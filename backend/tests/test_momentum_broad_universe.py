@@ -1,23 +1,21 @@
-"""Momentum discovery must be able to see a mover it does not already own.
+"""Screen the bars we have already paid for (bt 201039).
 
-Six independent investigations converged on one root cause: entry lateness, and
-entry lateness comes from discovery latency. Pooled over 21 filled positions in
-three runs, fraction-of-move-elapsed-at-fill vs capture is r = -0.895
-(p < 0.0001), with PERFECT separation — every position filled at <=55% elapsed
-made money (+$2,093.70), every one filled at >100% lost (-$234.81).
+Six investigations converged on entry lateness as the whole P&L: pooled over 21
+filled positions in three runs, fraction-of-move-elapsed-at-fill vs capture is
+r = -0.895 (p < 0.0001), with perfect separation — every position filled at <=55%
+elapsed made money, every one filled at >100% lost.
 
-`_build_momentum_scan_universe` sources: benchmark ETFs, trend ETFs, ETFs for
-active trends, tickers named by an active trend, and Neo4j COMPETES_WITH /
-STRATEGIC_PARTNER neighbours of stocks ALREADY TRACKED (LIMIT 30). Every one is
-reachable-from-what-we-already-have. There is no broad equity screen, so a mover
-can only be found if the book is already standing next to it.
+`_build_momentum_scan_universe` draws only from benchmark ETFs, trend ETFs,
+active-trend tickers and Neo4j neighbours of stocks ALREADY TRACKED. So a mover
+is invisible unless the book is already standing next to it. In bt 201039 SNDK's
+244 daily bars were fetched on bar 1 by the graph-seed batch and never screened;
+SNDK was first scored 29 sessions later and bought at $660.48 after running from
+$237, returning -4.38% on a +166.10% stock.
 
-bt 201039 bar 1: the pool contained no SNDK, WDC, VICR, MU or TSEM, while SNDK's
-244 daily bars were fetched on the same bar and never screened. SNDK was first
-scored on 2026-01-30 and bought 02-02 at $660.48 after running from $237 — it
-returned -4.38% on a +166.10% stock. bt 820236's pool DID contain them on bar 1;
-WDC and SNDK paid +$551.43 of that run's +$739.61. Same code, different
-neighbourhood.
+An earlier attempt queried the company graph with `ORDER BY c.ticker LIMIT n`.
+That truncates ALPHABETICALLY: of 5,568 companies a 1,500 cap stops at DNOW, so
+SNDK and WDC can never appear at any cap. `test_alphabetical_cap_is_the_trap`
+pins that so it is not reintroduced.
 """
 import os
 import sys
@@ -29,67 +27,46 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import strategies.graph_nexus_analysis as gna  # noqa: E402
 
-
-class _Res:
-    def __init__(self, rows): self._rows = rows
-    def __iter__(self): return iter(self._rows)
+# What bt 201039 had in the overlay cache on bar 1 but never screened.
+CACHED = {"AAPL": [], "MU": [], "SNDK": [], "TSEM": [], "VICR": [], "WDC": []}
 
 
-class _Sess:
-    def __init__(self, rows): self._rows = rows
-    def __enter__(self): return self
-    def __exit__(self, *a): return False
-    def run(self, q, **kw):
-        if "COMPETES_WITH" in q:
-            return _Res([])
-        cap = int(kw.get("cap", 0) or 0)
-        return _Res([{"t": t} for t in self._rows[:cap]])
+def _setup(monkeypatch, cfg, cache):
+    monkeypatch.setattr(gna, "_shared_neo4j_driver", None)
+    gna._MOMENTUM_SCAN_CONFIG = cfg
+    gna._MOMENTUM_SCAN_CACHE = cache
 
 
-class _Driver:
-    def __init__(self, rows): self._rows = rows
-    def session(self): return _Sess(self._rows)
+def test_default_off_is_byte_identical(monkeypatch):
+    _setup(monkeypatch, {}, {"_overlay_bars_raw": CACHED})
+    assert "SNDK" not in gna._build_momentum_scan_universe([], ["SPY"])
 
 
-BROAD = ["AAPL", "MU", "SNDK", "TSEM", "VICR", "WDC"]
-
-
-def _reset():
-    gna._momentum_broad_cache = {}
-    gna._momentum_neighbor_cache = {}
-
-
-def test_default_off_leaves_the_universe_unchanged(monkeypatch):
-    _reset()
-    monkeypatch.setattr(gna, "_shared_neo4j_driver", _Driver(BROAD))
-    gna._MOMENTUM_SCAN_CONFIG = {}
-    uni = gna._build_momentum_scan_universe([], ["SPY"])
-    assert "SNDK" not in uni, "must be byte-identical until a document opts in"
-
-
-def test_broad_universe_surfaces_a_name_we_do_not_own(monkeypatch):
-    """The bt 201039 failure, directly."""
-    _reset()
-    monkeypatch.setattr(gna, "_shared_neo4j_driver", _Driver(BROAD))
-    gna._MOMENTUM_SCAN_CONFIG = {"momentum_scan_broad_universe_max": 500}
+def test_cached_bars_are_screened(monkeypatch):
+    """The bt 201039 miss, directly: those bars were already in memory."""
+    _setup(monkeypatch, {"momentum_scan_cached_bars": True},
+           {"_overlay_bars_raw": CACHED})
     uni = gna._build_momentum_scan_universe([], ["SPY"])
     for sym in ("SNDK", "WDC", "VICR", "MU", "TSEM"):
-        assert sym in uni, f"{sym} still invisible to the momentum screen"
+        assert sym in uni, f"{sym} still invisible despite having bars"
 
 
-def test_cap_is_respected(monkeypatch):
-    _reset()
-    monkeypatch.setattr(gna, "_shared_neo4j_driver", _Driver(BROAD))
-    gna._MOMENTUM_SCAN_CONFIG = {"momentum_scan_broad_universe_max": 2}
-    uni = gna._build_momentum_scan_universe([], ["SPY"])
-    assert len([s for s in BROAD if s in uni]) <= 2
+def test_alphabetical_cap_is_the_trap():
+    """Why this is NOT done with `ORDER BY c.ticker LIMIT n`.
+
+    5,568 companies; a 1,500 cap stops at DNOW. Every ticker after it — SNDK,
+    WDC, VICR, XOM — is unreachable at ANY cap below the full universe, so the
+    screen would silently only ever see the front of the alphabet.
+    """
+    universe = sorted(["ANRO", "ALTO", "DNOW", "SNDK", "VICR", "WDC"])
+    assert universe[:3] == ["ALTO", "ANRO", "DNOW"]
+    assert "SNDK" not in universe[:3] and "WDC" not in universe[:3]
 
 
 def test_existing_sources_still_present(monkeypatch):
-    """The broad screen ADDS; it must not replace the news/graph lanes."""
-    _reset()
-    monkeypatch.setattr(gna, "_shared_neo4j_driver", _Driver(BROAD))
-    gna._MOMENTUM_SCAN_CONFIG = {"momentum_scan_broad_universe_max": 500}
+    """The cache screen ADDS; it must not replace the news/graph lanes."""
+    _setup(monkeypatch, {"momentum_scan_cached_bars": True},
+           {"_overlay_bars_raw": CACHED})
     uni = gna._build_momentum_scan_universe(
         [{"name": "oil", "affected_tickers": ["XOM"]}], ["SPY"])
     assert "XOM" in uni
@@ -97,34 +74,31 @@ def test_existing_sources_still_present(monkeypatch):
 
 
 def test_result_is_sorted_and_deduped(monkeypatch):
-    _reset()
-    monkeypatch.setattr(gna, "_shared_neo4j_driver", _Driver(BROAD + BROAD))
-    gna._MOMENTUM_SCAN_CONFIG = {"momentum_scan_broad_universe_max": 500}
+    _setup(monkeypatch, {"momentum_scan_cached_bars": True},
+           {"_overlay_bars_raw": dict(CACHED, SPY=[])})
     uni = gna._build_momentum_scan_universe([], ["SPY"])
     assert uni == sorted(uni) and len(uni) == len(set(uni))
 
 
-def test_no_driver_is_safe(monkeypatch):
-    _reset()
-    monkeypatch.setattr(gna, "_shared_neo4j_driver", None)
-    gna._MOMENTUM_SCAN_CONFIG = {"momentum_scan_broad_universe_max": 500}
-    assert isinstance(gna._build_momentum_scan_universe([], ["SPY"]), list)
-
-
-def test_query_failure_falls_back_to_the_old_universe(monkeypatch):
-    class _Bad:
-        def session(self): raise RuntimeError("neo4j down")
-    _reset()
-    monkeypatch.setattr(gna, "_shared_neo4j_driver", _Bad())
-    gna._MOMENTUM_SCAN_CONFIG = {"momentum_scan_broad_universe_max": 500}
+def test_symbols_are_normalised(monkeypatch):
+    _setup(monkeypatch, {"momentum_scan_cached_bars": True},
+           {"_overlay_bars_raw": {" sndk ": [], "wdc": []}})
     uni = gna._build_momentum_scan_universe([], ["SPY"])
-    assert isinstance(uni, list) and "SNDK" not in uni
+    assert "SNDK" in uni and "WDC" in uni
 
 
-def test_malformed_cap_is_off(monkeypatch):
-    _reset()
-    monkeypatch.setattr(gna, "_shared_neo4j_driver", _Driver(BROAD))
-    for bad in ("x", None, -5):
-        gna._momentum_broad_cache = {}
-        gna._MOMENTUM_SCAN_CONFIG = {"momentum_scan_broad_universe_max": bad}
-        assert "SNDK" not in gna._build_momentum_scan_universe([], ["SPY"])
+def test_missing_or_malformed_cache_is_safe(monkeypatch):
+    for cache in ({}, {"_overlay_bars_raw": None}, {"_overlay_bars_raw": []}, None):
+        _setup(monkeypatch, {"momentum_scan_cached_bars": True}, cache)
+        assert isinstance(gna._build_momentum_scan_universe([], ["SPY"]), list)
+
+
+def test_costs_no_query(monkeypatch):
+    """Zero marginal cost is the point — no Neo4j call, no bar fetch."""
+    class _Boom:
+        def session(self): raise AssertionError("must not query the graph")
+    monkeypatch.setattr(gna, "_shared_neo4j_driver", _Boom())
+    gna._MOMENTUM_SCAN_CONFIG = {"momentum_scan_cached_bars": True}
+    gna._MOMENTUM_SCAN_CACHE = {"_overlay_bars_raw": CACHED}
+    # current_symbols empty so the neighbour lane does not fire
+    assert "SNDK" in gna._build_momentum_scan_universe([], [])

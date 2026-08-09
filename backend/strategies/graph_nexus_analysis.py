@@ -9340,10 +9340,18 @@ def _extension_above_anchor(sym, price_history, lookback_bars) -> tuple[float | 
     only as fast as the anchor catches up — which is the honest answer, not a
     window artefact.
 
-    The anchor is the mean close over `lookback_bars`, which is a simple moving
-    average and needs no new data. Returns (extension_pct, diagnostics) so the
-    caller can LOG ITS INPUTS — the old reading was not reproducible from the
-    log, which cost one investigation its proof.
+    The anchor is the PRIOR N-bar HIGH, not a moving average. Distance above an
+    MA was measured and FAILS as a block: cross-sectional rank-IC against the
+    20-day forward return over 160,645 name-days is +0.018 for close/MA20 and
+    +0.015 for close/MA50 — the wrong SIGN for something used to refuse a buy,
+    with no threshold at which forward returns collapse. Distance above the prior
+    high is signed, base-relative, and is what "extended" actually means: a name
+    at a new high is 0% extended by construction, and only a name that has run
+    AWAY from its base reads high.
+
+    Returns (extension_pct, diagnostics) so the caller can LOG ITS INPUTS — the
+    old reading was not reproducible from the log, which cost one investigation
+    its proof.
     """
     diag: dict = {"bars_used": 0, "anchor": None, "price": None}
     if not isinstance(price_history, dict):
@@ -9356,7 +9364,7 @@ def _extension_above_anchor(sym, price_history, lookback_bars) -> tuple[float | 
     diag["bars_used"] = len(closes)
     if len(closes) < 2:
         return None, diag
-    anchor = sum(closes) / len(closes)
+    anchor = max(closes[:-1]) if len(closes) > 1 else closes[-1]
     price = closes[-1]
     diag["anchor"] = anchor
     diag["price"] = price
@@ -13961,8 +13969,9 @@ def _discover_stocks_from_momentum(
         # Hand the universe builder this bar's config (see the broad-universe
         # block there). Module-level rather than a signature change so the other
         # call sites and their tests are untouched.
-        global _MOMENTUM_SCAN_CONFIG
+        global _MOMENTUM_SCAN_CONFIG, _MOMENTUM_SCAN_CACHE
         _MOMENTUM_SCAN_CONFIG = config or {}
+        _MOMENTUM_SCAN_CACHE = strategy_cache or {}
         momentum_universe = _build_momentum_scan_universe(active_trends, list(current_symbols))
         scan_tickers = [t for t in momentum_universe
                         if t not in current_symbols and t not in existing_set and t not in seen]
@@ -15032,12 +15041,10 @@ def _detect_price_based_trends(
     return count
 
 
-# Broad company-graph universe for the momentum screen. Session-scoped: the
-# company set does not change during a backtest.
-_momentum_broad_cache: dict = {}
-# Set by the caller each bar so the universe builder can read config without a
-# signature change reaching every call site.
+# Set by the caller each bar so the universe builder can read config and the
+# overlay-bars cache without a signature change reaching every call site.
 _MOMENTUM_SCAN_CONFIG: dict = {}
+_MOMENTUM_SCAN_CACHE: dict = {}
 
 
 def _build_momentum_scan_universe(
@@ -15110,29 +15117,27 @@ def _build_momentum_scan_universe(
     #
     # The company graph is the system's own universe and needs no new data
     # source. Capped and sorted so the scan stays bounded and deterministic.
-    _broad_cap = 0
-    try:
-        _broad_cap = int((_MOMENTUM_SCAN_CONFIG or {}).get(
-            "momentum_scan_broad_universe_max", 0) or 0)
-    except (TypeError, ValueError, AttributeError):
-        _broad_cap = 0
-    if _broad_cap > 0 and _shared_neo4j_driver is not None:
-        global _momentum_broad_cache
-        if not _momentum_broad_cache.get("tickers"):
-            try:
-                with _shared_neo4j_driver.session() as _bsess:
-                    _bres = _bsess.run(
-                        "MATCH (c:Company) WHERE c.ticker IS NOT NULL "
-                        "RETURN c.ticker AS t ORDER BY c.ticker LIMIT $cap",
-                        cap=int(_broad_cap),
-                    )
-                    _momentum_broad_cache = {
-                        "tickers": [str(r["t"]).strip().upper() for r in _bres
-                                    if str(r["t"] or "").strip()]
-                    }
-            except Exception:
-                _momentum_broad_cache = {"tickers": []}
-        universe.update(_momentum_broad_cache.get("tickers", []))
+    # SCREEN WHAT WE HAVE ALREADY PAID FOR. The overlay cache holds daily bars
+    # for every symbol any lane has fetched this session — graph seeds, news
+    # names, propagation neighbours. Those bars are exactly what the momentum
+    # screen needs, and screening them costs nothing: no query, no fetch.
+    #
+    # This is the observed miss, precisely. In bt 201039 SNDK's 244 daily bars
+    # were fetched on bar 1 by the graph-seed batch and never screened, because
+    # SNDK was not in the neighbour-derived universe. It was first scored 29
+    # sessions later and bought at $660.48 after running from $237.
+    #
+    # An earlier version of this queried the company graph with
+    # `ORDER BY c.ticker LIMIT n`, which truncates ALPHABETICALLY: of 5,568
+    # companies a 1,500 cap stops at DNOW, so SNDK and WDC could never appear
+    # however large the cap. Screening the cache has no such bias and no cost.
+    if bool((_MOMENTUM_SCAN_CONFIG or {}).get("momentum_scan_cached_bars", False)):
+        try:
+            _cache = (_MOMENTUM_SCAN_CACHE or {}).get("_overlay_bars_raw") or {}
+            universe.update(
+                str(t).strip().upper() for t in _cache if str(t or "").strip())
+        except (TypeError, AttributeError):
+            pass
     return sorted(universe)
 
 
