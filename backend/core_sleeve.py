@@ -54,6 +54,8 @@ __all__ = [
     "satellite_design_share",
     "satellite_max_share",
     "turnover_budget_state",
+    "funding_release_reserve_state",
+    "reset_funding_release_reserve",
 ]
 
 #: Alpaca rejects equity orders under $1 of notional, and the residual sleeve
@@ -115,6 +117,10 @@ class CoreSleeveConfig:
     #: five bars, which is well inside a real downtrend and survivable through a
     #: false positive.
     bear_max_step_pct: float = 0.15
+    #: 2026-08-09 FUNDING-RELEASE RESERVE. 0 == OFF == today's behaviour, byte
+    #: for byte. See `_FUNDING_RELEASE_RESERVE` and the note on the deploy
+    #: branch of `core_rebalance_order` for what it buys and what it costs.
+    funding_release_reserve_decisions: int = 0
 
 
 def _f(cfg, key, default):
@@ -329,6 +335,8 @@ def core_sleeve_config(config) -> CoreSleeveConfig:
         bear_min_dwell_days=_i(cfg, "core_bear_min_dwell_days", 3),
         turnover_budget_monthly_pct=_f(cfg, "turnover_budget_monthly_pct", 0.0),
         bear_max_step_pct=_f(cfg, "core_bear_max_step_pct", 0.15),
+        funding_release_reserve_decisions=max(0, _i(
+            cfg, "core_funding_release_reserve_decisions", 0)),
     )
 
 
@@ -394,6 +402,130 @@ class RebalanceOrder:
         return abs(self.notional) > 0.0
 
 
+# ── funding-release reserve (2026-08-09, default OFF) ─────────────────────
+#
+# THE DEFECT, measured. `sweep2.md` §2c/§2d, verbatim off bt 427197:
+#
+#   L4101  [core] funding request trimmed $1,709 -> $1,669 — satellite headroom
+#          will refuse the remainder; releasing core for it would only be bought back
+#   L4112  SATELLITE OVERFLOW: ARWR raw=+1.750 >= 1.50 — funding $1,669 of room
+#   L4359  [execution] FILL SELL SPY qty=2.44 price=686.74  = $1,675.74
+#   L4115  SKIP BUY ARWR — cash_to_use $1.69 < min $366 (allocated $854.39)
+#   L4582  [core] bought $1546.03 SPY @ 687.73 (band_deploy: 12.1% -> 37.6% of NAV)
+#
+# The core sold $1,675.74 of SPY to fund two named conviction buys, and one bar
+# later `band_deploy` bought $1,545.98 (92.3%) of it straight back, because
+# `buy = min(drift_usd, _spendable)` has NO knowledge that the gap it is closing
+# was opened ON PURPOSE, one bar ago, to fund a buy that is still queued. The
+# drift it "corrects" IS the release.
+#
+# Not a window artefact — same shape in 4 runs, 3 windows, 2 regimes:
+#   427197 bull   released $3,703 -> re-bought $2,505 (68%)
+#   915207 bull   released $1,410 -> re-bought $1,317 (93%)
+#   542754 bear   released $3,924 -> re-bought $1,567 (40%)
+#   383778 OOS    released $2,437 -> re-bought $1,715 (70%)
+#   total         $11,474 released, $7,104 recycled (62%)
+#
+# THE RULE. A `funding` release is a RESERVED CREDIT: dollars already promised
+# to a named satellite buy. While that credit is outstanding, `band_deploy` may
+# not count it as spendable cash. It is not a permanent block — the credit
+# expires after `core_funding_release_reserve_decisions` core deploy decisions
+# that it actually refuses, so cash the satellite declines to spend still comes
+# home to the index instead of sitting dead.
+#
+# WHY MODULE STATE. The credit has to survive from the bar the release is
+# decided to the bar the satellite spends it, and `core_rebalance_order` is a
+# pure function called fresh each bar from broker.py's `_core_sleeve_decide`.
+# Adding a parameter would need a broker.py change; this module owns the rule,
+# so it owns the ledger. One core sleeve exists per process (broker's
+# `_core_sleeve_cfg` returns the first enabled spec), so one ledger is correct.
+# It is deliberately NOT persisted: a restart drops the credit, which fails
+# toward today's behaviour rather than toward a core that can never re-deploy.
+#
+# WHY "DECISIONS" AND NOT "BARS". broker.py evaluates the core TWICE per bar —
+# `_residual_sleeve_release` at cycle start (which DISCARDS a positive notional,
+# broker.py:4481) and `_residual_sleeve_deploy` at cycle end (which executes
+# it). Both reach the deploy branch below, both can be refused, and this module
+# is handed no clock that could tell them apart: `nav`/`cash` move within a bar
+# and `days_since_rebalance` is day-granular and resets. So the unit is one
+# REFUSED deploy decision.
+#
+# Counted against the real wiring, protecting the satellite for ONE bar costs
+# THREE decisions, because the funding sell fills before the release bar's own
+# cycle-end deploy:
+#     bar N   release  -> `funding`, arms the credit          (no decision)
+#     bar N   deploy   -> refused #1
+#     bar N+1 release  -> refused #2   (positive notional, discarded anyway)
+#     bar N+1 deploy   -> refused #3   <- the re-buy the finding is about
+#     bar N+2 release  -> refused #4, or expiry
+# `test_core_funding_release_reserve.py` pins that ladder against broker.py's
+# own extracted functions, so it cannot drift silently. 4 is the value to ship:
+# it covers the bar with one decision of margin. Bias UP, not down — a credit
+# that expires early is an INERT lever (five of those shipped this session),
+# while a credit that expires late only leaves the index a bar of cash behind.
+#
+# A decision is consumed ONLY when the reserve changes the outcome: the
+# unreserved order would have been a real deploy and the reserved one is not.
+# A bar the core was never going to deploy on costs nothing.
+_FUNDING_RELEASE_RESERVE: dict = {"usd": 0.0, "decisions": 0}
+
+
+def funding_release_reserve_state() -> dict:
+    """Read-only snapshot of the outstanding funding credit. For tests and for
+    an operator who wants to know why the core is holding cash."""
+    return dict(_FUNDING_RELEASE_RESERVE)
+
+
+def reset_funding_release_reserve() -> None:
+    """Drop any outstanding credit. Called by tests; a fresh process starts
+    here anyway."""
+    _FUNDING_RELEASE_RESERVE["usd"] = 0.0
+    _FUNDING_RELEASE_RESERVE["decisions"] = 0
+
+
+def _arm_funding_release_reserve(cfg: CoreSleeveConfig, released_usd: float,
+                                 nav: float) -> None:
+    """Record a `funding` release as a reserved credit. No-op when OFF."""
+    budget = int(getattr(cfg, "funding_release_reserve_decisions", 0) or 0)
+    if budget <= 0:
+        return
+    usd = float(_FUNDING_RELEASE_RESERVE.get("usd", 0.0) or 0.0)
+    # Accumulate: two releases on consecutive bars for two different names are
+    # two credits. Capped at NAV so a pathological loop cannot grow it without
+    # bound; the effective claim is capped again by actual cash at bite time.
+    usd = min(max(0.0, usd) + max(0.0, float(released_usd or 0.0)),
+              max(0.0, float(nav or 0.0)))
+    _FUNDING_RELEASE_RESERVE["usd"] = usd
+    # A NEW release refreshes the budget: the satellite gets its bar for THIS
+    # credit, not the leftovers of the previous one's clock.
+    _FUNDING_RELEASE_RESERVE["decisions"] = budget
+
+
+def _outstanding_funding_reserve(cfg: CoreSleeveConfig, spendable: float) -> float:
+    """Dollars of `spendable` that a funding release has already promised away.
+
+    Capped at `spendable`, which is what makes the credit self-clearing in the
+    good case: once the satellite has actually bought the name, the cash is gone
+    and the claim collapses to $0 without any bookkeeping.
+    """
+    if int(getattr(cfg, "funding_release_reserve_decisions", 0) or 0) <= 0:
+        return 0.0
+    if int(_FUNDING_RELEASE_RESERVE.get("decisions", 0) or 0) <= 0:
+        return 0.0
+    usd = float(_FUNDING_RELEASE_RESERVE.get("usd", 0.0) or 0.0)
+    if usd <= 0.0:
+        return 0.0
+    return min(usd, max(0.0, float(spendable or 0.0)))
+
+
+def _consume_funding_reserve_decision() -> None:
+    """Spend one unit of the credit's expiry budget; clear it at zero."""
+    left = int(_FUNDING_RELEASE_RESERVE.get("decisions", 0) or 0) - 1
+    _FUNDING_RELEASE_RESERVE["decisions"] = max(0, left)
+    if left <= 0:
+        _FUNDING_RELEASE_RESERVE["usd"] = 0.0
+
+
 def core_rebalance_order(
     cfg: CoreSleeveConfig,
     *,
@@ -456,6 +588,10 @@ def core_rebalance_order(
     if need > 0.0 and core_value > 0.0:
         sell = min(need, core_value)
         if sell >= MIN_CORE_ORDER_USD:
+            # These dollars are already promised to a named satellite buy.
+            # Reserve them so `band_deploy` below cannot re-buy them as index
+            # before the allocator has had its bar. OFF by default.
+            _arm_funding_release_reserve(cfg, sell, nav)
             return RebalanceOrder(notional=-sell, reason="funding", **base)
         # FALL THROUGH, do not return.
         #
@@ -537,8 +673,30 @@ def core_rebalance_order(
         # See CORE_DEPLOY_COST_HAIRCUT.
         _spendable /= (1.0 + CORE_DEPLOY_COST_HAIRCUT)
         buy = min(drift_usd, _spendable)
-        if buy < max(MIN_CORE_DEPLOY_USD, MIN_CORE_ORDER_USD):
+        _min_deploy = max(MIN_CORE_DEPLOY_USD, MIN_CORE_ORDER_USD)
+        if buy < _min_deploy:
+            # Refused for size, with or without a reserve. Return BEFORE the
+            # reserve is consulted so a bar the core was never going to deploy
+            # on cannot burn a unit of the credit's expiry budget.
             return RebalanceOrder(reason="deploy_below_min", **base)
+        # 2026-08-09 FUNDING-RELEASE RESERVE (default OFF, see the note above
+        # RebalanceOrder). `buy` is currently sized against cash the core itself
+        # may have released one bar ago to fund a conviction name that has not
+        # been bought yet — measured at 62% recycling across 4 runs, $7,104.
+        # Withhold that credit, and say so in the reason so the hold is visible
+        # in the operator log instead of being silently indistinguishable from
+        # `within_band`.
+        _reserved = _outstanding_funding_reserve(cfg, _spendable)
+        if _reserved > 0.0:
+            _buy_reserved = min(drift_usd, max(0.0, _spendable - _reserved))
+            if _buy_reserved < buy - 1e-9:
+                # The reserve genuinely changed the outcome — this is the
+                # re-buy the finding is about. Only now does it cost a unit.
+                _consume_funding_reserve_decision()
+                buy = _buy_reserved
+                if buy < _min_deploy:
+                    return RebalanceOrder(
+                        reason="funding_release_reserved", **base)
         return RebalanceOrder(notional=buy, reason="band_deploy", **base)
 
     sell = min(-drift_usd, core_value)

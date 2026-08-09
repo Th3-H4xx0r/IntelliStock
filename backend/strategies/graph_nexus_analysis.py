@@ -10078,6 +10078,7 @@ def _plan_backfill_buy_allocation(
     min_position_size: float,
     headroom: int,
     config: dict | None = None,
+    portfolio_total: float = 0.0,
 ) -> tuple[float, str]:
     config = config or {}
     # V28.8.1 (Codex-corrected): the V28.7 "rotation_needed_zero_headroom" marker
@@ -10111,6 +10112,70 @@ def _plan_backfill_buy_allocation(
             return 0.0, budget_key
         budget_key = alt_key
         available = alt_available
+    # ── 2026-08-09 BFQ CONVICTION TARGET WEIGHT (default OFF) ──────────────
+    # Why a top-conviction queue drain is funded at a flat $100.
+    #
+    # bt 571147, 2026-01-16, verbatim:
+    #   V28 BFQ DRAIN ENTRY: ... cash=$770 priority_budget=$385
+    #                        standard_budget=$385 min_pos=$100
+    #   Backfill queue BUY: GLUE (alloc=$193, score=1.000 HIGH-CONV)
+    #   Backfill queue BUY: SNDK (alloc=$100, score=1.700 HIGH-CONV)
+    #   Backfill queue BUY: BTC  (alloc=$193, score=1.300)
+    #   Backfill queue BUY: CMPX (alloc=$100, score=0.000)
+    #   V28 BFQ ALLOC=0: MDB/NUVB/BRKR/BKR/GH/V/GDX/GLD/TDY/POOL/BITO/AAL/BOTZ
+    #                    ... priority_budget=$93 standard_budget=$93 min_pos=$100
+    #
+    # The pool is halved three times and never once measured against NAV:
+    #   1. `_bfq_cash` is a RESIDUAL — leftover primary budget plus the
+    #      `backfill_budget_reserve_pct` (0.2) slice. $770 on a $6,421 book.
+    #   2. the drain site splits it 50/50 into priority/standard -> $385.
+    #   3. this line takes `available * 0.5` -> $192.
+    # The first drained name eats half its pool, the second eats half of what
+    # is left, and by the third pass the pool is under $100 and every
+    # remaining name returns ALLOC=0. That is the whole "689 ALLOC= lines all
+    # read ALLOC=0, median priority_budget $99 vs min_pos $100" finding: the
+    # residual is not small because the account is small, it is small because
+    # the names ahead of it were each handed half of it.
+    #
+    # And when `available <= 2 * min_required` the `max()` floor IS the entire
+    # allocation, so `priority_min_position_size` ($100, a BROKER MINIMUM)
+    # silently becomes the position size of the highest-conviction name in the
+    # queue: SNDK at raw 1.700 sized 1.6% of NAV against the 14% clip the
+    # concentrate allocator (gna, `total_spend_cap_target_weight_pct`) uses
+    # for exactly the same name on exactly the same bar.
+    #
+    # Raising `priority_min_position_size` would not fix this — it is the
+    # FLOOR, not the target, and lifting it only converts funded runts into
+    # ALLOC=0. The cause is that the size is a fraction of a residual instead
+    # of a share of NAV. So: a drain whose LIVE score clears the
+    # high-conviction bar asks for the same target weight a normal conviction
+    # buy asks for, and is bounded by the pool that actually exists (and by
+    # `min_required`, unchanged, so this can never create a smaller position
+    # than today's rule).
+    #
+    # LIVE score, not the queued one, on purpose. The queued score is stale by
+    # up to `backfill_queue_priority_grace_bars` and the drain order is keyed
+    # on it, so a decayed name can sit ahead of a live one: bt 915207
+    # 2026-01-20 funded `NUVB (alloc=$188, score=0.000 HIGH-CONV)` ahead of
+    # `RVMD (alloc=$100, score=1.700)`. Gating on the live score keeps the
+    # target-weight draw away from those names, and it is the same number the
+    # concentrate allocator ranks on downstream (`raw_net_score` is written
+    # from `_bfq_current_score` at the drain site).
+    #
+    # Absent/0 key -> the historical expression below, byte for byte.
+    _tw_pct = float((config or {}).get("bfq_conviction_target_weight_pct", 0.0) or 0.0)
+    if _tw_pct > 0.0 and float(portfolio_total or 0.0) > 0.0:
+        _tw_min_score = float(
+            (config or {}).get(
+                "bfq_conviction_target_min_score",
+                (config or {}).get("nexus_high_conviction_threshold", 1.5) or 1.5,
+            )
+            or 1.5
+        )
+        if float(current_score or 0.0) >= _tw_min_score:
+            _tw_target = float(portfolio_total) * _tw_pct
+            _tw_alloc = min(available, max(min_required, _tw_target))
+            return max(0.0, _tw_alloc), budget_key
     allocation = min(available, max(min_required, available * 0.5))
     return max(0.0, allocation), budget_key
 
@@ -19908,6 +19973,7 @@ def _evaluate_position_risk(
     """
     extras: dict = {}
     _profit_take_fired_fraction = None  # set by the tiered profit-take branch below
+    _pgb_forced_exit = False  # peak give-back exit asked to travel the forced-exit path
     if portfolio_emulator is None:
         return fresh_score, fresh_reason, extras
 
@@ -20162,6 +20228,64 @@ def _evaluate_position_risk(
                         f"Peak give-back exit: peaked +{_peak_pnl_pct_for_log:.1f}% "
                         f"then handed back {_drawdown_from_peak_pct_for_log:.1f}% "
                         f"(thresholds {_pgb_min_peak:.0f}%/{_pgb_dd:.0f}%)")
+                    # 2026-08-09 THE EXIT FIRED 55 TIMES AND NOTHING SOLD
+                    # (bt 571147, `peak_giveback_*` = 30/25).
+                    #
+                    # `fresh_score = -1` above is not a sell. It is a *proposal*
+                    # that has to survive four more gates, and every one of them
+                    # is keyed on `_forced_exit`, which is computed from the
+                    # REASON STRING against `_FORCED_EXIT_TAGS` — a tuple this
+                    # reason does not match. Traced against CART, the exit in the
+                    # same run that DID execute (circuit breaker, -10.4%):
+                    #
+                    #   CART  [sell-gate] ... gate=circuit_breaker ... result=fired
+                    #         ML overlay PRESERVE forced-exit: CART score=-1
+                    #         Sell enforcement ADD: CART forced_exit=True
+                    #         Nexus sell enforcement: CART
+                    #         V7.5 sell enforcement injection: ... CART
+                    #         FILL SELL CART
+                    #   SLV   PEAK GIVE-BACK EXIT: ... (x55)
+                    #         Monitor decision: SLV ... -> SELL          (x52)
+                    #         <nothing else, ever>
+                    #
+                    # Where the -1 dies, in order:
+                    #  1. _finalize_scores / monitor emit `_forced_exit` from
+                    #     `any(tag in reason for tag in _FORCED_EXIT_TAGS)` ->
+                    #     False for "Peak give-back exit: ...".
+                    #  2. FULL cycle: `_apply_ml_overlay`'s first branch is
+                    #     `if base["_forced_exit"]: keep the -1`. Falling past it
+                    #     the else-branch RECOMPUTES final_score from raw_net —
+                    #     SLV carried raw_score=+1.000 on the 02-02 full cycle, so
+                    #     the sell became a BUY, silently, with no log line.
+                    #  3. The forced-exit sweep (`Sell enforcement ADD`) only adds
+                    #     `_forced_exit and score == -1` names to
+                    #     `nexus_sell_enforcement`. SLV was never added — and a
+                    #     held name that is not in the discovery universe reaches
+                    #     the broker ONLY through enforcement (the broker filters
+                    #     scores by `allowed_syms`; SLV is absent from all 120
+                    #     symbols the 02-02 full cycle handed over).
+                    #  4. MONITOR cycle: the monitor returns scores the broker
+                    #     drops wholesale ("returned scores for 0 symbols"), so
+                    #     `_nexus_sell_enforcement` is its ONLY output channel,
+                    #     and that loop also requires `_forced_exit`.
+                    # Also downstream of (1): rank_band exit suppression, the
+                    # `llm_sell_min_hold` gate (15d here), winner_protect and the
+                    # overlay `sell_block` are all `not base["_forced_exit"]`.
+                    #
+                    # So the give-back exit needs the SAME flag the circuit
+                    # breaker gets. Setting it structurally (via `extras`) rather
+                    # than by smuggling a `_FORCED_EXIT_TAGS` substring into the
+                    # reason keeps the reason honest and greppable.
+                    # Default OFF -> byte-identical while the key is absent.
+                    if bool(config.get("peak_giveback_forced_exit_enabled", False)):
+                        _pgb_forced_exit = True
+                        extras["forced_exit"] = True
+                        _log(
+                            f"PEAK GIVE-BACK FORCED EXIT: {sym} routed through "
+                            f"_forced_exit -> nexus_sell_enforcement "
+                            f"(peak_giveback_forced_exit_enabled) — without this "
+                            f"the -1 is dropped by the ML overlay recompute and "
+                            f"never reaches the broker", "red")
 
                 _fast_cut_pct = float(config.get("fast_loser_cut_pct", -10.0))
                 # 2026-07-19 regime-safety Phase 4: hard/kill drawdown-circuit
@@ -20550,6 +20674,12 @@ def _evaluate_position_risk(
             _is_risk_exit_sell = bool(
                 fresh_reason and any(tag in fresh_reason for tag in _RISK_EXIT_TAGS)
             )
+            # A forced peak give-back exit is a protective exit by construction:
+            # grace gates SIGNAL sells, and a stop a calendar can veto is not a
+            # stop (same precedent as _RISK_EXIT_TAGS above). `_pgb_forced_exit`
+            # is False unless peak_giveback_forced_exit_enabled is set.
+            if _pgb_forced_exit and fresh_score == -1:
+                _is_risk_exit_sell = True
             if fresh_score == -1 and not _hold_limit_forced and not _is_risk_exit_sell:
                 _grace_days = held_days
                 _grace_regime = str((strategy_cache or {}).get("_market_regime") or "chop")
@@ -20614,6 +20744,14 @@ def _evaluate_position_risk(
             _profit_take_fired_fraction if _profit_take_fired_fraction is not None
             else float(config.get("profit_take_sell_fraction", 0.50) or 0.50)
         )
+    # `forced_exit` travels only with a LIVE give-back sell. A later branch
+    # could take the score off -1 (grace) or replace the reason with a partial
+    # profit-take trim; forcing either would liquidate 100% of the position via
+    # the enforcement sweep (`sell_fraction = 1.0`). Re-check both.
+    if extras.get("forced_exit") and not (
+        fresh_score == -1 and "Peak give-back exit" in (fresh_reason or "")
+    ):
+        extras.pop("forced_exit", None)
     return fresh_score, fresh_reason, extras
 
 
@@ -20830,20 +20968,29 @@ def _finalize_scores(symbols_list: list, sentiment_data: dict, propagated: dict,
                 # Tie: defer to fresh analysis (more current)
                 final_score = fresh_score
 
+            _fe_flag = (final_score == -1 and fresh_reason and any(x in fresh_reason for x in _FORCED_EXIT_TAGS))
+            # `_evaluate_position_risk` may also request the forced-exit path
+            # structurally (peak give-back). Empty unless the feature key is on,
+            # so the value above is preserved exactly while it is absent.
+            if not _fe_flag and final_score == -1 and _epr_extras.get("forced_exit"):
+                _fe_flag = True
             out[sym] = {
                 "score": final_score,
                 "reason": f"{fresh_reason} | scheduled: {ft_reasons}",
-                "_forced_exit": (final_score == -1 and fresh_reason and any(x in fresh_reason for x in _FORCED_EXIT_TAGS)),
+                "_forced_exit": _fe_flag,
             }
             if "Profit take" in fresh_reason and final_score == -1:
                 out[sym]["sell_fraction"] = _epr_extras.get(
                     "sell_fraction", float(config.get("profit_take_sell_fraction", 0.50) or 0.50)
                 )
         else:
+            _fe_flag = (fresh_score == -1 and fresh_reason and any(x in fresh_reason for x in _FORCED_EXIT_TAGS))
+            if not _fe_flag and fresh_score == -1 and _epr_extras.get("forced_exit"):
+                _fe_flag = True
             out[sym] = {
                 "score": fresh_score,
                 "reason": fresh_reason,
-                "_forced_exit": (fresh_score == -1 and fresh_reason and any(x in fresh_reason for x in _FORCED_EXIT_TAGS)),
+                "_forced_exit": _fe_flag,
             }
             if "Profit take" in fresh_reason and fresh_score == -1:
                 out[sym]["sell_fraction"] = _epr_extras.get(
@@ -24423,17 +24570,29 @@ class GraphNexusAnalysis:
                 holds += 1
                 continue
 
+            _m_fe_flag = (
+                _epr_score == -1
+                and _epr_reason
+                and any(
+                    x in _epr_reason
+                    for x in _FORCED_EXIT_TAGS
+                )
+            )
+            # Structural forced-exit request from the risk helper (peak
+            # give-back). Absent unless peak_giveback_forced_exit_enabled is set,
+            # so the flag above is preserved exactly by default. This is the
+            # load-bearing one in the monitor cycle: the broker drops the
+            # monitor's score dict wholesale ("returned scores for 0 symbols"),
+            # so `_nexus_sell_enforcement` — which only accepts `_forced_exit`
+            # names below — is the monitor's ONLY channel to execution.
+            if (not _m_fe_flag and _epr_score == -1
+                    and isinstance(_epr_extras, dict)
+                    and _epr_extras.get("forced_exit")):
+                _m_fe_flag = True
             _entry: dict = {
                 "score": int(_epr_score) if _epr_score in (-1, 0, 1) else 0,
                 "reason": str(_epr_reason or "monitor: hold"),
-                "_forced_exit": (
-                    _epr_score == -1
-                    and _epr_reason
-                    and any(
-                        x in _epr_reason
-                        for x in _FORCED_EXIT_TAGS
-                    )
-                ),
+                "_forced_exit": _m_fe_flag,
             }
             if isinstance(_epr_extras, dict) and "sell_fraction" in _epr_extras:
                 _entry["sell_fraction"] = float(_epr_extras["sell_fraction"])
@@ -31639,7 +31798,76 @@ class GraphNexusAnalysis:
                     _bfq_min_pos,
                     _bfq_headroom,
                     config,
+                    portfolio_total=portfolio_total,
                 )
+                # ── 2026-08-09 BFQ CONVICTION TARGET WEIGHT (default OFF) ──
+                # `bfq_conviction_target_weight_pct` > 0 makes the allocation
+                # above a share of NAV instead of half of a residual (see the
+                # note in `_plan_backfill_buy_allocation`). Two things have to
+                # happen HERE and not in the helper:
+                #   * `single_position_max_pct` — every other buy lane clips to
+                #     it (`_clip_to_single_position_cap`, incl. the sibling
+                #     direct-reserved drain 170 lines up). A weight-sized queue
+                #     buy is a real position and must obey the same cap. No-op
+                #     when the key is absent.
+                #   * a LOG SIGNATURE. Five levers this session shipped inert
+                #     because nothing in the log could prove they ran; the old
+                #     `alloc=$X` field alone cannot distinguish "target weight
+                #     applied" from "the pool happened to be that big", so the
+                #     counterfactual is logged next to it.
+                _bfq_tw_pct = float(config.get("bfq_conviction_target_weight_pct", 0.0) or 0.0)
+                if _bfq_tw_pct > 0.0 and portfolio_total > 0 and _bfq_alloc > 0.0:
+                    _bfq_tw_min = float(
+                        config.get(
+                            "bfq_conviction_target_min_score",
+                            config.get("nexus_high_conviction_threshold", 1.5) or 1.5,
+                        )
+                        or 1.5
+                    )
+                    if _bfq_current_score >= _bfq_tw_min:
+                        _bfq_tw_pool = (
+                            _bfq_priority_budget if _bfq_budget_key == "priority"
+                            else _bfq_standard_budget
+                        )
+                        # what the shipped `available * 0.5` rule would have paid,
+                        # computed from the identical inputs — this is the number
+                        # the log line has to carry, otherwise nobody can tell from
+                        # a run whether the lever bound or the pool was just big.
+                        _bfq_tw_was, _ = _plan_backfill_buy_allocation(
+                            _bfq_item,
+                            _bfq_current_score,
+                            _bfq_priority_budget,
+                            _bfq_standard_budget,
+                            _bfq_min_pos,
+                            _bfq_headroom,
+                            {k: v for k, v in config.items()
+                             if k != "bfq_conviction_target_weight_pct"},
+                            portfolio_total=portfolio_total,
+                        )
+                        _bfq_alloc = _clip_to_single_position_cap(
+                            sym=_bfq_sym,
+                            intended_value=_bfq_alloc,
+                            current_position_value=0.0,
+                            portfolio_total=portfolio_total,
+                            config=config,
+                        )
+                        # A risk cap wins over a target, but it must not leave a
+                        # sub-floor crumb holding a max_positions slot: refuse and
+                        # leave the item queued instead. Unreachable unless
+                        # `single_position_max_pct` is set tighter than
+                        # `min_position_size`.
+                        if _bfq_alloc < _bfq_min_pos:
+                            _bfq_alloc = 0.0
+                        _log(
+                            f"BFQ TARGET-WEIGHT: {_bfq_sym} score="
+                            f"{_bfq_current_score:.3f} >= {_bfq_tw_min:.2f} — sized "
+                            f"${_bfq_alloc:.0f} ({(_bfq_alloc / portfolio_total):.1%} "
+                            f"of ${portfolio_total:.0f}, target {_bfq_tw_pct:.0%}) "
+                            f"from the {_bfq_budget_key} pool ${_bfq_tw_pool:.0f}; "
+                            f"the half-a-residual rule would have paid "
+                            f"${_bfq_tw_was:.0f}",
+                            "green",
+                        )
                 # V28 Fix 4: explicit log when allocation returns 0 — previously
                 # this was silent and we couldn't tell whether headroom, cash, or
                 # min_position_size was the blocker.
