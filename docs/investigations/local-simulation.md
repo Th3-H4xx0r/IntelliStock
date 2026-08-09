@@ -416,6 +416,14 @@ not":
   the replay reproduces. 89.0% on 820236 with the right config, 74.4% with the
   wrong one. Below 85% it tells you to fix the config before reading anything
   underneath.
+* **`--set` shadowing warning.** doc-193 defines `core_sleeve_enabled`,
+  `core_target_pct`, `core_rebalance_band_pct` and `core_rebalance_min_days`
+  **only inside `regime_profiles`**, and `_apply_regime_profile` merges the
+  matching overlay on top before any gate reads the config. So
+  `--set core_target_pct=0.20` changes nothing. The harness detects the
+  shadowing and prints the profile-scoped form to use instead. This is the
+  easiest way to run a lever test that silently tested nothing — on the harness
+  *and* on a real backtest.
 
 ### What it CANNOT model (also stated at the top of the file)
 
@@ -472,7 +480,7 @@ count; and the fidelity rate.
 
 ### Tests
 
-`backend/tests/test_simulate_allocation.py` — 46 tests, 0.2s, no network, no DB.
+`backend/tests/test_simulate_allocation.py` — 48 tests, 0.3s, no network, no DB.
 They pin (a) that the real production objects are the ones being called, (b) the
 log reconstruction against a fragment copied verbatim out of 820236's log,
 (c) each gate's behaviour and each inline broker constant ($50 minimum, 15%
@@ -481,7 +489,7 @@ docstring does not claim a function the module never calls.
 
 ```
 $ python3 -m pytest backend/tests/test_simulate_allocation.py -q
-46 passed in 0.20s
+48 passed in 0.31s
 $ python3 -m pytest backend/tests/test_core_sleeve.py backend/tests/test_residual_sleeve.py \
       backend/tests/test_max_positions_gate.py backend/tests/test_backtest_sell_proceeds_credit.py -q
 134 passed in 0.19s
@@ -602,3 +610,51 @@ $31.52 where the real spread is under 1 bp. The core lane's problem is the
   0.1121`, status `stopped`. It is the worst chop/bull arm either way.
 * **Anything about P&L under a changed config.** By construction. The harness
   reports admissions.
+
+
+---
+
+## Appendix — reproducing every number in this document
+
+All of these cost zero backtest credits.
+
+```bash
+# pull any run's log (free)
+python3 scripts/pull_backtest_logs.py 820236 --out backtests/820236.log --no-meta
+
+# P&L attribution and gross-notional tables (sections 1, 2, 5)
+python3 scripts/pull_backtest_logs.py 820236 --filter 'FILL (BUY|SELL)|Monitor decision:' --stdout
+
+# the gate census and the refusal chain (section 3)
+python3 scripts/pull_backtest_logs.py 820236 \
+    --filter 'MAX_POSITIONS_GATE|SATELLITE (CAP|OVERFLOW)|TURNOVER BUDGET|Buy gate inputs|max_positions gate armed' --stdout
+
+# the sell-proceeds credit (section 4) — 1 hit in 498816, 0 everywhere else
+for id in 455506 498816 264179 820236 718249 613166 725146 342380; do
+  echo -n "$id "; python3 scripts/pull_backtest_logs.py $id --filter 'Sell-proceeds credit' --stdout | grep -c . ; done
+
+# the A/B table in section 3c
+python3 scripts/simulate_allocation.py backtests/820236.log \
+    --config scripts/doc193_backup_patch_20260808T110842Z.json --fix-config-from-log \
+    --set max_positions=8
+# NOTE: doc-193 defines core_target_pct ONLY inside regime_profiles, so a
+# base-level --set is SHADOWED by the overlay. The harness prints a
+# "--set keys SHADOWED by a regime_profiles overlay" warning; scope it to the
+# profile instead:
+python3 scripts/simulate_allocation.py backtests/820236.log \
+    --config scripts/doc193_backup_patch_20260808T110842Z.json --fix-config-from-log \
+    --set 'regime_profiles={"bull":{"core_sleeve_enabled":true,"core_target_pct":0.20},"chop":{"core_sleeve_enabled":true,"core_target_pct":0.20}}'
+    # -> satellite_skip 13 -> 0, admitted UNCHANGED at 13
+python3 scripts/simulate_allocation.py backtests/820236.log \
+    --config scripts/doc193_backup_patch_20260808T110842Z.json --fix-config-from-log \
+    --set turnover_budget_monthly_pct=1.5 # -> admitted unchanged at 13
+
+# tests
+python3 -m pytest backend/tests/test_simulate_allocation.py -q      # 48 passed
+```
+
+Logs used, all present under `backtests/`:
+`820236_20260808-142050Z.log`, `498816_20260808-024027Z.log`,
+`264179_20260808-124656Z.log`, `455506_20260807-192732Z.log`,
+`342380_localsim.log`; `718249`, `613166`, `725146` were read through
+`pull_backtest_logs.py --stdout --filter` without writing a file.

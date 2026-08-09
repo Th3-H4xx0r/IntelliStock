@@ -9281,6 +9281,90 @@ def _recent_runup_protect(sym, price_history, block_pct, lookback_bars) -> tuple
     return (runup_pct > _bp), runup_pct
 
 
+def _extension_blocks_entry(sym, price_history, block_pct, lookback_bars,
+                            config=None) -> tuple[bool, float, str, dict]:
+    """Entry-side extension test. Returns (blocked, reading, metric, diagnostics).
+
+    `entry_extension_metric` selects the measure:
+      "range"  (default) — the legacy (max-min)/min, byte-identical to today.
+      "anchor"           — distance above the mean close over the same window,
+                           which is directional and does not decay when a name
+                           consolidates at its highs.
+
+    Kept as a separate entry-side function so the EXIT-side protector
+    (`_recent_runup_protect`) is untouched: sparing a held name from a forced
+    exit at a local dip is a different question, and its metric is defensible
+    there. This is the reuse that produced the inversion.
+    """
+    cfg = config or {}
+    metric = str(cfg.get("entry_extension_metric", "range") or "range").strip().lower()
+    if metric != "anchor":
+        blocked, reading = _recent_runup_protect(
+            sym, price_history, block_pct, lookback_bars)
+        return blocked, reading, "range", {}
+    try:
+        _bp = float(block_pct or 0.0)
+    except (TypeError, ValueError):
+        return False, 0.0, "anchor", {}
+    if _bp <= 0:
+        return False, 0.0, "anchor", {}
+    ext, diag = _extension_above_anchor(sym, price_history, lookback_bars)
+    if ext is None:
+        # Unmeasurable extension must not silently pass as 0.0 — that is how a
+        # name with no history reads "not extended". Fail OPEN only when the
+        # document says to; otherwise refuse to judge and let the other gates run.
+        return False, 0.0, "anchor", diag
+    return (ext > _bp), ext, "anchor", diag
+
+
+def _extension_above_anchor(sym, price_history, lookback_bars) -> tuple[float | None, dict]:
+    """How far price sits ABOVE a slow anchor, as a %. None when unmeasurable.
+
+    2026-08-08. The entry gate has been using `_recent_runup_protect`, whose
+    docstring says it was built to spare a HELD name from a forced exit at a
+    local dip. Reused as an entry blocker it fails in three measured ways:
+
+      DECAY — it is (max-min)/min over a sliding window, so a parabola is
+        forgotten once it leaves the window. SNDK's own closes, replayed through
+        the gate's formula: 129.2% on 01-30, then 22.4% on 02-26 while sitting
+        at +168% on the window and 6.8% off its all-time high. It reads CLEAN
+        exactly when the name is most extended, and spike-then-consolidate is
+        the normal shape of the names this book exists to buy.
+      DIRECTION-BLIND — OMER's reading was pinned at +96.0% across six decision
+        bars while the close FELL 18.7%. It blocked a falling knife for being
+        over-extended, then admitted it lower.
+      ANTI-MONOTONIC — PLRZ rose +62.7% while the reading fell 106.2% -> 78.8%.
+
+    Distance above a slow anchor has none of those properties: it rises when
+    price rises, falls when price falls, and a genuine consolidation reduces it
+    only as fast as the anchor catches up — which is the honest answer, not a
+    window artefact.
+
+    The anchor is the mean close over `lookback_bars`, which is a simple moving
+    average and needs no new data. Returns (extension_pct, diagnostics) so the
+    caller can LOG ITS INPUTS — the old reading was not reproducible from the
+    log, which cost one investigation its proof.
+    """
+    diag: dict = {"bars_used": 0, "anchor": None, "price": None}
+    if not isinstance(price_history, dict):
+        return None, diag
+    n = max(2, int(lookback_bars or 0))
+    bars = (price_history.get(sym) or [])[-n:]
+    closes = [float(b.get("close") or b.get("c") or 0.0)
+              for b in bars if isinstance(b, dict)]
+    closes = [c for c in closes if c > 0.0]
+    diag["bars_used"] = len(closes)
+    if len(closes) < 2:
+        return None, diag
+    anchor = sum(closes) / len(closes)
+    price = closes[-1]
+    diag["anchor"] = anchor
+    diag["price"] = price
+    if anchor <= 0:
+        return None, diag
+    return ((price - anchor) / anchor) * 100.0, diag
+
+
 def _recent_return_pct(sym, price_history, lookback_bars) -> float | None:
     """Close-over-close % return across the last lookback_bars bars, or None
     when history is missing/too short. Same bar shape as
@@ -13874,6 +13958,11 @@ def _discover_stocks_from_momentum(
 
     # Source 2: overlay bars universe — catches ETFs and popular momentum stocks
     if strategy_cache is not None and alpaca_key and alpaca_secret:
+        # Hand the universe builder this bar's config (see the broad-universe
+        # block there). Module-level rather than a signature change so the other
+        # call sites and their tests are untouched.
+        global _MOMENTUM_SCAN_CONFIG
+        _MOMENTUM_SCAN_CONFIG = config or {}
         momentum_universe = _build_momentum_scan_universe(active_trends, list(current_symbols))
         scan_tickers = [t for t in momentum_universe
                         if t not in current_symbols and t not in existing_set and t not in seen]
@@ -13952,7 +14041,15 @@ def _discover_stocks_from_momentum(
     #
     # Default keeps the old key so this is opt-in per document.
     if bool(config.get("momentum_rank_on_60d", False)):
-        candidates.sort(key=lambda x: (-x[2], -x[1], x[0]))
+        # A missing 60d means UNKNOWN, not WORST: rank it on the 20d we do have
+        # rather than sending it to the back of a list that is then cut at
+        # `momentum_discovery_max_per_day`. The 60d THRESHOLD is unaffected —
+        # -inf still cannot clear min_60d — so such a name had to qualify on the
+        # 20d axis to be a candidate at all.
+        def _rank60(x):
+            r20, r60 = x[1], x[2]
+            return (-(r60 if r60 > float("-inf") else r20), -r20, x[0])
+        candidates.sort(key=_rank60)
     else:
         candidates.sort(key=lambda x: (-max(x[1], x[2]), -x[1], -x[2], x[0]))
 
@@ -14935,6 +15032,14 @@ def _detect_price_based_trends(
     return count
 
 
+# Broad company-graph universe for the momentum screen. Session-scoped: the
+# company set does not change during a backtest.
+_momentum_broad_cache: dict = {}
+# Set by the caller each bar so the universe builder can read config without a
+# signature change reaching every call site.
+_MOMENTUM_SCAN_CONFIG: dict = {}
+
+
 def _build_momentum_scan_universe(
     active_trends: list[dict] | None = None,
     current_symbols: list[str] | None = None,
@@ -14987,6 +15092,47 @@ def _build_momentum_scan_universe(
             except Exception:
                 _momentum_neighbor_cache = {"key": _syms_key, "tickers": []}
         universe.update(_momentum_neighbor_cache.get("tickers", []))
+    # 2026-08-08 — BREAK THE CLOSED LOOP (default OFF).
+    #
+    # Every source above is reachable-from-what-we-already-have: benchmark ETFs,
+    # trend ETFs, tickers named by an active news trend, and Neo4j neighbours of
+    # stocks ALREADY TRACKED. There is no broad equity screen, so a mover can
+    # only be discovered if the book is already standing next to it. That is the
+    # mechanism behind the strongest relationship in the whole investigation:
+    # fraction-of-move-elapsed-at-fill vs capture, r = -0.895 (n=21, p<0.0001),
+    # with perfect separation — every position filled at <=55% elapsed made
+    # money, every one filled at >100% lost.
+    #
+    # Concretely, bt 201039 bar 1: the pool held no SNDK, WDC, VICR, MU or TSEM
+    # while SNDK's 244 daily bars were fetched on the same bar and never
+    # screened. bt 820236's pool DID contain them on bar 1 and WDC+SNDK paid
+    # +$551.43 of that run's +$739.61. Same code, different neighbourhood.
+    #
+    # The company graph is the system's own universe and needs no new data
+    # source. Capped and sorted so the scan stays bounded and deterministic.
+    _broad_cap = 0
+    try:
+        _broad_cap = int((_MOMENTUM_SCAN_CONFIG or {}).get(
+            "momentum_scan_broad_universe_max", 0) or 0)
+    except (TypeError, ValueError, AttributeError):
+        _broad_cap = 0
+    if _broad_cap > 0 and _shared_neo4j_driver is not None:
+        global _momentum_broad_cache
+        if not _momentum_broad_cache.get("tickers"):
+            try:
+                with _shared_neo4j_driver.session() as _bsess:
+                    _bres = _bsess.run(
+                        "MATCH (c:Company) WHERE c.ticker IS NOT NULL "
+                        "RETURN c.ticker AS t ORDER BY c.ticker LIMIT $cap",
+                        cap=int(_broad_cap),
+                    )
+                    _momentum_broad_cache = {
+                        "tickers": [str(r["t"]).strip().upper() for r in _bres
+                                    if str(r["t"] or "").strip()]
+                    }
+            except Exception:
+                _momentum_broad_cache = {"tickers": []}
+        universe.update(_momentum_broad_cache.get("tickers", []))
     return sorted(universe)
 
 

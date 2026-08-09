@@ -578,11 +578,90 @@ def test_unscored_candidates_are_counted_in_the_result(prod, replay):
     assert res.unscored >= 1
 
 
+def test_core_funding_prepass_uses_the_real_admissible_buys(prod):
+    """The core sizes its release off the buys the allocator approved, and
+    broker.py trims that to the buys max_positions will admit. The harness
+    reports the gap through the REAL nexus_broker_utils helper, because that
+    gap is the churn loop bt 455506 measured at $9,081 of SPY gross for -1.37
+    shares of net."""
+    cfg = dict(CFG_CORE_ON, core_sleeve_enabled=False, turnover_budget_monthly_pct=0.0)
+    chain = sa.GateChain(prod, cfg)
+    held = {f"H{i}": 1.0 for i in range(6)}
+    prices = {f"H{i}": 10.0 for i in range(6)}
+    prices.update({"A": 100.0, "B": 100.0})
+    t = _tick([_one_candidate(symbol="A", alloc_cash=500.0),
+               _one_candidate(symbol="B", alloc_cash=500.0)],
+              held=held, prices=prices)
+    chain.run_tick(t, cash=5000.0, positions=held, initial_cash=6000.0,
+                   ledger_date="2026-01-05")
+    assert chain.funding_requested == pytest.approx(1000.0)
+    # cap 6, six held, no full exits -> nothing is admissible
+    assert chain.funding_admissible == pytest.approx(0.0)
+
+
+def test_core_funding_prepass_keeps_a_rotation_funded(prod):
+    cfg = dict(CFG_CORE_ON, core_sleeve_enabled=False, turnover_budget_monthly_pct=0.0)
+    chain = sa.GateChain(prod, cfg)
+    held = {f"H{i}": 1.0 for i in range(6)}
+    prices = {f"H{i}": 10.0 for i in range(6)}
+    prices["A"] = 100.0
+    t = _tick([_one_candidate(symbol="A", alloc_cash=500.0)], held=held, prices=prices)
+    t.full_exits = {"H0"}
+    chain.run_tick(t, cash=5000.0, positions=held, initial_cash=6000.0,
+                   ledger_date="2026-01-05")
+    assert chain.funding_admissible == pytest.approx(500.0)
+
+
+def test_regime_profile_shadowing_is_warned(capsys):
+    """`--set core_target_pct=0.20` on doc-193 changes NOTHING, because doc-193
+    defines core_target_pct only inside regime_profiles and _apply_regime_profile
+    merges the overlay on top before any gate reads it. That is the easiest way
+    to run a lever test that silently tested nothing, so the harness says so."""
+    cfg = {"regime_profiles": {"chop": {"core_target_pct": 0.35},
+                               "bull": {"core_target_pct": 0.35}}}
+    sa.print_override_shadowing(cfg, ["core_target_pct=0.20"], {"chop", "bull"})
+    out = capsys.readouterr().out
+    assert "SHADOWED" in out
+    assert "core_target_pct" in out
+    assert "regime_profiles.bull/chop" in out
+
+
+def test_regime_profile_shadowing_is_silent_when_not_shadowed(capsys):
+    cfg = {"core_target_pct": 0.35, "regime_profiles": {"chop": {"core_min_pct": 0.25}}}
+    sa.print_override_shadowing(cfg, ["core_target_pct=0.20"], {"chop"})
+    assert capsys.readouterr().out == ""
+
+
+def test_broker_fingerprint_is_reported(prod):
+    """broker.py is edited constantly. The replay binds by NAME so it does not
+    break, but a report has to say which revision produced it."""
+    sha, nlines = prod.broker_fingerprint
+    assert len(sha) == 12 and nlines > 1000
+
+
 def test_docstring_states_what_cannot_be_modelled():
     doc = sa.__doc__ or ""
     for phrase in ("CANNOT MODEL", "P&L", "PRICE IMPACT", "DOWNSTREAM DIVERGENCE",
-                   "THE STRATEGY SIDE", "LIVE-ONLY BEHAVIOUR", "SETTLEMENT"):
+                   "THE STRATEGY SIDE", "LIVE-ONLY BEHAVIOUR", "SETTLEMENT",
+                   "NOT MODELLED AT ALL"):
         assert phrase in doc, phrase
+
+
+def test_docstring_does_not_claim_functions_it_never_calls():
+    """Over-claiming which production functions are wired in is how a harness
+    starts lying. core_rebalance_order / core_target_weight are NOT called, and
+    the docstring has to say so in the NOT MODELLED block rather than list them
+    as wired."""
+    doc = sa.__doc__ or ""
+    not_modelled = doc.split("NOT MODELLED AT ALL", 1)[1]
+    for name in ("core_rebalance_order", "core_target_weight",
+                 "core_sleeve_armed_for_bar"):
+        assert name in not_modelled, name
+    src = open(_SCRIPT).read()
+    body = src.split('"""', 2)[2]      # everything after the module docstring
+    for name in ("core_rebalance_order(", "core_target_weight(",
+                 "core_sleeve_armed_for_bar("):
+        assert name not in body, f"{name} is claimed unmodelled but is called"
 
 
 def test_fidelity_is_reported_and_penalises_a_wrong_config(prod, replay):
