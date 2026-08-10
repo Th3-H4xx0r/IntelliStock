@@ -99,3 +99,71 @@ Reference window `2026-01-01..2026-03-01`, cold, `anchor_reinforce_target_pct=20
 **Attribution warning, written in advance:** every A/B this session overlapped its control by 2 of
 9-11 held names. A single run cannot resolve this lever's P&L. What it CAN resolve is whether the
 lane fires at all, and at what size — which is deterministic, greppable, and the actual claim here.
+
+
+---
+
+## 6. RESULT — bt 633644, `anchor_reinforce_target_pct = 20`
+
+Reference window `2026-01-01..2026-03-01`, cold. Control: bt 571147 (+17.36%).
+
+### Row 1 of the pass/fail table fired: THE LANE IS ALIVE, FOR THE FIRST TIME
+
+```
+ANCHOR ADD: UUUU stage=1 +$241 (held  7d, pnl +24.4%, drop_from_peak 0.0%, entry $840, raw 1.200)
+ANCHOR ADD: NVO  stage=1 +$175 (held 10d, pnl +15.2%, drop_from_peak 0.1%, entry $840, raw 1.250)
+ANCHOR ADD: UUUU stage=2 +$211 (held 14d, pnl +38.7%, drop_from_peak 0.6%, entry $840, raw 1.250)
+ANCHOR ADD: UUUU stage=3 +$319 (held 21d, pnl +51.7%, drop_from_peak 3.6%, entry $840, raw 1.250)
+ANCHOR ADD: SNDK stage=2 +$207 (held 25d, pnl +32.0%, drop_from_peak 1.9%, entry $925, raw 1.250)
+```
+
+**Five funded adds, all three stages, exactly the arithmetic §3 predicted** ($241/$211/$319 against
+predicted $234/$385/$586 — stage 2 and 3 are smaller because the budget bound them, see below).
+
+UUUU was scaled through **all three stages** while running +24% -> +39% -> +52%, and finished the
+run as the **top contributor, +$293.42**. SNDK — the name the objective names — took a stage-2 add
+and returned **+$203.38**, against **+$52.64** in the control where it was a $101 runt.
+
+That is the objective's mechanism, executing, for the first time in this repo's recorded history.
+
+### Row 4 also fired: the return is below the revert threshold
+
+| | 633644 (target 20) | 571147 (control) |
+|---|---|---|
+| return | **+5.61%** | +17.36% |
+| vs SPY (+0.24%) | +5.37pp | +17.12pp |
+| max DD | 12.9% | 10.6% |
+| top contributor | UUUU +$293 | SBLK +$293 |
+
+`+5.61% < +12.42%`. **Reverted to 12, as declared.**
+
+### THE HONEST VERDICT: "NOT PROVEN", NOT "HARMFUL"
+
+* Book overlap with the control is **2 of 8** (SNDK, AMCR) — the same re-randomisation every A/B
+  this session hit. The fourteen recorded runs of this window span **+1.72% to +17.36%**, and
+  +5.61% sits inside that.
+* The three names that received adds netted **+$283** between them (UUUU +$293, SNDK +$203,
+  NVO -$213) on ~$1,153 of adds. Two of three worked.
+* The single worst line in the run is **NVO -$213.32**, which took a stage-1 add at +15.2% and then
+  reversed. That is the real risk of this lane and it is not dismissible at n=1.
+
+**Reverting to 12 is not a safe default — it restores a lane that provably cannot add at all.**
+The defect in §1 stands regardless of this run. What this run establishes is that the fix *works
+mechanically*; what it cannot establish, at 2-of-8 overlap on one window, is the P&L.
+
+### THE NEXT CONSTRAINT, NOW VISIBLE
+
+The diagnostic line added in this commit fired **36 times**:
+
+```
+ANCHOR ADD: none funded from 4 candidate(s) on a $178 budget — check
+            anchor_reinforce_target_pct against the entry clip
+```
+
+$178 is below the $234 a stage-1 add costs. With the target fixed, **the binding constraint moved
+one step up to `_winner_add_budget_cap = _stock_budget_available * 0.40`** — a hard-coded 40% that
+lands at $170-$250 on a fully-deployed book. That is the fifth instance of the same pattern, and it
+is now greppable instead of silent.
+
+**Correct next step: evaluate `anchor_reinforce_target_pct` across the bear, OOS and non-semi
+windows before shipping it — not another single run on the tuning window.**
