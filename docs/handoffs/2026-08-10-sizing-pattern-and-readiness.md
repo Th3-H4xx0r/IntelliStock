@@ -383,3 +383,136 @@ New this session, all under `docs/investigations/`:
 
 Prior session: `fix-audit-levers.md` has a 63-row WORKS/INERT/BACKWARDS verdict table for every
 doc-193 key. **Read it before enabling anything.**
+
+
+---
+
+## 14. APPENDIX — HARNESS MEMORY, VERBATIM
+
+These are the persisted memory entries as they stand at the end of this session. They are
+reproduced in full so that a fresh session which has only this file still gets the same durable
+knowledge, and so that a session which HAS the harness can diff the two and notice drift.
+
+**GLOBAL** entries survive across sessions and are project-qualified facts or operating rules.
+**LOCAL** entries are this session's state and its one new procedure. Promote a local entry to
+global only once it has survived a second session.
+
+### GLOBAL · `intellistock_never_push_to_main_while_a_backtest_is_running_push_auto_deploys_an`
+**IntelliStock: EVERY push to main auto-deploys and kills any running backtest — batch commits, push only between runs**
+
+```
+IntelliStock deploy coupling (operator-confirmed 2026-08-10, stated twice — "it will interrupt a
+run for code changes all the time"):
+ANY push to origin/main AUTO-DEPLOYS to intellistock-api.pkrishna.dev and RESTARTS the backend
+container. It fires on EVERY push, including docs-only and test-only commits. A backtest in flight is
+killed unrecoverably and must be relaunched from scratch, including
+scripts/reset_backtest_event_state.py --apply (a partial run leaves GraphNexusActiveEvents and the
+NexusStrategyCache turnover_ledger dirty, and an inherited ledger invalidates the next A/B).
+
+Runs are the scarce resource; pushes are free to defer. Standing workflow:
+  1. Launch the run (scripts/run_validation_backtest.py). Record the bt id.
+  2. While in flight: edit freely, COMMIT locally, run pytest locally, read logs via
+     scripts/pull_backtest_logs.py (read-only, free). Accumulate commits. DO NOT `git push`.
+  3. Poll `scripts/pull_backtest_logs.py <id> --summary` until status != 'running'.
+  4. Then push ALL accumulated commits at once; re-run scripts/check_deployed_code.py before
+     launching the next run, so that run is known to be measuring the new code.
+
+Corollary that has burned analysis before: a run always measures the code deployed when it STARTED.
+Local edits never reach an in-flight run, so never read a running log as evidence about an
+undeployed local change.
+```
+
+### GLOBAL · `intellistock_hard_won_rules_grep_the_log_signature_4_94pp_noise_floor_always_res`
+**IntelliStock: hard-won rules — grep the log signature, 4.94pp noise floor, always reset event state**
+
+```
+IntelliStock hard-won rules (2026-08-09 session, each paid for with a wasted cycle):
+* GREP THE LOG SIGNATURE in a real run before claiming any lever works. FIVE inert levers shipped in one
+  session; peak_giveback fired 151x and sold NOTHING (reason string absent from _FORCED_EXIT_TAGS).
+  Also inert: watchlist_priority_slots (sector_watchlist is {}), rank_band_momentum_exempt (reader 5,606
+  lines before writer), max_positions_honour_regime_cap (0 blocks), backtest_credit_pending_sell_proceeds.
+  docs/investigations/fix-audit-levers.md has a 63-row WORKS/INERT/BACKWARDS verdict table for every doc-193 key.
+* NOISE FLOOR >= 4.94pp. Two runs of the SAME window and config had 0/18 held-name overlap. Attribute
+  nothing smaller than ~5pp to any lever.
+* ALWAYS scripts/reset_backtest_event_state.py --apply before a run. GraphNexusActiveEvents AND the
+  turnover_ledger (inside NexusStrategyCache) are INHERITED between runs; tick-1 turnover was 56-72% of a
+  50% budget before a single decision. Without the reset you are measuring the previous run.
+* Rotation must stay OFF (momentum_swap_vs_portfolio_enabled=False): ON gave 54 fills / 16 round trips /
+  -3.04%, sold winners (NTR, VOYA) to chase, and 5/5 rotations sold without buying the replacement.
+* Do NOT touch the exit stack. trailing_stop_disabled is correct: re-arming it kills all 8 big winners
+  (WDC, SNDK x2, LRCX, AMAT, AGMI, XOM, AAOI drew down 6.9-22.4% on the way up).
+* Nothing separates winners from losers AT ENTRY - do not build an entry filter. XOM/NTR/VOYA: same bar,
+  lane, score, size, extension -> +26.9% / +21.2% / -8.9%. ENTRY LATENESS is the whole P&L:
+  frac-of-move-elapsed-at-fill vs capture r = -0.895 (n=21, p<0.0001); every fill <=55% elapsed made money,
+  every fill >100% lost.
+* VERIFY THE RUN, NOT THE CONFIG. I cited bt 542754 as evidence for residual_sleeve_bear_alloc_pct=0.35;
+  that run actually logged alloc=70%. 0.35 has never run in a bear.
+* A test that mirrors the implementation agrees with itself - that is how the runt bug survived two fixes.
+  Drive the real function.
+* Cross-check parallel agents against each other before shipping one agent's recommendation.
+```
+
+### GLOBAL · `intellistock_broker_gate_reads_get_cash_emulator_funds_get_buying_power`
+**IntelliStock: broker gate reads get_cash(), emulator funds get_buying_power()**
+
+```
+Any broker.py buy gate reasoning about cash reads portfolio_emulator.get_cash(), but PortfolioEmulator.execute_signal actually funds min(cash_per_trade, get_buying_power(reserved_cash)) at portfolio_emulator.py:1489 — net of same-tick in-flight BUY reservations (_execution_cash_reservations; the SPY index-core leg submits first) and the unsettled 5% T+1 slice of recent sells (_withheld_cash). The two diverge on most ticks when core_sleeve_enabled=True. Two confirmed victims: backtest_credit_pending_sell_proceeds (fix-audit-levers row 31) and the exec min-position floor (bt 676939: AVY gate $860.36 -> fill $47.36, AMZN $613.78 -> $102.17; fixed via _exec_fundable_amount / _exec_min_position_gate, docs/investigations/fix-runt-leak.md). Also: broker.py is NOT importable (argparse + sockets at module scope) — tests AST-extract its module-level functions and exec them (pattern: backend/tests/test_core_sleeve_wiring.py). Suite baseline: 19 pre-existing failures in test_adv_exit_discipline_findings.py, test_core_sleeve_adversarial.py, test_zz_adversarial_sweep.py; everything else green (python3 -m pytest -q backend/tests).
+```
+
+### LOCAL · `intellistock_sizing_lane_audit_check_every_budget_against_one_entry_clip_840_and_prove_it_with_the_real_function`
+**IntelliStock: sizing-lane audit — check every budget/target against ONE entry clip ($840 = 0.14 x NAV) and prove it with the real function, not paper arithmetic**
+
+```
+IntelliStock sizing-lane audit procedure (2026-08-10, fifth instance of one bug).
+
+THE PATTERN: every lane whose job is to put size on a winner has been calibrated BELOW the size of one position. Five confirmed instances, all against entry clip = total_spend_cap_target_weight_pct 0.14 x NAV = $840 at $6000 cash:
+  1. conviction overflow band $600 < $840 -> FIXED 2026-08-09, reference window +9.70% -> +17.36%
+  2. BFQ priority pool $155-$385 < $840 -> lever bfq_conviction_target_weight_pct reverted; pool is the wall
+  3. satellite-cap remainder $235 < $370 min-position floor -> SNDK (+166%) refused outright
+  4. anchor_reinforce_target_pct 12 -> target 0.12 x NAV = $720 < entry $840. additional_needed = max(0, target - current_value) is $0 at EVERY stage forever; the better the winner the further out of reach. bt 571147 (best run on record) logged candidates=4..6 on 25 bars and funded ZERO.
+  5. _winner_add_budget_cap = _stock_budget_available * 0.40 (hard-coded in graph_nexus_analysis.py near the V31 anchor block) -> $170-$250 on a fully-deployed book vs a $234 stage-1 add. NEXT constraint; fired 36x as "ANCHOR ADD: none funded from N candidate(s)" in bt 633644.
+
+MANDATORY CHECK BEFORE SPENDING A ~70-MINUTE BACKTEST ON ANY SIZING LEVER:
+  a) Compute the lane's dollar budget/target at NAV=$6000 and compare to $840. If budget < clip, the lane is inert and no run is needed to prove it.
+  b) Do NOT trust paper arithmetic. Write a pytest that imports and drives the REAL planner (e.g. strategies.graph_nexus_analysis._plan_anchor_reinforcement) with a synthetic candidate. The real function corrected the sketch here: target_pct=17 LOOKED fundable and is not, because additional_needed must also clear min_position_size=$100. True switch-on boundary is ~17.8% of NAV (16.1% stage-1 value + 1.67% floor); tests assert 16->no, 17->no, 18->yes.
+  c) Ship the GREPPABLE LOG SIGNATURE in the same commit or earlier, including an explicit negative line ("none funded from N candidate(s)"). Only-the-budget-was-logged is how this bug hid for 25 bars in the best run on record.
+
+ANCHOR LANE STATUS: anchor_reinforce_target_pct is back to 12 on doc-193 (below the pre-declared +12.42% revert line at +5.61% vs control +17.36%). Verdict NOT PROVEN, not harmful — 2-of-8 book overlap, window's 14 runs span +1.72%..+17.36%, add-receiving names netted +$283 (UUUU +$293 top contributor after scaling 3 stages, SNDK +$203 vs +$52 as a $101 runt, NVO -$213 took a stage-1 add at +15.2% and reversed). BE EXPLICIT: 12 is NOT a safe default, it restores a lane that provably cannot add at all. Next action is a MULTI-WINDOW (bear + OOS + non-semi) evaluation of 20, never another reference-window run.
+```
+
+### LOCAL · `intellistock_session_state_2026_08_09_conviction_band_fixed_3_windows_clear_1x_n`
+**IntelliStock 2026-08-10 FINAL: handoff at docs/handoffs/2026-08-10-sizing-pattern-and-readiness.md; HEAD 155f271**
+
+```
+END OF SESSION 2026-08-10. HEAD 155f271 == origin/main, pushed, deploy hash-verified. NO run in flight.
+COMPREHENSIVE HANDOFF: docs/handoffs/2026-08-10-sizing-pattern-and-readiness.md (supersedes
+2026-08-10-benchmark-and-capacity.md). Read that first — it has everything below plus detail.
+
+GOAL NOT ACHIEVED on all three clauses. 22/24 beat SPY (mean alpha +9.17pp) but only 10/24 at 1x
+pace, and the OOS bull window (SPY +13.10%) is 0/3 — participation problem, not a hedge problem.
+
+MASTER PATTERN, 5 instances — CHECK EVERY SIZING LANE AGAINST 0.14 x NAV = $840:
+ 1 conviction band $600 (fixed 2026-08-09, +7.7pp)  2 BFQ pool $155-385  3 satellite remainder $235
+ vs $370 floor  4 anchor target 0.12xNAV < 0.14xNAV entry (lane could NEVER add; fixed->PROVEN to
+ fire, 5 adds, UUUU +24->+39->+52% top contributor +$293; reverted, NOT PROVEN)  5 anchor budget cap
+ stock_budget*0.40 = $170-250 vs a $234 add -> NEXT FIX, greppable via the "ANCHOR ADD: none funded"
+ line added this session (fired 36x).
+
+LIVE ON doc-193, KEEP: residual_sleeve_bear_block_at_fresh_low_bars=2 + regime_rally_onset_enabled=true.
+Verified selective: 12 blocks in the OOS window (SQQQ $0, maxDD 11.4->5.8%), ZERO in the bear window
+(leg reopened at the same bar+price as the +$889 leg, SQQQ +$918.78, +21.27% best bear on record).
+anchor_reinforce_target_pct back to 12 (20 is the tested value). bfq_conviction_target_weight_pct absent.
+
+REAL MONEY: refused, with the repo's own gate as the reason — assess_live_readiness.py = RESEARCH 0/6.
+Four blockers no code can clear today: (1) every backtest is pit_mode='research' = LOOKAHEAD
+(interactive_utils.py:5607), so the whole evidence base is not promotion-eligible; (2) 0 of 60 paper
+days, calendar-bound; (3) sealed holdout was never pre-registered and every window has now been
+looked at; (4) six gate criteria are uncomputable because a backtest emits NO equity time series.
+doc-179/alpaca-main untouched — real money, needs explicit sign-off.
+
+NEXT: (1) anchor_reinforce_target_pct=20 on bear+OOS+non-semi (3 runs, NOT another reference run);
+(2) fix the 40% anchor budget sub-cap; (3) bull participation; (4) emit an equity curve on the result
+row (unblocks 6 promotion criteria); (5) stage the deployment; (6) bear-regime core saw-tooth (3.72x NAV).
+
+BASELINE: 19 pre-existing test failures (test_A11 + adversarial-findings), 4,809 pass — NOT a regression.
+```
