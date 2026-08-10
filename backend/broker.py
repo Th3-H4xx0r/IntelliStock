@@ -3470,6 +3470,162 @@ def _core_sleeve_cfg_raw(cached_strategies):
     return {}
 
 
+# ── EXECUTION-TIME MINIMUM POSITION FLOOR ────────────────────────────────────
+#
+# Hoisted out of the per-symbol buy block so the decision is one testable
+# function instead of an expression the tests can only MIRROR. A mirrored gate
+# is how the runt leak survived two fixes: the mirror agreed with itself.
+#
+# The historical floor, kept when `min_position_nav_pct` is absent so an
+# unconfigured book is byte-identical to every run before this existed.
+_EXEC_MIN_POSITION_USD = 50.0
+
+
+def _exec_min_position_floor(cfg, nav):
+    """Dollar minimum or NAV share, whichever is larger.
+
+    The same number the allocator uses for `min_position_nav_pct`, so the two
+    ends cannot admit what the other refuses. Never raises: a floor that
+    disappears on a malformed config is worse than no floor, because it
+    disappears silently and only under the conditions nobody tested.
+    """
+    floor = _EXEC_MIN_POSITION_USD
+    try:
+        pct = float((cfg or {}).get("min_position_nav_pct", 0.0) or 0.0)
+    except (TypeError, ValueError, AttributeError):
+        return floor
+    try:
+        nav_f = float(nav or 0.0)
+    except (TypeError, ValueError):
+        return floor
+    if pct > 0 and nav_f > 0:
+        floor = max(floor, nav_f * pct)
+    return floor
+
+
+def _exec_fundable_amount(portfolio_emulator, cash_to_use):
+    """What the emulator will ACTUALLY spend — not what this gate asked for.
+
+    THE BUG THIS EXISTS FOR (bt 676939, +14.65%, and bt 613166 before it).
+    `PortfolioEmulator.execute_signal` clamps every buy to
+
+        amount_to_use = min(cash_per_trade, get_buying_power(reserved_cash))
+                                                (portfolio_emulator.py:1489)
+
+    where `reserved_cash` is the sum of the still-in-flight BUY reservations
+    booked EARLIER ON THIS SAME TICK, and `get_buying_power` additionally nets
+    out the unsettled slice of recent sells. The buy gate reads `get_cash()`,
+    which sees neither. So the floor was measured against a number that is not
+    the size of the position that opens:
+
+        AVY  2026-01-06  gate cash_to_use $860.36 -> FILL $47.36  (0.8% of NAV)
+        AMZN 2026-02-04  gate cash_to_use $613.78 -> FILL $102.17 (1.7% of NAV)
+
+    Both PASS the $360 floor, both open a NEW name, both are runts. The SPY
+    core leg is submitted first on the same tick and reserves the cash the
+    alpha name was sized against ($1,549 and $485); the 5% unsettled slice of
+    the prior day's sell takes the rest ($83.94 and $30.13). Reconstructed to
+    the dollar in docs/investigations/fix-runt-leak.md.
+
+    Returns `cash_to_use` unchanged for any broker that does not expose the
+    clamp — `get_buying_power` exists only on PortfolioEmulator, so every LIVE
+    adapter takes the identity path and live sizing is untouched.
+    """
+    try:
+        want = float(cash_to_use or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    get_bp = getattr(portfolio_emulator, "get_buying_power", None)
+    if not callable(get_bp):
+        return want
+    try:
+        resv = 0.0
+        resv_map = getattr(
+            portfolio_emulator, "_execution_cash_reservations", None)
+        if isinstance(resv_map, dict):
+            resv = sum(float(v or 0.0) for v in resv_map.values())
+        return min(want, max(0.0, float(get_bp(resv) or 0.0)))
+    except Exception:
+        # Never let a sizing diagnostic refuse a trade it cannot measure.
+        return want
+
+
+def _exec_min_position_skips(decision, cash_to_use, cash_per_trade,
+                             fundable, floor, held):
+    """True when this buy must not be executed because it is too small.
+
+    `fundable` is what will actually be spent; `cash_to_use` is what was asked
+    for. They differ only when the emulator's clamp bites, and the floor must
+    be measured against the former.
+
+    An ADD to a name already held is exempt: the floor exists so a position too
+    small to matter cannot take a `max_positions` SLOT, and an add takes no
+    slot. That exemption refused SNDK's winner-add ($216, bt 571147) and WDC's
+    ($586, bt 427197) before it was added.
+
+    With no NAV floor configured the caller passes `fundable == cash_to_use`
+    and `floor == _EXEC_MIN_POSITION_USD`, which reduces this to the historical
+    rule exactly: refuse a sub-$50 buy only if it was TRUNCATED from a larger
+    intent.
+    """
+    if decision != 1 or held:
+        return False
+    hard = floor > _EXEC_MIN_POSITION_USD
+    return fundable < floor and (hard or cash_to_use < cash_per_trade)
+
+
+def _exec_min_position_gate(decision, symbol, cash_to_use, cash_per_trade,
+                            cached_strategies, portfolio_emulator, prices):
+    """The whole execution-time floor decision, at one choke point.
+
+    Returns `(skip, floor, fundable, held)`. The buy block does nothing but
+    call this and log the outcome, so a test that drives this function has
+    tested the gate the run actually uses — the previous version lived as an
+    inline expression whose only test was a hand-written MIRROR of it, and a
+    mirror agrees with itself no matter what the real path does.
+
+    DEFAULT-OFF IS A PROPERTY OF THIS FUNCTION. With `min_position_nav_pct`
+    absent, `floor` is the historical $50, the emulator's clamp is never
+    consulted (`fundable is cash_to_use`), and the decision is bit-for-bit the
+    pre-2026-08-09 rule.
+
+    Never raises. Every read here is a diagnostic; a diagnostic that throws
+    would take the whole tick down.
+    """
+    pct = 0.0
+    floor = _EXEC_MIN_POSITION_USD
+    try:
+        cfg = _core_sleeve_cfg_raw(cached_strategies) or {}
+        pct = float(cfg.get("min_position_nav_pct", 0.0) or 0.0)
+        if pct > 0 and portfolio_emulator is not None:
+            nav = float(portfolio_emulator.get_portfolio_value(prices) or 0.0)
+            floor = _exec_min_position_floor(cfg, nav)
+    except Exception:
+        pct = 0.0
+        floor = _EXEC_MIN_POSITION_USD
+    # An ADD to a name already held takes no `max_positions` slot, which is the
+    # only thing this floor protects. bt 571147 refused SNDK's winner-add ($216)
+    # and bt 427197 WDC's ($586) before this exemption existed.
+    held = False
+    try:
+        pos = (portfolio_emulator.get_positions()
+               if hasattr(portfolio_emulator, "get_positions")
+               else (getattr(portfolio_emulator, "_positions", {}) or {}))
+        held = float((pos or {}).get(symbol, 0.0) or 0.0) > 0.0
+    except Exception:
+        held = False
+    fundable = cash_to_use
+    if pct > 0:
+        fundable = _exec_fundable_amount(portfolio_emulator, cash_to_use)
+    return (
+        _exec_min_position_skips(
+            decision, cash_to_use, cash_per_trade, fundable, floor, held),
+        floor,
+        fundable,
+        held,
+    )
+
+
 # 2026-08-03 MINIMUM HOLDING PERIOD — see backend/min_hold.py for the why.
 #
 # Turnover is the binding constraint on this book: ~290% of NAV per month at a
@@ -15387,17 +15543,7 @@ while not shutdown_requested:
                         # Same floor as the allocator, so the two agree: the
                         # dollar minimum, or the NAV share, whichever is larger.
                         # Absent config keeps the historical $50.
-                        _exec_min_pos = 50.0
-                        try:
-                            _emp_cfg = _core_sleeve_cfg_raw(_cached_strategies) or {}
-                            _emp_pct = float(_emp_cfg.get("min_position_nav_pct", 0.0) or 0.0)
-                            if _emp_pct > 0 and portfolio_emulator is not None:
-                                _emp_nav = float(
-                                    portfolio_emulator.get_portfolio_value(prices) or 0.0)
-                                if _emp_nav > 0:
-                                    _exec_min_pos = max(_exec_min_pos, _emp_nav * _emp_pct)
-                        except Exception:
-                            _exec_min_pos = 50.0
+                        #
                         # The legacy test also required cash_to_use < cash_per_trade,
                         # i.e. "only refuse what was truncated". That leaves the
                         # hole GH went through: the allocator had already sized it
@@ -15405,26 +15551,32 @@ while not shutdown_requested:
                         # the clause never fired. A position below the NAV floor
                         # must not open regardless of how it got small — when the
                         # floor is configured, size is the whole question.
-                        # 2026-08-09: an ADD to a name we already hold is exempt.
-                        # The floor exists so a position too small to matter cannot
-                        # take a max_positions SLOT — an add takes no slot. Applying
-                        # it to adds refused SNDK's winner-add ($216) in bt 571147
-                        # and WDC's ($586) in bt 427197, i.e. it blocked exactly the
-                        # top-up of the names the book most wanted more of. The
-                        # allocator's own floor already exempts held names; this end
-                        # did not, so the two disagreed.
-                        _emp_held = False
-                        try:
-                            _emp_pos = (portfolio_emulator.get_positions()
-                                        if hasattr(portfolio_emulator, "get_positions")
-                                        else (getattr(portfolio_emulator, "_positions", {}) or {}))
-                            _emp_held = float((_emp_pos or {}).get(symbol, 0.0) or 0.0) > 0.0
-                        except Exception:
-                            _emp_held = False
-                        _emp_hard = _exec_min_pos > 50.0 and not _emp_held
-                        if decision == 1 and cash_to_use < _exec_min_pos and not _emp_held and (
-                                _emp_hard or cash_to_use < cash_per_trade):
-                            _log(f"SKIP BUY {symbol} — cash_to_use ${cash_to_use:.2f} < min ${_exec_min_pos:.0f} (allocated ${cash_per_trade:.2f})", "yellow")
+                        #
+                        # 2026-08-09 (bt 676939): and the floor must be measured
+                        # against what the emulator will FUND, not against what we
+                        # asked for. `cash_to_use` is the request; execute_signal
+                        # clamps it to the buying power left after this tick's
+                        # in-flight reservations (the SPY core leg is emitted
+                        # first) and after the unsettled slice of recent sells.
+                        # That clamp is why AVY opened at $47.36 on a gate that
+                        # read $860.36 and AMZN at $102.17 on a gate that read
+                        # $613.78 — both NEW names, both under the $360 floor,
+                        # both PASS. `_exec_min_position_gate` owns the whole
+                        # decision, including the held-name exemption and the
+                        # default-OFF contract; see its docstring.
+                        (_emp_skip, _exec_min_pos, _emp_fundable,
+                         _emp_held) = _exec_min_position_gate(
+                            decision, symbol, cash_to_use, cash_per_trade,
+                            _cached_strategies, portfolio_emulator, prices)
+                        if _emp_skip:
+                            _emp_what = (
+                                f"cash_to_use ${cash_to_use:.2f}"
+                                if _emp_fundable >= cash_to_use - 0.005 else
+                                f"fundable ${_emp_fundable:.2f} of cash_to_use "
+                                f"${cash_to_use:.2f} (orders already in flight "
+                                f"this tick reserve the rest)")
+
+                            _log(f"SKIP BUY {symbol} — {_emp_what} < min ${_exec_min_pos:.0f} (allocated ${cash_per_trade:.2f})", "yellow")
                             _trade_skipped_no_price = True  # reuse flag to prevent recording
                             # V7.1: Report skipped buys to strategy cache for backfill queue
                             _nexus_cache = _strategy_cache.get("graph_nexus_analysis")

@@ -13,23 +13,49 @@ bt 371379, on a book that was refusing new names at the cap:
 That is the objective's blocker #3 — "a great name is refused because a mediocre
 one sits on the budget" — arriving through the execution path rather than the
 allocator.
+
+2026-08-09 UPDATE — this file no longer MIRRORS the broker, it CALLS it.
+A hand-written copy of the rule is how the AVY/AMZN runt leak survived bt
+676939: the copy agreed with itself while the real gate measured a different
+number. `exec_min_pos` and `skips` below are now thin adapters over broker.py's
+own `_exec_min_position_floor` / `_exec_min_position_skips`.
+
+The cases here all predate the emulator-clamp dimension, so they pass
+`fundable == cash_to_use` (nothing was in flight). That dimension is covered in
+test_exec_runt_leak_fundable.py.
 """
+import ast
+import os
+import sys
+import types
+
 import pytest
 
+_backend = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _backend not in sys.path:
+    sys.path.insert(0, _backend)
 
-HISTORICAL_MIN = 50.0
+_SRC = open(os.path.join(_backend, "broker.py"), encoding="utf-8").read()
+_WANTED = {"_exec_min_position_floor", "_exec_min_position_skips"}
+_ns = {}
+for _node in ast.parse(_SRC).body:
+    if isinstance(_node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "_EXEC_MIN_POSITION_USD"
+            for t in _node.targets):
+        exec(compile(ast.Module(body=[_node], type_ignores=[]), "broker.py", "exec"), _ns)
+for _node in ast.parse(_SRC).body:
+    if isinstance(_node, ast.FunctionDef) and _node.name in _WANTED:
+        exec(compile(ast.Module(body=[_node], type_ignores=[]), "broker.py", "exec"), _ns)
+for _name in _WANTED | {"_EXEC_MIN_POSITION_USD"}:
+    assert _name in _ns, f"failed to extract {_name} from broker.py"
+b = types.SimpleNamespace(**{k: v for k, v in _ns.items() if not k.startswith("__")})
+
+HISTORICAL_MIN = b._EXEC_MIN_POSITION_USD
 
 
 def exec_min_pos(config, nav):
-    """Mirror of the broker-side floor: dollar minimum or NAV share, larger wins."""
-    floor = HISTORICAL_MIN
-    try:
-        pct = float((config or {}).get("min_position_nav_pct", 0.0) or 0.0)
-    except (TypeError, ValueError):
-        return floor
-    if pct > 0 and nav and nav > 0:
-        floor = max(floor, float(nav) * pct)
-    return floor
+    """The broker-side floor: dollar minimum or NAV share, larger wins."""
+    return b._exec_min_position_floor(config, nav)
 
 
 def skips(cash_to_use, cash_per_trade, config, nav, held=False):
@@ -41,11 +67,9 @@ def skips(cash_to_use, cash_per_trade, config, nav, held=False):
     the hole GH went through — the allocator had already sized it down to the
     available $32.55, so cash_to_use == cash_per_trade and it never fired.
     """
-    if held:
-        return False          # an ADD takes no max_positions slot
-    m = exec_min_pos(config, nav)
-    hard = m > HISTORICAL_MIN
-    return cash_to_use < m and (hard or cash_to_use < cash_per_trade)
+    return b._exec_min_position_skips(
+        1, cash_to_use, cash_per_trade, cash_to_use,
+        exec_min_pos(config, nav), held)
 
 
 NAV = 6000.0

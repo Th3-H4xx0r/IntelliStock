@@ -14,30 +14,47 @@ would look like.
 
 IT IMPORTS PRODUCTION CODE, IT DOES NOT REIMPLEMENT IT
 ------------------------------------------------------
-Every decision below is made by the real function:
+CALLED DIRECTLY by the replay:
 
-  backend/core_sleeve.py          satellite_design_share, satellite_max_share,
-                                  core_sleeve_config, core_sleeve_armed_for_bar,
-                                  core_target_weight, core_rebalance_order,
-                                  turnover_budget_state
-  backend/nexus_broker_utils.py   max_positions_gate, max_positions_projected_count,
-                                  max_positions_admissible_buys,
-                                  planned_full_exit_symbols,
-                                  resolve_max_positions_cap, buy_ceiling
+  backend/broker.py               _core_sleeve_satellite_headroom  (the satellite
+                                    clamp -- SATELLITE CAP / SATELLITE OVERFLOW)
+                                  _core_turnover_state             (turnover budget)
+                                  _satellite_conviction_min_raw
+                                  _turnover_cfg_conviction_bypass
+                                  _turnover_cfg_bypass_ceiling
+                                  _turnover_is_governed
+                                  _turnover_ledger_record / _turnover_ledger_rolling
+                                  _regime_position_cap_hard
+                                  _max_positions_excludes_sleeve
+                                  _residual_sleeve_config
+                                  _residual_sleeve_universe_symbols
+                                  _core_sleeve_cfg / _core_sleeve_cfg_raw
+  backend/nexus_broker_utils.py   max_positions_gate               (the hard cap)
+                                  max_positions_projected_count
+                                  resolve_max_positions_cap
+                                  buy_ceiling                      (sell-proceeds credit)
+                                  max_positions_admissible_buys    (core funding pre-pass
+                                  planned_full_exit_symbols         diagnostic)
   backend/portfolio_emulator.py   PortfolioEmulator -- NAV, cash and the real
                                   get_buying_power() clamp that re-bounds an
                                   order the broker already approved
-  backend/broker.py               _core_sleeve_satellite_headroom, _core_sleeve_cfg,
-                                  _core_sleeve_cfg_raw, _core_sleeve_decide,
-                                  _satellite_conviction_min_raw,
-                                  _turnover_cfg_conviction_bypass,
-                                  _turnover_cfg_bypass_ceiling,
-                                  _turnover_is_governed, _turnover_ledger_record,
-                                  _turnover_ledger_rolling, _core_turnover_state,
-                                  _regime_position_cap_hard,
-                                  _max_positions_excludes_sleeve,
-                                  _residual_sleeve_config,
-                                  _residual_sleeve_universe_symbols
+
+REACHED TRANSITIVELY (so they still cannot drift):
+
+  backend/core_sleeve.py          satellite_design_share / satellite_max_share via
+                                    _core_sleeve_satellite_headroom
+                                  core_sleeve_config via _core_sleeve_cfg
+                                  turnover_budget_state via _core_turnover_state
+
+NOT MODELLED AT ALL (named so the omission is visible):
+
+  core_rebalance_order / core_target_weight / core_sleeve_armed_for_bar -- the
+  core's OWN buy and release decisions are replayed from the log verbatim, not
+  re-decided. A config that changes the core's cadence, band or bear scaling
+  will therefore show NO effect here even though it would change a real run.
+  What the harness does report is the funding pre-pass: how much core release
+  the recorded bar asked for, and how much of it was for buys max_positions was
+  about to refuse.
 
 ``broker.py`` is NOT import-safe (argparse runs at module scope and SystemExits
 under any other entrypoint), so its helpers are AST-extracted into a stub
@@ -64,7 +81,7 @@ WHAT THIS CANNOT MODEL.  READ THIS BEFORE QUOTING ANY NUMBER IT PRINTS.
 
 2. PRICE IMPACT, FILL PRICES, PARTIAL FILLS, FILL TIMING.  Execution is
    next-event (decide on bar N, fill at bar N+1's quote) and every fill crosses
-   a modelled 22.8 bps half-spread (simulated_execution.py:117-121). This
+   a modelled 22.8 bps half-spread (simulated_execution.py:117-121 (LIQUIDITY_ADJUSTED_EQUITY_COST_MODEL)). This
    harness assumes an admitted buy fills at the price the log recorded for that
    bar. It does not run NextEventExecutionSimulator.
 
@@ -144,7 +161,6 @@ import json
 import os
 import re
 import sys
-import types
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
@@ -269,7 +285,7 @@ class Production:
 # --validate reports that rather than pretending the stage did not exist.
 
 RX_TS = re.compile(r"^\[(\d{4}-\d{2}-\d{2} [\d:]+)\]\s*\[([^\]]+)\]\s*(.*)$")
-# broker.py:14190 -- emitted once per execution cycle, BEFORE any buy is
+# broker.py:14249 -- emitted once per execution cycle, BEFORE any buy is
 # considered, carrying the two numbers the gate itself will use. Using the
 # gate's own line as the tick delimiter means the harness cannot disagree with
 # the run about where a tick starts.
@@ -281,24 +297,24 @@ RX_FILL = re.compile(
     r"fees=([\d.]+) quote=(\d{4}-\d{2}-\d{2})")
 RX_MONITOR = re.compile(
     r"Monitor decision: (\S+) day (\d+) pnl=([-+\d.]+)% cp=\$([\d.]+) entry=\$([\d.]+)")
-# broker.py:15287
+# broker.py:15347
 RX_BUYGATE = re.compile(
     r"Buy gate inputs for (\S+): cash=\$([\d.]+)(?: bp=\$[\d.]+)? "
     r"reserved=\$([\d.]+) floor=\$([\d.]+) effective_floor=\$([\d.]+) "
     r"high_conv=(\w+) open_pos=(\d+) cash_per_trade=\$([\d.]+) "
     r"available=\$([\d.]+) cash_to_use=\$([\d.]+) . (\w+)")
-# broker.py:14897 / 14863 / 14870
+# broker.py:14956 / 14863 / 14870
 RX_SATTRIM = re.compile(
     r"SATELLITE CAP: (\S+) trimmed \$([\d,.]+) -> \$(-?[\d,.]+) to keep the core")
 RX_SATSKIP = re.compile(r"SATELLITE CAP: (\S+) skipped . satellite at its ")
 RX_SATOVF = re.compile(
     r"SATELLITE OVERFLOW: (\S+) raw=([-+][\d.]+) >= ([\d.]+) . funding \$([\d,.]+)")
-# broker.py:15001 / 14501 / 14993 / 14984
+# broker.py:15061 / 14501 / 14993 / 14984
 RX_TBBLOCK = re.compile(r"TURNOVER BUDGET BLOCK: (\S+) skipped . (\d+)% of NAV")
 RX_TBBIND = re.compile(r"TURNOVER BUDGET BINDING: (\d+)% of NAV")
 RX_TBBYPASS = re.compile(r"TURNOVER BUDGET BYPASS: (\S+) raw=([-+][\d.]+)")
 RX_TBCEIL = re.compile(r"TURNOVER BYPASS CEILING: (\S+) refused despite raw=([-+][\d.]+)")
-# broker.py:15491 / 15036 / 15186 / 15306
+# broker.py:15550 / 15036 / 15186 / 15306
 RX_MPG = re.compile(r"MAX_POSITIONS_GATE: blocked (\S+) \(held=(\d+), cap=(\d+)\)")
 RX_RCAP = re.compile(r"REGIME CAP HARD BLOCK: (\S+) skipped . held=(\d+) >= cap=(\d+)")
 RX_SINGLE = re.compile(
@@ -313,9 +329,9 @@ RX_CORE_PCT = re.compile(r"\[core\] .*?core ([\d.]+)% vs target ([\d.]+)% of NAV
 RX_SCP_CEIL = re.compile(
     r"Sell-proceeds credit: sizing ceiling \$([\d.]+) . \$([\d.]+)")
 
-#: broker.py:15304 -- the execution-time minimum below which a buy is dropped.
+#: broker.py:15363 -- the execution-time minimum below which a buy is dropped.
 EXEC_MIN_POSITION_USD = 50.0
-#: broker.py:15154 -- BROKER_MAX_SINGLE_POSITION_PCT default, both modes since
+#: broker.py:15207 -- BROKER_MAX_SINGLE_POSITION_PCT default, both modes since
 #: 2026-08-02.
 DEFAULT_MAX_SINGLE_POSITION_PCT = 0.15
 
@@ -325,7 +341,7 @@ class Candidate:
     """One BUY the broker's ``_exec_order`` loop considered on this tick."""
     symbol: str
     #: ``cash_per_trade`` as the ALLOCATOR handed it to the broker, i.e. BEFORE
-    #: the satellite clamp trimmed it (broker.py:14896-14900). Recovered from
+    #: the satellite clamp trimmed it (broker.py:14955-14900). Recovered from
     #: the ``SATELLITE CAP: X trimmed $A -> $B`` line where present, else from
     #: ``Buy gate inputs ... cash_per_trade=$A``.
     alloc_cash: float = 0.0
@@ -438,7 +454,7 @@ def parse_log(lines, initial_cash: float | None = None) -> Replay:
             scores[mm.group(1).strip().upper()] = (float(mm.group(2)), "bfq_signal_score")
         mm = RX_TBBIND.search(body)
         if mm:
-            # PER TICK, never carried. broker.py:14499 emits this line on every
+            # PER TICK, never carried. broker.py:14560 emits this line on every
             # tick where the budget binds, so its ABSENCE inside a tick is the
             # run telling us the budget did not bind there.
             turnover_pct = int(mm.group(1))
@@ -547,7 +563,7 @@ def parse_log(lines, initial_cash: float | None = None) -> Replay:
             c.recorded_stage = "buy_gate_" + mm.group(11).lower()
             c.recorded_size = float(mm.group(10))
             # The buy gate prints the emulator's own cash read, which is the
-            # authoritative value for this tick (broker.py:15095).
+            # authoritative value for this tick (broker.py:15154).
             cur.cash = float(mm.group(2))
             cur.cash_source = "buy_gate"
             cash = cur.cash
@@ -825,11 +841,11 @@ STAGES = (
     "unsized",                  # the log never printed an allocator size
     "satellite_skip",           # broker.py:14862  room <= _CORE_MIN_SATELLITE_TRIM_USD
     "turnover_budget",          # broker.py:15000
-    "turnover_bypass_ceiling",  # broker.py:14983
+    "turnover_bypass_ceiling",  # broker.py:15044
     "turnover_unknown",         # undecidable: see TurnoverState
-    "regime_cap",               # broker.py:15035
-    "min_position",             # broker.py:15305  cash_to_use < $50
-    "max_positions",            # broker.py:15488
+    "regime_cap",               # broker.py:15094
+    "min_position",             # broker.py:15364  cash_to_use < $50
+    "max_positions",            # broker.py:15547
     "emulator_buying_power",    # portfolio_emulator.py:1414-1423 (re-clamp)
     "admitted",
 )
@@ -840,7 +856,7 @@ class TurnoverState:
     """This tick's turnover-budget verdict, with an explicit unknown.
 
     The log prints ``TURNOVER BUDGET BINDING: N% of NAV`` only on ticks where
-    the budget BOUND (broker.py:14499-14503). On every other tick the run tells
+    the budget BOUND (broker.py:14560-14503). On every other tick the run tells
     us only that ``used < budget_of_the_run``. That is enough to answer some
     config questions exactly and not others, and conflating the two is how a
     replay produces a confident wrong number:
@@ -909,6 +925,9 @@ class GateChain:
         #: interpret the log's silence on non-binding ticks.
         self.run_budget_pct = float(run_budget_pct or 0.0)
         self.keys_read: set = set()
+        #: Core funding pre-pass totals (diagnostic only -- see run_tick).
+        self.funding_requested = 0.0
+        self.funding_admissible = 0.0
 
     def turnover_state(self, specs, tick: Tick, nav: float, ledger_date) -> TurnoverState:
         """This tick's budget state under the CANDIDATE config.
@@ -975,7 +994,7 @@ class GateChain:
                     for s in p.residual_sleeve_universe_symbols(specs)}
             held = held - legs
 
-        # broker.py:14491-14510 -- the turnover budget is read ONCE per tick.
+        # broker.py:14550-14569 -- the turnover budget is read ONCE per tick.
         # `turnover` is a TurnoverState: `used` may be EXACT (the log printed
         # it) or UNKNOWN (the log only prints a reading on ticks where the
         # budget bound). See TurnoverState for how an unknown is handled
@@ -992,7 +1011,7 @@ class GateChain:
         })
         rc = p.regime_position_cap_hard(specs)
 
-        # Same-cycle sell-proceeds credit -- broker.py:14168-14186 / 15133-15142.
+        # Same-cycle sell-proceeds credit -- broker.py:14227-14245 / 15133-15142.
         # In BACKTEST the credit only arms when
         # `backtest_credit_sell_proceeds_enabled` is set; live it is always on.
         # The proceeds list is APPROXIMATED by the SELL fills the log printed
@@ -1008,6 +1027,23 @@ class GateChain:
         out: list = []
         sim_cash = float(cash or 0.0)
         sim_positions = dict(positions or {})
+
+        # -- CORE FUNDING PRE-PASS (diagnostic, does not move the book) -------
+        # broker.py's `_core_funding_mpg_aware` block sizes the core's release
+        # off the buys the allocator approved, then trims it to the buys the
+        # position cap will actually admit. Replaying it with the real
+        # `max_positions_admissible_buys` says how much SPY the bar was about to
+        # sell for orders that were never going to emit -- the churn loop bt
+        # 455506 measured at $9,081 of gross for -1.37 shares of net.
+        self.keys_read.add("core_funding_max_positions_aware")
+        ordered = [c.symbol for c in tick.candidates if float(c.alloc_cash or 0) > 0]
+        admissible = p.nbu.max_positions_admissible_buys(
+            held, cap, full_exits, ordered)
+        self.funding_requested += sum(float(c.alloc_cash or 0.0)
+                                      for c in tick.candidates)
+        self.funding_admissible += sum(
+            float(c.alloc_cash or 0.0) for c in tick.candidates
+            if c.symbol in admissible)
 
         for c in tick.candidates:
             sym = c.symbol
@@ -1027,7 +1063,7 @@ class GateChain:
             pe_now = self.book(sim_positions, sim_cash, initial_cash)
             nav_now = float(pe_now.get_portfolio_value(prices) or 0.0)
 
-            # 1) SATELLITE CAP / OVERFLOW -- broker.py:14850-14900.
+            # 1) SATELLITE CAP / OVERFLOW -- broker.py:14909-14959.
             #    Evaluated BEFORE the size check because the SKIP branch does
             #    not depend on the size: the log's `SATELLITE CAP: X skipped`
             #    line never prints one, and refusing to score those would drop
@@ -1061,7 +1097,7 @@ class GateChain:
                 cash_per_trade = room
                 d.note = f"satellite trim ${alloc:,.0f}->${room:,.0f}"
 
-            # 2) TURNOVER BUDGET -- broker.py:14974-15021.
+            # 2) TURNOVER BUDGET -- broker.py:15034-15081.
             verdict, used_txt = turnover.verdict()
             if verdict == "unknown":
                 d.stage = "turnover_unknown"
@@ -1087,7 +1123,7 @@ class GateChain:
                     out.append(d)
                     continue
 
-            # 3) REGIME CAP HARD -- broker.py:15022-15055 (excludes sleeve legs).
+            # 3) REGIME CAP HARD -- broker.py:15082-15115 (excludes sleeve legs).
             if rc is not None:
                 sleeve = p.residual_sleeve_config(specs)
                 excl = {sleeve.get("symbol") or "", sleeve.get("bear_symbol") or ""}
@@ -1102,7 +1138,7 @@ class GateChain:
                     out.append(d)
                     continue
 
-            # 4) CASH FLOOR + available -- broker.py:15057-15144.
+            # 4) CASH FLOOR + available -- broker.py:15116-15203.
             floor_pct = float(cfg.get("cash_reserve_floor_pct", 0.10) or 0.0)
             floor_hard = bool(cfg.get("cash_reserve_floor_hard", True))
             floor_min_pos = int(cfg.get("cash_reserve_hard_min_positions", 5) or 5)
@@ -1134,7 +1170,7 @@ class GateChain:
             available = max(0.0, sizing_ceiling - reserved - effective_floor)
             cash_to_use = min(cash_per_trade, available)
 
-            # 5) BROKER SINGLE-POSITION CAP -- broker.py:15168-15192.
+            # 5) BROKER SINGLE-POSITION CAP -- broker.py:15221-15252.
             if self.max_single_position_pct > 0:
                 equity = nav_now if nav_now > 0 else float(initial_cash)
                 existing = float(sim_positions.get(sym, 0.0) or 0.0) * price
@@ -1144,7 +1180,7 @@ class GateChain:
                     d.note = (d.note + "; " if d.note else "") + \
                         f"single-position cap -> ${headroom:,.0f}"
 
-            # 6) EXECUTION MINIMUM -- broker.py:15305.
+            # 6) EXECUTION MINIMUM -- broker.py:15364.
             if cash_to_use < EXEC_MIN_POSITION_USD and cash_to_use < cash_per_trade:
                 d.stage = "min_position"
                 d.size = cash_to_use
@@ -1153,7 +1189,7 @@ class GateChain:
                 out.append(d)
                 continue
 
-            # 7) MAX_POSITIONS -- broker.py:15488, the real gate function.
+            # 7) MAX_POSITIONS -- broker.py:15547, the real gate function.
             if cap is not None:
                 if not p.nbu.max_positions_gate(held, cap, full_exits, emitted, sym):
                     proj = p.nbu.max_positions_projected_count(held, full_exits, emitted)
@@ -1215,6 +1251,8 @@ class Result:
     turnover_checks: list = field(default_factory=list)
     unscored: int = 0
     turnover_source: str = "from-log"
+    funding_requested: float = 0.0
+    funding_admissible: float = 0.0
 
 
 def _fills_by_tick(replay: Replay) -> dict:
@@ -1296,7 +1334,7 @@ def simulate(prod: Production, replay: Replay, cfg: dict, *,
                 continue
             res.admitted_notional += d.size
             res.admitted_names[d.symbol] += 1
-            # broker.py:15697 -- book one-way notional, governed symbols only.
+            # broker.py:15756 -- book one-way notional, governed symbols only.
             if prod.turnover_is_governed(d.symbol, specs):
                 prod.turnover_ledger_record(ledger_date, d.size, "sim buy")
             if mode == "projected":
@@ -1337,6 +1375,8 @@ def simulate(prod: Production, replay: Replay, cfg: dict, *,
             q * float(last.prices.get(s, 0.0) or 0.0)
             for s, q in res.end_book.items())
     res.keys_read = set(chain.keys_read)
+    res.funding_requested = chain.funding_requested
+    res.funding_admissible = chain.funding_admissible
     return res
 
 
@@ -1408,7 +1448,7 @@ def print_fidelity(res: Result):
         print("     on disk are PRE-patch snapshots, so the lever that made the")
         print("     run interesting is often missing. Fix that before reading any")
         print("     A/B underneath it.")
-    else:
+    elif f["disagree"]:
         print("")
         print("  Residual disagreement is dominated by candidates whose")
         print("  raw_net_score the log never printed (see the validation block):")
@@ -1521,6 +1561,12 @@ def print_result(res: Result, replay: Replay):
     book = {s: q for s, q in res.end_book.items() if q > 1e-9}
     print(f"  end book ({len(book)} names)  "
           + ", ".join(f"{s}={q:.4f}" for s, q in sorted(book.items())))
+    wasted = res.funding_requested - res.funding_admissible
+    print(f"  core funding pre-pass      requested {_fmt_money(res.funding_requested)}"
+          f", max_positions-admissible {_fmt_money(res.funding_admissible)}")
+    print(f"                             {_fmt_money(wasted)} of the release was for"
+          f" buys the cap would refuse")
+    print("")
     print(f"  end cash                   {_fmt_money(res.end_cash)}")
     print(f"  end NAV (marked at the log's last price)  {_fmt_money(res.end_nav)}")
     print("      NOT a P&L number: the marks come from the RECORDED run, and in")
@@ -1582,6 +1628,42 @@ def print_diff(a: Result, b: Result):
     print("  A changed admission is NOT a changed P&L. bt 718249 relaxed the")
     print("  position cap, admitted five more names, and returned +4.23% against")
     print("  +12.33% for the tighter arm.")
+    print("")
+
+
+def print_override_shadowing(cfg: dict, overrides, regimes):
+    """Warn when a --set key is SHADOWED by a regime_profiles overlay.
+
+    `_apply_regime_profile` merges the matching overlay ON TOP of the base
+    config before any gate reads it, so `--set core_target_pct=0.20` on a doc
+    that defines `core_target_pct` inside `regime_profiles.chop` changes
+    nothing. doc-193 does exactly this for `core_sleeve_enabled`,
+    `core_target_pct`, `core_rebalance_band_pct` and `core_rebalance_min_days`
+    (core_sleeve.py:157-210 documents the same trap on the production side), so
+    this is the single easiest way to run a lever test that silently tested
+    nothing.
+    """
+    profiles = (cfg or {}).get("regime_profiles") or {}
+    if not isinstance(profiles, dict) or not overrides:
+        return
+    hit = []
+    for pair in overrides:
+        key = pair.split("=", 1)[0].strip()
+        where = [name for name, over in profiles.items()
+                 if isinstance(over, dict) and key in over
+                 and str(name).strip().lower() in regimes]
+        if where:
+            hit.append((key, sorted(where)))
+    if not hit:
+        return
+    print("   !! --set keys SHADOWED by a regime_profiles overlay (the overlay")
+    print("      is merged on top before any gate reads the config, so these")
+    print("      --set values had NO effect):")
+    for key, where in hit:
+        print(f"      {key}  overridden by regime_profiles.{'/'.join(where)}")
+        example = json.dumps({where[0]: {key: "<value>"}})
+        print("        set it inside the profile instead, e.g.")
+        print(f"        --set 'regime_profiles={example}'")
     print("")
 
 
@@ -1716,6 +1798,8 @@ def main(argv=None) -> int:
                     else apply_overrides(base_cfg, args.set))
         cand_label = (Path(args.candidate_config).name if args.candidate_config
                       else "+".join(args.set))
+        print_override_shadowing(cand_cfg, args.set,
+                                 {t.regime for t in replay.ticks if t.regime})
         cand = simulate(prod, replay, cand_cfg, mode=args.book, label=cand_label,
                         max_single_position_pct=args.max_single_position_pct,
                         turnover_source=turnover_source, run_budget_pct=run_budget)
