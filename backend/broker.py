@@ -2881,6 +2881,15 @@ def _residual_sleeve_config(cached_strategies):
                 # Persistence can: that window's "bear" lasted 4 days, while
                 # 2026-03-02..03-30 runs 21 consecutive bear days.
                 "bear_min_dwell_days": int(cfg.get("residual_sleeve_bear_min_dwell_days", 0) or 0),
+                # 2026-08-10 fresh-low OPEN gate. 0 = off (default, byte-identical).
+                # N blocks opening a bear leg while the proxy is within N-1 bars of
+                # its 20-session closing low (N=1 blocks only bars that SET the low).
+                # gap-oos.md: the leg that made +$889 opened 1.2% off the range low;
+                # the one that lost -$257 opened at 96.8% of the range high. Depth
+                # and duration are both LARGER in the losing case, so range position
+                # is the only quantity that separates them in the right direction.
+                # ADDs to an open leg and every exit path are untouched.
+                "bear_block_at_fresh_low_bars": int(cfg.get("residual_sleeve_bear_block_at_fresh_low_bars", 0) or 0),
                 # 2026-07-30 beta floor: also park idle cash in the sleeve
                 # symbol on CHOP bars, not just confirmed bull. False = OFF.
                 "chop_enabled": bool(cfg.get("residual_sleeve_chop_enabled", False)),
@@ -4970,6 +4979,35 @@ def _residual_sleeve_deploy(
                     _log(f"[sleeve] bear leg SKIPPED — bear only {_dwell_now}d old "
                          f"(needs {_min_dwell}d of persistence)", "cyan")
                     return
+            # 2026-08-10 fresh-low first-park gate (default 0 = OFF, so this is
+            # byte-inert for every existing document). The sleeve is the ONE
+            # position in the book exempt from every extension check — it sizes on
+            # regime label + ret5 alone. gap-oos.md measured the consequence:
+            #   bt 542754  first park $70.80 = 1.2% off the range LOW  -> +$889
+            #   bt 383778  first park $86.92 = 96.8% of the range HIGH -> -$257
+            # Depth and duration are both LARGER in the losing case (ret20 -7.38 vs
+            # -3.93, ret5 -2.23 vs -0.20), so every magnitude knob is inverted;
+            # RANGE POSITION is the only measured quantity pointing the right way
+            # in both windows. Buying a 3x inverse at a fresh 20-session low is
+            # shorting the bottom.
+            #
+            # OPENS only. Once the leg is on, ADDs, the conviction ratchet and
+            # every EXIT path (leg stop, trailing bank, protective exit, episode
+            # latch) are untouched — an open leg that rides into new lows is the
+            # thesis working, not a bad entry.
+            _fresh_low_max = int(cfg.get("bear_block_at_fresh_low_bars", 0) or 0)
+            if _fresh_low_max > 0:
+                _held_bear = float((portfolio_emulator.get_positions() or {}).get(bsym, 0.0) or 0.0)
+                if _held_bear <= 0:
+                    _sl_diag = ((globals().get("_strategy_cache") or {}).get(
+                        "graph_nexus_analysis") or {}).get("_market_regime_diag") or {}
+                    _since_low = _sl_diag.get("bars_since_20d_low")
+                    if _since_low is not None and int(_since_low) < _fresh_low_max:
+                        _log(f"[sleeve] bear leg SKIPPED — proxy at a fresh 20d low "
+                             f"(since_20d_low={int(_since_low)} < {_fresh_low_max}, "
+                             f"off_low={_sl_diag.get('pct_off_20d_low')}%); "
+                             f"not opening a hedge at the bottom of the range", "cyan")
+                        return
             if _RESIDUAL_SLEEVE_STATE.get("bear_stop_episode"):
                 return  # already stopped out this bear episode — stay in cash
             # Re-entry dwell after any bear-leg exit (stop-loss/protective):

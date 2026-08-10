@@ -7405,6 +7405,23 @@ def _detect_market_regime(
         # override below.
         _ret5 = ((current - closes[-6]) / closes[-6] * 100.0) if (len(closes) >= 6 and closes[-6] > 0) else 0.0
         diag["ret5"] = round(_ret5, 2)
+        # 2026-08-10: where the proxy sits IN ITS 20-SESSION RANGE, stamped
+        # UNCONDITIONALLY and used by nobody by default. gap-oos.md measured that
+        # the ONLY quantity separating the bear leg that made +$889 (bt 542754,
+        # first park 1.2% off the range low) from the one that lost -$257 /
+        # -3.94pp (bt 383778, first park at 96.8% of the high) is range POSITION,
+        # not depth or duration — ret20/ret5 are both LARGER in the losing case,
+        # so every magnitude knob is inverted against you. `_rally_onset` already
+        # computes `_since_low`, but behind an early-return on a default-OFF flag,
+        # so the number is unreachable. Stamp it here like ret5: diagnostic only.
+        if len(closes) >= 21:
+            _w20 = closes[-20:]
+            _lo20d = min(_w20)
+            if _lo20d > 0:
+                diag["bars_since_20d_low"] = (
+                    len(_w20) - 1 - max(i for i, v in enumerate(_w20) if v == _lo20d)
+                )
+                diag["pct_off_20d_low"] = round((current - _lo20d) / _lo20d * 100.0, 2)
         # 2026-07-30 rally-onset flag (default OFF) -- see _rally_onset. Stamped
         # UNCONDITIONALLY, exactly like ret5 above, because its consumers (the
         # position caps and the sleeve bear leg) run on bars this function
@@ -26924,10 +26941,18 @@ class GraphNexusAnalysis:
             strategy_cache["_bear_capacity_latch"] = _next_bear_capacity_latch(
                 strategy_cache.get("_bear_capacity_latch"), _v31_regime,
                 strategy_cache.get("_market_regime_recovery"), config)
+            # 2026-08-10: ret5 + range position printed alongside ret20. The bear
+            # sleeve gates on ret5 and (once armed) on bars_since_20d_low, and
+            # NEITHER was greppable in any run — gap-oos.md had to INFER the range
+            # position of bt 542754's first park from the SQQQ fill price. A lever
+            # you cannot grep is a lever you cannot verify.
             _log(
                 f"V31 market regime: {_v31_regime} "
                 f"(raw={_v31_raw}, proxy={_v31_diag.get('proxy')}, "
-                f"closes={_v31_diag.get('closes')}, ret20={_v31_diag.get('ret20')})",
+                f"closes={_v31_diag.get('closes')}, ret20={_v31_diag.get('ret20')}, "
+                f"ret5={_v31_diag.get('ret5')}, "
+                f"since_20d_low={_v31_diag.get('bars_since_20d_low')}, "
+                f"off_20d_low={_v31_diag.get('pct_off_20d_low')})",
                 "cyan",
             )
         else:

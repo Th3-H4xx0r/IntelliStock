@@ -965,3 +965,114 @@ def test_protective_exit_above_the_minimum_is_untouched():
     b._residual_sleeve_release(emu, {"SPY": 600.0}, datetime(2026, 3, 3, 15), SPEC)
     assert len(emu.signals) == 1
     assert emu.signals[0]["sell_fraction"] == 1.0
+
+
+# --- 2026-08-10 fresh-low OPEN gate (residual_sleeve_bear_block_at_fresh_low_bars) ---
+#
+# gap-oos.md, measured on the only two windows with any bear bars:
+#   bt 542754  first park $70.80 = 1.2% off the 20-session range LOW  -> +$889.44
+#   bt 383778  first park $86.92 = 96.8% of the range HIGH            -> -$256.98
+# ret20 (-7.38 vs -3.93) and ret5 (-2.23 vs -0.20) are BOTH more negative in the
+# LOSING case, so every depth/duration knob is inverted against the operator.
+# Position in the 20-session range is the only measured quantity that points the
+# right way in both windows: buying a 3x inverse on the bar that SETS the low is
+# shorting the bottom. This gate blocks the OPEN only.
+
+
+def _bear_spec_with_fresh_low(bars):
+    cfg = dict(BEAR_SPEC[0]["config"])
+    cfg["residual_sleeve_bear_block_at_fresh_low_bars"] = bars
+    return [{"strategy": "graph_nexus_analysis", "config": cfg}]
+
+
+def _set_range_pos(since_low, off_low_pct=0.0, dwell=9):
+    """Inject what the nexus detector stamps into _market_regime_diag. dwell is
+    set high so the (separate) persistence gate is never what blocks."""
+    b._ns["_strategy_cache"] = {"graph_nexus_analysis": {
+        "_bear_dwell_bars": int(dwell),
+        "_market_regime_diag": {"bars_since_20d_low": since_low,
+                                "pct_off_20d_low": off_low_pct},
+    }}
+
+
+def test_fresh_low_gate_absent_is_byte_identical():
+    """Default 0 = OFF: a fresh-low bar still parks exactly as before."""
+    _set_regime("bear")
+    _set_range_pos(0, 0.0)
+    emu = _Emu2(cash=6000.0, nav=6000.0)
+    b._residual_sleeve_deploy(emu, {"SQQQ": 30.0}, datetime(2026, 3, 30, 15), BEAR_SPEC)
+    assert len(emu.signals) == 1
+    assert abs(emu.signals[0]["cash_per_trade"] - 2100.0) < 1e-6
+
+
+def test_fresh_low_gate_blocks_the_open_at_a_fresh_low():
+    """bt 383778's 03-30 bar: since_low=0, off_low +0.00% -> no first park."""
+    _set_regime("bear")
+    _set_range_pos(0, 0.0)
+    emu = _Emu2(cash=6000.0, nav=6000.0)
+    b._residual_sleeve_deploy(emu, {"SQQQ": 30.0}, datetime(2026, 3, 30, 15),
+                              _bear_spec_with_fresh_low(1))
+    assert emu.signals == [], "must not open a 3x inverse leg at a fresh 20d low"
+
+
+def test_fresh_low_gate_allows_the_open_off_the_low():
+    """bt 542754's 03-05 bar: the low is behind us -> the leg that made +$889."""
+    _set_regime("bear")
+    _set_range_pos(4, 1.2)
+    emu = _Emu2(cash=6000.0, nav=6000.0)
+    b._residual_sleeve_deploy(emu, {"SQQQ": 30.0}, datetime(2026, 3, 5, 15),
+                              _bear_spec_with_fresh_low(1))
+    assert len(emu.signals) == 1
+    assert abs(emu.signals[0]["cash_per_trade"] - 2100.0) < 1e-6
+
+
+def test_fresh_low_gate_window_is_n_bars_wide():
+    """N=2 covers the bar that set the low AND the one after it (383778 03-31)."""
+    _set_regime("bear")
+    _set_range_pos(1, 0.4)
+    emu = _Emu2(cash=6000.0, nav=6000.0)
+    b._residual_sleeve_deploy(emu, {"SQQQ": 30.0}, datetime(2026, 3, 31, 15),
+                              _bear_spec_with_fresh_low(2))
+    assert emu.signals == []
+    # ...and N=1 does not.
+    emu2 = _Emu2(cash=6000.0, nav=6000.0)
+    b._residual_sleeve_deploy(emu2, {"SQQQ": 30.0}, datetime(2026, 3, 31, 15),
+                              _bear_spec_with_fresh_low(1))
+    assert len(emu2.signals) == 1
+
+
+def test_fresh_low_gate_does_not_block_an_add_to_an_open_leg():
+    """OPENS only. An open leg riding into new lows is the thesis WORKING —
+    542754 added on 03-14/17/20/23 and those adds carried the window."""
+    _set_regime("bear")
+    _set_range_pos(0, 0.0)
+    emu = _Emu2(cash=3000.0, nav=6000.0, positions={"SQQQ": 20.0})  # $600 held
+    b._residual_sleeve_deploy(emu, {"SQQQ": 30.0}, datetime(2026, 3, 30, 15),
+                              _bear_spec_with_fresh_low(1))
+    assert len(emu.signals) == 1, "an ADD to a held leg must be untouched"
+    assert abs(emu.signals[0]["cash_per_trade"] - 1500.0) < 1e-6  # 2100 cap - 600 held
+
+
+def test_fresh_low_gate_fails_open_when_the_diagnostic_is_missing():
+    """bars_since_20d_low is stamped by the detector. If it is ever absent the
+    hedge must still run: silently disabling the bear leg is the expensive
+    failure (the sleeve produced 116% of the 2026-03 window's profit)."""
+    _set_regime("bear")
+    b._ns["_strategy_cache"] = {"graph_nexus_analysis": {
+        "_bear_dwell_bars": 9, "_market_regime_diag": {"ret20": -7.4}}}
+    emu = _Emu2(cash=6000.0, nav=6000.0)
+    b._residual_sleeve_deploy(emu, {"SQQQ": 30.0}, datetime(2026, 3, 30, 15),
+                              _bear_spec_with_fresh_low(1))
+    assert len(emu.signals) == 1
+
+
+def test_fresh_low_gate_does_not_touch_exits():
+    """Deploy-only: a held leg still releases on a regime upgrade even on a bar
+    where the gate would refuse a fresh open."""
+    _set_regime("chop")
+    _set_range_pos(0, 0.0)
+    b._RESIDUAL_SLEEVE_STATE["last_park_ts"] = datetime(2026, 3, 20, 14)
+    emu = _Emu2(cash=3000.0, nav=6000.0, positions={"SQQQ": 70.0})
+    b._residual_sleeve_release(emu, {"SQQQ": 28.0}, datetime(2026, 3, 20, 15),
+                               _bear_spec_with_fresh_low(1))
+    assert len(emu.signals) >= 1

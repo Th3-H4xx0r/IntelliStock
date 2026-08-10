@@ -81,3 +81,49 @@ def test_bull_on_uptrend():
     closes = [100.0 + i * 0.5 for i in range(60)]
     cache = {"_overlay_bars_raw": {"SPY": _bars("2025-12-01", closes)}}
     assert g._detect_market_regime(cache, {}, "2026-02-15") == "bull"
+
+
+# --- 2026-08-10: range position stamped unconditionally ---
+#
+# gap-oos.md had to INFER where in its 20-session range bt 542754 opened its
+# SQQQ leg, from the fill price, because no run has ever logged it. `_rally_onset`
+# computes exactly this number but returns early on a default-OFF flag, so it is
+# unreachable. Stamp it like ret5: diagnostic only, no effect on the label.
+
+def test_bars_since_20d_low_is_stamped_unconditionally():
+    """Monotone decline: today IS the 20-session low -> since_low == 0."""
+    closes = [100.0 - i * 0.5 for i in range(60)]
+    cache = {"_overlay_bars_raw": {"SPY": _bars("2025-12-01", closes)}}
+    g._detect_market_regime(cache, {}, "2026-02-15")
+    diag = cache.get("_market_regime_diag") or {}
+    assert diag.get("bars_since_20d_low") == 0
+    assert diag.get("pct_off_20d_low") == 0.0
+
+
+def test_bars_since_20d_low_counts_back_to_the_low():
+    """V-bottom: low 3 sessions ago, then up -> since_low == 3, off_low > 0."""
+    closes = [100.0] * 40 + [90.0, 88.0, 86.0, 80.0, 82.0, 84.0, 86.0]
+    cache = {"_overlay_bars_raw": {"SPY": _bars("2025-12-01", closes)}}
+    g._detect_market_regime(cache, {}, "2026-02-15")
+    diag = cache.get("_market_regime_diag") or {}
+    assert diag.get("bars_since_20d_low") == 3
+    assert diag.get("pct_off_20d_low") == 7.5  # 86 vs 80
+
+
+def test_range_position_stamp_does_not_change_the_label():
+    """Pure diagnostic: same closes, same regime as the pre-existing assertions."""
+    closes = [100.0] * 45 + [93.0] * 16
+    cache = {"_overlay_bars_raw": {"SPY": _bars("2025-12-01", closes)}}
+    assert g._detect_market_regime(cache, {}, "2026-02-15") == "bear"
+    assert (cache.get("_market_regime_diag") or {}).get("bars_since_20d_low") is not None
+
+
+def test_range_position_stamped_on_bull_bars_too():
+    """The stamp is UNCONDITIONAL — the sleeve reads it on bars this function
+    does not label bear (the 2026-03-30 window opens bear then turns bull)."""
+    closes = [100.0 + i * 0.5 for i in range(60)]
+    cache = {"_overlay_bars_raw": {"SPY": _bars("2025-12-01", closes)}}
+    assert g._detect_market_regime(cache, {}, "2026-02-15") == "bull"
+    diag = cache.get("_market_regime_diag") or {}
+    assert diag.get("bars_since_20d_low") == 19  # rising: the low is the oldest bar
+    assert diag.get("pct_off_20d_low") > 0
