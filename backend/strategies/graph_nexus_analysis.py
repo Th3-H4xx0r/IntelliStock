@@ -28688,6 +28688,24 @@ class GraphNexusAnalysis:
 
         _stock_budget_after_adds = 0.0  # V23: pre-init to avoid UnboundLocalError in backfill queue
         _etf_budget_available = 0.0
+        # 2026-08-10 (bt 789099): pre-init for the SAME reason as the two lines
+        # above, and it is not theoretical. `_max_positions` was only ever assigned
+        # inside `if portfolio_total > 0 and _primary_buy_budget > 0:` -> `if
+        # stock_buys or _bfq_pending:`, while the publish of the `_nexus_max_positions`
+        # key at the end of this function is UNCONDITIONAL. On any
+        # bar with no stock buys and nothing queued the read raised
+        #     cannot access local variable '_max_positions'
+        # which aborts the WHOLE strategy invocation for that bar ("Run-once
+        # strategy 'graph_nexus_analysis' error"), so the bar produces no decisions
+        # at all. It fired 7+ times in the first third of the bear window
+        # 2026-03-02..03-30, where the book is capped at max_positions_bear=2 and
+        # most bars are pure holds — i.e. it silently degrades exactly the regime
+        # the SQQQ hedge is supposed to earn its keep in.
+        #
+        # The static cap is the correct fallback: it is what `resolve_max_positions_cap`
+        # reads when this key is absent, so a bar that never reached the Z4.1 block
+        # publishes the same number the broker would have used anyway.
+        _max_positions = int(config.get("max_positions", 15) or 15)
         if portfolio_total > 0 and _primary_buy_budget > 0:
             _target_mix_total = 0.0
             if stock_buys:
