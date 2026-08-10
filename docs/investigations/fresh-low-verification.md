@@ -102,3 +102,33 @@ python3 scripts/check_range_position.py
 
 Read-only. Prints §1's table, the PIT replay of §2, and the ma10 margins. Requires only `.env`
 (RethinkDB) — no backtest credits, no deploy.
+
+
+---
+
+## 5. WHAT THE GATE DOES **NOT** COVER (measured, 2026-08-10)
+
+bt 584886 (non-semi window, 2026-06-01..07-01) also lost money on SQQQ — **-$45.54**, a one-day
+round trip:
+
+```
+2026-06-30  BUY  SQQQ $426 x3 = $1,278
+2026-06-30  SELL SQQQ $701 + $20 + $9
+2026-07-01  SELL SQQQ $502
+```
+
+The fresh-low gate would **not** have stopped it. Range position on that bar
+(`scripts/check_range_position.py`):
+
+| bar | SPY `since_20d_low` | off low | QQQ `since_20d_low` | off low |
+|---|---|---|---|---|
+| 2026-06-29 | 12 | +2.23% | 12 | +4.53% |
+| **2026-06-30** | **13** | **+3.02%** | **13** | **+6.30%** |
+
+The proxy was thirteen bars past its low and 3-6% above it — the opposite end of the statistic
+from 383778's `since_20d_low = 0`. This gate is aimed at exactly one failure, *shorting the
+bottom*, and it does nothing for *shorting a rally*.
+
+That is a real and separate failure mode, and it is deliberately **not** being fixed here:
+-$45.54 is -0.76pp on a $6,000 book, an order of magnitude below the 4.94pp noise floor, on n=1.
+Building a lever for it would be the sixth inert lever, not the first useful one.
