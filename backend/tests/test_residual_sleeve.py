@@ -1076,3 +1076,34 @@ def test_fresh_low_gate_does_not_touch_exits():
     b._residual_sleeve_release(emu, {"SQQQ": 28.0}, datetime(2026, 3, 20, 15),
                                _bear_spec_with_fresh_low(1))
     assert len(emu.signals) >= 1
+
+
+def test_fresh_low_gate_recommended_n2_covers_the_third_bad_bar():
+    """fresh-low-verification.md: under the detector's POINT-IN-TIME view,
+    383778's bad bars carry since_low = 0, 0, 1, 2. N=1 leaves the third (04-01)
+    to regime_rally_onset, whose ma10 reclaim there has a 34-cent margin on a
+    $650 index. N=2 covers it outright."""
+    _set_regime("bear")
+    _set_range_pos(1, 3.57)          # 383778's 04-01, decision-time view
+    emu_n1 = _Emu2(cash=6000.0, nav=6000.0)
+    b._residual_sleeve_deploy(emu_n1, {"SQQQ": 30.0}, datetime(2026, 4, 1, 15),
+                              _bear_spec_with_fresh_low(1))
+    assert len(emu_n1.signals) == 1, "N=1 leaks this bar — that is why N=2 is the setting"
+    emu_n2 = _Emu2(cash=6000.0, nav=6000.0)
+    b._residual_sleeve_deploy(emu_n2, {"SQQQ": 30.0}, datetime(2026, 4, 1, 15),
+                              _bear_spec_with_fresh_low(2))
+    assert emu_n2.signals == []
+
+
+def test_fresh_low_gate_n2_still_clears_the_good_park_by_sixteen_bars():
+    """542754's first park (the +$889 leg) sits at since_low = 18 — the 20-day
+    low is nearly the OLDEST bar in its own window. N=2 cannot reach it, and
+    neither could any N below 18."""
+    _set_regime("bear")
+    _set_range_pos(18, 1.63)
+    for n in (1, 2, 3, 17):
+        emu = _Emu2(cash=6000.0, nav=6000.0)
+        b._residual_sleeve_deploy(emu, {"SQQQ": 30.0}, datetime(2026, 3, 5, 15),
+                                  _bear_spec_with_fresh_low(n))
+        assert len(emu.signals) == 1, f"N={n} must not touch the good park"
+        assert abs(emu.signals[0]["cash_per_trade"] - 2100.0) < 1e-6

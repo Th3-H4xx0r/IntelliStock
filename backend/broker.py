@@ -4995,6 +4995,13 @@ def _residual_sleeve_deploy(
             # every EXIT path (leg stop, trailing bank, protective exit, episode
             # latch) are untouched — an open leg that rides into new lows is the
             # thesis working, not a bad entry.
+            # Recommended setting is 2, not 1. Measured (fresh-low-verification.md):
+            # the detector is POINT-IN-TIME, so on 383778's 03-31 bar it is still
+            # reading 03-30's close, which IS the low -> since_low is 0 on BOTH of
+            # the first two bad bars, and 1 on the third. N=1 leaves that third bar
+            # (04-01) to `regime_rally_onset`, whose ma10 reclaim there has a
+            # 34-cent margin on a $650 index. N=2 covers it outright and still
+            # clears 542754's good park by SIXTEEN bars (its since_low is 18).
             _fresh_low_max = int(cfg.get("bear_block_at_fresh_low_bars", 0) or 0)
             if _fresh_low_max > 0:
                 _held_bear = float((portfolio_emulator.get_positions() or {}).get(bsym, 0.0) or 0.0)
