@@ -30190,6 +30190,29 @@ class GraphNexusAnalysis:
                             continue
                         _winner_add_funded_filtered.append(_add)
                     _winner_add_funded = _winner_add_funded_filtered
+                    # 2026-08-10 LOG SIGNATURE. The budget line above prints every bar
+                    # and says nothing about whether an add was actually funded — bt
+                    # 571147 printed "candidates=4..6" on 25 separate bars and funded
+                    # ZERO, and nothing in the log said so. A lane you cannot grep is a
+                    # lane nobody can verify, which is how five inert levers shipped.
+                    for _wa in _winner_add_funded:
+                        _log(
+                            f"ANCHOR ADD: {_wa.get('ticker')} stage={_wa.get('anchor_stage')} "
+                            f"+${float(_wa.get('buy_cash', 0.0) or 0.0):.0f} "
+                            f"(held {int(_wa.get('held_days', 0) or 0)}d, "
+                            f"pnl {float(_wa.get('unrealized_pct', 0.0) or 0.0):+.1f}%, "
+                            f"drop_from_peak {float(_wa.get('drop_from_peak_pct') or 0.0):.1f}%, "
+                            f"entry ${float(_wa.get('entry_notional', 0.0) or 0.0):.0f}, "
+                            f"raw {float(_wa.get('raw_net_score', 0.0) or 0.0):.3f})",
+                            "green",
+                        )
+                    if not _winner_add_funded and _winner_add_docs:
+                        _log(
+                            f"ANCHOR ADD: none funded from {len(_winner_add_docs)} candidate(s) "
+                            f"on a ${_winner_add_budget:.0f} budget — check "
+                            f"anchor_reinforce_target_pct against the entry clip",
+                            "yellow",
+                        )
                     # V11: Return unused winner-add budget to the pool for new entries
                     _winner_add_spent = sum(
                         float(_a.get("buy_cash", 0.0) or 0.0) for _a in _winner_add_funded
