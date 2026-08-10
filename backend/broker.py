@@ -3479,6 +3479,132 @@ def _core_sleeve_cfg_raw(cached_strategies):
     return {}
 
 
+def _anchor_reinforcement_execution_policy(
+        cached_strategies, nexus_hint, mode_value):
+    """Default-OFF, backtest-only risk envelope for an anchor order.
+
+    The hint alone is never authority: both the strategy config flag and the
+    source marker must agree. An enabled policy fails closed without explicit
+    final-position and turnover ceilings. Values are deliberately lane-local;
+    this never changes the global broker cap or other BUY sources.
+    """
+    cfg = _core_sleeve_cfg_raw(cached_strategies) or {}
+    if not bool(cfg.get("anchor_reinforce_execution_enabled", False)):
+        return None
+    if not bool((nexus_hint or {}).get("anchor_reinforcement", False)):
+        return None
+    policy = {"research_only": mode_value != MODE_BACKTEST}
+    try:
+        cap_points = float(
+            cfg.get("anchor_reinforce_execution_max_position_pct", 0.0) or 0.0)
+        strategy_cap = float(cfg.get("single_position_max_pct", 25.0) or 25.0)
+        cap_points = min(cap_points, strategy_cap, 25.0)
+    except (TypeError, ValueError, AttributeError):
+        cap_points = 0.0
+    try:
+        turnover_ceiling = float(
+            cfg.get("anchor_reinforce_execution_turnover_ceiling_pct", 0.0)
+            or 0.0)
+        # This lane may cross the tighter general churn budget, but it may
+        # never remove the brake: at most 100% of NAV one-way in the rolling
+        # window, even if a document supplies a larger number.
+        if turnover_ceiling > 0.0:
+            turnover_ceiling = min(turnover_ceiling, 1.0)
+    except (TypeError, ValueError, AttributeError):
+        turnover_ceiling = 0.0
+    try:
+        min_fill = float(cfg.get("min_position_size", 100.0) or 100.0)
+    except (TypeError, ValueError, AttributeError):
+        min_fill = 100.0
+    allow_core_floor = bool(
+        cfg.get("anchor_reinforce_execution_core_floor_enabled", False))
+    # A next-event core SELL is not cash until its own fill. The only same-tick
+    # funding bridge is the emulator's explicit pending-sell credit, so a
+    # floor-funded anchor is invalid without that independently gated contract.
+    core_funding_ready = (
+        not allow_core_floor
+        or bool(cfg.get("backtest_credit_pending_sell_proceeds", False))
+    )
+    policy.update({
+        "valid": (
+            0.0 < cap_points <= 25.0
+            and turnover_ceiling > 0.0
+            and core_funding_ready
+        ),
+        "max_position_fraction": cap_points / 100.0,
+        "turnover_ceiling": turnover_ceiling,
+        "allow_core_floor": allow_core_floor,
+        "min_fill": max(50.0, min_fill),
+    })
+    return policy
+
+
+def _anchor_reinforcement_position_headroom(
+        policy, portfolio, prices, symbol, price):
+    """Actual dollar headroom to this lane's explicit final-position cap."""
+    if not policy or not policy.get("valid"):
+        return 0.0
+    try:
+        nav = float(portfolio.get_portfolio_value(prices) or 0.0)
+        qty = float((getattr(portfolio, "_positions", {}) or {}).get(symbol, 0.0) or 0.0)
+        return max(
+            0.0,
+            nav * float(policy["max_position_fraction"])
+            - qty * float(price or 0.0),
+        )
+    except (TypeError, ValueError, AttributeError, KeyError):
+        return 0.0
+
+
+def _anchor_reinforcement_turnover_allows(
+        policy, used_fraction, planned_notional, nav):
+    """Whether this add remains inside its lane ceiling after submission."""
+    if not policy or not policy.get("valid"):
+        return False, float("inf")
+    try:
+        nav_f = float(nav or 0.0)
+        projected = float(used_fraction or 0.0) + (
+            float(planned_notional or 0.0) / nav_f if nav_f > 0 else float("inf"))
+        return projected <= float(policy["turnover_ceiling"]), projected
+    except (TypeError, ValueError, AttributeError, KeyError):
+        return False, float("inf")
+
+
+def _anchor_reinforcement_block(symbol, gate, nexus_hint, *, detail=""):
+    """Clear a plan-time pending record after a broker rejection and log it."""
+    cache = (_strategy_cache or {}).get("graph_nexus_analysis")
+    pending = cache.get("_anchor_reinforce_pending") if isinstance(cache, dict) else None
+    record = pending.pop(symbol, None) if isinstance(pending, dict) else None
+    stage = (record or {}).get("stage", (nexus_hint or {}).get("anchor_stage"))
+    planned = float((record or {}).get("planned", 0.0) or 0.0)
+    suffix = f" {detail}" if detail else ""
+    _log(
+        f"ANCHOR BLOCK: {symbol} stage={stage} gate={gate} "
+        f"planned=${planned:.2f}{suffix}",
+        "yellow",
+    )
+
+
+def _reconcile_anchor_pending_orders(portfolio):
+    """Clear restored/expired anchor state not backed by an active order."""
+    cache = (_strategy_cache or {}).get("graph_nexus_analysis")
+    pending = cache.get("_anchor_reinforce_pending") if isinstance(cache, dict) else None
+    if not isinstance(pending, dict) or not pending:
+        return
+    simulator = getattr(portfolio, "_execution_simulator", None)
+    active = {
+        str(getattr(order, "order_id", "") or "")
+        for order in (getattr(simulator, "pending_orders", ()) or ())
+    }
+    for symbol, record in list(pending.items()):
+        order_id = str((record or {}).get("order_id") or "") if isinstance(record, dict) else ""
+        if not order_id or order_id not in active:
+            _anchor_reinforcement_block(
+                symbol, "no_active_order", {},
+                detail=f"order_id={order_id or 'none'}",
+            )
+
+
 # ── EXECUTION-TIME MINIMUM POSITION FLOOR ────────────────────────────────────
 #
 # Hoisted out of the per-symbol buy block so the decision is one testable
@@ -11013,6 +11139,121 @@ def _apply_backtest_confirmed_fill_state(fill):
     if not symbol or side not in {"buy", "sell"} or qty <= 0:
         return
 
+    if source.startswith("anchor_reinforcement:") and side == "buy":
+        cache = (_strategy_cache or {}).get("graph_nexus_analysis")
+        pending_map = (
+            cache.get("_anchor_reinforce_pending")
+            if isinstance(cache, dict) else None
+        )
+        pending = pending_map.get(symbol) if isinstance(pending_map, dict) else None
+        if not isinstance(pending, dict):
+            _log(
+                f"ANCHOR FILL ORPHAN: {symbol} order_id={fill.order_id} "
+                "has no pending stage",
+                "yellow",
+            )
+            return
+        try:
+            source_stage = int(source.split("stage=", 1)[1].split(":", 1)[0])
+        except (IndexError, TypeError, ValueError):
+            source_stage = 0
+        source_plan = (
+            source.split(":plan=", 1)[1]
+            if ":plan=" in source else ""
+        )
+        stage = int(pending.get("stage", 0) or 0)
+        expected_order = str(pending.get("order_id") or "")
+        expected_plan = str(pending.get("plan_id") or "")
+        actual_order = str(getattr(fill, "order_id", "") or "")
+        if (
+                source_stage != stage
+                or not expected_order
+                or actual_order != expected_order
+                or not source_plan
+                or source_plan != expected_plan
+        ):
+            _log(
+                f"ANCHOR FILL MISMATCH: {symbol} pending_stage={stage} "
+                f"source_stage={source_stage} pending_order={expected_order or 'none'} "
+                f"fill_order={actual_order or 'none'} pending_plan={expected_plan or 'none'} "
+                f"source_plan={source_plan or 'none'} — ignored",
+                "red",
+            )
+            return
+        seen = cache.setdefault("_anchor_reinforce_seen_fills", {})
+        fill_key = f"{actual_order}:{float(getattr(fill, 'cumulative_quantity', qty) or qty):.12f}"
+        if fill_key in seen:
+            _log(f"ANCHOR FILL DUPLICATE: {symbol} order_id={actual_order} ignored", "yellow")
+            return
+        seen[fill_key] = True
+        fill_notional = qty * price
+        filled_map = cache.setdefault("_anchor_reinforce_filled", {})
+        ledger = filled_map.get(symbol)
+        if not isinstance(ledger, dict) or int(ledger.get("stage", 0) or 0) != stage:
+            ledger = {"stage": stage, "filled_notional": 0.0}
+            filled_map[symbol] = ledger
+        cumulative = float(ledger.get("filled_notional", 0.0) or 0.0) + fill_notional
+        ledger["filled_notional"] = cumulative
+        pending["filled_notional"] = cumulative
+        current_qty = float(
+            (getattr(portfolio_emulator, "_positions", {}) or {}).get(symbol, 0.0)
+            or 0.0)
+        target_total = float(pending.get("target_total", 0.0) or 0.0)
+        mark = float(
+            (getattr(portfolio_emulator, "_last_prices", {}) or {}).get(symbol, price)
+            or price)
+        current_value = current_qty * mark
+        remaining = max(0.0, target_total - current_value)
+        _log(
+            f"ANCHOR FILL: {symbol} stage={stage} plan_id={expected_plan} "
+            f"order_id={actual_order} fill=${fill_notional:.2f} "
+            f"cumulative_stage_fill=${cumulative:.2f} quantity={current_qty:.8f} "
+            f"mark=${mark:.6f} position_value=${current_value:.2f}",
+            "green",
+        )
+        if bool(getattr(fill, "is_final", False)):
+            completion_tolerance = max(1.0, target_total * 0.001)
+            if remaining <= completion_tolerance + 1e-9:
+                stage_map = cache.setdefault("_anchor_reinforce_stage", {})
+                stage_map[symbol] = max(
+                    int(stage_map.get(symbol, 0) or 0), stage)
+                filled_map.pop(symbol, None)
+                _log(
+                    f"ANCHOR STAGE COMMIT: {symbol} stage={stage} "
+                    f"filled=${cumulative:.2f} target=${target_total:.2f} "
+                    f"remaining=${remaining:.2f}",
+                    "green",
+                )
+            else:
+                _log(
+                    f"ANCHOR STAGE PARTIAL: {symbol} stage={stage} "
+                    f"filled=${cumulative:.2f} remaining=${remaining:.2f} "
+                    "— stage remains incomplete",
+                    "yellow",
+                )
+            pending_map.pop(symbol, None)
+
+    if side == "sell" and bool(getattr(fill, "is_final", False)):
+        cfg = _core_sleeve_cfg_raw(_cached_strategies) or {}
+        if bool(cfg.get("anchor_reinforce_execution_enabled", False)):
+            current_qty = float(
+                (getattr(portfolio_emulator, "_positions", {}) or {}).get(symbol, 0.0)
+                or 0.0)
+            if current_qty <= 1e-9:
+                cache = (_strategy_cache or {}).get("graph_nexus_analysis")
+                if isinstance(cache, dict):
+                    for key in (
+                            "_anchor_reinforce_stage",
+                            "_anchor_reinforce_pending",
+                            "_anchor_reinforce_filled"):
+                        state = cache.get(key)
+                        if isinstance(state, dict):
+                            state.pop(symbol, None)
+                    _log(
+                        f"ANCHOR EPISODE RESET: {symbol} confirmed full exit",
+                        "cyan",
+                    )
+
     if source.startswith(("scheduled_start:", "scheduled_same_bar:")):
         strategy_name = source.split(":", 1)[1]
         cache = (_strategy_cache or {}).get(strategy_name)
@@ -12385,6 +12626,7 @@ while not shutdown_requested:
                         ),
                         "green",
                     )
+            _reconcile_anchor_pending_orders(portfolio_emulator)
 
         # Backtest: every bar, execute any pending future trades for TODAY before running strategies.
         # NOTE: loops over _strategy_cache (all strategies that ever scheduled trades), NOT _run_once_specs,
@@ -14557,6 +14799,7 @@ while not shutdown_requested:
                 _fr_conv_min = _satellite_conviction_min_raw(_cached_strategies)
                 _fr_conv = 0.0
                 _fr_plain = 0.0
+                _fr_anchor_reserved_turnover = 0.0
                 # 2026-08-07 (bt 455506) SECOND CHURN LEAK — the position cap.
                 #
                 # The 2026-08-03 sweep capped this request at the satellite
@@ -14656,7 +14899,13 @@ while not shutdown_requested:
                              f"({type(_fr_e).__name__}: {_fr_e}) — funding every sized buy",
                              "yellow")
                         _fr_admissible = None
-                for _fr_sym in (nexus_executable_buys or ()):
+                _fr_buy_symbols = {
+                    str(sym).strip().upper()
+                    for sym in (nexus_executable_buys or ())
+                }
+                for _fr_sym in (
+                        sym for sym in (_exec_order or ())
+                        if str(sym).strip().upper() in _fr_buy_symbols):
                     _fr_hint = (nexus_position_sizes or {}).get(_fr_sym) or {}
                     if not isinstance(_fr_hint, dict):
                         continue
@@ -14671,6 +14920,71 @@ while not shutdown_requested:
                                 _fr_hint.get("raw_net_score", 0.0) or 0.0) >= _fr_conv_min
                         except (TypeError, ValueError):
                             _fr_is_conv = False
+                    _fr_anchor_policy = _anchor_reinforcement_execution_policy(
+                        _cached_strategies, _fr_hint, mode)
+                    if _fr_anchor_policy and (
+                            _fr_anchor_policy.get("research_only")
+                            or not _fr_anchor_policy.get("valid")):
+                        # Fail closed BEFORE the core funding release. Counting a
+                        # research-only/invalid anchor here would sell the core to
+                        # fund an order the execution choke point must reject, then
+                        # buy the core straight back at cycle end.
+                        continue
+                    if _fr_anchor_policy:
+                        try:
+                            _fr_anchor_nav = float(
+                                portfolio_emulator.get_portfolio_value(prices) or 0.0)
+                            _fr_anchor_price = float((prices or {}).get(_fr_sym, 0.0) or 0.0)
+                            _fr_anchor_room = _anchor_reinforcement_position_headroom(
+                                _fr_anchor_policy, portfolio_emulator, prices,
+                                _fr_sym, _fr_anchor_price)
+                            if _fr_anchor_room + 1e-9 < float(
+                                    _fr_anchor_policy.get("min_fill", 100.0)):
+                                _log(
+                                    f"[core] anchor funding excluded for {_fr_sym}: "
+                                    f"position headroom ${_fr_anchor_room:.2f} below "
+                                    "the lane minimum",
+                                    "cyan",
+                                )
+                                continue
+                            _fr_cash = min(_fr_cash, _fr_anchor_room)
+                            _fr_anchor_used = (
+                                float(_turnover_ledger_rolling(current_time) or 0.0)
+                                / _fr_anchor_nav
+                                if _fr_anchor_nav > 0.0 else float("inf")
+                            ) + _fr_anchor_reserved_turnover
+                        except (TypeError, ValueError, AttributeError):
+                            _fr_anchor_nav = 0.0
+                            _fr_anchor_used = float("inf")
+                        # Conservatively project BOTH legs: the core sale this
+                        # pre-pass causes plus the anchor buy, and accumulate
+                        # earlier admitted anchors in execution order.
+                        (_fr_anchor_turnover_ok,
+                         _fr_anchor_projected) = (
+                            _anchor_reinforcement_turnover_allows(
+                                _fr_anchor_policy,
+                                _fr_anchor_used + (
+                                    _fr_cash / _fr_anchor_nav
+                                    if _fr_anchor_nav > 0.0 else float("inf")),
+                                _fr_cash, _fr_anchor_nav)
+                        )
+                        if not _fr_anchor_turnover_ok:
+                            _log(
+                                f"[core] anchor funding excluded for {_fr_sym}: "
+                                f"projected two-leg turnover "
+                                f"{_fr_anchor_projected * 100.0:.1f}% exceeds "
+                                f"{float(_fr_anchor_policy['turnover_ceiling']) * 100.0:.1f}% "
+                                "lane ceiling — not releasing core for a buy the "
+                                "execution gate will refuse",
+                                "cyan",
+                            )
+                            continue
+                        _fr_anchor_reserved_turnover += 2.0 * _fr_cash / _fr_anchor_nav
+                    if (
+                            _fr_anchor_policy
+                            and _fr_anchor_policy.get("allow_core_floor")
+                    ):
+                        _fr_is_conv = True
                     if _fr_is_conv:
                         _fr_conv += _fr_cash
                     else:
@@ -14679,6 +14993,10 @@ while not shutdown_requested:
                     portfolio_emulator, prices, _cached_strategies)
                 _fr_room_conv = _core_sleeve_satellite_headroom(
                     portfolio_emulator, prices, _cached_strategies, conviction=True)
+                # Even if headroom measurement fails open, retain the rebuilt
+                # request (which excludes invalid/research/over-ceiling anchors)
+                # rather than the original unfiltered sum.
+                _fr_capped = _fr_plain + _fr_conv
                 if _fr_room is not None:
                     # Non-conviction buys may only use the design-share room; the
                     # overflow band above it is reserved for conviction names, and
@@ -14698,7 +15016,7 @@ while not shutdown_requested:
                         _log(f"[core] funding ${_fr_allow_conv:,.0f} of conviction "
                              f"overflow out of the core (design room ${_fr_room:,.0f}, "
                              f"floor-bounded room ${_fr_ceiling:,.0f})", "green")
-                    _core_funding_request = _fr_capped
+                _core_funding_request = _fr_capped
             except (TypeError, ValueError, AttributeError):
                 _core_funding_request = 0.0
             # TICK-MODE PARITY for the CORE leg.
@@ -15019,6 +15337,20 @@ while not shutdown_requested:
                     nexus_executable_buys,
                     nexus_position_sizes,
                 )
+                _anchor_final_hint = nexus_position_sizes.get(symbol) or {}
+                _anchor_final_policy = (
+                    _anchor_reinforcement_execution_policy(
+                        _cached_strategies, _anchor_final_hint, mode)
+                    if isinstance(_anchor_final_hint, dict) else None
+                )
+                if _anchor_final_policy and decision != 1:
+                    # Voting/post-decision overrides happen after the planner has
+                    # created pending stage state. A HOLD or SELL must resolve that
+                    # pending intent or the planner will suppress this ticker forever.
+                    _anchor_reinforcement_block(
+                        symbol, "final_decision_not_buy", _anchor_final_hint,
+                        detail=f"decision={decision} action={action}",
+                    )
                 # Execute buy/sell via PortfolioEmulator (backtest) or AlpacaAdapter
                 # (live) — both share the same execute_signal() contract via
                 # BrokerAdapter. Cap buy size by available cash minus reserved
@@ -15029,11 +15361,35 @@ while not shutdown_requested:
                     price = prices.get(symbol)
                     if not price or price <= 0:
                         _log(f"SKIP {action} {symbol} — no price at {current_time}", "yellow")
+                        _no_price_hint = nexus_position_sizes.get(symbol) or {}
+                        if (
+                                decision == 1
+                                and isinstance(_no_price_hint, dict)
+                                and _anchor_reinforcement_execution_policy(
+                                    _cached_strategies, _no_price_hint, mode)
+                        ):
+                            _anchor_reinforcement_block(
+                                symbol, "no_price", _no_price_hint)
                         _trade_skipped_no_price = True
                     else:
                         nexus_hint = nexus_position_sizes.get(symbol) or {}
                         if not isinstance(nexus_hint, dict):
                             nexus_hint = {}
+                        _anchor_policy = (
+                            _anchor_reinforcement_execution_policy(
+                                _cached_strategies, nexus_hint, mode)
+                            if decision == 1 else None
+                        )
+                        if _anchor_policy and (
+                                _anchor_policy.get("research_only")
+                                or not _anchor_policy.get("valid")):
+                            _anchor_reinforcement_block(
+                                symbol,
+                                "research_only" if _anchor_policy.get("research_only")
+                                else "invalid_policy",
+                                nexus_hint,
+                            )
+                            continue
                         _nexus_block = get_nexus_buy_block_details(symbol, float(price), nexus_buy_guard) if decision == 1 else None
                         _nexus_block_reason = str((_nexus_block or {}).get("message") or "") if _nexus_block else None
                         if _nexus_block_reason:
@@ -15054,6 +15410,11 @@ while not shutdown_requested:
                                     "is_propagation_expansion": bool(nexus_hint.get("is_propagation_expansion")),
                                 })
                                 _log(f"Gate skips reported back: {symbol} ({_skip_code})", "magenta")
+                            if _anchor_policy:
+                                _anchor_reinforcement_block(
+                                    symbol, _skip_code, nexus_hint,
+                                    detail=str(_nexus_block_reason),
+                                )
                             continue
                         # 2026-07-19 regime-safety: airtight per-regime position
                         # cap at the ONE choke point every buy lane passes
@@ -15118,12 +15479,18 @@ while not shutdown_requested:
                             # and is already tested. Default 0.0 = off.
                             _sat_conv_min = _satellite_conviction_min_raw(_cached_strategies)
                             _sat_is_conv = False
+                            _sat_raw = 0.0
                             if _sat_conv_min > 0:
                                 try:
                                     _sat_raw = float((nexus_hint or {}).get("raw_net_score", 0.0) or 0.0)
                                 except (TypeError, ValueError):
                                     _sat_raw = 0.0
                                 _sat_is_conv = _sat_raw >= _sat_conv_min
+                            if _anchor_policy and _anchor_policy.get("allow_core_floor"):
+                                # Lane-local permission: an eligible held winner may
+                                # consume only the same floor-bounded overflow band;
+                                # it does not impersonate a high raw score.
+                                _sat_is_conv = True
                             _sat_room = _core_sleeve_satellite_headroom(
                                 portfolio_emulator, prices, _cached_strategies,
                                 conviction=_sat_is_conv)
@@ -15134,11 +15501,24 @@ while not shutdown_requested:
                                          f"(${_sat_room:,.0f} room); "
                                          f"core would be squeezed below "
                                          f"{'its floor' if _sat_is_conv else 'target'}", "yellow")
+                                    if _anchor_policy:
+                                        _anchor_reinforcement_block(
+                                            symbol, "satellite_cap", nexus_hint,
+                                            detail=f"room=${_sat_room:.2f}",
+                                        )
                                     continue
                                 if _sat_is_conv:
-                                    _log(f"SATELLITE OVERFLOW: {symbol} raw={_sat_raw:+.3f} "
-                                         f">= {_sat_conv_min:.2f} — funding ${_sat_room:,.0f} "
-                                         f"of room out of the core (floor-bounded)", "green")
+                                    if _anchor_policy and _sat_raw < _sat_conv_min:
+                                        _log(
+                                            f"ANCHOR SATELLITE ADMIT: {symbol} "
+                                            f"raw={_sat_raw:+.3f} funding up to "
+                                            f"${_sat_room:,.0f} from the floor-bounded core band",
+                                            "green",
+                                        )
+                                    else:
+                                        _log(f"SATELLITE OVERFLOW: {symbol} raw={_sat_raw:+.3f} "
+                                             f">= {_sat_conv_min:.2f} — funding ${_sat_room:,.0f} "
+                                             f"of room out of the core (floor-bounded)", "green")
                                 # 2026-08-04 CRASH FIX. This read `cash_to_use`,
                                 # which is not assigned until ~80 lines BELOW
                                 # (`cash_to_use = cash_per_trade`). At module
@@ -15167,6 +15547,16 @@ while not shutdown_requested:
                                          f"${cash_per_trade:,.0f} -> ${_sat_room:,.0f} "
                                          f"to keep the core at target", "yellow")
                                     cash_per_trade = _sat_room
+                                if (
+                                        _anchor_policy
+                                        and cash_per_trade + 1e-9 < float(
+                                            _anchor_policy.get("min_fill", 100.0))
+                                ):
+                                    _anchor_reinforcement_block(
+                                        symbol, "satellite_cap", nexus_hint,
+                                        detail=f"trimmed=${cash_per_trade:.2f}",
+                                    )
+                                    continue
                             # 2026-08-05 FUNDAMENTAL VETO (default OFF). Placed at
                             # this choke point for the same reason as the regime
                             # cap and the turnover budget: it is the one hop every
@@ -15181,6 +15571,11 @@ while not shutdown_requested:
                                 _log(f"FUNDAMENTAL VETO: {symbol} skipped — "
                                      f"{_fv_why}", "yellow")
                                 _trade_skipped_no_price = True
+                                if _anchor_policy:
+                                    _anchor_reinforcement_block(
+                                        symbol, "fundamental_veto", nexus_hint,
+                                        detail=str(_fv_why),
+                                    )
                                 continue
                             # 2026-07-19 adversarial review MED: the bear
                             # symbol is reserved for the sleeve — a strategy
@@ -15266,6 +15661,57 @@ while not shutdown_requested:
                                         f"brake is for churn, not for the trade that matters",
                                         "green",
                                     )
+                            if _anchor_policy:
+                                # The explicit lane ceiling is independent of the
+                                # general turnover budget. Evaluate it on EVERY
+                                # anchor order, including when the general budget
+                                # is OFF or has not bound yet; otherwise the new
+                                # "ceiling" would be inert in exactly those cases.
+                                _tb_bypass = False
+                                try:
+                                    _anchor_nav = float(
+                                        portfolio_emulator.get_portfolio_value(prices) or 0.0)
+                                    _anchor_turnover_used = (
+                                        float(_turnover_ledger_rolling(current_time) or 0.0)
+                                        / _anchor_nav if _anchor_nav > 0.0 else float("inf")
+                                    )
+                                except (TypeError, ValueError, AttributeError):
+                                    _anchor_nav = 0.0
+                                    _anchor_turnover_used = float("inf")
+                                (_anchor_turnover_allowed,
+                                 _anchor_projected_turnover) = (
+                                    _anchor_reinforcement_turnover_allows(
+                                        _anchor_policy, _anchor_turnover_used,
+                                        cash_per_trade, _anchor_nav)
+                                )
+                                if not _anchor_turnover_allowed:
+                                    _log(
+                                        f"ANCHOR TURNOVER BLOCK: {symbol} projected="
+                                        f"{_anchor_projected_turnover * 100.0:.1f}% > "
+                                        f"{float(_anchor_policy['turnover_ceiling']) * 100.0:.1f}% "
+                                        "lane ceiling",
+                                        "yellow",
+                                    )
+                                    _anchor_reinforcement_block(
+                                        symbol, "turnover_ceiling", nexus_hint,
+                                        detail=(
+                                            f"used={_anchor_turnover_used * 100.0:.1f}% "
+                                            f"projected={_anchor_projected_turnover * 100.0:.1f}%"
+                                        ),
+                                    )
+                                    continue
+                                if _turnover_blocked:
+                                    # A valid anchor may cross the tighter general
+                                    # churn budget only while still inside its own
+                                    # explicit hard ceiling.
+                                    _tb_bypass = True
+                                    _log(
+                                        f"ANCHOR TURNOVER ADMIT: {symbol} projected="
+                                        f"{_anchor_projected_turnover * 100.0:.1f}% <= "
+                                        f"{float(_anchor_policy['turnover_ceiling']) * 100.0:.1f}% "
+                                        "lane ceiling",
+                                        "green",
+                                    )
                             if _turnover_blocked and not _tb_bypass:
                                 _log(
                                     f"TURNOVER BUDGET BLOCK: {symbol} skipped — "
@@ -15287,6 +15733,14 @@ while not shutdown_requested:
                                         "is_propagation_expansion": bool(nexus_hint.get("is_propagation_expansion")),
                                     })
                                     _log(f"Gate skips reported back: {symbol} (turnover_budget)", "magenta")
+                                if _anchor_policy:
+                                    _anchor_reinforcement_block(
+                                        symbol, "turnover", nexus_hint,
+                                        detail=(
+                                            f"used={_turnover_used * 100.0:.1f}% "
+                                            f"projected={_anchor_projected_turnover * 100.0:.1f}%"
+                                        ),
+                                    )
                                 continue
                             _rc = _regime_position_cap_hard(_cached_strategies)
                             if _rc is not None:
@@ -15391,6 +15845,23 @@ while not shutdown_requested:
                                 _bp_cached = float(getattr(portfolio_emulator, "_buying_power", 0.0) or 0.0)
                                 if _bp_cached > 0:
                                     _sizing_ceiling = max(_cash_now, _bp_cached)
+                            if _anchor_policy and mode == MODE_BACKTEST:
+                                # The emulator funds from buying power, not raw
+                                # cash. This includes configured pending-sell
+                                # credit from the core release and subtracts
+                                # same-tick BUY reservations/T+1 withholding.
+                                try:
+                                    _anchor_resv = sum(
+                                        float(v or 0.0) for v in (
+                                            getattr(portfolio_emulator,
+                                                    "_execution_cash_reservations", {})
+                                            or {}).values())
+                                    _bp_cached = float(
+                                        portfolio_emulator.get_buying_power(_anchor_resv)
+                                        or 0.0)
+                                    _sizing_ceiling = max(_cash_now, _bp_cached)
+                                except (TypeError, ValueError, AttributeError):
+                                    _bp_cached = 0.0
                             # Task 13 (spec 5.8): lift the live sizing ceiling
                             # by 95% of this cycle's submit-successful sell
                             # proceeds (booked below after each sell submit).
@@ -15423,6 +15894,11 @@ while not shutdown_requested:
                                 _max_single_pct = float(os.environ.get("BROKER_MAX_SINGLE_POSITION_PCT", "0.15") or "0.15")
                             except (ValueError, TypeError):
                                 _max_single_pct = 0.15
+                            if _anchor_policy:
+                                # Lane-local cap override only; every other source
+                                # remains under BROKER_MAX_SINGLE_POSITION_PCT.
+                                _max_single_pct = float(
+                                    _anchor_policy["max_position_fraction"])
                             # 2026-08-02: this used to carry `and mode == MODE_LIVE`, so the
                             # tightest position cap in the system applied ONLY to real money
                             # and no backtest ever modelled it. Every sizing result the
@@ -15434,6 +15910,7 @@ while not shutdown_requested:
                             # Crypto instances set explicit per-coin allocations
                             # (e.g. 20%, 50%), so the equity 15% single-position
                             # safety cap must NOT trim them — honor the user's donut.
+                            _anchor_cap_headroom = None
                             if _max_single_pct > 0 and not _is_crypto_instance_runtime():
                                 try:
                                     # Q4 fix: use CURRENT portfolio value (cash + positions) so
@@ -15451,6 +15928,8 @@ while not shutdown_requested:
                                         _existing_value = _existing_qty * float(price or 0.0)
                                         _max_position_value = _equity * _max_single_pct
                                         _headroom = max(0.0, _max_position_value - _existing_value)
+                                        if _anchor_policy:
+                                            _anchor_cap_headroom = _headroom
                                         if cash_to_use > _headroom:
                                             _log(
                                                 f"Broker single-position cap: {symbol} cash_to_use ${cash_to_use:.2f} "
@@ -15461,6 +15940,17 @@ while not shutdown_requested:
                                             cash_to_use = _headroom
                                 except Exception as _cap_e:
                                     _log(f"Single-position cap check failed for {symbol}: {type(_cap_e).__name__}: {_cap_e}", "yellow")
+                            if (
+                                    _anchor_policy
+                                    and _anchor_cap_headroom is not None
+                                    and _anchor_cap_headroom + 1e-9 < float(
+                                        _anchor_policy.get("min_fill", 100.0))
+                            ):
+                                _anchor_reinforcement_block(
+                                    symbol, "single_position_cap", nexus_hint,
+                                    detail=f"headroom=${cash_to_use:.2f}",
+                                )
+                                continue
                             # Live-readiness HIGH #10: price-sanity check. Reject buys at
                             # prices >20% off recent close (fat-finger / stale-feed protection).
                             # Skipped in backtest where prices come from clean historical bars.
@@ -15613,6 +16103,24 @@ while not shutdown_requested:
                          _emp_held) = _exec_min_position_gate(
                             decision, symbol, cash_to_use, cash_per_trade,
                             _cached_strategies, portfolio_emulator, prices)
+                        _anchor_fundable = (
+                            _exec_fundable_amount(portfolio_emulator, cash_to_use)
+                            if _anchor_policy else _emp_fundable
+                        )
+                        if (
+                                _anchor_policy
+                                and _anchor_fundable + 1e-9 < float(
+                                    _anchor_policy.get("min_fill", 100.0))
+                        ):
+                            _anchor_reinforcement_block(
+                                symbol, "buying_power", nexus_hint,
+                                detail=(
+                                    f"cash_to_use=${cash_to_use:.2f} "
+                                    f"fundable=${_anchor_fundable:.2f}"
+                                ),
+                            )
+                            _trade_skipped_no_price = True
+                            continue
                         if _emp_skip:
                             _emp_what = (
                                 f"cash_to_use ${cash_to_use:.2f}"
@@ -15788,6 +16296,9 @@ while not shutdown_requested:
                                                 "red",
                                             )
                                             _trade_skipped_no_price = True
+                                            if _anchor_policy and decision == 1:
+                                                _anchor_reinforcement_block(
+                                                    symbol, "split_guard", nexus_hint)
                                             continue
                                         _log(
                                             f"SPLIT GUARD: {symbol} {_sg_ratio:g}x step unconfirmed by the "
@@ -15994,6 +16505,12 @@ while not shutdown_requested:
                                         "yellow",
                                     )
                             else:
+                                _anchor_order_source = (
+                                    f"anchor_reinforcement:stage="
+                                    f"{(nexus_hint or {}).get('anchor_stage')}:plan="
+                                    f"{(nexus_hint or {}).get('anchor_plan_id')}"
+                                    if _anchor_policy else "main_signal"
+                                )
                                 _mpg_result = _submit_portfolio_signal(
                                     portfolio_emulator,
                                     symbol,
@@ -16002,9 +16519,38 @@ while not shutdown_requested:
                                     timestamp=current_time,
                                     cash_per_trade=cash_to_use,
                                     sell_fraction=sell_fraction,
-                                    order_source="main_signal",
+                                    order_source=_anchor_order_source,
                                 )
                                 _mpg_submit_ok = bool(_mpg_result)
+                                if _anchor_policy:
+                                    _anchor_order_id = str(
+                                        getattr(_mpg_result, "order_id", "") or "")
+                                    if _mpg_submit_ok and _anchor_order_id:
+                                        _anchor_cache = (_strategy_cache or {}).get(
+                                            "graph_nexus_analysis")
+                                        _anchor_pending_map = (
+                                            _anchor_cache.get("_anchor_reinforce_pending")
+                                            if isinstance(_anchor_cache, dict) else None)
+                                        _anchor_pending = (
+                                            _anchor_pending_map.get(symbol)
+                                            if isinstance(_anchor_pending_map, dict) else None)
+                                        if isinstance(_anchor_pending, dict):
+                                            _anchor_pending["order_id"] = _anchor_order_id
+                                        _log(
+                                            f"ANCHOR ORDER: {symbol} "
+                                            f"stage={(nexus_hint or {}).get('anchor_stage')} "
+                                            f"plan_id={(nexus_hint or {}).get('anchor_plan_id')} "
+                                            f"accepted order_id={_anchor_order_id} "
+                                            f"requested=${cash_per_trade:.2f} "
+                                            f"cash_to_use=${cash_to_use:.2f} "
+                                            f"fundable=${_anchor_fundable:.2f}",
+                                            "green",
+                                        )
+                                    else:
+                                        _mpg_submit_ok = False
+                                        _anchor_reinforcement_block(
+                                            symbol, "order_submission", nexus_hint,
+                                            detail="missing_order_id" if bool(_mpg_result) else "")
 
                             # Book this trade's one-way notional. Same statement
                             # for live and backtest, after both branches have

@@ -1,6 +1,17 @@
 # 2026-08-10 — the benchmark, the sizing pattern, and why this is not going near real money
 
-**HEAD:** `54bacbf` == `origin/main`, pushed, deploy hash-verified (`scripts/check_deployed_code.py`)
+> **Execution correction, 2026-08-10:** `ANCHOR ADD:` is planner allocation, not a fill. All five
+> bt 633644 plans, AXTI in bt 584712, and AAOI in bt 615886 were rejected by `SATELLITE CAP`;
+> quantities never increased. The earlier +$283-on-$1,153 attribution and "scaled through stages"
+> claims were false. Corrected details are in §5 and `docs/investigations/anchor-target.md`.
+>
+> **Overnight execution-contract addendum:** a default-OFF/backtest-only plan→order→fill→stage
+> contract is now implemented in the local worktree and has passed both independent post-edit
+> sweeps after their reproduced blockers were fixed. Final suite: **4,829 passed / 13 skipped /
+> exact baseline 19 failed**. At the time of this note it is not yet pushed/deployed/enabled and no
+> verification run has started. See `docs/investigations/overnight-autonomous-cycle.md`.
+
+**Prior deployed HEAD:** `54bacbf` == then-`origin/main`, hash-verified (`scripts/check_deployed_code.py`)
 **Tests:** 4,809 passed / 13 skipped / **19 pre-existing failures** (`test_A11` + the
 `adversarial_findings` family — these fail ON PURPOSE and were failing identically at session start;
 verified by stashing every change and re-running. NOT a regression.)
@@ -67,7 +78,7 @@ One position = `total_spend_cap_target_weight_pct 0.14 × NAV` = **$840** on a $
 | 1 | conviction overflow band | `(0.35-0.25)×NAV = $600` | $600 < $840 | **FIXED 2026-08-09** → window +9.70% → +17.36% |
 | 2 | BFQ priority pool | `$155–$385` | 3–6× too small | lever reverted; the pool is the wall |
 | 3 | satellite-cap remainder | `$235` | below the `$370` min-position floor | SNDK refused outright |
-| 4 | anchor reinforcement target | `0.12×NAV = $720` | **below the $840 ENTRY** | fixed → **proven to fire**; reverted pending multi-window |
+| 4 | anchor reinforcement target | `0.12×NAV = $720` | **below a full $840 entry** | target 20 creates plans, but all observed plans were execution-blocked |
 | 5 | anchor budget cap | `stock_budget × 0.40 = $170–$250` | vs a $234 stage-1 add | **NEXT** — now greppable |
 
 **Standing rule: check any sizing lane against `0.14 × NAV` before believing it.** Four of these were
@@ -88,7 +99,7 @@ a cent**, and it moves further out of reach as it wins. Stage 1/2/3 all compute 
 bt 571147 (the best run on record, +17.36%) logged `candidates=4..6` on **25 separate bars** while
 holding AMAT +45%, SBLK +37%, SLV +32%, XOM +27% and **SNDK +166%**, and funded **zero** adds.
 
-Fix = `anchor_reinforce_target_pct` 12 → 20. The switch-on boundary is **~17.8%** of NAV (the target
+Planner lever = `anchor_reinforce_target_pct` 12 → 20. For a full entry, the switch-on boundary is **~17.8%** of NAV (the target
 must clear the stage-1 value `0.14 × 1.15 = 16.1%` **plus** `min_position_size` $100). Tests assert
 `16→no, 17→no, 18→yes`. **The real function corrected the paper arithmetic here — 17 looks fundable
 and is not.** 20 is the first round number with margin.
@@ -152,8 +163,9 @@ ANCHOR ADD: none funded from 6 candidate(s) on a $178 budget — check
             anchor_reinforce_target_pct against the entry clip
 ```
 
-The second line would have caught §2 #4 **25 times in a single run**. Shipped before the config
-change, per the five-inert-levers rule.
+The second line exposes planner negatives. Correction: the positive line is also planner-only; it
+must be followed through broker gates to a BUY fill/quantity increase. Bt 633644's positive lines
+were all rejected. Shipped before the config change, but insufficient as a success signature.
 
 ---
 
@@ -173,37 +185,28 @@ change, per the five-inert-levers rule.
 
 ---
 
-## 5. THE ANCHOR RESULT — "NOT PROVEN", NOT "HARMFUL"
+## 5. THE ANCHOR RESULT — PLANNER ALIVE, EXECUTION ZERO
 
-bt **633644**, reference window, `anchor_reinforce_target_pct=20`. Control bt 571147 (+17.36%).
+Bt **633644** printed five target-20 planner allocations ($1,153 total), but each `winner_add_buy`
+intent was immediately rejected by `SATELLITE CAP`. UUUU stayed at 53.07508767 shares, NVO at
+16.13507190 until its sell, and SNDK at 1.78663492. Therefore UUUU +$293.42, SNDK +$203.38 and
+NVO -$213.32 are original-lot P&Ls. The prior +$283 attribution to reinforcement capital was false.
+NVO still demonstrates that an eligible +15.2% name can reverse; it does not demonstrate add losses.
 
-**The lane fired for the first time in this repo's recorded history:**
+Bt **584712** also disproves the universal claim that target 12 cannot plan: AXTI's partial ~$579
+entry left room for a $130 plan. That plan was likewise rejected by satellite capacity.
 
-```
-ANCHOR ADD: UUUU stage=1 +$241  (+24.4%)
-ANCHOR ADD: NVO  stage=1 +$175  (+15.2%)
-ANCHOR ADD: UUUU stage=2 +$211  (+38.7%)
-ANCHOR ADD: UUUU stage=3 +$319  (+51.7%)
-ANCHOR ADD: SNDK stage=2 +$207  (+32.0%)
-```
+Bt **615886**, OOS bull target 20, reproduced the chain on the current build: 19 planner-negative
+lines, one `AAOI stage=1 +$265` plan, immediate satellite rejection (-$595 room), and no quantity
+increase. AAOI stayed at exactly 7.031933505093401 shares across all 180 snapshots until its
+equal-quantity exit. Final return was +9.02%, max DD 5.4%, versus SPY +13.10%; the delta is not an
+anchor effect because exposure was zero and the salt changed/inherited discovery.
 
-UUUU scaled through **all three stages** and finished **top contributor at +$293.42**. SNDK returned
-**+$203.38** against **+$52.64** in the control, where it was a $101 runt.
-
-**And the return was +5.61%** against the control's +17.36% — below the pre-declared +12.42% revert
-line. **Reverted to 12.**
-
-Recorded as **not proven**, not harmful:
-* book overlap with the control is **2 of 8**;
-* this window's sixteen recorded runs span **+1.72% to +17.36%**;
-* the three add-receiving names netted **+$283** between them on ~$1,153 of adds (2 of 3 worked);
-* **NVO -$213.32** took a stage-1 add at +15.2% and reversed — the real risk of this lane, and not
-  dismissible at n=1.
-
-**Reverting to 12 is NOT a safe default.** It restores a lane that provably cannot add at all. The
-arithmetic defect in §2 #4 stands regardless of this run's P&L.
-
----
+**Correct verdict:** the planner can allocate, but the observed execution lane is inert: seven plans,
+seven rejects, zero fills. Failed plans still consume same-bar strategy budget and advance stage
+before broker feedback. The historical paired return plan is stopped; the next step is a default-OFF,
+per-document, fill-acknowledged execution path with coherent satellite/turnover/position ceilings —
+not a global broker-cap increase and not a blind five-run spend.
 
 ## 6. THE OTHER STRUCTURAL FINDING — CAPACITY IS SPENT BY DAY THREE
 
@@ -289,12 +292,12 @@ the `live_readiness_report` writer. **(d) alone is a hard 60-day floor.**
 
 ## 8. NEXT STEPS, IN PRIORITY ORDER
 
-1. **Evaluate `anchor_reinforce_target_pct=20` on the bear, OOS and non-semi windows** — three runs,
-   *not* another reference-window run. It is the only lever that has ever put real size on a winner.
-   Grep `ANCHOR ADD:`; watch specifically for the NVO failure mode (add at +15%, then reversal).
-2. **Fix §2 #5** — `_winner_add_budget_cap = _stock_budget_available * 0.40` yields $170–$250 against
-   a $234 stage-1 add. It fired `none funded` **36 times** in bt 633644. Same class of bug, already
-   diagnosed, now greppable.
+1. **Stop the old salted paired-return plan.** Target 20 has produced planner intent but zero
+   executed size; salts change/inherit names. Aggregate deltas are not anchor evidence.
+2. **Fix the planner→broker contract behind a default-OFF doc flag.** Commit stages only on fills,
+   count actual position value, log PLAN/BLOCK/ORDER/FILL, and if an execution policy is tested, cap
+   it coherently at lane-specific satellite/core, turnover and final-position ceilings. The 40%
+   budget clipped plans but is not the first execution blocker and must not be raised alone.
 3. **Bull participation** — the only clause failing outright (0/3). Start from §6's cash-drag lead,
    but measure the per-bar invested fraction properly, from position values, not gate lines.
 4. **Emit an equity time series on the result row.** Unblocks six promotion criteria *and* makes
@@ -314,7 +317,8 @@ the `live_readiness_report` writer. **(d) alone is a hard 60-day floor.**
 | 584712 | OOS `03-30..04-27` | fresh-low N=2 + rally-onset | +12.34% | +13.10% | SQQQ $0, maxDD 11.4→5.8%; return inside noise |
 | 789099 | bear `03-02..03-30` | same | **+21.27%** | -7.86% | safety check **PASSED**: 0 blocks, SQQQ +$918.78 |
 | 424219 | reference `01-01..03-01` | + `bfq_conviction_target_weight_pct=0.14` | +4.10% | +0.24% | **REVERTED** — pool-bound |
-| 633644 | reference `01-01..03-01` | + `anchor_reinforce_target_pct=20` | +5.61% | +0.24% | lane **FIRED** (5 adds); **REVERTED**, not proven |
+| 633644 | reference `01-01..03-01` | + `anchor_reinforce_target_pct=20` | +5.61% | +0.24% | 5 plans, **0 fills**; P&L unidentified |
+| 615886 | OOS `03-30..04-27` | target 20 + separate salt | +9.02% | +13.10% | 1 AAOI plan, satellite reject, **0 fills** |
 
 ---
 
@@ -378,7 +382,7 @@ New this session, all under `docs/investigations/`:
 `sndk-100-dollars.md` (SNDK at $100 while $582 went to SPY),
 `satellite-capacity-584886.md` (refusals are capacity; displacement measured useless),
 `424219-bfq-target-weight-reverted.md` (the pool is the wall),
-`anchor-target.md` (**the fourth instance + the run that proved the lane can fire**),
+`anchor-target.md` (**corrected planner-vs-execution audit**),
 `scorecard.md` (where the alpha comes from).
 
 Prior session: `fix-audit-levers.md` has a 63-row WORKS/INERT/BACKWARDS verdict table for every
@@ -477,7 +481,11 @@ MANDATORY CHECK BEFORE SPENDING A ~70-MINUTE BACKTEST ON ANY SIZING LEVER:
   b) Do NOT trust paper arithmetic. Write a pytest that imports and drives the REAL planner (e.g. strategies.graph_nexus_analysis._plan_anchor_reinforcement) with a synthetic candidate. The real function corrected the sketch here: target_pct=17 LOOKED fundable and is not, because additional_needed must also clear min_position_size=$100. True switch-on boundary is ~17.8% of NAV (16.1% stage-1 value + 1.67% floor); tests assert 16->no, 17->no, 18->yes.
   c) Ship the GREPPABLE LOG SIGNATURE in the same commit or earlier, including an explicit negative line ("none funded from N candidate(s)"). Only-the-budget-was-logged is how this bug hid for 25 bars in the best run on record.
 
-ANCHOR LANE STATUS: anchor_reinforce_target_pct is back to 12 on doc-193 (below the pre-declared +12.42% revert line at +5.61% vs control +17.36%). Verdict NOT PROVEN, not harmful — 2-of-8 book overlap, window's 14 runs span +1.72%..+17.36%, add-receiving names netted +$283 (UUUU +$293 top contributor after scaling 3 stages, SNDK +$203 vs +$52 as a $101 runt, NVO -$213 took a stage-1 add at +15.2% and reversed). BE EXPLICIT: 12 is NOT a safe default, it restores a lane that provably cannot add at all. Next action is a MULTI-WINDOW (bear + OOS + non-semi) evaluation of 20, never another reference-window run.
+CORRECTION TO THE HISTORICAL MEMORY ABOVE: bt 633644 had five planner allocations and zero fills;
+UUUU/SNDK/NVO P&L came from original lots. Target 12 also planned AXTI after a partial entry, then
+satellite rejected it. Across bt 633644, 584712 and 615886 there are seven plans and zero quantity
+increases. The salted multi-window return plan is stopped. The next action is a default-OFF,
+fill-acknowledged and coherently capped execution path, not a return pair or a 40%-budget increase.
 ```
 
 ### LOCAL · `intellistock_session_state_2026_08_09_conviction_band_fixed_3_windows_clear_1x_n`
@@ -491,12 +499,10 @@ COMPREHENSIVE HANDOFF: docs/handoffs/2026-08-10-sizing-pattern-and-readiness.md 
 GOAL NOT ACHIEVED on all three clauses. 22/24 beat SPY (mean alpha +9.17pp) but only 10/24 at 1x
 pace, and the OOS bull window (SPY +13.10%) is 0/3 — participation problem, not a hedge problem.
 
-MASTER PATTERN, 5 instances — CHECK EVERY SIZING LANE AGAINST 0.14 x NAV = $840:
- 1 conviction band $600 (fixed 2026-08-09, +7.7pp)  2 BFQ pool $155-385  3 satellite remainder $235
- vs $370 floor  4 anchor target 0.12xNAV < 0.14xNAV entry (lane could NEVER add; fixed->PROVEN to
- fire, 5 adds, UUUU +24->+39->+52% top contributor +$293; reverted, NOT PROVEN)  5 anchor budget cap
- stock_budget*0.40 = $170-250 vs a $234 add -> NEXT FIX, greppable via the "ANCHOR ADD: none funded"
- line added this session (fired 36x).
+CORRECTED MASTER PATTERN: full-size entries usually sit above the target-12 planner target, but
+partial entries can still plan. Target 20 produced five bt633644 plans, not fills; all died at the
+satellite cap. The 40% sub-cap clipped some plans but is not the first execution blocker and is not
+a safe standalone next fix.
 
 LIVE ON doc-193, KEEP: residual_sleeve_bear_block_at_fresh_low_bars=2 + regime_rally_onset_enabled=true.
 Verified selective: 12 blocks in the OOS window (SQQQ $0, maxDD 11.4->5.8%), ZERO in the bear window
@@ -510,9 +516,9 @@ days, calendar-bound; (3) sealed holdout was never pre-registered and every wind
 looked at; (4) six gate criteria are uncomputable because a backtest emits NO equity time series.
 doc-179/alpaca-main untouched — real money, needs explicit sign-off.
 
-NEXT: (1) anchor_reinforce_target_pct=20 on bear+OOS+non-semi (3 runs, NOT another reference run);
-(2) fix the 40% anchor budget sub-cap; (3) bull participation; (4) emit an equity curve on the result
-row (unblocks 6 promotion criteria); (5) stage the deployment; (6) bear-regime core saw-tooth (3.72x NAV).
+CORRECTED NEXT: stop the non-identifying salted pair plan; implement a default-OFF
+fill-acknowledged, lane-capped anchor execution contract; verify an actual fill/quantity increase
+before any further window. Do not raise the 40% budget or global broker cap alone.
 
 BASELINE: 19 pre-existing test failures (test_A11 + adversarial-findings), 4,809 pass — NOT a regression.
 ```

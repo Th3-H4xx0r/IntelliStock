@@ -1,7 +1,11 @@
-# anchor-target — the winner-add lane cannot add, and it is the same arithmetic for the fourth time
+# anchor-target — planner arithmetic and the execution gate that was originally missed
 
-Found in bt 571147 (+17.36%, the best run on record) — **for zero runs**, by grepping a log we
-already had.
+> **CORRECTED 2026-08-10.** `ANCHOR ADD:` records a planner allocation, not a fill. Bt 633644's
+> five plans, bt 584712's AXTI plan, and bt 615886's AAOI plan were all rejected by downstream
+> `SATELLITE CAP`; no recipient quantity increased. The original result/attribution was false and is
+> replaced in §6.
+
+Found in bt 571147 (+17.36%, the best run on record) from logs already available.
 
 ---
 
@@ -14,7 +18,8 @@ V31 anchor reinforcement budget: cap=$178  (40% of stock_budget=$444),  candidat
 ...                                                                     (25 such bars)
 ```
 
-**Twenty-five bars. Four to six qualified winners on nearly every one. Zero adds funded.**
+**Twenty-five bars. Four to six candidate documents on nearly every one. Zero planner allocations.**
+(The document list is broader than stage-qualified winners; age/P&L/drawdown/gap can still reject.)
 
 The book on those bars held AMAT (+45%), SBLK (+37%), SLV (+32%), XOM (+27%) and SNDK (**+166%**).
 The lane whose entire job is *"size so one winner matters"* watched all of them and never bought
@@ -41,8 +46,10 @@ gained a cent**, and it only gets further above it as it wins:
 | 2 | +30%, 14d | $1,092 | $886 | **$0** |
 | 3 | +50%, 21d | $1,260 | $1,108 | **$0** |
 
-**The better the winner, the further out of reach its own target.** The lane is mathematically
-incapable of firing, for any name, in any window.
+For a full 14%-of-NAV opening clip, **the better the winner, the further out of reach its target.**
+This is not universal: a partial/runt entry can remain below the target. Bt 584712 target-12 planned
+$130 for AXTI after its smaller ~$579 opening fill, then the broker rejected that plan. Thus target
+12 is usually planner-inert at a full clip, but observed execution is zero for both 12 and 20.
 
 ## 2. THIS IS THE FOURTH INSTANCE OF ONE PATTERN
 
@@ -60,12 +67,14 @@ Every lane that is supposed to put size on a winner is calibrated below the size
 
 `anchor_reinforce_target_pct` **12 -> 20**.
 
-| target_pct | stage 1 | stage 2 | stage 3 | final weight |
+| target_pct | stage 1 plan | stage 2 plan | stage 3 plan | planner target |
 |---|---|---|---|---|
-| 12 (live) | $0 | $0 | $0 | 16-21% by drift only |
-| **20** | **$234** | **$385** | **$586** | 20% / 24.6% / 30.8%* |
+| 12 (full clip) | $0 | $0 | $0 | below a full entry |
+| **20** | **$234** | **$385** | **$586** | 20% / 24.6% / 30.8% |
 
-\* clipped by `single_position_max_pct = 25`.
+These are planner targets, not reachable position weights under the observed broker policy. The
+broker independently defaults to a 15%-of-NAV single-position cap, tighter than strategy
+`single_position_max_pct=25`, and the standing satellite cap rejected every observed plan first.
 
 **The boundary is not tuned.** The lane switches on where the target clears the position's value at
 the stage-1 trigger (`0.14 x 1.15 = 16.1%` of NAV) plus `min_position_size` ($100 = 1.67%), i.e.
@@ -83,7 +92,9 @@ ANCHOR ADD: none funded from 6 candidate(s) on a $178 budget — check
             anchor_reinforce_target_pct against the entry clip
 ```
 
-The second line is the one that would have caught this bug 25 times in a single run.
+The second line exposes planner negatives, but neither line proves execution. A valid success
+signature must also include a source-tagged BUY fill and a recipient quantity increase; blocked plans
+must name the satellite/turnover/single-position/cash/order gate.
 
 ## 5. PASS / FAIL, DECLARED BEFORE THE RUN
 
@@ -91,10 +102,10 @@ Reference window `2026-01-01..2026-03-01`, cold, `anchor_reinforce_target_pct=20
 
 | outcome | reading |
 |---|---|
-| `ANCHOR ADD: <SYM> stage=...` present | the lane is alive for the first time — this is the claim |
-| only `ANCHOR ADD: none funded` | still blocked; the target is not the last constraint |
-| adds fire and return >= +17.36% | the mechanism the objective describes, working |
-| adds fire and return < +12.42% | negative beyond the noise floor; revert to 12 |
+| `ANCHOR ADD: <SYM> stage=...` present | planner allocated; trace downstream, **not a pass** |
+| source-tagged BUY fill + quantity increase | execution mechanism is alive |
+| only `ANCHOR ADD: none funded` | no plan; target/budget/qualification reasons need separation |
+| aggregate return threshold | invalid unless exposure exists and discovery/history are held identical |
 
 **Attribution warning, written in advance:** every A/B this session overlapped its control by 2 of
 9-11 held names. A single run cannot resolve this lever's P&L. What it CAN resolve is whether the
@@ -103,67 +114,58 @@ lane fires at all, and at what size — which is deterministic, greppable, and t
 
 ---
 
-## 6. RESULT — bt 633644, `anchor_reinforce_target_pct = 20`
+## 6. CORRECTED RESULT — bt 633644 and follow-up bt 615886
 
-Reference window `2026-01-01..2026-03-01`, cold. Control: bt 571147 (+17.36%).
+### Bt 633644: five plans, zero adds
 
-### Row 1 of the pass/fail table fired: THE LANE IS ALIVE, FOR THE FIRST TIME
+The five printed allocations totalled $1,153, but every one followed the same path:
 
-```
-ANCHOR ADD: UUUU stage=1 +$241 (held  7d, pnl +24.4%, drop_from_peak 0.0%, entry $840, raw 1.200)
-ANCHOR ADD: NVO  stage=1 +$175 (held 10d, pnl +15.2%, drop_from_peak 0.1%, entry $840, raw 1.250)
-ANCHOR ADD: UUUU stage=2 +$211 (held 14d, pnl +38.7%, drop_from_peak 0.6%, entry $840, raw 1.250)
-ANCHOR ADD: UUUU stage=3 +$319 (held 21d, pnl +51.7%, drop_from_peak 3.6%, entry $840, raw 1.250)
-ANCHOR ADD: SNDK stage=2 +$207 (held 25d, pnl +32.0%, drop_from_peak 1.9%, entry $925, raw 1.250)
+```text
+ANCHOR ADD: UUUU stage=1 +$241 ...          # planner allocation
+UUUU ... action_intent=winner_add_buy
+SATELLITE CAP: UUUU skipped ...              # broker rejection
 ```
 
-**Five funded adds, all three stages, exactly the arithmetic §3 predicted** ($241/$211/$319 against
-predicted $234/$385/$586 — stage 2 and 3 are smaller because the budget bound them, see below).
+The sequence repeats for NVO, UUUU stages 2/3, and SNDK. Recipient quantities never increased:
+UUUU stayed 53.07508767 shares, NVO 16.13507190 until its sell, and SNDK 1.78663492. Their reported
+P&Ls — UUUU +$293.42, SNDK +$203.38 and NVO -$213.32 — belong entirely to original lots. The prior
+claim that the recipients netted +$283 "on ~$1,153 of adds" was false because the $1,153 never
+traded. NVO remains a useful *eligibility-risk* example (qualified at +15.2%, then reversed), not an
+add-loss example.
 
-UUUU was scaled through **all three stages** while running +24% -> +39% -> +52%, and finished the
-run as the **top contributor, +$293.42**. SNDK — the name the objective names — took a stage-2 add
-and returned **+$203.38**, against **+$52.64** in the control where it was a $101 runt.
+All five plans died at satellite capacity. Even without that gate, their pre-add weights were about
+15.25%-18.86%, already at/above the broker's default 15% cap. The target's stage weights
+(20%/24.6%/30.8%) therefore conflict with the actual execution cap. The planner also advanced the
+stage before broker feedback and deducted planned dollars from the new-entry slate despite rejection.
 
-That is the objective's mechanism, executing, for the first time in this repo's recorded history.
+### Bt 615886: the defect reproduces on the OOS bull window
 
-### Row 4 also fired: the return is below the revert threshold
+Final: +9.02%, max DD 5.4%, 27 fills. The run printed 19 `none funded` lines and one positive plan:
 
-| | 633644 (target 20) | 571147 (control) |
-|---|---|---|
-| return | **+5.61%** | +17.36% |
-| vs SPY (+0.24%) | +5.37pp | +17.12pp |
-| max DD | 12.9% | 10.6% |
-| top contributor | UUUU +$293 | SBLK +$293 |
-
-`+5.61% < +12.42%`. **Reverted to 12, as declared.**
-
-### THE HONEST VERDICT: "NOT PROVEN", NOT "HARMFUL"
-
-* Book overlap with the control is **2 of 8** (SNDK, AMCR) — the same re-randomisation every A/B
-  this session hit. The fourteen recorded runs of this window span **+1.72% to +17.36%**, and
-  +5.61% sits inside that.
-* The three names that received adds netted **+$283** between them (UUUU +$293, SNDK +$203,
-  NVO -$213) on ~$1,153 of adds. Two of three worked.
-* The single worst line in the run is **NVO -$213.32**, which took a stage-1 add at +15.2% and then
-  reversed. That is the real risk of this lane and it is not dismissible at n=1.
-
-**Reverting to 12 is not a safe default — it restores a lane that provably cannot add at all.**
-The defect in §1 stands regardless of this run. What this run establishes is that the fix *works
-mechanically*; what it cannot establish, at 2-of-8 overlap on one window, is the P&L.
-
-### THE NEXT CONSTRAINT, NOW VISIBLE
-
-The diagnostic line added in this commit fired **36 times**:
-
-```
-ANCHOR ADD: none funded from 4 candidate(s) on a $178 budget — check
-            anchor_reinforce_target_pct against the entry clip
+```text
+ANCHOR ADD: AAOI stage=1 +$265 ... raw 1.200
+AAOI ... action_intent=winner_add_buy
+SATELLITE CAP: AAOI skipped ... ($-595 room)
 ```
 
-$178 is below the $234 a stage-1 add costs. With the target fixed, **the binding constraint moved
-one step up to `_winner_add_budget_cap = _stock_budget_available * 0.40`** — a hard-coded 40% that
-lands at $170-$250 on a fully-deployed book. That is the fifth instance of the same pattern, and it
-is now greppable instead of silent.
+AAOI's only BUY was its original 7.03193351-share fill. All 180 position snapshots through its exit
+show exactly 7.031933505093401 shares, and the SELL removed the same quantity. Its +$238.63 was
+original-lot P&L. Thus target 20 again changed planner state/budget but produced zero reinforcement
+exposure. The run trailed SPY's +13.10% by 4.08pp, but target and salt/discovery both changed, so the
+return cannot be attributed to anchor planning.
 
-**Correct next step: evaluate `anchor_reinforce_target_pct` across the bear, OOS and non-semi
-windows before shipping it — not another single run on the tuning window.**
+### Correct verdict and next constraint
+
+* Planner activation is proven; execution activation is not. Across bt 633644, bt 584712 (AXTI),
+  and bt 615886 (AAOI): **7 plans, 7 downstream rejects, 0 fills/quantity increases**.
+* Target 12 is not universally planner-inert: a partial/runt opening fill can leave target room, as
+  AXTI's $130 target-12 plan showed. It was still execution-inert.
+* The hard-coded 40% budget clipped four bt 633644 plans but did not block an executed order, and
+  it does not explain every `none funded` line. Raising it alone increases false budget crowd-out.
+* The smallest safe prerequisite is default-OFF fill-time stage accounting and unambiguous
+  PLAN/BLOCK/ORDER/FILL logs. Any executable policy must remain lane-specific, retain core and
+  turnover ceilings, and cap the final position coherently; do not raise the global broker cap.
+* The old bear/OOS/non-semi paired-return plan is stopped. Salts demonstrably change/inherit
+  discovery, and no aggregate return comparison is causal while the treatment has zero exposure.
+
+Detailed independent evidence: `agent-anchor-log-analysis.md` and `agent-anchor-code-audit.md`.

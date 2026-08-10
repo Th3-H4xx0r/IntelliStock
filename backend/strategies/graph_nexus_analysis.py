@@ -1,4 +1,4 @@
-# INTELLISTOCK_SCHEMA: {"strategy": "graph_nexus_analysis", "weight": 0.5, "execution_position": 0, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"neo4j_uri": "bolt://localhost:7687", "neo4j_user": "<optional>", "neo4j_password": "<optional>", "llm_provider": "gemini", "llm_api_key": "<optional>", "llm_model": "gemini-3-flash-preview", "openai_base_url": "<optional>", "azure_openai_api_key": "<optional>", "azure_openai_endpoint": "<optional>", "azure_openai_api_version": "2024-10-21", "alpaca_key": "<optional>", "alpaca_secret": "<optional>", "min_articles": 20, "company_article_llm_workers": 4, "macro_article_llm_workers": 6, "use_llm_sentiment": true, "use_sentiment_cache": true, "num_articles_for_llm": 30, "max_daily_alpaca_articles": 50, "max_daily_google_news_articles": 50, "buy_threshold": 0.15, "sell_threshold": -0.15, "sector_propagation_weight": 0.2, "use_institutional_correlation": true, "max_hops": 2, "google_news_enabled": true, "trend_tracking_enabled": true, "stock_finder_enabled": true, "sell_enforcement_enabled": true, "max_discovered_stocks": 90, "trend_min_strength_to_buy": 0.5, "trend_max_age_days": 21, "nexus_portfolio_pct": 0.8, "cash_reserve_floor_pct": 0.1, "cash_reserve_floor_hard": true, "cash_reserve_hard_min_positions": 5, "cash_reserve_release_after_min_positions": true, "cash_reserve_release_min_score": 0.5, "cash_reserve_release_cap_pct": 1.0, "buy_price_floor": 5.0, "trailing_stop_pct": 8.0, "profit_take_gain_pct": 40.0, "profit_take_sell_fraction": 0.5, "profit_take_enabled": false, "profit_take_tiers": [], "rotation_min_delta": 0.15, "rotation_min_hold_days": 10, "rotation_profitable_min_delta": 1.5, "rotation_profitable_full_exit_min_hold_days": 20, "rotation_profitable_min_incoming_raw_score": 2.0, "rotation_winner_lock_enabled": true, "rotation_winner_lock_min_hold_days": 5, "rotation_winner_lock_min_pnl_pct": 3.0, "rotation_winner_lock_min_raw_score": -0.1, "rotation_winner_lock_max_peak_drawdown_pct": 8.0, "rotation_break_glass_raw_score": 2.75, "rotation_break_glass_delta": 2.25, "rotation_break_glass_sell_fraction": 0.5, "rotation_break_glass_recent_runup_block_pct": 0.0, "rotation_break_glass_recent_runup_lookback_bars": 20, "rotation_prevalidate_sector_cap_enabled": true, "fast_loser_cut_recent_runup_block_pct": 0.0, "fast_loser_cut_recent_runup_lookback_bars": 20, "profitable_min_hold_conviction_override_enabled": false, "profitable_min_hold_conviction_min_raw_score": 1.5, "profitable_min_hold_conviction_min_delta": 1.0, "profitable_min_hold_conviction_max_held_pnl_pct": 10.0, "rotation_winner_lock_bypass_min_raw_score": 1.8, "rotation_graph_gate_max_loss_pct": 0.0, "anchor_reinforce_target_pct": 0.0, "profitable_min_hold_release_enabled": false, "profitable_min_hold_release_peak_drop_pct": 12.0, "rotation_replace_loss_threshold_pct": -0.5, "rotation_ml_weight": 0.2, "portfolio_drawdown_halt_enabled": true, "portfolio_drawdown_halt_pct": 15.0, "portfolio_drawdown_resume_up_days": 2, "deployment_ramp_enabled": true, "deployment_bar1_cap_pct": 0.5, "deployment_bar2_cap_pct": 0.7, "deployment_bar3_cap_pct": 0.9, "macro_risk_scaling_enabled": true, "macro_risk_scale_step": 0.1, "macro_risk_scale_min": 0.6, "benzinga_api_key": "<optional>", "benzinga_ratings_enabled": true, "benzinga_insights_enabled": true, "benzinga_insider_trades_enabled": true, "benzinga_gov_trades_enabled": true, "benzinga_ma_enabled": true, "benzinga_ipo_enabled": true, "benzinga_splits_enabled": true, "benzinga_earnings_calendar_enabled": true, "benzinga_company_actions_enabled": true, "benzinga_prediction_markets_enabled": false, "benzinga_lookback_days": 7, "benzinga_lookahead_days": 0, "outcome_tracking_enabled": true, "learning_stage_enabled": true, "learning_stage_days": 14, "lookback_learning_days": 30, "learning_refresh_hours": 12, "use_toon_format": true, "etf_allocation_enabled": true, "etf_min_trend_strength": 0.4, "max_trend_etfs": 6, "etf_portfolio_pct": 0.1, "max_hold_days": 45, "max_active_events": 250, "max_events_in_prompt": 50, "event_maintenance_candidate_batch_size": 8, "event_grace_days": 7, "consecutive_sell_days_to_prune": 5, "llm_overlay_max_stock_candidates": 30, "llm_overlay_max_etf_candidates": 6, "max_etf_buys_per_day": 3, "momentum_discovery_enabled": true, "momentum_discovery_min_20d_return": 15.0, "momentum_discovery_min_60d_return": 40.0, "momentum_discovery_max_per_day": 6, "momentum_discovery_protect_days": 10, "momentum_discovery_exclude_leveraged_etfs": true, "sector_price_context_enabled": true, "price_trend_detection_enabled": true, "price_trend_bull_20d": 8.0, "price_trend_bull_60d": 12.0, "ml_signal_weight": 0.5, "pool_a_base": 10, "pool_b_base": 4, "pool_a_min": 3, "pool_b_min": 2, "max_stock_buys_per_day": 8, "min_market_cap": 500000000, "min_avg_volume": 200000, "propagation_min_paths": 2, "propagation_min_raw_score": 0.3, "propagation_floor_requires_min_paths": true, "backfill_queue_max_size": 30, "backfill_queue_grace_bars": 3, "backfill_queue_priority_grace_bars": 8, "backfill_queue_reserved_priority_slots": 10, "max_sector_peer_discoveries_per_day": 3, "max_competitor_discoveries_per_day": 3, "sector_fill_max_per_sector": 6, "sector_watchlist_reserved_slots": 0, "sector_watchlist_max_per_sector": 0, "watchlist_sector_protected_slots": 0, "watchlist_priority_requires_active_sector": false, "watchlist_priority_slots": 0, "watchlist_priority_min_raw_score": 0.35, "propagation_expansion_reserved_slots": 4, "propagation_expansion_min_raw_score": 0.5, "priority_min_position_size": 100.0, "direct_reserve_alloc_pct": 0.15, "slot_min_notional_pct": 0.0, "priority_budget_can_bypass_regular_min": true, "allocation_profile": "balanced", "allocation_max_new_stock_buys": 6, "allocation_execute_min_raw_score": 0.35, "allocation_top2_min_raw_score": 0.5, "winner_add_enabled": true, "winner_add_min_hold_days": 5, "winner_add_min_pnl_pct": 8.0, "winner_add_min_raw_score": 0.25, "winner_add_max_drawdown_from_peak_pct": 5.0, "winner_add_fraction_of_initial": 0.5, "winner_add_max_count": 1, "max_propagated_scoring_slots": 15, "propagation_max_per_seed": 8, "sell_enforcement_min_hold_days": 5, "llm_sell_conviction_bypass_enabled": false, "llm_sell_conviction_min_raw": -0.5, "llm_sell_conviction_min_loss_pct": 3.0, "sell_enforcement_hysteresis_threshold": -0.5, "sell_enforcement_consecutive_neutral_days": 3, "trailing_stop_commodity_etf_pct": 12.0, "trailing_stop_sector_etf_pct": 10.0, "backfill_budget_reserve_pct": 0.2, "portfolio_drawdown_halt_backfill_budget_pct": 0.5, "portfolio_drawdown_halt_backfill_reduce_pct": 20.0, "portfolio_drawdown_halt_backfill_reduce_budget_pct": 0.25, "portfolio_drawdown_halt_backfill_stop_pct": 25.0, "quality_filter_missing_metadata_policy": "warn", "earnings_penalty_enabled": true, "earnings_penalty_weight": 0.5, "rank_band_enabled": false, "rank_band_entry_pct": 10.0, "rank_band_exit_pct": 50.0, "profit_take_disabled": false, "trailing_stop_disabled": false, "catastrophic_stop_enabled": false, "catastrophic_stop_pct": -20.0, "edge_type_corroboration_weight": 1.0, "sector_watchlist": {}}}
+# INTELLISTOCK_SCHEMA: {"strategy": "graph_nexus_analysis", "weight": 0.5, "execution_position": 0, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"neo4j_uri": "bolt://localhost:7687", "neo4j_user": "<optional>", "neo4j_password": "<optional>", "llm_provider": "gemini", "llm_api_key": "<optional>", "llm_model": "gemini-3-flash-preview", "openai_base_url": "<optional>", "azure_openai_api_key": "<optional>", "azure_openai_endpoint": "<optional>", "azure_openai_api_version": "2024-10-21", "alpaca_key": "<optional>", "alpaca_secret": "<optional>", "min_articles": 20, "company_article_llm_workers": 4, "macro_article_llm_workers": 6, "use_llm_sentiment": true, "use_sentiment_cache": true, "num_articles_for_llm": 30, "max_daily_alpaca_articles": 50, "max_daily_google_news_articles": 50, "buy_threshold": 0.15, "sell_threshold": -0.15, "sector_propagation_weight": 0.2, "use_institutional_correlation": true, "max_hops": 2, "google_news_enabled": true, "trend_tracking_enabled": true, "stock_finder_enabled": true, "sell_enforcement_enabled": true, "max_discovered_stocks": 90, "trend_min_strength_to_buy": 0.5, "trend_max_age_days": 21, "nexus_portfolio_pct": 0.8, "cash_reserve_floor_pct": 0.1, "cash_reserve_floor_hard": true, "cash_reserve_hard_min_positions": 5, "cash_reserve_release_after_min_positions": true, "cash_reserve_release_min_score": 0.5, "cash_reserve_release_cap_pct": 1.0, "buy_price_floor": 5.0, "trailing_stop_pct": 8.0, "profit_take_gain_pct": 40.0, "profit_take_sell_fraction": 0.5, "profit_take_enabled": false, "profit_take_tiers": [], "rotation_min_delta": 0.15, "rotation_min_hold_days": 10, "rotation_profitable_min_delta": 1.5, "rotation_profitable_full_exit_min_hold_days": 20, "rotation_profitable_min_incoming_raw_score": 2.0, "rotation_winner_lock_enabled": true, "rotation_winner_lock_min_hold_days": 5, "rotation_winner_lock_min_pnl_pct": 3.0, "rotation_winner_lock_min_raw_score": -0.1, "rotation_winner_lock_max_peak_drawdown_pct": 8.0, "rotation_break_glass_raw_score": 2.75, "rotation_break_glass_delta": 2.25, "rotation_break_glass_sell_fraction": 0.5, "rotation_break_glass_recent_runup_block_pct": 0.0, "rotation_break_glass_recent_runup_lookback_bars": 20, "rotation_prevalidate_sector_cap_enabled": true, "fast_loser_cut_recent_runup_block_pct": 0.0, "fast_loser_cut_recent_runup_lookback_bars": 20, "profitable_min_hold_conviction_override_enabled": false, "profitable_min_hold_conviction_min_raw_score": 1.5, "profitable_min_hold_conviction_min_delta": 1.0, "profitable_min_hold_conviction_max_held_pnl_pct": 10.0, "rotation_winner_lock_bypass_min_raw_score": 1.8, "rotation_graph_gate_max_loss_pct": 0.0, "anchor_reinforce_target_pct": 0.0, "anchor_reinforce_execution_enabled": false, "anchor_reinforce_execution_max_position_pct": 0.0, "anchor_reinforce_execution_turnover_ceiling_pct": 0.0, "anchor_reinforce_execution_core_floor_enabled": false, "profitable_min_hold_release_enabled": false, "profitable_min_hold_release_peak_drop_pct": 12.0, "rotation_replace_loss_threshold_pct": -0.5, "rotation_ml_weight": 0.2, "portfolio_drawdown_halt_enabled": true, "portfolio_drawdown_halt_pct": 15.0, "portfolio_drawdown_resume_up_days": 2, "deployment_ramp_enabled": true, "deployment_bar1_cap_pct": 0.5, "deployment_bar2_cap_pct": 0.7, "deployment_bar3_cap_pct": 0.9, "macro_risk_scaling_enabled": true, "macro_risk_scale_step": 0.1, "macro_risk_scale_min": 0.6, "benzinga_api_key": "<optional>", "benzinga_ratings_enabled": true, "benzinga_insights_enabled": true, "benzinga_insider_trades_enabled": true, "benzinga_gov_trades_enabled": true, "benzinga_ma_enabled": true, "benzinga_ipo_enabled": true, "benzinga_splits_enabled": true, "benzinga_earnings_calendar_enabled": true, "benzinga_company_actions_enabled": true, "benzinga_prediction_markets_enabled": false, "benzinga_lookback_days": 7, "benzinga_lookahead_days": 0, "outcome_tracking_enabled": true, "learning_stage_enabled": true, "learning_stage_days": 14, "lookback_learning_days": 30, "learning_refresh_hours": 12, "use_toon_format": true, "etf_allocation_enabled": true, "etf_min_trend_strength": 0.4, "max_trend_etfs": 6, "etf_portfolio_pct": 0.1, "max_hold_days": 45, "max_active_events": 250, "max_events_in_prompt": 50, "event_maintenance_candidate_batch_size": 8, "event_grace_days": 7, "consecutive_sell_days_to_prune": 5, "llm_overlay_max_stock_candidates": 30, "llm_overlay_max_etf_candidates": 6, "max_etf_buys_per_day": 3, "momentum_discovery_enabled": true, "momentum_discovery_min_20d_return": 15.0, "momentum_discovery_min_60d_return": 40.0, "momentum_discovery_max_per_day": 6, "momentum_discovery_protect_days": 10, "momentum_discovery_exclude_leveraged_etfs": true, "sector_price_context_enabled": true, "price_trend_detection_enabled": true, "price_trend_bull_20d": 8.0, "price_trend_bull_60d": 12.0, "ml_signal_weight": 0.5, "pool_a_base": 10, "pool_b_base": 4, "pool_a_min": 3, "pool_b_min": 2, "max_stock_buys_per_day": 8, "min_market_cap": 500000000, "min_avg_volume": 200000, "propagation_min_paths": 2, "propagation_min_raw_score": 0.3, "propagation_floor_requires_min_paths": true, "backfill_queue_max_size": 30, "backfill_queue_grace_bars": 3, "backfill_queue_priority_grace_bars": 8, "backfill_queue_reserved_priority_slots": 10, "max_sector_peer_discoveries_per_day": 3, "max_competitor_discoveries_per_day": 3, "sector_fill_max_per_sector": 6, "sector_watchlist_reserved_slots": 0, "sector_watchlist_max_per_sector": 0, "watchlist_sector_protected_slots": 0, "watchlist_priority_requires_active_sector": false, "watchlist_priority_slots": 0, "watchlist_priority_min_raw_score": 0.35, "propagation_expansion_reserved_slots": 4, "propagation_expansion_min_raw_score": 0.5, "priority_min_position_size": 100.0, "direct_reserve_alloc_pct": 0.15, "slot_min_notional_pct": 0.0, "priority_budget_can_bypass_regular_min": true, "allocation_profile": "balanced", "allocation_max_new_stock_buys": 6, "allocation_execute_min_raw_score": 0.35, "allocation_top2_min_raw_score": 0.5, "winner_add_enabled": true, "winner_add_min_hold_days": 5, "winner_add_min_pnl_pct": 8.0, "winner_add_min_raw_score": 0.25, "winner_add_max_drawdown_from_peak_pct": 5.0, "winner_add_fraction_of_initial": 0.5, "winner_add_max_count": 1, "max_propagated_scoring_slots": 15, "propagation_max_per_seed": 8, "sell_enforcement_min_hold_days": 5, "llm_sell_conviction_bypass_enabled": false, "llm_sell_conviction_min_raw": -0.5, "llm_sell_conviction_min_loss_pct": 3.0, "sell_enforcement_hysteresis_threshold": -0.5, "sell_enforcement_consecutive_neutral_days": 3, "trailing_stop_commodity_etf_pct": 12.0, "trailing_stop_sector_etf_pct": 10.0, "backfill_budget_reserve_pct": 0.2, "portfolio_drawdown_halt_backfill_budget_pct": 0.5, "portfolio_drawdown_halt_backfill_reduce_pct": 20.0, "portfolio_drawdown_halt_backfill_reduce_budget_pct": 0.25, "portfolio_drawdown_halt_backfill_stop_pct": 25.0, "quality_filter_missing_metadata_policy": "warn", "earnings_penalty_enabled": true, "earnings_penalty_weight": 0.5, "rank_band_enabled": false, "rank_band_entry_pct": 10.0, "rank_band_exit_pct": 50.0, "profit_take_disabled": false, "trailing_stop_disabled": false, "catastrophic_stop_enabled": false, "catastrophic_stop_pct": -20.0, "edge_type_corroboration_weight": 1.0, "sector_watchlist": {}}}
 # INTELLISTOCK_DESCRIPTION: Advanced graph-based news contagion analysis with market trend tracking, Benzinga data sources, outcome tracking, and learning stage. Fetches today's news from Alpaca AND Google News (macro/geopolitical), enriches with Benzinga data (analyst ratings, analyst insights, insider trades, government trades, M&A, upcoming IPOs, stock splits, earnings calendar, company actions, prediction markets — all enable/disable configurable), uses LLM to classify sentiment AND event type per ticker, classifies macro news into sectors/themes and resolves to tickers via Neo4j (hybrid: structured classification + Gemini tool-calling fallback), then propagates through Neo4j using relationship-aware weights (10 edge types with directional propagation, sentiment inversion for competitors, edge confidence/revenue/obligation weighting, event-type amplification, sector peer contagion, macro sector-to-sector supply flows, 2-hop supply chain chains, patent partnership depth, and institutional co-holding correlation with position-size weighting). Tracks market trends across runs, discovers new stocks from trends, enforces sells on trend reversals. Outcome tracking stores event→price outcomes in RethinkDB for LLM pattern recognition. Learning stage pre-loads past outcome patterns before first trade (configurable lookback, cached). Uses TOON format for token-efficient LLM inputs. Returns symbol -> score with detailed graph reasoning. Runs once per loop (run_once).
 # DIFFICULTY: 8
 """
@@ -10791,6 +10791,35 @@ def _plan_anchor_reinforcement(
     hc_max_dd = float(config.get("anchor_reinforce_hc_max_drawdown_pct", 10.0) or 10.0)
 
     stage_state = _normalize_cache_mapping(strategy_cache, "_anchor_reinforce_stage") if strategy_cache is not None else {}
+    # Default-OFF execution-aware mode. Legacy mode intentionally commits a
+    # stage at plan time below; the safe mode keeps a pending record and waits
+    # for a source-tagged broker fill before advancing `stage_state`.
+    execution_enabled = bool(config.get("anchor_reinforce_execution_enabled", False))
+    if execution_enabled and strategy_cache is None:
+        # Execution-aware state cannot be reconciled without the shared cache.
+        return [], max(0.0, float(available_budget or 0.0))
+    pending_state = (
+        _normalize_cache_mapping(strategy_cache, "_anchor_reinforce_pending")
+        if execution_enabled and strategy_cache is not None else {}
+    )
+    filled_state = (
+        _normalize_cache_mapping(strategy_cache, "_anchor_reinforce_filled")
+        if execution_enabled and strategy_cache is not None else {}
+    )
+    try:
+        execution_cap_pct = float(
+            config.get("anchor_reinforce_execution_max_position_pct", 0.0) or 0.0
+        )
+    except (TypeError, ValueError):
+        execution_cap_pct = 0.0
+    try:
+        strategy_cap_pct = float(config.get("single_position_max_pct", 25.0) or 25.0)
+    except (TypeError, ValueError):
+        strategy_cap_pct = 25.0
+    if execution_enabled:
+        # Fail closed without an explicit per-document cap and never exceed the
+        # strategy's own concentration limit or 25% under this research lane.
+        execution_cap_pct = min(execution_cap_pct, strategy_cap_pct, 25.0)
 
     funded: list[dict] = []
     remaining_budget = max(0.0, float(available_budget or 0.0))
@@ -10808,6 +10837,10 @@ def _plan_anchor_reinforcement(
             break
         ticker = str(item.get("ticker") or "").strip().upper()
         if not ticker:
+            continue
+        if execution_enabled and ticker in pending_state:
+            # A submitted next-event order must resolve to fill/block before a
+            # second plan may crowd the new-entry slate.
             continue
         if not bool(item.get("is_equity", True)):
             continue
@@ -10852,8 +10885,20 @@ def _plan_anchor_reinforcement(
         target_total_notional = _anchor_reinforce_target(
             config, entry_notional, portfolio_total
         ) * (target_mult / s1_mult if s1_mult > 0 else 1.0)
-        # current_value = entry_notional × (1 + unrealized_pct/100)
-        current_value = entry_notional * (1.0 + unrealized_pct / 100.0)
+        # Execution-aware mode measures the actual held shares at the current
+        # mark, so earlier filled reinforcement capital is not double-counted.
+        # Legacy mode retains the original-entry arithmetic byte-for-byte.
+        if execution_enabled:
+            current_value = float(item.get("position_value", 0.0) or 0.0)
+            if current_value <= 0.0:
+                current_value = entry_notional * (1.0 + unrealized_pct / 100.0)
+            if execution_cap_pct <= 0.0 or portfolio_total <= 0.0:
+                continue
+            target_total_notional = min(
+                target_total_notional, portfolio_total * execution_cap_pct / 100.0
+            )
+        else:
+            current_value = entry_notional * (1.0 + unrealized_pct / 100.0)
         additional_needed = max(0.0, target_total_notional - current_value)
         if additional_needed + 1e-9 < min_position_size:
             continue
@@ -10863,10 +10908,43 @@ def _plan_anchor_reinforcement(
         funded_item = dict(item)
         funded_item["buy_cash"] = round(allocation, 2)
         funded_item["anchor_stage"] = current_stage
+        if execution_enabled:
+            prior_fill = filled_state.get(ticker)
+            if not isinstance(prior_fill, dict) or int(
+                    prior_fill.get("stage", 0) or 0) != current_stage:
+                prior_fill = {"stage": current_stage, "filled_notional": 0.0}
+                filled_state[ticker] = prior_fill
+            try:
+                plan_seq = int(strategy_cache.get("_anchor_reinforce_plan_seq", 0) or 0) + 1
+            except (TypeError, ValueError, AttributeError):
+                plan_seq = 1
+            strategy_cache["_anchor_reinforce_plan_seq"] = plan_seq
+            plan_id = f"{ticker}:s{current_stage}:p{plan_seq}"
+            funded_item["anchor_execution_enabled"] = True
+            funded_item["anchor_target_total"] = round(target_total_notional, 2)
+            funded_item["anchor_current_value"] = round(current_value, 2)
+            funded_item["anchor_additional_needed"] = round(additional_needed, 2)
+            funded_item["anchor_execution_max_position_pct"] = execution_cap_pct
+            funded_item["anchor_plan_id"] = plan_id
         funded.append(funded_item)
         remaining_budget = max(0.0, remaining_budget - allocation)
-        # Mark stage as fired (in-memory only; resets each backtest)
-        stage_state[ticker] = current_stage
+        if execution_enabled:
+            pending_state[ticker] = {
+                "stage": current_stage,
+                "plan_id": plan_id,
+                "order_id": None,
+                "planned": round(allocation, 2),
+                "required_notional": round(additional_needed, 2),
+                "target_total": round(target_total_notional, 2),
+                "current_value": round(current_value, 2),
+                "filled_notional": float(
+                    (filled_state.get(ticker) or {}).get("filled_notional", 0.0)
+                    or 0.0),
+            }
+        else:
+            # Legacy behavior: mark stage at plan time. Kept exactly when the
+            # new flag is absent/false.
+            stage_state[ticker] = current_stage
     return funded, remaining_budget
 
 
@@ -30189,34 +30267,82 @@ class GraphNexusAnalysis:
                             )
                             continue
                         _winner_add_funded_filtered.append(_add)
+                    if bool(config.get("anchor_reinforce_execution_enabled", False)) and isinstance(strategy_cache, dict):
+                        _anchor_pending = _normalize_cache_mapping(
+                            strategy_cache, "_anchor_reinforce_pending")
+                        _accepted_anchor_tickers = {
+                            str(_a.get("ticker") or "").strip().upper()
+                            for _a in _winner_add_funded_filtered
+                        }
+                        for _planned_anchor in _winner_add_funded:
+                            _planned_ticker = str(
+                                _planned_anchor.get("ticker") or "").strip().upper()
+                            if _planned_ticker and _planned_ticker not in _accepted_anchor_tickers:
+                                _anchor_pending.pop(_planned_ticker, None)
+                                _log(
+                                    f"ANCHOR BLOCK: {_planned_ticker} "
+                                    f"stage={_planned_anchor.get('anchor_stage')} "
+                                    "gate=strategy_filter",
+                                    "yellow",
+                                )
                     _winner_add_funded = _winner_add_funded_filtered
                     # 2026-08-10 LOG SIGNATURE. The budget line above prints every bar
                     # and says nothing about whether an add was actually funded — bt
                     # 571147 printed "candidates=4..6" on 25 separate bars and funded
                     # ZERO, and nothing in the log said so. A lane you cannot grep is a
                     # lane nobody can verify, which is how five inert levers shipped.
+                    _anchor_exec_mode = bool(
+                        config.get("anchor_reinforce_execution_enabled", False))
                     for _wa in _winner_add_funded:
-                        _log(
-                            f"ANCHOR ADD: {_wa.get('ticker')} stage={_wa.get('anchor_stage')} "
-                            f"+${float(_wa.get('buy_cash', 0.0) or 0.0):.0f} "
-                            f"(held {int(_wa.get('held_days', 0) or 0)}d, "
-                            f"pnl {float(_wa.get('unrealized_pct', 0.0) or 0.0):+.1f}%, "
-                            f"drop_from_peak {float(_wa.get('drop_from_peak_pct') or 0.0):.1f}%, "
-                            f"entry ${float(_wa.get('entry_notional', 0.0) or 0.0):.0f}, "
-                            f"raw {float(_wa.get('raw_net_score', 0.0) or 0.0):.3f})",
-                            "green",
-                        )
+                        if _anchor_exec_mode:
+                            _log(
+                                f"ANCHOR PLAN: {_wa.get('ticker')} "
+                                f"stage={_wa.get('anchor_stage')} "
+                                f"plan_id={_wa.get('anchor_plan_id')} "
+                                f"target=${float(_wa.get('anchor_target_total', 0.0) or 0.0):.0f} "
+                                f"current=${float(_wa.get('anchor_current_value', 0.0) or 0.0):.0f} "
+                                f"need=${float(_wa.get('anchor_additional_needed', 0.0) or 0.0):.0f} "
+                                f"planned=${float(_wa.get('buy_cash', 0.0) or 0.0):.0f} "
+                                f"raw={float(_wa.get('raw_net_score', 0.0) or 0.0):.3f}",
+                                "green",
+                            )
+                        else:
+                            _log(
+                                f"ANCHOR ADD: {_wa.get('ticker')} stage={_wa.get('anchor_stage')} "
+                                f"+${float(_wa.get('buy_cash', 0.0) or 0.0):.0f} "
+                                f"(held {int(_wa.get('held_days', 0) or 0)}d, "
+                                f"pnl {float(_wa.get('unrealized_pct', 0.0) or 0.0):+.1f}%, "
+                                f"drop_from_peak {float(_wa.get('drop_from_peak_pct') or 0.0):.1f}%, "
+                                f"entry ${float(_wa.get('entry_notional', 0.0) or 0.0):.0f}, "
+                                f"raw {float(_wa.get('raw_net_score', 0.0) or 0.0):.3f})",
+                                "green",
+                            )
                     if not _winner_add_funded and _winner_add_docs:
-                        _log(
-                            f"ANCHOR ADD: none funded from {len(_winner_add_docs)} candidate(s) "
-                            f"on a ${_winner_add_budget:.0f} budget — check "
-                            f"anchor_reinforce_target_pct against the entry clip",
-                            "yellow",
-                        )
+                        if _anchor_exec_mode:
+                            _log(
+                                f"ANCHOR PLAN NONE: docs={len(_winner_add_docs)} "
+                                f"budget=${_winner_add_budget:.0f}",
+                                "yellow",
+                            )
+                        else:
+                            _log(
+                                f"ANCHOR ADD: none funded from {len(_winner_add_docs)} candidate(s) "
+                                f"on a ${_winner_add_budget:.0f} budget — check "
+                                f"anchor_reinforce_target_pct against the entry clip",
+                                "yellow",
+                            )
                     # V11: Return unused winner-add budget to the pool for new entries
-                    _winner_add_spent = sum(
-                        float(_a.get("buy_cash", 0.0) or 0.0) for _a in _winner_add_funded
+                    _winner_add_spent = (
+                        0.0
+                        if _anchor_exec_mode
+                        else sum(
+                            float(_a.get("buy_cash", 0.0) or 0.0)
+                            for _a in _winner_add_funded
+                        )
                     )
+                    # In execution-aware mode the broker's accepted order/fill
+                    # is the reservation. A plan that later BLOCKs must not
+                    # shrink the unrelated new-entry slate with zero exposure.
                     _stock_budget_after_adds = _stock_budget_available - _winner_add_spent
                     for _add in _winner_add_funded:
                         nexus_position_sizes[_add["ticker"]] = {
@@ -30231,6 +30357,18 @@ class GraphNexusAnalysis:
                             "grace_eligible": bool(_add.get("grace_eligible")),
                             "winner_add": True,
                         }
+                        if bool(_add.get("anchor_execution_enabled", False)):
+                            # Strict dormant-path compatibility: these keys did
+                            # not exist before execution-aware mode and must not
+                            # leak into absent/false legacy metadata.
+                            nexus_position_sizes[_add["ticker"]].update({
+                                "anchor_reinforcement": True,
+                                "anchor_stage": _add.get("anchor_stage"),
+                                "anchor_plan_id": _add.get("anchor_plan_id"),
+                                "anchor_target_total": _add.get("anchor_target_total"),
+                                "anchor_execution_max_position_pct": _add.get(
+                                    "anchor_execution_max_position_pct"),
+                            })
                         # ADDED BY CODEX (Fix 1A): promote scores so the broker actually sees this
                         # as a buy decision (the broker reads scores, not nexus_position_sizes).
                         if _add["ticker"] in scores and isinstance(scores.get(_add["ticker"]), dict):
