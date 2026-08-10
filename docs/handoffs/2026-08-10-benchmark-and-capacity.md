@@ -160,3 +160,28 @@ Runs are the scarce resource and three of this session's four findings did not n
   the gate's skip line, its absence in the bear window, the BFQ line, and the revert threshold.
 * **The noise floor is real and it is about names, not returns.** Every A/B this session overlapped
   its control by 2 of 9-11 held names. Nothing below ~5pp on a single window is evidence.
+
+
+---
+
+## 8. APPENDIX — A FIRST MEASUREMENT ON §5.2 (BULL PARTICIPATION)
+
+Sampled at every buy-gate decision in bt 584712 (OOS bull, the window that has never beaten SPY):
+
+```
+cash at the gate    median $1,130 (18.8% of NAV)   p25 $1,032   p75 $3,382 (56.4% of NAV)
+open positions      median 5 of max_positions 6
+core weight         cycled 1.1% .. 27.4% of NAV, logged "deploy_below_min: core 1.2% vs target 10.0%"
+```
+
+In a month where SPY compounded **+13.10%**, the book sat on roughly a fifth of NAV in cash at the
+median decision point and over half at the 75th percentile, with a core that spent part of the
+window at **1.1% of NAV**.
+
+**Caveat: this is sampled at buy-gate lines only (22 of them), so it is biased toward bars where a
+buy was being considered.** It is a lead, not a conclusion — but it is the first number pointing at
+*why* the strategy cannot keep up with a fully-invested index, and it is consistent with §4:
+capacity and capital are committed early, and whatever is left over is not redeployed.
+
+Next measurement to take: per-bar invested fraction from the equity curve and position values,
+rather than from gate lines.
