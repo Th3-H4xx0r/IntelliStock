@@ -2987,9 +2987,10 @@ _RESIDUAL_SLEEVE_PERSIST_FIELDS = (
     #                             bypasses the 5-day cadence, so a host that
     #                             restarts 17 times in 12 days would rebalance
     #                             the core on every boot
-    #   turnover_ledger        -> [] reads as "no notional traded this month",
-    #                             which un-blocks a budget that had already
-    #                             bound; a restart would silently refund it
+    #   turnover_ledger        -> [] reads as "no accepted-order request
+    #                             notional submitted this month", which un-blocks
+    #                             a budget that had already bound; a restart would
+    #                             silently refund it
     "last_core_rebalance_ts",
     "turnover_ledger",
 )
@@ -3008,13 +3009,14 @@ _CORE_SLEEVE_LAST_REBALANCE_KEY = "last_core_rebalance_ts"
 _CORE_TURNOVER_LEDGER_KEY = "turnover_ledger"
 # 21 trading sessions = the design's rolling month. Bucketed by SESSION DATE and
 # not by trade: every evaluation stamps today's (possibly empty) bucket, so a
-# quiet week ages the window out. A ledger that only advanced when you traded
-# would let one heavy day hold the budget shut forever.
+# quiet week ages the window out. A ledger that only advanced on accepted
+# requests would let one heavy day hold the budget shut forever.
 _CORE_TURNOVER_SESSIONS = 21
 # ...and a calendar backstop, because the session count alone is not enough. If
 # the loop does not RUN for a stretch — a stopped instance, a weekend plus a
 # holiday plus an outage — no buckets are created, so 21 buckets can span months
-# and a budget could still be blocking on notional traded last quarter. That is
+# and a budget could still be blocking on accepted-order request notional
+# submitted last quarter. That is
 # not hypothetical here: the ledger is persisted across restarts precisely
 # because this host restarts often. 31 days is 21 sessions at 5/7 plus slack, so
 # in normal operation the session count is what binds and this never fires.
@@ -3094,7 +3096,8 @@ def _turnover_ledger_touch(current_time):
     """The rolling ledger with this session's bucket present and the window
     trimmed to the last `_CORE_TURNOVER_SESSIONS` sessions.
 
-    Rows are ``[session_date, one_way_notional]``. Plain lists of JSON scalars
+    Rows are ``[session_date, accepted_order_request_notional]``. Plain lists
+    of JSON scalars
     on purpose: this piggy-backs on `_RESIDUAL_SLEEVE_PERSIST_KEY` and rides the
     nexus strategy cache to RethinkDB, so it must survive the same round-trip
     the sleeve state already survives — no new table, no new writer, no new
@@ -3116,8 +3119,8 @@ def _turnover_ledger_touch(current_time):
         _ledger.sort(key=lambda _row: str(_row[0]))
     # Calendar backstop first (see _CORE_TURNOVER_MAX_AGE_DAYS): with the loop
     # stopped, no buckets are created, so trimming by COUNT alone would leave a
-    # months-old row in the window and keep the budget shut on notional the book
-    # traded last quarter.
+    # months-old row in the window and keep the budget shut on request notional
+    # the book accepted last quarter.
     try:
         from datetime import date as _date, timedelta as _td
         _cutoff = _date.fromisoformat(_key) - _td(days=_CORE_TURNOVER_MAX_AGE_DAYS)
@@ -3208,20 +3211,20 @@ def _turnover_is_governed(symbol, cached_strategies) -> bool:
 
 
 def _turnover_ledger_record(current_time, notional, label=""):
-    """Book one-way traded notional into the rolling ledger.
+    """Book accepted-order request notional into the rolling ledger.
 
-    Every discretionary trade the book makes goes through here, which is what
-    lets the budget be measured in the same units the design's arithmetic uses
-    (Sigma|trade notional| / NAV over 21 sessions). Best-effort: a bookkeeping
-    failure must never abort a trade.
+    Every submit-successful discretionary order goes through here. The ledger
+    is intentionally conservative and mode-consistent: it records the requested
+    notional at acceptance, before a later fill can be smaller, partial, expired,
+    or rejected by the venue. It is therefore a submission budget, not realized
+    fill turnover. Best-effort: a bookkeeping failure must never abort an order.
 
     Recording is deliberately UNCONDITIONAL — it does not check
     `core_sleeve_enabled`. Nothing reads the ledger unless the core is on
     (`_core_turnover_state` returns (False, 0.0) otherwise), so no trading
-    decision changes; but it means the operator can read today's real turnover
-    off a book running the legacy path, and the budget has 21 sessions of true
-    history the moment the flag is flipped instead of starting blind. The cost
-    is at most 21 rows of [date, float] in the strategy cache.
+    decision changes; but it means the budget has 21 sessions of conservative
+    accepted-order history the moment the flag is flipped instead of starting
+    blind. The cost is at most 21 rows of [date, float] in the strategy cache.
     """
     try:
         _amt = abs(float(notional or 0.0))
@@ -3237,7 +3240,7 @@ def _turnover_ledger_record(current_time, notional, label=""):
 
 
 def _turnover_ledger_rolling(current_time):
-    """One-way notional traded over the trailing 21 sessions ($)."""
+    """Accepted-order request notional over the trailing 21 sessions ($)."""
     try:
         return sum(float(_row[1] or 0.0)
                    for _row in _turnover_ledger_touch(current_time)
@@ -3485,8 +3488,10 @@ def _anchor_reinforcement_execution_policy(
 
     The hint alone is never authority: both the strategy config flag and the
     source marker must agree. An enabled policy fails closed without explicit
-    final-position and turnover ceilings. Values are deliberately lane-local;
-    this never changes the global broker cap or other BUY sources.
+    decision-time buy-admission and turnover ceilings. Values are deliberately
+    lane-local; this never changes the global broker cap or other BUY sources.
+    The position percentage is not a continuous rebalance/trim policy, and a
+    next-event price gap may move the eventual fill snapshot through it.
     """
     cfg = _core_sleeve_cfg_raw(cached_strategies) or {}
     if not bool(cfg.get("anchor_reinforce_execution_enabled", False)):
@@ -3541,7 +3546,11 @@ def _anchor_reinforcement_execution_policy(
 
 def _anchor_reinforcement_position_headroom(
         policy, portfolio, prices, symbol, price):
-    """Actual dollar headroom to this lane's explicit final-position cap."""
+    """Dollar headroom to the lane's decision-time buy-admission cap.
+
+    This sizes a submitted order from current NAV and mark. It does not promise
+    a continuous weight ceiling after a next-event gap or later appreciation.
+    """
     if not policy or not policy.get("valid"):
         return 0.0
     try:
@@ -11102,6 +11111,42 @@ def _get_price_events_at_time(data, symbols, current_time):
     return events
 
 
+def _backtest_fill_snapshot_marks(portfolio, prices, data, current_time):
+    """Current valid marks for read-only next-event fill diagnostics.
+
+    The main ``prices`` map begins with the configured universe, but a held
+    discovery ticker may not belong to that list. Resolve every currently held
+    symbol from the same point-in-time data before applying explicit pending
+    event marks. Invalid marks never erase a usable current value; the fill
+    reconciler supplies prior valid marks only as a labelled fallback.
+    """
+    held = ()
+    try:
+        held = tuple((portfolio.get_positions() or {}).keys())
+    except Exception:
+        held = ()
+    try:
+        held_marks = _get_prices_at_time(
+            data or {}, held, current_time) if held else {}
+    except Exception:
+        held_marks = {}
+    result = {}
+    for source_marks in (held_marks, prices):
+        try:
+            items = dict(source_marks or {}).items()
+        except Exception:
+            continue
+        for raw_symbol, raw_mark in items:
+            try:
+                symbol = str(raw_symbol or "").strip().upper()
+                mark = float(raw_mark)
+            except (TypeError, ValueError):
+                continue
+            if symbol and math.isfinite(mark) and mark > 0.0:
+                result[symbol] = mark
+    return result
+
+
 def _submit_portfolio_signal(
     portfolio,
     ticker,
@@ -11129,7 +11174,7 @@ def _signal_result_is_confirmed(result):
     return bool(result) and bool(getattr(result, "filled", True))
 
 
-def _apply_backtest_confirmed_fill_state(fill):
+def _apply_backtest_confirmed_fill_state(fill, current_prices=None):
     """Apply strategy/sleeve metadata only after incremental fill accounting."""
     source = str(getattr(fill, "source", "") or "")
     symbol = str(getattr(fill, "symbol", "") or "").strip().upper()
@@ -11204,13 +11249,133 @@ def _apply_backtest_confirmed_fill_state(fill):
             or price)
         current_value = current_qty * mark
         remaining = max(0.0, target_total - current_value)
+        # Observability only: the frozen order-admission percentage is not a
+        # continuous rebalance/trim policy. `process_price_events` applies the
+        # whole batch before returning, so these are explicitly ALL-SOURCE tick
+        # snapshot values rather than a causal reconstruction of this one fill.
+        try:
+            admission_cap_points = float(
+                pending.get("admission_cap_pct", 0.0) or 0.0)
+        except (TypeError, ValueError, AttributeError):
+            admission_cap_points = 0.0
+        fill_nav = None
+        fill_weight = None
+        telemetry_mark = None
+        tick_position_value = None
+        fill_mark_basis = "unavailable"
+        fill_valuation = "unavailable"
+        try:
+            fill_marks = {}
+            current_symbols = set()
+            for source_marks, is_current in (
+                    (getattr(portfolio_emulator, "_last_prices", {}) or {}, False),
+                    (current_prices or {}, True)):
+                try:
+                    fill_items = dict(source_marks).items()
+                except Exception:
+                    continue
+                for fill_symbol, fill_mark in fill_items:
+                    try:
+                        fill_symbol = str(fill_symbol or "").strip().upper()
+                        fill_mark = float(fill_mark)
+                    except (TypeError, ValueError):
+                        continue
+                    if (
+                            fill_symbol
+                            and math.isfinite(fill_mark)
+                            and fill_mark > 0.0
+                    ):
+                        fill_marks[fill_symbol] = fill_mark
+                        if is_current:
+                            current_symbols.add(fill_symbol)
+            # Prefer the actual current event mark. A passive order can fill
+            # at its resting decision-price limit while the current quote has
+            # moved through it; `_last_prices` then reflects the limit, not NAV.
+            telemetry_mark = float(fill_marks.get(symbol, mark))
+            if not math.isfinite(telemetry_mark) or telemetry_mark <= 0.0:
+                raise ValueError("invalid fill mark")
+            fill_marks[symbol] = telemetry_mark
+            held_positions = (
+                getattr(portfolio_emulator, "_positions", {}) or {})
+            missing_marks = [
+                str(held_symbol or "").strip().upper()
+                for held_symbol, held_qty in held_positions.items()
+                if float(held_qty or 0.0) != 0.0
+                and str(held_symbol or "").strip().upper() not in fill_marks
+            ]
+            if missing_marks:
+                raise ValueError("missing held-position mark")
+            fill_nav = float(
+                portfolio_emulator.get_portfolio_value(fill_marks) or 0.0)
+            tick_position_value = current_qty * telemetry_mark
+            if (
+                    not math.isfinite(fill_nav)
+                    or fill_nav <= 0.0
+                    or not math.isfinite(tick_position_value)
+            ):
+                raise ValueError("invalid tick valuation")
+            fill_weight = tick_position_value / fill_nav
+            if not math.isfinite(fill_weight) or fill_weight < 0.0:
+                raise ValueError("invalid tick weight")
+            fallback_count = sum(
+                1 for held_symbol, held_qty in held_positions.items()
+                if float(held_qty or 0.0) != 0.0
+                and str(held_symbol or "").strip().upper()
+                not in current_symbols
+            )
+            fill_mark_basis = (
+                "current" if fallback_count == 0
+                else f"current+prior_fallback:{fallback_count}"
+            )
+            fill_valuation = "ok"
+        except Exception as fill_valuation_error:
+            # Diagnostics must never interrupt fill/state reconciliation or
+            # masquerade as a real zero-NAV/zero-weight observation.
+            fill_nav = None
+            fill_weight = None
+            telemetry_mark = None
+            tick_position_value = None
+            fill_valuation = (
+                f"unavailable:{type(fill_valuation_error).__name__}")
+        fill_nav_text = (
+            f"${fill_nav:.2f}" if fill_nav is not None else "unavailable")
+        fill_weight_text = (
+            f"{fill_weight * 100.0:.4f}%"
+            if fill_weight is not None else "unavailable")
+        fill_mark_text = (
+            f"${telemetry_mark:.6f}"
+            if telemetry_mark is not None else "unavailable")
+        position_value_text = (
+            f"${tick_position_value:.2f}"
+            if tick_position_value is not None else "unavailable")
         _log(
             f"ANCHOR FILL: {symbol} stage={stage} plan_id={expected_plan} "
             f"order_id={actual_order} fill=${fill_notional:.2f} "
-            f"cumulative_stage_fill=${cumulative:.2f} quantity={current_qty:.8f} "
-            f"mark=${mark:.6f} position_value=${current_value:.2f}",
+            f"cumulative_stage_fill=${cumulative:.2f} "
+            f"tick_snapshot=all_sources quantity={current_qty:.8f} "
+            f"mark={fill_mark_text} position_value={position_value_text} "
+            f"nav={fill_nav_text} weight={fill_weight_text} "
+            f"mark_basis={fill_mark_basis} valuation={fill_valuation} "
+            f"admission_cap={admission_cap_points:.2f}%",
             "green",
         )
+        if (
+                admission_cap_points > 0.0
+                and fill_weight is not None
+                and fill_weight * 100.0 > admission_cap_points + 1e-9
+        ):
+            try:
+                _log(
+                    f"ANCHOR CAP DRIFT: {symbol} tick-snapshot weight="
+                    f"{fill_weight * 100.0:.4f}% > decision-time admission cap="
+                    f"{admission_cap_points:.2f}% — all same-tick sources "
+                    "included; diagnostic only; not attributed solely to the "
+                    "anchor fill; no forced trim",
+                    "yellow",
+                )
+            except Exception:
+                # A diagnostic sink failure cannot prevent final stage disposal.
+                pass
         if bool(getattr(fill, "is_final", False)):
             completion_tolerance = max(1.0, target_total * 0.001)
             if remaining <= completion_tolerance + 1e-9:
@@ -12606,26 +12771,37 @@ while not shutdown_requested:
                         _sym: _event.price
                         for _sym, _event in _bt_pending_events.items()
                     })
+                _bt_fill_prices = _backtest_fill_snapshot_marks(
+                    portfolio_emulator, prices, data, current_time)
                 _bt_fills = portfolio_emulator.process_price_events(
                     _bt_pending_events,
                 )
                 for _bt_fill in _bt_fills:
-                    _apply_backtest_confirmed_fill_state(_bt_fill)
-                    _log(
-                        "[execution] FILL %s %s qty=%.8f cumulative=%.8f "
-                        "price=%.6f fees=%.6f quote=%s model=%s"
-                        % (
-                            _bt_fill.side.upper(),
-                            _bt_fill.symbol,
-                            _bt_fill.incremental_quantity,
-                            _bt_fill.cumulative_quantity,
-                            _bt_fill.price,
-                            _bt_fill.fees,
-                            _bt_fill.quote_timestamp,
-                            _bt_fill.cost_model_version,
-                        ),
-                        "green",
-                    )
+                    # Print fill provenance before source-specific state changes,
+                    # so a grep sees execution -> reconciliation in causal order.
+                    # The finally preserves reconciliation if both logger
+                    # sinks fail.
+                    try:
+                        _log(
+                            "[execution] FILL %s %s qty=%.8f cumulative=%.8f "
+                            "price=%.6f fees=%.6f quote=%s model=%s source=%s"
+                            % (
+                                _bt_fill.side.upper(),
+                                _bt_fill.symbol,
+                                _bt_fill.incremental_quantity,
+                                _bt_fill.cumulative_quantity,
+                                _bt_fill.price,
+                                _bt_fill.fees,
+                                _bt_fill.quote_timestamp,
+                                _bt_fill.cost_model_version,
+                                str(getattr(
+                                    _bt_fill, "source", "") or "unspecified"),
+                            ),
+                            "green",
+                        )
+                    finally:
+                        _apply_backtest_confirmed_fill_state(
+                            _bt_fill, _bt_fill_prices)
             _reconcile_anchor_pending_orders(portfolio_emulator)
 
         # Backtest: every bar, execute any pending future trades for TODAY before running strategies.
@@ -15086,9 +15262,10 @@ while not shutdown_requested:
                 if _turnover_blocked:
                     _log(
                         f"TURNOVER BUDGET BINDING: {_turnover_used * 100.0:.0f}% "
-                        f"of NAV traded in the last {_CORE_TURNOVER_SESSIONS} "
-                        "sessions — new discretionary BUYS are blocked this "
-                        "tick; risk exits and reduce-only sells are unaffected",
+                        f"of NAV in accepted-order request notional over the last "
+                        f"{_CORE_TURNOVER_SESSIONS} sessions — new discretionary "
+                        "BUYS are blocked this tick; risk exits and reduce-only "
+                        "sells are unaffected",
                         "yellow",
                     )
             except Exception as _tb_exc:
@@ -15607,7 +15784,8 @@ while not shutdown_requested:
                             #   V31.2 [CONCENTRATE]: funded 3 of 5 (SNDK@$879, ...)
                             #   SATELLITE OVERFLOW: SNDK raw=+1.700 >= 1.50
                             #   TURNOVER BUDGET BLOCK: SNDK skipped — 67% of NAV
-                            #                          traded in 21 sessions
+                            #                          accepted requests / 21
+                            #                          sessions
                             #
                             # That repeated on 01-12, 01-13 and 01-14 with SNDK
                             # correctly sized at 14.6% of NAV, and SNDK was finally
@@ -15648,7 +15826,8 @@ while not shutdown_requested:
                                     _log(
                                         f"TURNOVER BYPASS CEILING: {symbol} refused despite "
                                         f"raw={_tb_raw:+.3f} — {_turnover_used * 100.0:.0f}% of NAV "
-                                        f"traded is at/over the {_tb_ceiling * 100.0:.0f}% ceiling; "
+                                        f"in accepted-order request notional is at/over the "
+                                        f"{_tb_ceiling * 100.0:.0f}% ceiling; "
                                         f"conviction raises the brake, it does not remove it",
                                         "yellow",
                                     )
@@ -15715,8 +15894,8 @@ while not shutdown_requested:
                             if _turnover_blocked and not _tb_bypass:
                                 _log(
                                     f"TURNOVER BUDGET BLOCK: {symbol} skipped — "
-                                    f"{_turnover_used * 100.0:.0f}% of NAV traded "
-                                    f"in {_CORE_TURNOVER_SESSIONS} sessions",
+                                    f"{_turnover_used * 100.0:.0f}% of NAV in accepted-order "
+                                    f"request notional over {_CORE_TURNOVER_SESSIONS} sessions",
                                     "yellow",
                                 )
                                 _nexus_cache = _strategy_cache.get("graph_nexus_analysis")
@@ -15895,8 +16074,10 @@ while not shutdown_requested:
                             except (ValueError, TypeError):
                                 _max_single_pct = 0.15
                             if _anchor_policy:
-                                # Lane-local cap override only; every other source
-                                # remains under BROKER_MAX_SINGLE_POSITION_PCT.
+                                # Lane-local decision-time buy-admission cap only;
+                                # every other source remains under
+                                # BROKER_MAX_SINGLE_POSITION_PCT. This does not
+                                # continuously trim later mark-to-market drift.
                                 _max_single_pct = float(
                                     _anchor_policy["max_position_fraction"])
                             # 2026-08-02: this used to carry `and mode == MODE_LIVE`, so the
@@ -16323,10 +16504,10 @@ while not shutdown_requested:
                             # 2026-08-03 MINIMUM HOLDING PERIOD. Placed here on
                             # purpose: after max_positions (so a blocked sell
                             # cannot free a slot the buy side would then claim)
-                            # and BEFORE the turnover ledger below (a trade the
-                            # gate suppresses must not be booked as notional
-                            # traded, or the budget would throttle the book for
-                            # churn that never happened).
+                            # and BEFORE the turnover ledger below (a request the
+                            # gate suppresses must not be booked as accepted-order
+                            # request notional, or the budget would throttle the
+                            # book for churn that never happened).
                             #
                             # Discretionary sells ONLY. `_risk_exit_intents` and
                             # nexus sell-enforcement are exempt, mirroring the
@@ -16354,14 +16535,12 @@ while not shutdown_requested:
                             # cannot credit a rotation slot (which would admit
                             # the paired buy and land the book at cap+1 live).
                             _mpg_submit_ok = False
-                            # 2026-08-03 turnover ledger. Size the trade BEFORE
-                            # submitting: after the submit the backtest emulator
-                            # has already mutated `_positions`, so a sell read
-                            # afterwards measures what is LEFT, not what was
-                            # sold. Booked below, once, on the shared path both
-                            # modes converge on — a ledger that only counted
-                            # backtest fills would report a live turnover of
-                            # zero and never bind.
+                            # 2026-08-03 turnover ledger. Size the request
+                            # BEFORE submitting so sell notional always uses the
+                            # decision-time position. The legacy emulator may fill
+                            # immediately while next-event equity returns a receipt;
+                            # the shared path below books only an accepted request,
+                            # consistently in live and backtest.
                             _to_notional = 0.0
                             try:
                                 if decision == 1:
@@ -16536,6 +16715,11 @@ while not shutdown_requested:
                                             if isinstance(_anchor_pending_map, dict) else None)
                                         if isinstance(_anchor_pending, dict):
                                             _anchor_pending["order_id"] = _anchor_order_id
+                                            _anchor_pending["admission_cap_pct"] = (
+                                                float(_anchor_policy.get(
+                                                    "max_position_fraction", 0.0) or 0.0)
+                                                * 100.0
+                                            )
                                         _log(
                                             f"ANCHOR ORDER: {symbol} "
                                             f"stage={(nexus_hint or {}).get('anchor_stage')} "
@@ -16552,9 +16736,10 @@ while not shutdown_requested:
                                             symbol, "order_submission", nexus_hint,
                                             detail="missing_order_id" if bool(_mpg_result) else "")
 
-                            # Book this trade's one-way notional. Same statement
-                            # for live and backtest, after both branches have
-                            # converged, so the budget measures the same thing
+                            # Book this accepted request's one-way notional. The
+                            # same statement applies to live and backtest after
+                            # both branches have converged, so the budget measures
+                            # the same thing
                             # in both — the failure this whole feature exists to
                             # avoid is a control that binds in one mode only.
                             if _mpg_submit_ok:

@@ -7,6 +7,7 @@ and a real PortfolioEmulator next-event fill. A planner line alone never passes.
 """
 import ast
 from datetime import datetime, timedelta, timezone
+import math
 from pathlib import Path
 import types
 
@@ -140,6 +141,7 @@ WANTED = {
     "_reconcile_anchor_pending_orders",
     "_exec_fundable_amount",
     "_apply_backtest_confirmed_fill_state",
+    "_backtest_fill_snapshot_marks",
 }
 LOGS = []
 NS = {
@@ -148,6 +150,8 @@ NS = {
     "_cached_strategies": [],
     "_log": lambda message, *_args, **_kwargs: LOGS.append(str(message)),
     "portfolio_emulator": None,
+    "math": math,
+    "_get_prices_at_time": lambda *_args, **_kwargs: {},
 }
 for node in TREE.body:
     if isinstance(node, ast.FunctionDef) and node.name in WANTED:
@@ -315,6 +319,7 @@ def _bind_order(receipt):
     pending = NS["_strategy_cache"]["graph_nexus_analysis"][
         "_anchor_reinforce_pending"]["WIN"]
     pending["order_id"] = receipt.order_id
+    pending["admission_cap_pct"] = 20.0
 
 
 def test_real_next_event_anchor_fill_commits_stage_and_quantity():
@@ -414,6 +419,280 @@ def test_fill_uses_mid_mark_and_rejects_stage_or_order_mismatch():
     assert any("ANCHOR FILL MISMATCH" in line for line in LOGS)
 
 
+def test_next_event_gap_reports_cap_drift_without_forced_trim():
+    emu = _configured_emulator()
+    _install_fill_globals(emu, {
+        "stage": 1, "planned": 200.0, "target_total": 1200.0,
+        "current_value": 1000.0, "filled_notional": 0.0,
+    })
+    receipt = emu.execute_signal(
+        "WIN", 1, 100.0, timestamp=T0, cash_per_trade=200.0,
+        order_source="anchor_reinforcement:stage=1:plan=WIN:s1:p1")
+    _bind_order(receipt)
+    fill = emu.process_quote(SimulationQuote.from_mid(
+        symbol="WIN", timestamp=T1, mid=150.0, spread_bps=0.0))[0]
+    broker._apply_backtest_confirmed_fill_state(fill, {"WIN": 150.0})
+
+    # The accepted request is filled at the next event without a fresh
+    # position-weight clamp. A gap through the admission percentage is explicit
+    # telemetry, not an undocumented continuous rebalance/trim policy.
+    assert emu.get_positions()["WIN"] == pytest.approx(10.0 + 200.0 / 150.0)
+    assert any(
+        "ANCHOR FILL: WIN" in line
+        and "nav=$6500.00 weight=26.1538%" in line
+        and "admission_cap=20.00%" in line
+        for line in LOGS)
+    assert any(
+        "ANCHOR CAP DRIFT: WIN" in line and "diagnostic only" in line
+        for line in LOGS)
+
+
+def _multi_asset_anchor_emulator():
+    emu = PortfolioEmulator(
+        NAV, execution_simulator=NextEventExecutionSimulator(ZERO),
+        execution_delay=timedelta(hours=1), equity_cost_model=ZERO)
+    assert emu.buy("WIN", 10.0, 100.0, timestamp=T0 - timedelta(days=8))
+    assert emu.buy("OTHER", 40.0, 100.0, timestamp=T0 - timedelta(days=8))
+    emu.save_portfolio_snapshot(
+        {"WIN": 100.0, "OTHER": 100.0}, timestamp=T0 - timedelta(hours=1))
+    return emu
+
+
+def _fill_multi_asset_anchor(emu, *, win_mark, current_marks):
+    _install_fill_globals(emu, {
+        "stage": 1, "planned": 200.0, "target_total": 1200.0,
+        "current_value": 1000.0, "filled_notional": 0.0,
+    })
+    receipt = emu.execute_signal(
+        "WIN", 1, 100.0, timestamp=T0, cash_per_trade=200.0,
+        order_source="anchor_reinforcement:stage=1:plan=WIN:s1:p1")
+    _bind_order(receipt)
+    fill = emu.process_quote(SimulationQuote.from_mid(
+        symbol="WIN", timestamp=T1, mid=win_mark, spread_bps=0.0))[0]
+    broker._apply_backtest_confirmed_fill_state(fill, current_marks)
+
+
+def test_fill_snapshot_uses_current_marks_and_avoids_false_cap_drift():
+    emu = _multi_asset_anchor_emulator()
+    _fill_multi_asset_anchor(
+        emu, win_mark=150.0, current_marks={"WIN": 150.0, "OTHER": 200.0})
+
+    # Current NAV is cash $800 + WIN $1,700 + OTHER $8,000. Prior-mark NAV
+    # would be only $6,500 and would falsely report a cap crossing.
+    assert any(
+        "ANCHOR FILL: WIN" in line
+        and "nav=$10500.00 weight=16.1905%" in line
+        for line in LOGS)
+    assert not any("ANCHOR CAP DRIFT: WIN" in line for line in LOGS)
+
+
+def test_fill_snapshot_uses_current_marks_and_detects_real_cap_drift():
+    emu = _multi_asset_anchor_emulator()
+    _fill_multi_asset_anchor(
+        emu, win_mark=100.0, current_marks={"WIN": 100.0, "OTHER": 50.0})
+
+    # Current NAV is cash $800 + WIN $1,200 + OTHER $2,000. Prior-mark NAV
+    # would be $6,000 and would miss the real 30% fill-snapshot weight.
+    assert any(
+        "ANCHOR FILL: WIN" in line
+        and "nav=$4000.00 weight=30.0000%" in line
+        for line in LOGS)
+    assert any("ANCHOR CAP DRIFT: WIN" in line for line in LOGS)
+
+
+@pytest.mark.parametrize("other_mark", [None, "bad", float("nan"),
+                                                 float("inf"), 0.0, -50.0])
+def test_invalid_or_missing_current_mark_uses_valid_prior_fallback(other_mark):
+    emu = _multi_asset_anchor_emulator()
+    marks = {"WIN": 100.0}
+    if other_mark is not None:
+        marks["OTHER"] = other_mark
+    _fill_multi_asset_anchor(emu, win_mark=100.0, current_marks=marks)
+
+    assert any(
+        "ANCHOR FILL: WIN" in line
+        and "nav=$6000.00 weight=20.0000%" in line
+        and "mark_basis=current+prior_fallback:1" in line
+        and "valuation=ok" in line
+        for line in LOGS)
+    assert not any("ANCHOR CAP DRIFT: WIN" in line for line in LOGS)
+
+
+def test_missing_current_and_prior_mark_reports_unavailable_not_zero():
+    emu = _multi_asset_anchor_emulator()
+    emu._last_prices.pop("OTHER", None)
+    _fill_multi_asset_anchor(
+        emu, win_mark=100.0, current_marks={"WIN": 100.0})
+
+    assert any(
+        "ANCHOR FILL: WIN" in line
+        and "nav=unavailable weight=unavailable" in line
+        and "valuation=unavailable:ValueError" in line
+        for line in LOGS)
+    assert not any("ANCHOR CAP DRIFT: WIN" in line for line in LOGS)
+    cache = NS["_strategy_cache"]["graph_nexus_analysis"]
+    assert cache["_anchor_reinforce_stage"] == {"WIN": 1}
+    assert cache["_anchor_reinforce_pending"] == {}
+
+
+def test_valuation_exception_reports_unavailable_and_still_commits(monkeypatch):
+    emu = _configured_emulator()
+    _install_fill_globals(emu, {
+        "stage": 1, "planned": 200.0, "target_total": 1200.0,
+        "current_value": 1000.0, "filled_notional": 0.0,
+    })
+    receipt = emu.execute_signal(
+        "WIN", 1, 100.0, timestamp=T0, cash_per_trade=200.0,
+        order_source="anchor_reinforcement:stage=1:plan=WIN:s1:p1")
+    _bind_order(receipt)
+    fill = emu.process_quote(SimulationQuote.from_mid(
+        symbol="WIN", timestamp=T1, mid=100.0, spread_bps=0.0))[0]
+    monkeypatch.setattr(
+        emu, "get_portfolio_value",
+        lambda _marks: (_ for _ in ()).throw(RuntimeError("valuation failed")))
+    broker._apply_backtest_confirmed_fill_state(fill, {"WIN": 100.0})
+
+    assert any(
+        "nav=unavailable weight=unavailable" in line
+        and "valuation=unavailable:RuntimeError" in line
+        for line in LOGS)
+    cache = NS["_strategy_cache"]["graph_nexus_analysis"]
+    assert cache["_anchor_reinforce_stage"] == {"WIN": 1}
+    assert cache["_anchor_reinforce_pending"] == {}
+
+
+def test_dynamic_held_symbol_is_added_to_production_fill_mark_map(monkeypatch):
+    class Book:
+        def get_positions(self):
+            return {"WIN": 10.0, "DYNAMIC": 40.0}
+
+    calls = []
+    def lookup(data, symbols, current_time):
+        calls.append((data, tuple(symbols), current_time))
+        return {"WIN": 100.0, "DYNAMIC": 50.0}
+
+    monkeypatch.setitem(NS, "_get_prices_at_time", lookup)
+    marks = broker._backtest_fill_snapshot_marks(
+        Book(), {"WIN": 100.0}, {"DYNAMIC": [{"c": 50.0}]}, T1)
+    assert calls and set(calls[0][1]) == {"WIN", "DYNAMIC"}
+    assert marks == {"WIN": 100.0, "DYNAMIC": 50.0}
+
+
+def test_passive_anchor_uses_current_quote_mark_not_resting_fill_limit():
+    prior_override = PortfolioEmulator._PASSIVE_OVERRIDE
+    try:
+        PortfolioEmulator.set_passive_execution(True)
+        emu = _multi_asset_anchor_emulator()
+        _install_fill_globals(emu, {
+            "stage": 1, "planned": 200.0, "target_total": 1200.0,
+            "current_value": 1000.0, "filled_notional": 0.0,
+        })
+        receipt = emu.execute_signal(
+            "WIN", 1, 100.0, timestamp=T0, cash_per_trade=200.0,
+            order_source="anchor_reinforcement:stage=1:plan=WIN:s1:p1")
+        _bind_order(receipt)
+        snapshot_marks = broker._backtest_fill_snapshot_marks(
+            emu, {"WIN": 90.0, "OTHER": 90.0}, {}, T1)
+        fill = emu.process_quote(SimulationQuote.from_mid(
+            symbol="WIN", timestamp=T1, mid=90.0, spread_bps=0.0))[0]
+        assert fill.price == pytest.approx(100.0)
+        broker._apply_backtest_confirmed_fill_state(fill, snapshot_marks)
+
+        # Cash $800 + WIN 12*$90 + OTHER 40*$90 = $5,480. The resting
+        # $100 fill limit is execution price, not the current NAV mark.
+        assert any(
+            "ANCHOR FILL: WIN" in line
+            and "mark=$90.000000 position_value=$1080.00" in line
+            and "nav=$5480.00 weight=19.7080%" in line
+            and "mark_basis=current" in line
+            for line in LOGS)
+        assert not any("ANCHOR CAP DRIFT: WIN" in line for line in LOGS)
+    finally:
+        PortfolioEmulator._PASSIVE_OVERRIDE = prior_override
+
+
+def test_same_symbol_batch_is_labeled_all_source_tick_snapshot():
+    emu = _configured_emulator()
+    _install_fill_globals(emu, {
+        "stage": 1, "planned": 200.0, "target_total": 1200.0,
+        "current_value": 1000.0, "filled_notional": 0.0,
+    })
+    anchor_receipt = emu.execute_signal(
+        "WIN", 1, 100.0, timestamp=T0, cash_per_trade=200.0,
+        order_source="anchor_reinforcement:stage=1:plan=WIN:s1:p1")
+    _bind_order(anchor_receipt)
+    main_receipt = emu.execute_signal(
+        "WIN", 1, 100.0, timestamp=T0, cash_per_trade=600.0,
+        order_source="main_signal")
+    assert anchor_receipt.accepted and main_receipt.accepted
+    fills = emu.process_quote(SimulationQuote.from_mid(
+        symbol="WIN", timestamp=T1, mid=100.0, spread_bps=0.0))
+    anchor_fill = next(
+        fill for fill in fills
+        if fill.source.startswith("anchor_reinforcement:"))
+    broker._apply_backtest_confirmed_fill_state(
+        anchor_fill, {"WIN": 100.0})
+
+    assert any(
+        "ANCHOR FILL: WIN" in line
+        and "tick_snapshot=all_sources" in line
+        and "quantity=18.00000000" in line
+        and "weight=30.0000%" in line
+        for line in LOGS)
+    assert any(
+        "ANCHOR CAP DRIFT: WIN tick-snapshot weight=30.0000%" in line
+        and "all same-tick sources included" in line
+        and "not attributed solely to the anchor fill" in line
+        for line in LOGS)
+
+
+def test_cap_drift_log_failure_cannot_prevent_stage_commit(monkeypatch):
+    emu = _configured_emulator()
+    _install_fill_globals(emu, {
+        "stage": 1, "planned": 200.0, "target_total": 1200.0,
+        "current_value": 1000.0, "filled_notional": 0.0,
+    })
+    receipt = emu.execute_signal(
+        "WIN", 1, 100.0, timestamp=T0, cash_per_trade=200.0,
+        order_source="anchor_reinforcement:stage=1:plan=WIN:s1:p1")
+    _bind_order(receipt)
+    fill = emu.process_quote(SimulationQuote.from_mid(
+        symbol="WIN", timestamp=T1, mid=150.0, spread_bps=0.0))[0]
+    emitted = []
+    def fail_only_drift(message, *_args, **_kwargs):
+        emitted.append(str(message))
+        if str(message).startswith("ANCHOR CAP DRIFT:"):
+            raise BrokenPipeError("both sinks failed")
+
+    monkeypatch.setitem(NS, "_log", fail_only_drift)
+    broker._apply_backtest_confirmed_fill_state(fill, {"WIN": 150.0})
+    cache = NS["_strategy_cache"]["graph_nexus_analysis"]
+    assert any(line.startswith("ANCHOR CAP DRIFT:") for line in emitted)
+    assert any(line.startswith("ANCHOR STAGE COMMIT:") for line in emitted)
+    assert cache["_anchor_reinforce_stage"] == {"WIN": 1}
+    assert cache["_anchor_reinforce_pending"] == {}
+
+
+def test_fill_uses_cap_frozen_when_order_was_admitted():
+    emu = _configured_emulator()
+    _install_fill_globals(emu, {
+        "stage": 1, "planned": 200.0, "target_total": 1200.0,
+        "current_value": 1000.0, "filled_notional": 0.0,
+    })
+    receipt = emu.execute_signal(
+        "WIN", 1, 100.0, timestamp=T0, cash_per_trade=200.0,
+        order_source="anchor_reinforcement:stage=1:plan=WIN:s1:p1")
+    _bind_order(receipt)
+    NS["_cached_strategies"] = _spec(_cfg(
+        anchor_reinforce_execution_max_position_pct=25.0))
+    fill = emu.process_quote(SimulationQuote.from_mid(
+        symbol="WIN", timestamp=T1, mid=120.0, spread_bps=0.0))[0]
+    broker._apply_backtest_confirmed_fill_state(fill, {"WIN": 120.0})
+
+    assert any("admission_cap=20.00%" in line for line in LOGS)
+    assert any("decision-time admission cap=20.00%" in line for line in LOGS)
+
+
 def test_confirmed_full_exit_resets_position_episode_state():
     emu = _configured_emulator()
     NS["portfolio_emulator"] = emu
@@ -465,6 +744,43 @@ def test_broker_source_wiring_has_all_greppable_states():
     for signature in (
         "ANCHOR BLOCK:", "ANCHOR SATELLITE ADMIT:",
         "ANCHOR TURNOVER ADMIT:", "ANCHOR ORDER:", "ANCHOR FILL:",
-        "ANCHOR STAGE COMMIT:", 'order_source=_anchor_order_source',
+        "ANCHOR STAGE COMMIT:", "ANCHOR CAP DRIFT:",
+        'order_source=_anchor_order_source',
     ):
         assert signature in SOURCE
+
+    fill_loop = SOURCE[SOURCE.index("for _bt_fill in _bt_fills:"):SOURCE.index(
+        "_reconcile_anchor_pending_orders", SOURCE.index("for _bt_fill in _bt_fills:"))]
+    assert "source=%s" in fill_loop
+    assert "getattr(" in fill_loop and '_bt_fill, "source"' in fill_loop
+    assert fill_loop.index("[execution] FILL") < fill_loop.index(
+        "_apply_backtest_confirmed_fill_state")
+    assert fill_loop.index("finally:") < fill_loop.index(
+        "_apply_backtest_confirmed_fill_state(")
+    assert "_bt_fill, _bt_fill_prices" in fill_loop
+    fill_setup = SOURCE[SOURCE.rindex(
+        "_bt_fill_prices =", 0, SOURCE.index("for _bt_fill in _bt_fills:")):
+        SOURCE.index("for _bt_fill in _bt_fills:")]
+    assert "_backtest_fill_snapshot_marks(" in fill_setup
+    assert '_anchor_pending["admission_cap_pct"]' in SOURCE
+    assert 'pending.get("admission_cap_pct"' in SOURCE
+
+
+def test_turnover_telemetry_names_accepted_requests_not_realized_fills():
+    assert "Book accepted-order request notional" in SOURCE
+    assert "of NAV in accepted-order request notional" in SOURCE
+    assert "Accepted-order request notional over the trailing" in SOURCE
+    assert "Book this accepted request's one-way notional" in SOURCE
+    assert "[session_date, accepted_order_request_notional]" in SOURCE
+    assert "the shared path below books only an accepted request" in SOURCE
+    for misleading in (
+        "One-way notional traded over the trailing",
+        "notional the book\n    # traded last quarter",
+        "booked as notional\n                            # traded",
+        "Book this trade's one-way notional",
+        "traded in 21 sessions",
+        "[session_date, one_way_notional]",
+        "after the submit the backtest emulator",
+        "a ledger that only counted\n                            # backtest fills",
+    ):
+        assert misleading not in SOURCE
