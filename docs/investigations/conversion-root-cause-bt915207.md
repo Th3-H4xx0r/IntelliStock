@@ -121,3 +121,70 @@ blocker (3) names as missing.
 * Window moves above are first-seen to last-seen quote prices inside the run, not realized P&L.
 * No causal claim is made here: this is a single-arm mechanical reconciliation, and a funded
   versus starved comparison still requires the frozen paired-arm protocol.
+
+## Addendum — the already-built lever that is switched off
+
+`satellite_conviction_reserve_pct` was built for this exact failure (after bt 613166, where
+SNDK got $168) and is covered by `backend/tests/test_satellite_conviction_reserve.py`.
+
+**In doc 193 it is set to `0`.** It is inert.
+
+A second lever is inert in the same way: `turnover_budget_conviction_bypass_enabled = True`
+but `turnover_budget_conviction_bypass_max_pct = 0` — enabled with a zero budget.
+
+### The arithmetic matches the log exactly
+
+Live doc-193 shape is `core_target_pct 0.35` (bull/chop/recovery profiles), `core_min_pct 0.10`,
+`cash_reserve_floor_pct 0.02`:
+
+| quantity | value |
+|---|---:|
+| satellite design share | 0.630 = **$3,780** |
+| satellite max share | 0.880 = $5,280 |
+| conviction band | $1,500 |
+| observed plain entry size | 12.68% NAV = **$761** |
+| plain names needed to exhaust the design share | **$3,780 / $761 = 5.0** |
+
+The log shows conviction overflow delivering real money for **exactly the first 5 bars**
+(36% of requests) and then collapsing to **0.5% of requests from bar 6 onward**. Five plain
+buys consume the design share; everything after that — SNDK, NVDA, RVLV — gets scraps.
+
+That is a numeric match, not an analogy.
+
+### What a reserve would change
+
+| reserve | design share | conviction band | plain names before full |
+|---:|---:|---:|---:|
+| 0.00 (current) | $3,780 | $1,500 | **5.0** |
+| 0.10 | $3,180 | $2,100 | 4.2 |
+| **0.15** | **$2,880** | **$2,400** | **3.8** |
+| 0.20 | $2,580 | $2,700 | 3.4 |
+| 0.25 | $2,280 | $3,000 | 3.0 |
+
+`0.15` leaves room for roughly three full-size conviction entries while still letting plain
+buys build a base — closest to the objective's "four names at ~10% of NAV each".
+
+The core target (0.35) and floor (0.10) are untouched by the reserve, so this is not a de-risk.
+
+### Note on a stale test assumption
+
+`test_satellite_conviction_reserve.py` calls `core_target_pct 0.35 / core_min_pct 0.25`
+"the live doc-193 shape". The live floor is **0.10**, not 0.25, so the band figures in that
+test ($600 band) do not describe the running config ($1,500 band). The lever's behaviour is
+still correct; the documented example is out of date.
+
+### Required validation before believing any of this
+
+Per the hard-won rule, a unit test on a pure function is not proof a lever binds in a run.
+Five levers have previously shipped "working" while the log showed nothing changed.
+
+Paired arms, control `reserve=0` versus treatment `reserve=0.15`, same window/instance/
+granularity/cash, at least three windows including one out-of-sample and one not led by
+semiconductors. Accept only if the log shows a changed signature:
+
+* `SATELLITE OVERFLOW` funding materially above $29-$51 at late bars;
+* at least one discovered winner funded above 5% of NAV;
+* `[core] funding request trimmed` delivering more than 0.5% after bar 5.
+
+Treat any return difference below the 4.94pp noise floor as inconclusive, and check gross
+turnover did not rise — turnover is the known leak.
