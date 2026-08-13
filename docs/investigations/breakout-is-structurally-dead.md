@@ -132,3 +132,28 @@ looked correct, changed the symbol count, and left the skip reason unchanged —
 appeared to do something.
 
 Both facts were free to establish by reading. Neither was visible from the run.
+
+## The dead path covers six of the eight named winners
+
+Cross-referencing the 396 symbols whose breakout evaluation exits at `bars=0` (bt 278531) against
+the eight winners the objective names:
+
+| name | in the `bars=0` skip set |
+|---|---|
+| AAOI | yes |
+| VICR | yes |
+| SNDK | yes |
+| LASR | yes |
+| TTMI | yes |
+| AMAT | yes |
+| VIAV | no |
+| ADI | no |
+
+Six of eight. More broadly the skip set overlaps **39 of the 103** W0 names that moved >=30%, and
+**31 of the 84** that never received a buy intent.
+
+So the mechanism that is supposed to promote a mover with no news and no graph edge is not merely
+idle in aggregate — it is idle on most of the specific names this objective was written around.
+That does not prove fixing it would buy them: `AAOI` is separately blocked by the entry-extension
+gate (a measured, do-not-retry tradeoff), and `SNDK` is already bought, just far too late. It does
+mean the promotion path cannot be ruled out as a cause for the rest.
