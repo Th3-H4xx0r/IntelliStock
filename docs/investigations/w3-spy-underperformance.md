@@ -73,3 +73,54 @@ It also kills the framing that the reference window is representative. W0's +16p
 Any future claim must be measured against SPY per window, not against a sibling arm.
 
 Caveat: all runs are `pit_mode=research` (lookahead) and not promotion-eligible.
+
+## Correction (same day): W3 is TWO failures, not "the same starvation"
+
+The section above claimed W3 reproduces the W0 cash starvation. Re-measuring the intent stream
+properly shows that is only partly true, and the larger half is a different problem.
+
+Of the 65 names that moved >=30% in W3:
+
+| stage | count | share |
+|---|---:|---:|
+| moved >=30% | 65 | — |
+| ever given a BUY intent by the strategy | **16** | 25% |
+| reached the broker buy gate | 8 | 12% |
+| actually bought | **1** | 1.5% |
+
+So **49 of 65 movers were never proposed as buys at all** — they carry `action_intent=hold` for the
+whole window. Cash never entered the question for them. Only the 16-to-1 collapse is portfolio
+construction; the 65-to-16 collapse happens upstream, in the signal layer.
+
+Two named upstream gates are visible:
+
+    Price floor: blocked 1 sub-floor buy(s) (primary=$8.00, prop=$3.50): ACHR ($6.70<$8.00)
+    V# falling-knife filter: SDOT score=... 4w_dd=...% 3mo_ret=...% v_bounce=...
+
+`SPCE` (+110%) is price-floor blocked. `SDOT` (+522%) and `CETX` (+159%) are evaluated by the
+falling-knife filter and never promoted. These are low-priced names, and the floor exists on
+purpose — it is not obviously wrong to refuse them.
+
+### Why this matters more than the original claim
+
+Displacement frees cash. It therefore cannot help the 49 names that were never proposed, which
+includes the four largest movers in the window. Running displacement on W3 to close a -10.14pp gap
+to SPY would test it where it structurally cannot bind.
+
+The honest scope of the cash-starvation finding is now:
+
+* **W0**: real, and displacement is the right lever (`SNDK`, `HYMC`, 103 movers -> 7 bought).
+* **W3**: `NVTS` (+84.3%) is a genuine starvation miss and displacement would address it. The rest
+  of the -10.14pp is an eligibility question — whether a universe that excludes sub-$8 names can
+  beat SPY in a window whose movers are mostly sub-$8.
+
+That second question is not answered here, and the do-not-retry list forbids the obvious knobs
+(loosening the entry-extension gate, raising `max_positions`). Lowering the price floor is NOT on
+that list, but it is a universe change, not a conversion fix, and it must be measured against SPY
+per window before anyone believes it.
+
+### Method note
+
+The first pass at this counted `action_intent` with a per-symbol regex that silently missed the
+buy-intent lines and reported "hold-only" for all 65. The corrected count reuses the same parser
+that built the price table. Recorded because the error direction flattered my own thesis.
