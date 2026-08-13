@@ -3268,6 +3268,15 @@ def _satellite_conviction_min_raw(cached_strategies) -> float:
         return 0.0
 
 
+def _hold_diagnostics_enabled(cached_strategies) -> bool:
+    """Print the scores behind a `hold`. Default OFF. Log-only, never trades."""
+    try:
+        cfg = _core_sleeve_cfg_raw(cached_strategies) or {}
+        return bool(cfg.get("hold_diagnostics_enabled", False))
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
 def _displacement_enabled(cached_strategies) -> bool:
     """Free cash for a high-conviction buy by trimming the weakest holding. Default OFF."""
     try:
@@ -15528,6 +15537,27 @@ while not shutdown_requested:
                 action = {1: "buy", 0: "hold", -1: "sell"}.get(decision, "hold")
                 _intent_label = f" action_intent={_trade_action_intent}" if _trade_action_intent else ""
                 _log(f"{symbol} @ {current_time} (${prices.get(symbol)}): {action}{_intent_label} (weighted scores from {len(weighted_scores)} strategies)", "white")
+                # HOLD diagnostics (default OFF, log-only, no trading effect).
+                # bt 873929: 84 of 103 names that moved >=30% never got a buy
+                # intent, and 52 of those never appear in any scoring or queue
+                # line. The decision above prints `hold` but never the score, so
+                # there is no way to tell a mover that scored 0.2 from one that
+                # scored 1.49 against a 1.50 threshold. That stage loses 84 names
+                # against the 12 lost downstream, and it is the only stage with
+                # no diagnostic output. This prints the scores behind a hold so
+                # the population can be split into correctly and wrongly declined.
+                if decision == 0 and _hold_diagnostics_enabled(_cached_strategies):
+                    try:
+                        _hd = sorted(
+                            ((str(_k), float(_v)) for _k, _v in
+                             (weighted_scores or {}).items()),
+                            key=lambda _p: -_p[1])[:4]
+                        _log(
+                            f"HOLD DIAG: {symbol} scores="
+                            + ", ".join(f"{_k}={_v:+.3f}" for _k, _v in _hd)
+                            + f" | intents={_trade_intents or []}", "yellow")
+                    except Exception as _hde:
+                        _log(f"HOLD DIAG ERROR for {symbol}: {_hde!r}", "red")
 
                 # Build strategy summary (strategy name, weight, decision, reason) for post-decision strategies that need it (e.g. ai-trading-decision)
                 strategy_summary = []
