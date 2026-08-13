@@ -56,3 +56,40 @@ answered. The prime suspect going in (`breakout_min_history_bars=25`) was falsif
 existing logs — all 103 W0 movers carry >=111 bars, median 702.
 
 `pit_mode=research` (lookahead), not promotion-eligible.
+
+## Correction: "frozen at startup" was wrong, and the fix is not yet known
+
+The section above attributes the empty history map to `symbols_for_data` being set once at startup.
+That is not accurate. Three sites (broker.py ~14001, ~14051, ~14112) do exactly the maintenance it
+claims is missing:
+
+```
+for loaded_sym in loaded_syms:
+    if loaded_sym not in symbols_for_data:
+        symbols_for_data.append(loaded_sym)
+        _rebuild_ph = True
+if _rebuild_ph and price_history is not None:
+    price_history = get_price_history_up_to_current(data, symbols_for_data, current_time)
+```
+
+So the universe *is* maintained. Two facts still have to be reconciled with the measurement:
+
+1. **Ordering.** The strategy scoring call is at ~13663, before all three rebuild sites. On the tick
+   a symbol is first discovered and its bars written into `data`, the scorer has already run
+   without it. That explains a *first* miss per symbol, not a persistent one.
+2. **Persistence.** 2,922 skips across 396 symbols is ~7.4 skips each, so these names are missing
+   from the map on many ticks, not once. Ordering alone does not account for that.
+
+Candidate explanations, none yet tested: the rebuild is gated on `price_history is not None` and
+may be skipped when it is None; the `loaded_syms` paths may not cover the expansion path that logs
+`Backtest symbol expansion: loaded N bars` and writes `data[sym] = bars` at ~1874; or the rebuild
+runs on a different branch from the one the reference window takes.
+
+**No fix is proposed here.** A patch that widens the history map to `data.keys()` was drafted and
+deliberately not applied, because it would paper over whichever of the above is actually true and
+could be redundant with machinery that already exists. The measurement (100% `bars=0`, zero
+promotions) stands and is reproducible; the causal story behind it does not yet, and shipping a
+trading change on a half-understood cause is how the five previously-inert levers were shipped.
+
+Next step is diagnostic, not corrective: log which rebuild branch is taken and whether
+`price_history` is None at the scoring call, for a symbol known to be skipped.
