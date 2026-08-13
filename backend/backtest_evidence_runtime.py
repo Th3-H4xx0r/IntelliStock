@@ -31,6 +31,24 @@ from backtest_replay import (
 _RECORD_MODES = frozenset({"record", "record_extend"})
 
 
+def _same_value(left, right) -> bool:
+    """Structural equality over plain JSON values, ignoring immutability form."""
+    import json as _json
+
+    def _plain(value):
+        if isinstance(value, Mapping):
+            return {str(key): _plain(item) for key, item in sorted(value.items())}
+        if isinstance(value, (list, tuple)):
+            return [_plain(item) for item in value]
+        return value
+
+    try:
+        return _json.dumps(_plain(left), sort_keys=True) == _json.dumps(
+            _plain(right), sort_keys=True)
+    except (TypeError, ValueError):
+        return False
+
+
 def default_replay_store():
     """Build the production replay store over the immutable-record seam.
 
@@ -100,6 +118,7 @@ class EvidenceRunLifecycle:
         self._rng_seed_manifest = dict(rng_seed_manifest or {})
 
         self._matrix: ExperimentMatrixManifest | None = None
+        self._replay_fixture = None
         self._arm_name: str | None = None
         self._build: FixtureBuild | None = None
         self._session = None
@@ -166,11 +185,34 @@ class EvidenceRunLifecycle:
             except ReplayError as exc:
                 raise EvidenceOptionError(str(exc)) from exc
 
+        ledger = self._build.ledger if self._build is not None else None
+        declared = None
+        if self._mode == "replay":
+            try:
+                fixture, ledger = self._store.load_replay_fixture(
+                    self._options.get("replay_fixture_id"), self._arm_name
+                )
+            except Exception as exc:
+                raise EvidenceOptionError(
+                    "replay fixture could not be loaded and verified"
+                ) from exc
+            # A sealed fixture belongs to one matrix/window/ordinal/cost address.
+            # Replaying it under a different run identity is not the same
+            # experiment, so bind every join before the session is activated.
+            if (fixture.matrix_id != matrix.matrix_id
+                    or not _same_value(fixture.window, self._window)
+                    or fixture.fixture_ordinal != self._fixture_ordinal
+                    or fixture.cost_scenario_id != scenario
+                    or fixture.cost_scenario_hash != matrix.cost_scenario_hashes[scenario]):
+                raise EvidenceOptionError(
+                    "replay fixture does not match this run's preregistered address")
+            self._replay_fixture = fixture
+            declared = frozenset(fixture.request_set(self._arm_name))
         session = model_evidence.ModelEvidenceSession(
             mode=self._mode,
-            ledger=self._build.ledger if self._build is not None else None,
+            ledger=ledger,
             arm_id=arm_id,
-            declared_occurrences=self._declared_occurrences(),
+            declared_occurrences=declared,
             backtest_id=self._backtest_id,
             build_id=(self._build.build_id if self._build is not None
                       else self._options.get("fixture_build_id")
@@ -184,10 +226,14 @@ class EvidenceRunLifecycle:
         if self._mode != "replay":
             return None
         fixture_id = self._options.get("replay_fixture_id")
-        fixture = getattr(self._store, "get_fixture", lambda _id: None)(fixture_id)
-        if fixture is None:
+        try:
+            fixture, _ledger = self._store.load_replay_fixture(
+                fixture_id, self._arm_name
+            )
+        except Exception as exc:
             raise EvidenceOptionError(
-                f"replay names an unsealed fixture {fixture_id!r}")
+                "replay fixture could not be loaded and verified"
+            ) from exc
         return frozenset(fixture.request_set(self._arm_name))
 
     # ------------------------------------------------------------------ capture
@@ -227,12 +273,36 @@ class EvidenceRunLifecycle:
         scenario = self._options.get("cost_scenario_id")
         experiment = self._matrix.experiment_for(self._arm_name, scenario)
         fixture = None
+        try:
+            session_audit = self._session.finalize()
+        except Exception as exc:
+            raise EvidenceOptionError(
+                "model evidence session did not finalize completely"
+            ) from exc
         if self._build is not None:
+            # Production publishes rows through the process-global session, so
+            # adopt exactly what this arm actually consumed/recorded before the
+            # request set is sealed.
+            self._build.adopt_session_occurrences(
+                self._arm_name, session_audit.get("observed_occurrences") or ())
             fixture = self._build.seal()
-            self._store.publish_fixture(fixture)
         else:
-            fixture = self._store.get_fixture(self._options.get("replay_fixture_id"))
+            fixture = self._replay_fixture
+            if fixture is None:
+                raise EvidenceOptionError("verified replay fixture is unavailable")
         audits = dict(audits or {})
+        if self._build is not None:
+            # Record modes own the whole ledger they sealed.
+            replay_complete = (
+                session_audit.get("ledger_content_hash") == fixture.model_ledger_hash
+            )
+        else:
+            # Replay consumes only this arm's declared subset of the union
+            # ledger; `finalize()` has already proved declared == observed.
+            replay_complete = (
+                frozenset(session_audit.get("observed_occurrences") or ())
+                == frozenset(fixture.request_set(self._arm_name))
+            )
         receipt = ReplayReceipt(
             matrix=self._matrix,
             arm_name=self._arm_name,
@@ -247,13 +317,20 @@ class EvidenceRunLifecycle:
             # applied. Deriving it from `experiment` would always match.
             executed_cost_model_hash=executed_cost_model_hash,
             trade_ledger_hash=trade_ledger_hash,
-            replay_audit={"complete": bool(audits.get("replay", True))},
+            replay_audit=(
+                {"complete": True, "ledger_content_hash": fixture.model_ledger_hash}
+                if replay_complete else {"complete": False}
+            ),
             pit_audit=bool(audits.get("pit")),
             execution_audit=bool(audits.get("execution")),
             benchmark_audit=bool(audits.get("benchmark")),
             accounting_audit=bool(audits.get("accounting")),
             executed_content_manifest=executed_content_manifest,
         )
+        # Publish only after the receipt validated: a durable fixture must
+        # never outlive a failed finalization.
+        if self._build is not None:
+            self._store.publish_fixture(fixture)
         self._store.publish_receipt(receipt)
         self._receipt = receipt
         self._terminal = {"reason": "success", "eligible": receipt.promotion_eligible,
@@ -276,14 +353,17 @@ class EvidenceRunLifecycle:
             "finalized_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         }
         self._terminal = outcome
-        if self.enabled:
-            try:
-                publish = getattr(self._store, "publish_outcome", None)
-                if callable(publish):
-                    publish(dict(outcome))
-            except Exception:
-                # A broken store must not mask the original failure.
-                pass
+        if not self.enabled:
+            # An off lifecycle owns no session and must not clear another
+            # run's process-global session.
+            return dict(outcome)
+        try:
+            publish = getattr(self._store, "publish_outcome", None)
+            if callable(publish):
+                publish(dict(outcome))
+        except Exception:
+            # A broken store must not mask the original failure.
+            pass
         self._clear_session()
         return dict(outcome)
 

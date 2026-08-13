@@ -351,3 +351,176 @@ def test_terminal_hook_is_a_noop_after_success():
     life.install_terminal_hook(exits.append)(0)
     assert exits == [0]
     assert store.write_order == before, "a completed run is not re-finalized"
+
+
+def test_replay_lifecycle_loads_fresh_store_ledger_and_requires_complete_consumption():
+    from backtest_replay import RethinkReplayStore
+    from model_evidence import ModelEvidenceContext, ModelEvidenceRecord, canonical_request_envelope, semantic_request_id
+
+    class Backend:
+        def __init__(self):
+            self.rows = {}
+        def insert_record(self, table, doc, *, durability):
+            key = (table, doc["id"])
+            prior = self.rows.get(key)
+            if prior is None:
+                self.rows[key] = dict(doc)
+            return prior
+        def get_record(self, table, record_id):
+            row = self.rows.get((table, record_id))
+            return dict(row) if row is not None else None
+
+    backend = Backend()
+    writer = RethinkReplayStore(backend)
+    matrix = _matrix()
+    writer.publish_matrix(matrix)
+    life = _lifecycle(writer, matrix)
+    life.begin()
+    context = ModelEvidenceContext(
+        decision_at="2026-03-02T14:30:00Z", call_site="strategy.score",
+        role="analyst", subject="AAA", local_sequence=0,
+    )
+    envelope = canonical_request_envelope(
+        requested_provider="openai", requested_model="research-model",
+        adapter_identity="adapter-v1", prompt="score", system_prompt="system",
+    )
+    semantic_id = semantic_request_id(envelope, context=context)
+    row = ModelEvidenceRecord.from_response(
+        semantic_id=semantic_id, envelope=envelope, context=context,
+        outcome={"score": 1}, attempted_models=("research-model",),
+        effective_model="research-model", raw_response={"score": 1},
+    )
+    life.record_model_row(row)
+    _run_one_decision(life)
+    recorded = life.succeed(
+        trade_ledger_hash="trade-ledger-sha256-" + "e" * 64,
+        executed_source_tree_hash=_SOURCE_TREE,
+        dependency_runtime_digest=_RUNTIME_DIGEST,
+        executed_cost_model_hash=_COST_HASH,
+        audits={"pit": True, "execution": True, "benchmark": True, "accounting": True},
+    )
+    fixture_id = recorded.fixture.fixture_id
+
+    reader = RethinkReplayStore(backend)
+    replay = _lifecycle(
+        reader, matrix, mode="replay", fixture_build_id=None,
+        replay_fixture_id=fixture_id,
+    )
+    replay.begin()
+    session = model_evidence.get_model_evidence_session()
+    assert session.replay(semantic_id) == {"score": 1}
+    receipt = replay.succeed(
+        trade_ledger_hash="trade-ledger-sha256-" + "e" * 64,
+        executed_source_tree_hash=_SOURCE_TREE,
+        dependency_runtime_digest=_RUNTIME_DIGEST,
+        executed_cost_model_hash=_COST_HASH,
+        audits={"pit": True, "execution": True, "benchmark": True, "accounting": True},
+    )
+    assert receipt.promotion_eligible is True
+    assert receipt.replay_audit["complete"] is True
+
+    reader2 = RethinkReplayStore(backend)
+    incomplete = _lifecycle(
+        reader2, matrix, mode="replay", fixture_build_id=None,
+        replay_fixture_id=fixture_id,
+    )
+    incomplete.begin()
+    with pytest.raises(EvidenceOptionError, match="did not finalize"):
+        incomplete.succeed(
+            trade_ledger_hash="trade-ledger-sha256-" + "e" * 64,
+            executed_source_tree_hash=_SOURCE_TREE,
+            dependency_runtime_digest=_RUNTIME_DIGEST,
+            executed_cost_model_hash=_COST_HASH,
+            audits={"pit": True, "execution": True, "benchmark": True, "accounting": True},
+        )
+
+
+def test_off_abort_does_not_clear_another_runs_session():
+    store, matrix = _store_with_matrix()
+    active = _lifecycle(store, matrix)
+    active.begin()
+    session = model_evidence.get_model_evidence_session()
+    off = EvidenceRunLifecycle(
+        options={"evidence_mode": "off", "matrix_manifest_id": None,
+                 "matrix_arm_id": None, "cost_scenario_id": None,
+                 "fixture_build_id": None, "replay_fixture_id": None,
+                 "equity_total_cost_bps": None, "nexus_candidate_overrides": {}},
+        backtest_id="bt-off", store=store, window=_WINDOW, fixture_ordinal=0,
+        benchmark_manifest=dict(_BENCHMARK), rng_seed_manifest={"seed": 7})
+    off.abort("stopped")
+    assert model_evidence.get_model_evidence_session() is session
+
+
+def test_replay_rejects_a_fixture_from_another_run_address():
+    from backtest_replay import RethinkReplayStore
+
+    class Backend:
+        def __init__(self):
+            self.rows = {}
+        def insert_record(self, table, doc, *, durability):
+            key = (table, doc["id"])
+            prior = self.rows.get(key)
+            if prior is None:
+                self.rows[key] = dict(doc)
+            return prior
+        def get_record(self, table, record_id):
+            row = self.rows.get((table, record_id))
+            return dict(row) if row is not None else None
+
+    backend = Backend()
+    writer = RethinkReplayStore(backend)
+    matrix = _matrix()
+    writer.publish_matrix(matrix)
+    life = _lifecycle(writer, matrix)
+    life.begin()
+    _run_one_decision(life)
+    receipt = life.succeed(
+        trade_ledger_hash="trade-ledger-sha256-" + "e" * 64,
+        executed_source_tree_hash=_SOURCE_TREE,
+        dependency_runtime_digest=_RUNTIME_DIGEST,
+        executed_cost_model_hash=_COST_HASH,
+        audits={"pit": True, "execution": True, "benchmark": True, "accounting": True},
+    )
+    wrong = EvidenceRunLifecycle(
+        options=dict(_options("replay"), matrix_manifest_id=matrix.matrix_id,
+                     matrix_arm_id=matrix.arm_id("a4"), cost_scenario_id="25bps",
+                     fixture_build_id=None,
+                     replay_fixture_id=receipt.fixture.fixture_id),
+        backtest_id="bt-2", store=RethinkReplayStore(backend), window=_WINDOW,
+        fixture_ordinal=0, benchmark_manifest=dict(_BENCHMARK),
+        rng_seed_manifest={"seed": 7})
+    with pytest.raises(EvidenceOptionError, match="preregistered address"):
+        wrong.begin()
+
+
+def test_record_run_seals_only_the_occurrences_the_session_published():
+    store, matrix = _store_with_matrix()
+    life = _lifecycle(store, matrix)
+    life.begin()
+    _run_one_decision(life)
+    receipt = life.succeed(
+        trade_ledger_hash="trade-ledger-sha256-" + "e" * 64,
+        executed_source_tree_hash=_SOURCE_TREE,
+        dependency_runtime_digest=_RUNTIME_DIGEST,
+        executed_cost_model_hash=_COST_HASH,
+        audits={"pit": True, "execution": True, "benchmark": True, "accounting": True},
+    )
+    assert receipt.fixture.request_set("a4") == frozenset()
+    assert receipt.replay_audit["complete"] is True
+
+
+def test_an_invalid_receipt_never_publishes_a_durable_fixture():
+    store, matrix = _store_with_matrix()
+    life = _lifecycle(store, matrix)
+    life.begin()
+    _run_one_decision(life)
+    with pytest.raises(Exception):
+        life.succeed(
+            trade_ledger_hash="not-a-canonical-ledger-hash",
+            executed_source_tree_hash=_SOURCE_TREE,
+            dependency_runtime_digest=_RUNTIME_DIGEST,
+            executed_cost_model_hash=_COST_HASH,
+            audits={"pit": True, "execution": True, "benchmark": True,
+                    "accounting": True})
+    assert "fixture" not in store.write_order
+    assert "receipt" not in store.write_order

@@ -305,6 +305,15 @@ class ExperimentMatrixManifest:
 
     @classmethod
     def from_doc(cls, doc: Mapping[str, Any]) -> "ExperimentMatrixManifest":
+        expected_keys = {
+            "id", "record_kind", "matrix_id", "arms", "arm_ids", "combinations",
+            "windows", "cost_scenarios", "cost_scenario_hashes", "fixture_count",
+            "arm_recording_order", "trial_count", "bootstrap_seed",
+            "failure_rules", "selection_rule", "implementation_hashes",
+        }
+        if (not isinstance(doc, Mapping) or set(doc) != expected_keys
+                or doc.get("record_kind") != "experiment_matrix"):
+            raise ReplayError("matrix document shape is invalid")
         try:
             matrix = cls(
                 arms={name: ExperimentSpec.from_doc(spec) for name, spec in doc["arms"].items()},
@@ -324,8 +333,10 @@ class ExperimentMatrixManifest:
             raise ReplayError(f"matrix document is missing {exc.args[0]}") from exc
         if doc.get("matrix_id", doc.get("id")) != matrix.matrix_id:
             raise ReplayError("matrix document identity does not match canonical contents")
-        if "arm_ids" in doc and not _same(doc["arm_ids"], matrix.arm_ids):
+        if not _same(doc["arm_ids"], matrix.arm_ids):
             raise ReplayError("matrix arm IDs do not match canonical contents")
+        if not _same(doc["cost_scenario_hashes"], matrix.cost_scenario_hashes):
+            raise ReplayError("matrix cost scenario hashes do not match canonical contents")
         return matrix
 
 
@@ -419,6 +430,53 @@ class ReplayFixture:
             "benchmark_manifest": _plain(self.benchmark_manifest),
         }
 
+    @classmethod
+    def from_doc(cls, doc: Mapping[str, Any]) -> "ReplayFixture":
+        """Reconstruct and re-address an immutable persisted fixture.
+
+        Call rows are deliberately loaded separately: the fixture manifest owns
+        only their declared request sets and aggregate ledger hash.  Derived
+        IDs/hashes in the stored document are treated as assertions, never as
+        constructor authority.
+        """
+        if not isinstance(doc, Mapping):
+            raise ReplayError("fixture document is missing")
+        required = {
+            "id", "record_kind", "fixture_id", "matrix_id", "build_id", "window",
+            "fixture_ordinal", "cost_scenario_id", "cost_scenario_hash", "pit_chain",
+            "model_ledger_hash", "arm_request_sets", "arm_request_set_hashes",
+            "rng_seed_manifest", "benchmark_manifest",
+        }
+        if set(doc) != required or doc.get("record_kind") != "replay_fixture":
+            raise ReplayError("fixture document shape is invalid")
+        try:
+            fixture = cls(
+                matrix_id=doc["matrix_id"], build_id=doc["build_id"],
+                window=doc["window"], fixture_ordinal=doc["fixture_ordinal"],
+                cost_scenario_id=doc["cost_scenario_id"],
+                cost_scenario_hash=doc["cost_scenario_hash"],
+                pit_chain=doc["pit_chain"], model_ledger_hash=doc["model_ledger_hash"],
+                arm_request_sets=doc["arm_request_sets"],
+                rng_seed_manifest=doc["rng_seed_manifest"],
+                benchmark_manifest=doc["benchmark_manifest"], records=(),
+            )
+        except (KeyError, TypeError, ModelEvidenceError) as exc:
+            raise ReplayError("fixture document contents are invalid") from exc
+        if doc.get("id") != fixture.fixture_id or doc.get("fixture_id") != fixture.fixture_id:
+            raise ReplayError("fixture document identity does not match canonical contents")
+        # build_id is not part of fixture_id, so it must be re-derived: otherwise
+        # a writer can repoint a sealed fixture at another build address.
+        expected_build = _named_hash("fixture-build-sha256-", {
+            "matrix_id": fixture.matrix_id, "window": _plain(fixture.window),
+            "fixture_ordinal": fixture.fixture_ordinal,
+            "cost_scenario_id": fixture.cost_scenario_id,
+        })
+        if fixture.build_id != expected_build:
+            raise ReplayError("fixture build address does not match canonical contents")
+        if not _same(doc.get("arm_request_set_hashes"), fixture.arm_request_set_hashes):
+            raise ReplayError("fixture request-set hashes do not match canonical contents")
+        return fixture
+
 
 class FixtureBuild:
     """Mutable construction state addressed by a preregistered build identity."""
@@ -498,6 +556,23 @@ class FixtureBuild:
             raise ReplayError(str(exc)) from exc
         self._arm_requests[name].add(record.semantic_id)
 
+    def adopt_session_occurrences(self, arm: str, semantic_ids) -> None:
+        """Bind occurrences the evidence session published for this arm.
+
+        Production records rows through the process-global session rather than
+        through `record_model_row`, so without this the sealed fixture would
+        declare an empty request set for a run that really made calls.
+        """
+        self._assert_open()
+        name = _text("arm", arm)
+        if name not in self._arm_requests:
+            raise ReplayError(f"unknown matrix arm {arm!r}")
+        for semantic_id in semantic_ids:
+            identifier = _text("semantic ID", semantic_id)
+            if self._ledger.get(identifier) is None:
+                raise ReplayError("session occurrence is absent from the fixture ledger")
+            self._arm_requests[name].add(identifier)
+
     def seal(self) -> ReplayFixture:
         if self._sealed is not None:
             return self._sealed
@@ -566,6 +641,13 @@ class ReplayReceipt:
         if re.fullmatch(r"trade-ledger-sha256-[0-9a-f]{64}", ledger_hash) is None:
             raise ReplayError("trade ledger hash must be a canonical trade-ledger-sha256 digest")
         audit = _immutable_mapping("replay_audit", self.replay_audit)
+        # A receipt may not assert completeness against a ledger the fixture
+        # does not own; otherwise "complete" is an unverifiable self-claim.
+        claimed_ledger = audit.get("ledger_content_hash")
+        if claimed_ledger is not None and claimed_ledger != self.fixture.model_ledger_hash:
+            raise ReplayError("replay audit ledger hash differs from its fixture")
+        if audit.get("complete") is True and claimed_ledger is None:
+            raise ReplayError("a complete replay audit must bind its ledger hash")
         all_audits = (
             audit.get("complete") is True and self.pit_audit is True and self.execution_audit is True
             and self.benchmark_audit is True and self.accounting_audit is True
@@ -639,6 +721,42 @@ class InMemoryReplayStore:
 
     def get_matrix(self, matrix_id: str) -> ExperimentMatrixManifest | None:
         return self._matrices.get(matrix_id)
+
+    def get_call(self, semantic_id: str) -> ModelEvidenceRecord | None:
+        return self._calls.get(semantic_id)
+
+    def get_fixture(self, fixture_id: str) -> ReplayFixture | None:
+        return self._fixtures.get(fixture_id)
+
+    def load_replay_fixture(
+        self, fixture_id: str, arm_name: str
+    ) -> tuple[ReplayFixture, ModelEvidenceLedger]:
+        """Load exactly one arm's declared, validated replay ledger."""
+        fixture = self.get_fixture(_text("fixture_id", fixture_id))
+        if fixture is None:
+            raise ReplayError("replay fixture is not published")
+        request_ids = fixture.request_set(arm_name)
+        records = []
+        for semantic_id in sorted(request_ids):
+            row = self.get_call(semantic_id)
+            if row is None:
+                raise ReplayError("replay fixture call row is missing")
+            records.append(row)
+        ledger = ModelEvidenceLedger(records)
+        # The fixture ledger is the union across arms.  Recompute that union
+        # from storage, not only this arm's subset, before trusting the fixture.
+        union_ids = set().union(*(
+            fixture.request_set(name) for name in fixture.arm_request_sets
+        ))
+        union_rows = []
+        for semantic_id in sorted(union_ids):
+            row = self.get_call(semantic_id)
+            if row is None:
+                raise ReplayError("replay fixture call row is missing")
+            union_rows.append(row)
+        if ModelEvidenceLedger(union_rows).content_hash != fixture.model_ledger_hash:
+            raise ReplayError("replay fixture model ledger hash mismatch")
+        return fixture, ledger
 
     def reserve_build(self, build_id: str, declaration: Mapping[str, Any]) -> Mapping[str, Any]:
         """Durably reserve one matrix/window/ordinal/cost construction address."""
@@ -763,6 +881,51 @@ class RethinkReplayStore(InMemoryReplayStore):
         matrix = ExperimentMatrixManifest.from_doc(doc)
         self._matrices[matrix.matrix_id] = matrix
         return matrix
+
+    @staticmethod
+    def _call_from_doc(doc: Mapping[str, Any]) -> ModelEvidenceRecord:
+        if not isinstance(doc, Mapping):
+            raise ReplayError("model evidence call document is missing")
+        required = {
+            "id", "record_kind", "semantic_id", "envelope", "context",
+            "outcome", "response_metadata", "content_hash",
+        }
+        if set(doc) != required or doc.get("record_kind") != "model_evidence_call":
+            raise ReplayError("model evidence call document shape is invalid")
+        try:
+            from model_evidence import ModelEvidenceContext
+            row = ModelEvidenceRecord(
+                semantic_id=doc["semantic_id"], envelope=doc["envelope"],
+                context=ModelEvidenceContext(**doc["context"]),
+                outcome=doc["outcome"], response_metadata=doc["response_metadata"],
+            )
+        except (KeyError, TypeError, ModelEvidenceError) as exc:
+            raise ReplayError("model evidence call document contents are invalid") from exc
+        if doc.get("id") != row.semantic_id or doc.get("content_hash") != row.content_hash:
+            raise ReplayError("model evidence call identity does not match canonical contents")
+        return row
+
+    def get_call(self, semantic_id: str) -> ModelEvidenceRecord | None:
+        cached = super().get_call(semantic_id)
+        if cached is not None:
+            return cached
+        doc = self.backend.get_record(CALL_TABLE, semantic_id)
+        if doc is None:
+            return None
+        row = self._call_from_doc(doc)
+        self._calls[row.semantic_id] = row
+        return row
+
+    def get_fixture(self, fixture_id: str) -> ReplayFixture | None:
+        cached = super().get_fixture(fixture_id)
+        if cached is not None:
+            return cached
+        doc = self.backend.get_record(FIXTURE_TABLE, fixture_id)
+        if doc is None:
+            return None
+        fixture = ReplayFixture.from_doc(doc)
+        self._fixtures[fixture.fixture_id] = fixture
+        return fixture
 
     def reserve_build(self, build_id: str, declaration: Mapping[str, Any]) -> Mapping[str, Any]:
         doc = {

@@ -243,7 +243,7 @@ def test_cost_scenario_is_part_of_build_identity_and_arm_request_set_identity():
         dependency_runtime_digest="sha256:" + "a" * 64,
         executed_cost_model_hash=experiment.execution_cost_model_hash,
         trade_ledger_hash=trade_ledger_hash([], []),
-        replay_audit={"complete": True},
+        replay_audit={"complete": True, "ledger_content_hash": fixture.model_ledger_hash},
         pit_audit=True,
         execution_audit=True,
         benchmark_audit=True,
@@ -273,7 +273,7 @@ def test_store_publishes_calls_before_fixture_and_receipt_and_rejects_divergence
         dependency_runtime_digest="sha256:" + "a" * 64,
         executed_cost_model_hash=matrix.arms["baseline"].execution_cost_model_hash,
         trade_ledger_hash=trade_ledger_hash([{"id": "decision-1"}], [{"id": "fill-1"}]),
-        replay_audit={"complete": True},
+        replay_audit={"complete": True, "ledger_content_hash": fixture.model_ledger_hash},
         pit_audit=True,
         execution_audit=True,
         benchmark_audit=True,
@@ -387,7 +387,8 @@ def test_invalid_fixture_never_persists_a_manifest_and_receipt_requires_fixture(
         experiment=matrix.arms["baseline"], executed_source_tree_hash="sha256:tree",
         dependency_runtime_digest="sha256:" + "a" * 64,
         executed_cost_model_hash=matrix.arms["baseline"].execution_cost_model_hash,
-        trade_ledger_hash=trade_ledger_hash([], []), replay_audit={"complete": True},
+        trade_ledger_hash=trade_ledger_hash([], []),
+        replay_audit={"complete": True, "ledger_content_hash": clean_fixture.model_ledger_hash},
         pit_audit=True, execution_audit=True, benchmark_audit=True, accounting_audit=True,
     )
     with pytest.raises(ReplayError, match="fixture manifest"):
@@ -424,3 +425,126 @@ def test_rethink_store_uses_a_fake_backend_without_database_calls():
         "backtest_replay_calls",
         "backtest_replay_fixtures",
     ]
+
+
+def test_fresh_rethink_adapter_reconstructs_fixture_and_exact_arm_ledger():
+    class Backend:
+        def __init__(self):
+            self.rows = {}
+
+        def insert_record(self, table, doc, *, durability):
+            key = (table, doc["id"])
+            prior = self.rows.get(key)
+            if prior is None:
+                self.rows[key] = dict(doc)
+            return prior
+
+        def get_record(self, table, record_id):
+            row = self.rows.get((table, record_id))
+            return dict(row) if row is not None else None
+
+    backend = Backend()
+    writer = RethinkReplayStore(backend)
+    matrix = _matrix()
+    writer.publish_matrix(matrix)
+    build = _build(matrix, store=writer)
+    baseline = _record("baseline")
+    candidate = _record("candidate", 2)
+    build.record_model_row("baseline", baseline)
+    build.record_model_row("candidate", candidate)
+    fixture = build.seal()
+    writer.publish_fixture(fixture)
+
+    reader = RethinkReplayStore(backend)
+    loaded, ledger = reader.load_replay_fixture(fixture.fixture_id, "baseline")
+    assert loaded.fixture_id == fixture.fixture_id
+    assert tuple(row.semantic_id for row in ledger.records) == (baseline.semantic_id,)
+    assert reader.get_fixture(fixture.fixture_id).to_doc() == fixture.to_doc()
+
+
+def test_fresh_replay_load_rejects_tampered_fixture_call_and_missing_union_row():
+    class Backend:
+        def __init__(self):
+            self.rows = {}
+
+        def insert_record(self, table, doc, *, durability):
+            key = (table, doc["id"])
+            prior = self.rows.get(key)
+            if prior is None:
+                self.rows[key] = dict(doc)
+            return prior
+
+        def get_record(self, table, record_id):
+            return self.rows.get((table, record_id))
+
+    backend = Backend()
+    writer = RethinkReplayStore(backend)
+    matrix = _matrix()
+    writer.publish_matrix(matrix)
+    build = _build(matrix, store=writer)
+    row = _record("baseline")
+    build.record_model_row("baseline", row)
+    build.record_model_row("candidate", row)
+    fixture = build.seal()
+    writer.publish_fixture(fixture)
+
+    original_call = dict(backend.rows[("backtest_replay_calls", row.semantic_id)])
+    backend.rows[("backtest_replay_calls", row.semantic_id)]["outcome"] = {"tampered": True}
+    with pytest.raises(ReplayError, match="call"):
+        RethinkReplayStore(backend).load_replay_fixture(fixture.fixture_id, "baseline")
+
+    backend.rows[("backtest_replay_calls", row.semantic_id)] = original_call
+    original_fixture = dict(backend.rows[("backtest_replay_fixtures", fixture.fixture_id)])
+    backend.rows[("backtest_replay_fixtures", fixture.fixture_id)]["fixture_ordinal"] = 1
+    with pytest.raises(ReplayError, match="fixture document identity"):
+        RethinkReplayStore(backend).load_replay_fixture(fixture.fixture_id, "baseline")
+
+    backend.rows[("backtest_replay_fixtures", fixture.fixture_id)] = original_fixture
+    del backend.rows[("backtest_replay_calls", row.semantic_id)]
+    with pytest.raises(ReplayError, match="call row is missing"):
+        RethinkReplayStore(backend).load_replay_fixture(fixture.fixture_id, "candidate")
+
+
+def test_replay_audit_cannot_claim_completeness_it_cannot_prove():
+    matrix = _matrix()
+    fixture = _build(matrix).seal()
+    common = dict(
+        matrix=matrix, arm_name="baseline", arm_id=matrix.arm_id("baseline"),
+        fixture=fixture, experiment=matrix.arms["baseline"],
+        executed_source_tree_hash="sha256:tree",
+        dependency_runtime_digest="sha256:" + "a" * 64,
+        executed_cost_model_hash=matrix.arms["baseline"].execution_cost_model_hash,
+        trade_ledger_hash=trade_ledger_hash([], []),
+        pit_audit=True, execution_audit=True, benchmark_audit=True, accounting_audit=True,
+    )
+    with pytest.raises(ReplayError, match="must bind its ledger hash"):
+        ReplayReceipt(replay_audit={"complete": True}, **common)
+    with pytest.raises(ReplayError, match="differs from its fixture"):
+        ReplayReceipt(
+            replay_audit={"complete": True, "ledger_content_hash": "sha256:lie"},
+            **common,
+        )
+
+
+def test_persisted_fixture_build_address_cannot_be_repointed():
+    from backtest_replay import ReplayFixture
+
+    matrix = _matrix()
+    fixture = _build(matrix).seal()
+    doc = fixture.to_doc()
+    assert ReplayFixture.from_doc(doc).fixture_id == fixture.fixture_id
+    doc["build_id"] = "fixture-build-sha256-" + "0" * 64
+    with pytest.raises(ReplayError, match="build address"):
+        ReplayFixture.from_doc(doc)
+
+
+def test_persisted_matrix_rejects_missing_or_extra_document_fields():
+    matrix = _matrix()
+    doc = matrix.to_doc()
+    assert ExperimentMatrixManifest.from_doc(doc).matrix_id == matrix.matrix_id
+    extra = dict(doc, unexpected=True)
+    with pytest.raises(ReplayError, match="matrix document shape"):
+        ExperimentMatrixManifest.from_doc(extra)
+    missing = {key: value for key, value in doc.items() if key != "arm_ids"}
+    with pytest.raises(ReplayError, match="matrix document shape"):
+        ExperimentMatrixManifest.from_doc(missing)
