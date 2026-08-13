@@ -3268,6 +3268,57 @@ def _satellite_conviction_min_raw(cached_strategies) -> float:
         return 0.0
 
 
+def _displacement_enabled(cached_strategies) -> bool:
+    """Free cash for a high-conviction buy by trimming the weakest holding. Default OFF."""
+    try:
+        cfg = _core_sleeve_cfg_raw(cached_strategies) or {}
+        return bool(cfg.get("satellite_displacement_enabled", False))
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
+def _displacement_candidate(held, incoming_score, shortfall, min_gap=0.5):
+    """Pick the holding to trim so a materially stronger name can be funded.
+
+    `held` maps symbol -> (conviction, market_value). Returns (symbol, value) or None.
+
+    Rules, each paid for by evidence from bt 873929 (2026-01-19 tick):
+
+    * Trim the LOWEST-CONVICTION holding, never the largest. On that tick the book held
+      AGQ at $2,535 (42% of NAV) which went on to +169.7% and was captured 94.9%. Sorting
+      by position size would have sold the best trade of the window to buy the second best.
+    * Require a material conviction gap (default 0.5). CPER scored +1.000 against SNDK's
+      +1.700, a 0.700 gap, so the swap clears. Churning between neighbours does not.
+    * The trimmed holding must actually cover the shortfall, or the sale is pure turnover
+      for a buy that still gets refused.
+    * Never displace a holding that is itself stronger than the incoming name.
+    """
+    best = None
+    for sym, pair in (held or {}).items():
+        try:
+            raw_score, value = pair[0], float(pair[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        # A holding with NO score is not a weak holding — it is an unknown one.
+        # AGQ carried no raw score anywhere in bt 873929 and was 42% of NAV on its
+        # way to +169.7%. Defaulting absent scores to 0.0 made the best position in
+        # the book look like the weakest and the first thing to sell. Unknown is
+        # ineligible, never a displacement target.
+        if raw_score is None:
+            continue
+        try:
+            score = float(raw_score)
+        except (TypeError, ValueError):
+            continue
+        if value + 1e-9 < float(shortfall):
+            continue
+        if float(incoming_score) - score + 1e-9 < float(min_gap):
+            continue
+        if best is None or score < best[1]:
+            best = (sym, score, value)
+    return (best[0], best[2]) if best else None
+
+
 def _buy_order_conviction_ranked(cached_strategies) -> bool:
     """Rank the buy queue by conviction instead of alphabetically. Default OFF.
 
@@ -16347,6 +16398,54 @@ while not shutdown_requested:
                                 f"${cash_to_use:.2f} (orders already in flight "
                                 f"this tick reserve the rest)")
 
+                            if _displacement_enabled(_cached_strategies):
+                                _disp = None
+                                try:
+                                    _rs_cfg = _residual_sleeve_config(_cached_strategies) or {}
+                                    _disp_sleeve = {
+                                        str(_rs_cfg.get("symbol") or "SPY").upper(),
+                                        str(_rs_cfg.get("bear_symbol") or "").upper(),
+                                    } - {""}
+                                    _disp_px = dict(getattr(
+                                        portfolio_emulator, "_last_prices", None) or {})
+                                    _disp_px.update(prices or {})
+                                    _disp_held = {}
+                                    for _dh, _dq in (
+                                            portfolio_emulator.get_positions() or {}).items():
+                                        if _dh == symbol or _dh in _disp_sleeve:
+                                            continue
+                                        _dp = float(_disp_px.get(_dh) or 0.0)
+                                        if _dp <= 0:
+                                            continue
+                                        _dhint = (nexus_position_sizes or {}).get(_dh) or {}
+                                        _ds = (_dhint.get("raw_net_score")
+                                               if isinstance(_dhint, dict) else None)
+                                        # absent score => ineligible, not weakest
+                                        _disp_held[_dh] = (_ds, float(_dq) * _dp)
+                                    _disp_in = float(
+                                        (nexus_hint or {}).get("raw_net_score", 0.0) or 0.0)
+                                    _disp = _displacement_candidate(
+                                        _disp_held, _disp_in, float(_exec_min_pos))
+                                    if not _disp:
+                                        _log(
+                                            f"DISPLACEMENT: no candidate for {symbol} "
+                                            f"raw={_disp_in:+.3f} need ${_exec_min_pos:.0f} "
+                                            f"from {len(_disp_held)} holding(s)", "yellow")
+                                except Exception as _de:
+                                    # Never silent: an inert lever must announce itself.
+                                    _log(f"DISPLACEMENT ERROR for {symbol}: {_de!r}", "red")
+                                if _disp:
+                                    _log(
+                                        f"DISPLACEMENT: trimming {_disp[0]} (${_disp[1]:.2f}) "
+                                        f"to fund {symbol} raw={_disp_in:+.3f} — "
+                                        f"weakest holding, not the largest", "cyan")
+                                    _nexus_disp = _strategy_cache.get("graph_nexus_analysis")
+                                    if _nexus_disp is not None:
+                                        _nexus_disp.setdefault(
+                                            "_broker_displacement_requests", []).append({
+                                                "sell": _disp[0], "fund": symbol,
+                                                "value": _disp[1], "score": _disp_in,
+                                            })
                             _log(f"SKIP BUY {symbol} — {_emp_what} < min ${_exec_min_pos:.0f} (allocated ${cash_per_trade:.2f})", "yellow")
                             _trade_skipped_no_price = True  # reuse flag to prevent recording
                             # V7.1: Report skipped buys to strategy cache for backfill queue
