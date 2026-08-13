@@ -157,3 +157,34 @@ idle in aggregate — it is idle on most of the specific names this objective wa
 That does not prove fixing it would buy them: `AAOI` is separately blocked by the entry-extension
 gate (a measured, do-not-retry tradeoff), and `SNDK` is already bought, just far too late. It does
 mean the promotion path cannot be ruled out as a cause for the rest.
+
+## Confirmed: the skipped names have bars; the map simply lacks them
+
+Breakdown of the 396 symbols whose breakout evaluation exits at `bars=0` (bt 278531):
+
+| category | count |
+|---|---:|
+| logged `no historical bars found` (legitimately empty) | **10** |
+| logged `expansion: loaded N 1Hour bars for SYM` | **217** |
+| neither logged (present in the startup universe) | 169 |
+
+**217 symbols successfully loaded bars into `data` and are still absent from the history map handed
+to the scorer.** Only 10 of the 396 are the legitimate empty case. So this is not "these names have
+no data" — the data is loaded and the map does not contain it.
+
+That eliminates the benign explanation and leaves the mechanism identified above: three of the six
+`_ensure_backtest_history_for_symbols` call sites (4511, 14163, 14220) discard the returned
+`loaded` list, so those symbols never enter `symbols_for_data` and never appear in a rebuild.
+
+Reconciling with tick ordering: the scorer at ~13663 runs before the rebuild sites at ~14001+, but
+line 12837 rebuilds `price_history` from `symbols_for_data` at the top of every backtest tick. A
+symbol added on tick N is therefore visible from tick N+1 onward. Persistent absence across the
+whole window is only consistent with never being added at all.
+
+Remaining unknown: which of the three discarding sites the 217 arrive through. That is one
+diagnostic line, not a trading change.
+
+## Session cost note
+
+This section, the `bars=0` breakdown, the six-of-eight tie-back and the falsification of
+`breakout_min_history_bars` were all derived from logs already pulled — no additional backtests.
