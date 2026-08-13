@@ -66,6 +66,18 @@ def test_is_log_only_and_cannot_alter_the_decision():
     assert body.count("_log(") >= 1
 
 
+def test_reads_votes_as_a_list_not_a_dict():
+    """bt 511709: 1,625 HOLD DIAG ERRORs — weighted_scores is list[(weight, vote)]."""
+    body = _diag_block()
+    assert ".items()" not in body, "weighted_scores is a list, not a mapping"
+    assert "for _w, _s in _votes" in body
+
+
+def test_reports_absent_raw_score_explicitly():
+    """The 52 movers with no scoring trace must read `raw=absent`, not be skipped."""
+    assert '"absent"' in _diag_block()
+
+
 def test_failure_is_loud_not_silent():
     assert "HOLD DIAG ERROR" in _diag_block(), (
         "a swallowed exception makes the telemetry silently inert, which is the "

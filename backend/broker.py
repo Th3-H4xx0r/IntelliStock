@@ -14481,6 +14481,23 @@ while not shutdown_requested:
                 _disp_cache = _strategy_cache.get("graph_nexus_analysis")
                 _disp_reqs = ((_disp_cache or {}).pop(
                     "_broker_displacement_requests", None) or [])
+                # bt 511709: three separate buys each queued a 45% trim of the
+                # SAME holding (TSM $858.81) on one tick, so three buys expected
+                # funding from one $365 release. Honour only the strongest
+                # request per holding per tick; the rest re-evaluate next bar.
+                _disp_best = {}
+                for _dreq in (_disp_reqs or []):
+                    try:
+                        _bk = str((_dreq or {}).get("sell") or "").upper()
+                        _bs = float((_dreq or {}).get("score") or 0.0)
+                    except (TypeError, ValueError, AttributeError):
+                        continue
+                    if not _bk:
+                        continue
+                    if _bk not in _disp_best or _bs > float(
+                            _disp_best[_bk].get("score") or 0.0):
+                        _disp_best[_bk] = _dreq
+                _disp_reqs = list(_disp_best.values())
                 for _dreq in _disp_reqs:
                     try:
                         _dsym = str(_dreq.get("sell") or "").upper()
@@ -15548,14 +15565,24 @@ while not shutdown_requested:
                 # the population can be split into correctly and wrongly declined.
                 if decision == 0 and _hold_diagnostics_enabled(_cached_strategies):
                     try:
-                        _hd = sorted(
-                            ((str(_k), float(_v)) for _k, _v in
-                             (weighted_scores or {}).items()),
-                            key=lambda _p: -_p[1])[:4]
+                        # weighted_scores is list[(weight, vote)] with vote in
+                        # {1,0,-1} — discrete votes, not conviction. The number
+                        # that decides a buy is the nexus raw score, which is
+                        # only present for names that entered the scoring
+                        # pipeline; its ABSENCE is itself the diagnostic for the
+                        # 52 movers that never appear in any scoring line.
+                        _votes = list(weighted_scores or [])
+                        _up = sum(float(_w) for _w, _s in _votes if float(_s) > 0)
+                        _dn = sum(float(_w) for _w, _s in _votes if float(_s) < 0)
+                        _fl = sum(float(_w) for _w, _s in _votes if float(_s) == 0)
+                        _raw_h = ((nexus_position_sizes or {}).get(symbol) or {})
+                        _raw_v = (_raw_h.get("raw_net_score")
+                                  if isinstance(_raw_h, dict) else None)
                         _log(
-                            f"HOLD DIAG: {symbol} scores="
-                            + ", ".join(f"{_k}={_v:+.3f}" for _k, _v in _hd)
-                            + f" | intents={_trade_intents or []}", "yellow")
+                            f"HOLD DIAG: {symbol} votes up={_up:.2f} flat={_fl:.2f} "
+                            f"down={_dn:.2f} n={len(_votes)} raw="
+                            + ("absent" if _raw_v is None else f"{float(_raw_v):+.3f}")
+                            + f" intents={_trade_intents or []}", "yellow")
                     except Exception as _hde:
                         _log(f"HOLD DIAG ERROR for {symbol}: {_hde!r}", "red")
 
