@@ -14462,6 +14462,35 @@ while not shutdown_requested:
             }
             _DEFAULT_BUY_INTENT_PRIORITY = 3
             _nexus_sell_set = set(nexus_sell_enforcement)
+            # Execute displacement requests raised on a PREVIOUS tick. The buy that
+            # triggered them was refused for cash after this tick's sells had already
+            # run, so the trim lands here, one bar later, and the starved name is
+            # retried by the normal backfill path with the proceeds available.
+            # Trims only the shortfall (plus a 5% buffer), never the whole position:
+            # displacement is meant to free cash, not to liquidate a holding.
+            if _displacement_enabled(_cached_strategies):
+                _disp_cache = _strategy_cache.get("graph_nexus_analysis")
+                _disp_reqs = ((_disp_cache or {}).pop(
+                    "_broker_displacement_requests", None) or [])
+                for _dreq in _disp_reqs:
+                    try:
+                        _dsym = str(_dreq.get("sell") or "").upper()
+                        _dval = float(_dreq.get("value") or 0.0)
+                        _dneed = float(_dreq.get("need") or 0.0)
+                    except (TypeError, ValueError, AttributeError):
+                        continue
+                    if not _dsym or _dval <= 0 or _dneed <= 0:
+                        continue
+                    _dfrac = min(1.0, (_dneed * 1.05) / _dval)
+                    _dhint_out = nexus_position_sizes.setdefault(_dsym, {})
+                    if isinstance(_dhint_out, dict) and "buy_cash" not in _dhint_out:
+                        _dhint_out["sell_fraction"] = max(
+                            float(_dhint_out.get("sell_fraction") or 0.0), _dfrac)
+                        _nexus_sell_set.add(_dsym)
+                        _log(
+                            f"DISPLACEMENT EXECUTE: trimming {_dfrac:.0%} of {_dsym} "
+                            f"(${_dval:.2f}) to free ${_dneed:.2f} for "
+                            f"{_dreq.get('fund')}", "cyan")
             # Also treat symbols with sell_fraction in nexus_position_sizes as sells
             for _ps_sym, _ps_hint in (nexus_position_sizes or {}).items():
                 if isinstance(_ps_hint, dict) and 'sell_fraction' in _ps_hint and 'buy_cash' not in _ps_hint:
@@ -16463,6 +16492,7 @@ while not shutdown_requested:
                                             "_broker_displacement_requests", []).append({
                                                 "sell": _disp[0], "fund": symbol,
                                                 "value": _disp[1], "score": _disp_in,
+                                                "need": float(_exec_min_pos),
                                             })
                             _log(f"SKIP BUY {symbol} — {_emp_what} < min ${_exec_min_pos:.0f} (allocated ${cash_per_trade:.2f})", "yellow")
                             _trade_skipped_no_price = True  # reuse flag to prevent recording
