@@ -6304,17 +6304,22 @@ def _compute_breakout_score_boost(
     prices_history: dict | None,
     config: dict,
 ) -> tuple[float, str]:
+    # The reason string is only consumed when boost > 0, so naming each early
+    # exit is free and makes the guard that fired observable. bt 180796: the
+    # breakout promotion is enabled in doc 193 yet 84 of 103 names that moved
+    # >=30% ended the window at a flat vote, and only 11 log lines mention
+    # breakout at all — so which guard returns first is the open question.
     if not bool(config.get("breakout_score_boost_enabled", True)):
-        return (0.0, "")
+        return (0.0, "skip:disabled")
     if not prices_history or not isinstance(prices_history, dict):
-        return (0.0, "")
+        return (0.0, "skip:no_history_map")
     sym_u = str(sym or "").strip().upper()
     if not sym_u:
-        return (0.0, "")
+        return (0.0, "skip:no_symbol")
     bars = prices_history.get(sym_u) or prices_history.get(sym) or []
     min_bars = int(config.get("breakout_min_history_bars", 25) or 25)
     if not bars or len(bars) < min_bars:
-        return (0.0, "")
+        return (0.0, f"skip:bars={len(bars)}<{min_bars}")
     closes: list[float] = []
     volumes: list[float] = []
     opens: list[float] = []
@@ -6333,7 +6338,7 @@ def _compute_breakout_score_boost(
             volumes.append(0.0)
             opens.append(0.0)
     if len(closes) < min_bars or closes[-1] <= 0:
-        return (0.0, "")
+        return (0.0, f"skip:closes={len(closes)}<{min_bars}_or_last<=0")
     current_close = closes[-1]
     boost = 0.0
     reasons: list[str] = []
@@ -21007,6 +21012,8 @@ def _finalize_scores(symbols_list: list, sentiment_data: dict, propagated: dict,
         # PROMOTE a previously-neutral stock to score=1 even without LLM news.
         if bool(config.get("breakout_score_boost_enabled", True)):
             _bk_boost, _bk_reason = _compute_breakout_score_boost(sym, price_history, config)
+            if _bk_boost <= 0 and bool(config.get("breakout_diagnostics_enabled", False)):
+                _log(f"BREAKOUT SKIP: {sym} {_bk_reason}", "yellow")
             if _bk_boost > 0:
                 _existing_raw = float(propagated.get(sym, {}).get("raw_score", 0.0) or 0.0)
                 _new_raw = _existing_raw + _bk_boost
