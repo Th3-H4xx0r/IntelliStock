@@ -958,7 +958,7 @@ def _alpaca_chunk_days_for_timeframe(timeframe):
         "1Day": 1,
     }
     n = bars_per_day.get(timeframe, 7)
-    
+
     # For 1-hour and smaller timeframes, use much smaller chunks to avoid API limits
     # and empty responses from data feeds (especially IEX) with limited history
     if timeframe == "1Hour":
@@ -980,7 +980,7 @@ def _alpaca_chunk_days_for_timeframe(timeframe):
     else:
         # For daily bars, can use larger chunks
         chunk_days = max(1, min(365, 10000 // n))
-    
+
     return chunk_days
 
 
@@ -3266,6 +3266,32 @@ def _satellite_conviction_min_raw(cached_strategies) -> float:
         return float(cfg.get("satellite_conviction_overflow_min_raw_score", 0.0) or 0.0)
     except (TypeError, ValueError, AttributeError):
         return 0.0
+
+
+def _buy_order_conviction_ranked(cached_strategies) -> bool:
+    """Rank the buy queue by conviction instead of alphabetically. Default OFF.
+
+    2026-08-13, bt 873929. The buy queue's final tiebreaker was the TICKER:
+
+        Execution order: ... by (intent_priority, allocation, ticker)
+
+    Cash is consumed in that order, so among candidates sharing an intent class
+    and allocation the alphabetically-earlier name is funded and the later one
+    is skipped for want of cash. On the 01-19 tick HYMC and SNDK both carried
+    `high_conv=True` and an identical $955.76 allocation; HYMC was evaluated
+    first purely on spelling. SNDK went on to move +187.9% and was not filled
+    until 02-02, 94.9% of the way through that move.
+
+    Alphabetical order is not a risk decision. When this is enabled the raw
+    conviction score orders the queue ahead of allocation, so the strongest
+    name gets first call on the cash. Default False keeps every existing
+    document byte-identical.
+    """
+    try:
+        cfg = _core_sleeve_cfg_raw(cached_strategies) or {}
+        return bool(cfg.get("buy_order_conviction_ranked_enabled", False))
+    except (TypeError, ValueError, AttributeError):
+        return False
 
 
 def _turnover_cfg_bypass_ceiling(cached_strategies) -> float:
@@ -7322,12 +7348,12 @@ def run_strategy(spec, symbol, prices, current_time, data=None, portfolio_emulat
     - score: 1 (buy), 0 (hold), -1 (sell)
     - weight_override: float or None (None means use original weight from spec)
     - time_increment: optional (e.g. "1h", "1d", 3600) for instance/backtest granularity; strategies may use it (e.g. News).
-    
+
     The strategy file must define a class with the same name as the strategy string (PascalCase)
     and a run(self, symbol, price, current_time, config, conditions, data=None, portfolio_emulator=None, strategy_cache=None, time_increment=None) method.
-    
+
     strategy_cache: per-strategy dict (stored globally in broker) for the strategy to persist data across runs.
-    
+
     The run() method can return:
     - An integer (1, 0, -1) for backward compatibility (weight_override=None, default size, no reason)
     - A tuple (score, weight_override [, size_hint [, reason]]) where weight_override is optional float or None,
@@ -7359,7 +7385,7 @@ def run_strategy(spec, symbol, prices, current_time, data=None, portfolio_emulat
     try:
         instance = cls()
         result = instance.run(symbol, price, current_time, config, conditions, data, portfolio_emulator=portfolio_emulator, strategy_cache=strategy_cache, time_increment=time_increment)
-        
+
         # Handle return value: int or tuple (score [, weight_override [, size_hint [, reason]]])
         reason = None
         if isinstance(result, tuple) and len(result) >= 1:
@@ -9304,11 +9330,11 @@ def _time_increment_to_alpaca_timeframe(time_increment):
     """
     if not time_increment:
         return "1Min"  # Default to 1 minute
-    
+
     # First convert to timedelta to get total seconds
     td = _time_increment_to_timedelta(time_increment)
     total_seconds = int(td.total_seconds())
-    
+
     # Convert to Alpaca timeframe format
     if total_seconds >= 86400:  # 1 day or more
         days = total_seconds // 86400
@@ -12327,7 +12353,7 @@ while not shutdown_requested:
                         else:
                             _log(f"  {sym}: start={sp}, end={ep}", "white")
                     _log("---------------------------------------------------", "cyan")
-                    
+
                     # Save to database (reuse long-lived conn if still open)
                     try:
                         conn = _backtest_db_conn if _backtest_db_conn is not None else get_conn_retry(max_attempts=5, delay=2)
@@ -12339,17 +12365,17 @@ while not shutdown_requested:
                             if 'BacktestResults' not in tables:
                                 r.db(DB_NAME).table_create('BacktestResults').run(conn)
                                 _log("Created BacktestResults table", "green")
-                            
+
                             # Get instance_id and strategy_row_id (instance_id can be int or string)
                             instance_id_for_db = int(instance_id) if (instance_id and str(instance_id).isdigit()) else instance_id
                             strategy_row_id = _strategy_row_id
-                            
+
                             # Calculate elapsed time for backtest
                             time_elapsed_seconds = None
                             if backtest_start_time is not None:
                                 import time
                                 time_elapsed_seconds = time.time() - backtest_start_time
-                            
+
                             # Get start_date and end_date (start_dt and end_dt are datetime objects from backtest setup)
                             try:
                                 backtest_start_date = _backtest_start_dt_input.isoformat() if _backtest_start_dt_input else (start_dt.isoformat() if start_dt else None)
@@ -12357,7 +12383,7 @@ while not shutdown_requested:
                             except NameError:
                                 backtest_start_date = None
                                 backtest_end_date = None
-                            
+
                             # Build price series for DB and CSV (same as below for backtest_prices.csv)
                             start_date_only = start_dt.date() if start_dt else None
                             end_date_only = end_dt.date() if end_dt else None
@@ -12431,7 +12457,7 @@ while not shutdown_requested:
                             final_value = _bt_summary["final_value"]
                             final_pnl = _bt_summary["pnl"]
                             final_pnl_percent = _bt_summary["pnl_percent"]
-                            
+
                             # Create backtest result document (full update)
                             from datetime import datetime as _dt
                             backtest_id_raw = backtest_row_id
@@ -12527,7 +12553,7 @@ while not shutdown_requested:
                                     backtest_result[_benchmark_field] = (
                                         _bt_summary[_benchmark_field]
                                     )
-                            
+
                             # Update existing row if we have id, else insert.
                             # Fail the write closed if any secret material slipped
                             # into the payload (schema, logs, decisions, ...).
@@ -12677,7 +12703,7 @@ while not shutdown_requested:
                                 pass
                             _backtest_db_conn = None
                         sys.exit(1)
-                
+
                 # Write history to CSV for inspection (keep this for backward compatibility)
                 try:
                     import csv
@@ -14391,6 +14417,7 @@ while not shutdown_requested:
                     _nexus_sell_set.add(_ps_sym)
             _sell_first = [s for s in sorted(expanded_symbols) if s in _nexus_sell_set]
             _buy_rest = [s for s in sorted(expanded_symbols) if s not in _nexus_sell_set]
+            _conv_ranked = _buy_order_conviction_ranked(_cached_strategies)
             def _buy_sort_key(s: str) -> tuple:
                 _hint = (nexus_position_sizes or {}).get(s) or {}
                 # action_intent lives in nexus_action_intents_merged (extracted above),
@@ -14398,12 +14425,22 @@ while not shutdown_requested:
                 _intent = nexus_action_intents_merged.get(s)
                 _intent_pri = _BUY_INTENT_PRIORITY.get(_intent, _DEFAULT_BUY_INTENT_PRIORITY)
                 _alloc = float(_hint.get("buy_cash", 0) or 0) if isinstance(_hint, dict) else 0.0
+                if _conv_ranked:
+                    # Conviction outranks allocation; ticker remains only as the
+                    # final deterministic tiebreaker so the order stays stable.
+                    try:
+                        _raw = float(_hint.get("raw_net_score", 0.0) or 0.0)
+                    except (TypeError, ValueError):
+                        _raw = 0.0
+                    return (_intent_pri, -_raw, -_alloc, s)
                 # tuple: (intent_priority asc, alloc desc via negation, ticker asc)
                 return (_intent_pri, -_alloc, s)
             _buy_rest.sort(key=_buy_sort_key)
             _exec_order = _sell_first + _buy_rest
             if _sell_first:
-                _log(f"Execution order: {len(_sell_first)} sell(s) first, then {len(_buy_rest)} buy/hold candidate(s) by (intent_priority, allocation, ticker)", "cyan")
+                _log(f"Execution order: {len(_sell_first)} sell(s) first, then "
+                     f"{len(_buy_rest)} buy/hold candidate(s) by "
+                     f"{'(intent_priority, conviction, allocation, ticker)' if _conv_ranked else '(intent_priority, allocation, ticker)'}", "cyan")
 
             # 2026-04-23 F3: NY-midnight rollover for `_orders_today`. Cheap
             # (1 attribute compare) on 99.99% of ticks; only hits Alpaca's
@@ -15324,27 +15361,27 @@ while not shutdown_requested:
                         'reason': reason,
                     })
                     original_weights.append(original_weight)
-            
+
                 # Step 2: Apply dynamic weight redistribution if any strategy overrides weight
                 final_weights = []
                 has_overrides = any(sr['weight_override'] is not None for sr in strategy_results)
-            
+
                 if has_overrides:
                     # Calculate total override weight and remaining weight
                     override_sum = sum(sr['weight_override'] or 0.0 for sr in strategy_results)
                     remaining_weight = 1.0 - override_sum
-                
+
                     if remaining_weight < 0:
                         _log(f"Warning: Total weight overrides ({override_sum:.3f}) exceed 1.0. Clamping to 1.0.", "yellow")
                         override_sum = 1.0
                         remaining_weight = 0.0
-                
+
                     # Calculate sum of original weights for strategies that didn't override
                     non_override_original_sum = sum(
                         sr['original_weight'] for sr in strategy_results
                         if sr['weight_override'] is None
                     )
-                
+
                     # Redistribute remaining weight proportionally among non-override strategies
                     for sr in strategy_results:
                         if sr['weight_override'] is not None:
@@ -15365,7 +15402,7 @@ while not shutdown_requested:
                 else:
                     # No overrides, use original weights
                     final_weights = original_weights
-            
+
                 # Step 3: Build weighted_scores from per-symbol strategies, then add run_once strategy scores for this symbol
                 weighted_scores = [(w, sr['score']) for w, sr in zip(final_weights, strategy_results) if w > 0]
                 for spec, scores_dict, reasons_dict, *_meta in run_once_results:
@@ -15373,7 +15410,7 @@ while not shutdown_requested:
                         w = float(spec.get("weight", 0))
                         if w > 0:
                             weighted_scores.append((w, scores_dict[symbol]))
-            
+
                 if weighted_scores:
                     weighted_sum = sum(w * s for w, s in weighted_scores)
                     total_weight = sum(w for w, _ in weighted_scores)
@@ -16848,7 +16885,7 @@ while not shutdown_requested:
                         "strategies": list(strategy_summary) if strategy_summary else [],
                         "post_decision": list(post_decision_trace) if post_decision_trace else [],
                     })
-    
+
             ###################################
             ## Save portfolio snapshot every loop (value at current time with current prices).
             ## Applies in BOTH modes so LiveState's portfolio_history and the UI's
@@ -16960,7 +16997,7 @@ while not shutdown_requested:
                         )
                     if not _skip_snapshot:
                         portfolio_emulator.save_portfolio_snapshot(prices, timestamp=current_time)
-    
+
         ###################################
         ## Backtesting: update progress, P&L, status in DB (throttled for fast loops)
         ###################################
@@ -17122,7 +17159,7 @@ while not shutdown_requested:
                         f"RethinkDB connection failed {_BACKTEST_PROGRESS_FAIL_MAX} times in a row. Last error: lost connection.",
                         progress_pct_on_fail,
                     )
-    
+
         ###################################
         ## Backtesting/LIVE footer (MUST run for BOTH modes - previously
         ## nested under the backtest-only progress block, causing a live
