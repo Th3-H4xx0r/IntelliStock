@@ -3268,6 +3268,15 @@ def _satellite_conviction_min_raw(cached_strategies) -> float:
         return 0.0
 
 
+def _price_history_diagnostics(cached_strategies) -> bool:
+    """Report price_history coverage at the scoring call. Default OFF, log-only."""
+    try:
+        cfg = _core_sleeve_cfg_raw(cached_strategies) or {}
+        return bool(cfg.get("price_history_diagnostics_enabled", False))
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
 def _hold_diagnostics_enabled(cached_strategies) -> bool:
     """Print the scores behind a `hold`. Default OFF. Log-only, never trades."""
     try:
@@ -13660,6 +13669,28 @@ while not shutdown_requested:
                                         _log(f"bar snapshot capture failed (non-fatal): {_capture_err}", "yellow")
                                     except Exception:
                                         pass
+                            # bt 278531: 2,922 breakout evaluations, 100% exiting at
+                            # `bars=0`, zero promotions — while 217 of the skipped
+                            # symbols had bars successfully loaded into `data`. Three
+                            # explanations were advanced and each falsified:
+                            # breakout_min_history_bars (all movers carry >=111 bars),
+                            # widening to data.keys() (line ~1876 stores empty lists),
+                            # and the discarding call sites (they handle sleeve legs
+                            # and sells, not discoveries). These counts separate the
+                            # survivors: a map far smaller than `data` is a membership
+                            # gap; a full map with empty values is the causal filter in
+                            # get_price_history_up_to_current.
+                            if _price_history_diagnostics(_cached_strategies):
+                                try:
+                                    _phd = price_history or {}
+                                    _phd_empty = sum(1 for _v in _phd.values() if not _v)
+                                    _log(
+                                        f"PH DIAG: map={len(_phd)} empty={_phd_empty} "
+                                        f"symbols_for_data={len(symbols_for_data or [])} "
+                                        f"data={len(data or {})} "
+                                        f"scored={len(symbols or [])}", "yellow")
+                                except Exception as _phde:
+                                    _log(f"PH DIAG ERROR: {_phde!r}", "red")
                             run_once_results = run_run_once_strategies(
                                 _run_once_specs, list(symbols or []), prices, current_time,
                                 price_history if mode == MODE_BACKTEST else None,
