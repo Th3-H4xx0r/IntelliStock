@@ -77,3 +77,23 @@ This is the rule that five previously "working" levers failed.
 
 No push to `main` while either arm is running (a push auto-deploys and kills the run). No
 config edit to doc 193, doc 194, doc 195, or doc 179 between the two arms.
+
+## Operational finding — arms must run sequentially
+
+First attempt launched both arms within seconds of each other:
+
+* control `609441` (`v2-conv-ctl`) -> `stopped` at progress 0
+* treatment `906181` (`v2-conv-trt`) -> `running`
+
+The control log runs 320 lines, initialises cleanly (`RNG seed 0`, `PYTHONHASHSEED=0`,
+history scope `v2-conv-ctl|4f430a0ae8cdd108951ff2c3`, clean start, Neo4j snapshot loaded)
+and then ends mid bar-fetch at `06:57:06` with **no stop message, no traceback, and no
+error** — the sole logged error is a benign sentiment-LLM fallback. That is an external
+kill, not a strategy failure.
+
+**Conclusion: this deployment runs one backtest at a time; a second launch preempts the
+first.** Paired arms must be run strictly sequentially, and the arm-order caveat already
+stated in the validity limits therefore applies to every pair.
+
+Revised execution order: run treatment `906181` to completion, then relaunch the control on
+the identical window/cash/granularity. Do not push to `main` while either arm is running.
