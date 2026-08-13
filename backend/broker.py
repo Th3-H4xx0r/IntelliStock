@@ -16406,6 +16406,20 @@ while not shutdown_requested:
                                         str(_rs_cfg.get("symbol") or "SPY").upper(),
                                         str(_rs_cfg.get("bear_symbol") or "").upper(),
                                     } - {""}
+                                    # Conviction for a HELD name does not live in
+                                    # nexus_position_sizes — that only carries names the
+                                    # strategy is acting on this tick, so every holding
+                                    # looked unscored and displacement found no candidate
+                                    # on all 12 attempts in bt 550605. The ranked cache
+                                    # (list[(ticker, score)] desc) covers the whole
+                                    # watchlist and is the real source.
+                                    _disp_rank = {}
+                                    _dnc = _strategy_cache.get("graph_nexus_analysis") or {}
+                                    for _rt in (_dnc.get("_momentum_ranked_cache") or []):
+                                        try:
+                                            _disp_rank[str(_rt[0]).upper()] = float(_rt[1])
+                                        except (TypeError, ValueError, IndexError):
+                                            continue
                                     _disp_px = dict(getattr(
                                         portfolio_emulator, "_last_prices", None) or {})
                                     _disp_px.update(prices or {})
@@ -16420,6 +16434,8 @@ while not shutdown_requested:
                                         _dhint = (nexus_position_sizes or {}).get(_dh) or {}
                                         _ds = (_dhint.get("raw_net_score")
                                                if isinstance(_dhint, dict) else None)
+                                        if _ds is None:
+                                            _ds = _disp_rank.get(str(_dh).upper())
                                         # absent score => ineligible, not weakest
                                         _disp_held[_dh] = (_ds, float(_dq) * _dp)
                                     _disp_in = float(
@@ -16430,7 +16446,9 @@ while not shutdown_requested:
                                         _log(
                                             f"DISPLACEMENT: no candidate for {symbol} "
                                             f"raw={_disp_in:+.3f} need ${_exec_min_pos:.0f} "
-                                            f"from {len(_disp_held)} holding(s)", "yellow")
+                                            f"from {len(_disp_held)} holding(s) "
+                                            f"scored={sum(1 for _v in _disp_held.values() if _v[0] is not None)} "
+                                            f"ranked={len(_disp_rank)}", "yellow")
                                 except Exception as _de:
                                     # Never silent: an inert lever must announce itself.
                                     _log(f"DISPLACEMENT ERROR for {symbol}: {_de!r}", "red")
