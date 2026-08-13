@@ -188,3 +188,38 @@ diagnostic line, not a trading change.
 
 This section, the `bars=0` breakdown, the six-of-eight tie-back and the falsification of
 `breakout_min_history_bars` were all derived from logs already pulled — no additional backtests.
+
+## Correction: the three discarding sites cannot explain the 217
+
+Reading what each discarding call site actually handles:
+
+| line | symbol set | nature |
+|---|---|---|
+| 4511 | `_sleeve_syms` | sleeve legs (SPY / SQQQ) |
+| 14163 | `_enforce_missing` | names under sell enforcement |
+| 14220 | `_mpt_missing` | names under momentum partial trim |
+
+All three deal with **sleeve legs or positions being sold** — not newly discovered buy candidates.
+Newly discovered names go through `_exp_new` / `_exec_new` / `new_syms` at 13994 / 14044 / 14105,
+and those three **do** capture `loaded_syms`, append to `symbols_for_data`, and rebuild.
+
+So the discarding sites do not account for 217 discovery-expanded symbols being absent from the
+history map. The hypothesis in the previous section is **withdrawn**.
+
+What survives is only the measurement, which is not in doubt:
+
+* 2,922 breakout evaluations, 100% exiting at `bars=0`, zero promotions in the window.
+* 217 of the 396 skipped symbols have a successful `expansion: loaded N 1Hour bars` line.
+* only 10 are the legitimate `no historical bars found` case.
+
+Untested alternatives now include: `get_price_history_up_to_current` applying a causal filter that
+yields an empty list for a symbol whose fetched range begins near the current bar; the `_rebuild_ph
+and price_history is not None` guard failing; or the expansion happening on a branch whose rebuild
+does not run in this configuration.
+
+**No fix is proposed, and none should be attempted from here.** Three candidate causes have now
+been advanced and knocked down — `breakout_min_history_bars`, widening to `data.keys()`, and the
+discarding call sites. Each looked convincing before being checked. The next step is the diagnostic
+that was named and not yet run: log, for one known-skipped symbol, whether it is present in
+`symbols_for_data`, whether `price_history` is `None`, and what `len(price_history.get(sym))` is at
+the scoring call.
