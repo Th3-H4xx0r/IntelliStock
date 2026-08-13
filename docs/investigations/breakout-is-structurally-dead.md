@@ -93,3 +93,42 @@ trading change on a half-understood cause is how the five previously-inert lever
 
 Next step is diagnostic, not corrective: log which rebuild branch is taken and whether
 `price_history` is None at the scoring call, for a symbol known to be skipped.
+
+## Located: three of six call sites discard the loaded-symbol list
+
+`_ensure_backtest_history_for_symbols(data, symbols, ...)` writes `data[sym] = bars` and **returns
+the list of symbols it actually loaded**. Six call sites:
+
+| line | return value | consequence |
+|---|---|---|
+| 13994 | `loaded_syms = ...` | appended to `symbols_for_data`, history rebuilt |
+| 14044 | `loaded_syms = ...` | appended, rebuilt |
+| 14105 | `loaded_syms = ...` | appended, rebuilt |
+| **4511** | **discarded** | bars land in `data`, symbol never enters `symbols_for_data` |
+| **14163** (`_enforce_missing`) | **discarded** | same |
+| **14220** (`_mpt_missing`) | **discarded** | same |
+
+A symbol loaded through one of the three discarding paths has bars in `data` and is absent from the
+history map for the rest of the run — which matches the measurement: persistent `bars=0`, ~7.4
+skips per symbol, not a one-tick ordering artifact.
+
+This is a hypothesis with a mechanism, not a proven cause. It has not been shown that the 396
+skipped symbols arrive via those three paths specifically.
+
+## The drafted patch would have been wrong twice
+
+The rejected fix widened the history map to `set(symbols_for_data) | set(data.keys())`. Line 1876
+is decisive against it:
+
+```python
+else:
+    data.setdefault(sym, [])          # symbol had NO bars
+    _backtest_no_history_symbols.add(sym)
+```
+
+`data` deliberately holds **empty lists** for symbols with no history, so `data.keys()` includes
+bar-less names and widening to it reproduces `bars=0` for exactly those. The patch would have
+looked correct, changed the symbol count, and left the skip reason unchanged — an inert lever that
+appeared to do something.
+
+Both facts were free to establish by reading. Neither was visible from the run.
