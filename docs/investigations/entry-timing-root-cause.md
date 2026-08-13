@@ -100,3 +100,43 @@ entry-extension gate, nor a turnover exemption, nor raising `max_positions`.
 
 `pit_mode=research` (lookahead). Prices above are first/last quoted values inside the run, not
 realised P&L. One window. Nothing here is promotion-eligible or justifies real money.
+
+## Displacement is viable, and the log names the trade
+
+Reconstructed the book from fills at the moment `SNDK` was starved (2026-01-19, $147.20 cash,
+$27.20 fundable against a $955.76 allocation):
+
+| holding | value | conviction at the time | what it went on to do |
+|---|---:|---:|---:|
+| AGQ | $2,535.70 | (core winner) | **+169.7%** |
+| CPER | **$921.78** | **+1.000** | +13.8% |
+| APP | $847.55 | +1.800 | flat |
+| BKNG | $824.68 | +1.800 | flat |
+| SNDK (refused) | — | **+1.700 → +2.136** | **+187.9%** |
+
+`CPER` was worth **$921.78** against the **$955.76** `SNDK` needed — one trim funds the buy almost
+exactly. `CPER` scored **+1.000**, *below* the 1.50 conviction-overflow threshold and far below
+`SNDK`'s +1.700.
+
+The decision rule uses only information available at the time — +1.000 versus +1.700 — so this is
+a causal rule, not hindsight. The outcome column merely shows what the rule would have bought:
+a +13.8% mover swapped for a +187.9% mover.
+
+`AGQ` is the counter-example that constrains the rule. It was 42% of NAV and captured 94.9% of a
++169.7% move. **A displacement rule must trim the weakest holding, never the largest** — sorting by
+position size instead of conviction would have sold the year's best trade to buy the second-best.
+
+### What this changes about the preregistered test
+
+The conviction-ordering lever alone cannot fix this tick: reordering the queue does not create
+cash, and `SNDK` and `HYMC` both hit the same $27.20 wall. Ordering is necessary but not
+sufficient. The pair to test is ordering **plus** displacement, and the log gives a specific
+mechanism check to grep for before believing any P&L:
+
+    a sell of the lowest-conviction satellite holding on the same tick as a >=1.50 buy that
+    would otherwise be refused for cash
+
+If that line never appears, the lever is inert regardless of what the return column says.
+
+Turnover: displacement is a swap, so it adds a sell leg but removes the later forced entry. It
+must be measured, not assumed; a rise is still disqualifying.
