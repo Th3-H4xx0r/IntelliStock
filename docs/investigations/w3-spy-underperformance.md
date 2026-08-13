@@ -124,3 +124,44 @@ per window before anyone believes it.
 The first pass at this counted `action_intent` with a per-symbol regex that silently missed the
 buy-intent lines and reported "hold-only" for all 65. The corrected count reuses the same parser
 that built the price table. Recorded because the error direction flattered my own thesis.
+
+## The funnel, measured the same way in both windows — this corrects the W0 claim too
+
+Applying the corrected intent parser to W0 shows the same shape, so the W3 correction was not a
+W3 quirk. It revises the headline I reported for W0 as well.
+
+| stage | W0 (2026-01..03) | W3 (2026-06..07) |
+|---|---:|---:|
+| names moving >=30% in-window | 103 | 65 |
+| ever given a BUY intent | **19 (18%)** | **16 (25%)** |
+| reached the broker buy gate | 9 (9%) | 8 (12%) |
+| actually bought | 7 (7%) | 1 (2%) |
+
+In both windows the dominant loss is the **first** step: 84 of 103 movers in W0 and 49 of 65 in W3
+are never proposed as buys at all. Portfolio construction — the cash starvation, the satellite cap,
+the queue, and therefore displacement — governs only the 19->7 and 16->1 steps.
+
+The objective's premise is that "discovery already finds the winners... SNDK emitted 13 buy signals,
+all refused by portfolio construction." That is exactly right **for SNDK**, and the W0 log confirms
+it name by name. But across the whole population of big movers, roughly four out of five never
+reach portfolio construction in either window. Both statements are true at once: the named winners
+died at construction, and most movers died earlier.
+
+### Consequence for where effort goes
+
+Displacement and conviction ordering remain correct for the 19->7 / 16->1 step and remain worth
+validating — that is where `SNDK` and `NVTS` were lost, both `high_conv=True`, both starved to ~$30
+of fundable cash. But neither lever can reach the 84 and 49 names filtered upstream, so neither can
+be expected to close the -10.14pp SPY gap in W3 on its own.
+
+The upstream stage has not been diagnosed. Two visible gates are the sub-floor price block
+(`primary=$8.00`) and the falling-knife filter, and low-priced names are a large share of the
+missed movers in both windows. Whether tightening or loosening that stage helps is unmeasured, and
+lowering the floor is a universe change rather than a conversion fix.
+
+### Method
+
+Counts come from the merged action-intent stream in each run's own log, parsed with the same
+regex that builds the price table, treating any intent containing `buy` or `backfill` as a buy
+proposal. An earlier per-symbol variant of this count silently missed those lines and is corrected
+above.
