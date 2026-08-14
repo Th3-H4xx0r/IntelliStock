@@ -342,3 +342,44 @@ that covers discovered symbols - is a trading behaviour change and must be defau
 judged against the ~10pp dispersion measured today, not the 4.94pp floor. Four prior hypotheses in
 this document were confidently wrong; this one is better evidenced but has not been tested by
 running it.
+
+## Falsification test of the mechanism: the two sets are disjoint, not merely overlapping
+
+If `symbols_list` and the `price_history` map partially overlapped, some breakout evaluations would
+report `bars>0`. Parsing every skip reason in bt 278531:
+
+| skip reason | count |
+|---|---:|
+| `skip:bars=0<25` | **7,156** |
+| any other reason | 0 |
+| any evaluation with `bars>0` | **0** |
+
+Every evaluation in the run saw zero bars. Not one symbol out of thousands had history available at
+the moment it was scored. The scored set and the history map are **disjoint**, which is what the
+mechanism predicts: `symbols_list` is populated by discovery inside `run_once`, while the map is
+built by the broker from `symbols_for_data` before the call.
+
+This is the strongest available confirmation short of running a fix.
+
+### Count correction
+
+An earlier section of this document reports 2,922 `BREAKOUT SKIP` lines. The full parse gives
+**7,156**. The earlier figure came from a narrower grep and undercounted; the qualitative claim
+(100% `bars=0`, zero promotions) is unchanged and the corrected total makes it stronger.
+
+## Where this leaves the objective
+
+The objective states the gap is conversion, not discovery, and that portfolio construction refuses
+top-ranked names. Measured across seven runs today:
+
+* **Discovery works** - 35 of 36 lost movers are discovered by momentum.
+* **Portfolio construction is not the main refuser** - 86% of lost movers are never scored, so they
+  never reach it.
+* **The refusal that does happen is real but narrow** - `SNDK` is scored, proposed and filled 94.9%
+  through its move; the entry-extension gate blocks 4 of 36.
+* **Sizing is solved** - 14.00% median entry, inside the 10-15% band.
+* **Capture is adequate** - 40-100% on names actually bought.
+* **Turnover moved the right way for the first time** - displacement halved trades and core spend.
+
+The single remaining structural defect is the one identified above, and it explains why the account
+returns +6% to +11% on a window containing 53 names that moved more than 30%.
