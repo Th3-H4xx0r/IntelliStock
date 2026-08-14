@@ -74,3 +74,42 @@ That is a reason to test it properly, not a reason to enable it.
    one pair.
 2. Re-open the conviction reserve as **undecided**, not rejected.
 3. Do not quote the +129%/yr chained figure again.
+
+## Sizing is no longer the blocker; holding and selection are
+
+Measured from the fill lines of both arms (`FILL BUY sym qty= price=`), cumulative buy notional per
+name as a share of starting NAV:
+
+| | control 523085 | treatment 102463 |
+|---|---:|---:|
+| names bought | 12 | 9 |
+| per-name entry notional, median | **14.00%** | **14.00%** |
+| per-name mean | 21.03% | 18.39% |
+| SPY core, cumulative | 95.94% | **54.01%** |
+| `TURNOVER BUDGET BINDING` lines | 611 | **314** |
+| buys / sells | 16B / 16S | **11B / 5S** |
+
+Two things follow.
+
+**Blocker (2) reads differently now.** The objective records per-name satellite weight as mean 6.75%
+/ median 4.73% of NAV. In both of these runs the median entry is **14.00%** — inside the 10-15% band
+the objective asks for, and evidently a cap rather than an accident (the value is exactly 14.00 for
+most names). Sizing is not what is holding the result back here.
+
+Caveat: this is *cumulative* buy notional per name, so a name bought repeatedly sums above its true
+position weight — that is why SPY shows 95.94%. For the satellites, most sit at a single 14.00%
+entry, so the median is a fair read of entry size.
+
+**So why did no name move the needle?** Both summaries say `NO single name moved the needle`, with
+the top contributor at +4.9% (control) and +4.5% (treatment) of starting NAV. A 14% position
+returning ~35% produces ~4.9%. The positions are large enough; the names either did not move far
+enough or were not held through the move. That points at selection and holding, not sizing.
+
+**The core is finally being spent as designed.** The objective says the SPY core is meant to be SOLD
+to fund high-conviction buys. Control put 95.94% of NAV cumulatively through SPY; the treatment arm
+halved that to 54.01% while buying `AMAT` at 14.0%, `URA` at 14.0%, `CCK` at 14.2%. The
+buy/sell ratio also shifts from 16B/16S to 11B/5S — the treatment arm accumulates and holds rather
+than churning, which is the behaviour the objective asks for.
+
+None of this is a return claim. The +5.12pp return gap remains inside the ~10pp same-config
+dispersion measured above.
