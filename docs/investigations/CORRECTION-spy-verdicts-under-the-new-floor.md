@@ -49,3 +49,39 @@ dispersion, using a benchmark with single-digit sample counts. That combination 
 confident conclusions in both directions. The corrected position is not that the strategy is bad —
 it is that **the evidence collected so far cannot tell**, and the fix is repetition and a real
 benchmark, not another lever.
+
+
+## A better SPY benchmark, and what it changes
+
+`spy_series` returns **4 samples** for bt 523085 — unusable. But SPY is *traded* in these runs, so
+its fills carry dated prices. Extracting those gives 16, 6 and 17 points respectively, and the
+17-point series from bt 718107 spans 2026-01-02 to 02-26, most of the window:
+
+**Window SPY = +0.45%.**
+
+| run | strategy | SPY | vs SPY | verdict @ ~10pp |
+|---|---:|---:|---:|---|
+| ctl 523085 | +6.00% | +0.45% | +5.55pp | **noise** |
+| trt 102463 (displacement) | +11.12% | +0.45% | **+10.67pp** | beat, **marginal** |
+
+Three caveats that must travel with those numbers:
+
+1. SPY coverage differs per run (16, 6, 17 points), because it depends on when the core lane traded.
+   Comparing a full-window strategy return against a partial SPY window is the same error as reading
+   a stopped run's P&L, so only the 17-point series is used above.
+2. The ~10pp floor is itself estimated from **one** same-config comparison. A floor with n=1 cannot
+   sharply adjudicate a result 0.67pp beyond it.
+3. One window, one pair. The objective requires >=3 windows including one OOS and one
+   non-semiconductor.
+
+So the honest statement is narrower than either of my earlier ones: **the displacement arm is the
+only result in this session that clears the corrected floor at all, and it clears it by 0.67pp on a
+single window with a benchmark built from 17 points.** That is a reason to run it again, not a
+result.
+
+## Method note for next time
+
+Benchmark SPY from **fills**, not from the monitor stream — 17 dated points against 4. Better still,
+fetch an independent SPY series for the window so the benchmark does not depend on whether the
+strategy happened to trade the core lane. Every SPY comparison this project has published rests on
+the weaker source.
