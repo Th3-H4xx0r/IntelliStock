@@ -6386,6 +6386,31 @@ def _compute_breakout_score_boost(
                 boost += _b
                 reasons.append(f"gap_up({(today_open / prev_close - 1.0) * 100.0:.1f}%,+{_b:.2f})")
     boost = min(1.0, max(0.0, boost))
+    if boost <= 0 and bool(config.get("breakout_diagnostics_enabled", False)):
+        # bt 718107: 6,314 of 7,340 skips carried an EMPTY reason, because
+        # "+".join([]) is "". That made "evaluated, no pattern" indistinguishable
+        # from "not evaluated" and produced a wrong published claim. A name up
+        # +87.7% (AAOI) was evaluated 26 times and matched nothing, which is not
+        # credible on its face — so report what was actually seen. Logged, never
+        # returned: the return value must not depend on a diagnostics flag.
+        try:
+            _n = len(closes)
+            _h25 = max((c for c in closes[-25:] if c > 0), default=0.0)
+            _h252 = max((c for c in closes[-252:] if c > 0), default=0.0)
+            _pv = [v for v in volumes[-21:-1] if v > 0]
+            _avgv = (sum(_pv) / len(_pv)) if _pv else 0.0
+            _volx = (volumes[-1] / _avgv) if _avgv > 0 else 0.0
+            _gap = ((opens[-1] / closes[-2] - 1.0) * 100.0
+                    if len(opens) >= 1 and len(closes) >= 2 and closes[-2] > 0 else 0.0)
+            if _h25 > 0 and _h252 > 0:
+                _log(f"BREAKOUT NOPATTERN: {sym_u} bars={_n} last={current_close:.2f} "
+                     f"h25={_h25:.2f}({100.0 * current_close / _h25 - 100.0:+.1f}%) "
+                     f"h252={_h252:.2f}({100.0 * current_close / _h252 - 100.0:+.1f}%) "
+                     f"vol={_volx:.1f}x gap={_gap:+.1f}%", "yellow")
+            else:
+                _log(f"BREAKOUT NOPATTERN: {sym_u} bars={_n} degenerate", "yellow")
+        except (TypeError, ValueError, ZeroDivisionError, IndexError) as exc:
+            _log(f"BREAKOUT NOPATTERN ERROR: {sym_u} {exc!r}", "red")
     return (boost, "+".join(reasons))
 
 

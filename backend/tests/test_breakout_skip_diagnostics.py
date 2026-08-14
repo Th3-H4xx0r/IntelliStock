@@ -59,13 +59,34 @@ def test_no_early_exit_returns_a_silent_empty_reason():
 
 
 def test_diagnostic_is_default_off_and_log_only():
-    i = _src.index('breakout_diagnostics_enabled')
-    line = _src[_src.rindex("\n", 0, i) + 1: _src.index("\n", i)]
-    assert 'config.get("breakout_diagnostics_enabled", False)' in line
-    nxt = _src[_src.index("\n", i) + 1: _src.index("\n", _src.index("\n", i) + 1)]
-    assert "_log(" in nxt and "fresh_score" not in nxt
+    """The flag must not change the return value — tested behaviourally.
+
+    The previous version asserted the log call sat on the literal next line and
+    broke on a comment while the invariant still held. Textual adjacency was the
+    wrong tool: what matters is that turning diagnostics on changes nothing a
+    caller can observe. bt 718107 relies on that — the reason string is logged,
+    and `boost` is what drives promotion.
+    """
+    bars = [{"c": 10.0 + i * 0.01, "v": 100.0, "o": 10.0 + i * 0.01} for i in range(300)]
+    hist = {"AAA": bars}
+    for cfg_extra in ({}, {"breakout_min_history_bars": 25}):
+        off = dict(cfg_extra, breakout_diagnostics_enabled=False)
+        on = dict(cfg_extra, breakout_diagnostics_enabled=True)
+        boost_off, _ = _boost("AAA", hist, off)
+        boost_on, _ = _boost("AAA", hist, on)
+        assert boost_off == boost_on, "diagnostics changed the boost"
+    # a symbol with no history: the early exit must also be flag-independent
+    assert _boost("ZZZ", {}, {"breakout_diagnostics_enabled": False})[0] == 0.0
+    assert _boost("ZZZ", {}, {"breakout_diagnostics_enabled": True})[0] == 0.0
 
 
+def test_flag_always_defaults_to_false():
+    for i in range(len(_src)):
+        if _src.startswith("breakout_diagnostics_enabled", i):
+            line = _src[_src.rindex("\n", 0, i) + 1: _src.index("\n", i)]
+            if "config.get(" in line:
+                assert 'config.get("breakout_diagnostics_enabled", False)' in line, (
+                    f"must default to False: {line.strip()!r}")
 def test_reason_only_consumed_when_boost_positive():
     assert "if _bk_boost > 0:" in _src, (
         "naming the skip reasons is only safe while the reason is used on the "
