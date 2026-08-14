@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""Benchmark a backtest against SPY using the run's own SPY FILLS.
+
+Why this exists: `spy_series` reads the monitor price stream and returned FOUR
+samples for bt 523085 and bt 102463 (25 for the bear window). A benchmark built
+from four points is not a benchmark, and every SPY comparison published in this
+project before 2026-08-14 rested on it. SPY is traded in the core lane, so its
+fill lines carry dated prices — 16-17 per run.
+
+It also refuses to difference two series that do not span the same dates. On
+2026-08-14 the SPY fills for bt 102463 stopped on 02-05 while the strategy ran to
+02-26; differencing those is the same error as reading a stopped run's P&L.
+
+Usage:
+    python3 scripts/spy_benchmark.py <backtest_id> [--return PCT] [--log PATH]
+"""
+import argparse
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+FILL = re.compile(
+    r"FILL (?:BUY|SELL) (\S+) qty=[\d\.]+ cumulative=[\d\.]+ price=([\d\.]+)"
+    r".*quote=(\d{4}-\d{2}-\d{2})")
+
+
+def spy_points(lines):
+    """Dated SPY prices, de-duplicated and ordered."""
+    pts = {}
+    for line in lines:
+        m = FILL.search(line)
+        if m and m.group(1) == "SPY":
+            pts[m.group(3)] = float(m.group(2))
+    return sorted(pts.items())
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser()
+    ap.add_argument("backtest_id")
+    ap.add_argument("--return", dest="ret", type=float, default=None,
+                    help="strategy return %% for the same window, to difference")
+    ap.add_argument("--log", default=None, help="use an existing log file")
+    ap.add_argument("--floor", type=float, default=10.0,
+                    help="noise floor in pp (measured ~10pp on 2026-08-14)")
+    args = ap.parse_args(argv)
+
+    if args.log:
+        text = Path(args.log).read_text(errors="replace")
+    else:
+        out = Path(f"/tmp/bt{args.backtest_id}_spy.log")
+        subprocess.run([sys.executable, "scripts/pull_backtest_logs.py",
+                        args.backtest_id, "--out", str(out)],
+                       check=False, capture_output=True, timeout=900)
+        text = out.read_text(errors="replace")
+
+    pts = spy_points(text.splitlines())
+    if len(pts) < 3:
+        print(f"REFUSING: only {len(pts)} SPY fill points — not a benchmark.")
+        return 2
+
+    first, last = pts[0], pts[-1]
+    spy = 100.0 * (last[1] - first[1]) / first[1]
+    print(f"SPY points   : {len(pts)}")
+    print(f"span         : {first[0]} -> {last[0]}")
+    print(f"SPY return   : {spy:+.2f}%  (${first[1]:.2f} -> ${last[1]:.2f})")
+
+    if args.ret is not None:
+        delta = args.ret - spy
+        verdict = "beat" if delta > args.floor else (
+            "LOSES" if delta < -args.floor else "NOISE")
+        print(f"strategy     : {args.ret:+.2f}%")
+        print(f"vs SPY       : {delta:+.2f}pp  -> {verdict} (floor {args.floor:.1f}pp)")
+        print("\nCHECK THE SPAN: if the SPY span above is shorter than the "
+              "strategy's window, this difference is not meaningful.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
