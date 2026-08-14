@@ -196,3 +196,40 @@ what was measured at −7.95%. The objective lists it under DO NOT RETRY.
 The honest conclusion is narrower than either of my earlier ones: **the promotion path is
 marginally, not structurally, out of reach for large movers** — and closing that margin safely is a
 question about *when names become candidates*, not about the size of the threshold they meet.
+
+
+## Evaluation coverage is sparse, which revives an option I dismissed
+
+Caveat first: bt 778288's pulled log spans 2026-01-01..01-29 against a window ending 03-01, so it is
+partial. The coverage ratios below are computed within that span and should be re-measured on a
+complete run before being relied on.
+
+Within it, movers are evaluated by the breakout scorer on a **median 43% of trading days**, and
+**29 of 45 on fewer than half**:
+
+| mover | evaluations / 21 days | coverage | closest approach |
+|---|---:|---:|---:|
+| AAOI | 18 | 86% | −3.4% |
+| LITE | 15 | 71% | −1.1% |
+| MRNA | 10 | 48% | −3.1% |
+| RDW | 9 | 43% | −1.4% |
+| VICR | 6 | 29% | −2.1% |
+| SNDK | 3 | 14% | −5.1% |
+
+Put beside the previous finding — 18 of 45 movers come within 2% of the promotion test, several at
+the −1.0% boundary — this changes the picture again. A name that is repeatedly within 1-2% of
+qualifying, and is only *looked at* on 43% of days, may be missing its qualifying moments rather
+than never having them. `SNDK` is the extreme case: 3 evaluations in a month, closest −5.1%, while
+its underlying series (from the quote stream) sits within 1% of its trailing 25-day high on 2 of 12
+testable days.
+
+Earlier in this investigation I dismissed "evaluate discovered names more often" on the grounds that
+qualifying highs precede discovery. That was based on 11 evaluations from a truncated probe. On this
+fuller data the dismissal does not hold: coverage is sparse enough that the two explanations —
+missing the moment, versus the moment never arriving — are not distinguished by anything measured so
+far.
+
+**Distinguishing them is cheap and does not require a trading change**: log, for each mover on each
+day, whether `current_close >= 0.99 * high_25` held *whether or not the scorer ran*. If qualifying
+days exist on days the scorer skipped, cadence is the lever. If they do not, discovery latency is.
+That measurement has not been built, and no lever should be chosen before it is.
