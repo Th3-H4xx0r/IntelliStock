@@ -120,3 +120,26 @@ That does not make those results wrong. It makes them unmeasured. The correct st
 cannot silently recur. But the real fix is an **independent SPY series** for each window, fetched
 rather than inferred from whether the core lane happened to trade. Until that exists, no regime
 claim should be made in either direction.
+
+
+## Attempt to build an independent SPY series — and why it failed
+
+Two local sources were checked so a future session does not repeat the search:
+
+* **Market-data credentials**: absent. `.env` holds only `INTELLISTOCK_CRED_KEY` and
+  `SOCKET_CONTROL_MASTER_KEY`; no Alpaca/Polygon/Tiingo keys, and no such variables in the
+  environment. SPY cannot be fetched from this machine.
+* **`backend/backtest_prices.csv`**: 181 SPY rows, but spanning only **2026-03-30 to 2026-04-27**.
+  That covers none of W0, W2 or W3, and only the first month of W1.
+
+So the benchmark cannot be repaired locally. The position stands: of every SPY comparison this
+project has made, **only W3 has a series covering its window, and it is a 10.14pp loss**.
+
+Closing this properly needs one of:
+
+1. market-data credentials on the machine doing the analysis, or
+2. a backtest that logs a SPY quote every tick regardless of whether the core lane trades, or
+3. an independent daily SPY series committed once per validation window.
+
+Option 3 is cheapest and permanent — four windows of daily closes is a few hundred rows and removes
+the dependency entirely. It costs no backtest credits.
