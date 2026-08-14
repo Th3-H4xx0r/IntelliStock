@@ -185,3 +185,36 @@ because that is all that survives to the buy gate.
 The mechanism that should promote a no-news, no-graph-edge mover into candidacy is the breakout
 rescue, and it is measured dead: 2,922 evaluations, 100% exiting at `bars=0`, zero promotions,
 covering six of the eight winners the objective names.
+
+## Where the lost movers are lost: never scored, not refused
+
+In bt 102463, 53 names moved >=30% and 42 never produced a buy intent. Splitting those 42 by
+whether the name ever carried a score anywhere in the run (223 symbols did):
+
+| fate | count | share |
+|---|---:|---:|
+| **never scored at all** | **36** | 86% |
+| scored, but never produced a buy intent | 6 | 14% |
+
+Among the never-scored are `AAOI` (+87.7%), `VIAV` (+68.9%) and `LASR` — three of the eight winners
+the objective names — alongside `LITE` (+105.1%), `DTSS` (+95.7%), `ODYS` (+94.5%), `MRNA` (+81.8%)
+and `UCTT` (+64.6%).
+
+This is the sharpest statement of the problem available:
+
+> For 86% of the large movers that fail to convert, portfolio construction never gets the chance to
+> refuse them. They are never scored, so they are never candidates.
+
+The objective's framing - "SNDK emitted 13 buy signals, all refused by portfolio construction" - is
+accurate for `SNDK`, which is scored, proposed, and refused or filled late. It is **not** what
+happens to the majority. Most large movers are lost one stage earlier, at scoring, exactly where
+`_finalize_scores` leaves `fresh_score = 0` for a name with no LLM sentiment and no graph path, and
+where the breakout rescue that should promote them is measured dead.
+
+### Correction
+
+A first pass at this reported "42 of 42 never scored" from a regex that took the first token of
+lines like `Buy: GLD (Direct trend_momentum sentiment=+1 (raw=+1.000, 1 paths) | B), RTX (...)`,
+which enumerate many symbols per line. That yielded 4 scored symbols in the whole run - implausible
+on its face, which is what prompted the check. Parsing the enumerated form gives 223 scored symbols
+and the 36/6 split above. The direction of the finding survives; the absolute claim did not.
