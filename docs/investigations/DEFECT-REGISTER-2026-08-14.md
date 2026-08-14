@@ -3,6 +3,22 @@
 Twelve independent agents, different logs, no shared context. Convergence across agents is the
 evidence standard here: where several found the same thing from different angles, it is real.
 
+> **SUPERSEDED IN PART — 2026-08-14b. Read `HANDOFF-2026-08-14b.md` §1 before acting on this file.**
+> A second audit re-derived these from the same logs and three entries did not survive:
+>
+> - **D1 is real but is the SMALLER half.** It cannot create a fill by construction — it declines a
+>   buy that had no room; it does not find room. The larger causes are the book being
+>   arithmetically sealed at six names, and the passive core holding cash hostage in unfilled orders
+>   ($16,117 of in-flight refusals against D1's $6,759).
+> - **D6's consequence is REFUTED.** The arithmetic is exact to the cent (102.8%), but the turnover
+>   brake blocked ZERO orders — the bear book was starved upstream by the regime capacity gate.
+> - **D8 is UNDERSTATED, and its stated workaround does not work.** A fresh `history_scope_salt`
+>   does NOT isolate an arm: the active-event tables use a separate salt, and the discovery-snapshot
+>   bridge imports the sibling arm's universe into a freshly-empty scope.
+>
+> Also corrected: the objective's "median position 4.73% of NAV" is stale (measured 13.96%), and the
+> satellite cap refuses ADDS TO HELD WINNERS, not only entries.
+
 ## D1 — THE CONVERSION BUG. Satellite cap trims below the floor that then refuses. 6 agents.
 
 `_CORE_MIN_SATELLITE_TRIM_USD = 25.0` (broker.py:3255) permits the cap to trim `cash_per_trade` to
