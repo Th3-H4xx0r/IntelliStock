@@ -302,3 +302,43 @@ wrong, and no fix was shipped on it - which is the one thing that went right.
 Buys: the search is now correctly aimed. The next step is to instrument the *graph_nexus* side -
 what `price_history` (if any) `_finalize_scores` passes into `_compute_breakout_score_boost` - and to
 find out why the scorer is called with an empty symbol list.
+
+## Mechanism identified: the scorer is asked about symbols the map was never built for
+
+Chain, with each link labelled measured or read:
+
+1. **`symbols` arrives empty.** `PH DIAG` reports `scored=0` on 142 of 142 samples (measured). The
+   broker calls `run_run_once_strategies(..., list(symbols or []), ...)` with an empty list.
+2. **`symbols_list` therefore starts empty.** `graph_nexus_analysis.run_once` line 25072:
+   `symbols_list = list(symbols or [])` (read).
+3. **Discovery populates it inside `run_once`.** Six `symbols_list.append(...)` sites at 26905,
+   27323, 27328, 27342, 27725, 27771 (read). This is where `AAOI`, `VIAV`, `LITE` enter - the log
+   confirms `Discovered stock (momentum): AAOI (20d=+33.9%, 60d=+3.1%)` (measured).
+4. **`_finalize_scores` iterates those discovered names** and passes `price_history=data` into
+   `_compute_breakout_score_boost(sym, price_history, config)` at 21014 (read).
+5. **`data` is the broker's map, built from `symbols_for_data`.** `PH DIAG` shows
+   `map == symbols_for_data` on every sample, `empty=0`, size reaching 201 (measured).
+6. **The discovered names are not in it.** `bars = prices_history.get(sym_u) or ... or []` returns
+   `[]`, and the guard returns `skip:bars=0<25` (read + measured: 2,922 such lines, 100% of skips,
+   396 distinct symbols against a map of ~201).
+
+The broker only fetches history for a discovered symbol *after* the strategy returns - the expansion
+lines `Nexus discovered: expanding symbols with 120 new tickers` and `Backtest symbol expansion:
+fetching 1Hour history` appear at broker lines ~14001+, while the scoring call sits at ~13663. So on
+the tick a name is discovered it cannot be in the map, and if it never enters `symbols_for_data` it
+never will be.
+
+This reconciles the fact that looked contradictory earlier: 217 of the skipped symbols do have
+`expansion: loaded N 1Hour bars` lines. Their bars are loaded - just not before the scorer asked
+about them.
+
+**Consequence.** A discovered mover with no LLM sentiment and no graph path reaches
+`_finalize_scores` with `fresh_score = 0`, the breakout rescue that would promote it on price action
+alone cannot see its bars, so it stays 0 and is held. That is the 79-82% funnel loss measured across
+four runs, and it is upstream of every lever this project has built.
+
+**Not yet shipped, deliberately.** The obvious repair - give the breakout scorer a history source
+that covers discovered symbols - is a trading behaviour change and must be default-OFF, paired, and
+judged against the ~10pp dispersion measured today, not the 4.94pp floor. Four prior hypotheses in
+this document were confidently wrong; this one is better evidenced but has not been tested by
+running it.
