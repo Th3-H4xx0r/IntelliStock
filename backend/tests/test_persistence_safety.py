@@ -12,7 +12,12 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from persistence_safety import SecretMaterialError, assert_secret_free, sanitize_snapshot
+from persistence_safety import (  # noqa: E402
+    REDACTION_MARKER,
+    SecretMaterialError,
+    assert_secret_free,
+    sanitize_snapshot,
+)
 
 
 def test_sanitize_snapshot_removes_nested_secret_values():
@@ -122,3 +127,63 @@ def test_camel_case_secret_names_are_caught():
         assert "CANARY_CAMEL_VALUE" not in json.dumps(clean), key
         with pytest.raises(SecretMaterialError):
             assert_secret_free({key: "CANARY_CAMEL_VALUE"})
+
+
+# ── ticker symbols that collide with credential key segments ───────────────
+#
+# bt 599773 completed its whole window, printed its summary, and then died at
+# 97% on:
+#     unredacted secret-bearing field at $.portfolio_value_history[381].prices.KEY
+# `KEY` is KeyCorp. `assert_secret_free` runs over the entire BacktestResults
+# row (broker.py:12755), which carries a symbol->price map, and `_is_secret_key`
+# lowercases the ticker to the segment `key`. The separating rule is the VALUE,
+# not the name: a credential here is always a string, never a bare number.
+
+def test_a_ticker_named_KEY_does_not_fail_the_write():
+    row = {"portfolio_value_history": [
+        {"timestamp": "2026-01-02T15:00:00Z",
+         "value": 6123.45,
+         "prices": {"SPY": 681.82, "KEY": 18.42, "SNDK": 237.33}}]}
+    assert_secret_free(row)   # must not raise
+
+
+def test_a_ticker_named_KEY_keeps_its_price_through_sanitize():
+    """Redacting it would be worse than the failed write: the equity curve
+    would persist as {"redacted": True} and look like a value."""
+    out = sanitize_snapshot({"prices": {"KEY": 18.42, "SPY": 681.82}})
+    assert out["prices"]["KEY"] == 18.42
+    assert out["prices"]["SPY"] == 681.82
+
+
+def test_every_credential_segment_still_fails_closed_on_a_string():
+    for name in ("key", "api_key", "secret", "token", "password", "passwd",
+                 "pwd", "credential", "auth", "authorization", "bearer",
+                 "apikey", "dsn", "userinfo", "passphrase", "alpacaKey",
+                 "clientSecret"):
+        with pytest.raises(SecretMaterialError):
+            assert_secret_free({name: "hunter2-hunter2-hunter2"})
+
+
+def test_a_string_secret_under_a_ticker_shaped_key_still_fails():
+    """The relaxation is scoped to NUMBERS. A string under `KEY` is exactly the
+    shape the guard exists for and must still be refused."""
+    with pytest.raises(SecretMaterialError):
+        assert_secret_free({"prices": {"KEY": "sk-abcdefghijklmnopqrstuvwx"}})
+    with pytest.raises(SecretMaterialError):
+        assert_secret_free({"KEY": "AKIAIOSFODNN7EXAMPLE"})
+
+
+def test_a_bool_under_a_secret_key_is_not_treated_as_a_number():
+    """`isinstance(True, int)` is True in Python; a flag must keep going through
+    the marker path rather than silently persisting."""
+    with pytest.raises(SecretMaterialError):
+        assert_secret_free({"api_key": True})
+    assert sanitize_snapshot({"api_key": True})["api_key"] == REDACTION_MARKER
+
+
+def test_numbers_under_secret_keys_survive_a_round_trip():
+    row = {"prices": {"KEY": 18.42}, "count": 3, "api_key": "sk-" + "a" * 24}
+    cleaned = sanitize_snapshot(row)
+    assert_secret_free(cleaned)          # must not raise
+    assert cleaned["prices"]["KEY"] == 18.42
+    assert cleaned["api_key"] == REDACTION_MARKER

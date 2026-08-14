@@ -63,6 +63,35 @@ def _is_secret_key(key):
     return any(seg in _SECRET_KEY_SEGMENTS for seg in segments if seg)
 
 
+def _is_non_secret_scalar(value):
+    """True for values that cannot carry secret material whatever their key.
+
+    THE INCIDENT (bt 599773, 2026-08-14). `assert_secret_free` is called on the
+    whole BacktestResults row (broker.py:12755), and that row contains
+    `portfolio_value_history[i].prices`, a map keyed by TICKER SYMBOL. `KEY` is
+    KeyCorp — a large-cap bank in the ordinary universe — and `_is_secret_key`
+    lowercases it to the segment `key`, so the guard read a stock price as an
+    unredacted credential and failed the write closed:
+
+        unredacted secret-bearing field at $.portfolio_value_history[381].prices.KEY
+
+    The run had already completed its full window and printed its summary; only
+    the persist died, at 97%. Any backtest that prices KEY hits this.
+
+    Allowlisting the name `key` was not an option — `{"key": "sk-..."}` is
+    exactly the shape the guard exists for. The rule that separates them is the
+    VALUE, not the name: a credential in this system is always a string (or
+    bytes), never a bare number. Numbers are therefore accepted under any key,
+    and every string is still scanned with the value patterns regardless of its
+    key, so nothing that could be a credential gets through.
+
+    Booleans are excluded deliberately: `isinstance(True, int)` is True in
+    Python, and a flag under a secret-looking key should keep going through the
+    marker path rather than silently persisting.
+    """
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def _is_approved_secret_ref(value):
     return isinstance(value, str) and bool(_SECRET_REF_RE.match(value))
 
@@ -96,6 +125,13 @@ def sanitize_snapshot(value):
             lowered = str(key).lower()
             if lowered == "secret_ref" and not _is_approved_secret_ref(item):
                 clean[key] = dict(REDACTION_MARKER)
+            elif _is_secret_key(key) and _is_non_secret_scalar(item):
+                # A number under a secret-looking key is data, not a credential
+                # — a ticker's price under the symbol KEY. Redacting it here
+                # would silently corrupt the equity curve into
+                # {"redacted": True}, which is worse than the failed write,
+                # because it persists and looks like a value.
+                clean[key] = copy.deepcopy(item)
             elif _is_secret_key(key):
                 clean[key] = dict(REDACTION_MARKER)
             else:
@@ -131,6 +167,11 @@ def assert_secret_free(value, _path="$"):
                         f"unapproved secret_ref value at {child_path}")
                 continue
             if _is_secret_key(key):
+                # See `_is_non_secret_scalar`: a bare number cannot be a
+                # credential, and a symbol->price map is keyed by ticker, one of
+                # which is KeyCorp's `KEY`.
+                if _is_non_secret_scalar(item):
+                    continue
                 if not _is_redaction_marker(item):
                     raise SecretMaterialError(
                         f"unredacted secret-bearing field at {child_path}")
