@@ -64,3 +64,43 @@ here.
 `breakout_history_fallback_enabled` reverted to OFF; `breakout_diagnostics_enabled` is log-only and
 its behavioural invariance is now under test. doc 193 untouched at 580 keys. No return claim rests
 on any of this.
+
+## The qualifying days precede the evaluations
+
+Reconstructing each mover's daily series from the run's own quote stream and asking how often it
+sits within 1% of its trailing 25-day high:
+
+| | count |
+|---|---:|
+| movers with enough observations to test | 30 |
+| **ever within 1% of their trailing 25-day high** | **17 (57%)** |
+| never | 13 |
+
+`AAOI` qualifies on **5 of 8** testable days, `LITE` 5 of 11, `SNDK` 2 of 12, `VICR` 2 of 9. So the
+promotion test is not impossible for these names - they do print fresh highs.
+
+And yet in the run they never qualify. The reason is visible in the instrumented output: `AAOI` is
+evaluated 11 times with `h25` pinned at **41.00** while `last` ranges 34.84 to 37.01. That 41.00 is
+`AAOI`'s own peak - the same peak that produces the +87.7% figure in the mover table. The name is
+only ever scored on the way *down* from it.
+
+**The qualifying days happen before the name becomes evaluable.** Discovery fires on a completed
+20-day run, and by then the fresh highs that would have promoted it are in the past.
+
+This is blocker (1) - entry timing - measured at the mechanism level rather than inferred from fill
+prices. It also explains the two facts that looked contradictory all session: the movers are found
+(35 of 36 discovered), and they are never promoted (7,340 evaluations, near-zero promotions).
+
+## The consequence for the objective
+
+The objective's arithmetic - four names at ~10-15% of NAV each capturing half of a 60% move - needs
+names to be *bought while the move has room*. Sizing is solved at 14.00% and capture on names
+actually bought is 40-100%. What is missing is candidacy at the right moment, and no downstream
+lever can create it: ordering, conviction reserve, displacement and the history fallback all act on
+names that have already become candidates.
+
+The lever that would matter is upstream of everything tested here: **shorten the lag between a move
+starting and the name becoming scoreable**. That is a change to discovery cadence or criteria, it
+has a real cost (more candidates, and turnover is the known leak at ~290%/mo against ~50%
+break-even), and it is a design decision rather than a parameter. It is not proposed here, and
+nothing in this session licenses picking a value for it.
