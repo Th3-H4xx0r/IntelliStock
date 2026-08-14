@@ -113,3 +113,45 @@ than churning, which is the behaviour the objective asks for.
 
 None of this is a return claim. The +5.12pp return gap remains inside the ~10pp same-config
 dispersion measured above.
+
+## Capture: the names it does buy are now caught well; there are too few of them
+
+Per bought name, from the fills and the run's own quote stream: the move available from entry price
+to the subsequent peak, versus what was actually realised at exit (or mark at window end).
+
+**Control 523085**
+
+| name | entry | available | captured | share |
+|---|---|---:|---:|---:|
+| VICR | 2026-01-02 | +71.0% | +28.3% | 39.9% |
+| SBLK | 2026-01-02 | +32.3% | +32.3% | **100.0%** |
+| BALL | 2026-01-06 | +23.1% | +2.7% | 11.8% |
+| SNDK | 2026-02-04 | +10.7% | +3.9% | 36.2% |
+
+Median capture **38.1%**.
+
+**Treatment 102463**
+
+| name | entry | available | captured | share |
+|---|---|---:|---:|---:|
+| AMAT | 2026-01-08 | +39.8% | +32.4% | **81.2%** |
+| TSLA | 2026-01-02 | -4.0% | -4.9% | n/a |
+
+Three things fall out.
+
+**`VICR` and `AMAT` are being bought.** The objective lists both among eight winners that "none were
+bought". In these runs `VICR` is entered on the second trading day of the window and captures 39.9%
+of a 71% move at 14% of NAV, and `AMAT` captures 81.2% of a 39.8% move at 14.0% of NAV. Whatever
+was refusing them before is not refusing them here.
+
+**`SNDK` still enters late.** Entry 2026-02-04 with only +10.7% left to peak, consistent with the
+earlier finding that it signals on 01-19 at $413.60 and fills on 02-02 at $660.48 — 94.9% through
+its move. Blocker (1), entry timing, is real and unfixed.
+
+**The arithmetic explains the modest return.** The objective's target is four names at ~10% of NAV
+each capturing half of a 60% move. Sizing is there (14%) and capture on the good entries is there
+(40-100%), but only **two to four names** had a meaningful move available at all. The binding
+constraint is breadth of conversion — the 103 -> 19 -> 9 -> 7 funnel — not size and not capture.
+
+That is consistent with everything else measured today: the promotion path that would let a
+no-news, no-graph-edge mover become a candidate never fires (2,922 skips, zero promotions).
