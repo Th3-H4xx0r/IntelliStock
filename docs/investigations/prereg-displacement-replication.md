@@ -18,7 +18,7 @@ stopped run's return is meaningless. Both were demonstrated on 2026-08-14.
 |---|---|---|
 | W0 reference | 2026-01-01..2026-03-01 | replicate the observed result |
 | W2 bear | 2026-03-02..2026-03-30 | safety veto; the bear leg must not be harmed |
-| W3 non-semiconductor | 2026-06-01..2026-07-01 | currently the worst window |
+| W3 non-semiconductor | 2026-06-01..2026-07-01 | currently the worst window, and the ONLY window with a trustworthy SPY benchmark to date (-10.14pp) |
 
 Per window: doc 194 (control) vs doc 195 (`satellite_displacement_enabled=True`), same instance
 family, cash $6,000, granularity 3600, both arms equally warm, differing in that one operative key
@@ -26,8 +26,12 @@ plus their required separate salts.
 
 ## Endpoints, fixed now
 
-1. **Return vs SPY**, with SPY built **from the run's own SPY fills** (16-17 dated points), not from
-   `spy_series` (4 points). Verify both series span the same dates before differencing.
+1. **Return vs SPY**, with `benchmark_quote_logging_enabled=true` on **both arms** so SPY and QQQ
+   are logged every tick with timestamps. Do **not** benchmark from fills and do **not** use
+   `spy_series`: fills gave 4-17 points depending on whether the core lane traded, and only one
+   window in the project's history ever had a series covering it. Verify the SPY span covers the
+   strategy window before differencing — a partial benchmark is the same error as a stopped run's
+   P&L. `scripts/spy_benchmark.py` refuses series under three points and prints the span.
 2. **Turnover** — any rise is disqualifying regardless of return. This is the objective's known leak
    and the mechanism displacement is supposed to help.
 3. **Max drawdown** — a materially worse figure is not offset by return.
