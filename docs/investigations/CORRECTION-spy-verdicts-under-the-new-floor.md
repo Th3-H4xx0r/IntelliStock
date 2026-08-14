@@ -85,3 +85,38 @@ Benchmark SPY from **fills**, not from the monitor stream — 17 dated points ag
 fetch an independent SPY series for the window so the benchmark does not depend on whether the
 strategy happened to trade the core lane. Every SPY comparison this project has published rests on
 the weaker source.
+
+
+## Retroactive re-benchmark of every run with an available log
+
+Using SPY fills and reporting the span, because a truncated SPY series cannot be differenced against
+a full-window strategy return:
+
+| window | bt | SPY pts | SPY span | window ends | SPY | vs SPY | usable? |
+|---|---|---:|---|---|---:|---:|---|
+| W0 ref | 873929 | 11 | 01-02..**02-10** | 03-01 | +1.59% | +14.82pp | **no** — span short, and this is the AGQ run |
+| W1 OOS bull | 647755 | 6 | 04-06..**04-13** | ~06-01 | +3.03% | +8.95pp | **no** — 7 days of SPY |
+| W2 bear | 624674 | 4 | 03-10..**03-19** | 03-30 | −3.40% | +27.76pp | **no** — 4 points, 9 days |
+| W3 non-semi | 553341 | 9 | 06-01..**06-29** | 07-01 | −2.72% | **−10.14pp** | **yes** — span covers the window |
+| W0 ctl | 523085 | 16 | 01-02..**02-09** | 03-01 | +1.42% | +4.58pp | partial |
+| W0 fallback | 718107 | 17 | 01-02..**02-26** | 03-01 | +0.45% | n/a | best coverage |
+
+**Exactly one comparison in the project has a SPY series that covers its window: W3, and it is a
+loss of 10.14pp.**
+
+Every other SPY figure this project has published — including the +26.13pp bear-regime "win" that
+made blocker (5) look resolved — differences a full-window strategy return against a SPY series
+spanning 7 to 39 days of it. The bear window's benchmark rests on **four price points over nine
+days**.
+
+That does not make those results wrong. It makes them unmeasured. The correct statement about
+"beat SPY in every regime" is:
+
+> One window is properly benchmarked and the strategy loses it. The rest are not benchmarked at all.
+
+## What would fix this permanently
+
+`scripts/spy_benchmark.py` refuses series under three points and prints the span, so the error
+cannot silently recur. But the real fix is an **independent SPY series** for each window, fetched
+rather than inferred from whether the core lane happened to trade. Until that exists, no regime
+claim should be made in either direction.
