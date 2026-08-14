@@ -256,3 +256,49 @@ The single highest-value action remaining is the diagnostic already shipped and 
 missing symbols that have bars; if `map ~= data` with a high empty count, the causal filter in
 `get_price_history_up_to_current` is returning empty lists. Either answer identifies the fix for
 step 4, which is the only step that can widen the funnel.
+
+## The diagnostic ran, and it falsifies my entire line of investigation
+
+bt 896168, `price_history_diagnostics_enabled=true`, 142 `PH DIAG` samples:
+
+| quantity | result |
+|---|---|
+| `map == symbols_for_data` | **true on 142 of 142 lines** |
+| `empty` (map entries with no bars) | **0 on every line** |
+| `data - map` | constant **11** (mean 10.9, max 11) |
+| map size | grows 1 -> 116 -> 135 -> **201** |
+| `scored` (symbols passed to the scorer) | **0 on every line** |
+
+Read against the discriminator written before the run:
+
+* `map << data` would mean a membership gap. **It is not** - the gap is a constant 11 symbols, not
+  the 217 that show `bars=0`.
+* `map ~= data` with high `empty` would mean the causal filter in `get_price_history_up_to_current`
+  returns empty lists. **It does not** - `empty` is 0 on every sample.
+
+**The broker-side history map is healthy.** It mirrors `symbols_for_data` exactly, contains no empty
+entries, and reaches 201 symbols. Every hypothesis advanced in this document about that map -
+`breakout_min_history_bars`, widening to `data.keys()`, the discarding call sites, and the causal
+filter - is now falsified. Four for four.
+
+The `bars=0` skips are therefore **not** produced by the map measured here. `_compute_breakout_score_boost`
+is called from `graph_nexus_analysis._finalize_scores`, which is a different call path from
+`broker.run_run_once_strategies`; whatever history map that path receives is not this one.
+
+### The unexpected result
+
+`scored=0` on all 142 samples. The `symbols` argument passed to `run_run_once_strategies` is empty
+on every tick of the run, while `price_history` carries up to 201 symbols. Whatever drives scoring,
+it is not that argument. This was not the question the instrument was built to answer and it is the
+most interesting thing it returned.
+
+### What this costs and what it buys
+
+Cost: the map investigation that occupied most of this session was aimed at a component that is
+working. The measurements it produced (2,922 skips, 100% `bars=0`, 217 skipped symbols holding
+bars, six of eight named winners in the skip set) all stand; the explanation attached to them was
+wrong, and no fix was shipped on it - which is the one thing that went right.
+
+Buys: the search is now correctly aimed. The next step is to instrument the *graph_nexus* side -
+what `price_history` (if any) `_finalize_scores` passes into `_compute_breakout_score_boost` - and to
+find out why the scorer is called with an empty symbol list.
