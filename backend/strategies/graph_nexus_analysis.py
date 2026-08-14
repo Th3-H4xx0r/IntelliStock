@@ -20884,6 +20884,57 @@ def _evaluate_position_risk(
 # Final score mapping
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _breakout_opportunity_audit(
+    price_history: dict | None,
+    strategy_cache: dict | None,
+    date_key: str,
+    config: dict,
+) -> None:
+    """Log which symbols QUALIFY for breakout promotion, independent of scoring.
+
+    Distinguishes the two surviving explanations for near-zero promotions:
+    cadence (the scorer looks at a mover on a median 43% of days, so it may miss
+    the qualifying moment) versus latency (the moment never arrives because
+    discovery fires after the run). `_compute_breakout_score_boost` cannot answer
+    this because it only sees a symbol when it is called; this walks the overlay
+    cache every tick and reports qualification regardless.
+
+    Read the output as: a symbol appearing here on a day it was never scored is
+    evidence for cadence. No such days is evidence for latency. Log-only, OFF.
+    """
+    if not bool(config.get("breakout_opportunity_audit_enabled", False)):
+        return
+    try:
+        raw = (strategy_cache or {}).get("_overlay_bars_raw") or {}
+        if not isinstance(raw, dict):
+            return
+        have = price_history or {}
+        qualifying = []
+        for sym, bars in raw.items():
+            visible = _visible_overlay_bars(bars, strategy_cache, date_key, config)
+            closes = [float(b.get("c", 0) or 0) for b in (visible or [])
+                      if isinstance(b, dict)]
+            closes = [c for c in closes if c > 0]
+            if len(closes) < 25:
+                continue
+            high_25 = max(closes[-25:])
+            if high_25 > 0 and closes[-1] >= 0.99 * high_25:
+                qualifying.append(
+                    f"{sym}({100.0 * closes[-1] / high_25 - 100.0:+.2f}%"
+                    f"{'' if sym in have else ',nomap'})")
+        if qualifying:
+            _log(f"BREAKOUT OPPORTUNITY {date_key}: {len(qualifying)} qualify | "
+                 + " ".join(sorted(qualifying)[:40]), "cyan")
+        else:
+            _log(f"BREAKOUT OPPORTUNITY {date_key}: none of "
+                 f"{len(raw)} cached symbols qualify", "cyan")
+    except (TypeError, ValueError, AttributeError, KeyError) as exc:
+        try:
+            _log(f"BREAKOUT OPPORTUNITY ERROR: {exc!r}", "red")
+        except Exception:
+            pass
+
+
 def _breakout_history_fallback(
     symbols_list: list,
     price_history: dict | None,
@@ -20954,6 +21005,7 @@ def _finalize_scores(symbols_list: list, sentiment_data: dict, propagated: dict,
     not in the active discovery universe still get scored, enabling the
     stop-loss / drawdown logic to fire on every bar.
     """
+    _breakout_opportunity_audit(price_history, strategy_cache, date_key, config)
     _bk_fallback = _breakout_history_fallback(
         symbols_list, price_history, strategy_cache, date_key, config)
     import datetime as _dt
