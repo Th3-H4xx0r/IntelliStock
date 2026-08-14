@@ -150,6 +150,90 @@ def test_a_filled_order_stops_reserving():
     assert _total(emu) <= IDLE + 1e-6, _total(emu)
 
 
+# ── the BULL leg ───────────────────────────────────────────────────────────
+#
+# READ THIS BEFORE TRUSTING A RESULT FROM IT. On doc-193/194/195 this lane is
+# UNREACHABLE: `core_sleeve_enabled` lives only in
+# `regime_profiles.{bull,chop,recovery}`, so in exactly those regimes the
+# `if _core is not None:` block in `_residual_sleeve_deploy` returns before
+# control can arrive, and bear/crash go to the bear leg. It runs only on a
+# document with NO core — the doc-179 shape, which is what these fixtures model
+# (`h.SPEC` carries no `core_sleeve_enabled`). An A/B on a core-bearing document
+# will show this lane unchanged, and that means "never ran".
+
+BULL_PX = 600.0
+
+
+def _bull_spec(**over):
+    cfg = dict(h.SPEC[0]["config"])
+    cfg.update(over)
+    return [{"strategy": "graph_nexus_analysis", "config": cfg}]
+
+
+def _bull_idle(cash):
+    return cash - (0.15 + 0.02) * NAV
+
+
+def test_bull_leg_today_commits_the_same_cash_twice():
+    h._set_regime("bull")
+    emu = s._EmuNextEvent(cash=CASH, nav=NAV)
+    for hour in (1, 2):
+        b._residual_sleeve_deploy(emu, {"SPY": BULL_PX},
+                                  datetime(2026, 1, 16, hour), _bull_spec())
+    assert [x["sym"] for x in emu.signals] == ["SPY", "SPY"], emu.signals
+    assert _total(emu) > _bull_idle(CASH) * 1.9, _total(emu)
+
+
+def test_bull_leg_flag_stops_the_second_park():
+    h._set_regime("bull")
+    emu = s._EmuNextEvent(cash=CASH, nav=NAV)
+    spec = _bull_spec(sleeve_park_nets_pending_cash_enabled=True)
+    for hour in (1, 2, 3):
+        b._residual_sleeve_deploy(emu, {"SPY": BULL_PX},
+                                  datetime(2026, 1, 16, hour), spec)
+    assert len(emu.signals) == 1, [x["cash_per_trade"] for x in emu.signals]
+    assert _total(emu) <= _bull_idle(CASH) + 1e-6
+
+
+def test_bull_leg_nets_its_own_symbol_not_the_hedge():
+    """`sym`/`px` must be the bull symbol here, not leftovers from the bear
+    branch. A resting SQQQ order must not suppress the SPY park."""
+    h._set_regime("bull")
+    emu = s._EmuNextEvent(cash=CASH, nav=NAV)
+    emu._execution_simulator.pending_orders.append(
+        s._PendingOrder("SQQQ", "buy", 40.0))
+    b._residual_sleeve_deploy(emu, {"SPY": BULL_PX}, datetime(2026, 1, 16, 1),
+                              _bull_spec(sleeve_park_nets_pending_cash_enabled=True))
+    assert len(emu.signals) == 1, emu.signals
+    assert emu.signals[0]["sym"] == "SPY"
+    assert abs(_total(emu) - _bull_idle(CASH)) < 1e-6
+
+
+def test_bull_leg_does_no_lookup_on_a_bar_that_parks_nothing():
+    """The min-deploy guard must run BEFORE the netting. In live the lookup is
+    a non-indexed table scan, and running it above the guard put one on every
+    bull/chop evaluation including the majority that park nothing."""
+    h._set_regime("bull")
+    calls = []
+    real = b._ns["_sleeve_pending_qty"]
+
+    def _spy(*a, **kw):
+        calls.append(a[:2])
+        return real(*a, **kw)
+
+    b._ns["_sleeve_pending_qty"] = _spy
+    try:
+        # cash barely above the 17% floor -> idle under the $300 min-deploy
+        emu = s._EmuNextEvent(cash=1100.0, nav=NAV)
+        b._residual_sleeve_deploy(
+            emu, {"SPY": BULL_PX}, datetime(2026, 1, 16, 1),
+            _bull_spec(sleeve_park_nets_pending_cash_enabled=True))
+        assert emu.signals == [], emu.signals
+        assert calls == [], f"looked up pending orders on a no-park bar: {calls}"
+    finally:
+        b._ns["_sleeve_pending_qty"] = real
+
+
 def test_flag_off_is_byte_identical():
     for cash in (1200.0, 2000.0, 3000.0, 6000.0):
         off = s._EmuNextEvent(cash=cash, nav=NAV)

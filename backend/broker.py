@@ -5336,8 +5336,16 @@ def _residual_sleeve_deploy(
                 _park_nets_pending = bool((_core_sleeve_cfg_raw(cached_strategies)
                                            or {}).get(
                     "sleeve_park_nets_pending_cash_enabled", False))
-            except (TypeError, ValueError, AttributeError):
+            except (TypeError, ValueError, AttributeError) as _bear_net_exc:
+                # Fail OPEN (== flag off), but say so once. An armed flag that
+                # silently disarms is how a control gets credited with a result
+                # it never produced.
                 _park_nets_pending = False
+                if not globals().get("_sleeve_park_net_warned"):
+                    globals()["_sleeve_park_net_warned"] = True
+                    _log(f"[sleeve] pending-cash netting unavailable — bear park "
+                         f"is UNFIXED this tick "
+                         f"({type(_bear_net_exc).__name__})", "yellow")
             _pending_buy_qty = _sleeve_pending_qty(
                 portfolio_emulator, bsym, "buy", order_service)
             idle = cash - park_floor_pct * nav
@@ -5480,19 +5488,51 @@ def _residual_sleeve_deploy(
         park_floor_pct = max(cfg["buffer_pct"],
                              cfg["release_cash_pct"] + cfg["buffer_pct"])
         idle = cash - park_floor_pct * nav
-        # Same defect as the bear leg above, and worse here: this lane has no
-        # `room` cap at all, so `idle` is the ONLY term and nothing else can
-        # notice that an accepted-but-unfilled park has already claimed the
-        # cash. Only the 24h `min_park_hours` guard limits it today. Same flag,
-        # same direction — this can only reduce the park.
+        # Same defect as the bear leg above, and structurally worse: this lane
+        # has no `room` cap at all, so `idle` is the ONLY term and nothing else
+        # can notice that an accepted-but-unfilled park has already claimed the
+        # cash. Only the 24h `min_park_hours` guard limits it.
+        #
+        # BUT READ THIS BEFORE MEASURING IT. On doc-193/194/195 this lane is
+        # UNREACHABLE. `core_sleeve_enabled` lives only in
+        # `regime_profiles.{bull,chop,recovery}`, and in exactly those regimes
+        # `_core` is non-None so the `if _core is not None:` block above ends in
+        # a `return` and control never arrives here; bear/crash go to the bear
+        # leg. So this site only runs on a document with NO core (the doc-179
+        # shape). An A/B on those documents will show this lane unchanged, and
+        # that means "never ran", not "no effect" — five levers have shipped
+        # inert in this project and each was read as a null result.
+        #
+        # The lane that IS reachable in bull/chop has the same defect untouched:
+        # `core_sleeve.py:674` sizes `_spendable` off a raw `get_cash()` threaded
+        # from broker.py:4157/4202. `core_deploy_alpha_headroom_pct` mitigates
+        # the symptom there (it leaves the alpha book its floor) but does not
+        # stop the core sizing against dollars it has already committed. That is
+        # a separate fix and belongs in its own arm.
+        #
+        # The guard comes FIRST on purpose. In live, `_sleeve_pending_qty` with
+        # an `order_service` reaches `OrderLifecycleStore.list_for_instance`,
+        # which is a non-indexed table scan per call. Running it above the
+        # min-deploy guard put that scan on every bull/chop evaluation including
+        # the overwhelming majority that park nothing. The netting can only
+        # REDUCE `idle`, so testing the guard before and after is equivalent.
+        _park_floor_usd = max(50.0, cfg["min_deploy_pct"] * nav)
+        if idle < _park_floor_usd:
+            return
         try:
             if bool((_core_sleeve_cfg_raw(cached_strategies) or {}).get(
                     "sleeve_park_nets_pending_cash_enabled", False)):
                 idle -= _sleeve_pending_qty(
                     portfolio_emulator, sym, "buy", order_service) * px
-        except (TypeError, ValueError, AttributeError):
-            pass
-        if idle < max(50.0, cfg["min_deploy_pct"] * nav):
+        except (TypeError, ValueError, AttributeError) as _park_net_exc:
+            # Fail OPEN (== flag off), but never silently: an operator who armed
+            # the flag would otherwise get the unfixed behaviour with no signal.
+            if not globals().get("_sleeve_park_net_warned"):
+                globals()["_sleeve_park_net_warned"] = True
+                _log(f"[sleeve] pending-cash netting unavailable — park is "
+                     f"UNFIXED this tick ({type(_park_net_exc).__name__})",
+                     "yellow")
+        if idle < _park_floor_usd:
             return
         ok = _submit_deploy(
             sym,

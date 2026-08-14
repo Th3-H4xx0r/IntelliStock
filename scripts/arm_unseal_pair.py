@@ -46,6 +46,23 @@ SHARED = {
     # near-clean A/B on this flag and it cost 1.12pp, so it must be pinned and
     # visibly identical rather than merely defaulted.
     "satellite_displacement_enabled": False,
+    # The overlay result cache is COMPLETELY UNSCOPED: its key is
+    # md5(symbol|date_key|round(raw_net_score,1)|event_types|model)
+    # (graph_nexus_analysis.py:22490-22498) — no instance, no history scope, no
+    # salt, and the score is bucketed to one decimal so near-miss scores
+    # collide. The treatment changes slots and sizing, not scores, so the two
+    # arms produce matching keys on most names and the SECOND arm replays the
+    # FIRST arm's LLM overlay verdicts. That is order-dependent, not symmetric,
+    # and neither salt reaches it. Off on both arms.
+    "overlay_result_cache_enabled": False,
+    # The fifth max_positions counter (graph_nexus_analysis.py:29522) is the one
+    # site that never moved onto `slot_exclusions`. With the core leg held and a
+    # cap of 4 it reads 5 > 4, latches a permanent V28.8.1 BREACH and blocks
+    # every new-ticker buy — so the treatment would measure permanently-breached
+    # rotation machinery rather than a four-name book, and the alpha book would
+    # converge to THREE names while max_positions read 4. On both arms so the
+    # counter cannot be the difference between them.
+    "slot_exclusions_all_counters_enabled": True,
 }
 SALTS = {
     CONTROL_DOC: {"history_scope_salt": "uns-ctl-0814b",
@@ -59,12 +76,19 @@ TREATMENT = {
     # The book is sealed at six names: 6 x 14% = 84% of an 88% ceiling leaves
     # ~$250 against a ~$370 min-position floor, so nothing can enter and no
     # winner can be added. Four names reopens ~$1,920 of room.
+    # `regime_chop_max_positions` and `regime_bear_max_positions` are NOT here:
+    # broker.py:5906-5913 is an explicit dead-key registry and both are in it
+    # ("no reader; the live key is max_positions_chop / max_positions_bear").
+    # Setting them would be a no-op that reads like a lever.
+    #
+    # `max_positions_bear` is deliberately left at 2 on both arms, so the
+    # treatment is INERT in bear — W0 opens in a bull, but any bear stretch
+    # inside it measures nothing. `max_positions_crash` is absent on both
+    # (default 0), also symmetric.
     "max_positions": 4,
     "max_positions_bull": 4,
     "max_positions_chop": 4,
     "max_positions_recovery": 4,
-    "regime_chop_max_positions": 4,
-    "regime_bear_max_positions": 4,
     # The passive core takes every dollar of cash (its deploy is CASH-bound on
     # 4 of 5 deploys) and its order pends into the next bar, where the
     # reservation refuses every alpha buy.
@@ -78,8 +102,6 @@ CONTROL_OFF = {
     "max_positions_bull": 14,
     "max_positions_chop": 8,
     "max_positions_recovery": 14,
-    "regime_chop_max_positions": 6,
-    "regime_bear_max_positions": 6,
     "core_deploy_alpha_headroom_pct": None,
     "conversion_fixes_enabled": None,
 }

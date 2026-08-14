@@ -23,8 +23,30 @@ floor**. Median held position weight is 13.96% — the sizing intent was never t
 planned winner-adds in W0/W1 were refused by the satellite cap on the tick they were planned
 (L8048, L21978, L37126, L40506).
 
-At four names the same config produces the objective's design exactly: 4 x 14% = 56% satellite,
-core at its 40% ceiling, $1,920 of conviction room permanently open.
+At four names: 4 x 14% = 56% satellite.
+
+**Corrected by review before launch — the reopened room is smaller than it first looked.** 0.88 is
+the ceiling a CONVICTION name reaches; `broker.py:3531-3533` picks `satellite_max_share` only when
+`raw_net_score >= satellite_conviction_overflow_min_raw_score` (1.5 on both docs). A plain new name
+is bounded by `satellite_design_share = 1 - core_target_pct(0.35) - cash_floor(0.02) = 0.63`.
+
+| names | satellite used | room to MAX 0.88 | room to DESIGN 0.63 |
+|---|---|---|---|
+| 3 | 0.42 = $2,520 | $2,760 | $1,260 |
+| **4** | **0.56 = $3,360** | **$1,920** | **$420** |
+| 5 | 0.70 = $4,200 | $1,080 | sealed |
+| 6 | 0.84 = $5,040 | $240 (< the $360 floor) | sealed |
+
+Four names therefore reopen **$420 for an ordinary name — exactly one plain slot** — and $1,920 for
+a conviction name. The sealed-book claim at six names is unaffected and stands.
+
+A prerequisite found by the same review and fixed in this commit: the V28.8.1 breach counter
+(`graph_nexus_analysis.py:29522`) is a FIFTH `max_positions` counter that never moved onto
+`slot_exclusions`. With the core leg held and a cap of 4 it reads 5 > 4, latches a permanent BREACH
+and blocks every new-ticker buy — the alpha book would converge to THREE names while
+`max_positions` read 4, and only the treatment arm would breach. Without
+`slot_exclusions_all_counters_enabled` on both arms this experiment measures breached rotation
+machinery, not a four-name book.
 
 **2. The passive core takes the cash the alpha book needs, and holds it across bars.**
 
@@ -72,6 +94,22 @@ current scope's discovery table is empty (`:12930-12932`), which is the state a 
 so a fresh salt *invites* an arm to import its sibling's discovered universe. That is the most
 plausible mechanism behind the AGQ artifact and the ~10pp dispersion.
 
+A third channel the salts do not reach, closed here: `overlay_result_cache_enabled` is True on both
+documents and its key is `md5(symbol|date_key|round(raw_net_score,1)|event_types|model)`
+(`graph_nexus_analysis.py:22490-22498`) — no instance, no scope, no salt, and the score bucketed to
+one decimal so near-miss scores collide. The treatment changes slots and sizing, not scores, so most
+names produce matching keys and the second arm would replay the first arm's LLM overlay verdicts.
+Off on both arms.
+
+Known and NOT closed, recorded so it is not discovered afterwards: `GraphNexusTickerHistory` is
+keyed by the bare ticker with no as-of filter on read (`graph_nexus_analysis.py:16084-16090`), and
+it feeds the sentiment prompt. A prior run over a later window leaves headlines dated after this
+window under the same ticker, so day-1 prompts can contain future headlines. This is a lookahead
+channel, not merely an asymmetry, and nothing in the codebase purges it. It is left in place because
+purging a shared production table is not a change to make unattended; it biases both arms in the
+same direction, so the paired comparison survives, but no absolute return from either arm should be
+treated as clean.
+
 Residual, and accepted: the sentiment cache is forced on in backtest
 (`_phase_alpha_helpers.py:100-121`) and a hit restores only `sentiment_data`, so
 `_apply_trend_updates` never runs — 42 hits / 0 saves on 42 of 42 bars in both prior W0 runs. It is
@@ -90,6 +128,14 @@ Read from the treatment log, not from the config:
    a lever that does not move it has not touched the binding constraint.
 4. **Turnover.** Any rise is disqualifying regardless of return. ~208%/mo in bt 523085 against a
    ~50%/mo break-even.
+
+   **Confound registered in advance.** `_v288_at_cap = (_position_breach_active or
+   _position_headroom <= 0)` (`graph_nexus_analysis.py:30094`) gates the V31.7 CONVERT path that
+   turns 50% partial trims into 100% full exits. A lower `max_positions` drives headroom to zero
+   sooner, so it makes that path fire more often **mechanically**, with nothing to do with cash
+   availability. If turnover rises, check the CONVERT count before attributing the rise to the
+   hypothesis — and note that `max_positions` therefore cannot be read as independent of
+   `conversion_fixes_enabled`, since both feed this expression.
 5. **Return vs SPY**, benchmarked from `BENCHMARK QUOTE` lines via `scripts/spy_benchmark.py`, with
    the span checked against the window. Never from `spy_series`, never from fills.
 6. **Max drawdown.** A materially worse figure is not offset by return.
@@ -97,7 +143,8 @@ Read from the treatment log, not from the config:
 ## Prior, recorded so it cannot be revised afterwards
 
 Confident on the mechanism, uncertain on the return. The sealed-book arithmetic is not a hypothesis
-— it is arithmetic, and four names demonstrably reopens $1,920 of room. What is genuinely uncertain
+— it is arithmetic, and four names demonstrably reopens $420 of plain room and $1,920 of conviction
+room where six names leave nothing fundable at all. What is genuinely uncertain
 is whether the names that then get bought are the winners: discovery fires a median 19 days and
 +24.2% into a move, and that is untouched here. Expect the funnel to move and the return to be noisy.
 A single-window return difference under ~10pp is not evidence of anything.

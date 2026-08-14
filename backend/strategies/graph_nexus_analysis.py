@@ -29519,7 +29519,37 @@ class GraphNexusAnalysis:
                 # (`_z41_held_now`, `_count_open_positions`, `_mw_open_set`) and
                 # moving it alone desynchronises the bear-capacity latch, the BFQ
                 # headroom and the cash-reserve floor from the main slate.
-                _current_positions = len(portfolio_emulator.get_positions()) if portfolio_emulator and hasattr(portfolio_emulator, 'get_positions') else 0
+                #
+                # 2026-08-14: that instruction was "do this properly by moving all
+                # four counters together", and `slot_exclusions` (:5630) is the
+                # helper written the next day to do exactly that — ONE definition,
+                # one flag. All four NAMED counters were moved onto it
+                # (broker.py:15121 `_mpg_held`, :29497 `_z41_held_now`,
+                # :30944 `_mw_open_set`, :31921 the BFQ headroom). There is a
+                # FIFTH — this one, the V28.8.1 breach counter — and it was
+                # missed, so it is now the only site that disagrees. That is the
+                # state the note was warning against, not the state it describes.
+                #
+                # It matters most precisely when the slot count is tightened. With
+                # the core leg held and a cap of 4, this counter reads 5 while the
+                # buy gate reads 4, so `_current_positions > _max_positions` latches
+                # a permanent BREACH and blocks every new-ticker buy — the alpha
+                # book gets 3 usable slots and the breach flag never clears.
+                #
+                # Also fixes a second, smaller error in the same expression:
+                # `len(get_positions())` counts dict ENTRIES, so a closed position
+                # left at qty 0 still consumes a slot. `_count_open_positions`
+                # filters `qty > 0`.
+                #
+                # Behind its own flag rather than the existing
+                # `max_positions_exclude_sleeve_legs`, because doc-193 already sets
+                # that one — honouring it here would change a production document
+                # with no paired run behind it. Default OFF.
+                if bool(config.get("slot_exclusions_all_counters_enabled", False)):
+                    _current_positions = _count_open_positions(
+                        portfolio_emulator, slot_exclusions(config))
+                else:
+                    _current_positions = len(portfolio_emulator.get_positions()) if portfolio_emulator and hasattr(portfolio_emulator, 'get_positions') else 0
                 _blocked_buys = []
                 # V28.8.1 (Codex-corrected): breach detection + strategy_cache flag
                 # propagation. The breach flag is READ by:
