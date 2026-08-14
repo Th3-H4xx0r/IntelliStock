@@ -6,3 +6,5 @@ launch preempts the first), but log analysis can.
 
 bt 973976 (W3 control) was stopped at ~2% for this purpose. Logs under investigation are the
 completed performance runs, not the killed diagnostic probes.
+
+bt 973976 survived the first push (the container does not always cycle). Second attempt logged here.
