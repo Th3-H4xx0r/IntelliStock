@@ -20878,9 +20878,19 @@ def _breakout_history_fallback(
     """
     if not bool(config.get("breakout_history_fallback_enabled", False)):
         return {}
+    _diag = bool(config.get("breakout_diagnostics_enabled", False))
     try:
         raw = (strategy_cache or {}).get("_overlay_bars_raw") or {}
         if not isinstance(raw, dict):
+            # bt 179977: the fallback returned nothing and said nothing, so the
+            # run could not distinguish "cache absent" from "cache present but
+            # filtered empty". Loud failure over silent inertness — the rule
+            # that caught 1,625 hidden AttributeErrors in the displacement work
+            # applies to the EMPTY case, not just the throwing case.
+            if _diag:
+                _log(f"BREAKOUT FALLBACK: cache missing or malformed "
+                     f"(type={type(raw).__name__}, "
+                     f"cache_keys={len((strategy_cache or {}))})", "yellow")
             return {}
         out: dict = {}
         have = price_history or {}
@@ -20894,6 +20904,9 @@ def _breakout_history_fallback(
             visible = _visible_overlay_bars(bars, strategy_cache, date_key, config)
             if visible:
                 out[key] = visible
+        if _diag:
+            _log(f"BREAKOUT FALLBACK: cache={len(raw)} symbols, "
+                 f"requested={len(symbols_list or [])}, supplied={len(out)}", "yellow")
         return out
     except (TypeError, ValueError, AttributeError, KeyError) as exc:
         try:
