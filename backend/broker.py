@@ -3268,6 +3268,15 @@ def _satellite_conviction_min_raw(cached_strategies) -> float:
         return 0.0
 
 
+def _conversion_fixes(cached_strategies) -> bool:
+    """Umbrella flag for the conversion defects found by the 2026-08-14 audit. OFF."""
+    try:
+        cfg = _core_sleeve_cfg_raw(cached_strategies) or {}
+        return bool(cfg.get("conversion_fixes_enabled", False))
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
 def _benchmark_quote_logging(cached_strategies) -> bool:
     """Log SPY/QQQ every tick so the benchmark does not depend on trading. OFF."""
     try:
@@ -15952,6 +15961,105 @@ while not shutdown_requested:
                                 # cap now binds on EVERY lane rather than on one
                                 # assignment a later line could overwrite.
                                 if cash_per_trade > _sat_room:
+                                    # 2026-08-14 audit, six independent agents: this trim lands BELOW
+                                    # the execution floor that then refuses the order.
+                                    # _CORE_MIN_SATELLITE_TRIM_USD is $25 (~3255) while the floor at
+                                    # ~16515 is max($50, NAV*min_position_nav_pct) ~ $370 - 15x apart,
+                                    # and neither knows the other. 44 of 44 trims that reached the
+                                    # floor were refused on the NEXT line; ZERO trims ever filled;
+                                    # ~$67k of intended notional per window. The core is sold to raise
+                                    # cash for buys that then die.
+                                    # We decline rather than emit an unfillable order, and we report
+                                    # the skip the way every sibling refusal site does - the satellite
+                                    # cap was the ONLY refusal that never appeared in
+                                    # `_broker_skipped_buys`, so the backfill queue and next-bar
+                                    # scoring never learned these names were refused (40 such skips,
+                                    # 35 of those names never bought).
+                                    # NOT raised to the floor on purpose: `_sat_room` IS the
+                                    # floor-bounded overflow band, so room below the floor means there
+                                    # is genuinely no room without breaching core_min_pct, and a
+                                    # 2.8%-of-NAV position is the "noise" the objective rejects.
+                                    _cf_decline = False
+                                    if _conversion_fixes(_cached_strategies):
+                                        # Reviewer defect 1: only the NAV-based floor is "hard". With
+                                        # min_position_nav_pct unset the floor is $50 and
+                                        # _exec_min_position_skips (~3830) lets the order through because
+                                        # post-trim cash_to_use == cash_per_trade, so the old path FILLED.
+                                        # Declining there would refuse REAL fills for room in ($25,$50);
+                                        # the measured "44 of 44 refused" holds only when the NAV floor is
+                                        # in play. Reviewer defect 2: the gate itself uses a bare except, so
+                                        # catch broadly here or a LIVE adapter error aborts the whole tick.
+                                        _cf_hard = False
+                                        try:
+                                            _cf_cfg = _core_sleeve_cfg_raw(_cached_strategies) or {}
+                                            _cf_hard = float(
+                                                _cf_cfg.get("min_position_nav_pct", 0.0) or 0.0) > 0
+                                            _cf_nav = float(
+                                                portfolio_emulator.get_portfolio_value(prices) or 0.0)
+                                            _cf_floor = _exec_min_position_floor(_cf_cfg, _cf_nav)
+                                        except Exception:  # noqa: BLE001 - must not abort the tick
+                                            _cf_floor = 0.0
+                                            _cf_hard = False
+                                        try:
+                                            _cf_held = float((portfolio_emulator.get_positions()
+                                                              or {}).get(symbol, 0) or 0) > 0
+                                        except Exception:  # noqa: BLE001 - unknown => treat as held
+                                            _cf_held = True
+                                        _cf_decline = (
+                                            _cf_hard
+                                            and (_sat_room + 1e-9 < _cf_floor)
+                                            and not _cf_held)
+                                    if _cf_decline:
+                                        # Shape matched to the existing SKIP BUY
+                                        # line so scripts/simulate_allocation.py
+                                        # RX_SKIPMIN still parses it: ASCII "-",
+                                        # "cash_to_use $X < min $N", trailing
+                                        # "(allocated $M)". A log-only change
+                                        # broke that regex silently earlier today
+                                        # while its fixtures stayed green.
+                                        # Shape copied from the live SKIP BUY
+                                        # line (em-dash, "fundable $X of
+                                        # cash_to_use $Y ... < min $N (allocated
+                                        # $M)") so downstream log tooling sees a
+                                        # familiar row. A log-only edit silently
+                                        # broke simulate_allocation.py earlier
+                                        # today while its fixtures stayed green.
+                                        _log(f"SKIP BUY {symbol} \u2014 fundable "
+                                             f"${_sat_room:.2f} of cash_to_use "
+                                             f"${_sat_room:.2f} (satellite cap "
+                                             f"holds the core at target) < min "
+                                             f"${int(_cf_floor)} (allocated "
+                                             f"${_sat_room:.2f})", "yellow")
+                                        _trade_skipped_no_price = True
+                                        _nexus_cache = _strategy_cache.get("graph_nexus_analysis")
+                                        if _nexus_cache is not None:
+                                            _nexus_cache.setdefault("_broker_skipped_buys", []).append({
+                                                "ticker": symbol,
+                                                # POST-trim, matching the sibling
+                                                # site's semantics: reviewer B
+                                                # found this field otherwise flips
+                                                # meaning for consumers.
+                                                "allocated": round(float(_sat_room or 0.0), 2),
+                                                "reason": "insufficient_cash",
+                                                "price": round(float(price), 4),
+                                                "raw_net_score": round(float(
+                                                    nexus_hint.get("raw_net_score", 0.0) or 0.0), 4),
+                                                "signal_source": str(nexus_hint.get("signal_source") or ""),
+                                                "is_watchlist_member": bool(
+                                                    nexus_hint.get("is_watchlist_member")),
+                                                "is_watchlist_priority": bool(
+                                                    nexus_hint.get("is_watchlist_priority")),
+                                                "is_propagation_expansion": bool(
+                                                    nexus_hint.get("is_propagation_expansion")),
+                                            })
+                                            _log(f"Gate skips reported back: {symbol} "
+                                                 f"(satellite_cap_below_floor)", "magenta")
+                                        if _anchor_policy:
+                                            _anchor_reinforcement_block(
+                                                symbol, "satellite_cap_below_floor", nexus_hint,
+                                                detail=f"room=${_sat_room:.2f} floor=${_cf_floor:.2f}",
+                                            )
+                                        continue
                                     _log(f"SATELLITE CAP: {symbol} trimmed "
                                          f"${cash_per_trade:,.0f} -> ${_sat_room:,.0f} "
                                          f"to keep the core at target", "yellow")
