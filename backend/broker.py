@@ -3268,6 +3268,15 @@ def _satellite_conviction_min_raw(cached_strategies) -> float:
         return 0.0
 
 
+def _benchmark_quote_logging(cached_strategies) -> bool:
+    """Log SPY/QQQ every tick so the benchmark does not depend on trading. OFF."""
+    try:
+        cfg = _core_sleeve_cfg_raw(cached_strategies) or {}
+        return bool(cfg.get("benchmark_quote_logging_enabled", False))
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
 def _price_history_diagnostics(cached_strategies) -> bool:
     """Report price_history coverage at the scoring call. Default OFF, log-only."""
     try:
@@ -13680,6 +13689,24 @@ while not shutdown_requested:
                             # survivors: a map far smaller than `data` is a membership
                             # gap; a full map with empty values is the causal filter in
                             # get_price_history_up_to_current.
+                            # Benchmark quotes. Every SPY comparison this project
+                            # published before 2026-08-14 was built from SPY *fills*,
+                            # so the series existed only when the core lane happened
+                            # to trade: 4 points for bt 523085, 11 for bt 873929,
+                            # and 4 spanning 9 days for the bear window that was
+                            # reported as a +26.13pp regime win. Logging the quote
+                            # every tick makes the benchmark independent of trading
+                            # activity. Default OFF, log-only.
+                            if _benchmark_quote_logging(_cached_strategies):
+                                try:
+                                    for _bq in ("SPY", "QQQ"):
+                                        _bqp = (prices or {}).get(_bq)
+                                        if _bqp and float(_bqp) > 0:
+                                            _log(f"BENCHMARK QUOTE: {_bq} "
+                                                 f"{current_time:%Y-%m-%d %H:%M} "
+                                                 f"{float(_bqp):.4f}", "cyan")
+                                except (TypeError, ValueError, AttributeError) as _bqe:
+                                    _log(f"BENCHMARK QUOTE ERROR: {_bqe!r}", "red")
                             if _price_history_diagnostics(_cached_strategies):
                                 try:
                                     _phd = price_history or {}
