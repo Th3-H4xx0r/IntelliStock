@@ -29,8 +29,17 @@ audit = _ns["_breakout_opportunity_audit"]
 ON = {"breakout_opportunity_audit_enabled": True}
 
 
-def _bars(n, last):
-    return [{"c": 10.0} for _ in range(n - 1)] + [{"c": last}]
+def _bars(n, last, low=8.0):
+    """A window with real range, with the low INSIDE the trailing 25 bars.
+
+    Two bugs were made here in sequence. First the helper returned n-1 identical
+    closes, so `last == max` held trivially and the audit reported 433 symbols
+    per tick in bt 292790, 59% at exactly +0.00%, including treasury ETFs — and
+    the test blessed it. Then the low was placed at index 0, outside
+    `closes[-25:]`, so the range guard saw a flat window anyway.
+    """
+    return ([{"c": 10.0} for _ in range(n - 3)]
+            + [{"c": low}, {"c": 10.0}, {"c": last}])
 
 
 def setup_function(_):
@@ -65,6 +74,18 @@ def test_flags_symbols_absent_from_the_history_map():
 def test_requires_25_bars_like_the_scorer_does():
     audit({}, {"_overlay_bars_raw": {"A": _bars(20, 10.0)}}, "d", ON)
     assert any("none of 1" in m for m in LOGS)
+
+
+def test_a_flat_series_is_not_a_breakout():
+    """last == max holds trivially on a flat series; that is not a signal."""
+    flat = [{"c": 10.0} for _ in range(30)]
+    audit({}, {"_overlay_bars_raw": {"SGOV": flat}}, "d", ON)
+    assert any("none of 1" in m for m in LOGS), "flat series must not qualify"
+
+
+def test_reports_the_window_range_so_degeneracy_is_visible():
+    audit({}, {"_overlay_bars_raw": {"A": _bars(30, 10.0)}}, "d", ON)
+    assert any("rng" in m for m in LOGS)
 
 
 def test_uses_the_same_1pct_band_as_the_promotion_test():

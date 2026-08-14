@@ -20917,10 +20917,21 @@ def _breakout_opportunity_audit(
             closes = [c for c in closes if c > 0]
             if len(closes) < 25:
                 continue
-            high_25 = max(closes[-25:])
-            if high_25 > 0 and closes[-1] >= 0.99 * high_25:
+            window = closes[-25:]
+            high_25 = max(window)
+            low_25 = min(window)
+            # bt 292790: the first version reported up to 433 symbols per tick,
+            # 59% at exactly +0.00%, including SGOV/SHV/SHY and BA/BAC/C on the
+            # same tick. A FLAT series trivially satisfies close >= 0.99*high
+            # because last == max. That is not a breakout, and the first test
+            # written for this encoded the bug by asserting 30 identical closes
+            # qualify. Require the window to have real range before believing it.
+            min_range = float(config.get("breakout_audit_min_range_pct", 2.0) or 2.0)
+            has_range = low_25 > 0 and (high_25 / low_25 - 1.0) * 100.0 >= min_range
+            if high_25 > 0 and has_range and closes[-1] >= 0.99 * high_25:
                 qualifying.append(
-                    f"{sym}({100.0 * closes[-1] / high_25 - 100.0:+.2f}%"
+                    f"{sym}({100.0 * closes[-1] / high_25 - 100.0:+.2f}%,"
+                    f"rng{(high_25 / low_25 - 1.0) * 100.0:.0f}%"
                     f"{'' if sym in have else ',nomap'})")
         if qualifying:
             _log(f"BREAKOUT OPPORTUNITY {date_key}: {len(qualifying)} qualify | "
