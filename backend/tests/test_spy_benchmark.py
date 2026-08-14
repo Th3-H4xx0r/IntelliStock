@@ -14,17 +14,46 @@ def _fill(sym, price, date):
             f"side=buy quote={date} 10:00:00")
 
 
+def _quote(sym, px, date):
+    """A `benchmark_quote_logging_enabled` line (broker.py:13714)."""
+    return f"[BROKER] BENCHMARK QUOTE: {sym} {date} 15:00 {px}"
+
+
 def test_extracts_dated_spy_points_only():
     lines = [_fill("SPY", "100.00", "2026-01-02"),
              _fill("AAPL", "200.00", "2026-01-02"),
              _fill("SPY", "110.00", "2026-02-26")]
-    assert _mod.spy_points(lines) == [("2026-01-02", 100.0), ("2026-02-26", 110.0)]
+    pts, source = _mod.spy_points(lines)
+    assert pts == [("2026-01-02", 100.0), ("2026-02-26", 110.0)]
+    assert source == "fills"
 
 
 def test_deduplicates_by_date():
     lines = [_fill("SPY", "100.00", "2026-01-02"),
              _fill("SPY", "101.00", "2026-01-02")]
-    assert len(_mod.spy_points(lines)) == 1
+    assert len(_mod.spy_points(lines)[0]) == 1
+
+
+def test_tick_quotes_win_over_fills():
+    """A fill series samples only the days the core lane happened to trade —
+    four points for bt 523085. When the tick-logged quote is present it is the
+    benchmark, and the fills are ignored entirely."""
+    lines = [_fill("SPY", "100.00", "2026-01-02"),
+             _quote("SPY", "700.0000", "2026-01-02"),
+             _quote("QQQ", "500.0000", "2026-01-02"),
+             _quote("SPY", "770.0000", "2026-02-26")]
+    pts, source = _mod.spy_points(lines)
+    assert source == "tick quotes"
+    assert pts == [("2026-01-02", 700.0), ("2026-02-26", 770.0)]
+
+
+def test_a_named_symbol_selects_its_own_quotes():
+    lines = [_quote("SPY", "700.0000", "2026-01-02"),
+             _quote("QQQ", "500.0000", "2026-01-02"),
+             _quote("QQQ", "550.0000", "2026-02-26")]
+    pts, source = _mod.spy_points(lines, "QQQ")
+    assert source == "tick quotes"
+    assert pts == [("2026-01-02", 500.0), ("2026-02-26", 550.0)]
 
 
 def test_refuses_a_series_too_thin_to_be_a_benchmark(capsys, tmp_path):

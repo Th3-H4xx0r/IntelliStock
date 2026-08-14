@@ -121,6 +121,10 @@ class CoreSleeveConfig:
     #: for byte. See `_FUNDING_RELEASE_RESERVE` and the note on the deploy
     #: branch of `core_rebalance_order` for what it buys and what it costs.
     funding_release_reserve_decisions: int = 0
+    #: 2026-08-14 ALPHA HEADROOM. Fraction of NAV the deploy leaves unspent so
+    #: the alpha book can still open one position on the next bar. 0.0 == OFF ==
+    #: today's behaviour, byte for byte. See the deploy branch below.
+    deploy_alpha_headroom_pct: float = 0.0
 
 
 def _f(cfg, key, default):
@@ -337,6 +341,8 @@ def core_sleeve_config(config) -> CoreSleeveConfig:
         bear_max_step_pct=_f(cfg, "core_bear_max_step_pct", 0.15),
         funding_release_reserve_decisions=max(0, _i(
             cfg, "core_funding_release_reserve_decisions", 0)),
+        deploy_alpha_headroom_pct=max(0.0, _f(
+            cfg, "core_deploy_alpha_headroom_pct", 0.0)),
     )
 
 
@@ -672,12 +678,63 @@ def core_rebalance_order(
         # rejected for being unaffordable by the spread it has to pay.
         # See CORE_DEPLOY_COST_HAIRCUT.
         _spendable /= (1.0 + CORE_DEPLOY_COST_HAIRCUT)
-        buy = min(drift_usd, _spendable)
+        # 2026-08-14 ALPHA HEADROOM (default 0.0 = OFF = byte-identical).
+        #
+        # THE DEFECT, bt 523085 (W0), reconciled to the cent. This clip is
+        # CASH-bound, not drift-bound, on four of the run's five deploys: the
+        # core sat at 11.6-12.1% of NAV against a 27-30% target for the whole
+        # window, so `drift_usd` always exceeded `_spendable` and `buy`
+        # collapsed to "every dollar there is". At L13194 that was
+        # (1299.21 - 0.02*6329)/1.006 = $1,165.64 against a logged $1,165.72.
+        #
+        # Under next-event execution the deploy's order pends into the NEXT
+        # bar, and its `_execution_cash_reservations` entry is invisible to the
+        # alpha buy gate (which reads `get_cash()`) but binding on the executor
+        # (which reads `get_buying_power(reserved)`). So the alpha book sees
+        # PASS and is then refused:
+        #     L13631  Buy gate inputs for AMZN: cash=$1299.21 reserved=$0.00 -> PASS
+        #     L13632  SKIP BUY AMZN - fundable $133.49 ... < min $379
+        # $1,299.21 - $1,165.72 = $133.49. All five core deploys in that run
+        # held at least one gate-passed alpha buy hostage; $5,774.16 of core
+        # notional against $5,756.28 deployed.
+        #
+        # WHY A CLIP AND NOT A VETO. Because the deploy is cash-bound, a gate
+        # of the form "hold while alpha has queued buys" fires on essentially
+        # every bar (the run logged a funding request on 41 of 41) and the core
+        # deploys ZERO times. Leaving headroom keeps the core deploying — on
+        # the measured run four of the five deploys survive at 0.07 — while
+        # leaving enough behind for the alpha book to clear its min-position
+        # floor, which is `max($50, NAV*min_position_nav_pct)`, i.e. 6% of NAV
+        # on the documents that set it. 0.07 clears that with a margin.
+        #
+        # The cost is real and unconditional: the headroom sits idle whenever
+        # the core is cash-bound, whether or not the alpha book uses it. The
+        # conditional version (withhold only against a live, actionable funding
+        # request) needs `funding_request` threaded into the deploy call site,
+        # which today passes none — broker.py:5143 calls `_core_sleeve_decide`
+        # without it, so the whole funding branch above is dead code on the
+        # deploy path. That is a second behaviour and belongs in its own A/B.
+        _alpha_headroom = max(0.0, float(
+            getattr(cfg, "deploy_alpha_headroom_pct", 0.0) or 0.0)) * nav
+        if _alpha_headroom > 0.0:
+            # Never surrender more than half of what the core can see. A
+            # mis-set flag on a fully-invested book would otherwise pin the
+            # core below its band permanently with no way back in.
+            _alpha_headroom = min(_alpha_headroom, 0.5 * _spendable)
+        buy = min(drift_usd, max(0.0, _spendable - _alpha_headroom))
         _min_deploy = max(MIN_CORE_DEPLOY_USD, MIN_CORE_ORDER_USD)
         if buy < _min_deploy:
             # Refused for size, with or without a reserve. Return BEFORE the
             # reserve is consulted so a bar the core was never going to deploy
             # on cannot burn a unit of the credit's expiry budget.
+            #
+            # Say WHICH refusal it was. If the un-reserved clip would have
+            # cleared the minimum, the headroom is what refused this deploy and
+            # `_core_sleeve_log_hold` must show that rather than hiding it
+            # inside `deploy_below_min` — five levers have shipped inert in
+            # this project and each was invisible for exactly that reason.
+            if _alpha_headroom > 0.0 and min(drift_usd, _spendable) >= _min_deploy:
+                return RebalanceOrder(reason="deploy_alpha_headroom", **base)
             return RebalanceOrder(reason="deploy_below_min", **base)
         # 2026-08-09 FUNDING-RELEASE RESERVE (default OFF, see the note above
         # RebalanceOrder). `buy` is currently sized against cash the core itself

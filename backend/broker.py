@@ -5306,7 +5306,43 @@ def _residual_sleeve_deploy(
                         and _dwell >= int(cfg["bear_scale_min_days"])):
                     _release_cash = float(cfg["bear_release_cash_pct_deep"])
             park_floor_pct = max(cfg["buffer_pct"], _release_cash + cfg["buffer_pct"])
+            # 2026-08-14 (bt 624674) SAME-BAR CASH DOUBLE-SPEND. Default OFF.
+            #
+            # The 2026-08-04 stacking fix below nets pending buys out of
+            # `cur_val` — the ALLOCATION term — and therefore out of `room`. It
+            # does NOT net them out of `idle`, the CASH term. And `cash` here is
+            # `get_cash()`, which returns `self._cash` raw and does not subtract
+            # `_execution_cash_reservations` (portfolio_emulator.py:1083); only
+            # `get_buying_power()` does. So under next-event execution the cash
+            # committed to an accepted-but-unfilled park is still fully present
+            # on the next evaluation, and `deploy = min(idle, room)` re-commits
+            # it whenever IDLE is the binding term:
+            #
+            #   bt 624674 03-13  parked $681.43 + $681.43 + $568.26 vs idle $681.43
+            #   bt 624674 03-19  parked $716.09 + $716.09 + $534.62 vs idle $716.09
+            #
+            # The `room` half worked correctly both times (the leg readout
+            # climbed 3,326 -> 4,006 -> 4,573 against a 4,573 cap); the two
+            # identical clips are the fingerprint of `idle` being re-spent. Cash
+            # then landed at 1.3-1.6% of NAV against a 15% release floor and
+            # forced an ~$850 refill SELL of what had just been bought — $3,898
+            # of ledger and $1,759 of round-trip churn from an accounting error.
+            #
+            # One `_sleeve_pending_qty` call now feeds both terms, so the two
+            # cannot drift apart again. This can only REDUCE `deploy`; it can
+            # never create spend.
+            _park_nets_pending = False
+            try:
+                _park_nets_pending = bool((_core_sleeve_cfg_raw(cached_strategies)
+                                           or {}).get(
+                    "sleeve_park_nets_pending_cash_enabled", False))
+            except (TypeError, ValueError, AttributeError):
+                _park_nets_pending = False
+            _pending_buy_qty = _sleeve_pending_qty(
+                portfolio_emulator, bsym, "buy", order_service)
             idle = cash - park_floor_pct * nav
+            if _park_nets_pending:
+                idle -= _pending_buy_qty * bpx
             cur_val = float((portfolio_emulator.get_positions() or {}).get(bsym, 0.0) or 0.0) * bpx
             # 2026-08-04 SAME-BAR STACKING FIX. Execution is NEXT-EVENT, so an
             # order placed earlier THIS bar has not filled and does not appear in
@@ -5328,8 +5364,7 @@ def _residual_sleeve_deploy(
             # Count UNFILLED buys as already held. See _sleeve_pending_qty: under
             # next-event execution an overnight order rests across many bars, and
             # without this every bar in between re-grants the whole cap.
-            cur_val += _sleeve_pending_qty(
-                portfolio_emulator, bsym, "buy", order_service) * bpx
+            cur_val += _pending_buy_qty * bpx
             room = max(0.0, _alloc * nav - cur_val)
             deploy = min(idle, room)
             if deploy < max(50.0, cfg["min_deploy_pct"] * nav):
@@ -5445,6 +5480,18 @@ def _residual_sleeve_deploy(
         park_floor_pct = max(cfg["buffer_pct"],
                              cfg["release_cash_pct"] + cfg["buffer_pct"])
         idle = cash - park_floor_pct * nav
+        # Same defect as the bear leg above, and worse here: this lane has no
+        # `room` cap at all, so `idle` is the ONLY term and nothing else can
+        # notice that an accepted-but-unfilled park has already claimed the
+        # cash. Only the 24h `min_park_hours` guard limits it today. Same flag,
+        # same direction — this can only reduce the park.
+        try:
+            if bool((_core_sleeve_cfg_raw(cached_strategies) or {}).get(
+                    "sleeve_park_nets_pending_cash_enabled", False)):
+                idle -= _sleeve_pending_qty(
+                    portfolio_emulator, sym, "buy", order_service) * px
+        except (TypeError, ValueError, AttributeError):
+            pass
         if idle < max(50.0, cfg["min_deploy_pct"] * nav):
             return
         ok = _submit_deploy(

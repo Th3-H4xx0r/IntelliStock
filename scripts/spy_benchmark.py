@@ -24,15 +24,32 @@ FILL = re.compile(
     r"FILL (?:BUY|SELL) (\S+) qty=[\d\.]+ cumulative=[\d\.]+ price=([\d\.]+)"
     r".*quote=(\d{4}-\d{2}-\d{2})")
 
+# `benchmark_quote_logging_enabled` (broker.py:13709) prints the mark every tick,
+# so the series no longer depends on the core lane happening to trade. Prefer it.
+QUOTE = re.compile(
+    r"BENCHMARK QUOTE: (\S+) (\d{4}-\d{2}-\d{2}) \d{2}:\d{2} ([\d\.]+)")
 
-def spy_points(lines):
-    """Dated SPY prices, de-duplicated and ordered."""
-    pts = {}
+
+def spy_points(lines, symbol="SPY"):
+    """Dated prices for `symbol`, de-duplicated and ordered.
+
+    Returns `(points, source)`. Tick-logged quotes win outright when present:
+    a fill series is a sample of the days the core lane traded, which is how
+    every pre-2026-08-14 SPY comparison in this project ended up resting on
+    four points.
+    """
+    quotes, fills = {}, {}
     for line in lines:
+        q = QUOTE.search(line)
+        if q and q.group(1) == symbol:
+            quotes[q.group(2)] = float(q.group(3))
+            continue
         m = FILL.search(line)
-        if m and m.group(1) == "SPY":
-            pts[m.group(3)] = float(m.group(2))
-    return sorted(pts.items())
+        if m and m.group(1) == symbol:
+            fills[m.group(3)] = float(m.group(2))
+    if quotes:
+        return sorted(quotes.items()), "tick quotes"
+    return sorted(fills.items()), "fills"
 
 
 def main(argv=None):
@@ -43,6 +60,9 @@ def main(argv=None):
     ap.add_argument("--log", default=None, help="use an existing log file")
     ap.add_argument("--floor", type=float, default=10.0,
                     help="noise floor in pp (measured ~10pp on 2026-08-14)")
+    ap.add_argument("--symbol", default="SPY",
+                    help="benchmark symbol (QQQ is logged too when tick "
+                         "quote logging is on)")
     args = ap.parse_args(argv)
 
     if args.log:
@@ -54,14 +74,15 @@ def main(argv=None):
                        check=False, capture_output=True, timeout=900)
         text = out.read_text(errors="replace")
 
-    pts = spy_points(text.splitlines())
+    pts, source = spy_points(text.splitlines(), args.symbol)
     if len(pts) < 3:
-        print(f"REFUSING: only {len(pts)} SPY fill points — not a benchmark.")
+        print(f"REFUSING: only {len(pts)} {args.symbol} {source} points "
+              f"— not a benchmark.")
         return 2
 
     first, last = pts[0], pts[-1]
     spy = 100.0 * (last[1] - first[1]) / first[1]
-    print(f"SPY points   : {len(pts)}")
+    print(f"{args.symbol} points   : {len(pts)}  (from {source})")
     print(f"span         : {first[0]} -> {last[0]}")
     print(f"SPY return   : {spy:+.2f}%  (${first[1]:.2f} -> ${last[1]:.2f})")
 
