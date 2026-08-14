@@ -104,3 +104,54 @@ starting and the name becoming scoreable**. That is a change to discovery cadenc
 has a real cost (more candidates, and turnover is the known leak at ~290%/mo against ~50%
 break-even), and it is a design decision rather than a parameter. It is not proposed here, and
 nothing in this session licenses picking a value for it.
+
+## How late is discovery, in days and in percent
+
+Measured across the 50 movers with a resolvable move start and a later peak, using each run's own
+quote stream:
+
+| quantity | value |
+|---|---|
+| median days from a name first being +10% to its peak | **19 days** |
+| median 20-day return already booked when discovery fires | **+24.2%** |
+
+Examples:
+
+| name | +10% on | peak on | days of run | 20d return at discovery |
+|---|---|---|---:|---:|
+| SNDK | 2026-01-02 | 2026-02-23 | 52 | +15.6% |
+| VICR | 2026-01-05 | 2026-02-25 | 51 | +20.4% |
+| MRNA | 2026-01-06 | 2026-02-23 | 48 | +37.0% |
+| AAOI | 2026-02-09 | 2026-02-27 | 18 | +33.9% |
+| LITE | 2026-02-02 | 2026-02-25 | 23 | +21.7% |
+
+Two readings, and they point the same way.
+
+**There is room.** The median mover runs for 19 days between first being up 10% and topping out, and
+several of the largest run for 48-52 days. The objective's requirement - *enter while the move still
+has room* - is achievable on this data; the raw material is genuinely there, as the objective says.
+
+**Discovery consumes a quarter of it.** The momentum screen fires on a 20-day lookback, so by
+construction it cannot see a name until roughly a month of move exists, and the median name is
+already +24.2% on that lookback when it appears. `SNDK` is the clearest case: 52 days of run
+available, discovered with +15.6% booked, and filled 94.9% of the way through.
+
+## What this quantifies for the operator
+
+The gap between "the move is detectable" and "the name is a candidate" is the single largest
+remaining loss, and it is now measured rather than asserted: about **19 days of available run**, of
+which discovery's own lookback consumes the first portion, and after which the breakout promotion
+demands a fresh high the name has usually stopped making.
+
+Three levers exist, all upstream, all with real costs, none tested:
+
+1. **Shorten the discovery lookback** - sees names earlier, admits more noise, and turnover is the
+   known leak at ~290%/mo against ~50% break-even.
+2. **Promote on the pullback rather than the high** - directly contradicts the entry-extension gate,
+   which was measured at -7.95% and is listed under DO NOT RETRY.
+3. **Evaluate discovered names more often** - cheap in principle, but the measurement above shows
+   the qualifying highs mostly precede discovery, so this alone would not have caught `AAOI`.
+
+Option 1 is the only one not already falsified, and it trades directly against the constraint the
+objective names as the known leak. That trade is the operator's to make; this document does not make
+it.
