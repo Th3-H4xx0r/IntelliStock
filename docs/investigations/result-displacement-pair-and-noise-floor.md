@@ -218,3 +218,41 @@ lines like `Buy: GLD (Direct trend_momentum sentiment=+1 (raw=+1.000, 1 paths) |
 which enumerate many symbols per line. That yielded 4 scored symbols in the whole run - implausible
 on its face, which is what prompted the check. Parsing the enumerated form gives 223 scored symbols
 and the 36/6 split above. The direction of the finding survives; the absolute claim did not.
+
+## The complete chain, evidenced
+
+Of the 36 large movers in bt 102463 that are never scored:
+
+| | count |
+|---|---:|
+| **discovered by momentum** (`Discovered stock (momentum): SYM`) | **35 of 36** |
+| blocked by the entry-extension gate | 4 |
+| neither discovered nor blocked | 1 |
+
+So the names are found, admitted to the universe, and have bars fetched — and then receive no score
+at all. The extension gate explains only 4 of 36, and loosening it is a measured dead end (blocked
+basket -7.95%), so it is not the lever here.
+
+The full path, every step measured in this session:
+
+1. **Discovery works.** 35 of 36 lost movers are discovered by momentum, e.g.
+   `Discovered stock (momentum): AAOI (20d=+33.9%, 60d=+3.1%)`. The objective's claim that discovery
+   already finds the winners is confirmed, not merely assumed.
+2. **They enter the universe.** `Nexus discovered: expanding symbols with 120 new tickers: AAOI, ...`
+   followed by `Backtest symbol expansion: fetching 1Hour history` and cached bar chunks.
+3. **They are never scored.** `_finalize_scores` sets `fresh_score = 0` and only overwrites it if the
+   symbol has LLM sentiment or a graph path. These names have neither.
+4. **The rescue is dead.** `_compute_breakout_score_boost` exists to promote exactly this case on
+   price action alone, and measures 2,922 evaluations, 100% exiting at `bars=0`, zero promotions,
+   with 217 of the 396 skipped symbols demonstrably holding loaded bars.
+5. **So they never reach portfolio construction**, which therefore never refuses them.
+
+Everything built and tested in this project - buy ordering, conviction reserve, displacement,
+sizing, trim-back - operates strictly downstream of step 5.
+
+The single highest-value action remaining is the diagnostic already shipped and never run: set
+`price_history_diagnostics_enabled=true` and read one line per tick,
+`PH DIAG: map=N empty=N symbols_for_data=N data=N scored=N`. If `map << data`, the history map is
+missing symbols that have bars; if `map ~= data` with a high empty count, the causal filter in
+`get_price_history_up_to_current` is returning empty lists. Either answer identifies the fix for
+step 4, which is the only step that can widen the funnel.
