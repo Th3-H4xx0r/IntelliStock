@@ -155,3 +155,44 @@ Three levers exist, all upstream, all with real costs, none tested:
 Option 1 is the only one not already falsified, and it trades directly against the constraint the
 objective names as the known leak. That trade is the operator's to make; this document does not make
 it.
+
+
+## Full-run data revises the previous section
+
+bt 778288 to completion: 2,965 `BREAKOUT NOPATTERN` samples across 361 symbols. The earlier reading
+came from 11 evaluations in a truncated probe — the same mistake that produced a false "zero
+promotions" verdict earlier in this investigation.
+
+**First, a tautology avoided.** `NOPATTERN` fires only when the boost is zero, which *means* the 5w
+test failed, which *means* the name was not within 1% of its high. "0 of 361 ever qualified" is
+therefore circular and says nothing. The meaningful statistic is how *close* they came.
+
+**Closest approach to the 25-bar high, per symbol, across the whole run:**
+
+| group | median | best | worst |
+|---|---:|---:|---:|
+| the 45 movers ≥30% | **−2.6%** | −1.0% | −30.6% |
+| all 361 evaluated symbols | −2.1% | −1.0% | — |
+
+**18 of the 45 movers came within 2% of promoting**, several sitting exactly at the −1.0% boundary:
+`ATI`, `NEXA`, `KMT`, `MU` at −1.0%; `TER`, `LITE`, `VIAV` at −1.1%; `AMAT` −1.3%; `RDW` −1.4%.
+
+And `MU` **did** promote — it appears among the seven symbols that received a boost somewhere in the
+run, two of which are ≥30% movers (`MU`, `URAA`).
+
+## What this changes
+
+My previous statement — that the qualifying highs simply precede evaluation — is **too strong**. The
+movers are not far from the promotion test; they cluster **just below** it, a median 2.6% away, with
+40% of them within 2% and several at the boundary. The mechanism is close to firing on exactly the
+names the objective cares about, and occasionally does.
+
+That is a materially more hopeful picture than the previous section implied, and it is also a more
+dangerous one: a threshold that 18 of 45 movers approach within 2% is precisely the kind of dial
+that looks free to loosen. It is not. Relaxing `0.99` to catch names 2% off their highs buys
+consolidating names on price alone, which is what the entry-extension gate exists to prevent and
+what was measured at −7.95%. The objective lists it under DO NOT RETRY.
+
+The honest conclusion is narrower than either of my earlier ones: **the promotion path is
+marginally, not structurally, out of reach for large movers** — and closing that margin safely is a
+question about *when names become candidates*, not about the size of the threshold they meet.
