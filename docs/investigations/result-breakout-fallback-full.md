@@ -73,3 +73,54 @@ measured, in order of size:
 
 The next question is not "how do we promote more names" but "why does a +87% mover carry a negative
 base at all". That is a scoring question, not a plumbing one, and it has not been investigated.
+
+## Why the funnel did not widen: the fallback helps a different set of symbols
+
+| | count |
+|---|---:|
+| symbols ever receiving a breakout boost | 18 |
+| of those, names that moved >=30% | **3** |
+| movers >=30% evaluated with bars | **0 of 53** |
+| movers >=30% still skipping at `bars=0` | **53 of 53** |
+
+The 18 symbols the fallback rescued are `AGMI, AJG, COPA, COPP, DFEN, EXAS, GBUG, ILIT, LIMI,
+MSTZ, MU, PILL, SELX, SLJY, SLVP, URAA, URNJ, YXI` - overwhelmingly leveraged and thematic ETFs.
+**Every single one of the 53 large movers is still `bars=0`.**
+
+So `_overlay_bars_raw` is populated for the momentum-scan universe, not for the names discovery
+appends during the tick. The newly discovered mover has bars in **neither** source at the moment it
+is scored:
+
+* not in the broker `price_history` map - built from `symbols_for_data` before `run_once`;
+* not in `strategy_cache["_overlay_bars_raw"]` - populated for a different universe.
+
+That is why the skip rate fell from 100% to 10.5% while the funnel stayed at 18%. The rate improved
+for symbols nobody was asking about.
+
+### The claim this corrects
+
+Earlier in this document: *"the same bars are already in scope - momentum discovery reads
+`_overlay_bars_raw` to compute its 20d/60d returns"*. True for the symbols discovery scanned;
+**false for the symbols it discovers**. `AAOI` is announced as
+`Discovered stock (momentum): AAOI (20d=+33.9%, 60d=+3.1%)` using bars held transiently during the
+scan, and those bars are not what `_finalize_scores` can see afterwards.
+
+## The actual requirement, stated precisely
+
+For a discovered mover to be promotable on price action in the same tick it is discovered, its bars
+must be reachable at scoring time. Neither existing source provides that. The options are
+architectural, not parametric:
+
+1. fetch history for discovered symbols **before** the scoring call rather than after it;
+2. persist the scan's bars into `_overlay_bars_raw` at discovery time, so the name it just
+   discovered is covered;
+3. accept a one-tick delay and score discovered names on the following bar, once
+   `symbols_for_data` has expanded to include them.
+
+Option 3 is the smallest change and costs one hourly bar of entry timing - which matters, since
+blocker (1) is that winners are already entered late. Option 2 is the most direct. Neither has been
+tried, and given that four hypotheses in this document have been falsified by measurement, neither
+should be assumed to work.
+
+**No further change is being shipped on this today.** The evidence supports the diagnosis; it does
+not yet support a repair.
