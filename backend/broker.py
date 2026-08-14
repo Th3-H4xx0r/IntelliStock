@@ -5181,6 +5181,18 @@ def _residual_sleeve_deploy(
                      f"confirmed ({_corder.reason}) — holding the cadence "
                      f"anyway so this cannot retry every tick", "yellow")
             _RESIDUAL_SLEEVE_STATE.pop(_CORE_SLEEVE_LAST_HOLD_REASON, None)
+            # The shrink is the lever's COMMON path and it is otherwise
+            # invisible: a deploy trimmed from $1,165.64 to $722.61 logs exactly
+            # like a $722.61 deploy with the lever off. Five levers have shipped
+            # inert here and every one was unprovable from its own log. This
+            # line is what `prereg-unseal-the-book-2026-08-14b.md` endpoint 1
+            # greps for.
+            _cwithheld = float(getattr(_corder, "withheld", 0.0) or 0.0)
+            if _cwithheld > 0.0:
+                _log(f"[core] ALPHA HEADROOM: withheld ${_cwithheld:.2f} of "
+                     f"deployable cash for the alpha book — deploy "
+                     f"${_corder.notional + _cwithheld:.2f} -> "
+                     f"${_corder.notional:.2f}", "green")
             _log(f"[core] bought ${_corder.notional:.2f} {sym} @ {px:.2f} "
                  f"({_corder.reason}: {_corder.current_weight:.1%} -> "
                  f"{_corder.target_weight:.1%} of NAV, ok={_cok})", "cyan")

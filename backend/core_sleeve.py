@@ -402,6 +402,16 @@ class RebalanceOrder:
     reason: str = "disabled"
     target_weight: float = 0.0
     current_weight: float = 0.0
+    #: Dollars this deploy did NOT spend because `deploy_alpha_headroom_pct`
+    #: reserved them for the alpha book. 0.0 whenever the lever is off.
+    #:
+    #: It exists to be GREPPABLE. The lever's common path is a SHRUNK deploy,
+    #: which logs `[core] bought $722.61 SPY (band_deploy: ...)` — byte-
+    #: indistinguishable from a run with the lever off. Five levers have shipped
+    #: inert in this project; each was invisible because its live path left no
+    #: fingerprint, and a reason string that only fires on refusal is not one
+    #: when refusal never happens.
+    withheld: float = 0.0
 
     @property
     def is_action(self) -> bool:
@@ -714,27 +724,39 @@ def core_rebalance_order(
         # which today passes none — broker.py:5143 calls `_core_sleeve_decide`
         # without it, so the whole funding branch above is dead code on the
         # deploy path. That is a second behaviour and belongs in its own A/B.
+        _min_deploy = max(MIN_CORE_DEPLOY_USD, MIN_CORE_ORDER_USD)
         _alpha_headroom = max(0.0, float(
             getattr(cfg, "deploy_alpha_headroom_pct", 0.0) or 0.0)) * nav
         if _alpha_headroom > 0.0:
-            # Never surrender more than half of what the core can see. A
-            # mis-set flag on a fully-invested book would otherwise pin the
-            # core below its band permanently with no way back in.
-            _alpha_headroom = min(_alpha_headroom, 0.5 * _spendable)
-        buy = min(drift_usd, max(0.0, _spendable - _alpha_headroom))
-        _min_deploy = max(MIN_CORE_DEPLOY_USD, MIN_CORE_ORDER_USD)
-        if buy < _min_deploy:
-            # Refused for size, with or without a reserve. Return BEFORE the
-            # reserve is consulted so a bar the core was never going to deploy
-            # on cannot burn a unit of the credit's expiry budget.
+            # The core keeps its OWN minimum, and the alpha book gets the rest.
             #
-            # Say WHICH refusal it was. If the un-reserved clip would have
-            # cleared the minimum, the headroom is what refused this deploy and
-            # `_core_sleeve_log_hold` must show that rather than hiding it
-            # inside `deploy_below_min` — five levers have shipped inert in
-            # this project and each was invisible for exactly that reason.
-            if _alpha_headroom > 0.0 and min(drift_usd, _spendable) >= _min_deploy:
-                return RebalanceOrder(reason="deploy_alpha_headroom", **base)
+            # This was `min(_alpha_headroom, 0.5 * _spendable)` — keep half —
+            # and adversarial review measured what that costs against all 133
+            # real `[core] bought $X` lines in the repo's logs: on 23 of them
+            # (17.3%) halving the deploy STILL left the alpha book under its
+            # min-position floor. Those bars paid the full cost of the
+            # reservation and bought nothing with it, because below ~$630 of
+            # cash half the pot is less than the floor. Keeping `_min_deploy`
+            # instead leaves the alpha book above its floor on 133 of 133 while
+            # refusing the core on 0 of 133 — strictly better on both counts.
+            #
+            # The invariant this encodes is the real one: a mis-set flag must
+            # never pin the core below its band with no way back in. "Half the
+            # pot" was a proxy for that; "the core's own minimum" IS that.
+            _alpha_headroom = min(_alpha_headroom,
+                                  max(0.0, _spendable - _min_deploy))
+        buy = min(drift_usd, max(0.0, _spendable - _alpha_headroom))
+        _withheld = max(0.0, min(_alpha_headroom, _spendable) if buy > 0 else 0.0)
+        if buy < _min_deploy:
+            # Refused for size. Return BEFORE the reserve is consulted so a bar
+            # the core was never going to deploy on cannot burn a unit of the
+            # credit's expiry budget.
+            #
+            # No separate "the headroom refused it" reason: with the clamp above
+            # the headroom can no longer be what pushes a clip under the
+            # minimum, so such a reason would be unreachable — and an
+            # unreachable diagnostic is worse than none, because it reads as
+            # evidence of absence.
             return RebalanceOrder(reason="deploy_below_min", **base)
         # 2026-08-09 FUNDING-RELEASE RESERVE (default OFF, see the note above
         # RebalanceOrder). `buy` is currently sized against cash the core itself
@@ -754,7 +776,8 @@ def core_rebalance_order(
                 if buy < _min_deploy:
                     return RebalanceOrder(
                         reason="funding_release_reserved", **base)
-        return RebalanceOrder(notional=buy, reason="band_deploy", **base)
+        return RebalanceOrder(notional=buy, reason="band_deploy",
+                              withheld=_withheld, **base)
 
     sell = min(-drift_usd, core_value)
     if sell < MIN_CORE_ORDER_USD:

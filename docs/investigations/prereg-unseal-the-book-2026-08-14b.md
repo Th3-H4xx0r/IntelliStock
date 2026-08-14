@@ -120,8 +120,14 @@ same experiment.
 
 Read from the treatment log, not from the config:
 
-1. **Did the mechanism fire.** `grep` for `deploy_alpha_headroom` and for `satellite_cap_below_floor`.
-   If neither appears, the levers are inert and the run says nothing about them.
+1. **Did the mechanism fire.** `grep` the treatment log for `ALPHA HEADROOM: withheld` (the core
+   left cash for the alpha book) and for `satellite_cap_below_floor` (the D1 decline). If neither
+   appears, the levers are inert and the run says nothing about them.
+
+   The first of those exists because review caught that the lever's common path is a *shrunk*
+   deploy, which logs identically to a smaller deploy with the lever off. A refusal-only diagnostic
+   would have been unreachable — greppable-and-absent reads as "never fired", which is exactly how
+   five previous levers were mis-read.
 2. **Conversion.** Is SNDK bought near its first actionable signal (2026-01-12, ~$388) instead of
    2026-02-04 at $617, and at a size at or above the floor? Count `FILL BUY` against `SKIP BUY`.
 3. **Funnel.** Share of >=30% movers receiving a buy intent. Stable at 17-20% across five prior runs;
