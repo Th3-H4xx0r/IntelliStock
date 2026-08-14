@@ -20859,6 +20859,49 @@ def _evaluate_position_risk(
 # Final score mapping
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _breakout_history_fallback(
+    symbols_list: list,
+    price_history: dict | None,
+    strategy_cache: dict | None,
+    date_key: str,
+    config: dict,
+) -> dict:
+    """Bars for discovered symbols the broker map does not cover. Default OFF.
+
+    The map passed into scoring is built from the broker's `symbols_for_data`
+    before `run_once` is called; `symbols_list` is then populated by discovery
+    inside it. Measured, the two sets are disjoint: 7,156 breakout evaluations
+    in bt 278531, 100% exiting at bars=0, zero promotions. The same bars are
+    already in scope — momentum discovery reads `_overlay_bars_raw` to compute
+    its 20d/60d returns — and `_visible_overlay_bars` applies the point-in-time
+    filter, so no lookahead is introduced.
+    """
+    if not bool(config.get("breakout_history_fallback_enabled", False)):
+        return {}
+    try:
+        raw = (strategy_cache or {}).get("_overlay_bars_raw") or {}
+        if not isinstance(raw, dict):
+            return {}
+        out: dict = {}
+        have = price_history or {}
+        for sym in symbols_list or []:
+            key = str(sym or "").strip().upper()
+            if not key or have.get(key):
+                continue
+            bars = raw.get(key) or raw.get(sym) or []
+            if not bars:
+                continue
+            visible = _visible_overlay_bars(bars, strategy_cache, date_key, config)
+            if visible:
+                out[key] = visible
+        return out
+    except (TypeError, ValueError, AttributeError, KeyError) as exc:
+        try:
+            _log(f"BREAKOUT FALLBACK ERROR: {exc!r}", "red")
+        except Exception:
+            pass
+        return {}
+
 def _finalize_scores(symbols_list: list, sentiment_data: dict, propagated: dict, config: dict, pending_by_symbol: dict | None = None, portfolio_emulator=None, date_key: str = "", prices: dict | None = None, strategy_cache: dict | None = None, price_history: dict | None = None) -> dict:
     """
     Map continuous raw_scores to discrete {-1, 0, 1} with detailed reasoning.
@@ -20873,6 +20916,8 @@ def _finalize_scores(symbols_list: list, sentiment_data: dict, propagated: dict,
     not in the active discovery universe still get scored, enabling the
     stop-loss / drawdown logic to fire on every bar.
     """
+    _bk_fallback = _breakout_history_fallback(
+        symbols_list, price_history, strategy_cache, date_key, config)
     import datetime as _dt
     if strategy_cache is None:
         strategy_cache = {}
@@ -21011,7 +21056,20 @@ def _finalize_scores(symbols_list: list, sentiment_data: dict, propagated: dict,
         # for any stock printing 52w/5w highs, volume surge, or gap-up. Can
         # PROMOTE a previously-neutral stock to score=1 even without LLM news.
         if bool(config.get("breakout_score_boost_enabled", True)):
-            _bk_boost, _bk_reason = _compute_breakout_score_boost(sym, price_history, config)
+            # bt 278531/896168: 7,156 breakout evaluations, EVERY ONE exiting at
+            # bars=0, because `price_history` is the broker map built from
+            # symbols_for_data BEFORE this call, while symbols_list is populated
+            # by discovery INSIDE run_once. The two sets are disjoint, so a
+            # discovered mover with no LLM sentiment and no graph path can never
+            # be promoted on price action. The bars do exist in this scope:
+            # momentum discovery reads strategy_cache["_overlay_bars_raw"] to
+            # compute its own 20d/60d returns. Default OFF.
+            _bk_hist = price_history
+            if _bk_fallback:
+                _bk_bars = _bk_fallback.get(sym)
+                if _bk_bars and not (price_history or {}).get(sym):
+                    _bk_hist = {**(price_history or {}), sym: _bk_bars}
+            _bk_boost, _bk_reason = _compute_breakout_score_boost(sym, _bk_hist, config)
             if _bk_boost <= 0 and bool(config.get("breakout_diagnostics_enabled", False)):
                 _log(f"BREAKOUT SKIP: {sym} {_bk_reason}", "yellow")
             if _bk_boost > 0:
