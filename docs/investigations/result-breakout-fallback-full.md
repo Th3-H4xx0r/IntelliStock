@@ -124,3 +124,59 @@ should be assumed to work.
 
 **No further change is being shipped on this today.** The evidence supports the diagnosis; it does
 not yet support a repair.
+
+## CORRECTION: the previous section is wrong — the movers ARE evaluated
+
+The section above claims *"every single one of the 53 large movers is still `bars=0`"*. That is
+false, and the error was mine: `BREAKOUT SKIP` lines carry an **empty reason string** when the
+scorer runs to completion and simply finds no breakout pattern, and I treated every skip line as a
+`bars=0` skip.
+
+Splitting the 7,340 skip lines by whether a reason is present:
+
+| | lines | symbols |
+|---|---:|---:|
+| `skip:bars=0<25` — no history | 1,026 | 423 |
+| **empty reason — evaluated WITH bars, no pattern found** | **6,314** | **536** |
+
+And for the 53 large movers specifically:
+
+| | count |
+|---|---:|
+| ever skipped for `bars=0` | **10** |
+| **ever evaluated with bars** | **53 of 53** |
+
+| mover | move | `bars=0` skips | evaluated with bars |
+|---|---:|---:|---:|
+| SNDK | +187.9% | 0 | 20 |
+| LITE | +105.1% | 0 | 20 |
+| DTSS | +95.7% | 0 | 27 |
+| AAOI | +87.7% | 0 | 26 |
+| MRNA | +81.8% | 0 | 25 |
+| VICR | +81.3% | 0 | 20 |
+
+**The fallback works, and it works on the names that matter.** Every large mover is now scored
+against its price history, dozens of times each, where before not one ever was.
+
+## So the blocker has moved, and this is the honest new question
+
+`AAOI` is up 87.7% and is evaluated 26 times with bars, and the breakout scorer finds **no 52-week
+high, no 5-week high, no volume surge and no gap-up** on any of them. For a name that nearly
+doubled, that is not credible on its face. Two candidates, neither tested:
+
+1. **The bars are wrong for the purpose.** `_overlay_bars_raw` holds `1Day` bars and
+   `_visible_overlay_bars` truncates to what is causally visible; if the visible tail is short or
+   stale, `closes[-25:]` and `closes[-252:]` describe a window that does not include the move.
+2. **The thresholds do not match the data.** The gap-up test wants 5.0% against the previous close
+   and the volume test wants 2.0x a 20-bar average - plausible on daily bars, but they have never
+   been checked against what these series actually contain.
+
+Distinguishing them costs one instrumented run that logs, for a named mover, the number of visible
+bars and the actual 5w/52w/volume/gap values computed. That is the next step, and it is a
+measurement, not a change.
+
+## Standing correction count
+
+This document now contains five falsified hypotheses of mine and two corrected factual claims. The
+measurements have survived every check; my explanations of them have not. The practical consequence
+is unchanged: nothing has been enabled on doc 193, and no return claim rests on any of this.
