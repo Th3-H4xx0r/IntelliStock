@@ -155,3 +155,33 @@ constraint is breadth of conversion — the 103 -> 19 -> 9 -> 7 funnel — not s
 
 That is consistent with everything else measured today: the promotion path that would let a
 no-news, no-graph-edge mover become a candidate never fires (2,922 skips, zero promotions).
+
+## The funnel collapse reproduces across four independent runs
+
+Same measurement, taken from each run's own quote stream and fills: names that moved >=30% from
+their first quote to their subsequent peak, how many ever produced a `buy` action intent, and how
+many were actually filled.
+
+| run | window | moved >=30% | buy intent | bought |
+|---|---|---:|---:|---:|
+| bt 873929 | W0 ref | 103 | 19 (18%) | 7 (7%) |
+| bt 553341 | W3 non-semi | 65 | 16 (25%) | 1 (2%) |
+| bt 523085 | W0 control | 57 | 10 (18%) | 3 (5%) |
+| bt 102463 | W0 treatment | 53 | 11 (21%) | 1 (2%) |
+
+Across four runs spanning two windows, two instances and both arms of a paired test, **79-82% of
+names that made a >=30% move never produce a buy intent at all**. The share that reaches a fill is
+2-7%.
+
+This is no longer a one-window observation. It is the stable shape of the system, and it is
+upstream of every lever tested in this project: ordering, conviction reserve, displacement and
+sizing all operate on the 10-19 names that do reach portfolio construction, never on the ~45 that
+do not.
+
+It also bounds what the objective's arithmetic can produce today. Four names at 14% of NAV each
+capturing half of a 60% move requires four such names to be *bought*; these runs buy one to three,
+because that is all that survives to the buy gate.
+
+The mechanism that should promote a no-news, no-graph-edge mover into candidacy is the breakout
+rescue, and it is measured dead: 2,922 evaluations, 100% exiting at `bars=0`, zero promotions,
+covering six of the eight winners the objective names.
