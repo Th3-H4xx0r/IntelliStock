@@ -32909,6 +32909,52 @@ class GraphNexusAnalysis:
             if _conc_on:
                 _conc_target_pct = float(
                     config.get("total_spend_cap_target_weight_pct", 0.0) or 0.0)
+                # 2026-08-15 THE SIZING CONTRADICTION. Default OFF.
+                #
+                # `max_positions` x this weight is what the book will hold once
+                # full, and it must not exceed the satellite's design share, or
+                # the book permanently overruns and the residual index core is
+                # crushed to its floor:
+                #
+                #     6 x 0.14                                     = 0.84
+                #     satellite_design_share = 1 - 0.35 - 0.02     = 0.63
+                #     total demanded = 0.35 + 0.02 + 0.84          = 1.21 of NAV
+                #
+                # The consequence is not a rounding error. With the satellite
+                # pinned at its 0.88 conviction ceiling, the satellite cap grants
+                # a median $160 while `_exec_min_position_floor` demands a median
+                # $370 — measured on bt 559934, ZERO of 134 grants could ever
+                # clear the floor, and 144 buys were refused `insufficient_cash`.
+                # broker.py:3744's docstring claims "the two ends cannot admit
+                # what the other refuses"; the satellite cap sits between them and
+                # breaks exactly that invariant. In that window 100% of the 52
+                # names that moved >=30% were discovered and 0% were bought —
+                # INTC +156%, DELL +156%, SNDK +135%, MU +105%, AXTI +87%, each
+                # refused over roughly $150.
+                #
+                # Clamping the per-name weight to design_share/max_positions makes
+                # the two ends consistent by construction. 0.63/6 = 0.105, which
+                # is still inside the objective's stated 10-15%-of-NAV band, so
+                # this does not trade away the "size so one winner matters" rule.
+                if bool(config.get("sizing_respects_satellite_share_enabled", False)):
+                    try:
+                        _ss_core_t = float(config.get("core_target_pct", 0.0) or 0.0)
+                        _ss_cash_f = float(config.get("cash_reserve_floor_pct", 0.02) or 0.02)
+                        _ss_slots = int(config.get("max_positions", 0) or 0)
+                        _ss_share = max(0.0, 1.0 - _ss_core_t - _ss_cash_f)
+                        if _ss_slots > 0 and _ss_share > 0 and _conc_target_pct > 0:
+                            _ss_max_w = _ss_share / _ss_slots
+                            if _conc_target_pct > _ss_max_w + 1e-9:
+                                _log(
+                                    f"SIZING CLAMP: per-name weight "
+                                    f"{_conc_target_pct:.3f} x {_ss_slots} slots = "
+                                    f"{_conc_target_pct * _ss_slots:.2f} of NAV exceeds the "
+                                    f"satellite design share {_ss_share:.2f} — clamping to "
+                                    f"{_ss_max_w:.4f} so the satellite cap and the "
+                                    f"min-position floor can both be satisfied", "yellow")
+                                _conc_target_pct = _ss_max_w
+                    except (TypeError, ValueError, ZeroDivisionError):
+                        pass
                 _conc_target = (portfolio_total * _conc_target_pct
                                 if _conc_target_pct > 0 else 0.0)
                 _conc_cands = []
