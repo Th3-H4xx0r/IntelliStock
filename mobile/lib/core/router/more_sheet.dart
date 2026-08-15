@@ -25,6 +25,7 @@ class _MoreSheet extends ConsumerWidget {
     ('account_balance', 'Brokerages', '/brokerages'),
     ('smart_toy', 'Agent Runs', '/agent-runs'),
     ('hub', 'Nexus Graph', '/nexus'),
+    ('lightbulb', 'Learning', '/learning'),
     ('psychology', 'Models', '/models'),
     ('payments', 'Token Usage', '/token-usage'),
     ('settings', 'Settings', '/settings'),

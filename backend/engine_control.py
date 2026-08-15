@@ -21,6 +21,7 @@ ENGINE_ID_NEXUS_GRAPH = "nexus_graph_engine"
 ENGINE_ID_PRICE = "price_engine"
 ENGINE_ID_AI_BACKTEST = "ai_backtest_engine"
 ENGINE_ID_DISCOVER = "discover_engine"
+ENGINE_ID_SELF_LEARNING = "self_learning_engine"
 
 ALL_ENGINE_IDS = [
     ENGINE_ID_BACKTEST,
@@ -30,6 +31,7 @@ ALL_ENGINE_IDS = [
     ENGINE_ID_PRICE,
     ENGINE_ID_AI_BACKTEST,
     ENGINE_ID_DISCOVER,
+    ENGINE_ID_SELF_LEARNING,
 ]
 
 
@@ -47,6 +49,11 @@ def default_doc(engine_id: str) -> dict:
             "last_evening_at": None,
         }
     if engine_id == ENGINE_ID_DISCORD_BOT:
+        return {"id": engine_id, "running": False, "config": {}}
+    if engine_id == ENGINE_ID_SELF_LEARNING:
+        # Phase 1 is observe-only and writes no strategy config, but it still
+        # ships OFF: an operator starts it deliberately, the same as every
+        # other engine that reads the whole BacktestResults table.
         return {"id": engine_id, "running": False, "config": {}}
     if engine_id == ENGINE_ID_NEXUS_GRAPH:
         return {

@@ -149,6 +149,10 @@ from interactive_utils import (
     action_list_agent_runs,
     action_agent_run_force_stop,
     action_list_bot_trade_decisions,
+    action_learning_findings,
+    action_learning_funnels,
+    action_learning_observations,
+    action_learning_overview,
     action_list_models,
     action_get_model,
     action_get_model_raw,
@@ -3686,6 +3690,31 @@ def api_agent_cycle_log_update(log_id: str, body: AgentCycleLogUpdateBody, conn=
 def api_agent_runs(page: int = 1, per_page: int = 20, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """List agent strategy attempts (cycle log) with pagination."""
     return _run(action_list_agent_runs, conn, page, per_page)
+
+
+@app.get("/learning/overview", response_class=JSONResponse)
+def api_learning_overview(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Headline counters for the Learning tab. `acts_autonomously` is false
+    while the subsystem is in observe mode — the UI must not imply otherwise."""
+    return _run(action_learning_overview, conn)
+
+
+@app.get("/learning/findings", response_class=JSONResponse)
+def api_learning_findings(limit: int = 100, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Findings raised by the self-learning guards, newest first."""
+    return _run(action_learning_findings, conn, limit)
+
+
+@app.get("/learning/funnels", response_class=JSONResponse)
+def api_learning_funnels(limit: int = 100, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Per-run decided / executed / refused counts."""
+    return _run(action_learning_funnels, conn, limit)
+
+
+@app.get("/learning/observations/{run_id}", response_class=JSONResponse)
+def api_learning_observations(run_id: str, limit: int = 500, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Decision-level observations for one run, including the refusals."""
+    return _run(action_learning_observations, conn, run_id, limit)
 
 
 @app.post("/agent/runs/{log_id}/force-stop", response_class=JSONResponse)

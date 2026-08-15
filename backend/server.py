@@ -261,7 +261,7 @@ def ensure_db_and_tables(c):
     dbs = list(r.db_list().run(c))
     if DB_NAME not in dbs:
         r.db_create(DB_NAME).run(c)
-    tables = ('Config', 'Instances', 'LivePricesStocks', 'LivePrices', 'PriceHistory', 'Strategies', 'BacktestResults', 'BacktestInstances', 'AIBacktestingResults', 'AgentBest', 'GraphNexusNewsCache', 'GraphNexusProgress', 'EngineControl', 'EarningsLLMCache', 'BrokerageAccounts', 'Models')
+    tables = ('Config', 'Instances', 'LivePricesStocks', 'LivePrices', 'PriceHistory', 'Strategies', 'BacktestResults', 'BacktestInstances', 'AIBacktestingResults', 'AgentBest', 'GraphNexusNewsCache', 'GraphNexusProgress', 'EngineControl', 'EarningsLLMCache', 'BrokerageAccounts', 'Models', 'LearningObservations', 'LearningObservationRollups', 'LearningFindings', 'LearningFunnels', 'LearningConfig')
     for table in tables:
         if table not in list(r.db(DB_NAME).table_list().run(c)):
             r.db(DB_NAME).table_create(table).run(c)

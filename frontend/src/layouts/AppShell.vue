@@ -66,6 +66,7 @@ const navItems = [
   { label: 'Backtests',  icon: 'analytics',        to: '/backtests'   },
   { label: 'Agent Runs', icon: 'smart_toy',        to: '/agent-runs'  },
   { label: 'Nexus Graph', icon: 'hub',             to: '/nexus'       },
+  { label: 'Learning',    icon: 'lightbulb',       to: '/learning'    },
   { label: 'Strategies',  icon: 'schema',          to: '/strategies'  },
   { label: 'Models',      icon: 'psychology',       to: '/models'      },
   { label: 'Token Usage', icon: 'payments',         to: '/token-usage' },

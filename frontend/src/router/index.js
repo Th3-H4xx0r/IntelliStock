@@ -76,6 +76,12 @@ const routes = [
     meta: { requiresAuth: true },
   },
   {
+    path: '/learning',
+    name: 'learning',
+    component: () => import('../views/LearningView.vue'),
+    meta: { requiresAuth: true },
+  },
+  {
     path: '/kalshi',
     name: 'kalshi',
     component: () => import('../views/KalshiView.vue'),

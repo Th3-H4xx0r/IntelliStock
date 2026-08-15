@@ -8475,3 +8475,34 @@ def action_model_strategies(conn, model_id):
     _ensure_models_table(conn)
     refs = _find_strategies_referencing_model(conn, model_id)
     return {"strategies": [{"id": s["id"], "name": s["name"]} for s in refs]}
+
+
+# ── Self-learning subsystem reads (Phase 1: observe-only) ──────────────────
+# The subsystem writes no strategy config and takes no autonomous action in
+# Phase 1; these are read paths for the Learning tab. Aggregation lives in
+# self_learning.api_shape so it is unit-testable without RethinkDB.
+def action_learning_findings(conn, limit=100):
+    from self_learning import store
+    store.ensure_tables(conn)
+    return {"findings": store.list_findings(conn, limit=limit)}
+
+
+def action_learning_funnels(conn, limit=100):
+    from self_learning import store
+    store.ensure_tables(conn)
+    return {"funnels": store.list_funnels(conn, limit=limit)}
+
+
+def action_learning_observations(conn, run_id, limit=500):
+    from self_learning import store
+    store.ensure_tables(conn)
+    return {"observations": store.list_observations(conn, run_id, limit=limit)}
+
+
+def action_learning_overview(conn):
+    from self_learning import store
+    from self_learning.api_shape import overview
+    store.ensure_tables(conn)
+    return overview(findings=store.list_findings(conn, limit=500),
+                    funnels=store.list_funnels(conn, limit=500),
+                    config=store.get_config(conn))

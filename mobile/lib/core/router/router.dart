@@ -19,6 +19,7 @@ import '../../features/strategies/presentation/strategies_screen.dart';
 import '../../features/strategies/presentation/strategy_detail_screen.dart';
 import '../../features/brokerages/presentation/brokerages_screen.dart';
 import '../../features/agent_runs/presentation/agent_runs_screen.dart';
+import '../../features/learning/presentation/learning_screen.dart';
 import '../../features/nexus/presentation/nexus_screen.dart';
 import '../../features/kalshi/presentation/kalshi_screen.dart';
 import '../../features/crypto/presentation/crypto_instance_detail_screen.dart';
@@ -206,6 +207,11 @@ final goRouterProvider = Provider<GoRouter>((ref) {
         path: '/nexus',
         parentNavigatorKey: _rootKey,
         builder: (_, _) => const NexusScreen(),
+      ),
+      GoRoute(
+        path: '/learning',
+        parentNavigatorKey: _rootKey,
+        builder: (_, _) => const LearningScreen(),
       ),
       GoRoute(
         path: '/models',
