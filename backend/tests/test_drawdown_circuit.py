@@ -132,3 +132,117 @@ def test_account_kill_includes_sleeve_legs():
     assert out["AAA"]["score"] == -1
     assert out["SQQQ"]["score"] == -1
     assert out["SPY"]["score"] == -1
+
+
+# ── THE KILL LOOP (2026-08-15) ─────────────────────────────────────────────
+#
+# `portfolio_dd_kill_pct` is 12 and `portfolio_drawdown_halt_backfill_stop_pct`
+# is 25, so across the 13-point band between them the circuit LIQUIDATES THE
+# WHOLE BOOK and funds new entries ON THE SAME TICK. And because `peak_value` is
+# re-based only on resume, the kill re-fires every bar. Measured on bt 569516,
+# 02-02..02-16 — twelve consecutive buy->kill cycles:
+#
+#     02-02 BFQ BUY SNDK      -> 02-03 KILL SNDK
+#     02-03 BFQ BUY TYRA      -> 02-04 KILL TYRA
+#     02-04 BFQ BUY SNDK, C   -> 02-05 KILL C, SNDK
+#     02-05 BFQ BUY LLY       -> 02-06 KILL LLY
+#     02-09 BFQ BUY LLY       -> 02-10 KILL LLY
+#     02-10 BFQ BUY GM        -> 02-11 KILL GM
+#
+# 74% of that run's governed turnover and 100% of its sell notional. The round
+# trips LOST money (-$240.75), deepening the drawdown -18.0% -> -22.0%, which
+# kept the kill armed. The churn deepens the drawdown that causes the churn.
+#
+# It is absent from the older runs only because they never made enough money to
+# draw down 12%: bt 523085 peaked at +6.5% and logged SOFT twice, never KILL.
+
+KILL_VALUE = 5100.0          # -15% from the 6000 peak: inside the 12-25% band
+HELD = {"AAA": 10.0, "BBB": 5.0}
+
+
+def test_today_the_kill_tier_still_funds_new_entries():
+    """The defect, pinned. Flag off: the backfill queue keeps a budget on the
+    very tick the book is being liquidated."""
+    out, cache = _run(KILL_VALUE, spy_ret20=-4.0, positions=HELD)
+    assert cache["_portfolio_drawdown_state"]["circuit_tier"] == "kill"
+    assert cache.get("_bfq_halt_budget_pct", 0.0) > 0.0, (
+        "pre-fix behaviour: entries are still funded during a KILL")
+    assert not cache.get("_dd_kill_blocks_entries")
+
+
+def test_the_flag_zeroes_the_entry_budget_during_a_kill():
+    out, cache = _run(KILL_VALUE, spy_ret20=-4.0, positions=HELD,
+                      cfg={"dd_kill_blocks_entries_enabled": True})
+    assert cache["_portfolio_drawdown_state"]["circuit_tier"] == "kill"
+    assert cache["_bfq_halt_budget_pct"] == 0.0
+    assert cache["_dd_kill_blocks_entries"] is True, (
+        "the momentum lanes read this; the queue budget alone does not close "
+        "the entry path")
+
+
+def test_the_entry_block_lifts_below_the_kill_tier():
+    """It must bind ONLY while the kill is armed — a hard/soft tier keeps its
+    graduated budget, and a healthy book is untouched."""
+    for value in (5650.0, 5500.0, 5900.0):
+        _out, cache = _run(value, spy_ret20=-4.0, positions=HELD,
+                           cfg={"dd_kill_blocks_entries_enabled": True})
+        if cache["_portfolio_drawdown_state"]["circuit_tier"] != "kill":
+            assert not cache.get("_dd_kill_blocks_entries"), value
+
+
+# The NAV must keep FALLING, which is what actually happened. A flat NAV
+# accrues up-days and resumes after two bars — that is the correctness argument
+# the code comment relies on ("the kill tier liquidates to 100% cash, and a
+# 100%-cash portfolio has an EXACTLY flat NAV"). It fails in practice because
+# the backfill queue and the momentum lanes keep buying, the round trips lose
+# money, NAV keeps moving, `up_days` keeps resetting, and the halt never clears.
+# bt 569516 sat in the band for 12 sessions on exactly this.
+_DECLINE = [5100.0, 5050.0, 5000.0]
+
+
+def test_the_kill_fires_once_per_episode_with_the_latch():
+    """Second bar deeper in the drawdown must NOT re-liquidate."""
+    cache = {"_portfolio_drawdown_state": {"peak_value": 6000.0}}
+    cfg = {"dd_kill_once_per_episode_enabled": True}
+    first, cache = _run(_DECLINE[0], spy_ret20=-4.0, positions=HELD, cfg=cfg,
+                        cache=cache)
+    killed_first = [s for s, v in first.items() if v.get("score") == -1]
+    assert killed_first, "the first kill must still liquidate"
+    assert cache["_portfolio_drawdown_state"].get("kill_fired_episode") is True
+
+    second, cache = _run(_DECLINE[1], spy_ret20=-4.0, positions=HELD,
+                         cfg=cfg, cache=cache)
+    killed_second = [s for s, v in second.items() if v.get("score") == -1]
+    assert not killed_second, (
+        f"the kill re-fired on the next bar: {killed_second}. peak_value is "
+        "only re-based on resume, so without the latch it re-arms every bar — "
+        "12 times in bt 569516.")
+
+
+def test_without_the_latch_the_kill_refires_every_bar():
+    """Proves the latch is load-bearing rather than coincidental."""
+    cache = {"_portfolio_drawdown_state": {"peak_value": 6000.0}}
+    fired = 0
+    for value in _DECLINE:
+        out, cache = _run(value, spy_ret20=-4.0, positions=HELD, cache=cache)
+        if [s for s, v in out.items() if v.get("score") == -1]:
+            fired += 1
+    assert fired == 3, (
+        f"expected the documented re-fire on every bar, got {fired}. The peak "
+        "is re-based only on resume, so a still-falling book re-arms the tier "
+        "every bar — 12 times in bt 569516.")
+
+
+def test_flag_off_is_byte_identical_across_the_drawdown_range():
+    for value in (5900.0, 5650.0, 5500.0, 5100.0, 4400.0):
+        a_cache = {"_portfolio_drawdown_state": {"peak_value": 6000.0}}
+        b_cache = {"_portfolio_drawdown_state": {"peak_value": 6000.0}}
+        a, a_cache = _run(value, spy_ret20=-4.0, positions=HELD, cache=a_cache,
+                          cfg={})
+        b, b_cache = _run(value, spy_ret20=-4.0, positions=HELD, cache=b_cache,
+                          cfg={"dd_kill_blocks_entries_enabled": False,
+                               "dd_kill_once_per_episode_enabled": False})
+        assert {k: v.get("score") for k, v in a.items()} == \
+               {k: v.get("score") for k, v in b.items()}, value
+        assert a_cache["_portfolio_drawdown_state"]["circuit_tier"] == \
+               b_cache["_portfolio_drawdown_state"]["circuit_tier"], value

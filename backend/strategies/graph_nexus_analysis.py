@@ -24359,7 +24359,60 @@ def _apply_portfolio_drawdown_halt(
     else:
         strategy_cache.pop("_dd_cut_floor_override", None)
 
-    if circuit_tier == "kill":
+    # ── 2026-08-15 THE KILL LOOP. Both flags default OFF. ──────────────────
+    #
+    # `portfolio_dd_kill_pct` is 12% and `portfolio_drawdown_halt_backfill_stop_pct`
+    # is 25%, so across the 13-point band between them the system LIQUIDATES THE
+    # WHOLE BOOK and funds new entries ON THE SAME TICK. The two thresholds were
+    # set without reference to each other. Measured on bt 569516, 02-02..02-16:
+    #
+    #     02-02 BFQ BUY SNDK      -> 02-03 KILL SNDK
+    #     02-03 BFQ BUY TYRA      -> 02-04 KILL TYRA
+    #     02-04 BFQ BUY SNDK, C   -> 02-05 KILL C, SNDK
+    #     02-05 BFQ BUY LLY       -> 02-06 KILL LLY
+    #     02-09 BFQ BUY LLY       -> 02-10 KILL LLY
+    #     02-10 BFQ BUY GM        -> 02-11 KILL GM
+    #
+    # Twelve consecutive buy->kill cycles: 74% of that run's governed turnover
+    # and 100% of its sell notional. The round trips LOST money (-$240.75 on a
+    # $7.1k book), deepening the drawdown -18.0% -> -22.0%, which kept the kill
+    # armed. The churn deepens the drawdown that causes the churn — a closed
+    # loop, and it is why the treatment's turnover read 392% of NAV.
+    #
+    # It did not appear in the older runs because they never made enough money
+    # to draw down 12%: bt 523085 peaked at +6.5% and logged SOFT twice, never
+    # KILL. This is a defect that only shows up once the book starts working.
+    if circuit_tier == "kill" and bool(
+            config.get("dd_kill_blocks_entries_enabled", False)):
+        # A kill means stop, and stop has to include buying.
+        strategy_cache["_bfq_halt_budget_pct"] = 0.0
+        # Read by the momentum lanes, which re-promote score=1 AFTER the halt
+        # demotion (:28368) and reference neither `_drawdown_halt_active` nor
+        # `circuit_tier`. Capping the queue budget alone does NOT close the
+        # entry path — HYMC and SNDK came back in through the momentum lane.
+        strategy_cache["_dd_kill_blocks_entries"] = True
+    else:
+        strategy_cache.pop("_dd_kill_blocks_entries", None)
+
+    # The kill re-fires EVERY BAR while the drawdown stays past the tier,
+    # because `peak_value` is only re-based on resume (:24253) and is otherwise
+    # carried forward (:24311). Twelve fires in bt 569516, three in bt 599773.
+    # One protective liquidation per episode is the whole intent; the repeats
+    # are what turn a stop into a grinder. The latch clears on resume, below.
+    _kill_latched = False
+    if circuit_tier == "kill" and bool(
+            config.get("dd_kill_once_per_episode_enabled", False)):
+        if state.get("kill_fired_episode"):
+            _kill_latched = True
+            _log("Drawdown circuit KILL already fired this episode — holding "
+                 "(peak re-bases on resume, so the tier stays armed until then)",
+                 "yellow")
+        else:
+            state["kill_fired_episode"] = True
+    if resumed_now:
+        state.pop("kill_fired_episode", None)
+
+    if circuit_tier == "kill" and not _kill_latched:
         _held_syms = []
         try:
             if hasattr(portfolio_emulator, "get_positions"):
@@ -29361,6 +29414,19 @@ class GraphNexusAnalysis:
                             )
                             if _v32_blocked:
                                 continue
+                            # 2026-08-15 kill-loop gate. This lane re-promotes
+                            # score=1 AFTER the drawdown-halt demotion and never
+                            # consulted `circuit_tier`, so it bought straight
+                            # through a protective liquidation and the next bar's
+                            # kill sold what it had just bought. HYMC and SNDK
+                            # re-entered here, not via the backfill queue, which
+                            # is why capping the queue budget alone did not stop
+                            # the loop. Default OFF, set by the circuit.
+                            if strategy_cache and strategy_cache.get(
+                                    "_dd_kill_blocks_entries"):
+                                _log(f"DD KILL: mw_buy entry blocked for {_mp_ticker} "
+                                     "— protective liquidation is active", "yellow")
+                                continue
                             if _mp_ticker not in scores:
                                 scores[_mp_ticker] = {}
                             scores[_mp_ticker]["raw_net_score"] = _mp["raw_net_score"]
@@ -31636,6 +31702,20 @@ class GraphNexusAnalysis:
                         if _mw_ba_nav_cap > 0 and portfolio_total > 0:
                             _mw_ba_alloc = min(_mw_ba_alloc, portfolio_total * _mw_ba_nav_cap)
                         if _mw_ba_alloc < _mw_ba_min_pos:
+                            continue
+                        # 2026-08-15 kill-loop gate — see the mw_buy lane. This
+                        # is the OTHER path that re-promotes score=1 after the
+                        # halt demotion without consulting `circuit_tier`.
+                        # Deliberately gated even though this is the lane the
+                        # objective's "catch the big movers" thesis runs on: a
+                        # protective liquidation that buys back on the same tick
+                        # is not catching a mover, it is funding the next kill.
+                        # The block lasts only while the KILL tier is armed.
+                        if strategy_cache and strategy_cache.get(
+                                "_dd_kill_blocks_entries"):
+                            _log(f"DD KILL: breakout_add entry blocked for "
+                                 f"{_mw_ba_sym_u} — protective liquidation is active",
+                                 "yellow")
                             continue
                         # η.E — Phase η (2026-05-20): floor + natural-signal differentiator.
                         _eta_e_ba_floored = max(_mw_ba_score, 1.50)
