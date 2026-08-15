@@ -131,16 +131,63 @@ in one window were discovered and 0% were bought; 0 of 134 grants could clear th
 min-position floor; 144 buys were refused for insufficient cash. Ordinary trade telemetry
 records fills and is blind to all of it.
 
-So the primary record is **every candidate that reached the ranking stage** — scored,
-ranked, granted, refused, ordered, filled — each carrying its refusal reason, and **each
-resolved to a forward outcome whether or not it was ever bought.** The counterfactual on
-refusals is the mistake signal.
+So the primary record is **every symbol the system formed a decision about** — decided,
+sized, submitted, filled or not — and **each is resolved to a forward outcome whether or
+not it was ever bought.** The counterfactual on the ones it declined is the mistake signal.
+
+### 3.0 Where the data actually comes from — and why no strategy code changes
+
+An earlier draft of this section described stages ("scored, ranked, granted") that are
+Nexus vocabulary, not generic. Corrected: the decision record already exists, it is already
+strategy-agnostic, and it is already written for every strategy.
+
+`broker.py:17342` appends a per-symbol decision record on every backtest bar — in the
+**common execution path**, not inside any strategy:
+
+```
+{timestamp, symbol, action, decision, normalized_score, override_applied,
+ pre_override_action, pre_override_decision, primary_strategy,
+ primary_action_intent, final_reason,
+ strategies: [{strategy, decision, weight, reason}, …],
+ post_decision: [...]}
+```
+
+It lands in `BacktestResults.backtest_decisions`. `BotTradeDecisions` is its live twin,
+built by `bot_decision_log.primary_decision()` from the same `strategy_summary` shape and
+indexed by `brokerage_id`.
+
+| observation | source |
+|---|---|
+| what was decided, by which sub-strategy, with what reason | `BacktestResults.backtest_decisions` / `BotTradeDecisions` |
+| what actually executed | `BacktestResults.backtest_trades` / broker fills |
+| **what was decided BUY and never executed — the refusals** | the join: decided-BUY minus filled |
+| equity path for attribution | `BacktestResults.portfolio_value_history` |
+
+**Consequence: Phase 1 requires no changes to any strategy file.** The refusal set is
+derivable from data already being written. This also means the subsystem inherits
+strategy-agnosticism from the execution layer rather than having to enforce it.
+
+`normalized_score` on that record is the immediate target of Guard 3 — running the variance
+assertion over existing `BacktestResults` documents reproduces the "717 of 723 candidates
+scored exactly +1.000" finding from history already on disk, with no new instrumentation.
+
+**Two known gaps, recorded rather than hidden:**
+
+1. **Refusal *reason codes* are not structured.** The existence of a refusal is derivable
+   from the join; *why* (insufficient cash, floor unmet, cap hit) currently lives only in
+   run logs. Phase 1 records the refusal and leaves the reason `unknown`; structured reason
+   capture is a Phase 2 enrichment, and log parsing is explicitly rejected as a source —
+   the first sweep reader in this project was broken by a regex crossing a timestamp.
+2. **`broker.py:17315` skips the record when `_trade_skipped_no_price`.** Symbols with no
+   price on a bar produce no decision record at all, so the observation set is already
+   filtered upstream. Phase 1 must measure and report that filter's size rather than
+   assume it is small.
 
 ### 3.1 Tables
 
 | table | grain | retention |
 |---|---|---|
-| `LearningObservations` | one row per candidate per decision point: stage, action, reason code, score fields, size requested, size granted, price | **90d raw (configurable), then rolled up** |
+| `LearningObservations` | one row per (run, symbol, bar) decision: action, decision, `normalized_score`, per-sub-strategy votes, executed y/n, refusal reason (`unknown` in Phase 1) | **90d raw (configurable), then rolled up** |
 | `LearningOutcomes` | forward return at 1/5/20 sessions plus SPY-relative excess, via `benchmark_alpha/outcomes.py`'s exchange-authoritative calendar — **including refused candidates** | rollups kept indefinitely |
 | `LearningFindings` | thread root: what was observed, severity, target, status | forever |
 | `LearningHypotheses` | immutable, content-hashed: claim, mechanism, levers, **predicted direction and magnitude** | forever |
@@ -163,9 +210,14 @@ second elephant:
 
 1. **Only `LearningObservations` is large, and it is the only table with a TTL.** Raw rows
    expire; daily rollups preserve the learning value permanently.
-2. **Two write tiers.** Decision-stage rows (scored and beyond) are written in full —
-   bounded to hundreds per run by the funnel's own numbers. The discovery funnel above that
-   stage is written as **per-bar aggregates, not rows**.
+2. **Two write tiers.** Decision rows are written in full — the source
+   (`backtest_decisions`) is already bounded to symbols that reached the trade loop, which
+   is hundreds per run, not tens of thousands. Anything coarser (per-bar funnel counts,
+   price-skip counts) is written as **per-bar aggregates, not rows**.
+
+Because Phase 1's sources are documents that already exist, backfill over historical
+`BacktestResults` is a read-only batch job — the subsystem has useful history on day one
+rather than starting empty.
 
 ### 3.3 The three guards
 
