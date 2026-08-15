@@ -63,6 +63,31 @@ SHARED = {
     # converge to THREE names while max_positions read 4. On both arms so the
     # counter cannot be the difference between them.
     "slot_exclusions_all_counters_enabled": True,
+    # The lookahead bound. `GraphNexusTickerHistory` is keyed by bare ticker with
+    # no as-of filter and the read sorts newest-first before truncating, so
+    # future-dated headlines left by a later-window run were PREFERENTIALLY
+    # selected into the sentiment prompt. On both arms: it is a correctness fix,
+    # not a lever, and leaving it off would mean knowingly running with a
+    # lookahead.
+    "ticker_history_as_of_enabled": True,
+    # Cleared from BOTH arms (None removes the key). These were the previous
+    # experiment's treatment levers and they are still written on doc 195; left
+    # in place they would ride along as a silent confound. `conversion_fixes`
+    # was measured INERT in bt 569516 (zero satellite_cap_below_floor lines) and
+    # `core_deploy_alpha_headroom_pct` is confounded with the refuted slot cut,
+    # so both go back on the shelf until they can be tested on their own.
+    "conversion_fixes_enabled": None,
+    "core_deploy_alpha_headroom_pct": None,
+    # REFUTED 2026-08-15 (bt 599773 vs bt 569516). Cutting the slot count does
+    # not concentrate into winners — it fills the slots with whatever is
+    # discovered FIRST and then cannot rotate into later-discovered movers. The
+    # control held AMAT +45%, VAL +90%, ARIS +40%; the treatment held none of
+    # them, its funnel fell 11.9% -> 3.4% and its turnover ROSE. Back to 6 on
+    # BOTH arms so the refuted lever cannot contaminate the next question.
+    "max_positions": 6,
+    "max_positions_bull": 14,
+    "max_positions_chop": 8,
+    "max_positions_recovery": 14,
 }
 # Salts rotate per ARM **and per WINDOW**.
 #
@@ -78,54 +103,53 @@ SHARED = {
 # contamination it is supposed to be testing through. One salt per (arm, window).
 WINDOWS = {
     # label: (start, end, what it tests)
-    "w0": ("2026-01-01", "2026-03-01", "reference bull, semiconductor-heavy"),
+    #
+    # The available data is 2025-11-10 .. 2026-08-01, and 52 of the project's
+    # first 100 backtests used ONE window (2026-01-01..2026-03-01). Every
+    # mechanism in this codebase was found there, so measuring there again
+    # cannot tell us whether any of it generalises. These step across the whole
+    # range on a fixed monthly rule rather than being chosen for their content.
+    "w0": ("2026-01-01", "2026-03-01", "the over-tested reference — IN SAMPLE"),
+    "a": ("2025-11-10", "2026-01-10", "earliest data; never tested as a window"),
+    "b": ("2025-12-01", "2026-02-01", "straddles the year boundary; novel"),
+    "c": ("2026-02-01", "2026-04-01", "the Feb drawdown INTO the March bear; novel"),
+    "d": ("2026-04-01", "2026-06-01", "post-bear recovery; novel"),
+    "e": ("2026-05-01", "2026-06-30", "lightly tested"),
+    "f": ("2026-06-15", "2026-08-01", "most recent data; novel"),
+    # kept for reference, previously used
     "w1": ("2026-03-30", "2026-04-27", "OUT OF SAMPLE bull"),
-    "w2": ("2026-03-02", "2026-03-30", "bear — safety veto, must not be harmed"),
-    "w3": ("2026-06-01", "2026-07-01", "NON-SEMICONDUCTOR; currently -10.14pp vs SPY"),
+    "w2": ("2026-03-02", "2026-03-30", "bear"),
+    "w3": ("2026-06-01", "2026-07-01", "non-semiconductor; -10.14pp vs SPY"),
 }
+
 
 
 def _salts(window):
     return {
-        CONTROL_DOC: {"history_scope_salt": f"uns-ctl-{window}-0814b",
-                      "active_event_history_scope_salt": f"uns-ctl-{window}-0814b"},
-        TREATMENT_DOC: {"history_scope_salt": f"uns-trt-{window}-0814b",
-                        "active_event_history_scope_salt": f"uns-trt-{window}-0814b"},
+        CONTROL_DOC: {"history_scope_salt": f"kill-ctl-{window}-0815",
+                      "active_event_history_scope_salt": f"kill-ctl-{window}-0815"},
+        TREATMENT_DOC: {"history_scope_salt": f"kill-trt-{window}-0815",
+                        "active_event_history_scope_salt": f"kill-trt-{window}-0815"},
     }
 
 # The treatment. Every key here must be ABSENT or at its off-value on 194.
+# THE DRAWDOWN-KILL LOOP, isolated. One mechanism, two flags that are halves of
+# the same rule, and nothing else — because the previous bundle confounded three
+# levers and the one that moved was the one that hurt.
+#
+# The circuit kills at -12% and liquidates the book, but the backfill stop is at
+# -25%, so across that band it re-buys on the same tick; and the peak re-bases
+# only on resume, so it re-fires every bar. 12 consecutive buy->kill cycles in
+# bt 569516 = 74% of its governed turnover and 100% of its sell notional, with
+# the round trips losing money and deepening the drawdown that kept it armed.
 TREATMENT = {
-    # The book is sealed at six names: 6 x 14% = 84% of an 88% ceiling leaves
-    # ~$250 against a ~$370 min-position floor, so nothing can enter and no
-    # winner can be added. Four names reopens ~$1,920 of room.
-    # `regime_chop_max_positions` and `regime_bear_max_positions` are NOT here:
-    # broker.py:5906-5913 is an explicit dead-key registry and both are in it
-    # ("no reader; the live key is max_positions_chop / max_positions_bear").
-    # Setting them would be a no-op that reads like a lever.
-    #
-    # `max_positions_bear` is deliberately left at 2 on both arms, so the
-    # treatment is INERT in bear — W0 opens in a bull, but any bear stretch
-    # inside it measures nothing. `max_positions_crash` is absent on both
-    # (default 0), also symmetric.
-    "max_positions": 4,
-    "max_positions_bull": 4,
-    "max_positions_chop": 4,
-    "max_positions_recovery": 4,
-    # The passive core takes every dollar of cash (its deploy is CASH-bound on
-    # 4 of 5 deploys) and its order pends into the next bar, where the
-    # reservation refuses every alpha buy.
-    "core_deploy_alpha_headroom_pct": 0.07,
-    # The satellite cap declines instead of emitting an order the floor refuses.
-    "conversion_fixes_enabled": True,
+    "dd_kill_blocks_entries_enabled": True,
+    "dd_kill_once_per_episode_enabled": True,
 }
 # The control's value for each treatment key. `None` means "remove the key".
 CONTROL_OFF = {
-    "max_positions": 6,
-    "max_positions_bull": 14,
-    "max_positions_chop": 8,
-    "max_positions_recovery": 14,
-    "core_deploy_alpha_headroom_pct": None,
-    "conversion_fixes_enabled": None,
+    "dd_kill_blocks_entries_enabled": None,
+    "dd_kill_once_per_episode_enabled": None,
 }
 
 
