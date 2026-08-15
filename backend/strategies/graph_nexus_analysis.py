@@ -16072,20 +16072,50 @@ def _update_ticker_history(conn, ticker_headlines: dict, date_key: str, max_age_
         _log(f"Update ticker history error: {e}", "yellow")
 
 
-def _get_ticker_history(conn, tickers: list, max_per_ticker: int = 10) -> dict:
+def _get_ticker_history(conn, tickers: list, max_per_ticker: int = 10,
+                        as_of: str = "") -> dict:
     """
     Return recent headline history for requested tickers.
     Returns {ticker: [{d: "2026-02-20", h: "..."}, ...]} sorted newest first, capped.
+
+    `as_of` (ISO date) drops headlines dated after it. THIS IS A LOOKAHEAD FIX,
+    not a filter for tidiness.
+
+    THE DEFECT. This table is keyed by the BARE TICKER (`"id": ticker`, :16055)
+    with no instance, no scope and no salt, and it is never purged by the restart
+    cleanup — `_clear_instance_state` and the backtest cleanup both log "Shared
+    caches preserved". So a run over a LATER window leaves headlines dated after
+    THIS window under the same ticker. The read then sorts NEWEST FIRST and takes
+    the top `max_per_ticker`, which means future-dated headlines are not merely
+    present, they are PREFERENTIALLY SELECTED — they crowd out the real ones. The
+    result flows straight into the sentiment LLM prompt (`ticker_history=` at
+    :26931), so a day-1 prompt could be reasoning about news from months ahead.
+
+    The alternative fix was to purge the table between runs. Filtering on READ is
+    better: it needs no destructive operation on shared production data, it fixes
+    every future run rather than only the next one, and it cannot be forgotten
+    between arms of a pair.
+
+    `as_of` defaults to "" (no filter) so existing callers are byte-identical.
     """
     if conn is None or not tickers:
         return {}
     _ensure_ticker_history_table(conn)
     result = {}
+    cutoff = str(as_of or "").strip()
     try:
         for ticker in tickers[:20]:  # cap to avoid huge queries
             doc = _r.db(DB_NAME).table(TICKER_HISTORY_TABLE).get(ticker).run(conn)
             if doc and isinstance(doc.get("headlines"), list):
-                headlines = sorted(doc["headlines"], key=lambda x: x.get("d", ""), reverse=True)
+                headlines = doc["headlines"]
+                if cutoff:
+                    # Undated entries are dropped, not kept: an entry whose date
+                    # cannot be established cannot be shown to be in the past,
+                    # and this guard has to fail CLOSED to be worth having.
+                    headlines = [e for e in headlines
+                                 if str(e.get("d", "")).strip() and
+                                 str(e.get("d", "")).strip() <= cutoff]
+                headlines = sorted(headlines, key=lambda x: x.get("d", ""), reverse=True)
                 result[ticker] = headlines[:max_per_ticker]
     except Exception as e:
         _log(f"Get ticker history error: {e}", "yellow")
@@ -26917,9 +26947,21 @@ class GraphNexusAnalysis:
                 ticker_history = {}
                 if llm_pending and conn_hist:
                     pending_tickers = list({t.get("symbol", "") for t in llm_pending if t.get("symbol")})
-                    ticker_history = _get_ticker_history(conn_hist, pending_tickers, max_per_ticker=10)
+                    # `as_of=date_key`: this table is keyed by bare ticker and is
+                    # never purged, so a run over a later window leaves
+                    # future-dated headlines here — and the read sorts newest
+                    # first, so without the bound they crowd out the real ones in
+                    # the top-10 and reach the sentiment prompt. Default-OFF via
+                    # the flag so the pre-fix behaviour stays reproducible, but
+                    # note the OFF path is the one with the lookahead.
+                    _th_asof = date_key if bool(config.get(
+                        "ticker_history_as_of_enabled", False)) else ""
+                    ticker_history = _get_ticker_history(
+                        conn_hist, pending_tickers, max_per_ticker=10,
+                        as_of=_th_asof)
                     if ticker_history:
-                        _log(f"  Loaded headline history for {len(ticker_history)} tickers with pending trades", "cyan")
+                        _log(f"  Loaded headline history for {len(ticker_history)} tickers with pending trades"
+                             + (f" (as-of {date_key}, lookahead bound ON)" if _th_asof else ""), "cyan")
                 _log(f"LLM: calling {_sent_provider}/{_sent_model_ref} for up to {int(_sent_limits['max_articles'])} articles" +
                      (f" (requested {int(_sent_limits['requested_articles'])}, auto-reduced)" if int(_sent_limits["requested_articles"]) != int(_sent_limits["max_articles"]) else "") +
                      (f" (reviewing {len(llm_pending)} pending trades)" if llm_pending else ""), "cyan")

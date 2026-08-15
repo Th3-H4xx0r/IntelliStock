@@ -161,6 +161,56 @@ single-lever A/Bs that all came back null because the book was sealed underneath
 converts, decompose it; if it does not, the mechanism is refuted as a bundle and no decomposition is
 warranted.
 
+## Generalisation — registered before any result
+
+W0 is where the mechanism was FOUND. A win there is in-sample and proves nothing on its own; the
+sealed-book arithmetic was derived from W0's own logs, so W0 is the window most likely to reward it
+for the wrong reason. The sweep exists to find that out.
+
+| window | dates | what it tests |
+|---|---|---|
+| W0 | 2026-01-01..2026-03-01 | reference bull, semiconductor-heavy — IN SAMPLE |
+| W1 | 2026-03-30..2026-04-27 | out of sample bull |
+| W2 | 2026-03-02..2026-03-30 | bear — safety veto, must not be harmed |
+| W3 | 2026-06-01..2026-07-01 | non-semiconductor, and the window that currently LOSES 10.14pp |
+
+**W3 is the acid test.** It is the worst window on record and the least like the one the fix was
+derived from. If the diagnosis is right — the book seals at six names and the core hoards the cash —
+then W3 should improve, because nothing about that arithmetic is semiconductor-specific. If W0
+improves and W3 does not, the honest reading is that the lever is fitted to W0, not that W3 is
+special.
+
+**Salts rotate per (arm, window).** Reusing W0's salts on a later window rebuilds the exact
+contamination this experiment controls for: every row the W0 run wrote in Jan-Feb is `< date_key`
+for a March window, therefore immortal, and is served to the later run as legitimate lookback. That
+is how one scoped instance came to carry 178 / 242 / 285 trends across three windows.
+`scripts/arm_unseal_pair.py --window w3` handles it.
+
+### Acceptance rule, fixed now
+
+Accept the bundle only if ALL of:
+1. treatment beats control by more than the dispersion in **at least two of {W0, W1, W3}**, and W3 is
+   one of them;
+2. **no turnover rise in any window** — this is the objective's named leak and it is disqualifying
+   regardless of return;
+3. **no harm in W2** (bear). Note the treatment is structurally INERT in bear —
+   `max_positions_bear` stays 2 on both arms — so W2 is a safety veto, not a test.
+
+A win in W0 alone is what we already have from a single arm and is not sufficient.
+
+### The dispersion is NOT known, and the old figure does not transfer
+
+The ~10pp noise floor came from bt 873929 vs bt 523085 — two runs whose difference was later
+attributed to AGQ appearing in one and not its twin, i.e. to the contamination this design now
+controls for. **Under the new isolation the dispersion is unmeasured.** It could be far smaller
+(making a 5pp difference meaningful) or the isolation could have removed one contamination channel
+while leaving others (making 20pp still a draw). Either way, differencing against a floor measured on
+contaminated runs is not sound.
+
+Registered consequence: before any cross-window claim is published, ONE window must be repeated
+same-config, same-arm, fresh salts, to measure the dispersion under the current isolation. Until
+that exists, every delta below is reported with the floor stated as UNKNOWN rather than as 10pp.
+
 ## Cost and scope
 
 Two full runs. doc 193 is untouched. `doc-179`/`alpaca-main` is not involved and is not started.

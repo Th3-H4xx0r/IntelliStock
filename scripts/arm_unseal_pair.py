@@ -64,12 +64,34 @@ SHARED = {
     # counter cannot be the difference between them.
     "slot_exclusions_all_counters_enabled": True,
 }
-SALTS = {
-    CONTROL_DOC: {"history_scope_salt": "uns-ctl-0814b",
-                  "active_event_history_scope_salt": "uns-ctl-0814b"},
-    TREATMENT_DOC: {"history_scope_salt": "uns-trt-0814b",
-                    "active_event_history_scope_salt": "uns-trt-0814b"},
+# Salts rotate per ARM **and per WINDOW**.
+#
+# Per-arm alone is not enough, and this is the exact trap the 2026-08-14 audit
+# documented: the same scoped instance was reused across three different
+# windows, so every row the W0 run wrote during Jan-Feb was `< date_key` for a
+# March window and therefore IMMORTAL — presented to the later run as legitimate
+# lookback. Measured: 178 / 242 / 285 trends inherited on one byte-identical
+# scoped instance id. State became a function of which backtests happened to run
+# before, in what order.
+#
+# So a generalisation sweep that reuses W0's salts on W1/W2/W3 rebuilds the
+# contamination it is supposed to be testing through. One salt per (arm, window).
+WINDOWS = {
+    # label: (start, end, what it tests)
+    "w0": ("2026-01-01", "2026-03-01", "reference bull, semiconductor-heavy"),
+    "w1": ("2026-03-30", "2026-04-27", "OUT OF SAMPLE bull"),
+    "w2": ("2026-03-02", "2026-03-30", "bear — safety veto, must not be harmed"),
+    "w3": ("2026-06-01", "2026-07-01", "NON-SEMICONDUCTOR; currently -10.14pp vs SPY"),
 }
+
+
+def _salts(window):
+    return {
+        CONTROL_DOC: {"history_scope_salt": f"uns-ctl-{window}-0814b",
+                      "active_event_history_scope_salt": f"uns-ctl-{window}-0814b"},
+        TREATMENT_DOC: {"history_scope_salt": f"uns-trt-{window}-0814b",
+                        "active_event_history_scope_salt": f"uns-trt-{window}-0814b"},
+    }
 
 # The treatment. Every key here must be ABSENT or at its off-value on 194.
 TREATMENT = {
@@ -135,9 +157,9 @@ def _put(api, auth, doc_id, doc, lanes):
         raise SystemExit(f"PUT /strategies/{doc_id} -> {status}: {str(body)[:300]}")
 
 
-def _plan(doc_id):
+def _plan(doc_id, window):
     want = dict(SHARED)
-    want.update(SALTS[doc_id])
+    want.update(_salts(window)[doc_id])
     want.update(TREATMENT if doc_id == TREATMENT_DOC else CONTROL_OFF)
     return want
 
@@ -145,7 +167,13 @@ def _plan(doc_id):
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true")
+    ap.add_argument("--window", default="w0", choices=sorted(WINDOWS),
+                    help="which window this pair is for; rotates BOTH salts "
+                         "so a later window cannot inherit an earlier run's "
+                         "rows as immortal lookback")
     args = ap.parse_args(argv)
+    start, end, why = WINDOWS[args.window]
+    print(f"window {args.window}: {start} -> {end}  ({why})")
     api, auth = _api()
     projected = {}
 
@@ -155,7 +183,7 @@ def main(argv=None):
         if not lanes:
             raise SystemExit(f"doc {doc_id} has no strategy lane")
         cfg = dict(lanes[0].get("config") or {})
-        want = _plan(doc_id)
+        want = _plan(doc_id, args.window)
         changes = []
         for key, value in want.items():
             before = cfg.get(key, "<absent>")
