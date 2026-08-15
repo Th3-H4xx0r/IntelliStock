@@ -206,3 +206,30 @@ def test_every_live_row_is_an_execution_not_a_refusal():
     obs = observations_from_live(_live_rows(), instance_id="a")
     assert all(o.executed for o in obs)
     assert all(o.refusal_reason is None for o in obs)
+
+
+# ── Fill size: `executed` alone hides a partial ──────────────────────────────
+
+def test_the_filled_notional_travels_with_the_observation():
+    """The simulator clamps buys to buying power, so a $5,000 request that
+    filled for $50 is routine — and indistinguishable from a full fill if all
+    we record is a boolean. For a subsystem whose thesis is "the position floor
+    refused everything", the size is part of the measurement."""
+    doc = _equity_doc()
+    doc["backtest_trades"][0]["total"] = 225.0
+    intc = [o for o in observations_from_backtest(doc) if o.symbol == "INTC"][0]
+    assert intc.executed is True
+    assert intc.filled_notional == 225.0
+
+
+def test_an_unfilled_decision_has_no_notional():
+    xom = [o for o in observations_from_backtest(_equity_doc())
+           if o.symbol == "XOM"][0]
+    assert xom.filled_notional is None
+
+
+def test_a_missing_total_does_not_break_the_join():
+    doc = _equity_doc()
+    doc["backtest_trades"][0].pop("total", None)
+    intc = [o for o in observations_from_backtest(doc) if o.symbol == "INTC"][0]
+    assert intc.executed is True and intc.filled_notional == 0.0

@@ -111,9 +111,13 @@ def _fill_index(doc: dict):
         if stamp is None:
             continue
         symbol = _norm_symbol(trade.get("ticker") or trade.get("symbol"))
-        buckets[(symbol, side)].append(stamp)
+        try:
+            notional = abs(float(trade.get("total") or 0.0))
+        except (TypeError, ValueError):
+            notional = 0.0
+        buckets[(symbol, side)].append((stamp, notional))
     for key in buckets:
-        buckets[key].sort()
+        buckets[key].sort(key=lambda pair: pair[0])
     return buckets, executable
 
 
@@ -124,9 +128,14 @@ def _match_fills(entries, buckets, *, max_lag_seconds: float) -> set:
     fill stamp is aware-UTC one execution-delay later, so they are never equal.
     Each fill is consumed at most once, so two buys of one name cannot both
     claim a single fill.
+
+    Returns {decision index: filled notional}. A bare boolean cannot tell a
+    $5,000 request that filled for $50 from one that filled in full — and for a
+    subsystem whose thesis is "the position floor refused everything", the size
+    is part of the measurement.
     """
     used = {key: [False] * len(times) for key, times in buckets.items()}
-    matched = set()
+    matched = {}
     ordered = sorted(
         (m for m in entries if m[3] is not None and m[2] is not None),
         key=lambda m: m[3],
@@ -136,7 +145,7 @@ def _match_fills(entries, buckets, *, max_lag_seconds: float) -> set:
         if not times:
             continue
         flags = used[(symbol, side)]
-        for position, fill_time in enumerate(times):
+        for position, (fill_time, notional) in enumerate(times):
             if fill_time < stamp:
                 continue              # execution never precedes its decision
             if (fill_time - stamp).total_seconds() > max_lag_seconds:
@@ -144,7 +153,7 @@ def _match_fills(entries, buckets, *, max_lag_seconds: float) -> set:
             if flags[position]:
                 continue
             flags[position] = True
-            matched.add(index)
+            matched[index] = notional
             break
     return matched
 
@@ -195,6 +204,7 @@ def observations_from_backtest(doc: dict, *, venue: str = "equity",
             action=str(entry.get("action") or "").strip().lower(),
             decision=decision, normalized_score=_score(entry),
             executed=executed,
+            filled_notional=matched.get(index),
             refusal_reason="unfilled" if refused else None,
             votes=_votes(entry),
             # No provenance today: `broker.py` writes no top-level config_hash

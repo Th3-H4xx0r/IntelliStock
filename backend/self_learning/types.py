@@ -56,6 +56,12 @@ class Observation:
     refusal_reason: str | None
     votes: tuple           # ((strategy, decision, weight), ...)
     config_hash: str | None
+    # The notional that actually filled. `executed` alone cannot tell a $5,000
+    # request that filled for $50 from one that filled in full, and the
+    # simulator clamps buys to buying power (`simulated_execution.py:606`), so
+    # partial fills are routine. Defaulted so existing construction sites and
+    # the gate-refusal path (where nothing filled) stay valid.
+    filled_notional: float | None = None
 
     @property
     def id(self) -> str:
@@ -76,6 +82,7 @@ class Observation:
             "symbol": self.symbol, "action": self.action,
             "decision": self.decision, "normalized_score": self.normalized_score,
             "executed": self.executed, "refusal_reason": self.refusal_reason,
+            "filled_notional": self.filled_notional,
             "votes": [list(v) for v in self.votes],
             "config_hash": self.config_hash,
         }
