@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections import Counter
 
 from self_learning.findings import finding_from_funnel, finding_from_variance
-from self_learning.observers import funnel_summary, observations_from_backtest
+from self_learning.observers import all_observations, funnel_summary
 from self_learning.variance import assess_observations
 
 UNATTRIBUTED = "unattributed"
@@ -41,7 +41,9 @@ def _dominant_strategy(observations) -> str:
 def process_backtest_document(doc, *, detected_at: str, venue: str = "equity",
                               variance_threshold: float = 0.95,
                               variance_min_n: int = 30) -> dict:
-    observations = observations_from_backtest(doc or {}, venue=venue)
+    # Includes the gate refusals, which is the population the whole
+    # subsystem exists to study.
+    observations = all_observations(doc or {}, venue=venue)
     # Pass the observations in: recomputing them inside funnel_summary doubled
     # the work over a list that reaches 7-15k entries on a long run.
     summary = funnel_summary(doc or {}, observations, venue=venue)

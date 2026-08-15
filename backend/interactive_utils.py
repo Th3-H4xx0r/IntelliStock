@@ -8542,3 +8542,40 @@ def action_learning_set_control(conn, running=None, config=None):
     if config:
         store.put_config(conn, config)
     return action_learning_get_control(conn)
+
+
+def action_learning_levers(conn, strategy_id=None):
+    """The tunable surface, derived from the INTELLISTOCK_SCHEMA headers every
+    strategy already declares. This is what makes the subsystem
+    strategy-agnostic — RSI's four tunables and Nexus's ~300 come through one
+    code path — so it is exposed rather than left as an unreachable module."""
+    from self_learning.levers import lever_surface
+    from strategies_meta import get_available_strategies
+    surface = lever_surface(get_available_strategies())
+    if strategy_id:
+        surface = [l for l in surface if l.strategy_id == str(strategy_id)]
+    by_strategy = {}
+    for lever in surface:
+        by_strategy.setdefault(lever.strategy_id, []).append(lever.to_doc())
+    return {"levers": [l.to_doc() for l in surface],
+            "by_strategy": by_strategy,
+            "strategy_count": len(by_strategy),
+            "lever_count": len(surface)}
+
+
+def action_learning_acknowledge(conn, finding_id, status="acknowledged"):
+    """Set a finding's status.
+
+    Findings are re-detected every run, so without an explicit status the
+    open-findings counter could never decrease. `store.put_findings` merges on
+    conflict and preserves whatever is set here.
+    """
+    from self_learning import store
+    store.ensure_tables(conn)
+    allowed = {"open", "acknowledged", "resolved", "wontfix"}
+    status = str(status or "acknowledged")
+    if status not in allowed:
+        raise ValueError("status must be one of %s" % sorted(allowed))
+    r.db(DB_NAME).table(store.FINDINGS).get(str(finding_id)).update(
+        {"status": status}).run(conn)
+    return {"id": str(finding_id), "status": status}

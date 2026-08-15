@@ -84,6 +84,10 @@ def test_funnel_summary_counts_the_refusals():
         "decided": 3, "executed": 1, "refused": 1,
         "buy_decided": 2, "buy_executed": 1,
         "trades_available": 1, "trades_matched": 1,
+        "gate_refused": 0, "gate_reasons": {},
+        # This document predates gate capture. False, not 0 — a consumer must
+        # not read a missing field as "no gate refused anything".
+        "gate_refusals_available": False,
     }
 
 

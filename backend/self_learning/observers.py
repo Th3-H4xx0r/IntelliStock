@@ -5,23 +5,29 @@ strategy, so this module is strategy-agnostic by construction: RSI and
 graph_nexus_analysis produce the same record shape.
 
 ────────────────────────────────────────────────────────────────────────────
-WHAT "REFUSAL" MEANS HERE, AND WHAT IT DOES NOT
+TWO KINDS OF REFUSAL, BOTH NOW OBSERVED
 ────────────────────────────────────────────────────────────────────────────
-`refusal_reason="unfilled"` means: the strategy decided BUY or SELL, the order
-reached the execution path, and no matching fill followed.
+* `refusal_reason="unfilled"` — the strategy decided BUY or SELL, the order
+  reached the execution path, and no matching fill followed. Source:
+  `backtest_decisions` minus `backtest_trades`.
+* `refusal_reason=<gate code>` — a gate refused the name before it ever reached
+  the execution path: `min_position_floor`, `max_positions`, `satellite_cap`,
+  `fundamental_veto`, `anchor_buying_power`, `nexus_buy_guard`, `min_hold`,
+  `split_guard`, `no_price`. Source: `backtest_refusals`.
 
-It does **not** cover the gate refusals, and that distinction is load-bearing.
-`broker.py:17315` only records a decision when `not _trade_skipped_no_price`,
-and that flag is set at ELEVEN sites — the comment at `broker.py:16820` says so
-outright: ``_trade_skipped_no_price = True  # reuse flag to prevent recording``.
-Those sites include the min-position floor, the max_positions gate, the
-fundamental veto, the satellite cap and the buying-power block. So the names
-refused AT A GATE are precisely the ones absent from `backtest_decisions`.
+The second kind is the one that matters and it used to be invisible.
+`broker.py` records a decision only when `not _trade_skipped_no_price`, and the
+comment at the min-position floor says the quiet part out loud —
+``_trade_skipped_no_price = True  # reuse flag to prevent recording``. So
+`backtest_decisions` was the COMPLEMENT of the refusal set: the names refused at
+a gate were precisely the ones missing. That is why "0 of 134 grants cleared the
+min-position floor" took a human reading logs to find.
 
-The counts here are therefore a LOWER BOUND on refusals. Capturing the gate
-refusals needs an emission at those eleven sites in `broker.py` — a change to
-the live order path, deliberately not made here. Until then nothing in this
-package may describe its refusal count as complete.
+`backtest_refusals` is emitted by an optimistic-then-cleared register in the
+order loop, so it covers every refusing path without instrumenting each one.
+Runs recorded BEFORE that shipped have no `backtest_refusals` field; for those
+the gate refusals remain unobservable and `funnel_summary` reports
+`gate_refusals_available=False` so a consumer cannot mistake absence for zero.
 """
 from __future__ import annotations
 
@@ -199,6 +205,38 @@ def observations_from_backtest(doc: dict, *, venue: str = "equity",
     return out
 
 
+def observations_from_gate_refusals(doc: dict, *, venue: str = "equity") -> list:
+    """One `Observation` per name a gate refused before execution.
+
+    These carry `executed=False` and the gate's own reason code, so the learner
+    can ask "what did the min-position floor cost me?" — which is the question
+    the whole subsystem exists to answer.
+    """
+    run_id = str((doc or {}).get("id") or "")
+    out = []
+    for entry in ((doc or {}).get("backtest_refusals") or []):
+        if not isinstance(entry, dict):
+            continue
+        try:
+            decision = int(entry.get("decision") or 0)
+        except (TypeError, ValueError):
+            decision = 0
+        if decision == 0:
+            continue
+        out.append(Observation(
+            run_id=run_id, origin="backtest", venue=venue,
+            strategy_id=str(entry.get("primary_strategy") or ""),
+            as_of=str(entry.get("timestamp") or ""),
+            symbol=_norm_symbol(entry.get("symbol")),
+            action=str(entry.get("action") or "").strip().lower(),
+            decision=decision, normalized_score=_score(entry),
+            executed=False,
+            refusal_reason=str(entry.get("reason") or "gate"),
+            votes=(), config_hash=(doc or {}).get("config_hash"),
+        ))
+    return out
+
+
 def observations_from_live(rows: list, *, instance_id: str,
                            venue: str = "equity") -> list:
     """One `Observation` per `BotTradeDecisions` row.
@@ -233,6 +271,14 @@ def observations_from_live(rows: list, *, instance_id: str,
     return out
 
 
+def all_observations(doc: dict, *, venue: str = "equity") -> list:
+    """Everything one run decided: what reached execution, and what a gate
+    refused before it could. The two sources are disjoint by construction —
+    a name that reached the record site had its refusal register cleared."""
+    return (observations_from_backtest(doc or {}, venue=venue)
+            + observations_from_gate_refusals(doc or {}, venue=venue))
+
+
 def funnel_summary(doc: dict, observations=None, *, venue: str = "equity") -> dict:
     """Aggregate counts for one run, written as an aggregate and never as rows.
 
@@ -243,9 +289,14 @@ def funnel_summary(doc: dict, observations=None, *, venue: str = "equity") -> di
     broken one.
     """
     if observations is None:
-        observations = observations_from_backtest(doc or {}, venue=venue)
+        observations = all_observations(doc or {}, venue=venue)
     _buckets, executable = _fill_index(doc or {})
     buys = [o for o in observations if o.decision == 1]
+    gate_refused = [o for o in observations
+                    if o.refusal_reason not in (None, "unfilled")]
+    reasons = {}
+    for obs in gate_refused:
+        reasons[obs.refusal_reason] = reasons.get(obs.refusal_reason, 0) + 1
     return {
         "decided": len(observations),
         "executed": sum(1 for o in observations if o.executed),
@@ -254,4 +305,9 @@ def funnel_summary(doc: dict, observations=None, *, venue: str = "equity") -> di
         "buy_executed": sum(1 for o in buys if o.executed),
         "trades_available": executable,
         "trades_matched": sum(1 for o in observations if o.executed),
+        "gate_refused": len(gate_refused),
+        "gate_reasons": reasons,
+        # False for runs recorded before gate capture shipped. A consumer must
+        # not read a missing field as "no gate refused anything".
+        "gate_refusals_available": "backtest_refusals" in (doc or {}),
     }

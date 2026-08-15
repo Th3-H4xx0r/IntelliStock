@@ -151,7 +151,9 @@ from interactive_utils import (
     action_list_bot_trade_decisions,
     action_learning_findings,
     action_learning_funnels,
+    action_learning_acknowledge,
     action_learning_get_control,
+    action_learning_levers,
     action_learning_observations,
     action_learning_overview,
     action_learning_set_control,
@@ -765,6 +767,10 @@ class DigestControlBody(BaseModel):
 class LearningControlBody(BaseModel):
     running: Optional[bool] = None
     config: Optional[dict] = None
+
+
+class LearningStatusBody(BaseModel):
+    status: str = "acknowledged"
 
 
 class DiscoverControlBody(BaseModel):
@@ -3722,6 +3728,18 @@ def api_learning_funnels(limit: int = 100, conn=Depends(conn_dependency), curren
 def api_learning_observations(run_id: str, limit: int = 500, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Decision-level observations for one run, including the refusals."""
     return _run(action_learning_observations, conn, run_id, limit)
+
+
+@app.get("/learning/levers", response_class=JSONResponse)
+def api_learning_levers(strategy_id: str = None, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """The tunable surface derived from every strategy's declared schema."""
+    return _run(action_learning_levers, conn, strategy_id)
+
+
+@app.post("/learning/findings/{finding_id}/status", response_class=JSONResponse)
+def api_learning_acknowledge(finding_id: str, body: LearningStatusBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Acknowledge or resolve a finding so the open counter can decrease."""
+    return _run(action_learning_acknowledge, conn, finding_id, body.status)
 
 
 @app.get("/learning/control", response_class=JSONResponse)

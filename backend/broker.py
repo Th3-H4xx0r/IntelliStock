@@ -11753,6 +11753,44 @@ _backtest_db_conn = None
 # Per-bar, per-symbol sub-strategy decision log for playback UI
 _backtest_decisions = []
 
+# ── 2026-08-15 GATE REFUSALS ──────────────────────────────────────────────────
+# `_backtest_decisions` records only what SURVIVED the gates. Every path that
+# refuses a name either sets `_trade_skipped_no_price` or `continue`s past the
+# record site at :17315 — see the comment at :16820, "reuse flag to prevent
+# recording". That excludes exactly the population worth studying: the
+# min-position floor, max_positions, the fundamental veto, the satellite cap,
+# buying power, min-hold.
+#
+# Rather than instrument ~25 separate control paths in the order loop (a large
+# diff in the path that places real orders), a refusal is registered
+# OPTIMISTICALLY the moment a non-hold decision exists, and CLEARED if the
+# decision is actually recorded. Whatever is left over was refused, by whichever
+# gate fired, with no change to control flow.
+#
+# Kept in its own list and its own BacktestResults field so the playback UI,
+# which reads `backtest_decisions`, is untouched.
+_backtest_refusals = []
+_pending_gate_refusal = None
+_gate_refusal_reason = None
+
+from gate_refusal_log import build_refusal as _gate_build_refusal
+from gate_refusal_log import finalize_refusal as _gate_finalize_refusal
+
+def _flush_pending_gate_refusal():
+    """Append any still-armed refusal, stamped with the gate that fired.
+
+    Called at the top of each symbol iteration (which finalises the PREVIOUS
+    symbol) and once more before persisting, so the last symbol of the run is
+    not lost. Record construction lives in `gate_refusal_log` so it is testable
+    without importing this CLI script."""
+    global _pending_gate_refusal, _gate_refusal_reason
+    stamped = _gate_finalize_refusal(_pending_gate_refusal, _gate_refusal_reason)
+    if stamped is not None:
+        _backtest_refusals.append(stamped)
+    _pending_gate_refusal = None
+    _gate_refusal_reason = None
+
+
 if mode == MODE_BACKTEST:
     import time
     import random
@@ -12648,6 +12686,7 @@ while not shutdown_requested:
                             from datetime import datetime as _dt
                             backtest_id_raw = backtest_row_id
                             backtest_id_int = int(backtest_id_raw) if backtest_id_raw and str(backtest_id_raw).isdigit() else None
+                            _flush_pending_gate_refusal()
                             backtest_result = {
                                 'backtest_id': backtest_id_int,
                                 'instance_id': instance_id_for_db,
@@ -12715,6 +12754,7 @@ while not shutdown_requested:
                                 'backtest_trades': _convert_datetimes_to_iso(trades),  # List of dicts with ISO timestamps
                                 'backtest_prices': backtest_prices_list,  # List of {timestamp, symbol, close} for graph-backtest
                                 'backtest_decisions': list(_backtest_decisions) if _backtest_decisions else [],
+                                'backtest_refusals': _convert_datetimes_to_iso(list(_backtest_refusals)),
                                 'logs': list(_backtest_log_buffer)[-500:] if _backtest_log_buffer else [],
                                 'cadence_mode': "dual_cadence_backtest_sim" if _dc_bt_sim else "full_every_tick",
                                 'dual_cadence_backtest_simulation': bool(_dc_bt_sim),
@@ -15874,6 +15914,17 @@ while not shutdown_requested:
                 # capital. Before this fix this block was gated on
                 # `mode == MODE_BACKTEST` which silently dropped every live order.
                 _trade_skipped_no_price = False
+                # Flush the previous symbol's unresolved refusal, then arm one
+                # for this symbol. Reaching here means the prior iteration is
+                # over: if its refusal was never cleared at :17315, no decision
+                # record was written for it and a gate is why.
+                if mode == MODE_BACKTEST:
+                    _flush_pending_gate_refusal()
+                    _pending_gate_refusal = _gate_build_refusal(
+                        timestamp=current_time, symbol=symbol, action=action,
+                        decision=decision, normalized=normalized,
+                        strategy_summary=strategy_summary,
+                    )
                 if portfolio_emulator is not None and decision != 0:
                     price = prices.get(symbol)
                     if not price or price <= 0:
@@ -15888,6 +15939,7 @@ while not shutdown_requested:
                             _anchor_reinforcement_block(
                                 symbol, "no_price", _no_price_hint)
                         _trade_skipped_no_price = True
+                        _gate_refusal_reason = "no_price"
                     else:
                         nexus_hint = nexus_position_sizes.get(symbol) or {}
                         if not isinstance(nexus_hint, dict):
@@ -15912,6 +15964,7 @@ while not shutdown_requested:
                         if _nexus_block_reason:
                             _log(f"SKIP BUY {symbol} - {_nexus_block_reason}", "yellow")
                             _trade_skipped_no_price = True
+                            _gate_refusal_reason = "nexus_buy_guard"
                             _nexus_cache = _strategy_cache.get("graph_nexus_analysis")
                             if _nexus_cache is not None:
                                 _skip_code = str((_nexus_block or {}).get("code") or "execution_gate")
@@ -16130,6 +16183,7 @@ while not shutdown_requested:
                                              f"${int(_cf_floor)} (allocated "
                                              f"${_sat_room:.2f})", "yellow")
                                         _trade_skipped_no_price = True
+                                        _gate_refusal_reason = "satellite_cap"
                                         _nexus_cache = _strategy_cache.get("graph_nexus_analysis")
                                         if _nexus_cache is not None:
                                             _nexus_cache.setdefault("_broker_skipped_buys", []).append({
@@ -16187,6 +16241,7 @@ while not shutdown_requested:
                                 _log(f"FUNDAMENTAL VETO: {symbol} skipped — "
                                      f"{_fv_why}", "yellow")
                                 _trade_skipped_no_price = True
+                                _gate_refusal_reason = "fundamental_veto"
                                 if _anchor_policy:
                                     _anchor_reinforcement_block(
                                         symbol, "fundamental_veto", nexus_hint,
@@ -16740,6 +16795,7 @@ while not shutdown_requested:
                                 ),
                             )
                             _trade_skipped_no_price = True
+                            _gate_refusal_reason = "anchor_buying_power"
                             continue
                         if _emp_skip:
                             _emp_what = (
@@ -16818,6 +16874,7 @@ while not shutdown_requested:
                                             })
                             _log(f"SKIP BUY {symbol} — {_emp_what} < min ${_exec_min_pos:.0f} (allocated ${cash_per_trade:.2f})", "yellow")
                             _trade_skipped_no_price = True  # reuse flag to prevent recording
+                            _gate_refusal_reason = "min_position_floor"
                             # V7.1: Report skipped buys to strategy cache for backfill queue
                             _nexus_cache = _strategy_cache.get("graph_nexus_analysis")
                             if _nexus_cache is not None:
@@ -16840,6 +16897,7 @@ while not shutdown_requested:
                             # dedup the "market closed" log line.
                             if mode == MODE_LIVE and not _live_market_open_this_tick:
                                 _trade_skipped_no_price = True
+                                _gate_refusal_reason = "market_closed"
                                 continue
                             # 2026-04-22 Fix B: skip re-submitting if we
                             # already have a non-rejected order of this side
@@ -16903,6 +16961,7 @@ while not shutdown_requested:
                                     "yellow",
                                 )
                                 _trade_skipped_no_price = True
+                                _gate_refusal_reason = "already_ordered_today"
                                 continue
                             # ── 2026-08-02 SPLIT GUARD. A stock split arrives as a
                             # clean step in an UNADJUSTED feed (VGT 8-for-1:
@@ -16983,6 +17042,7 @@ while not shutdown_requested:
                                                 "red",
                                             )
                                             _trade_skipped_no_price = True
+                                            _gate_refusal_reason = "split_guard"
                                             if _anchor_policy and decision == 1:
                                                 _anchor_reinforcement_block(
                                                     symbol, "split_guard", nexus_hint)
@@ -17006,6 +17066,7 @@ while not shutdown_requested:
                                     _mpg_proj = max_positions_projected_count(_mpg_held, _mpg_full_exits, _mpg_new_emitted)
                                     _log(f"MAX_POSITIONS_GATE: blocked {symbol} (held={_mpg_proj}, cap={_mpg_cap})", "yellow")
                                     _trade_skipped_no_price = True
+                                    _gate_refusal_reason = "max_positions"
                                     continue
                             # 2026-08-03 MINIMUM HOLDING PERIOD. Placed here on
                             # purpose: after max_positions (so a blocked sell
@@ -17027,6 +17088,7 @@ while not shutdown_requested:
                                         bool(_z21_intents & _RISK_EXIT_INTENTS)
                                         or symbol in nexus_sell_enforcement)):
                                 _trade_skipped_no_price = True
+                                _gate_refusal_reason = "min_hold"
                                 continue
                             # 2026-05-06: bound order submission at 90s. Adapter
                             # internally has ~70s retry budget + 25-45s inter-order
@@ -17312,6 +17374,11 @@ while not shutdown_requested:
                                     _log(f"Sell-proceeds booking failed for {symbol}: {type(_scp_e).__name__}: {_scp_e}", "yellow")
 
                 # Capture per-symbol sub-strategy decision for playback UI (skip if no price — trade wasn't executed)
+                # This name reached the record site, so it was not refused at a
+                # gate. Disarm the optimistic refusal.
+                if mode == MODE_BACKTEST and not _trade_skipped_no_price:
+                    _pending_gate_refusal = None
+                    _gate_refusal_reason = None
                 if mode == MODE_BACKTEST and _backtest_decisions is not None and not _trade_skipped_no_price:
                     _norm = normalized
                     aligned_strategies = [s for s in strategy_summary if s.get("decision") == decision]
@@ -17555,6 +17622,7 @@ while not shutdown_requested:
                             update_payload['logs'] = list(_backtest_log_buffer)[-500:]
                         if _backtest_decisions is not None:
                             update_payload['backtest_decisions'] = _convert_datetimes_to_iso(list(_backtest_decisions))
+                            update_payload['backtest_refusals'] = _convert_datetimes_to_iso(list(_backtest_refusals))
                         r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).update(update_payload).run(conn)
                         progress_update_ok = True
                         _backtest_progress_fail_count = 0
