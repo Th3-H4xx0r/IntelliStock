@@ -22,6 +22,7 @@ import math
 try:
     from simulated_execution import (
         DEFAULT_EQUITY_EXECUTION_COST_MODEL,
+        InsufficientBuyingPower,
         LIQUIDITY_ADJUSTED_EQUITY_COST_MODEL,
         ExecutionCostModel,
         NextEventExecutionSimulator,
@@ -34,6 +35,7 @@ try:
 except ImportError:  # Package import path used by repository-root pytest.
     from backend.simulated_execution import (
         DEFAULT_EQUITY_EXECUTION_COST_MODEL,
+        InsufficientBuyingPower,
         LIQUIDITY_ADJUSTED_EQUITY_COST_MODEL,
         ExecutionCostModel,
         NextEventExecutionSimulator,
@@ -453,6 +455,17 @@ class PortfolioEmulator:
             return 0.0
         return max(0.0, total)
 
+    def spendable_cash(self):
+        """Money that has ARRIVED and settled — the SETTLE-time question.
+
+        Deliberately not `get_buying_power`, which answers the COMMIT-time
+        question ("how much may I put in the market?") and, with
+        `credit_pending_sell_proceeds`, includes a sale that is only SUBMITTED.
+        A promise cannot pay for a confirmed fill: paying out of that number is
+        how `_cash` reached -$200.28 in the bt 101666 reconstruction, silently.
+        """
+        return self._cash - self._withheld_cash()
+
     def get_buying_power(self, reserved=0.0, *, prices=None):
         """Cash that could actually fund a new order right now.
 
@@ -473,7 +486,7 @@ class PortfolioEmulator:
             reserved = float(reserved or 0.0)
         except (TypeError, ValueError):
             reserved = 0.0
-        base = self._cash - self._withheld_cash() - reserved
+        base = self.spendable_cash() - reserved
         if getattr(self, "credit_pending_sell_proceeds", False):
             base += self._settled_sell_proceeds_fraction * self.pending_sell_proceeds(prices)
         return max(0.0, base)
@@ -1165,8 +1178,17 @@ class PortfolioEmulator:
             cash_delta = gross + fill.fees
             # Buying power, not raw cash: proceeds from a sale that has not
             # settled are in the balance but are not yet spendable.
-            if cash_delta > self.get_buying_power() + 1e-9:
-                raise ValueError("confirmed buy fill exceeds available cash")
+            # SETTLE-time, not COMMIT-time. `get_buying_power` may carry the
+            # pending-sell credit, and bt 101666 died on a $0.4646 shortfall
+            # that was exactly the funding sale's own 23.2 bps of execution
+            # cost. The simulator now clamps buys to this same number before
+            # proposing them, so this is a backstop against a future desync
+            # rather than the gate — and it raises a soft type the simulator
+            # can catch instead of killing the run.
+            if cash_delta > self.spendable_cash() + 1e-9:
+                raise InsufficientBuyingPower(
+                    "confirmed buy fill exceeds spendable cash"
+                )
             new_cash = self._cash - cash_delta
             new_quantity = self._positions.get(fill.symbol, 0.0) + delta
             trade_total = cash_delta
@@ -1234,6 +1256,7 @@ class PortfolioEmulator:
         fills = self._execution_simulator.on_quote(
             quote,
             accept_fill=self.apply_fill,
+            cash_budget=self.spendable_cash,
         )
         for fill in fills:
             if fill.side == "buy":

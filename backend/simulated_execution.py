@@ -380,6 +380,17 @@ class _PendingOrder:
     quotes_seen: int = 0
 
 
+class InsufficientBuyingPower(ValueError):
+    """Accounting refused a proposed fill: the cash is not there.
+
+    Subclasses ValueError so every existing handler around the fill path
+    behaves as it did, but distinct so `on_quote` can honour the soft-reject
+    its own docstring already promises instead of letting a shortfall kill a
+    three-hour run. bt 101666 died on $0.4646 — exactly the funding sale's own
+    23.2 bps of execution cost.
+    """
+
+
 class NextEventExecutionSimulator:
     def __init__(self, cost_model: ExecutionCostModel):
         if not isinstance(cost_model, ExecutionCostModel):
@@ -390,6 +401,7 @@ class NextEventExecutionSimulator:
         self._fills: list[SimulationFill] = []
         self._rejected_order_count = 0
         self._expired_order_count = 0
+        self._refused_fill_count = 0
 
     @property
     def pending_orders(self) -> tuple[SimulationOrder, ...]:
@@ -447,11 +459,19 @@ class NextEventExecutionSimulator:
         )
         return cash_value / all_in_per_share
 
+    @property
+    def refused_fill_count(self) -> int:
+        """Fills accounting could not pay for. Should be 0; if it is not, the
+        emulator and the simulator disagree about the cash and the run's sizing
+        is suspect."""
+        return self._refused_fill_count
+
     def on_quote(
         self,
         quote: SimulationQuote,
         *,
         accept_fill=None,
+        cash_budget=None,
     ) -> tuple[SimulationFill, ...]:
         """Propose, account, then commit each fill.
 
@@ -553,20 +573,50 @@ class NextEventExecutionSimulator:
             )
             remaining = order.quantity - state.cumulative_quantity
             incremental = min(remaining, liquidity)
+            all_in_per_share = fill_price * (
+                1.0 + self.cost_model.fee_bps / 10_000.0
+            )
             if order.notional_limit is not None:
                 remaining_cash = max(
                     0.0,
                     order.notional_limit - state.cumulative_cost,
                 )
-                all_in_per_share = fill_price * (
-                    1.0 + self.cost_model.fee_bps / 10_000.0
-                )
                 incremental = min(
                     incremental,
                     remaining_cash / all_in_per_share,
                 )
+            # A broker fills to BUYING POWER; it does not overdraw the account.
+            #
+            # Sized here rather than rejected downstream on purpose: this method
+            # commits `state.cumulative_quantity` from the fill it proposes, so a
+            # clamp applied inside `accept_fill` would desynchronise the
+            # emulator's applied quantity from the simulator's committed one and
+            # make `fill_provenance` a lie.
+            #
+            # bt 101666 died on a $0.4646 shortfall that was exactly the funding
+            # sale's own 23.2 bps of execution cost: the pending-sell credit
+            # values a submitted sale at its MARK, while the sale delivers mark
+            # minus half-spread, slippage and fee. The crash was the benign
+            # outcome — under a different fill ordering the same gap drove cash
+            # to -$200.28 with no exception at all.
+            #
+            # Inert unless `cash_budget` is supplied, and inert with it unless
+            # the book is genuinely short.
+            budget_bound = False
+            if order.side == "buy" and cash_budget is not None:
+                try:
+                    _budget = max(0.0, float(cash_budget() or 0.0))
+                except (TypeError, ValueError):
+                    _budget = None
+                if _budget is not None:
+                    affordable = _budget / all_in_per_share
+                    if affordable < incremental:
+                        incremental, budget_bound = affordable, True
             if incremental <= 1e-12:
-                completed.append(order_id)
+                # Own notional exhausted => the order is done. Cash-starved =>
+                # NOT done: the funding sell may fill on a later quote.
+                if not budget_bound:
+                    completed.append(order_id)
                 continue
 
             cumulative = state.cumulative_quantity + incremental
@@ -611,7 +661,16 @@ class NextEventExecutionSimulator:
                 is_final=is_final,
             )
             if accept_fill is not None:
-                accept_fill(fill)
+                try:
+                    accept_fill(fill)
+                except InsufficientBuyingPower:
+                    # The contract this method's docstring already states:
+                    # "If accounting rejects the candidate, the order remains
+                    # pending and no fill provenance is recorded." Until now the
+                    # only rejection channel was an exception nothing caught, so
+                    # a sub-dollar shortfall killed the entire run.
+                    self._refused_fill_count += 1
+                    continue
             state.cumulative_quantity = cumulative
             state.cumulative_cost += fill_cost
             state.last_fill_quote_seconds = quote_seconds
@@ -635,6 +694,7 @@ class NextEventExecutionSimulator:
             "slippage_cost": sum(fill.slippage_cost for fill in self._fills),
             "unfilled_order_count": self.pending_order_count,
             "rejected_order_count": self.rejected_order_count,
+            "refused_fill_count": self.refused_fill_count,
             "fill_provenance": [
                 fill.as_dict() for fill in self._fills
             ],
