@@ -10534,9 +10534,50 @@ def _conviction_allocation_schedule(
     except (TypeError, ValueError):
         _corroboration_w = 1.0
     _corroboration_w = max(0.0, _corroboration_w)
+    # 2026-08-15 THE ALLOCATOR IS BLIND. Default OFF.
+    #
+    # This function's own docstring promises "a stock with score 0.90 gets 3x
+    # the capital of one with score 0.30". Measured across four runs it emitted
+    # IDENTICAL dollar amounts to every funded name in 154 of 159 events (97%) —
+    # e.g. `funded 4 of 5 by conviction (RIVN@$836, MSFT@$836, XOM@$836,
+    # HAPN@$836)`. A conviction-weighted allocator that produces equal weights
+    # 97% of the time is reporting that it cannot tell its candidates apart.
+    #
+    # It cannot, because `raw_net_score` has no cross-sectional variance by the
+    # time it arrives: 717 of 723 buy candidates across those runs scored
+    # EXACTLY +1.000. Three death points upstream —
+    #   :19848  the graph aggregate is clamped to +/-1 while its seed sentiment
+    #           is an integer +/-1, so one supporting path pins the ceiling;
+    #   :21170  a name absent from the graph (~94% of the time) falls back to
+    #           the TERNARY LLM label;
+    #   :22213  every momentum score in [0.40, 1.50] maps to exactly 1.700.
+    #
+    # `raw_net_natural` (:22219) carries the undamaged continuous signal and is
+    # read by NOTHING — the comment at :22207 claiming eta.G consumes it is
+    # wrong; eta.G reads `raw_net_score`. Preferring it here is the cheapest
+    # change that gives the allocator something to vary on.
+    #
+    # This matters beyond sizing: while the score is a constant, no A/B on any
+    # downstream lever measures anything, because a 97%-equal-weight allocator
+    # returns the same book regardless of what is tuned.
+    _use_natural = False
+    try:
+        _use_natural = bool((config or {}).get(
+            "selection_uses_natural_score_enabled", False))
+    except (TypeError, ValueError, AttributeError):
+        _use_natural = False
     scores = []
     for item in ranked:
         raw_in = float(item.get("raw_net_score", 0.0) or 0.0)
+        if _use_natural:
+            # Fall back to the saturated score when the natural one is absent,
+            # so a lane that never carried it is unchanged rather than zeroed.
+            try:
+                _nat = float(item.get("raw_net_natural", raw_in) or 0.0)
+                if _nat == _nat and _nat > 0.0:
+                    raw_in = _nat
+            except (TypeError, ValueError):
+                pass
         # NaN guard: NaN propagates silently through max/sum and corrupts every
         # downstream weight. CPython's max(0.10, nan) returns nan; total <= 0
         # check is False for nan; division yields nan. Coerce to 0 first.
@@ -29084,6 +29125,9 @@ class GraphNexusAnalysis:
                 # decreasing order of how much it says about a real move. This
                 # cannot change any ordering where the primary scores differ, so a
                 # book with no ties is byte-identical.
+                _sb_use_natural = bool(config.get(
+                    "selection_uses_natural_score_enabled", False))
+
                 def _sb_rank_key(sym):
                     _d = scores.get(sym) or {}
 
@@ -29098,8 +29142,22 @@ class GraphNexusAnalysis:
                             return 0.0
                         return _v if math.isfinite(_v) else 0.0
 
+                    # 2026-08-15: `raw_net_score` is the "unchanged primary" and
+                    # it is a CONSTANT — 717 of 723 buy candidates across four
+                    # runs scored exactly +1.000, so this sort collapses onto
+                    # `confidence`, `base_signal` and finally `str(sym)`, i.e.
+                    # alphabetical. `raw_net_natural` (:22219) carries the
+                    # undamaged continuous signal and is read by nothing.
+                    # Default OFF; falls back to the saturated score wherever
+                    # the natural one is absent, so a lane that never carried it
+                    # sorts exactly as before.
+                    _primary = _n("raw_net_score")
+                    if _sb_use_natural:
+                        _nat = _n("raw_net_natural")
+                        if _nat > 0.0:
+                            _primary = _nat
                     return (
-                        -abs(_n("raw_net_score")),   # unchanged primary
+                        -abs(_primary),
                         -_n("confidence"),           # continuous, both lanes carry it
                         -_n("base_signal"),          # SIGNED: this list is buys only
                         str(sym),                    # deterministic final resort
@@ -32870,6 +32928,64 @@ class GraphNexusAnalysis:
                 _tot_cap_pct = _sat_room
         if _tot_cap_pct > 0 and portfolio_total > 0:
             _tot_cap = portfolio_total * _tot_cap_pct
+            # 2026-08-15 THE CAP IS NOT CUMULATIVE. Default OFF.
+            #
+            # `_total_new_spend` below EXCLUDES held names (`_held_for_cap`), so
+            # this cap governs one bar's NEW spend and never the book's total
+            # exposure. The satellite can therefore walk past its design share
+            # across successive bars without the cap ever binding. The
+            # broker-side twin already does it correctly —
+            # broker.py:3534 returns `(share * nav) - satellite`.
+            #
+            # bt 559934, the recovery window that lost 11.21pp to SPY, is this
+            # bug in three bars:
+            #   04-01  regime=bear -> no bear profile -> `_core_armed` False, so
+            #          the clamp is INERT. GLD $900 goes in uncapped.
+            #   04-02  still bear. OIH $891. Satellite now ~30% of NAV.
+            #   04-03  regime flips to chop, the clamp arms and computes
+            #          $3,764 of room — but cannot see the $1,791 already held,
+            #          so it funds FOUR more at $836. Satellite = 86% of NAV
+            #          against a 63% design share, and the cap never bound.
+            #   04-06  the core's $2,389.94 deploy fills for $863.40. Its target,
+            #          being the residual of the satellite, collapses to 12.5%
+            #          and locks there for the rest of the window.
+            #
+            # From there every bar reads `[core] funding request trimmed
+            # $3,3xx -> $1xx`, the conviction band can release ~$150-220 against
+            # a $360 min-position floor, and 144 buys die `insufficient_cash`
+            # while INTC +156%, DELL +156%, SNDK +135%, MU +105% and AXTI +87%
+            # are refused. Window a won by keeping a 42% core it could SELL on
+            # session 5 to fund AMAT and CMI — 83% of that window's return.
+            # Window d's core never got funded, so it had nothing to sell.
+            #
+            # Strictly tightening: this can only ever REDUCE the room, never
+            # raise it. It fires only inside the existing `_core_armed` branch,
+            # so a bear bar with no bear profile is untouched and the hedge path
+            # is unaffected.
+            if (_core_armed and bool(config.get(
+                    "satellite_share_counts_held_enabled", False))):
+                try:
+                    _held_sat = 0.0
+                    _sat_prices = prices or {}
+                    for _hs, _hq in ((portfolio_emulator.get_positions() or {})
+                                     if portfolio_emulator is not None else {}).items():
+                        _hsu = str(_hs).strip().upper()
+                        if _hsu in _sleeve_symbols(config):
+                            continue
+                        _held_sat += float(_hq or 0.0) * float(
+                            _sat_prices.get(_hsu, 0.0) or 0.0)
+                    if _held_sat > 0:
+                        _tot_cap_before = _tot_cap
+                        _tot_cap = max(0.0, _tot_cap - _held_sat)
+                        _log(
+                            f"SATELLITE SHARE (cumulative): held satellite "
+                            f"${_held_sat:,.0f} counts against the "
+                            f"{_tot_cap_pct:.2f} share — new-spend room "
+                            f"${_tot_cap_before:,.0f} -> ${_tot_cap:,.0f}",
+                            "yellow")
+                except Exception as _ssc_exc:  # noqa: BLE001 - must not kill the bar
+                    _log(f"satellite cumulative share unavailable "
+                         f"({type(_ssc_exc).__name__}) — cap left per-bar", "yellow")
             _total_new_spend = sum(
                 float(_h.get("buy_cash", 0.0) or 0.0)
                 for _s, _h in nexus_position_sizes.items()
