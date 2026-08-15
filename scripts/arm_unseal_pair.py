@@ -165,9 +165,16 @@ TREATMENT = {
     # cannot walk past it across bars.
     "sizing_respects_satellite_share_enabled": True,
     "satellite_share_counts_held_enabled": True,
-    # The kill loop: a protective liquidation must stop buying, and fire once.
+    # The kill loop: a protective liquidation must stop buying.
     "dd_kill_blocks_entries_enabled": True,
-    "dd_kill_once_per_episode_enabled": True,
+    # `dd_kill_once_per_episode_enabled` is DELIBERATELY NOT HERE. Adversarial
+    # review measured it as a pure risk increase: it latches on the DECISION,
+    # not on the book being flat, so if the kill orders never fill the book
+    # keeps falling with no further liquidation (one instead of six down to
+    # -50%); and leaving the kill band then re-entering it deeper gets no
+    # protection at all, because only `resumed_now` clears the latch. Its
+    # marginal effect given `dd_kill_blocks_entries_enabled` is exactly zero
+    # (both: 5 buy bars / 4 kills; flag 4 alone: identical).
 }
 # The control's value for each treatment key. `None` means "remove the key".
 CONTROL_OFF = {

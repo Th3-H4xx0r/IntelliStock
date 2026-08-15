@@ -10566,6 +10566,30 @@ def _conviction_allocation_schedule(
             "selection_uses_natural_score_enabled", False))
     except (TypeError, ValueError, AttributeError):
         _use_natural = False
+    # D1 (adversarial review): `raw_net_natural` is written ONLY by the momentum
+    # lanes (:22260, :31598, :31790). Backfill-queue, propagation and graph
+    # candidates keep their SATURATED constant (1.700/1.800), and momentum
+    # naturals usually sit BELOW 1.0 — the `max(score, 1.50)` floor exists
+    # because they do. Mixing the two scales in one normalised weight vector
+    # therefore DEFUNDS the momentum lane: measured 57.5% -> 42.3% of the slate,
+    # with the two weakest momentum names dropping from ranks 3-4 to last. That
+    # is backwards: the momentum lane is the one that finds the movers.
+    #
+    # Use the natural scale only when EVERY candidate is on it. A mixed slate
+    # falls back wholesale, which is a real fallback rather than a silent
+    # cross-scale comparison.
+    def _nat_of(_item):
+        """Finite positive natural score, or 0.0. Never raises: a malformed
+        value must fall back, not abort the bar."""
+        try:
+            _v = float((_item or {}).get("raw_net_natural", 0.0) or 0.0)
+        except (TypeError, ValueError, AttributeError):
+            return 0.0
+        return _v if math.isfinite(_v) and _v > 0.0 else 0.0
+
+    if _use_natural:
+        _use_natural = bool(ranked) and all(
+            _nat_of(_i) > 0.0 for _i in ranked)
     scores = []
     for item in ranked:
         raw_in = float(item.get("raw_net_score", 0.0) or 0.0)
@@ -10573,8 +10597,8 @@ def _conviction_allocation_schedule(
             # Fall back to the saturated score when the natural one is absent,
             # so a lane that never carried it is unchanged rather than zeroed.
             try:
-                _nat = float(item.get("raw_net_natural", raw_in) or 0.0)
-                if _nat == _nat and _nat > 0.0:
+                _nat = _nat_of(item)
+                if _nat > 0.0:
                     raw_in = _nat
             except (TypeError, ValueError):
                 pass
@@ -29127,6 +29151,20 @@ class GraphNexusAnalysis:
                 # book with no ties is byte-identical.
                 _sb_use_natural = bool(config.get(
                     "selection_uses_natural_score_enabled", False))
+                if _sb_use_natural:
+                    # D1: a comparative sort across two scales is worse than no
+                    # sort. Only rank on the natural signal when every candidate
+                    # carries it; otherwise the saturated names win by default.
+                    def _sb_nat_ok(_s):
+                        try:
+                            _v = float((scores.get(_s) or {}).get(
+                                "raw_net_natural", 0.0) or 0.0)
+                        except (TypeError, ValueError, AttributeError):
+                            return False
+                        return math.isfinite(_v) and _v > 0.0
+
+                    _sb_use_natural = bool(stock_buys) and all(
+                        _sb_nat_ok(_s) for _s in (stock_buys or []))
 
                 def _sb_rank_key(sym):
                     _d = scores.get(sym) or {}
@@ -32965,15 +33003,41 @@ class GraphNexusAnalysis:
             if (_core_armed and bool(config.get(
                     "satellite_share_counts_held_enabled", False))):
                 try:
-                    _held_sat = 0.0
+                    # D5 (adversarial review): summing priced positions is the
+                    # arithmetic the broker twin explicitly forbids. An unpriced
+                    # holding contributes $0 of satellite while contributing its
+                    # full value to NAV, so a genuine 60% satellite reads as 15%
+                    # and this guard SILENTLY DISABLES ITSELF — reachable
+                    # whenever the bounded price refresh falls back to cached
+                    # marks. Measured: 2 unpriced names took the cap from $180 to
+                    # $2,880. There is already a failing red test for this shape
+                    # (test_core_sleeve_adversarial::test_A2).
+                    #
+                    # Use the NAV residual, exactly as broker.py:3521 does:
+                    #   satellite = max(0, nav - cash - core - hedge)
+                    # D6: sleeve legs are excluded unconditionally. `_sleeve_symbols`
+                    # returns an EMPTY set when `residual_sleeve_enabled` is unset
+                    # while the core is armed by a DIFFERENT flag, so relying on it
+                    # would charge the index core to the satellite and take the cap
+                    # to zero.
                     _sat_prices = prices or {}
-                    for _hs, _hq in ((portfolio_emulator.get_positions() or {})
-                                     if portfolio_emulator is not None else {}).items():
-                        _hsu = str(_hs).strip().upper()
-                        if _hsu in _sleeve_symbols(config):
-                            continue
-                        _held_sat += float(_hq or 0.0) * float(
-                            _sat_prices.get(_hsu, 0.0) or 0.0)
+                    _pos = ((portfolio_emulator.get_positions() or {})
+                            if portfolio_emulator is not None else {})
+                    _nav_now = float(portfolio_total or 0.0)
+                    _cash_now = float(
+                        portfolio_emulator.get_cash() or 0.0
+                    ) if portfolio_emulator is not None else 0.0
+                    _legs = set(_sleeve_symbols(config)) | {
+                        str(config.get("residual_sleeve_symbol", "") or "").strip().upper(),
+                        str(config.get("residual_sleeve_bear_symbol", "") or "").strip().upper(),
+                    } - {""}
+                    _leg_val = sum(
+                        float(_q or 0.0) * float(_sat_prices.get(
+                            str(_s).strip().upper(), 0.0) or 0.0)
+                        for _s, _q in _pos.items()
+                        if str(_s).strip().upper() in _legs
+                    )
+                    _held_sat = max(0.0, _nav_now - _cash_now - _leg_val)
                     if _held_sat > 0:
                         _tot_cap_before = _tot_cap
                         _tot_cap = max(0.0, _tot_cap - _held_sat)
@@ -33054,12 +33118,24 @@ class GraphNexusAnalysis:
                 # this does not trade away the "size so one winner matters" rule.
                 if bool(config.get("sizing_respects_satellite_share_enabled", False)):
                     try:
-                        _ss_core_t = float(config.get("core_target_pct", 0.0) or 0.0)
-                        _ss_cash_f = float(config.get("cash_reserve_floor_pct", 0.02) or 0.02)
+                        # D3 (adversarial review): `core_target_pct` lives ONLY in
+                        # `regime_profiles`, so reading it off the base config
+                        # returned 0.98 and the clamp did nothing on warm-up,
+                        # tick 1 and every bear/crash bar — i.e. inert on exactly
+                        # the opening build this was written for. `_sat_room` is
+                        # `satellite_design_share(config, regime=...)`, resolved
+                        # regime-aware five lines above. core_sleeve.py:231-234
+                        # warns about this base-config read by name.
                         _ss_slots = int(config.get("max_positions", 0) or 0)
-                        _ss_share = max(0.0, 1.0 - _ss_core_t - _ss_cash_f)
+                        _ss_share = max(0.0, float(_sat_room or 0.0))
+                        _ss_floor_w = float(
+                            config.get("min_position_nav_pct", 0.0) or 0.0)
                         if _ss_slots > 0 and _ss_share > 0 and _conc_target_pct > 0:
-                            _ss_max_w = _ss_share / _ss_slots
+                            # D4: bounded below by the min-position floor. Above
+                            # core_target ~0.62 the naive quotient falls under
+                            # `min_position_nav_pct` and EVERY grant is dropped —
+                            # the clamp would silently stop the book buying.
+                            _ss_max_w = max(_ss_share / _ss_slots, _ss_floor_w)
                             if _conc_target_pct > _ss_max_w + 1e-9:
                                 _log(
                                     f"SIZING CLAMP: per-name weight "
@@ -33100,6 +33176,25 @@ class GraphNexusAnalysis:
                 # over budget is better left as cash for the queue or a
                 # rotation than turned into a position that cannot matter.
                 _conc_floor = _conc_target if _conc_target > 0 else _min_pos_final
+                _conc_scaled: list[str] = []
+                # Median NATURAL signal over the candidates, so the multiplier
+                # below is relative to this bar's own field rather than to an
+                # absolute constant. Zero disables the scaling entirely, which
+                # is the default and is byte-identical to the flat clip.
+                _conc_natural_med = 0.0
+                if bool(config.get("selection_uses_natural_score_enabled", False)):
+                    try:
+                        _cn = sorted(
+                            v for v in (
+                                float((_h or {}).get("raw_net_natural", 0.0) or 0.0)
+                                for _s, _h in nexus_position_sizes.items()
+                                if isinstance(_h, dict) and not str(_s).startswith("_")
+                            ) if v > 0
+                        )
+                        if _cn:
+                            _conc_natural_med = _cn[len(_cn) // 2]
+                    except (TypeError, ValueError):
+                        _conc_natural_med = 0.0
                 _conc_skipped: list[str] = []
                 # COLD START. `_rotation_incoming_executable` fails open on an
                 # unresolved price, and on the bar that BUILDS THE BOOK a freshly
@@ -33152,14 +33247,55 @@ class GraphNexusAnalysis:
                         _conc_skipped.append(f"{_cc_sym}({_cc_why})")
                         _conc_dropped.append(_cc_sym)
                         continue
-                    _cc_want = max(_cc_cash, _conc_target) if _conc_target > 0 else _cc_cash
+                    # 2026-08-15 THIS is where every funded name gets the SAME
+                    # dollar figure. `_conc_target = NAV * target_weight_pct` is
+                    # flat, so `max(own_cash, flat_target)` hands 97% of funded
+                    # names an identical clip — measured 190 of 195 multi-name
+                    # conviction events across 8 logs, e.g.
+                    #   funded 4 of 5 by conviction
+                    #     (RIVN@$836, MSFT@$836, XOM@$836, HAPN@$836)
+                    #
+                    # It also OVERRIDES `_conviction_allocation_schedule`
+                    # upstream, whose docstring promises "a stock with score 0.90
+                    # gets 3x the capital of one with score 0.30". Scaling that
+                    # function alone is INERT — this line overwrites its answer,
+                    # which is how the first attempt at this fix would have become
+                    # the fourteenth inert lever in this project.
+                    #
+                    # Scale the clip by the name's NATURAL signal relative to the
+                    # funded group. Bounded to [0.75, 1.30] so a 10.5% base stays
+                    # inside the objective's stated 10-15%-of-NAV band in both
+                    # directions — the point is to let conviction matter, not to
+                    # reintroduce the runt positions the concentrate cap exists to
+                    # prevent.
+                    _cc_mult = 1.0
+                    if _conc_target > 0 and _conc_natural_med > 0:
+                        try:
+                            _cc_nat = float(_cc_hint.get("raw_net_natural", 0.0) or 0.0)
+                            if _cc_nat > 0:
+                                _cc_mult = max(0.75, min(
+                                    1.30, _cc_nat / _conc_natural_med))
+                        except (TypeError, ValueError):
+                            _cc_mult = 1.0
+                    _cc_want = (max(_cc_cash, _conc_target * _cc_mult)
+                                if _conc_target > 0 else _cc_cash)
                     _cc_take = min(_cc_want, _conc_left)
-                    if _cc_take < _conc_floor or _cc_take < _min_pos_final:
+                    # D16: the floor must scale with the clip. Left unscaled, a
+                    # down-tilt can only be a NO-OP or a REFUSAL — never a
+                    # smaller position — so the tilt turned into a 50% breadth
+                    # cut (funded 2 of 4 instead of 4 of 4).
+                    _cc_floor_eff = _conc_floor * _cc_mult if _cc_mult < 1.0 else _conc_floor
+                    if _cc_take < _cc_floor_eff or _cc_take < _min_pos_final:
                         _conc_dropped.append(_cc_sym)
                         continue
                     _cc_hint["buy_cash"] = round(_cc_take, 2)
                     _conc_left -= _cc_take
                     _conc_funded.append(f"{_cc_sym}@${_cc_take:,.0f}")
+                    if _cc_mult != 1.0:
+                        _conc_scaled.append(
+                            f"{_cc_sym} x{_cc_mult:.2f} (nat "
+                            f"{float(_cc_hint.get('raw_net_natural', 0.0) or 0.0):.2f}"
+                            f" vs med {_conc_natural_med:.2f})")
                 for _cc_sym in _conc_dropped:
                     nexus_position_sizes.pop(_cc_sym, None)
                 _log(
@@ -33172,6 +33308,20 @@ class GraphNexusAnalysis:
                        if _conc_skipped else ""),
                     "cyan",
                 )
+                if _conc_scaled:
+                    # THE LIVENESS FINGERPRINT. The first version of this fix
+                    # shipped SILENT, and its one indirect check — allocator
+                    # variance — failed, because the flat clip above overwrote
+                    # whatever the allocator computed. It would have been the
+                    # fourteenth inert lever in this project. If
+                    # `selection_uses_natural_score_enabled` is on and this line
+                    # is absent from a run's log, the lever did NOT fire.
+                    _log(
+                        f"CONVICTION SIZING: {len(_conc_scaled)} name(s) scaled "
+                        f"off the natural signal — "
+                        f"{'; '.join(_conc_scaled[:6])}"
+                        f"{'...' if len(_conc_scaled) > 6 else ''}",
+                        "green")
             elif _total_new_spend > _tot_cap:
                 _scale = _tot_cap / _total_new_spend
                 _scaled_count = 0
