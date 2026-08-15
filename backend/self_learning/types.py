@@ -14,12 +14,29 @@ from dataclasses import dataclass, field
 SCHEMA_VERSION = 1
 
 
+def _tagged(value):
+    """Type-tag a value so two different values can never serialize alike.
+
+    A plain `json.dumps(..., default=str)` collides silently: `Decimal("1")` and
+    the string `"1"` both stringify to `"1"`, and a tuple and a list both encode
+    as an array. Tagging the type makes the identity injective.
+    """
+    if isinstance(value, dict):
+        return ["dict", sorted((str(k), _tagged(v)) for k, v in value.items())]
+    if isinstance(value, (list, tuple)):
+        return [type(value).__name__, [_tagged(v) for v in value]]
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return [type(value).__name__, value if value is None else str(value)]
+    return [type(value).__name__, str(value)]
+
+
 def content_id(kind: str, identity: dict) -> str:
     """A stable 64-hex identity over `kind` + the natural key. Key order and
-    dict nesting never change the result."""
+    dict nesting never change the result; differing types never collide."""
     canonical = json.dumps(
-        {"schema_version": SCHEMA_VERSION, "kind": kind, "identity": identity},
-        sort_keys=True, separators=(",", ":"), default=str,
+        {"schema_version": SCHEMA_VERSION, "kind": kind,
+         "identity": _tagged(identity or {})},
+        sort_keys=True, separators=(",", ":"),
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -42,8 +59,12 @@ class Observation:
 
     @property
     def id(self) -> str:
+        # `venue` participates: the same run id under two venues is two
+        # different decision points, and without it re-processing a document
+        # as crypto would silently rewrite the equity row in place
+        # (`store.put_observations` writes with conflict="update").
         return content_id("observation", {
-            "run_id": self.run_id, "origin": self.origin,
+            "run_id": self.run_id, "origin": self.origin, "venue": self.venue,
             "symbol": self.symbol, "as_of": self.as_of,
         })
 

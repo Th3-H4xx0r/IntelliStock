@@ -26,6 +26,29 @@ from self_learning.pipeline import process_backtest_document      # noqa: E402
 r = RethinkDB()
 DB_NAME = "IntelliStock"
 _TERMINAL = frozenset({"completed", "complete", "finished", "done"})
+_CRYPTO_HINTS = ("crypto", "coin")
+
+
+def _venue_for(doc) -> str:
+    """Crypto and equity are different targets. A finding's id hashes its
+    target, so mislabelling collapses two venues onto one thread."""
+    kind = str((doc or {}).get("kind") or (doc or {}).get("instance_kind") or "")
+    if any(hint in kind.lower() for hint in _CRYPTO_HINTS):
+        return "crypto"
+    tickers = (doc or {}).get("tickers") or []
+    if tickers and all("/" in str(t) for t in tickers):
+        return "crypto"
+    return "equity"
+
+
+def _run_time(doc) -> str:
+    """Order by the RUN's time, not the backfill's — stamping "now" collapses
+    every historical run onto one instant in the feed."""
+    for key in ("completed_at", "end_date", "timestamp", "_last_active"):
+        value = (doc or {}).get(key)
+        if value:
+            return str(value)
+    return ""
 
 
 def main() -> int:
@@ -54,7 +77,8 @@ def main() -> int:
         doc = r.db(DB_NAME).table("BacktestResults").get(row["id"]).run(conn)
         if not doc:
             continue
-        result = process_backtest_document(doc, detected_at=now)
+        venue = _venue_for(doc)
+        result = process_backtest_document(doc, detected_at=now, venue=venue)
         if not result["observations"]:
             continue
         total_obs += len(result["observations"])
@@ -69,7 +93,8 @@ def main() -> int:
         if args.apply:
             store.put_observations(conn, result["observations"])
             store.put_funnel(conn, result["run_id"], summary,
-                             target=result["target"], observed_at=now)
+                             target=result["target"],
+                             observed_at=_run_time(doc))
             store.put_findings(conn, result["findings"])
 
     print(f"\ntotal observations={total_obs} findings={total_find}")

@@ -151,8 +151,10 @@ from interactive_utils import (
     action_list_bot_trade_decisions,
     action_learning_findings,
     action_learning_funnels,
+    action_learning_get_control,
     action_learning_observations,
     action_learning_overview,
+    action_learning_set_control,
     action_list_models,
     action_get_model,
     action_get_model_raw,
@@ -758,6 +760,11 @@ class AgentCycleLogUpdateBody(BaseModel):
 class DigestControlBody(BaseModel):
     running: Optional[bool] = None
     send_now: Optional[bool] = None
+
+
+class LearningControlBody(BaseModel):
+    running: Optional[bool] = None
+    config: Optional[dict] = None
 
 
 class DiscoverControlBody(BaseModel):
@@ -3715,6 +3722,18 @@ def api_learning_funnels(limit: int = 100, conn=Depends(conn_dependency), curren
 def api_learning_observations(run_id: str, limit: int = 500, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Decision-level observations for one run, including the refusals."""
     return _run(action_learning_observations, conn, run_id, limit)
+
+
+@app.get("/learning/control", response_class=JSONResponse)
+def api_learning_get_control(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Engine on/off plus the operator-settable learning config."""
+    return _run(action_learning_get_control, conn)
+
+
+@app.post("/learning/control", response_class=JSONResponse)
+def api_learning_set_control(body: LearningControlBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Start/stop the self-learning engine and patch its config."""
+    return _run(action_learning_set_control, conn, body.running, body.config)
 
 
 @app.post("/agent/runs/{log_id}/force-stop", response_class=JSONResponse)

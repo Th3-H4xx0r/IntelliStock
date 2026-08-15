@@ -12,17 +12,39 @@ from self_learning.findings import finding_from_funnel, finding_from_variance
 from self_learning.observers import funnel_summary, observations_from_backtest
 from self_learning.variance import assess_observations
 
+UNATTRIBUTED = "unattributed"
+
 
 def _dominant_strategy(observations) -> str:
-    names = Counter(o.strategy_id for o in observations if o.strategy_id)
-    return names.most_common(1)[0][0] if names else "unknown"
+    """The strategy a run is attributed to.
+
+    Two details are load-bearing:
+
+    * **The tie-break is explicit.** `Counter.most_common` returns the
+      first-INSERTED key among ties, and insertion order here is the order
+      symbols appear in `backtest_decisions` — which `broker.py:14690` re-sorts
+      by conviction every tick. A 20/20 split between two strategies would
+      therefore pick a different target run to run, and since a finding's id
+      hashes its target, one defect would fragment into two threads. Sorting by
+      (count, name) makes it deterministic.
+    * **Blanks are counted, not dropped.** `primary_strategy` is None whenever
+      `strategy_summary` is empty (`broker.py:17337`), which is the normal shape
+      for run_once-only strategies. Dropping blanks from the vote lets a single
+      attributed decision out of forty win outright and mislabel the whole run.
+    """
+    names = Counter((o.strategy_id or UNATTRIBUTED) for o in (observations or []))
+    if not names:
+        return UNATTRIBUTED
+    return max(names.items(), key=lambda kv: (kv[1], kv[0]))[0]
 
 
 def process_backtest_document(doc, *, detected_at: str, venue: str = "equity",
                               variance_threshold: float = 0.95,
                               variance_min_n: int = 30) -> dict:
     observations = observations_from_backtest(doc or {}, venue=venue)
-    summary = funnel_summary(doc or {})
+    # Pass the observations in: recomputing them inside funnel_summary doubled
+    # the work over a list that reaches 7-15k entries on a long run.
+    summary = funnel_summary(doc or {}, observations, venue=venue)
     run_id = str((doc or {}).get("id") or "")
     target = f"{venue}/{_dominant_strategy(observations)}" if observations else ""
 

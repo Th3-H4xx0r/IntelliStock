@@ -3,14 +3,23 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from self_learning.observers import (
-    funnel_summary, observations_from_backtest, observations_from_live,
-)
+from self_learning.observers import funnel_summary, observations_from_backtest
+
+# NOTE: the live-path tests live in `test_self_learning_join.py`, built from the
+# REAL `bot_decision_log.build_decision_doc` shape. The fixture that used to sit
+# here invented `decision`/`filled`/`primary_strategy`/`normalized_score`/
+# `strategy_summary` — none of which exist on a BotTradeDecisions row — and
+# three tests passed against that fiction.
 
 
 def _doc():
     """Shape copied from broker.py:17342 (decisions) and
-    portfolio_emulator.py:229 (trades). Note symbol vs ticker."""
+    portfolio_emulator.py:229 (trades). Note symbol vs ticker.
+
+    This is the CRYPTO/legacy timestamp shape, where the fill carries the same
+    naive stamp as the decision. The equity shape — naive decision, aware-UTC
+    fill one execution-delay later — is covered in test_self_learning_join.py.
+    """
     return {
         "id": 559934,
         "backtest_decisions": [
@@ -48,8 +57,9 @@ def test_the_filled_name_is_marked_executed_despite_symbol_vs_ticker():
 def test_a_buy_that_never_filled_is_a_refusal():
     xom = [o for o in observations_from_backtest(_doc()) if o.symbol == "XOM"][0]
     assert xom.executed is False
-    # Phase 1 records THAT it was refused; WHY lives only in run logs.
-    assert xom.refusal_reason == "unknown"
+    # "unfilled", not "unknown": this is a decision that reached the execution
+    # path and got no fill. Gate refusals never reach the source table at all.
+    assert xom.refusal_reason == "unfilled"
 
 
 def test_a_hold_is_not_a_refusal():
@@ -73,7 +83,15 @@ def test_funnel_summary_counts_the_refusals():
     assert funnel_summary(_doc()) == {
         "decided": 3, "executed": 1, "refused": 1,
         "buy_decided": 2, "buy_executed": 1,
+        "trades_available": 1, "trades_matched": 1,
     }
+
+
+def test_funnel_summary_reuses_supplied_observations():
+    """The pipeline passes them in; recomputing over a 15k-entry list doubles
+    the work for nothing."""
+    obs = observations_from_backtest(_doc())
+    assert funnel_summary(_doc(), obs)["decided"] == 3
 
 
 def test_a_document_with_no_decisions_yields_nothing_and_does_not_raise():
@@ -81,37 +99,11 @@ def test_a_document_with_no_decisions_yields_nothing_and_does_not_raise():
     assert funnel_summary({"id": 1})["decided"] == 0
 
 
-def _live_rows():
-    """BotTradeDecisions shape — written by broker.py via
-    bot_decision_log.primary_decision()."""
-    return [
-        {"id": "a", "brokerage_id": "alpaca-main", "symbol": "MSFT",
-         "ts": "2026-08-14T17:02:00Z", "decision": 1, "action": "buy",
-         "primary_strategy": "graph_nexus_analysis", "normalized_score": 1.0,
-         "filled": True,
-         "strategy_summary": [{"strategy": "graph_nexus_analysis",
-                               "decision": 1, "weight": 0.5, "reason": "r"}]},
-        {"id": "b", "brokerage_id": "alpaca-main", "symbol": "HAPN",
-         "ts": "2026-08-14T17:02:00Z", "decision": 1, "action": "buy",
-         "primary_strategy": "graph_nexus_analysis", "normalized_score": 1.0,
-         "filled": False, "strategy_summary": []},
-    ]
-
-
-def test_live_rows_become_observations_with_live_origin():
-    obs = observations_from_live(_live_rows(), instance_id="alpaca-main")
-    assert len(obs) == 2
-    assert {o.origin for o in obs} == {"live"}
-    assert {o.run_id for o in obs} == {"alpaca-main"}
-
-
-def test_an_unfilled_live_buy_is_a_refusal():
-    obs = observations_from_live(_live_rows(), instance_id="alpaca-main")
-    hapn = [o for o in obs if o.symbol == "HAPN"][0]
-    assert hapn.executed is False and hapn.refusal_reason == "unknown"
-
-
-def test_live_and_backtest_observations_never_collide_on_id():
-    live = observations_from_live(_live_rows(), instance_id="559934")[0]
-    bt = observations_from_backtest(_doc())[0]
-    assert live.id != bt.id
+def test_venue_reaches_the_observation_and_its_identity():
+    """Two venues are two decision points. Without venue in the identity,
+    re-processing a run as crypto silently rewrites the equity row, because
+    store.put_observations writes with conflict="update"."""
+    equity = observations_from_backtest(_doc(), venue="equity")[0]
+    crypto = observations_from_backtest(_doc(), venue="crypto")[0]
+    assert equity.venue == "equity" and crypto.venue == "crypto"
+    assert equity.id != crypto.id

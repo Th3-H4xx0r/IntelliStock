@@ -57,6 +57,7 @@ from engine_control import (
     ENGINE_ID_DAILY_DIGEST,
     ENGINE_ID_DISCOVER,
     ENGINE_ID_NEXUS_GRAPH,
+    ENGINE_ID_SELF_LEARNING,
     get_engine_doc,
 )
 
@@ -67,8 +68,10 @@ DIGEST_CONTAINER_NAME = 'intellistock-daily-digest-engine'
 digest_container_obj = None
 
 DISCOVER_CONTAINER_NAME = 'intellistock-discover-service'
+SELF_LEARNING_CONTAINER_NAME = 'intellistock-self-learning-service'
 DISCOVER_DATA_VOLUME_NAME = os.environ.get('DISCOVER_DATA_VOLUME_NAME', 'intellistockv4_discover_stocks_data')
 discover_container_obj = None
+self_learning_container_obj = None
 
 NEXUS_CONTAINER_NAME = 'intellistock-graph-nexus'
 # Fixed named volume for nexus cache (supply chain CSV, SEC filings, etc.) so the same volume is reused
@@ -1046,6 +1049,164 @@ def start_discover_container():
         return None
 
 
+def _self_learning_container_env():
+    """Build env dict for the Self-Learning container. It reads RethinkDB only —
+    no broker keys, no LLM keys: Phase 1 observes and calls nothing outward."""
+    load_dotenv(os.path.join(BACKEND_DIR, '.env'))
+    load_dotenv(os.path.join(os.path.dirname(BACKEND_DIR), '.env'))
+    return {
+        'RETHINKDB_HOST': os.environ.get('RETHINKDB_HOST', RETHINKDB_HOST),
+        'RETHINKDB_PORT': str(RETHINKDB_PORT),
+    }
+
+
+def start_self_learning_container():
+    """Start a Docker container running the Self-Learning engine. One only."""
+    global self_learning_container_obj
+    if self_learning_container_obj is not None:
+        try:
+            self_learning_container_obj.reload()
+            if _container_can_reuse(getattr(self_learning_container_obj, 'status', '')):
+                return self_learning_container_obj
+            if _container_is_terminal(getattr(self_learning_container_obj, 'status', '')):
+                self_learning_container_obj.remove()
+        except Exception:
+            pass
+        self_learning_container_obj = None
+    image = os.environ.get('DOCKER_INSTANCE_IMAGE', 'intellistock-backend')
+    name = SELF_LEARNING_CONTAINER_NAME
+    cmd = ['python', 'engines/self_learning_engine.py']
+    try:
+        client = _get_docker_client()
+        if not client:
+            return None
+        network = _get_instance_network(client)
+        try:
+            client.images.get(image)
+        except Exception:
+            intellistock_logger.log(
+                f"Image '{image}' not found; cannot start Self-Learning container. Build backend image first.",
+                "red", service="SERVER",
+            )
+            return None
+        try:
+            old = client.containers.get(name)
+            old.reload()
+            old_status = getattr(old, 'status', '')
+            if _container_can_reuse(old_status):
+                self_learning_container_obj = old
+                intellistock_logger.log(
+                    "Self-Learning container (%s) already exists with status=%s — reusing" % (name, old_status),
+                    "green", service="SERVER",
+                )
+                return old
+            if _container_is_terminal(old_status):
+                old.remove()
+                self_learning_container_obj = None
+            else:
+                self_learning_container_obj = old
+                return old
+        except Exception:
+            pass
+        container = client.containers.run(
+            image,
+            command=cmd,
+            name=name,
+            environment=_self_learning_container_env(),
+            network=network,
+            detach=True,
+            remove=False,
+        )
+        self_learning_container_obj = container
+        intellistock_logger.log("Started Self-Learning engine container (%s)" % name, "green", service="SERVER")
+        return container
+    except Exception as e:
+        intellistock_logger.log("Failed to start Self-Learning container: %s" % e, "red", service="SERVER")
+        self_learning_container_obj = None
+        try:
+            c = get_conn()
+            from engine_control import update_engine_doc
+            update_engine_doc(c, ENGINE_ID_SELF_LEARNING, {"running": False})
+            c.close()
+        except Exception:
+            pass
+        return None
+
+
+def stop_self_learning_container():
+    """Stop and remove the Self-Learning engine container."""
+    global self_learning_container_obj
+    if self_learning_container_obj is None:
+        return
+    name = SELF_LEARNING_CONTAINER_NAME
+    try:
+        try:
+            self_learning_container_obj.stop(timeout=10)
+        except Exception:
+            pass
+        try:
+            self_learning_container_obj.remove()
+        except Exception:
+            pass
+    except Exception as e:
+        intellistock_logger.log("Error stopping Self-Learning container: %s" % e, "yellow", service="SERVER")
+    finally:
+        self_learning_container_obj = None
+    intellistock_logger.log("Stopped and removed Self-Learning container (%s)" % name, "green", service="SERVER")
+
+
+def run_self_learning_control_change(change, c):
+    """Handle EngineControl.self_learning_engine: start/stop the container."""
+    global self_learning_container_obj
+    try:
+        new_val = change.get('new_val')
+        if new_val is None:
+            if self_learning_container_obj is not None:
+                stop_self_learning_container()
+            return
+        if new_val.get('id') != ENGINE_ID_SELF_LEARNING:
+            return
+        running = new_val.get('running', False)
+        if self_learning_container_obj is not None:
+            try:
+                self_learning_container_obj.reload()
+                if _container_is_terminal(getattr(self_learning_container_obj, 'status', '')):
+                    self_learning_container_obj = None
+            except Exception:
+                self_learning_container_obj = None
+        if running and self_learning_container_obj is None:
+            start_self_learning_container()
+        elif not running and self_learning_container_obj is not None:
+            stop_self_learning_container()
+    except Exception as e:
+        intellistock_logger.log("Self-Learning control change error: %s" % e, "red", service="SERVER")
+
+
+def run_self_learning_control_changefeed():
+    """Run changefeed on EngineControl; start/stop the Self-Learning container
+    when self_learning_engine.running changes."""
+    run_reconnecting_changefeed(
+        lambda c: r.db(DB_NAME).table(ENGINE_CONTROL_TABLE).changes().run(c),
+        run_self_learning_control_change,
+        "SelfLearningControl",
+        get_conn=get_conn,
+        log=intellistock_logger.log,
+    )
+
+
+def launch_self_learning_from_db():
+    """On startup, start the Self-Learning container if it is flagged running."""
+    global self_learning_container_obj
+    try:
+        c = get_conn()
+        doc = get_engine_doc(c, ENGINE_ID_SELF_LEARNING)
+        c.close()
+        if doc and doc.get("running") and self_learning_container_obj is None:
+            start_self_learning_container()
+    except Exception as e:
+        intellistock_logger.log("Could not read EngineControl (self-learning) for startup: %s" % e, "yellow", service="SERVER")
+
+
 def stop_discover_container():
     """Stop and remove the Discover engine container."""
     global discover_container_obj
@@ -1743,6 +1904,9 @@ def run():
     nexus_control_feed_thread = threading.Thread(target=run_nexus_control_changefeed, daemon=True)
     nexus_control_feed_thread.start()
 
+    self_learning_control_feed_thread = threading.Thread(target=run_self_learning_control_changefeed, daemon=True)
+    self_learning_control_feed_thread.start()
+
     global nexus_container_poll_thread
     nexus_container_poll_thread = threading.Thread(target=_nexus_container_poll, daemon=True)
     nexus_container_poll_thread.start()
@@ -1757,6 +1921,7 @@ def run():
     launch_digest_from_db()
     launch_discover_from_db()
     launch_nexus_from_db()
+    launch_self_learning_from_db()
 
     intellistock_logger.log("Server running. Press Ctrl+C to stop.", "green", service="SERVER")
     try:

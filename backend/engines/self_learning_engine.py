@@ -7,6 +7,16 @@ the permission matrix in LearningConfig.
 
 Controlled via EngineControl.self_learning_engine (running true/false), exactly
 like daily_digest_engine and discover_engine.
+
+WHY A CHANGEFEED AND NOT A POLL. The first version scanned
+``BacktestResults.pluck("id","status")`` every 30 seconds. RethinkDB has no
+columnar projection, so `pluck` is a post-read transform: the server must
+deserialize every document to emit two fields, and a single row here carries
+5-13MB (`interactive_utils.py:5220`) across ~1000 rows. That is gigabytes of
+deserialization 2,880 times a day against a 5GB cache on a VM that already
+suffered 17 restarts in 12 days. `run_reconnecting_changefeed` is the house
+idiom for exactly this (six uses in `server.py`), and a server-side projection
+keeps the 5-13MB document off the wire.
 """
 from __future__ import annotations
 
@@ -36,36 +46,68 @@ except Exception:                                    # pragma: no cover
     def _log(msg, color="white"):
         print(f"[SELF_LEARNING] {msg}")
 
-from self_learning import store
+from rethink_changefeed import run_reconnecting_changefeed
+from self_learning import retention, store
 from self_learning.pipeline import process_backtest_document
 
 _TERMINAL = frozenset({"completed", "complete", "finished", "done"})
-_IDLE_SECONDS = 30
+_CRYPTO_HINTS = ("crypto", "coin")
+_SWEEP_INTERVAL_SECONDS = 6 * 3600
+
+_last_sweep = 0.0
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _venue_for(doc) -> str:
+    """Crypto and equity are different targets and must not share a thread.
+
+    `Finding.id` hashes its target, so labelling a crypto run "equity" collapses
+    two venues' findings into one row and `conflict="update"` overwrites one
+    with the other.
+    """
+    kind = str((doc or {}).get("kind") or (doc or {}).get("instance_kind") or "")
+    if any(hint in kind.lower() for hint in _CRYPTO_HINTS):
+        return "crypto"
+    tickers = (doc or {}).get("tickers") or []
+    if tickers and all("/" in str(t) for t in tickers):
+        return "crypto"          # crypto pairs are SYM/QUOTE; equities are not
+    return "equity"
+
+
+def _run_time(doc) -> str:
+    """The run's own time, for ordering. NOT the processing time — stamping
+    "now" makes a restart rewrite every funnel's position in the feed."""
+    for key in ("completed_at", "end_date", "timestamp", "_last_active"):
+        value = (doc or {}).get(key)
+        if value:
+            return str(value)
+    return _now_iso()
+
+
 def _process(conn, doc, config) -> None:
+    venue = _venue_for(doc)
     result = process_backtest_document(
-        doc, detected_at=_now_iso(),
-        variance_threshold=float(config.get("variance_threshold", 0.95)),
-        variance_min_n=int(config.get("variance_min_n", 30)),
+        doc, detected_at=_now_iso(), venue=venue,
+        variance_threshold=float(config.get("variance_threshold", 0.95) or 0.95),
+        variance_min_n=int(config.get("variance_min_n", 30) or 30),
     )
     if not result["observations"]:
         return
     written = store.put_observations(conn, result["observations"])
     store.put_funnel(conn, result["run_id"], result["summary"],
-                     target=result["target"], observed_at=_now_iso())
+                     target=result["target"], observed_at=_run_time(doc))
     store.put_findings(conn, result["findings"])
     summary = result["summary"]
     # Every lever in this project that shipped without its own log line became
     # unprovable. This one announces itself.
     _log(
         f"OBSERVED run {result['run_id']} target={result['target']} "
-        f"observations={written} decided={summary['decided']} "
+        f"rows={written} decided={summary['decided']} "
         f"executed={summary['executed']} refused={summary['refused']} "
+        f"join={summary['trades_matched']}/{summary['trades_available']} "
         f"findings={len(result['findings'])}",
         "cyan",
     )
@@ -73,49 +115,111 @@ def _process(conn, doc, config) -> None:
         _log(f"FINDING [{finding.severity}] {finding.title}", "yellow")
 
 
-def _is_running(conn) -> bool:
+def _should_run(conn) -> bool:
+    """Fail CLOSED. A missing control document or an unreadable config means
+    stop, not go — the engine ships `running: False` and a database that cannot
+    answer is not permission to start scanning it."""
     try:
         doc = r.db(DB_NAME).table("EngineControl").get(
             "self_learning_engine").run(conn)
     except Exception:
-        return True
-    return bool((doc or {}).get("running", True))
+        return False
+    if not doc or not doc.get("running", False):
+        return False
+    try:
+        return bool(store.get_config(conn).get("enabled", True))
+    except Exception:
+        return False
+
+
+def _maybe_sweep(conn, config) -> None:
+    """Retention, as a server-side range delete on the `as_of` index."""
+    global _last_sweep
+    now = time.time()
+    if now - _last_sweep < _SWEEP_INTERVAL_SECONDS:
+        return
+    _last_sweep = now
+    cutoff = retention.cutoff_iso(now_iso=_now_iso(),
+                                  retain_days=config.get("retain_days", 90))
+    if not cutoff:
+        return
+    try:
+        deleted = store.sweep_expired(conn, cutoff=cutoff)
+        if deleted:
+            _log(f"RETENTION swept {deleted} observation(s) older than {cutoff}",
+                 "cyan")
+    except Exception as exc:
+        _log(f"retention sweep failed: {type(exc).__name__}: {exc}", "yellow")
+
+
+def _handle_run(conn, run_id, status, processed) -> None:
+    if str(status or "").strip().lower() not in _TERMINAL:
+        return
+    if str(run_id) in processed:
+        return
+    # Mark BEFORE processing. Marking after meant one un-processable document
+    # aborted the loop and was retried forever, so every run behind it was
+    # never observed while the engine looked alive.
+    processed.add(str(run_id))
+    try:
+        store.mark_processed(conn, run_id)
+    except Exception:
+        pass
+    try:
+        doc = r.db(DB_NAME).table("BacktestResults").get(run_id).run(conn)
+        if doc:
+            config = store.get_config(conn)
+            _process(conn, doc, config)
+            _maybe_sweep(conn, config)
+    except Exception as exc:
+        _log(f"run {run_id} failed: {type(exc).__name__}: {exc}", "red")
 
 
 def main() -> None:
-    conn = store.get_conn()
-    store.ensure_tables(conn)
-    _log("Self-learning engine started (Phase 1: observe-only)", "green")
-    seen = set()
-    while True:
+    conn = None
+    for attempt in range(1, 31):
         try:
-            if not _is_running(conn):
-                time.sleep(10)
-                continue
-            config = store.get_config(conn)
-            if not config.get("enabled", True):
-                time.sleep(_IDLE_SECONDS)
-                continue
-            rows = list(r.db(DB_NAME).table("BacktestResults")
-                        .pluck("id", "status").run(conn))
-            for row in rows:
-                rid = row.get("id")
-                if rid in seen:
-                    continue
-                if str(row.get("status") or "").strip().lower() not in _TERMINAL:
-                    continue
-                doc = r.db(DB_NAME).table("BacktestResults").get(rid).run(conn)
-                if doc:
-                    _process(conn, doc, config)
-                seen.add(rid)
-            time.sleep(_IDLE_SECONDS)
-        except Exception as exc:                      # pragma: no cover
-            _log(f"loop error: {type(exc).__name__}: {exc}", "red")
-            time.sleep(_IDLE_SECONDS)
-            try:
-                conn = store.get_conn()
-            except Exception:
-                pass
+            conn = store.get_conn()
+            store.ensure_tables(conn)
+            break
+        except Exception as exc:
+            if attempt == 30:
+                _log(f"RethinkDB not ready after 30 attempts: {exc}", "red")
+                return
+            _log(f"RethinkDB not ready (attempt {attempt}/30), retrying", "yellow")
+            time.sleep(2)
+
+    _log("Self-learning engine started (Phase 1: observe-only)", "green")
+    processed = set(store.get_config(conn).get("processed_run_ids") or [])
+
+    def _open_feed(c):
+        # Server-side projection: without it `new_val` is the whole 5-13MB
+        # document on every progress tick of a running backtest.
+        return (r.db(DB_NAME).table("BacktestResults")
+                .changes(squash=True, include_initial=True)
+                .pluck({"new_val": ["id", "status"]}).run(c))
+
+    def _handle(change, c):
+        try:
+            if not _should_run(c):
+                return
+            new_val = (change or {}).get("new_val") or {}
+            run_id = new_val.get("id")
+            if run_id is None:
+                return
+            _handle_run(c, run_id, new_val.get("status"), processed)
+        except Exception as exc:
+            _log(f"change handler error: {type(exc).__name__}: {exc}", "red")
+
+    try:
+        conn.close()
+    except Exception:
+        pass
+
+    run_reconnecting_changefeed(
+        _open_feed, _handle, "SelfLearning",
+        get_conn=store.get_conn, log=intellistock_logger.log,
+    )
 
 
 if __name__ == "__main__":

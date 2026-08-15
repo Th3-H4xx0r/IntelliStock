@@ -8477,10 +8477,11 @@ def action_model_strategies(conn, model_id):
     return {"strategies": [{"id": s["id"], "name": s["name"]} for s in refs]}
 
 
-# ── Self-learning subsystem reads (Phase 1: observe-only) ──────────────────
+# ── Self-learning subsystem (Phase 1: observe-only) ────────────────────────
 # The subsystem writes no strategy config and takes no autonomous action in
-# Phase 1; these are read paths for the Learning tab. Aggregation lives in
-# self_learning.api_shape so it is unit-testable without RethinkDB.
+# Phase 1. Aggregation lives in self_learning.api_shape and the counters are
+# computed BY RethinkDB (self_learning.store.counts) so they cannot silently
+# become "the newest 500 runs" once the tables grow.
 def action_learning_findings(conn, limit=100):
     from self_learning import store
     store.ensure_tables(conn)
@@ -8499,10 +8500,45 @@ def action_learning_observations(conn, run_id, limit=500):
     return {"observations": store.list_observations(conn, run_id, limit=limit)}
 
 
+def _learning_engine_running(conn):
+    try:
+        doc = r.db(DB_NAME).table("EngineControl").get("self_learning_engine").run(conn)
+        return bool((doc or {}).get("running", False))
+    except Exception:
+        return False
+
+
 def action_learning_overview(conn):
     from self_learning import store
     from self_learning.api_shape import overview
     store.ensure_tables(conn)
-    return overview(findings=store.list_findings(conn, limit=500),
-                    funnels=store.list_funnels(conn, limit=500),
-                    config=store.get_config(conn))
+    return overview(counts=store.counts(conn), config=store.get_config(conn),
+                    engine_running=_learning_engine_running(conn))
+
+
+def action_learning_get_control(conn):
+    """Engine on/off plus the operator-settable config."""
+    from self_learning import store
+    store.ensure_tables(conn)
+    return {"running": _learning_engine_running(conn),
+            "config": store.get_config(conn)}
+
+
+def action_learning_set_control(conn, running=None, config=None):
+    """Flip the engine and/or patch the config.
+
+    Without this the six LearningConfig keys are unreachable and the engine can
+    only be started by a manual docker run on the host — i.e. six inert levers
+    and a dead daemon.
+    """
+    from self_learning import store
+    import engine_control as _ec
+    store.ensure_tables(conn)
+    if running is not None:
+        _ec.ensure_engine_control_table(conn)
+        r.db(DB_NAME).table("EngineControl").insert(
+            {"id": "self_learning_engine", "running": bool(running)},
+            conflict="update").run(conn)
+    if config:
+        store.put_config(conn, config)
+    return action_learning_get_control(conn)

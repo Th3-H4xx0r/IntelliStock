@@ -35,6 +35,9 @@ const LADDER = [
   { key: 'LIVE_FULL',   label: 'Live (full)', hint: 'applied to the primary live document' },
 ]
 
+const funnelRows = computed(() =>
+  funnels.value.map((row) => ({ ...row, pct: conversionPct(row) })))
+
 const observeOnly = computed(() => !(overview.value?.acts_autonomously))
 const modeLabel = computed(() => {
   if (!overview.value) return '—'
@@ -61,25 +64,48 @@ function fmtWhen(value) {
 
 async function getJson(path) {
   const res = await fetch(`${API_BASE}${path}`, { headers: authHeaders() })
-  if (!res.ok) throw new Error(`${path} → ${res.status}`)
+  if (res.status === 401) {
+    const err = new Error('Session expired — please sign in again.')
+    err.unauthorized = true
+    throw err
+  }
+  if (!res.ok) throw new Error(`Request failed (${res.status})`)
   return res.json()
 }
 
+// Settled individually, not Promise.all: one missing endpoint used to blank the
+// whole tab, including the counters that had loaded fine. These are three
+// brand-new endpoints and the backend can lag a redeploy.
 async function load() {
-  try {
-    const [ov, fi, fu] = await Promise.all([
-      getJson('/learning/overview'),
-      getJson('/learning/findings?limit=100'),
-      getJson('/learning/funnels?limit=100'),
-    ])
-    overview.value = ov
-    findings.value = fi?.findings || []
-    funnels.value = fu?.funnels || []
-    loadError.value = ''
-  } catch (err) {
-    loadError.value = err?.message || 'Failed to load learning data'
-  } finally {
+  const results = await Promise.allSettled([
+    getJson('/learning/overview'),
+    getJson('/learning/findings?limit=100'),
+    getJson('/learning/funnels?limit=100'),
+  ])
+  const failures = results.filter((r) => r.status === 'rejected')
+
+  if (failures.some((r) => r.reason?.unauthorized)) {
+    // Stop polling rather than firing three 401s every 30 seconds forever.
+    stopPolling()
+    loadError.value = 'Session expired — please sign in again.'
     loading.value = false
+    return
+  }
+
+  if (results[0].status === 'fulfilled') overview.value = results[0].value
+  if (results[1].status === 'fulfilled') findings.value = results[1].value?.findings || []
+  if (results[2].status === 'fulfilled') funnels.value = results[2].value?.funnels || []
+
+  loadError.value = failures.length
+    ? failures.map((r) => r.reason?.message || 'request failed').join('; ')
+    : ''
+  loading.value = false
+}
+
+function stopPolling() {
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
   }
 }
 
@@ -92,9 +118,7 @@ onMounted(() => {
   pollTimer = setInterval(load, 30000)
 })
 
-onUnmounted(() => {
-  if (pollTimer) clearInterval(pollTimer)
-})
+onUnmounted(stopPolling)
 </script>
 
 <template>
@@ -118,6 +142,19 @@ onUnmounted(() => {
           >
             <span class="size-1.5 rounded-full" :class="observeOnly ? 'bg-sky-400' : 'bg-emerald-400 animate-pulse'"></span>
             {{ modeLabel }}
+          </span>
+        </div>
+
+        <div v-if="overview" class="mb-3">
+          <span
+            class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold border"
+            :class="overview.engine_running
+              ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20'
+              : 'text-slate-500 bg-slate-500/10 border-slate-700'"
+          >
+            <span class="size-1.5 rounded-full"
+                  :class="overview.engine_running ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'"></span>
+            {{ overview.engine_running ? 'Engine running' : 'Engine stopped' }}
           </span>
         </div>
 
@@ -162,10 +199,14 @@ onUnmounted(() => {
       <section class="mb-8">
         <h2 class="text-sm font-semibold text-slate-300 mb-2">Findings &amp; reports</h2>
 
-        <div v-if="!loading && !findings.length"
+        <div v-if="!loading && !findings.length && !loadError"
              class="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-6 text-center">
           <p class="text-sm text-slate-400">Nothing raised yet.</p>
-          <p class="text-xs text-slate-600 mt-1">Findings appear as completed runs are observed.</p>
+          <p class="text-xs text-slate-600 mt-1">
+            {{ overview && !overview.engine_running
+                ? 'The self-learning engine is stopped — start it to begin observing.'
+                : 'Findings appear as completed runs are observed.' }}
+          </p>
         </div>
 
         <div class="space-y-2">
@@ -217,9 +258,11 @@ onUnmounted(() => {
       <!-- Observed runs -->
       <section>
         <h2 class="text-sm font-semibold text-slate-300 mb-2">Observed runs</h2>
-        <div v-if="!loading && !funnels.length"
+        <div v-if="!funnels.length"
              class="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-6 text-center">
-          <p class="text-sm text-slate-400">No runs observed yet.</p>
+          <p class="text-sm text-slate-400">
+            {{ loading ? 'Loading…' : loadError ? 'Could not load observed runs.' : 'No runs observed yet.' }}
+          </p>
         </div>
         <div v-else class="rounded-lg border border-slate-800 bg-slate-900/40 overflow-x-auto">
           <table class="w-full text-xs">
@@ -234,15 +277,15 @@ onUnmounted(() => {
               </tr>
             </thead>
             <tbody>
-              <tr v-for="row in funnels" :key="row.id" class="border-b border-slate-800/60 last:border-0">
+              <tr v-for="row in funnelRows" :key="row.id" class="border-b border-slate-800/60 last:border-0">
                 <td class="px-3 py-2 font-mono text-slate-300">{{ row.run_id }}</td>
                 <td class="px-3 py-2 text-slate-400">{{ row.target }}</td>
                 <td class="px-3 py-2 text-right text-slate-300">{{ row.decided }}</td>
                 <td class="px-3 py-2 text-right text-slate-300">{{ row.executed }}</td>
                 <td class="px-3 py-2 text-right text-slate-300">{{ row.refused }}</td>
                 <td class="px-3 py-2 text-right"
-                    :class="conversionPct(row) !== null && conversionPct(row) < 25 ? 'text-rose-400' : 'text-slate-300'">
-                  {{ conversionPct(row) === null ? '—' : conversionPct(row).toFixed(1) + '%' }}
+                    :class="row.pct !== null && row.pct < 25 ? 'text-rose-400' : 'text-slate-300'">
+                  {{ row.pct === null ? '—' : row.pct.toFixed(1) + '%' }}
                 </td>
               </tr>
             </tbody>

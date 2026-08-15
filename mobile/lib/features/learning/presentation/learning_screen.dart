@@ -57,11 +57,25 @@ class LearningScreen extends ConsumerWidget {
             ),
           ),
           data: (state) => RefreshIndicator(
-            onRefresh: () async => ref.invalidate(learningStateProvider),
+            color: AppColors.primary,
+            backgroundColor: AppColors.surface,
+            // `ref.invalidate` returns void, so an `async =>` wrapper settles on
+            // the next microtask — the spinner snapped away over stale data
+            // before the refetch had started. Await the new future instead.
+            onRefresh: () => ref.refresh(learningStateProvider.future),
             child: ListView(
+              // Phase 1 ships with zero findings, so the content is shorter
+              // than the viewport. Default physics refuse a drag on a
+              // non-scrollable list, which makes RefreshIndicator inert on
+              // exactly the state this screen launches in.
+              physics: const AlwaysScrollableScrollPhysics(),
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
               children: [
                 _header(state),
+                if (state.partialError != null) ...[
+                  const SizedBox(height: 12),
+                  ErrorBanner(message: state.partialError!),
+                ],
                 const SizedBox(height: 20),
                 const SectionHeader(title: 'Pending approvals'),
                 const SizedBox(height: 8),
@@ -113,6 +127,14 @@ class LearningScreen extends ConsumerWidget {
               label: state.observeOnly ? 'Observe only' : (ov?.mode ?? '—'),
               color: state.observeOnly ? AppColors.info : AppColors.success,
               pulsing: !state.observeOnly,
+            ),
+            const SizedBox(width: 8),
+            StatusPill(
+              label: (ov?.engineRunning ?? false) ? 'Engine on' : 'Engine off',
+              color: (ov?.engineRunning ?? false)
+                  ? AppColors.success
+                  : AppColors.textDim,
+              pulsing: ov?.engineRunning ?? false,
             ),
           ],
         ),
@@ -217,6 +239,17 @@ class _FindingCardState extends State<_FindingCard> {
               color: AppColors.danger,
               reached: true,
             ),
+            if (f.evidence.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(left: 20, bottom: 12),
+                child: Text(
+                  f.evidence.entries
+                      .map((e) => '${e.key}: ${e.value}')
+                      .join('\n'),
+                  style: AppTextStyles.nano
+                      .copyWith(color: AppColors.textFaint),
+                ),
+              ),
             for (final rung in _ladder)
               _step(
                 label: rung.$1,

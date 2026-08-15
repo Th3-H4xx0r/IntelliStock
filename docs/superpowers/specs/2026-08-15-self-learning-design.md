@@ -171,17 +171,54 @@ strategy-agnosticism from the execution layer rather than having to enforce it.
 assertion over existing `BacktestResults` documents reproduces the "717 of 723 candidates
 scored exactly +1.000" finding from history already on disk, with no new instrumentation.
 
-**Two known gaps, recorded rather than hidden:**
+### 3.0.1 CORRECTION — the gate refusals are NOT in the source table
 
-1. **Refusal *reason codes* are not structured.** The existence of a refusal is derivable
-   from the join; *why* (insufficient cash, floor unmet, cap hit) currently lives only in
-   run logs. Phase 1 records the refusal and leaves the reason `unknown`; structured reason
-   capture is a Phase 2 enrichment, and log parsing is explicitly rejected as a source —
-   the first sweep reader in this project was broken by a regex crossing a timestamp.
-2. **`broker.py:17315` skips the record when `_trade_skipped_no_price`.** Symbols with no
-   price on a bar produce no decision record at all, so the observation set is already
-   filtered upstream. Phase 1 must measure and report that filter's size rather than
-   assume it is small.
+An adversarial sweep of the Phase 1 implementation falsified the strongest form of the
+claim above. It is recorded here rather than quietly fixed, because the difference decides
+what the subsystem can honestly say.
+
+`broker.py:17315` records a decision only when `not _trade_skipped_no_price`. That flag is
+set at **eleven sites**, and they are not price gaps — they are refusal gates. The comment
+at `broker.py:16820` states it outright:
+
+```python
+_log(f"SKIP BUY {symbol} — {_emp_what} < min ${_exec_min_pos:.0f} …")
+_trade_skipped_no_price = True  # reuse flag to prevent recording
+```
+
+The eleven include the **min-position floor** (`:16820`) — the very refusal this design
+cites as its motivating example — plus `max_positions` (`:17008`), the fundamental veto
+(`:16189`), the satellite cap (`:16132`), the buying-power block (`:16742`), and the
+min-hold sell block (`:17029`). A further set of gate `continue`s jump past the record
+site entirely.
+
+**Consequence:** `backtest_decisions` contains {all HOLDs} ∪ {orders that survived every
+gate and reached submission}. The names refused AT A GATE are precisely the ones absent.
+
+**What Phase 1 therefore measures**, honestly stated: `refusal_reason="unfilled"` means a
+decision reached the execution path and no fill followed. That is a **lower bound** on
+refusals, and `finding_from_funnel` says so in its own operator-facing text. Nothing in
+the package describes its refusal count as complete.
+
+**What closing the gap requires:** an emission at those eleven sites in `broker.py` —
+the live order path. That is a change to the execution path, not an observation of it, and
+it is deliberately **not** made in Phase 1. It is the first task of the Phase 2 plan and
+needs an explicit decision, because it touches the file that places real orders.
+
+**Two further corrections from the same sweep:**
+
+1. **The execution join is an interval join, not an equality join.** Decision stamps are
+   naive (`_parse_date`, `broker.py:9470`); fill stamps are aware-UTC one execution-delay
+   later (`fill.executed_at` = `quote.timestamp`). String equality could never match on the
+   equity path, so every buy read as a refusal and the flagship `buy_conversion` finding
+   fired on every run as a guaranteed false positive. The join now matches on
+   `(symbol, side)` with the fill at-or-after the decision, consumed once, within a bounded
+   lag — and `funnel_summary` carries **join health** so a broken join reports itself as
+   `join_failure` instead of masquerading as 0% conversion.
+2. **Refusal *reason codes* are not structured.** Why a submitted order went unfilled lives
+   only in run logs. Phase 1 records the refusal and leaves the reason `unfilled`. Log
+   parsing is explicitly rejected as a source — the first sweep reader in this project was
+   broken by a regex crossing a timestamp.
 
 ### 3.1 Tables
 

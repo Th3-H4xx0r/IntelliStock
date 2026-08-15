@@ -88,6 +88,7 @@ const Map<String, IconData> _symbols = {
   'check': Icons.check,
   'currency_bitcoin': Icons.currency_bitcoin,
   'edit': Icons.edit_outlined,
+  'lightbulb': Icons.lightbulb_outline,
 };
 
 /// Resolve a Material Symbols name to an [IconData], falling back to a dot.

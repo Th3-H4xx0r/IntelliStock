@@ -12,6 +12,7 @@ class LearningOverview {
     required this.runsObserved,
     required this.decisionsObserved,
     required this.refusalsObserved,
+    required this.engineRunning,
   });
 
   final String mode;
@@ -21,6 +22,7 @@ class LearningOverview {
   final int runsObserved;
   final int decisionsObserved;
   final int refusalsObserved;
+  final bool engineRunning;
 
   factory LearningOverview.fromJson(Map<String, dynamic> j) => LearningOverview(
         mode: (j['mode'] ?? 'observe').toString(),
@@ -30,6 +32,7 @@ class LearningOverview {
         runsObserved: (j['runs_observed'] as num?)?.toInt() ?? 0,
         decisionsObserved: (j['decisions_observed'] as num?)?.toInt() ?? 0,
         refusalsObserved: (j['refusals_observed'] as num?)?.toInt() ?? 0,
+        engineRunning: j['engine_running'] == true,
       );
 }
 
@@ -43,6 +46,8 @@ class LearningFinding {
     required this.detail,
     required this.detectedAt,
     required this.runId,
+    required this.status,
+    required this.evidence,
   });
 
   final String id;
@@ -53,6 +58,8 @@ class LearningFinding {
   final String detail;
   final String detectedAt;
   final String runId;
+  final String status;
+  final Map<String, dynamic> evidence;
 
   factory LearningFinding.fromJson(Map<String, dynamic> j) => LearningFinding(
         id: (j['id'] ?? '').toString(),
@@ -63,6 +70,8 @@ class LearningFinding {
         detail: (j['detail'] ?? '').toString(),
         detectedAt: (j['detected_at'] ?? '').toString(),
         runId: (j['run_id'] ?? '').toString(),
+        status: (j['status'] ?? 'open').toString(),
+        evidence: (j['evidence'] as Map?)?.cast<String, dynamic>() ?? const {},
       );
 }
 
@@ -113,8 +122,8 @@ class LearningRepository {
   }
 
   Future<List<LearningFinding>> findings({int limit = 100}) async {
-    final data = await _client
-        .get<Map<String, dynamic>>('/learning/findings?limit=$limit');
+    final data = await _client.get<Map<String, dynamic>>(
+        '/learning/findings', query: {'limit': limit.toString()});
     final rows = (data['findings'] as List?) ?? const [];
     return rows
         .whereType<Map<String, dynamic>>()
@@ -123,8 +132,8 @@ class LearningRepository {
   }
 
   Future<List<LearningFunnel>> funnels({int limit = 100}) async {
-    final data = await _client
-        .get<Map<String, dynamic>>('/learning/funnels?limit=$limit');
+    final data = await _client.get<Map<String, dynamic>>(
+        '/learning/funnels', query: {'limit': limit.toString()});
     final rows = (data['funnels'] as List?) ?? const [];
     return rows
         .whereType<Map<String, dynamic>>()
