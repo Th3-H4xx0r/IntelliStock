@@ -70,6 +70,18 @@ SHARED = {
     # not a lever, and leaving it off would mean knowingly running with a
     # lookahead.
     "ticker_history_as_of_enabled": True,
+    # OFF on both arms as a WORKAROUND, not a fix. `pending_sell_proceeds`
+    # CREDITS an unfilled sale into get_buying_power, but once that sale fills
+    # the proceeds become unsettled and `_withheld_cash()` DEBITS them — the
+    # same dollars flip sign across the fill boundary, so a buy sized against
+    # the credit is unaffordable when it fills and `apply_fill`
+    # (portfolio_emulator.py:1169) RAISES rather than clamps, killing the run
+    # (bt 101666, 2026-04-20). Latent while the book barely trades; reachable
+    # the moment the core actually deploys to its target. The real fix is to
+    # make the credit and the withholding consistent across that boundary, and
+    # it belongs in daylight with an adversarial sweep — this is a live-money
+    # adjacent cash-accounting path.
+    "backtest_credit_pending_sell_proceeds": False,
     # Cleared from BOTH arms (None removes the key). These were the previous
     # experiment's treatment levers and they are still written on doc 195; left
     # in place they would ride along as a silent confound. `conversion_fixes`
@@ -126,10 +138,10 @@ WINDOWS = {
 
 def _salts(window):
     return {
-        CONTROL_DOC: {"history_scope_salt": f"kill-ctl-{window}-0815",
-                      "active_event_history_scope_salt": f"kill-ctl-{window}-0815"},
-        TREATMENT_DOC: {"history_scope_salt": f"kill-trt-{window}-0815",
-                        "active_event_history_scope_salt": f"kill-trt-{window}-0815"},
+        CONTROL_DOC: {"history_scope_salt": f"sel-ctl-{window}-0815b",
+                      "active_event_history_scope_salt": f"sel-ctl-{window}-0815b"},
+        TREATMENT_DOC: {"history_scope_salt": f"sel-trt-{window}-0815b",
+                        "active_event_history_scope_salt": f"sel-trt-{window}-0815b"},
     }
 
 # The treatment. Every key here must be ABSENT or at its off-value on 194.
@@ -143,11 +155,25 @@ def _salts(window):
 # bt 569516 = 74% of its governed turnover and 100% of its sell notional, with
 # the round trips losing money and deepening the drawdown that kept it armed.
 TREATMENT = {
+    # THE ROOT CAUSE. 717 of 723 buy candidates scored exactly +1.000, and the
+    # "conviction-weighted" allocator emitted identical dollars to every funded
+    # name in 97% of events. While the score is a constant nothing downstream
+    # can be measured, so this is the one flag that has to move first.
+    "selection_uses_natural_score_enabled": True,
+    # The two halves of the sizing contradiction: per-name weight clamped to
+    # design_share/max_positions, and the share counted cumulatively so the book
+    # cannot walk past it across bars.
+    "sizing_respects_satellite_share_enabled": True,
+    "satellite_share_counts_held_enabled": True,
+    # The kill loop: a protective liquidation must stop buying, and fire once.
     "dd_kill_blocks_entries_enabled": True,
     "dd_kill_once_per_episode_enabled": True,
 }
 # The control's value for each treatment key. `None` means "remove the key".
 CONTROL_OFF = {
+    "selection_uses_natural_score_enabled": None,
+    "sizing_respects_satellite_share_enabled": None,
+    "satellite_share_counts_held_enabled": None,
     "dd_kill_blocks_entries_enabled": None,
     "dd_kill_once_per_episode_enabled": None,
 }
