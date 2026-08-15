@@ -246,3 +246,46 @@ def test_flag_off_is_byte_identical_across_the_drawdown_range():
                {k: v.get("score") for k, v in b.items()}, value
         assert a_cache["_portfolio_drawdown_state"]["circuit_tier"] == \
                b_cache["_portfolio_drawdown_state"]["circuit_tier"], value
+
+
+# ── D11: the entry block must not survive a bar it was not evaluated on ──────
+# `_dd_kill_blocks_entries` was written at the END of this function and popped
+# only there, past three early returns. One transient bar — an unpriceable
+# portfolio, a missing emulator, the halt config toggled off — left a stale True
+# behind, and the momentum lanes read it for the rest of the run: every entry
+# blocked, no kill in effect, no log line saying why.
+
+def test_a_stale_entry_block_does_not_survive_an_unpriceable_bar():
+    cache = {"_dd_kill_blocks_entries": True,
+             "_portfolio_drawdown_state": {"peak_value": 6000.0}}
+    # current_value <= 0 takes the third early return.
+    g._apply_portfolio_drawdown_halt(
+        {"NEW": {"score": 1}}, ["NEW"], _Emu(0.0, None), {}, cache, {}, {},
+        "2026-03-10",
+    )
+    assert not cache.get("_dd_kill_blocks_entries")
+
+
+def test_a_stale_entry_block_does_not_survive_a_missing_emulator():
+    cache = {"_dd_kill_blocks_entries": True}
+    g._apply_portfolio_drawdown_halt(
+        {"NEW": {"score": 1}}, ["NEW"], None, {}, cache, {}, {}, "2026-03-10")
+    assert not cache.get("_dd_kill_blocks_entries")
+
+
+def test_a_stale_entry_block_does_not_survive_the_halt_being_disabled():
+    cache = {"_dd_kill_blocks_entries": True,
+             "_portfolio_drawdown_state": {"peak_value": 6000.0}}
+    g._apply_portfolio_drawdown_halt(
+        {"NEW": {"score": 1}}, ["NEW"], _Emu(5000.0, None),
+        {"portfolio_drawdown_halt_enabled": False}, cache, {}, {}, "2026-03-10")
+    assert not cache.get("_dd_kill_blocks_entries")
+
+
+def test_the_kill_still_sets_the_entry_block_when_the_flag_is_on():
+    """The clear-at-top must not defeat the flag it is protecting."""
+    cache = {"_portfolio_drawdown_state": {"peak_value": 6000.0}}
+    _out, cache = _run(5000.0, positions=None,
+                       cfg={"dd_kill_blocks_entries_enabled": True},
+                       cache=cache)   # -16.7% dd => kill tier
+    assert cache.get("_dd_kill_blocks_entries") is True

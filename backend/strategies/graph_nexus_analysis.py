@@ -24250,6 +24250,18 @@ def _apply_portfolio_drawdown_halt(
     price_history: dict[str, list[dict]] | None,
     date_key: str,
 ) -> dict:
+    # ── 2026-08-15 D11: clear the entry block BEFORE any early return ────────
+    # `_dd_kill_blocks_entries` is written at :24458 and popped at :24460, both
+    # of which sit past the three early returns below. So one transient bar —
+    # an unpriceable portfolio, a missing emulator, the halt config toggled off
+    # — left a stale True in the cache, and the momentum lanes at :29522 and
+    # :31811 read it forever: entries blocked for the rest of the run with no
+    # kill in effect and no log line saying why. Clearing it here makes the key
+    # non-sticky by construction. Inert while the flag is off (nothing writes
+    # the key at all in that case).
+    if strategy_cache is not None:
+        strategy_cache.pop("_dd_kill_blocks_entries", None)
+
     if not bool(config.get("portfolio_drawdown_halt_enabled", True)):
         return scores
     if portfolio_emulator is None or strategy_cache is None:
@@ -24458,6 +24470,30 @@ def _apply_portfolio_drawdown_halt(
         strategy_cache["_dd_kill_blocks_entries"] = True
     else:
         strategy_cache.pop("_dd_kill_blocks_entries", None)
+
+    # ── 2026-08-15 D10b: the queue budget answers to the wrong threshold ─────
+    # `_bfq_halt_budget_pct` is graduated only while `halt_active`, which needs
+    # `portfolio_drawdown_halt_pct` — 15 by default, and 15 on doc 179. The
+    # circuit's own tiers arm at 5 / 9 / 12. So across the whole 12→15 band the
+    # KILL tier liquidates the book while the backfill queue keeps funding new
+    # entries at 100% budget: the buy→kill loop, financed by the queue.
+    # Default OFF (the band is only reachable once a book draws down past 12%),
+    # and it logs, because an unlogged lever here is unprovable.
+    if bool(config.get("dd_circuit_governs_backfill_budget_enabled", False)):
+        if circuit_tier in ("hard", "kill") and not halt_active:
+            _prior_budget = float(strategy_cache.get("_bfq_halt_budget_pct", 1.0))
+            _tiered_budget = (
+                0.0 if circuit_tier == "kill"
+                else _compute_drawdown_halt_backfill_budget_pct(drawdown_pct, config))
+            if _tiered_budget < _prior_budget:
+                strategy_cache["_bfq_halt_budget_pct"] = _tiered_budget
+                _log(
+                    f"DD CIRCUIT governs backfill budget: tier={circuit_tier} "
+                    f"dd=-{drawdown_pct:.1f}% (legacy halt needs "
+                    f"{halt_pct:.0f}%, so it is inactive) — queue budget "
+                    f"{_prior_budget:.0%} -> {_tiered_budget:.0%}",
+                    "yellow",
+                )
 
     # The kill re-fires EVERY BAR while the drawdown stays past the tier,
     # because `peak_value` is only re-based on resume (:24253) and is otherwise
@@ -26749,9 +26785,54 @@ class GraphNexusAnalysis:
                 )
             # Pre-load dynamic ETF-sector/theme mappings from Neo4j (refreshed per session)
             if config.get("etf_allocation_enabled", True):
-                _load_neo4j_etf_mappings(_shared_neo4j_driver, force_refresh=True)
-                _load_neo4j_stock_sector_mappings(_shared_neo4j_driver, force_refresh=True)
-                _load_neo4j_market_cap_cache(_shared_neo4j_driver)
+                # ── 2026-08-15: the sector/ETF maps are undated too ──────────
+                # Same class of leak as the market cap below: these read
+                # CURRENT node properties and apply them to a historical
+                # window. Weaker than the mcap leak — a sector is structural
+                # and is used for grouping and propagation rather than for
+                # ranking or sizing — but it is still future information.
+                #
+                # It gets its OWN flag because the remedies differ: declining
+                # the mcap degrades gracefully to raw_score, whereas declining
+                # these disables sector propagation and ETF allocation
+                # outright. Default OFF; turn both on together for a run that
+                # is genuinely point-in-time clean.
+                if bool(config.get("sector_maps_pit_safe_enabled", False)):
+                    _log(
+                        "PIT: declining the Neo4j ETF/sector maps — they carry "
+                        "present-day classifications into a historical window. "
+                        "Sector propagation and ETF allocation are inert for "
+                        "this run.",
+                        "yellow",
+                    )
+                else:
+                    _load_neo4j_etf_mappings(_shared_neo4j_driver, force_refresh=True)
+                    _load_neo4j_stock_sector_mappings(_shared_neo4j_driver, force_refresh=True)
+                # ── 2026-08-15: a REAL lookahead, closed by refusal ──────────
+                # The mcap query is `MATCH (c:Company) WHERE c.yf_market_cap
+                # IS NOT NULL` with no as-of bound, and `yf_market_cap` is a
+                # CURRENT property on the node. A 2026-04 backtest therefore
+                # reads TODAY's market cap and decides the A1 conviction tier
+                # with it — measured deciding that tier 4,915 times in one run.
+                # A company that became mega-cap after the window is treated as
+                # mega-cap inside it.
+                #
+                # There is no point-in-time market cap anywhere in the tree, so
+                # the query cannot be bounded; the only honest fix is to decline
+                # the data. With the flag on, the cache stays empty and every
+                # symbol takes the documented raw_score fallback (:8549), which
+                # is exactly the path the code already handles and logs.
+                # Default OFF: it changes every backtest's conviction tiers.
+                if bool(config.get("mcap_tier_pit_safe_enabled", False)):
+                    _log(
+                        "PIT: declining the Neo4j market_cap cache — "
+                        "c.yf_market_cap is undated, so using it inside a "
+                        "historical window is lookahead. A1 mega-cap tiers "
+                        "fall back to raw_score for this run.",
+                        "yellow",
+                    )
+                else:
+                    _load_neo4j_market_cap_cache(_shared_neo4j_driver)
         except Exception as _drv_exc:
             from point_in_time_data import PointInTimeDataError
 
@@ -31275,6 +31356,20 @@ class GraphNexusAnalysis:
                         _log(f"V32 P3 B-1 mw_rotation blacklist-block: {_mw_buy} ({_bl_rem_r} bars remaining)", "yellow")
                         _mw_sell, _mw_buy = None, None
                 if _mw_sell and _mw_buy and portfolio_emulator is not None:
+                    # ── 2026-08-15 D10a: this lane ignored the kill halt ──────
+                    # `dd_kill_blocks_entries` was wired into mw_buy (:29534)
+                    # and breakout_add (:31823) but not here, so a protective
+                    # liquidation still rotated INTO a new name on the same
+                    # tick — the exact buy→kill loop the flag exists to break,
+                    # just through a third door. The SELL leg is deliberately
+                    # left alone: a kill wants the exit, only the re-entry is
+                    # the problem, so the pair is collapsed to sell-only.
+                    if strategy_cache and strategy_cache.get(
+                            "_dd_kill_blocks_entries"):
+                        _log(f"DD KILL: mw_rotation entry blocked for {_mw_buy} "
+                             "— protective liquidation is active", "yellow")
+                        _mw_buy = None
+                if _mw_sell and _mw_buy and portfolio_emulator is not None:
                     # V32 T1-c + T2-a: momentum_watchlist_rotation lane gate on the BUY ticker.
                     _mw_buy_price_for_gate = _resolve_symbol_price(
                         _mw_buy, prices, data, portfolio_emulator=portfolio_emulator,
@@ -31549,6 +31644,16 @@ class GraphNexusAnalysis:
                             _bl_rem_s = (_fl_bl_mws.get(_mw_pf_buy) or {}).get("bars_remaining", 0)
                             _log(f"V32 P3 B-1 mw_swap blacklist-block: {_mw_pf_buy} ({_bl_rem_s} bars remaining)", "yellow")
                             _mw_pf_sell, _mw_pf_buy = None, None
+                    # ── 2026-08-15 D10a: the swap lane ignored the kill halt ──
+                    # Same defect as the rotation lane above: a kill liquidates
+                    # and this lane swaps straight back into a new name on the
+                    # same tick. Collapse to sell-only while the KILL tier is
+                    # armed; the exit is wanted, the re-entry is not.
+                    if (_mw_pf_buy and strategy_cache
+                            and strategy_cache.get("_dd_kill_blocks_entries")):
+                        _log(f"DD KILL: mw_swap entry blocked for {_mw_pf_buy} "
+                             "— protective liquidation is active", "yellow")
+                        _mw_pf_buy = None
                     if _mw_pf_sell and _mw_pf_buy and _mw_pf_buy not in nexus_position_sizes:
                         # V32 T1-c + T2-a: momentum_watchlist_portfolio_swap lane gate on BUY.
                         _mw_pf_buy_price_for_gate = _resolve_symbol_price(
