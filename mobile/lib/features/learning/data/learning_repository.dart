@@ -178,7 +178,7 @@ class LearningStrategyTarget {
     required this.name,
     required this.subStrategies,
     required this.instanceNames,
-    required this.isLive,
+    required this.money,
   });
 
   final String id;
@@ -186,9 +186,12 @@ class LearningStrategyTarget {
   final int subStrategies;
   final List<String> instanceNames;
 
-  /// A running instance with a real brokerage attached. Arming this document
-  /// means the subsystem can change real money.
-  final bool isLive;
+  /// "live" | "paper" | "unknown" | "none". Three states rather than a boolean:
+  /// inferring live from "has a brokerage" flagged every document as REAL
+  /// MONEY, which buried the one that actually was.
+  final String money;
+
+  bool get isLive => money == 'live';
 
   factory LearningStrategyTarget.fromJson(Map<String, dynamic> j) =>
       LearningStrategyTarget(
@@ -198,7 +201,7 @@ class LearningStrategyTarget {
         instanceNames: ((j['instance_names'] as List?) ?? const [])
             .map((e) => e.toString())
             .toList(),
-        isLive: j['is_live'] == true,
+        money: (j['money'] ?? 'unknown').toString(),
       );
 }
 
@@ -210,7 +213,7 @@ class LearningInstanceTarget {
     required this.kind,
     required this.strategyId,
     required this.running,
-    required this.isLive,
+    required this.money,
   });
 
   final String id;
@@ -218,7 +221,9 @@ class LearningInstanceTarget {
   final String kind;
   final String? strategyId;
   final bool running;
-  final bool isLive;
+  final String money;
+
+  bool get isLive => money == 'live';
 
   factory LearningInstanceTarget.fromJson(Map<String, dynamic> j) =>
       LearningInstanceTarget(
@@ -227,7 +232,7 @@ class LearningInstanceTarget {
         kind: (j['kind'] ?? '').toString(),
         strategyId: j['strategy_id']?.toString(),
         running: j['running'] == true,
-        isLive: j['is_live'] == true,
+        money: (j['money'] ?? 'unknown').toString(),
       );
 }
 

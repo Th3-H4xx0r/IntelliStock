@@ -419,22 +419,30 @@ onUnmounted(stopPolling)
                   @click="toggleDocument(doc.id)"
                   class="w-full text-left rounded-lg border px-3 py-2 transition-colors"
                   :class="draft.document_allowlist?.includes(doc.id)
-                    ? (doc.is_live
+                    ? (doc.money === 'live'
                         ? 'border-rose-500/40 bg-rose-500/10'
                         : 'border-emerald-500/30 bg-emerald-500/10')
                     : 'border-slate-800 bg-slate-950/40 hover:bg-slate-900/60'">
             <div class="flex items-center gap-2">
               <span class="material-symbols-outlined text-[16px]"
                     :class="draft.document_allowlist?.includes(doc.id)
-                      ? (doc.is_live ? 'text-rose-400' : 'text-emerald-400')
+                      ? (doc.money === 'live' ? 'text-rose-400' : 'text-emerald-400')
                       : 'text-slate-600'">
                 {{ draft.document_allowlist?.includes(doc.id) ? 'check_box' : 'check_box_outline_blank' }}
               </span>
               <span class="text-sm text-slate-200 truncate">{{ doc.name }}</span>
               <span class="text-[10px] text-slate-600 font-mono">#{{ doc.id }}</span>
-              <span v-if="doc.is_live"
+              <span v-if="doc.money === 'live'"
                     class="ml-auto px-1.5 py-0.5 rounded text-[10px] font-bold border text-rose-400 bg-rose-500/10 border-rose-500/30">
                 REAL MONEY
+              </span>
+              <span v-else-if="doc.money === 'unknown'"
+                    class="ml-auto px-1.5 py-0.5 rounded text-[10px] font-semibold border text-amber-400 bg-amber-500/10 border-amber-500/20">
+                unverified
+              </span>
+              <span v-else-if="doc.money === 'paper'"
+                    class="ml-auto px-1.5 py-0.5 rounded text-[10px] font-semibold border text-slate-400 bg-slate-500/10 border-slate-700">
+                paper
               </span>
             </div>
             <div class="text-[10px] text-slate-600 mt-0.5 pl-6">
@@ -476,9 +484,17 @@ onUnmounted(stopPolling)
               </span>
               <span class="text-sm text-slate-200 truncate">{{ inst.name }}</span>
               <span class="text-[10px] text-slate-600 font-mono">{{ inst.kind }}</span>
-              <span v-if="inst.is_live"
+              <span v-if="inst.money === 'live'"
                     class="ml-auto px-1.5 py-0.5 rounded text-[10px] font-bold border text-rose-400 bg-rose-500/10 border-rose-500/30">
-                LIVE
+                REAL MONEY
+              </span>
+              <span v-else-if="inst.money === 'unknown'"
+                    class="ml-auto px-1.5 py-0.5 rounded text-[10px] font-semibold border text-amber-400 bg-amber-500/10 border-amber-500/20">
+                unverified
+              </span>
+              <span v-else-if="inst.money === 'paper'"
+                    class="ml-auto px-1.5 py-0.5 rounded text-[10px] font-semibold border text-slate-400 bg-slate-500/10 border-slate-700">
+                paper
               </span>
               <span v-else-if="inst.running"
                     class="ml-auto px-1.5 py-0.5 rounded text-[10px] font-semibold border text-emerald-400 bg-emerald-500/10 border-emerald-500/20">

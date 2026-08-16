@@ -722,8 +722,10 @@ class _TargetsSheetState extends State<_TargetsSheet> {
                                 style: AppTextStyles.body,
                                 overflow: TextOverflow.ellipsis),
                           ),
-                          if (doc.isLive)
-                            AppBadge(label: 'real money', color: AppColors.danger),
+                          if (doc.money == 'live')
+                            AppBadge(label: 'real money', color: AppColors.danger)
+                          else if (doc.money == 'unknown')
+                            AppBadge(label: 'unverified', color: AppColors.warning),
                         ],
                       ),
                       subtitle: Text(
@@ -761,8 +763,10 @@ class _TargetsSheetState extends State<_TargetsSheet> {
                                 style: AppTextStyles.body,
                                 overflow: TextOverflow.ellipsis),
                           ),
-                          if (inst.isLive)
-                            AppBadge(label: 'live', color: AppColors.danger)
+                          if (inst.money == 'live')
+                            AppBadge(label: 'real money', color: AppColors.danger)
+                          else if (inst.money == 'unknown')
+                            AppBadge(label: 'unverified', color: AppColors.warning)
                           else if (inst.running)
                             AppBadge(label: 'running', color: AppColors.success),
                         ],

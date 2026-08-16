@@ -8735,10 +8735,16 @@ def action_learning_targets(conn):
     `/instances` itself: both carry payloads far larger than a picker needs, and
     this is read on a phone.
 
-    Each row carries `is_live` — whether a RUNNING instance is attached to a
-    real brokerage. Arming a document is what lets the subsystem write to it, so
-    the one fact that must not require cross-referencing another tab is "this is
-    the real-money one".
+    Each row carries a THREE-STATE money flag — "live", "paper" or "unknown" —
+    because arming a document is what lets the subsystem write to it, and "this
+    is the real-money one" must not require cross-referencing another tab.
+
+    Three states rather than a boolean on purpose. A first cut inferred live
+    from `brokerage_id` alone, which flagged all 19 instances and 123 documents
+    as REAL MONEY — including `alpaca-paper-pit`. A warning that is always on is
+    noise, and it buried the one instance that genuinely is real money. Equally,
+    calling an undetermined account "paper" would under-warn on exactly the case
+    that matters, so unknown stays unknown.
     """
     from self_learning import store
     store.ensure_tables(conn)
@@ -8747,19 +8753,52 @@ def action_learning_targets(conn):
     instances = (action_instances(conn) or {}).get("instances") or []
     strategies = (action_strategies(conn) or {}).get("strategies") or []
 
-    by_id = {}
-    for inst in instances:
-        by_id[str(inst.get("id"))] = inst
+    # brokerage_id -> "live" | "paper" | "unknown"
+    brokerage_money = {}
+    try:
+        _ensure_brokerage_accounts_table(conn)
+        for row in r.db(DB_NAME).table(BROKERAGE_ACCOUNTS_TABLE).run(conn):
+            paper = row.get("alpaca_paper")
+            if paper is True:
+                money = "paper"
+            elif paper is False:
+                money = "live"
+            else:
+                # Non-Alpaca (Kalshi) rows carry no alpaca_paper. Their
+                # paper-vs-real discriminator is per-instance, not per-account.
+                money = "unknown"
+            brokerage_money[str(row.get("id"))] = money
+    except Exception:
+        brokerage_money = {}
 
-    def _is_live(inst):
-        # A brokerage id means a real account is attached. `runCommand` alone is
-        # not enough — a stopped live instance is still real money.
-        return bool(inst.get("brokerage_id"))
+    def _money_for(inst):
+        brokerage_id = inst.get("brokerage_id")
+        if not brokerage_id:
+            return "none"          # no account attached: nothing to lose
+        money = brokerage_money.get(str(brokerage_id), "unknown")
+        if money != "unknown":
+            return money
+        if str(inst.get("kind") or "") == "kalshi":
+            try:
+                from kalshi.mode import is_real_mode
+                return "live" if is_real_mode(
+                    str(inst.get("kalshi_environment") or ""),
+                    bool(inst.get("kalshi_live_enabled")),
+                    bool(inst.get("kalshi_paper_mode"))) else "paper"
+            except Exception:
+                return "unknown"
+        return "unknown"
+
+    by_id = {str(inst.get("id")): inst for inst in instances}
 
     strategy_rows = []
     for row in strategies:
         used_by = [str(i) for i in (row.get("instances_using") or [])]
-        live_users = [i for i in used_by if _is_live(by_id.get(i) or {})]
+        monies = {_money_for(by_id.get(i) or {}) for i in used_by}
+        # A document is only as safe as the riskiest instance using it.
+        money = ("live" if "live" in monies
+                 else "unknown" if "unknown" in monies
+                 else "paper" if "paper" in monies else "none")
         strategy_rows.append({
             "id": str(row.get("id")),
             "name": row.get("name") or f"id={row.get('id')}",
@@ -8767,25 +8806,31 @@ def action_learning_targets(conn):
             "instances_using": used_by,
             "instance_names": [
                 (by_id.get(i) or {}).get("name") or i for i in used_by],
-            "is_live": bool(live_users),
+            "money": money,
+            "is_live": money == "live",
             "armed": str(row.get("id")) in {
                 str(d) for d in (config.get("document_allowlist") or [])},
         })
 
     watched = {str(w) for w in (config.get("watched_instances") or [])}
-    instance_rows = [{
-        "id": str(inst.get("id")),
-        "name": inst.get("name") or str(inst.get("id")),
-        "kind": inst.get("kind") or "equity",
-        "strategy_id": (None if inst.get("strategy_id") is None
-                        else str(inst.get("strategy_id"))),
-        "running": bool(inst.get("runCommand")),
-        "is_live": _is_live(inst),
-        "watched": (not watched) or str(inst.get("id")) in watched,
-    } for inst in instances]
+    instance_rows = []
+    for inst in instances:
+        money = _money_for(inst)
+        instance_rows.append({
+            "id": str(inst.get("id")),
+            "name": inst.get("name") or str(inst.get("id")),
+            "kind": inst.get("kind") or "equity",
+            "strategy_id": (None if inst.get("strategy_id") is None
+                            else str(inst.get("strategy_id"))),
+            "running": bool(inst.get("runCommand")),
+            "money": money,
+            "is_live": money == "live",
+            "watched": (not watched) or str(inst.get("id")) in watched,
+        })
 
-    strategy_rows.sort(key=lambda d: (not d["is_live"], d["name"].lower()))
-    instance_rows.sort(key=lambda d: (not d["is_live"], d["name"].lower()))
+    _order = {"live": 0, "unknown": 1, "paper": 2, "none": 3}
+    strategy_rows.sort(key=lambda d: (_order.get(d["money"], 9), d["name"].lower()))
+    instance_rows.sort(key=lambda d: (_order.get(d["money"], 9), d["name"].lower()))
 
     return {
         "strategies": strategy_rows,
@@ -8795,4 +8840,5 @@ def action_learning_targets(conn):
         # An empty watch list means every instance, which is the opposite of the
         # allowlist's empty-means-nothing. Say so rather than let the UI guess.
         "watching_all": not watched,
+        "live_documents": [d["id"] for d in strategy_rows if d["money"] == "live"],
     }
