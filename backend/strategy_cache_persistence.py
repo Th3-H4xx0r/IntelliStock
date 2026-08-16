@@ -113,6 +113,34 @@ _MAX_DICT_ENTRIES = 500
 _ROW_TTL_SEC = 14 * 24 * 3600
 
 
+#: Keys whose loss CHANGES WHAT THE BOT DOES WITH MONEY on the next boot, rather
+#: than merely costing it a recomputation. The oversize-eviction loop below sorts
+#: by size and pops until the blob fits; these are tiny, so sort order has been
+#: evicting them last BY ACCIDENT. That is not a guarantee, and the failure is
+#: silent — which is the part that matters, because each of these fails in the
+#: expensive direction:
+#:
+#:   _peak_*      per-position peak for the trailing stop. Lost, the peak
+#:                re-bases to the current price on restart
+#:                (`_resolve_position_peak_state`) and every point of accumulated
+#:                downside protection on a winner disappears.
+#:   *cooldown*   re-entry suppression. Lost, the bot can immediately re-buy a
+#:                name it just sold — and turnover is this system's known leak
+#:                (~290%/mo live against ~50%/mo break-even).
+#:   *latch*      regime hysteresis. Lost, the regime can flap on the first bar
+#:                after a restart and re-run a whole allocation.
+#:   _dd_kill_*   drawdown-circuit episode state. Lost, a kill that already fired
+#:                can re-arm and liquidate the book a second time.
+_RISK_CRITICAL_MARKERS = ("_peak_", "cooldown", "latch", "_dd_kill_")
+
+
+def _is_risk_critical(key: str) -> bool:
+    """True when losing `key` across a restart changes a money decision."""
+    if not isinstance(key, str):
+        return False
+    return any(m in key for m in _RISK_CRITICAL_MARKERS)
+
+
 def _is_blacklisted(key: str) -> bool:
     if not isinstance(key, str):
         return False
@@ -384,16 +412,42 @@ def save_strategy_cache_to_db(
         filtered = {k: v for k, v in filtered.items() if v is not None}
         blob = json.dumps(filtered, default=str)
         if len(blob) > max_blob_bytes:
+            # Evict expendable keys first and risk-critical ones only as a last
+            # resort. Previously this was one size-sorted pass over everything:
+            # the risk keys survived only because they happen to be small, and
+            # nothing said so or noticed when they did not.
             sized = sorted(
                 filtered.items(),
                 key=lambda kv: len(json.dumps(kv[1], default=str)),
                 reverse=True,
             )
-            for k, _ in sized:
-                filtered.pop(k, None)
-                blob = json.dumps(filtered, default=str)
+            expendable = [k for k, _ in sized if not _is_risk_critical(k)]
+            critical = [k for k, _ in sized if _is_risk_critical(k)]
+            evicted, evicted_critical = [], []
+            for k in expendable + critical:
                 if len(blob) <= max_blob_bytes:
                     break
+                filtered.pop(k, None)
+                evicted.append(k)
+                if _is_risk_critical(k):
+                    evicted_critical.append(k)
+                blob = json.dumps(filtered, default=str)
+            # Silent truncation reads as "everything was saved". Say what went.
+            if evicted:
+                try:
+                    from intellistock_logger import intellistock_logger
+                    intellistock_logger.log(
+                        f"strategy cache over {max_blob_bytes} bytes for "
+                        f"{instance_id}/{strategy_name}: evicted {len(evicted)} key(s)"
+                        + (f" — INCLUDING {len(evicted_critical)} RISK-CRITICAL "
+                           f"{evicted_critical[:8]}; trailing-stop peaks, cooldowns "
+                           f"or regime latches will be REBUILT FROM SCRATCH on the "
+                           f"next boot" if evicted_critical else ""),
+                        "red" if evicted_critical else "yellow",
+                        service="STRATEGY_CACHE_PERSISTENCE",
+                    )
+                except Exception:
+                    pass
         if not _ensure_table(conn, r):
             return False
         row = {
