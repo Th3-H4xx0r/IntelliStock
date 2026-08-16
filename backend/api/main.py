@@ -161,6 +161,7 @@ from interactive_utils import (
     action_learning_experiments,
     action_learning_hypotheses,
     action_learning_reports,
+    action_learning_targets,
     action_learning_roles,
     action_learning_levers,
     action_learning_noise_floors,
@@ -3756,6 +3757,12 @@ def api_learning_intents(limit: int = 200, conn=Depends(conn_dependency), curren
 def api_learning_budget(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """The spend ceiling and what remains of it."""
     return _run(action_learning_budget, conn)
+
+
+@app.get("/learning/targets", response_class=JSONResponse)
+def api_learning_targets(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Strategy documents and instances to pick from, with the live ones flagged."""
+    return _run(action_learning_targets, conn)
 
 
 @app.get("/learning/permissions", response_class=JSONResponse)

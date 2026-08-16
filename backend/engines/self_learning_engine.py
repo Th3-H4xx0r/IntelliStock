@@ -54,6 +54,7 @@ from self_learning import loop as learning_loop
 from self_learning import outcomes as learning_outcomes
 from self_learning import permissions as learning_perms
 from self_learning import retention, store
+from self_learning.watch import is_watched
 from self_learning.pipeline import process_backtest_document
 
 _TERMINAL = frozenset({"completed", "complete", "finished", "done"})
@@ -317,6 +318,11 @@ def _handle_run(conn, run_id, status, processed) -> None:
         doc = r.db(DB_NAME).table("BacktestResults").get(run_id).run(conn)
         if doc:
             config = store.get_config(conn)
+            watched = config.get("watched_instances") or []
+            if not is_watched(doc, watched):
+                _log(f"run {run_id} skipped — its instance is not in the "
+                     f"watch list ({len(watched)} watched)", "white")
+                return
             _process(conn, doc, config)
             _maybe_sweep(conn, config)
             # A finished run is an event worth thinking about, which is what

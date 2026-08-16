@@ -33,7 +33,7 @@ const busy       = ref('')
 const saveError  = ref('')
 const saveOk     = ref('')
 const draft      = ref({})
-const newDoc     = ref('')
+const targets    = ref(null)
 const loading    = ref(true)
 const loadError  = ref('')
 const openThread = ref(null)      // the finding whose ladder stepper is expanded
@@ -106,6 +106,7 @@ async function load() {
     getJson('/learning/control'),
     getJson('/learning/permissions'),
     getJson('/models'),
+    getJson('/learning/targets'),
   ])
   const failures = results.filter((r) => r.status === 'rejected')
 
@@ -132,6 +133,7 @@ async function load() {
   }
   if (results[10].status === 'fulfilled') permissions.value = results[10].value || null
   if (results[11].status === 'fulfilled') models.value = results[11].value?.models || []
+  if (results[12].status === 'fulfilled') targets.value = results[12].value || null
 
   loadError.value = failures.length
     ? failures.map((r) => r.reason?.message || 'request failed').join('; ')
@@ -173,8 +175,23 @@ function resetDraft() {
     permission_matrix: JSON.parse(JSON.stringify(
       permissions.value?.matrix || cfg.permission_matrix || {})),
     ...Object.fromEntries(NUMBER_FIELDS.map(([k]) => [k, cfg[k] ?? 0])),
+    watched_instances: [...(cfg.watched_instances || [])],
     ...Object.fromEntries(ROLE_KEYS.map(([, k]) => [k, cfg[k] || ''])),
   }
+}
+
+function toggleDocument(id) {
+  const list = draft.value.document_allowlist || []
+  draft.value.document_allowlist = list.includes(id)
+    ? list.filter((d) => d !== id)
+    : [...list, id]
+}
+
+function toggleInstance(id) {
+  const list = draft.value.watched_instances || []
+  draft.value.watched_instances = list.includes(id)
+    ? list.filter((d) => d !== id)
+    : [...list, id]
 }
 
 async function postControl(body, label) {
@@ -208,20 +225,6 @@ function toggleEngine() {
 
 function saveSettings() {
   postControl({ config: { ...draft.value } }, 'settings')
-}
-
-function addDocument() {
-  const id = String(newDoc.value || '').trim()
-  if (!id) return
-  if (!draft.value.document_allowlist.includes(id)) {
-    draft.value.document_allowlist.push(id)
-  }
-  newDoc.value = ''
-}
-
-function removeDocument(id) {
-  draft.value.document_allowlist =
-    draft.value.document_allowlist.filter((d) => d !== id)
 }
 
 function openSettings() {
@@ -401,28 +404,90 @@ onUnmounted(stopPolling)
         </div>
 
         <!-- Document allowlist -->
-        <h3 class="text-xs font-semibold text-slate-400 mt-5 mb-2">Document allowlist</h3>
+        <h3 class="text-xs font-semibold text-slate-400 mt-5 mb-2">
+          Strategy documents the subsystem may write to
+        </h3>
         <p class="text-[11px] text-slate-600 mb-2">
-          The only documents the subsystem may ever write to. Empty means it writes
-          nowhere, whatever the permission matrix says.
+          Arming a document is what lets the subsystem change it. Empty means it
+          writes nowhere, whatever the permission matrix says.
         </p>
-        <div class="flex flex-wrap gap-2 mb-2">
-          <span v-for="d in draft.document_allowlist" :key="d"
-                class="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs border border-amber-500/30 bg-amber-500/10 text-amber-300">
-            {{ d }}
-            <button @click="removeDocument(d)" class="text-amber-400/70 hover:text-amber-200">×</button>
-          </span>
-          <span v-if="!draft.document_allowlist?.length" class="text-xs text-slate-600">
-            none — the subsystem cannot write anywhere
-          </span>
+        <div v-if="!targets?.strategies?.length" class="text-xs text-slate-600 mb-4">
+          No strategy documents found.
         </div>
-        <div class="flex gap-2 mb-4">
-          <input v-model="newDoc" placeholder="Strategies document id (e.g. 195)"
-                 @keyup.enter="addDocument"
-                 class="flex-1 rounded-lg bg-slate-950/60 border border-slate-700 px-3 py-2 text-sm text-slate-200" />
-          <button @click="addDocument"
-                  class="px-3 py-2 rounded-lg text-xs font-semibold border border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-800">
-            Arm
+        <div v-else class="space-y-1.5 mb-4">
+          <button v-for="doc in targets.strategies" :key="doc.id"
+                  @click="toggleDocument(doc.id)"
+                  class="w-full text-left rounded-lg border px-3 py-2 transition-colors"
+                  :class="draft.document_allowlist?.includes(doc.id)
+                    ? (doc.is_live
+                        ? 'border-rose-500/40 bg-rose-500/10'
+                        : 'border-emerald-500/30 bg-emerald-500/10')
+                    : 'border-slate-800 bg-slate-950/40 hover:bg-slate-900/60'">
+            <div class="flex items-center gap-2">
+              <span class="material-symbols-outlined text-[16px]"
+                    :class="draft.document_allowlist?.includes(doc.id)
+                      ? (doc.is_live ? 'text-rose-400' : 'text-emerald-400')
+                      : 'text-slate-600'">
+                {{ draft.document_allowlist?.includes(doc.id) ? 'check_box' : 'check_box_outline_blank' }}
+              </span>
+              <span class="text-sm text-slate-200 truncate">{{ doc.name }}</span>
+              <span class="text-[10px] text-slate-600 font-mono">#{{ doc.id }}</span>
+              <span v-if="doc.is_live"
+                    class="ml-auto px-1.5 py-0.5 rounded text-[10px] font-bold border text-rose-400 bg-rose-500/10 border-rose-500/30">
+                REAL MONEY
+              </span>
+            </div>
+            <div class="text-[10px] text-slate-600 mt-0.5 pl-6">
+              {{ doc.sub_strategies }} sub-strateg{{ doc.sub_strategies === 1 ? 'y' : 'ies' }}
+              <span v-if="doc.instance_names?.length">
+                · used by {{ doc.instance_names.join(', ') }}
+              </span>
+              <span v-else> · not attached to an instance</span>
+            </div>
+          </button>
+        </div>
+
+        <!-- Watched instances -->
+        <h3 class="text-xs font-semibold text-slate-400 mt-5 mb-2">
+          Instances to watch
+        </h3>
+        <p class="text-[11px] text-slate-600 mb-2">
+          Which instances' runs the engine observes. Selecting none watches
+          everything — observing is read-only, so narrowing is the deliberate act.
+        </p>
+        <div v-if="!draft.watched_instances?.length"
+             class="text-[11px] text-sky-400 mb-2">
+          Watching every instance.
+        </div>
+        <div v-if="!targets?.instances?.length" class="text-xs text-slate-600 mb-4">
+          No instances found.
+        </div>
+        <div v-else class="space-y-1.5 mb-4">
+          <button v-for="inst in targets.instances" :key="inst.id"
+                  @click="toggleInstance(inst.id)"
+                  class="w-full text-left rounded-lg border px-3 py-2 transition-colors"
+                  :class="draft.watched_instances?.includes(inst.id)
+                    ? 'border-sky-500/30 bg-sky-500/10'
+                    : 'border-slate-800 bg-slate-950/40 hover:bg-slate-900/60'">
+            <div class="flex items-center gap-2">
+              <span class="material-symbols-outlined text-[16px]"
+                    :class="draft.watched_instances?.includes(inst.id) ? 'text-sky-400' : 'text-slate-600'">
+                {{ draft.watched_instances?.includes(inst.id) ? 'check_box' : 'check_box_outline_blank' }}
+              </span>
+              <span class="text-sm text-slate-200 truncate">{{ inst.name }}</span>
+              <span class="text-[10px] text-slate-600 font-mono">{{ inst.kind }}</span>
+              <span v-if="inst.is_live"
+                    class="ml-auto px-1.5 py-0.5 rounded text-[10px] font-bold border text-rose-400 bg-rose-500/10 border-rose-500/30">
+                LIVE
+              </span>
+              <span v-else-if="inst.running"
+                    class="ml-auto px-1.5 py-0.5 rounded text-[10px] font-semibold border text-emerald-400 bg-emerald-500/10 border-emerald-500/20">
+                running
+              </span>
+            </div>
+            <div class="text-[10px] text-slate-600 mt-0.5 pl-6">
+              doc #{{ inst.strategy_id || '—' }}
+            </div>
           </button>
         </div>
 

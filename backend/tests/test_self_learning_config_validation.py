@@ -80,3 +80,43 @@ def test_counts_must_be_at_least_one():
 
 def test_a_breaker_limit_of_zero_is_allowed_because_it_means_never_fire():
     assert _validated("breaker_limit_pct", 0) == 0.0
+
+
+def test_a_string_watch_list_is_refused():
+    """Same trap as the allowlist: "alpaca-main" would watch each character."""
+    with pytest.raises(ConfigError, match="each character"):
+        _validated("watched_instances", "alpaca-main")
+
+
+def test_a_watch_list_is_normalised():
+    assert _validated("watched_instances", [" test ", "", 179]) == ["test", "179"]
+
+
+# ── The watch filter ─────────────────────────────────────────────────────────
+
+def test_an_empty_watch_list_watches_everything():
+    """Observing is read-only, so watching broadly is the useful default and
+    narrowing is the deliberate act. This is the OPPOSITE of the document
+    allowlist, where empty means write nowhere."""
+    from self_learning.store import DEFAULT_CONFIG
+    from self_learning.watch import is_watched
+    assert DEFAULT_CONFIG["watched_instances"] == []
+    assert is_watched({"instance_id": "anything"}, []) is True
+    assert is_watched({}, []) is True
+
+
+def test_only_watched_instances_are_observed():
+    from self_learning.watch import is_watched
+    assert is_watched({"instance_id": "test"}, ["test"]) is True
+    assert is_watched({"instance_id": "other"}, ["test"]) is False
+
+
+def test_a_run_with_no_identifiable_instance_is_not_silently_included():
+    """Guessing would widen the scope the operator explicitly narrowed."""
+    from self_learning.watch import is_watched
+    assert is_watched({}, ["test"]) is False
+
+
+def test_the_alternate_instance_field_is_honoured():
+    from self_learning.watch import is_watched
+    assert is_watched({"backtest_instance_id": "test"}, ["test"]) is True

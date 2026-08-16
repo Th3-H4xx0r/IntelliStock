@@ -12,6 +12,7 @@ class LearningState {
     this.floors = const [],
     this.engineRunning = false,
     this.mode = 'observe',
+    this.targets,
     this.partialError,
   });
 
@@ -27,6 +28,7 @@ class LearningState {
   final List<LearningFloor> floors;
   final bool engineRunning;
   final String mode;
+  final LearningTargets? targets;
 
   /// Set when SOME endpoints answered and others did not. The screen still
   /// renders what loaded — an all-or-nothing `Future.wait` blanked the whole
@@ -64,6 +66,7 @@ final learningStateProvider = FutureProvider.autoDispose<LearningState>((ref) as
     _attempt(repo.approvals, errors, 'approvals'),
     _attempt(repo.noiseFloors, errors, 'noise floors'),
     _attempt(repo.control, errors, 'control'),
+    _attempt(repo.targets, errors, 'targets'),
   ]);
   final controlDoc = results[5] as Map<String, dynamic>?;
   final state = LearningState(
@@ -74,6 +77,7 @@ final learningStateProvider = FutureProvider.autoDispose<LearningState>((ref) as
     floors: (results[4] as List<LearningFloor>?) ?? const [],
     engineRunning: controlDoc?['running'] == true,
     mode: ((controlDoc?['config'] as Map?)?['mode'] ?? 'observe').toString(),
+    targets: results[6] as LearningTargets?,
     partialError: errors.isEmpty ? null : errors.join('; '),
   );
   if (state.isEmptyFailure && errors.isNotEmpty) {

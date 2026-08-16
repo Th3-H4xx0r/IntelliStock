@@ -8726,3 +8726,73 @@ def action_learning_permissions(conn):
     return {"matrix": merge_matrix(config.get("permission_matrix")),
             "action_classes": list(ACTION_CLASSES), "rungs": list(RUNGS),
             "document_allowlist": config.get("document_allowlist") or []}
+
+
+def action_learning_targets(conn):
+    """The strategy documents and instances an operator can pick from.
+
+    Purpose-built rather than making the tab fetch and join `/strategies` and
+    `/instances` itself: both carry payloads far larger than a picker needs, and
+    this is read on a phone.
+
+    Each row carries `is_live` — whether a RUNNING instance is attached to a
+    real brokerage. Arming a document is what lets the subsystem write to it, so
+    the one fact that must not require cross-referencing another tab is "this is
+    the real-money one".
+    """
+    from self_learning import store
+    store.ensure_tables(conn)
+    config = store.get_config(conn)
+
+    instances = (action_instances(conn) or {}).get("instances") or []
+    strategies = (action_strategies(conn) or {}).get("strategies") or []
+
+    by_id = {}
+    for inst in instances:
+        by_id[str(inst.get("id"))] = inst
+
+    def _is_live(inst):
+        # A brokerage id means a real account is attached. `runCommand` alone is
+        # not enough — a stopped live instance is still real money.
+        return bool(inst.get("brokerage_id"))
+
+    strategy_rows = []
+    for row in strategies:
+        used_by = [str(i) for i in (row.get("instances_using") or [])]
+        live_users = [i for i in used_by if _is_live(by_id.get(i) or {})]
+        strategy_rows.append({
+            "id": str(row.get("id")),
+            "name": row.get("name") or f"id={row.get('id')}",
+            "sub_strategies": len(row.get("strategies") or []),
+            "instances_using": used_by,
+            "instance_names": [
+                (by_id.get(i) or {}).get("name") or i for i in used_by],
+            "is_live": bool(live_users),
+            "armed": str(row.get("id")) in {
+                str(d) for d in (config.get("document_allowlist") or [])},
+        })
+
+    watched = {str(w) for w in (config.get("watched_instances") or [])}
+    instance_rows = [{
+        "id": str(inst.get("id")),
+        "name": inst.get("name") or str(inst.get("id")),
+        "kind": inst.get("kind") or "equity",
+        "strategy_id": (None if inst.get("strategy_id") is None
+                        else str(inst.get("strategy_id"))),
+        "running": bool(inst.get("runCommand")),
+        "is_live": _is_live(inst),
+        "watched": (not watched) or str(inst.get("id")) in watched,
+    } for inst in instances]
+
+    strategy_rows.sort(key=lambda d: (not d["is_live"], d["name"].lower()))
+    instance_rows.sort(key=lambda d: (not d["is_live"], d["name"].lower()))
+
+    return {
+        "strategies": strategy_rows,
+        "instances": instance_rows,
+        "document_allowlist": [str(d) for d in (config.get("document_allowlist") or [])],
+        "watched_instances": sorted(watched),
+        # An empty watch list means every instance, which is the opposite of the
+        # allowlist's empty-means-nothing. Say so rather than let the UI guess.
+        "watching_all": not watched,
+    }

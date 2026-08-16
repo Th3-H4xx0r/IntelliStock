@@ -171,6 +171,103 @@ class LearningFloor {
       );
 }
 
+/// A strategy document the subsystem could be allowed to write to.
+class LearningStrategyTarget {
+  LearningStrategyTarget({
+    required this.id,
+    required this.name,
+    required this.subStrategies,
+    required this.instanceNames,
+    required this.isLive,
+  });
+
+  final String id;
+  final String name;
+  final int subStrategies;
+  final List<String> instanceNames;
+
+  /// A running instance with a real brokerage attached. Arming this document
+  /// means the subsystem can change real money.
+  final bool isLive;
+
+  factory LearningStrategyTarget.fromJson(Map<String, dynamic> j) =>
+      LearningStrategyTarget(
+        id: (j['id'] ?? '').toString(),
+        name: (j['name'] ?? '').toString(),
+        subStrategies: (j['sub_strategies'] as num?)?.toInt() ?? 0,
+        instanceNames: ((j['instance_names'] as List?) ?? const [])
+            .map((e) => e.toString())
+            .toList(),
+        isLive: j['is_live'] == true,
+      );
+}
+
+/// An instance whose runs the engine can be pointed at.
+class LearningInstanceTarget {
+  LearningInstanceTarget({
+    required this.id,
+    required this.name,
+    required this.kind,
+    required this.strategyId,
+    required this.running,
+    required this.isLive,
+  });
+
+  final String id;
+  final String name;
+  final String kind;
+  final String? strategyId;
+  final bool running;
+  final bool isLive;
+
+  factory LearningInstanceTarget.fromJson(Map<String, dynamic> j) =>
+      LearningInstanceTarget(
+        id: (j['id'] ?? '').toString(),
+        name: (j['name'] ?? '').toString(),
+        kind: (j['kind'] ?? '').toString(),
+        strategyId: j['strategy_id']?.toString(),
+        running: j['running'] == true,
+        isLive: j['is_live'] == true,
+      );
+}
+
+class LearningTargets {
+  LearningTargets({
+    required this.strategies,
+    required this.instances,
+    required this.documentAllowlist,
+    required this.watchedInstances,
+    required this.watchingAll,
+  });
+
+  final List<LearningStrategyTarget> strategies;
+  final List<LearningInstanceTarget> instances;
+  final List<String> documentAllowlist;
+  final List<String> watchedInstances;
+
+  /// An empty watch list means EVERY instance — the opposite of the allowlist,
+  /// where empty means write nowhere.
+  final bool watchingAll;
+
+  factory LearningTargets.fromJson(Map<String, dynamic> j) => LearningTargets(
+        strategies: ((j['strategies'] as List?) ?? const [])
+            .whereType<Map<String, dynamic>>()
+            .map(LearningStrategyTarget.fromJson)
+            .toList(),
+        instances: ((j['instances'] as List?) ?? const [])
+            .whereType<Map<String, dynamic>>()
+            .map(LearningInstanceTarget.fromJson)
+            .toList(),
+        documentAllowlist: ((j['document_allowlist'] as List?) ?? const [])
+            .map((e) => e.toString())
+            .toList(),
+        watchedInstances: ((j['watched_instances'] as List?) ?? const [])
+            .map((e) => e.toString())
+            .toList(),
+        watchingAll: j['watching_all'] == true,
+      );
+}
+
 // ── Repository ────────────────────────────────────────────────────────────────
 
 class LearningRepository {
@@ -211,6 +308,21 @@ class LearningRepository {
         .whereType<Map<String, dynamic>>()
         .map(LearningFloor.fromJson)
         .toList();
+  }
+
+  Future<LearningTargets> targets() async {
+    final data = await _client.get<Map<String, dynamic>>('/learning/targets');
+    return LearningTargets.fromJson(data);
+  }
+
+  Future<void> setDocumentAllowlist(List<String> ids) async {
+    await _client.post<dynamic>('/learning/control',
+        body: {'config': {'document_allowlist': ids}});
+  }
+
+  Future<void> setWatchedInstances(List<String> ids) async {
+    await _client.post<dynamic>('/learning/control',
+        body: {'config': {'watched_instances': ids}});
   }
 
   Future<Map<String, dynamic>> control() async {

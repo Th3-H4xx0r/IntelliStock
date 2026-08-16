@@ -100,6 +100,11 @@ DEFAULT_CONFIG = {
     "breaker_limit_pct": 0.0,
     "attributable_drawdown_pct": 0.0,
     "demote_after": 3,
+    # Which instances the engine observes. EMPTY MEANS ALL — the subsystem is
+    # read-only when observing, so watching everything is the useful default and
+    # narrowing is the deliberate act. This is separate from
+    # `document_allowlist`, which governs WRITING and ships empty.
+    "watched_instances": [],
 }
 
 _MUTABLE_KEYS = frozenset({
@@ -111,6 +116,7 @@ _MUTABLE_KEYS = frozenset({
     "learning_coder_llm_model_id", "learning_judge_llm_model_id",
     "approval_timeout_hours", "daily_budget_usd", "monthly_budget_usd",
     "permission_matrix", "breaker_limit_pct", "demote_after",
+    "watched_instances",
 })
 
 
@@ -209,6 +215,12 @@ def _validated(key, value):
         return text
     if key == "enabled":
         return bool(value)
+    if key == "watched_instances":
+        if isinstance(value, str) or not isinstance(value, (list, tuple)):
+            raise ConfigError(
+                "watched_instances must be a list of instance ids — a bare "
+                "string would watch each character as a separate instance")
+        return [str(v).strip() for v in value if str(v).strip()]
     if key == "document_allowlist":
         if isinstance(value, str) or not isinstance(value, (list, tuple)):
             raise ConfigError(

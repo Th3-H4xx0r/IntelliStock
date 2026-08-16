@@ -76,6 +76,18 @@ class LearningScreen extends ConsumerWidget {
     }
   }
 
+  Future<void> _openTargets(
+      BuildContext context, WidgetRef ref, LearningTargets targets) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: AppColors.panel,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (_) => _TargetsSheet(targets: targets, ref: ref),
+    );
+    ref.invalidate(learningStateProvider);
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final async = ref.watch(learningStateProvider);
@@ -118,6 +130,9 @@ class LearningScreen extends ConsumerWidget {
                   onToggleEngine: () =>
                       _setRunning(context, ref, !state.engineRunning),
                   onModeChanged: (mode) => _setMode(context, ref, mode),
+                  onPickTargets: state.targets == null
+                      ? null
+                      : () => _openTargets(context, ref, state.targets!),
                 ),
                 if (state.partialError != null) ...[
                   const SizedBox(height: 12),
@@ -544,6 +559,14 @@ class _ApprovalCard extends StatelessWidget {
 }
 
 
+String _targetsLabel(LearningState state) {
+  final t = state.targets;
+  if (t == null) return 'Documents & instances';
+  final armed = t.documentAllowlist.length;
+  final watching = t.watchingAll ? 'all' : '${t.watchedInstances.length}';
+  return 'Documents ($armed armed) · watching $watching';
+}
+
 /// Engine start/stop and the mode selector. The full settings surface stays on
 /// the web — it is a long form, and a phone is where you ANSWER a proposal, not
 /// where you configure a permission matrix.
@@ -552,11 +575,13 @@ class _Controls extends StatelessWidget {
     required this.state,
     required this.onToggleEngine,
     required this.onModeChanged,
+    this.onPickTargets,
   });
 
   final LearningState state;
   final VoidCallback onToggleEngine;
   final void Function(String mode) onModeChanged;
+  final VoidCallback? onPickTargets;
 
   @override
   Widget build(BuildContext context) {
@@ -599,14 +624,170 @@ class _Controls extends StatelessWidget {
                 ),
             ],
           ),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: AppButton.ghost(
+              label: _targetsLabel(state),
+              onPressed: onPickTargets,
+            ),
+          ),
           const SizedBox(height: 8),
           Text(
-            'Budgets, the document allowlist and the permission matrix are on '
-            'the web tab — a phone is where you answer a proposal, not where '
-            'you configure a matrix.',
+            'Budgets and the permission matrix are on the web tab — a phone is '
+            'where you answer a proposal, not where you tune a matrix.',
             style: AppTextStyles.nano.copyWith(color: AppColors.textFaint),
           ),
         ],
+      ),
+    );
+  }
+}
+
+
+/// Pick which strategy documents may be written to, and which instances the
+/// engine watches. The two lists mean OPPOSITE things when empty, so each says
+/// so rather than leaving the operator to infer it.
+class _TargetsSheet extends StatefulWidget {
+  const _TargetsSheet({required this.targets, required this.ref});
+
+  final LearningTargets targets;
+  final WidgetRef ref;
+
+  @override
+  State<_TargetsSheet> createState() => _TargetsSheetState();
+}
+
+class _TargetsSheetState extends State<_TargetsSheet> {
+  late final Set<String> _armed = {...widget.targets.documentAllowlist};
+  late final Set<String> _watched = {...widget.targets.watchedInstances};
+  bool _saving = false;
+  String? _error;
+
+  Future<void> _save() async {
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      final repo = widget.ref.read(learningRepositoryProvider);
+      await repo.setDocumentAllowlist(_armed.toList());
+      await repo.setWatchedInstances(_watched.toList());
+      if (mounted) Navigator.pop(context);
+    } catch (err) {
+      if (mounted) {
+        setState(() {
+          _error = err.toString();
+          _saving = false;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = widget.targets;
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Documents & instances', style: AppTextStyles.h3),
+            const SizedBox(height: 12),
+            Flexible(
+              child: ListView(
+                shrinkWrap: true,
+                children: [
+                  Text('Documents the subsystem may write to',
+                      style: AppTextStyles.cardTitle),
+                  Text(
+                    'Empty means it writes nowhere.',
+                    style: AppTextStyles.nano
+                        .copyWith(color: AppColors.textDim),
+                  ),
+                  const SizedBox(height: 8),
+                  for (final doc in t.strategies)
+                    CheckboxListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      value: _armed.contains(doc.id),
+                      onChanged: (on) => setState(() =>
+                          on == true ? _armed.add(doc.id) : _armed.remove(doc.id)),
+                      title: Row(
+                        children: [
+                          Expanded(
+                            child: Text(doc.name,
+                                style: AppTextStyles.body,
+                                overflow: TextOverflow.ellipsis),
+                          ),
+                          if (doc.isLive)
+                            AppBadge(label: 'real money', color: AppColors.danger),
+                        ],
+                      ),
+                      subtitle: Text(
+                        doc.instanceNames.isEmpty
+                            ? '#${doc.id} · not attached to an instance'
+                            : '#${doc.id} · ${doc.instanceNames.join(', ')}',
+                        style: AppTextStyles.nano
+                            .copyWith(color: AppColors.textFaint),
+                      ),
+                    ),
+                  const SizedBox(height: 16),
+                  Text('Instances to watch', style: AppTextStyles.cardTitle),
+                  Text(
+                    _watched.isEmpty
+                        ? 'None selected — watching every instance.'
+                        : 'Only the selected instances are observed.',
+                    style: AppTextStyles.nano.copyWith(
+                        color: _watched.isEmpty
+                            ? AppColors.info
+                            : AppColors.textDim),
+                  ),
+                  const SizedBox(height: 8),
+                  for (final inst in t.instances)
+                    CheckboxListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      value: _watched.contains(inst.id),
+                      onChanged: (on) => setState(() => on == true
+                          ? _watched.add(inst.id)
+                          : _watched.remove(inst.id)),
+                      title: Row(
+                        children: [
+                          Expanded(
+                            child: Text(inst.name,
+                                style: AppTextStyles.body,
+                                overflow: TextOverflow.ellipsis),
+                          ),
+                          if (inst.isLive)
+                            AppBadge(label: 'live', color: AppColors.danger)
+                          else if (inst.running)
+                            AppBadge(label: 'running', color: AppColors.success),
+                        ],
+                      ),
+                      subtitle: Text('${inst.kind} · doc #${inst.strategyId ?? "—"}',
+                          style: AppTextStyles.nano
+                              .copyWith(color: AppColors.textFaint)),
+                    ),
+                ],
+              ),
+            ),
+            if (_error != null) ...[
+              const SizedBox(height: 8),
+              ErrorBanner(message: _error!),
+            ],
+            const SizedBox(height: 12),
+            SizedBox(
+              width: double.infinity,
+              child: AppButton.primary(
+                label: _saving ? 'Saving…' : 'Save',
+                onPressed: _saving ? null : _save,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
