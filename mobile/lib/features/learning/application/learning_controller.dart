@@ -8,12 +8,21 @@ class LearningState {
     this.overview,
     this.findings = const [],
     this.funnels = const [],
+    this.approvals = const [],
+    this.floors = const [],
     this.partialError,
   });
+
+  /// Live approvals wait for a human indefinitely, so they are what the screen
+  /// leads with.
+  List<LearningApproval> get liveApprovals =>
+      approvals.where((a) => a.holdsForever).toList();
 
   final LearningOverview? overview;
   final List<LearningFinding> findings;
   final List<LearningFunnel> funnels;
+  final List<LearningApproval> approvals;
+  final List<LearningFloor> floors;
 
   /// Set when SOME endpoints answered and others did not. The screen still
   /// renders what loaded — an all-or-nothing `Future.wait` blanked the whole
@@ -27,7 +36,8 @@ class LearningState {
 
   /// True when nothing loaded at all — the only case worth an error screen.
   bool get isEmptyFailure =>
-      overview == null && findings.isEmpty && funnels.isEmpty;
+      overview == null && findings.isEmpty && funnels.isEmpty &&
+      approvals.isEmpty && floors.isEmpty;
 }
 
 Future<T?> _attempt<T>(Future<T> Function() call, List<String> errors,
@@ -47,11 +57,15 @@ final learningStateProvider = FutureProvider.autoDispose<LearningState>((ref) as
     _attempt(repo.overview, errors, 'overview'),
     _attempt(repo.findings, errors, 'findings'),
     _attempt(repo.funnels, errors, 'runs'),
+    _attempt(repo.approvals, errors, 'approvals'),
+    _attempt(repo.noiseFloors, errors, 'noise floors'),
   ]);
   final state = LearningState(
     overview: results[0] as LearningOverview?,
     findings: (results[1] as List<LearningFinding>?) ?? const [],
     funnels: (results[2] as List<LearningFunnel>?) ?? const [],
+    approvals: (results[3] as List<LearningApproval>?) ?? const [],
+    floors: (results[4] as List<LearningFloor>?) ?? const [],
     partialError: errors.isEmpty ? null : errors.join('; '),
   );
   if (state.isEmptyFailure && errors.isNotEmpty) {

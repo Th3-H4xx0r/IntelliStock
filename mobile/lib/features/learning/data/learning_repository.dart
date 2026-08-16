@@ -109,6 +109,68 @@ class LearningFunnel {
       );
 }
 
+class LearningApproval {
+  LearningApproval({
+    required this.id,
+    required this.rung,
+    required this.actionClass,
+    required this.target,
+    required this.summary,
+    required this.documentId,
+    required this.requestedAt,
+    required this.holdsForever,
+  });
+
+  final String id;
+  final String rung;
+  final String actionClass;
+  final String target;
+  final String summary;
+  final String documentId;
+  final String requestedAt;
+
+  /// Live rungs wait indefinitely — silence is never consent for real money.
+  final bool holdsForever;
+
+  factory LearningApproval.fromJson(Map<String, dynamic> j) => LearningApproval(
+        id: (j['id'] ?? '').toString(),
+        rung: (j['rung'] ?? '').toString(),
+        actionClass: (j['action_class'] ?? '').toString(),
+        target: (j['target'] ?? '').toString(),
+        summary: (j['summary'] ?? '').toString(),
+        documentId: (j['document_id'] ?? '').toString(),
+        requestedAt: (j['requested_at'] ?? '').toString(),
+        holdsForever: j['holds_forever'] == true,
+      );
+}
+
+class LearningFloor {
+  LearningFloor({
+    required this.target,
+    required this.windowClass,
+    required this.floorPp,
+    required this.n,
+    required this.measured,
+    required this.reason,
+  });
+
+  final String target;
+  final String windowClass;
+  final double floorPp;
+  final int n;
+  final bool measured;
+  final String reason;
+
+  factory LearningFloor.fromJson(Map<String, dynamic> j) => LearningFloor(
+        target: (j['target'] ?? '').toString(),
+        windowClass: (j['window_class'] ?? '').toString(),
+        floorPp: (j['floor_pp'] as num?)?.toDouble() ?? 0.0,
+        n: (j['n'] as num?)?.toInt() ?? 0,
+        measured: j['measured'] == true,
+        reason: (j['reason'] ?? '').toString(),
+      );
+}
+
 // ── Repository ────────────────────────────────────────────────────────────────
 
 class LearningRepository {
@@ -129,6 +191,31 @@ class LearningRepository {
         .whereType<Map<String, dynamic>>()
         .map(LearningFinding.fromJson)
         .toList();
+  }
+
+  Future<List<LearningApproval>> approvals({int limit = 100}) async {
+    final data = await _client.get<Map<String, dynamic>>(
+        '/learning/approvals', query: {'limit': limit.toString()});
+    final rows = (data['pending'] as List?) ?? const [];
+    return rows
+        .whereType<Map<String, dynamic>>()
+        .map(LearningApproval.fromJson)
+        .toList();
+  }
+
+  Future<List<LearningFloor>> noiseFloors() async {
+    final data =
+        await _client.get<Map<String, dynamic>>('/learning/noise-floors');
+    final rows = (data['floors'] as List?) ?? const [];
+    return rows
+        .whereType<Map<String, dynamic>>()
+        .map(LearningFloor.fromJson)
+        .toList();
+  }
+
+  Future<void> decide(String approvalId, String decision) async {
+    await _client.post<dynamic>('/learning/approvals/$approvalId',
+        body: {'decision': decision});
   }
 
   Future<List<LearningFunnel>> funnels({int limit = 100}) async {

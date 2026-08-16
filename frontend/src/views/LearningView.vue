@@ -18,6 +18,13 @@ function authHeaders() {
 const overview   = ref(null)
 const findings   = ref([])
 const funnels    = ref([])
+const approvals  = ref({ pending: [], pending_count: 0, live_pending_count: 0 })
+const hypotheses = ref([])
+const floors     = ref([])
+const intents    = ref([])
+const budget     = ref(null)
+const roles      = ref(null)
+const deciding   = ref('')
 const loading    = ref(true)
 const loadError  = ref('')
 const openThread = ref(null)      // the finding whose ladder stepper is expanded
@@ -81,6 +88,12 @@ async function load() {
     getJson('/learning/overview'),
     getJson('/learning/findings?limit=100'),
     getJson('/learning/funnels?limit=100'),
+    getJson('/learning/approvals?limit=100'),
+    getJson('/learning/hypotheses?limit=100'),
+    getJson('/learning/noise-floors'),
+    getJson('/learning/intents?limit=60'),
+    getJson('/learning/budget'),
+    getJson('/learning/roles'),
   ])
   const failures = results.filter((r) => r.status === 'rejected')
 
@@ -95,6 +108,12 @@ async function load() {
   if (results[0].status === 'fulfilled') overview.value = results[0].value
   if (results[1].status === 'fulfilled') findings.value = results[1].value?.findings || []
   if (results[2].status === 'fulfilled') funnels.value = results[2].value?.funnels || []
+  if (results[3].status === 'fulfilled') approvals.value = results[3].value || approvals.value
+  if (results[4].status === 'fulfilled') hypotheses.value = results[4].value?.hypotheses || []
+  if (results[5].status === 'fulfilled') floors.value = results[5].value?.floors || []
+  if (results[6].status === 'fulfilled') intents.value = results[6].value?.intents || []
+  if (results[7].status === 'fulfilled') budget.value = results[7].value || null
+  if (results[8].status === 'fulfilled') roles.value = results[8].value || null
 
   loadError.value = failures.length
     ? failures.map((r) => r.reason?.message || 'request failed').join('; ')
@@ -106,6 +125,22 @@ function stopPolling() {
   if (pollTimer) {
     clearInterval(pollTimer)
     pollTimer = null
+  }
+}
+
+async function decide(approval, decision) {
+  deciding.value = approval.id
+  try {
+    const res = await fetch(`${API_BASE}/learning/approvals/${approval.id}`, {
+      method: 'POST', headers: authHeaders(),
+      body: JSON.stringify({ decision }),
+    })
+    if (!res.ok) throw new Error(`Request failed (${res.status})`)
+    await load()
+  } catch (err) {
+    loadError.value = err?.message || 'Could not record that decision'
+  } finally {
+    deciding.value = ''
   }
 }
 
@@ -179,6 +214,34 @@ onUnmounted(stopPolling)
         </div>
       </div>
 
+      <div v-if="budget || roles" class="mb-6 grid grid-cols-1 sm:grid-cols-2 gap-2">
+        <div v-if="budget" class="rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2">
+          <div class="text-[11px] text-slate-500">Budget remaining</div>
+          <div class="text-lg font-bold"
+               :class="Number(budget.remaining_usd) > 0 ? 'text-slate-100' : 'text-amber-400'">
+            ${{ Number(budget.remaining_usd || 0).toFixed(2) }}
+          </div>
+          <div class="text-[11px] text-slate-600">
+            ${{ Number(budget.spent_today_usd || 0).toFixed(2) }} today ·
+            ${{ Number(budget.reserved_usd || 0).toFixed(2) }} reserved
+            <span v-if="!Number(budget.daily_limit_usd)"> · no ceiling set, so nothing will spend</span>
+          </div>
+        </div>
+        <div v-if="roles" class="rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2">
+          <div class="text-[11px] text-slate-500">AI roles configured</div>
+          <div class="text-lg font-bold text-slate-100">
+            {{ Object.keys(roles.roles || {}).length - (roles.unconfigured || []).length }}
+            / {{ Object.keys(roles.roles || {}).length }}
+          </div>
+          <div class="text-[11px] text-slate-600">
+            <span v-if="(roles.unconfigured || []).length">
+              unconfigured: {{ (roles.unconfigured || []).join(', ') }}
+            </span>
+            <span v-else>every role has a model</span>
+          </div>
+        </div>
+      </div>
+
       <div v-if="loadError" class="mb-6 rounded-lg border border-rose-500/20 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">
         {{ loadError }}
       </div>
@@ -186,12 +249,95 @@ onUnmounted(stopPolling)
 
       <!-- 1. Pending approvals -->
       <section class="mb-8">
-        <h2 class="text-sm font-semibold text-slate-300 mb-2">Pending approvals</h2>
-        <div class="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-6 text-center">
+        <div class="flex items-center gap-2 mb-2">
+          <h2 class="text-sm font-semibold text-slate-300">Pending approvals</h2>
+          <span v-if="approvals.live_pending_count"
+                class="px-2 py-0.5 rounded-full text-[10px] font-bold border text-rose-400 bg-rose-500/10 border-rose-500/20">
+            {{ approvals.live_pending_count }} LIVE — waits indefinitely
+          </span>
+        </div>
+
+        <div v-if="!approvals.pending?.length"
+             class="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-6 text-center">
           <p class="text-sm text-slate-400">No approvals waiting.</p>
           <p class="text-xs text-slate-600 mt-1">
-            The subsystem is observe-only — it records and reports, and does not yet propose changes.
+            {{ observeOnly
+                ? 'The subsystem is in observe mode — it records and reports, and does not propose changes.'
+                : 'Nothing is waiting on you right now.' }}
           </p>
+        </div>
+
+        <div class="space-y-2">
+          <div v-for="a in approvals.pending" :key="a.id"
+               class="rounded-lg border px-4 py-3"
+               :class="a.holds_forever
+                 ? 'border-rose-500/30 bg-rose-500/5'
+                 : 'border-slate-800 bg-slate-900/40'">
+            <div class="flex items-start justify-between gap-3">
+              <div class="min-w-0">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="px-2 py-0.5 rounded-full text-[10px] font-bold border"
+                        :class="a.holds_forever
+                          ? 'text-rose-400 bg-rose-500/10 border-rose-500/20'
+                          : 'text-sky-400 bg-sky-500/10 border-sky-500/20'">{{ a.rung }}</span>
+                  <span class="text-[11px] text-slate-500 font-mono">{{ a.action_class }}</span>
+                  <span class="text-[11px] text-slate-500 font-mono">doc {{ a.document_id || '—' }}</span>
+                </div>
+                <p class="text-sm text-slate-200 mt-1">{{ a.summary }}</p>
+                <p class="text-[11px] text-slate-600 mt-1">
+                  {{ a.target }} · requested {{ fmtWhen(a.requested_at) }}
+                  <span v-if="a.holds_forever"> · this one waits until you answer</span>
+                </p>
+              </div>
+              <div class="flex gap-2 shrink-0">
+                <button @click="decide(a, 'approved')" :disabled="deciding === a.id"
+                        class="px-3 py-1.5 rounded-lg text-xs font-semibold border border-emerald-500/30 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 disabled:opacity-50">
+                  Approve
+                </button>
+                <button @click="decide(a, 'rejected')" :disabled="deciding === a.id"
+                        class="px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-800 disabled:opacity-50">
+                  Reject
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Noise floors: which targets can be trusted at all -->
+      <section class="mb-8">
+        <h2 class="text-sm font-semibold text-slate-300 mb-2">Measured noise floors</h2>
+        <p class="text-xs text-slate-600 mb-2">
+          A target with no measured floor cannot promote anything — two runs of one
+          window have differed by ~16pp here, so an unmeasured target's results are
+          not attributable.
+        </p>
+        <div v-if="!floors.length"
+             class="rounded-lg border border-amber-500/20 bg-amber-500/5 px-4 py-4">
+          <p class="text-sm text-amber-300">No floor has been measured yet.</p>
+          <p class="text-xs text-slate-500 mt-1">Nothing is promotable until one is.</p>
+        </div>
+        <div v-else class="rounded-lg border border-slate-800 bg-slate-900/40 overflow-x-auto">
+          <table class="w-full text-xs">
+            <thead><tr class="text-slate-500 border-b border-slate-800">
+              <th class="text-left font-medium px-3 py-2">Target</th>
+              <th class="text-left font-medium px-3 py-2">Window class</th>
+              <th class="text-right font-medium px-3 py-2">Floor</th>
+              <th class="text-right font-medium px-3 py-2">Repeats</th>
+              <th class="text-left font-medium px-3 py-2">Usable</th>
+            </tr></thead>
+            <tbody>
+              <tr v-for="f in floors" :key="f.id" class="border-b border-slate-800/60 last:border-0">
+                <td class="px-3 py-2 text-slate-300">{{ f.target }}</td>
+                <td class="px-3 py-2 text-slate-500 font-mono">{{ f.window_class }}</td>
+                <td class="px-3 py-2 text-right text-slate-300">{{ Number(f.floor_pp).toFixed(2) }}pp</td>
+                <td class="px-3 py-2 text-right text-slate-300">{{ f.n }}</td>
+                <td class="px-3 py-2" :class="f.measured ? 'text-emerald-400' : 'text-amber-400'">
+                  {{ f.measured ? 'yes' : (f.reason || 'not measured') }}
+                </td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </section>
 
@@ -251,6 +397,69 @@ onUnmounted(stopPolling)
                 </li>
               </ol>
             </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Hypothesis ledger -->
+      <section class="mb-8">
+        <h2 class="text-sm font-semibold text-slate-300 mb-2">Hypothesis ledger</h2>
+        <p class="text-xs text-slate-600 mb-2">
+          Rejections are kept on purpose — they are what stops the generator
+          re-proposing an idea that has already been disproved.
+        </p>
+        <div v-if="!hypotheses.length"
+             class="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-6 text-center">
+          <p class="text-sm text-slate-400">No hypotheses yet.</p>
+        </div>
+        <div v-else class="space-y-2">
+          <div v-for="h in hypotheses" :key="h.id"
+               class="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-3">
+            <div class="flex items-center gap-2 flex-wrap">
+              <span class="px-2 py-0.5 rounded-full text-[10px] font-bold border"
+                    :class="h.status === 'confirmed'
+                      ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20'
+                      : h.status === 'proposed'
+                        ? 'text-sky-400 bg-sky-500/10 border-sky-500/20'
+                        : 'text-slate-400 bg-slate-500/10 border-slate-700'">
+                {{ (h.status || '').toUpperCase() }}
+              </span>
+              <span class="text-[11px] text-slate-500 font-mono">{{ h.target }}</span>
+              <span class="text-[11px] text-slate-600">
+                predicts {{ h.predicted_direction }} {{ h.predicted_min_pp }}–{{ h.predicted_max_pp }}pp
+              </span>
+            </div>
+            <p class="text-sm text-slate-200 mt-1">{{ h.claim }}</p>
+            <p class="text-xs text-slate-500 mt-1">{{ h.mechanism }}</p>
+            <p v-if="h.status_reason" class="text-[11px] text-slate-600 mt-1">
+              {{ h.status_reason }}
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- What the loop decided, and why -->
+      <section class="mb-8">
+        <h2 class="text-sm font-semibold text-slate-300 mb-2">Loop decisions</h2>
+        <p class="text-xs text-slate-600 mb-2">
+          Every turn's intents, blocked ones included — a decision that leaves no
+          trace is as unprovable as a lever that never announced itself.
+        </p>
+        <div v-if="!intents.length"
+             class="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-6 text-center">
+          <p class="text-sm text-slate-400">The loop has not run a turn yet.</p>
+        </div>
+        <div v-else class="rounded-lg border border-slate-800 bg-slate-900/40 divide-y divide-slate-800/60">
+          <div v-for="(i, idx) in intents" :key="idx" class="px-4 py-2">
+            <div class="flex items-center gap-2 flex-wrap">
+              <span class="px-2 py-0.5 rounded text-[10px] font-mono border border-slate-700 text-slate-300">
+                {{ i.kind }}
+              </span>
+              <span v-if="i.target" class="text-[11px] text-slate-500">{{ i.target }}</span>
+              <span v-if="i.rung" class="text-[11px] text-slate-500">{{ i.rung }}</span>
+              <span class="text-[11px] text-slate-700 ml-auto">{{ fmtWhen(i.at) }}</span>
+            </div>
+            <p class="text-xs text-slate-400 mt-1">{{ i.reason }}</p>
           </div>
         </div>
       </section>

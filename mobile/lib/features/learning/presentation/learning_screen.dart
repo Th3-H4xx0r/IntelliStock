@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_text_styles.dart';
 import '../../../core/widgets/app_background.dart';
+import '../../../core/widgets/app_button.dart';
 import '../../../core/widgets/common_widgets.dart';
 import '../../../core/widgets/glass_card.dart';
 import '../../../core/widgets/material_symbols.dart';
@@ -35,6 +36,19 @@ Color _severityColor(String severity) {
 
 class LearningScreen extends ConsumerWidget {
   const LearningScreen({super.key});
+
+  Future<void> _decide(BuildContext context, WidgetRef ref,
+      LearningApproval approval, String decision) async {
+    try {
+      await ref.read(learningRepositoryProvider).decide(approval.id, decision);
+      ref.invalidate(learningStateProvider);
+    } catch (err) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not record that decision: $err')),
+      );
+    }
+  }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -79,7 +93,76 @@ class LearningScreen extends ConsumerWidget {
                 const SizedBox(height: 20),
                 const SectionHeader(title: 'Pending approvals'),
                 const SizedBox(height: 8),
-                _approvals(state),
+                if (state.approvals.isEmpty)
+                  _approvals(state)
+                else
+                  ...state.approvals.map((a) => Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: _ApprovalCard(
+                          approval: a,
+                          onDecide: (decision) =>
+                              _decide(context, ref, a, decision),
+                        ),
+                      )),
+                const SizedBox(height: 20),
+                const SectionHeader(title: 'Measured noise floors'),
+                const SizedBox(height: 8),
+                if (state.floors.isEmpty)
+                  GlassCard(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('No floor measured yet',
+                            style: AppTextStyles.cardTitle
+                                .copyWith(color: AppColors.warning)),
+                        const SizedBox(height: 4),
+                        Text(
+                          'Two runs of one window have differed by ~16pp here, '
+                          'so nothing is promotable until a target has a '
+                          'measured floor.',
+                          style: AppTextStyles.meta
+                              .copyWith(color: AppColors.textDim),
+                        ),
+                      ],
+                    ),
+                  )
+                else
+                  ...state.floors.map((f) => Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: GlassCard(
+                          padding: const EdgeInsets.all(14),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(f.target,
+                                        style: AppTextStyles.cardTitle),
+                                    Text(f.windowClass,
+                                        style: AppTextStyles.nano.copyWith(
+                                            color: AppColors.textDim)),
+                                    if (!f.measured && f.reason.isNotEmpty)
+                                      Text(f.reason,
+                                          style: AppTextStyles.nano.copyWith(
+                                              color: AppColors.warning)),
+                                  ],
+                                ),
+                              ),
+                              Text(
+                                f.measured
+                                    ? '${f.floorPp.toStringAsFixed(2)}pp'
+                                    : '—',
+                                style: AppTextStyles.value.copyWith(
+                                    color: f.measured
+                                        ? AppColors.textHi
+                                        : AppColors.warning),
+                              ),
+                            ],
+                          ),
+                        ),
+                      )),
                 const SizedBox(height: 20),
                 const SectionHeader(title: 'Findings & reports'),
                 const SizedBox(height: 8),
@@ -350,6 +433,75 @@ class _FunnelRow extends StatelessWidget {
               Text('buy conv.',
                   style:
                       AppTextStyles.nano.copyWith(color: AppColors.textDim)),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+
+/// A proposal awaiting an answer. Live-rung cards are visually distinct because
+/// they wait indefinitely — silence is never consent for real money.
+class _ApprovalCard extends StatelessWidget {
+  const _ApprovalCard({required this.approval, required this.onDecide});
+
+  final LearningApproval approval;
+  final void Function(String decision) onDecide;
+
+  @override
+  Widget build(BuildContext context) {
+    final live = approval.holdsForever;
+    return GlassCard(
+      padding: const EdgeInsets.all(14),
+      borderColor: live ? AppColors.danger : AppColors.border,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              AppBadge(
+                label: approval.rung,
+                color: live ? AppColors.danger : AppColors.info,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(approval.actionClass,
+                    style: AppTextStyles.nano
+                        .copyWith(color: AppColors.textDim)),
+              ),
+              Text('doc ${approval.documentId}',
+                  style: AppTextStyles.nano
+                      .copyWith(color: AppColors.textFaint)),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(approval.summary, style: AppTextStyles.body),
+          const SizedBox(height: 4),
+          Text(
+            live
+                ? '${approval.target} · this one waits until you answer'
+                : approval.target,
+            style: AppTextStyles.nano.copyWith(
+                color: live ? AppColors.danger : AppColors.textFaint),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: AppButton.primary(
+                  label: 'Approve',
+                  onPressed: () => onDecide('approved'),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: AppButton.ghost(
+                  label: 'Reject',
+                  onPressed: () => onDecide('rejected'),
+                ),
+              ),
             ],
           ),
         ],
