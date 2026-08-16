@@ -95,6 +95,12 @@ def decide(*, matrix, action_class, rung, document_id, allowlist,
         return {"allowed": False, "needs_approval": False,
                 "reason": f"unknown rung {rung!r}"}
 
+    # A bare string iterates as characters: storing "179" would arm docs 1, 7
+    # and 9 while refusing 179.
+    if isinstance(allowlist, str):
+        return {"allowed": False, "needs_approval": False,
+                "reason": ("document_allowlist must be a list, not a string — "
+                           "a string would arm each character as a document id")}
     allow = {str(d) for d in (allowlist or [])}
     if str(document_id) not in allow:
         return {"allowed": False, "needs_approval": False,
@@ -110,14 +116,49 @@ def decide(*, matrix, action_class, rung, document_id, allowlist,
         return {"allowed": True, "needs_approval": False,
                 "reason": f"{action_class} is autonomous at {rung}"}
 
-    # ASK: an approval must exist AND be affirmative.
-    status = str((approval or {}).get("status") or "")
-    if status in ("approved", "auto_approved"):
-        return {"allowed": True, "needs_approval": False,
-                "reason": f"approved ({status})"}
+    # ASK: an approval must exist, be affirmative, AND have been granted for
+    # THIS rung, action class and document.
+    #
+    # Reading only `status` meant an approval that auto-proceeded at PAPER on a
+    # 4-hour timeout — i.e. one the operator never answered — was accepted as
+    # consent for LIVE_CAPPED. Silence below live minted a token that was
+    # honoured above it, which defeats the one rule the operator actually
+    # stated. It also meant a single explicit "yes" at PAPER carried a change
+    # through BOTH live rungs without ever asking again.
+    approval = approval if isinstance(approval, dict) else (
+        approval.to_doc() if hasattr(approval, "to_doc") else {})
+    status = str(approval.get("status") or "").strip().lower()
+
     if status == "rejected":
         return {"allowed": False, "needs_approval": False,
                 "reason": "the operator rejected this proposal"}
+
+    if status in ("approved", "auto_approved"):
+        mismatch = []
+        if str(approval.get("rung") or "") != rung:
+            mismatch.append(f"rung {approval.get('rung')!r} != {rung!r}")
+        if str(approval.get("action_class") or action_class) != action_class:
+            mismatch.append(
+                f"action class {approval.get('action_class')!r} != {action_class!r}")
+        if str(approval.get("document_id") or document_id) != str(document_id):
+            mismatch.append(
+                f"document {approval.get('document_id')!r} != {document_id!r}")
+        if mismatch:
+            return {"allowed": False, "needs_approval": True,
+                    "reason": ("the approval on file was granted for something "
+                               "else (" + "; ".join(mismatch) + ") — it is not "
+                               "consent for this change")}
+        if status == "auto_approved" and rung in LIVE_RUNGS:
+            # Belt and braces with `approvals.auto_proceed`, which refuses to
+            # mint this. If one ever appears — a hand-written row, an older
+            # schema — it is not consent for real money.
+            return {"allowed": False, "needs_approval": True,
+                    "reason": ("an auto-proceeded approval is never consent at "
+                               "a live rung — silence is not a yes for real "
+                               "money")}
+        return {"allowed": True, "needs_approval": False,
+                "reason": f"approved for {rung} ({status})"}
+
     return {"allowed": False, "needs_approval": True,
             "reason": (f"{action_class} requires approval at {rung}"
                        + (" — live rungs wait indefinitely"

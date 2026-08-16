@@ -14,8 +14,9 @@ Pure — the caller supplies "now" and the stored rows.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 
+from self_learning.permissions import LIVE_RUNGS, RUNGS
 from self_learning.timeline import to_naive_utc
 from self_learning.types import content_id
 
@@ -26,9 +27,12 @@ EXPIRED_AUTO = "auto_approved"
 CANCELLED = "cancelled"
 
 OPEN = frozenset({PENDING})
+ALL_STATUSES = frozenset({PENDING, APPROVED, REJECTED, EXPIRED_AUTO, CANCELLED})
 
-# Rungs at which silence is NEVER consent.
-LIVE_RUNGS = frozenset({"LIVE_CAPPED", "LIVE_FULL"})
+# LIVE_RUNGS is IMPORTED, not redeclared. Two copies of the one constant that
+# stands between silence and real money is one copy too many — and a lowercase
+# or whitespace-padded rung slipped past the local set entirely, so
+# `rung="live_full"` auto-proceeded.
 
 
 @dataclass(frozen=True)
@@ -47,12 +51,30 @@ class Approval:
     decided_by: str = ""
     reason: str = ""
 
+    def __post_init__(self):
+        # An unknown rung is not a rung. Without this, `live_full` (lowercase)
+        # read as sub-live and auto-proceeded on a real-money change.
+        if self.rung not in RUNGS:
+            raise ValueError(
+                f"unknown rung {self.rung!r} — must be one of {sorted(RUNGS)}. "
+                f"An unrecognised rung would default to sub-live and could "
+                f"auto-proceed.")
+        if self.status not in ALL_STATUSES:
+            raise ValueError(f"unknown approval status {self.status!r}")
+
     @property
     def id(self) -> str:
+        # `action_class` and `document_id` participate. Without them two
+        # proposals from one hypothesis — say a config lever on 179 and a
+        # universe change on 404 — collapsed to one row under
+        # conflict="update", and a single operator click answered a question
+        # they were never shown, on a live rung.
         return content_id("approval", {
             "hypothesis_id": self.hypothesis_id,
             "experiment_id": self.experiment_id,
             "rung": self.rung,
+            "action_class": self.action_class,
+            "document_id": self.document_id,
         })
 
     @property
@@ -108,9 +130,8 @@ def resolve(approval, *, decision, now_iso, actor="operator", reason="") -> Appr
     if decision not in (APPROVED, REJECTED, CANCELLED):
         raise ValueError(f"decision must be one of "
                          f"{sorted((APPROVED, REJECTED, CANCELLED))}")
-    return Approval(**{**approval.__dict__, "status": decision,
-                       "decided_at": str(now_iso), "decided_by": str(actor),
-                       "reason": str(reason or "")})
+    return replace(approval, status=decision, decided_at=str(now_iso),
+                   decided_by=str(actor), reason=str(reason or ""))
 
 
 def auto_proceed(approval, *, now_iso) -> Approval:
@@ -119,22 +140,48 @@ def auto_proceed(approval, *, now_iso) -> Approval:
         raise ValueError(
             "a live-rung approval never auto-proceeds — silence is not consent "
             "for real money")
-    return Approval(**{**approval.__dict__, "status": EXPIRED_AUTO,
-                       "decided_at": str(now_iso), "decided_by": "timeout",
-                       "reason": "no answer before the configured timeout"})
+    return replace(approval, status=EXPIRED_AUTO, decided_at=str(now_iso),
+                   decided_by="timeout",
+                   reason="no answer before the configured timeout")
+
+
+def normalise_status(value) -> str:
+    """Fold a stored status into the canonical set.
+
+    `''`, None and `'Pending'` all meant pending to a human and none of them
+    matched. The `'Pending'` case was the worst: a LIVE row that held forever
+    AND never appeared in the queue, so the operator could neither see nor
+    clear it.
+    """
+    text = str(value or "").strip().lower()
+    return text if text in ALL_STATUSES else PENDING
+
+
+def from_doc(row) -> "Approval":
+    """Rebuild an Approval from a stored document, tolerating extra keys.
+
+    Filtering to the declared fields rather than blacklisting `id` and
+    `holds_forever` means a future `schema_version` (which every other record
+    here emits) cannot break the operator's only approve path.
+    """
+    row = dict(row or {})
+    row["status"] = normalise_status(row.get("status"))
+    row["changes"] = tuple(tuple(c) for c in (row.get("changes") or []))
+    allowed = {f.name for f in fields(Approval)}
+    return Approval(**{k: v for k, v in row.items() if k in allowed})
 
 
 def pending(rows) -> list:
     return [row for row in (rows or [])
-            if str((row or {}).get("status") or PENDING) in OPEN]
+            if normalise_status((row or {}).get("status")) in OPEN]
 
 
 def queue_view(rows) -> dict:
     """What the tab's first section renders. Live-rung items are pinned because
     they are the ones that will wait indefinitely for you."""
     open_rows = pending(rows)
-    live = [r for r in open_rows if r.get("rung") in LIVE_RUNGS]
-    other = [r for r in open_rows if r.get("rung") not in LIVE_RUNGS]
+    live = [r for r in open_rows if str(r.get("rung") or "") in LIVE_RUNGS]
+    other = [r for r in open_rows if str(r.get("rung") or "") not in LIVE_RUNGS]
     live.sort(key=lambda r: str(r.get("requested_at") or ""))
     other.sort(key=lambda r: str(r.get("requested_at") or ""))
     return {

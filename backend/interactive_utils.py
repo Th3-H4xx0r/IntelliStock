@@ -8650,16 +8650,13 @@ def action_learning_decide_approval(conn, approval_id, decision, reason="",
     """Approve or reject a pending proposal."""
     from datetime import datetime, timezone
     from self_learning import store
-    from self_learning.approvals import Approval, resolve as resolve_approval
+    from self_learning.approvals import from_doc, resolve as resolve_approval
     store.ensure_tables(conn)
     row = store.get_approval(conn, approval_id)
     if not row:
         raise ValueError("approval not found: %s" % approval_id)
-    row = {k: v for k, v in row.items()
-           if k not in ("id", "holds_forever")}
-    row["changes"] = tuple(tuple(c) for c in (row.get("changes") or []))
     updated = resolve_approval(
-        Approval(**row), decision=decision,
+        from_doc(row), decision=decision,
         now_iso=datetime.now(timezone.utc).isoformat(), actor=actor,
         reason=reason)
     store.put_approval(conn, updated)
@@ -8689,3 +8686,43 @@ def action_learning_reports(conn, limit=50):
     from self_learning import store
     store.ensure_tables(conn)
     return {"reports": store.list_reports(conn, limit=limit)}
+
+
+def action_learning_intents(conn, limit=200):
+    """What the loop decided, and why.
+
+    Every turn records its intents — including the ones that were BLOCKED. A
+    decision that leaves no trace is the same unprovable state as a lever that
+    never announced itself, and this repo has thirteen of those.
+    """
+    from self_learning import store
+    store.ensure_tables(conn)
+    return {"intents": store.list_intents(conn, limit=limit)}
+
+
+def action_learning_budget(conn):
+    """The spend ceiling and what is left of it."""
+    from datetime import datetime, timezone
+    from self_learning import budget as learning_budget
+    from self_learning import store
+    store.ensure_tables(conn)
+    config = store.get_config(conn)
+    state = learning_budget.state_from_ledger(
+        store.list_budget_ledger(conn, limit=2000),
+        now_iso=datetime.now(timezone.utc).isoformat(),
+        daily_limit_usd=config.get("daily_budget_usd", 0),
+        monthly_limit_usd=config.get("monthly_budget_usd", 0))
+    return state.to_doc()
+
+
+def action_learning_permissions(conn):
+    """The action-class x rung matrix, merged over the defaults."""
+    from self_learning import store
+    from self_learning.permissions import (
+        ACTION_CLASSES, RUNGS, merge_matrix,
+    )
+    store.ensure_tables(conn)
+    config = store.get_config(conn)
+    return {"matrix": merge_matrix(config.get("permission_matrix")),
+            "action_classes": list(ACTION_CLASSES), "rungs": list(RUNGS),
+            "document_allowlist": config.get("document_allowlist") or []}

@@ -63,9 +63,11 @@ def test_code_changes_ask_even_at_the_lowest_rung():
 
 
 def test_an_approved_proposal_may_apply():
-    decision = perms.decide(matrix=_matrix(), action_class=perms.CONFIG_LEVERS,
-                            rung=perms.LIVE_FULL, document_id="179",
-                            allowlist=["179"], approval={"status": "approved"})
+    decision = perms.decide(
+        matrix=_matrix(), action_class=perms.CONFIG_LEVERS,
+        rung=perms.LIVE_FULL, document_id="179", allowlist=["179"],
+        approval={"status": "approved", "rung": perms.LIVE_FULL,
+                  "action_class": perms.CONFIG_LEVERS, "document_id": "179"})
     assert decision["allowed"] is True
 
 
@@ -119,7 +121,8 @@ def _floor(measured=True):
 def test_a_clean_pass_promotes_exactly_one_rung():
     move = laddering.promote(current_rung=laddering.BACKTEST,
                              judgement=_judgement(), proof=_proof(),
-                             floor=_floor(), sessions_observed=99)
+                             floor=_floor(), sessions_observed=99,
+                             windows_passed=4)
     assert move.direction == "promote"
     assert move.to_rung == laddering.SHADOW
 
@@ -137,7 +140,7 @@ def test_an_unmeasured_floor_blocks_promotion_at_every_rung():
     for rung in (laddering.BACKTEST, laddering.PAPER, laddering.LIVE_CAPPED):
         move = laddering.promote(current_rung=rung, judgement=_judgement(),
                                  proof=_proof(), floor=_floor(measured=False),
-                                 sessions_observed=99)
+                                 sessions_observed=99, windows_passed=4)
         assert move.direction == "hold"
         assert "no measured noise floor" in move.reason
 
@@ -145,14 +148,16 @@ def test_an_unmeasured_floor_blocks_promotion_at_every_rung():
 def test_an_ambiguous_proof_blocks_promotion():
     move = laddering.promote(current_rung=laddering.BACKTEST,
                              judgement=_judgement(), proof=_proof("ambiguous"),
-                             floor=_floor(), sessions_observed=99)
+                             floor=_floor(), sessions_observed=99,
+                             windows_passed=4)
     assert move.direction == "hold"
 
 
 def test_a_judge_hold_blocks_promotion():
     move = laddering.promote(current_rung=laddering.BACKTEST,
                              judgement=_judgement("hold"), proof=_proof(),
-                             floor=_floor(), sessions_observed=99)
+                             floor=_floor(), sessions_observed=99,
+                             windows_passed=4)
     assert move.direction == "hold"
 
 
@@ -364,3 +369,265 @@ def test_every_plan_carries_a_proof_probe():
     plan = plan_config_levers(document_id="d", config={"a": 1}, changes={"a": 2})
     assert plan.proof_probe["kind"] == "config_keys"
     assert plan.proof_probe["keys"] == ["a"]
+
+
+# ── Sweep regressions: 11 mutations survived, and one reached real money ─────
+
+def test_an_approval_granted_at_paper_is_not_consent_at_live():
+    """THE critical one. An approval that AUTO-PROCEEDED at PAPER on a 4-hour
+    timeout — one the operator never answered — was accepted as consent for
+    LIVE_CAPPED on document 179, the live Alpaca account. Silence below live
+    minted a token honoured above it."""
+    decision = perms.decide(
+        matrix=_matrix(), action_class=perms.CONFIG_LEVERS,
+        rung=perms.LIVE_CAPPED, document_id="179", allowlist=["179"],
+        approval={"status": "auto_approved", "rung": perms.PAPER,
+                  "action_class": perms.CONFIG_LEVERS, "document_id": "179"})
+    assert decision["allowed"] is False
+    assert decision["needs_approval"] is True
+
+
+def test_one_yes_at_paper_does_not_carry_through_both_live_rungs():
+    approval = {"status": "approved", "rung": perms.PAPER,
+                "action_class": perms.CONFIG_LEVERS, "document_id": "179"}
+    for rung in (perms.LIVE_CAPPED, perms.LIVE_FULL):
+        decision = perms.decide(matrix=_matrix(),
+                                action_class=perms.CONFIG_LEVERS, rung=rung,
+                                document_id="179", allowlist=["179"],
+                                approval=approval)
+        assert decision["allowed"] is False
+
+
+def test_an_auto_proceeded_approval_is_never_consent_at_a_live_rung():
+    """Belt and braces with approvals.auto_proceed, which refuses to mint one."""
+    decision = perms.decide(
+        matrix=_matrix(), action_class=perms.CONFIG_LEVERS,
+        rung=perms.LIVE_FULL, document_id="179", allowlist=["179"],
+        approval={"status": "auto_approved", "rung": perms.LIVE_FULL,
+                  "action_class": perms.CONFIG_LEVERS, "document_id": "179"})
+    assert decision["allowed"] is False
+    assert "silence is not a yes" in decision["reason"]
+
+
+def test_an_approval_for_another_document_is_not_consent():
+    decision = perms.decide(
+        matrix=_matrix(), action_class=perms.CONFIG_LEVERS,
+        rung=perms.LIVE_FULL, document_id="179", allowlist=["179"],
+        approval={"status": "approved", "rung": perms.LIVE_FULL,
+                  "action_class": perms.CONFIG_LEVERS, "document_id": "195"})
+    assert decision["allowed"] is False
+
+
+def test_a_blocked_cell_is_refused():
+    """The operator's 'never touch this' mode was 100% untested."""
+    matrix = perms.merge_matrix({perms.CODE: {perms.LIVE_FULL: perms.BLOCKED}})
+    decision = perms.decide(matrix=matrix, action_class=perms.CODE,
+                            rung=perms.LIVE_FULL, document_id="179",
+                            allowlist=["179"],
+                            approval={"status": "approved",
+                                      "rung": perms.LIVE_FULL,
+                                      "action_class": perms.CODE,
+                                      "document_id": "179"})
+    assert decision["allowed"] is False
+
+
+def test_a_document_not_in_a_non_empty_allowlist_is_refused():
+    """The only negative test used an EMPTY allowlist, so a substring match
+    would have survived: doc '17' passing on ['179']."""
+    decision = perms.decide(matrix=_matrix(), action_class=perms.CONFIG_LEVERS,
+                            rung=perms.PAPER, document_id="193",
+                            allowlist=["179", "195"])
+    assert decision["allowed"] is False
+    decision = perms.decide(matrix=_matrix(), action_class=perms.CONFIG_LEVERS,
+                            rung=perms.PAPER, document_id="17",
+                            allowlist=["179"])
+    assert decision["allowed"] is False
+
+
+def test_a_string_allowlist_is_refused_rather_than_iterated_as_characters():
+    """Storing "179" would arm docs 1, 7 and 9 while refusing 179."""
+    decision = perms.decide(matrix=_matrix(), action_class=perms.CONFIG_LEVERS,
+                            rung=perms.PAPER, document_id="1", allowlist="179")
+    assert decision["allowed"] is False
+    assert "must be a list" in decision["reason"]
+
+
+def test_ask_without_an_approval_is_not_allowed():
+    """The CODE test asserted only needs_approval, never allowed is False —
+    and the backend auto-deploys from main, so an allowed CODE change is a
+    deployed patch."""
+    decision = perms.decide(matrix=_matrix(), action_class=perms.CODE,
+                            rung=perms.BACKTEST, document_id="195",
+                            allowlist=["195"])
+    assert decision["allowed"] is False
+
+
+def test_an_approval_dataclass_is_accepted_not_crashed_on():
+    from self_learning.approvals import Approval
+    approval = Approval(hypothesis_id="h", experiment_id="e", target="t",
+                        rung=perms.LIVE_FULL, action_class=perms.CONFIG_LEVERS,
+                        summary="s", document_id="179", status="approved")
+    decision = perms.decide(matrix=_matrix(), action_class=perms.CONFIG_LEVERS,
+                            rung=perms.LIVE_FULL, document_id="179",
+                            allowlist=["179"], approval=approval)
+    assert decision["allowed"] is True
+
+
+def test_one_confirmed_backtest_does_not_promote():
+    """The replication requirement was decorative — promote() read only
+    'sessions' while BACKTEST expresses dwell as windows. One judge-confirmed
+    run promoting is the max-of-N artifact this project already has."""
+    move = laddering.promote(current_rung=laddering.BACKTEST,
+                             judgement=_judgement(), proof=_proof(),
+                             floor=_floor(), windows_passed=1)
+    assert move.direction == "hold"
+    assert "max-of-N" in move.reason
+
+
+def test_a_partial_requirements_override_does_not_zero_the_other_rungs():
+    """Editing the PAPER dwell removed the dwell on the promotion into full
+    real money."""
+    move = laddering.promote(current_rung=laddering.LIVE_CAPPED,
+                             judgement=_judgement(), proof=_proof(),
+                             floor=_floor(), sessions_observed=0,
+                             requirements={laddering.PAPER: {"sessions": 50}})
+    assert move.direction == "hold"
+    assert "session(s) observed" in move.reason
+
+
+def test_the_shadow_and_live_capped_dwells_are_enforced():
+    """Only PAPER's dwell was tested."""
+    for rung in (laddering.SHADOW, laddering.LIVE_CAPPED):
+        move = laddering.promote(current_rung=rung, judgement=_judgement(),
+                                 proof=_proof(), floor=_floor(),
+                                 sessions_observed=0)
+        assert move.direction == "hold"
+
+
+def test_demotion_drops_exactly_one_rung():
+    move = laddering.demote(current_rung=laddering.LIVE_FULL,
+                            consecutive_failures=3)
+    assert move.to_rung == laddering.LIVE_CAPPED
+
+
+def test_the_breaker_fires_on_a_negative_drawdown_convention_too():
+    """Callers differ on whether a drawdown is -9 or +9, and under the negative
+    convention the breaker could never fire."""
+    assert laddering.breaker(drawdown_pct=-9.0, limit_pct=5.0).direction == "demote"
+
+
+def test_the_breaker_records_the_rung_it_actually_fired_from():
+    move = laddering.breaker(drawdown_pct=9.0, limit_pct=5.0,
+                             current_rung=laddering.LIVE_CAPPED)
+    assert move.from_rung == laddering.LIVE_CAPPED
+
+
+def test_reservations_from_a_ledger_count_against_the_ceiling():
+    """The pre-commitment mechanism the module exists for was untested — every
+    test hand-built the reserved figure."""
+    reserved = budgeting.reservation(experiment_id="e1", amount_usd=9.0,
+                                     now_iso="2026-08-15T00:00:00")
+    state = budgeting.state_from_ledger([reserved], now_iso="2026-08-15T01:00:00",
+                                        daily_limit_usd=10, monthly_limit_usd=100)
+    assert state.reserved_usd == 9.0
+    assert budgeting.can_afford(state, 5.0)["allowed"] is False
+
+
+def test_an_abandoned_reservation_expires_instead_of_bricking_the_loop():
+    """Nothing releases a reservation if the engine dies between reserve and
+    settle, and this host restarts often."""
+    stale = budgeting.reservation(experiment_id="e1", amount_usd=9.0,
+                                  now_iso="2026-05-01T00:00:00")
+    state = budgeting.state_from_ledger([stale], now_iso="2026-08-15T00:00:00",
+                                        daily_limit_usd=10, monthly_limit_usd=100)
+    assert state.reserved_usd == 0.0
+
+
+def test_spend_is_billed_when_it_settled_not_when_it_was_reserved():
+    """A backtest starting at 23:59 and finishing at 00:30 was billed to a day
+    already closed — and across a month boundary it escaped BOTH ceilings."""
+    reserved = budgeting.reservation(experiment_id="e1", amount_usd=9.0,
+                                     now_iso="2026-07-31T23:50:00")
+    settled = budgeting.settle(reserved, actual_usd=9.0,
+                               now_iso="2026-08-01T00:10:00")
+    state = budgeting.state_from_ledger([settled], now_iso="2026-08-01T12:00:00",
+                                        daily_limit_usd=10, monthly_limit_usd=100)
+    assert state.spent_today_usd == 9.0
+    assert state.spent_month_usd == 9.0
+
+
+def test_a_negative_ledger_row_cannot_raise_the_ceiling():
+    """A refund row or a sign bug turned a hard stop into a bigger budget."""
+    state = budgeting.state_from_ledger(
+        [{"amount_usd": -1000.0, "status": "spent", "at": "2026-08-15T00:00:00"}],
+        now_iso="2026-08-15T01:00:00", daily_limit_usd=10, monthly_limit_usd=100)
+    assert state.daily_remaining == 10.0
+
+
+def test_the_monthly_ceiling_actually_binds():
+    """Every test set monthly=100 with spent_month == spent_today, so the
+    monthly ceiling was never the binding constraint."""
+    state = budgeting.BudgetState(daily_limit_usd=100.0, monthly_limit_usd=10.0,
+                                  spent_today_usd=0.0, spent_month_usd=9.0,
+                                  reserved_usd=0.0)
+    assert budgeting.can_afford(state, 5.0)["allowed"] is False
+
+
+def test_a_debit_from_the_same_month_last_year_does_not_count():
+    state = budgeting.state_from_ledger(
+        [{"amount_usd": 9.0, "status": "spent", "at": "2025-08-15T00:00:00"}],
+        now_iso="2026-08-15T01:00:00", daily_limit_usd=10, monthly_limit_usd=100)
+    assert state.spent_month_usd == 0.0
+
+
+def test_a_missing_cost_estimate_is_refused():
+    """It always launched and settled for its real cost afterwards — the
+    'tally that notices afterwards' this module replaces."""
+    assert budgeting.can_afford(_state(), None)["allowed"] is False
+
+
+def test_reverting_a_code_plan_with_a_config_revert_raises():
+    """plan_code's token has no `before` map, so the breaker would have fired,
+    'reverted', logged success, and left the change live."""
+    plan = plan_code(branch="feat/x", diff_summary="d", test_command="t")
+    with pytest.raises(ActionError, match="cannot restore a config document"):
+        revert_config({"a": 1}, plan, force=True)
+
+
+def test_a_token_missing_a_key_raises_rather_than_half_reverting():
+    plan = plan_config_levers(document_id="d", config={"a": 1}, changes={"a": 2})
+    broken = plan.__class__(action_class=plan.action_class,
+                            document_id=plan.document_id, changes=plan.changes,
+                            rollback_token={"before": {}}, proof_probe={},
+                            notes="")
+    with pytest.raises(ActionError, match="no prior value"):
+        revert_config({"a": 2}, broken, force=True)
+
+
+def test_a_list_value_round_tripped_from_the_database_still_reverts():
+    """A tuple applied here comes back a list, and ("SPY","QQQ") !=
+    ["SPY","QQQ"] refused the revert forever."""
+    plan = plan_config_levers(document_id="d", config={"universe": ["A"]},
+                              changes={"universe": ("SPY", "QQQ")})
+    stored = {"universe": ["SPY", "QQQ"]}          # as RethinkDB returns it
+    assert revert_config(stored, plan)["universe"] == ["A"]
+
+
+def test_a_plan_round_trips_through_a_document():
+    """Without a deserializer, a plan persisted before a container restart had
+    nothing to revert with at 3am."""
+    from self_learning.actions import from_doc
+    plan = plan_config_levers(document_id="195", config={"a": 1}, changes={"a": 2})
+    restored = from_doc(plan.to_doc())
+    assert restored.action_class == plan.action_class
+    assert restored.rollback_token == plan.rollback_token
+
+
+def test_an_action_class_swap_keeps_the_rollback_token():
+    """A hand-listed constructor silently dropped fields on the LLM_MODELS and
+    UNIVERSE paths only — producing an unrevertable plan."""
+    plan = plan_llm_model(document_id="d", config={},
+                          role_key="learning_generator_llm_model_id",
+                          model_id="abc")
+    assert plan.rollback_token.get("before") is not None
+    assert plan.proof_probe

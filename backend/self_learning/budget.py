@@ -16,6 +16,9 @@ from dataclasses import dataclass
 from self_learning.timeline import to_naive_utc
 
 RESERVED = "reserved"
+# A reservation older than this is presumed abandoned. Long enough to outlast
+# any real backtest, short enough that a crash does not starve the loop.
+RESERVATION_TTL_SECONDS = 24 * 3600
 SPENT = "spent"
 RELEASED = "released"
 
@@ -70,13 +73,29 @@ def state_from_ledger(ledger, *, now_iso, daily_limit_usd, monthly_limit_usd
             amount = float(row.get("amount_usd") or 0.0)
         except (TypeError, ValueError):
             continue
+        # A negative row would RAISE the ceiling. A refund, a sign bug, or an
+        # LLM-authored cost estimate must not turn a hard stop into a bigger
+        # budget.
+        amount = max(0.0, amount)
         status = str(row.get("status") or SPENT)
         if status == RELEASED:
             continue
         if status == RESERVED:
+            # Reservations expire. Nothing releases one if the engine dies
+            # between reserve and settle, and this host restarts often — a
+            # handful of orphans would otherwise consume the ceiling forever
+            # and brick the loop with no self-heal path.
+            stamp = to_naive_utc(row.get("at"))
+            if (stamp is not None and now is not None
+                    and (now - stamp).total_seconds() > RESERVATION_TTL_SECONDS):
+                continue
             reserved += amount
             continue
-        stamp = to_naive_utc(row.get("at"))
+        # Spend is billed when it SETTLED, not when it was reserved. A backtest
+        # that starts at 23:59 and finishes at 00:30 was being billed to a day
+        # already closed — and across a month boundary it escaped both ceilings
+        # entirely.
+        stamp = to_naive_utc(row.get("settled_at") or row.get("at"))
         if stamp is None or today is None:
             spent_today += amount
             spent_month += amount
@@ -97,8 +116,16 @@ def can_afford(state: BudgetState, amount_usd) -> dict:
     if state is None:
         return {"allowed": False, "reason": "no budget state — failing closed",
                 "remaining_usd": 0.0}
+    if amount_usd is None:
+        # An experiment with no cost estimate would always launch and settle
+        # for its real cost afterwards — exactly the "tally that notices
+        # afterwards" this module exists to replace.
+        return {"allowed": False,
+                "reason": "no cost estimate supplied — nothing is launched "
+                          "without one",
+                "remaining_usd": state.remaining}
     try:
-        amount = float(amount_usd or 0.0)
+        amount = float(amount_usd)
     except (TypeError, ValueError):
         return {"allowed": False, "reason": f"cost {amount_usd!r} is not numeric",
                 "remaining_usd": state.remaining}
@@ -134,7 +161,7 @@ def reservation(*, experiment_id, amount_usd, now_iso, kind="backtest") -> dict:
 def settle(reservation_doc, *, actual_usd, now_iso) -> dict:
     """Convert a reservation into actual spend."""
     return {**(reservation_doc or {}),
-            "amount_usd": round(float(actual_usd or 0.0), 6),
+            "amount_usd": round(max(0.0, float(actual_usd or 0.0)), 6),
             "status": SPENT, "settled_at": str(now_iso)}
 
 

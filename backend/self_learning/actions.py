@@ -132,9 +132,12 @@ def plan_code(*, branch, diff_summary, test_command, revert_commit="") -> Action
 
 
 def _replace_class(self, action_class):
-    return ActionPlan(action_class=action_class, document_id=self.document_id,
-                      changes=self.changes, rollback_token=self.rollback_token,
-                      proof_probe=self.proof_probe, notes=self.notes)
+    # `dataclasses.replace` rather than a hand-listed constructor call: the
+    # hand-written list silently dropped any field added later, and it would
+    # have dropped it only on the LLM_MODELS and UNIVERSE paths — producing an
+    # unrevertable plan with an empty rollback token.
+    from dataclasses import replace as _dc_replace
+    return _dc_replace(self, action_class=action_class)
 
 
 ActionPlan._replace_class = _replace_class
@@ -148,6 +151,23 @@ def apply_to_config(config, plan: ActionPlan) -> dict:
     return updated
 
 
+def from_doc(row) -> ActionPlan:
+    """Rebuild a persisted plan.
+
+    Without this a plan written to the database could not be turned back into
+    an ActionPlan, so the 3am rollback after a container restart had nothing to
+    revert with.
+    """
+    row = dict(row or {})
+    return ActionPlan(
+        action_class=str(row.get("action_class") or ""),
+        document_id=str(row.get("document_id") or ""),
+        changes=tuple(tuple(c) for c in (row.get("changes") or [])),
+        rollback_token=dict(row.get("rollback_token") or {}),
+        proof_probe=dict(row.get("proof_probe") or {}),
+        notes=str(row.get("notes") or ""))
+
+
 def revert_config(config, plan: ActionPlan, *, force: bool = False) -> dict:
     """Put a document back, refusing if it moved underneath us.
 
@@ -158,13 +178,36 @@ def revert_config(config, plan: ActionPlan, *, force: bool = False) -> dict:
     """
     config = dict(config or {})
     token = plan.rollback_token or {}
+
+    # A token that cannot restore this plan's keys must RAISE, not quietly
+    # return the input unchanged. `plan_code`'s token is a revert commit and has
+    # no `before` map at all — the breaker would have fired, "reverted", logged
+    # success, and left the change live.
+    if "before" not in token:
+        raise ActionError(
+            f"this rollback token cannot restore a config document "
+            f"(kind={token.get('kind') or 'unknown'}) — "
+            f"{plan.action_class} changes are not reverted this way")
+
     before = token.get("before") or {}
     absent = set(token.get("absent_keys") or [])
+    missing = [k for k, _b, _a in plan.changes if k not in before]
+    if missing:
+        raise ActionError(
+            f"the rollback token has no prior value for "
+            f"{', '.join(sorted(missing))} — reverting would leave the change "
+            f"in place while reporting success")
 
     if not force:
         drifted = []
         for key, _before_value, after in plan.changes:
-            if config.get(key, _MISSING) != after:
+            current = config.get(key, _MISSING)
+            # A tuple applied here comes back from RethinkDB as a list, and
+            # ("SPY","QQQ") != ["SPY","QQQ"] would refuse the revert forever.
+            if isinstance(current, (list, tuple)) and isinstance(after, (list, tuple)):
+                if list(current) != list(after):
+                    drifted.append(key)
+            elif current != after:
                 drifted.append(key)
         if drifted:
             raise ActionError(

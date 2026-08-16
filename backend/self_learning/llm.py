@@ -20,7 +20,7 @@ import re
 from dataclasses import dataclass
 
 from self_learning.prompts import prompt_hash
-from self_learning.roles import role_config
+from self_learning.roles import model_id_key, role_config
 
 _JSON_BLOCK = re.compile(r"\{.*\}", re.DOTALL)
 
@@ -84,24 +84,36 @@ def call_role(role: str, resolved_config: dict, system: str, user: str, *,
             role=role, ok=False, text="", payload=None, model=cfg.model,
             provider=cfg.provider, prompt_hash=digest, cost_usd=0.0,
             error=(f"role '{role}' has no model configured — set "
-                   f"{role}_llm_model_id in LearningConfig. Falling back to a "
+                   f"{model_id_key(role)} in LearningConfig. Falling back to a "
                    f"default would make the recorded model id wrong."))
 
     if caller is None:                                    # pragma: no cover
         from llm_utils import call_llm_by_provider
 
         def caller(**kwargs):
+            # `provider_config` carries the endpoint/base-url/region keys
+            # `model_resolver` injects. Dropping them sent an Ollama or
+            # OpenRouter role to whatever the environment defaulted to — for
+            # Ollama that is localhost, a documented past outage here.
+            #
+            # NOTE: `call_llm_by_provider` has no temperature parameter, so a
+            # role's temperature is NOT applied on this path. `RoleConfig`
+            # still carries it for the structured path and for the record; it
+            # is deliberately not silently dropped without a note, because
+            # "the judge runs at 0.0" would otherwise be an unenforced claim.
             return call_llm_by_provider(
                 provider=kwargs["provider"], api_key=kwargs["api_key"],
                 model=kwargs["model"],
                 prompt=f"{kwargs['system']}\n\n{kwargs['user']}",
-                max_output_tokens=kwargs["max_output_tokens"])
+                max_output_tokens=kwargs["max_output_tokens"],
+                provider_config=kwargs.get("provider_config") or None)
 
     try:
         text = caller(provider=cfg.provider, api_key=cfg.api_key,
                       model=cfg.model, system=system, user=user,
                       max_output_tokens=cfg.max_output_tokens,
-                      temperature=cfg.temperature)
+                      temperature=cfg.temperature,
+                      provider_config=cfg.provider_config)
     except Exception as exc:
         return RoleResult(role=role, ok=False, text="", payload=None,
                           model=cfg.model, provider=cfg.provider,

@@ -154,6 +154,9 @@ from interactive_utils import (
     action_learning_acknowledge,
     action_learning_get_control,
     action_learning_approvals,
+    action_learning_budget,
+    action_learning_intents,
+    action_learning_permissions,
     action_learning_decide_approval,
     action_learning_experiments,
     action_learning_hypotheses,
@@ -3741,6 +3744,24 @@ def api_learning_funnels(limit: int = 100, conn=Depends(conn_dependency), curren
 def api_learning_observations(run_id: str, limit: int = 500, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Decision-level observations for one run, including the refusals."""
     return _run(action_learning_observations, conn, run_id, limit)
+
+
+@app.get("/learning/intents", response_class=JSONResponse)
+def api_learning_intents(limit: int = 200, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """What the loop decided each turn, and why — blocked decisions included."""
+    return _run(action_learning_intents, conn, limit)
+
+
+@app.get("/learning/budget", response_class=JSONResponse)
+def api_learning_budget(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """The spend ceiling and what remains of it."""
+    return _run(action_learning_budget, conn)
+
+
+@app.get("/learning/permissions", response_class=JSONResponse)
+def api_learning_permissions(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """The action-class x rung permission matrix and the document allowlist."""
+    return _run(action_learning_permissions, conn)
 
 
 @app.get("/learning/hypotheses", response_class=JSONResponse)

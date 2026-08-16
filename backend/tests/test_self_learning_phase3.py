@@ -138,10 +138,62 @@ def test_the_prediction_is_part_of_the_identity():
     assert up.id != down.id
 
 
-def test_the_same_claim_on_the_same_target_is_the_same_hypothesis():
+def test_the_same_change_is_the_same_hypothesis_however_it_is_worded():
+    """Dedup was defeated by a full stop. The generator is SHOWN the rejected
+    claim verbatim and runs at temperature 0.6 — it is being asked to reword —
+    so identity is what CHANGES, not the prose."""
     a = build(_payload(), finding_id="f1", target="t")
-    b = build(_payload(), finding_id="f2", target="t")
+    b = build(_payload(claim="The min-position floor refuses every grant."),
+              finding_id="f2", target="t")
+    c = build(_payload(claim="minimum-position floor blocks all grants"),
+              finding_id="f3", target="t")
+    assert a.id == b.id == c.id
+
+
+def test_a_different_lever_is_a_different_hypothesis():
+    a = build(_payload(), finding_id="f", target="t")
+    b = build(_payload(lever_keys=["max_positions"]), finding_id="f", target="t")
+    assert a.id != b.id
+
+
+def test_lever_order_does_not_change_the_identity():
+    a = build(_payload(lever_keys=["a", "b"]), finding_id="f", target="t")
+    b = build(_payload(lever_keys=["b", "a"]), finding_id="f", target="t")
     assert a.id == b.id
+
+
+def test_the_same_change_on_a_different_target_is_a_different_hypothesis():
+    a = build(_payload(), finding_id="f", target="equity/nexus")
+    b = build(_payload(), finding_id="f", target="crypto/meanrev")
+    assert a.id != b.id
+
+
+def test_a_prediction_inside_the_noise_floor_is_refused():
+    """Unfalsifiable by construction: the experiment cannot resolve it either
+    way, so running it only spends money."""
+    from self_learning.noise import NoiseFloor
+    floor = NoiseFloor(target="t", window_class="c", n=3, floor_pp=4.1,
+                       mean_pp=0.0, measured=True)
+    with pytest.raises(HypothesisError, match="inside the measured"):
+        build(_payload(predicted_min_pp=0.1, predicted_max_pp=0.3),
+              finding_id="f", target="t", noise_floor=floor)
+
+
+def test_a_lever_that_does_not_exist_is_refused():
+    """Otherwise the subsystem can autonomously write a key no strategy reads —
+    a self-authored inert lever, on a live document."""
+    with pytest.raises(HypothesisError, match="not present in the strategy"):
+        build(_payload(lever_keys=["definitely_not_a_real_lever"]),
+              finding_id="f", target="t",
+              known_levers=["max_positions", "buy_threshold"])
+
+
+def test_a_non_finite_prediction_is_refused():
+    """NaN survives every comparison as False and is not valid JSON."""
+    with pytest.raises(HypothesisError, match="finite"):
+        build(_payload(predicted_min_pp=float("nan")), finding_id="f", target="t")
+    with pytest.raises(HypothesisError, match="finite"):
+        build(_payload(predicted_max_pp=float("inf")), finding_id="f", target="t")
 
 
 def test_a_rejected_idea_is_not_re_proposed():
@@ -191,10 +243,16 @@ def _proof(status="executed"):
                           control_n=10, treatment_n=10)
 
 
+def _hyp(direction="increase"):
+    return build(_payload(predicted_direction=direction), finding_id="f",
+                 target="equity/nexus")
+
+
 def test_the_judge_cannot_promote_what_the_statistics_rejected():
     """THE load-bearing rule of the whole phase."""
     judgement = judging.decide(statistical_verdict=_stat(False, "inside the floor"),
-                               proof=_proof(), llm_verdict="confirm",
+                               proof=_proof(), hypothesis=_hyp(),
+                               llm_verdict="confirm",
                                llm_reason="looks good to me")
     assert judgement.verdict == judging.HOLD
     assert judgement.overridden is True
@@ -204,7 +262,7 @@ def test_the_judge_cannot_promote_what_the_statistics_rejected():
 
 def test_the_judge_may_veto_something_the_statistics_accepted():
     judgement = judging.decide(statistical_verdict=_stat(True),
-                               proof=_proof(), llm_verdict="veto",
+                               proof=_proof(), hypothesis=_hyp(), llm_verdict="veto",
                                llm_reason="the win is one position")
     assert judgement.verdict == judging.VETO
     assert judging.promotes(judgement) is False
@@ -212,7 +270,7 @@ def test_the_judge_may_veto_something_the_statistics_accepted():
 
 def test_a_clean_pass_promotes():
     judgement = judging.decide(statistical_verdict=_stat(True), proof=_proof(),
-                               llm_verdict="confirm")
+                               hypothesis=_hyp(), llm_verdict="confirm")
     assert judging.promotes(judgement) is True
 
 
@@ -220,27 +278,27 @@ def test_an_inert_treatment_is_held_not_rejected():
     """Calling it rejected would retire a hypothesis that was never tested —
     the exact error that turned 13 inert levers into 13 'no effect' results."""
     judgement = judging.decide(statistical_verdict=_stat(True),
-                               proof=_proof("inert"), llm_verdict="confirm")
+                               proof=_proof("inert"), hypothesis=_hyp(), llm_verdict="confirm")
     assert judgement.verdict == judging.HOLD
     assert "not testable as specified" in judgement.reason
 
 
 def test_an_unprovable_treatment_is_also_held():
     judgement = judging.decide(statistical_verdict=_stat(True),
-                               proof=_proof("unprovable"), llm_verdict="confirm")
+                               proof=_proof("unprovable"), hypothesis=_hyp(), llm_verdict="confirm")
     assert judgement.verdict == judging.HOLD
 
 
 def test_an_unparseable_judgement_defaults_to_hold_not_approval():
     judgement = judging.decide(statistical_verdict=_stat(True), proof=_proof(),
-                               llm_verdict="LGTM ship it")
+                               hypothesis=_hyp(), llm_verdict="LGTM ship it")
     assert judgement.verdict == judging.HOLD
     assert "unparseable" in judgement.reason
 
 
 def test_a_missing_judgement_defaults_to_hold():
     judgement = judging.decide(statistical_verdict=_stat(True), proof=_proof(),
-                               llm_verdict=None)
+                               hypothesis=_hyp(), llm_verdict=None)
     assert judgement.verdict == judging.HOLD
 
 
@@ -416,14 +474,14 @@ def test_an_ambiguous_proof_cannot_be_promoted():
     the judge listed statuses by hand — so a treatment whose stream moved no
     more than control-vs-control churn fell straight through to CONFIRM."""
     judgement = judging.decide(statistical_verdict=_stat(True),
-                               proof=_proof("ambiguous"), llm_verdict="confirm")
+                               proof=_proof("ambiguous"), hypothesis=_hyp(), llm_verdict="confirm")
     assert judgement.verdict == judging.HOLD
     assert judging.promotes(judgement) is False
 
 
 def test_a_missing_proof_cannot_be_promoted():
     judgement = judging.decide(statistical_verdict=_stat(True), proof=None,
-                               llm_verdict="confirm")
+                               hypothesis=_hyp(), llm_verdict="confirm")
     assert judging.promotes(judgement) is False
 
 
@@ -438,3 +496,144 @@ def test_an_effect_in_the_wrong_direction_is_refused_at_the_judge_too():
                                llm_verdict="confirm", hypothesis=hypothesis)
     assert judging.promotes(judgement) is False
     assert "predicted increase" in judgement.reason
+
+
+# ── Sweep regressions: 15 mutations survived the first suite ─────────────────
+
+def test_an_approval_identity_includes_the_rung():
+    """Without it a sub-live `auto_approved` row would satisfy a live gate."""
+    from self_learning.approvals import Approval
+    base = dict(hypothesis_id="h", experiment_id="e", target="t",
+                action_class="config_levers", summary="s", document_id="195")
+    assert Approval(rung="PAPER", **base).id != Approval(rung="LIVE_FULL", **base).id
+
+
+def test_an_approval_identity_includes_the_action_class_and_document():
+    """Two proposals from one hypothesis collapsed into one row under
+    conflict="update", so a single click answered a question never shown."""
+    from self_learning.approvals import Approval
+    base = dict(hypothesis_id="h", experiment_id="e", target="t",
+                rung="LIVE_FULL", summary="s")
+    a = Approval(action_class="config_levers", document_id="179", **base)
+    b = Approval(action_class="universe", document_id="179", **base)
+    c = Approval(action_class="config_levers", document_id="404", **base)
+    assert len({a.id, b.id, c.id}) == 3
+
+
+def test_an_unknown_rung_is_refused_at_construction():
+    """`rung='live_full'` read as sub-live and auto-proceeded on real money."""
+    from self_learning.approvals import Approval
+    for bad in ("live_full", "LIVE", "LIVE_CAPPED ", ""):
+        with pytest.raises(ValueError, match="unknown rung"):
+            Approval(hypothesis_id="h", experiment_id="e", target="t",
+                     rung=bad, action_class="config_levers", summary="s")
+
+
+def test_a_messy_stored_status_still_reaches_the_queue_and_can_be_decided():
+    """'Pending' was a LIVE row that held forever AND never appeared in the
+    queue — the operator could neither see nor clear it."""
+    from self_learning.approvals import from_doc, normalise_status, queue_view
+    for messy in ("Pending", "", None, "  pending "):
+        assert normalise_status(messy) == "pending"
+    row = _approval("LIVE_FULL").to_doc()
+    row["status"] = "Pending"
+    assert queue_view([row])["pending_count"] == 1
+    assert from_doc(row).status == "pending"
+
+
+def test_an_approval_rebuilt_from_a_future_schema_still_works():
+    """A blacklist of two keys meant one added field broke the operator's only
+    approve path — while live approvals accumulated."""
+    from self_learning.approvals import from_doc
+    row = _approval().to_doc()
+    row["schema_version"] = 1
+    row["some_future_field"] = "x"
+    assert from_doc(row).rung == "PAPER"
+
+
+def test_auto_proceed_records_that_nobody_answered():
+    """Writing APPROVED would erase the distinction between 'the operator said
+    yes' and 'nobody answered'."""
+    from self_learning.approvals import EXPIRED_AUTO, auto_proceed
+    assert auto_proceed(_approval("PAPER"),
+                        now_iso="2026-08-15T09:00:00").status == EXPIRED_AUTO
+
+
+def test_a_decided_approval_is_not_expirable():
+    from self_learning.approvals import is_expired, resolve
+    decided = resolve(_approval("PAPER"), decision="approved",
+                      now_iso="2026-08-15T01:00:00")
+    assert is_expired(decided, now_iso="2030-01-01T00:00:00",
+                      timeout_hours=1) is False
+
+
+def test_an_auto_approved_row_leaves_the_queue():
+    from self_learning.approvals import queue_view
+    row = dict(_approval().to_doc(), status="auto_approved")
+    assert queue_view([row])["pending_count"] == 0
+
+
+def test_call_role_reports_unparseable_json_as_not_ok():
+    """Callers must not receive ok=True with payload=None and then call
+    .get() on it."""
+    from self_learning.llm import call_role
+    resolved = {"learning_judge_llm_provider": "p", "learning_judge_llm_model": "m"}
+    result = call_role("judge", resolved, "s", "u", caller=lambda **kw: "no json")
+    assert result.ok is False and result.payload is None
+
+
+def test_a_blank_temperature_does_not_take_down_every_role_call():
+    """A cleared UI text box saves ''. `role_config` runs OUTSIDE call_role's
+    try, so one blank field took down the Roles tab and every role call."""
+    from self_learning.llm import call_role
+    resolved = {"learning_judge_llm_provider": "p", "learning_judge_llm_model": "m",
+                "learning_judge_temperature": "", "learning_judge_max_output_tokens": ""}
+    cfg = role_config(JUDGE, resolved)
+    assert cfg.temperature == 0.0 and cfg.max_output_tokens == 1200
+    assert call_role("judge", resolved, "s", "u",
+                     caller=lambda **kw: '{"verdict": "hold"}').ok is True
+
+
+def test_the_unconfigured_error_names_the_real_config_key():
+    """It said `generator_llm_model_id`; the real key is
+    `learning_generator_llm_model_id`, so an operator following the message set
+    a key nothing reads."""
+    from self_learning.llm import call_role
+    result = call_role("generator", {}, "s", "u", caller=lambda **kw: "{}")
+    assert "learning_generator_llm_model_id" in result.error
+
+
+def test_provider_endpoint_config_reaches_the_role():
+    """Dropping it sent an Ollama role to localhost — a documented outage."""
+    resolved = {"learning_judge_llm_provider": "ollama",
+                "learning_judge_llm_model": "m",
+                "learning_judge_ollama_base_url": "http://gpu-box:11434"}
+    cfg = role_config(JUDGE, resolved)
+    assert cfg.provider_config.get("ollama_base_url") == "http://gpu-box:11434"
+
+
+def test_the_judge_system_prompt_states_the_floor_rule():
+    """No test asserted anything about a SYSTEM prompt, so the sentence telling
+    the model it cannot promote past the statistics could be deleted freely."""
+    from self_learning.prompts import judge_prompt
+    system, _user = judge_prompt({"claim": "x"})
+    assert "cannot promote" in system
+    for verdict in ("confirm", "hold", "demote", "veto"):
+        assert verdict in system
+
+
+def test_the_generator_system_prompt_demands_a_mechanism_and_a_range():
+    from self_learning.prompts import generator_prompt
+    system, _user = generator_prompt(target="t", levers=[], noise_floor={},
+                                     summary={}, refusal_cost={}, findings=[],
+                                     rejected=[])
+    assert "MECHANISM" in system
+    assert "noise floor" in system
+
+
+def test_prior_rejections_shows_the_newest_first():
+    """With a limit, ordering decides WHICH failures the generator is shown."""
+    ledger = [{"id": str(i), "status": "rejected", "target": "t",
+               "created_at": f"2026-08-{i:02d}"} for i in range(1, 6)]
+    rows = prior_rejections(ledger, target="t", limit=2)
+    assert [r["id"] for r in rows] == ["5", "4"]

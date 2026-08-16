@@ -41,12 +41,16 @@ EXPERIMENTS = "LearningExperiments"
 LEASE = "LearningLease"
 # Phase 3
 HYPOTHESES = "LearningHypotheses"
+INTENTS = "LearningIntents"
+BUDGET_LEDGER = "LearningBudgetLedger"
+ACTIVE_CHANGES = "LearningActiveChanges"
 APPROVALS = "LearningApprovals"
 REPORTS = "LearningReports"
 
 LEARNING_TABLES = (OBSERVATIONS, ROLLUPS, FINDINGS, FUNNELS, CONFIG,
                    OUTCOMES, NOISE_FLOORS, EXPERIMENTS, LEASE,
-                   HYPOTHESES, APPROVALS, REPORTS)
+                   HYPOTHESES, APPROVALS, REPORTS,
+                   INTENTS, BUDGET_LEDGER, ACTIVE_CHANGES)
 
 LEASE_DOC_ID = "backtest_lease"
 
@@ -83,6 +87,19 @@ DEFAULT_CONFIG = {
     # Sub-live approvals auto-proceed after this many hours. Live rungs ignore
     # it entirely — silence is never consent for real money.
     "approval_timeout_hours": 4,
+    # Phase 4/5. Both ceilings default to ZERO, which `budget.can_afford`
+    # treats as "no spending" rather than "no limit" — an unset ceiling is not
+    # an infinite one.
+    "daily_budget_usd": 0.0,
+    "monthly_budget_usd": 0.0,
+    # The action-class x rung matrix. Empty means the defaults in
+    # `permissions.DEFAULT_MATRIX`, which ask before every live change.
+    "permission_matrix": {},
+    # The automatic breaker. Zero means it never fires, so it must be set
+    # before any live rung is armed.
+    "breaker_limit_pct": 0.0,
+    "attributable_drawdown_pct": 0.0,
+    "demote_after": 3,
 }
 
 _MUTABLE_KEYS = frozenset({
@@ -92,7 +109,8 @@ _MUTABLE_KEYS = frozenset({
     # `model_resolver.resolve_model_refs_in_config`.
     "learning_analyst_llm_model_id", "learning_generator_llm_model_id",
     "learning_coder_llm_model_id", "learning_judge_llm_model_id",
-    "approval_timeout_hours",
+    "approval_timeout_hours", "daily_budget_usd", "monthly_budget_usd",
+    "permission_matrix", "breaker_limit_pct", "demote_after",
 })
 
 
@@ -442,12 +460,19 @@ def set_hypothesis_status(conn, hypothesis_id, status, reason="") -> None:
 
 
 def list_hypotheses(conn, limit: int = 200, target=None) -> list:
+    """Filter and order in the DATABASE, then limit.
+
+    Limiting first meant "the 200 most recent for this target" was really "200
+    arbitrary rows, then filtered" — which could legitimately return zero for a
+    target with hundreds of rows. That feed is what reaches the generator as its
+    memory of what has already failed, so a random sample there quietly defeats
+    the "do not re-propose" guarantee.
+    """
     limit = max(1, min(int(limit or 200), 1000))
-    rows = list(r.db(DB_NAME).table(HYPOTHESES).limit(limit).run(conn))
+    selection = r.db(DB_NAME).table(HYPOTHESES)
     if target:
-        rows = [row for row in rows if str(row.get("target")) == str(target)]
-    rows.sort(key=lambda d: str(d.get("created_at") or ""), reverse=True)
-    return rows
+        selection = selection.filter({"target": str(target)})
+    return list(selection.order_by(r.desc("created_at")).limit(limit).run(conn))
 
 
 def put_approval(conn, approval) -> None:
@@ -460,8 +485,12 @@ def get_approval(conn, approval_id):
 
 
 def list_approvals(conn, limit: int = 200) -> list:
+    """Pending first, then newest. An unordered `.limit()` returns an ARBITRARY
+    subset, so past 200 approvals a pending LIVE row — the one that waits
+    indefinitely for a human — could simply not be in the queue's input."""
     limit = max(1, min(int(limit or 200), 1000))
-    return list(r.db(DB_NAME).table(APPROVALS).limit(limit).run(conn))
+    return list(r.db(DB_NAME).table(APPROVALS)
+                .order_by(r.desc("requested_at")).limit(limit).run(conn))
 
 
 def put_report(conn, report) -> None:
@@ -474,3 +503,55 @@ def list_reports(conn, limit: int = 50) -> list:
     rows = list(r.db(DB_NAME).table(REPORTS).limit(limit).run(conn))
     rows.sort(key=lambda d: str(d.get("created_at") or ""), reverse=True)
     return rows
+
+
+# ── Phase 4/5: intents, budget ledger, active changes ─────────────────────────
+
+def put_intent(conn, intent_doc, *, at="") -> None:
+    """Record what the loop decided, so its reasoning is readable afterwards."""
+    r.db(DB_NAME).table(INTENTS).insert(
+        {**(intent_doc or {}), "at": str(at)}).run(conn)
+
+
+def list_intents(conn, limit: int = 200) -> list:
+    limit = max(1, min(int(limit or 200), 1000))
+    rows = list(r.db(DB_NAME).table(INTENTS).limit(limit).run(conn))
+    rows.sort(key=lambda d: str(d.get("at") or ""), reverse=True)
+    return rows
+
+
+def list_budget_ledger(conn, limit: int = 1000) -> list:
+    limit = max(1, min(int(limit or 1000), 5000))
+    return list(r.db(DB_NAME).table(BUDGET_LEDGER).limit(limit).run(conn))
+
+
+def put_budget_row(conn, row) -> None:
+    r.db(DB_NAME).table(BUDGET_LEDGER).insert(
+        dict(row or {}), conflict="update").run(conn)
+
+
+def list_active_changes(conn, limit: int = 200) -> list:
+    """Changes currently applied at some rung."""
+    limit = max(1, min(int(limit or 200), 1000))
+    return list(r.db(DB_NAME).table(ACTIVE_CHANGES).limit(limit).run(conn))
+
+
+def put_active_change(conn, change) -> None:
+    r.db(DB_NAME).table(ACTIVE_CHANGES).insert(
+        dict(change or {}), conflict="update").run(conn)
+
+
+def running_backtests(conn) -> list:
+    """In-flight runs, for the single-flight lease.
+
+    `BacktestResults` has no `origin` field, so everything here reads as
+    human-launched unless the lease itself recognises the run id — which is
+    exactly how the lease is written.
+    """
+    try:
+        rows = list(r.db(DB_NAME).table("BacktestResults")
+                    .filter(lambda doc: doc["status"].default("").eq("running"))
+                    .pluck("id", "status").limit(50).run(conn))
+    except Exception:
+        return []
+    return [{"id": row.get("id"), "origin": "human"} for row in rows]

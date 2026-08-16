@@ -70,8 +70,8 @@ def judge_prompt_context(*, hypothesis, statistical_verdict, proof, summary):
     }
 
 
-def decide(*, statistical_verdict, proof, llm_verdict=None, llm_reason="",
-           model="", hypothesis=None) -> Judgement:
+def decide(*, statistical_verdict, proof, hypothesis, llm_verdict=None,
+           llm_reason="", model="") -> Judgement:
     """Combine the statistics, the execution proof, and the LLM's opinion.
 
     Order matters and is not negotiable:
@@ -90,9 +90,12 @@ def decide(*, statistical_verdict, proof, llm_verdict=None, llm_reason="",
     # than listing statuses here. Listing them meant AMBIGUOUS — added later,
     # for a treatment whose stream moved no more than control-vs-control churn
     # — fell through this check and could be promoted.
-    from self_learning.execution_proof import blocks_scoring
+    from self_learning.execution_proof import EXECUTED, blocks_scoring
 
-    if blocks_scoring(proof):
+    # An ALLOW-list, not a deny-list. `blocks_scoring` names the statuses that
+    # block, so the next status added to execution_proof would silently
+    # re-open the hole that check was written to close.
+    if getattr(proof, "status", None) != EXECUTED or blocks_scoring(proof):
         proof_status = getattr(proof, "status", None) or "missing"
         return Judgement(
             verdict=HOLD,
@@ -110,13 +113,31 @@ def decide(*, statistical_verdict, proof, llm_verdict=None, llm_reason="",
     # arrive here already "accepted".
     predicted = str(getattr(hypothesis, "predicted_direction", "") or "").lower()
     effect = getattr(statistical_verdict, "effect_pp", None)
-    if accepted and predicted in ("increase", "decrease") and effect is not None:
-        moved_up = float(effect) > 0
+    if accepted and predicted not in ("increase", "decrease"):
+        # `hypothesis` is required, but a malformed one must not silently
+        # disable the check — that is the same forgettable shape one layer up.
+        return Judgement(
+            verdict=HOLD,
+            reason=("the hypothesis carries no predicted direction, so the "
+                    "two-sided statistical verdict cannot be checked for sign"),
+            statistical_accepted=True, llm_verdict=llm, overridden=True,
+            model=model)
+    if accepted and effect is not None:
+        try:
+            effect_value = float(effect)
+        except (TypeError, ValueError):
+            # A verdict function must not be able to throw.
+            return Judgement(
+                verdict=HOLD,
+                reason=f"measured effect {effect!r} is not numeric",
+                statistical_accepted=True, llm_verdict=llm, overridden=True,
+                model=model)
+        moved_up = effect_value > 0
         if moved_up != (predicted == "increase"):
             return Judgement(
                 verdict=HOLD,
                 reason=(f"the hypothesis predicted {predicted} but the measured "
-                        f"effect was {float(effect):+.2f}pp — accepted by a "
+                        f"effect was {effect_value:+.2f}pp — accepted by a "
                         f"two-sided test, refused here"),
                 statistical_accepted=True, llm_verdict=llm, overridden=True,
                 model=model)

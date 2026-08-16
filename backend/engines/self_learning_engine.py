@@ -47,7 +47,12 @@ except Exception:                                    # pragma: no cover
         print(f"[SELF_LEARNING] {msg}")
 
 from rethink_changefeed import run_reconnecting_changefeed
+from self_learning import approvals as learning_approvals
+from self_learning import budget as learning_budget
+from self_learning import lease as learning_lease
+from self_learning import loop as learning_loop
 from self_learning import outcomes as learning_outcomes
+from self_learning import permissions as learning_perms
 from self_learning import retention, store
 from self_learning.pipeline import process_backtest_document
 
@@ -161,6 +166,100 @@ def _process(conn, doc, config) -> None:
         _log(f"FINDING [{finding.severity}] {finding.title}", "yellow")
 
 
+def _plan_and_log_turn(conn, config) -> list:
+    """Run one decision turn and RECORD it.
+
+    This is the wiring the sweep found missing: every guard in this subsystem —
+    the judge's floor, the ladder, the permission matrix, the budget, the lease
+    — existed with passing tests and NO production caller. That is precisely the
+    failure this project already has thirteen instances of: a lever that ships,
+    never executes, and is scored as if it had. The safety layer does not get an
+    exemption from its own rule, so the loop runs, and it logs every intent with
+    its reason.
+    """
+    now = _now_iso()
+    try:
+        floors = {}
+        for row in store.list_noise_floors(conn, limit=500):
+            from self_learning.noise import NoiseFloor
+            floors[str(row.get("target") or "")] = NoiseFloor(
+                target=str(row.get("target") or ""),
+                window_class=str(row.get("window_class") or ""),
+                n=int(row.get("n") or 0),
+                floor_pp=float(row.get("floor_pp") or 0.0),
+                mean_pp=float(row.get("mean_pp") or 0.0),
+                measured=bool(row.get("measured")),
+                reason=str(row.get("reason") or ""))
+
+        ledger = store.list_budget_ledger(conn, limit=1000)
+        budget_state = learning_budget.state_from_ledger(
+            ledger, now_iso=now,
+            daily_limit_usd=config.get("daily_budget_usd", 0),
+            monthly_limit_usd=config.get("monthly_budget_usd", 0))
+
+        running = store.running_backtests(conn)
+        lease_decision = learning_lease.acquire(
+            current_lease=store.get_lease(conn), running_backtests=running,
+            now_iso=now, experiment_id="turn")
+
+        active = store.list_active_changes(conn)
+        targets = sorted({str(f.get("target") or "")
+                          for f in store.list_funnels(conn, limit=200)
+                          if f.get("target")})
+
+        intents = learning_loop.plan_turn(
+            config=config,
+            matrix=learning_perms.merge_matrix(config.get("permission_matrix")),
+            floors=floors, active_changes=active,
+            hypotheses=store.list_hypotheses(conn, limit=100),
+            budget_state=budget_state.to_doc(), lease_decision=lease_decision,
+            drawdown_pct=float(config.get("attributable_drawdown_pct") or 0.0),
+            breaker_limit_pct=float(config.get("breaker_limit_pct") or 0.0),
+            targets_seen=targets)
+    except Exception as exc:
+        _log(f"turn planning failed: {type(exc).__name__}: {exc}", "red")
+        return []
+
+    summary = learning_loop.summarise(intents)
+    _log(f"TURN {summary['by_kind']} (breaking={summary['breaking']})", "cyan")
+    for intent in intents:
+        # Every intent announces itself. An unlogged decision is the same
+        # unprovable state as an unlogged lever.
+        _log(f"INTENT {intent.kind}"
+             + (f" target={intent.target}" if intent.target else "")
+             + (f" rung={intent.rung}" if intent.rung else "")
+             + f" — {intent.reason}",
+             "yellow" if intent.kind != learning_loop.IDLE else "white")
+        try:
+            store.put_intent(conn, intent.to_doc(), at=now)
+        except Exception:
+            pass
+        if intent.kind == learning_loop.REQUEST_APPROVAL:
+            _request_approval(conn, intent, now)
+    return intents
+
+
+def _request_approval(conn, intent, now) -> None:
+    """Enqueue the proposal the operator has to answer.
+
+    Nothing constructed an Approval before this, so `action_learning_approvals`
+    could only ever return an empty queue and `decide_approval` could only
+    decide rows that were never written.
+    """
+    try:
+        approval = learning_approvals.Approval(
+            hypothesis_id=intent.hypothesis_id, experiment_id=intent.experiment_id,
+            target=intent.target, rung=intent.rung,
+            action_class=learning_perms.CONFIG_LEVERS,
+            summary=intent.reason, document_id=intent.document_id,
+            requested_at=now)
+        store.put_approval(conn, approval)
+        _log(f"LEARNING PROPOSAL [{intent.rung}] {intent.target}: "
+             f"{intent.reason}", "yellow")
+    except Exception as exc:
+        _log(f"could not enqueue approval: {type(exc).__name__}: {exc}", "red")
+
+
 def _should_run(conn) -> bool:
     """Fail CLOSED. A missing control document or an unreadable config means
     stop, not go — the engine ships `running: False` and a database that cannot
@@ -220,6 +319,9 @@ def _handle_run(conn, run_id, status, processed) -> None:
             config = store.get_config(conn)
             _process(conn, doc, config)
             _maybe_sweep(conn, config)
+            # A finished run is an event worth thinking about, which is what
+            # "event-driven" was supposed to mean.
+            _plan_and_log_turn(conn, config)
     except Exception as exc:
         _log(f"run {run_id} failed: {type(exc).__name__}: {exc}", "red")
 

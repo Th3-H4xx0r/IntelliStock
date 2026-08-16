@@ -72,13 +72,16 @@ def is_live(rung) -> bool:
 
 
 def promote(*, current_rung, judgement, proof, floor, sessions_observed=0,
-            requirements=None) -> Transition:
+            windows_passed=0, requirements=None) -> Transition:
     """One rung up, if everything says so. Otherwise hold, with the reason."""
     from self_learning.execution_proof import blocks_scoring
     from self_learning.judge import promotes as judge_promotes
     from self_learning.noise import can_promote
 
-    requirements = requirements or DEFAULT_REQUIREMENTS
+    # MERGED over the defaults. A tab that PATCHes one rung would otherwise
+    # zero the dwell at every other rung — including the promotion into full
+    # real money.
+    requirements = {**DEFAULT_REQUIREMENTS, **(requirements or {})}
     target = next_rung(current_rung)
     if target is None:
         return Transition(current_rung, current_rung, "hold",
@@ -103,7 +106,22 @@ def promote(*, current_rung, judgement, proof, floor, sessions_observed=0,
                           f"no measured noise floor for this target "
                           f"({getattr(floor, 'reason', '') or 'never measured'})")
 
-    needed = int((requirements.get(current_rung) or {}).get("sessions", 0) or 0)
+    rung_requirements = requirements.get(current_rung) or {}
+
+    # BACKTEST expresses its dwell as windows/repeats, not sessions. Reading
+    # only "sessions" made the replication requirement decorative, so ONE
+    # judge-confirmed backtest promoted — which is the max-of-N artifact this
+    # project already has burned into its memory.
+    if current_rung == BACKTEST:
+        needed_windows = int(rung_requirements.get("min_pass", 0) or 0)
+        passed = int(windows_passed or 0)
+        if needed_windows and passed < needed_windows:
+            return Transition(current_rung, current_rung, "hold",
+                              f"{passed} of {needed_windows} window(s) passed "
+                              f"at BACKTEST — one confirmed run is a max-of-N "
+                              f"result, not evidence")
+
+    needed = int(rung_requirements.get("sessions", 0) or 0)
     if needed and int(sessions_observed or 0) < needed:
         return Transition(current_rung, current_rung, "hold",
                           f"{sessions_observed} of {needed} session(s) observed "
@@ -120,7 +138,7 @@ def demote(*, current_rung, consecutive_failures, demote_after=DEFAULT_DEMOTE_AF
     Never gated. Permission modes govern applying a change; reverting one is a
     safety action that must not wait for a human to wake up.
     """
-    if int(consecutive_failures or 0) < int(demote_after):
+    if int(consecutive_failures or 0) < int(demote_after or DEFAULT_DEMOTE_AFTER):
         return Transition(current_rung, current_rung, "hold",
                           f"{consecutive_failures} of {demote_after} "
                           f"consecutive failures")
@@ -134,7 +152,7 @@ def demote(*, current_rung, consecutive_failures, demote_after=DEFAULT_DEMOTE_AF
                       gated=False)
 
 
-def breaker(*, drawdown_pct, limit_pct) -> Transition:
+def breaker(*, drawdown_pct, limit_pct, current_rung=LIVE_FULL) -> Transition:
     """The automatic circuit breaker.
 
     Unwinds the ENTIRE live tier at once rather than one rung at a time. A
@@ -142,16 +160,19 @@ def breaker(*, drawdown_pct, limit_pct) -> Transition:
     LIVE_CAPPED while the drawdown continued.
     """
     try:
-        drawdown = float(drawdown_pct or 0.0)
-        limit = float(limit_pct or 0.0)
+        # abs(): callers differ on whether a drawdown is -9 or +9, and under the
+        # negative convention `drawdown < limit` meant the breaker could never
+        # fire. A magnitude has no sign ambiguity.
+        drawdown = abs(float(drawdown_pct or 0.0))
+        limit = abs(float(limit_pct or 0.0))
     except (TypeError, ValueError):
         return Transition(LIVE_FULL, LIVE_FULL, "hold",
                           "drawdown or limit is not numeric")
     if limit <= 0 or drawdown < limit:
-        return Transition(LIVE_FULL, LIVE_FULL, "hold",
+        return Transition(current_rung, current_rung, "hold",
                           f"attributable drawdown {drawdown:.2f}% is within the "
                           f"{limit:.2f}% limit")
-    return Transition(LIVE_FULL, PAPER, "demote",
+    return Transition(current_rung, PAPER, "demote",
                       f"BREAKER: attributable drawdown {drawdown:.2f}% breached "
                       f"the {limit:.2f}% limit — the entire live tier is "
                       f"reverted at once", gated=False)

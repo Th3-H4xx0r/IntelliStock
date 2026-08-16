@@ -69,6 +69,7 @@ class RoleConfig:
     max_output_tokens: int
     temperature: float
     configured: bool
+    provider_config: dict = None
 
     def to_doc(self) -> dict:
         # Never serialize the key.
@@ -102,13 +103,39 @@ def role_config(role: str, resolved_config: dict) -> RoleConfig:
     provider = str(config.get(f"{prefix}llm_provider") or "").strip().lower()
     model = str(config.get(f"{prefix}llm_model") or "").strip()
     api_key = str(config.get(f"{prefix}llm_api_key") or "")
+
+    def _number(key, default, cast):
+        """A blank field is how this repo stores 'unset' everywhere. A bare
+        cast raised on it — and `role_config` is called OUTSIDE `call_role`'s
+        try, so one cleared text box took down every role call and the Roles
+        tab with them."""
+        raw = config.get(f"{prefix}{key}")
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            return default
+        try:
+            value = cast(raw)
+        except (TypeError, ValueError):
+            return default
+        return value
+
+    tokens = _number("max_output_tokens", spec["max_output_tokens"], int)
+    if tokens <= 0:
+        tokens = spec["max_output_tokens"]
+    temperature = _number("temperature", spec["temperature"], float)
+
     return RoleConfig(
         role=role, provider=provider, model=model, api_key=api_key,
-        max_output_tokens=int(config.get(f"{prefix}max_output_tokens")
-                              or spec["max_output_tokens"]),
-        temperature=float(config.get(f"{prefix}temperature")
-                          if config.get(f"{prefix}temperature") is not None
-                          else spec["temperature"]),
+        # `model_resolver` injects endpoint/region/base-url keys alongside the
+        # provider. Dropping them sent an Ollama or OpenRouter role to whatever
+        # the environment defaulted to — for Ollama that is localhost, which is
+        # a documented past outage in this repo.
+        provider_config={
+            key[len(prefix):]: value for key, value in config.items()
+            if isinstance(key, str) and key.startswith(prefix)
+            and not key.endswith(("llm_api_key", "llm_model_id"))
+        },
+        max_output_tokens=tokens,
+        temperature=temperature,
         # A role with no provider or model is NOT configured. Silently falling
         # back to some ambient default would make the recorded model id a lie,
         # and the whole point is that every output is attributable.
