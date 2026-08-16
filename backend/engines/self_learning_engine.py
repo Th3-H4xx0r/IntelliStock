@@ -20,6 +20,7 @@ keeps the 5-13MB document off the wire.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 import threading
@@ -73,6 +74,15 @@ _last_sweep = 0.0
 # The design always called for "event-driven PLUS a slow heartbeat"; this is
 # the heartbeat.
 _TURN_INTERVAL_SECONDS = 120
+
+
+def _source_fingerprint() -> str:
+    """A hash of this file, so the tab can prove which code the engine runs."""
+    try:
+        with open(os.path.abspath(__file__), "rb") as handle:
+            return hashlib.sha256(handle.read()).hexdigest()[:12]
+    except Exception:
+        return "unknown"
 
 
 def _now_iso() -> str:
@@ -234,6 +244,10 @@ def _plan_and_log_turn(conn, config) -> list:
 
     summary = learning_loop.summarise(intents)
     _log(f"TURN {summary['by_kind']} (breaking={summary['breaking']})", "cyan")
+    store.put_engine_status(
+        conn, source_fingerprint=_source_fingerprint(), last_turn_at=now,
+        last_turn_kinds=summary["by_kind"],
+        has_propose_executor=True)
     for intent in intents:
         # Every intent announces itself. An unlogged decision is the same
         # unprovable state as an unlogged lever.
@@ -471,7 +485,9 @@ def main() -> None:
             _log(f"RethinkDB not ready (attempt {attempt}/30), retrying", "yellow")
             time.sleep(2)
 
-    _log("Self-learning engine started (Phase 1: observe-only)", "green")
+    _log(f"Self-learning engine started (source {_source_fingerprint()})", "green")
+    store.put_engine_status(conn, source_fingerprint=_source_fingerprint(),
+                            started_at=_now_iso(), has_propose_executor=True)
     processed = set(store.get_config(conn).get("processed_run_ids") or [])
 
     def _open_feed(c):

@@ -45,13 +45,15 @@ INTENTS = "LearningIntents"
 BUDGET_LEDGER = "LearningBudgetLedger"
 ACTIVE_CHANGES = "LearningActiveChanges"
 ACTIVITY = "LearningActivity"
+ENGINE_STATUS = "LearningEngineStatus"
 APPROVALS = "LearningApprovals"
 REPORTS = "LearningReports"
 
 LEARNING_TABLES = (OBSERVATIONS, ROLLUPS, FINDINGS, FUNNELS, CONFIG,
                    OUTCOMES, NOISE_FLOORS, EXPERIMENTS, LEASE,
                    HYPOTHESES, APPROVALS, REPORTS,
-                   INTENTS, BUDGET_LEDGER, ACTIVE_CHANGES, ACTIVITY)
+                   INTENTS, BUDGET_LEDGER, ACTIVE_CHANGES, ACTIVITY,
+                   ENGINE_STATUS)
 
 LEASE_DOC_ID = "backtest_lease"
 
@@ -774,7 +776,8 @@ def list_activity(conn, *, now_iso="") -> list:
 # excludes LLMUsage, which is shared with the rest of the app.
 PURGEABLE_TABLES = (OBSERVATIONS, ROLLUPS, FINDINGS, FUNNELS, OUTCOMES,
                     NOISE_FLOORS, EXPERIMENTS, LEASE, HYPOTHESES, APPROVALS,
-                    REPORTS, INTENTS, BUDGET_LEDGER, ACTIVE_CHANGES, ACTIVITY)
+                    REPORTS, INTENTS, BUDGET_LEDGER, ACTIVE_CHANGES, ACTIVITY,
+                   ENGINE_STATUS)
 
 
 def purge(conn, *, confirm: bool = False) -> dict:
@@ -804,3 +807,29 @@ def purge(conn, *, confirm: bool = False) -> dict:
             "note": ("settings, role models and the LLM usage ledger were kept; "
                      "the processed-run watermark was cleared so every "
                      "completed run is observed again")}
+
+
+# ── Engine self-report ────────────────────────────────────────────────────────
+# The deploy check compares the API container against the working tree. The
+# ENGINE runs in its own container from the `intellistock-backend` image tag,
+# which that check never touches — so "is the engine running my code" was
+# unanswerable, and a stale engine looked identical to a broken one. It now
+# reports its own source hash and the time of its last turn.
+
+ENGINE_STATUS_ID = "engine"
+
+
+def put_engine_status(conn, **fields) -> None:
+    try:
+        r.db(DB_NAME).table(ENGINE_STATUS).insert(
+            {"id": ENGINE_STATUS_ID, **fields}, conflict="update").run(conn)
+    except Exception:
+        pass
+
+
+def get_engine_status(conn) -> dict:
+    try:
+        return r.db(DB_NAME).table(ENGINE_STATUS).get(
+            ENGINE_STATUS_ID).run(conn) or {}
+    except Exception:
+        return {}

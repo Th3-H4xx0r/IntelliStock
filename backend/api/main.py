@@ -154,6 +154,7 @@ from interactive_utils import (
     action_learning_acknowledge,
     action_learning_get_control,
     action_learning_activity,
+    action_learning_engine_status,
     action_learning_approvals,
     action_learning_budget,
     action_learning_intents,
@@ -3759,6 +3760,12 @@ def api_learning_purge(body: LearningPurgeBody, conn=Depends(conn_dependency), c
     """Delete derived learning data so the subsystem re-observes from scratch.
     Settings and the four configured role models are kept."""
     return _run(action_learning_purge, conn, body.confirm)
+
+
+@app.get("/learning/engine-status", response_class=JSONResponse)
+def api_learning_engine_status(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """What the engine container reports about its own code and last turn."""
+    return _run(action_learning_engine_status, conn)
 
 
 @app.get("/learning/activity", response_class=JSONResponse)

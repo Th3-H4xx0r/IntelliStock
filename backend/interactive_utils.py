@@ -8856,6 +8856,26 @@ def action_learning_llm_usage(conn, limit=500):
     return store.llm_usage(conn, limit=limit)
 
 
+def action_learning_engine_status(conn):
+    """What the engine container reports about ITSELF.
+
+    The deploy check verifies the API container only; the engine runs from a
+    separate image tag. Without this, a stale engine and a broken one look
+    identical from the tab.
+    """
+    from self_learning import store
+    store.ensure_tables(conn)
+    status = store.get_engine_status(conn)
+    return {
+        "reported": bool(status),
+        "source_fingerprint": status.get("source_fingerprint"),
+        "started_at": status.get("started_at"),
+        "last_turn_at": status.get("last_turn_at"),
+        "last_turn_kinds": status.get("last_turn_kinds") or {},
+        "has_propose_executor": bool(status.get("has_propose_executor")),
+    }
+
+
 def action_learning_activity(conn):
     """Which role calls are in flight right now.
 
