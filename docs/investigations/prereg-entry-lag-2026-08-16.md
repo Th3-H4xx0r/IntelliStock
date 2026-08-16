@@ -73,6 +73,81 @@ runs (`attest_arm_start.py`). A return delta here measures the draw.
 3. **Did turnover rise?** A turnover increase is disqualifying, per the objective's standing
    constraint.
 
+## RESULT — bt 826225 vs bt 333727
+
+**First, a correction to this document's own baseline.** The "14 calendar days" above was
+computed from a metric that only saw names passing two momentum-specific log lines. Run against
+the treatment it produced **negative lags** (a name bought before it was "first seen"), which is
+impossible and exposed the bug. Replaced with a lane-agnostic definition — the first bar on
+which the broker evaluated the symbol at all (`SYM @ DATE ($price)`), which news, graph and
+momentum lanes all print — and applied identically to both arms. **On the corrected metric the
+control median is 3.0 days, not 14.** The preregistered baseline was wrong, and it was wrong in
+the direction that would have flattered the treatment.
+
+### Endpoint 1 — did it execute? **PASS.**
+
+```
+Breakout freshness: fresh=14 stale=19 unmeasurable=0 (band<=5.0%, lookback=20 bars) — order CHANGED
+...  44 evaluations, 44 of 44 "order CHANGED", unmeasurable=0 throughout
+```
+
+`unmeasurable=0` is the important number: the bars map is populated at ranking time, so this is
+**not** the `breakout-is-structurally-dead.md` failure where a breakout mechanism reached its
+arithmetic 2,922 times and exited at `bars=0` every time. The tie-break is live and it reorders.
+Hit rate is 10-40% of candidates, tighter than the 62% the offline test reported, as the 5% band
+intended.
+
+### Endpoint 2 — did median lag fall? **NOT MET.**
+
+| | control 333727 | treatment 826225 |
+|---|---:|---:|
+| n | 11 | 8 |
+| **median lag** | **3.0 d** | **3.0 d** |
+| mean lag | 9.2 d | 2.6 d |
+| max lag | **35 d** | **6 d** |
+| names with lag >= 12 d | **5** | **0** |
+
+**The preregistered primary endpoint did not move.** Median is identical. Reporting this as a
+win by switching to the mean would be choosing the statistic after seeing the answer.
+
+What did change is the TAIL: the control's long-lag entries were AIOS 12d, MXL 12d, AAOI 14d,
+AEHR 23d, AXTI 35d — and **AAOI, AEHR and AXTI are exactly the three names it lost money on**.
+The treatment has no entry beyond 6 days. That is the predicted direction, and it is recorded as
+a **post-hoc secondary observation, not a preregistered result.**
+
+**And it is contaminated.** The arms share **11% of their traded names** — lag is a per-name
+property, so a treatment trading almost entirely different names has a different lag
+distribution for that reason alone. Lag is less draw-sensitive than return; it is not
+draw-independent. I cannot attribute the tail collapse to the lever.
+
+### Endpoint 3 — turnover. **Favourable, also contaminated.**
+
+Total trades **20 -> 15**. A decrease, so not disqualifying, and it points the way the
+objective's turnover constraint wants. Same 11%-overlap caveat.
+
+### Return — NOT quoted as a result
+
++26.81% against the control's +20.53%. `check_pair_validity` scores the pair **VOID at 11%
+overlap**, so that +6.28pp measures the draw. It is written here only so nobody later finds the
+number and mistakes it for a finding.
+
+### The one clean claim
+
+Stripping everything the overlap contaminates, exactly one statement survives:
+**the tie-break executes and changes the candidate ordering on every evaluation, and it is not
+inert.** Everything else this run touched is directional evidence at 11% overlap.
+
+Worth noting separately: `SNDK` — the name the OBJECTIVE singles out as emitting 13 buy signals
+that were all refused — was bought in the treatment on **day 2** (considered 04-01, bought
+04-02, lag 1 day).
+
+### Disposition
+
+`momentum_rank_on_60d=true` and `momentum_breakout_freshness_pct=5.0` stay armed on doc 195: the
+lever is proven live, turnover moved the right way, no endpoint moved against it, and the
+alternative it replaced (`max(20d,60d)`) measures IC = −0.003. It is **not** claimed to improve
+returns, and the primary endpoint did not move.
+
 ## What I will not claim
 
 - Not that a lag reduction is a return improvement. It is a necessary condition the objective
