@@ -34,6 +34,7 @@ const saveError  = ref('')
 const saveOk     = ref('')
 const draft      = ref({})
 const targets    = ref(null)
+const llmUsage   = ref(null)
 const loading    = ref(true)
 const loadError  = ref('')
 const openThread = ref(null)      // the finding whose ladder stepper is expanded
@@ -107,6 +108,7 @@ async function load() {
     getJson('/learning/permissions'),
     getJson('/models'),
     getJson('/learning/targets'),
+    getJson('/learning/llm-usage'),
   ])
   const failures = results.filter((r) => r.status === 'rejected')
 
@@ -134,6 +136,7 @@ async function load() {
   if (results[10].status === 'fulfilled') permissions.value = results[10].value || null
   if (results[11].status === 'fulfilled') models.value = results[11].value?.models || []
   if (results[12].status === 'fulfilled') targets.value = results[12].value || null
+  if (results[13].status === 'fulfilled') llmUsage.value = results[13].value || null
 
   loadError.value = failures.length
     ? failures.map((r) => r.reason?.message || 'request failed').join('; ')
@@ -737,6 +740,72 @@ onUnmounted(stopPolling)
             </div>
           </div>
         </div>
+      </section>
+
+      <!-- LLM usage -->
+      <section v-if="llmUsage" class="mb-8">
+        <h2 class="text-sm font-semibold text-slate-300 mb-2">AI usage &amp; cost</h2>
+        <p class="text-xs text-slate-600 mb-2">
+          The recorded cost of the subsystem's own calls, by role — not an
+          estimate reconstructed from a price list.
+        </p>
+        <div v-if="!llmUsage.available || !llmUsage.totals?.calls"
+             class="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-6 text-center">
+          <p class="text-sm text-slate-400">No AI calls yet.</p>
+          <p class="text-xs text-slate-600 mt-1">
+            Usage appears once the loop asks a role for something.
+          </p>
+        </div>
+        <template v-else>
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-2">
+            <div class="rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2">
+              <div class="text-[11px] text-slate-500">Total cost</div>
+              <div class="text-lg font-bold text-slate-100">
+                ${{ Number(llmUsage.totals.cost_usd || 0).toFixed(4) }}
+              </div>
+            </div>
+            <div class="rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2">
+              <div class="text-[11px] text-slate-500">Calls</div>
+              <div class="text-lg font-bold text-slate-100">{{ llmUsage.totals.calls }}</div>
+            </div>
+            <div class="rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2">
+              <div class="text-[11px] text-slate-500">Input tokens</div>
+              <div class="text-lg font-bold text-slate-100">
+                {{ Number(llmUsage.totals.input_tokens || 0).toLocaleString() }}
+              </div>
+            </div>
+            <div class="rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2">
+              <div class="text-[11px] text-slate-500">Output tokens</div>
+              <div class="text-lg font-bold text-slate-100">
+                {{ Number(llmUsage.totals.output_tokens || 0).toLocaleString() }}
+              </div>
+            </div>
+          </div>
+          <div class="rounded-lg border border-slate-800 bg-slate-900/40 overflow-x-auto">
+            <table class="w-full text-xs">
+              <thead><tr class="text-slate-500 border-b border-slate-800">
+                <th class="text-left font-medium px-3 py-2">Role</th>
+                <th class="text-right font-medium px-3 py-2">Calls</th>
+                <th class="text-right font-medium px-3 py-2">In</th>
+                <th class="text-right font-medium px-3 py-2">Out</th>
+                <th class="text-right font-medium px-3 py-2">Cost</th>
+                <th class="text-right font-medium px-3 py-2">Errors</th>
+              </tr></thead>
+              <tbody>
+                <tr v-for="(u, role) in llmUsage.by_role" :key="role"
+                    class="border-b border-slate-800/60 last:border-0">
+                  <td class="px-3 py-2 text-slate-300 capitalize">{{ role }}</td>
+                  <td class="px-3 py-2 text-right text-slate-300">{{ u.calls }}</td>
+                  <td class="px-3 py-2 text-right text-slate-400">{{ Number(u.input_tokens).toLocaleString() }}</td>
+                  <td class="px-3 py-2 text-right text-slate-400">{{ Number(u.output_tokens).toLocaleString() }}</td>
+                  <td class="px-3 py-2 text-right text-slate-300">${{ Number(u.cost_usd).toFixed(4) }}</td>
+                  <td class="px-3 py-2 text-right"
+                      :class="u.errors ? 'text-rose-400' : 'text-slate-600'">{{ u.errors }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </template>
       </section>
 
       <!-- Hypothesis ledger -->

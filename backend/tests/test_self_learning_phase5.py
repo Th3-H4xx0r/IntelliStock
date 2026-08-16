@@ -202,11 +202,9 @@ def test_a_document_off_the_allowlist_is_neither_promoted_nor_asked_about():
     assert looping.PROMOTE not in kinds and looping.REQUEST_APPROVAL not in kinds
 
 
-def test_a_target_without_a_floor_can_only_measure_its_floor():
+def test_a_target_without_a_floor_is_told_to_measure_one():
     intents = _plan(floors={})
-    kinds = [i.kind for i in intents]
-    assert looping.MEASURE_FLOOR in kinds
-    assert looping.PROPOSE not in kinds
+    assert looping.MEASURE_FLOOR in [i.kind for i in intents]
 
 
 def test_an_exhausted_budget_stops_the_turn_before_any_spending():
@@ -250,3 +248,24 @@ def test_the_summary_flags_a_breaking_turn():
     intents = _plan(drawdown_pct=9.0,
                     active_changes=[_change(rung=perms.LIVE_FULL)])
     assert looping.summarise(intents)["breaking"] is True
+
+
+def test_a_missing_floor_does_not_stop_the_loop_proposing():
+    """PROPOSE was gated behind "no MEASURE_FLOOR intents". Since nothing had
+    measured a floor yet, the loop emitted measure_noise_floor forever and an
+    operator watching the tab saw it do nothing, permanently. Promotion is
+    already floor-gated in `ladder.promote`, which is the correct place."""
+    intents = _plan(floors={})
+    kinds = [i.kind for i in intents]
+    assert looping.MEASURE_FLOOR in kinds
+    assert looping.PROPOSE in kinds
+
+
+def test_a_queued_experiment_still_takes_priority_over_proposing():
+    """A loop that proposes faster than it tests just grows a backlog."""
+    intents = _plan(floors={},
+                    hypotheses=[{"id": "h9", "status": "proposed",
+                                 "target": "equity/nexus"}])
+    kinds = [i.kind for i in intents]
+    assert looping.RUN_EXPERIMENT in kinds
+    assert looping.PROPOSE not in kinds

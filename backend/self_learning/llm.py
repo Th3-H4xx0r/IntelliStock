@@ -24,6 +24,10 @@ from self_learning.roles import model_id_key, role_config
 
 _JSON_BLOCK = re.compile(r"\{.*\}", re.DOTALL)
 
+# Every learning LLM call is tagged with this in place of an instance id, so
+# its tokens and cost can be separated from strategy traffic in LLMUsage.
+LEARNING_INSTANCE_TAG = "self_learning"
+
 
 @dataclass(frozen=True)
 class RoleResult:
@@ -89,6 +93,7 @@ def call_role(role: str, resolved_config: dict, system: str, user: str, *,
 
     if caller is None:                                    # pragma: no cover
         from llm_utils import call_llm_by_provider
+        from llm_telemetry import llm_call_context
 
         def caller(**kwargs):
             # `provider_config` carries the endpoint/base-url/region keys
@@ -101,15 +106,23 @@ def call_role(role: str, resolved_config: dict, system: str, user: str, *,
             # still carries it for the structured path and for the record; it
             # is deliberately not silently dropped without a note, because
             # "the judge runs at 0.0" would otherwise be an unenforced claim.
-            return call_llm_by_provider(
-                provider=kwargs["provider"], api_key=kwargs["api_key"],
-                model=kwargs["model"],
-                prompt=f"{kwargs['system']}\n\n{kwargs['user']}",
-                max_output_tokens=kwargs["max_output_tokens"],
-                provider_config=kwargs.get("provider_config") or None)
+            # Tagged so every token this subsystem spends is attributable to
+            # the ROLE that spent it. `llm_utils` already records usage and
+            # cost into LLMUsage; without the tag those rows are
+            # indistinguishable from a strategy's calls and the tab could only
+            # ever show an estimate.
+            with llm_call_context(instance_id=LEARNING_INSTANCE_TAG,
+                                  call_site=f"self_learning.{kwargs['role']}",
+                                  strategy="self_learning"):
+                return call_llm_by_provider(
+                    provider=kwargs["provider"], api_key=kwargs["api_key"],
+                    model=kwargs["model"],
+                    prompt=f"{kwargs['system']}\n\n{kwargs['user']}",
+                    max_output_tokens=kwargs["max_output_tokens"],
+                    provider_config=kwargs.get("provider_config") or None)
 
     try:
-        text = caller(provider=cfg.provider, api_key=cfg.api_key,
+        text = caller(role=role, provider=cfg.provider, api_key=cfg.api_key,
                       model=cfg.model, system=system, user=user,
                       max_output_tokens=cfg.max_output_tokens,
                       temperature=cfg.temperature,

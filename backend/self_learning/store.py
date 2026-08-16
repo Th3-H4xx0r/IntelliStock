@@ -651,3 +651,62 @@ def running_backtests(conn) -> list:
     except Exception:
         return []
     return [{"id": row.get("id"), "origin": "human"} for row in rows]
+
+
+# ── LLM usage: what the subsystem's own thinking cost ─────────────────────────
+
+LLM_USAGE_TABLE = "LLMUsage"
+LEARNING_TAG = "self_learning"
+
+
+def llm_usage(conn, *, limit: int = 500) -> dict:
+    """Tokens and cost for THIS subsystem's calls, split by role.
+
+    Reads the same `LLMUsage` table the rest of the app writes, filtered to the
+    `self_learning` tag `llm.call_role` sets. That means the figures here are
+    the real recorded cost of the calls, not an estimate reconstructed from
+    prices — and a role's spend is attributable to the role.
+    """
+    try:
+        rows = list(r.db(DB_NAME).table(LLM_USAGE_TABLE)
+                    .get_all(LEARNING_TAG, index="instance_id")
+                    .run(conn))
+    except Exception:
+        return {"available": False, "by_role": {}, "totals": {},
+                "reason": "no LLM usage recorded for the subsystem yet"}
+
+    def _blank():
+        return {"calls": 0, "input_tokens": 0, "output_tokens": 0,
+                "total_tokens": 0, "cost_usd": 0.0, "errors": 0}
+
+    totals, by_role = _blank(), {}
+    for row in rows:
+        site = str(row.get("call_site") or "")
+        role = site.split(".")[-1] if site.startswith("self_learning.") else "other"
+        bucket = by_role.setdefault(role, _blank())
+        for target in (totals, bucket):
+            target["calls"] += 1
+            target["input_tokens"] += int(row.get("input_tokens") or 0)
+            target["output_tokens"] += int(row.get("output_tokens") or 0)
+            target["cost_usd"] += float(row.get("cost_usd") or 0.0)
+            if not row.get("ok", True):
+                target["errors"] += 1
+    for bucket in [totals, *by_role.values()]:
+        bucket["total_tokens"] = bucket["input_tokens"] + bucket["output_tokens"]
+        bucket["cost_usd"] = round(bucket["cost_usd"], 6)
+
+    recent = sorted(rows, key=lambda d: str(d.get("ts") or ""), reverse=True)[:20]
+    return {
+        "available": True,
+        "totals": totals,
+        "by_role": by_role,
+        "recent": [{
+            "ts": str(row.get("ts") or ""),
+            "role": (str(row.get("call_site") or "").split(".")[-1]),
+            "model": row.get("model"), "provider": row.get("provider"),
+            "input_tokens": int(row.get("input_tokens") or 0),
+            "output_tokens": int(row.get("output_tokens") or 0),
+            "cost_usd": round(float(row.get("cost_usd") or 0.0), 6),
+            "ok": bool(row.get("ok", True)),
+        } for row in recent],
+    }

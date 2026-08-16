@@ -156,6 +156,7 @@ from interactive_utils import (
     action_learning_approvals,
     action_learning_budget,
     action_learning_intents,
+    action_learning_llm_usage,
     action_learning_permissions,
     action_learning_decide_approval,
     action_learning_experiments,
@@ -3751,6 +3752,12 @@ def api_learning_observations(run_id: str, limit: int = 500, conn=Depends(conn_d
 def api_learning_intents(limit: int = 200, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """What the loop decided each turn, and why — blocked decisions included."""
     return _run(action_learning_intents, conn, limit)
+
+
+@app.get("/learning/llm-usage", response_class=JSONResponse)
+def api_learning_llm_usage(limit: int = 500, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Tokens and cost of the subsystem's own LLM calls, by role."""
+    return _run(action_learning_llm_usage, conn, limit)
 
 
 @app.get("/learning/budget", response_class=JSONResponse)

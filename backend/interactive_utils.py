@@ -8842,3 +8842,15 @@ def action_learning_targets(conn):
         "watching_all": not watched,
         "live_documents": [d["id"] for d in strategy_rows if d["money"] == "live"],
     }
+
+
+def action_learning_llm_usage(conn, limit=500):
+    """Tokens and cost for the subsystem's own LLM calls, split by role.
+
+    Reads the same LLMUsage table the rest of the app writes to, filtered to
+    the `self_learning` tag set by `llm.call_role`. These are the RECORDED
+    costs of the calls, not an estimate reconstructed from a price list.
+    """
+    from self_learning import store
+    store.ensure_tables(conn)
+    return store.llm_usage(conn, limit=limit)

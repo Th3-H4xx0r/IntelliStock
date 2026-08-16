@@ -48,6 +48,9 @@ except Exception:                                    # pragma: no cover
 
 from rethink_changefeed import run_reconnecting_changefeed
 from self_learning import approvals as learning_approvals
+from self_learning import hypotheses as learning_hypotheses
+from self_learning import llm as learning_llm
+from self_learning import prompts as learning_prompts
 from self_learning import budget as learning_budget
 from self_learning import lease as learning_lease
 from self_learning import loop as learning_loop
@@ -237,7 +240,87 @@ def _plan_and_log_turn(conn, config) -> list:
             pass
         if intent.kind == learning_loop.REQUEST_APPROVAL:
             _request_approval(conn, intent, now)
+        elif intent.kind == learning_loop.PROPOSE:
+            _execute_propose(conn, config, intent, now)
     return intents
+
+
+def _execute_propose(conn, config, intent, now) -> None:
+    """Actually ask the generator for a hypothesis.
+
+    Until this existed the loop PLANNED a proposal every turn and nothing acted
+    on it, so an operator with all four roles configured watched the tab do
+    nothing forever. Planning without executing is the same unprovable state as
+    a lever that never runs — the failure this subsystem exists to detect.
+    """
+    resolved = store.resolved_config(conn)
+    from self_learning.roles import GENERATOR, role_config
+
+    if not role_config(GENERATOR, resolved).configured:
+        _log("PROPOSE skipped — no generator model configured "
+             "(set learning_generator_llm_model_id)", "yellow")
+        return
+
+    findings = store.list_findings(conn, limit=10)
+    open_findings = [f for f in findings
+                     if str(f.get("status") or "open") == "open"]
+    if not open_findings:
+        _log("PROPOSE skipped — no open finding to base a hypothesis on",
+             "white")
+        return
+    finding = open_findings[0]
+    target = str(finding.get("target") or "")
+
+    funnels = [f for f in store.list_funnels(conn, limit=50)
+               if str(f.get("target") or "") == target]
+    summary = funnels[0] if funnels else {}
+    floor = store.get_noise_floor(
+        conn, target=target,
+        window_class=str(summary.get("window_class") or "")) or {}
+
+    try:
+        from self_learning.levers import lever_surface
+        from strategies_meta import get_available_strategies
+        strategy_id = target.split("/")[-1]
+        levers = [l.to_doc() for l in lever_surface(get_available_strategies())
+                  if l.strategy_id == strategy_id]
+    except Exception:
+        levers = []
+
+    ledger = store.list_hypotheses(conn, limit=100, target=target)
+    system, user = learning_prompts.generator_prompt(
+        target=target, levers=levers, noise_floor=floor,
+        summary=summary, refusal_cost=(summary.get("refusal_cost") or {}),
+        findings=[finding],
+        rejected=learning_hypotheses.prior_rejections(ledger, target=target))
+
+    result = learning_llm.call_role(GENERATOR, resolved, system, user)
+    if not result.ok:
+        _log(f"PROPOSE failed — {result.error}", "red")
+        return
+
+    try:
+        hypothesis = learning_hypotheses.build(
+            result.payload, finding_id=str(finding.get("id") or ""),
+            target=target, author_model=result.model,
+            prompt_hash=result.prompt_hash, created_at=now,
+            known_levers=[l["key"] for l in levers] or None)
+    except learning_hypotheses.HypothesisError as exc:
+        # A refused proposal is RECORDED, not swallowed: "the generator keeps
+        # proposing undetectable effects" is itself a finding.
+        _log(f"PROPOSE rejected — {exc}", "yellow")
+        return
+
+    skip = learning_hypotheses.already_proposed(hypothesis, ledger)
+    if skip:
+        _log(f"PROPOSE skipped — {skip}", "white")
+        return
+
+    store.put_hypothesis(conn, hypothesis)
+    _log(f"LEARNING PROPOSAL [{target}] {hypothesis.claim} "
+         f"(predicts {hypothesis.predicted_direction} "
+         f"{hypothesis.predicted_min_pp}-{hypothesis.predicted_max_pp}pp via "
+         f"{', '.join(hypothesis.lever_keys)}; model {result.model})", "yellow")
 
 
 def _request_approval(conn, intent, now) -> None:

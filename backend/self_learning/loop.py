@@ -174,11 +174,19 @@ def plan_turn(*, config, matrix, floors, active_changes, hypotheses,
                 target=str(hypothesis.get("target") or ""),
                 hypothesis_id=str(hypothesis.get("id") or "")))
 
-    if not any(i.kind in (RUN_EXPERIMENT, MEASURE_FLOOR) for i in intents):
+    # PROPOSE is NOT gated on a measured floor. Promotion already is
+    # (`ladder.promote` refuses without one), so gating proposals too was
+    # redundant — and because nothing had yet measured a floor, it made the
+    # loop emit `measure_noise_floor` forever and never do anything an operator
+    # could see. A hypothesis proposed without a floor is a hypothesis that
+    # cannot be PROMOTED; that is the correct constraint, and it is enforced
+    # where promotion happens.
+    if not any(i.kind == RUN_EXPERIMENT for i in intents):
         intents.append(Intent(
             kind=PROPOSE,
-            reason=("nothing is queued and every target has a floor — ask the "
-                    "generator for a new hypothesis")))
+            reason=("nothing is queued — ask the generator for a hypothesis "
+                    "(it cannot be promoted until this target has a measured "
+                    "noise floor)")))
     return intents
 
 
