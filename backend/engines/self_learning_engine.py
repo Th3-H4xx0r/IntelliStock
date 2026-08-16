@@ -489,6 +489,36 @@ def main() -> None:
             _log(f"RethinkDB not ready (attempt {attempt}/30), retrying", "yellow")
             time.sleep(2)
 
+    # Telemetry is opt-in per process: `record_llm_call` returns immediately
+    # unless `configure` ran. Without this the engine made real LLM calls and
+    # recorded none of them, so the tab's token and cost figures sat at zero
+    # while money was being spent — the worst possible direction for a
+    # subsystem whose spending is supposed to be capped.
+    try:
+        import llm_telemetry
+        from llm_telemetry import ensure_llm_usage_tables
+        llm_telemetry.configure(
+            db_conn_factory=store.get_conn,
+            enabled=True,
+            flush_interval_s=2.0,
+            max_buffer=25,
+            pricing_yaml_path=os.path.join(_backend_dir, "llm_pricing.yaml"),
+            r_module=r,
+            db_name=DB_NAME,
+        )
+        setup_conn = store.get_conn()
+        try:
+            ensure_llm_usage_tables(conn=setup_conn, r=r, db_name=DB_NAME)
+        finally:
+            try:
+                setup_conn.close()
+            except Exception:
+                pass
+        _log("LLM telemetry configured — token and cost recording is on", "green")
+    except Exception as exc:
+        _log(f"LLM telemetry NOT configured ({type(exc).__name__}: {exc}) — "
+             f"calls will still work but their cost will not be recorded", "red")
+
     _log(f"Self-learning engine started (source {_source_fingerprint()})", "green")
     store.put_engine_status(conn, source_fingerprint=_source_fingerprint(),
                             started_at=_now_iso(), has_propose_executor=True)
