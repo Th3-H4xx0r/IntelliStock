@@ -93,6 +93,19 @@ range in bt 333727: entered early (<40% through) → 4 of 5 profitable, mean +13
 which the window ended**. The system's three biggest movers — AEHR +152.43%, AAOI +118.22%, AXTI
 +90.11% — were all bought and all closed at a loss.
 
+**(f) No A/B in this project is currently interpretable — and this was proved, not suspected.**
+bt 453789 re-ran window d against bt 333727 changing exactly ONE config flag. The two runs shared
+**4 of 20 names — 20% overlap.** AAOI and AEHR, the two names the experiment was designed around,
+did not appear in the treatment at all. doc 195 carries the isolation recipe the handoffs call the
+one that works (both salts set, discovery bootstrap and snapshot off) and **it was not enough.**
+
+This generalises backwards: every paired A/B here, including the ones that produced the flags now
+shipping, measures the draw as much as the lever. It is the mechanism behind the ~10pp same-config
+dispersion. `backend/frozen_paired_state.py` was written for exactly this problem, is pure, and is
+imported by nothing. **Wiring it is now the highest-leverage engineering task in the repository**,
+because until it exists, config tuning — which is what the last several months have consisted of —
+cannot be measured.
+
 ## 6. If you want money at risk now
 
 The defensible version, in order:
@@ -105,9 +118,21 @@ The defensible version, in order:
    and after the fixes.
 3. **Do not point doc 179 / `alpaca-main` at this yet.** It is real money and it is stopped, so
    nothing is being lost by waiting. It was not modified in this session.
-4. **The next real work is entry timing, not another config lever.** Every lever in this repo has
-   now been tried; the levers are exhausted and the remaining gap is when the system buys, not
-   whether it can.
+4. **The next real work is NOT another config lever.** In order: (a) wire
+   `frozen_paired_state.py` so experiments become measurable at all — nothing else can be trusted
+   until this exists; (b) entry timing, which is the root cause of the lost movers and is not a
+   flag. Every config lever in this repo has now been tried, and the honest reason they keep
+   returning null is partly that the measurement cannot resolve them.
+
+## 6a. One data-quality defect found in passing
+
+`AKTX` appears in bt 453789 with a "movement" of **$0.12 → $13.41 (+10,815%)**, while the decision
+log quotes it flat at **$6.10** for days. A sub-penny start, a four-order-of-magnitude move and a
+frozen quote together read as an **unadjusted reverse split**, not a real price series — and the
+system traded it, lost $120.68, and fired the circuit breaker on it five times. This repo has
+already shipped two split-handling fixes (`4d5c705`, `3c09d81`); this one escaped them. It did not
+affect the conclusions above, but it is a live defect in the data path that decides real trades and
+should be looked at before funding anything.
 
 ## 7. What was done this session
 

@@ -137,6 +137,78 @@ the flag acts; it cannot establish that the effect generalises. Rules 1 and 3-5 
 unchanged; rule 2's bull-fire check becomes: the control has 4 bull fires, the treatment must show
 fewer.
 
+## RESULT — the experiment is VOID, and that is the finding
+
+**bt 453789** (treatment, window d, `semantics_v2=true`) returned **+19.25%** against control
+**bt 333727 +20.53%**: a difference of **−1.28pp**, far inside the ~10pp noise floor.
+
+**The flag acted.** Confirmed, not assumed:
+
+| | control 333727 | treatment 453789 |
+|---|---|---|
+| circuit-breaker floor in bull, LOW tier | **−10.0%** | **−20.0%** |
+| distinct names stopped in bull | **4** (AAOI, AEHR, AXTI, RIVN) | **1** (AKTX at −22.6%) |
+| bull bars | 43 | 45 |
+
+That is exactly what v2 predicts (`-15 − |5| = −20`). Rule 2 is satisfied.
+
+**But the pair failed its validity precondition, so rules 1, 4 and 5 cannot be evaluated.** The two
+arms drew almost entirely different universes:
+
+```
+control only : AAOI AEHR AIFD AIQ BC BOTZ D RIVN
+treatment only: AKTX ARGX ETH FCEL MSFT NVDA STT TEXU
+in BOTH      : AIOS AXTI MXL SPY        -> 4 of 20 names = 20% overlap
+```
+
+**80% of each book is a different name.** A portfolio-level return difference between two books
+that share a fifth of their holdings measures the draw, not the lever. `AAOI` and `AEHR` — the two
+names the whole hypothesis was built on — **do not appear in the treatment at all**, so the
+comparison the run was launched to make is not available in it.
+
+So the verdict is **VOID, not pass and not fail.** Reporting −1.28pp as "the lever is neutral"
+would be reporting a lottery draw.
+
+### The one clean data point, and it supports the mechanism
+
+`AXTI` is the only stopped name present in BOTH arms:
+
+| | control | treatment |
+|---|---|---|
+| AXTI | stopped at the −10% floor, **−11.94%** | held under the −20% floor, **+17.59%** |
+
+A **+29.5pp swing on the one name where the comparison is actually valid.** That is one name, and
+one name is not evidence of an edge — but it is a direct, uncontaminated read on the mechanism the
+document set out to test.
+
+### THE REAL FINDING: no A/B on this system is currently interpretable
+
+doc 195 carries the isolation recipe that `HANDOFF-2026-08-14b` §1 says is the one that works —
+`history_scope_salt` AND `active_event_history_scope_salt` both set, `nexus_discovery_bootstrap`
+and `nexus_discovery_snapshot` both false. **It was not enough.** Two runs of the same document, on
+the same window, differing in ONE config flag, drew 80% different names.
+
+That generalises past this experiment: **every paired A/B in this project, including the ones that
+produced the currently-shipped flags, is subject to the same divergence.** It is why the ~10pp
+same-config dispersion exists and it is not fixable with salts.
+
+`backend/frozen_paired_state.py` was built for exactly this and is a pure contract module that
+**nothing imports** — it was never wired into the queue or the engine. Wiring it is now the highest
+-leverage engineering task in the repository, because until it exists, no config lever can be
+measured, and tuning levers is what this project has been doing for months.
+
+### Disposition of the flag
+
+`semantics_v2` stays **ON** on doc 195, and the reasoning is stated rather than buried: the legacy
+path is an arithmetic inversion that the code's own comments call INVERTED, it makes the stop
+TIGHTEN in a bull when the documented intent is to widen, and the objective explicitly asks to
+"exit on a real turn not noise". Choosing the legacy branch because the correction is unvalidated
+is also choosing an unvalidated branch — the buggy one. The mechanism is confirmed to act, its
+blast radius is small (it binds in 1 of 4 windows), and no return effect was measured in either
+direction.
+
+It is **not** claimed to improve returns. It needs forward validation like everything else here.
+
 ## Pre-committed decision rule
 
 If the treatment shows materially fewer bull circuit-breaker fires AND does not worsen turnover or
