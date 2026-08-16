@@ -153,7 +153,12 @@ from interactive_utils import (
     action_learning_funnels,
     action_learning_acknowledge,
     action_learning_get_control,
+    action_learning_approvals,
+    action_learning_decide_approval,
     action_learning_experiments,
+    action_learning_hypotheses,
+    action_learning_reports,
+    action_learning_roles,
     action_learning_levers,
     action_learning_noise_floors,
     action_learning_outcomes,
@@ -774,6 +779,11 @@ class LearningControlBody(BaseModel):
 
 class LearningStatusBody(BaseModel):
     status: str = "acknowledged"
+
+
+class LearningApprovalBody(BaseModel):
+    decision: str
+    reason: Optional[str] = None
 
 
 class DiscoverControlBody(BaseModel):
@@ -3731,6 +3741,36 @@ def api_learning_funnels(limit: int = 100, conn=Depends(conn_dependency), curren
 def api_learning_observations(run_id: str, limit: int = 500, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Decision-level observations for one run, including the refusals."""
     return _run(action_learning_observations, conn, run_id, limit)
+
+
+@app.get("/learning/hypotheses", response_class=JSONResponse)
+def api_learning_hypotheses(limit: int = 200, target: str = None, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """The hypothesis ledger, rejections included."""
+    return _run(action_learning_hypotheses, conn, limit, target)
+
+
+@app.get("/learning/approvals", response_class=JSONResponse)
+def api_learning_approvals(limit: int = 200, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """The approval queue; live-rung proposals are pinned first."""
+    return _run(action_learning_approvals, conn, limit)
+
+
+@app.post("/learning/approvals/{approval_id}", response_class=JSONResponse)
+def api_learning_decide_approval(approval_id: str, body: LearningApprovalBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Approve or reject a pending proposal."""
+    return _run(action_learning_decide_approval, conn, approval_id, body.decision, body.reason or "", str(current_user.get("username") or "operator"))
+
+
+@app.get("/learning/roles", response_class=JSONResponse)
+def api_learning_roles(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Which AI roles are configured and with which model."""
+    return _run(action_learning_roles, conn)
+
+
+@app.get("/learning/reports", response_class=JSONResponse)
+def api_learning_reports(limit: int = 50, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Analyst narrative reports."""
+    return _run(action_learning_reports, conn, limit)
 
 
 @app.get("/learning/noise-floors", response_class=JSONResponse)

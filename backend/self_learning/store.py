@@ -39,9 +39,14 @@ OUTCOMES = "LearningOutcomes"
 NOISE_FLOORS = "LearningNoiseFloors"
 EXPERIMENTS = "LearningExperiments"
 LEASE = "LearningLease"
+# Phase 3
+HYPOTHESES = "LearningHypotheses"
+APPROVALS = "LearningApprovals"
+REPORTS = "LearningReports"
 
 LEARNING_TABLES = (OBSERVATIONS, ROLLUPS, FINDINGS, FUNNELS, CONFIG,
-                   OUTCOMES, NOISE_FLOORS, EXPERIMENTS, LEASE)
+                   OUTCOMES, NOISE_FLOORS, EXPERIMENTS, LEASE,
+                   HYPOTHESES, APPROVALS, REPORTS)
 
 LEASE_DOC_ID = "backtest_lease"
 
@@ -67,11 +72,27 @@ DEFAULT_CONFIG = {
     # completed run — multi-GB of document transfer and a multi-million-row
     # rewrite storm on a host that restarts often.
     "processed_run_ids": [],
+    # Phase 3. Each role reads its own model, so a cheap one can narrate while
+    # a strong one forms hypotheses. Empty = that role is off; it never falls
+    # back to an ambient default, because a recorded model id that is not the
+    # model that answered would make every attribution here a lie.
+    "learning_analyst_llm_model_id": "",
+    "learning_generator_llm_model_id": "",
+    "learning_coder_llm_model_id": "",
+    "learning_judge_llm_model_id": "",
+    # Sub-live approvals auto-proceed after this many hours. Live rungs ignore
+    # it entirely — silence is never consent for real money.
+    "approval_timeout_hours": 4,
 }
 
 _MUTABLE_KEYS = frozenset({
     "mode", "enabled", "retain_days", "variance_threshold", "variance_min_n",
     "document_allowlist",
+    # Phase 3: per-role model ids, resolved through the Models table by
+    # `model_resolver.resolve_model_refs_in_config`.
+    "learning_analyst_llm_model_id", "learning_generator_llm_model_id",
+    "learning_coder_llm_model_id", "learning_judge_llm_model_id",
+    "approval_timeout_hours",
 })
 
 
@@ -386,3 +407,70 @@ def sweep_expired_outcomes(conn, *, cutoff: str) -> int:
               .between("", cutoff, index="as_of", left_bound="open")
               .delete().run(conn))
     return int((result or {}).get("deleted") or 0)
+
+
+# ── Phase 3: hypotheses, approvals, reports ───────────────────────────────────
+
+def resolved_config(conn) -> dict:
+    """The config with each role's `*_llm_model_id` resolved into
+    provider/model/key by the existing Models-table resolver."""
+    config = get_config(conn)
+    try:
+        from model_resolver import resolve_model_refs_in_config
+        return resolve_model_refs_in_config(conn, config)
+    except Exception:
+        return config
+
+
+def put_hypothesis(conn, hypothesis) -> None:
+    doc = hypothesis.to_doc() if hasattr(hypothesis, "to_doc") else dict(hypothesis)
+    r.db(DB_NAME).table(HYPOTHESES).insert(
+        doc,
+        # Status is operator/judge-owned; re-proposing must never reopen a
+        # closed hypothesis, or the generator's memory resets every round and
+        # the loop re-proposes what it already disproved.
+        conflict=lambda _id, old, new: old.merge({
+            "experiment_ids": old["experiment_ids"].default([]).set_union(
+                new["experiment_ids"].default([])),
+        }),
+    ).run(conn)
+
+
+def set_hypothesis_status(conn, hypothesis_id, status, reason="") -> None:
+    r.db(DB_NAME).table(HYPOTHESES).get(str(hypothesis_id)).update(
+        {"status": str(status), "status_reason": str(reason)}).run(conn)
+
+
+def list_hypotheses(conn, limit: int = 200, target=None) -> list:
+    limit = max(1, min(int(limit or 200), 1000))
+    rows = list(r.db(DB_NAME).table(HYPOTHESES).limit(limit).run(conn))
+    if target:
+        rows = [row for row in rows if str(row.get("target")) == str(target)]
+    rows.sort(key=lambda d: str(d.get("created_at") or ""), reverse=True)
+    return rows
+
+
+def put_approval(conn, approval) -> None:
+    doc = approval.to_doc() if hasattr(approval, "to_doc") else dict(approval)
+    r.db(DB_NAME).table(APPROVALS).insert(doc, conflict="update").run(conn)
+
+
+def get_approval(conn, approval_id):
+    return r.db(DB_NAME).table(APPROVALS).get(str(approval_id)).run(conn)
+
+
+def list_approvals(conn, limit: int = 200) -> list:
+    limit = max(1, min(int(limit or 200), 1000))
+    return list(r.db(DB_NAME).table(APPROVALS).limit(limit).run(conn))
+
+
+def put_report(conn, report) -> None:
+    r.db(DB_NAME).table(REPORTS).insert(
+        dict(report or {}), conflict="update").run(conn)
+
+
+def list_reports(conn, limit: int = 50) -> list:
+    limit = max(1, min(int(limit or 50), 500))
+    rows = list(r.db(DB_NAME).table(REPORTS).limit(limit).run(conn))
+    rows.sort(key=lambda d: str(d.get("created_at") or ""), reverse=True)
+    return rows

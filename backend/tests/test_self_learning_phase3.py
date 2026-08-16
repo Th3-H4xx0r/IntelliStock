@@ -254,3 +254,187 @@ def test_the_judge_never_sees_the_generators_reasoning():
     assert hypothesis.mechanism not in repr(context)
     assert context["predicted_direction"] == "increase"
     assert context["measured_effect_pp"] == 5.0
+
+
+# ── LLM plumbing ─────────────────────────────────────────────────────────────
+
+def test_json_is_extracted_from_a_fenced_response():
+    from self_learning.llm import extract_json
+    assert extract_json('```json\n{"a": 1}\n```') == {"a": 1}
+
+
+def test_json_is_extracted_from_surrounding_prose():
+    from self_learning.llm import extract_json
+    assert extract_json('Sure! {"a": 1} hope that helps') == {"a": 1}
+
+
+def test_an_unparseable_response_is_none_not_an_empty_dict():
+    """The caller treats None as 'no proposal'. An empty dict would be read as
+    a proposal with every field missing, which then fails validation with a
+    confusing message instead of being skipped."""
+    from self_learning.llm import extract_json
+    assert extract_json("no json here") is None
+    assert extract_json("[1, 2, 3]") is None
+    assert extract_json("") is None
+
+
+def test_an_unconfigured_role_does_not_silently_use_a_default():
+    """A recorded model id that is not the model that answered would make every
+    attribution guarantee here a lie."""
+    from self_learning.llm import call_role
+    result = call_role("generator", {}, "sys", "user",
+                       caller=lambda **kw: '{"a": 1}')
+    assert result.ok is False
+    assert "no model configured" in result.error
+
+
+def test_a_configured_role_records_the_model_it_used():
+    from self_learning.llm import call_role
+    resolved = {"learning_generator_llm_provider": "anthropic",
+                "learning_generator_llm_model": "claude-opus-5",
+                "learning_generator_llm_api_key": "k"}
+    result = call_role("generator", resolved, "sys", "user",
+                       caller=lambda **kw: '{"claim": "x"}')
+    assert result.ok is True
+    assert result.model == "claude-opus-5"
+    assert result.payload == {"claim": "x"}
+    assert len(result.prompt_hash) == 32
+
+
+def test_a_provider_exception_is_captured_not_raised():
+    from self_learning.llm import call_role
+
+    def boom(**_kw):
+        raise RuntimeError("provider down")
+
+    resolved = {"learning_analyst_llm_provider": "p",
+                "learning_analyst_llm_model": "m"}
+    result = call_role("analyst", resolved, "s", "u", caller=boom)
+    assert result.ok is False and "provider down" in result.error
+
+
+def test_the_generator_prompt_carries_the_floor_the_rejections_and_the_levers():
+    from self_learning.prompts import generator_prompt
+    _system, user = generator_prompt(
+        target="equity/nexus",
+        levers=[{"key": "max_positions", "value_type": "number", "default": 6}],
+        noise_floor={"measured": True, "floor_pp": 4.1},
+        summary={"decided": 10}, refusal_cost={}, findings=[],
+        rejected=[{"claim": "entry gates", "status": "rejected",
+                   "status_reason": "made both windows worse"}])
+    assert "4.1pp" in user
+    assert "max_positions" in user
+    assert "entry gates" in user
+    assert "do NOT propose these again" in user
+
+
+def test_the_generator_is_told_when_no_floor_exists():
+    from self_learning.prompts import generator_prompt
+    _system, user = generator_prompt(
+        target="t", levers=[], noise_floor={"measured": False},
+        summary={}, refusal_cost={}, findings=[], rejected=[])
+    assert "NO noise floor has been measured" in user
+
+
+# ── Approval queue ───────────────────────────────────────────────────────────
+
+def _approval(rung="PAPER", **over):
+    from self_learning.approvals import Approval
+    base = dict(hypothesis_id="h1", experiment_id="e1", target="equity/nexus",
+                rung=rung, action_class="config_levers",
+                summary="clamp per-name weight",
+                requested_at="2026-08-15T00:00:00")
+    base.update(over)
+    return Approval(**base)
+
+
+def test_a_sub_live_approval_auto_proceeds_after_the_timeout():
+    from self_learning.approvals import is_expired
+    assert is_expired(_approval("PAPER"), now_iso="2026-08-15T05:00:00",
+                      timeout_hours=4) is True
+
+
+def test_a_live_approval_never_auto_proceeds():
+    """The operator's rule: silence is never consent for real money."""
+    from self_learning.approvals import is_expired
+    for rung in ("LIVE_CAPPED", "LIVE_FULL"):
+        assert is_expired(_approval(rung), now_iso="2030-01-01T00:00:00",
+                          timeout_hours=4) is False
+
+
+def test_auto_proceeding_a_live_approval_is_refused_outright():
+    from self_learning.approvals import auto_proceed
+    with pytest.raises(ValueError, match="silence is not consent"):
+        auto_proceed(_approval("LIVE_FULL"), now_iso="2030-01-01T00:00:00")
+
+
+def test_a_zero_timeout_means_hold_not_proceed_immediately():
+    from self_learning.approvals import is_expired
+    assert is_expired(_approval("PAPER"), now_iso="2030-01-01T00:00:00",
+                      timeout_hours=0) is False
+
+
+def test_an_unparseable_request_time_is_not_consent():
+    from self_learning.approvals import is_expired
+    assert is_expired(_approval("PAPER", requested_at="nonsense"),
+                      now_iso="2030-01-01T00:00:00", timeout_hours=1) is False
+
+
+def test_a_decided_approval_cannot_be_re_decided():
+    """Re-deciding would silently reverse an operator's answer."""
+    from self_learning.approvals import resolve
+    approved = resolve(_approval(), decision="approved",
+                       now_iso="2026-08-15T01:00:00")
+    with pytest.raises(ValueError, match="already approved"):
+        resolve(approved, decision="rejected", now_iso="2026-08-15T02:00:00")
+
+
+def test_an_unknown_decision_is_refused():
+    from self_learning.approvals import resolve
+    with pytest.raises(ValueError):
+        resolve(_approval(), decision="maybe", now_iso="t")
+
+
+def test_live_approvals_are_pinned_to_the_top_of_the_queue():
+    from self_learning.approvals import queue_view
+    rows = [_approval("PAPER", requested_at="2026-08-01T00:00:00").to_doc(),
+            _approval("LIVE_FULL", requested_at="2026-08-15T00:00:00").to_doc()]
+    view = queue_view(rows)
+    assert view["pending"][0]["rung"] == "LIVE_FULL"
+    assert view["live_pending_count"] == 1
+    assert view["blocking"] is True
+
+
+def test_a_decided_approval_leaves_the_queue():
+    from self_learning.approvals import queue_view
+    rows = [_approval().to_doc(), dict(_approval().to_doc(), status="approved")]
+    assert queue_view(rows)["pending_count"] == 1
+
+
+def test_an_ambiguous_proof_cannot_be_promoted():
+    """AMBIGUOUS was added to the proof module AFTER the judge was written, and
+    the judge listed statuses by hand — so a treatment whose stream moved no
+    more than control-vs-control churn fell straight through to CONFIRM."""
+    judgement = judging.decide(statistical_verdict=_stat(True),
+                               proof=_proof("ambiguous"), llm_verdict="confirm")
+    assert judgement.verdict == judging.HOLD
+    assert judging.promotes(judgement) is False
+
+
+def test_a_missing_proof_cannot_be_promoted():
+    judgement = judging.decide(statistical_verdict=_stat(True), proof=None,
+                               llm_verdict="confirm")
+    assert judging.promotes(judgement) is False
+
+
+def test_an_effect_in_the_wrong_direction_is_refused_at_the_judge_too():
+    """Defence in depth: if a caller forgets `expected_direction` on
+    `acceptance`, the verdict arrives here two-sided and already 'accepted'."""
+    hypothesis = build(_payload(predicted_direction="increase"),
+                       finding_id="f", target="t")
+    losing = Verdict(accepted=True, reason="r", effect_pp=-9.0, floor_pp=1.0,
+                     bar_pp=1.5, sign_consistent=4, n=4)
+    judgement = judging.decide(statistical_verdict=losing, proof=_proof(),
+                               llm_verdict="confirm", hypothesis=hypothesis)
+    assert judging.promotes(judgement) is False
+    assert "predicted increase" in judgement.reason

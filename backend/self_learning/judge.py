@@ -71,7 +71,7 @@ def judge_prompt_context(*, hypothesis, statistical_verdict, proof, summary):
 
 
 def decide(*, statistical_verdict, proof, llm_verdict=None, llm_reason="",
-           model="") -> Judgement:
+           model="", hypothesis=None) -> Judgement:
     """Combine the statistics, the execution proof, and the LLM's opinion.
 
     Order matters and is not negotiable:
@@ -86,17 +86,40 @@ def decide(*, statistical_verdict, proof, llm_verdict=None, llm_reason="",
     llm = raw if raw in VERDICTS else _SAFE_DEFAULT
     llm_unparseable = bool(raw) and raw not in VERDICTS
 
-    proof_status = getattr(proof, "status", None)
-    if proof_status in ("inert", "unprovable"):
+    # Ask the proof module whether this result may be scored at all, rather
+    # than listing statuses here. Listing them meant AMBIGUOUS — added later,
+    # for a treatment whose stream moved no more than control-vs-control churn
+    # — fell through this check and could be promoted.
+    from self_learning.execution_proof import blocks_scoring
+
+    if blocks_scoring(proof):
+        proof_status = getattr(proof, "status", None) or "missing"
         return Judgement(
             verdict=HOLD,
-            reason=(f"execution proof is {proof_status} — the treatment did not "
-                    f"reach the decision path, so this is not testable as "
+            reason=(f"execution proof is {proof_status} — the treatment cannot "
+                    f"be attributed to the lever, so this is not testable as "
                     f"specified rather than disproved"),
             statistical_accepted=False, llm_verdict=llm, overridden=False,
             model=model)
 
     accepted = bool(getattr(statistical_verdict, "accepted", False))
+
+    # Second line of defence on direction. `noise.acceptance` takes an
+    # `expected_direction`, but a caller that forgets to pass it yields a
+    # two-sided verdict, and a lever that moved hard the WRONG way would then
+    # arrive here already "accepted".
+    predicted = str(getattr(hypothesis, "predicted_direction", "") or "").lower()
+    effect = getattr(statistical_verdict, "effect_pp", None)
+    if accepted and predicted in ("increase", "decrease") and effect is not None:
+        moved_up = float(effect) > 0
+        if moved_up != (predicted == "increase"):
+            return Judgement(
+                verdict=HOLD,
+                reason=(f"the hypothesis predicted {predicted} but the measured "
+                        f"effect was {float(effect):+.2f}pp — accepted by a "
+                        f"two-sided test, refused here"),
+                statistical_accepted=True, llm_verdict=llm, overridden=True,
+                model=model)
 
     if not accepted:
         stat_reason = getattr(statistical_verdict, "reason", "rejected")

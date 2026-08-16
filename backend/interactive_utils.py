@@ -8620,3 +8620,72 @@ def action_learning_outcomes(conn, run_id, limit=2000):
     rows = list(selection.order_by("as_of").limit(limit).run(conn))
     return {"outcomes": rows, "total": total,
             "truncated": bool(total > len(rows))}
+
+
+# ── Self-learning Phase 3 (Hypothesize) ────────────────────────────────────
+def action_learning_hypotheses(conn, limit=200, target=None):
+    """The hypothesis ledger — rejections included, deliberately.
+
+    Rejected hypotheses are the generator's memory. Hiding them is how a loop
+    re-proposes the idea it already disproved twice.
+    """
+    from self_learning import store
+    store.ensure_tables(conn)
+    return {"hypotheses": store.list_hypotheses(conn, limit=limit, target=target)}
+
+
+def action_learning_approvals(conn, limit=200):
+    """The approval queue. Live-rung items are pinned: they wait indefinitely."""
+    from self_learning import store
+    from self_learning.approvals import queue_view
+    store.ensure_tables(conn)
+    rows = store.list_approvals(conn, limit=limit)
+    view = queue_view(rows)
+    view["all"] = rows
+    return view
+
+
+def action_learning_decide_approval(conn, approval_id, decision, reason="",
+                                    actor="operator"):
+    """Approve or reject a pending proposal."""
+    from datetime import datetime, timezone
+    from self_learning import store
+    from self_learning.approvals import Approval, resolve as resolve_approval
+    store.ensure_tables(conn)
+    row = store.get_approval(conn, approval_id)
+    if not row:
+        raise ValueError("approval not found: %s" % approval_id)
+    row = {k: v for k, v in row.items()
+           if k not in ("id", "holds_forever")}
+    row["changes"] = tuple(tuple(c) for c in (row.get("changes") or []))
+    updated = resolve_approval(
+        Approval(**row), decision=decision,
+        now_iso=datetime.now(timezone.utc).isoformat(), actor=actor,
+        reason=reason)
+    store.put_approval(conn, updated)
+    return updated.to_doc()
+
+
+def action_learning_roles(conn):
+    """Which AI roles are configured, and with which model.
+
+    A role with no model is reported UNCONFIGURED rather than silently falling
+    back, so the tab can show exactly what is and is not wired.
+    """
+    from self_learning import store
+    from self_learning.roles import all_role_configs, model_id_key, ROLES
+    store.ensure_tables(conn)
+    resolved = store.resolved_config(conn)
+    configs = all_role_configs(resolved)
+    return {
+        "roles": {role: cfg.to_doc() for role, cfg in configs.items()},
+        "model_id_keys": {role: model_id_key(role) for role in ROLES},
+        "unconfigured": [role for role, cfg in configs.items()
+                         if not cfg.configured],
+    }
+
+
+def action_learning_reports(conn, limit=50):
+    from self_learning import store
+    store.ensure_tables(conn)
+    return {"reports": store.list_reports(conn, limit=limit)}
