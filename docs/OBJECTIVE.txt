@@ -1,0 +1,108 @@
+INTELLISTOCK - THE OBJECTIVE
+
+Grow the account 1x-3x a year (+100% to +300%), beating SPY in every regime,
+eventually on real money. Two-month equivalents: 1x = +12%, 2x = +20%, 3x = +25%.
+
+The mechanism is NOT grinding small edges across many positions. It is catching
+the big movers and holding them at size. A +100% name at a 2% position is noise;
+at 10-15% it is the year.
+
+Bull/chop - buy names making large sustained moves, enter while the move still
+has room, size so one winner matters, hold.
+Bear - do not sit in cash. Rotate into SQQQ (-3x inverse QQQ) and profit from the
+downtrend. Trim the long book, hold while the downtrend persists, exit on a real
+turn not noise.
+Recovery - get back in fast; reversals start the largest moves.
+
+
+THE GAP IS CONVERSION, NOT DISCOVERY
+
+Discovery already finds the winners. One two-month window surfaced AAOI +102%,
+VICR +80%, VIAV +66%, SNDK +65%, LASR +54%, TTMI +52%, AMAT +32%, ADI +28% -
+none were bought. SNDK alone emitted 13 buy signals, all refused by portfolio
+construction.
+
+Four names at ~10% of NAV each, capturing half of a 60% move, is ~+12% per
+two-month window, which is ~+100%/yr. The raw material is already there.
+
+Do not hunt more names. Ask why a name the system ranked #1 did not get bought.
+
+
+WHAT BLOCKS IT
+
+1. Entry timing - winners bought late. One entered at 96.7% of the way through
+   its move; another 19 days after the gap that was its whole +54.7%, with a
+   measured maximum of +0.87% ever available.
+2. Sizing - per-name satellite weight is mean 6.75% / median 4.73% of NAV.
+3. No trim-back - the satellite cap is entry-only, so a great name is refused
+   because a mediocre one sits on the budget (test_A11, fails on purpose).
+4. Execution cost - every fill crosses the spread. Passive execution is the
+   documented "largest unexploited cost lever" (simulated_execution.py:135).
+5. Bear leg unvalidated - built, but not yet shown to profit in a bear.
+
+
+ALREADY BUILT - VALIDATE, DO NOT REBUILD
+
+Core/satellite architecture (the SPY core is meant to be SOLD to fund
+high-conviction buys); conviction overflow bounded by core_min_pct; the full SQQQ
+bear leg (bear_alloc_pct 0.35 scaling to 0.7 with drawdown depth, 10% stop,
+10%/5% leg trail, hold-through-chop, freshness gate); regime detection with
+recovery override and per-regime caps.
+
+doc-193 has no "bear" regime profile on purpose. That keeps the core OFF in a
+bear so the SQQQ hedge actually runs. Arming the core globally routes bear
+de-risk to cash and silently drops the hedge. Do not add a bear profile.
+
+
+CONSTRAINTS
+
+- Turnover is the known leak: ~290%/mo live vs ~50%/mo break-even (23-35% for
+  this specific edge). Prefer fewer, larger, longer-held positions.
+- doc-179 / alpaca-main is real money, currently stopped. Nothing ships there
+  without explicit sign-off.
+- Never push to main while a backtest is running - it auto-deploys, the restart
+  kills the run, and the run is unrecoverable.
+- Equities backtests run pit_mode=research (lookahead bias, not
+  promotion-eligible). A real-money claim needs a PIT run.
+- New behaviour ships default-OFF, enabled per-document.
+
+
+DO NOT RETRY (all measured)
+
+- Loosening the entry-extension gate: blocked basket returned -7.95%.
+- Exempting sells or the opening basket from the turnover budget: leaves 7.1%
+  charged against a 50% budget, so the brake never binds again.
+- Raising max_positions: latches breach auto-heal into per-bar forced
+  liquidation and dilutes the prize ~62%.
+- Entry gates to beat SPY in a bull: made both test windows worse.
+- The asymmetric-objective search (beat B&H in every bull AND positive in every
+  bear): ~60 configs across 9 approaches, proven unreachable.
+STRUCK 2026-08-16 — "'The ranking score is noise': false, IC +0.17 at 1d, t=3.1."
+That entry is withdrawn. It has no reproducible artifact in the tree (no scipy,
+no spearmanr anywhere), and it is contradicted by direct measurement on live
+data: 717 of 723 buy candidates scored exactly +1.000, and the self-learning
+observer independently found one value on 96.4% of 2,516 samples and 97.6% of
+4,893. A field that constant cannot carry an IC of +0.17. The entry forbade the
+investigation that found the root cause; treat the saturation as the finding.
+See HANDOFF-2026-08-15.md §1.
+
+Evidence for each is in
+docs/superpowers/specs/2026-08-07-bt804832-three-layer-remediation-design.md
+
+
+HOW TO VALIDATE
+
+Paired runs on the same window, instance, granularity and cash. Reference:
+2026-01-01..2026-03-01, v2-let-run-core, 3600s, $6,000.
+
+Use at least 3 windows, including at least 1 out-of-sample and at least 1 where
+leadership is not semiconductors - otherwise you are fitting to one name.
+
+Nexus state is shared and mutable across runs. Give each arm its own
+history_scope_salt, and make both arms equally warm or equally cold.
+
+n=5 round trips is not evidence. Do not promote a lever on one window.
+
+Read the run. Config-based predictions have been wrong more often than right on
+this codebase. Pull the log and confirm what actually happened before believing
+any mechanism.
