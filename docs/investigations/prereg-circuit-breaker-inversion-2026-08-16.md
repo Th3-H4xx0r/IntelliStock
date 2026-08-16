@@ -96,6 +96,47 @@ The older 4.94pp floor is known to be about half the real dispersion. Therefore:
 - Not that this generalises until it is seen on a window where leadership is not semiconductors.
 - I will not re-pick the window, the endpoints, or the noise bar after seeing the result.
 
+## DEVIATION, recorded when it happened and before any config was touched
+
+The control **bt 325136** finished at **−5.09%** (window f post-fix; pre-fix was −11.26%, SPY
++0.69%). It fired the circuit breaker **once**, `TSLA tier=HIGH regime=chop unrealized=−25.1%
+floor=−25.0%`. **Zero bull fires.**
+
+I predicted 7, from the PRE-fix run bt 288424. That prediction was wrong because the five fixes
+changed the regime mix itself:
+
+| run | config | chop | bull | bear | bull CB fires |
+|---|---|---:|---:|---:|---:|
+| 288424 | pre-fix | 40 | **16** | 3 | **7** |
+| 325136 | post-fix | 40 | **3** | 6 | **0** |
+
+`semantics_v2` adjusts only `bull` and `bear`; in `chop` it is a no-op by construction
+(`:8811` — "chop / unknown: no adjustment"). With 3 bull bars and no bull fires, **the lever cannot
+act on window f under the post-fix configuration.** By this document's own rule 2 — *"if the
+treatment does not show materially fewer bull fires, the flag did not act and the run says nothing
+— report inert and stop"* — running the treatment here would burn ~2 hours to produce a vacuous
+result. I am not running it.
+
+**Where the lever can act, measured across all four windows' post-fix controls:**
+
+| window | control | bull CB fires | `semantics_v2` |
+|---|---|---:|---|
+| a | 443154 | 1 (UNG −10.9%) | barely binds; control is a STOPPED run anyway |
+| c | 235194 | 0 (all 8 fires chop) | **inert** |
+| d | 333727 | **4** | **binds — the only window it does** |
+| f | 325136 | 0 | **inert** |
+
+**That is itself the headline result: the inverted bull adjustment binds in one window out of four.**
+Its blast radius is far smaller than §1 suggested, and any gain it produces is confined to strongly
+trending bull tape.
+
+**Amended test:** the treatment moves to **window d** (2026-04-01..2026-06-01), paired against
+bt 333727. This is the window where the mechanism was DISCOVERED, so it is **in-sample**, and I say
+so rather than dressing it up. It can measure the magnitude of the effect in the one regime where
+the flag acts; it cannot establish that the effect generalises. Rules 1 and 3-5 below stand
+unchanged; rule 2's bull-fire check becomes: the control has 4 bull fires, the treatment must show
+fewer.
+
 ## Pre-committed decision rule
 
 If the treatment shows materially fewer bull circuit-breaker fires AND does not worsen turnover or

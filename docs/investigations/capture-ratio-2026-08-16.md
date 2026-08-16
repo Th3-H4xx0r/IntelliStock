@@ -174,6 +174,46 @@ makes **no adjustment at all**. The lever is inert here; window c's result stand
 rests on that single run, on six round trips, with 78% of the return unrealized. That is the
 sentence that has to travel with any production decision.
 
+## 3c. The conversion bug IS fixed — and fixing it did not produce an edge
+
+This is the strongest result of the session because it does **not** rest on the ~10pp return
+dispersion. Refusal counts are deterministic mechanism counts, not noisy P&L, and this is the same
+window before and after:
+
+| run | window | config | `SKIP BUY` | `insufficient_cash` | bars with book FULL | trades | return | SPY |
+|---|---|---|---:|---:|---:|---:|---:|---:|
+| 288424 | f | pre-fix | **41** | 40 | 180 | 37 | −11.26% | +0.69% |
+| **325136** | f | **post-fix** | **2** | **2** | 59 | 35 | **−5.09%** | +0.69% |
+| 333727 | d | post-fix | 4 | 4 | 0 | 20 | +20.53% | +16.66% |
+
+**Refusals collapsed 41 → 2 on the identical window.** The five 2026-08-15 fixes did precisely what
+they claimed: they unblocked conversion. `satellite_cap_below_floor` never fires in any post-fix
+run. The book is no longer sealed — it holds 4-5 of 6 slots on most bars rather than jamming at 6.
+
+**And the run still loses 5.09% while SPY gains 0.69%.**
+
+Window f post-fix bought a completely different, larger-cap book (AAPL, ABBV, AMZN, EQT, SPY, VVX)
+and still lost, on its selections:
+
+| name | the name's move | captured |
+|---|---:|---:|
+| TSLA | −23.45% | **−25.72%** (−$155.09) |
+| CCL | −4.60% | **−12.53%** |
+| **RCL** | **+8.10%** | **−7.50%** |
+| NVDA | −2.16% | −6.37% |
+| SQQQ | +10.31% | +0.22% |
+| AMZN | +13.79% | +12.06% |
+
+`RCL` rose 8.1% over the window and the system **lost 7.5% on it** — a round trip taken the wrong
+way inside a rising name. `SQQQ` captured 0.22% of a +10.31% move because only 6 bars classified
+bear, so the hedge that carried window c never ran here. 35 trades on a six-name book over six
+weeks.
+
+**Conclusion: conversion was real, it has been fixed, and fixing it did not create an edge in flat
+tape.** The binding constraint is no longer refusal. It is that in chop the selection has no edge
+and the churn costs money. That is a strategy problem, not a plumbing problem, and no config lever
+in this repository addresses it.
+
 ## 4. What this changes about priorities
 
 1. `semantics_v2` is worth ONE paired run because it is a sign correction, not a fitted threshold —
