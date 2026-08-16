@@ -104,6 +104,65 @@ def adjust_closes_for_splits(closes, tolerance=DEFAULT_TOLERANCE):
     return out, found
 
 
+def returns_are_trustworthy(closes, tolerance=DEFAULT_TOLERANCE,
+                            max_step_ratio=3.0):
+    """Is a trailing return computed over `closes` worth ranking on?
+
+    Returns ``(ok, reason)``. This DETECTS and lets the caller decline; it never
+    restates a price, which is the line the module header draws — inference may
+    gate a decision (cheap if wrong) but must not rewrite stored prices
+    (unbounded if wrong).
+
+    Two independent failure modes make a trailing return meaningless:
+
+    * a **listed split ratio** between consecutive bars, which
+      `detect_split_ratio` already names; and
+    * a step so large that no listed ratio covers it. `SPLIT_RATIOS` stops at
+      20.0, but sub-dollar issuers reverse-split at 1-for-25, 1-for-50 and
+      1-for-100, and a stale cache chunk spliced onto a fresh one produces the
+      same shape. AKTX entered bt 453789's momentum scan at ``20d=+4554.2%``
+      from exactly this: the movement summary read $0.12 -> $13.41 (+10,815%)
+      while the decision log quoted the name at $3.05 rising to $24.
+
+    A 3.0x default is deliberately far above real price action. The largest
+    single-bar equity moves that print calmly are takeover pops and biotech
+    readouts, which top out near +150%; anything at or beyond +200% either
+    halted the tape or is not a price. The bound is symmetric, because a
+    forward split steps DOWN and a -67% "crash" that is really a 3-for-1 would
+    otherwise be ranked as a collapse.
+
+    Note the asymmetry with the momentum ceiling this sits beside: the ceiling
+    caps the RETURN and so cannot tell a data artifact from a genuine big mover
+    — the names the objective exists to catch. This looks at the STEP, which a
+    real multi-week move never produces.
+    """
+    try:
+        vals = [float(c) for c in (closes or [])]
+    except (TypeError, ValueError):
+        return False, "non-numeric close in series"
+    if len(vals) < 2:
+        return True, ""
+    try:
+        bound = float(max_step_ratio)
+    except (TypeError, ValueError):
+        bound = 3.0
+    if not (bound > 1.0):
+        bound = 3.0
+    for i in range(1, len(vals)):
+        prev, cur = vals[i - 1], vals[i]
+        if prev <= 0 or cur <= 0:
+            return False, f"non-positive close at index {i}"
+        ratio = detect_split_ratio(prev, cur, tolerance)
+        if ratio is not None:
+            return False, (f"split-shaped step at index {i}: "
+                           f"{prev:g} -> {cur:g} = {ratio:g}x share multiplier")
+        step = cur / prev if cur >= prev else prev / cur
+        if step >= bound:
+            return False, (f"implausible step at index {i}: "
+                           f"{prev:g} -> {cur:g} = {step:.1f}x")
+    return True, ""
+
+
 def reconcile_with_corporate_action(observed_ratio, action_multiplier,
                                     tolerance=0.05):
     """Confirm an inferred split against an authoritative corporate action.

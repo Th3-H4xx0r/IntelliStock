@@ -14211,6 +14211,34 @@ def _discover_stocks_from_momentum(
             features = _recent_price_features(data, sym)
             r20 = features.get("recent_return_20", 0.0)
             r60 = features.get("recent_return_60", 0.0)
+            # Same discontinuity guard as the overlay source below. BOTH sources
+            # need it: patching only one is how this repository has shipped
+            # inert levers before, and `price_history` is the source that feeds
+            # the LIVE path.
+            if bool(config.get("momentum_skip_discontinuous_series_enabled", False)):
+                try:
+                    from split_detect import returns_are_trustworthy
+                    _closes = []
+                    for _b in (data or {}).get(sym, []) or []:
+                        try:
+                            _c = float(_b.get("c"))
+                        except Exception:
+                            continue
+                        if _c > 0:
+                            _closes.append(_c)
+                    _ok, _why = returns_are_trustworthy(
+                        _closes[-62:] if len(_closes) > 62 else _closes,
+                        max_step_ratio=float(config.get(
+                            "momentum_discontinuity_step_ratio", 3.0) or 3.0),
+                    )
+                    if not _ok:
+                        _log(
+                            f"  Momentum discontinuity skip: {sym} — {_why}",
+                            "yellow",
+                        )
+                        continue
+                except Exception:
+                    pass
             if r20 >= min_20d or r60 >= min_60d:
                 # Z1.1: skip parabolic candidates
                 if (max_20d > 0 and r20 > max_20d) or (max_60d > 0 and r60 > max_60d):
@@ -14251,6 +14279,44 @@ def _discover_stocks_from_momentum(
                 if len(closes) < 6:
                     continue
                 latest = closes[-1]
+                # 2026-08-16: a return computed ACROSS a split (or across the
+                # seam where a stale cache chunk meets a fresh one) is not a
+                # small error, it is a different number entirely. AKTX reached
+                # this scan at 20d=+4554.2% in bt 453789; its movement summary
+                # read $0.12 -> $13.41 while the decision log quoted the name
+                # at $3.05 rising to $24.
+                #
+                # The momentum ceiling below is NOT this guard. It caps the
+                # RETURN, so it cannot separate a data artifact from a genuine
+                # big mover — and it discarded 102 distinct symbols across five
+                # runs against only 8 split-shaped ones. This looks at the
+                # STEP, which a real multi-week move never produces.
+                #
+                # DECLINES to rank; never restates a price. That is the line
+                # split_detect's header draws and the reason the neighbouring
+                # NEXUS_INFER_BAR_SPLITS path is off: inference carries a 65%
+                # false-positive rate, so it may gate a decision but must not
+                # rewrite prices. Skipping one candidate for one bar is the
+                # cheap side of that trade.
+                if bool(config.get("momentum_skip_discontinuous_series_enabled", False)):
+                    try:
+                        from split_detect import returns_are_trustworthy
+                        _win = closes[-62:] if len(closes) > 62 else closes
+                        _ok, _why = returns_are_trustworthy(
+                            _win,
+                            max_step_ratio=float(config.get(
+                                "momentum_discontinuity_step_ratio", 3.0) or 3.0),
+                        )
+                        if not _ok:
+                            _log(
+                                f"  Momentum discontinuity skip: {sym} — {_why}",
+                                "yellow",
+                            )
+                            continue
+                    except Exception:
+                        # Fail OPEN, exactly as corporate_actions does: a
+                        # detector that cannot run must not stop discovery.
+                        pass
                 r20 = ((latest - closes[-21]) / closes[-21] * 100.0) if len(closes) > 21 and closes[-21] > 0 else 0.0
                 # 2026-08-08: a 60d return we cannot compute is MISSING, not 0.0.
                 # With too few closes this silently returned 0.0 and the name

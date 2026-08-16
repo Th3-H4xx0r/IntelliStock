@@ -106,6 +106,34 @@ imported by nothing. **Wiring it is now the highest-leverage engineering task in
 because until it exists, config tuning — which is what the last several months have consisted of —
 cannot be measured.
 
+## 5a. The repo's OWN promotion gate agrees — 0 of 6
+
+`python3 scripts/assess_live_readiness.py` hands the evidence we actually have to the repository's
+own `evaluate_promotion` and prints the gate's reasons. It is not my judgement:
+
+```
+LIVE READINESS - alpaca-main (real money)
+state          : RESEARCH
+checks passed  : 0/6
+
+BLOCKING:
+  [FAIL] secrets              secret_migration, rollback
+  [FAIL] research_integrity   point_in_time_provenance, unseen_months, regime_count,
+                              sealed_holdout, median_repeat, max_drawdown, ...
+  [FAIL] execution_safety     lifecycle_chaos, dependency_chaos
+  [FAIL] risk_state           restart_state
+  [FAIL] operations           watchdog
+  [FAIL] paper_observation    paper_build, paper_days
+```
+
+Note `paper_observation` is itself a **blocking** gate, and `paper_days` is zero. The system will
+not promote anything to real money until a paper run has accumulated days — so "paper first" is not
+a preference I am imposing, it is the shortest path the gate allows.
+
+Most of the remaining failures are operational rather than strategic (`watchdog`, `restart_state`,
+`lifecycle_chaos`, secret rotation/rollback rehearsal). Those are days of work, not months, and
+they are worth doing precisely because they are the cheap half of the list.
+
 ## 6. If you want money at risk now
 
 The defensible version, in order:
