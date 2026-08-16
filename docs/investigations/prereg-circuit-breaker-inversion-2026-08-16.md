@@ -197,6 +197,28 @@ same-config dispersion exists and it is not fixable with salts.
 -leverage engineering task in the repository, because until it exists, no config lever can be
 measured, and tuning levers is what this project has been doing for months.
 
+**Shipped in the meantime so this cannot happen silently again.**
+`backend/pair_validity.py` + `scripts/check_pair_validity.py` score a pair's comparability
+BEFORE its delta is read, straight from the runs' own P&L blocks:
+
+```
+$ python3 scripts/check_pair_validity.py 333727 453789
+  shared         : AIOS, AXTI, MXL, SPY
+  control only   : AAOI, AEHR, AIFD, AIQ, BC, BOTZ, D, RIVN
+  treatment only : AKTX, ARGX, ETH, FCEL, MSFT, NVDA, STT, TEXU
+  overlap        : 20%  (floor 60%)
+  delta          : -1.28pp
+VERDICT: VOID — arms share 20% of their traded names; the return delta measures
+                which names discovery drew, not the lever            (exit 2)
+```
+
+`VOID` deliberately outranks `NOISE`: calling a contaminated pair "inside the noise floor"
+implies the arms WERE comparable and the lever did nothing, which is a stronger claim than
+the data supports. A −1.28pp delta invites exactly that phrasing, so the ordering is
+pinned by a test. An empty universe (a STOPPED run prints no P&L block) reads as VOID
+rather than as a clean 0% overlap, because reading a stopped run's P&L is a documented
+error here.
+
 ### Disposition of the flag
 
 `semantics_v2` stays **ON** on doc 195, and the reasoning is stated rather than buried: the legacy
