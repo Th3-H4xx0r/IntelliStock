@@ -69,9 +69,14 @@ class Observation:
         # different decision points, and without it re-processing a document
         # as crypto would silently rewrite the equity row in place
         # (`store.put_observations` writes with conflict="update").
+        # `decision` participates: without it a BUY and a SELL on the same
+        # symbol in the same bar collapse to one id, one row survives
+        # `conflict="update"`, and which one lands in the refused-vs-executed
+        # bucket becomes list-order dependent.
         return content_id("observation", {
             "run_id": self.run_id, "origin": self.origin, "venue": self.venue,
             "symbol": self.symbol, "as_of": self.as_of,
+            "decision": self.decision,
         })
 
     def to_doc(self) -> dict:

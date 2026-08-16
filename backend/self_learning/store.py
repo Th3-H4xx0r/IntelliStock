@@ -34,8 +34,16 @@ ROLLUPS = "LearningObservationRollups"
 FINDINGS = "LearningFindings"
 FUNNELS = "LearningFunnels"
 CONFIG = "LearningConfig"
+# Phase 2
+OUTCOMES = "LearningOutcomes"
+NOISE_FLOORS = "LearningNoiseFloors"
+EXPERIMENTS = "LearningExperiments"
+LEASE = "LearningLease"
 
-LEARNING_TABLES = (OBSERVATIONS, ROLLUPS, FINDINGS, FUNNELS, CONFIG)
+LEARNING_TABLES = (OBSERVATIONS, ROLLUPS, FINDINGS, FUNNELS, CONFIG,
+                   OUTCOMES, NOISE_FLOORS, EXPERIMENTS, LEASE)
+
+LEASE_DOC_ID = "backtest_lease"
 
 CONFIG_DOC_ID = "LearningConfig"
 
@@ -87,6 +95,18 @@ def ensure_tables(conn) -> None:
         if index not in idxs:
             r.db(DB_NAME).table(OBSERVATIONS).index_create(index).run(conn)
             r.db(DB_NAME).table(OBSERVATIONS).index_wait(index).run(conn)
+    out_idx = list(r.db(DB_NAME).table(OUTCOMES).index_list().run(conn))
+    # `as_of` is required for the retention RANGE delete. Without it the sweep
+    # degrades to a full-table scan-and-delete on the largest table here.
+    for index in ("run_id", "observation_id", "as_of"):
+        if index not in out_idx:
+            r.db(DB_NAME).table(OUTCOMES).index_create(index).run(conn)
+            r.db(DB_NAME).table(OUTCOMES).index_wait(index).run(conn)
+    exp_idx = list(r.db(DB_NAME).table(EXPERIMENTS).index_list().run(conn))
+    for index in ("status", "registered_at"):
+        if index not in exp_idx:
+            r.db(DB_NAME).table(EXPERIMENTS).index_create(index).run(conn)
+            r.db(DB_NAME).table(EXPERIMENTS).index_wait(index).run(conn)
     for table, index in ((FINDINGS, "detected_at"), (FUNNELS, "observed_at")):
         existing_idx = list(r.db(DB_NAME).table(table).index_list().run(conn))
         if index not in existing_idx:
@@ -261,5 +281,108 @@ def sweep_expired(conn, *, cutoff: str) -> int:
         return 0
     result = (r.db(DB_NAME).table(OBSERVATIONS)
               .between(r.minval, cutoff, index="as_of")
+              .delete().run(conn))
+    return int((result or {}).get("deleted") or 0)
+
+
+# ── Phase 2: outcomes, floors, experiments, lease ─────────────────────────────
+
+def put_outcomes(conn, outcomes) -> int:
+    """Outcomes share the observation TTL: they are derived from a raw row and
+    become meaningless once it expires."""
+    payloads = [o.to_doc() for o in (outcomes or []) if o.resolved]
+    if not payloads:
+        return 0
+    return _insert_chunked(conn, OUTCOMES, payloads)
+
+
+def put_noise_floor(conn, floor) -> None:
+    r.db(DB_NAME).table(NOISE_FLOORS).insert(
+        floor.to_doc(), conflict="update").run(conn)
+
+
+def get_noise_floor(conn, *, target, window_class):
+    return r.db(DB_NAME).table(NOISE_FLOORS).get(
+        f"{target}|{window_class}").run(conn)
+
+
+def list_noise_floors(conn, limit: int = 200) -> list:
+    limit = max(1, min(int(limit or 200), 1000))
+    rows = list(r.db(DB_NAME).table(NOISE_FLOORS).limit(limit).run(conn))
+    rows.sort(key=lambda d: (str(d.get("target") or ""),
+                             str(d.get("window_class") or "")))
+    return rows
+
+
+def put_experiment(conn, spec) -> None:
+    """Registered specs are immutable; only status and run ids may move.
+
+    A spec that vanishes when it fails turns the ledger into a highlight reel,
+    and the trial count that any multiple-comparisons correction depends on
+    would silently undercount.
+    """
+    doc = spec.to_doc() if hasattr(spec, "to_doc") else dict(spec)
+    doc.setdefault("status", "registered")
+    doc.setdefault("run_ids", [])
+    doc.setdefault("refusal_reason", "")
+    doc.setdefault("registered_at", "")
+    r.db(DB_NAME).table(EXPERIMENTS).insert(
+        doc,
+        # Status is MONOTONIC toward terminal and run_ids only ever grow.
+        # Re-registering an identical spec (same content hash) would otherwise
+        # reset a `failed` experiment to `registered` and wipe its run ids —
+        # which is exactly the "ledger becomes a highlight reel" failure this
+        # table exists to prevent, and it would silently undercount the trials
+        # any multiple-comparisons correction depends on.
+        conflict=lambda _id, old, new: old.merge({
+            "status": r.branch(
+                old["status"].default("registered").eq("registered"),
+                new["status"].default("registered"),
+                old["status"].default("registered")),
+            "run_ids": old["run_ids"].default([]).set_union(
+                new["run_ids"].default([])),
+            "refusal_reason": r.branch(
+                new["refusal_reason"].default("").eq(""),
+                old["refusal_reason"].default(""),
+                new["refusal_reason"].default("")),
+        }),
+    ).run(conn)
+
+
+def list_experiments(conn, limit: int = 100) -> list:
+    limit = max(1, min(int(limit or 100), 1000))
+    return list(r.db(DB_NAME).table(EXPERIMENTS)
+                .order_by(index=r.desc("registered_at")).limit(limit).run(conn))
+
+
+def get_lease(conn):
+    try:
+        return r.db(DB_NAME).table(LEASE).get(LEASE_DOC_ID).run(conn)
+    except Exception:
+        return None
+
+
+def put_lease(conn, lease_doc) -> None:
+    r.db(DB_NAME).table(LEASE).insert(
+        {**(lease_doc or {}), "id": LEASE_DOC_ID}, conflict="update").run(conn)
+
+
+def clear_lease(conn) -> None:
+    r.db(DB_NAME).table(LEASE).get(LEASE_DOC_ID).delete().run(conn)
+
+
+def sweep_expired_outcomes(conn, *, cutoff: str) -> int:
+    """Outcomes are keyed to observations; expire them on the same clock rather
+    than leaving orphans behind the observation TTL.
+
+    A RANGE delete on the `as_of` index, matching the observations sweep. The
+    lower bound is the empty string rather than `r.minval`, so an UNDATED row
+    (`as_of == ""`) is never swept — the same rule `retention` states: a parse
+    failure must not become data loss.
+    """
+    if not cutoff:
+        return 0
+    result = (r.db(DB_NAME).table(OUTCOMES)
+              .between("", cutoff, index="as_of", left_bound="open")
               .delete().run(conn))
     return int((result or {}).get("deleted") or 0)

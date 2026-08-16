@@ -8579,3 +8579,44 @@ def action_learning_acknowledge(conn, finding_id, status="acknowledged"):
     r.db(DB_NAME).table(store.FINDINGS).get(str(finding_id)).update(
         {"status": status}).run(conn)
     return {"id": str(finding_id), "status": status}
+
+
+# ── Self-learning Phase 2 reads (Measure) ──────────────────────────────────
+def action_learning_noise_floors(conn, limit=200):
+    """Which targets have a MEASURED dispersion floor, and which do not.
+
+    A target with no floor cannot promote anything, so this panel is the honest
+    answer to "can any of this be trusted yet".
+    """
+    from self_learning import store
+    store.ensure_tables(conn)
+    return {"floors": store.list_noise_floors(conn, limit=limit)}
+
+
+def action_learning_experiments(conn, limit=100):
+    """The pre-registration ledger, including refused and failed specs.
+
+    Terminal-but-unsuccessful specs stay visible on purpose: a ledger that drops
+    them is a highlight reel, and the trial count stops meaning anything.
+    """
+    from self_learning import store
+    store.ensure_tables(conn)
+    return {"experiments": store.list_experiments(conn, limit=limit)}
+
+
+def action_learning_outcomes(conn, run_id, limit=2000):
+    """Forward outcomes for one run, refusals included.
+
+    Reports `total` and `truncated` alongside the rows. Returning an
+    unannounced slice of a few thousand outcomes would let a caller compute a
+    median over an arbitrary sample and believe it was the population.
+    """
+    from self_learning import store
+    store.ensure_tables(conn)
+    limit = max(1, min(int(limit or 2000), 5000))
+    selection = r.db(DB_NAME).table(store.OUTCOMES).get_all(
+        str(run_id), index="run_id")
+    total = int(selection.count().run(conn) or 0)
+    rows = list(selection.order_by("as_of").limit(limit).run(conn))
+    return {"outcomes": rows, "total": total,
+            "truncated": bool(total > len(rows))}

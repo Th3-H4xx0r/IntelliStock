@@ -153,7 +153,10 @@ from interactive_utils import (
     action_learning_funnels,
     action_learning_acknowledge,
     action_learning_get_control,
+    action_learning_experiments,
     action_learning_levers,
+    action_learning_noise_floors,
+    action_learning_outcomes,
     action_learning_observations,
     action_learning_overview,
     action_learning_set_control,
@@ -3728,6 +3731,24 @@ def api_learning_funnels(limit: int = 100, conn=Depends(conn_dependency), curren
 def api_learning_observations(run_id: str, limit: int = 500, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Decision-level observations for one run, including the refusals."""
     return _run(action_learning_observations, conn, run_id, limit)
+
+
+@app.get("/learning/noise-floors", response_class=JSONResponse)
+def api_learning_noise_floors(limit: int = 200, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Measured dispersion per target. No floor means nothing is promotable."""
+    return _run(action_learning_noise_floors, conn, limit)
+
+
+@app.get("/learning/experiments", response_class=JSONResponse)
+def api_learning_experiments(limit: int = 100, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """The pre-registration ledger, refused and failed specs included."""
+    return _run(action_learning_experiments, conn, limit)
+
+
+@app.get("/learning/outcomes/{run_id}", response_class=JSONResponse)
+def api_learning_outcomes(run_id: str, limit: int = 2000, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Forward outcomes for one run, including the refusals."""
+    return _run(action_learning_outcomes, conn, run_id, limit)
 
 
 @app.get("/learning/levers", response_class=JSONResponse)

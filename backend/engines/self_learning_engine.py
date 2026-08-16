@@ -47,6 +47,7 @@ except Exception:                                    # pragma: no cover
         print(f"[SELF_LEARNING] {msg}")
 
 from rethink_changefeed import run_reconnecting_changefeed
+from self_learning import outcomes as learning_outcomes
 from self_learning import retention, store
 from self_learning.pipeline import process_backtest_document
 
@@ -97,10 +98,39 @@ def _process(conn, doc, config) -> None:
     if not result["observations"]:
         return
     written = store.put_observations(conn, result["observations"])
-    store.put_funnel(conn, result["run_id"], result["summary"],
+
+    # Phase 2: price the decisions, INCLUDING the ones a gate refused. Without
+    # this "it refused 134 names" stays a fact; with it, it becomes "those names
+    # went on to beat the benchmark by X", which is a finding.
+    persisted = store.persistable(result["observations"])
+    resolved = learning_outcomes.resolve(persisted, doc)
+    cost = learning_outcomes.refusal_cost(resolved, persisted)
+    summary = dict(result["summary"])
+    summary["refusal_cost"] = cost
+    # Unresolved outcomes are not persisted, so their COUNTS ride here — they
+    # are the denominator, and they are not randomly distributed.
+    summary["unresolved_outcomes"] = learning_outcomes.unresolved_reasons(resolved)
+
+    # The cheap, high-value writes go FIRST. `_handle_run` marks a run
+    # processed BEFORE calling this (deliberately, so one bad document cannot
+    # wedge the loop), which means an exception here is never retried. If the
+    # bulk outcome write went first, its failure would permanently destroy the
+    # funnel row and findings for this run — and `store.counts()` derives every
+    # operator-facing counter from the funnel table.
+    store.put_funnel(conn, result["run_id"], summary,
                      target=result["target"], observed_at=_run_time(doc))
     store.put_findings(conn, result["findings"])
-    summary = result["summary"]
+
+    # Only the scoring horizon is persisted. Three horizons x thousands of
+    # decisions x ~1000 historical runs is millions of rows, and PriceHistory
+    # at 2.3M rows already drove 17 restarts in 12 days on this host.
+    try:
+        scoring = [o for o in resolved
+                   if o.horizon_bars == learning_outcomes.SCORING_HORIZON_BARS]
+        store.put_outcomes(conn, scoring)
+    except Exception as exc:
+        _log(f"outcome write failed for run {result['run_id']}: "
+             f"{type(exc).__name__}: {exc}", "yellow")
     # Every lever in this project that shipped without its own log line became
     # unprovable. This one announces itself.
     _log(
@@ -108,9 +138,25 @@ def _process(conn, doc, config) -> None:
         f"rows={written} decided={summary['decided']} "
         f"executed={summary['executed']} refused={summary['refused']} "
         f"join={summary['trades_matched']}/{summary['trades_available']} "
-        f"findings={len(result['findings'])}",
+        f"gate_refused={summary.get('gate_refused', 0)} "
+        f"outcomes={len(resolved)} findings={len(result['findings'])}",
         "cyan",
     )
+    if cost.get("refusals_resolvable") and cost.get("refused_median_excess_pct") is not None:
+        _bought = cost.get("executed_median_excess_pct")
+        _bought_txt = "n/a" if _bought is None else f"{_bought:+.2f}pp"
+        _log(
+            f"REFUSAL COST run {result['run_id']}: {cost['refused_n']} refused "
+            f"BUY(s) had a median {cost['horizon_bars']}-bar excess of "
+            f"{cost['refused_median_excess_pct']:+.2f}pp vs {_bought_txt} for "
+            f"the ones it bought; by gate: {cost.get('by_gate') or {}}",
+            "yellow",
+        )
+    elif summary.get("unresolved_outcomes"):
+        # Silence here used to be ambiguous between "no refusals" and "the
+        # benchmark was missing so nothing could be scored". Say which.
+        _log(f"REFUSAL COST run {result['run_id']}: not scoreable — "
+             f"{summary['unresolved_outcomes']}", "yellow")
     for finding in result["findings"]:
         _log(f"FINDING [{finding.severity}] {finding.title}", "yellow")
 
@@ -145,9 +191,12 @@ def _maybe_sweep(conn, config) -> None:
         return
     try:
         deleted = store.sweep_expired(conn, cutoff=cutoff)
-        if deleted:
-            _log(f"RETENTION swept {deleted} observation(s) older than {cutoff}",
-                 "cyan")
+        # Outcomes are keyed to observations and expire on the same clock, or
+        # they become orphans that outlive the rows they describe.
+        deleted_outcomes = store.sweep_expired_outcomes(conn, cutoff=cutoff)
+        if deleted or deleted_outcomes:
+            _log(f"RETENTION swept {deleted} observation(s) and "
+                 f"{deleted_outcomes} outcome(s) older than {cutoff}", "cyan")
     except Exception as exc:
         _log(f"retention sweep failed: {type(exc).__name__}: {exc}", "yellow")
 

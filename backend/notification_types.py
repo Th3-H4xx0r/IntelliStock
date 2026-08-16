@@ -109,6 +109,35 @@ NOTIFICATION_TYPES = [
      "desc": "An LLM provider hit a rate limit", "channel": "notifications",
      "discord": True, "push": True, "prefixes": ["Claude Code rate limit"]},
 
+    # --- Self-Learning ---
+    # Approval requests PUSH by default and the rest do not: a proposal waiting
+    # at a live rung holds indefinitely, so a missed notification stalls the
+    # loop, whereas a finding can wait for the digest.
+    {"key": "learning_finding", "group": "Self-Learning", "label": "Learning finding",
+     "desc": "The self-learning guards raised a defect or insight",
+     "channel": "notifications", "discord": True, "push": False,
+     "prefixes": ["LEARNING FINDING ["]},
+    {"key": "learning_proposal", "group": "Self-Learning", "label": "Approval requested",
+     "desc": "A change is waiting for your approval before it is applied",
+     "channel": "notifications", "discord": True, "push": True,
+     "prefixes": ["LEARNING PROPOSAL ["]},
+    {"key": "learning_applied", "group": "Self-Learning", "label": "Change applied",
+     "desc": "The subsystem applied a change at some rung of the ladder",
+     "channel": "notifications", "discord": True, "push": True,
+     "prefixes": ["LEARNING APPLIED ["]},
+    {"key": "learning_demoted", "group": "Self-Learning", "label": "Change rolled back",
+     "desc": "A change was demoted and reverted automatically",
+     "channel": "notifications", "discord": True, "push": True,
+     "prefixes": ["LEARNING DEMOTED ["]},
+    {"key": "learning_inert", "group": "Self-Learning", "label": "Change proved inert",
+     "desc": "A treatment changed nothing — not testable as specified",
+     "channel": "notifications", "discord": True, "push": False,
+     "prefixes": ["LEARNING INERT ["]},
+    {"key": "learning_budget", "group": "Self-Learning", "label": "Learning budget",
+     "desc": "The self-learning spend ceiling was reached",
+     "channel": "notifications", "discord": True, "push": True,
+     "prefixes": ["LEARNING BUDGET ["]},
+
     # --- Fallback (hidden default) — never dropped ---
     {"key": "other", "group": "Other", "label": "Other notifications",
      "desc": "Anything not otherwise categorized", "channel": "notifications",
