@@ -530,13 +530,20 @@ def sweep_expired_outcomes(conn, *, cutoff: str) -> int:
 
 def resolved_config(conn) -> dict:
     """The config with each role's `*_llm_model_id` resolved into
-    provider/model/key by the existing Models-table resolver."""
+    provider/model/key by the existing Models-table resolver.
+
+    A resolution failure is RECORDED on the returned config rather than
+    swallowed. Silently returning the unresolved config made every role look
+    merely unconfigured, which is indistinguishable from the operator not
+    having set one — and sent an hour of debugging in the wrong direction.
+    """
     config = get_config(conn)
     try:
         from model_resolver import resolve_model_refs_in_config
         return resolve_model_refs_in_config(conn, config)
-    except Exception:
-        return config
+    except Exception as exc:
+        return {**config,
+                "_resolution_error": f"{type(exc).__name__}: {exc}"}
 
 
 def put_hypothesis(conn, hypothesis) -> None:

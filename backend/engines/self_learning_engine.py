@@ -303,7 +303,11 @@ def _execute_propose(conn, config, intent, now) -> None:
         _skip(conn, now,
               f"no generator model resolved — learning_generator_llm_model_id="
               f"{config.get('learning_generator_llm_model_id') or 'unset'!r}, "
-              f"resolved provider={generator.provider!r} model={generator.model!r}")
+              f"resolved provider={generator.provider!r} model={generator.model!r}"
+              + (f"; resolver error: {resolved['_resolution_error']}"
+                 if resolved.get("_resolution_error") else
+                 "; the Models row resolved to no provider — is "
+                 "INTELLISTOCK_CRED_KEY present in the engine container?"))
         return
 
     findings = store.list_findings(conn, limit=10)

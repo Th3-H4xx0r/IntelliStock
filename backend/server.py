@@ -1050,14 +1050,36 @@ def start_discover_container():
 
 
 def _self_learning_container_env():
-    """Build env dict for the Self-Learning container. It reads RethinkDB only —
-    no broker keys, no LLM keys: Phase 1 observes and calls nothing outward."""
+    """Build env dict for the Self-Learning container.
+
+    Phase 1 observed and called nothing outward, so this passed RethinkDB
+    coordinates and deliberately nothing else. Phase 3 onward calls LLMs, and
+    the stored model credentials are Fernet-encrypted — without
+    INTELLISTOCK_CRED_KEY the resolver cannot decrypt them, every role resolves
+    to an empty provider, and the engine reports "no generator model resolved"
+    while the API (which has the key) shows all four roles configured. That
+    exact split is what made the loop look broken rather than unconfigured.
+
+    Broker keys are still NOT passed: the engine never places an order.
+    """
     load_dotenv(os.path.join(BACKEND_DIR, '.env'))
     load_dotenv(os.path.join(os.path.dirname(BACKEND_DIR), '.env'))
-    return {
+    env = {
         'RETHINKDB_HOST': os.environ.get('RETHINKDB_HOST', RETHINKDB_HOST),
         'RETHINKDB_PORT': str(RETHINKDB_PORT),
     }
+    for key in (
+        # Decrypts the Models-table credentials.
+        'INTELLISTOCK_CRED_KEY',
+        # Provider fallbacks for a role whose Models row carries no inline key.
+        'OPENROUTER_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY',
+        'ANTHROPIC_API_KEY', 'DEEPSEEK_API_KEY', 'AZURE_OPENAI_API_KEY',
+        'AZURE_OPENAI_ENDPOINT', 'OLLAMA_BASE_URL',
+    ):
+        value = os.environ.get(key)
+        if value is not None:
+            env[key] = value
+    return env
 
 
 def start_self_learning_container():
