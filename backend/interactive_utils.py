@@ -8854,3 +8854,30 @@ def action_learning_llm_usage(conn, limit=500):
     from self_learning import store
     store.ensure_tables(conn)
     return store.llm_usage(conn, limit=limit)
+
+
+def action_learning_activity(conn):
+    """Which role calls are in flight right now.
+
+    Polled by the tab so a model call in progress shows as a spinner on the
+    finding and ladder step it belongs to, instead of the operator staring at
+    an unchanged screen wondering whether anything is happening.
+    """
+    from datetime import datetime, timezone
+    from self_learning import store
+    store.ensure_tables(conn)
+    rows = store.list_activity(
+        conn, now_iso=datetime.now(timezone.utc).isoformat())
+    return {"activity": rows, "busy": any(x.get("active") for x in rows)}
+
+
+def action_learning_purge(conn, confirm=False):
+    """Delete the subsystem's derived data so it re-observes from scratch.
+
+    Settings — mode, budgets, the document allowlist and the four role models —
+    are KEPT, as is the shared LLMUsage ledger. Only what the subsystem itself
+    derived is removed.
+    """
+    from self_learning import store
+    store.ensure_tables(conn)
+    return store.purge(conn, confirm=bool(confirm))

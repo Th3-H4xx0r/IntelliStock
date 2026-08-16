@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -65,6 +66,13 @@ _CRYPTO_HINTS = ("crypto", "coin")
 _SWEEP_INTERVAL_SECONDS = 6 * 3600
 
 _last_sweep = 0.0
+
+# The changefeed fires for existing rows once and then only on change, so with
+# every completed run already processed the loop would never turn again — which
+# is exactly what an operator saw: findings recorded, then nothing, forever.
+# The design always called for "event-driven PLUS a slow heartbeat"; this is
+# the heartbeat.
+_TURN_INTERVAL_SECONDS = 120
 
 
 def _now_iso() -> str:
@@ -294,7 +302,16 @@ def _execute_propose(conn, config, intent, now) -> None:
         findings=[finding],
         rejected=learning_hypotheses.prior_rejections(ledger, target=target))
 
-    result = learning_llm.call_role(GENERATOR, resolved, system, user)
+    # Beacon: the tab polls this to show a live spinner on the finding whose
+    # hypothesis is being generated, rather than leaving the operator to guess
+    # whether a model call is in flight.
+    store.begin_activity(conn, role=GENERATOR, target=target,
+                         finding_id=str(finding.get("id") or ""),
+                         step="PROPOSED", at=now)
+    try:
+        result = learning_llm.call_role(GENERATOR, resolved, system, user)
+    finally:
+        store.end_activity(conn, role=GENERATOR)
     if not result.ok:
         _log(f"PROPOSE failed — {result.error}", "red")
         return
@@ -450,6 +467,30 @@ def main() -> None:
             _handle_run(c, run_id, new_val.get("status"), processed)
         except Exception as exc:
             _log(f"change handler error: {type(exc).__name__}: {exc}", "red")
+
+    def _heartbeat():
+        """Turn on a timer as well as on an event."""
+        beat_conn = None
+        while True:
+            time.sleep(_TURN_INTERVAL_SECONDS)
+            try:
+                if beat_conn is None:
+                    beat_conn = store.get_conn()
+                if not _should_run(beat_conn):
+                    continue
+                config = store.get_config(beat_conn)
+                _plan_and_log_turn(beat_conn, config)
+                _maybe_sweep(beat_conn, config)
+            except Exception as exc:
+                _log(f"heartbeat error: {type(exc).__name__}: {exc}", "yellow")
+                try:
+                    beat_conn.close()
+                except Exception:
+                    pass
+                beat_conn = None
+
+    threading.Thread(target=_heartbeat, daemon=True).start()
+    _log(f"Heartbeat started — a turn every {_TURN_INTERVAL_SECONDS}s", "green")
 
     try:
         conn.close()

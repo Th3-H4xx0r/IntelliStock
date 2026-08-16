@@ -120,3 +120,29 @@ def test_a_run_with_no_identifiable_instance_is_not_silently_included():
 def test_the_alternate_instance_field_is_honoured():
     from self_learning.watch import is_watched
     assert is_watched({"backtest_instance_id": "test"}, ["test"]) is True
+
+
+# ── Purge scope ──────────────────────────────────────────────────────────────
+
+def test_purge_refuses_without_an_explicit_confirm():
+    from self_learning.store import purge
+    with pytest.raises(ValueError, match="confirm=True"):
+        purge(None, confirm=False)
+
+
+def test_purge_never_touches_the_config_or_the_shared_usage_table():
+    """Wiping the config would take the operator's mode, budgets, allowlist and
+    four configured role models with it, which is not what "delete the learning
+    data" means. LLMUsage is shared with the rest of the app."""
+    from self_learning.store import CONFIG, PURGEABLE_TABLES
+    assert CONFIG not in PURGEABLE_TABLES
+    assert "LLMUsage" not in PURGEABLE_TABLES
+
+
+def test_purge_covers_every_derived_table():
+    """A table left out would survive the purge and silently contradict the
+    fresh data around it."""
+    from self_learning.store import (
+        CONFIG, LEARNING_TABLES, PURGEABLE_TABLES,
+    )
+    assert set(LEARNING_TABLES) - set(PURGEABLE_TABLES) == {CONFIG}

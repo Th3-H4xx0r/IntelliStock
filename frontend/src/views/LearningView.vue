@@ -35,10 +35,45 @@ const saveOk     = ref('')
 const draft      = ref({})
 const targets    = ref(null)
 const llmUsage   = ref(null)
+const activity   = ref({ activity: [], busy: false })
+
+// Pagination. Every one of these lists grows without bound — 109 observed runs
+// on day one — and an unpaged page is unusable on a phone.
+const PAGE = 8
+const page = ref({ findings: 1, funnels: 1, hypotheses: 1, intents: 1, approvals: 1 })
+
+function paged(rows, key) {
+  const list = rows || []
+  const start = (page.value[key] - 1) * PAGE
+  return list.slice(start, start + PAGE)
+}
+function pageCount(rows) {
+  return Math.max(1, Math.ceil((rows || []).length / PAGE))
+}
+function turnPage(key, delta, rows) {
+  const next = page.value[key] + delta
+  if (next >= 1 && next <= pageCount(rows)) page.value[key] = next
+}
+
+/// Is a model call in flight for this finding right now?
+function busyFor(findingId) {
+  return (activity.value?.activity || []).some(
+    (a) => a.active && a.finding_id === findingId)
+}
+function busyStep(findingId, step) {
+  return (activity.value?.activity || []).some(
+    (a) => a.active && a.finding_id === findingId && a.step === step)
+}
+function busyRole(findingId) {
+  const hit = (activity.value?.activity || []).find(
+    (a) => a.active && a.finding_id === findingId)
+  return hit?.role || ''
+}
 const loading    = ref(true)
 const loadError  = ref('')
 const openThread = ref(null)      // the finding whose ladder stepper is expanded
 let pollTimer = null
+let activityTimer = null
 
 // The six rungs of the promotion ladder. Phase 1 populates only the detection
 // step; the rest render locked so the UI never implies an autonomy that is not
@@ -109,6 +144,7 @@ async function load() {
     getJson('/models'),
     getJson('/learning/targets'),
     getJson('/learning/llm-usage'),
+    getJson('/learning/activity'),
   ])
   const failures = results.filter((r) => r.status === 'rejected')
 
@@ -137,6 +173,7 @@ async function load() {
   if (results[11].status === 'fulfilled') models.value = results[11].value?.models || []
   if (results[12].status === 'fulfilled') targets.value = results[12].value || null
   if (results[13].status === 'fulfilled') llmUsage.value = results[13].value || null
+  if (results[14].status === 'fulfilled') activity.value = results[14].value || activity.value
 
   loadError.value = failures.length
     ? failures.map((r) => r.reason?.message || 'request failed').join('; ')
@@ -148,6 +185,10 @@ function stopPolling() {
   if (pollTimer) {
     clearInterval(pollTimer)
     pollTimer = null
+  }
+  if (activityTimer) {
+    clearInterval(activityTimer)
+    activityTimer = null
   }
 }
 
@@ -255,9 +296,17 @@ function toggleThread(finding) {
   openThread.value = openThread.value === finding.id ? null : finding.id
 }
 
+async function pollActivity() {
+  try {
+    activity.value = await getJson('/learning/activity')
+  } catch (_e) { /* the main poll reports errors */ }
+}
+
 onMounted(() => {
   load()
   pollTimer = setInterval(load, 30000)
+  // A spinner that updates every 30s is not a spinner.
+  activityTimer = setInterval(pollActivity, 3000)
 })
 
 onUnmounted(stopPolling)
@@ -609,7 +658,7 @@ onUnmounted(stopPolling)
         </div>
 
         <div class="space-y-2">
-          <div v-for="a in approvals.pending" :key="a.id"
+          <div v-for="a in paged(approvals.pending, 'approvals')" :key="a.id"
                class="rounded-lg border px-4 py-3"
                :class="a.holds_forever
                  ? 'border-rose-500/30 bg-rose-500/5'
@@ -642,6 +691,20 @@ onUnmounted(stopPolling)
               </div>
             </div>
           </div>
+        </div>
+
+        <div v-if="pageCount(approvals.pending) > 1" class="flex items-center justify-center gap-3 mt-3">
+          <button @click="turnPage('approvals', -1, approvals.pending)" :disabled="page.approvals === 1"
+                  class="px-2.5 py-1 rounded-lg text-xs border border-slate-700 bg-slate-800/60 text-slate-300 disabled:opacity-40">
+            Prev
+          </button>
+          <span class="text-[11px] text-slate-500">
+            {{ page.approvals }} / {{ pageCount(approvals.pending) }} · {{ (approvals.pending || []).length }} total
+          </span>
+          <button @click="turnPage('approvals', 1, approvals.pending)" :disabled="page.approvals === pageCount(approvals.pending)"
+                  class="px-2.5 py-1 rounded-lg text-xs border border-slate-700 bg-slate-800/60 text-slate-300 disabled:opacity-40">
+            Next
+          </button>
         </div>
       </section>
 
@@ -697,7 +760,7 @@ onUnmounted(stopPolling)
         </div>
 
         <div class="space-y-2">
-          <div v-for="f in findings" :key="f.id"
+          <div v-for="f in paged(findings, 'findings')" :key="f.id"
                class="rounded-lg border border-slate-800 bg-slate-900/40 overflow-hidden">
             <button class="w-full text-left px-4 py-3 hover:bg-slate-900/70 transition-colors"
                     @click="toggleThread(f)">
@@ -711,6 +774,11 @@ onUnmounted(stopPolling)
                   <h3 class="text-sm font-semibold text-slate-100 mt-1">{{ f.title }}</h3>
                   <p class="text-xs text-slate-400 mt-1">{{ f.detail }}</p>
                 </div>
+                <span v-if="busyFor(f.id)"
+                      class="shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border text-violet-300 bg-violet-500/10 border-violet-500/30">
+                  <span class="size-1.5 rounded-full bg-violet-400 animate-pulse"></span>
+                  {{ busyRole(f.id) }} thinking…
+                </span>
                 <span class="material-symbols-outlined text-slate-600 text-[18px] shrink-0">
                   {{ openThread === f.id ? 'expand_less' : 'expand_more' }}
                 </span>
@@ -731,14 +799,39 @@ onUnmounted(stopPolling)
                   <pre class="mt-2 text-[10px] text-slate-400 bg-slate-950/60 rounded p-2 overflow-x-auto">{{ JSON.stringify(f.evidence, null, 2) }}</pre>
                 </li>
                 <li v-for="rung in LADDER" :key="rung.key" class="ml-4 pb-4">
-                  <span class="absolute -left-[5px] mt-1 size-2.5 rounded-full bg-slate-700"></span>
-                  <div class="text-xs font-semibold text-slate-500">{{ rung.label }}</div>
+                  <span class="absolute -left-[5px] mt-1 size-2.5 rounded-full"
+                        :class="busyStep(f.id, rung.key)
+                          ? 'bg-violet-400 animate-pulse'
+                          : 'bg-slate-700'"></span>
+                  <div class="text-xs font-semibold"
+                       :class="busyStep(f.id, rung.key) ? 'text-violet-300' : 'text-slate-500'">
+                    {{ rung.label }}
+                  </div>
                   <div class="text-[11px] text-slate-600">{{ rung.hint }}</div>
-                  <div class="text-[10px] text-slate-700 mt-0.5">not reached — the subsystem observes only</div>
+                  <div v-if="busyStep(f.id, rung.key)"
+                       class="text-[10px] text-violet-300 mt-0.5 flex items-center gap-1">
+                    <span class="size-1.5 rounded-full bg-violet-400 animate-pulse"></span>
+                    {{ busyRole(f.id) }} working on this step…
+                  </div>
+                  <div v-else class="text-[10px] text-slate-700 mt-0.5">not reached yet</div>
                 </li>
               </ol>
             </div>
           </div>
+        </div>
+
+        <div v-if="pageCount(findings) > 1" class="flex items-center justify-center gap-3 mt-3">
+          <button @click="turnPage('findings', -1, findings)" :disabled="page.findings === 1"
+                  class="px-2.5 py-1 rounded-lg text-xs border border-slate-700 bg-slate-800/60 text-slate-300 disabled:opacity-40">
+            Prev
+          </button>
+          <span class="text-[11px] text-slate-500">
+            {{ page.findings }} / {{ pageCount(findings) }} · {{ (findings || []).length }} total
+          </span>
+          <button @click="turnPage('findings', 1, findings)" :disabled="page.findings === pageCount(findings)"
+                  class="px-2.5 py-1 rounded-lg text-xs border border-slate-700 bg-slate-800/60 text-slate-300 disabled:opacity-40">
+            Next
+          </button>
         </div>
       </section>
 
@@ -820,7 +913,7 @@ onUnmounted(stopPolling)
           <p class="text-sm text-slate-400">No hypotheses yet.</p>
         </div>
         <div v-else class="space-y-2">
-          <div v-for="h in hypotheses" :key="h.id"
+          <div v-for="h in paged(hypotheses, 'hypotheses')" :key="h.id"
                class="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-3">
             <div class="flex items-center gap-2 flex-wrap">
               <span class="px-2 py-0.5 rounded-full text-[10px] font-bold border"
@@ -843,6 +936,20 @@ onUnmounted(stopPolling)
             </p>
           </div>
         </div>
+
+        <div v-if="pageCount(hypotheses) > 1" class="flex items-center justify-center gap-3 mt-3">
+          <button @click="turnPage('hypotheses', -1, hypotheses)" :disabled="page.hypotheses === 1"
+                  class="px-2.5 py-1 rounded-lg text-xs border border-slate-700 bg-slate-800/60 text-slate-300 disabled:opacity-40">
+            Prev
+          </button>
+          <span class="text-[11px] text-slate-500">
+            {{ page.hypotheses }} / {{ pageCount(hypotheses) }} · {{ (hypotheses || []).length }} total
+          </span>
+          <button @click="turnPage('hypotheses', 1, hypotheses)" :disabled="page.hypotheses === pageCount(hypotheses)"
+                  class="px-2.5 py-1 rounded-lg text-xs border border-slate-700 bg-slate-800/60 text-slate-300 disabled:opacity-40">
+            Next
+          </button>
+        </div>
       </section>
 
       <!-- What the loop decided, and why -->
@@ -857,7 +964,7 @@ onUnmounted(stopPolling)
           <p class="text-sm text-slate-400">The loop has not run a turn yet.</p>
         </div>
         <div v-else class="rounded-lg border border-slate-800 bg-slate-900/40 divide-y divide-slate-800/60">
-          <div v-for="(i, idx) in intents" :key="idx" class="px-4 py-2">
+          <div v-for="(i, idx) in paged(intents, 'intents')" :key="idx" class="px-4 py-2">
             <div class="flex items-center gap-2 flex-wrap">
               <span class="px-2 py-0.5 rounded text-[10px] font-mono border border-slate-700 text-slate-300">
                 {{ i.kind }}
@@ -868,6 +975,20 @@ onUnmounted(stopPolling)
             </div>
             <p class="text-xs text-slate-400 mt-1">{{ i.reason }}</p>
           </div>
+        </div>
+
+        <div v-if="pageCount(intents) > 1" class="flex items-center justify-center gap-3 mt-3">
+          <button @click="turnPage('intents', -1, intents)" :disabled="page.intents === 1"
+                  class="px-2.5 py-1 rounded-lg text-xs border border-slate-700 bg-slate-800/60 text-slate-300 disabled:opacity-40">
+            Prev
+          </button>
+          <span class="text-[11px] text-slate-500">
+            {{ page.intents }} / {{ pageCount(intents) }} · {{ (intents || []).length }} total
+          </span>
+          <button @click="turnPage('intents', 1, intents)" :disabled="page.intents === pageCount(intents)"
+                  class="px-2.5 py-1 rounded-lg text-xs border border-slate-700 bg-slate-800/60 text-slate-300 disabled:opacity-40">
+            Next
+          </button>
         </div>
       </section>
 
@@ -893,7 +1014,7 @@ onUnmounted(stopPolling)
               </tr>
             </thead>
             <tbody>
-              <tr v-for="row in funnelRows" :key="row.id" class="border-b border-slate-800/60 last:border-0">
+              <tr v-for="row in paged(funnelRows, 'funnels')" :key="row.id" class="border-b border-slate-800/60 last:border-0">
                 <td class="px-3 py-2 font-mono text-slate-300">{{ row.run_id }}</td>
                 <td class="px-3 py-2 text-slate-400">{{ row.target }}</td>
                 <td class="px-3 py-2 text-right text-slate-300">{{ row.decided }}</td>
@@ -906,6 +1027,20 @@ onUnmounted(stopPolling)
               </tr>
             </tbody>
           </table>
+        </div>
+
+        <div v-if="pageCount(funnelRows) > 1" class="flex items-center justify-center gap-3 mt-3">
+          <button @click="turnPage('funnels', -1, funnelRows)" :disabled="page.funnels === 1"
+                  class="px-2.5 py-1 rounded-lg text-xs border border-slate-700 bg-slate-800/60 text-slate-300 disabled:opacity-40">
+            Prev
+          </button>
+          <span class="text-[11px] text-slate-500">
+            {{ page.funnels }} / {{ pageCount(funnelRows) }} · {{ (funnelRows || []).length }} total
+          </span>
+          <button @click="turnPage('funnels', 1, funnelRows)" :disabled="page.funnels === pageCount(funnelRows)"
+                  class="px-2.5 py-1 rounded-lg text-xs border border-slate-700 bg-slate-800/60 text-slate-300 disabled:opacity-40">
+            Next
+          </button>
         </div>
       </section>
 

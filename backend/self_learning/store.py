@@ -44,13 +44,14 @@ HYPOTHESES = "LearningHypotheses"
 INTENTS = "LearningIntents"
 BUDGET_LEDGER = "LearningBudgetLedger"
 ACTIVE_CHANGES = "LearningActiveChanges"
+ACTIVITY = "LearningActivity"
 APPROVALS = "LearningApprovals"
 REPORTS = "LearningReports"
 
 LEARNING_TABLES = (OBSERVATIONS, ROLLUPS, FINDINGS, FUNNELS, CONFIG,
                    OUTCOMES, NOISE_FLOORS, EXPERIMENTS, LEASE,
                    HYPOTHESES, APPROVALS, REPORTS,
-                   INTENTS, BUDGET_LEDGER, ACTIVE_CHANGES)
+                   INTENTS, BUDGET_LEDGER, ACTIVE_CHANGES, ACTIVITY)
 
 LEASE_DOC_ID = "backtest_lease"
 
@@ -710,3 +711,96 @@ def llm_usage(conn, *, limit: int = 500) -> dict:
             "ok": bool(row.get("ok", True)),
         } for row in recent],
     }
+
+
+# ── Live activity beacon ──────────────────────────────────────────────────────
+# One row per in-flight role call. The tab polls it to show a spinner on the
+# specific finding and ladder step being worked on, so "thinking" is visible
+# rather than inferred from a screen that has not changed.
+
+ACTIVITY_STALE_SECONDS = 600
+
+
+def begin_activity(conn, *, role, target="", finding_id="", step="", at="") -> None:
+    try:
+        r.db(DB_NAME).table(ACTIVITY).insert(
+            {"id": str(role), "role": str(role), "target": str(target),
+             "finding_id": str(finding_id), "step": str(step),
+             "started_at": str(at), "active": True},
+            conflict="update").run(conn)
+    except Exception:
+        pass
+
+
+def end_activity(conn, *, role) -> None:
+    try:
+        r.db(DB_NAME).table(ACTIVITY).get(str(role)).update(
+            {"active": False}).run(conn)
+    except Exception:
+        pass
+
+
+def list_activity(conn, *, now_iso="") -> list:
+    """In-flight role calls.
+
+    A row older than the stale window is reported inactive rather than left
+    spinning forever: a crashed engine must not leave the UI claiming it is
+    still thinking.
+    """
+    from self_learning.timeline import to_naive_utc
+    try:
+        rows = list(r.db(DB_NAME).table(ACTIVITY).run(conn))
+    except Exception:
+        return []
+    now = to_naive_utc(now_iso)
+    out = []
+    for row in rows:
+        active = bool(row.get("active"))
+        started = to_naive_utc(row.get("started_at"))
+        if active and now and started and \
+                (now - started).total_seconds() > ACTIVITY_STALE_SECONDS:
+            active = False
+        out.append({"role": row.get("role"), "target": row.get("target"),
+                    "finding_id": row.get("finding_id"), "step": row.get("step"),
+                    "started_at": row.get("started_at"), "active": active})
+    return out
+
+
+# ── Purge ─────────────────────────────────────────────────────────────────────
+
+# Everything the subsystem DERIVED. Deliberately excludes CONFIG — wiping it
+# would take the operator's mode, budgets, allowlist and four configured role
+# models with it, which is not what "delete the learning data" means. Also
+# excludes LLMUsage, which is shared with the rest of the app.
+PURGEABLE_TABLES = (OBSERVATIONS, ROLLUPS, FINDINGS, FUNNELS, OUTCOMES,
+                    NOISE_FLOORS, EXPERIMENTS, LEASE, HYPOTHESES, APPROVALS,
+                    REPORTS, INTENTS, BUDGET_LEDGER, ACTIVE_CHANGES, ACTIVITY)
+
+
+def purge(conn, *, confirm: bool = False) -> dict:
+    """Delete everything the subsystem derived, so it can observe from scratch.
+
+    `confirm` must be passed explicitly. The watermark in CONFIG is cleared too
+    — without that the engine would consider every run already processed and
+    the purge would leave it permanently idle rather than re-observing.
+    """
+    if not confirm:
+        raise ValueError("purge requires confirm=True")
+    deleted = {}
+    for table in PURGEABLE_TABLES:
+        try:
+            result = r.db(DB_NAME).table(table).delete().run(conn)
+            deleted[table] = int((result or {}).get("deleted") or 0)
+        except Exception as exc:
+            deleted[table] = f"error: {type(exc).__name__}"
+    try:
+        r.db(DB_NAME).table(CONFIG).get(CONFIG_DOC_ID).update(
+            {"processed_run_ids": []}).run(conn)
+        deleted["_watermark_cleared"] = True
+    except Exception:
+        deleted["_watermark_cleared"] = False
+    return {"deleted": deleted,
+            "kept": [CONFIG, "LLMUsage"],
+            "note": ("settings, role models and the LLM usage ledger were kept; "
+                     "the processed-run watermark was cleared so every "
+                     "completed run is observed again")}

@@ -153,11 +153,13 @@ from interactive_utils import (
     action_learning_funnels,
     action_learning_acknowledge,
     action_learning_get_control,
+    action_learning_activity,
     action_learning_approvals,
     action_learning_budget,
     action_learning_intents,
     action_learning_llm_usage,
     action_learning_permissions,
+    action_learning_purge,
     action_learning_decide_approval,
     action_learning_experiments,
     action_learning_hypotheses,
@@ -784,6 +786,10 @@ class LearningControlBody(BaseModel):
 
 class LearningStatusBody(BaseModel):
     status: str = "acknowledged"
+
+
+class LearningPurgeBody(BaseModel):
+    confirm: bool = False
 
 
 class LearningApprovalBody(BaseModel):
@@ -3746,6 +3752,19 @@ def api_learning_funnels(limit: int = 100, conn=Depends(conn_dependency), curren
 def api_learning_observations(run_id: str, limit: int = 500, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     """Decision-level observations for one run, including the refusals."""
     return _run(action_learning_observations, conn, run_id, limit)
+
+
+@app.post("/learning/purge", response_class=JSONResponse)
+def api_learning_purge(body: LearningPurgeBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """Delete derived learning data so the subsystem re-observes from scratch.
+    Settings and the four configured role models are kept."""
+    return _run(action_learning_purge, conn, body.confirm)
+
+
+@app.get("/learning/activity", response_class=JSONResponse)
+def api_learning_activity(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """In-flight LLM role calls, for the live spinner."""
+    return _run(action_learning_activity, conn)
 
 
 @app.get("/learning/intents", response_class=JSONResponse)
