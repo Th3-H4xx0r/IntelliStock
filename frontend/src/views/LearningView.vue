@@ -25,6 +25,15 @@ const intents    = ref([])
 const budget     = ref(null)
 const roles      = ref(null)
 const deciding   = ref('')
+const control    = ref(null)      // { running, config }
+const permissions= ref(null)
+const models     = ref([])
+const showSettings = ref(false)
+const busy       = ref('')
+const saveError  = ref('')
+const saveOk     = ref('')
+const draft      = ref({})
+const newDoc     = ref('')
 const loading    = ref(true)
 const loadError  = ref('')
 const openThread = ref(null)      // the finding whose ladder stepper is expanded
@@ -94,6 +103,9 @@ async function load() {
     getJson('/learning/intents?limit=60'),
     getJson('/learning/budget'),
     getJson('/learning/roles'),
+    getJson('/learning/control'),
+    getJson('/learning/permissions'),
+    getJson('/models'),
   ])
   const failures = results.filter((r) => r.status === 'rejected')
 
@@ -114,6 +126,12 @@ async function load() {
   if (results[6].status === 'fulfilled') intents.value = results[6].value?.intents || []
   if (results[7].status === 'fulfilled') budget.value = results[7].value || null
   if (results[8].status === 'fulfilled') roles.value = results[8].value || null
+  if (results[9].status === 'fulfilled') {
+    control.value = results[9].value || null
+    if (!showSettings.value) resetDraft()
+  }
+  if (results[10].status === 'fulfilled') permissions.value = results[10].value || null
+  if (results[11].status === 'fulfilled') models.value = results[11].value?.models || []
 
   loadError.value = failures.length
     ? failures.map((r) => r.reason?.message || 'request failed').join('; ')
@@ -126,6 +144,89 @@ function stopPolling() {
     clearInterval(pollTimer)
     pollTimer = null
   }
+}
+
+const ROLE_KEYS = [
+  ['analyst',   'learning_analyst_llm_model_id',   'Narrates what happened. Runs often — a cheap model is right.'],
+  ['generator', 'learning_generator_llm_model_id', 'Invents hypotheses. Worth your strongest model.'],
+  ['coder',     'learning_coder_llm_model_id',     'Writes patches for confirmed hypotheses.'],
+  ['judge',     'learning_judge_llm_model_id',     'Confirms or vetoes. Cannot promote past the statistics.'],
+]
+
+const NUMBER_FIELDS = [
+  ['daily_budget_usd',      'Daily spend ceiling ($)',   '0 means the loop will not spend at all.'],
+  ['monthly_budget_usd',    'Monthly spend ceiling ($)', '0 means the loop will not spend at all.'],
+  ['breaker_limit_pct',     'Breaker limit (%)',         'Attributable drawdown that unwinds the whole live tier. 0 means it never fires.'],
+  ['approval_timeout_hours','Approval timeout (hours)',  'Sub-live proposals auto-proceed after this. Live rungs ignore it and wait for you.'],
+  ['demote_after',          'Demote after N failures',   'Consecutive sub-bar evaluations before a change is reverted.'],
+  ['retain_days',           'Keep raw observations (days)', 'Rolled-up aggregates are kept regardless.'],
+  ['variance_threshold',    'Variance guard threshold',  'A field where this share of samples take one value raises a defect finding.'],
+  ['variance_min_n',        'Variance guard minimum n',  'Below this many samples, saturation is a small sample rather than a constant.'],
+]
+
+function resetDraft() {
+  const cfg = control.value?.config || {}
+  draft.value = {
+    mode: cfg.mode || 'observe',
+    enabled: cfg.enabled !== false,
+    document_allowlist: [...(cfg.document_allowlist || [])],
+    permission_matrix: JSON.parse(JSON.stringify(
+      permissions.value?.matrix || cfg.permission_matrix || {})),
+    ...Object.fromEntries(NUMBER_FIELDS.map(([k]) => [k, cfg[k] ?? 0])),
+    ...Object.fromEntries(ROLE_KEYS.map(([, k]) => [k, cfg[k] || ''])),
+  }
+}
+
+async function postControl(body, label) {
+  busy.value = label
+  saveError.value = ''
+  saveOk.value = ''
+  try {
+    const res = await fetch(`${API_BASE}/learning/control`, {
+      method: 'POST', headers: authHeaders(), body: JSON.stringify(body),
+    })
+    if (!res.ok) {
+      let detail = `Request failed (${res.status})`
+      try { detail = (await res.json())?.detail || detail } catch (_e) { /* keep */ }
+      throw new Error(detail)
+    }
+    control.value = await res.json()
+    saveOk.value = label === 'settings' ? 'Settings saved.' : 'Engine updated.'
+    await load()
+  } catch (err) {
+    saveError.value = err?.message || 'Could not apply that change'
+  } finally {
+    busy.value = ''
+  }
+}
+
+const engineRunning = computed(() => !!control.value?.running)
+
+function toggleEngine() {
+  postControl({ running: !engineRunning.value }, 'engine')
+}
+
+function saveSettings() {
+  postControl({ config: { ...draft.value } }, 'settings')
+}
+
+function addDocument() {
+  const id = String(newDoc.value || '').trim()
+  if (!id) return
+  if (!draft.value.document_allowlist.includes(id)) {
+    draft.value.document_allowlist.push(id)
+  }
+  newDoc.value = ''
+}
+
+function removeDocument(id) {
+  draft.value.document_allowlist =
+    draft.value.document_allowlist.filter((d) => d !== id)
+}
+
+function openSettings() {
+  resetDraft()
+  showSettings.value = true
 }
 
 async function decide(approval, decision) {
@@ -180,17 +281,46 @@ onUnmounted(stopPolling)
           </span>
         </div>
 
-        <div v-if="overview" class="mb-3">
+        <!-- Controls -->
+        <div class="mb-3 flex items-center gap-2 flex-wrap">
           <span
             class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold border"
-            :class="overview.engine_running
+            :class="engineRunning
               ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20'
               : 'text-slate-500 bg-slate-500/10 border-slate-700'"
           >
             <span class="size-1.5 rounded-full"
-                  :class="overview.engine_running ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'"></span>
-            {{ overview.engine_running ? 'Engine running' : 'Engine stopped' }}
+                  :class="engineRunning ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'"></span>
+            {{ engineRunning ? 'Engine running' : 'Engine stopped' }}
           </span>
+
+          <button
+            @click="toggleEngine" :disabled="busy === 'engine'"
+            class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors disabled:opacity-50"
+            :class="engineRunning
+              ? 'border-rose-500/30 bg-rose-500/10 text-rose-400 hover:bg-rose-500/20'
+              : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20'"
+          >
+            <span class="material-symbols-outlined text-[14px]">
+              {{ engineRunning ? 'stop' : 'play_arrow' }}
+            </span>
+            <span>{{ busy === 'engine' ? 'Working…' : (engineRunning ? 'Stop engine' : 'Start engine') }}</span>
+          </button>
+
+          <button
+            @click="showSettings ? (showSettings = false) : openSettings()"
+            class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-800 transition-colors"
+          >
+            <span class="material-symbols-outlined text-[14px]">tune</span>
+            <span>{{ showSettings ? 'Close settings' : 'Settings' }}</span>
+          </button>
+        </div>
+
+        <div v-if="saveError" class="mb-3 rounded-lg border border-rose-500/20 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">
+          {{ saveError }}
+        </div>
+        <div v-if="saveOk" class="mb-3 rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-300">
+          {{ saveOk }}
         </div>
 
         <!-- Counters -->
@@ -213,6 +343,133 @@ onUnmounted(stopPolling)
           </div>
         </div>
       </div>
+
+      <!-- Settings -->
+      <section v-if="showSettings" class="mb-8 rounded-lg border border-slate-800 bg-slate-900/40 p-4">
+        <h2 class="text-sm font-semibold text-slate-300 mb-1">Settings</h2>
+        <p class="text-xs text-slate-600 mb-4">
+          Nothing is promotable until a target has a measured noise floor, whatever
+          these say.
+        </p>
+
+        <!-- Mode + enabled -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
+          <label class="block">
+            <span class="text-[11px] text-slate-500">Mode</span>
+            <select v-model="draft.mode"
+                    class="mt-1 w-full rounded-lg bg-slate-950/60 border border-slate-700 px-3 py-2 text-sm text-slate-200">
+              <option value="observe">observe — record and report only</option>
+              <option value="propose">propose — ask, never apply</option>
+              <option value="act">act — apply what the permissions allow</option>
+            </select>
+          </label>
+          <label class="flex items-center gap-2 mt-1 sm:mt-6">
+            <input type="checkbox" v-model="draft.enabled"
+                   class="size-4 rounded border-slate-600 bg-slate-950" />
+            <span class="text-sm text-slate-300">Subsystem enabled</span>
+          </label>
+        </div>
+
+        <!-- Numbers -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
+          <label v-for="[key, label, hint] in NUMBER_FIELDS" :key="key" class="block">
+            <span class="text-[11px] text-slate-500">{{ label }}</span>
+            <input type="number" step="any" min="0" v-model.number="draft[key]"
+                   class="mt-1 w-full rounded-lg bg-slate-950/60 border border-slate-700 px-3 py-2 text-sm text-slate-200" />
+            <span class="text-[10px] text-slate-600 block mt-0.5">{{ hint }}</span>
+          </label>
+        </div>
+
+        <!-- AI role models -->
+        <h3 class="text-xs font-semibold text-slate-400 mt-5 mb-2">AI role models</h3>
+        <p class="text-[11px] text-slate-600 mb-2">
+          A role with no model is skipped — it never falls back to a default, so
+          the recorded model id is always the model that actually answered.
+        </p>
+        <div class="space-y-3 mb-4">
+          <label v-for="[role, key, hint] in ROLE_KEYS" :key="key" class="block">
+            <span class="text-[11px] text-slate-500 capitalize">{{ role }}</span>
+            <select v-model="draft[key]"
+                    class="mt-1 w-full rounded-lg bg-slate-950/60 border border-slate-700 px-3 py-2 text-sm text-slate-200">
+              <option value="">— not configured —</option>
+              <option v-for="m in models" :key="m.id" :value="m.id">
+                {{ m.name || m.model || m.id }}<span v-if="m.provider"> ({{ m.provider }})</span>
+              </option>
+            </select>
+            <span class="text-[10px] text-slate-600 block mt-0.5">{{ hint }}</span>
+          </label>
+        </div>
+
+        <!-- Document allowlist -->
+        <h3 class="text-xs font-semibold text-slate-400 mt-5 mb-2">Document allowlist</h3>
+        <p class="text-[11px] text-slate-600 mb-2">
+          The only documents the subsystem may ever write to. Empty means it writes
+          nowhere, whatever the permission matrix says.
+        </p>
+        <div class="flex flex-wrap gap-2 mb-2">
+          <span v-for="d in draft.document_allowlist" :key="d"
+                class="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs border border-amber-500/30 bg-amber-500/10 text-amber-300">
+            {{ d }}
+            <button @click="removeDocument(d)" class="text-amber-400/70 hover:text-amber-200">×</button>
+          </span>
+          <span v-if="!draft.document_allowlist?.length" class="text-xs text-slate-600">
+            none — the subsystem cannot write anywhere
+          </span>
+        </div>
+        <div class="flex gap-2 mb-4">
+          <input v-model="newDoc" placeholder="Strategies document id (e.g. 195)"
+                 @keyup.enter="addDocument"
+                 class="flex-1 rounded-lg bg-slate-950/60 border border-slate-700 px-3 py-2 text-sm text-slate-200" />
+          <button @click="addDocument"
+                  class="px-3 py-2 rounded-lg text-xs font-semibold border border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-800">
+            Arm
+          </button>
+        </div>
+
+        <!-- Permission matrix -->
+        <h3 class="text-xs font-semibold text-slate-400 mt-5 mb-2">Permissions</h3>
+        <p class="text-[11px] text-slate-600 mb-2">
+          What may be applied without asking. Reverting is never gated by any of
+          these — a rollback that waits for approval is one that does not happen.
+        </p>
+        <div class="overflow-x-auto rounded-lg border border-slate-800">
+          <table class="w-full text-xs">
+            <thead>
+              <tr class="text-slate-500 border-b border-slate-800">
+                <th class="text-left font-medium px-2 py-2">Action</th>
+                <th v-for="rung in (permissions?.rungs || [])" :key="rung"
+                    class="text-left font-medium px-2 py-2 whitespace-nowrap">{{ rung }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="cls in (permissions?.action_classes || [])" :key="cls"
+                  class="border-b border-slate-800/60 last:border-0">
+                <td class="px-2 py-2 text-slate-300 whitespace-nowrap">{{ cls }}</td>
+                <td v-for="rung in (permissions?.rungs || [])" :key="rung" class="px-2 py-1.5">
+                  <select v-if="draft.permission_matrix?.[cls]"
+                          v-model="draft.permission_matrix[cls][rung]"
+                          class="w-full rounded bg-slate-950/60 border border-slate-700 px-1.5 py-1 text-[11px] text-slate-200">
+                    <option value="autonomous">auto</option>
+                    <option value="ask">ask</option>
+                    <option value="blocked">blocked</option>
+                  </select>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="flex gap-2 mt-5">
+          <button @click="saveSettings" :disabled="busy === 'settings'"
+                  class="px-4 py-2 rounded-lg text-xs font-semibold border border-emerald-500/30 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 disabled:opacity-50">
+            {{ busy === 'settings' ? 'Saving…' : 'Save settings' }}
+          </button>
+          <button @click="resetDraft"
+                  class="px-4 py-2 rounded-lg text-xs font-semibold border border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-800">
+            Revert
+          </button>
+        </div>
+      </section>
 
       <div v-if="budget || roles" class="mb-6 grid grid-cols-1 sm:grid-cols-2 gap-2">
         <div v-if="budget" class="rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2">

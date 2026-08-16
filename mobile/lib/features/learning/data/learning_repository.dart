@@ -213,6 +213,19 @@ class LearningRepository {
         .toList();
   }
 
+  Future<Map<String, dynamic>> control() async {
+    return await _client.get<Map<String, dynamic>>('/learning/control');
+  }
+
+  Future<void> setRunning(bool running) async {
+    await _client.post<dynamic>('/learning/control', body: {'running': running});
+  }
+
+  Future<void> setMode(String mode) async {
+    await _client.post<dynamic>('/learning/control',
+        body: {'config': {'mode': mode}});
+  }
+
   Future<void> decide(String approvalId, String decision) async {
     await _client.post<dynamic>('/learning/approvals/$approvalId',
         body: {'decision': decision});

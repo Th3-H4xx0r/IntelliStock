@@ -10,6 +10,8 @@ class LearningState {
     this.funnels = const [],
     this.approvals = const [],
     this.floors = const [],
+    this.engineRunning = false,
+    this.mode = 'observe',
     this.partialError,
   });
 
@@ -23,6 +25,8 @@ class LearningState {
   final List<LearningFunnel> funnels;
   final List<LearningApproval> approvals;
   final List<LearningFloor> floors;
+  final bool engineRunning;
+  final String mode;
 
   /// Set when SOME endpoints answered and others did not. The screen still
   /// renders what loaded — an all-or-nothing `Future.wait` blanked the whole
@@ -59,13 +63,17 @@ final learningStateProvider = FutureProvider.autoDispose<LearningState>((ref) as
     _attempt(repo.funnels, errors, 'runs'),
     _attempt(repo.approvals, errors, 'approvals'),
     _attempt(repo.noiseFloors, errors, 'noise floors'),
+    _attempt(repo.control, errors, 'control'),
   ]);
+  final controlDoc = results[5] as Map<String, dynamic>?;
   final state = LearningState(
     overview: results[0] as LearningOverview?,
     findings: (results[1] as List<LearningFinding>?) ?? const [],
     funnels: (results[2] as List<LearningFunnel>?) ?? const [],
     approvals: (results[3] as List<LearningApproval>?) ?? const [],
     floors: (results[4] as List<LearningFloor>?) ?? const [],
+    engineRunning: controlDoc?['running'] == true,
+    mode: ((controlDoc?['config'] as Map?)?['mode'] ?? 'observe').toString(),
     partialError: errors.isEmpty ? null : errors.join('; '),
   );
   if (state.isEmptyFailure && errors.isNotEmpty) {

@@ -50,6 +50,32 @@ class LearningScreen extends ConsumerWidget {
     }
   }
 
+  Future<void> _setRunning(
+      BuildContext context, WidgetRef ref, bool running) async {
+    try {
+      await ref.read(learningRepositoryProvider).setRunning(running);
+      ref.invalidate(learningStateProvider);
+    } catch (err) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not change the engine: $err')),
+      );
+    }
+  }
+
+  Future<void> _setMode(
+      BuildContext context, WidgetRef ref, String mode) async {
+    try {
+      await ref.read(learningRepositoryProvider).setMode(mode);
+      ref.invalidate(learningStateProvider);
+    } catch (err) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not change the mode: $err')),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final async = ref.watch(learningStateProvider);
@@ -86,6 +112,13 @@ class LearningScreen extends ConsumerWidget {
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
               children: [
                 _header(state),
+                const SizedBox(height: 12),
+                _Controls(
+                  state: state,
+                  onToggleEngine: () =>
+                      _setRunning(context, ref, !state.engineRunning),
+                  onModeChanged: (mode) => _setMode(context, ref, mode),
+                ),
                 if (state.partialError != null) ...[
                   const SizedBox(height: 12),
                   ErrorBanner(message: state.partialError!),
@@ -503,6 +536,75 @@ class _ApprovalCard extends StatelessWidget {
                 ),
               ),
             ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+
+/// Engine start/stop and the mode selector. The full settings surface stays on
+/// the web — it is a long form, and a phone is where you ANSWER a proposal, not
+/// where you configure a permission matrix.
+class _Controls extends StatelessWidget {
+  const _Controls({
+    required this.state,
+    required this.onToggleEngine,
+    required this.onModeChanged,
+  });
+
+  final LearningState state;
+  final VoidCallback onToggleEngine;
+  final void Function(String mode) onModeChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final running = state.engineRunning;
+    return GlassCard(
+      padding: const EdgeInsets.all(14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(running ? 'Engine running' : 'Engine stopped',
+                    style: AppTextStyles.cardTitle.copyWith(
+                        color: running ? AppColors.success : AppColors.textMd)),
+              ),
+              running
+                  ? AppButton.ghost(label: 'Stop', onPressed: onToggleEngine)
+                  : AppButton.primary(label: 'Start', onPressed: onToggleEngine),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Text('Mode', style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),
+          const SizedBox(height: 6),
+          Wrap(
+            spacing: 8,
+            children: [
+              for (final mode in const ['observe', 'propose', 'act'])
+                ChoiceChip(
+                  label: Text(mode),
+                  selected: state.mode == mode,
+                  onSelected: (_) => onModeChanged(mode),
+                  labelStyle: AppTextStyles.micro.copyWith(
+                      color: state.mode == mode
+                          ? AppColors.onPrimary
+                          : AppColors.textMd),
+                  selectedColor: AppColors.primary,
+                  backgroundColor: AppColors.surface,
+                  side: const BorderSide(color: AppColors.border),
+                ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Budgets, the document allowlist and the permission matrix are on '
+            'the web tab — a phone is where you answer a proposal, not where '
+            'you configure a matrix.',
+            style: AppTextStyles.nano.copyWith(color: AppColors.textFaint),
           ),
         ],
       ),

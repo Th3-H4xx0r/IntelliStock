@@ -185,9 +185,93 @@ def get_config(conn) -> dict:
     return merge_config(doc)
 
 
+class ConfigError(ValueError):
+    pass
+
+
+_MODES = ("observe", "propose", "act")
+
+
+def _validated(key, value):
+    """Coerce and range-check one setting, or raise.
+
+    Validation lives at the write boundary because these values gate real
+    money. A `document_allowlist` stored as the STRING "179" iterates as the
+    characters 1, 7 and 9 — arming three documents that do not exist while
+    refusing the one that does. A negative budget would raise the ceiling
+    rather than lower it. Neither is something a UI should be trusted to
+    prevent.
+    """
+    if key == "mode":
+        text = str(value or "").strip().lower()
+        if text not in _MODES:
+            raise ConfigError(f"mode must be one of {list(_MODES)}")
+        return text
+    if key == "enabled":
+        return bool(value)
+    if key == "document_allowlist":
+        if isinstance(value, str) or not isinstance(value, (list, tuple)):
+            raise ConfigError(
+                "document_allowlist must be a list of document ids — a bare "
+                "string would arm each character as a separate document")
+        return [str(v).strip() for v in value if str(v).strip()]
+    if key == "permission_matrix":
+        from self_learning.permissions import (
+            ACTION_CLASSES, MODES as PERM_MODES, RUNGS,
+        )
+        if not isinstance(value, dict):
+            raise ConfigError("permission_matrix must be an object")
+        clean = {}
+        for action_class, rungs in value.items():
+            if action_class not in ACTION_CLASSES:
+                raise ConfigError(f"unknown action class {action_class!r}")
+            if not isinstance(rungs, dict):
+                raise ConfigError(f"{action_class} must map rungs to modes")
+            for rung, mode in rungs.items():
+                if rung not in RUNGS:
+                    raise ConfigError(f"unknown rung {rung!r}")
+                if str(mode) not in PERM_MODES:
+                    raise ConfigError(
+                        f"unknown permission mode {mode!r} — must be one of "
+                        f"{sorted(PERM_MODES)}")
+            clean[action_class] = {str(k): str(v) for k, v in rungs.items()}
+        return clean
+    if key in ("daily_budget_usd", "monthly_budget_usd", "breaker_limit_pct",
+               "variance_threshold", "approval_timeout_hours"):
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            raise ConfigError(f"{key} must be a number")
+        if number < 0:
+            raise ConfigError(f"{key} cannot be negative")
+        if key == "variance_threshold" and not 0 < number <= 1:
+            raise ConfigError("variance_threshold must be between 0 and 1")
+        return number
+    if key in ("retain_days", "variance_min_n", "demote_after"):
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            raise ConfigError(f"{key} must be a whole number")
+        if number < 1:
+            raise ConfigError(f"{key} must be at least 1")
+        return number
+    if key.endswith("llm_model_id"):
+        return str(value or "").strip()
+    return value
+
+
 def put_config(conn, patch: dict) -> dict:
-    """Update the operator-settable keys. Unknown keys are ignored."""
-    clean = {k: v for k, v in (patch or {}).items() if k in _MUTABLE_KEYS}
+    """Update the operator-settable keys. Unknown keys are ignored.
+
+    Every accepted key is validated first, and one bad value rejects the WHOLE
+    patch rather than writing a half-applied config — a settings form that
+    silently applies three of five fields is worse than one that refuses.
+    """
+    clean = {}
+    for key, value in (patch or {}).items():
+        if key not in _MUTABLE_KEYS:
+            continue
+        clean[key] = _validated(key, value)
     if clean:
         clean["id"] = CONFIG_DOC_ID
         r.db(DB_NAME).table(CONFIG).insert(clean, conflict="update").run(conn)
