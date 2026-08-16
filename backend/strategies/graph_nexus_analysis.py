@@ -14404,12 +14404,30 @@ def _discover_stocks_from_momentum(
         _bo_hist = (strategy_cache or {}).get("_overlay_bars_raw") or {}
         _bo_lb = int(config.get("momentum_breakout_lookback_bars", 20) or 20)
 
+        # 2026-08-16: this tie-break had NO log line, so it could not be told
+        # apart from an inert one — and this repo has shipped 13 inert levers,
+        # one of them (`breakout-is-structurally-dead.md`) a breakout mechanism
+        # that reached its arithmetic 2,922 times and exited at `bars=0` every
+        # single time because the price map handed to it was empty. `_fresh`
+        # reads `_overlay_bars_raw`, a DIFFERENT map from that one, but the
+        # failure mode is close enough that it must be observable rather than
+        # assumed. `unmeasurable` is counted separately from `stale` precisely
+        # so the empty-map case cannot hide inside "nothing was fresh".
+        _bo_stats = {"fresh": 0, "stale": 0, "unmeasurable": 0}
+
         def _fresh(sym) -> int:
             """0 when the name just broke out of its own base, else 1."""
             if _bo_band <= 0:
                 return 1
             ext, _ = _extension_above_anchor(sym, _bo_hist, _bo_lb)
-            return 0 if (ext is not None and 0.0 <= ext <= _bo_band) else 1
+            if ext is None:
+                _bo_stats["unmeasurable"] += 1
+                return 1
+            if 0.0 <= ext <= _bo_band:
+                _bo_stats["fresh"] += 1
+                return 0
+            _bo_stats["stale"] += 1
+            return 1
 
         # A missing 60d means UNKNOWN, not WORST: rank it on the 20d we do have
         # rather than sending it to the back of a list that is then cut at
@@ -14419,7 +14437,22 @@ def _discover_stocks_from_momentum(
         def _rank60(x):
             r20, r60 = x[1], x[2]
             return (_fresh(x[0]), -(r60 if r60 > float("-inf") else r20), -r20, x[0])
+        _bo_before = [c[0] for c in candidates]
         candidates.sort(key=_rank60)
+        if _bo_band > 0 and candidates:
+            # Report whether the tie-break actually REORDERED anything. A lever
+            # that ran and changed no ordering is inert in effect even though it
+            # executed, and that distinction is what five prior "shipped"
+            # levers turned on.
+            _bo_after = [c[0] for c in candidates]
+            _log(
+                f"  Breakout freshness: fresh={_bo_stats['fresh']} "
+                f"stale={_bo_stats['stale']} unmeasurable={_bo_stats['unmeasurable']} "
+                f"(band<={_bo_band:.1f}%, lookback={_bo_lb} bars) — order "
+                f"{'CHANGED' if _bo_after != _bo_before else 'unchanged'}; "
+                f"top={_bo_after[:5]}",
+                "cyan",
+            )
     else:
         candidates.sort(key=lambda x: (-max(x[1], x[2]), -x[1], -x[2], x[0]))
 
