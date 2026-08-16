@@ -249,8 +249,28 @@ def _plan_and_log_turn(conn, config) -> list:
         if intent.kind == learning_loop.REQUEST_APPROVAL:
             _request_approval(conn, intent, now)
         elif intent.kind == learning_loop.PROPOSE:
-            _execute_propose(conn, config, intent, now)
+            try:
+                _execute_propose(conn, config, intent, now)
+            except Exception as exc:
+                _skip(conn, now,
+                      f"the proposal path raised {type(exc).__name__}: {exc}")
     return intents
+
+
+def _skip(conn, now, reason, **extra) -> None:
+    """Record WHY a proposal did not happen, where the operator can see it.
+
+    A skip that only writes to a container log is indistinguishable, from the
+    tab, from the loop not running at all — which is precisely the "it just
+    stopped" state this subsystem exists to make impossible. So the reason is a
+    row like any other decision.
+    """
+    _log(f"PROPOSE skipped — {reason}", "yellow")
+    try:
+        store.put_intent(conn, {"kind": "propose_skipped", "reason": reason,
+                                **extra}, at=now)
+    except Exception:
+        pass
 
 
 def _execute_propose(conn, config, intent, now) -> None:
@@ -264,17 +284,21 @@ def _execute_propose(conn, config, intent, now) -> None:
     resolved = store.resolved_config(conn)
     from self_learning.roles import GENERATOR, role_config
 
-    if not role_config(GENERATOR, resolved).configured:
-        _log("PROPOSE skipped — no generator model configured "
-             "(set learning_generator_llm_model_id)", "yellow")
+    generator = role_config(GENERATOR, resolved)
+    if not generator.configured:
+        _skip(conn, now,
+              f"no generator model resolved — learning_generator_llm_model_id="
+              f"{config.get('learning_generator_llm_model_id') or 'unset'!r}, "
+              f"resolved provider={generator.provider!r} model={generator.model!r}")
         return
 
     findings = store.list_findings(conn, limit=10)
     open_findings = [f for f in findings
                      if str(f.get("status") or "open") == "open"]
     if not open_findings:
-        _log("PROPOSE skipped — no open finding to base a hypothesis on",
-             "white")
+        _skip(conn, now,
+              f"no open finding to base a hypothesis on "
+              f"({len(findings)} finding(s) total)")
         return
     finding = open_findings[0]
     target = str(finding.get("target") or "")
@@ -325,12 +349,13 @@ def _execute_propose(conn, config, intent, now) -> None:
     except learning_hypotheses.HypothesisError as exc:
         # A refused proposal is RECORDED, not swallowed: "the generator keeps
         # proposing undetectable effects" is itself a finding.
-        _log(f"PROPOSE rejected — {exc}", "yellow")
+        _skip(conn, now, f"the generator's proposal was refused: {exc}",
+              target=target, model=result.model)
         return
 
     skip = learning_hypotheses.already_proposed(hypothesis, ledger)
     if skip:
-        _log(f"PROPOSE skipped — {skip}", "white")
+        _skip(conn, now, skip, target=target)
         return
 
     store.put_hypothesis(conn, hypothesis)
