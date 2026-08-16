@@ -214,6 +214,42 @@ tape.** The binding constraint is no longer refusal. It is that in chop the sele
 and the churn costs money. That is a strategy problem, not a plumbing problem, and no config lever
 in this repository addresses it.
 
+## 3d. The discontinuity guard is PROVEN NOT INERT in production
+
+This repository has shipped 13 inert levers, so a flag is not believed until a run logs it.
+**bt 749060** (window d, `momentum_skip_discontinuous_series_enabled=true`) logged
+**387 skips across 15 distinct symbols**, with BOTH detection paths active:
+
+| symbol | reason | detail |
+|---|---|---|
+| AIOS | split-shaped | `8.4 -> 0.42 = 20x share multiplier` (an exact ratio — real splits are exact, crashes are not) |
+| NRGD, BIAF, BOIL, FRGT | split-shaped | listed `SPLIT_RATIOS` steps |
+| **AKTX** | implausible | the motivating case, now excluded |
+| MOBX, QH, DULL, ARTL, UOKA, CNSP, HCWB, BTM, VRRM | implausible | steps beyond any listed ratio |
+
+Fifteen symbols is more than the eight the momentum-ceiling analysis predicted, and that is
+expected: the ceiling can only ever catch the artifacts that push a return ABOVE its cap. A
+**forward** split steps DOWN and reads as a crash, so the ceiling could never see it — the
+new guard catches both directions.
+
+**What this run does NOT establish.** bt 749060 returned +10.48% against bt 453789's
++19.25%, and that −8.77pp is **not attributable to the guard**:
+
+```
+$ python3 scripts/check_pair_validity.py 453789 749060
+  shared   : AXTI, MSFT, NVDA, SPY, TEXU
+  overlap  : 23%  (floor 60%)
+  delta    : -8.77pp
+VERDICT: VOID — arms share 23% of their traded names
+```
+
+The comparability gate shipped hours earlier caught this on its first real use. Without it
+the obvious and wrong conclusion was sitting right there: *"the guard cost 8.77pp."* It did
+not; the two arms drew different books, as every pair here does.
+
+So the guard's status is precisely: **mechanism proven, price impact unmeasured** — which
+is the honest ceiling on any claim in this project until frozen state exists.
+
 ## 4. What this changes about priorities
 
 1. `semantics_v2` is worth ONE paired run because it is a sign correction, not a fitted threshold —
