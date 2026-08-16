@@ -8865,14 +8865,37 @@ def action_learning_engine_status(conn):
     """
     from self_learning import store
     store.ensure_tables(conn)
+    from datetime import datetime, timezone
+    from self_learning.timeline import to_naive_utc
     status = store.get_engine_status(conn)
+    flagged_running = _learning_engine_running(conn)
+
+    # "It says running but has not turned" is the state that wasted an hour:
+    # the control flag is what the OPERATOR asked for, the turn timestamp is
+    # what the engine actually did. Report the gap rather than either alone.
+    last_turn = to_naive_utc(status.get("last_turn_at"))
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    stale_seconds = None if last_turn is None else int((now - last_turn).total_seconds())
+    # The heartbeat turns every 120s; three missed beats is not a blip.
+    alive = bool(stale_seconds is not None and stale_seconds < 360)
+
     return {
         "reported": bool(status),
         "source_fingerprint": status.get("source_fingerprint"),
         "started_at": status.get("started_at"),
         "last_turn_at": status.get("last_turn_at"),
+        "seconds_since_last_turn": stale_seconds,
         "last_turn_kinds": status.get("last_turn_kinds") or {},
         "has_propose_executor": bool(status.get("has_propose_executor")),
+        "flagged_running": flagged_running,
+        "alive": alive,
+        "diagnosis": (
+            "not started" if not status else
+            "flagged running but has not turned recently — the engine container "
+            "is probably stopped or stuck on an older image; it needs a "
+            "host-side restart" if flagged_running and not alive else
+            "stopped by the operator" if not flagged_running else
+            "healthy"),
     }
 
 

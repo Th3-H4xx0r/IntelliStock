@@ -36,6 +36,7 @@ const draft      = ref({})
 const targets    = ref(null)
 const llmUsage   = ref(null)
 const activity   = ref({ activity: [], busy: false })
+const engineStatus = ref(null)
 
 // Pagination. Every one of these lists grows without bound — 109 observed runs
 // on day one — and an unpaged page is unusable on a phone.
@@ -145,6 +146,7 @@ async function load() {
     getJson('/learning/targets'),
     getJson('/learning/llm-usage'),
     getJson('/learning/activity'),
+    getJson('/learning/engine-status'),
   ])
   const failures = results.filter((r) => r.status === 'rejected')
 
@@ -174,6 +176,7 @@ async function load() {
   if (results[12].status === 'fulfilled') targets.value = results[12].value || null
   if (results[13].status === 'fulfilled') llmUsage.value = results[13].value || null
   if (results[14].status === 'fulfilled') activity.value = results[14].value || activity.value
+  if (results[15].status === 'fulfilled') engineStatus.value = results[15].value || null
 
   loadError.value = failures.length
     ? failures.map((r) => r.reason?.message || 'request failed').join('; ')
@@ -369,6 +372,24 @@ onUnmounted(stopPolling)
             <span class="material-symbols-outlined text-[14px]">tune</span>
             <span>{{ showSettings ? 'Close settings' : 'Settings' }}</span>
           </button>
+        </div>
+
+        <div v-if="engineStatus && engineStatus.flagged_running && !engineStatus.alive"
+             class="mb-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2">
+          <div class="text-xs font-semibold text-amber-300">
+            Engine is flagged running but has not taken a turn
+            <span v-if="engineStatus.seconds_since_last_turn !== null">
+              in {{ Math.round(engineStatus.seconds_since_last_turn / 60) }} min
+            </span>
+          </div>
+          <div class="text-[11px] text-amber-200/70 mt-0.5">
+            {{ engineStatus.diagnosis }}
+          </div>
+        </div>
+        <div v-else-if="engineStatus && engineStatus.alive"
+             class="mb-3 text-[11px] text-slate-600">
+          Last turn {{ engineStatus.seconds_since_last_turn }}s ago ·
+          engine build {{ engineStatus.source_fingerprint }}
         </div>
 
         <div v-if="saveError" class="mb-3 rounded-lg border border-rose-500/20 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">
