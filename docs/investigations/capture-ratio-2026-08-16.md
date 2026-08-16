@@ -93,6 +93,50 @@ flat, trendless tape it buys names that fall and pays the turnover to do it.
 That is the honest shape of this system: **a momentum strategy with a real but regime-dependent
 edge**, not a general one. It is also why "beat SPY in EVERY regime" has never been met.
 
+## 2a. Late entry is the ROOT cause; the stop is only the proximate one
+
+Placing each entry inside the name's own start→end range for bt 333727 splits the book perfectly:
+
+| name | start | end | entry | % through the move | captured |
+|---|---:|---:|---:|---:|---:|
+| AIQ | 46.67 | 69.42 | 47.25 | **2.6%** | +14.92% |
+| BOTZ | 33.22 | 40.59 | 33.55 | **4.4%** | +20.99% |
+| AIFD | 37.75 | 55.22 | 39.90 | **12.3%** | +38.39% |
+| BC | 72.73 | 82.48 | 74.66 | **19.8%** | +10.47% |
+| RIVN | 15.06 | 16.94 | 15.60 | 28.8% | −15.01% |
+| MXL | 17.39 | 86.24 | 52.27 | 50.7% | +73.66% |
+| AAOI | 84.60 | 184.61 | 154.76 | 70.2% | −12.33% |
+| AIOS | 10.96 | 15.10 | 14.82 | 93.3% | +1.86% |
+| AEHR | 37.10 | 93.65 | **97.45** | **106.7%** | −10.93% |
+| AXTI | 57.05 | 108.45 | **120.75** | **123.9%** | −11.94% |
+| D | 61.82 | 64.59 | **67.62** | **209.5%** | −4.49% |
+
+* entered **early** (<40% through): n=5, **4 of 5 profitable**, mean captured **+13.95%**
+* entered **late** (≥40% through): n=6, **2 of 6 profitable**, mean **+5.97%** — and that mean is
+  carried entirely by MXL. Excluding MXL: **1 of 5 profitable, mean −7.6%.**
+
+**AEHR, AXTI and D were bought ABOVE the price at which the window ended** (106.7%, 123.9% and
+209.5% through their own ranges). The system did not buy them early in a move; it bought them after
+the move was over.
+
+This corrects the interpretation of §1. Widening the stop does not rescue a name bought above where
+it finishes. Holding each stopped name to the window end instead of stopping it:
+
+| name | stopped at | hold-to-end | swing |
+|---|---:|---:|---:|
+| AAOI | −12.33% | **+19.3%** | +$220 |
+| RIVN | −15.01% | +8.6% | +$198 |
+| AEHR | −10.93% | −3.9% | +$48 |
+| AXTI | −11.94% | −10.2% | +$11 |
+
+≈ **+$477, about +8% of the account** before accounting for the fact that the freed capital did get
+redeployed (AIOS/BC/D, +$61 combined), so call it ~+6-7% net. Real but not transformative — and
+**two of the four remain losses even when held.**
+
+So the ordering of the remaining work is: **entry timing first, stop semantics second.** The stop
+is worth one preregistered run because it is a sign error and nearly free to correct. Entry timing
+is the bigger prize and is not a config flag.
+
 ## 3a. The bear leg DID profit in a bear — objective blocker #5 is closed
 
 The objective lists as blocker #5: *"Bear leg built but never shown to profit in a bear."* It has
