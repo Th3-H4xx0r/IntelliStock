@@ -81,6 +81,42 @@ that itself bleeds ~2pp does not recover $91.66, it recovers some fraction.
 comes back only slightly better than −2.70%, that is the core drag eating the benefit — and the
 real lever is then the core's own execution, not the chop allocation.
 
+## RESULT — DISQUALIFIED, despite the return improving
+
+**bt 790588 (control) −2.70% vs bt 969796 (treatment) −1.53%.** Both cold-started and attested.
+
+| endpoint | control | treatment | verdict |
+|---|---:|---:|---|
+| 2. comparability | — | — | **64% overlap — comparable** ✓ |
+| 1. return | −2.70% | **−1.53%** | **+1.17pp, above the 0.5pp cold floor — READABLE** ✓ |
+| 4. SQQQ deployment | $2,209.84 | **$3,410.31** | **+54% — hedge intact** ✓ |
+| 3. turnover | **303% of NAV** | **361% of NAV** | **ROSE — DISQUALIFYING** ✗ |
+
+**Verdict: the preregistered turnover rule fails it, and the rule stands.** The mechanism was
+supposed to be "trade less in chop"; it traded MORE — 26→28 fills and $18,206→$21,631 of notional.
+Whatever produced the +1.17pp, it is not the mechanism this document proposed, and accepting it
+anyway would be choosing the endpoint after seeing the answer.
+
+`regime_profiles.chop.core_target_pct` is reverted to 0.35.
+
+**A measurement correction I made against myself:** I first read the drop in SQQQ *P&L*
+($20.49 → $12.30) as reduced hedging and nearly failed endpoint 4 on it. P&L is not deployment —
+BUY notional rose 54% on identical fill counts, so the hedge deployed MORE and simply exited at
+different prices. The endpoint said "deployment"; measuring the proxy would have disqualified the
+lever for the wrong reason.
+
+**The prediction recorded before the run was right in direction.** The core drag did eat the
+benefit: the treatment moved capital into a core that itself captured −1.41% against SPY's +0.69%.
+
+### What this run actually taught, which is bigger than the lever
+
+**Turnover is 303-361% of NAV over a SIX-WEEK window.** The objective's break-even is ~50%/month
+— roughly 75% over this window. **Both arms run 4-5x break-even**, and the losing window's problem
+may be less "which names" than "how often". That reframes the priority: the next lever should
+attack turnover and its cost, not allocation. The core is the obvious suspect, since it is exempt
+from the turnover budget, rebalances on a 5% band every 5 days, and gives away 1.7-2.2pp per
+window against the index it is supposed to track.
+
 ## What I will not claim
 
 - Not that one window generalises. Window d is bull-dominated and this lever barely binds there;
