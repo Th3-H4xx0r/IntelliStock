@@ -181,3 +181,49 @@ def test_a_realistic_strategy_cache_row_does_not_blow_the_cap():
              "cache_json": "z" * 1_000_000} for i in range(8)]
     fp = table_fingerprint(rows)
     assert fp["rows"] == 8
+
+
+# --------------------------------------------------------------------------
+# mode-aware coldness (added after clear_instance_state was found to PRESERVE
+# origin="backtest" snapshots in every scope, by design)
+# --------------------------------------------------------------------------
+def _tables_with_backtest_snapshots():
+    t = _cold_tables()
+    t["NexusStrategyCache"] = [
+        {"id": f"inst|graph_nexus_analysis|hash|backtest|2026-0{i}-01",
+         "instance_id": "inst", "origin": "backtest", "cache_json": "x" * 900}
+        for i in range(1, 9)
+    ]
+    return t
+
+
+def test_backtest_snapshots_do_not_block_a_cold_backtest_verdict():
+    """clear_instance_state PRESERVES these in every scope, so without this the
+    instance attests cold=False forever and the check becomes unusable.
+
+    Justified empirically, not by taste: the snapshot boot path logs
+    `[snapshot] decision:` / `[snapshot] hydrated`, and neither appears in ANY backtest
+    log examined — it is a live-boot mechanism.
+    """
+    fp = state_fingerprint(_tables_with_backtest_snapshots(), for_mode="backtest")
+    assert fp["tables"]["NexusStrategyCache"]["rows"] == 0
+    assert is_cold(fp) is True
+
+
+def test_the_same_rows_DO_count_for_a_live_boot():
+    """A live boot is exactly where that path runs, so there they steer the run."""
+    fp = state_fingerprint(_tables_with_backtest_snapshots(), for_mode="live")
+    assert fp["tables"]["NexusStrategyCache"]["rows"] == 8
+    assert is_cold(fp) is False
+
+
+def test_a_LIVE_origin_cache_row_still_blocks_a_backtest_cold_verdict():
+    """Only origin=backtest is exempt. A live/legacy row is real carried state."""
+    t = _cold_tables()
+    t["NexusStrategyCache"] = [{"id": "inst|x", "instance_id": "inst", "origin": "live"}]
+    assert is_cold(state_fingerprint(t, for_mode="backtest")) is False
+
+
+def test_an_unknown_mode_fails_closed():
+    with pytest.raises(FrozenStateError):
+        state_fingerprint(_cold_tables(), for_mode="paper")

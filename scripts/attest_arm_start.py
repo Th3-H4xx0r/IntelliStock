@@ -117,6 +117,11 @@ def main(argv=None):
     p.add_argument("--compare", nargs=2, metavar=("CONTROL", "TREATMENT"))
     p.add_argument("--allow-warm", action="store_true",
                    help="accept identical WARM starts (say so in the write-up)")
+    p.add_argument("--for-mode", choices=("backtest", "live"), default="backtest",
+                   help="which rows can steer the run. 'backtest' ignores "
+                        "origin=backtest NexusStrategyCache snapshots, which "
+                        "clear_instance_state preserves by design and which no backtest "
+                        "reads; 'live' counts them, because live boot does read them.")
     a = p.parse_args(argv)
 
     if a.compare:
@@ -130,8 +135,8 @@ def main(argv=None):
 
     if not a.instance_id:
         p.error("instance_id is required unless --compare is used")
-    fp = state_fingerprint(_read_tables(a.instance_id))
-    _print(fp, a.instance_id)
+    fp = state_fingerprint(_read_tables(a.instance_id), for_mode=a.for_mode)
+    _print(fp, f"{a.instance_id} [{a.for_mode}]")
     if a.out:
         Path(a.out).write_text(json.dumps(fp, indent=1))
         print(f"\nwrote {a.out}")

@@ -114,22 +114,51 @@ def table_fingerprint(rows, key_fields=("id",)):
     }
 
 
-def state_fingerprint(tables, key_fields=("id",)):
+def _rows_that_steer(name, rows, for_mode):
+    """Drop rows that exist in the table but cannot influence a run of `for_mode`.
+
+    One case, and it is verified rather than assumed. `NexusStrategyCache` holds
+    `origin="backtest"` end-of-run snapshots, keyed per window end-date, and
+    `clear_instance_state.py` PRESERVES them by design in every scope — its docstring says
+    so twice. That made a freshly-cleared instance attest as `cold=False` forever.
+
+    But a BACKTEST never reads them: the snapshot boot path emits
+    `[snapshot] decision: reason=…` and `[snapshot] hydrated N keys`, and neither line
+    appears in ANY backtest log examined (bt 333727 / 826225 / 749060 — zero hits). It is a
+    live-boot warm-start mechanism, so for backtest pairing these rows are write-only
+    artifacts and must not block a cold verdict.
+
+    They ARE retained for `for_mode="live"`, where that boot path is exactly what runs.
+    """
+    if for_mode != "backtest" or name != "NexusStrategyCache":
+        return rows
+    return [r for r in (rows or [])
+            if not (type(r) is dict and str(r.get("origin", "")) == "backtest")]
+
+
+def state_fingerprint(tables, key_fields=("id",), for_mode="backtest"):
     """Fingerprint an arm's starting state.
 
     `tables` maps table name -> list of rows. A table that is ABSENT is reported as absent
     and a table that is EMPTY is reported with rows=0; the two are not merged, because
     "the table was never read" and "the table was read and was cold" are different claims
     and only the second is evidence of a clean start.
+
+    `for_mode` selects which rows can steer the run — see `_rows_that_steer`. Attesting rows
+    the run cannot read would make every cleared instance look dirty, and a check that can
+    never say PASS is a check that gets ignored.
     """
     if type(tables) is not dict:
         raise FrozenStateError("tables_invalid")
+    if for_mode not in ("backtest", "live"):
+        raise FrozenStateError("for_mode_invalid")
     per_table = {}
     for name in ATTESTED_TABLES:
         if name not in tables:
             per_table[name] = {"absent": True}
             continue
-        per_table[name] = table_fingerprint(tables[name], key_fields=key_fields)
+        per_table[name] = table_fingerprint(
+            _rows_that_steer(name, tables[name], for_mode), key_fields=key_fields)
     bundle = canonical_state_json(
         {"version": "paired-start-v1", "tables": per_table}
     )
