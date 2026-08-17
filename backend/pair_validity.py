@@ -26,9 +26,23 @@ import re
 #: well-behaved pair here drifts. It is a floor for "worth reading", not a quality bar.
 DEFAULT_MIN_OVERLAP = 0.60
 
-#: Same-config dispersion measured on this system, in percentage points of return.
-#: A delta smaller than this is noise REGARDLESS of overlap.
+#: Same-config dispersion for a WARM pair, in percentage points of return. Measured on
+#: bt 873929 (+16.41%) vs bt 523085 (+6.00%) — identical config, the whole gap one name.
 MEASURED_DISPERSION_PP = 10.0
+
+#: Same-config dispersion for a COLD pair, measured 2026-08-16 by an explicit A/A:
+#: bt 479057 vs bt 193668, same document and window, each preceded by a full state clear
+#: verified `cold=True`. Result: **100% traded-name overlap, +10.1463% vs +10.1586%** — a
+#: 0.012pp difference on identical seven-name books.
+#:
+#: So the ~10pp figure above was never inherent nondeterminism. It was carried state, and it
+#: is removable. This matters enormously for what can be concluded: against a 10pp floor a
+#: real 3pp lever is indistinguishable from noise, which is why years of tuning returned
+#: nulls. Against a 0.02pp floor, a 1pp effect is visible.
+#:
+#: Deliberately set to 0.5 rather than 0.012 — an order of magnitude of headroom over the
+#: single measurement, because one A/A pair is not a distribution.
+COLD_START_DISPERSION_PP = 0.5
 
 # NOT anchored with `^`: the real line carries a `[2026-08-15 19:55:40] [BROKER]`
 # prefix, so a start-of-line anchor matches nothing. The first draft of this regex
@@ -63,7 +77,7 @@ def overlap(control_symbols, treatment_symbols):
 
 
 def assess_pair(control, treatment, min_overlap=DEFAULT_MIN_OVERLAP,
-                dispersion_pp=MEASURED_DISPERSION_PP):
+                dispersion_pp=None, cold_start=False):
     """Verdict for a paired run.
 
     `control`/`treatment` are dicts with `symbols` (iterable) and `return_pct` (float or
@@ -78,7 +92,14 @@ def assess_pair(control, treatment, min_overlap=DEFAULT_MIN_OVERLAP,
     * ``NOISE``      — comparable, but the delta is inside measured dispersion.
     * ``READABLE``   — comparable and outside dispersion. Still n=1; this says the
                        number is worth reading, NOT that the lever works.
+
+    `cold_start=True` selects the COLD dispersion floor (0.5pp) instead of the warm one
+    (10pp). Pass it ONLY when both arms were verified `cold=True` by `paired_state_attest`,
+    because the entire difference between those two numbers is whether carried state was
+    cleared. Claiming a cold floor for a warm pair would turn noise into a finding.
     """
+    if dispersion_pp is None:
+        dispersion_pp = COLD_START_DISPERSION_PP if cold_start else MEASURED_DISPERSION_PP
     cs = set(control.get("symbols") or ())
     ts = set(treatment.get("symbols") or ())
     ov = overlap(cs, ts)

@@ -129,3 +129,47 @@ def test_the_thresholds_are_the_measured_ones():
     """
     assert MEASURED_DISPERSION_PP == 10.0
     assert DEFAULT_MIN_OVERLAP == 0.60
+
+
+# --------------------------------------------------------------------------
+# cold-start dispersion (measured 2026-08-16 by an explicit A/A)
+# --------------------------------------------------------------------------
+def test_the_cold_floor_is_the_measured_one():
+    """bt 479057 vs bt 193668: same doc and window, each preceded by a verified cold
+    clear, produced 100% overlap and +10.1463% vs +10.1586% — 0.012pp apart.
+
+    0.5 is set with an order of magnitude of headroom over that, because one A/A pair
+    is not a distribution.
+    """
+    from pair_validity import COLD_START_DISPERSION_PP
+    assert COLD_START_DISPERSION_PP == 0.5
+    assert COLD_START_DISPERSION_PP < MEASURED_DISPERSION_PP
+
+
+def test_the_real_AA_pair_reads_as_NOISE_on_either_floor():
+    shared = {"MSFT", "NVDA", "NVTS", "OIH", "RIVN", "SPY", "VDE"}
+    ctl = {"symbols": shared, "return_pct": 10.1463}
+    trt = {"symbols": shared, "return_pct": 10.1586}
+    assert assess_pair(ctl, trt)["verdict"] == "NOISE"
+    assert assess_pair(ctl, trt, cold_start=True)["verdict"] == "NOISE"
+    assert assess_pair(ctl, trt)["overlap"] == 1.0
+
+
+def test_a_3pp_lever_is_INVISIBLE_warm_and_VISIBLE_cold():
+    """This is the whole reason the project returned nulls for months.
+
+    Against a 10pp floor a genuine 3pp improvement is indistinguishable from noise.
+    Against the cold floor it is a result.
+    """
+    shared = {"A", "B", "C", "D", "E"}
+    ctl = {"symbols": shared, "return_pct": 10.0}
+    trt = {"symbols": shared, "return_pct": 13.0}
+    assert assess_pair(ctl, trt)["verdict"] == "NOISE"
+    assert assess_pair(ctl, trt, cold_start=True)["verdict"] == "READABLE"
+
+
+def test_cold_start_does_NOT_rescue_a_contaminated_pair():
+    """Overlap is checked before dispersion, so a cold floor cannot launder a VOID."""
+    ctl = {"symbols": {"A", "B", "C", "D"}, "return_pct": 10.0}
+    trt = {"symbols": {"W", "X", "Y", "D"}, "return_pct": 30.0}
+    assert assess_pair(ctl, trt, cold_start=True)["verdict"] == "VOID"
