@@ -14769,6 +14769,43 @@ while not shutdown_requested:
                         _dhint_out["sell_fraction"] = max(
                             float(_dhint_out.get("sell_fraction") or 0.0), _dfrac)
                         _nexus_sell_set.add(_dsym)
+                        # 2026-08-17 BREAK #1 of three (default-OFF lever, so this
+                        # cannot change a run until displacement is enabled).
+                        #
+                        # `_sell_first` twenty lines below is
+                        #     [s for s in sorted(expanded_symbols) if s in _nexus_sell_set]
+                        # so a trim target that is not in `expanded_symbols` is
+                        # dropped on the floor — and a HELD name with no fresh
+                        # signal this bar routinely is not. That is why the audit
+                        # found 24 `DISPLACEMENT EXECUTE` lines and ZERO fills:
+                        # the decision was made and then filtered out.
+                        #
+                        # V7.5 sell-enforcement (~:14400) already solved exactly
+                        # this for stops and loser cuts, with the same reasoning:
+                        # "without this, ... tickers not in the current
+                        # discovery/expansion set silently fail to execute". This
+                        # follows that precedent rather than inventing a channel.
+                        #
+                        # Guarded on an actual position, so this can only ever
+                        # re-admit a name the book already owns — it cannot
+                        # conjure a symbol into the universe.
+                        if _dsym not in expanded_symbols:
+                            try:
+                                _dqty = float((getattr(
+                                    portfolio_emulator, "_positions", None) or {}
+                                ).get(_dsym, 0) or 0)
+                            except (TypeError, ValueError, AttributeError):
+                                _dqty = 0.0
+                            if _dqty > 0 and float((prices or {}).get(_dsym) or 0) > 0:
+                                expanded_symbols.add(_dsym)
+                                _log(f"DISPLACEMENT: injected held {_dsym} into "
+                                     f"execution set (was filtered out — this is "
+                                     f"the 24-EXECUTE/0-fill defect)", "yellow")
+                            else:
+                                _log(f"DISPLACEMENT: cannot trim {_dsym} — "
+                                     f"qty={_dqty} price="
+                                     f"{(prices or {}).get(_dsym)!r}; skipping", "yellow")
+                                continue
                         _log(
                             f"DISPLACEMENT EXECUTE: trimming {_dfrac:.0%} of {_dsym} "
                             f"(${_dval:.2f}) to free ${_dneed:.2f} for "
