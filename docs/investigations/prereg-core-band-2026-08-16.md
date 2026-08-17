@@ -28,9 +28,17 @@ Both facts point at the same place: the core trades too often.
 
 | key | control | treatment |
 |---|---|---|
-| `core_rebalance_band_pct` | **0.05** | **0.12** |
+| `regime_profiles.{bull,chop,recovery}.core_rebalance_band_pct` | **0.05** | **0.12** |
+| `core_rebalance_band_pct` (base) | 0.1 | 0.12 |
 
-ONE key. A wider band means the core tolerates more drift before trading.
+A wider band means the core tolerates more drift before trading.
+
+**Correction made while applying it:** this document first said the value was 0.05. The BASE key
+was actually **0.1**; the three regime profiles carried 0.05, and the profile is what binds
+(`core_target_pct` and its siblings are resolved regime-aware — reading them off base config is a
+documented live defect pattern, `core_sleeve.py:231-234`). So the effective band was 0.05
+everywhere, and all four keys are now 0.12 — base included, so base and profiles cannot disagree
+and silently reintroduce 0.1 on a regime with no profile. Recorded rather than quietly widened.
 
 Control is **bt 790588** (already run, cold, `chop.core_target_pct=0.35`), and the document has
 been reverted to 0.35, so the band is the only difference.
@@ -48,6 +56,52 @@ been reverted to 0.35, so the band is the only difference.
    return gain with unchanged turnover would not support the stated mechanism.
 5. **SQQQ deployment must not fall** (BUY notional, not P&L — P&L is exit timing and nearly made
    me fail the chop lever for the wrong reason).
+
+## RESULT — INERT on the endpoint that mattered
+
+**bt 790588 (control, band 0.05) vs bt 545803 (treatment, band 0.12)**, both cold, 80% overlap.
+
+| endpoint | control | treatment | verdict |
+|---|---:|---:|---|
+| 2. comparability | — | — | 80% overlap ✓ |
+| **1. turnover** | **303% of NAV** | **302% of NAV** | **UNCHANGED — INERT** ✗ |
+| fills | 26 | 26 | unchanged |
+| 3. core capture (SPY +0.69%) | −1.41% | **−1.64%** | slightly WORSE ✗ |
+| 5. SQQQ BUY notional | $2,210 | $2,212 | unchanged ✓ |
+| 4. return | −2.70% | −1.72% | **not readable — endpoint 1 failed** |
+
+By this document's own rule 1 — *"if notional turnover does not drop, the lever did not do what it
+claims and the run says nothing, regardless of return"* — **the +0.98pp return gain is not
+claimed.** The band is not being kept.
+
+### Why it was inert, which is the useful part
+
+The band DID act. It is visible in both logs and they differ exactly as predicted:
+
+```
+control    [core] released 0.7143 SPY @ 754.16 (core rebalance: band_release (49.0% -> 40.0% of NAV))
+treatment  [core] hold (release) — within_band: core 49.0% vs target 40.0% of NAV
+```
+
+The wider band suppressed the *rebalance* release — and the core still made **7 SPY fills in both
+arms**, because the suppressed trade was immediately replaced by a different one:
+
+```
+treatment  [core] funding $630 of conviction overflow out of the core (design room $738, ...)
+           [core] released 0.8051 SPY @ 754.75 (core rebalance: funding (48.9% -> 40.0% of NAV))
+```
+
+**`core_rebalance_band_pct` gates the REBALANCE path only. The FUNDING path — selling core to
+finance a satellite buy — is not band-gated at all.** So widening the band moves core turnover
+from one lane to the other and changes nothing net.
+
+That is a structural finding, not a tuning result: **the core's turnover is driven by satellite
+funding demand, not by drift.** Any lever aimed at core churn has to gate the funding release, and
+the levers that do that are `core_funding_release_reserve_decisions` and the conviction-overflow
+sizing — not the rebalance band. It also explains why the core's ~2pp drag has survived every
+band-shaped fix.
+
+Reverted to 0.05 in all three profiles, base back to 0.1.
 
 ## What I will not claim
 
