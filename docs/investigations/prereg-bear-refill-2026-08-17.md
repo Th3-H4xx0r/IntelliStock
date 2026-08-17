@@ -176,3 +176,43 @@ asserting. bt 324360 is running it.
 **Pre-committed rule:** if the gate reduces SQQQ deployment in window c, it is REJECTED regardless
 of what it does to turnover. The bear leg is the one validated edge this system has, and trading
 it away for a churn saving is a bad trade.
+
+## DECISIVE TEST PASSED — the dwell gate is ADOPTED
+
+**bt 324360**, window c with `dwell=2`, cold:
+
+```
+bear leg DEFERRED  ->  0 occurrences
+```
+
+**The gate fired ZERO times in the window where the hedge earns its keep.** 19 confirmed bear
+bars clear a 2-day dwell trivially, so the gate is inert there *by construction* — which also
+means the run is identical to what `dwell=0` would produce, and no separate control was needed.
+
+| window c | pre-fix (bt 235194) | current code + dwell=2 (bt 324360) |
+|---|---:|---:|
+| deferrals | — | **0** |
+| SQQQ BUY notional | $3,179 | **$3,745** |
+| SQQQ P&L | $416.61 | **$490.84** |
+| turnover | 574% | **402%** |
+| fills | 33 | **15** |
+| return | +0.46% | **+6.11%** (SPY −5.29%) |
+
+Hedge deployment ROSE rather than fell, so the preregistered disqualifier is satisfied with
+margin. **The +6.11% is NOT attributable to the dwell gate** — the gate did nothing here — it is
+the accumulated fixes against an old pre-fix run, a multi-variable comparison.
+
+### Verdict across both windows
+
+| endpoint | window f | window c |
+|---|---|---|
+| mechanism fired where predicted | ✓ 3× on one-day bears | ✓ 0× (correctly silent) |
+| SQQQ deployment must not fall | n/a (no confirmed bear) | ✓ **rose** $3,179 → $3,745 |
+| turnover | ✓ 303% → **228%** | unchanged (gate inert) |
+| return | −0.24pp, below the 0.5pp floor | unchanged (gate inert) |
+
+**ADOPTED at `residual_sleeve_bear_deploy_min_dwell_days = 2`.** It is the only lever of the five
+tested tonight that did what it claimed, moved the known leak, and could not harm the one
+validated edge. It is not claimed to improve returns — its measured return effect is inside the
+noise floor. It is claimed to stop the book opening a −3x leveraged short on a one-day dip, which
+is a risk decision, and to cut turnover 25% while doing it.

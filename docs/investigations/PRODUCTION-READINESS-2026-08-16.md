@@ -1,4 +1,24 @@
-# Production readiness — 2026-08-16
+# Production readiness — 2026-08-16 (UPDATED 2026-08-17)
+
+> **2026-08-17 UPDATE — read this first; it changes the argument.**
+>
+> Measurement was fixed: a cold-start A/A is **byte-identical** (100% overlap, per-name P&L to
+> the cent), so the noise floor fell from **10pp to 0.5pp** and levers became measurable for the
+> first time. Five were then tested properly. **Four were rejected** — two of them despite
+> producing a positive return, because their preregistered mechanism did not do what it claimed.
+> One was adopted: a **bear dwell gate** that refuses to open a −3x short on an unconfirmed
+> one-day downtrend (turnover 303% → 228% in window f; provably inert in window c, where the
+> hedge earns its keep).
+>
+> **The scoreboard below is WARM-run data. Cold runs are worse: 1 of 3 windows beat SPY, mean
+> +0.50pp.** Cold starts strip the discovery pool — 7 names traded instead of 12, large caps
+> instead of AEHR/AAOI/AXTI — so they understate the strategy; warm runs are contaminated by
+> state from other backtests. Neither is a forecast. See `COLD-VS-WARM-2026-08-17.md`.
+>
+> That makes the recommendation **stronger, not weaker**: a live/paper instance is the only
+> configuration that is both warm (real discovery pool) and clean (no cross-run contamination).
+> Paper is not a compliance step here — it is the only experiment that can answer the question.
+
 
 Written for the operator, who has asked for a production decision and is tired of iteration. This
 answers the question directly and does not hedge. Where the answer is "no", the reason is a number,
