@@ -142,3 +142,37 @@ deploying a hedge into chop and unwinding it immediately.
 
 Fourth distinct mechanism ruled out in this chain, after the chop allocation, the rebalance band
 and the funding path.
+
+---
+
+# The dwell gate — code change, and the first lever that did what it claimed
+
+`residual_sleeve_bear_deploy_min_dwell_days = 2` (new code, shipped 59798b2), window f,
+bt 790588 (control) vs bt 310460 (treatment), both cold, 89% overlap.
+
+| | control | treatment | |
+|---|---:|---:|---|
+| gate fired | — | **3×** | "held 1 day(s), needs 2" |
+| SQQQ BUY notional | $2,210 | **$0** | hedge never opened |
+| bear-leg refills | 48 | **0** | the churn is gone with it |
+| total fills | 26 | **14** | −46% |
+| **turnover** | **303% of NAV** | **228%** | **−75pp** |
+| return | −2.70% | −2.94% | −0.24pp, BELOW the 0.5pp cold floor |
+
+**Mechanism confirmed**: the gate fired exactly where predicted, on the one-day bear bars that
+window f is made of, and the entire 48-release refill cycle disappeared with the position that
+caused it. Turnover fell 25% — the first movement on this project's known leak from any of the
+five levers tested.
+
+**Return is unchanged within noise** (−0.24pp against a 0.5pp floor). The hedge earned +$20.49 in
+this window, so removing it costs about that and saves the spread on 12 fills.
+
+**This is not yet an adoption.** Suppressing the hedge is correct ONLY where no sustained bear
+arrives. The decisive question is whether the same gate also suppresses it in **window c**, where
+the leg captured 77% of a +16.98% move for **+$416.61** — that window has 19 confirmed bear bars,
+so the dwell should clear 2 easily, but "should" is what preregistration exists to stop me
+asserting. bt 324360 is running it.
+
+**Pre-committed rule:** if the gate reduces SQQQ deployment in window c, it is REJECTED regardless
+of what it does to turnover. The bear leg is the one validated edge this system has, and trading
+it away for a churn saving is a bad trade.
