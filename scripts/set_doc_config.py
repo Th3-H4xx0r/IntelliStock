@@ -63,6 +63,16 @@ def main(argv=None):
     p = argparse.ArgumentParser()
     p.add_argument("strategy_id", type=int)
     p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
+    p.add_argument("--set-path", action="append", default=[], metavar="A.B.C=VALUE",
+                   help="set a NESTED key, e.g. "
+                        "regime_profiles.chop.core_target_pct=0.85. Needed because the "
+                        "levers that matter most live inside `regime_profiles`, and "
+                        "core_target_pct is resolved REGIME-AWARE — reading it off the "
+                        "base config is a documented live defect pattern "
+                        "(core_sleeve.py:231-234). Intermediate dicts must already "
+                        "exist; this refuses to invent a regime profile, because "
+                        "creating a `bear` profile by typo would silently drop the "
+                        "SQQQ hedge.")
     p.add_argument("--unset", action="append", default=[], metavar="KEY")
     p.add_argument("--show", nargs="*", metavar="SUBSTR",
                    help="print matching keys and exit")
@@ -100,7 +110,39 @@ def main(argv=None):
         updates[k.strip()] = _parse(v.strip())
 
     changed = []
-    new_cfg = dict(cfg)
+    new_cfg = copy.deepcopy(cfg)
+
+    # Nested paths first, so a --set on the same top-level key still wins visibly.
+    for item in a.set_path:
+        if "=" not in item:
+            print(f"--set-path expects A.B.C=VALUE, got {item!r}")
+            return 1
+        path, raw = item.split("=", 1)
+        parts = [p for p in path.strip().split(".") if p]
+        if len(parts) < 2:
+            print(f"--set-path needs at least two segments, got {path!r}")
+            return 1
+        node = new_cfg
+        for seg in parts[:-1]:
+            nxt = node.get(seg)
+            if not isinstance(nxt, dict):
+                # Refuse to CREATE the container. Typing `regime_profiles.bare` or
+                # `regime_profiles.bear` into existence is exactly the mistake the
+                # objective warns about: a bear profile routes bear de-risk to cash and
+                # silently drops the hedge.
+                print(f"  refusing to create missing container {seg!r} in {path!r} — "
+                      f"existing keys: {sorted(node) if isinstance(node, dict) else '?'}")
+                return 1
+            node = nxt
+        leaf = parts[-1]
+        val = _parse(raw.strip())
+        before = node.get(leaf, _MISSING)
+        if before is not _MISSING and before == val:
+            print(f"  unchanged  {path} = {val!r}")
+            continue
+        node[leaf] = val
+        changed.append((path, before, val))
+
     for k, v in updates.items():
         before = cfg.get(k, _MISSING)
         if before is not _MISSING and before == v:
@@ -148,8 +190,20 @@ def main(argv=None):
     status, doc2 = _http("GET", f"{api}/strategies/{a.strategy_id}", headers=auth)
     cfg2 = (doc2.get("strategies") or [{}])[a.lane].get("config") or {}
     ok = True
+    def _resolve(cfg_dict, key):
+        """Read back a flat OR dotted key. A verifier that cannot see the value it just
+        wrote is worse than none — it reports FAIL on a correct write, and gets ignored."""
+        if "." not in key:
+            return cfg_dict.get(key, _MISSING)
+        node = cfg_dict
+        for seg in key.split("."):
+            if not isinstance(node, dict) or seg not in node:
+                return _MISSING
+            node = node[seg]
+        return node
+
     for k, _before, after in changed:
-        got = cfg2.get(k, _MISSING)
+        got = _resolve(cfg2, k)
         if after is _MISSING:
             good = got is _MISSING
         else:
