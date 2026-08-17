@@ -58,6 +58,29 @@ Each arm preceded by a full state clear attested `cold=True`. Arms strictly sequ
 4. **The hedge must still work.** If the treatment reduces SQQQ deployment in any window, that is
    disqualifying regardless of return — the bear leg is the one validated edge this system has.
 
+## CONTROL IN, and a prediction against my own hypothesis — recorded before the treatment
+
+**bt 790588** (cold, window f): **−2.70%** against SPY +0.69%. 42 chop / 6 bear / 3 bull bars,
+26 trades, SQQQ deployed (+$20.49, +0.93%).
+
+| sleeve | P&L |
+|---|---:|
+| satellite | −$91.66 |
+| SPY core | −$72.97 |
+
+**The estimate in §"The hypothesis" is probably too optimistic, and here is why.** It assumed
+that capital moved into the core earns SPY's +0.69%. It does not: **the core captured −1.41%
+while SPY returned +0.69% — a 2.1pp drag**, the same drag measured in bt 333727 (+14.95% captured
+of +16.66%) and bt 325136 (−1.55% of +0.69%).
+
+So moving money from satellites into the core swaps one loss for a smaller one, not for a gain.
+Rough arithmetic on this control: the satellite sleeve lost $91.66; routing most of it to a core
+that itself bleeds ~2pp does not recover $91.66, it recovers some fraction.
+
+**Recorded now, before the treatment lands, so it cannot be retrofitted.** If the treatment
+comes back only slightly better than −2.70%, that is the core drag eating the benefit — and the
+real lever is then the core's own execution, not the chop allocation.
+
 ## What I will not claim
 
 - Not that one window generalises. Window d is bull-dominated and this lever barely binds there;
