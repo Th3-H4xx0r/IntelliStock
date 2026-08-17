@@ -32,16 +32,29 @@ MEASURED_DISPERSION_PP = 10.0
 
 #: Same-config dispersion for a COLD pair, measured 2026-08-16 by an explicit A/A:
 #: bt 479057 vs bt 193668, same document and window, each preceded by a full state clear
-#: verified `cold=True`. Result: **100% traded-name overlap, +10.1463% vs +10.1586%** — a
-#: 0.012pp difference on identical seven-name books.
+#: verified `cold=True`. Result: **100% traded-name overlap and BYTE-IDENTICAL P&L** —
+#: MSFT $143.34, NVDA $166.26, NVTS −$36.93, OIH $49.34, RIVN −$23.05, SPY $342.75,
+#: VDE −$37.68 in both arms.
 #:
 #: So the ~10pp figure above was never inherent nondeterminism. It was carried state, and it
-#: is removable. This matters enormously for what can be concluded: against a 10pp floor a
-#: real 3pp lever is indistinguishable from noise, which is why years of tuning returned
-#: nulls. Against a 0.02pp floor, a 1pp effect is visible.
+#: is removable. Against a 10pp floor a real 3pp lever is indistinguishable from noise, which
+#: is the mechanical reason years of tuning returned nulls.
 #:
-#: Deliberately set to 0.5 rather than 0.012 — an order of magnitude of headroom over the
-#: single measurement, because one A/A pair is not a distribution.
+#: **The zero is NOT taken at face value, deliberately.** This project's own guard rule says
+#: a floor of zero is not a floor — byte-identical repeats have previously meant a forgotten
+#: `history_scope_salt`, i.e. a configuration error rather than a quiet system. Two facts say
+#: this particular zero is partly cache-mediated: both arms resolved the SAME scope id
+#: (`abb5b0232cf8`), and arm B logged 413 MORE cache-hit lines than arm A, so it reused what
+#: arm A computed rather than recomputing it. That the answers matched means the caches are
+#: faithful; it does not mean the engine would agree from a globally-cold cache.
+#:
+#: For an A/B that is the right property anyway — the shared cache is a COMMON input to both
+#: arms, so it cannot confound a single-lever comparison. The residual to watch is a lever
+#: that changes WHICH symbols get scored, because then the two arms' cache coverage differs;
+#: the overlap check catches gross cases of that.
+#:
+#: Hence 0.5 rather than 0.0: an order of magnitude of headroom, because one A/A pair is not
+#: a distribution and a zero floor would certify anything.
 COLD_START_DISPERSION_PP = 0.5
 
 # NOT anchored with `^`: the real line carries a `[2026-08-15 19:55:40] [BROKER]`
