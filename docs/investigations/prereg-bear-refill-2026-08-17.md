@@ -67,10 +67,78 @@ Control is **bt 790588** (cold; band, chop target and funding reserve all revert
 4. **Total turnover** against the control's 303% of NAV.
 5. **Return** readable at >0.5pp, secondary to 1 and 3.
 
-## The risk, stated plainly
+## CORROBORATION from a window this document did not plan to use
+
+Found before the treatment landed, at zero run cost, by asking the same question of the window
+where the hedge WORKED. **bt 235194** (window c) is the run where SQQQ captured 77% of a +16.98%
+move for **+$416.61** while SPY fell −5.29%:
+
+| window | hedge outcome | parked | refill releases | sold back |
+|---|---|---:|---:|---:|
+| **c** (bt 235194) | **+$416.61, 77% capture** | $3,225.09 | **0** | **$0.00 (0%)** |
+| **f** (bt 790588) | +$20.49, 0.9% capture | $3,966.51 | **48** | **$2,230.84 (56%)** |
+
+**The window where the hedge earned its keep never refilled once. The window where it captured
+almost nothing sold 56% of itself back.**
+
+That is a stronger test than the treatment run, because it is a natural experiment on the
+outcome that matters rather than on turnover: same code, same config, opposite behaviour, and the
+difference tracks hedge performance exactly. It does not establish causation on its own — window c
+is also a genuinely trending bear where the hedge would do well regardless — but it means the
+refill is not merely a turnover cost. It is plausibly the difference between a hedge that captures
+77% of its move and one that captures 0.9%.
+
+This raises the stakes on endpoint 3: if the treatment holds the hedge intact AND SQQQ capture
+improves, the lever is worth more than its turnover saving.
 
 Cutting the cash target means the sleeve holds less dry powder in a bear. If the hedge then cannot
 fund a satellite buy or a stop-out, that shows up as fewer satellite fills — endpoint 3's sibling,
 and I will report it if it happens. The bear leg is the ONE validated edge this system has
 (window c: SQQQ captured 77% of a +16.98% move, +$416.61), so a change that weakens it is a bad
 trade even if turnover falls.
+
+## RESULT — the mechanism moved, the outcome did not. NOT ADOPTED.
+
+**bt 790588 (cash 0.15) vs bt 129963 (cash 0.02)**, both cold, **100% overlap**.
+
+| endpoint | control | treatment | |
+|---|---:|---:|---|
+| **1a. sold back** | **$2,230.84** | **$168.42** | **−92%** ✓ |
+| **1b. refill releases** | 48 | **79** | **ROSE** ✗ |
+| 3. SQQQ BUY notional | $2,210 | $2,210 | unchanged ✓ |
+| SQQQ P&L | $20.49 | **$8.97** | worse |
+| SQQQ capture | 0.93% | **0.41%** | **worse** ✗ |
+| satellite fills | 9 | 9 | unchanged ✓ |
+| total fills | 26 | **18** | −31% ✓ |
+| turnover | 303% | 302% | unchanged |
+| return | −2.70% | **−3.05%** | −0.35pp, below the cold floor |
+
+**Endpoint 1 is SPLIT, and the split is the finding.** The dollar value of hedge liquidation
+collapsed 92% — the mechanism working. But the COUNT of refill releases *rose* 48 → 79, because
+the same cash-target logic now fires more often for tiny amounts: the control sold ~$46 per
+release, the treatment ~$2. Same defect at a smaller scale, and the log already flags these as
+unexecutable in live — `release SKIPPED SQQQ: $0.55 < $5.00 minimum — the live broker would
+reject this order`.
+
+**Endpoint 3's letter passes and its spirit fails.** SQQQ BUY notional is identical so the hedge
+still deployed, but capture FELL 0.93% → 0.41% and P&L halved. Holding the hedge did not make it
+earn more, because window f's 3 bear bars never produced a sustained downtrend.
+
+**Verdict: NOT ADOPTED.** Reverted to 0.15. Total fills −31% and liquidation −92% are real, but
+the preregistered endpoint named refill COUNT and it rose, the hedge got worse on the outcome that
+matters, and return did not improve. Adopting on "fills fell" alone would be picking the surviving
+half of a split endpoint after seeing the result — exactly what the chop lever was rejected for.
+
+### What this establishes about the bear sleeve
+
+The natural experiment still stands — window c refilled **0** times and captured **77%**; window f
+refilled 48 times and captured **0.9%**. But this run shows the causation does NOT run
+refill → poor capture: removing 92% of the refilling did not restore capture. Both are symptoms of
+one upstream condition — **window f had 3 bear bars, window c had 19.**
+
+**That reframes the bear leg's problem as regime DETECTION, not sleeve mechanics.** The leg is
+being armed on isolated bars where it cannot work, and the refill churn is a side-effect of
+deploying a hedge into chop and unwinding it immediately.
+
+Fourth distinct mechanism ruled out in this chain, after the chop allocation, the rebalance band
+and the funding path.
