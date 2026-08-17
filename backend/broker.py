@@ -2890,6 +2890,13 @@ def _residual_sleeve_config(cached_strategies):
                 # is the only quantity that separates them in the right direction.
                 # ADDs to an open leg and every exit path are untouched.
                 "bear_block_at_fresh_low_bars": int(cfg.get("residual_sleeve_bear_block_at_fresh_low_bars", 0) or 0),
+                # 2026-08-17 dwell gate: minimum CONFIRMED-bear days before the
+                # -3x leg may OPEN. 0 = OFF. See the gate site for the window
+                # c-vs-f measurement (19 bear days -> 77% capture; 3 -> 0.9%).
+                # This dict is an explicit whitelist, so a key added only at the
+                # read site would read 0 forever — an inert lever, which this
+                # repository has shipped thirteen of.
+                "bear_deploy_min_dwell_days": int(cfg.get("residual_sleeve_bear_deploy_min_dwell_days", 0) or 0),
                 # 2026-07-30 beta floor: also park idle cash in the sleeve
                 # symbol on CHOP bars, not just confirmed bull. False = OFF.
                 "chop_enabled": bool(cfg.get("residual_sleeve_chop_enabled", False)),
@@ -5274,6 +5281,49 @@ def _residual_sleeve_deploy(
                              f"(since_20d_low={int(_since_low)} < {_fresh_low_max}, "
                              f"off_low={_sl_diag.get('pct_off_20d_low')}%); "
                              f"not opening a hedge at the bottom of the range", "cyan")
+                        return
+            # 2026-08-17 BEAR DWELL GATE (default 0 = OFF, current behaviour).
+            #
+            # Regime DOWNGRADES apply immediately by design — fast to de-risk is
+            # right for SELLING longs. But the same single bar also opens a -3x
+            # leveraged short, and those are not the same decision: cutting risk
+            # early costs a little upside, while buying SQQQ into a one-day dip
+            # that mean-reverts costs real money and then unwinds itself.
+            #
+            # Measured across two windows on identical code and config:
+            #
+            #   window c (bt 235194)  19 bear bars   hedge captured 77% of a
+            #                                        +16.98% move, +$416.61
+            #   window f (bt 790588)   3 bear bars   hedge captured 0.9%, +$20.49,
+            #                                        and sold 56% of itself back
+            #                                        across 48 refill releases
+            #
+            # Removing 92% of that refill churn (bt 129963) did NOT restore
+            # capture — 0.93% -> 0.41% — which rules the refill out as the cause
+            # and leaves the obvious one: the leg is being armed on isolated bars
+            # where a sustained downtrend never arrives.
+            #
+            # `_bear_dwell_bars` is the existing per-DAY counter (gna ~:27512):
+            # incremented once per new date_key while the confirmed regime is
+            # bear/crash, reset to 0 by ANY upgrade. It already gates the
+            # conviction scale-up and the deep-bear long cut, so this shares
+            # their single source of truth rather than adding a second clock.
+            #
+            # ENTRY ONLY, exactly like the fresh-low gate above: a leg that is
+            # already open is untouched, because an open leg riding a downtrend
+            # is the thesis working. Every EXIT path stays live, so this can
+            # delay a hedge but can never trap one.
+            _dwell_min = int(cfg.get("bear_deploy_min_dwell_days", 0) or 0)
+            if _dwell_min > 0:
+                _held_bear_dw = float(
+                    (portfolio_emulator.get_positions() or {}).get(bsym, 0.0) or 0.0)
+                if _held_bear_dw <= 0:
+                    _dw_now = int(((globals().get("_strategy_cache") or {}).get(
+                        "graph_nexus_analysis") or {}).get("_bear_dwell_bars", 0) or 0)
+                    if _dw_now < _dwell_min:
+                        _log(f"[sleeve] bear leg DEFERRED — confirmed bear has held "
+                             f"{_dw_now} day(s), needs {_dwell_min}; not opening a -3x "
+                             f"short on an unconfirmed downtrend", "cyan")
                         return
             if _RESIDUAL_SLEEVE_STATE.get("bear_stop_episode"):
                 return  # already stopped out this bear episode — stay in cash

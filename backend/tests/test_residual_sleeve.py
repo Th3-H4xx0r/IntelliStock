@@ -1107,3 +1107,94 @@ def test_fresh_low_gate_n2_still_clears_the_good_park_by_sixteen_bars():
                                   _bear_spec_with_fresh_low(n))
         assert len(emu.signals) == 1, f"N={n} must not touch the good park"
         assert abs(emu.signals[0]["cash_per_trade"] - 2100.0) < 1e-6
+
+
+# --- 2026-08-17 bear DWELL open gate (residual_sleeve_bear_deploy_min_dwell_days) ---
+#
+# Measured on two windows, identical code and config:
+#   bt 235194 (window c)  19 confirmed-bear bars -> hedge captured 77% of a
+#                         +16.98% move, +$416.61, and refilled ZERO times
+#   bt 790588 (window f)   3 confirmed-bear bars -> captured 0.9%, +$20.49, and
+#                         sold 56% of itself back over 48 refill releases
+# Removing 92% of that refill churn (bt 129963) did NOT restore capture
+# (0.93% -> 0.41%), which rules the refill out as the cause and leaves the
+# obvious one: the leg is armed on isolated bars where no downtrend arrives.
+#
+# Regime DOWNGRADES stay immediate — fast de-risking of LONGS is correct. This
+# gates only the decision to OPEN a -3x leveraged short, which is a different
+# decision with a different cost of being wrong.
+
+
+def _bear_spec_with_dwell(days):
+    cfg = dict(BEAR_SPEC[0]["config"])
+    cfg["residual_sleeve_bear_deploy_min_dwell_days"] = days
+    return [{"strategy": "graph_nexus_analysis", "config": cfg}]
+
+
+def test_dwell_gate_absent_is_byte_identical():
+    """Default 0 = OFF. A one-day bear still parks exactly as today, so the
+    flag cannot change a single existing run until it is set."""
+    _set_regime("bear")
+    _set_range_pos(9, 5.0, dwell=1)
+    emu = _Emu2(cash=6000.0, nav=6000.0)
+    b._residual_sleeve_deploy(emu, {"SQQQ": 30.0}, datetime(2026, 6, 30, 15), BEAR_SPEC)
+    assert len(emu.signals) == 1
+    assert abs(emu.signals[0]["cash_per_trade"] - 2100.0) < 1e-6
+
+
+def test_dwell_gate_defers_the_open_on_an_unconfirmed_downtrend():
+    """Window f's shape: the bear has held ONE day and the gate wants two."""
+    _set_regime("bear")
+    _set_range_pos(9, 5.0, dwell=1)
+    emu = _Emu2(cash=6000.0, nav=6000.0)
+    b._residual_sleeve_deploy(emu, {"SQQQ": 30.0}, datetime(2026, 6, 30, 15),
+                              _bear_spec_with_dwell(2))
+    assert emu.signals == [], "must not open a -3x short on a one-day bear"
+
+
+def test_dwell_gate_allows_the_open_once_the_bear_persists():
+    """Window c's shape: 19 confirmed bear bars — the leg that made +$416.61."""
+    _set_regime("bear")
+    _set_range_pos(9, 5.0, dwell=19)
+    emu = _Emu2(cash=6000.0, nav=6000.0)
+    b._residual_sleeve_deploy(emu, {"SQQQ": 30.0}, datetime(2026, 2, 20, 15),
+                              _bear_spec_with_dwell(2))
+    assert len(emu.signals) == 1
+    assert abs(emu.signals[0]["cash_per_trade"] - 2100.0) < 1e-6
+
+
+def test_dwell_gate_boundary_is_inclusive():
+    """dwell == N opens; dwell == N-1 does not. Pins the comparison so a
+    silent off-by-one cannot make the lever a bar early or a bar late."""
+    _set_regime("bear")
+    for dwell, expect in ((2, 1), (1, 0)):
+        _set_range_pos(9, 5.0, dwell=dwell)
+        emu = _Emu2(cash=6000.0, nav=6000.0)
+        b._residual_sleeve_deploy(emu, {"SQQQ": 30.0}, datetime(2026, 6, 30, 15),
+                                  _bear_spec_with_dwell(2))
+        assert len(emu.signals) == expect, f"dwell={dwell} expected {expect} signal(s)"
+
+
+def test_dwell_gate_does_not_block_an_ADD_to_an_open_leg():
+    """OPENS only, like the fresh-low gate. Once the leg is on, a dwell reset
+    must never strand it — every exit path stays live, so this can delay a
+    hedge but can never trap one."""
+    _set_regime("bear")
+    _set_range_pos(9, 5.0, dwell=1)          # would BLOCK an open
+    emu = _Emu2(cash=3000.0, nav=6000.0, positions={"SQQQ": 20.0})   # $600 held
+    b._residual_sleeve_deploy(emu, {"SQQQ": 30.0}, datetime(2026, 6, 30, 15),
+                              _bear_spec_with_dwell(2))
+    assert len(emu.signals) == 1, "an ADD to an already-open leg must be allowed"
+
+
+def test_dwell_gate_is_read_from_the_whitelisted_config_key():
+    """ANTI-INERT GUARD.
+
+    `_residual_sleeve_config` builds an explicit whitelist dict; a key added
+    only at the read site would resolve to 0 forever and the lever would ship
+    inert — which this repository has done thirteen times. This asserts the
+    document-level key actually reaches the gate.
+    """
+    cfg = b._residual_sleeve_config(_bear_spec_with_dwell(3))
+    assert cfg["bear_deploy_min_dwell_days"] == 3
+    assert b._residual_sleeve_config(BEAR_SPEC)["bear_deploy_min_dwell_days"] == 0
