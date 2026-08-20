@@ -73,4 +73,4 @@ ollama>=0.4,<1
 # the control-plane bedrock client (discovery). The pydantic-ai bedrock extra
 # above also pulls boto3, but we pin an explicit floor because Bedrock API-key
 # (bearer-token) auth requires a recent botocore.
-boto3>=1.43.34
+boto3>=1.43.40
