@@ -42,5 +42,39 @@ Adopt iff PRIMARY fires, no guard breached, and drawdown endpoint (2a) met. A po
 delta with the hedge still late = reject (mechanism failed). An earlier hedge that stops out
 repeatedly = reject (the filter is load-bearing; document the measured cost of keeping it).
 
-## Result (appended after the runs)
-_pending_
+## Result (bt 621886 control +6.70% / bt 362992 treatment +4.48%; 3-agent parallel sweep)
+**NOT ADOPTED — filter stays at 2 — and the pair is VOID for outcome inference.** The three
+independent analyses (mechanism autopsy, path/delta attribution, adversarial refuter) agree:
+
+- **PRIMARY (mechanism) FIRED:** filter OFF deploys the hedge **7 sessions earlier** (03-16 vs
+  03-25; a separate `bear_confirm_days=2` gate costs 2 more). The early hedge's closed round
+  trip was **+$100.24 better** than the control's, with a better basis (74.71 vs 76.10).
+- **Secondary 2a FAILED, inverted:** treatment max DD **−7.30% vs control −6.21%** — the early
+  hedge deepened and extended the trough (bought into the 03-16..18 bounce; below control every
+  day 03-10..03-18). The "earlier hedge shallows the dip" prediction is absent from this pair.
+- **The −2.22pp headline is NOT the lever.** 128% of it is one selection fork on 03-09 (control
+  bought ADEA +$105.59; treatment bought ASO −$64.39 in the same slot at the same tick), seeded
+  by discovery-candidate divergence starting 02-11 — five weeks before the filter's first
+  action. The SQQQ leg itself was +$32.90 (net) / +$100 (through 03-31) in the TREATMENT's
+  favor. The delta and the lever point in opposite directions.
+- **The filter's design case fired exactly once and won:** 04-01, leg flat post-trail-exit, the
+  filter blocked re-entry at a fresh 20d low; the unfiltered arm re-opened $4,069 @ 78.88 and
+  marked 77.57 same day (−$67). Purpose vindicated, once, worth ≈ the early-deploy gain.
+- **Real noise floor for a 78%-overlap pair ≈ 2.8pp per divergent name slot** (measured: the
+  ADEA/ASO slot alone = 2.83pp; shared-name P&L differences = $0.00 to the cent). 2.22pp is
+  unreadable. Corroborated by same-config cross-time dispersion: +2.97% (morning bt 712452) vs
+  +6.70% (tonight) = 3.73pp.
+
+**Two new tickets from the sweep:**
+1. **Bear-refill hedge leak:** `residual_bear_refill` trims SQQQ into strength to restore cash
+   targets and re-buys higher — treatment sold 31.5 sh @ avg 75.94, re-bought 26.6 sh @ avg
+   76.53, and arrived at the payoff move with a **7.7% smaller hedge** despite 7 extra sessions
+   of exposure. Independent of this filter; live-money leak candidate.
+2. **The news/LLM corpus is an unfrozen input.** Arms 1h apart diverge in the discovery layer
+   even from attested-cold starts (universe counts differ from 02-04, candidates from 02-11).
+   Cold-clearing pins instance state, not the corpus. This is the deepest remaining
+   nondeterminism; the warm-protocol A/A in flight doubles as its measurement.
+
+**Disposition:** filter stays 2 (default retained on its one vindicated fire + unreadable
+outcome). Re-test only under a frozen corpus (warm protocol at minimum), aggregated over ≥5
+pairs, including a window where the proxy makes a fresh low and BOUNCES (the design case).
