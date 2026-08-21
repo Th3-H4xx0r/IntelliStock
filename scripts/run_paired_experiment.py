@@ -130,12 +130,30 @@ def _return_pct(text):
     return float(m.group(1)) if m else None
 
 
-def _run_arm(label, args, settings):
+def _snapshot(action, instance, path, apply=False):
+    args = [sys.executable, str(_REPO / "scripts" / "snapshot_instance_state.py"),
+            action, instance]
+    args += (["--out", path] if action == "export" else ["--in", path])
+    if apply:
+        args.append("--apply")
+    r = subprocess.run(args, capture_output=True, text=True)
+    print("  " + (r.stdout.strip().splitlines() or ["(no output)"])[-1])
+    if r.returncode != 0:
+        print(r.stdout[-800:])
+        raise SystemExit(f"snapshot {action} failed — arms would not be comparable")
+
+
+def _run_arm(label, args, settings, snapshot_path=None):
+    """One arm. Cold protocol: clear -> attest cold -> run. Warm protocol
+    (snapshot_path set): clear -> restore the warmup snapshot -> attest
+    (IDENTICAL_WARM by construction) -> run."""
     print(f"\n=== ARM {label} ===")
     print(f"  cleared {_clear(args.instance)} row(s)")
+    if snapshot_path:
+        _snapshot("restore", args.instance, snapshot_path, apply=True)
     fp = _attest(args.instance)
     print(f"  start: {fp['total_rows']} steering row(s), cold={is_cold(fp)}")
-    if not is_cold(fp):
+    if snapshot_path is None and not is_cold(fp):
         print("  WARNING: arm did not start cold — the comparison will be flagged")
     _apply(args.doc, settings)
     bid, status = _launch_and_wait(args.instance, args.start, args.end,
@@ -153,15 +171,37 @@ def main(argv=None):
     p.add_argument("--granularity", default="3600")
     p.add_argument("--control", action="append", default=[], metavar="KEY=VALUE")
     p.add_argument("--treatment", action="append", default=[], metavar="KEY=VALUE")
+    p.add_argument("--warmup-start", metavar="DATE", help=(
+        "Warm-but-clean protocol: run ONE warmup backtest from this date to "
+        "--start under the doc's base config, snapshot the accumulated state, "
+        "and start BOTH arms from that identical snapshot. Fixes the cold "
+        "protocol's stripped discovery pool (cold runs understate the "
+        "strategy) without cross-run contamination — every row in the pool "
+        "was written by data from before the measurement window."))
     a = p.parse_args(argv)
     if (a.control or a.treatment) and not a.doc:
         p.error("--doc is required when --control/--treatment settings are given")
 
-    ctl = _run_arm("CONTROL", a, a.control)
-    trt = _run_arm("TREATMENT", a, a.treatment)
+    snapshot_path = None
+    if a.warmup_start:
+        print(f"=== WARMUP {a.warmup_start} -> {a.start} (base config) ===")
+        print(f"  cleared {_clear(a.instance)} row(s)")
+        fp0 = _attest(a.instance)
+        if not is_cold(fp0):
+            raise SystemExit("warmup must start cold — clear-state failed?")
+        _launch_and_wait(a.instance, a.warmup_start, a.start,
+                         a.cash, a.granularity)
+        snapshot_path = f"/tmp/_pair_warm_{a.instance}_{a.start}.state.json"
+        _snapshot("export", a.instance, snapshot_path)
+
+    ctl = _run_arm("CONTROL", a, a.control, snapshot_path=snapshot_path)
+    trt = _run_arm("TREATMENT", a, a.treatment, snapshot_path=snapshot_path)
 
     print("\n" + "=" * 72)
-    start_verdict = compare_arm_starts(ctl["fingerprint"], trt["fingerprint"])
+    # Warm protocol: IDENTICAL_WARM is by construction (same restored
+    # snapshot), not the coincidence the cold-only rule guards against.
+    start_verdict = compare_arm_starts(ctl["fingerprint"], trt["fingerprint"],
+                                       require_cold=(snapshot_path is None))
     print(f"START STATE : {start_verdict['verdict']} — {start_verdict['reason']}")
 
     ctext, ttext = _log_text(ctl["bid"]), _log_text(trt["bid"])
