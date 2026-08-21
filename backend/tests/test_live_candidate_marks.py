@@ -170,3 +170,36 @@ def test_risk_state_is_restamped_pre_submission():
         f"expected pre-cycle AND pre-submission risk-state refresh call "
         f"sites, found {len(calls)}"
     )
+
+
+def test_bar_coverage_gate_exists_is_backtest_scoped_and_default_off():
+    """COPA gate (2026-08-21): the bar-coverage buy gate must exist, read
+    `buy_min_bar_coverage` (default 0 = inert), and sit in a backtest-scoped
+    branch. Anti-vacuity: the default must be 0 so untouched docs are
+    byte-identical."""
+    src_nodes = [
+        n for n in ast.walk(_TREE)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "get"
+        and any(
+            isinstance(a, ast.Constant) and a.value == "buy_min_bar_coverage"
+            for a in n.args
+        )
+    ]
+    assert len(src_nodes) == 1, "expected exactly one buy_min_bar_coverage read"
+    default = src_nodes[0].args[1]
+    assert isinstance(default, ast.Constant) and default.value == 0, (
+        "buy_min_bar_coverage default must be 0 (gate inert unless armed)")
+    parent = {}
+    for node in ast.walk(_TREE):
+        for child in ast.iter_child_nodes(node):
+            parent[child] = node
+    node = src_nodes[0]
+    backtest_scoped = False
+    while node in parent:
+        node = parent[node]
+        if isinstance(node, ast.If) and "MODE_BACKTEST" in ast.dump(node.test):
+            backtest_scoped = True
+            break
+    assert backtest_scoped, "coverage gate must be inside a MODE_BACKTEST branch"

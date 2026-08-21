@@ -16029,6 +16029,39 @@ while not shutdown_requested:
                     bars = price_history[symbol] or []
                     price_history_symbol = bars[-30:] if len(bars) > 30 else bars
 
+                # 2026-08-21 — bar-coverage buy gate. bt 209809 bought COPA on
+                # 17 hourly bars in a 4.5-month window: its mark was a
+                # two-value step function and its circuit-breaker sell rested
+                # NINE SESSIONS before filling 7.2% worse than the decision
+                # price. A name the harness cannot price is a name it must not
+                # buy. Backtest-only (live prices come from the mark stream,
+                # not price_history); NEW entries only, never holds/sells.
+                # Default OFF: `buy_min_bar_coverage` bars, 0 = gate inert.
+                if decision == 1 and mode == MODE_BACKTEST:
+                    try:
+                        _cov_min = int((_core_sleeve_cfg_raw(
+                            _cached_strategies) or {}).get(
+                            "buy_min_bar_coverage", 0) or 0)
+                    except Exception:
+                        _cov_min = 0
+                    if _cov_min > 0:
+                        _cov_bars = len((price_history or {}).get(symbol) or [])
+                        try:
+                            _cov_held = float((portfolio_emulator.get_positions()
+                                               or {}).get(symbol, 0) or 0) > 0
+                        except Exception:
+                            _cov_held = False
+                        if _cov_bars < _cov_min and not _cov_held:
+                            _log(
+                                f"BAR-COVERAGE GATE: blocking NEW BUY {symbol} "
+                                f"— {_cov_bars} bar(s) loaded < {_cov_min} "
+                                "required; a name the harness cannot price is "
+                                "a name it must not buy",
+                                "yellow",
+                            )
+                            decision = 0
+                            action = "hold"
+
                 # Resolve size: default sell all (1.0), buy up to cash_per_trade (1000). Use first pre-decision strategy that voted for decision and provided a size_hint.
                 sell_fraction = 1.0
                 cash_per_trade = 1000.0
