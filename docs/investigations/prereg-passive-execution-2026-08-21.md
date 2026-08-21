@@ -36,21 +36,38 @@ Adopt iff PRIMARY fires, no guard breached, secondary ≥ −0.5pp. Else reject 
 mechanism recorded.
 
 ## Result (bt 980932 control / bt 871653 treatment)
-**THE LEVER IS INERT IN THE BACKTEST HARNESS — the A/B cannot be run as a backtest at all.**
-The treatment logged zero passive lines (no `[passive] limit execution ENABLED` banner, nothing).
-Both `set_passive_execution` call sites (broker.py ~9689, ~10979) are in the LIVE boot path;
-the backtest boot path never calls it. The 2026-08-03 commit message said "per-doc so it can be
-A/B'd" — the wiring never reached the harness the A/B would run in. PRIMARY endpoint fails by
-vacuity; no adoption question can be posed until the flag is wired into the backtest boot (or
-judged directly in paper, where the wiring exists).
+**REJECTED — and the first-pass reading of this pair was WRONG and is corrected here.**
 
-Two protocol findings the accident produced (both consequential):
-1. **A semantically-identical config pair diverged to 45% overlap in chop** (control −2.94%,
-   treatment −3.02%). The arms differed only by the PRESENCE of an inert key. Chop draw
-   instability (and possibly config-hash→scope-id perturbation) produces VOID-scale divergence
-   with no real lever at all — hard confirmation that chop pairs cannot be read on returns.
-2. **Same-config cold runs hours apart differ**: bt 209809 (morning, −1.22%, CPER/EEM/COPA
-   book) vs bt 980932 (evening, −2.94%, COPJ/COPX/CVLT/CSCO/GCMG book). Shared
-   article/sentiment caches evolve with wall-clock time, so cold comparability requires
-   BACK-TO-BACK arms — which run_paired_experiment.py provides. Never reuse a control across
-   pairs (validated: tonight's fresh-control choice was load-bearing).
+First pass (now retracted): "the lever is inert in the backtest harness" — based on the absence
+of any `[passive]` log line. The deep path analysis falsified that with fill forensics: the
+CONTROL pays a constant ±22.9 bps against next-bar mid on 14/14 fills (marketable), while the
+TREATMENT fills at exactly the anchor price, zero spread, with orders resting ACROSS BARS (one
+never filled). The flag rewrites the entire fill model in backtests; it simply has no log line
+on the backtest path (the `[passive]` banner is wired only into the live boot). The
+scope-perturbation hypothesis is also ruled out: identical scope ids, 100% discovery overlap —
+the 45% book divergence cascades entirely from ONE unfilled day-1 SPY order (control was 40%
+SPY-core from 15:00; treatment held 0% core for a full session).
+
+Verdict against the preregistered endpoints:
+- PRIMARY: the passive path engaged (resting fills confirmed) — fires, but with no banner
+  (an unlogged lever, the documented anti-pattern).
+- GUARDS: **breached, decisively.**
+  1. **Risk exits rest unfilled.** COPX's circuit breaker fired on 11 consecutive bars
+     (6/24 15:00 → 6/25 13:00) before filling — a stop-loss that cannot stop. Unbounded risk
+     in a fast market. This alone kills the lever as implemented.
+  2. Day-1 entries cost MORE, not less (~$15 worse: anchor sat above next-bar mid).
+  3. Resting orders double-count the turnover budget (superseded order + reissue both count):
+     budget-binding ticks 55% → 77%, further starving an already-starved book.
+- SECONDARY: −0.08pp nominal; irrelevant next to the guard breaches.
+
+**Disposition: passive execution stays OFF. Do not re-test until (a) risk exits are exempted
+from passive routing, (b) the backtest path logs the banner, (c) resting orders stop
+double-counting the turnover budget.** The 22.8 bps crossing saving is real but this
+implementation spends more than it saves.
+
+Additional path findings from the pair (both arms): the entire −3% loss is the day-1 copper
+entry at its top (−$193/−$199) plus zero give-back protection (control's CVLT round-tripped
++22.9% → −6.1%); the turnover governor blocked buys on 55%/77% of ticks and `funded 0 of N` on
+~30 of 35 batches — in this window the book is STARVED, not churned. Same-config cross-time
+drift confirmed separately: bt 209809 (morning) vs bt 980932 (evening), identical config, cold,
+different books (−1.22% vs −2.94%) — arms must be back-to-back.
