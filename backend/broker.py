@@ -4318,6 +4318,92 @@ def _subscribe_residual_sleeve_marks(live_adapter, base_symbols,
              "red")
 
 
+def _live_candidate_marks_enabled(cached_strategies) -> bool:
+    """Default ON — this is a defect repair, not a lever. Without candidate
+    marks a pure-discovery live instance can never open a position: the mark
+    stream carries only operator symbols + held positions + the sleeve, so
+    every entry intent reaches the unified order gate markless and dies on
+    quote.invalid_price (2026-08-21, alpaca-paper-fwd tick #2: ROST/WMT/GLDM/
+    PSLV all blocked). `live_candidate_mark_subscribe_enabled=false` opts out."""
+    try:
+        spec = next(
+            (s for s in (cached_strategies or [])
+             if str((s or {}).get("strategy") or "").strip()
+             == "graph_nexus_analysis"),
+            None,
+        )
+        if spec is None:
+            return True
+        val = (spec.get("config") or {}).get(
+            "live_candidate_mark_subscribe_enabled", True)
+        return True if val is None else bool(val)
+    except Exception:
+        return True
+
+
+def _ensure_live_candidate_marks(live_adapter, run_once_results,
+                                 cached_strategies, wait_seconds=8.0):
+    """Subscribe this tick's BUY candidates to the mark stream BEFORE the
+    per-symbol submission loop, then wait briefly for first marks.
+
+    Same failure family as `_subscribe_residual_sleeve_marks` (which fixed it
+    for the sleeve): a symbol without a mark is not refused early — it decides
+    to trade and THEN the order gate blocks on quote.invalid_price, which
+    reads like a data outage rather than a missing subscription. Candidates
+    are unioned with the current subscription (set_symbols reconciles, so
+    passing only the candidates would silently unsubscribe held names).
+    Returns (newly_subscribed, still_unmarked); both empty on the no-op paths.
+    """
+    import time as _cm_time
+    if live_adapter is None or not _live_candidate_marks_enabled(
+            cached_strategies):
+        return ([], [])
+    buys = set()
+    for _row in (run_once_results or []):
+        _scores = _row[1] if isinstance(_row, (list, tuple)) and len(_row) > 1 else None
+        if not isinstance(_scores, dict):
+            continue
+        for _s, _d in _scores.items():
+            try:
+                if float(_d) > 0:
+                    buys.add(str(_s).strip().upper())
+            except (TypeError, ValueError):
+                continue
+    if not buys:
+        return ([], [])
+    marks = getattr(live_adapter, "_market_marks", None)
+    missing = sorted(
+        s for s in buys if marks is None or marks.get(s) is None)
+    if not missing:
+        return ([], [])
+    try:
+        _ms = getattr(live_adapter, "_mark_stream", None)
+        _current = set(_ms.subscribed_symbols()) if _ms is not None else set()
+        _status = live_adapter.start_market_marks(
+            tuple(sorted(_current | buys)))
+    except Exception as _cm_exc:
+        _log(f"[marks] candidate subscribe failed for "
+             f"{', '.join(missing)}: {type(_cm_exc).__name__}: {_cm_exc} — "
+             "entries will be gate-blocked on quote.invalid_price", "red")
+        return ([], missing)
+    if isinstance(_status, dict) and _status.get("overflow"):
+        _log("[marks] mark-stream overflow after candidate subscribe; "
+             f"unmarked symbols fail closed: {_status['overflow']}", "red")
+    _deadline = _cm_time.time() + max(0.0, float(wait_seconds))
+    still = [s for s in missing if marks is None or marks.get(s) is None]
+    while still and _cm_time.time() < _deadline:
+        _cm_time.sleep(0.5)
+        still = [s for s in still if marks.get(s) is None]
+    _log(f"[marks] candidate subscribe: +{len(missing)} symbol(s) "
+         f"({', '.join(missing[:8])}{'…' if len(missing) > 8 else ''}); "
+         f"marked {len(missing) - len(still)}/{len(missing)} within "
+         f"{float(wait_seconds):.0f}s"
+         + (f"; still unmarked (will gate-block): {', '.join(still)}"
+            if still else ""),
+         "yellow" if still else "cyan")
+    return (missing, still)
+
+
 def _residual_sleeve_state_persist():
     """Mirror the sleeve's decision state into the nexus strategy cache so the
     existing per-tick RethinkDB flush carries it across a restart. Live-only
@@ -15708,6 +15794,16 @@ while not shutdown_requested:
                 _log(f"turnover budget check failed ({type(_tb_exc).__name__}: "
                      f"{_tb_exc}) — budget inert this tick", "yellow")
                 _turnover_blocked, _turnover_used = False, 0.0
+            # 2026-08-21 — marks for THIS tick's entry candidates, before the
+            # submission loop. Live-only; backtests price from bars.
+            if mode == MODE_LIVE and live_adapter is not None:
+                try:
+                    _ensure_live_candidate_marks(
+                        live_adapter, run_once_results, _cached_strategies)
+                except Exception as _cm_top_exc:
+                    _log("[marks] candidate mark subscribe crashed "
+                         f"({type(_cm_top_exc).__name__}: {_cm_top_exc}) — "
+                         "continuing; entries may be gate-blocked", "yellow")
             for symbol in _exec_order:
                 # Step 1: Run all per-symbol pre-decision (voting) strategies and collect scores + weight overrides
                 normalized = None  # reset per-symbol to avoid stale values from previous iteration
