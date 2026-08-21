@@ -90,3 +90,18 @@ What IS established:
 
 Disposition: `max_positions` stays 6 on doc 195. **max_positions=4 is the first candidate for a
 paper-era A/B** — forward paper is the only instrument that can read its chop behaviour.
+
+## Post-hoc mechanism correction (2026-08-21, from the Opus path analysis)
+The deep per-run analysis of the window-c pair shows the effect was NEVER the position cap:
+the Z4.1 regime gate overrode both arms' caps (bear→2, chop→8), and in window c the static
+`max_positions` **never bound as a cap in either arm**. The entire treatment effect flows
+through the **sizing clamp**: per-name weight 0.14 × slots vs the 0.63 satellite design share —
+6 slots trips the clamp (0.84 > 0.63 → clamped to 10.5%), 4 slots does not (0.56 < 0.63 → full
+14.0%). The same arithmetic explains window d's +33% entry weights. Window-d path detail: the
+treatment TRAILED the control on every close from 04-07 to 05-28 and won only in the final two
+sessions (DELL +$131 exactly cancelling NVDA+NVTS; the repeatable residue is ≈+$52 of
+concentration). Max DD was deeper in the treatment in d (−2.65% vs −2.15%), shallower in c
+(−6.71% vs −7.37%, smaller SPY sleeve into a falling index).
+
+Consequence: the honest name for this lever is "satellite weight 10.5% → 14%", and it could be
+tested directly via the sizing-clamp/design-share keys without touching the cap at all.

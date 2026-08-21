@@ -35,5 +35,22 @@ then RESTORE: `--unset passive_execution_enabled --apply`.
 Adopt iff PRIMARY fires, no guard breached, secondary ≥ −0.5pp. Else reject with the measured
 mechanism recorded.
 
-## Result (appended after the runs)
-_pending_
+## Result (bt 980932 control / bt 871653 treatment)
+**THE LEVER IS INERT IN THE BACKTEST HARNESS — the A/B cannot be run as a backtest at all.**
+The treatment logged zero passive lines (no `[passive] limit execution ENABLED` banner, nothing).
+Both `set_passive_execution` call sites (broker.py ~9689, ~10979) are in the LIVE boot path;
+the backtest boot path never calls it. The 2026-08-03 commit message said "per-doc so it can be
+A/B'd" — the wiring never reached the harness the A/B would run in. PRIMARY endpoint fails by
+vacuity; no adoption question can be posed until the flag is wired into the backtest boot (or
+judged directly in paper, where the wiring exists).
+
+Two protocol findings the accident produced (both consequential):
+1. **A semantically-identical config pair diverged to 45% overlap in chop** (control −2.94%,
+   treatment −3.02%). The arms differed only by the PRESENCE of an inert key. Chop draw
+   instability (and possibly config-hash→scope-id perturbation) produces VOID-scale divergence
+   with no real lever at all — hard confirmation that chop pairs cannot be read on returns.
+2. **Same-config cold runs hours apart differ**: bt 209809 (morning, −1.22%, CPER/EEM/COPA
+   book) vs bt 980932 (evening, −2.94%, COPJ/COPX/CVLT/CSCO/GCMG book). Shared
+   article/sentiment caches evolve with wall-clock time, so cold comparability requires
+   BACK-TO-BACK arms — which run_paired_experiment.py provides. Never reuse a control across
+   pairs (validated: tonight's fresh-control choice was load-bearing).
