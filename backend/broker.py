@@ -15161,6 +15161,30 @@ while not shutdown_requested:
                             "unified order gate will fail closed",
                             "yellow",
                         )
+                # 2026-08-21 — risk_state was the one dependency this
+                # pre-submission sync block did NOT re-stamp. The gate requires
+                # evidence younger than max_control_age (60s), but the only
+                # stamp was the PRE-cycle refresh, minutes of discovery work
+                # earlier — so every entry died on dependency.risk_state.stale
+                # (alpaca-paper-fwd tick #2). Re-evaluate on fresh equity here,
+                # beside the cash/positions re-syncs that already exist.
+                if str(live_broker_type or "").strip().lower() == "alpaca":
+                    try:
+                        _ra_fut = _PRICE_FETCH_EXECUTOR.submit(
+                            live_adapter.refresh_account)
+                        _ra_fut.result(timeout=15.0)
+                        _refresh_live_account_risk_state(
+                            live_adapter,
+                            datetime.datetime.now(datetime.timezone.utc),
+                        )
+                    except Exception as _rs_sync_e:
+                        _log(
+                            "Pre-submit risk-state refresh failed "
+                            f"({type(_rs_sync_e).__name__}: {_rs_sync_e}); "
+                            "entries will be gate-blocked on "
+                            "dependency.risk_state.stale",
+                            "yellow",
+                        )
 
             # A6 hoisted: broker-calendar market-open check ONCE per tick (not
             # per-symbol) to avoid log spam during holidays/half-days. Dedup

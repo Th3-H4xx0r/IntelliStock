@@ -153,3 +153,20 @@ def test_call_site_is_live_guarded_and_reachable():
             guarded = True
             break
     assert guarded, "_ensure_live_candidate_marks call site is not inside a MODE_LIVE guard"
+
+
+def test_risk_state_is_restamped_pre_submission():
+    """The gate demands risk_state evidence <60s old; the pre-cycle stamp is
+    minutes stale by submission. There must be a second, pre-submission call
+    to _refresh_live_account_risk_state (2026-08-21: every entry died on
+    dependency.risk_state.stale with only the pre-cycle stamp)."""
+    calls = [
+        n for n in ast.walk(_TREE)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Name)
+        and n.func.id == "_refresh_live_account_risk_state"
+    ]
+    assert len(calls) >= 2, (
+        f"expected pre-cycle AND pre-submission risk-state refresh call "
+        f"sites, found {len(calls)}"
+    )
