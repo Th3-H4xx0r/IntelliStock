@@ -5194,7 +5194,84 @@ def action_list_backtests(conn, instance_id=None, page=1, per_page=20, sort_by="
         queue_rows = list(queue_query.run(conn))
 
     result_rows = []
+    # 2026-08-21 perf: index-paged fast path. Pluck does NOT spare RethinkDB
+    # from loading each full document (5-13MB of decisions/prices/logs per
+    # row), so the old full-table pluck read the whole table on every page
+    # load — measured 12.2s for 1,426 rows. With `list_ts` (plain index on
+    # `timestamp`, the only non-NULL time field; ISO strings, so
+    # lexicographic == chronological), `status_norm`, and `instance_ts`
+    # (see scripts/create_backtest_list_indices.py) the endpoint reads the
+    # ~per_page documents the page actually renders, plus the handful of
+    # active rows. Applies to the default completed_at sort only; pnl sorts
+    # and missing-index deployments fall through to the original path.
+    _pre_paged_total = None
+    _fast_idx = set()
     if has_results:
+        try:
+            _fast_idx = set(
+                r.db(DB_NAME).table("BacktestResults").index_list().run(conn))
+        except Exception:
+            _fast_idx = set()
+    _fast = (
+        has_results
+        and sort_by == "completed_at"
+        and {"list_ts", "status_norm"} <= _fast_idx
+        and (not instance_filter or "instance_ts" in _fast_idx)
+    )
+    if _fast:
+        _tblq = r.db(DB_NAME).table("BacktestResults")
+        _pluck_fields = (
+            "id", "backtest_id", "instance_id", "instance", "tickers",
+            "start_date", "end_date", "status", "progress", "pnl",
+            "pnl_percent", "time_elapsed_seconds", "started_at",
+            "created_at", "timestamp", "completed_at",
+        )
+
+        def _slim(q):
+            return q.pluck(*_pluck_fields).merge(lambda row: {
+                "tickers": row["tickers"].default([]).limit(_LIST_TICKER_PREVIEW),
+                "tickers_total": row["tickers"].default([]).count(),
+            })
+
+        _active_q = _tblq.get_all(
+            "running", "queued", "pending", "paused", index="status_norm")
+        if instance_filter:
+            _active_rows = [
+                row for row in _slim(_active_q).run(conn)
+                if str(row.get("instance_id", row.get("instance") or ""))
+                == instance_filter
+            ]
+            _base = _tblq.between(
+                [instance_filter, r.minval], [instance_filter, r.maxval],
+                index="instance_ts")
+            _order_idx = "instance_ts"
+            _db_total = int(_base.count().run(conn))
+        else:
+            _active_rows = list(_slim(_active_q).run(conn))
+            _base = _tblq
+            _order_idx = "list_ts"
+            _db_total = int(_tblq.count().run(conn))
+        _page_i = max(1, int(page))
+        _pp = max(1, min(100, int(per_page)))
+        # Plain page window over the timestamp order. Active rows are ALSO in
+        # this order and are almost always the newest timestamps, so the DB
+        # rank matches the final python rank (active pinned first) and pages
+        # line up with the legacy full-scan path exactly. The explicit
+        # active fetch above only matters for a long-running row whose
+        # timestamp has scrolled off the page — it still gets pinned to the
+        # top, shifting that page by at most n_active rows.
+        _t_skip = (_page_i - 1) * _pp
+        _ordered = _base.order_by(index=(
+            r.desc(_order_idx) if sort_order == "desc"
+            else r.asc(_order_idx)))
+        _page_rows = list(
+            _slim(_ordered.slice(_t_skip, _t_skip + _pp)).run(conn))
+        # Explicit active rows belong to page 1 only — the python sort pins
+        # them first, and pinning them onto every page would repeat them.
+        result_rows = (_active_rows if _page_i == 1 else []) + _page_rows
+        # merged{} below dedupes any active row the slice also contained.
+        _pre_paged_total = _db_total
+    if has_results and not _fast:
         # 2026-04-26 perf: same index-first pattern as the queue side.
         results_query = None
         if instance_filter:
@@ -5527,11 +5604,25 @@ def action_list_backtests(conn, instance_id=None, page=1, per_page=20, sort_by="
 
     all_backtests = sorted(merged.values(), key=_sort_key)
     all_backtests = [{k: v for k, v in bt.items() if not str(k).startswith("_")} for bt in all_backtests]
-    total = len(all_backtests)
     page = max(1, int(page))
     per_page = max(1, min(100, int(per_page)))
-    offset = (page - 1) * per_page
-    backtests = all_backtests[offset: offset + per_page]
+    if _pre_paged_total is not None:
+        # Index fast path already applied the page window at the DB; the rows
+        # here ARE the page (plus pinned active rows on page 1). Re-slicing
+        # with the page offset would discard them. Active rows (result-side
+        # AND queue-side) always sort to the head of the global list, so in
+        # the legacy path they appear on page 1 only — enforce the same here.
+        if page > 1:
+            all_backtests = [
+                b for b in all_backtests
+                if not _is_active_status(b.get("status"))
+            ]
+        total = max(int(_pre_paged_total), len(all_backtests))
+        backtests = all_backtests[:per_page]
+    else:
+        total = len(all_backtests)
+        offset = (page - 1) * per_page
+        backtests = all_backtests[offset: offset + per_page]
     import math
     return {
         "backtests": backtests,
