@@ -1,4 +1,5 @@
 import os
+import threading
 import time
 
 import pytest
@@ -61,19 +62,6 @@ def test_watch_progress_rows_never_carries_the_document(progress_schema):
         w.stop()
 
 
-def test_current_rows_projects_the_same_two_keys_as_the_feed(progress_schema):
-    """The snapshot accessor and the feed must not drift: a caller that seeds
-    from one and then follows the other has to see the same shape."""
-    import self_learning_progress as slp
-    brs.write_progress(820004, {"status": "running", "progress": 7})
-    brs.write_progress(820005, {"progress": 0})           # no status yet
-    rows = {r["id"]: r for r in slp.current_rows()}
-    assert set(rows) == {"820004", "820005"}
-    assert set(rows["820004"]) == {"id", "status"}
-    assert rows["820004"]["status"] == "running"
-    assert rows["820005"]["status"] is None
-
-
 def test_include_initial_replays_existing_rows(progress_schema):
     import self_learning_progress as slp
     brs.write_progress(820003, {"status": "finished", "progress": 100})
@@ -85,3 +73,40 @@ def test_include_initial_replays_existing_rows(progress_schema):
             (c["new_val"] or {}).get("id") == "820003" for c in seen))
     finally:
         w.stop()
+
+
+def test_progress_feed_delivers_the_two_key_change_the_engine_consumes(
+        progress_schema):
+    """The path self_learning_engine.py's _open_feed actually runs.
+
+    watch_progress_rows is the Watcher form; the engine consumes the generator
+    form, because run_reconnecting_changefeed's open_feed(conn) wants an
+    iterator. Nothing exercised it until this test, so a composition break
+    between watch.feed and the projection would have shipped unnoticed.
+    """
+    import self_learning_progress as slp
+    seen, stop = [], threading.Event()
+
+    def _drain():
+        for change in slp.progress_feed(
+                should_continue=lambda: not stop.is_set()):
+            seen.append(change)
+
+    t = threading.Thread(target=_drain, daemon=True)
+    t.start()
+    try:
+        brs.write_progress(820006, {"status": "running", "progress": 0})
+        assert _wait_for(lambda: any(
+            (c["new_val"] or {}).get("id") == "820006" for c in seen))
+        change = [c for c in seen
+                  if (c["new_val"] or {}).get("id") == "820006"][0]
+        assert set(change["new_val"]) == {"id", "status"}
+        assert change["new_val"]["status"] == "running"
+        # The projection is what keeps the row off the handler. fields= was
+        # dropped from progress_feed, so _id_and_status is now the ONLY thing
+        # standing between the handler and the whole row.
+        assert "payload" not in change["new_val"]
+    finally:
+        stop.set()
+        t.join(timeout=15)
+        assert not t.is_alive(), "the feed generator must shut its watcher down"

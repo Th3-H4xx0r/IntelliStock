@@ -55,7 +55,8 @@ except Exception:                                    # pragma: no cover
 
 import backtest_result_store as brs
 import self_learning_progress as slp
-from rethink_changefeed import run_reconnecting_changefeed
+from rethink_changefeed import (is_transient_db_error,
+                                run_reconnecting_changefeed)
 from self_learning import approvals as learning_approvals
 from self_learning import hypotheses as learning_hypotheses
 from self_learning import llm as learning_llm
@@ -411,20 +412,53 @@ def _request_approval(conn, intent, now) -> None:
         _log(f"could not enqueue approval: {type(exc).__name__}: {exc}", "red")
 
 
+class ControlPlaneUnreadable(RuntimeError):
+    """The control plane could not be READ — which is not the same answer as
+    "the operator turned it off", and must not be handled the same way.
+
+    Before the Postgres port the changefeed cursor was bound to the same
+    connection this reads, so a dropped connection raised out of the feed loop
+    and `run_reconnecting_changefeed` healed it. The feed now lives on Postgres
+    and cannot see a RethinkDB blip, so the liveness coupling has to be
+    restored here: swallowing the error would leave completion processing
+    permanently inert while the process still looked healthy.
+    """
+
+
+def _refuse(what: str, exc: Exception) -> None:
+    """Log an unreadable control read, and re-raise the transient ones.
+
+    Fail CLOSED either way — every caller treats a return as "do not run".
+    What changes is that a connection-level failure is now LOUD and reaches a
+    reconnect, instead of being indistinguishable from `running: False`.
+    """
+    _log(f"cannot read {what}: {type(exc).__name__}: {exc} — refusing to run",
+         "red")
+    if is_transient_db_error(exc):
+        raise ControlPlaneUnreadable(f"{what}: {exc}") from exc
+
+
 def _should_run(conn) -> bool:
     """Fail CLOSED. A missing control document or an unreadable config means
     stop, not go — the engine ships `running: False` and a database that cannot
-    answer is not permission to start scanning it."""
+    answer is not permission to start scanning it.
+
+    A TRANSIENT read failure additionally raises `ControlPlaneUnreadable`, so
+    the caller can reconnect rather than sit inert forever. Fail-closed is
+    unaffected: nothing downstream of a raise gets to run either.
+    """
     try:
         doc = r.db(DB_NAME).table("EngineControl").get(
             "self_learning_engine").run(conn)
-    except Exception:
+    except Exception as exc:
+        _refuse("EngineControl", exc)
         return False
     if not doc or not doc.get("running", False):
         return False
     try:
         return bool(store.get_config(conn).get("enabled", True))
-    except Exception:
+    except Exception as exc:
+        _refuse("LearningConfig", exc)
         return False
 
 
@@ -483,6 +517,34 @@ def _handle_run(conn, run_id, status, processed) -> None:
             _plan_and_log_turn(conn, config)
     except Exception as exc:
         _log(f"run {run_id} failed: {type(exc).__name__}: {exc}", "red")
+
+
+def _make_handler(processed):
+    """The per-change handler, as a closure over the processed-run watermark.
+
+    Module level, not nested in main(), so the property that matters can be
+    tested: a dead control-plane connection must reach
+    `run_reconnecting_changefeed` and be reconnected, not be swallowed into
+    permanent inertness.
+    """
+    def _handle(change, c):
+        try:
+            if not _should_run(c):
+                return
+            new_val = (change or {}).get("new_val") or {}
+            run_id = new_val.get("id")
+            if run_id is None:
+                return
+            _handle_run(c, run_id, new_val.get("status"), processed)
+        except ControlPlaneUnreadable:
+            # Deliberately ESCAPES. The runner treats an escaping handler
+            # exception as a feed error and reconnects with a fresh connection
+            # (rethink_changefeed.py:112-116) — which is what the ReQL cursor
+            # bound to this same connection used to do for us.
+            raise
+        except Exception as exc:
+            _log(f"change handler error: {type(exc).__name__}: {exc}", "red")
+    return _handle
 
 
 def main() -> None:
@@ -547,17 +609,7 @@ def main() -> None:
         # been ported, so the handler still needs it and the feed ignores it.
         return slp.progress_feed()
 
-    def _handle(change, c):
-        try:
-            if not _should_run(c):
-                return
-            new_val = (change or {}).get("new_val") or {}
-            run_id = new_val.get("id")
-            if run_id is None:
-                return
-            _handle_run(c, run_id, new_val.get("status"), processed)
-        except Exception as exc:
-            _log(f"change handler error: {type(exc).__name__}: {exc}", "red")
+    _handle = _make_handler(processed)
 
     def _heartbeat():
         """Turn on a timer as well as on an event."""
