@@ -115,10 +115,14 @@ class Watcher:
         if not has_doc:
             rows = dbstore.sql("SELECT * FROM %s" % q)
             return {str(r.get("id")): dict(r) for r in rows}
+        # iter(), not run(): run() raises above PG_MAX_ROWS, and a watcher
+        # that raises on its own snapshot logs a lost connection and backs
+        # off forever -- a watch_table on a large table would never deliver
+        # anything at all.
         if self.predicate is not None:
-            rows = dbstore.run(dbstore.filter(self.table, self.predicate))
+            rows = dbstore.iter(dbstore.filter(self.table, self.predicate))
         else:
-            rows = dbstore.run(dbstore.Selection(self.table))
+            rows = dbstore.iter(dbstore.Selection(self.table))
         pk_field = _pk_field(self.table)
         return {str(r.get(pk_field)): r for r in rows}
 
