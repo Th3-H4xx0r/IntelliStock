@@ -1,4 +1,4 @@
-"""One-shot RethinkDB -> PostgreSQL migration: export, convert, COPY.
+"""One-shot RethinkDB -> PostgreSQL migration: export, convert, COPY, verify.
 
 The ONLY file in the tree allowed to import ``rethinkdb``, and it imports it
 lazily inside :func:`rethink_conn` so nothing else pays for the dependency.
@@ -7,6 +7,7 @@ Shape of a run::
 
     scripts/migrate_rethinkdb_to_postgres.py                    # copy everything
     scripts/migrate_rethinkdb_to_postgres.py --tables Instances # one table
+    scripts/migrate_rethinkdb_to_postgres.py --verify --verify-sample 1.0
 
 Three things the design turns on:
 
@@ -16,8 +17,9 @@ Three things the design turns on:
   so re-running a partial batch is a no-op. A ``_migration_state`` row per
   table records the last primary key written, so a killed run continues rather
   than restarting or duplicating.
-* **Documents survive unchanged.** Nothing is normalised on the way through
-  except RethinkDB's TIME pseudotype, which has no JSON form.
+* **Documents are compared, not summarised.** ``--verify`` hashes whole
+  documents with :func:`db.json.canonical_sha256` and writes both sides of any
+  mismatch to disk.
 
 Two corrections to the design brief, both from the running system:
 
@@ -35,7 +37,10 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import json as _stdjson
 import os
+import pathlib
+import random
 import sys
 from typing import Any, Iterator
 
@@ -45,16 +50,23 @@ if _BACKEND not in sys.path:
 
 import backtest_result_store as brs                      # noqa: E402
 from db import pool, schema, store                       # noqa: E402
-from db.json import dumps                                # noqa: E402
+from db.json import canonical_sha256, dumps              # noqa: E402
 
 MIGRATION_STATE_TABLE = "_migration_state"
 DEFAULT_BATCH = 2000
 BACKTEST_BATCH = 200
+MISMATCH_DIR = ".migration-mismatches"
 
 #: RethinkDB pseudotypes must arrive RAW. ``native`` hands back ``datetime``
 #: objects ``json.dumps`` cannot serialise, and native binary hands back
 #: ``bytes``; both are unrepresentable in a jsonb document.
 _RUN_OPTS = {"time_format": "raw", "binary_format": "raw"}
+
+#: ReQL secondary indexes that the BacktestResults split MOVED to another
+#: table. ``status_norm`` indexes ``status``, which now lives on the hot
+#: BacktestProgress row, so looking for it on BacktestResults would report a
+#: missing index that is in fact present -- one table to the left.
+_MOVED_INDEXES = {"BacktestResults": {"status_norm": "BacktestProgress"}}
 
 
 # --------------------------------------------------------------------------
@@ -151,9 +163,9 @@ def pg_id(table: str, doc: dict) -> str:
 
     Deliberately NOT ``store.coerce_id``: coerce_id enforces the registry's
     declared ``id_type``, and enforcing it *here* would drop rows the registry
-    is simply wrong about. The copy stays faithful; the registry
-    disagreement is reported separately (Instances declares id_type="int" and
-    holds "alpaca-main").
+    is simply wrong about. The copy stays faithful and
+    :func:`verify_id_types` reports the disagreement instead -- see the
+    Instances finding in the report.
     """
     pk = schema.spec(table).pk_field
     value = doc.get(pk)
@@ -430,6 +442,187 @@ def migrate_table(table: str, *, batch: int = DEFAULT_BATCH,
 
 
 # --------------------------------------------------------------------------
+# verify
+# --------------------------------------------------------------------------
+
+def _pg_doc(table: str, row_id: str):
+    """The stored document, raw.
+
+    NOT ``store.get``: that decodes ``TableSpec.time_fields`` back into
+    ``datetime`` objects for the call sites that want them, and a datetime is
+    not JSON-serialisable, so canonical() would raise on exactly the tables
+    (GraphNexusNewsCache, GraphNexusTickerHistory) whose timestamps this
+    migration converts. Verification compares what is STORED.
+    """
+    rows = store.sql('SELECT doc FROM %s WHERE id = %%s' % schema.quoted(table),
+                     (row_id,))
+    return rows[0]["doc"] if rows else None
+
+
+def _dump_mismatch(table: str, row_id: str, source, target) -> None:
+    out = pathlib.Path(MISMATCH_DIR) / table
+    out.mkdir(parents=True, exist_ok=True)
+    safe = "".join(c if (c.isalnum() or c in "-_.") else "_" for c in str(row_id))
+    (out / ("%s.json" % safe)).write_text(
+        _stdjson.dumps({"rethink": source, "postgres": target},
+                       indent=2, sort_keys=True, default=str))
+
+
+def verify_table(table: str, *, sample: float = 0.05) -> dict:
+    """Row count both sides + canonical sha256 over a sampled fraction.
+
+    Mismatches are written WHOLE, both documents, never summarised into a
+    counter -- a count tells you something broke and nothing about what.
+    """
+    rethink_rows = 0
+    mismatches = 0
+    sampled = 0
+    pk = schema.spec(table).pk_field
+    for chunk in export_table(table, since_id=None, batch=DEFAULT_BATCH):
+        rethink_rows += len(chunk)
+        for source in chunk:
+            if sample < 1.0 and random.random() > sample:
+                continue
+            sampled += 1
+            row_id = pg_id(table, source)
+            target = (brs.assemble(row_id) if table == brs.RESULTS_TABLE
+                      else _pg_doc(table, row_id))
+            if target is None or canonical_sha256(source) != canonical_sha256(target):
+                mismatches += 1
+                _dump_mismatch(table, row_id, source, target)
+    return {"table": table, "rethink_rows": rethink_rows,
+            "pg_rows": store.count(table), "sampled": sampled,
+            "mismatches": mismatches}
+
+
+def verify_ordering(table: str, *, first_n: int = 200) -> list:
+    """The first N Postgres ids under ``ORDER BY id`` -- bytewise, COLLATE "C".
+
+    ``order_by(index="id")`` orders on the ``id`` COLUMN, which is where the
+    ``COLLATE "C"`` lives. Ordering on ``doc->>'id'`` would carry the cluster's
+    default collation instead, which is the exact failure this check exists to
+    catch.
+    """
+    sel = store.limit(store.order_by(store.Selection(table), index="id"),
+                      int(first_n))
+    sql_, params = sel.to_sql(columns="id")
+    return [row["id"] for row in store.sql(sql_, params)]
+
+
+def verify_ordering_parity(table: str, *, first_n: int = 200) -> dict:
+    """Both stores' first N ids, and the first position where they diverge.
+
+    Skipped for an int-keyed table. RethinkDB orders a NUMBER primary key
+    numerically (3, 4, ..., 11, 12, ..., 100); a Postgres ``id`` is text and
+    orders bytewise (100, 101, ..., 11, 12, ..., 3). That is a known,
+    deliberate consequence of ids becoming text -- nothing reads those tables
+    in id order, they are read by key and ordered by ``list_ts`` -- and
+    reporting it per run would train the operator to ignore the one check that
+    matters. The check that matters is the scope-suffixed text ids in
+    ``_ALLOWED_STATE_TABLES``, all of which are text-keyed.
+    """
+    if schema.spec(table).id_type == "int":
+        return {"table": table, "compared": 0, "diverged_at": None,
+                "skipped": "int-keyed: ReQL orders numbers numerically, "
+                           "Postgres text ids order bytewise"}
+    pg_ids = verify_ordering(table, first_n=first_n)
+    rk_ids: list = []
+    for chunk in export_table(table, since_id=None, batch=min(first_n, 1000)):
+        rk_ids.extend(pg_id(table, row) for row in chunk)
+        if len(rk_ids) >= first_n:
+            break
+    rk_ids = rk_ids[:first_n]
+    diverged = None
+    for i in range(min(len(rk_ids), len(pg_ids))):
+        if rk_ids[i] != pg_ids[i]:
+            diverged = i
+            break
+    if diverged is None and len(rk_ids) != len(pg_ids):
+        diverged = min(len(rk_ids), len(pg_ids))
+    return {"table": table, "compared": min(len(rk_ids), len(pg_ids)),
+            "diverged_at": diverged,
+            "rethink": rk_ids[:8], "postgres": pg_ids[:8]}
+
+
+def verify_indexes(table: str) -> list:
+    """Every ReQL secondary index must have a Postgres counterpart.
+
+    An index the BacktestResults split MOVED to another table counts as
+    present when it is present there.
+    """
+    r, conn = rethink_conn()
+    try:
+        reql = set(r.db(rethink_db()).table(table).index_list().run(conn, **_RUN_OPTS))
+    finally:
+        conn.close()
+    have = set(store.index_list(table))
+    for name, moved_to in _MOVED_INDEXES.get(table, {}).items():
+        if name in store.index_list(moved_to):
+            have.add(name)
+    return sorted(reql - have)
+
+
+def verify_id_types(table: str, *, limit: int = 20) -> list:
+    """Primary keys the registry's declared ``id_type`` cannot represent.
+
+    ``schema.TableSpec.id_type="int"`` makes ``store.coerce_id`` reject a
+    non-integer key, so a table declared int-keyed whose live keys are strings
+    is unreadable through the store after the cutover -- ``get(table, "x")``
+    raises instead of returning the row. The copy itself is unaffected (ids are
+    text in Postgres either way), which is why this is checked explicitly
+    rather than left to surface as a mismatch.
+    """
+    if schema.spec(table).id_type != "int":
+        return []
+    pk = schema.spec(table).pk_field
+    offenders: list = []
+    for chunk in export_table(table, since_id=None, batch=DEFAULT_BATCH):
+        for row in chunk:
+            value = row.get(pk)
+            try:
+                int(value)
+            except (TypeError, ValueError):
+                offenders.append(value)
+                if len(offenders) >= limit:
+                    return offenders
+    return offenders
+
+
+def _attested_tables() -> tuple:
+    import paired_state_attest as psa
+    return psa.ATTESTED_TABLES
+
+
+def _rethink_rows(table: str) -> list:
+    out: list = []
+    for chunk in export_table(table, since_id=None, batch=DEFAULT_BATCH):
+        out.extend(chunk)
+    return out
+
+
+def _pg_rows(table: str) -> list:
+    return [r["doc"] for r in
+            store.sql('SELECT doc FROM %s ORDER BY id COLLATE "C"'
+                      % schema.quoted(table))]
+
+
+def verify_fingerprint(for_mode: str = "backtest") -> tuple:
+    """``(rethink_fp, pg_fp)`` -- paired_state_attest's start fingerprint,
+    computed against each store over ATTESTED_TABLES.
+
+    ``fingerprint_rethink`` lives HERE and not in ``paired_state_attest``: that
+    module must stay RethinkDB-free, which is the whole point of the port.
+    ``_VOLATILE_FIELDS`` is excluded by ``state_fingerprint`` itself, as today.
+    """
+    import paired_state_attest as psa
+    tables = _attested_tables()
+    rk = {name: _rethink_rows(name) for name in tables}
+    pg = {name: _pg_rows(name) for name in tables}
+    return (psa.state_fingerprint(rk, for_mode=for_mode)["bundle_sha256"],
+            psa.state_fingerprint(pg, for_mode=for_mode)["bundle_sha256"])
+
+
+# --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
 
@@ -447,6 +640,50 @@ def _batch_for(table: str, requested: int) -> int:
     return requested
 
 
+def _run_verify(tables: list, args) -> int:
+    failed = False
+    for table in tables:
+        report = verify_table(table, sample=args.verify_sample)
+        print(report)
+        if report["mismatches"] or report["rethink_rows"] != report["pg_rows"]:
+            failed = True
+        if args.no_parity_checks:
+            continue
+        try:
+            missing = verify_indexes(table)
+            bad_ids = verify_id_types(table)
+            parity = verify_ordering_parity(table, first_n=args.ordering_sample)
+        except Exception as exc:                       # noqa: BLE001
+            print("  PARITY CHECKS UNAVAILABLE: %s: %s" % (type(exc).__name__, exc))
+            failed = True
+            continue
+        if missing:
+            print("  MISSING INDEXES: %s" % missing)
+            failed = True
+        if bad_ids:
+            print("  ID TYPE MISMATCH: %s declares id_type='int' but holds %r"
+                  % (table, bad_ids[:5]))
+            failed = True
+        if parity["diverged_at"] is not None:
+            print("  ORDERING DIVERGED at %d: %s" % (parity["diverged_at"], parity))
+            failed = True
+    if not args.no_parity_checks:
+        try:
+            rk_fp, pg_fp = verify_fingerprint()
+        except Exception as exc:                       # noqa: BLE001
+            print("  FINGERPRINT UNAVAILABLE: %s: %s" % (type(exc).__name__, exc))
+            failed = True
+        else:
+            if rk_fp != pg_fp:
+                print("  FINGERPRINT MISMATCH: %s != %s" % (rk_fp, pg_fp))
+                failed = True
+            else:
+                print({"fingerprint": rk_fp, "equal": True})
+    if failed:
+        print("VERIFY FAILED -- whole documents in %s/" % MISMATCH_DIR)
+    return 1 if failed else 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="migrate_rethinkdb_to_postgres")
     p.add_argument("--tables", help="comma-separated; default: RethinkDB's table_list()")
@@ -454,10 +691,19 @@ def main(argv=None) -> int:
     p.add_argument("--batch", type=int, default=DEFAULT_BATCH,
                    help="COPY batch size (default %d; %d for BacktestResults)"
                         % (DEFAULT_BATCH, BACKTEST_BATCH))
+    p.add_argument("--verify", action="store_true", help="verify only, no writes")
+    p.add_argument("--verify-sample", type=float, default=0.05)
+    p.add_argument("--ordering-sample", type=int, default=200)
+    p.add_argument("--no-parity-checks", action="store_true",
+                   help="row counts and hashes only: skip the index, id-type, "
+                        "ordering and fingerprint parity checks")
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args(argv)
 
     tables = _tables_arg(args)
+    if args.verify:
+        return _run_verify(tables, args)
+
     if args.since_id is not None:
         if len(tables) != 1:
             print("--since-id needs exactly one --tables entry")

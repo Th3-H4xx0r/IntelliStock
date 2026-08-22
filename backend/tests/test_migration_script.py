@@ -277,3 +277,124 @@ def test_dry_run_writes_nothing(store, exported, monkeypatch):
     assert report["rows"] == len(rows)
     assert store.count("Instances") == 0
     assert mig.read_state("Instances") == {}
+
+
+# --------------------------------------------------------------------------
+# verify
+# --------------------------------------------------------------------------
+
+def test_verify_writes_whole_documents_on_mismatch(store, exported, tmp_path,
+                                                   monkeypatch):
+    monkeypatch.setattr(mig, "MISMATCH_DIR", str(tmp_path))
+    source = dict(exported["Instances"][0])
+    mig.copy_batch("Instances", [{**source, "name": "TAMPERED"}])
+    monkeypatch.setattr(mig, "export_table", _feed([source]))
+    report = mig.verify_table("Instances", sample=1.0)
+    assert report["mismatches"] == 1
+    written = list(tmp_path.rglob("*.json"))
+    assert len(written) == 1
+    body = json.loads(written[0].read_text())
+    assert body["rethink"]["name"] == source["name"]     # WHOLE doc, both sides
+    assert body["postgres"]["name"] == "TAMPERED"
+
+
+def test_verify_hash_is_invariant_to_key_order(store, exported, monkeypatch,
+                                               tmp_path):
+    monkeypatch.setattr(mig, "MISMATCH_DIR", str(tmp_path))
+    source = exported["Instances"][1]
+    mig.copy_batch("Instances", [dict(reversed(list(source.items())))])
+    monkeypatch.setattr(mig, "export_table", _feed([source]))
+    assert mig.verify_table("Instances", sample=1.0)["mismatches"] == 0
+
+
+def test_verify_counts_a_missing_row(store, exported, monkeypatch, tmp_path):
+    monkeypatch.setattr(mig, "MISMATCH_DIR", str(tmp_path))
+    rows = exported["Instances"]
+    mig.copy_batch("Instances", rows[:3])
+    monkeypatch.setattr(mig, "export_table", _feed(rows))
+    report = mig.verify_table("Instances", sample=1.0)
+    assert report["rethink_rows"] == 5
+    assert report["pg_rows"] == 3
+    assert report["mismatches"] == 2
+
+
+def test_verify_assembles_backtest_results_before_hashing(store, exported,
+                                                          monkeypatch, tmp_path):
+    monkeypatch.setattr(mig, "MISMATCH_DIR", str(tmp_path))
+    rows = exported["BacktestResults"]
+    for row in rows:
+        mig._write_backtest_rows([row])
+    monkeypatch.setattr(mig, "export_table", _feed(rows))
+    report = mig.verify_table("BacktestResults", sample=1.0)
+    assert report["mismatches"] == 0
+    assert report["rethink_rows"] == report["pg_rows"] == len(rows)
+
+
+def test_verify_ordering_is_bytewise_on_scope_suffixed_ids(store):
+    ids = ["alpaca-main|a", "alpaca-mainZ", "alpaca-main9", "alpaca-mainb"]
+    for rid in ids:
+        store.insert("GraphNexusTradeContexts", {"id": rid})
+    assert mig.verify_ordering("GraphNexusTradeContexts", first_n=4) == sorted(ids)
+
+
+def test_verify_ordering_parity_names_the_position_that_diverged(
+        store, monkeypatch):
+    ids = ["alpaca-main9", "alpaca-mainZ", "alpaca-mainb"]
+    for rid in ids:
+        store.insert("GraphNexusTradeContexts", {"id": rid})
+    monkeypatch.setattr(mig, "export_table",
+                        _feed([{"id": rid} for rid in ids]))
+    assert mig.verify_ordering_parity(
+        "GraphNexusTradeContexts", first_n=10)["diverged_at"] is None
+
+    monkeypatch.setattr(mig, "export_table",
+                        _feed([{"id": rid} for rid in
+                               ["alpaca-mainZ", "alpaca-main9", "alpaca-mainb"]]))
+    assert mig.verify_ordering_parity(
+        "GraphNexusTradeContexts", first_n=10)["diverged_at"] == 0
+
+
+def test_verify_id_types_reports_a_registry_disagreement(store, exported,
+                                                         monkeypatch):
+    """Instances is declared id_type="int" but every live key is a string.
+    store.coerce_id rejects those, so the rows would be unreadable after the
+    cutover -- the copy is faithful and this is what says so out loud."""
+    monkeypatch.setattr(mig, "export_table", _feed(exported["Instances"]))
+    offenders = mig.verify_id_types("Instances")
+    assert "alpaca-main" in offenders
+    monkeypatch.setattr(mig, "export_table", _feed(exported["BacktestResults"]))
+    assert mig.verify_id_types("BacktestResults") == []
+
+
+def test_verify_exits_nonzero_on_any_mismatch(store, exported, monkeypatch,
+                                              tmp_path):
+    monkeypatch.setattr(mig, "MISMATCH_DIR", str(tmp_path))
+    source = exported["Instances"][2]
+    mig.copy_batch("Instances", [{**source, "name": "WRONG"}])
+    monkeypatch.setattr(mig, "export_table", _feed([source]))
+    assert mig.main(["--verify", "--tables", "Instances",
+                     "--verify-sample", "1.0"]) != 0
+
+
+def test_verify_exits_zero_when_the_copy_is_faithful(store, exported,
+                                                     monkeypatch, tmp_path):
+    """The counterpart that proves the exit code tracks the data and not the
+    unreachable RethinkDB in a test environment."""
+    monkeypatch.setattr(mig, "MISMATCH_DIR", str(tmp_path))
+    rows = exported["Instances"]
+    mig.copy_batch("Instances", rows)
+    monkeypatch.setattr(mig, "export_table", _feed(rows))
+    assert mig.main(["--verify", "--tables", "Instances", "--verify-sample",
+                     "1.0", "--no-parity-checks"]) == 0
+    assert not list(tmp_path.rglob("*.json"))
+
+
+def test_ordering_parity_is_skipped_for_an_int_keyed_table(store, exported,
+                                                           monkeypatch):
+    """Strategies ids are NUMBERS in RethinkDB, so its id order legitimately
+    differs from the text order Postgres gives them. Reporting that every run
+    would train the operator to ignore the check that matters."""
+    monkeypatch.setattr(mig, "export_table", _feed(exported["Instances"]))
+    parity = mig.verify_ordering_parity("Strategies", first_n=10)
+    assert parity["diverged_at"] is None
+    assert "int-keyed" in parity["skipped"]
