@@ -23,7 +23,7 @@ def _reset_state():
     sys.modules["llm_critical_guard"] = llm_critical_guard
     sys.modules["backtest_critical_abort"] = backtest_critical_abort
     # The BacktestResults pause write goes through the split store now, so
-    # patching _get_conn_and_r no longer cages it. Cage the seam itself: a
+    # patching _get_store no longer cages it. Cage the seam itself: a
     # unit test must never touch a real database.
     backtest_critical_abort._write_backtest_pause_status = lambda *a, **kw: None
     yield
@@ -65,7 +65,7 @@ def test_capture_then_critical_then_restore_then_resume(monkeypatch):
         apply_calls["portfolio"] = portfolio_emulator
         apply_calls["time"] = current_time
 
-    with patch.object(backtest_critical_abort, "_get_conn_and_r", return_value=(MagicMock(), MagicMock())), \
+    with patch.object(backtest_critical_abort, "_get_store", return_value=MagicMock()), \
          patch.object(backtest_critical_abort, "_enqueue_discord", return_value=None), \
          patch.object(backtest_critical_abort, "_apply_restore", side_effect=fake_apply):
         backtest_critical_abort.handle(backtest_id="999", instance_id="main", failure=failure)

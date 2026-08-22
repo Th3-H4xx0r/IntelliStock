@@ -33,7 +33,7 @@ def _reset_modules():
             except Exception:
                 pass
     # The BacktestResults pause write goes through the split store now, so
-    # patching _get_conn_and_r no longer cages it. Cage the seam itself: a
+    # patching _get_store no longer cages it. Cage the seam itself: a
     # unit test must never touch a real database.
     backtest_critical_abort._write_backtest_pause_status = lambda *a, **kw: None
     yield
@@ -86,8 +86,8 @@ def test_e2e_backtest_pause_flow(monkeypatch):
 
     with patch.object(backtest_critical_abort, "_write_backtest_pause_status",
                       side_effect=_record_update), \
-         patch.object(backtest_critical_abort, "_get_conn_and_r",
-                      return_value=(fake_conn, fake_r)), \
+         patch.object(backtest_critical_abort, "_get_store",
+                      return_value=fake_r), \
          patch.object(backtest_critical_abort, "_enqueue_discord",
                       side_effect=fake_enqueue), \
          patch.object(backtest_critical_abort, "_bs_restore",

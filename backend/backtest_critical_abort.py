@@ -26,12 +26,12 @@ _already_alerted = False
 _skip_snapshot_persist = False
 
 
-def _get_conn_and_r():
-    from rethinkdb import RethinkDB
-    r = RethinkDB()
-    host = os.environ.get("RETHINKDB_HOST", "localhost")
-    port = int(os.environ.get("RETHINKDB_PORT", "28015"))
-    return r.connect(host=host, port=port, timeout=10), r
+def _get_store():
+    """R26: the store takes its own pooled connection per operation, so there
+    is nothing to open or close here. Kept as a seam so tests can cage it.
+    """
+    from db import store as db_store
+    return db_store
 
 
 def _write_backtest_pause_status(backtest_id, payload: dict) -> None:
@@ -158,37 +158,32 @@ def handle(*, backtest_id: str, instance_id: str, failure) -> None:
 
     # 2 + 3. DB writes
     try:
-        conn, r = _get_conn_and_r()
+        db_store = _get_store()
+        # BacktestInstances.paused=True
         try:
-            # BacktestInstances.paused=True
-            try:
-                r.db("IntelliStock").table("BacktestInstances").get(int(backtest_id)).update({
-                    "paused": True,
-                }).run(conn)
-            except Exception as e:
-                _log_red(f"BacktestInstances pause flag write failed: {e}")
+            db_store.update("BacktestInstances", int(backtest_id),
+                            {"paused": True})
+        except Exception as e:
+            _log_red(f"BacktestInstances pause flag write failed: {e}")
 
-            # BacktestResults.status + diagnostic fields
-            try:
-                payload = {
-                    "status": "paused_llm_critical",
-                    "pause_reason_tag": failure.class_tag,
-                    "pause_reason_text": _format_reason_text(failure),
-                    "pause_provider": failure.provider,
-                    "pause_model": failure.model,
-                    "pause_call_site": failure.attribution.get("call_site") or "unknown",
-                    "pause_attempts": len(failure.attempts),
-                    "pause_bar_time": _fmt_ts(restored_time),
-                    "paused_at": __import__("datetime").datetime.now(
-                        __import__("datetime").timezone.utc).isoformat(),
-                    "pause_sample": (failure.attempts[-1].get("body_sample") or "")[:500] if failure.attempts else "",
-                }
-                _write_backtest_pause_status(backtest_id, payload)
-            except Exception as e:
-                _log_red(f"BacktestResults pause status update failed: {e}")
-        finally:
-            try: conn.close()
-            except Exception: pass
+        # BacktestResults.status + diagnostic fields
+        try:
+            payload = {
+                "status": "paused_llm_critical",
+                "pause_reason_tag": failure.class_tag,
+                "pause_reason_text": _format_reason_text(failure),
+                "pause_provider": failure.provider,
+                "pause_model": failure.model,
+                "pause_call_site": failure.attribution.get("call_site") or "unknown",
+                "pause_attempts": len(failure.attempts),
+                "pause_bar_time": _fmt_ts(restored_time),
+                "paused_at": __import__("datetime").datetime.now(
+                    __import__("datetime").timezone.utc).isoformat(),
+                "pause_sample": (failure.attempts[-1].get("body_sample") or "")[:500] if failure.attempts else "",
+            }
+            _write_backtest_pause_status(backtest_id, payload)
+        except Exception as e:
+            _log_red(f"BacktestResults pause status update failed: {e}")
     except Exception as e:
         _log_red(f"DB write phase failed: {e}")
 
