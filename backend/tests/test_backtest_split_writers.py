@@ -573,25 +573,24 @@ def test_delete_removes_the_row_from_all_three_tables(split_schema):
 
 # ---- R17: the ported paths must not be gated on the RethinkDB table list --
 
-def _rethink_without_backtestresults(instance_row, queue_rows=()):
-    """A ReQL stub whose table_list() has already dropped "BacktestResults" --
-    the endpoint state of this port. BacktestInstances still answers."""
-    from unittest.mock import MagicMock
-    fake = MagicMock()
-    fake.db.return_value.table_list.return_value.run.return_value = \
-        ["BacktestInstances", "Instances", "Strategies"]
-    fake.db.return_value.table.return_value.get.return_value.run.return_value = \
-        instance_row
-    fake.db.return_value.table.return_value.run.return_value = list(queue_rows)
-    return fake
+def _seed_queue(instance_row, queue_rows=()):
+    """Seed the real queue table. There is no ReQL left to stub: the endpoint
+    state of this port is that BacktestInstances is an ordinary registry table
+    and BacktestResults lives in its own split tables."""
+    from db import schema as dbschema
+    from db import store as dbstore
+    dbschema.ensure_schema(tables=["BacktestInstances"])
+    rows = list(queue_rows) or ([instance_row] if instance_row else [])
+    for row in rows:
+        dbstore.insert("BacktestInstances", dict(row), conflict="replace")
+    return None
 
 
 def test_stop_writes_postgres_when_the_reql_table_list_lacks_backtestresults(
         split_schema, monkeypatch):
     import interactive_utils as iu
     brs.write_stub(dict(STUB))
-    monkeypatch.setattr(iu, "r", _rethink_without_backtestresults(
-        {"id": 700001, "status": "running"}))
+    _seed_queue({"id": 700001, "status": "running"})
     monkeypatch.setattr(iu, "ensure_backtest_instances_table", lambda conn: None)
     assert iu.action_stop_backtest(object(), 700001) == {"stop_requested": True,
                                                          "id": 700001}
@@ -602,8 +601,7 @@ def test_stop_all_sweeps_postgres_when_the_reql_table_list_lacks_backtestresults
         split_schema, monkeypatch):
     import interactive_utils as iu
     brs.write_stub(dict(STUB))
-    monkeypatch.setattr(iu, "r", _rethink_without_backtestresults(
-        {"id": 700001, "status": "running"}, queue_rows=[{"id": 700001}]))
+    _seed_queue({"id": 700001, "status": "running"}, queue_rows=[{"id": 700001}])
     monkeypatch.setattr(iu, "ensure_backtest_instances_table", lambda conn: None)
     monkeypatch.setattr(iu, "_stop_all_backtest_containers", lambda: 0)
     iu.action_stop_all_backtests(object())
@@ -615,8 +613,7 @@ def test_delete_clears_postgres_when_the_reql_table_list_lacks_backtestresults(
     import interactive_utils as iu
     brs.write_stub(dict(STUB))
     brs.append_steps(700001, "decision", [{"n": 1}], start_seq=0)
-    monkeypatch.setattr(iu, "r", _rethink_without_backtestresults(
-        {"id": 700001, "status": "running"}))
+    _seed_queue({"id": 700001, "status": "running"})
     assert iu.action_delete_backtest(object(), 700001) == {"deleted": True,
                                                            "id": 700001}
     assert store.get("BacktestResults", 700001) is None

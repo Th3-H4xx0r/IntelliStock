@@ -125,11 +125,9 @@ def test_portfolio_history_rejects_plaintext_alpaca_row_before_fetch(monkeypatch
 
     row = _plaintext_alpaca_row()
     monkeypatch.setattr(iu, "_ensure_brokerage_accounts_table", lambda _conn: None)
-    monkeypatch.setattr(
-        iu,
-        "r",
-        _FakeR({("BrokerageAccounts", row["id"]): row}),
-    )
+    _rows = {("BrokerageAccounts", row["id"]): row}
+    monkeypatch.setattr(iu.store, "get",
+                        lambda table, row_id: _rows.get((table, row_id)))
     called = []
     monkeypatch.setattr(
         iu,

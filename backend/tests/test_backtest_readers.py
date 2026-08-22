@@ -90,13 +90,11 @@ def test_best_by_strategy_rows_omits_absent_keys_the_way_pluck_did(seeded):
 # run as-is; best-per-strategy still reads Instances over ReQL and is caged.
 
 def _no_reql(monkeypatch, iu):
-    """Cage the rethinkdb driver so any surviving ReQL call fails loudly
-    instead of reaching a real database."""
-    from unittest.mock import MagicMock
-    fake_r = MagicMock()
-    fake_r.db.return_value.table_list.return_value.run.return_value = []
-    monkeypatch.setattr(iu, "r", fake_r)
-    return fake_r
+    """There is no ReQL left in this path: Instances is an ordinary registry
+    table, so the reads go to the same Postgres the results half uses."""
+    from db import schema as dbschema
+    dbschema.ensure_schema(tables=["Instances"])
+    return None
 
 
 def test_status_endpoint_keeps_progress_last_active_and_nexus_lookback(
@@ -179,10 +177,10 @@ def test_logs_endpoint_reads_the_step_rows(seeded, monkeypatch):
 
 def test_best_per_strategy_joins_instances_and_skips_running(seeded, monkeypatch):
     import interactive_utils as iu
-    fake_r = _no_reql(monkeypatch, iu)
-    fake_r.db.return_value.table_list.return_value.run.return_value = ["Instances"]
-    fake_r.db.return_value.table.return_value.pluck.return_value.run.return_value = [
-        {"id": "main", "strategy_id": 7}, {"id": "alt", "strategy_id": 9}]
+    _no_reql(monkeypatch, iu)
+    for row in ({"id": "main", "strategy_id": 7},
+                {"id": "alt", "strategy_id": 9}):
+        iu.store.insert("Instances", dict(row), conflict="replace")
     out = iu.action_backtest_best_per_strategy(None)["by_strategy"]
     assert out == {"7": {"best_pnl": 55.0, "best_pct": 5.5,
                          "backtest_id": 810001}}

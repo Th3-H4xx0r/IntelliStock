@@ -112,8 +112,8 @@ def test_stock_instance_creation_rejects_direct_credentials_before_write(monkeyp
     import interactive_utils as iu
 
     monkeypatch.setattr(iu, "ensure_instances_table", lambda _conn: None)
-    insert = MagicMock(side_effect=AssertionError("stock instance must not be written"))
-    monkeypatch.setattr(iu, "r", SimpleNamespace(db=lambda _name: insert))
+    monkeypatch.setattr(iu.store, "insert", MagicMock(
+        side_effect=AssertionError("stock instance must not be written")))
 
     with pytest.raises(ValueError, match="linked Alpaca brokerage"):
         iu.action_create_instance(
@@ -133,22 +133,13 @@ def test_stock_instance_creation_does_not_copy_environment_credentials(monkeypat
 
     captured = {}
 
-    class _Insert:
-        def run(self, _conn):
-            return {"inserted": 1}
+    def _capture_insert(table, doc, conflict=None, **_k):
+        assert table == "Instances"
+        assert conflict == "replace"
+        captured.update(doc)
+        return {"inserted": 1}
 
-    class _Table:
-        def insert(self, doc, conflict=None):
-            captured.update(doc)
-            assert conflict == "replace"
-            return _Insert()
-
-    class _Db:
-        def table(self, name):
-            assert name == "Instances"
-            return _Table()
-
-    monkeypatch.setattr(iu, "r", SimpleNamespace(db=lambda _name: _Db()))
+    monkeypatch.setattr(iu.store, "insert", _capture_insert)
 
     iu.action_create_instance(object(), "stock-instance")
 
@@ -299,22 +290,10 @@ def test_forced_model_delete_cannot_restore_inline_credentials(monkeypatch):
 
     delete = MagicMock(side_effect=AssertionError("referenced model must not be deleted"))
 
-    class _Get:
-        def run(self, _conn):
-            return {"id": "model-1", "provider": "openrouter", "api_key": "fernet:ciphertext"}
-
-        def delete(self):
-            return delete()
-
-    class _Table:
-        def get(self, _model_id):
-            return _Get()
-
-    class _Db:
-        def table(self, _name):
-            return _Table()
-
-    monkeypatch.setattr(iu, "r", SimpleNamespace(db=lambda _name: _Db()))
+    monkeypatch.setattr(iu.store, "get", lambda _t, _id: {
+        "id": "model-1", "provider": "openrouter",
+        "api_key": "fernet:ciphertext"})
+    monkeypatch.setattr(iu.store, "delete", lambda *a, **k: delete())
 
     with pytest.raises(ValueError, match="reassign"):
         iu.action_delete_model(object(), "model-1", force=True)

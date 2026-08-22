@@ -152,19 +152,16 @@ def test_unpaged_still_honours_the_instance_filter(seeded):
 #
 # list_rows() being right does not prove action_list_backtests() still wires
 # it into the active-then-page merge, the dedupe and the page-1-only pinning.
-# The queue half still runs on ReQL, so it is caged with a MagicMock; the
-# results half runs against the real split tables.
+# Both halves run against the real tables now. The queue rows are seeded
+# rather than mocked: BacktestInstances is an ordinary registry table.
 
 def _cage_queue(monkeypatch, iu, queue_rows=()):
-    from unittest.mock import MagicMock
+    from db import schema as dbschema
     monkeypatch.setattr(iu, "ensure_backtest_instances_table", lambda conn: None)
-    fake_r = MagicMock()
-    fake_r.db.return_value.table_list.return_value.run.return_value = [
-        "BacktestInstances"]
-    fake_r.db.return_value.table.return_value.pluck.return_value.run.return_value = (
-        list(queue_rows))
-    monkeypatch.setattr(iu, "r", fake_r)
-    return fake_r
+    dbschema.ensure_schema(tables=["BacktestInstances"])
+    for row in queue_rows:
+        iu.store.insert("BacktestInstances", dict(row), conflict="replace")
+    return None
 
 
 def test_endpoint_page_one_pins_the_active_row_and_dedupes(seeded, monkeypatch):

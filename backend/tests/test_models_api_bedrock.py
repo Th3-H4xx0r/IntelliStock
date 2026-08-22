@@ -54,12 +54,12 @@ def test_action_create_model_persists_cache_family(monkeypatch):
     from cryptography.fernet import Fernet
     monkeypatch.setenv("INTELLISTOCK_CRED_KEY", Fernet.generate_key().decode())
     fake_r = MagicMock()
-    fake_r.db.return_value.table.return_value.insert.return_value.run.return_value = {"generated_keys": ["new-id"]}
-    monkeypatch.setattr(iu, "r", fake_r)
+    monkeypatch.setattr(iu.store, "insert", fake_r.insert)
+    fake_r.insert.return_value = {"inserted": 1, "generated_keys": ["new-id"]}
     monkeypatch.setattr(iu, "_ensure_models_table", lambda conn: None)
     iu.action_create_model(None, "x", "bedrock", "openai.gpt-oss-120b-1:0",
                            api_key="k", model_cache_family="GPT-OSS-120b")
-    doc = fake_r.db.return_value.table.return_value.insert.call_args.args[0]
+    doc = fake_r.insert.call_args.args[1]
     assert doc["model_cache_family"] == "gpt-oss-120b"  # normalized lowercase
 
 
@@ -172,13 +172,13 @@ def test_action_create_model_persists_bedrock_fields(monkeypatch):
     from cryptography.fernet import Fernet
     monkeypatch.setenv("INTELLISTOCK_CRED_KEY", Fernet.generate_key().decode())
     fake_r = MagicMock()
-    fake_r.db.return_value.table.return_value.insert.return_value.run.return_value = {"generated_keys": ["new-id"]}
-    monkeypatch.setattr(iu, "r", fake_r)
+    monkeypatch.setattr(iu.store, "insert", fake_r.insert)
+    fake_r.insert.return_value = {"inserted": 1, "generated_keys": ["new-id"]}
     monkeypatch.setattr(iu, "_ensure_models_table", lambda conn: None)
     iu.action_create_model(
         None, "bk", "bedrock", "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
         api_key="key", bedrock_region="us-east-1", bedrock_reasoning="Medium")
-    doc = fake_r.db.return_value.table.return_value.insert.call_args.args[0]
+    doc = fake_r.insert.call_args.args[1]
     assert doc["provider"] == "bedrock"
     assert doc["bedrock_region"] == "us-east-1"
     assert doc["bedrock_reasoning"] == "medium"  # normalized to lowercase
@@ -191,10 +191,12 @@ def test_action_edit_model_updates_bedrock_fields(monkeypatch):
                 "model": "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
                 "bedrock_region": "us-east-1", "bedrock_reasoning": "off"}
     fake_r = MagicMock()
-    fake_r.db.return_value.table.return_value.get.return_value.run.return_value = existing
-    monkeypatch.setattr(iu, "r", fake_r)
+    fake_r.get.return_value = existing
+    monkeypatch.setattr(iu.store, "insert", fake_r.insert)
+    monkeypatch.setattr(iu.store, "update", fake_r.update)
+    monkeypatch.setattr(iu.store, "get", fake_r.get)
     monkeypatch.setattr(iu, "_ensure_models_table", lambda conn: None)
     iu.action_edit_model(None, "m1", bedrock_region="eu-west-1", bedrock_reasoning="high")
-    update = fake_r.db.return_value.table.return_value.get.return_value.update.call_args.args[0]
+    update = fake_r.update.call_args.args[2]
     assert update["bedrock_region"] == "eu-west-1"
     assert update["bedrock_reasoning"] == "high"

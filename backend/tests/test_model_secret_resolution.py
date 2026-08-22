@@ -57,10 +57,12 @@ def test_action_get_model_raw_decrypts_api_key(monkeypatch, encrypted_key):
     import interactive_utils as iu
 
     fake_r = MagicMock()
-    fake_r.db.return_value.table.return_value.get.return_value.run.return_value = {
+    fake_r.get.return_value = {
         "id": "model-1", "api_key": encrypted_key,
     }
-    monkeypatch.setattr(iu, "r", fake_r)
+    monkeypatch.setattr(iu.store, "insert", fake_r.insert)
+    monkeypatch.setattr(iu.store, "update", fake_r.update)
+    monkeypatch.setattr(iu.store, "get", fake_r.get)
     monkeypatch.setattr(iu, "_ensure_models_table", lambda conn: None)
 
     assert iu.action_get_model_raw(None, "model-1")["api_key"] == "model-secret"
@@ -70,11 +72,13 @@ def test_action_get_model_raw_rejects_plaintext_api_key(monkeypatch):
     import interactive_utils as iu
 
     fake_r = MagicMock()
-    fake_r.db.return_value.table.return_value.get.return_value.run.return_value = {
+    fake_r.get.return_value = {
         "id": "model-1",
         "api_key": "CANARY_PLAINTEXT",
     }
-    monkeypatch.setattr(iu, "r", fake_r)
+    monkeypatch.setattr(iu.store, "insert", fake_r.insert)
+    monkeypatch.setattr(iu.store, "update", fake_r.update)
+    monkeypatch.setattr(iu.store, "get", fake_r.get)
     monkeypatch.setattr(iu, "_ensure_models_table", lambda conn: None)
 
     with pytest.raises(RuntimeError, match="plaintext secret"):

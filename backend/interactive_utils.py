@@ -18,31 +18,36 @@ _backend_dir = os.path.dirname(os.path.abspath(__file__))
 if _backend_dir not in sys.path:
     sys.path.insert(0, _backend_dir)
 
-from rethinkdb import RethinkDB
+from db import schema
+from db import store
+from db import watch  # noqa: F401  (re-exported for callers that watch rows)
 from strategy_secret_boundary import scrub_inline_strategy_secrets
 
-r = RethinkDB()
 DB_NAME = "IntelliStock"
-RETHINKDB_HOST = os.environ.get("RETHINKDB_HOST", "localhost")
-RETHINKDB_PORT = int(os.environ.get("RETHINKDB_PORT", "28015"))
+
+# The pluck list the backtest-queue page returns. It was inline in the ReQL
+# chain; the store plucks after the read, so it needs a name.
+_QUEUE_FIELDS = (
+    "id", "instance", "stocks", "start-date", "end-date", "status",
+    "paused", "created_at", "timestamp", "completed_at",
+    "time_elapsed_seconds",
+)
 
 
 def get_conn(host=None, port=None):
-    """Create a RethinkDB connection."""
-    h = host if host is not None else RETHINKDB_HOST
-    p = int(port) if port is not None else RETHINKDB_PORT
-    # 2026-05-05 live-hang investigation: a half-open TCP socket on the
-    # rdb side can block r.connect() forever without an explicit timeout.
-    return r.connect(host=h, port=p, timeout=10)
+    """R26: the store pools its own connection per operation, so there is
+    nothing to hand out. Kept because ~200 call sites take `conn` as their
+    first argument and pass it on to helpers that now ignore it."""
+    return None
 
 
 def _resolve_instance_doc(conn, instance_id):
     """Return instance document by id (string or int). Returns None if not found."""
-    doc = r.db(DB_NAME).table("Instances").get(instance_id).run(conn)
+    doc = store.get("Instances", instance_id)
     if doc is not None:
         return doc
     try:
-        doc = r.db(DB_NAME).table("Instances").get(int(instance_id)).run(conn)
+        doc = store.get("Instances", int(instance_id))
         return doc
     except (TypeError, ValueError):
         return None
@@ -52,39 +57,19 @@ def _resolve_instance_doc(conn, instance_id):
 
 
 def ensure_live_prices_stocks_table(conn):
-    dbs = list(r.db_list().run(conn))
-    if DB_NAME not in dbs:
-        r.db_create(DB_NAME).run(conn)
-    tables = list(r.db(DB_NAME).table_list().run(conn))
-    if "LivePricesStocks" not in tables:
-        r.db(DB_NAME).table_create("LivePricesStocks").run(conn)
+    schema.ensure_schema(tables=["LivePricesStocks"])
 
 
 def ensure_instances_table(conn):
-    dbs = list(r.db_list().run(conn))
-    if DB_NAME not in dbs:
-        r.db_create(DB_NAME).run(conn)
-    tables = list(r.db(DB_NAME).table_list().run(conn))
-    if "Instances" not in tables:
-        r.db(DB_NAME).table_create("Instances").run(conn)
+    schema.ensure_schema(tables=["Instances"])
 
 
 def ensure_stocks_table(conn):
-    dbs = list(r.db_list().run(conn))
-    if DB_NAME not in dbs:
-        r.db_create(DB_NAME).run(conn)
-    tables = list(r.db(DB_NAME).table_list().run(conn))
-    if "Stocks" not in tables:
-        r.db(DB_NAME).table_create("Stocks").run(conn)
+    schema.ensure_schema(tables=["Stocks"])
 
 
 def ensure_strategies_table(conn):
-    dbs = list(r.db_list().run(conn))
-    if DB_NAME not in dbs:
-        r.db_create(DB_NAME).run(conn)
-    tables = list(r.db(DB_NAME).table_list().run(conn))
-    if "Strategies" not in tables:
-        r.db(DB_NAME).table_create("Strategies").run(conn)
+    schema.ensure_schema(tables=["Strategies"])
 
 
 # Strategy difficulty (1-10) from strategies/*.py, for Discord backtest embeds. Lazy-loaded.
@@ -306,7 +291,7 @@ def get_instance_avg_difficulty(conn, instance_id):
         strategy_id = inst.get("strategy_id")
         if strategy_id is None:
             return DEFAULT_DIFFICULTY
-        strat_doc = r.db(DB_NAME).table("Strategies").get(strategy_id).run(conn)
+        strat_doc = store.get("Strategies", strategy_id)
         if not strat_doc:
             return DEFAULT_DIFFICULTY
         subs = strat_doc.get("strategies") or []
@@ -333,7 +318,7 @@ def get_instance_high_usage(conn, instance_id):
         strategy_id = inst.get("strategy_id")
         if strategy_id is None:
             return False
-        strat_doc = r.db(DB_NAME).table("Strategies").get(strategy_id).run(conn)
+        strat_doc = store.get("Strategies", strategy_id)
         if not strat_doc:
             return False
         for sub in (strat_doc.get("strategies") or []):
@@ -349,22 +334,18 @@ def get_instance_high_usage(conn, instance_id):
 
 
 def ensure_backtest_instances_table(conn):
-    dbs = list(r.db_list().run(conn))
-    if DB_NAME not in dbs:
-        r.db_create(DB_NAME).run(conn)
-    tables = list(r.db(DB_NAME).table_list().run(conn))
-    if "BacktestInstances" not in tables:
-        r.db(DB_NAME).table_create("BacktestInstances").run(conn)
+    schema.ensure_schema(tables=["BacktestInstances"])
     # 2026-04-26 perf: secondary indexes on instance lookups so the list
     # endpoint can use .get_all(instance, index=...) instead of full-table
     # .filter() scans. With ~1000 BacktestResults rows and growing, every
     # backtest-list page load was scanning the entire table; the index
     # collapses that to a sub-ms range read.
     try:
-        existing = set(r.db(DB_NAME).table("BacktestInstances").index_list().run(conn))
+        existing = set(store.index_list("BacktestInstances"))
         if "instance" not in existing:
-            r.db(DB_NAME).table("BacktestInstances").index_create("instance").run(conn)
-            r.db(DB_NAME).table("BacktestInstances").index_wait("instance").run(conn)
+            # R25: the index set is declared in db.schema; CREATE INDEX is
+            # synchronous, so there is nothing to wait for.
+            schema.ensure_schema(tables=["BacktestInstances"])
     except Exception:
         pass
     # BacktestResults' own indexes (instance_or_instance_id, list_ts,
@@ -374,22 +355,12 @@ def ensure_backtest_instances_table(conn):
 
 def ensure_discord_outbox_table(conn):
     """Table for other services to enqueue Discord messages. Bot (engines/discord_bot.py) polls and sends."""
-    dbs = list(r.db_list().run(conn))
-    if DB_NAME not in dbs:
-        r.db_create(DB_NAME).run(conn)
-    tables = list(r.db(DB_NAME).table_list().run(conn))
-    if "DiscordOutbox" not in tables:
-        r.db(DB_NAME).table_create("DiscordOutbox").run(conn)
+    schema.ensure_schema(tables=["DiscordOutbox"])
 
 
 def ensure_discord_message_ids_table(conn):
     """Table for bot to store Discord message IDs by (channel, message_key) so messages can be edited later."""
-    dbs = list(r.db_list().run(conn))
-    if DB_NAME not in dbs:
-        r.db_create(DB_NAME).run(conn)
-    tables = list(r.db(DB_NAME).table_list().run(conn))
-    if "DiscordMessageIds" not in tables:
-        r.db(DB_NAME).table_create("DiscordMessageIds").run(conn)
+    schema.ensure_schema(tables=["DiscordMessageIds"])
 
 
 def action_enqueue_discord_message(conn, channel, content, embed=None, guild_id=None, message_key=None, notif_key=None):
@@ -444,7 +415,7 @@ def action_enqueue_discord_message(conn, channel, content, embed=None, guild_id=
         # Fail-open: a routing failure must never drop a Discord message.
         pass
 
-    r.db(DB_NAME).table("DiscordOutbox").insert(doc).run(conn)
+    store.insert("DiscordOutbox", doc)
     return {"id": doc["id"], "channel": doc["channel"], "status": "pending"}
 
 
@@ -469,7 +440,7 @@ def action_enqueue_discord_edit(conn, channel, message_key, content=None, embed=
         doc["embed"] = embed
     if guild_id is not None:
         doc["guild_id"] = str(guild_id)
-    r.db(DB_NAME).table("DiscordOutbox").insert(doc).run(conn)
+    store.insert("DiscordOutbox", doc)
     return {"id": doc["id"], "channel": doc["channel"], "status": "pending"}
 
 
@@ -490,7 +461,7 @@ def action_enqueue_discord_delete(conn, channel, message_key, guild_id=None):
     }
     if guild_id is not None:
         doc["guild_id"] = str(guild_id)
-    r.db(DB_NAME).table("DiscordOutbox").insert(doc).run(conn)
+    store.insert("DiscordOutbox", doc)
     return {"id": doc["id"], "channel": doc["channel"], "status": "pending"}
 
 
@@ -498,20 +469,20 @@ def action_store_discord_message_id(conn, channel, message_key, message_id, guil
     """Store Discord message ID for (channel, message_key) so the bot can edit it later."""
     ensure_discord_message_ids_table(conn)
     key = "%s:%s" % (str(channel).strip(), str(message_key).strip())
-    r.db(DB_NAME).table("DiscordMessageIds").insert({
+    store.insert("DiscordMessageIds", {
         "id": key,
         "channel": str(channel).strip(),
         "message_key": str(message_key).strip(),
         "message_id": str(message_id),
         "guild_id": str(guild_id) if guild_id else None,
-    }, conflict="replace").run(conn)
+    }, conflict="replace")
 
 
 def action_get_discord_message_id(conn, channel, message_key):
     """Return {"message_id": "...", "guild_id": "..."} or None if not found."""
     ensure_discord_message_ids_table(conn)
     key = "%s:%s" % (str(channel).strip(), str(message_key).strip())
-    doc = r.db(DB_NAME).table("DiscordMessageIds").get(key).run(conn)
+    doc = store.get("DiscordMessageIds", key)
     if doc is None:
         return None
     return {"message_id": doc.get("message_id"), "guild_id": doc.get("guild_id")}
@@ -546,17 +517,14 @@ def action_get_pending_discord_messages(conn, limit=50):
     message isn't retried before its window.
     """
     ensure_discord_outbox_table(conn)
-    now_epoch = r.now().to_epoch_time()
+    now_epoch = datetime.datetime.now(datetime.timezone.utc).timestamp()
     cursor = (
-        r.db(DB_NAME)
-        .table("DiscordOutbox")
-        .filter(
-            lambda d: (d["status"] == "pending")
-            & ((~d.has_fields("next_retry_at")) | (d["next_retry_at"].le(now_epoch)))
-        )
-        .order_by("created_at")
-        .limit(limit)
-        .run(conn)
+        store.run(store.limit(store.order_by(store.filter(
+            "DiscordOutbox",
+            store.P.field("status").eq("pending")
+            & (store.P.field("next_retry_at").is_null()
+               | store.P.field("next_retry_at").le(now_epoch))),
+            index="created_at"), limit))
     )
     return list(cursor)
 
@@ -570,7 +538,7 @@ def action_requeue_or_fail_discord_message(conn, msg_id, error):
     ensure_discord_outbox_table(conn)
     import time as _time
     from datetime import datetime, timezone
-    doc = r.db(DB_NAME).table("DiscordOutbox").get(msg_id).run(conn)
+    doc = store.get("DiscordOutbox", msg_id)
     attempts = int((doc or {}).get("attempts", 0) or 0)
     status, next_at, new_attempts = discord_retry_decision(attempts, _time.time())
     update = {
@@ -580,7 +548,7 @@ def action_requeue_or_fail_discord_message(conn, msg_id, error):
         "updated_at": datetime.now(timezone.utc).isoformat() + "Z",
         "next_retry_at": next_at,  # float epoch seconds, or None when failed
     }
-    r.db(DB_NAME).table("DiscordOutbox").get(msg_id).update(update).run(conn)
+    store.update("DiscordOutbox", msg_id, update)
     return {"status": status, "attempts": new_attempts}
 
 
@@ -588,18 +556,14 @@ def action_mark_discord_message_sent(conn, msg_id):
     """Mark a DiscordOutbox message as sent."""
     ensure_discord_outbox_table(conn)
     from datetime import datetime, timezone
-    r.db(DB_NAME).table("DiscordOutbox").get(msg_id).update(
-        {"status": "sent", "updated_at": datetime.now(timezone.utc).isoformat() + "Z"}
-    ).run(conn)
+    store.update("DiscordOutbox", msg_id, {"status": "sent", "updated_at": datetime.now(timezone.utc).isoformat() + "Z"})
 
 
 def action_mark_discord_message_failed(conn, msg_id, error):
     """Mark a DiscordOutbox message as failed."""
     ensure_discord_outbox_table(conn)
     from datetime import datetime, timezone
-    r.db(DB_NAME).table("DiscordOutbox").get(msg_id).update(
-        {"status": "failed", "error": str(error)[:500], "updated_at": datetime.now(timezone.utc).isoformat() + "Z"}
-    ).run(conn)
+    store.update("DiscordOutbox", msg_id, {"status": "failed", "error": str(error)[:500], "updated_at": datetime.now(timezone.utc).isoformat() + "Z"})
 
 
 # ----------------------------------------------------------------------------
@@ -659,19 +623,14 @@ def _validate_provided_categories(categories):
 
 
 def ensure_notification_preferences_table(conn):
-    dbs = list(r.db_list().run(conn))
-    if DB_NAME not in dbs:
-        r.db_create(DB_NAME).run(conn)
-    tables = list(r.db(DB_NAME).table_list().run(conn))
-    if "NotificationPreferences" not in tables:
-        r.db(DB_NAME).table_create("NotificationPreferences").run(conn)
+    schema.ensure_schema(tables=["NotificationPreferences"])
 
 
 def action_get_notification_preferences(conn, user_id):
     """Return ``{"user_id", "categories"}`` with all 9 categories filled in
     (defaults where unset)."""
     ensure_notification_preferences_table(conn)
-    doc = r.db(DB_NAME).table("NotificationPreferences").get(str(user_id)).run(conn)
+    doc = store.get("NotificationPreferences", str(user_id))
     stored = doc.get("categories") if isinstance(doc, dict) else None
     return {"user_id": str(user_id), "categories": _merge_notification_categories(stored)}
 
@@ -684,7 +643,7 @@ def action_set_notification_preferences(conn, user_id, categories):
     from datetime import datetime, timezone
     ensure_notification_preferences_table(conn)
     provided = _validate_provided_categories(categories)  # raises on unknown
-    existing_doc = r.db(DB_NAME).table("NotificationPreferences").get(str(user_id)).run(conn)
+    existing_doc = store.get("NotificationPreferences", str(user_id))
     stored = existing_doc.get("categories") if isinstance(existing_doc, dict) else None
     merged = _merge_notification_categories(stored)  # full 9, stored values kept
     merged.update(provided)
@@ -694,7 +653,7 @@ def action_set_notification_preferences(conn, user_id, categories):
         "categories": merged,
         "updated_at": datetime.now(timezone.utc).isoformat() + "Z",
     }
-    r.db(DB_NAME).table("NotificationPreferences").insert(doc, conflict="replace").run(conn)
+    store.insert("NotificationPreferences", doc, conflict="replace")
     return {"user_id": str(user_id), "categories": merged}
 
 
@@ -720,26 +679,21 @@ def _push_device_doc(user_id, token, platform="ios", env="prod", app_version=Non
 
 
 def ensure_push_devices_table(conn):
-    dbs = list(r.db_list().run(conn))
-    if DB_NAME not in dbs:
-        r.db_create(DB_NAME).run(conn)
-    tables = list(r.db(DB_NAME).table_list().run(conn))
-    if "PushDevices" not in tables:
-        r.db(DB_NAME).table_create("PushDevices").run(conn)
+    schema.ensure_schema(tables=["PushDevices"])
 
 
 def action_register_push_device(conn, user_id, token, platform="ios", env="prod", app_version=None):
     """Idempotently register/refresh an APNs device token (id == token)."""
     ensure_push_devices_table(conn)
     doc = _push_device_doc(user_id, token, platform=platform, env=env, app_version=app_version)
-    r.db(DB_NAME).table("PushDevices").insert(doc, conflict="replace").run(conn)
+    store.insert("PushDevices", doc, conflict="replace")
     return doc
 
 
 def action_list_push_devices(conn, user_id, env=None):
     """Return a user's registered devices, optionally filtered by env."""
     ensure_push_devices_table(conn)
-    sel = r.db(DB_NAME).table("PushDevices").filter({"user_id": str(user_id)})
+    sel = store.filter("PushDevices", {"user_id": str(user_id)})
     if env:
         sel = sel.filter({"env": str(env)})
     return list(sel.run(conn))
@@ -749,7 +703,7 @@ def action_push_device_user_ids(conn):
     """Distinct user_ids that have at least one registered push device.
     Used to resolve the operator for the live-alert push path (single-operator)."""
     ensure_push_devices_table(conn)
-    rows = r.db(DB_NAME).table("PushDevices").pluck("user_id").run(conn)
+    rows = store.pluck(store.run("PushDevices"), "user_id")
     return sorted({row.get("user_id") for row in rows if isinstance(row, dict) and row.get("user_id")})
 
 
@@ -757,7 +711,7 @@ def action_set_push_device_env(conn, token, env):
     """Correct a device's stored APNs env (e.g. after a fallback-host send
     succeeds), so future sends hit the right host first."""
     ensure_push_devices_table(conn)
-    r.db(DB_NAME).table("PushDevices").get(str(token)).update({"env": str(env)}).run(conn)
+    store.update("PushDevices", str(token), {"env": str(env)})
     return {"token": str(token), "env": str(env)}
 
 
@@ -768,7 +722,7 @@ def action_delete_push_device(conn, token, user_id=None):
     can't delete another user's token). The internal 410-prune path calls
     without a user_id since it has no user context."""
     ensure_push_devices_table(conn)
-    row = r.db(DB_NAME).table("PushDevices").get(str(token))
+    row = store.get("PushDevices", str(token))
     if user_id is not None:
         doc = row.run(conn)
         if doc and doc.get("user_id") != str(user_id):
@@ -779,7 +733,7 @@ def action_delete_push_device(conn, token, user_id=None):
 
 def next_strategy_id(conn):
     """Return next available integer id for Strategies table."""
-    cursor = r.db(DB_NAME).table("Strategies").run(conn)
+    cursor = store.run("Strategies")
     rows = list(cursor)
     if not rows:
         return 1
@@ -831,7 +785,7 @@ def insert_backtest_with_unique_id(conn, doc, max_attempts=10):
         doc = dict(doc)
         doc["id"] = random_backtest_id()
         try:
-            r.db(DB_NAME).table("BacktestInstances").insert(doc).run(conn)
+            store.insert("BacktestInstances", doc)
             return doc["id"]
         except Exception as e:
             if "Duplicate" in str(e) or "duplicate" in str(e).lower() or "primary key" in str(e).lower():
@@ -982,10 +936,10 @@ def action_engines_status(conn):
 
 
 def action_status(conn):
-    tables = list(r.db(DB_NAME).table_list().run(conn))
+    tables = store.table_list()
     if "Config" not in tables:
         return {"config": None, "error": "Config table not found", "engines": []}
-    config = r.db(DB_NAME).table("Config").get("Config").run(conn)
+    config = store.get("Config", "Config")
     config_out = None
     if config is not None:
         keys = ["runPriceService", "terminatePriceService", "terminatePriceBroker", "terminateDiscoverService"]
@@ -995,10 +949,10 @@ def action_status(conn):
 
 
 def action_tickers(conn):
-    tables = list(r.db(DB_NAME).table_list().run(conn))
+    tables = store.table_list()
     if "LivePricesStocks" not in tables:
         return {"tickers": [], "count": 0}
-    cursor = r.db(DB_NAME).table("LivePricesStocks").run(conn)
+    cursor = store.run("LivePricesStocks")
     rows = list(cursor)
     tickers = [str(row.get("ticker", row.get("id", ""))) for row in rows]
     return {"tickers": tickers, "count": len(tickers)}
@@ -1013,9 +967,7 @@ def action_add_ticker(conn, symbols):
         ticker = sym.upper().strip()
         if not ticker:
             continue
-        r.db(DB_NAME).table("LivePricesStocks").insert(
-            {"id": ticker, "ticker": ticker}, conflict="replace"
-        ).run(conn)
+        store.insert("LivePricesStocks", {"id": ticker, "ticker": ticker}, conflict="replace")
         added.append(ticker)
     return {"added": added}
 
@@ -1024,16 +976,16 @@ def action_remove_ticker(conn, symbol):
     if not symbol or not str(symbol).strip():
         raise ValueError("Symbol required")
     ticker = str(symbol).upper().strip()
-    result = r.db(DB_NAME).table("LivePricesStocks").get(ticker).delete().run(conn)
+    result = store.delete("LivePricesStocks", ticker)
     deleted = result.get("deleted", 0)
     return {"removed": deleted > 0, "ticker": ticker}
 
 
 def action_prices(conn):
-    tables = list(r.db(DB_NAME).table_list().run(conn))
+    tables = store.table_list()
     if "LivePrices" not in tables:
         return {"prices": []}
-    cursor = r.db(DB_NAME).table("LivePrices").run(conn)
+    cursor = store.run("LivePrices")
     rows = list(cursor)
     rows_sorted = sorted(rows, key=lambda x: str(x.get("ticker", "")))
     prices = [
@@ -1044,17 +996,18 @@ def action_prices(conn):
 
 
 def action_history(conn, ticker=None, limit=30):
-    tables = list(r.db(DB_NAME).table_list().run(conn))
+    tables = store.table_list()
     if "PriceHistory" not in tables:
         return {"history": []}
-    q = r.db(DB_NAME).table("PriceHistory")
+    q = "PriceHistory"
     if ticker:
         sym = ticker.upper().strip()
         if not sym.startswith("T."):
             sym = "T." + sym
-        q = q.filter(r.row["ticker"] == sym)
-    q = q.order_by(r.desc("timestamp")).limit(min(int(limit) if limit else 30, 500))
-    rows = list(q.run(conn))
+        q = store.filter("PriceHistory", {"ticker": sym})
+    rows = list(store.run(store.limit(
+        store.order_by(q, index="timestamp", desc=True),
+        min(int(limit) if limit else 30, 500))))
     history = [
         {
             "ticker": row.get("ticker"),
@@ -1070,9 +1023,8 @@ def action_history(conn, ticker=None, limit=30):
 def action_instances(conn):
     ensure_instances_table(conn)
     cursor = (
-        r.db(DB_NAME)
-        .table("Instances")
-        .pluck(
+        store.pluck(
+            store.run("Instances"),
             "id",
             "name",
             "runCommand",
@@ -1085,7 +1037,6 @@ def action_instances(conn):
             "crypto_config",
             "crashed",
         )
-        .run(conn)
     )
     rows = list(cursor)
     instances = []
@@ -1191,7 +1142,7 @@ def action_create_instance(
             doc["crypto_config"] = dict(crypto_config)
         except (TypeError, ValueError):
             doc["crypto_config"] = {}
-    r.db(DB_NAME).table("Instances").insert(doc, conflict="replace").run(conn)
+    store.insert("Instances", doc, conflict="replace")
     return {"id": instance_id, "name": name, "strategy_id": doc.get("strategy_id")}
 
 
@@ -1234,7 +1185,7 @@ def action_edit_instance(
         bid = str(brokerage_id).strip()
         if bid:
             _ensure_brokerage_accounts_table(conn)
-            brok = r.db(DB_NAME).table(BROKERAGE_ACCOUNTS_TABLE).get(bid).run(conn)
+            brok = store.get(BROKERAGE_ACCOUNTS_TABLE, bid)
             if brok is None:
                 raise ValueError("Brokerage account not found: %s" % bid)
             updates["brokerage_id"] = bid
@@ -1253,7 +1204,7 @@ def action_edit_instance(
     if not updates:
         raise ValueError("No editable fields provided")
 
-    r.db(DB_NAME).table("Instances").get(instance_id_actual).update(updates).run(conn)
+    store.update("Instances", instance_id_actual, updates)
     return action_get_instance(conn, instance_id_actual)
 
 
@@ -1269,16 +1220,16 @@ def action_delete_instance(conn, instance_id, force=False):
     strategy_id = doc.get("strategy_id")
     if strategy_id is not None and not force:
         instances_using = list(
-            r.db(DB_NAME).table("Instances").filter(r.row["strategy_id"] == strategy_id).run(conn)
+            store.run(store.filter("Instances", {"strategy_id": strategy_id}))
         )
         if any(str(i.get("id")) == str(instance_id_actual) for i in instances_using):
-            strat_doc = r.db(DB_NAME).table("Strategies").get(strategy_id).run(conn)
+            strat_doc = store.get("Strategies", strategy_id)
             strat_name = strat_doc.get("name", strategy_id) if strat_doc else strategy_id
             raise ValueError(
                 "Instance is linked to strategy id=%s '%s'. Use force=true to delete anyway."
                 % (strategy_id, strat_name)
             )
-    r.db(DB_NAME).table("Instances").get(instance_id_actual).delete().run(conn)
+    store.delete("Instances", instance_id_actual)
     return {"deleted": True, "id": instance_id_actual}
 
 
@@ -1296,10 +1247,10 @@ def action_add_stock(conn, instance_id, symbol):
     if symbol in stocks:
         return {"added": False, "message": "Symbol already in instance", "stocks_count": len(stocks)}
     stocks.append(symbol)
-    r.db(DB_NAME).table("Instances").get(instance_id_actual).update({"stocks": stocks}).run(conn)
+    store.update("Instances", instance_id_actual, {"stocks": stocks})
     ensure_live_prices_stocks_table(conn)
-    if r.db(DB_NAME).table("LivePricesStocks").get(symbol).run(conn) is None:
-        r.db(DB_NAME).table("LivePricesStocks").insert({"id": symbol, "ticker": symbol}).run(conn)
+    if store.get("LivePricesStocks", symbol) is None:
+        store.insert("LivePricesStocks", {"id": symbol, "ticker": symbol})
     return {"added": True, "symbol": symbol, "stocks_count": len(stocks)}
 
 
@@ -1316,7 +1267,7 @@ def action_remove_stock(conn, instance_id, symbol):
     if symbol not in stocks:
         return {"removed": False, "message": "Symbol not in instance", "stocks_count": len(stocks)}
     stocks = [s for s in stocks if str(s).strip().upper() != symbol]
-    r.db(DB_NAME).table("Instances").get(instance_id_actual).update({"stocks": stocks}).run(conn)
+    store.update("Instances", instance_id_actual, {"stocks": stocks})
     return {"removed": True, "symbol": symbol, "stocks_count": len(stocks)}
 
 
@@ -1329,10 +1280,10 @@ def action_start_instance(conn, instance_id):
         raise ValueError("Instance not found: %s" % instance_id)
     instance_id_actual = doc.get("id", instance_id)
     import datetime
-    r.db(DB_NAME).table("Instances").get(instance_id_actual).update({
+    store.update("Instances", instance_id_actual, {
         "runCommand": True,
         "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
-    }).run(conn)
+    })
     return {"started": True, "id": instance_id_actual}
 
 
@@ -1344,10 +1295,10 @@ def action_stop_instance(conn, instance_id):
     if doc is None:
         raise ValueError("Instance not found: %s" % instance_id)
     instance_id_actual = doc.get("id", instance_id)
-    r.db(DB_NAME).table("Instances").get(instance_id_actual).update({
+    store.update("Instances", instance_id_actual, {
         "runCommand": False,
         "started_at": None,
-    }).run(conn)
+    })
     return {"stopped": True, "id": instance_id_actual}
 
 
@@ -1373,7 +1324,7 @@ def action_get_instance(conn, instance_id):
     if bid:
         try:
             _ensure_brokerage_accounts_table(conn)
-            brok_doc = r.db(DB_NAME).table(BROKERAGE_ACCOUNTS_TABLE).get(bid).run(conn)
+            brok_doc = store.get(BROKERAGE_ACCOUNTS_TABLE, bid)
             if brok_doc:
                 brokerage = _mask_brokerage_doc(brok_doc)
         except Exception:
@@ -1385,7 +1336,7 @@ def action_get_instance(conn, instance_id):
     if data_bid:
         try:
             _ensure_brokerage_accounts_table(conn)
-            data_doc = r.db(DB_NAME).table(BROKERAGE_ACCOUNTS_TABLE).get(data_bid).run(conn)
+            data_doc = store.get(BROKERAGE_ACCOUNTS_TABLE, data_bid)
             if data_doc:
                 data_brokerage = _mask_brokerage_doc(data_doc)
         except Exception:
@@ -1395,7 +1346,7 @@ def action_get_instance(conn, instance_id):
     backtests = []
     try:
         ensure_backtest_instances_table(conn)
-        tables = list(r.db(DB_NAME).table_list().run(conn))
+        tables = store.table_list()
         # Use the "instance" secondary index when present — same
         # optimisation as action_list_backtests. Falls back to filter()
         # when the index isn't ready (e.g. first deploy of that index).
@@ -1404,22 +1355,19 @@ def action_get_instance(conn, instance_id):
         # an instance has dozens of historical backtests.
         _bt_instance_filter = str(doc.get("id", instance_id))
         try:
-            _bt_idx = set(
-                r.db(DB_NAME).table("BacktestInstances").index_list().run(conn)
-            )
+            _bt_idx = set(store.index_list("BacktestInstances"))
         except Exception:
             _bt_idx = set()
         if "instance" in _bt_idx:
             bt_rows = list(
-                r.db(DB_NAME).table("BacktestInstances")
-                .get_all(_bt_instance_filter, index="instance")
-                .run(conn)
+                store.get_all("BacktestInstances", _bt_instance_filter,
+                              index="instance")
             )
         else:
             bt_rows = list(
-                r.db(DB_NAME).table("BacktestInstances")
-                .filter(r.row["instance"] == _bt_instance_filter)
-                .run(conn)
+                store.run(store.filter(
+                    "BacktestInstances",
+                    {"instance": _bt_instance_filter}))
             )
         from db import store as _store
         import backtest_result_store as _brs
@@ -1526,11 +1474,8 @@ def action_ensure_ai_alpaca_brokerage(conn):
     if not key or not secret:
         return None
     _ensure_brokerage_accounts_table(conn)
-    existing = list(
-        r.db(DB_NAME).table(BROKERAGE_ACCOUNTS_TABLE)
-        .filter({"account_name": "AI Engine (Alpaca)"})
-        .run(conn)
-    )
+    existing = list(store.run(store.filter(
+        BROKERAGE_ACCOUNTS_TABLE, {"account_name": "AI Engine (Alpaca)"})))
     if existing:
         return existing[0].get("id")
     try:
@@ -1548,7 +1493,7 @@ def action_terminate_price(conn):
         update_engine_doc(conn, ENGINE_ID_PRICE, {"terminate": True})
     except Exception:
         pass
-    r.db(DB_NAME).table("Config").get("Config").update({"terminatePriceService": True}).run(conn)
+    store.update("Config", "Config", {"terminatePriceService": True})
     return {"ok": True}
 
 
@@ -1560,7 +1505,7 @@ def action_terminate_discover(conn):
         update_engine_doc(conn, ENGINE_ID_DISCOVER, {"terminate": True, "running": False})
     except Exception:
         pass
-    r.db(DB_NAME).table("Config").get("Config").update({"terminateDiscoverService": True}).run(conn)
+    store.update("Config", "Config", {"terminateDiscoverService": True})
     return {"ok": True}
 
 
@@ -1572,7 +1517,7 @@ def action_start_broker(conn):
         update_engine_doc(conn, ENGINE_ID_PRICE, {"run_price_service": True})
     except Exception:
         pass
-    r.db(DB_NAME).table("Config").get("Config").update({"runPriceService": True}).run(conn)
+    store.update("Config", "Config", {"runPriceService": True})
     return {"ok": True}
 
 
@@ -1607,7 +1552,7 @@ def action_discover_control_set(conn, running=None):
         update["running"] = bool(running)
         update["terminate"] = False
         try:
-            r.db(DB_NAME).table("Config").get("Config").update({"terminateDiscoverService": False}).run(conn)
+            store.update("Config", "Config", {"terminateDiscoverService": False})
         except Exception:
             pass
     if update:
@@ -1636,12 +1581,7 @@ def ensure_agent_control_table(conn):
 
 
 def ensure_ai_backtesting_results_table(conn):
-    dbs = list(r.db_list().run(conn))
-    if DB_NAME not in dbs:
-        r.db_create(DB_NAME).run(conn)
-    tables = list(r.db(DB_NAME).table_list().run(conn))
-    if "AIBacktestingResults" not in tables:
-        r.db(DB_NAME).table_create("AIBacktestingResults").run(conn)
+    schema.ensure_schema(tables=["AIBacktestingResults"])
 
 
 def action_agent_control_get(conn):
@@ -1720,9 +1660,10 @@ def action_agent_control_set(conn, running=None, paused=None, special_request=No
         # Mark stale running cycle log entries as stopped
         try:
             ensure_agent_cycle_log_table(conn)
-            r.db(DB_NAME).table(AGENT_CYCLE_LOG_TABLE).filter(
-                r.row["status"].eq("running")
-            ).update({"status": "stopped", "updated_at": now}).run(conn)
+            store.update(AGENT_CYCLE_LOG_TABLE,
+                         store.filter(AGENT_CYCLE_LOG_TABLE,
+                                      {"status": "running"}),
+                         {"status": "stopped", "updated_at": now})
         except Exception:
             pass
         # Stop all running backtests and mark BacktestResults as stopped
@@ -1787,7 +1728,8 @@ def action_agent_increment_backtest_count(conn):
 
 def action_list_ai_backtest_results(conn, limit=100):
     ensure_ai_backtesting_results_table(conn)
-    cursor = r.db(DB_NAME).table("AIBacktestingResults").order_by(r.desc("created_at")).limit(limit).run(conn)
+    cursor = store.run(store.limit(store.order_by(
+        "AIBacktestingResults", index="created_at", desc=True), limit))
     rows = list(cursor)
     return {"results": rows}
 
@@ -1795,14 +1737,10 @@ def action_list_ai_backtest_results(conn, limit=100):
 def action_list_ai_backtest_results_since(conn, since_iso: str, limit=200):
     """List AI backtest results with created_at >= since_iso (ISO string). For digest summaries."""
     ensure_ai_backtesting_results_table(conn)
-    cursor = (
-        r.db(DB_NAME)
-        .table("AIBacktestingResults")
-        .filter(r.row["created_at"].ge(since_iso))
-        .order_by(r.desc("created_at"))
-        .limit(limit)
-        .run(conn)
-    )
+    cursor = store.run(store.limit(store.order_by(store.filter(
+        "AIBacktestingResults",
+        store.P.field("created_at").ge(since_iso)),
+        index="created_at", desc=True), limit))
     rows = list(cursor)
     return {"results": rows}
 
@@ -1845,7 +1783,7 @@ def action_insert_ai_backtest_result(
         "status": status,
         "agent_notes": agent_notes,
     }
-    r.db(DB_NAME).table("AIBacktestingResults").insert(doc).run(conn)
+    store.insert("AIBacktestingResults", doc)
     return doc
 
 
@@ -1855,9 +1793,7 @@ AGENT_TOP5_SIZE = 5
 
 
 def ensure_agent_best_table(conn):
-    tables = list(r.db(DB_NAME).table_list().run(conn))
-    if "AgentBest" not in tables:
-        r.db(DB_NAME).table_create("AgentBest").run(conn)
+    schema.ensure_schema(tables=["AgentBest"])
 
 
 def _normalize_snapshot_to_strategies(strategy_snapshot):
@@ -1875,13 +1811,13 @@ def action_agent_get_best(conn):
     """Return the current best strategy (from Strategies table with tag Best). Returns None if no best set."""
     ensure_agent_best_table(conn)
     ensure_strategies_table(conn)
-    best_doc = r.db(DB_NAME).table("AgentBest").get(AGENT_BEST_ID).run(conn)
+    best_doc = store.get("AgentBest", AGENT_BEST_ID)
     if not best_doc:
         return None
     sid = best_doc.get("strategy_id")
     if sid is None:
         return None
-    strat = r.db(DB_NAME).table("Strategies").get(sid).run(conn)
+    strat = store.get("Strategies", sid)
     if not strat:
         return None
     normalized_array = []
@@ -1913,31 +1849,31 @@ def action_agent_set_best(conn, strategy_snapshot, overall_profit, pnl_percent, 
     if not strategies_list:
         return {"set": False, "reason": "invalid strategy_snapshot"}
     # Clear Best tag from any strategy that has it
-    for row in r.db(DB_NAME).table("Strategies").run(conn):
+    for row in store.run("Strategies"):
         tags = row.get("tags") or []
         if isinstance(tags, list) and "Best" in tags:
-            r.db(DB_NAME).table("Strategies").get(row["id"]).update({"tags": []}).run(conn)
+            store.update("Strategies", row["id"], {"tags": []})
     # Find or create "Agent Best" strategy
     agent_best_row = None
-    for row in r.db(DB_NAME).table("Strategies").run(conn):
+    for row in store.run("Strategies"):
         if (row.get("name") or "").strip() == "Agent Best":
             agent_best_row = row
             break
     now = datetime.now(timezone.utc).isoformat() + "Z"
     if agent_best_row:
         sid = agent_best_row["id"]
-        r.db(DB_NAME).table("Strategies").get(sid).update({
+        store.update("Strategies", sid, {
             "strategies": strategies_list,
             "tags": ["Best"],
-        }).run(conn)
+        })
     else:
         next_id = next_strategy_id(conn)
-        r.db(DB_NAME).table("Strategies").insert({
+        store.insert("Strategies", {
             "id": next_id,
             "name": "Agent Best",
             "strategies": strategies_list,
             "tags": ["Best"],
-        }).run(conn)
+        })
         sid = next_id
     doc = {
         "id": AGENT_BEST_ID,
@@ -1949,16 +1885,14 @@ def action_agent_set_best(conn, strategy_snapshot, overall_profit, pnl_percent, 
     }
     if results_summary is not None:
         doc["results_summary"] = results_summary
-    r.db(DB_NAME).table("AgentBest").insert(doc, conflict="replace").run(conn)
+    store.insert("AgentBest", doc, conflict="replace")
     return {"set": True, "strategy_id": sid, "overall_profit": overall_profit, "pnl_percent": pnl_percent}
 
 
 # --- Agent Top-5 ---
 
 def ensure_agent_top5_table(conn):
-    tables = list(r.db(DB_NAME).table_list().run(conn))
-    if "AgentTop5" not in tables:
-        r.db(DB_NAME).table_create("AgentTop5").run(conn)
+    schema.ensure_schema(tables=["AgentTop5"])
 
 
 def action_agent_get_top5(conn):
@@ -1967,18 +1901,16 @@ def action_agent_get_top5(conn):
     from datetime import datetime, timezone
 
     ensure_agent_top5_table(conn)
-    doc = r.db(DB_NAME).table("AgentTop5").get(AGENT_TOP5_ID).run(conn)
+    doc = store.get("AgentTop5", AGENT_TOP5_ID)
     entries = list(doc.get("entries") or []) if doc else []
 
     # Auto-seed from existing results if empty
     if not entries:
         ensure_ai_backtesting_results_table(conn)
         cursor = (
-            r.db(DB_NAME)
-            .table("AIBacktestingResults")
-            .order_by(r.desc("pnl_percent"))
-            .limit(AGENT_TOP5_SIZE)
-            .run(conn)
+            store.run(store.limit(store.order_by(
+                "AIBacktestingResults", index="pnl_percent", desc=True),
+                AGENT_TOP5_SIZE))
         )
         rows = list(cursor)
         if rows:
@@ -1996,10 +1928,8 @@ def action_agent_get_top5(conn):
                     "updated_at": row.get("created_at") or now,
                     "rank": i + 1,
                 })
-            r.db(DB_NAME).table("AgentTop5").insert(
-                {"id": AGENT_TOP5_ID, "entries": entries, "updated_at": now},
-                conflict="replace",
-            ).run(conn)
+            store.insert("AgentTop5", {"id": AGENT_TOP5_ID, "entries": entries, "updated_at": now},
+                conflict="replace",)
 
     return {"top5": entries}
 
@@ -2024,7 +1954,7 @@ def action_agent_update_top5(
     overall_profit = float(overall_profit) if overall_profit is not None else 0.0
     pnl_percent    = float(pnl_percent)    if pnl_percent    is not None else 0.0
 
-    doc = r.db(DB_NAME).table("AgentTop5").get(AGENT_TOP5_ID).run(conn)
+    doc = store.get("AgentTop5", AGENT_TOP5_ID)
     entries = list(doc.get("entries") or []) if doc else []
 
     # Check if candidate qualifies (better than worst, or list not full)
@@ -2057,10 +1987,8 @@ def action_agent_update_top5(
 
     new_rank = next(i + 1 for i, e in enumerate(entries) if e is new_entry)
 
-    r.db(DB_NAME).table("AgentTop5").insert(
-        {"id": AGENT_TOP5_ID, "entries": entries, "updated_at": now},
-        conflict="replace",
-    ).run(conn)
+    store.insert("AgentTop5", {"id": AGENT_TOP5_ID, "entries": entries, "updated_at": now},
+        conflict="replace",)
     return {"entered": True, "rank": new_rank, "dethroned": dethroned_name, "top5": entries}
 
 
@@ -2415,16 +2343,14 @@ def _remove_nexus_container(container):
 
 
 def _ensure_table(conn, table_name):
-    tables = list(r.db(DB_NAME).table_list().run(conn))
-    if table_name not in tables:
-        r.db(DB_NAME).table_create(table_name).run(conn)
+    schema.ensure_schema(tables=[table_name])
 
 
 def _upsert_nexus_progress_doc(conn, doc_id, updates):
     _ensure_table(conn, "GraphNexusProgress")
     payload = {"id": doc_id}
     payload.update(updates)
-    r.db(DB_NAME).table("GraphNexusProgress").insert(payload, conflict="update").run(conn)
+    store.insert("GraphNexusProgress", payload, conflict="update")
 
 
 def _destructive_nexus_progress_reset_docs(queue_message):
@@ -2461,8 +2387,9 @@ def _destructive_nexus_progress_reset_docs(queue_message):
 
 def _reset_nexus_rethink_status(conn, queue_message):
     graph_doc, scraper_doc = _destructive_nexus_progress_reset_docs(queue_message)
-    graph_doc["last_updated"] = r.now()
-    scraper_doc["last_updated"] = r.now()
+    _now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    graph_doc["last_updated"] = _now_iso
+    scraper_doc["last_updated"] = _now_iso
     _upsert_nexus_progress_doc(conn, "graph_nexus", graph_doc)
     _upsert_nexus_progress_doc(conn, "sec_edgar_scraper", scraper_doc)
 
@@ -2620,7 +2547,8 @@ def _queue_nexus_rebuild(conn, message):
         {
             "status": "queued",
             "message": message,
-            "last_updated": r.now(),
+            "last_updated": datetime.datetime.now(
+                datetime.timezone.utc).isoformat(),
         },
     )
 
@@ -4192,14 +4120,14 @@ def action_nexus_status(conn):
         )
     )
     try:
-        tables = list(r.db(DB_NAME).table_list().run(conn))
+        tables = store.table_list()
         if "GraphNexusProgress" not in tables:
             out["graph_build"] = None
             out["scraper"] = None
             out["graph_built"] = None
             out["bootstrap"] = _build_nexus_bootstrap_status(out["control"], None)
             return out
-        tbl = r.db(DB_NAME).table("GraphNexusProgress")
+        tbl = "GraphNexusProgress"
         graph_doc = tbl.get("graph_nexus").run(conn)
         scraper_doc = tbl.get("sec_edgar_scraper").run(conn)
         out["graph_build"] = _nexus_progress_doc_to_status(graph_doc, "last_completed_phase", "phase")
@@ -4873,17 +4801,14 @@ def action_nexus_rebuild(conn=None, delete_cache_paths=None, destructive=False, 
 
 def action_strategies(conn, instance_filter=None):
     ensure_strategies_table(conn)
-    tables = list(r.db(DB_NAME).table_list().run(conn))
+    tables = store.table_list()
     if "Strategies" not in tables:
         return {"strategies": []}
-    rows = list(r.db(DB_NAME).table("Strategies").order_by("id").run(conn))
+    rows = list(store.run(store.order_by("Strategies", index="id")))
     instances_by_strategy = {}
     if "Instances" in tables:
         instance_rows = list(
-            r.db(DB_NAME)
-            .table("Instances")
-            .pluck("id", "strategy_id")
-            .run(conn)
+            store.pluck(store.run("Instances"), "id", "strategy_id")
         )
         for inst in instance_rows:
             sid = inst.get("strategy_id")
@@ -4917,7 +4842,7 @@ def action_get_strategy(conn, strategy_id):
     except (TypeError, ValueError):
         raise ValueError("Strategy ID must be an integer")
     ensure_strategies_table(conn)
-    doc = r.db(DB_NAME).table("Strategies").get(sid).run(conn)
+    doc = store.get("Strategies", sid)
     if doc is None:
         raise ValueError("Strategy not found: %s" % sid)
     normalized_array = []
@@ -4954,7 +4879,7 @@ def action_create_strategy(conn, name, strategies):
     for attempt in range(max_attempts):
         next_id = next_strategy_id(conn)
         doc["id"] = next_id
-        result = r.db(DB_NAME).table("Strategies").insert(doc, conflict="error").run(conn)
+        result = store.insert("Strategies", doc, conflict="error")
         if result.get("inserted", 0) == 1:
             return {"id": next_id, "name": doc["name"], "strategies": normalized}
         # Duplicate key — another thread grabbed this ID; retry with a new one
@@ -4967,7 +4892,7 @@ def action_edit_strategy(conn, strategy_id, name=None, strategies=None, preserve
     except (TypeError, ValueError):
         raise ValueError("Strategy ID must be an integer")
     ensure_strategies_table(conn)
-    doc = r.db(DB_NAME).table("Strategies").get(sid).run(conn)
+    doc = store.get("Strategies", sid)
     if doc is None:
         raise ValueError("Strategy not found: %s" % sid)
     update = {}
@@ -4985,7 +4910,7 @@ def action_edit_strategy(conn, strategy_id, name=None, strategies=None, preserve
         update["strategies"] = normalized
     if not update:
         return {"updated": True, "id": sid}
-    r.db(DB_NAME).table("Strategies").get(sid).update(update).run(conn)
+    store.update("Strategies", sid, update)
     result = {"updated": True, "id": sid}
     # "Preserve history": re-stamp existing Nexus saved-state to the new model
     # identities so the next boot reuses it instead of running a destructive
@@ -5007,8 +4932,8 @@ def _apply_preserve_history(conn, sid, normalized):
         nexus_cfg = _nr._nexus_config_from_strategies(normalized)
         resolved = _nr.resolve_for_identity(conn, nexus_cfg)
         restamps = [
-            _nr.restamp_instance(conn, r, base_id, resolved)
-            for base_id in _nr.linked_base_instance_ids(conn, r, sid)
+            _nr.restamp_instance(conn, store, base_id, resolved)
+            for base_id in _nr.linked_base_instance_ids(conn, store, sid)
         ]
         return {"restamp": restamps}
     except Exception as e:  # surface but never block the save
@@ -5028,7 +4953,7 @@ def action_preview_strategy_config_change(conn, strategy_id, strategies):
     if strategies is not None and not isinstance(strategies, list):
         raise ValueError("strategies must be a list")
     import nexus_restamp as _nr
-    return _nr.preview_change(conn, r, sid, strategies or [])
+    return _nr.preview_change(conn, store, sid, strategies or [])
 
 
 def action_delete_strategy(conn, strategy_id, force=False):
@@ -5037,18 +4962,18 @@ def action_delete_strategy(conn, strategy_id, force=False):
     except (TypeError, ValueError):
         raise ValueError("Strategy ID must be an integer")
     ensure_strategies_table(conn)
-    doc = r.db(DB_NAME).table("Strategies").get(sid).run(conn)
+    doc = store.get("Strategies", sid)
     if doc is None:
         return {"deleted": False, "id": sid}
     instances_using = list(
-        r.db(DB_NAME).table("Instances").filter(r.row["strategy_id"] == sid).run(conn)
+        store.run(store.filter("Instances", {"strategy_id": sid}))
     )
     if instances_using and not force:
         inst_ids = [str(i.get("id")) for i in instances_using]
         raise ValueError(
             "Strategy is used by instance(s): %s. Use force=true to delete anyway." % ", ".join(inst_ids)
         )
-    r.db(DB_NAME).table("Strategies").get(sid).delete().run(conn)
+    store.delete("Strategies", sid)
     return {"deleted": True, "id": sid}
 
 
@@ -5058,7 +4983,7 @@ def action_unlink_strategy(conn, instance_id):
     if doc is None:
         raise ValueError("Instance not found: %s" % instance_id)
     instance_id_actual = doc.get("id", instance_id)
-    r.db(DB_NAME).table("Instances").get(instance_id_actual).update({"strategy_id": None}).run(conn)
+    store.update("Instances", instance_id_actual, {"strategy_id": None})
     return {"unlinked": True, "instance_id": instance_id_actual}
 
 
@@ -5073,7 +4998,7 @@ def action_link_strategy(conn, instance_id, strategy_id):
     if doc is None:
         raise ValueError("Instance not found: %s" % instance_id)
     instance_id_actual = doc.get("id", instance_id)
-    strategy_doc = r.db(DB_NAME).table("Strategies").get(strategy_id_int).run(conn)
+    strategy_doc = store.get("Strategies", strategy_id_int)
     if strategy_doc is None:
         raise ValueError("Strategy not found: %s" % strategy_id_int)
     current_strategy_id = doc.get("strategy_id")
@@ -5083,9 +5008,7 @@ def action_link_strategy(conn, instance_id, strategy_id):
             "Instance %s is already linked to strategy id=%s '%s'."
             % (instance_id_actual, strategy_id_int, strategy_name)
         )
-    r.db(DB_NAME).table("Instances").get(instance_id_actual).update(
-        {"strategy_id": strategy_id_int}
-    ).run(conn)
+    store.update("Instances", instance_id_actual, {"strategy_id": strategy_id_int})
     return {"linked": True, "instance_id": instance_id_actual, "strategy_id": strategy_id_int}
 
 
@@ -5097,10 +5020,10 @@ def action_link_brokerage_to_instance(conn, instance_id, brokerage_id):
         raise ValueError("Instance not found: %s" % instance_id)
     instance_id_actual = doc.get("id", instance_id)
     if brokerage_id:
-        brok = r.db(DB_NAME).table("BrokerageAccounts").get(brokerage_id).run(conn)
+        brok = store.get("BrokerageAccounts", brokerage_id)
         if brok is None:
             raise ValueError("Brokerage not found: %s" % brokerage_id)
-    r.db(DB_NAME).table("Instances").get(instance_id_actual).update({"brokerage_id": brokerage_id}).run(conn)
+    store.update("Instances", instance_id_actual, {"brokerage_id": brokerage_id})
     return {"linked": True, "instance_id": instance_id_actual, "brokerage_id": brokerage_id}
 
 
@@ -5119,7 +5042,7 @@ def action_link_data_brokerage_to_instance(conn, instance_id, brokerage_id):
         raise ValueError("Instance not found: %s" % instance_id)
     instance_id_actual = doc.get("id", instance_id)
     if brokerage_id:
-        brok = r.db(DB_NAME).table("BrokerageAccounts").get(brokerage_id).run(conn)
+        brok = store.get("BrokerageAccounts", brokerage_id)
         if brok is None:
             raise ValueError("Brokerage not found: %s" % brokerage_id)
         if (brok.get("brokerage_type") or "").strip().lower() != "alpaca":
@@ -5127,9 +5050,7 @@ def action_link_data_brokerage_to_instance(conn, instance_id, brokerage_id):
                 "Data-source brokerage must be an Alpaca account "
                 "(got brokerage_type=%r)" % brok.get("brokerage_type")
             )
-    r.db(DB_NAME).table("Instances").get(instance_id_actual).update(
-        {"alpaca_data_brokerage_id": brokerage_id}
-    ).run(conn)
+    store.update("Instances", instance_id_actual, {"alpaca_data_brokerage_id": brokerage_id})
     return {
         "linked": True,
         "instance_id": instance_id_actual,
@@ -5147,7 +5068,7 @@ _LIST_TICKER_PREVIEW = 4
 def action_list_backtests(conn, instance_id=None, page=1, per_page=20, sort_by="completed_at", sort_order="desc"):
     ensure_backtest_instances_table(conn)
     from db import store as _store
-    tables = list(r.db(DB_NAME).table_list().run(conn))
+    tables = store.table_list()
     has_queue = "BacktestInstances" in tables
     # BacktestResults lives in Postgres now, so its existence is a Postgres
     # question -- the ReQL table_list above only answers for the queue table.
@@ -5162,38 +5083,29 @@ def action_list_backtests(conn, instance_id=None, page=1, per_page=20, sort_by="
 
     queue_rows = []
     if has_queue:
-        # 2026-04-26 perf: prefer the `instance` secondary index over .filter()
+        # 2026-04-26 perf: prefer the `instance` secondary index over a filter
         # so per-instance list pages do an O(log N) range read instead of a
-        # full-table scan. Falls back to .filter() if the index isn't ready
-        # yet (e.g. first deploy after this commit, before index_wait succeeds).
-        queue_query = None
+        # full-table scan. Falls back to the filter if the index is not there
+        # yet (e.g. the first deploy after this commit).
+        #
+        # get_all returns ROWS while filter returns a SELECTION, so the two
+        # branches are resolved to rows here rather than downstream.
         if instance_filter:
             try:
-                _qidx = set(r.db(DB_NAME).table("BacktestInstances").index_list().run(conn))
+                _qidx = set(store.index_list("BacktestInstances"))
             except Exception:
                 _qidx = set()
             if "instance" in _qidx:
-                queue_query = r.db(DB_NAME).table("BacktestInstances").get_all(instance_filter, index="instance")
+                _queue_docs = store.get_all(
+                    "BacktestInstances", instance_filter, index="instance")
             else:
-                queue_query = r.db(DB_NAME).table("BacktestInstances").filter(
-                    lambda row: row["instance"].default("").coerce_to("string") == instance_filter
-                )
+                _queue_docs = store.run(store.filter(
+                    "BacktestInstances",
+                    store.P.field("instance").default("")
+                    .coerce_to_string().eq(instance_filter)))
         else:
-            queue_query = r.db(DB_NAME).table("BacktestInstances")
-        queue_query = queue_query.pluck(
-            "id",
-            "instance",
-            "stocks",
-            "start-date",
-            "end-date",
-            "status",
-            "paused",
-            "created_at",
-            "timestamp",
-            "completed_at",
-            "time_elapsed_seconds",
-        )
-        queue_rows = list(queue_query.run(conn))
+            _queue_docs = store.run("BacktestInstances")
+        queue_rows = list(store.pluck(_queue_docs, *_QUEUE_FIELDS))
 
     result_rows = []
     # 2026-08-21 perf: index-paged fast path, on Postgres since the
@@ -5622,7 +5534,7 @@ def action_create_backtest(
             _bid = (instance_doc or {}).get("brokerage_id") if instance_doc else None
             if _bid:
                 try:
-                    _brok = r.db(DB_NAME).table("BrokerageAccounts").get(str(_bid)).run(conn)
+                    _brok = store.get("BrokerageAccounts", str(_bid))
                 except Exception:
                     _brok = None
             _taker_rate = resolve_crypto_taker_fee(instance_doc, _brok)
@@ -5709,12 +5621,12 @@ def action_delete_backtest(conn, backtest_id):
         bid = int(backtest_id)
     except (TypeError, ValueError):
         raise ValueError("Backtest ID must be an integer")
-    tables = list(r.db(DB_NAME).table_list().run(conn))
+    tables = store.table_list()
     found = False
     if "BacktestInstances" in tables:
-        doc = r.db(DB_NAME).table("BacktestInstances").get(bid).run(conn)
+        doc = store.get("BacktestInstances", bid)
         if doc is not None:
-            r.db(DB_NAME).table("BacktestInstances").get(bid).delete().run(conn)
+            store.delete("BacktestInstances", bid)
             found = True
     # R17: no table_list guard -- delete_backtest goes to POSTGRES, and
     # gating it on the presence of the vestigial RethinkDB table would make
@@ -5734,12 +5646,12 @@ def action_stop_backtest(conn, backtest_id):
     except (TypeError, ValueError):
         raise ValueError("Backtest ID must be an integer")
     ensure_backtest_instances_table(conn)
-    doc = r.db(DB_NAME).table("BacktestInstances").get(bid).run(conn)
+    doc = store.get("BacktestInstances", bid)
     if doc is None:
         raise ValueError("Backtest not found: %s" % bid)
     if (doc.get("status") or "").strip().lower() != "running":
         raise ValueError("Backtest is not running (status=%s). Use delete to remove from queue." % doc.get("status"))
-    r.db(DB_NAME).table("BacktestInstances").get(bid).update({"run": False}).run(conn)
+    store.update("BacktestInstances", bid, {"run": False})
     # Mark BacktestResults as stopped so UI doesn't show stale "running" state.
     # R17: no table_list guard -- this write goes to POSTGRES.
     try:
@@ -5772,16 +5684,16 @@ def _stop_all_backtest_containers():
 def action_stop_all_backtests(conn):
     """Stop all backtests: set run=false for every row (so running brokers exit), delete all rows, and stop any backtest Docker containers (no orphans)."""
     ensure_backtest_instances_table(conn)
-    rows = list(r.db(DB_NAME).table("BacktestInstances").run(conn))
+    rows = list(store.run("BacktestInstances"))
     ids = [row["id"] for row in rows]
     for bid in ids:
         try:
-            r.db(DB_NAME).table("BacktestInstances").get(bid).update({"run": False}).run(conn)
+            store.update("BacktestInstances", bid, {"run": False})
         except Exception:
             pass
     for bid in ids:
         try:
-            r.db(DB_NAME).table("BacktestInstances").get(bid).delete().run(conn)
+            store.delete("BacktestInstances", bid)
         except Exception:
             pass
     containers_stopped = _stop_all_backtest_containers()
@@ -5805,10 +5717,10 @@ def action_pause_backtest(conn, backtest_id):
     except (TypeError, ValueError):
         raise ValueError("Backtest ID must be an integer")
     ensure_backtest_instances_table(conn)
-    doc = r.db(DB_NAME).table("BacktestInstances").get(bid).run(conn)
+    doc = store.get("BacktestInstances", bid)
     if doc is None:
         raise ValueError("Backtest not found: %s" % bid)
-    r.db(DB_NAME).table("BacktestInstances").get(bid).update({"paused": True}).run(conn)
+    store.update("BacktestInstances", bid, {"paused": True})
     return {"paused": True, "id": bid}
 
 
@@ -5819,10 +5731,10 @@ def action_resume_backtest(conn, backtest_id):
     except (TypeError, ValueError):
         raise ValueError("Backtest ID must be an integer")
     ensure_backtest_instances_table(conn)
-    doc = r.db(DB_NAME).table("BacktestInstances").get(bid).run(conn)
+    doc = store.get("BacktestInstances", bid)
     if doc is None:
         raise ValueError("Backtest not found: %s" % bid)
-    r.db(DB_NAME).table("BacktestInstances").get(bid).update({"paused": False}).run(conn)
+    store.update("BacktestInstances", bid, {"paused": False})
     return {"paused": False, "id": bid}
 
 
@@ -5832,11 +5744,11 @@ def action_get_backtest_status(conn, backtest_id):
         bid = int(backtest_id)
     except (TypeError, ValueError):
         raise ValueError("Backtest ID must be an integer")
-    tables = list(r.db(DB_NAME).table_list().run(conn))
+    tables = store.table_list()
     queue_doc = None
     if "BacktestInstances" in tables:
         try:
-            queue_doc = r.db(DB_NAME).table("BacktestInstances").get(bid).run(conn)
+            queue_doc = store.get("BacktestInstances", bid)
         except Exception:
             queue_doc = None
 
@@ -5963,7 +5875,7 @@ def action_get_backtest_status(conn, backtest_id):
     # Fallback: still in queue (BacktestInstances)
     ensure_backtest_instances_table(conn)
     if queue_doc is None:
-        queue_doc = r.db(DB_NAME).table("BacktestInstances").get(bid).run(conn)
+        queue_doc = store.get("BacktestInstances", bid)
     if queue_doc is not None:
         status = (queue_doc.get("status") or "pending").strip() or "pending"
         if bool(queue_doc.get("paused")) and status.lower() in ("running", "queued", "pending"):
@@ -5985,7 +5897,7 @@ def action_summarize_backtest(conn, backtest_id):
         raise ValueError("Backtest ID must be an integer")
     from db import store as _store
     import backtest_result_store as _brs
-    tables = list(r.db(DB_NAME).table_list().run(conn))   # BacktestInstances
+    tables = store.table_list()   # BacktestInstances
     if "BacktestResults" not in _store.table_list():
         raise ValueError("BacktestResults table not found")
     doc = _brs.assemble(bid)
@@ -6039,7 +5951,7 @@ def action_summarize_backtest(conn, backtest_id):
     # Pull rerun fields from BacktestInstances
     queue_doc = None
     if "BacktestInstances" in tables:
-        queue_doc = r.db(DB_NAME).table("BacktestInstances").get(bid).run(conn)
+        queue_doc = store.get("BacktestInstances", bid)
 
     backtest_trades = doc.get("backtest_trades") or []
     total_trades, total_buys, total_sells, cycle_pnls, winning, losing, breakeven = round_trip_stats(
@@ -6083,7 +5995,7 @@ def action_summarize_backtest(conn, backtest_id):
                 _ibid = (_idoc or {}).get("brokerage_id") if _idoc else None
                 if _ibid:
                     try:
-                        _ibrok = r.db(DB_NAME).table("BrokerageAccounts").get(str(_ibid)).run(conn)
+                        _ibrok = store.get("BrokerageAccounts", str(_ibid))
                     except Exception:
                         _ibrok = None
                 _inst_rate = resolve_crypto_taker_fee(_idoc, _ibrok)
@@ -6256,14 +6168,13 @@ def action_backtest_logs(conn, backtest_id):
 
 def action_list_nexus_graph_builds(conn, limit=50):
     """List recent nexus graph builds (newest first), minimal summary fields."""
-    tables = list(r.db(DB_NAME).table_list().run(conn))
+    tables = store.table_list()
     if "NexusGraphBuilds" not in tables:
         return {"builds": []}
     rows = list(
-        r.db(DB_NAME).table("NexusGraphBuilds")
-        .order_by(r.desc("started_at"))
-        .limit(int(limit) if limit else 50)
-        .run(conn)
+        store.run(store.limit(store.order_by(
+            "NexusGraphBuilds", index="started_at", desc=True),
+            int(limit) if limit else 50))
     )
     out = []
     for row in rows:
@@ -6302,16 +6213,12 @@ def action_list_nexus_graph_builds(conn, limit=50):
 
 def _resolve_latest_nexus_graph_build_id(conn):
     """Return the id of the most recent build (by started_at), or None if none exist."""
-    tables = list(r.db(DB_NAME).table_list().run(conn))
+    tables = store.table_list()
     if "NexusGraphBuilds" not in tables:
         return None
     try:
-        latest = list(
-            r.db(DB_NAME).table("NexusGraphBuilds")
-            .order_by(r.desc("started_at"))
-            .limit(1)
-            .run(conn)
-        )
+        latest = list(store.run(store.limit(store.order_by(
+            "NexusGraphBuilds", index="started_at", desc=True), 1)))
     except Exception:
         latest = []
     return (latest[0].get("id") if latest else None) or None
@@ -6322,7 +6229,7 @@ def action_get_nexus_graph_build(conn, build_id):
 
     build_id="latest" resolves to the most recently started build.
     """
-    tables = list(r.db(DB_NAME).table_list().run(conn))
+    tables = store.table_list()
     if "NexusGraphBuilds" not in tables:
         raise ValueError("NexusGraphBuilds table not found")
     if str(build_id).lower() == "latest":
@@ -6330,7 +6237,7 @@ def action_get_nexus_graph_build(conn, build_id):
         if not resolved:
             raise ValueError("No nexus graph builds found")
         build_id = resolved
-    doc = r.db(DB_NAME).table("NexusGraphBuilds").get(str(build_id)).run(conn)
+    doc = store.get("NexusGraphBuilds", str(build_id))
     if doc is None:
         raise ValueError("Nexus graph build not found: %s" % build_id)
     return doc
@@ -6374,7 +6281,7 @@ def action_nexus_graph_build_logs(conn, build_id, since_line=0):
         since_line = max(0, int(since_line))
     except (TypeError, ValueError):
         since_line = 0
-    tables = list(r.db(DB_NAME).table_list().run(conn))
+    tables = store.table_list()
     if "NexusGraphBuilds" not in tables:
         raise NexusBuildNotFoundError("NexusGraphBuilds table not found")
     if str(build_id).lower() == "latest":
@@ -6382,7 +6289,7 @@ def action_nexus_graph_build_logs(conn, build_id, since_line=0):
         if not resolved:
             raise NexusBuildNotFoundError("No nexus graph builds found")
         build_id = resolved
-    doc = r.db(DB_NAME).table("NexusGraphBuilds").get(str(build_id)).run(conn)
+    doc = store.get("NexusGraphBuilds", str(build_id))
     if doc is None:
         raise NexusBuildNotFoundError("Nexus graph build not found: %s" % build_id)
 
@@ -6703,11 +6610,11 @@ def action_backtest_best_per_strategy(conn):
     Used by StrategiesView to show best backtest even for strategies with no AIBacktestingResults."""
     from db import store as _store
     import backtest_result_store as _brs
-    tables = list(r.db(DB_NAME).table_list().run(conn))   # Instances
+    tables = store.table_list()   # Instances
     if "Instances" not in tables or "BacktestResults" not in _store.table_list():
         return {"by_strategy": {}}
     # Build instance_id -> strategy_id map
-    instances = list(r.db(DB_NAME).table("Instances").pluck("id", "strategy_id").run(conn))
+    instances = list(store.pluck(store.run("Instances"), "id", "strategy_id"))
     inst_to_strat = {}
     for inst in instances:
         iid = str(inst.get("id", ""))
@@ -7057,11 +6964,9 @@ _NEXUS_DISCOVERED_TABLE = "GraphNexusDiscoveredStocks"
 
 def _ensure_nexus_trends_tables(conn):
     """Ensure trends and discovered stocks tables exist."""
-    tables = list(r.db(DB_NAME).table_list().run(conn))
-    if _NEXUS_TRENDS_TABLE not in tables:
-        r.db(DB_NAME).table_create(_NEXUS_TRENDS_TABLE).run(conn)
+    schema.ensure_schema(tables=[_NEXUS_TRENDS_TABLE])
     if _NEXUS_DISCOVERED_TABLE not in tables:
-        r.db(DB_NAME).table_create(_NEXUS_DISCOVERED_TABLE).run(conn)
+        schema.ensure_schema(tables=[_NEXUS_DISCOVERED_TABLE])
 
 
 def action_list_trends(conn, instance_id=None, status=None, match_base=False):
@@ -7072,16 +6977,25 @@ def action_list_trends(conn, instance_id=None, status=None, match_base=False):
     base (the part before the first '|'), so a plain id like 'alpaca-main' finds
     those scoped rows. Default False keeps exact-match behaviour for the CLI."""
     _ensure_nexus_trends_tables(conn)
-    query = r.db(DB_NAME).table(_NEXUS_TRENDS_TABLE)
+    preds = []
     if instance_id:
         if match_base:
-            query = query.filter(
-                lambda doc: doc["instance_id"].default("").split("|").nth(0) == instance_id)
+            # Rows are written under a SCOPE-suffixed id, 'alpaca-main|<hash>';
+            # match on the part before the first '|'.
+            preds.append(store.P.field("instance_id").default("")
+                         .split_nth("|", 0).eq(instance_id))
         else:
-            query = query.filter(lambda doc: doc["instance_id"] == instance_id)
+            preds.append(store.P.field("instance_id").eq(instance_id))
     if status:
-        query = query.filter(lambda doc: doc["status"] == status)
-    cursor = query.order_by(r.desc("updated_at")).limit(100).run(conn)
+        preds.append(store.P.field("status").eq(status))
+    query = _NEXUS_TRENDS_TABLE
+    if preds:
+        pred = preds[0]
+        for extra in preds[1:]:
+            pred = pred & extra
+        query = store.filter(query, pred)
+    cursor = store.run(store.limit(
+        store.order_by(query, index="updated_at", desc=True), 100))
     trends = list(cursor)
     return {"trends": trends, "count": len(trends)}
 
@@ -7091,7 +7005,7 @@ def action_get_trend(conn, trend_id):
     _ensure_nexus_trends_tables(conn)
     if not trend_id:
         raise ValueError("Trend ID required")
-    doc = r.db(DB_NAME).table(_NEXUS_TRENDS_TABLE).get(str(trend_id)).run(conn)
+    doc = store.get(_NEXUS_TRENDS_TABLE, str(trend_id))
     if doc is None:
         raise ValueError("Trend not found: %s" % trend_id)
     return {"trend": doc}
@@ -7102,17 +7016,17 @@ def action_end_trend(conn, trend_id, reason="manually ended"):
     _ensure_nexus_trends_tables(conn)
     if not trend_id:
         raise ValueError("Trend ID required")
-    doc = r.db(DB_NAME).table(_NEXUS_TRENDS_TABLE).get(str(trend_id)).run(conn)
+    doc = store.get(_NEXUS_TRENDS_TABLE, str(trend_id))
     if doc is None:
         raise ValueError("Trend not found: %s" % trend_id)
     if doc.get("status") == "ended":
         return {"ended": False, "message": "Trend already ended"}
     from datetime import datetime
-    r.db(DB_NAME).table(_NEXUS_TRENDS_TABLE).get(str(trend_id)).update({
+    store.update(_NEXUS_TRENDS_TABLE, str(trend_id), {
         "status": "ended",
         "ended_at": datetime.utcnow().isoformat(),
         "end_reason": reason,
-    }).run(conn)
+    })
     return {"ended": True, "id": trend_id}
 
 
@@ -7121,10 +7035,10 @@ def action_delete_trend(conn, trend_id):
     _ensure_nexus_trends_tables(conn)
     if not trend_id:
         raise ValueError("Trend ID required")
-    doc = r.db(DB_NAME).table(_NEXUS_TRENDS_TABLE).get(str(trend_id)).run(conn)
+    doc = store.get(_NEXUS_TRENDS_TABLE, str(trend_id))
     if doc is None:
         raise ValueError("Trend not found: %s" % trend_id)
-    r.db(DB_NAME).table(_NEXUS_TRENDS_TABLE).get(str(trend_id)).delete().run(conn)
+    store.delete(_NEXUS_TRENDS_TABLE, str(trend_id))
     return {"deleted": True, "id": trend_id}
 
 
@@ -7133,16 +7047,25 @@ def action_list_discovered_stocks(conn, instance_id=None, status=None, match_bas
     match_base matches the base of a scope-suffixed instance_id (see
     action_list_trends). Default False keeps exact-match behaviour for the CLI."""
     _ensure_nexus_trends_tables(conn)
-    query = r.db(DB_NAME).table(_NEXUS_DISCOVERED_TABLE)
+    preds = []
     if instance_id:
         if match_base:
-            query = query.filter(
-                lambda doc: doc["instance_id"].default("").split("|").nth(0) == instance_id)
+            # Rows are written under a SCOPE-suffixed id, 'alpaca-main|<hash>';
+            # match on the part before the first '|'.
+            preds.append(store.P.field("instance_id").default("")
+                         .split_nth("|", 0).eq(instance_id))
         else:
-            query = query.filter(lambda doc: doc["instance_id"] == instance_id)
+            preds.append(store.P.field("instance_id").eq(instance_id))
     if status:
-        query = query.filter(lambda doc: doc["status"] == status)
-    cursor = query.order_by(r.desc("discovered_at")).limit(100).run(conn)
+        preds.append(store.P.field("status").eq(status))
+    query = _NEXUS_DISCOVERED_TABLE
+    if preds:
+        pred = preds[0]
+        for extra in preds[1:]:
+            pred = pred & extra
+        query = store.filter(query, pred)
+    cursor = store.run(store.limit(
+        store.order_by(query, index="discovered_at", desc=True), 100))
     stocks = list(cursor)
     return {"stocks": stocks, "count": len(stocks)}
 
@@ -7154,14 +7077,14 @@ def action_remove_discovered_stock(conn, instance_id, ticker):
         raise ValueError("Instance ID and ticker required")
     ticker = ticker.upper().strip()
     doc_id = f"{instance_id}:{ticker}"
-    doc = r.db(DB_NAME).table(_NEXUS_DISCOVERED_TABLE).get(doc_id).run(conn)
+    doc = store.get(_NEXUS_DISCOVERED_TABLE, doc_id)
     if doc is None:
         raise ValueError("Discovered stock not found: %s" % doc_id)
     from datetime import datetime
-    r.db(DB_NAME).table(_NEXUS_DISCOVERED_TABLE).get(doc_id).update({
+    store.update(_NEXUS_DISCOVERED_TABLE, doc_id, {
         "status": "removed",
         "removed_at": datetime.utcnow().isoformat(),
-    }).run(conn)
+    })
     return {"removed": True, "ticker": ticker, "instance_id": instance_id}
 
 
@@ -7170,23 +7093,19 @@ _NEXUS_TRADE_OUTCOMES_TABLE = "GraphNexusTradeOutcomes"
 
 
 def _ensure_nexus_trade_tables(conn):
-    tables = r.db(DB_NAME).table_list().run(conn)
+    tables = store.table_list()
     if _NEXUS_TRADE_CONTEXTS_TABLE not in tables:
-        r.db(DB_NAME).table_create(_NEXUS_TRADE_CONTEXTS_TABLE).run(conn)
+        schema.ensure_schema(tables=[_NEXUS_TRADE_CONTEXTS_TABLE])
     if _NEXUS_TRADE_OUTCOMES_TABLE not in tables:
-        r.db(DB_NAME).table_create(_NEXUS_TRADE_OUTCOMES_TABLE).run(conn)
+        schema.ensure_schema(tables=[_NEXUS_TRADE_OUTCOMES_TABLE])
     # Task 8: function index on the base instance id (part before the first
     # '|' of the scope-suffixed instance_id) so telemetry reads never scan
     # the 100k-row tables with a lambda filter again.
     for _tbl in (_NEXUS_TRADE_CONTEXTS_TABLE, _NEXUS_TRADE_OUTCOMES_TABLE):
         try:
-            existing = r.db(DB_NAME).table(_tbl).index_list().run(conn)
+            existing = store.index_list(_tbl)
             if "base_instance_id" not in existing:
-                r.db(DB_NAME).table(_tbl).index_create(
-                    "base_instance_id",
-                    lambda doc: doc["instance_id"].default("").split("|").nth(0),
-                ).run(conn)
-                r.db(DB_NAME).table(_tbl).index_wait("base_instance_id").run(conn)
+                schema.ensure_schema(tables=[_tbl])
         except Exception:
             pass
 
@@ -7202,12 +7121,10 @@ def action_nexus_trade_contexts(conn, instance_id, limit=40):
     # the base_instance_id function index matches the base directly (Task 8 —
     # no full-table lambda filter).
     cursor = (
-        r.db(DB_NAME)
-        .table(_NEXUS_TRADE_CONTEXTS_TABLE)
-        .get_all(instance_id, index="base_instance_id")
-        .order_by(r.desc("date_key"))
-        .limit(400)
-        .run(conn)
+        store.run(store.limit(store.order_by(
+            store.filter(_NEXUS_TRADE_CONTEXTS_TABLE,
+                         {"base_instance_id": instance_id}),
+            index="date_key", desc=True), 400))
     )
     return {"contexts": dedupe_latest_contexts(list(cursor), limit=limit)}
 
@@ -7220,11 +7137,9 @@ def action_nexus_outcome_stats(conn, instance_id):
     _ensure_nexus_trade_tables(conn)
     # Indexed base-instance read (see action_nexus_trade_contexts).
     cursor = (
-        r.db(DB_NAME)
-        .table(_NEXUS_TRADE_OUTCOMES_TABLE)
-        .get_all(instance_id, index="base_instance_id")
-        .limit(2000)
-        .run(conn)
+        store.run(store.limit(store.filter(
+            _NEXUS_TRADE_OUTCOMES_TABLE,
+            {"base_instance_id": instance_id}), 2000))
     )
     return summarize_outcomes(list(cursor))
 
@@ -7233,7 +7148,7 @@ def action_nexus_config_get(conn, instance_id):
     """Get nexus trend/discovery configuration for an instance."""
     if not instance_id:
         raise ValueError("Instance ID required")
-    tables = list(r.db(DB_NAME).table_list().run(conn))
+    tables = store.table_list()
     if "Instances" not in tables:
         return {"config": {}}
     doc = _resolve_instance_doc(conn, instance_id)
@@ -7301,9 +7216,9 @@ def action_nexus_config_set(conn, instance_id, updates):
             config[k] = v
             applied[k] = v
     strategies[nexus_idx]["config"] = config
-    r.db(DB_NAME).table("Instances").get(instance_id_actual).update({
+    store.update("Instances", instance_id_actual, {
         "strategies": strategies,
-    }).run(conn)
+    })
     return {"updated": True, "applied": applied, "instance_id": instance_id_actual}
 
 
@@ -7313,9 +7228,7 @@ BROKERAGE_ACCOUNTS_TABLE = "BrokerageAccounts"
 
 
 def _ensure_brokerage_accounts_table(conn):
-    tables = list(r.db(DB_NAME).table_list().run(conn))
-    if BROKERAGE_ACCOUNTS_TABLE not in tables:
-        r.db(DB_NAME).table_create(BROKERAGE_ACCOUNTS_TABLE).run(conn)
+    schema.ensure_schema(tables=[BROKERAGE_ACCOUNTS_TABLE])
 
 
 def _mask_brokerage_doc(doc):
@@ -7373,7 +7286,7 @@ def _looks_masked(val: str) -> bool:
 def action_list_brokerages(conn):
     """List all linked brokerage accounts (credentials masked)."""
     _ensure_brokerage_accounts_table(conn)
-    docs = list(r.db(DB_NAME).table(BROKERAGE_ACCOUNTS_TABLE).run(conn))
+    docs = list(store.run(BROKERAGE_ACCOUNTS_TABLE))
     return {"accounts": [_mask_brokerage_doc(d) for d in docs]}
 
 
@@ -7615,7 +7528,7 @@ def action_link_alpaca(conn, account_name, key, secret, paper=True, alpaca_data_
         "updated_at": now,
         "last_refresh_at": now,
     }
-    result = r.db(DB_NAME).table(BROKERAGE_ACCOUNTS_TABLE).insert(doc).run(conn)
+    result = store.insert(BROKERAGE_ACCOUNTS_TABLE, doc)
     inserted_id = (result.get("generated_keys") or [None])[0]
     doc["id"] = inserted_id
     return {"linked": True, "account": _mask_brokerage_doc(doc), "data_access": data_access}
@@ -7627,10 +7540,10 @@ def action_delete_brokerage(conn, brokerage_id):
     if not brokerage_id:
         raise ValueError("brokerage_id is required")
     _ensure_brokerage_accounts_table(conn)
-    doc = r.db(DB_NAME).table(BROKERAGE_ACCOUNTS_TABLE).get(brokerage_id).run(conn)
+    doc = store.get(BROKERAGE_ACCOUNTS_TABLE, brokerage_id)
     if doc is None:
         raise ValueError(f"Brokerage account not found: {brokerage_id}")
-    r.db(DB_NAME).table(BROKERAGE_ACCOUNTS_TABLE).get(brokerage_id).delete().run(conn)
+    store.delete(BROKERAGE_ACCOUNTS_TABLE, brokerage_id)
     return {"deleted": True, "id": brokerage_id}
 
 
@@ -7653,7 +7566,7 @@ def action_update_brokerage(
     if not brokerage_id:
         raise ValueError("brokerage_id is required")
     _ensure_brokerage_accounts_table(conn)
-    doc = r.db(DB_NAME).table(BROKERAGE_ACCOUNTS_TABLE).get(brokerage_id).run(conn)
+    doc = store.get(BROKERAGE_ACCOUNTS_TABLE, brokerage_id)
     if doc is None:
         raise ValueError(f"Brokerage account not found: {brokerage_id}")
 
@@ -7775,8 +7688,8 @@ def action_update_brokerage(
     else:
         raise ValueError(f"Unsupported brokerage type: {btype}")
 
-    r.db(DB_NAME).table(BROKERAGE_ACCOUNTS_TABLE).get(brokerage_id).update(update).run(conn)
-    updated_doc = r.db(DB_NAME).table(BROKERAGE_ACCOUNTS_TABLE).get(brokerage_id).run(conn)
+    store.update(BROKERAGE_ACCOUNTS_TABLE, brokerage_id, update)
+    updated_doc = store.get(BROKERAGE_ACCOUNTS_TABLE, brokerage_id)
     _out = {"updated": True, "account": _mask_brokerage_doc(updated_doc)}
     if data_access_result is not None:
         _out["data_access"] = data_access_result
@@ -7795,7 +7708,7 @@ def action_get_portfolio_history(conn, brokerage_id, range_str="1M"):
         raise ValueError(f"Invalid range: {range_str}. Must be one of 1D, 1W, 1M, 3M, YTD, 1Y, ALL")
 
     _ensure_brokerage_accounts_table(conn)
-    doc = r.db(DB_NAME).table(BROKERAGE_ACCOUNTS_TABLE).get(brokerage_id).run(conn)
+    doc = store.get(BROKERAGE_ACCOUNTS_TABLE, brokerage_id)
     if doc is None:
         raise ValueError(f"Brokerage account not found: {brokerage_id}")
 
@@ -7823,11 +7736,11 @@ def action_get_portfolio_history(conn, brokerage_id, range_str="1M"):
     if doc.get("status") != "active" or doc.get("last_error"):
         try:
             import datetime as _dt
-            r.db(DB_NAME).table(BROKERAGE_ACCOUNTS_TABLE).get(brokerage_id).update({
+            store.update(BROKERAGE_ACCOUNTS_TABLE, brokerage_id, {
                 "status": "active",
                 "last_error": None,
                 "updated_at": _dt.datetime.utcnow().isoformat(),
-            }).run(conn)
+            })
         except Exception:
             pass  # best-effort; don't fail the history fetch
 
@@ -7949,12 +7862,7 @@ def _fetch_alpaca_portfolio_history(key, secret, base_url, range_str):
 
 
 def ensure_agent_cycle_log_table(conn):
-    dbs = list(r.db_list().run(conn))
-    if DB_NAME not in dbs:
-        r.db_create(DB_NAME).run(conn)
-    tables = list(r.db(DB_NAME).table_list().run(conn))
-    if AGENT_CYCLE_LOG_TABLE not in tables:
-        r.db(DB_NAME).table_create(AGENT_CYCLE_LOG_TABLE).run(conn)
+    schema.ensure_schema(tables=[AGENT_CYCLE_LOG_TABLE])
 
 
 def action_agent_cycle_log_create(conn, cycle_id, name):
@@ -7972,7 +7880,7 @@ def action_agent_cycle_log_create(conn, cycle_id, name):
         "stages": [],
         "final_result": None,
     }
-    r.db(DB_NAME).table(AGENT_CYCLE_LOG_TABLE).insert(doc).run(conn)
+    store.insert(AGENT_CYCLE_LOG_TABLE, doc)
     return {"id": doc["id"]}
 
 
@@ -7986,7 +7894,7 @@ def action_agent_cycle_log_update(conn, log_id, status=None, stages=None, final_
         update["stages"] = stages
     if final_result is not None:
         update["final_result"] = final_result
-    r.db(DB_NAME).table(AGENT_CYCLE_LOG_TABLE).get(log_id).update(update).run(conn)
+    store.update(AGENT_CYCLE_LOG_TABLE, log_id, update)
     return {"ok": True}
 
 
@@ -7995,23 +7903,18 @@ def action_agent_run_force_stop(conn, log_id):
     from datetime import datetime, timezone
     ensure_agent_cycle_log_table(conn)
     now = datetime.now(timezone.utc).isoformat() + "Z"
-    r.db(DB_NAME).table(AGENT_CYCLE_LOG_TABLE).get(log_id).update(
-        {"status": "stopped", "updated_at": now, "final_result": "Manually marked as stopped."}
-    ).run(conn)
+    store.update(AGENT_CYCLE_LOG_TABLE, log_id, {"status": "stopped", "updated_at": now, "final_result": "Manually marked as stopped."})
     return {"ok": True, "id": log_id}
 
 
 def action_list_agent_runs(conn, page=1, per_page=20):
     ensure_agent_cycle_log_table(conn)
-    total = r.db(DB_NAME).table(AGENT_CYCLE_LOG_TABLE).count().run(conn)
+    total = store.count(AGENT_CYCLE_LOG_TABLE)
     offset = (page - 1) * per_page
     cursor = (
-        r.db(DB_NAME)
-        .table(AGENT_CYCLE_LOG_TABLE)
-        .order_by(r.desc("created_at"))
-        .skip(offset)
-        .limit(per_page)
-        .run(conn)
+        store.run(store.slice(store.order_by(
+            AGENT_CYCLE_LOG_TABLE, index="created_at", desc=True),
+            offset, offset + per_page))
     )
     rows = list(cursor)
     return {
@@ -8036,27 +7939,21 @@ BOT_TRADE_DECISIONS_TABLE = "BotTradeDecisions"
 
 
 def ensure_bot_trade_decisions_table(conn):
-    dbs = list(r.db_list().run(conn))
-    if DB_NAME not in dbs:
-        r.db_create(DB_NAME).run(conn)
-    tables = list(r.db(DB_NAME).table_list().run(conn))
-    if BOT_TRADE_DECISIONS_TABLE not in tables:
-        r.db(DB_NAME).table_create(BOT_TRADE_DECISIONS_TABLE).run(conn)
+    schema.ensure_schema(tables=[BOT_TRADE_DECISIONS_TABLE])
     # Secondary index for fast per-account lookups.
-    idxs = list(r.db(DB_NAME).table(BOT_TRADE_DECISIONS_TABLE).index_list().run(conn))
+    idxs = list(store.index_list(BOT_TRADE_DECISIONS_TABLE))
     if "brokerage_id" not in idxs:
-        r.db(DB_NAME).table(BOT_TRADE_DECISIONS_TABLE).index_create("brokerage_id").run(conn)
-        r.db(DB_NAME).table(BOT_TRADE_DECISIONS_TABLE).index_wait("brokerage_id").run(conn)
+        # R25: db.schema owns the index set; CREATE INDEX is synchronous.
+        schema.ensure_schema(tables=[BOT_TRADE_DECISIONS_TABLE])
 
 
 def action_list_bot_trade_decisions(conn, brokerage_id, symbol=None, page=1, per_page=20):
     """Recent bot trade decisions for a brokerage (newest first), optionally
     filtered to one symbol. Returns {events, total, page, per_page}."""
     ensure_bot_trade_decisions_table(conn)
-    sel = r.db(DB_NAME).table(BOT_TRADE_DECISIONS_TABLE).get_all(
-        str(brokerage_id), index="brokerage_id"
-    )
-    rows = list(sel.run(conn))
+    sel = store.get_all(BOT_TRADE_DECISIONS_TABLE, str(brokerage_id),
+                        index="brokerage_id")
+    rows = list(sel)
     if symbol:
         sym = str(symbol).upper()
         rows = [d for d in rows if str(d.get("symbol") or "").upper() == sym]
@@ -8081,9 +7978,7 @@ MODELS_TABLE = "Models"
 
 
 def _ensure_models_table(conn):
-    tables = list(r.db(DB_NAME).table_list().run(conn))
-    if MODELS_TABLE not in tables:
-        r.db(DB_NAME).table_create(MODELS_TABLE).run(conn)
+    schema.ensure_schema(tables=[MODELS_TABLE])
 
 
 def _mask_model_doc(doc):
@@ -8099,13 +7994,13 @@ def _mask_model_doc(doc):
 
 def action_list_models(conn):
     _ensure_models_table(conn)
-    docs = list(r.db(DB_NAME).table(MODELS_TABLE).run(conn))
+    docs = list(store.run(MODELS_TABLE))
     return {"models": [_mask_model_doc(d) for d in docs]}
 
 
 def action_get_model(conn, model_id):
     _ensure_models_table(conn)
-    doc = r.db(DB_NAME).table(MODELS_TABLE).get(model_id).run(conn)
+    doc = store.get(MODELS_TABLE, model_id)
     if doc is None:
         raise ValueError(f"Model not found: {model_id}")
     return _mask_model_doc(doc)
@@ -8115,7 +8010,7 @@ def action_get_model_raw(conn, model_id):
     """Return the UNMASKED model doc — internal use only (never serialized to a
     client). Used by /llm/test so a saved key can be reused without re-entry."""
     _ensure_models_table(conn)
-    doc = r.db(DB_NAME).table(MODELS_TABLE).get(model_id).run(conn)
+    doc = store.get(MODELS_TABLE, model_id)
     if doc is None:
         raise ValueError(f"Model not found: {model_id}")
     if doc.get("api_key"):
@@ -8290,7 +8185,7 @@ def action_create_model(conn, name, provider, model, api_key=None,
         "created_at": now,
         "updated_at": now,
     }
-    result = r.db(DB_NAME).table(MODELS_TABLE).insert(doc).run(conn)
+    result = store.insert(MODELS_TABLE, doc)
     doc["id"] = result["generated_keys"][0]
     return {"created": True, "model": _mask_model_doc(doc)}
 
@@ -8299,7 +8194,7 @@ def action_edit_model(conn, model_id, **kwargs):
     from secret_store import encrypt as _encrypt
 
     _ensure_models_table(conn)
-    doc = r.db(DB_NAME).table(MODELS_TABLE).get(model_id).run(conn)
+    doc = store.get(MODELS_TABLE, model_id)
     if doc is None:
         raise ValueError(f"Model not found: {model_id}")
     # If the resulting provider is claude-cli, validate extra_args before
@@ -8379,8 +8274,8 @@ def action_edit_model(conn, model_id, **kwargs):
         if field == "api_key" and (val == "" or _looks_masked(val)):
             continue
         update[field] = _encrypt(val) if field == "api_key" else val
-    r.db(DB_NAME).table(MODELS_TABLE).get(model_id).update(update).run(conn)
-    updated = r.db(DB_NAME).table(MODELS_TABLE).get(model_id).run(conn)
+    store.update(MODELS_TABLE, model_id, update)
+    updated = store.get(MODELS_TABLE, model_id)
     # If the conversation is using a claude-cli session with this model,
     # the session manager will close + respawn on the next turn when it
     # notices the model/system_prompt/extra_args signature changed.
@@ -8412,7 +8307,7 @@ def action_edit_model(conn, model_id, **kwargs):
 
 def _find_strategies_referencing_model(conn, model_id):
     """Return list of strategies that reference the given model_id."""
-    strategies = list(r.db(DB_NAME).table("Strategies").run(conn))
+    strategies = list(store.run("Strategies"))
     result = []
     for strat in strategies:
         for sub in (strat.get("strategies") or []):
@@ -8437,7 +8332,7 @@ def _restore_inline_from_model(conn, model_id, model_doc):
 
 def action_delete_model(conn, model_id, force=False):
     _ensure_models_table(conn)
-    doc = r.db(DB_NAME).table(MODELS_TABLE).get(model_id).run(conn)
+    doc = store.get(MODELS_TABLE, model_id)
     if doc is None:
         return {"deleted": False, "id": model_id}
     referencing = _find_strategies_referencing_model(conn, model_id)
@@ -8447,7 +8342,7 @@ def action_delete_model(conn, model_id, force=False):
             f"Model is used by strategy(ies): {', '.join(names)}. "
             "Please reassign or remove those model references before deleting it."
         )
-    r.db(DB_NAME).table(MODELS_TABLE).get(model_id).delete().run(conn)
+    store.delete(MODELS_TABLE, model_id)
     try:
         from model_resolver import invalidate_model_cache
         invalidate_model_cache(model_id)
@@ -8467,7 +8362,7 @@ def action_delete_model(conn, model_id, force=False):
 def action_resolve_model_for_runtime(conn, model_id):
     """Return full (unmasked) model doc for runtime use."""
     _ensure_models_table(conn)
-    return r.db(DB_NAME).table(MODELS_TABLE).get(model_id).run(conn)
+    return store.get(MODELS_TABLE, model_id)
 
 
 def action_model_strategies(conn, model_id):
@@ -8502,7 +8397,7 @@ def action_learning_observations(conn, run_id, limit=500):
 
 def _learning_engine_running(conn):
     try:
-        doc = r.db(DB_NAME).table("EngineControl").get("self_learning_engine").run(conn)
+        doc = store.get("EngineControl", "self_learning_engine")
         return bool((doc or {}).get("running", False))
     except Exception:
         return False
@@ -8536,9 +8431,8 @@ def action_learning_set_control(conn, running=None, config=None):
     store.ensure_tables(conn)
     if running is not None:
         _ec.ensure_engine_control_table(conn)
-        r.db(DB_NAME).table("EngineControl").insert(
-            {"id": "self_learning_engine", "running": bool(running)},
-            conflict="update").run(conn)
+        store.insert("EngineControl", {"id": "self_learning_engine", "running": bool(running)},
+            conflict="update")
     if config:
         store.put_config(conn, config)
     return action_learning_get_control(conn)
@@ -8576,8 +8470,7 @@ def action_learning_acknowledge(conn, finding_id, status="acknowledged"):
     status = str(status or "acknowledged")
     if status not in allowed:
         raise ValueError("status must be one of %s" % sorted(allowed))
-    r.db(DB_NAME).table(store.FINDINGS).get(str(finding_id)).update(
-        {"status": status}).run(conn)
+    store.update(store.FINDINGS, str(finding_id), {"status": status})
     return {"id": str(finding_id), "status": status}
 
 
@@ -8611,13 +8504,14 @@ def action_learning_outcomes(conn, run_id, limit=2000):
     unannounced slice of a few thousand outcomes would let a caller compute a
     median over an arbitrary sample and believe it was the population.
     """
+    from db import store as _store
     from self_learning import store
     store.ensure_tables(conn)
     limit = max(1, min(int(limit or 2000), 5000))
-    selection = r.db(DB_NAME).table(store.OUTCOMES).get_all(
-        str(run_id), index="run_id")
-    total = int(selection.count().run(conn) or 0)
-    rows = list(selection.order_by("as_of").limit(limit).run(conn))
+    selection = _store.filter(store.OUTCOMES, {"run_id": str(run_id)})
+    total = int(_store.count(selection) or 0)
+    rows = list(_store.run(_store.limit(
+        _store.order_by(selection, index="as_of"), limit)))
     return {"outcomes": rows, "total": total,
             "truncated": bool(total > len(rows))}
 
@@ -8757,7 +8651,7 @@ def action_learning_targets(conn):
     brokerage_money = {}
     try:
         _ensure_brokerage_accounts_table(conn)
-        for row in r.db(DB_NAME).table(BROKERAGE_ACCOUNTS_TABLE).run(conn):
+        for row in store.run(BROKERAGE_ACCOUNTS_TABLE):
             paper = row.get("alpaca_paper")
             if paper is True:
                 money = "paper"
