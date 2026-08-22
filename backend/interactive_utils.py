@@ -1421,12 +1421,22 @@ def action_get_instance(conn, instance_id):
                 .filter(r.row["instance"] == _bt_instance_filter)
                 .run(conn)
             )
-        has_results = "BacktestResults" in tables
+        from db import store as _store
+        import backtest_result_store as _brs
+        # BacktestResults lives in Postgres now; the ReQL table_list above
+        # only answers for BacktestInstances.
+        has_results = "BacktestResults" in _store.table_list()
         for row in bt_rows:
             rid = row.get("id")
             result_doc = None
             if has_results:
-                result_doc = r.db(DB_NAME).table("BacktestResults").get(rid).run(conn)
+                # status, pnl, pnl_percent and progress only: the metadata row
+                # carries pnl, the hot row carries status and progress, and no
+                # step row is fetched for any of them.
+                result_doc = _store.get("BacktestResults", rid)
+                if result_doc is not None:
+                    result_doc = dict(result_doc)
+                    result_doc.update(_brs.read_progress(rid) or {})
             status = str(row.get("status", "queued"))
             pnl = pnl_pct = progress = None
             if result_doc:
@@ -5922,9 +5932,17 @@ def action_get_backtest_status(conn, backtest_id):
             return max(0, int(end_ts - start_ts))
         return None
     # Prefer BacktestResults (written by broker when backtest runs)
-    if "BacktestResults" in tables:
-        result_doc = r.db(DB_NAME).table("BacktestResults").get(bid).run(conn)
+    from db import store as _store
+    if "BacktestResults" in _store.table_list():
+        # The polled status endpoint: status, progress and _last_active off
+        # the hot row, nexus_lookback and the timestamps _elapsed_for() needs
+        # off the metadata row. No step row is fetched -- this is the call the
+        # UI makes every few seconds while a backtest runs.
+        import backtest_result_store as _brs
+        result_doc = _store.get("BacktestResults", bid)
         if result_doc is not None:
+            result_doc = dict(result_doc)
+            result_doc.update(_brs.read_progress(bid) or {})
             status = str(result_doc.get("status") or "running").strip() or "running"
             # If the queue row is paused, reflect that state in the API for UI controls.
             if queue_doc is not None and bool(queue_doc.get("paused")) and status.lower() in ("running", "queued", "pending"):
@@ -5966,10 +5984,12 @@ def action_summarize_backtest(conn, backtest_id):
         bid = int(backtest_id)
     except (TypeError, ValueError):
         raise ValueError("Backtest ID must be an integer")
-    tables = list(r.db(DB_NAME).table_list().run(conn))
-    if "BacktestResults" not in tables:
+    from db import store as _store
+    import backtest_result_store as _brs
+    tables = list(r.db(DB_NAME).table_list().run(conn))   # BacktestInstances
+    if "BacktestResults" not in _store.table_list():
         raise ValueError("BacktestResults table not found")
-    doc = r.db(DB_NAME).table("BacktestResults").get(bid).run(conn)
+    doc = _brs.assemble(bid)
     if doc is None:
         raise ValueError("Backtest result not found: %s" % bid)
 
@@ -6197,10 +6217,11 @@ def action_backtest_logs(conn, backtest_id):
         bid = int(backtest_id)
     except (TypeError, ValueError):
         raise ValueError("Backtest ID must be an integer")
-    tables = list(r.db(DB_NAME).table_list().run(conn))
-    if "BacktestResults" not in tables:
+    from db import store as _store
+    import backtest_result_store as _brs
+    if "BacktestResults" not in _store.table_list():
         raise ValueError("BacktestResults table not found")
-    doc = r.db(DB_NAME).table("BacktestResults").get(bid).run(conn)
+    doc = _brs.assemble(bid)
     if doc is None:
         raise ValueError("Backtest result not found: %s" % bid)
 
@@ -6681,8 +6702,10 @@ def action_live_trading_logs(conn, instance_id, since_line=0):
 def action_backtest_best_per_strategy(conn):
     """Return best backtest result (by pnl) per strategy_id, joining BacktestResults with Instances.
     Used by StrategiesView to show best backtest even for strategies with no AIBacktestingResults."""
-    tables = list(r.db(DB_NAME).table_list().run(conn))
-    if "BacktestResults" not in tables or "Instances" not in tables:
+    from db import store as _store
+    import backtest_result_store as _brs
+    tables = list(r.db(DB_NAME).table_list().run(conn))   # Instances
+    if "Instances" not in tables or "BacktestResults" not in _store.table_list():
         return {"by_strategy": {}}
     # Build instance_id -> strategy_id map
     instances = list(r.db(DB_NAME).table("Instances").pluck("id", "strategy_id").run(conn))
@@ -6694,11 +6717,9 @@ def action_backtest_best_per_strategy(conn):
             inst_to_strat[iid] = sid
     # Fetch all completed BacktestResults (skip running/queued/pending)
     skip_statuses = {"running", "queued", "pending"}
-    results = list(
-        r.db(DB_NAME).table("BacktestResults")
-        .pluck("id", "instance_id", "pnl", "pnl_percent", "status")
-        .run(conn)
-    )
+    # Five summary columns over the whole table, joined to the hot row for
+    # status -- the pluck it replaces still materialised every document.
+    results = _brs.best_by_strategy_rows()
     best_by_strat = {}
     for row in results:
         if (row.get("status") or "").lower() in skip_statuses:
@@ -6722,10 +6743,11 @@ def action_graph_backtest_data(conn, backtest_id):
         bid = int(backtest_id)
     except (TypeError, ValueError):
         raise ValueError("Backtest ID must be an integer")
-    tables = list(r.db(DB_NAME).table_list().run(conn))
-    if "BacktestResults" not in tables:
+    from db import store as _store
+    import backtest_result_store as _brs
+    if "BacktestResults" not in _store.table_list():
         raise ValueError("BacktestResults table not found")
-    doc = r.db(DB_NAME).table("BacktestResults").get(bid).run(conn)
+    doc = _brs.assemble(bid)
     if doc is None:
         raise ValueError("Backtest result not found: %s" % bid)
     portfolio_value_history = doc.get("portfolio_value_history") or []
@@ -6756,10 +6778,11 @@ def action_get_backtest_playback_data(conn, backtest_id):
         bid = int(backtest_id)
     except (TypeError, ValueError):
         raise ValueError("Backtest ID must be an integer")
-    tables = list(r.db(DB_NAME).table_list().run(conn))
-    if "BacktestResults" not in tables:
+    from db import store as _store
+    import backtest_result_store as _brs
+    if "BacktestResults" not in _store.table_list():
         raise ValueError("BacktestResults table not found")
-    doc = r.db(DB_NAME).table("BacktestResults").get(bid).run(conn)
+    doc = _brs.assemble(bid)
     if doc is None:
         raise ValueError("Backtest result not found: %s" % bid)
 

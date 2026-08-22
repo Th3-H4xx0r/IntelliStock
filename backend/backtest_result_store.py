@@ -590,3 +590,34 @@ def list_rows(*, instance_filter, page: int, per_page: int, sort_order: str,
     page_params = dict(params, limit=pp, offset=(page_i - 1) * pp)
     page_rows = [_list_row(r) for r in store.sql(page_sql, page_params)]
     return active_rows, page_rows, db_total
+
+
+def best_by_strategy_rows() -> list:
+    """Every row's five summary fields, summary columns only.
+
+    Replaces interactive_utils.py's full-table
+    .pluck("id","instance_id","pnl","pnl_percent","status"), which
+    materialised every 5-13 MB document server-side. Absent keys are OMITTED,
+    not emitted as null, matching ReQL pluck -- the caller's
+    ``row.get("status") or ""`` and ``float(row.get("pnl") or 0)`` read the
+    same values either way, but ``set(row)`` does not. Status comes from the
+    hot row (R4).
+    """
+    rows = store.sql('''
+        SELECT r.id,
+               r.doc -> 'instance_id' AS instance_id,
+               r.doc -> 'pnl'         AS pnl,
+               r.doc -> 'pnl_percent' AS pnl_percent,
+               coalesce(p.payload -> 'status', r.doc -> 'status') AS status
+        FROM "BacktestResults" r
+        LEFT JOIN "BacktestProgress" p ON p.id = r.id
+    ''')
+    out = []
+    for row in rows:
+        rid = row["id"]
+        picked = {"id": int(rid) if str(rid).lstrip("-").isdigit() else rid}
+        for key in ("instance_id", "pnl", "pnl_percent", "status"):
+            if row.get(key) is not None:
+                picked[key] = row[key]
+        out.append(picked)
+    return out
