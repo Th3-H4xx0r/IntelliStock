@@ -326,12 +326,10 @@ def test_snapshot_reader_happy_path_uses_only_fake_rethink_and_broker(monkeypatc
             "alpaca_account_number": "acct",
         },
     }
-    class Chain:
-        def __init__(self): self.name = None
-        def table(self, name): self.name=name; return self
-        def get(self, _): return self
-        def run(self, _): return rows[self.name]
-    monkeypatch.setattr(verifier, "RethinkDB", lambda: type("R", (), {"db": lambda self, _: Chain()})())
+    # The reader takes its rows from the store now, keyed by table name.
+    monkeypatch.setattr(verifier, "_store",
+                        type("S", (), {"get": staticmethod(
+                            lambda table, _row_id: rows[table])})())
     snap = verifier._snapshot_reader(object(), "i", lambda *_: {"account_id":"acct", "positions":[], "open_orders":[], "recent_orders":[], "recent_trades":[]}, lambda _: "stopped", digest)
     assert snap.run_command is False and snap.worker_state == "stopped" and snap.account_hash and not snap.account.positions and not snap.account.orders
 
