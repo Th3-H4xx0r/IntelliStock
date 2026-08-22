@@ -102,17 +102,32 @@ def test_off_mode_ignores_inert_fixture_artifact_config():
     ) is True
 
 
+class _TripwireStore:
+    """Stands in for llm_utils._db_store. Any call is a database touch.
+
+    The prompt cache used to reach the database through
+    ``_prompt_cache_new_conn()``; after the Postgres port it reaches it through
+    the module-level store, so that is what these tests watch.
+    """
+
+    def __init__(self, touched):
+        self._touched = touched
+
+    def get(self, *args, **kwargs):
+        self._touched.append("database")
+        return None
+
+    def insert(self, *args, **kwargs):
+        self._touched.append("database")
+
+
 def test_ordinary_prompt_reader_consults_policy_before_database(monkeypatch):
     activate_model_evidence_session(ModelEvidenceSession(mode="record", arm_id="arm"))
     touched = []
     monkeypatch.setattr(llm_utils, "_rethink", object())
     monkeypatch.setattr(llm_utils, "_prompt_cache_enabled", True)
     monkeypatch.setattr(llm_utils, "_prompt_cache_tbl_ok", True)
-    monkeypatch.setattr(
-        llm_utils,
-        "_prompt_cache_new_conn",
-        lambda: touched.append("database") or object(),
-    )
+    monkeypatch.setattr(llm_utils, "_db_store", _TripwireStore(touched))
     assert llm_utils._check_prompt_cache("prompt", "model", "") is None
     assert touched == []
 
@@ -124,11 +139,7 @@ def test_ordinary_prompt_writer_is_bypassed_in_every_evidence_mode(monkeypatch, 
     monkeypatch.setattr(llm_utils, "_rethink", object())
     monkeypatch.setattr(llm_utils, "_prompt_cache_enabled", True)
     monkeypatch.setattr(llm_utils, "_prompt_cache_tbl_ok", True)
-    monkeypatch.setattr(
-        llm_utils,
-        "_prompt_cache_new_conn",
-        lambda: touched.append("database") or object(),
-    )
+    monkeypatch.setattr(llm_utils, "_db_store", _TripwireStore(touched))
     llm_utils._store_prompt_cache("prompt", "model", "", "response long enough")
     assert touched == []
 

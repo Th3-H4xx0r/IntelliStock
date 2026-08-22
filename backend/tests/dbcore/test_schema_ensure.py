@@ -8,13 +8,28 @@ from db import pool as dbpool
 from .conftest import requires_pg
 
 
+# Tables that are NOT in the 2026-08-22 live table_list because the code that
+# writes them created them lazily at first use. The port deleted those
+# ensure-blocks (recipe R25: schema.py owns DDL), so the registry must declare
+# them or a bare ensure_schema() would not create them.
+_LAZILY_CREATED = (
+    # benchmark_alpha/pg_store.py + records.py
+    "AlphaEvents", "AlphaExperiments", "AlphaPredictions", "AlphaGates",
+    "AlphaAllocations", "AlphaOrderIntents", "AlphaBrokerOrders", "AlphaFills",
+    "AlphaPortfolioSnapshots", "AlphaCashActivities", "AlphaOutcomes",
+    "AlphaIncidents",
+)
+
+
 def test_all_tables_has_the_125_live_tables_plus_the_two_split_tables():
-    assert len(schema.ALL_TABLES) == 127
-    assert len(set(schema.ALL_TABLES)) == 127
+    assert len(schema.ALL_TABLES) == 127 + len(_LAZILY_CREATED)
+    assert len(set(schema.ALL_TABLES)) == len(schema.ALL_TABLES)
     for name in ("BacktestResults", "PriceHistory", "GraphNexusTradeContexts",
                  "kalshi_decisions", "sports_fixtures", "Users",
                  # both have specs, so a bare ensure_schema() must create them
                  "BacktestSteps", "BacktestProgress"):
+        assert name in schema.ALL_TABLES
+    for name in _LAZILY_CREATED:
         assert name in schema.ALL_TABLES
 
 

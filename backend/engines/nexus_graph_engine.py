@@ -16969,8 +16969,12 @@ def _run_build(driver, conn) -> bool:
                 build_row_finalize as _ngb_row_finalize,
                 _neo4j_counts as _ngb_counts,
             )
-            from rethinkdb import RethinkDB as _NgbRDB
-            _r_ngb = _NgbRDB()
+            # nexus_graph_builds took (r, conn) and now ignores both: the
+            # store takes its own pooled connection per operation. The handle
+            # stays so the ~6 call sites below keep their arity. It must NOT
+            # be None-by-accident: build_row_start's r.now() used to sit
+            # OUTSIDE the try below, so a None here crashed a real build.
+            _r_ngb = None
             _ngb_ensure_log_dir()
             _ngb_rotate()
             _build_row_id = _ngb_make_id()

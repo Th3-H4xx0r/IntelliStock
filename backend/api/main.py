@@ -3278,31 +3278,16 @@ def api_get_live_state(instance_id: str, conn=Depends(conn_dependency), current_
 
 
 def _alpha_store():
-    from contextlib import contextmanager
+    from benchmark_alpha.pg_store import AlphaPostgresStore
 
-    import interactive_utils as _iu
-    from benchmark_alpha.rethink_store import AlphaRethinkStore
-    from rethinkdb import RethinkDB
-
-    _alpha_r = RethinkDB()
-
-    @contextmanager
-    def _factory():
-        c = _iu.get_conn()
-        try:
-            yield c
-        finally:
-            try:
-                c.close()
-            except Exception:
-                pass
-
-    return AlphaRethinkStore(_alpha_r, _factory)
+    # No connection factory: the store takes its own pooled connection per
+    # operation, so an audit read is never tied to the request-scoped one.
+    return AlphaPostgresStore()
 
 
 def _alpha_page(table, instance_id, origin, run_id, limit, cursor):
     from benchmark_alpha.api_reads import read_alpha_records
-    from benchmark_alpha.rethink_store import AlphaUnavailableError
+    from benchmark_alpha.pg_store import AlphaUnavailableError
     store = _alpha_store()
     try:
         rows, next_cursor = read_alpha_records(
@@ -3332,7 +3317,7 @@ def api_alpha_allocations(instance_id: str, origin: str = None, run_id: str = No
 @app.get("/instances/{instance_id}/alpha/performance", response_class=JSONResponse)
 def api_alpha_performance(instance_id: str, origin: str = None, run_id: str = None,
                           current_user: dict = Depends(get_current_user)):
-    from benchmark_alpha.rethink_store import AlphaUnavailableError
+    from benchmark_alpha.pg_store import AlphaUnavailableError
     store = _alpha_store()
     health = store.health()
     payload = {"audit_store_health": {"available": health.available,
@@ -3356,7 +3341,7 @@ def api_alpha_readiness(instance_id: str,
                         current_user: dict = Depends(get_current_user)):
     from live_readiness import (LiveReadinessError, ReadinessCheck, ReadinessReport,
                                 ReadinessState, assert_live_start_allowed, report_from_mapping)
-    from benchmark_alpha.rethink_store import AlphaUnavailableError
+    from benchmark_alpha.pg_store import AlphaUnavailableError
     store = _alpha_store()
     health = store.health()
     reasons = []
