@@ -12269,14 +12269,22 @@ def _backtest_save_error_and_exit(error_msg, progress_pct=None):
                     }
                     if _backtest_log_buffer is not None:
                         update_payload['logs'] = list(_backtest_log_buffer)[-500:]
-                    r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).update(update_payload).run(conn)
+                    # Terminal-ish: the run is over, so the last-500 log
+                    # slice this payload carries is the authoritative array
+                    # and is finalized, exactly as the legacy update stored it.
+                    import backtest_result_store as _brs_err
+                    _brs_err.write_terminal(_backtest_result_id, update_payload)
                     _log("Saved error status and logs to BacktestResults.", "yellow")
                     # Edit #backtests Discord message to Failed (same message that was Queued/Running)
                     try:
                         from interactive_utils import action_enqueue_discord_edit
                         err_short = (str(error_msg)[:300] + "...") if len(str(error_msg)) > 300 else str(error_msg)
                         msg_key = str(backtest_row_id) if backtest_row_id is not None else str(_backtest_result_id)
-                        _res = r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).run(conn)
+                        # Metadata-only read: difficulty lives in doc, so
+                        # store.get is right -- assemble() would fetch every
+                        # step row of a finished run for one scalar.
+                        from db import store as _store_err
+                        _res = _store_err.get('BacktestResults', _backtest_result_id)
                         _d = _res.get('difficulty') if _res else None
                         diff_str = ("%.1f" % float(_d) + (" (HIGH USAGE)" if backtest_high_usage else "")) if _d is not None else _backtest_difficulty_discord_str()
                         action_enqueue_discord_edit(conn, "backtests", msg_key, content=None, embed={
@@ -12953,11 +12961,13 @@ while not shutdown_requested:
                             if _evidence_projection is not None:
                                 backtest_result["evidence"] = _evidence_projection
                             assert_secret_free(backtest_result)
+                            import backtest_result_store as _brs
                             if _backtest_result_id is not None:
-                                r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).update(backtest_result).run(conn)
+                                _brs.write_terminal(_backtest_result_id, backtest_result)
                                 _log(f"Updated backtest results in database (id={_backtest_result_id}, status=finished, P&L={final_pnl})", "green")
                             else:
-                                r.db(DB_NAME).table('BacktestResults').insert(backtest_result).run(conn)
+                                _brs.write_terminal(backtest_result.get('id'),
+                                                    backtest_result, insert_if_absent=True)
                                 _log(f"Saved backtest results to database (instance_id={instance_id_for_db}, strategy_id={strategy_row_id})", "green")
                             # Phase 1 snapshot: persist final _strategy_cache for live-boot reuse.
                             # Helpers live in broker_snapshot_helpers.py so they're testable without
@@ -13046,7 +13056,11 @@ while not shutdown_requested:
                                             wstr = ("%.2f" % w) if w is not None else "?"
                                             parts.append("%s (w=%s)" % (st, wstr))
                                         strategy_detail = "\n".join(parts) if len(parts) <= 8 else "\n".join(parts[:8]) + "\n... +%d more" % (len(parts) - 8)
-                                _res = r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).run(conn)
+                                # Metadata-only read: difficulty lives in
+                                # doc, so store.get is right -- assemble()
+                                # would fetch every step row for one scalar.
+                                from db import store as _store_fin
+                                _res = _store_fin.get('BacktestResults', _backtest_result_id)
                                 _d = _res.get('difficulty') if _res else None
                                 diff_str = ("%.1f" % float(_d) + (" (HIGH USAGE)" if backtest_high_usage else "")) if _d is not None else _backtest_difficulty_discord_str()
                                 fields = [

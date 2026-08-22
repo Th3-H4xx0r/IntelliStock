@@ -294,6 +294,31 @@ def write_difficulty(backtest_id, difficulty) -> None:
     store.update(RESULTS_TABLE, backtest_id, {"difficulty": difficulty})
 
 
+def write_terminal(backtest_id, result: dict, *,
+                   insert_if_absent: bool = False) -> None:
+    """The end-of-run write.
+
+    Metadata is deep-merged into doc (the legacy call was ``.update(...)``,
+    which merges); each array present in ``result`` is finalized into
+    BacktestSteps with final=true, superseding the live rows; the hot row is
+    set to the terminal status.
+
+    assert_secret_free() is the CALLER's responsibility and stays at
+    broker.py's terminal write, unchanged.
+    """
+    meta, steps, progress = split_doc(
+        dict(result, id=result.get("id", backtest_id)))
+    if insert_if_absent and store.get(RESULTS_TABLE, backtest_id) is None:
+        store.insert(RESULTS_TABLE, meta, conflict="replace")
+    else:
+        store.update(RESULTS_TABLE, backtest_id, meta)
+    for kind in STEP_KINDS:
+        if kind in steps:
+            finalize_steps(backtest_id, kind, steps[kind])
+    if progress:
+        write_progress(backtest_id, progress)
+
+
 def active_run_age(backtest_id) -> Optional[float]:
     """Seconds since the last heartbeat of a run the hot row still calls
     ``running``, or None when no live-run evidence exists.

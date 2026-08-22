@@ -411,3 +411,76 @@ def test_the_three_table_bootstrap_self_heals_an_empty_database(pg_schema):
     brs.write_stub(dict(STUB))
     assert brs.assemble(700001)["tickers"] == ["AACI", "AA"]
     assert schema.ensure_schema(tables=tables) == []   # idempotent: a no-op
+
+
+# ---- Task 6: the terminal writer ----------------------------------------
+
+def test_terminal_write_finalizes_every_present_array(split_schema):
+    from db.json import canonical
+    brs.write_stub(dict(STUB))
+    result = dict(STUB)
+    result.update({
+        "status": "finished", "progress": 100, "pnl": 500.0,
+        "pnl_percent": 5.0, "time_elapsed_seconds": 1234.5,
+        "backtest_decisions": [{"d": i} for i in range(1200)],
+        "backtest_refusals": [],
+        "backtest_trades": [{"t": i} for i in range(1500)],
+        "portfolio_value_history": [{"v": i} for i in range(4000)],
+        "logs": ["l%d" % i for i in range(900)],
+        "backtest_prices": [{"p": i} for i in range(2597)],
+        "evidence": {"fixture": "sealed"},
+    })
+    brs.write_terminal(700001, result)
+    got = brs.assemble(700001)
+    assert canonical(got) == canonical(dict(sorted(result.items())))
+
+
+def test_terminal_arrays_are_returned_uncapped(split_schema):
+    brs.write_stub(dict(STUB))
+    result = dict(STUB)
+    result.update({"status": "finished",
+                   "backtest_trades": [{"t": i} for i in range(1500)],
+                   "logs": ["l%d" % i for i in range(900)]})
+    brs.write_terminal(700001, result)
+    got = brs.assemble(700001)
+    assert len(got["backtest_trades"]) == 1500      # not tail-1000
+    assert len(got["logs"]) == 900                  # not tail-500
+
+
+def test_terminal_write_supersedes_the_live_rows(split_schema):
+    brs.write_stub(dict(STUB))
+    brs.append_steps(700001, "decision", [{"d": "live"}], start_seq=0)
+    result = dict(STUB)
+    result.update({"status": "finished", "backtest_decisions": [{"d": "final"}]})
+    brs.write_terminal(700001, result)
+    assert brs.assemble(700001)["backtest_decisions"] == [{"d": "final"}]
+
+
+def test_terminal_write_sets_the_hot_row_to_the_terminal_status(split_schema):
+    brs.write_stub(dict(STUB))
+    result = dict(STUB)
+    result.update({"status": "finished", "progress": 100,
+                   "time_elapsed_seconds": 1234.5})
+    brs.write_terminal(700001, result)
+    prog = brs.read_progress(700001)
+    assert prog["status"] == "finished" and prog["progress"] == 100
+    assert prog["time_elapsed_seconds"] == 1234.5      # a float, preserved
+
+
+def test_terminal_write_deep_merges_metadata(split_schema):
+    stub = dict(STUB)
+    stub["strategy_schema"] = {"name": "gna", "config": {"a": 1}}
+    brs.write_stub(stub)
+    result = {"id": 700001, "status": "finished",
+              "strategy_schema": {"version": 9}}
+    brs.write_terminal(700001, result)
+    row = store.get("BacktestResults", 700001)
+    assert row["strategy_schema"] == {"name": "gna", "config": {"a": 1},
+                                      "version": 9}
+
+
+def test_terminal_write_inserts_when_the_row_is_absent(split_schema):
+    result = dict(STUB)
+    result.update({"id": 700009, "backtest_id": 700009, "status": "finished"})
+    brs.write_terminal(700009, result, insert_if_absent=True)
+    assert brs.assemble(700009)["status"] == "finished"
