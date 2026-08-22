@@ -1693,11 +1693,8 @@ def _resolve_data_brokerage_creds_now():
         # Preserve global discovery only for explicitly non-equity runtimes.
         if not _data_bid and not _equity_stock:
             try:
-                _rows = list(
-                    _r17.db("IntelliStock").table("BrokerageAccounts")
-                    .filter(lambda doc: doc["brokerage_type"] == "alpaca")
-                    .run(_conn)
-                )
+                _rows = list(_r17.run(_r17.filter(
+                    "BrokerageAccounts", {"brokerage_type": "alpaca"})))
                 # Prefer paper=False (live, holds data subscription)
                 for _row in _rows:
                     if not bool(_row.get("alpaca_paper", False)) and _row.get("alpaca_data_feed"):
@@ -1715,7 +1712,7 @@ def _resolve_data_brokerage_creds_now():
                 pass
             return None, None, None
         try:
-            _row = _r17.db("IntelliStock").table("BrokerageAccounts").get(_data_bid).run(_conn)
+            _row = _r17.get("BrokerageAccounts", _data_bid)
         except Exception as _e:
             try:
                 _log("Alpaca data credential lookup failed.", "yellow")

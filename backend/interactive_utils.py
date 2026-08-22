@@ -693,10 +693,10 @@ def action_register_push_device(conn, user_id, token, platform="ios", env="prod"
 def action_list_push_devices(conn, user_id, env=None):
     """Return a user's registered devices, optionally filtered by env."""
     ensure_push_devices_table(conn)
-    sel = store.filter("PushDevices", {"user_id": str(user_id)})
+    pred = store.P.field("user_id").eq(str(user_id))
     if env:
-        sel = sel.filter({"env": str(env)})
-    return list(sel.run(conn))
+        pred = pred & store.P.field("env").eq(str(env))
+    return list(store.run(store.filter("PushDevices", pred)))
 
 
 def action_push_device_user_ids(conn):
@@ -722,12 +722,11 @@ def action_delete_push_device(conn, token, user_id=None):
     can't delete another user's token). The internal 410-prune path calls
     without a user_id since it has no user context."""
     ensure_push_devices_table(conn)
-    row = store.get("PushDevices", str(token))
     if user_id is not None:
-        doc = row.run(conn)
+        doc = store.get("PushDevices", str(token))
         if doc and doc.get("user_id") != str(user_id):
             return {"deleted": None, "reason": "not_owner"}
-    row.delete().run(conn)
+    store.delete("PushDevices", str(token))
     return {"deleted": str(token)}
 
 
@@ -4127,9 +4126,8 @@ def action_nexus_status(conn):
             out["graph_built"] = None
             out["bootstrap"] = _build_nexus_bootstrap_status(out["control"], None)
             return out
-        tbl = "GraphNexusProgress"
-        graph_doc = tbl.get("graph_nexus").run(conn)
-        scraper_doc = tbl.get("sec_edgar_scraper").run(conn)
+        graph_doc = store.get("GraphNexusProgress", "graph_nexus")
+        scraper_doc = store.get("GraphNexusProgress", "sec_edgar_scraper")
         out["graph_build"] = _nexus_progress_doc_to_status(graph_doc, "last_completed_phase", "phase")
         scr = _nexus_progress_doc_to_status(scraper_doc, "last_ticker_index", "ticker")
         if scraper_doc and scr:
