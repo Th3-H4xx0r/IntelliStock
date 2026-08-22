@@ -97,9 +97,9 @@ class FakeStore:
     def count(self, table_or_selection) -> int:
         sel = table_or_selection
         if isinstance(sel, _s.Selection):
-            # count() ignores LIMIT/OFFSET in the real store: it builds its own
-            # SELECT count(*) from where_sql() alone.
-            sel = sel.with_limit(None, 0).ordered(())
+            # LIMIT/OFFSET are honoured (ReQL's .limit(n).count() is
+            # min(n, total)); ORDER BY cannot change a count.
+            sel = sel.ordered(())
         return len(self._select(sel))
 
     def pluck(self, rows_or_selection, *fields):
@@ -150,6 +150,13 @@ class FakeStore:
     MINVAL = _s.MINVAL
     MAXVAL = _s.MAXVAL
     PG_MAX_ROWS = _s.PG_MAX_ROWS
+    # A ported call site writing store.Literal({}) must not raise
+    # AttributeError only on the laptops the fake exists to serve.
+    Literal = _s.Literal
+    deep_merge = staticmethod(_s.deep_merge)
+    encode_patch = staticmethod(_s.encode_patch)
+    Order = _s.Order
+    WRITE_CHUNK = _s.WRITE_CHUNK
 
     # -- writes -----------------------------------------------------------
     def insert(self, table: str, doc_or_docs, *, conflict: str = "error",
@@ -163,9 +170,19 @@ class FakeStore:
         rows = self._rows(table)
         inserted = replaced = unchanged = errors = 0
         first_error = None
+        generated_keys = []
+        # The whole batch is validated before anything is written, exactly as
+        # db.store does it: a NaN or a bad primary key is a client-side
+        # rejection, so no row of the batch may land.
+        encoded = []
         for doc in docs:
-            rid = _s._row_id_for(table, doc)
+            rid, doc, generated = _s._row_id_or_generate(table, doc)
             dbjson.dumps(doc)                     # NaN rejection, at the client
+            _s._extra_column_values(table, dbschema.spec(table), doc)
+            encoded.append((rid, doc, generated))
+        for rid, doc, generated in encoded:
+            if generated is not None:
+                generated_keys.append(generated)
             if rid not in rows:
                 rows[rid] = dict(doc)
                 inserted += 1
@@ -183,7 +200,8 @@ class FakeStore:
                 first_error = first_error or _s._DUP_ERROR
         return _s.InsertResult(inserted=inserted, replaced=replaced,
                                unchanged=unchanged, errors=errors,
-                               first_error=first_error)
+                               first_error=first_error,
+                               generated_keys=generated_keys)
 
     def update(self, table: str, selector, patch) -> _s.WriteResult:
         rows = self._rows(table)
@@ -196,15 +214,22 @@ class FakeStore:
             if row is None:
                 return _s.WriteResult(skipped=1)
             targets = [(rid, row)]
+        replaced = 0
         for rid, row in targets:
-            rows[rid] = deep_merge(row, patch)
-        return _s.WriteResult(replaced=len(targets))
+            merged = deep_merge(row, patch)
+            if merged != row:
+                replaced += 1
+            rows[rid] = merged
+        return _s.WriteResult(replaced=replaced,
+                              unchanged=len(targets) - replaced)
 
     def replace(self, table: str, row_id, doc) -> _s.WriteResult:
         rid = _s.coerce_id(table, row_id)
         rows = self._rows(table)
         if rid not in rows:
             return _s.WriteResult(skipped=1)
+        if rows[rid] == doc:
+            return _s.WriteResult(unchanged=1)
         rows[rid] = dict(doc)
         return _s.WriteResult(replaced=1)
 
@@ -230,7 +255,9 @@ class FakeStore:
             doomed = [k for k, r in rows.items() if self._match(table, r, selector)]
         else:
             rid = _s.coerce_id(table, selector)
-            doomed = [rid] if rid in rows else []
+            if rid not in rows:
+                return _s.WriteResult(skipped=1)
+            doomed = [rid]
         for key in doomed:
             del rows[key]
         return _s.WriteResult(deleted=len(doomed))
@@ -338,7 +365,9 @@ _FRAG_RE = re.compile(
 
 _JSON_NULL_RE = re.compile(r"^doc -> '(?P<key>[^']+)' = 'null'::jsonb$")
 _JSON_BOOL_RE = re.compile(r"^doc -> '(?P<key>[^']+)' = %s::jsonb$")
-_JSON_NUM_RE = re.compile(r"^\(doc -> '(?P<key>[^']+)'\)::numeric = %s$")
+_JSON_NUM_RE = re.compile(
+    r"^\(CASE WHEN jsonb_typeof\(doc -> '(?P<key>[^']+)'\) = 'number' "
+    r"THEN \(doc -> '(?P=key)'\)::numeric = %s ELSE false END\)$")
 
 _NOT_HEAD = "COALESCE(NOT ("
 _NOT_TAIL = "), false)"
@@ -387,13 +416,14 @@ def _eval_fragment(fragment: str, params, row: dict, table: str):
         return isinstance(value, bool) and value is want
     m = _JSON_NUM_RE.match(frag)
     if m:
+        # ELSE false: a missing key or a non-number is not a match, and it
+        # is not NULL either -- the CASE the real store emits returns false.
         value = row.get(m.group("key"))
         if value is None or isinstance(value, bool):
-            return None
-        try:
-            return float(value) == float(params[0])
-        except (TypeError, ValueError):
-            return None
+            return False
+        if not isinstance(value, (int, float)):
+            return False
+        return float(value) == float(params[0])
 
     m = _FRAG_RE.match(frag)
     if not m:
@@ -436,6 +466,10 @@ _COL_RE = re.compile(r'^"([^"]+)"$')
 def _eval_expr(expr: str, params, row: dict, table: str):
     """Returns (text-or-None, n_params_consumed) for one FieldRef expression."""
     expr = expr.strip()
+    if expr.endswith('COLLATE "C"'):
+        # The four ordering operators pin the collation; this interpreter
+        # already compares UTF-8 bytes, which IS collation C.
+        expr = expr[:-len('COLLATE "C"')].strip()
     m = _DOC_KEY_RE.match(expr)
     if m:
         return _text(row.get(m.group(1))), 0

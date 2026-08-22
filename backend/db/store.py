@@ -8,6 +8,7 @@ statement, not a fetch-then-delete.
 from __future__ import annotations
 
 import datetime as _dt
+import itertools as _itertools
 import os
 from dataclasses import dataclass, field, replace as _replace
 from typing import Any, Iterator, Optional, Sequence
@@ -28,6 +29,9 @@ PG_MAX_ROWS = int(os.environ.get("PG_MAX_ROWS", "100000"))
 WRITE_CHUNK = 500     # self_learning/store.py:64 -- a 15k-document insert is
                       # one oversized request that can fail as a unit.
 
+# id() is reused after GC, so it never made a unique cursor name.
+_iter_seq = _itertools.count(1)
+
 _DUP_ERROR = "Duplicate primary key `id`"
 _C = ' COLLATE "C"'
 
@@ -40,7 +44,13 @@ class Order:
 
     def to_sql(self) -> str:
         if self.numeric:
-            expr = "(doc->>'%s')::numeric" % self.field
+            # The cast is evaluated for EVERY scanned row, so one row holding
+            # a string under this key answered "cannot cast jsonb string to
+            # type numeric" and poisoned the whole query. A CASE guarantees
+            # the untaken branch is never evaluated; a non-number sorts as
+            # NULL, which is where ReQL put it too.
+            expr = ("(CASE WHEN jsonb_typeof(doc->'%s') = 'number' "
+                    "THEN (doc->>'%s')::numeric END)" % (self.field, self.field))
         else:
             expr = "(doc->>'%s')%s" % (self.field, _C)
         return "%s %s" % (expr, "DESC" if self.desc else "ASC")
@@ -191,7 +201,7 @@ def iter(selection, *, batch: int = 1000) -> Iterator:   # noqa: A001 - ReQL's n
     sel = _as_selection(selection)
     sql_, params = sel.to_sql()
     with dbpool.connection() as conn:
-        with conn.cursor(name="store_iter_%d" % id(sel)) as cur:
+        with conn.cursor(name="store_iter_%d" % next(_iter_seq)) as cur:
             cur.itersize = int(batch)
             cur.execute(sql_, params)
             for row in cur:
@@ -199,11 +209,22 @@ def iter(selection, *, batch: int = 1000) -> Iterator:   # noqa: A001 - ReQL's n
 
 
 def count(table_or_selection) -> int:
+    """ReQL's ``.limit(n).count()`` returns min(n, total), so LIMIT/OFFSET are
+    honoured. ORDER BY is dropped: it cannot change a count."""
     sel = _as_selection(table_or_selection)
     where, params = sel.where_sql()
+    body = "SELECT 1 FROM %s%s" % (dbschema.quoted(sel.table), where)
+    if sel.limit_n is not None:
+        body += " LIMIT %d" % int(sel.limit_n)
+    if sel.offset_n:
+        body += " OFFSET %d" % int(sel.offset_n)
+    if sel.limit_n is None and not sel.offset_n:
+        body = "SELECT count(*) AS n FROM %s%s" % (dbschema.quoted(sel.table),
+                                                   where)
+    else:
+        body = "SELECT count(*) AS n FROM (%s) AS _c" % body
     with dbpool.cursor() as cur:
-        cur.execute("SELECT count(*) AS n FROM %s%s"
-                    % (dbschema.quoted(sel.table), where), params)
+        cur.execute(body, params)
         return int(cur.fetchone()["n"])
 
 
@@ -360,8 +381,15 @@ class FieldRef:
         return FieldRef("split_part(%s, %%s, %%s)" % self.expr,
                         self.params + (sep, int(n) + 1))
 
+    # doc->> carries collation "default", not "C": on a prod cluster initdb'd
+    # with a locale (stock postgres:17), .lt/.le/.gt/.ge ordered under that
+    # locale instead of bytewise. Equality, IS NULL and = ANY are
+    # collation-independent, so only the four ordering operators are pinned.
+    _ORDERING_OPS = ("<", "<=", ">", ">=")
+
     def _cmp(self, op: str, value: Any) -> Predicate:
-        return Predicate("%s %s %%s" % (self.expr, op), self.params + (value,))
+        expr = self.expr + (_C if op in self._ORDERING_OPS else "")
+        return Predicate("%s %s %%s" % (expr, op), self.params + (value,))
 
     def eq(self, value: Any) -> Predicate:
         return self._cmp("=", value)
@@ -423,7 +451,14 @@ def _predicate_from(predicate) -> Predicate:
                 term = Predicate("doc -> '%s' = %%s::jsonb" % key,
                                  ("true" if value else "false",))
             elif isinstance(value, (int, float)):
-                term = Predicate("(doc -> '%s')::numeric = %%s" % key, (value,))
+                # Guarded: BacktestResults carries instance_id as a NUMBER on
+                # 592 rows and a STRING on 833, and an unguarded ::numeric
+                # cast on the string rows raises for the whole query where
+                # ReQL simply did not match them.
+                term = Predicate(
+                    "(CASE WHEN jsonb_typeof(doc -> '%s') = 'number' "
+                    "THEN (doc -> '%s')::numeric = %%s ELSE false END)"
+                    % (key, key), (value,))
             else:
                 term = P.field(key).eq(value)
             out = term if out is None else (out & term)
@@ -522,6 +557,89 @@ def _row_id_for(table: str, doc: Doc) -> str:
     return coerce_id(table, doc[spec_.pk_field])
 
 
+def _row_id_or_generate(table: str, doc: Doc):
+    """(row_id, doc, generated_key).
+
+    RethinkDB generated a uuid4 for a document with no primary key and
+    returned it in ``generated_keys`` -- priceBroker.py:186 writes
+    PriceHistory rows that way and has never supplied an id. The generated
+    value is written INTO the document, as ReQL did, so a later read sees it.
+
+    An ``id_type="int"`` table is the exception: a uuid there is exactly the
+    shadow row coerce_id exists to forbid, so it still raises.
+    """
+    spec_ = dbschema.spec(table)
+    if spec_.pk_field in doc and doc[spec_.pk_field] is not None:
+        return coerce_id(table, doc[spec_.pk_field]), doc, None
+    if spec_.id_type == "int":
+        raise StoreError("%s: document is missing its primary key field %r"
+                         % (table, spec_.pk_field))
+    import uuid as _uuid
+    key = str(_uuid.uuid4())
+    doc = dict(doc)
+    doc[spec_.pk_field] = key
+    return key, doc, key
+
+
+def _parse_timestamp(table: str, key: str, value):
+    """doc[key] -> an aware datetime, or StoreError. Never a silent drop."""
+    if isinstance(value, _dt.datetime):
+        return value if value.tzinfo else value.replace(tzinfo=_dt.timezone.utc)
+    if isinstance(value, str):
+        text = value[:-1] + "+00:00" if value.endswith("Z") else value
+        try:
+            parsed = _dt.datetime.fromisoformat(text)
+        except ValueError:
+            parsed = None
+        if parsed is not None:
+            return parsed if parsed.tzinfo else parsed.replace(
+                tzinfo=_dt.timezone.utc)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return _dt.datetime.fromtimestamp(float(value), _dt.timezone.utc)
+    raise StoreError("%s: document timestamp %r=%r will not parse"
+                     % (table, key, value))
+
+
+def _extra_column_values(table: str, spec_, doc: Doc) -> list:
+    """The real (non-generated) columns store.insert must populate itself."""
+    out = []
+    for col in sorted(spec_.column_sources):
+        doc_key, kind = spec_.column_sources[col]
+        value = doc.get(doc_key)
+        if kind == "timestamp":
+            out.append(_parse_timestamp(table, doc_key, value))
+        elif value is None:
+            raise StoreError("%s: document is missing %r, which column %r "
+                             "requires" % (table, doc_key, col))
+        else:
+            out.append(value if isinstance(value, str) else str(value))
+    return out
+
+
+def _ensure_partitions_for(table: str, spec_, docs) -> None:
+    """Create the range partitions this batch needs before writing it.
+
+    pg_partman keeps the rolling window ahead in production, but nothing
+    covers a historical row (the migration copy) or a month partman has not
+    premade yet, and PriceHistory has NO default partition by design -- the
+    insert would fail with "no partition of relation found for row".
+    schema.ensure_partitions memoises, so a steady-state write costs nothing.
+    """
+    doc_key = spec_.column_sources.get(spec_.partitioned.by, (None, None))[0]
+    if doc_key is None:
+        return
+    stamps = []
+    for doc in docs:
+        try:
+            stamps.append(_parse_timestamp(table, doc_key, doc.get(doc_key)))
+        except StoreError:
+            continue          # the per-row savepoint reports it as errors:1
+    if not stamps:
+        return
+    dbschema.ensure_partitions(table, lo=min(stamps).astimezone(_dt.timezone.utc),
+                               hi=max(stamps).astimezone(_dt.timezone.utc))
+
+
 def insert(table: str, doc_or_docs, *, conflict: str = "error",
            durability: str = "hard") -> InsertResult:
     """``durability`` is accepted and ignored: Postgres is durable by default,
@@ -530,6 +648,14 @@ def insert(table: str, doc_or_docs, *, conflict: str = "error",
 
     ReQL multi-insert is partial-success; a plain multi-row INSERT is
     all-or-nothing, so each row gets its own savepoint.
+
+    Every document is encoded BEFORE the first row is written. A NaN, a NUL,
+    a non-integer id on an int-keyed table or an unparseable PriceHistory
+    timestamp is a client-side rejection in RethinkDB too: it raises there
+    before anything reaches the server, so nothing must be written here
+    either. Encoding inside the write loop meant a bad document in chunk 3
+    left chunks 1 and 2 committed and rolled back every good row in its own
+    chunk -- a half-written batch that neither store ever produced.
     """
     if conflict not in ("error", "replace", "update"):
         raise StoreError("conflict must be error|replace|update, got %r" % conflict)
@@ -537,31 +663,71 @@ def insert(table: str, doc_or_docs, *, conflict: str = "error",
     if not docs:
         return InsertResult()
     q = dbschema.quoted(table)
+    spec_ = dbschema.spec(table)
+    # The conflict target is the table's real primary key, not always (id):
+    # PriceHistory's is (ticker, ts, id), and ON CONFLICT (id) there has no
+    # matching unique index at all.
+    target = ", ".join('"%s"' % c for c in spec_.pk)
+    extra_cols = sorted(spec_.column_sources)
     if conflict == "replace":
-        tail = (" ON CONFLICT (id) DO UPDATE SET doc = EXCLUDED.doc, "
-                "updated_at = now() WHERE %s.doc IS DISTINCT FROM EXCLUDED.doc" % q)
+        tail = (" ON CONFLICT (%s) DO UPDATE SET doc = EXCLUDED.doc, "
+                "updated_at = now() WHERE %s.doc IS DISTINCT FROM EXCLUDED.doc"
+                % (target, q))
     elif conflict == "update":
         # NOT `||` -- `||` is shallow and silently drops sibling keys.
-        tail = (" ON CONFLICT (id) DO UPDATE SET "
-                "doc = jsonb_deep_merge(%s.doc, EXCLUDED.doc), updated_at = now()" % q)
+        tail = (" ON CONFLICT (%s) DO UPDATE SET "
+                "doc = jsonb_deep_merge(%s.doc, EXCLUDED.doc), updated_at = now()"
+                % (target, q))
     else:
-        tail = " ON CONFLICT (id) DO NOTHING"
-    statement = ("INSERT INTO %s (id, doc) VALUES (%%s, %%s::jsonb)%s "
-                 "RETURNING (xmax = 0) AS was_insert" % (q, tail))
+        tail = " ON CONFLICT (%s) DO NOTHING" % target
+    columns = ", ".join(['"id"', '"doc"'] + ['"%s"' % c for c in extra_cols])
+    placeholders = ", ".join(["%s", "%s::jsonb"] + ["%s"] * len(extra_cols))
+    # xmax is a system column, and PG answers "cannot retrieve a system column
+    # in this context" when the INSERT target is a PARTITIONED table. Under
+    # DO NOTHING a returned row can only be a fresh insert, so the constant
+    # carries the same information there; the probe below covers the two
+    # upsert modes, which no partitioned-table call site uses today.
+    probe_pk = spec_.partitioned is not None and conflict != "error"
+    returning = "true" if spec_.partitioned is not None else "(xmax = 0)"
+    statement = ("INSERT INTO %s (%s) VALUES (%s)%s "
+                 "RETURNING %s AS was_insert"
+                 % (q, columns, placeholders, tail, returning))
+    probe = ("SELECT 1 FROM %s WHERE %s" %
+             (q, " AND ".join('"%s" = %%s' % c for c in spec_.pk)))
+
+    # Client-side validation of the WHOLE batch, before any write.
+    encoded = []
+    for doc in docs:
+        row_id, doc, generated = _row_id_or_generate(table, doc)
+        values = [row_id, dbjson.dumps(doc)]     # dumps raises on NaN/NUL
+        values.extend(_extra_column_values(table, spec_, doc))
+        encoded.append((values, generated,
+                        dict(zip(["id"] + extra_cols,
+                                 [values[0]] + values[2:]))))
+
+    if spec_.partitioned is not None:
+        _ensure_partitions_for(table, spec_, docs)
 
     inserted = replaced = unchanged = errors = 0
+    generated_keys: list = []
     first_error = None
-    for start in range(0, len(docs), WRITE_CHUNK):
-        chunk = docs[start:start + WRITE_CHUNK]
+    for start in range(0, len(encoded), WRITE_CHUNK):
+        chunk = encoded[start:start + WRITE_CHUNK]
         with dbpool.connection() as conn:
             with conn.cursor() as cur:
-                for doc in chunk:
-                    row_id = _row_id_for(table, doc)
-                    payload = dbjson.dumps(doc)      # raises on NaN, at the client
+                for values, generated, by_column in chunk:
+                    # ReQL multi-insert is partial-success: a server-side
+                    # rejection of one row is errors:1 and the rest still land.
                     cur.execute("SAVEPOINT s")
                     try:
-                        cur.execute(statement, (row_id, payload))
+                        if probe_pk:
+                            cur.execute(probe,
+                                        tuple(by_column[c] for c in spec_.pk))
+                            existed = cur.fetchone() is not None
+                        cur.execute(statement, tuple(values))
                         row = cur.fetchone()
+                        if probe_pk and row is not None and existed:
+                            row = {"was_insert": False}
                         cur.execute("RELEASE SAVEPOINT s")
                     except Exception as exc:
                         cur.execute("ROLLBACK TO SAVEPOINT s")
@@ -578,13 +744,16 @@ def insert(table: str, doc_or_docs, *, conflict: str = "error",
                             first_error = first_error or _DUP_ERROR
                     elif row["was_insert"]:
                         inserted += 1
+                        if generated is not None:
+                            generated_keys.append(generated)
                     elif conflict in ("replace", "update"):
                         replaced += 1
                     else:
                         unchanged += 1
             conn.commit()
     return InsertResult(inserted=inserted, replaced=replaced, unchanged=unchanged,
-                        errors=errors, first_error=first_error)
+                        errors=errors, first_error=first_error,
+                        generated_keys=generated_keys)
 
 
 def _selector_to_selection(table: str, selector) -> Selection:
@@ -598,30 +767,52 @@ def update(table: str, selector, patch: Doc) -> WriteResult:
     over a Selection -- ReQL's .filter(...).update() is server-side too."""
     sel = _selector_to_selection(table, selector)
     where, params = sel.where_sql()
+    q = dbschema.quoted(table)
     payload = dbjson.dumps(encode_patch(patch))
     with dbpool.connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE %s SET doc = jsonb_deep_merge(doc, %%s::jsonb), "
-                "updated_at = now()%s" % (dbschema.quoted(table), where),
-                (payload,) + params)
-            n = cur.rowcount
+            # ReQL counted a patch that changed nothing as unchanged, not
+            # replaced. The guard makes the UPDATE skip those rows (which also
+            # spares the WAL a full doc rewrite); matched-minus-replaced is
+            # what ReQL called unchanged. Both statements share one
+            # transaction, so no row can move between them.
+            cur.execute("SELECT count(*) AS n FROM %s%s" % (q, where), params)
+            matched = int(cur.fetchone()["n"])
+            replaced_n = 0
+            if matched:
+                cur.execute(
+                    "UPDATE %s SET doc = jsonb_deep_merge(doc, %%s::jsonb), "
+                    "updated_at = now()%s%s doc IS DISTINCT FROM "
+                    "jsonb_deep_merge(doc, %%s::jsonb)"
+                    % (q, where, " AND" if where else " WHERE"),
+                    (payload,) + params + (payload,))
+                replaced_n = cur.rowcount
         conn.commit()
-    if n == 0 and not isinstance(selector, Selection):
+    if matched == 0 and not isinstance(selector, Selection):
         return WriteResult(skipped=1)
-    return WriteResult(replaced=n)
+    return WriteResult(replaced=replaced_n, unchanged=matched - replaced_n)
 
 
 def replace(table: str, row_id, doc: Doc) -> WriteResult:
+    """A replace that writes the identical document is ReQL's ``unchanged``;
+    a replace of a row that is not there is ReQL's ``skipped``."""
     payload = dbjson.dumps(doc)
+    q = dbschema.quoted(table)
+    rid = coerce_id(table, row_id)
     with dbpool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute("UPDATE %s SET doc = %%s::jsonb, updated_at = now() "
-                        "WHERE id = %%s" % dbschema.quoted(table),
-                        (payload, coerce_id(table, row_id)))
+                        "WHERE id = %%s AND doc IS DISTINCT FROM %%s::jsonb"
+                        % q, (payload, rid, payload))
             n = cur.rowcount
+            existed = True
+            if not n:            # only the no-op path pays for this
+                cur.execute("SELECT 1 FROM %s WHERE id = %%s" % q, (rid,))
+                existed = cur.fetchone() is not None
         conn.commit()
-    return WriteResult(replaced=n) if n else WriteResult(skipped=1)
+    if n:
+        return WriteResult(replaced=n)
+    return WriteResult(unchanged=1) if existed else WriteResult(skipped=1)
 
 
 def replace_if(table: str, row_id, *, when, doc: Doc,
@@ -664,4 +855,8 @@ def delete(table: str, selector) -> WriteResult:
             cur.execute("DELETE FROM %s%s" % (dbschema.quoted(table), where), params)
             n = cur.rowcount
         conn.commit()
+    if n == 0 and not isinstance(selector, Selection):
+        # ReQL's delete(missing_id) reported skipped:1, not deleted:0. A
+        # Selection that matches nothing stays deleted:0, as it did there.
+        return WriteResult(skipped=1)
     return WriteResult(deleted=n)

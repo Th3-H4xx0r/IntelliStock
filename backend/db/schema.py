@@ -5,7 +5,10 @@ Tables keep their RethinkDB names 1:1 and the default shape
 Every field that is a secondary index, a filter key, or a prefix-scan key
 today becomes a STORED generated column plus a B-tree under COLLATE "C".
 
-ALL_TABLES is the live ``table_list()`` (125 names, read 2026-08-22).
+ALL_TABLES is the live ``table_list()`` (125 names, read 2026-08-22) plus the
+two tables the BacktestResults split adds -- BacktestSteps and
+BacktestProgress -- which have specs and so must be created by a bare
+``ensure_schema()``, not only by the tests that name them explicitly.
 TABLES holds an entry only where a table needs something beyond the default:
 a non-id primary key, an index, a partition, a retention policy, an int id,
 time fields, or suppressed notifications. The other ~85 tables are created
@@ -34,6 +37,10 @@ class RetentionSpec:
     field: str
     days_env: str
     default_days: Optional[int] = None   # None => retention OFF by default
+    # True when ``field`` names a real COLUMN rather than a key inside doc.
+    # PriceHistory's "ts" is a timestamptz column; doc->>'ts' is always NULL
+    # there, which made the sweep report deleted:0 forever.
+    is_column: bool = False
 
     def days(self) -> Optional[int]:
         raw = os.environ.get(self.days_env)
@@ -55,6 +62,14 @@ class TableSpec:
     prefix_fields: tuple = ()
     generated: Mapping[str, tuple] = field(default_factory=dict)
     compound_indexes: Mapping[str, str] = field(default_factory=dict)
+    # Real (non-generated) columns the STORE must populate on insert, mapped
+    # to (doc key, kind) where kind is "text" or "timestamp". A partitioned
+    # table's partition key cannot be a generated column, so PriceHistory's
+    # ticker/ts are written by store.insert from the document.
+    column_sources: Mapping[str, tuple] = field(default_factory=dict)
+    # Extra indexes that are not backed by a generated column: short name ->
+    # index expression. Named "<Table>_<short>_idx", like the rest.
+    extra_indexes: Mapping[str, str] = field(default_factory=dict)
     time_fields: tuple = ()
     partitioned: Optional[PartitionSpec] = None
     retention: Optional[RetentionSpec] = None
@@ -65,8 +80,9 @@ class TableSpec:
 
 ALL_TABLES: tuple = (
     "AIBacktestingResults", "AgentBest", "AgentCycleLog", "AgentTop5",
-    "AlpacaBarsCache", "AlphaState", "BacktestInstances", "BacktestResults",
-    "BotTradeDecisions", "BrokerageAccounts", "ChatbotConversations", "Config",
+    "AlpacaBarsCache", "AlphaState", "BacktestInstances", "BacktestProgress",
+    "BacktestResults", "BacktestSteps", "BotTradeDecisions", "BrokerageAccounts",
+    "ChatbotConversations", "Config",
     "DiscordMessageIds", "DiscordOutbox", "DiscoverPriceCache", "DiscoverStocks",
     "EarningsLLMCache", "EarningsLLMPromptCache", "EngineControl", "GoogleNewsCache",
     "GraphNexusActiveEventHistory", "GraphNexusActiveEventMaintenance",
@@ -173,7 +189,14 @@ _SPECS = [
     TableSpec(
         "PriceHistory", pk=("ticker", "ts", "id"), notify=False,
         partitioned=PartitionSpec(by="ts", interval="1 month"),
-        retention=RetentionSpec(field="ts", days_env="RETAIN_PRICE_HISTORY_DAYS"),
+        retention=RetentionSpec(field="ts", days_env="RETAIN_PRICE_HISTORY_DAYS",
+                                is_column=True),
+        # priceBroker.py:186 writes {ticker, price, timestamp, type} and no id.
+        column_sources={"ticker": ("ticker", "text"),
+                        "ts": ("timestamp", "timestamp")},
+        # design 3.4 line 503: get("PriceHistory", id) is used by the migration
+        # verifier, and without this it is an all-partition sequential scan.
+        extra_indexes={"id": "(id)"},
         tune_autovacuum=True,
         ddl='''CREATE TABLE IF NOT EXISTS "PriceHistory" (
   ticker      text COLLATE "C" NOT NULL,
@@ -351,6 +374,9 @@ _AUTOVACUUM = ('ALTER TABLE {q} SET (autovacuum_vacuum_scale_factor = 0.02, '
 
 _ensure_lock = threading.Lock()
 
+# (search_path, partition_name) pairs already known to exist in this process.
+_partition_memo: set = set()
+
 
 def quoted(name: str) -> str:
     if '"' in name:
@@ -390,6 +416,9 @@ def _statements(s: TableSpec) -> list:
     for index_name, expr in sorted(s.compound_indexes.items()):
         out.append('CREATE INDEX IF NOT EXISTS "%s_%s_idx" ON %s (%s)'
                    % (s.name, index_name, q, expr))
+    for index_name, expr in sorted(s.extra_indexes.items()):
+        out.append('CREATE INDEX IF NOT EXISTS "%s_%s_idx" ON %s %s'
+                   % (s.name, index_name, q, expr))
     if s.notify:
         out.append('DROP TRIGGER IF EXISTS "%s_notify" ON %s' % (s.name, q))
         out.append('CREATE TRIGGER "%s_notify" AFTER INSERT OR UPDATE OR DELETE ON %s '
@@ -421,6 +450,7 @@ def _already_applied(cur, s: TableSpec) -> bool:
     wanted_idx |= {"%s_%s_idx" % (s.name, c) for c in s.generated}
     wanted_idx |= {"%s_%s_pfx" % (s.name, f) for f in s.prefix_fields}
     wanted_idx |= {"%s_%s_idx" % (s.name, n) for n in s.compound_indexes}
+    wanted_idx |= {"%s_%s_idx" % (s.name, n) for n in s.extra_indexes}
     if not wanted_idx <= idx:
         return False
     if s.notify:
@@ -473,6 +503,7 @@ def ensure_schema(*, tables: Optional[Iterable[str]] = None) -> list:
                         for stmt in _statements(s):
                             cur.execute(stmt)
                             applied.append(stmt)
+                    conn.commit()
                 except Exception:
                     # A failed statement poisons the transaction; roll back
                     # BEFORE unlocking or the unlock raises
@@ -480,12 +511,30 @@ def ensure_schema(*, tables: Optional[Iterable[str]] = None) -> list:
                     conn.rollback()
                     raise
                 finally:
+                    # Unlock AFTER the commit: the lock exists to cover the
+                    # DDL commit, and releasing it first left a window where a
+                    # second booting process saw neither the lock nor the
+                    # committed objects.
                     try:
                         cur.execute(
                             "SELECT pg_advisory_unlock(hashtext('intellistock.ddl'))")
                     except Exception:
                         pass
-            conn.commit()
+    # Partitions are created OUTSIDE that transaction: the parent table has to
+    # be committed before a sibling connection can attach a partition to it.
+    # Plan A task 6 -- "wired into ensure_schema" -- without this, the first
+    # insert fails with "no partition of relation ... found for row".
+    for name in names:
+        s = spec(name)
+        if s.partitioned is None:
+            continue
+        import datetime as _dt
+        today = _dt.datetime.now(_dt.timezone.utc).date()
+        premake = max(1, int(s.partitioned.premake))
+        hi = today
+        for _ in range(premake):
+            hi = _dt.date(hi.year + (hi.month == 12), hi.month % 12 + 1, 1)
+        applied.extend(ensure_partitions(name, lo=today, hi=hi))
     return applied
 
 
@@ -522,15 +571,25 @@ def ensure_partitions(table: str, *, lo, hi) -> list:
     s = spec(table)
     if s.partitioned is None:
         raise StoreError("%s is not a partitioned table" % table)
+    # store.insert calls this on every write to a partitioned table, so the
+    # already-created months must cost nothing. The memo is keyed by
+    # search_path: each test runs in its own schema and must not inherit
+    # another's belief that a partition exists.
+    memo_scope = os.environ.get("PG_SEARCH_PATH", "")
+    wanted = [d for d in _month_starts(lo, hi)
+              if (memo_scope, partition_name(table, d)) not in _partition_memo]
+    if not wanted:
+        return []
     made = []
     with dbpool.connection() as conn:
         with conn.cursor() as cur:
-            for start in _month_starts(lo, hi):
+            for start in wanted:
                 nxt = _dt.date(start.year + (start.month == 12),
                                start.month % 12 + 1, 1)
                 part = partition_name(table, start)
                 cur.execute("SELECT to_regclass(%s) AS t", (quoted(part),))
                 if cur.fetchone()["t"] is not None:
+                    _partition_memo.add((memo_scope, part))
                     continue
                 # CREATE TABLE is a utility statement: PG accepts no bind
                 # parameters in FOR VALUES and answers "could not determine
@@ -539,12 +598,27 @@ def ensure_partitions(table: str, *, lo, hi) -> list:
                 # this module computed, never from caller input. The explicit
                 # +00 offset keeps the month boundary from shifting with the
                 # session's TimeZone.
-                cur.execute(
-                    "CREATE TABLE %s PARTITION OF %s FOR VALUES "
-                    "FROM ('%s 00:00:00+00'::timestamptz) "
-                    "TO ('%s 00:00:00+00'::timestamptz)"
-                    % (quoted(part), quoted(table),
-                       start.isoformat(), nxt.isoformat()))
+                cur.execute("SAVEPOINT p")
+                try:
+                    cur.execute(
+                        "CREATE TABLE %s PARTITION OF %s FOR VALUES "
+                        "FROM ('%s 00:00:00+00'::timestamptz) "
+                        "TO ('%s 00:00:00+00'::timestamptz)"
+                        % (quoted(part), quoted(table),
+                           start.isoformat(), nxt.isoformat()))
+                except Exception as exc:
+                    # A sibling process (or pg_partman) won the race. Both
+                    # errors mean the partition now exists, which is the
+                    # postcondition this function promises.
+                    if type(exc).__name__ not in ("DuplicateTable",
+                                                  "DuplicateObject",
+                                                  "InvalidObjectDefinition"):
+                        raise
+                    cur.execute("ROLLBACK TO SAVEPOINT p")
+                    _partition_memo.add((memo_scope, part))
+                    continue
+                cur.execute("RELEASE SAVEPOINT p")
+                _partition_memo.add((memo_scope, part))
                 if s.tune_autovacuum:
                     # The 0.2 default scale factor means 570,050 dead tuples on
                     # PriceHistory before autovacuum reacts. Leaf partitions
