@@ -171,6 +171,10 @@ def main(argv=None):
     p.add_argument("--granularity", default="3600")
     p.add_argument("--control", action="append", default=[], metavar="KEY=VALUE")
     p.add_argument("--treatment", action="append", default=[], metavar="KEY=VALUE")
+    p.add_argument("--keep-bar-snapshots", action="store_true", help=(
+        "Keep per-bar LLM-crash rewind snapshots ON during the arms (the old "
+        "behaviour, ~19min slower per run). Default: off for both arms — a "
+        "deterministic cached run is cheaper to relaunch than to rewind."))
     p.add_argument("--snapshot", metavar="PATH", help=(
         "Warm protocol without re-running the warmup: start BOTH arms from "
         "this existing snapshot file (produced by an earlier --warmup-start "
@@ -205,6 +209,15 @@ def main(argv=None):
                          a.cash, a.granularity)
         snapshot_path = f"/tmp/_pair_warm_{a.instance}_{a.start}.state.json"
         _snapshot("export", a.instance, snapshot_path)
+
+    # 2026-08-22: per-bar rewind snapshots cost ~19min of a 52min run and
+    # protect against a failure a cached deterministic run cannot have; a
+    # crashed arm is relaunched byte-identically for $0. OFF for BOTH arms
+    # (identical, so comparability is untouched); --keep-bar-snapshots
+    # restores the old behaviour.
+    if not a.keep_bar_snapshots:
+        a.control = list(a.control) + ["backtest_bar_snapshot_enabled=false"]
+        a.treatment = list(a.treatment) + ["backtest_bar_snapshot_enabled=false"]
 
     ctl = _run_arm("CONTROL", a, a.control, snapshot_path=snapshot_path)
     trt = _run_arm("TREATMENT", a, a.treatment, snapshot_path=snapshot_path)
