@@ -283,6 +283,17 @@ def write_progress_tick(backtest_id, *, hot: dict, metadata: dict,
     return dict(seqs)
 
 
+def write_difficulty(backtest_id, difficulty) -> None:
+    """Patch the ``difficulty`` scalar onto the metadata document.
+
+    The engine computes it once, right after the stub write; broker.py:12037
+    reads it back to carry it onto the running stub, and broker.py:17909 puts
+    it in the Discord embed. A deep-merge patch, not a replace: the stub the
+    engine just wrote must survive.
+    """
+    store.update(RESULTS_TABLE, backtest_id, {"difficulty": difficulty})
+
+
 def active_run_age(backtest_id) -> Optional[float]:
     """Seconds since the last heartbeat of a run the hot row still calls
     ``running``, or None when no live-run evidence exists.

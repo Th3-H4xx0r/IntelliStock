@@ -392,10 +392,13 @@ def ensure_table(conn):
     if TABLE_NAME not in tables:
         r.db(DB_NAME).table_create(TABLE_NAME).run(conn)
         intellistock_logger.log(f"Created table {TABLE_NAME}", "green", service="BACKTEST_ENGINE")
-    # RESULTS_TABLE is no longer created here: BacktestResults is split across
-    # three Postgres tables whose DDL belongs to db.schema.ensure_schema, run
-    # once at deploy. Concurrent engines/brokers issuing CREATE TABLE would
-    # race on the same catalog lock for no benefit.
+    # BacktestResults is split across three Postgres tables. ensure_schema is
+    # idempotent (CREATE ... IF NOT EXISTS under an advisory lock), so this is
+    # a cheap no-op on every boot but keeps the self-heal the table_create
+    # bootstrap used to provide on a fresh deploy.
+    from db import schema as _db_schema
+    _db_schema.ensure_schema(tables=["BacktestResults", "BacktestSteps",
+                                     "BacktestProgress"])
 
 
 def _backtest_container_name(instance_id, row_id):
@@ -1132,7 +1135,8 @@ def main():
                     _ensure_backtest_result_row(conn_here, row, 'pending')
                     _ensure_backtest_result_row(conn_here, row, 'running')
                     avg_difficulty = _backtest_avg_difficulty(conn_here, row)  # per-row: instance -> strategy -> subs
-                    r.db(DB_NAME).table(RESULTS_TABLE).get(row_id).update({'difficulty': avg_difficulty}).run(conn_here)
+                    import backtest_result_store as _brs_engine
+                    _brs_engine.write_difficulty(row_id, avg_difficulty)
                     # Edit #backtests Discord message from Queued → Running (broker will keep editing with progress/P&L)
                     try:
                         from interactive_utils import action_enqueue_discord_edit

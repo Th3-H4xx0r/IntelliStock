@@ -362,3 +362,52 @@ def test_progress_tick_with_a_shrinking_source_does_not_rewind(split_schema):
                             appended={"decision": [{"n": 0}]}, seqs=seqs)
     assert seqs["decision"] == 4
     assert brs.watermarks(700001) == {}
+
+
+# ---- the difficulty seam (backtest_engine.py:1135 -> broker.py:12037) ----
+
+def test_difficulty_written_by_the_engine_is_readable_by_the_broker(split_schema):
+    """The engine computes difficulty once, right after the stub write; the
+    broker reads it back with store.get to carry it onto the running stub
+    (broker.py:12037/12100) and into the Discord embed (broker.py:17909).
+    One writer, two readers -- all three on Postgres."""
+    brs.write_stub(dict(STUB))
+    brs.write_difficulty(700001, 7.5)
+    existing_result = store.get("BacktestResults", 700001)   # broker.py:12037
+    assert existing_result["difficulty"] == 7.5
+
+
+def test_writing_difficulty_does_not_clobber_the_stub(split_schema):
+    """It is a deep-merge patch: the stub the engine wrote a line earlier has
+    to survive it."""
+    brs.write_stub(dict(STUB))
+    brs.write_difficulty(700001, 3.25)
+    row = store.get("BacktestResults", 700001)
+    assert row["tickers"] == ["AACI", "AA"]
+    assert row["start_date"] == "2026-03-01 00:00:00"
+    assert brs.read_progress(700001)["status"] == "running"
+    from db.json import canonical
+    expected = dict(STUB)
+    expected["difficulty"] = 3.25
+    assert canonical(brs.assemble(700001)) == canonical(expected)
+
+
+def test_a_null_difficulty_round_trips_as_none(split_schema):
+    """_backtest_avg_difficulty returns None when nothing scores; the readers
+    test `is not None`, so None must not become a missing key or a 0."""
+    brs.write_stub(dict(STUB))
+    brs.write_difficulty(700001, None)
+    assert store.get("BacktestResults", 700001)["difficulty"] is None
+
+
+def test_the_three_table_bootstrap_self_heals_an_empty_database(pg_schema):
+    """What the deleted table_create('BacktestResults') blocks used to do.
+    broker.py and backtest_engine.py call ensure_schema with exactly this
+    table list at startup; on a fresh deploy the store.get that follows it
+    would otherwise raise UndefinedTable inside a try/finally with no except.
+    """
+    tables = ["BacktestResults", "BacktestSteps", "BacktestProgress"]
+    assert schema.ensure_schema(tables=tables)      # ran real DDL
+    brs.write_stub(dict(STUB))
+    assert brs.assemble(700001)["tickers"] == ["AACI", "AA"]
+    assert schema.ensure_schema(tables=tables) == []   # idempotent: a no-op

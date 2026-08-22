@@ -12021,9 +12021,15 @@ if mode == MODE_BACKTEST:
             sys.stderr.flush()
             sys.exit(1)
         try:
-            # BacktestResults is no longer created here: it is split across
-            # three Postgres tables whose DDL belongs to db.schema.ensure_schema,
-            # run once at deploy rather than by every broker container.
+            # BacktestResults is split across three Postgres tables.
+            # ensure_schema is idempotent (CREATE ... IF NOT EXISTS under an
+            # advisory lock), so this is a cheap no-op on every boot but keeps
+            # the self-heal the table_create bootstrap used to provide: the
+            # store.get below would otherwise raise UndefinedTable on a fresh
+            # deploy, inside a try/finally with no except.
+            from db import schema as _db_schema
+            _db_schema.ensure_schema(tables=["BacktestResults", "BacktestSteps",
+                                             "BacktestProgress"])
             # instance_id can be numeric (8) or string (e.g. "ai-temp-xxx"); store as-is for BacktestResults
             instance_id_for_db = int(instance_id) if (instance_id and str(instance_id).isdigit()) else instance_id
             try:
@@ -12736,8 +12742,13 @@ while not shutdown_requested:
                         if conn is None:
                             conn = get_conn()
                         try:
-                            # BacktestResults' three Postgres tables are created
-                            # by db.schema.ensure_schema at deploy, not here.
+                            # Self-heal the three Postgres tables before the
+                            # terminal write, the way the table_create
+                            # bootstrap used to. ensure_schema is idempotent.
+                            from db import schema as _db_schema_term
+                            _db_schema_term.ensure_schema(
+                                tables=["BacktestResults", "BacktestSteps",
+                                        "BacktestProgress"])
 
                             # Get instance_id and strategy_row_id (instance_id can be int or string)
                             instance_id_for_db = int(instance_id) if (instance_id and str(instance_id).isdigit()) else instance_id
