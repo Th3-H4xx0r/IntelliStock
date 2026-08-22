@@ -23749,6 +23749,7 @@ def _apply_rank_band_gate(
     symbols_list: list[str],
     portfolio_emulator,
     config: dict,
+    strategy_cache: dict | None = None,
 ) -> dict:
     """Novy-Marx & Velikov buy/hold spread (the "sS" rule). Default OFF.
 
@@ -23866,6 +23867,23 @@ def _apply_rank_band_gate(
     # score, which is the ranking the momentum lane itself uses.
     _rb_mom_min = float(config.get("rank_band_momentum_exempt_min_score", 0.0) or 0.0)
     _rb_mom_exempt: list[str] = []
+    # 2026-08-22 wiring fix: `momentum_watchlist_score` is stamped only on the
+    # watchlist lane's OWN picks, so the exemption could never reach the
+    # discovery-lane movers the band's comment documents as its victims
+    # (AAOI/VICR/AMAT — bt 443898 measured 0 exemptions in 44 evaluations
+    # with the lever armed). `_momentum_ranked_cache` carries the full
+    # momentum ranking (~120+ names, prior bar — momentum is a 20-60d
+    # signal, one bar of staleness is immaterial); use it as the fallback
+    # so the exemption sees every momentum-qualified name.
+    _rb_mom_map: dict[str, float] = {}
+    if _rb_mom_min > 0 and isinstance(strategy_cache, dict):
+        try:
+            _rb_mom_map = {
+                str(t).strip().upper(): float(s or 0.0)
+                for t, s in (strategy_cache.get("_momentum_ranked_cache") or [])
+            }
+        except (TypeError, ValueError):
+            _rb_mom_map = {}
 
     for rank, (blended, sym) in enumerate(ranked, start=1):
         sc = scores[sym]
@@ -23875,6 +23893,8 @@ def _apply_rank_band_gate(
                 _rb_mom = float(sc.get("momentum_watchlist_score", 0.0) or 0.0)
             except (TypeError, ValueError):
                 _rb_mom = 0.0
+            if _rb_mom <= 0.0:
+                _rb_mom = _rb_mom_map.get(str(sym).strip().upper(), 0.0)
             if _rb_mom >= _rb_mom_min:
                 _rb_mom_exempt.append(f"{sym}({_rb_mom:.2f})")
                 continue
@@ -28647,7 +28667,8 @@ class GraphNexusAnalysis:
         # ranking say" rather than a portfolio-level risk veto — and because
         # the circuit breaker's mass-liquidation cap should count the sells that
         # will actually be submitted, not the ones the band is about to retract.
-        scores = _apply_rank_band_gate(scores, symbols_list, portfolio_emulator, config)
+        scores = _apply_rank_band_gate(scores, symbols_list, portfolio_emulator, config,
+                                       strategy_cache=strategy_cache)
         scores = _apply_portfolio_circuit_breaker(scores, symbols_list, portfolio_emulator, config)
         scores = _apply_buy_price_floor(scores, symbols_list, prices, data, portfolio_emulator, config)
         scores = _apply_quality_filter(scores, symbols_list, prices, data, portfolio_emulator, config, strategy_cache=strategy_cache, date_key=date_key)
