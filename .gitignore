@@ -274,3 +274,6 @@ kalshi_data_dump/
 .backtest_llm_cache/
 backtests/local/
 scripts/local_backtest_bear_baseline.json
+
+# Throwaway local Postgres cluster (scripts/dev_pg.sh)
+.devpg/
