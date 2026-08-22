@@ -115,6 +115,65 @@ def _watch_engine_control(on_change, *, label='engine-control',
     )
 
 
+# --- Postgres coordinates for spawned containers ---------------------------
+#
+# db/pool.py:dsn_from_env() reads PG_DSN first and otherwise assembles the DSN
+# from the POSTGRES_* parts, so a container that inherits neither falls back to
+# host=localhost user=intellistock -- i.e. its own loopback -- and every store
+# call fails. Every env dict this module hands to `docker run` therefore carries
+# whichever of these the server itself has.
+#
+# PG_SEARCH_PATH is deliberately NOT in this list: it is the per-test schema
+# isolation seam, and leaking it into a container would silently point
+# production writes at a test schema.
+#
+# RETHINKDB_HOST/PORT stay: `grep -rn RETHINKDB_HOST backend --include='*.py'`
+# still finds ~40 readers across broker.py, the engines, kalshi, api/main.py and
+# the strategies, none of which are ported yet (plan C groups G2-G11). Drop them
+# from these dicts in G12, once that grep comes back empty.
+_PG_CONTAINER_ENV_KEYS = (
+    'PG_DSN',
+    'POSTGRES_HOST', 'POSTGRES_PORT', 'POSTGRES_USER',
+    'POSTGRES_PASSWORD', 'POSTGRES_DB',
+    # pool + store tuning: absent means the module default, which is correct,
+    # but an operator who tuned the server must get the same tuning inside the
+    # containers or the two disagree about pool size and row caps.
+    'PG_POOL_MIN', 'PG_POOL_MAX', 'PG_POOL_TIMEOUT', 'PG_RECONNECT_TIMEOUT',
+    'PG_MAX_ROWS', 'DB_WATCH_POLL_SECONDS',
+)
+
+
+def _pg_container_env():
+    """Postgres coordinates to hand a spawned container.
+
+    Only keys actually set in the server's environment are emitted, so an unset
+    key keeps the container on db/pool.py's own default rather than being
+    pinned to an empty string.
+
+    `INSTANCE_PG_DSN` / `INSTANCE_POSTGRES_HOST` override the inherited value
+    for the container only -- the same escape hatch `INSTANCE_RETHINKDB_HOST`
+    provides, and needed for the same reason: the server's own `localhost` is
+    not the container's.
+    """
+    env = {}
+    for key in _PG_CONTAINER_ENV_KEYS:
+        value = os.environ.get(key)
+        if value is not None and str(value) != '':
+            env[key] = str(value)
+    dsn_override = (os.environ.get('INSTANCE_PG_DSN') or '').strip()
+    if dsn_override:
+        env['PG_DSN'] = dsn_override
+    host_override = (os.environ.get('INSTANCE_POSTGRES_HOST') or '').strip()
+    if host_override:
+        env['POSTGRES_HOST'] = host_override
+        # An inherited PG_DSN would win over POSTGRES_HOST inside the container
+        # (dsn_from_env checks PG_DSN first), so an explicit host override that
+        # is not paired with a DSN override must drop the inherited DSN.
+        if not dsn_override:
+            env.pop('PG_DSN', None)
+    return env
+
+
 def register_socket_client(sio, sid, data, *, master_key=None):
     """Register a client ID; a duplicate can replace a worker only with proof."""
     global clientList, priceBrokerUID, brokersList, clientOwners
@@ -479,7 +538,7 @@ def start_instance_container(instance_id, *, preflight=None):
     """
     global running_threads_objs
     name = _instance_container_name(instance_id)
-    # Env for the container: RethinkDB and server URL (so instance can connect)
+    # Env for the container: database coordinates and server URL (so instance can connect)
     rethink_host = os.environ.get('INSTANCE_RETHINKDB_HOST', RETHINKDB_HOST)
     server_url = os.environ.get('INSTANCE_SERVER_URL', os.environ.get('SERVER_URL', 'http://localhost:5000'))
     env = {
@@ -495,6 +554,7 @@ def start_instance_container(instance_id, *, preflight=None):
         # which is exactly what passing it to `docker run` does.
         'PYTHONHASHSEED': (os.environ.get('PYTHONHASHSEED') or '').strip() or '0',
     }
+    env.update(_pg_container_env())
     # Pass through API keys needed by broker strategies.
     # INTELLISTOCK_CRED_KEY is REQUIRED for the broker to decrypt Fernet-
     # encrypted BrokerageAccounts credentials - without it the adapter silently
@@ -731,6 +791,7 @@ def _agent_container_env():
         v = os.environ.get(k)
         if v is not None:
             env[k] = v
+    env.update(_pg_container_env())
     if not env.get('DEFAULT_ADMIN_USERNAME') and not env.get('AGENT_API_USERNAME'):
         intellistock_logger.log(
             "Agent container will miss credentials: set DEFAULT_ADMIN_USERNAME and DEFAULT_ADMIN_PASSWORD (or AGENT_API_*) in server env or .env",
@@ -885,6 +946,7 @@ def start_digest_container():
             'RETHINKDB_HOST': os.environ.get('RETHINKDB_HOST', 'localhost'),
             'RETHINKDB_PORT': os.environ.get('RETHINKDB_PORT', '28015'),
         }
+        env.update(_pg_container_env())
         # Pass through digest-specific and LLM API keys from os.environ
         _digest_passthrough_keys = (
             'AI_DIGEST_PROVIDER', 'AI_DIGEST_MODEL', 'AI_DIGEST_API_KEY',
@@ -959,6 +1021,7 @@ def _discover_container_env():
         v = os.environ.get(k)
         if v is not None:
             env[k] = v
+    env.update(_pg_container_env())
     return env
 
 
@@ -1068,6 +1131,7 @@ def _self_learning_container_env():
         value = os.environ.get(key)
         if value is not None:
             env[key] = value
+    env.update(_pg_container_env())
     return env
 
 
@@ -1287,6 +1351,7 @@ def _nexus_container_env():
     # Always ensure the child knows the log dir matches the mount point, even if .env omits it.
     env.setdefault('NEXUS_GRAPH_LOG_DIR', NEXUS_GRAPH_LOG_DIR_IN_CONTAINER)
     env.setdefault('NEXUS_GRAPH_LOG_VOLUME', NEXUS_GRAPH_LOG_VOLUME_NAME)
+    env.update(_pg_container_env())
     return env
 
 
