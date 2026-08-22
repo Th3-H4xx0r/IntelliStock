@@ -480,3 +480,113 @@ def delete_backtest(backtest_id) -> bool:
     store.sql('DELETE FROM "BacktestProgress" WHERE id = %s', (bid,))
     store.delete(RESULTS_TABLE, backtest_id)
     return existed
+
+
+# ---- the list endpoint ---------------------------------------------------
+
+#: The 16 summary fields the list page renders, in the order the legacy
+#: ``.pluck(...)`` named them (interactive_utils.py:5223-5228). ``pnl`` and
+#: ``pnl_percent`` are load-bearing: the merge below the query does
+#: ``current["pnl"] = row.get("pnl")``, and sort_by=pnl ranks on them.
+LIST_FIELDS = ("id", "backtest_id", "instance_id", "instance", "tickers",
+               "start_date", "end_date", "status", "progress", "pnl",
+               "pnl_percent", "time_elapsed_seconds", "started_at",
+               "created_at", "timestamp", "completed_at")
+
+# Summary values only -- the six step arrays live in BacktestSteps and are
+# never touched here, and no whole document crosses the wire. The legacy
+# pluck still materialised every 5-13 MB document server-side, which is why
+# one list render read the entire table in 12.2s for 1,426 rows
+# (scripts/create_backtest_list_indices.py:6-11). status, progress and
+# time_elapsed_seconds come from the hot row (R4: BacktestResults' generated
+# status column is stale by design after the split), falling back to doc only
+# where no hot row exists -- exactly the precedence assemble() applies.
+_LIST_SELECT = '''
+SELECT r.id,
+       r.doc -> 'backtest_id'          AS backtest_id,
+       r.doc -> 'instance_id'          AS instance_id,
+       r.doc -> 'instance'             AS instance,
+       r.doc -> 'pnl'                  AS pnl,
+       r.doc -> 'pnl_percent'          AS pnl_percent,
+       r.start_date, r.end_date, r.started_at, r.created_at,
+       r.timestamp, r.completed_at,
+       coalesce(p.payload -> 'status',   r.doc -> 'status')   AS status,
+       coalesce(p.payload -> 'progress', r.doc -> 'progress') AS progress,
+       coalesce(p.payload -> 'time_elapsed_seconds',
+                r.doc -> 'time_elapsed_seconds')              AS time_elapsed_seconds,
+       coalesce(jsonb_path_query_array(r.doc, ('$.tickers[0 to '
+                || %(preview)s::text || ']')::jsonpath), '[]'::jsonb) AS tickers,
+       r.tickers_total
+FROM "BacktestResults" r
+LEFT JOIN "BacktestProgress" p ON p.id = r.id
+'''
+
+# The status_norm index expression, verbatim, so the active scan is an index
+# read rather than a sequential scan of the hot table.
+_STATUS_NORM = ("(CASE WHEN lower(p.status) LIKE 'paused%%' THEN 'paused' "
+                "      ELSE lower(p.status) END) COLLATE \"C\"")
+
+_ACTIVE_STATUSES = ("running", "queued", "pending", "paused")
+
+_LIST_VALUE_KEYS = ("backtest_id", "instance_id", "instance", "pnl",
+                    "pnl_percent", "start_date", "end_date", "started_at",
+                    "created_at", "timestamp", "completed_at", "status",
+                    "progress", "time_elapsed_seconds")
+
+
+def _list_row(row: dict) -> dict:
+    out = {"id": int(row["id"]) if str(row["id"]).lstrip("-").isdigit()
+           else row["id"]}
+    for key in _LIST_VALUE_KEYS:
+        value = row.get(key)
+        if value is not None:                 # ReQL pluck OMITS absent keys
+            out[key] = value
+    out["tickers"] = row.get("tickers") or []
+    out["tickers_total"] = int(row.get("tickers_total") or 0)
+    return out
+
+
+def list_rows(*, instance_filter, page: int, per_page: int, sort_order: str,
+              ticker_preview: int, paged: bool = True):
+    """(active_rows, page_rows, db_total) for the backtest list endpoint.
+
+    ``paged=False`` returns every matching row and no active rows: the
+    pnl / pnl_percent sorts rank the whole table in python, so the page
+    window cannot be applied at the database.
+    """
+    preview = max(int(ticker_preview) - 1, 0)
+    direction = "DESC" if sort_order == "desc" else "ASC"
+    where, params = "", {"preview": preview}
+    if instance_filter:
+        # coalesce(instance_id, instance, '') is the instance_or_instance_id
+        # index expression, and ->> stringifies, so the NUMBER/STRING split
+        # across 592/833 live rows stops mattering.
+        where = ("WHERE coalesce(r.doc->>'instance_id', r.doc->>'instance', '') "
+                 "COLLATE \"C\" = %(instance)s ")
+        params["instance"] = str(instance_filter)
+
+    # ``where`` is written against the ``r`` alias, so the count reuses it
+    # verbatim. Extra keys in the params mapping (``preview``) are ignored.
+    count_sql = 'SELECT count(*) AS n FROM "BacktestResults" r ' + where
+    db_total = int(store.sql(count_sql, params)[0]["n"])
+
+    if not paged:
+        return [], [_list_row(r) for r in store.sql(_LIST_SELECT + where,
+                                                    params)], db_total
+
+    active_sql = (_LIST_SELECT + where +
+                  ("AND " if where else "WHERE ") +
+                  _STATUS_NORM + " = ANY(%(active)s::text[])")
+    active_params = dict(params, active=list(_ACTIVE_STATUSES))
+    active_rows = [_list_row(r) for r in store.sql(active_sql, active_params)]
+
+    page_i = max(1, int(page))
+    pp = max(1, min(100, int(per_page)))
+    # The list_ts index expression, verbatim: coalesce(doc->>'timestamp','')
+    # COLLATE "C". Bytewise, so ISO-8601 lexicographic order is chronological.
+    order_expr = "coalesce(r.doc->>'timestamp', '') COLLATE \"C\""
+    page_sql = (_LIST_SELECT + where + "ORDER BY " + order_expr + " " +
+                direction + " LIMIT %(limit)s OFFSET %(offset)s")
+    page_params = dict(params, limit=pp, offset=(page_i - 1) * pp)
+    page_rows = [_list_row(r) for r in store.sql(page_sql, page_params)]
+    return active_rows, page_rows, db_total

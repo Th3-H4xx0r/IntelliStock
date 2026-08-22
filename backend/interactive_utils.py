@@ -367,20 +367,9 @@ def ensure_backtest_instances_table(conn):
             r.db(DB_NAME).table("BacktestInstances").index_wait("instance").run(conn)
     except Exception:
         pass
-    if "BacktestResults" in tables:
-        try:
-            existing = set(r.db(DB_NAME).table("BacktestResults").index_list().run(conn))
-            if "instance_or_instance_id" not in existing:
-                # The instance identifier lives in either `instance_id` (newer
-                # rows) or `instance` (legacy). Index against a coalesced
-                # lambda so .get_all(...) covers both.
-                r.db(DB_NAME).table("BacktestResults").index_create(
-                    "instance_or_instance_id",
-                    lambda row: row["instance_id"].default(row["instance"].default("")).coerce_to("string"),
-                ).run(conn)
-                r.db(DB_NAME).table("BacktestResults").index_wait("instance_or_instance_id").run(conn)
-        except Exception:
-            pass
+    # BacktestResults' own indexes (instance_or_instance_id, list_ts,
+    # instance_ts, status_norm) are declared in db/schema.py and created by
+    # db.schema.ensure_schema(), so there is nothing to ensure here.
 
 
 def ensure_discord_outbox_table(conn):
@@ -5147,9 +5136,12 @@ _LIST_TICKER_PREVIEW = 4
 
 def action_list_backtests(conn, instance_id=None, page=1, per_page=20, sort_by="completed_at", sort_order="desc"):
     ensure_backtest_instances_table(conn)
+    from db import store as _store
     tables = list(r.db(DB_NAME).table_list().run(conn))
     has_queue = "BacktestInstances" in tables
-    has_results = "BacktestResults" in tables
+    # BacktestResults lives in Postgres now, so its existence is a Postgres
+    # question -- the ReQL table_list above only answers for the queue table.
+    has_results = "BacktestResults" in _store.table_list()
     if not has_queue and not has_results:
         return {"backtests": [], "total": 0, "page": page, "per_page": per_page, "total_pages": 0}
     instance_filter = str(instance_id).strip() if instance_id is not None else None
@@ -5194,149 +5186,40 @@ def action_list_backtests(conn, instance_id=None, page=1, per_page=20, sort_by="
         queue_rows = list(queue_query.run(conn))
 
     result_rows = []
-    # 2026-08-21 perf: index-paged fast path. Pluck does NOT spare RethinkDB
-    # from loading each full document (5-13MB of decisions/prices/logs per
-    # row), so the old full-table pluck read the whole table on every page
-    # load — measured 12.2s for 1,426 rows. With `list_ts` (plain index on
-    # `timestamp`, the only non-NULL time field; ISO strings, so
-    # lexicographic == chronological), `status_norm`, and `instance_ts`
-    # (see scripts/create_backtest_list_indices.py) the endpoint reads the
-    # ~per_page documents the page actually renders, plus the handful of
-    # active rows. Applies to the default completed_at sort only; pnl sorts
-    # and missing-index deployments fall through to the original path.
+    # 2026-08-21 perf: index-paged fast path, on Postgres since the
+    # BacktestResults split. Pluck did NOT spare RethinkDB from loading each
+    # full document (5-13MB of decisions/prices/logs per row), so the old
+    # full-table pluck read the whole table on every page load - measured
+    # 12.2s for 1,426 rows. brs.list_rows() reads the summary columns of the
+    # ~per_page rows the page actually renders plus the handful of active
+    # rows, over the `list_ts` / `instance_ts` / `status_norm` indexes
+    # (db/schema.py); the six step arrays live in BacktestSteps and are never
+    # fetched here. Status and progress come from the hot BacktestProgress
+    # row, never from BacktestResults' stale generated status column.
     _pre_paged_total = None
-    _fast_idx = set()
-    if has_results:
-        try:
-            _fast_idx = set(
-                r.db(DB_NAME).table("BacktestResults").index_list().run(conn))
-        except Exception:
-            _fast_idx = set()
-    _fast = (
-        has_results
-        and sort_by == "completed_at"
-        and {"list_ts", "status_norm"} <= _fast_idx
-        and (not instance_filter or "instance_ts" in _fast_idx)
-    )
+    _fast = has_results and sort_by == "completed_at"
     if _fast:
-        _tblq = r.db(DB_NAME).table("BacktestResults")
-        _pluck_fields = (
-            "id", "backtest_id", "instance_id", "instance", "tickers",
-            "start_date", "end_date", "status", "progress", "pnl",
-            "pnl_percent", "time_elapsed_seconds", "started_at",
-            "created_at", "timestamp", "completed_at",
-        )
-
-        def _slim(q):
-            return q.pluck(*_pluck_fields).merge(lambda row: {
-                "tickers": row["tickers"].default([]).limit(_LIST_TICKER_PREVIEW),
-                "tickers_total": row["tickers"].default([]).count(),
-            })
-
-        _active_q = _tblq.get_all(
-            "running", "queued", "pending", "paused", index="status_norm")
-        if instance_filter:
-            _active_rows = [
-                row for row in _slim(_active_q).run(conn)
-                if str(row.get("instance_id", row.get("instance") or ""))
-                == instance_filter
-            ]
-            _base = _tblq.between(
-                [instance_filter, r.minval], [instance_filter, r.maxval],
-                index="instance_ts")
-            _order_idx = "instance_ts"
-            _db_total = int(_base.count().run(conn))
-        else:
-            _active_rows = list(_slim(_active_q).run(conn))
-            _base = _tblq
-            _order_idx = "list_ts"
-            _db_total = int(_tblq.count().run(conn))
+        import backtest_result_store as _brs
+        _active_rows, _page_rows, _db_total = _brs.list_rows(
+            instance_filter=instance_filter, page=page, per_page=per_page,
+            sort_order=sort_order, ticker_preview=_LIST_TICKER_PREVIEW)
         _page_i = max(1, int(page))
-        _pp = max(1, min(100, int(per_page)))
-        # Plain page window over the timestamp order. Active rows are ALSO in
-        # this order and are almost always the newest timestamps, so the DB
-        # rank matches the final python rank (active pinned first) and pages
-        # line up with the legacy full-scan path exactly. The explicit
-        # active fetch above only matters for a long-running row whose
-        # timestamp has scrolled off the page — it still gets pinned to the
-        # top, shifting that page by at most n_active rows.
-        _t_skip = (_page_i - 1) * _pp
-        _ordered = _base.order_by(index=(
-            r.desc(_order_idx) if sort_order == "desc"
-            else r.asc(_order_idx)))
-        _page_rows = list(
-            _slim(_ordered.slice(_t_skip, _t_skip + _pp)).run(conn))
-        # Explicit active rows belong to page 1 only — the python sort pins
+        # Explicit active rows belong to page 1 only - the python sort pins
         # them first, and pinning them onto every page would repeat them.
-        result_rows = (_active_rows if _page_i == 1 else []) + _page_rows
         # merged{} below dedupes any active row the slice also contained.
+        result_rows = (_active_rows if _page_i == 1 else []) + _page_rows
         _pre_paged_total = _db_total
-    if has_results and not _fast:
-        # 2026-04-26 perf: same index-first pattern as the queue side.
-        results_query = None
-        if instance_filter:
-            try:
-                _ridx = set(r.db(DB_NAME).table("BacktestResults").index_list().run(conn))
-            except Exception:
-                _ridx = set()
-            if "instance_or_instance_id" in _ridx:
-                results_query = r.db(DB_NAME).table("BacktestResults").get_all(
-                    instance_filter, index="instance_or_instance_id"
-                )
-            else:
-                results_query = r.db(DB_NAME).table("BacktestResults").filter(
-                    lambda row: row["instance_id"]
-                    .default(row["instance"].default(""))
-                    .coerce_to("string")
-                    == instance_filter
-                )
-        else:
-            results_query = r.db(DB_NAME).table("BacktestResults")
-        # R22 (2026-04-25): list endpoint only reads ~15 summary fields per
-        # row (id, status, pnl, pnl_percent, dates, time_elapsed, tickers).
-        # Each BacktestResults row also carries backtest_decisions (7-15k
-        # entries), backtest_prices (9-37k entries), backtest_trades, the
-        # frozen strategy_schema (~20KB), per-symbol pnl dicts, and logs —
-        # totalling 5-13MB per row. With 50+ backtests, list page used to
-        # transfer >250MB. Pluck the needed fields server-side so the network
-        # payload + Python deserialization stay bounded even if new heavy
-        # fields are added later.
-        # Detail / playback / graph endpoints fetch the full row separately.
-        results_query = results_query.pluck(
-            "id",
-            "backtest_id",
-            "instance_id",
-            "instance",
-            "tickers",
-            "start_date",
-            "end_date",
-            "status",
-            "progress",
-            "pnl",
-            "pnl_percent",
-            "time_elapsed_seconds",
-            "started_at",
-            "created_at",
-            "timestamp",
-            "completed_at",
-        )
-        # `tickers` on a FINISHED row is all_traded (symbols | positions |
-        # traded), which reaches 325 entries — mean 32, median 7. The list page
-        # renders four of them and a "+N" chip, so shipping the whole array is
-        # pure waste: it is 43% of the response payload and it is deserialized
-        # for every one of 1,300+ rows on every page load, including the 1,285
-        # rows that pagination is about to discard.
-        #
-        # Slice server-side and send the count alongside, so the chip still has
-        # its number. Callers wanting the full universe use the detail endpoint,
-        # which already fetches the whole row.
-        results_query = results_query.merge(
-            lambda row: {
-                "tickers": row["tickers"].default([]).limit(_LIST_TICKER_PREVIEW),
-                "tickers_total": row["tickers"].default([]).count(),
-            }
-        )
-        result_rows = list(results_query.run(conn))
+    elif has_results:
+        # The pnl / pnl_percent sorts rank the WHOLE table in python below, so
+        # the page window cannot be applied at the database and
+        # _pre_paged_total stays None - the same shape the pre-index path had.
+        # The scan itself is no longer expensive: it reads the same summary
+        # columns, never a document.
+        import backtest_result_store as _brs
+        _unused_active, result_rows, _unused_total = _brs.list_rows(
+            instance_filter=instance_filter, page=1, per_page=per_page,
+            sort_order=sort_order, ticker_preview=_LIST_TICKER_PREVIEW,
+            paged=False)
 
     def _to_unix_ts(value):
         if value is None:
