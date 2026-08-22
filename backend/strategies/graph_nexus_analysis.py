@@ -17682,9 +17682,6 @@ class _TradeOverlayResponse(BaseModel):
     buy_block: bool = Field(False, alias="bb")
     sell_block: bool = Field(False, alias="sb")
     reason_codes: list[str] = Field(default_factory=list, alias="rc")
-    feature_boosts: list[str] = Field(default_factory=list, alias="fb")
-    feature_penalties: list[str] = Field(default_factory=list, alias="fp")
-    rationale: str = Field("", alias="ra")
 
 
 
@@ -21873,7 +21870,14 @@ def _fetch_price_history_for_overlay(
                 return round((_closes[-1] / _closes[-(n + 1)] - 1) * 100, 2)
             return None
 
-        recent_closes = [round(c, 2) for c in closes[-5:]]
+        # 2026-08-22 audit fix: `overlay_price_history_bars` was inert — the
+        # consumer branched on shapes ({"bars": ...} / list) this producer
+        # never emits, and this line hard-coded 5 closes regardless. Honor
+        # the lever HERE, where the payload is built: it is the number of
+        # recent closes shown to the overlay LLM. 0/absent keeps the legacy
+        # 5-close payload byte-for-byte.
+        _rc_n = int((config or {}).get("overlay_price_history_bars", 0) or 0)
+        recent_closes = [round(c, 2) for c in closes[-(_rc_n if _rc_n > 0 else 5):]]
 
         result[sym] = {
             "recent_closes": recent_closes,
@@ -22695,9 +22699,14 @@ def _apply_trade_overlay(
         "When graph relationships show strong multi-path signals (raw >= 0.30), favor 'buy' bias "
         "unless there is clear negative evidence (bad earnings, downtrend, sell-side downgrades). "
         "Use short alias keys: ds (delta_score), cd (confidence_delta), db (decision_bias), "
-        "bb (buy_block), sb (sell_block), rc (reason_codes), fb (feature_boosts), fp (feature_penalties), ra (rationale). "
-        "Omit fields with default/empty values. Keep rationale under 15 words. "
-        "Keep reason_codes/feature_boosts/feature_penalties to max 3 items each, max 5 words per item. "
+        "bb (buy_block), sb (sell_block), rc (reason_codes). "
+        # 2026-08-22 audit: fb/fp/ra were requested from the LLM on every
+        # overlay call and consumed by NOTHING (readers use only ds/cd/db/
+        # bb/sb/rc) — paid output tokens, discarded. Dropped from the
+        # prompt and schema. NOTE: this changes the overlay prompt hash,
+        # so sentiment/overlay cache scopes re-key (one-time cold refill).
+        "Omit fields with default/empty values. "
+        "Keep reason_codes to max 3 items, max 5 words per item. "
         "Minimize total output tokens."
     )
     # Canonicalize the two payloads that were previously handed to the prompt
@@ -22858,9 +22867,6 @@ def _apply_trade_overlay(
         "buy_block": bool(raw.buy_block),
         "sell_block": bool(raw.sell_block),
         "reason_codes": list(raw.reason_codes or []),
-        "feature_boosts": list(raw.feature_boosts or []),
-        "feature_penalties": list(raw.feature_penalties or []),
-        "rationale": str(raw.rationale or "").strip()[:500],
     }
     # ── Fast mode: store result in overlay cache ──
     if _fast_mode_overlay:
@@ -22926,9 +22932,14 @@ def _apply_etf_trade_overlay(
         "sector momentum, and whether the trend is strengthening or weakening. "
         "Company-specific signals do not apply to ETFs. "
         "Use short alias keys: ds (delta_score), cd (confidence_delta), db (decision_bias), "
-        "bb (buy_block), sb (sell_block), rc (reason_codes), fb (feature_boosts), fp (feature_penalties), ra (rationale). "
-        "Omit fields with default/empty values. Keep rationale under 15 words. "
-        "Keep reason_codes/feature_boosts/feature_penalties to max 3 items each, max 5 words per item. "
+        "bb (buy_block), sb (sell_block), rc (reason_codes). "
+        # 2026-08-22 audit: fb/fp/ra were requested from the LLM on every
+        # overlay call and consumed by NOTHING (readers use only ds/cd/db/
+        # bb/sb/rc) — paid output tokens, discarded. Dropped from the
+        # prompt and schema. NOTE: this changes the overlay prompt hash,
+        # so sentiment/overlay cache scopes re-key (one-time cold refill).
+        "Omit fields with default/empty values. "
+        "Keep reason_codes to max 3 items, max 5 words per item. "
         "Minimize total output tokens."
     )
     base_score_doc = _canonicalize_overlay_base_doc(base_score_doc)
@@ -23004,9 +23015,6 @@ def _apply_etf_trade_overlay(
         "buy_block": bool(raw.buy_block),
         "sell_block": bool(raw.sell_block),
         "reason_codes": list(raw.reason_codes or []),
-        "feature_boosts": list(raw.feature_boosts or []),
-        "feature_penalties": list(raw.feature_penalties or []),
-        "rationale": str(raw.rationale or "").strip()[:500],
     }, trace
 
 
@@ -28756,11 +28764,53 @@ class GraphNexusAnalysis:
                         "magenta",
                     )
                 # TTL sweep on in-memory storage so old rows don't linger past
-                # the watch window. DB sweep happens elsewhere (live cooldown).
+                # the watch window.
                 if not _GN_LIVE_MODE_FLAG:
                     _post_sell_watch_inmem_forget_expired(
                         strategy_cache, date_key, window_days=_a4_window_days,
                     )
+                else:
+                    # 2026-08-22 audit fix: the comment above used to claim
+                    # "DB sweep happens elsewhere (live cooldown)" — it did
+                    # not; _mark_discovered_stock_forgotten had NO live
+                    # caller, so post_sell_watch rows accumulated as
+                    # permanent DB state and kept blocking re-discovery via
+                    # the cooldown filter forever. Sweep expired rows here,
+                    # on the same cadence the in-memory path already uses.
+                    try:
+                        _a4_cutoff = (
+                            datetime.strptime(date_key, "%Y-%m-%d")
+                            - timedelta(days=int(_a4_window_days))
+                        ).strftime("%Y-%m-%d")
+                        _a4_expired = []
+                        _a4_cur = _r.db(DB_NAME).table(DISCOVERED_TABLE).filter(
+                            lambda doc: (doc["instance_id"] == instance_id)
+                            & (doc["status"] == "post_sell_watch")
+                            & (
+                                (~doc.has_fields("sold_date"))
+                                | (doc["sold_date"] < _a4_cutoff)
+                            )
+                        ).pluck("ticker").run(conn_trends)
+                        for _a4_row in _a4_cur:
+                            _a4_t = str(_a4_row.get("ticker") or "").strip().upper()
+                            if _a4_t:
+                                _mark_discovered_stock_forgotten(
+                                    conn_trends, instance_id, _a4_t)
+                                _a4_expired.append(_a4_t)
+                        if _a4_expired:
+                            _log(
+                                f"A4 TTL sweep (live): {len(_a4_expired)} "
+                                f"post_sell_watch row(s) past {_a4_window_days}d "
+                                f"-> forgotten: {', '.join(_a4_expired[:8])}"
+                                + ("…" if len(_a4_expired) > 8 else ""),
+                                "cyan",
+                            )
+                    except Exception as _a4_ttl_exc:
+                        _log(
+                            "A4 TTL sweep (live) failed (non-fatal): "
+                            f"{type(_a4_ttl_exc).__name__}: {_a4_ttl_exc}",
+                            "yellow",
+                        )
             except Exception as _a4_exc:
                 _log(f"A4 re-entry phase error (non-fatal): {_a4_exc}", "yellow")
 
@@ -31822,7 +31872,10 @@ class GraphNexusAnalysis:
                                 (strategy_cache or {}).get("_market_regime"),
                                 (strategy_cache or {}).get("_bear_capacity_latch"))),
                             (strategy_cache or {}).get("_market_regime_recovery"), config))
-                    _mw_ba_buy_price_floor = float(config.get("buy_price_floor", 8.0) or 8.0)
+                    _mw_ba_buy_price_floor = float(config.get("buy_price_floor", 5.0) or 5.0)
+                    # 2026-08-22 audit: default was 8.0 here while every other
+                    # read site and INTELLISTOCK_SCHEMA say 5.0 — harmonized.
+                    # No live change: production docs set the key explicitly.
                     _mw_ba_current_positions = len(_mw_open_set)
                     # V31.1 bug-sweep fix: count only NEW-entry buys (tickers not
                     # already in _mw_open_set), so winner_adds don't inflate count.
@@ -33728,6 +33781,34 @@ class GraphNexusAnalysis:
                 portfolio_emulator=portfolio_emulator,
                 point_in_time_context=point_in_time_context,
             )
+
+        # 2026-08-22 audit fix: A4 post-sell re-entries were FULL SIZE. The A4
+        # phase stamps `_is_post_sell_reentry`/`_reentry_size_fraction` into
+        # scores and nothing ever consulted them — the docstring's promised
+        # half-size re-entry never happened. Scale the funded buy_cash here,
+        # the single point after every entry lane has written its hint.
+        # A4 skips already-held symbols, so this can only shrink a NEW entry.
+        _a4_scaled = []
+        for _a4s, _a4doc in scores.items():
+            if not (isinstance(_a4doc, dict)
+                    and _a4doc.get("_is_post_sell_reentry")):
+                continue
+            _a4hint = nexus_position_sizes.get(_a4s)
+            if not (isinstance(_a4hint, dict)
+                    and float(_a4hint.get("buy_cash", 0) or 0) > 0):
+                continue
+            _a4frac = float(
+                _a4doc.get("_reentry_size_fraction", 0.50) or 0.50)
+            if not (0.0 < _a4frac < 1.0):
+                continue
+            _a4orig = float(_a4hint["buy_cash"])
+            _a4hint["buy_cash"] = round(_a4orig * _a4frac, 2)
+            _a4_scaled.append(
+                f"{_a4s} ${_a4orig:.0f}->${_a4hint['buy_cash']:.0f}")
+        if _a4_scaled:
+            _log(
+                "A4 re-entry sizing: scaled " + ", ".join(_a4_scaled)
+                + " (post_sell_reentry_size_fraction)", "magenta")
 
         # Attach nexus metadata for broker to extract
         scores["_nexus_discovered"] = list(all_discovered) if all_discovered else []

@@ -1,9 +1,10 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **IntelliStock** (45578 symbols, 84546 relationships, 144 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **IntelliStock** (58821 symbols, 107287 relationships, 155 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
-> If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
+> If any GitNexus tool warns the index is stale, run `GITNEXUS_MAX_FILE_SIZE=2048 npx gitnexus analyze` in terminal first.
+> ⚠️ The env var is REQUIRED: without it the indexer silently skips files >512KB — including `backend/strategies/graph_nexus_analysis.py` (~1.7MB, 4,205 symbols), leaving the graph blind to the largest file in the repo.
 
 ## Always Do
 
