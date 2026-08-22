@@ -100,3 +100,139 @@ def test_postgres_declares_shm_size():
     scans fail with a confusing error without an explicit shm_size."""
     compose = (REPO_ROOT / "docker-compose.yml").read_text()
     assert "shm_size: 1gb" in compose
+
+
+# ---------------------------------------------------------------------------
+# Postgres wiring, asserted against the PARSED compose file.
+#
+# The string assertions above are security invariants: a substring is exactly
+# the right tool for "this literal must never appear". Wiring is different --
+# "every backend service can reach the database" is a statement about the
+# structure, and a substring check passes just as happily when the variable
+# landed in the wrong service's block.
+# ---------------------------------------------------------------------------
+
+import yaml  # noqa: E402
+
+
+# Services that talk to the store. Each one declares RETHINKDB_* today and must
+# declare the POSTGRES_* twin, because the flip is an env change, not a rebuild.
+STORE_SERVICES = ("backend", "api", "price-service", "backtest-engine",
+                  "discord-bot")
+
+# The env dsn_from_env() assembles a DSN from when PG_DSN is unset.
+REQUIRED_PG_ENV = {
+    "POSTGRES_HOST": "postgres",
+    "POSTGRES_PORT": "5432",
+}
+
+
+def _compose():
+    return yaml.safe_load((REPO_ROOT / "docker-compose.yml").read_text())
+
+
+def _env(service: dict) -> dict:
+    """Compose accepts both `KEY=value` list form and mapping form."""
+    raw = service.get("environment", {})
+    if isinstance(raw, dict):
+        return {str(k): "" if v is None else str(v) for k, v in raw.items()}
+    out = {}
+    for item in raw:
+        key, _, value = str(item).partition("=")
+        out[key] = value
+    return out
+
+
+def test_every_store_service_gets_the_postgres_coordinates():
+    services = _compose()["services"]
+    for name in STORE_SERVICES:
+        env = _env(services[name])
+        for key, value in REQUIRED_PG_ENV.items():
+            assert env.get(key) == value, "%s is missing %s=%s" % (name, key, value)
+        for key in ("POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PASSWORD"):
+            assert key in env, "%s is missing %s" % (name, key)
+
+
+def test_every_store_service_keeps_its_rethinkdb_coordinates():
+    """The rollback is unsetting PG_DSN, which only works while the old
+    variables are still there. Deleting them is a later, separate decision."""
+    services = _compose()["services"]
+    for name in STORE_SERVICES:
+        env = _env(services[name])
+        assert env.get("RETHINKDB_HOST") == "rethinkdb", name
+        assert env.get("RETHINKDB_PORT") == "28015", name
+
+
+def test_container_spawning_services_forward_an_instance_postgres_host():
+    """server.py and backtest_engine.py spawn containers whose `localhost` is
+    not the server's. INSTANCE_POSTGRES_HOST is the escape hatch
+    _pg_container_env() reads; without it every spawned broker dials its own
+    loopback and finds nothing."""
+    services = _compose()["services"]
+    for name in ("backend", "backtest-engine"):
+        env = _env(services[name])
+        assert env.get("INSTANCE_POSTGRES_HOST") == "postgres", name
+        assert env.get("INSTANCE_RETHINKDB_HOST") == "rethinkdb", name
+
+
+def test_every_store_service_waits_for_postgres():
+    services = _compose()["services"]
+    for name in STORE_SERVICES:
+        depends = services[name].get("depends_on") or []
+        names = list(depends) if isinstance(depends, dict) else [str(d) for d in depends]
+        assert "postgres" in names, "%s does not depend_on postgres" % name
+        assert "rethinkdb" in names, "%s dropped its rethinkdb dependency" % name
+
+
+def test_postgres_service_is_built_from_the_partman_image():
+    postgres = _compose()["services"]["postgres"]
+    assert postgres["build"]["context"] == "./docker/postgres"
+    dockerfile = (REPO_ROOT / "docker/postgres/Dockerfile").read_text()
+    assert "FROM postgres:17" in dockerfile
+    assert "postgresql-17-partman" in dockerfile
+
+
+def test_postgres_memory_settings_are_internally_consistent():
+    """shared_buffers is 25% of the container's memory limit. They are set in
+    two different places, so nothing but a test keeps them in step."""
+    postgres = _compose()["services"]["postgres"]
+    assert postgres["shm_size"] == "1gb"
+    limits = postgres["deploy"]["resources"]["limits"]
+    assert limits["memory"] == "4G"
+    assert "-c shared_buffers=1GB" in postgres["command"]
+
+
+def test_postgres_is_not_the_oom_killers_first_choice():
+    """The postmaster resets its own oom_score_adj for child backends. Without
+    these the kernel kills the postmaster, which takes the whole cluster down
+    instead of one backend."""
+    env = _env(_compose()["services"]["postgres"])
+    assert env["PG_OOM_ADJUST_FILE"] == "/proc/self/oom_score_adj"
+    assert env["PG_OOM_ADJUST_VALUE"] == "0"
+
+
+def test_postgres_has_a_readiness_healthcheck():
+    postgres = _compose()["services"]["postgres"]
+    probe = " ".join(postgres["healthcheck"]["test"])
+    assert "pg_isready" in probe
+
+
+def test_the_rethinkdb_service_and_its_volume_survive_the_port():
+    compose = _compose()
+    assert "rethinkdb" in compose["services"]
+    assert "rethinkdb_data" in compose["volumes"]
+    assert "postgres_data" in compose["volumes"]
+
+
+def test_env_template_documents_the_postgres_password():
+    template = (REPO_ROOT / ".env.example").read_text()
+    assert "POSTGRES_PASSWORD=<FILL THIS IN>" in template
+    assert "PG_DSN" in template
+
+
+def test_migration_mismatch_dumps_are_never_committed():
+    """A mismatch dump is two whole documents, verbatim, including anything the
+    row happened to hold. It is evidence to read, not source to commit."""
+    ignored = (REPO_ROOT / ".gitignore").read_text()
+    assert ".migration-mismatches/" in ignored
+    assert ".devpg/" in ignored

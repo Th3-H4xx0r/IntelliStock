@@ -95,6 +95,7 @@ services:
       - codex_auth:/root/.codex
     restart: unless-stopped
     depends_on:
+      - postgres
       - rethinkdb
       - neo4j
     env_file:
@@ -196,6 +197,7 @@ services:
       - LIVE_TRADING_LOG_DIR=/app/live_trading_logs
     restart: unless-stopped
     depends_on:
+      - postgres
       - rethinkdb
       - neo4j
 
@@ -205,6 +207,7 @@ services:
     command: ["python", "engines/price_engine.py"]
     restart: unless-stopped
     depends_on:
+      - postgres
       - rethinkdb
     environment:
       - RETHINKDB_HOST=rethinkdb
@@ -221,6 +224,7 @@ services:
     command: ["python", "engines/backtest_engine.py"]
     restart: unless-stopped
     depends_on:
+      - postgres
       - rethinkdb
       - neo4j
     volumes:
@@ -314,6 +318,7 @@ services:
     command: ["python", "engines/discord_bot.py"]
     restart: unless-stopped
     depends_on:
+      - postgres
       - rethinkdb
       - neo4j
     ports:

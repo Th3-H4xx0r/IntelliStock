@@ -277,3 +277,6 @@ scripts/local_backtest_bear_baseline.json
 
 # Throwaway local Postgres cluster (scripts/dev_pg.sh)
 .devpg/
+
+# Migration verify mismatches (whole documents, dumped for reading, never source)
+.migration-mismatches/
