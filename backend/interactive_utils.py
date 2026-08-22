@@ -5716,12 +5716,13 @@ def action_delete_backtest(conn, backtest_id):
         if doc is not None:
             r.db(DB_NAME).table("BacktestInstances").get(bid).delete().run(conn)
             found = True
-    if "BacktestResults" in tables:
-        # delete_backtest clears all three split tables, not just the
-        # metadata row.
-        import backtest_result_store as _brs
-        if _brs.delete_backtest(bid):
-            found = True
+    # R17: no table_list guard -- delete_backtest goes to POSTGRES, and
+    # gating it on the presence of the vestigial RethinkDB table would make
+    # this silently no-op the day that table is dropped. delete_backtest
+    # clears all three split tables, not just the metadata row.
+    import backtest_result_store as _brs
+    if _brs.delete_backtest(bid):
+        found = True
     if not found:
         raise ValueError("Backtest not found: %s" % bid)
     return {"deleted": True, "id": bid}
@@ -5739,14 +5740,13 @@ def action_stop_backtest(conn, backtest_id):
     if (doc.get("status") or "").strip().lower() != "running":
         raise ValueError("Backtest is not running (status=%s). Use delete to remove from queue." % doc.get("status"))
     r.db(DB_NAME).table("BacktestInstances").get(bid).update({"run": False}).run(conn)
-    # Mark BacktestResults as stopped so UI doesn't show stale "running" state
-    tables = list(r.db(DB_NAME).table_list().run(conn))
-    if "BacktestResults" in tables:
-        try:
-            import backtest_result_store as _brs
-            _brs.set_status(bid, "stopped")
-        except Exception:
-            pass
+    # Mark BacktestResults as stopped so UI doesn't show stale "running" state.
+    # R17: no table_list guard -- this write goes to POSTGRES.
+    try:
+        import backtest_result_store as _brs
+        _brs.set_status(bid, "stopped")
+    except Exception:
+        pass
     return {"stop_requested": True, "id": bid}
 
 
@@ -5785,17 +5785,16 @@ def action_stop_all_backtests(conn):
         except Exception:
             pass
     containers_stopped = _stop_all_backtest_containers()
-    # Mark any stale running BacktestResults as stopped so the UI reflects reality
-    tables = list(r.db(DB_NAME).table_list().run(conn))
-    if "BacktestResults" in tables:
-        try:
-            # R4: the "still running?" predicate reads the hot
-            # BacktestProgress row. BacktestResults' generated status column
-            # is advisory after the split and would be stale here.
-            import backtest_result_store as _brs
-            _brs.stop_running()
-        except Exception:
-            pass
+    # Mark any stale running BacktestResults as stopped so the UI reflects
+    # reality. R4: the "still running?" predicate reads the hot
+    # BacktestProgress row -- BacktestResults' generated status column is
+    # advisory after the split and would be stale here. R17: no table_list
+    # guard, the sweep goes to POSTGRES.
+    try:
+        import backtest_result_store as _brs
+        _brs.stop_running()
+    except Exception:
+        pass
     return {"stopped": len(ids), "ids": ids, "containers_stopped": containers_stopped}
 
 

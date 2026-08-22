@@ -475,8 +475,8 @@ def _check_dead_backtest_containers():
         if not running_rows:
             return
 
-        tables = list(r.db(DB_NAME).table_list().run(conn))
-        has_results_table = "BacktestResults" in tables
+        # R17: the BacktestResults reads/writes below go to POSTGRES, so
+        # they are no longer gated on the RethinkDB table list.
         now = time.time()
 
         for row in running_rows:
@@ -504,16 +504,15 @@ def _check_dead_backtest_containers():
                 # whose container crashed must survive for operator resume —
                 # keep the row (run=False) instead of deleting it.
                 is_paused = False
-                if has_results_table:
-                    try:
-                        # R4: the status predicate reads the hot
-                        # BacktestProgress row, never BacktestResults' stale
-                        # advisory copy.
-                        import backtest_result_store as _brs
-                        is_paused = "paused" in str(
-                            _brs.read_status(bid) or "").lower()
-                    except Exception:
-                        is_paused = False
+                try:
+                    # R4: the status predicate reads the hot
+                    # BacktestProgress row, never BacktestResults' stale
+                    # advisory copy.
+                    import backtest_result_store as _brs
+                    is_paused = "paused" in str(
+                        _brs.read_status(bid) or "").lower()
+                except Exception:
+                    is_paused = False
                 if is_paused:
                     try:
                         r.db(DB_NAME).table(TABLE_NAME).get(bid).update({"run": False}).run(conn)
@@ -528,12 +527,11 @@ def _check_dead_backtest_containers():
                         r.db(DB_NAME).table(TABLE_NAME).get(bid).delete().run(conn)
                     except Exception:
                         pass
-                    if has_results_table:
-                        try:
-                            import backtest_result_store as _brs
-                            _brs.set_status(bid, "stopped")
-                        except Exception:
-                            pass
+                    try:
+                        import backtest_result_store as _brs
+                        _brs.set_status(bid, "stopped")
+                    except Exception:
+                        pass
                 with _queued_or_active_lock:
                     _queued_or_active_ids.discard(bid)
                 with _container_launch_times_lock:

@@ -12964,13 +12964,13 @@ while not shutdown_requested:
                                 backtest_result["evidence"] = _evidence_projection
                             assert_secret_free(backtest_result)
                             import backtest_result_store as _brs
+                            # R16: no insert branch. A broker without a row id
+                            # exits at the stub write, long before here, and
+                            # backtest_result carries backtest_id, never id --
+                            # so the legacy insert path could only ever raise.
                             if _backtest_result_id is not None:
                                 _brs.write_terminal(_backtest_result_id, backtest_result)
                                 _log(f"Updated backtest results in database (id={_backtest_result_id}, status=finished, P&L={final_pnl})", "green")
-                            else:
-                                _brs.write_terminal(backtest_result.get('id'),
-                                                    backtest_result, insert_if_absent=True)
-                                _log(f"Saved backtest results to database (instance_id={instance_id_for_db}, strategy_id={strategy_row_id})", "green")
                             # Phase 1 snapshot: persist final _strategy_cache for live-boot reuse.
                             # Helpers live in broker_snapshot_helpers.py so they're testable without
                             # broker.py's module-level argparse + DB bootstrap (extraction pattern

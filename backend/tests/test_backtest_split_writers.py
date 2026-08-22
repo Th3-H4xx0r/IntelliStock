@@ -479,12 +479,6 @@ def test_terminal_write_deep_merges_metadata(split_schema):
                                       "version": 9}
 
 
-def test_terminal_write_inserts_when_the_row_is_absent(split_schema):
-    result = dict(STUB)
-    result.update({"id": 700009, "backtest_id": 700009, "status": "finished"})
-    brs.write_terminal(700009, result, insert_if_absent=True)
-    assert brs.assemble(700009)["status"] == "finished"
-
 
 # ---- Task 7: stop, pause, and side-channel writers ----------------------
 
@@ -573,5 +567,59 @@ def test_delete_removes_the_row_from_all_three_tables(split_schema):
     brs.write_stub(dict(STUB))
     brs.append_steps(700001, "decision", [{"n": 1}], start_seq=0)
     assert brs.delete_backtest(700001) is True
+    assert store.sql('SELECT count(*) AS n FROM "BacktestSteps" '
+                     "WHERE backtest_id='700001'")[0]["n"] == 0
+
+
+# ---- R17: the ported paths must not be gated on the RethinkDB table list --
+
+def _rethink_without_backtestresults(instance_row, queue_rows=()):
+    """A ReQL stub whose table_list() has already dropped "BacktestResults" --
+    the endpoint state of this port. BacktestInstances still answers."""
+    from unittest.mock import MagicMock
+    fake = MagicMock()
+    fake.db.return_value.table_list.return_value.run.return_value = \
+        ["BacktestInstances", "Instances", "Strategies"]
+    fake.db.return_value.table.return_value.get.return_value.run.return_value = \
+        instance_row
+    fake.db.return_value.table.return_value.run.return_value = list(queue_rows)
+    return fake
+
+
+def test_stop_writes_postgres_when_the_reql_table_list_lacks_backtestresults(
+        split_schema, monkeypatch):
+    import interactive_utils as iu
+    brs.write_stub(dict(STUB))
+    monkeypatch.setattr(iu, "r", _rethink_without_backtestresults(
+        {"id": 700001, "status": "running"}))
+    monkeypatch.setattr(iu, "ensure_backtest_instances_table", lambda conn: None)
+    assert iu.action_stop_backtest(object(), 700001) == {"stop_requested": True,
+                                                         "id": 700001}
+    assert brs.read_status(700001) == "stopped"
+
+
+def test_stop_all_sweeps_postgres_when_the_reql_table_list_lacks_backtestresults(
+        split_schema, monkeypatch):
+    import interactive_utils as iu
+    brs.write_stub(dict(STUB))
+    monkeypatch.setattr(iu, "r", _rethink_without_backtestresults(
+        {"id": 700001, "status": "running"}, queue_rows=[{"id": 700001}]))
+    monkeypatch.setattr(iu, "ensure_backtest_instances_table", lambda conn: None)
+    monkeypatch.setattr(iu, "_stop_all_backtest_containers", lambda: 0)
+    iu.action_stop_all_backtests(object())
+    assert brs.read_status(700001) == "stopped"
+
+
+def test_delete_clears_postgres_when_the_reql_table_list_lacks_backtestresults(
+        split_schema, monkeypatch):
+    import interactive_utils as iu
+    brs.write_stub(dict(STUB))
+    brs.append_steps(700001, "decision", [{"n": 1}], start_seq=0)
+    monkeypatch.setattr(iu, "r", _rethink_without_backtestresults(
+        {"id": 700001, "status": "running"}))
+    assert iu.action_delete_backtest(object(), 700001) == {"deleted": True,
+                                                           "id": 700001}
+    assert store.get("BacktestResults", 700001) is None
+    assert brs.read_progress(700001) is None
     assert store.sql('SELECT count(*) AS n FROM "BacktestSteps" '
                      "WHERE backtest_id='700001'")[0]["n"] == 0

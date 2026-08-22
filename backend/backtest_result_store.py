@@ -294,8 +294,7 @@ def write_difficulty(backtest_id, difficulty) -> None:
     store.update(RESULTS_TABLE, backtest_id, {"difficulty": difficulty})
 
 
-def write_terminal(backtest_id, result: dict, *,
-                   insert_if_absent: bool = False) -> None:
+def write_terminal(backtest_id, result: dict) -> None:
     """The end-of-run write.
 
     Metadata is deep-merged into doc (the legacy call was ``.update(...)``,
@@ -303,15 +302,18 @@ def write_terminal(backtest_id, result: dict, *,
     BacktestSteps with final=true, superseding the live rows; the hot row is
     set to the terminal status.
 
+    Update only. The legacy code had an insert branch for the case where the
+    broker had no row id, but that branch was already unreachable -- a broker
+    with no _backtest_result_id exits long before the terminal write -- and
+    the terminal ``result`` dict carries ``backtest_id``, never ``id``, so the
+    branch could only ever have raised. R16: deleted rather than repaired.
+
     assert_secret_free() is the CALLER's responsibility and stays at
     broker.py's terminal write, unchanged.
     """
     meta, steps, progress = split_doc(
         dict(result, id=result.get("id", backtest_id)))
-    if insert_if_absent and store.get(RESULTS_TABLE, backtest_id) is None:
-        store.insert(RESULTS_TABLE, meta, conflict="replace")
-    else:
-        store.update(RESULTS_TABLE, backtest_id, meta)
+    store.update(RESULTS_TABLE, backtest_id, meta)
     for kind in STEP_KINDS:
         if kind in steps:
             finalize_steps(backtest_id, kind, steps[kind])
