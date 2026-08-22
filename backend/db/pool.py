@@ -102,6 +102,16 @@ def connection(*, autocommit: bool = False) -> Iterator[Any]:
     ``broker.py:1897 get_conn_retry(max_attempts, delay)``, whose call sites
     keep their own outer loops. Query-level errors are NEVER retried: a
     retried non-idempotent write is worse than an error.
+
+    The retry loop deliberately contains NO ``yield``. With the yield inside
+    it, a mid-query connection loss -- an admin shutdown, a killed backend --
+    was thrown back in at the yield, swallowed by the except, and the loop
+    reached the yield a second time: contextlib turned that into
+    ``RuntimeError: generator didn't stop after throw()`` and destroyed the
+    original error class, so callers catching UnavailableError saw a
+    RuntimeError instead. The connection is therefore acquired in the loop and
+    yielded exactly once, outside it; a connection-level error raised by the
+    caller's ``with`` body is re-raised as UnavailableError, never retried.
     """
     import psycopg
     from psycopg_pool import PoolTimeout
@@ -111,17 +121,33 @@ def connection(*, autocommit: bool = False) -> Iterator[Any]:
     while True:
         try:
             pool = get_pool()
-            with pool.connection() as conn:
-                if autocommit and not conn.autocommit:
-                    conn.autocommit = True
-                yield conn
-            return
+            ctx = pool.connection()
+            conn = ctx.__enter__()
+            break
         except (psycopg.OperationalError, PoolTimeout, OSError) as exc:
             if attempt >= budget:
                 raise UnavailableError("postgres unavailable: %s" % exc) from exc
             time.sleep(_RETRY_DELAYS[min(attempt, len(_RETRY_DELAYS) - 1)])
             attempt += 1
             close_pool()
+
+    try:
+        if autocommit and not conn.autocommit:
+            conn.autocommit = True
+        yield conn
+    except (psycopg.OperationalError, PoolTimeout, OSError) as exc:
+        # The pool's own context manager still gets to see the error, so the
+        # broken connection is discarded rather than returned to the pool.
+        try:
+            ctx.__exit__(type(exc), exc, exc.__traceback__)
+        except Exception:
+            pass
+        raise UnavailableError("postgres unavailable: %s" % exc) from exc
+    except BaseException as exc:
+        ctx.__exit__(type(exc), exc, exc.__traceback__)
+        raise
+    else:
+        ctx.__exit__(None, None, None)
 
 
 @contextlib.contextmanager
