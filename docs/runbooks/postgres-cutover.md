@@ -34,11 +34,14 @@ Record what RethinkDB holds, so step 4 has something to compare against:
 
     python3 scripts/migrate_rethinkdb_to_postgres.py --dry-run > preflight-counts.txt
 
-**Stop if** `default_toast_compression` is not `lz4`. Drop `-c
-default_toast_compression=lz4` from the `postgres` service's `command` in
-`docker-compose.yml`, recreate the container, and repeat this step. pglz is the
-fallback and costs disk, not correctness — but a flag the server rejects is a
-server that will not start.
+**Stop if** the container does not come up, or if `default_toast_compression` is
+not `lz4`. lz4 is a build-time option, and a `postgres:17` built without it
+rejects the value outright — the failure looks like a container that will not
+start, with `invalid value for parameter "default_toast_compression"` in its
+logs, not like a missing feature. Drop `-c default_toast_compression=lz4` from
+the `postgres` service's `command` in `docker-compose.yml`, recreate the
+container, and repeat this step. pglz is the fallback and costs disk, not
+correctness.
 
 **Stop if** `/dev/shm` is 64 MB or `shared_buffers` is not `1GB`. The Docker
 default `/dev/shm` is 64 MB and is *not* `shared_buffers`; parallel scans fail
