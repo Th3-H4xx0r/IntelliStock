@@ -139,3 +139,125 @@ def test_active_run_age_ignores_a_stale_running_status_in_the_document(split_sch
     brs.write_progress(700001, {"status": "finished",
                                 "_last_active": _iso_ago(5)})
     assert brs.active_run_age(700001) is None
+
+
+# ---- the heartbeat writer (broker.py:12174) ------------------------------
+
+def test_heartbeat_updates_only_the_hot_row_scalars(split_schema):
+    brs.write_stub(dict(STUB))
+    before = store.get("BacktestResults", 700001)
+    brs.heartbeat(700001, last_active="2026-08-22T03:15:00+00:00",
+                  elapsed_seconds=900)
+    assert store.get("BacktestResults", 700001) == before   # metadata untouched
+    prog = brs.read_progress(700001)
+    assert prog["time_elapsed_seconds"] == 900
+    assert prog["_last_active"] == "2026-08-22T03:15:00+00:00"
+
+
+def test_heartbeat_appends_only_new_log_lines(split_schema):
+    brs.write_stub(dict(STUB))
+    mark = brs.heartbeat(700001, last_active="t1", new_log_lines=["a", "b"],
+                         log_seq=0)
+    assert mark == 2
+    mark = brs.heartbeat(700001, last_active="t2", new_log_lines=["c"],
+                         log_seq=mark)
+    assert mark == 3
+    assert brs.assemble(700001)["logs"] == ["a", "b", "c"]
+
+
+def test_heartbeat_never_rewrites_the_whole_log_list(split_schema):
+    """The legacy heartbeat re-sent 500 lines every 15s. Appending 1 line
+    must write exactly 1 step row."""
+    brs.write_stub(dict(STUB))
+    brs.heartbeat(700001, last_active="t1",
+                  new_log_lines=["l%d" % i for i in range(500)], log_seq=0)
+    n_before = store.sql('SELECT count(*) AS n FROM "BacktestSteps" '
+                         "WHERE backtest_id='700001' AND kind='log'")[0]["n"]
+    brs.heartbeat(700001, last_active="t2", new_log_lines=["l500"], log_seq=500)
+    n_after = store.sql('SELECT count(*) AS n FROM "BacktestSteps" '
+                        "WHERE backtest_id='700001' AND kind='log'")[0]["n"]
+    assert n_after - n_before == 1
+
+
+def test_watermarks_let_a_reconnecting_writer_continue(split_schema):
+    """R6: the broker re-seeds _steps_written from watermarks() itself; there
+    is no resume_watermarks alias."""
+    brs.write_stub(dict(STUB))
+    brs.heartbeat(700001, last_active="t1", new_log_lines=["a", "b", "c"],
+                  log_seq=0)
+    # Simulate the writer losing its in-process watermark on reconnect.
+    marks = brs.watermarks(700001)
+    assert marks["log"] == 3
+    brs.heartbeat(700001, last_active="t2", new_log_lines=["d"],
+                  log_seq=marks["log"])
+    assert brs.assemble(700001)["logs"] == ["a", "b", "c", "d"]
+
+
+def test_the_read_still_tails_500_lines(split_schema):
+    brs.write_stub(dict(STUB))
+    lines = ["l%d" % i for i in range(900)]
+    brs.heartbeat(700001, last_active="t1", new_log_lines=lines, log_seq=0)
+    assert brs.assemble(700001)["logs"] == lines[-500:]
+
+
+def test_heartbeat_with_no_new_lines_returns_the_watermark_unchanged(split_schema):
+    brs.write_stub(dict(STUB))
+    assert brs.heartbeat(700001, last_active="t1", log_seq=7) == 7
+
+
+def test_the_logger_counts_lines_it_has_trimmed_away():
+    """intellistock_logger.py:210-215 trims the buffer FIFO to max_lines, so
+    len(buffer) saturates at 500 and cannot be a watermark. The emitted
+    counter must keep climbing."""
+    from intellistock_logger import intellistock_logger as logger
+    buf = []
+    logger.set_backtest_log_buffer(buf, max_lines=5)
+    try:
+        for i in range(12):
+            logger.log("line %d" % i, "white")
+        assert len(buf) == 5
+        assert logger.context_log_lines_emitted("backtest") == 12
+    finally:
+        logger.clear_backtest_log_buffer()
+    assert logger.context_log_lines_emitted("backtest") == 0
+
+
+def test_the_heartbeat_slice_survives_a_buffer_that_overflowed(split_schema):
+    """The broker's slicing arithmetic (broker.py:_backtest_heartbeat), run
+    against a real FIFO-trimmed buffer. More lines were emitted since the last
+    tick than the buffer holds, so the overflow is gone; what survives must be
+    appended once, at seqs aligned with the emitted index."""
+    from intellistock_logger import intellistock_logger as logger
+    brs.write_stub(dict(STUB))
+    buf, steps = [], {}
+
+    def tick():
+        start_seq = steps.get("log", 0)
+        buffered = list(buf)
+        emitted = logger.context_log_lines_emitted("backtest")
+        n_new = min(max(emitted - start_seq, 0), len(buffered))
+        new_lines = []
+        if n_new:
+            new_lines = buffered[len(buffered) - n_new:]
+            start_seq = emitted - n_new
+        steps["log"] = brs.heartbeat(700001, last_active="t",
+                                     new_log_lines=new_lines, log_seq=start_seq)
+
+    logger.set_backtest_log_buffer(buf, max_lines=5)
+    try:
+        for i in range(3):
+            logger.log("a%d" % i, "white")
+        tick()
+        for i in range(20):                     # 20 emitted, only 5 survive
+            logger.log("b%d" % i, "white")
+        tick()
+        logger.log("c0", "white")
+        tick()
+    finally:
+        logger.clear_backtest_log_buffer()
+
+    assert steps["log"] == 24                   # aligned with emitted, not row count
+    logs = brs.assemble(700001)["logs"]
+    assert len(logs) == len(set(logs))          # nothing duplicated
+    assert [l.split("] ")[-1] for l in logs] == (
+        ["a0", "a1", "a2"] + ["b%d" % i for i in range(15, 20)] + ["c0"])

@@ -221,6 +221,31 @@ def write_stub(stub: dict) -> None:
                                 if k in stub})
 
 
+def heartbeat(backtest_id, *, last_active: str, elapsed_seconds=None,
+              new_log_lines: Sequence = (), log_seq: int = 0) -> int:
+    """The 15-second liveness write.
+
+    The legacy version re-sent the whole last-500-line log list every tick
+    (broker.py:12191). This writes two scalars into the hot row and appends
+    only the lines past ``log_seq``; assemble() still tails 500 on read, so
+    the document the UI sees is unchanged.
+
+    Returns the new log watermark. A writer that has lost its in-process
+    watermark re-seeds it from watermarks(backtest_id).
+
+    The heartbeat is the ONLY writer of the ``log`` kind: the log buffer is
+    trimmed FIFO to 500 lines, so slicing it correctly needs the logger's
+    monotonic emitted counter, and exactly one writer may own that watermark.
+    """
+    payload = {"_last_active": last_active}
+    if elapsed_seconds is not None:
+        payload["time_elapsed_seconds"] = elapsed_seconds
+    write_progress(backtest_id, payload)
+    if new_log_lines:
+        return append_steps(backtest_id, "log", new_log_lines, start_seq=log_seq)
+    return log_seq
+
+
 def active_run_age(backtest_id) -> Optional[float]:
     """Seconds since the last heartbeat of a run the hot row still calls
     ``running``, or None when no live-run evidence exists.

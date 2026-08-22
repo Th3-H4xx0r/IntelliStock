@@ -11875,6 +11875,10 @@ backtest_start_time = None
 # Backtest progress tracking: document id for DB updates, last progress % updated, last loop time
 _backtest_result_id = None
 _last_progress_updated = -2.0  # so first update at 0%; then every 2% so progress is visible in DB
+# BacktestSteps watermarks: kind -> highest seq this process has written.
+# Re-seeded from backtest_result_store.watermarks() after any write failure so
+# a reconnecting writer neither duplicates nor skips.
+_steps_written = {}
 # Throttle "Could not fetch price" to once per symbol per run (avoid log spam)
 _fetch_price_fail_logged = set()
 _backtest_last_loop_time = None
@@ -11937,6 +11941,7 @@ if mode == MODE_BACKTEST:
     _backtest_result_id = int(backtest_id_raw) if backtest_id_raw and str(backtest_id_raw).isdigit() else backtest_id_raw
     # Start capturing logs to buffer (last 500 lines) for live DB progress writes
     _backtest_log_buffer = []
+    _steps_written = {}
     try:
         from intellistock_logger import intellistock_logger
         intellistock_logger.set_backtest_log_buffer(_backtest_log_buffer, max_lines=500)
@@ -11952,6 +11957,7 @@ if mode == MODE_BACKTEST:
             pass
     except Exception:
         _backtest_log_buffer = []
+        _steps_written = {}
     # Phase γ.2 (2026-05-18, BT232179 follow-up): the α.3 seed-log block
     # below MUST emit AFTER the log buffer + file sink are wired so the
     # `RNG seed: ...` and PYTHONHASHSEED confirmation lines land in the
@@ -12173,38 +12179,47 @@ if mode == MODE_BACKTEST:
     _heartbeat_stop = threading.Event()
     def _backtest_heartbeat():
         import datetime as _dt_hb
-        hb_conn = None
         while not _heartbeat_stop.is_set() and not shutdown_requested:
             _heartbeat_stop.wait(15)
             if _heartbeat_stop.is_set() or shutdown_requested:
                 break
             try:
-                if hb_conn is None:
-                    hb_conn = get_conn_retry(max_attempts=3, delay=2)
-                if hb_conn is None:
-                    continue
+                import backtest_result_store as _brs
+                from intellistock_logger import intellistock_logger as _hb_logger
                 now_hb = _dt_hb.datetime.now(_dt_hb.timezone.utc).isoformat()
                 elapsed_hb = max(0, int(time.time() - backtest_start_time)) if backtest_start_time else None
-                hb_payload = {'_last_active': now_hb}
-                if elapsed_hb is not None:
-                    hb_payload['time_elapsed_seconds'] = elapsed_hb
+                # Append only the log lines past our watermark. The legacy
+                # write re-sent the whole last-500 list every 15 seconds;
+                # assemble() still tails 500 on read, so the UI is unchanged.
+                #
+                # The watermark keys off the logger's monotonic emitted count,
+                # NOT len(buffer): the buffer is trimmed FIFO to 500 lines
+                # (intellistock_logger.py fan-out) and its length saturates.
+                new_lines, start_seq = [], _steps_written.get('log', 0)
                 if _backtest_log_buffer is not None:
-                    hb_payload['logs'] = list(_backtest_log_buffer)[-500:]
-                r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).update(hb_payload).run(hb_conn)
+                    buffered = list(_backtest_log_buffer)
+                    emitted = _hb_logger.context_log_lines_emitted("backtest")
+                    n_new = min(max(emitted - start_seq, 0), len(buffered))
+                    if n_new:
+                        new_lines = buffered[len(buffered) - n_new:]
+                        # If more than 500 lines were emitted since the last
+                        # tick the buffer already dropped the overflow; start
+                        # the seq run where the surviving lines actually are,
+                        # so seq stays aligned with the emitted index and
+                        # nothing is duplicated.
+                        start_seq = emitted - n_new
+                _steps_written['log'] = _brs.heartbeat(
+                    _backtest_result_id, last_active=now_hb,
+                    elapsed_seconds=elapsed_hb, new_log_lines=new_lines,
+                    log_seq=start_seq)
             except Exception:
-                # Connection lost — reset so next iteration reconnects
+                # Write failed -- re-seed the watermarks from the DB on the
+                # next tick so we neither duplicate nor skip.
                 try:
-                    if hb_conn:
-                        hb_conn.close()
+                    import backtest_result_store as _brs2
+                    _steps_written.update(_brs2.watermarks(_backtest_result_id))
                 except Exception:
                     pass
-                hb_conn = None
-        # Cleanup
-        try:
-            if hb_conn:
-                hb_conn.close()
-        except Exception:
-            pass
     try:
         _heartbeat_thread = threading.Thread(target=_backtest_heartbeat, daemon=True)
         _heartbeat_thread.start()
