@@ -59,3 +59,42 @@ def store():
         with dbpool.connection(autocommit=True) as conn:
             conn.execute('DROP SCHEMA IF EXISTS "%s" CASCADE' % name)
         dbpool.close_pool()
+
+
+# ---------------------------------------------------------------------------
+# Real-Postgres fixtures, shared by every test under backend/tests.
+#
+# They used to live in backend/tests/dbcore/conftest.py, which made them
+# invisible to flat backend/tests/*.py files. dbcore/conftest.py re-exports
+# them, so its `from .conftest import requires_pg` importers keep working.
+# ---------------------------------------------------------------------------
+
+PG_TEST_DSN = os.environ.get("PG_TEST_DSN")
+requires_pg = pytest.mark.skipif(
+    not PG_TEST_DSN, reason="PG_TEST_DSN not set (run: ./scripts/dev_pg.sh up)")
+
+
+@pytest.fixture
+def pg_schema():
+    """Create a throwaway schema, point the pool's search_path at it, drop it."""
+    if not PG_TEST_DSN:
+        pytest.skip("PG_TEST_DSN not set")
+    import uuid
+
+    from db import pool as dbpool
+    name = "t_" + uuid.uuid4().hex[:16]
+    dbpool.close_pool()
+    os.environ["PG_DSN"] = PG_TEST_DSN
+    os.environ.pop("PG_SEARCH_PATH", None)
+    with dbpool.connection(autocommit=True) as conn:
+        conn.execute('CREATE SCHEMA IF NOT EXISTS "%s"' % name)
+    dbpool.close_pool()
+    os.environ["PG_SEARCH_PATH"] = name
+    try:
+        yield name
+    finally:
+        os.environ.pop("PG_SEARCH_PATH", None)
+        dbpool.close_pool()
+        with dbpool.connection(autocommit=True) as conn:
+            conn.execute('DROP SCHEMA IF EXISTS "%s" CASCADE' % name)
+        dbpool.close_pool()

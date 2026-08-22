@@ -12015,9 +12015,9 @@ if mode == MODE_BACKTEST:
             sys.stderr.flush()
             sys.exit(1)
         try:
-            tables = list(r.db(DB_NAME).table_list().run(conn))
-            if 'BacktestResults' not in tables:
-                r.db(DB_NAME).table_create('BacktestResults').run(conn)
+            # BacktestResults is no longer created here: it is split across
+            # three Postgres tables whose DDL belongs to db.schema.ensure_schema,
+            # run once at deploy rather than by every broker container.
             # instance_id can be numeric (8) or string (e.g. "ai-temp-xxx"); store as-is for BacktestResults
             instance_id_for_db = int(instance_id) if (instance_id and str(instance_id).isdigit()) else instance_id
             try:
@@ -12026,30 +12026,30 @@ if mode == MODE_BACKTEST:
             except NameError:
                 backtest_start_date = backtest_end_date = None
             backtest_id_int = _backtest_result_id if isinstance(_backtest_result_id, int) else (int(_backtest_result_id) if _backtest_result_id else None)
-            existing_result = r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).run(conn)
+            import backtest_result_store as _brs
+            from db import store as _store
+            existing_result = _store.get('BacktestResults', _backtest_result_id)
             # Duplicate-run guard: if another container is actively running this backtest, exit.
-            # Uses _last_active heartbeat (updated on every progress write) to detect live runs.
-            if existing_result is not None and existing_result.get('status') == 'running':
-                _last_active = existing_result.get('_last_active', '')
-                if _last_active:
+            # Uses the _last_active heartbeat to detect live runs. status and
+            # _last_active now live on the hot BacktestProgress row, not in the
+            # multi-MB document (the doc's status is advisory after the split),
+            # so brs.active_run_age() answers both in one small read. It
+            # returns None when there is no live-run evidence and 9999 when the
+            # heartbeat will not parse -- the legacy "stale, overwrite" case.
+            _active_age = _brs.active_run_age(_backtest_result_id)
+            if _active_age is not None:
+                if _active_age < 120:
+                    _log(f"Backtest id={_backtest_result_id} is already running (heartbeat {int(_active_age)}s ago). "
+                         "Exiting duplicate to avoid double LLM costs and race conditions.", "yellow")
                     try:
-                        _la_dt = __import__('datetime').datetime.fromisoformat(_last_active.replace('Z', '+00:00'))
-                        _now_utc = __import__('datetime').datetime.now(__import__('datetime').timezone.utc)
-                        _active_age = (_now_utc - _la_dt).total_seconds()
+                        conn.close()
                     except Exception:
-                        _active_age = 9999
-                    if _active_age < 120:
-                        _log(f"Backtest id={_backtest_result_id} is already running (heartbeat {int(_active_age)}s ago). "
-                             "Exiting duplicate to avoid double LLM costs and race conditions.", "yellow")
-                        try:
-                            conn.close()
-                        except Exception:
-                            pass
-                        sys.stdout.flush()
-                        sys.stderr.flush()
-                        sys.exit(0)
-                    else:
-                        _log(f"Backtest id={_backtest_result_id} has stale 'running' status (heartbeat {int(_active_age)}s ago, likely crashed). Overwriting.", "yellow")
+                        pass
+                    sys.stdout.flush()
+                    sys.stderr.flush()
+                    sys.exit(0)
+                else:
+                    _log(f"Backtest id={_backtest_result_id} has stale 'running' status (heartbeat {int(_active_age)}s ago, likely crashed). Overwriting.", "yellow")
             _now_iso = __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()
             stub = {
                 'id': _backtest_result_id,
@@ -12117,7 +12117,7 @@ if mode == MODE_BACKTEST:
                 stub['progress'] = 100.0
                 stub['error'] = err_msg[:2000]
                 assert_secret_free(stub)
-                r.db(DB_NAME).table('BacktestResults').insert(stub, conflict='replace').run(conn)
+                _brs.write_stub(stub)
                 _log("Backtest validation failed: %s" % err_msg, "red")
                 _log("BacktestResults row written with status=error, progress=100.", "yellow")
                 try:
@@ -12128,9 +12128,10 @@ if mode == MODE_BACKTEST:
                 sys.stdout.flush()
                 sys.stderr.flush()
                 sys.exit(1)
-            # Ensure row exists: insert with conflict='replace' so it works when broker runs standalone (no engine)
+            # Ensure row exists: write_stub upserts, so this works when the
+            # broker runs standalone (no engine).
             assert_secret_free(stub)
-            r.db(DB_NAME).table('BacktestResults').insert(stub, conflict='replace').run(conn)
+            _brs.write_stub(stub)
             _log(f"Backtest result row (id={_backtest_result_id}) ensured in DB, status=running", "green")
             # Keep connection open for all progress updates (avoids repeated connect/disconnect that can cause "lost connection")
             _backtest_db_conn = conn
@@ -12720,11 +12721,8 @@ while not shutdown_requested:
                         if conn is None:
                             conn = get_conn()
                         try:
-                            # Ensure BacktestResults table exists
-                            tables = list(r.db(DB_NAME).table_list().run(conn))
-                            if 'BacktestResults' not in tables:
-                                r.db(DB_NAME).table_create('BacktestResults').run(conn)
-                                _log("Created BacktestResults table", "green")
+                            # BacktestResults' three Postgres tables are created
+                            # by db.schema.ensure_schema at deploy, not here.
 
                             # Get instance_id and strategy_row_id (instance_id can be int or string)
                             instance_id_for_db = int(instance_id) if (instance_id and str(instance_id).isdigit()) else instance_id

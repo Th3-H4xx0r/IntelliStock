@@ -208,6 +208,43 @@ def write_progress(backtest_id, payload: dict, *, last_active=None) -> None:
         (bid, _dumps(payload), when))
 
 
+def write_stub(stub: dict) -> None:
+    """The row-creation write: metadata WITHOUT the six arrays, plus the hot
+    progress row. Resets nothing -- backtest_engine.py:1126-1127 calls it
+    twice in a row (pending, then running), and a broker may already have
+    appended steps by then.
+    """
+    meta, _steps, _progress = split_doc(stub)
+    store.insert(RESULTS_TABLE, meta, conflict="replace")
+    write_progress(stub["id"], {k: stub.get(k) for k in
+                                ("status", "progress", "time_elapsed_seconds")
+                                if k in stub})
+
+
+def active_run_age(backtest_id) -> Optional[float]:
+    """Seconds since the last heartbeat of a run the hot row still calls
+    ``running``, or None when no live-run evidence exists.
+
+    The duplicate-run guard (broker.py:12029) used to read ``status`` and
+    ``_last_active`` off the multi-MB document; both now live on the hot row
+    (R4: doc.status is advisory after the split). An unparseable timestamp
+    returns 9999, matching the legacy guard's "stale, overwrite" fallback --
+    a parse failure must never look like a live duplicate.
+    """
+    progress = read_progress(backtest_id) or {}
+    if progress.get("status") != "running":
+        return None
+    last_active = progress.get("_last_active") or ""
+    if not last_active:
+        return None
+    try:
+        when = _dt.datetime.fromisoformat(str(last_active).replace("Z", "+00:00"))
+        now = _dt.datetime.now(_dt.timezone.utc)
+        return (now - when).total_seconds()
+    except Exception:
+        return 9999
+
+
 def read_progress(backtest_id) -> Optional[dict]:
     rows = store.sql('SELECT payload FROM "BacktestProgress" WHERE id = %s',
                      (_bid(backtest_id),))

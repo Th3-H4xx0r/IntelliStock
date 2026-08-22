@@ -384,7 +384,7 @@ RESULTS_TABLE = 'BacktestResults'
 
 
 def ensure_table(conn):
-    """Ensure BacktestInstances and BacktestResults tables exist."""
+    """Ensure the BacktestInstances table exists."""
     dbs = list(r.db_list().run(conn))
     if DB_NAME not in dbs:
         r.db_create(DB_NAME).run(conn)
@@ -392,9 +392,10 @@ def ensure_table(conn):
     if TABLE_NAME not in tables:
         r.db(DB_NAME).table_create(TABLE_NAME).run(conn)
         intellistock_logger.log(f"Created table {TABLE_NAME}", "green", service="BACKTEST_ENGINE")
-    if RESULTS_TABLE not in tables:
-        r.db(DB_NAME).table_create(RESULTS_TABLE).run(conn)
-        intellistock_logger.log(f"Created table {RESULTS_TABLE}", "green", service="BACKTEST_ENGINE")
+    # RESULTS_TABLE is no longer created here: BacktestResults is split across
+    # three Postgres tables whose DDL belongs to db.schema.ensure_schema, run
+    # once at deploy. Concurrent engines/brokers issuing CREATE TABLE would
+    # race on the same catalog lock for no benefit.
 
 
 def _backtest_container_name(instance_id, row_id):
@@ -963,7 +964,12 @@ def _ensure_backtest_result_row(conn, row, status):
         'backtest_prices': [],
         'logs': [],
     }
-    r.db(DB_NAME).table(RESULTS_TABLE).insert(stub, conflict='replace').run(conn)
+    # ``stub`` keeps its four empty arrays: they are the legacy contract that
+    # portfolio_value_history / backtest_trades / backtest_prices / logs exist
+    # from the first read. write_stub strips them out of the metadata row and
+    # assemble() puts them back (backtest_result_store._ALWAYS_PRESENT).
+    import backtest_result_store as _brs
+    _brs.write_stub(stub)
 
 
 def _load_initial_queue(conn):
