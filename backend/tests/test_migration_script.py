@@ -398,3 +398,25 @@ def test_ordering_parity_is_skipped_for_an_int_keyed_table(store, exported,
     parity = mig.verify_ordering_parity("Strategies", first_n=10)
     assert parity["diverged_at"] is None
     assert "int-keyed" in parity["skipped"]
+
+
+def test_since_id_is_coerced_to_the_primary_key_type():
+    """RethinkDB sorts every number before every string, so between("0", maxval,
+    index="id") on an int-keyed table matches NOTHING -- `--since-id 0` on
+    Strategies silently copied zero rows instead of restarting."""
+    assert mig.coerce_since_id("Strategies", "0") == 0
+    assert mig.coerce_since_id("BacktestResults", "460555") == 460555
+    assert mig.coerce_since_id("GraphNexusTradeContexts", "alpaca-main|a") == \
+        "alpaca-main|a"
+    with pytest.raises(ValueError):
+        mig.coerce_since_id("Strategies", "not-a-number")
+    # ...and Instances raises here for the same reason store.coerce_id rejects
+    # its live keys: the registry declares id_type="int" and every one of them
+    # is a string. See verify_id_types.
+    with pytest.raises(ValueError):
+        mig.coerce_since_id("Instances", "alpaca-main")
+
+
+def test_since_id_needs_exactly_one_table(store):
+    assert mig.main(["--since-id", "0"]) == 2
+    assert mig.main(["--since-id", "x", "--tables", "Strategies"]) == 2

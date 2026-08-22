@@ -638,6 +638,23 @@ def _tables_arg(args) -> list:
     return rethink_table_list()
 
 
+def coerce_since_id(table: str, raw: str):
+    """``--since-id`` text -> the primary key's REAL type.
+
+    RethinkDB is type-strict and sorts every number before every string, so
+    ``between("0", maxval, index="id")`` on an int-keyed table matches nothing
+    at all: ``--since-id 0`` on BacktestResults silently copied zero rows
+    instead of restarting from the beginning.
+    """
+    if schema.spec(table).id_type != "int":
+        return raw
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        raise ValueError("%s has an integer primary key; --since-id %r is not "
+                         "an integer" % (table, raw))
+
+
 def _batch_for(table: str, requested: int) -> int:
     """BacktestResults documents are megabytes each; 2000 of them is not a
     batch, it is an out-of-memory error."""
@@ -706,16 +723,25 @@ def main(argv=None) -> int:
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args(argv)
 
+    # Checked BEFORE the table list is resolved: _tables_arg falls back to
+    # RethinkDB's table_list(), and a usage error must not need a live server.
+    if args.since_id is not None and len(
+            [t for t in (args.tables or "").split(",") if t.strip()]) != 1:
+        print("--since-id needs exactly one --tables entry")
+        return 2
+
     tables = _tables_arg(args)
     if args.verify:
         return _run_verify(tables, args)
 
     if args.since_id is not None:
-        if len(tables) != 1:
-            print("--since-id needs exactly one --tables entry")
-            return 2
         schema.ensure_schema(tables=[MIGRATION_STATE_TABLE])
-        _save_state(tables[0], last_id=args.since_id, rows_copied=0)
+        try:
+            since = coerce_since_id(tables[0], args.since_id)
+        except ValueError as exc:
+            print(str(exc))
+            return 2
+        _save_state(tables[0], last_id=since, rows_copied=0)
 
     schema.ensure_schema()
     total = 0
