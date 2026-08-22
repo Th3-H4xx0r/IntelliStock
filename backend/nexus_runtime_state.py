@@ -1,4 +1,4 @@
-"""RethinkDB-backed runtime state for live mode.
+"""Postgres-backed runtime state for live mode.
 
 This module exposes NEW tables ONLY. It MUST NOT read, write, or even reference
 the Strategies table. An explicit _FORBIDDEN set is checked at every write path
@@ -13,17 +13,11 @@ Tables introduced:
 
 from __future__ import annotations
 
-import os
 from contextlib import contextmanager
 from typing import Iterator, Optional
 
-try:
-    from rethinkdb import RethinkDB
-    _r = RethinkDB()
-    _HAS_RDB = True
-except ImportError:
-    _r = None
-    _HAS_RDB = False
+from db import store
+from db import schema
 
 
 DB_NAME = "IntelliStock"
@@ -35,14 +29,6 @@ AUDIT_TABLE = "LiveDecisionAudit"
 _FORBIDDEN_TABLES = frozenset({"Strategies"})
 
 
-def _host() -> str:
-    return os.environ.get("RETHINKDB_HOST", "localhost")
-
-
-def _port() -> int:
-    return int(os.environ.get("RETHINKDB_PORT", "28015"))
-
-
 def _assert_table_allowed(name: str) -> None:
     if name in _FORBIDDEN_TABLES:
         raise RuntimeError(
@@ -51,52 +37,45 @@ def _assert_table_allowed(name: str) -> None:
         )
 
 
+class _StoreConn:
+    """Placeholder handed to the ``with _conn() as c`` blocks that survive.
+
+    The store takes its own pooled connection per operation, so nothing is
+    opened here. ``live_risk_state.RethinkRiskBackend`` still imports ``_conn``
+    as its default connection factory, so the context manager keeps existing.
+    """
+
+    def close(self) -> None:
+        return None
+
+
 @contextmanager
 def _conn() -> Iterator:
-    if not _HAS_RDB or _r is None:
-        raise RuntimeError("rethinkdb not available")
-    c = _r.connect(host=_host(), port=_port(), timeout=10)
-    try:
-        yield c
-    finally:
-        try:
-            c.close()
-        except Exception:
-            pass
+    yield _StoreConn()
 
 
 def ensure_tables() -> None:
     """Create WAL/state/audit tables if missing. Raises if a forbidden table is requested."""
     for t in (WAL_TABLE, LIFECYCLE_TABLE, STATE_TABLE, AUDIT_TABLE):
         _assert_table_allowed(t)
-    with _conn() as c:
-        existing = set(_r.db(DB_NAME).table_list().run(c))
-        for t in (WAL_TABLE, LIFECYCLE_TABLE, STATE_TABLE, AUDIT_TABLE):
-            if t not in existing:
-                _r.db(DB_NAME).table_create(t).run(c)
+    for t in (WAL_TABLE, LIFECYCLE_TABLE, STATE_TABLE, AUDIT_TABLE):
+        schema.ensure_table(t)
 
 
 def ensure_alpha_wal_indexes() -> None:
-    """Create the LiveOrderWAL secondary indexes the benchmark-alpha system
-    queries by (Task 5): ``instance_id`` for instance-scoped reconciliation
-    and ``client_order_id`` for prefix scans that replace the full-table
-    filter in ``list_filled_for_prefix``. WAL rows carry ``instance_id``,
-    ``run_id``, ``allocation_id``, and ``intent_id`` as OPTIONAL fields
-    (existing callers unchanged; Task 14 threads them through
-    ``record_intent``)."""
+    """The LiveOrderWAL secondary indexes the benchmark-alpha system queries
+    by (Task 5): ``instance_id`` for instance-scoped reconciliation and
+    ``client_order_id`` for prefix scans that replace the full-table filter in
+    ``list_filled_for_prefix``. Both are declared in ``db/schema.py``, so this
+    is now the same idempotent ensure_table the rest of the module calls."""
     _assert_table_allowed(WAL_TABLE)
-    with _conn() as c:
-        existing = set(_r.db(DB_NAME).table(WAL_TABLE).index_list().run(c))
-        for index in ("instance_id", "client_order_id"):
-            if index not in existing:
-                _r.db(DB_NAME).table(WAL_TABLE).index_create(index).run(c)
-                _r.db(DB_NAME).table(WAL_TABLE).index_wait(index).run(c)
+    schema.ensure_table(WAL_TABLE)
 
 
 # ---- WAL store adapter ----
 
 class WALStore:
-    """Storage backend for LiveOrderWAL, wrapping RethinkDB LiveOrderWAL table."""
+    """Storage backend for LiveOrderWAL, wrapping the LiveOrderWAL table."""
 
     def __init__(self) -> None:
         _assert_table_allowed(WAL_TABLE)
@@ -104,18 +83,15 @@ class WALStore:
     def insert(self, row: dict) -> None:
         _assert_table_allowed(WAL_TABLE)
         payload = dict(row, id=row["client_order_id"])
-        with _conn() as c:
-            _r.db(DB_NAME).table(WAL_TABLE).insert(payload, conflict="error").run(c)
+        store.insert(WAL_TABLE, payload, conflict="error")
 
     def update(self, cid: str, patch: dict) -> None:
         _assert_table_allowed(WAL_TABLE)
-        with _conn() as c:
-            _r.db(DB_NAME).table(WAL_TABLE).get(cid).update(patch).run(c)
+        store.update(WAL_TABLE, cid, patch)
 
     def get(self, cid: str) -> Optional[dict]:
         _assert_table_allowed(WAL_TABLE)
-        with _conn() as c:
-            row = _r.db(DB_NAME).table(WAL_TABLE).get(cid).run(c)
+        row = store.get(WAL_TABLE, cid)
         if not row:
             return None
         row.pop("id", None)
@@ -124,8 +100,7 @@ class WALStore:
     def list_open(self) -> list[dict]:
         _assert_table_allowed(WAL_TABLE)
         terminal = {"filled", "canceled", "rejected", "expired"}
-        with _conn() as c:
-            rows = list(_r.db(DB_NAME).table(WAL_TABLE).run(c))
+        rows = store.run(WAL_TABLE)
         return [r for r in rows if r.get("state") not in terminal]
 
     def list_filled_for_prefix(
@@ -145,14 +120,14 @@ class WALStore:
         another's. For instance_id="main", the prefix is "main-" — see
         broker_adapters/_client_order_id.py for the exact format.
 
-        NOTE: this scans the WAL table without a secondary index. Fine for
-        the few-thousand-row WAL typical of a single live instance over six
-        months. If we deploy many concurrent instances we should add an
-        index on client_order_id.
+        The scan stays a full-table read in Python, exactly as it was under
+        RethinkDB: pushing the prefix into SQL would change which rows a row
+        missing ``client_order_id`` falls into, and every other filter here
+        (``filled_qty`` truthiness, the ``dry-`` exclusion) is Python
+        truthiness that has no faithful SQL twin.
         """
         _assert_table_allowed(WAL_TABLE)
-        with _conn() as c:
-            rows = list(_r.db(DB_NAME).table(WAL_TABLE).run(c))
+        rows = store.run(WAL_TABLE)
         out: list[dict] = []
         for row in rows:
             cid = row.get("client_order_id") or ""
@@ -175,7 +150,7 @@ class WALStore:
         return out
 
 
-class RethinkLifecycleBackend:
+class PostgresLifecycleBackend:
     """Atomic backend for ``live_orders.OrderLifecycleStore``.
 
     Each row owns one immutable client-order identity. ``events`` only grows;
@@ -190,10 +165,9 @@ class RethinkLifecycleBackend:
         payload = dict(row)
         payload["id"] = payload["client_order_id"]
         try:
-            with _conn() as c:
-                _r.db(DB_NAME).table(LIFECYCLE_TABLE).insert(
-                    payload, conflict="error"
-                ).run(c)
+            res = store.insert(LIFECYCLE_TABLE, payload, conflict="error")
+            if res["errors"]:
+                raise RuntimeError(res["first_error"] or "insert failed")
             return True
         except Exception:
             # A duplicate deterministic identity is idempotent. Any storage
@@ -204,13 +178,7 @@ class RethinkLifecycleBackend:
 
     def get(self, client_order_id: str) -> Optional[dict]:
         _assert_table_allowed(LIFECYCLE_TABLE)
-        with _conn() as c:
-            row = (
-                _r.db(DB_NAME)
-                .table(LIFECYCLE_TABLE)
-                .get(str(client_order_id))
-                .run(c)
-            )
+        row = store.get(LIFECYCLE_TABLE, str(client_order_id))
         if row is None:
             return None
         row.pop("id", None)
@@ -219,37 +187,39 @@ class RethinkLifecycleBackend:
     def compare_and_swap(
         self, client_order_id: str, expected_version: int, row
     ) -> bool:
+        """One statement: UPDATE ... WHERE id = %s AND <version matches>.
+
+        The ReQL form was ``.update(lambda cur: r.branch(cur['version']
+        .default(-1).eq(expected), patch, {}))`` -- a DEEP MERGE of ``patch``
+        on match, not a replace, so a key present on the stored row and absent
+        from ``patch`` (``id``, which is popped below) survives. ``store.update``
+        over a Selection is the same deep merge in one server-side statement,
+        and it counts a no-change patch as ``unchanged`` exactly as ReQL did.
+        """
         _assert_table_allowed(LIFECYCLE_TABLE)
         patch = dict(row)
         patch.pop("id", None)
-        with _conn() as c:
-            result = (
-                _r.db(DB_NAME)
-                .table(LIFECYCLE_TABLE)
-                .get(str(client_order_id))
-                .update(
-                    lambda current: _r.branch(
-                        current["version"].default(-1).eq(int(expected_version)),
-                        patch,
-                        {},
-                    )
-                )
-                .run(c)
-            )
+        rid = store.coerce_id(LIFECYCLE_TABLE, str(client_order_id))
+        # The dict predicate carries the guarded ::numeric compare, so a
+        # version stored as 3.0 still matches an expected 3, as it did in ReQL.
+        sel = store.filter(
+            LIFECYCLE_TABLE, {"version": int(expected_version)}
+        ).where("id = %s", (rid,))
+        result = store.update(LIFECYCLE_TABLE, sel, patch)
         return int(result.get("replaced", 0) or 0) == 1
 
     def list_for_instance(self, instance_id: str) -> list[dict]:
         _assert_table_allowed(LIFECYCLE_TABLE)
-        with _conn() as c:
-            rows = list(
-                _r.db(DB_NAME)
-                .table(LIFECYCLE_TABLE)
-                .filter({"instance_id": str(instance_id)})
-                .run(c)
-            )
+        rows = store.run(
+            store.filter(LIFECYCLE_TABLE, {"instance_id": str(instance_id)}))
         for row in rows:
             row.pop("id", None)
         return rows
+
+
+# The class was named for the driver, not for what it does. Both names refer
+# to the same object so broker.py (a different port group) keeps importing.
+RethinkLifecycleBackend = PostgresLifecycleBackend
 
 
 # ---- NexusRuntimeState accessors ----
@@ -257,8 +227,7 @@ class RethinkLifecycleBackend:
 def load_runtime_state(instance_id: str, scope_id: str) -> dict:
     _assert_table_allowed(STATE_TABLE)
     key = f"{instance_id}:{scope_id}"
-    with _conn() as c:
-        row = _r.db(DB_NAME).table(STATE_TABLE).get(key).run(c)
+    row = store.get(STATE_TABLE, key)
     if not row:
         return {}
     row.pop("id", None)
@@ -269,8 +238,7 @@ def save_runtime_state(instance_id: str, scope_id: str, state: dict) -> None:
     _assert_table_allowed(STATE_TABLE)
     key = f"{instance_id}:{scope_id}"
     payload = dict(state, id=key)
-    with _conn() as c:
-        _r.db(DB_NAME).table(STATE_TABLE).insert(payload, conflict="replace").run(c)
+    store.insert(STATE_TABLE, payload, conflict="replace")
 
 
 # ---- LiveDecisionAudit (append-only) ----
@@ -278,5 +246,4 @@ def save_runtime_state(instance_id: str, scope_id: str, state: dict) -> None:
 def audit_decision(record: dict) -> None:
     """Append a live decision to the audit log. Never updates or deletes."""
     _assert_table_allowed(AUDIT_TABLE)
-    with _conn() as c:
-        _r.db(DB_NAME).table(AUDIT_TABLE).insert(dict(record)).run(c)
+    store.insert(AUDIT_TABLE, dict(record))

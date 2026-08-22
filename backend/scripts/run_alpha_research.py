@@ -47,31 +47,9 @@ def _load_specs(path) -> tuple[ExperimentSpec, ...]:
 
 
 def _build_production_registry() -> ExperimentRegistry:
-    try:
-        from rethinkdb import RethinkDB
-    except Exception as exc:
-        raise RuntimeError("RethinkDB is required for durable registration") from exc
-
-    r_module = RethinkDB()
-    host = os.environ.get("RETHINKDB_HOST", "localhost")
-    port = int(os.environ.get("RETHINKDB_PORT", "28015"))
-    db_name = os.environ.get("RETHINKDB_DB", "IntelliStock")
-
-    @contextmanager
-    def connection_factory():
-        connection = r_module.connect(host=host, port=port, timeout=10)
-        try:
-            yield connection
-        finally:
-            connection.close()
-
-    return ExperimentRegistry(
-        store=AlphaRethinkStore(
-            r_module,
-            connection_factory,
-            db_name=db_name,
-        )
-    )
+    # R26: the store pools its own connection per operation, so the registry
+    # needs neither a driver handle nor a connection factory.
+    return ExperimentRegistry(store=AlphaRethinkStore())
 
 
 def _register_all_before_execution(registry, specs):

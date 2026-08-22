@@ -12,10 +12,10 @@ if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 os.chdir(BACKEND_DIR)
 
-from rethinkdb import RethinkDB
+from db import store as db_store
+from db import watch as db_watch
 from intellistock_logger import intellistock_logger
 
-r = RethinkDB()
 DB_NAME = 'IntelliStock'
 RETHINKDB_HOST = os.environ.get('RETHINKDB_HOST', 'localhost')
 RETHINKDB_PORT = int(os.environ.get('RETHINKDB_PORT', '28015'))
@@ -25,8 +25,10 @@ if os.name == 'nt':
 
 
 def get_conn():
-    """Create a new RethinkDB connection (connections are not thread-safe)."""
-    return r.connect(host=RETHINKDB_HOST, port=RETHINKDB_PORT)
+    """R26: the store takes its own pooled connection per operation, so there
+    is nothing to hand out. Kept so the readiness probe below reads as it did.
+    """
+    return None
 
 
 def _is_retryable_rethink_error(exc) -> bool:
@@ -38,11 +40,11 @@ def wait_for_rethinkdb(max_attempts=30, delay=2, require_primary=False):
     """Wait until RethinkDB accepts connections and, optionally, table primaries are ready."""
     for attempt in range(1, max_attempts + 1):
         try:
-            conn = get_conn()
             if require_primary:
-                r.db(DB_NAME).table('Config').get('Pings').default({}).run(conn)
-                r.db(DB_NAME).table('EngineControl').get('discover_engine').default({}).run(conn)
-            conn.close()
+                db_store.get('Config', 'Pings')
+                db_store.get('EngineControl', 'discover_engine')
+            else:
+                db_store.table_list()
             return True
         except Exception as e:
             if attempt == max_attempts:
@@ -62,19 +64,18 @@ def run_config_pings_changefeed():
     global terminate_requested
     delay = 2
     while not terminate_requested:
-        c = None
         try:
-            c = get_conn()
-            for change in r.db(DB_NAME).table('Config').get('Pings').changes().run(c):
+            for change in db_watch.feed('Config', row_id='Pings',
+                                        include_initial=False):
                 if terminate_requested:
                     return
                 new_val = change.get('new_val')
                 if new_val and 'discoverServicePing' in new_val:
                     try:
                         request = new_val['discoverServicePing']
-                        r.db(DB_NAME).table('Config').get('Pings').update({
+                        db_store.update('Config', 'Pings', {
                             'discoverServiceResponse': request
-                        }).run(c)
+                        })
                     except Exception as e:
                         intellistock_logger.log(str(e), "red", service="DiscoverEngine")
             delay = 2
@@ -85,9 +86,6 @@ def run_config_pings_changefeed():
             intellistock_logger.log(f"Config Pings changefeed error: {e}", level, service="DiscoverEngine")
             time.sleep(delay)
             delay = min(delay * 1.5, 30)
-        finally:
-            if c:
-                c.close()
 
 
 def run_engine_control_changefeed():
@@ -100,10 +98,10 @@ def run_engine_control_changefeed():
         ENGINE_ID_DISCOVER = "discover_engine"
     delay = 2
     while not terminate_requested:
-        c = None
         try:
-            c = get_conn()
-            for change in r.db(DB_NAME).table(ENGINE_CONTROL_TABLE).get(ENGINE_ID_DISCOVER).changes().run(c):
+            for change in db_watch.feed(ENGINE_CONTROL_TABLE,
+                                        row_id=ENGINE_ID_DISCOVER,
+                                        include_initial=False):
                 new_val = change.get('new_val')
                 if new_val and new_val.get('terminate') is True:
                     terminate_requested = True
@@ -117,9 +115,6 @@ def run_engine_control_changefeed():
             intellistock_logger.log(f"EngineControl changefeed error: {e}", level, service="DiscoverEngine")
             time.sleep(delay)
             delay = min(delay * 1.5, 30)
-        finally:
-            if c:
-                c.close()
 
 
 def run_discover():

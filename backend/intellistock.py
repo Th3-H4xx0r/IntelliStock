@@ -9,9 +9,24 @@ import firebase_admin
 from firebase_admin import credentials
 from firebase_admin import firestore
 import sqlite3
-from rethinkdb import RethinkDB
+import uuid
+
+from db import store
 
 init()
+
+# NOTE (Postgres port, G11): this module has ZERO importers -- it is the
+# original 2021-era API shim, kept for reference. Its tables ("Prices",
+# "Transactions") are not in db/schema.py's registry, so they would be
+# created from the default template on first use. ReQL generated a UUID
+# primary key for a document with no "id"; store.insert requires one, so the
+# two insert sites below now generate the same thing explicitly.
+
+def _epoch_to_iso(epoch_seconds):
+    """R24 replacement for ``r.epoch_time(x)``: a UTC ISO-8601 string, which
+    is what any reader of these documents got after JSON serialisation."""
+    return dt.datetime.fromtimestamp(epoch_seconds, dt.timezone.utc).isoformat()
+
 
 class intellistockAPI:
 
@@ -24,15 +39,14 @@ class intellistockAPI:
         self.ticker = ticker
         self.endpoint = 'https://intellistockapi.loca.lt'
         self.backupEndpoint = 'http://localhost:3101'
-        self.r = RethinkDB()
-        self.connection = self.r.connect( "localhost", 28015).repl()
+        self.connection = None      # the store takes its own connection
 
 
         print("Intellistock class connected to firebase")
 
         if(mode != 'instance'):
 
-            table = self.r.db("Intellistock").table('LivePricesStocks').filter(self.r.row['ticker'] == self.ticker).run(self.connection)
+            table = store.run(store.filter('LivePricesStocks', {'ticker': self.ticker}))
 
             inTable = False
 
@@ -43,24 +57,24 @@ class intellistockAPI:
             
 
             if(inTable == False):
-                self.r.db("Intellistock").table('LivePricesStocks').insert({
+                store.insert('LivePricesStocks', {
                     "id": self.ticker,
                     "ticker": self.ticker,
                     "price": 0,
                     "timestamp": 0,
-                }).run(self.connection)
+                })
 
-                self.r.db("Intellistock").table('LivePrices').insert({
+                store.insert('LivePrices', {
                     "id": self.ticker,
                     "ticker": self.ticker,
                     "price": 0,
                     #"timestamp": timestamp,
-                }).run(self.connection)
+                })
 
 
     
     def getPrice(self):
-        table = self.r.db("Intellistock").table('LivePrices').filter(self.r.row['id'] == self.ticker).run(self.connection)
+        table = store.run(store.filter('LivePrices', {'id': self.ticker}))
 
         price = 0
 
@@ -112,8 +126,8 @@ class intellistockAPI:
             timestamp = calendar.timegm(calendarTime)
 
             try:
-                table = self.r.db("Intellistock").table('Prices')
-                table.insert({
+                store.insert('Prices', {
+                    "id": str(uuid.uuid4()),
                     "ticker": self.ticker,
                     "price": price,
                     "timestamp": timestamp,
@@ -121,8 +135,8 @@ class intellistockAPI:
                     "day": now.day,
                     "month": now.month,
                     "year": now.year,
-                    "datetime": self.r.epoch_time(timestamp)
-                }).run(self.connection)
+                    "datetime": _epoch_to_iso(timestamp),
+                })
 
             except Exception as e:
                 print(colored("[ERROR][" + str(dt.datetime.now().strftime("%H:%M:%S")) + "] Update ticker price error RETHINK. Skipping", 'red'))
@@ -205,8 +219,8 @@ class intellistockAPI:
             timestamp = calendar.timegm(calendarTime)
 
             try:
-                table = self.r.db("Intellistock").table('Transactions')
-                table.insert({
+                store.insert('Transactions', {
+                    "id": str(uuid.uuid4()),
                     "type": action,
                     "ticker": self.ticker,
                     "quantity": shares,
@@ -216,8 +230,8 @@ class intellistockAPI:
                     "day": now.day,
                     "month": now.month,
                     "year": now.year,
-                    "datetime": self.r.epoch_time(timestamp)
-                }).run(self.connection)
+                    "datetime": _epoch_to_iso(timestamp),
+                })
 
             except Exception as e:
                 print(colored("[ERROR][" + str(dt.datetime.now().strftime("%H:%M:%S")) + "] Update transaction error RETHINK. Skipping", 'red'))

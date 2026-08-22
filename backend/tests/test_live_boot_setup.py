@@ -32,68 +32,65 @@ def test_auto_reset_unset_env_mirrors_clean_room():
 # ----------------- is_first_clean_room_boot -----------------------------
 
 
-def _fake_r_for_first_boot(audit_table_exists: bool, audit_rows_for_main: list | None = None):
-    """Build a MagicMock rethinkdb root that yields the requested topology.
+def _seed_audit(store, monkeypatch, audit_table_exists, audit_rows_for_main=None):
+    """Point live_boot_setup at ``store`` and seed the LiveBootAudit rows.
 
-    audit_rows_for_main: the LiveBootAudit rows .filter(instance_id).run() returns
-    (each a dict that may carry a 'mode' key)."""
-    r = MagicMock()
-    db = MagicMock()
-    r.db.return_value = db
+    Postgres port (G11): ``r`` and ``conn`` are still on the signature but are
+    ignored, so the topology is set up on the store instead of on a mock.
+    """
+    import live_boot_setup
 
-    db.table_list.return_value.run.return_value = (
-        ["Instances", "BrokerageAccounts", "LiveBootAudit", "Other"]
-        if audit_table_exists
-        else ["Instances", "BrokerageAccounts", "Other"]
-    )
-
-    # LiveBootAudit -> filter(...).run(conn) -> iterable of rows
-    audit_tbl = MagicMock()
-    audit_filtered = MagicMock()
-    audit_filtered.run.return_value = iter(list(audit_rows_for_main or []))
-    audit_tbl.filter.return_value = audit_filtered
-
-    def _table_dispatch(name):
-        if name == "LiveBootAudit":
-            return audit_tbl
-        return MagicMock()
-    db.table.side_effect = _table_dispatch
-    return r
+    monkeypatch.setattr(live_boot_setup, "store", store)
+    if not audit_table_exists:
+        monkeypatch.setattr(store, "table_list", lambda: ["Instances", "Other"])
+        return
+    monkeypatch.setattr(
+        store, "table_list",
+        lambda: ["Instances", "BrokerageAccounts", "LiveBootAudit", "Other"])
+    rows = [dict(row, id=f"audit-{i}")
+            for i, row in enumerate(audit_rows_for_main or [])]
+    if rows:
+        store.insert("LiveBootAudit", rows)
 
 
-def test_first_clean_room_boot_table_absent_is_true():
+def test_first_clean_room_boot_table_absent_is_true(store, monkeypatch):
     from live_boot_setup import is_first_clean_room_boot
-    r = _fake_r_for_first_boot(audit_table_exists=False)
-    assert is_first_clean_room_boot(r, conn=MagicMock(), instance_id="main") is True
+    _seed_audit(store, monkeypatch, audit_table_exists=False)
+    assert is_first_clean_room_boot(None, conn=None, instance_id="main") is True
 
 
-def test_first_clean_room_boot_table_exists_no_rows_is_true():
+def test_first_clean_room_boot_table_exists_no_rows_is_true(store, monkeypatch):
     from live_boot_setup import is_first_clean_room_boot
-    r = _fake_r_for_first_boot(audit_table_exists=True, audit_rows_for_main=[])
-    assert is_first_clean_room_boot(r, conn=MagicMock(), instance_id="main") is True
+    _seed_audit(store, monkeypatch, audit_table_exists=True, audit_rows_for_main=[])
+    assert is_first_clean_room_boot(None, conn=None, instance_id="main") is True
 
 
-def test_first_clean_room_boot_prior_clean_room_row_is_false():
+def test_first_clean_room_boot_prior_clean_room_row_is_false(store, monkeypatch):
     from live_boot_setup import is_first_clean_room_boot
-    r = _fake_r_for_first_boot(
-        audit_table_exists=True,
-        audit_rows_for_main=[{"instance_id": "main", "mode": "clean_room"}],
-    )
-    assert is_first_clean_room_boot(r, conn=MagicMock(), instance_id="main") is False
+    _seed_audit(store, monkeypatch, audit_table_exists=True,
+                audit_rows_for_main=[{"instance_id": "main", "mode": "clean_room"}])
+    assert is_first_clean_room_boot(None, conn=None, instance_id="main") is False
 
 
-def test_first_clean_room_boot_only_legacy_rows_is_true():
+def test_first_clean_room_boot_ignores_other_instances(store, monkeypatch):
+    """The filter is scoped to instance_id -- another instance's clean-room row
+    must not suppress this one's first-boot cleanup."""
+    from live_boot_setup import is_first_clean_room_boot
+    _seed_audit(store, monkeypatch, audit_table_exists=True,
+                audit_rows_for_main=[{"instance_id": "other", "mode": "clean_room"}])
+    assert is_first_clean_room_boot(None, conn=None, instance_id="main") is True
+
+
+def test_first_clean_room_boot_only_legacy_rows_is_true(store, monkeypatch):
     """0-B: a prior LEGACY/smoke boot must NOT suppress the first clean-room
     cleanup (the per-boot audit row is written on every boot, mode='legacy')."""
     from live_boot_setup import is_first_clean_room_boot
-    r = _fake_r_for_first_boot(
-        audit_table_exists=True,
-        audit_rows_for_main=[
-            {"instance_id": "main", "mode": "legacy"},
-            {"instance_id": "main", "mode": "legacy"},
-        ],
-    )
-    assert is_first_clean_room_boot(r, conn=MagicMock(), instance_id="main") is True
+    _seed_audit(store, monkeypatch, audit_table_exists=True,
+                audit_rows_for_main=[
+                    {"instance_id": "main", "mode": "legacy"},
+                    {"instance_id": "main", "mode": "legacy"},
+                ])
+    assert is_first_clean_room_boot(None, conn=None, instance_id="main") is True
 
 
 def test_rebaseline_clean_room_drawdown_resets_stale_backtest_peak():
@@ -146,12 +143,17 @@ def test_first_clean_room_boot_empty_instance_id_is_false():
     assert is_first_clean_room_boot(r, conn=MagicMock(), instance_id=None) is False  # type: ignore[arg-type]
 
 
-def test_first_clean_room_boot_db_error_is_false():
-    """Defensive: if RethinkDB errors out we return False (skip cleanup)."""
+def test_first_clean_room_boot_db_error_is_false(store, monkeypatch):
+    """Defensive: if the store errors out we return False (skip cleanup)."""
+    import live_boot_setup
     from live_boot_setup import is_first_clean_room_boot
-    r = MagicMock()
-    r.db.side_effect = RuntimeError("connection dropped")
-    assert is_first_clean_room_boot(r, conn=MagicMock(), instance_id="main") is False
+
+    def _boom():
+        raise RuntimeError("connection dropped")
+
+    monkeypatch.setattr(live_boot_setup, "store", store)
+    monkeypatch.setattr(store, "table_list", _boom)
+    assert is_first_clean_room_boot(None, conn=None, instance_id="main") is False
 
 
 # ----------------- run_first_clean_room_boot_cleanup --------------------
@@ -240,33 +242,30 @@ def test_should_reset_unknown_origin_only_on_first_boot():
 # after cleanup, before _build_adapter.
 
 
-def test_write_cleanup_marker_inserts_clean_room_sentinel():
+def test_write_cleanup_marker_inserts_clean_room_sentinel(store, monkeypatch):
+    import live_boot_setup
     from live_boot_setup import write_clean_room_cleanup_marker
-    r = MagicMock()
-    db = MagicMock()
-    r.db.return_value = db
-    db.table_list.return_value.run.return_value = ["LiveBootAudit"]
-    tbl = MagicMock()
-    db.table.return_value = tbl
-    ok = write_clean_room_cleanup_marker(r, conn=MagicMock(), instance_id="main")
+
+    monkeypatch.setattr(live_boot_setup, "store", store)
+    ok = write_clean_room_cleanup_marker(None, conn=None, instance_id="main")
     assert ok is True
-    args, kwargs = tbl.insert.call_args
-    row = args[0]
-    assert row["id"] == "main|cleanup-done"
+    row = store.get("LiveBootAudit", "main|cleanup-done")
     assert row["mode"] == "clean_room"
     assert row["instance_id"] == "main"
-    assert kwargs.get("conflict") == "replace"
+    assert row["marker"] == "cleanup-done"
+    # conflict="replace" keeps it idempotent across repeated boots.
+    assert write_clean_room_cleanup_marker(None, conn=None, instance_id="main") is True
+    assert store.count("LiveBootAudit") == 1
 
 
-def test_write_cleanup_marker_makes_first_boot_false():
+def test_write_cleanup_marker_makes_first_boot_false(store, monkeypatch):
     """The mode='clean_room' sentinel makes is_first_clean_room_boot False even
     if the later forensic audit row never gets written."""
     from live_boot_setup import is_first_clean_room_boot
-    r = _fake_r_for_first_boot(
-        audit_table_exists=True,
-        audit_rows_for_main=[{"instance_id": "main", "mode": "clean_room", "marker": "cleanup-done"}],
-    )
-    assert is_first_clean_room_boot(r, conn=MagicMock(), instance_id="main") is False
+    _seed_audit(store, monkeypatch, audit_table_exists=True,
+                audit_rows_for_main=[{"instance_id": "main", "mode": "clean_room",
+                                      "marker": "cleanup-done"}])
+    assert is_first_clean_room_boot(None, conn=None, instance_id="main") is False
 
 
 def test_write_cleanup_marker_empty_instance_id_is_noop():
@@ -274,9 +273,14 @@ def test_write_cleanup_marker_empty_instance_id_is_noop():
     assert write_clean_room_cleanup_marker(MagicMock(), MagicMock(), "") is False
 
 
-def test_write_cleanup_marker_swallows_db_error():
+def test_write_cleanup_marker_swallows_db_error(store, monkeypatch):
     """Best-effort: a DB failure returns False, never raises into broker boot."""
+    import live_boot_setup
     from live_boot_setup import write_clean_room_cleanup_marker
-    r = MagicMock()
-    r.db.side_effect = RuntimeError("conn dropped")
-    assert write_clean_room_cleanup_marker(r, MagicMock(), "main") is False
+
+    def _boom(*a, **k):
+        raise RuntimeError("conn dropped")
+
+    monkeypatch.setattr(live_boot_setup, "store", store)
+    monkeypatch.setattr(store, "insert", _boom)
+    assert write_clean_room_cleanup_marker(None, None, "main") is False

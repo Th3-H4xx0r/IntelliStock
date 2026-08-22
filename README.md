@@ -243,14 +243,24 @@ into `.env` stable. Losing `INTELLISTOCK_CRED_KEY` makes encrypted
 brokerage credentials unrecoverable; losing `SECRET_AUTH_KEY` breaks
 new-user signup until you generate a replacement.
 
+You must also set `POSTGRES_PASSWORD` in `.env`. The `postgres` service
+refuses to render without it, so compose fails immediately rather than
+booting a database with an empty password. `.env.example` documents the
+rest of the `POSTGRES_*` settings; all of them are optional, and
+`PG_DSN` overrides the lot when you point the stack at a database you
+manage yourself. Postgres publishes on `127.0.0.1` by default —
+`POSTGRES_BIND_ADDR` opens it up, and should only be set on a host
+reachable over a private network.
+
 ## Quick start (TL;DR)
 
 ```bash
 git clone https://github.com/Th3-H4xx0r/IntelliStock.git
 cd IntelliStock
 
-# Bring up the full stack (rethinkdb, neo4j, backend, api, frontend,
-# price-service, backtest-engine, credential-service, optional discord-bot)
+# Bring up the full stack (postgres, rethinkdb, neo4j, backend, api,
+# frontend, price-service, backtest-engine, credential-service,
+# optional discord-bot)
 ./install.sh                                     # or .\install.ps1 on Windows
 
 # Tail logs while it boots
@@ -259,7 +269,7 @@ docker compose logs -f api
 # Stop everything
 docker compose down
 
-# Stop AND wipe RethinkDB + Neo4j volumes (destructive)
+# Stop AND wipe the Postgres + RethinkDB + Neo4j volumes (destructive)
 docker compose down -v
 ```
 
@@ -294,11 +304,19 @@ visible — read the [educational-use warning](#) above, the
 [Security model (important)](#security-model-important) section below,
 and start in paper mode. Always.
 
-**Why Neo4j and RethinkDB instead of one database?** RethinkDB's native
-changefeeds let the live-trading instances react to control-row
-mutations in real time without polling. Neo4j gives the Graph Nexus
-1-hop and 2-hop traversals that would be ugly in SQL. They earn their
-operational cost in the workloads they're actually used for.
+**Why Neo4j and PostgreSQL instead of one database?** Documents live in
+Postgres as JSONB; live-trading instances react to control-row mutations
+in real time through `LISTEN`/`NOTIFY` rather than polling. Neo4j gives
+the Graph Nexus 1-hop and 2-hop traversals that would be ugly in SQL.
+They earn their operational cost in the workloads they're actually used
+for.
+
+**Why is RethinkDB still here?** It was the document store until the
+2026-08 port and remains the rollback path until it is decommissioned —
+the service, its volume, and every `RETHINKDB_*` variable stay in place
+deliberately. Nothing reads it once Postgres is live. See
+[`docs/runbooks/postgres-cutover.md`](docs/runbooks/postgres-cutover.md)
+for how the move is performed and reversed.
 
 **Can I use it without the Graph Nexus?** Yes. The `graph_nexus_analysis`
 strategy is opt-in per instance — every other strategy (RSI, MACD,

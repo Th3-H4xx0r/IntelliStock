@@ -95,6 +95,7 @@ services:
       - codex_auth:/root/.codex
     restart: unless-stopped
     depends_on:
+      - postgres
       - rethinkdb
       - neo4j
     env_file:
@@ -102,6 +103,11 @@ services:
     environment:
       - TERM=dumb
       - RETHINKDB_HOST=rethinkdb
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-IntelliStock}
+      - POSTGRES_USER=${POSTGRES_USER:-intellistock}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-}
       - RETHINKDB_PORT=28015
       - NEO4J_URI=bolt://neo4j:7687
       - NEO4J_USER=neo4j
@@ -114,6 +120,7 @@ services:
       # Evidence capture is opt-in and never starts an equities worker.
       - PIT_CAPTURE_ENABLED=${PIT_CAPTURE_ENABLED:-0}
       - INSTANCE_RETHINKDB_HOST=rethinkdb
+      - INSTANCE_POSTGRES_HOST=postgres
       - INSTANCE_SERVER_URL=http://intellistock-backend:5000
       - INSTANCE_DOCKER_NETWORK=intellistockv4_default
       - GRAPH_NEXUS_CACHE_DIR=/app/.cache
@@ -174,6 +181,11 @@ services:
       - .env
     environment:
       - RETHINKDB_HOST=rethinkdb
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-IntelliStock}
+      - POSTGRES_USER=${POSTGRES_USER:-intellistock}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-}
       - RETHINKDB_PORT=28015
       - API_HOST=0.0.0.0
       - NEO4J_URI=bolt://neo4j:7687
@@ -185,6 +197,7 @@ services:
       - LIVE_TRADING_LOG_DIR=/app/live_trading_logs
     restart: unless-stopped
     depends_on:
+      - postgres
       - rethinkdb
       - neo4j
 
@@ -194,9 +207,15 @@ services:
     command: ["python", "engines/price_engine.py"]
     restart: unless-stopped
     depends_on:
+      - postgres
       - rethinkdb
     environment:
       - RETHINKDB_HOST=rethinkdb
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-IntelliStock}
+      - POSTGRES_USER=${POSTGRES_USER:-intellistock}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-}
       - RETHINKDB_PORT=28015
 
   backtest-engine:
@@ -205,6 +224,7 @@ services:
     command: ["python", "engines/backtest_engine.py"]
     restart: unless-stopped
     depends_on:
+      - postgres
       - rethinkdb
       - neo4j
     volumes:
@@ -228,12 +248,18 @@ services:
       - .env
     environment:
       - RETHINKDB_HOST=rethinkdb
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-IntelliStock}
+      - POSTGRES_USER=${POSTGRES_USER:-intellistock}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-}
       - RETHINKDB_PORT=28015
       - NEO4J_URI=bolt://neo4j:7687
       - NEO4J_USER=neo4j
       - NEO4J_PASSWORD=${NEO4J_PASSWORD:?Set NEO4J_PASSWORD in .env (run install.sh/install.ps1 to auto-generate)}
       - DOCKER_INSTANCE_IMAGE=intellistock-backend
       - INSTANCE_RETHINKDB_HOST=rethinkdb
+      - INSTANCE_POSTGRES_HOST=postgres
       - INSTANCE_DOCKER_NETWORK=intellistockv4_default
       - BACKTEST_LOG_VOLUME=backtest_logs
       - BACKTEST_LOG_DIR=/app/backtest_logs
@@ -292,6 +318,7 @@ services:
     command: ["python", "engines/discord_bot.py"]
     restart: unless-stopped
     depends_on:
+      - postgres
       - rethinkdb
       - neo4j
     ports:
@@ -300,6 +327,11 @@ services:
       - .env
     environment:
       - RETHINKDB_HOST=rethinkdb
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-IntelliStock}
+      - POSTGRES_USER=${POSTGRES_USER:-intellistock}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-}
       - RETHINKDB_PORT=28015
       - NEO4J_URI=bolt://neo4j:7687
       - NEO4J_USER=neo4j
@@ -336,6 +368,49 @@ services:
 
   # Graph Nexus is no longer a separate service. The server (backend) starts/stops it via NexusControl in RethinkDB.
   # Use CLI: nexus start | nexus stop | nexus status. Or API: GET/POST /nexus/control, GET /nexus/status. Or Discord: !nexus start|stop|status.
+
+  postgres:
+    build:
+      context: ./docker/postgres        # FROM postgres:17 + postgresql-17-partman
+    container_name: intellistock-postgres
+    command: >
+      postgres -c shared_buffers=1GB -c work_mem=16MB
+               -c maintenance_work_mem=256MB
+               -c shared_preload_libraries=pg_partman_bgw
+               -c pg_partman_bgw.dbname=${POSTGRES_DB:-IntelliStock}
+               -c pg_partman_bgw.interval=3600
+               -c default_toast_compression=lz4
+               -c max_connections=120
+               -c timezone=UTC
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-IntelliStock}
+      POSTGRES_USER: ${POSTGRES_USER:-intellistock}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      PG_OOM_ADJUST_FILE: /proc/self/oom_score_adj
+      PG_OOM_ADJUST_VALUE: "0"
+    # Required: the Docker default /dev/shm is 64MB and is NOT shared_buffers.
+    # Parallel scans fail with a confusing error without this.
+    shm_size: 1gb
+    # Unlike RethinkDB, Postgres is NOT exposed on 0.0.0.0 by default.
+    # Preserving the old default would export an authenticated database to the
+    # network by accident. An operator who needs Tailscale access sets
+    # POSTGRES_BIND_ADDR explicitly.
+    ports:
+      - "${POSTGRES_BIND_ADDR:-127.0.0.1}:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "3"
+          memory: 4G          # shared_buffers=1GB is 25% of this
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-intellistock} -d ${POSTGRES_DB:-IntelliStock}"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
   rethinkdb:
     image: rethinkdb:2.4
@@ -374,6 +449,7 @@ volumes:
     name: ${NEXUS_CACHE_VOLUME_NAME:-intellistock_graph_nexus_cache}
   discover_stocks_data:
   rethinkdb_data:
+  postgres_data:
   neo4j_data:
   neo4j_logs:   # Neo4j log files; without this the image creates an anonymous volume for /logs
   backtest_logs: # Full backtest log files; mounted to api + backtest-engine + ephemeral broker containers

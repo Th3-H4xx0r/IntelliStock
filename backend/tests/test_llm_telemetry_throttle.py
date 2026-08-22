@@ -4,21 +4,12 @@ import llm_telemetry as t
 
 
 class FakeR:
-    """r_module whose .db().table().insert().run() always raises a HUGE, multi-line
-    error (mimics a rethinkdb write error that stringifies the entire insert query)."""
+    """The store handle whose insert() always raises a HUGE, multi-line error
+    (mimics a driver write error that stringifies the entire insert query)."""
     def __init__(self, exc):
         self.exc = exc
 
-    def db(self, _n):
-        return self
-
-    def table(self, _n):
-        return self
-
-    def insert(self, _rows):
-        return self
-
-    def run(self, _conn):
+    def insert(self, _table, _rows, **_kw):
         raise self.exc
 
 
@@ -47,10 +38,8 @@ def test_success_resets_failure_counter():
     t._state["consecutive_flush_failures"] = 7  # pretend we were failing
 
     class OKR:
-        def db(self, _n): return self
-        def table(self, _n): return self
-        def insert(self, _rows): return self
-        def run(self, _conn): return {"inserted": 1}
+        def insert(self, _table, rows, **_kw):
+            return {"inserted": len(rows)}
 
     t.configure(db_conn_factory=lambda: object(), enabled=True,
                 auto_start_flusher=False, r_module=OKR())

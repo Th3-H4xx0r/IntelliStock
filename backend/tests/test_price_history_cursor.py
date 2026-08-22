@@ -226,10 +226,20 @@ def test_malformed_bars_skipped_not_appended():
 
 
 def test_cursor_is_materially_faster_than_rescan():
-    """Performance regression test: cursor path must complete a
-    realistic-scale workload (50 symbols × 5000 bars × 200 calls)
-    well under 2s. A future regression that drops the cursor and
-    falls back to rescan would push this into many seconds.
+    """The cursor path must cost materially less PER CALL than the
+    from-scratch rescan it replaced.
+
+    Measured as a RATIO of two timings taken on the same machine, in the
+    same process, moments apart — not against a fixed wall-clock budget.
+    An absolute threshold measures how busy the host is: this file's own
+    workload runs in ~0.9s idle, so a machine under parallel load fails a
+    2s budget while the cursor is working perfectly. The ratio cancels
+    machine speed out, and it is the property the test's name claims.
+
+    The rescan reference is the same function with the cursor dropped
+    before every call, which is exactly the pre-2026-05-08 behaviour:
+    invalidate_cursor() clears both the cursor and the parsed-bar cache,
+    so each call re-scans every bar of every symbol from index 0.
     """
     data = {}
     for i in range(50):
@@ -238,15 +248,30 @@ def test_cursor_is_materially_faster_than_rescan():
     symbols = list(data.keys())
     base = datetime(2025, 1, 1, tzinfo=timezone.utc)
 
-    t_start = time.perf_counter()
-    for i in range(200):
-        cur_iso = (base + timedelta(hours=i * 25)).isoformat()
-        _call(data, symbols, cur_iso)
-    cursor_secs = time.perf_counter() - t_start
+    def _time_at(i):
+        return (base + timedelta(hours=i * 25)).isoformat()
 
-    assert cursor_secs < 2.0, (
-        f"Cursor path took {cursor_secs:.2f}s for 200×50-symbol calls — "
-        f"perf regression suspected (expected well under 1s)."
+    cursor_calls = 200
+    bph.invalidate_cursor()
+    t_start = time.perf_counter()
+    for i in range(cursor_calls):
+        _call(data, symbols, _time_at(i))
+    cursor_per_call = (time.perf_counter() - t_start) / cursor_calls
+
+    # A rescan call is ~2 orders of magnitude dearer, so a handful is a
+    # sufficient sample and keeps the test itself quick.
+    rescan_calls = 5
+    t_start = time.perf_counter()
+    for i in range(rescan_calls):
+        bph.invalidate_cursor()
+        _call(data, symbols, _time_at(i * (cursor_calls // rescan_calls)))
+    rescan_per_call = (time.perf_counter() - t_start) / rescan_calls
+
+    assert cursor_per_call * 10 < rescan_per_call, (
+        f"Cursor path costs {cursor_per_call * 1e3:.2f}ms/call vs "
+        f"{rescan_per_call * 1e3:.2f}ms/call for a full rescan "
+        f"({rescan_per_call / cursor_per_call:.1f}x) — the monotonic cursor "
+        f"looks disabled or defeated."
     )
 
 

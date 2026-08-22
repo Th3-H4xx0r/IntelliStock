@@ -77,35 +77,29 @@ class RethinkMigrationBackend:
             load_dotenv(os.path.join(os.path.dirname(_BACKEND_ROOT), ".env"))
         except Exception:
             pass
-        from rethinkdb import RethinkDB
-        self._r = RethinkDB()
-        self._conn = self._r.connect(
-            host=host or os.environ.get("RETHINKDB_HOST", "localhost"),
-            port=int(port or os.environ.get("RETHINKDB_PORT", "28015") or 28015),
-            timeout=20,
-        )
+        from db import store as _store
+        from db import schema as _schema
+        self._r = _store
+        self._schema = _schema
+        self._conn = None
 
     def list_tables(self):
-        return set(self._r.db(DB_NAME).table_list().run(self._conn))
+        return set(self._r.table_list())
 
     def list_indexes(self, table):
         try:
-            return set(self._r.db(DB_NAME).table(table).index_list().run(self._conn))
+            return set(self._r.index_list(table))
         except Exception:
             return set()
 
     def create_table(self, table):
-        self._r.db(DB_NAME).table_create(table).run(self._conn)
+        # R25: db.schema owns the DDL, indexes included, and is idempotent.
+        self._schema.ensure_schema(tables=[table])
 
     def create_index(self, table, index):
-        fields = COMPOUND_INDEX_FIELDS.get(index)
-        if fields:
-            row = self._r.row
-            self._r.db(DB_NAME).table(table).index_create(
-                index, [row[f] for f in fields]).run(self._conn)
-        else:
-            self._r.db(DB_NAME).table(table).index_create(index).run(self._conn)
-        self._r.db(DB_NAME).table(table).index_wait(index).run(self._conn)
+        # R25: the index set is declared in db.schema, and CREATE INDEX is
+        # synchronous, so there is no index_wait to do.
+        self._schema.ensure_schema(tables=[table])
 
 
 def retention_plan(now):

@@ -52,12 +52,12 @@ def _same_value(left, right) -> bool:
 def default_replay_store():
     """Build the production replay store over the immutable-record seam.
 
-    `RethinkReplayStore` needs an `insert_record`/`get_record` backend, NOT a
-    raw RethinkDB connection, and it opens short-lived connections of its own
-    so an immutable publish is never tied to a request- or run-scoped one.
-    Shared by the API and the broker so the two cannot drift.
+    `PostgresReplayStore` needs an `insert_record`/`get_record` backend, NOT a
+    database connection, and the store takes its own pooled connection per
+    operation so an immutable publish is never tied to a request- or
+    run-scoped one. Shared by the API and the broker so the two cannot drift.
     """
-    import contextlib
+    from db import schema
 
     from backtest_replay import (
         BUILD_TABLE,
@@ -65,33 +65,17 @@ def default_replay_store():
         FIXTURE_TABLE,
         MATRIX_TABLE,
         RECEIPT_TABLE,
-        RethinkReplayStore,
+        PostgresReplayStore,
     )
-    from benchmark_alpha.rethink_store import _RethinkBackend
-    from interactive_utils import DB_NAME, get_conn, r
-
-    @contextlib.contextmanager
-    def _conn_factory():
-        conn = get_conn()
-        try:
-            yield conn
-        finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
+    from benchmark_alpha.pg_store import PostgresBackend
 
     # Create the immutable-record tables on first use. Idempotent, and cheap
     # next to the run that follows; the alternative is a first publish that
     # fails on a missing table long after the work was done.
-    with _conn_factory() as conn:
-        existing = set(r.db(DB_NAME).table_list().run(conn))
-        for table in (MATRIX_TABLE, BUILD_TABLE, CALL_TABLE, FIXTURE_TABLE,
-                      RECEIPT_TABLE):
-            if table not in existing:
-                r.db(DB_NAME).table_create(table).run(conn)
+    schema.ensure_schema(tables=(MATRIX_TABLE, BUILD_TABLE, CALL_TABLE,
+                                 FIXTURE_TABLE, RECEIPT_TABLE))
 
-    return RethinkReplayStore(_RethinkBackend(r, _conn_factory, DB_NAME))
+    return PostgresReplayStore(PostgresBackend())
 
 
 class EvidenceRunLifecycle:

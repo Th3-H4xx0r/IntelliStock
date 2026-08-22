@@ -18,17 +18,15 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "scripts"))
 sys.path.insert(0, str(REPO / "backend"))
 from reset_backtest_event_state import conn as _conn  # noqa: E402
-from rethinkdb import RethinkDB  # noqa: E402
+from db import store as _store  # noqa: E402
 
-r = RethinkDB()
 DB = "IntelliStock"
 
 
 def daily_closes(c, symbol):
     """Every cached bar for `symbol`, collapsed to one close per session."""
     out = {}
-    cur = r.db(DB).table("AlpacaBarsCache").filter(
-        r.row["symbol"].eq(symbol)).run(c)
+    cur = _store.run(_store.filter("AlpacaBarsCache", {"symbol": symbol}))
     n_docs = 0
     for doc in cur:
         n_docs += 1

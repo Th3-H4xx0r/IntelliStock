@@ -45,6 +45,7 @@ load_dotenv(os.path.join(_backend_dir, '.env'))
 load_dotenv(os.path.join(os.path.dirname(_backend_dir), '.env'))
 
 
+from db import store as _store
 from interactive_utils import (
     RETHINKDB_HOST,
     RETHINKDB_PORT,
@@ -650,7 +651,8 @@ async def cmd_create_backtest(
             pass
     try:
         # Read key/secret from instance so the broker can fetch prices for scheduled trades
-        instance_doc = await run_sync(lambda c: r.db(DB_NAME).table("Instances").get(instance_id.strip()).run(c), conn)
+        instance_doc = await run_sync(
+            lambda _c: _store.get("Instances", instance_id.strip()), conn)
         inst_key = (instance_doc.get("key") or "") if instance_doc else ""
         inst_secret = (instance_doc.get("secret") or "") if instance_doc else ""
         out = await run_sync(

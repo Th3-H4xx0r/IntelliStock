@@ -154,95 +154,42 @@ def test_deserialize_empty_blob_returns_empty_dict():
     assert scp._deserialize_cache_from_blob("{}") == {}
 
 
-class _FakeQuery:
-    """Chainable mock that records calls and returns itself."""
-    def __init__(self, recorder, name="root"):
-        self.recorder = recorder
-        self.name = name
-    def __getattr__(self, attr):
-        return _FakeQuery(self.recorder, f"{self.name}.{attr}")
-    def __call__(self, *args, **kwargs):
-        self.recorder.append((self.name, args, kwargs))
-        return _FakeQuery(self.recorder, f"{self.name}()")
-    def __getitem__(self, key):
-        return _FakeQuery(self.recorder, f"{self.name}[{key!r}]")
+# ── Store-backed tests ────────────────────────────────────────────────────
+#
+# Postgres port (G11): ``conn`` and ``r`` are still on every signature but are
+# ignored -- the module talks to db.store directly -- so these point the module
+# at the FakeStore (or real Postgres under PG_TEST_DSN) instead of walking a
+# ReQL chain. ``_ensure_table`` runs real DDL, which the FakeStore has no
+# server for, so it is stubbed wherever the test is not about DDL.
+import datetime as _dt
+
+import pytest
 
 
-class _FakeR:
-    def __init__(self, table_list=None, insert_result=None):
-        self.recorder: list = []
-        self._table_list = table_list or [scp.TABLE_NAME]
-        self._insert_result = insert_result or {"inserted": 1, "errors": 0}
-        self.row = _FakeQuery(self.recorder, "row")
-    def db(self, name):
-        return _FakeDB(self, name)
-    def now(self):
-        import datetime
-        return datetime.datetime.utcnow()
-    def desc(self, field):
-        # Mirror rethinkdb's r.desc(): a sentinel passed into order_by().
-        # Tests only need this to be a no-op callable that the chain stub
-        # can ignore.
-        return ("desc", field)
+@pytest.fixture
+def scp_store(store, monkeypatch):
+    monkeypatch.setattr(scp, "store", store)
+    monkeypatch.setattr(scp, "_ensure_table", lambda conn=None, r=None: True)
+    return store
 
 
-class _FakeDB:
-    def __init__(self, parent, name):
-        self.parent = parent
-        self.name = name
-    def table(self, name):
-        return _FakeTable(self.parent, self.name, name)
-    def table_list(self):
-        items = self.parent._table_list
-        class _RunWrap:
-            def run(self, conn): return list(items)
-        return _RunWrap()
-    def table_create(self, name):
-        class _RunWrap:
-            def run(self, conn): return {"created": 1}
-        return _RunWrap()
+def _rows(store):
+    return store.run(scp.TABLE_NAME)
 
 
-class _FakeTable:
-    def __init__(self, parent, db_name, name):
-        self.parent = parent
-        self.db_name = db_name
-        self.name = name
-    def insert(self, row, conflict=None):
-        result = self.parent._insert_result
-        recorder = self.parent.recorder
-        recorder.append(("insert", row, conflict))
-        class _RunWrap:
-            def run(self, conn): return result
-        return _RunWrap()
-    def get(self, row_id):
-        class _RunWrap:
-            def run(self, conn): return None
-        return _RunWrap()
-
-    def index_list(self):
-        # Pretend the compound index already exists so _ensure_table is happy.
-        class _W:
-            def run(self, conn): return ["instance_id_config_hash"]
-        return _W()
-
-    def index_create(self, name, *args, **kwargs):
-        class _W:
-            def run(self, conn): return {"created": 1}
-        return _W()
-
-    def index_wait(self, name):
-        class _W:
-            def run(self, conn): return [{"ready": True}]
-        return _W()
+def _today_iso():
+    return _dt.date.today().isoformat()
 
 
-def test_persist_backtest_snapshot_writes_row():
-    fake_r = _FakeR()
+def _days_ago_iso(n):
+    return (_dt.date.today() - _dt.timedelta(days=n)).isoformat()
+
+
+def test_persist_backtest_snapshot_writes_row(scp_store):
     cache = {"_momentum_watchlist": ["AAPL"], "_deployment_bar_index": 5}
     ok = scp.persist_backtest_snapshot(
         conn=object(),
-        r=fake_r,
+        r=None,
         instance_id="main",
         strategy_name="graph_nexus_analysis",
         cache=cache,
@@ -252,9 +199,9 @@ def test_persist_backtest_snapshot_writes_row():
         end_date="2026-05-20",
     )
     assert ok is True
-    inserts = [call for call in fake_r.recorder if call[0] == "insert"]
-    assert len(inserts) == 1
-    row = inserts[0][1]
+    rows = _rows(scp_store)
+    assert len(rows) == 1
+    row = rows[0]
     assert row["instance_id"] == "main"
     assert row["strategy_name"] == "graph_nexus_analysis"
     assert row["origin"] == "backtest"
@@ -266,99 +213,53 @@ def test_persist_backtest_snapshot_writes_row():
     assert row["id"] == "main|graph_nexus_analysis|abc123def456|backtest|2026-05-20"
 
 
-def test_persist_backtest_snapshot_handles_db_error():
-    """If insert raises, the function logs but does not propagate."""
-    class _RaisingR(_FakeR):
-        def db(self, name):
-            class _D:
-                def table_list(self):
-                    class _W:
-                        def run(self, conn): raise RuntimeError("rethink down")
-                    return _W()
-            return _D()
+def test_persist_backtest_snapshot_handles_db_error(store, monkeypatch):
+    """If the write raises, the function logs but does not propagate."""
+    def _boom(*a, **k):
+        raise RuntimeError("database down")
+
+    monkeypatch.setattr(scp, "store", store)
+    monkeypatch.setattr(scp, "_ensure_table", lambda conn=None, r=None: True)
+    monkeypatch.setattr(store, "insert", _boom)
     ok = scp.persist_backtest_snapshot(
-        conn=object(),
-        r=_RaisingR(),
-        instance_id="main",
-        strategy_name="graph_nexus_analysis",
-        cache={},
-        config_hash="abc",
-        module_hash="def",
-        start_date="2025-11-10",
-        end_date="2026-05-20",
+        conn=object(), r=None,
+        instance_id="main", strategy_name="graph_nexus_analysis",
+        cache={}, config_hash="abc", module_hash="def",
+        start_date="2025-11-10", end_date="2026-05-20",
     )
     assert ok is False
 
 
-def test_persist_backtest_snapshot_rejects_blank_args():
-    fake_r = _FakeR()
+def test_persist_backtest_snapshot_rejects_blank_args(scp_store):
     assert scp.persist_backtest_snapshot(
-        conn=None, r=fake_r, instance_id="main", strategy_name="x",
+        conn=None, r=None, instance_id="", strategy_name="x",
         cache={}, config_hash="a", module_hash="b",
         start_date="d", end_date="d",
     ) is False
     assert scp.persist_backtest_snapshot(
-        conn=object(), r=fake_r, instance_id="", strategy_name="x",
+        conn=object(), r=None, instance_id="main", strategy_name="",
         cache={}, config_hash="a", module_hash="b",
         start_date="d", end_date="d",
     ) is False
 
 
-import datetime as _dt
+def _seed_snapshot(store, row):
+    store.insert(scp.TABLE_NAME, row, conflict="replace")
 
 
-class _FakeRWithSnapshot(_FakeR):
-    """_FakeR variant that returns a specific snapshot row on query."""
-    def __init__(self, snapshot_row=None, table_list=None):
-        super().__init__(table_list=table_list)
-        self._snapshot_row = snapshot_row
-    def db(self, name):
-        return _FakeDBWithSnapshot(self, name, self._snapshot_row)
+def _load(**overrides):
+    kwargs = dict(
+        conn=object(), r=None,
+        instance_id="main", strategy_name="x",
+        current_config_hash="abc", current_module_hash="mod",
+        staleness_days=7,
+    )
+    kwargs.update(overrides)
+    return scp.load_with_fallback(**kwargs)
 
 
-class _FakeDBWithSnapshot(_FakeDB):
-    def __init__(self, parent, name, snapshot_row):
-        super().__init__(parent, name)
-        self._snapshot_row = snapshot_row
-    def table(self, name):
-        return _FakeTableWithSnapshot(self.parent, self.name, name, self._snapshot_row)
-
-
-class _FakeTableWithSnapshot(_FakeTable):
-    def __init__(self, parent, db_name, name, snapshot_row):
-        super().__init__(parent, db_name, name)
-        self._snapshot_row = snapshot_row
-    def get_all(self, key, index=None):
-        return _ChainStub(self._snapshot_row)
-    def index_list(self):
-        # Pretend the compound index already exists so _ensure_table is happy.
-        class _W:
-            def run(self, conn): return ["instance_id_config_hash"]
-        return _W()
-
-
-class _ChainStub:
-    """Chainable stub that returns the seeded row from any terminal `.run(conn)` call."""
-    def __init__(self, row):
-        self._row = row
-    def filter(self, *a, **kw): return self
-    def order_by(self, *a, **kw): return self
-    def limit(self, *a, **kw): return self
-    def nth(self, *a, **kw): return self
-    def default(self, *a, **kw): return self
-    def run(self, conn): return self._row
-
-
-def _today_iso():
-    return _dt.date.today().isoformat()
-
-
-def _days_ago_iso(n):
-    return (_dt.date.today() - _dt.timedelta(days=n)).isoformat()
-
-
-def test_load_with_fallback_returns_match():
-    row = {
+def test_load_with_fallback_returns_match(scp_store):
+    _seed_snapshot(scp_store, {
         "id": "main|graph_nexus_analysis|abc|backtest|" + _today_iso(),
         "instance_id": "main",
         "strategy_name": "graph_nexus_analysis",
@@ -368,14 +269,10 @@ def test_load_with_fallback_returns_match():
         "end_date": _today_iso(),
         "cache_json": '{"_momentum_watchlist": ["AAPL"]}',
         "size_bytes": 42,
-    }
-    fake_r = _FakeRWithSnapshot(snapshot_row=row)
-    cache, reason, meta = scp.load_with_fallback(
-        conn=object(), r=fake_r,
-        instance_id="main", strategy_name="graph_nexus_analysis",
-        current_config_hash="abc", current_module_hash="mod1",
-        staleness_days=7,
-    )
+        "updated_at_epoch": 1.0,
+    })
+    cache, reason, meta = _load(strategy_name="graph_nexus_analysis",
+                                current_module_hash="mod1")
     assert reason == "ok"
     assert cache == {"_momentum_watchlist": ["AAPL"]}
     assert meta is not None
@@ -384,244 +281,158 @@ def test_load_with_fallback_returns_match():
     assert meta["config_hash"] == "abc"
 
 
-def test_load_with_fallback_returns_no_match_on_empty():
-    fake_r = _FakeRWithSnapshot(snapshot_row=None)
-    cache, reason, meta = scp.load_with_fallback(
-        conn=object(), r=fake_r,
-        instance_id="main", strategy_name="x",
-        current_config_hash="abc", current_module_hash="mod",
-        staleness_days=7,
-    )
+def test_load_with_fallback_returns_no_match_on_empty(scp_store):
+    cache, reason, meta = _load()
     assert cache is None
     assert reason == "no_match"
     assert meta is None
 
 
-def test_load_with_fallback_rejects_stale():
-    row = {
+def test_load_with_fallback_ignores_another_instances_snapshot(scp_store):
+    """The lookup is keyed on (instance_id, config_hash, strategy_name)."""
+    _seed_snapshot(scp_store, {
+        "id": "other|x|abc|backtest|" + _today_iso(),
+        "instance_id": "other", "strategy_name": "x", "origin": "backtest",
+        "config_hash": "abc", "nexus_module_hash": "mod",
+        "end_date": _today_iso(), "cache_json": '{"k": 1}',
+        "updated_at_epoch": 1.0,
+    })
+    cache, reason, meta = _load()
+    assert (cache, reason, meta) == (None, "no_match", None)
+
+
+def test_load_with_fallback_rejects_stale(scp_store):
+    _seed_snapshot(scp_store, {
         "id": "main|x|abc|backtest|" + _days_ago_iso(30),
-        "cache_json": '{"k": 1}',
-        "end_date": _days_ago_iso(30),
-        "nexus_module_hash": "mod",
-        "origin": "backtest",
-        "config_hash": "abc",
-    }
-    fake_r = _FakeRWithSnapshot(snapshot_row=row)
-    cache, reason, meta = scp.load_with_fallback(
-        conn=object(), r=fake_r,
-        instance_id="main", strategy_name="x",
-        current_config_hash="abc", current_module_hash="mod",
-        staleness_days=7,
-    )
+        "instance_id": "main", "strategy_name": "x", "origin": "backtest",
+        "config_hash": "abc", "nexus_module_hash": "mod",
+        "end_date": _days_ago_iso(30), "cache_json": '{"k": 1}',
+        "updated_at_epoch": 1.0,
+    })
+    cache, reason, meta = _load()
     assert cache is None
     assert reason == "stale"
     assert meta is None
 
 
-def test_load_with_fallback_rejects_module_drift():
-    row = {
+def test_load_with_fallback_rejects_module_drift(scp_store):
+    _seed_snapshot(scp_store, {
         "id": "main|x|abc|backtest|" + _today_iso(),
-        "cache_json": '{"k": 1}',
-        "end_date": _today_iso(),
-        "nexus_module_hash": "mod_OLD",
-        "origin": "backtest",
-        "config_hash": "abc",
-    }
-    fake_r = _FakeRWithSnapshot(snapshot_row=row)
-    cache, reason, meta = scp.load_with_fallback(
-        conn=object(), r=fake_r,
-        instance_id="main", strategy_name="x",
-        current_config_hash="abc", current_module_hash="mod_NEW",
-        staleness_days=7,
-    )
+        "instance_id": "main", "strategy_name": "x", "origin": "backtest",
+        "config_hash": "abc", "nexus_module_hash": "mod_OLD",
+        "end_date": _today_iso(), "cache_json": '{"k": 1}',
+        "updated_at_epoch": 1.0,
+    })
+    cache, reason, meta = _load(current_module_hash="mod_NEW")
     assert cache is None
     assert reason == "module_drift"
     assert meta is None
 
 
-def test_load_with_fallback_rejects_deserialize_error():
-    row = {
+def test_load_with_fallback_rejects_deserialize_error(scp_store):
+    _seed_snapshot(scp_store, {
         "id": "main|x|abc|backtest|" + _today_iso(),
-        "cache_json": "}{not valid json{{",
-        "end_date": _today_iso(),
-        "nexus_module_hash": "mod",
-        "origin": "backtest",
-        "config_hash": "abc",
-    }
-    fake_r = _FakeRWithSnapshot(snapshot_row=row)
-    cache, reason, meta = scp.load_with_fallback(
-        conn=object(), r=fake_r,
-        instance_id="main", strategy_name="x",
-        current_config_hash="abc", current_module_hash="mod",
-        staleness_days=7,
-    )
+        "instance_id": "main", "strategy_name": "x", "origin": "backtest",
+        "config_hash": "abc", "nexus_module_hash": "mod",
+        "end_date": _today_iso(), "cache_json": "}{not valid json{{",
+        "updated_at_epoch": 1.0,
+    })
+    cache, reason, meta = _load()
     assert cache is None
     assert reason == "deserialize_error"
     assert meta is None
 
 
-def test_load_with_fallback_db_error_returns_none():
-    class _RaisingR(_FakeR):
-        def db(self, name):
-            class _D:
-                def table_list(self):
-                    class _W:
-                        def run(self, conn): raise RuntimeError("rethink down")
-                    return _W()
-            return _D()
-    cache, reason, meta = scp.load_with_fallback(
-        conn=object(), r=_RaisingR(),
-        instance_id="main", strategy_name="x",
-        current_config_hash="abc", current_module_hash="mod",
-        staleness_days=7,
-    )
+def test_load_with_fallback_db_error_returns_none(store, monkeypatch):
+    def _boom(*a, **k):
+        raise RuntimeError("database down")
+
+    monkeypatch.setattr(scp, "store", store)
+    monkeypatch.setattr(scp, "_ensure_table", lambda conn=None, r=None: True)
+    monkeypatch.setattr(store, "run", _boom)
+    cache, reason, meta = _load()
     assert cache is None
     assert reason == "db_error"
     assert meta is None
 
 
-def test_load_with_fallback_prefers_newer_updated_at_when_end_date_ties():
+def test_load_with_fallback_prefers_newer_updated_at_when_end_date_ties(scp_store):
     """Phase 1 bug-sweep regression: when two snapshots share the same
     ``end_date``, the secondary order must be ``updated_at_epoch`` (a real
     field set by both writers), not ``created_at`` (never written, so the
     tiebreaker was undefined before this fix).
     """
-    captured_order_by = {"args": None}
-
-    class _R:
-        row = _FakeQuery([], "row")
-        def __init__(self):
-            pass
-        def db(self, name): return _D()
-        def now(self): import datetime; return datetime.datetime.utcnow()
-        def desc(self, field):
-            # Return a tagged tuple we can inspect.
-            return ("desc", field)
-    class _D:
-        def table_list(self):
-            class _W:
-                def run(self, conn): return [scp.TABLE_NAME]
-            return _W()
-        def table(self, name): return _T()
-    class _T:
-        def index_list(self):
-            class _W:
-                def run(self, conn): return ["instance_id_config_hash"]
-            return _W()
-        def get_all(self, *a, **kw): return _Chain()
-    class _Chain:
-        def filter(self, *a, **kw): return self
-        def order_by(self, *args, **kwargs):
-            captured_order_by["args"] = args
-            return self
-        def limit(self, *a, **kw): return self
-        def nth(self, *a, **kw): return self
-        def default(self, *a, **kw): return self
-        def run(self, conn): return None
-
-    # Don't care about the return value; only the captured order_by args.
-    scp.load_with_fallback(
-        conn=object(), r=_R(),
-        instance_id="main", strategy_name="x",
-        current_config_hash="abc", current_module_hash="mod",
-        staleness_days=7,
-    )
-    args = captured_order_by["args"]
-    assert args is not None, "order_by was not invoked"
-    fields = [a[1] for a in args if isinstance(a, tuple) and a and a[0] == "desc"]
-    assert "end_date" in fields, f"primary sort must be end_date; got {fields}"
-    assert "updated_at_epoch" in fields, (
-        f"tiebreaker must be updated_at_epoch (a real field), not created_at; got {fields}"
-    )
-    assert "created_at" not in fields, (
-        f"created_at is never written by either writer; remove it as tiebreaker; got {fields}"
-    )
+    same_day = _today_iso()
+    for suffix, epoch, blob in (("older", 100.0, '{"k": "old"}'),
+                                ("newer", 200.0, '{"k": "new"}')):
+        _seed_snapshot(scp_store, {
+            "id": f"main|x|abc|backtest|{same_day}|{suffix}",
+            "instance_id": "main", "strategy_name": "x", "origin": "backtest",
+            "config_hash": "abc", "nexus_module_hash": "mod",
+            "end_date": same_day, "cache_json": blob,
+            "updated_at_epoch": epoch,
+        })
+    cache, reason, _meta = _load()
+    assert reason == "ok"
+    assert cache == {"k": "new"}, "the tiebreaker must be updated_at_epoch DESC"
 
 
-def test_load_with_fallback_env_flag_off(monkeypatch):
+def test_load_with_fallback_env_flag_off(scp_store, monkeypatch):
     monkeypatch.setenv("NEXUS_LIVE_SNAPSHOT_LOAD", "off")
-    fake_r = _FakeRWithSnapshot(snapshot_row={"cache_json": "{}", "end_date": _today_iso(), "nexus_module_hash": "mod", "origin": "backtest", "config_hash": "abc"})
-    cache, reason, meta = scp.load_with_fallback(
-        conn=object(), r=fake_r,
-        instance_id="main", strategy_name="x",
-        current_config_hash="abc", current_module_hash="mod",
-        staleness_days=7,
-    )
+    _seed_snapshot(scp_store, {
+        "id": "main|x|abc|backtest|" + _today_iso(),
+        "instance_id": "main", "strategy_name": "x", "origin": "backtest",
+        "config_hash": "abc", "nexus_module_hash": "mod",
+        "end_date": _today_iso(), "cache_json": "{}", "updated_at_epoch": 1.0,
+    })
+    cache, reason, meta = _load()
     assert cache is None
     assert reason == "disabled"
     assert meta is None
 
 
-def test_ensure_table_creates_compound_index_when_missing():
-    """When the table exists but the compound index doesn't, create it."""
-    index_create_calls = []
-    index_wait_calls = []
-
-    class _R:
-        row = _FakeQuery([], "row")
-        def db(self, name): return _D(name)
-        def now(self): import datetime; return datetime.datetime.utcnow()
-        def desc(self, *a, **kw): return None
-    class _D:
-        def __init__(self, name): self.name = name
-        def table_list(self):
-            class _W:
-                def run(self, conn): return [scp.TABLE_NAME]
-            return _W()
-        def table(self, name): return _T()
-    class _T:
-        def index_list(self):
-            class _W:
-                def run(self, conn): return []
-            return _W()
-        def index_create(self, name, *args, **kwargs):
-            index_create_calls.append((name, args, kwargs))
-            class _W:
-                def run(self, conn): return {"created": 1}
-            return _W()
-        def index_wait(self, name):
-            index_wait_calls.append(name)
-            class _W:
-                def run(self, conn): return [{"ready": True}]
-            return _W()
-
-    ok = scp._ensure_table(object(), _R())
-    assert ok is True
-    assert len(index_create_calls) == 1
-    assert index_create_calls[0][0] == "instance_id_config_hash"
-    assert index_wait_calls == ["instance_id_config_hash"]
+@pytest.fixture
+def unlatched_ensure(monkeypatch):
+    """_ensure_table latches after its first success; reset it per test."""
+    monkeypatch.setattr(scp, "_TABLE_ENSURED", [False])
 
 
-def test_ensure_table_skips_index_create_when_present():
-    create_calls = []
-    class _R:
-        row = _FakeQuery([], "row")
-        def db(self, name): return _D()
-        def now(self): import datetime; return datetime.datetime.utcnow()
-    class _D:
-        def table_list(self):
-            class _W:
-                def run(self, conn): return [scp.TABLE_NAME]
-            return _W()
-        def table(self, name): return _T()
-    class _T:
-        def index_list(self):
-            class _W:
-                def run(self, conn): return ["instance_id_config_hash"]
-            return _W()
-        def index_create(self, *a, **kw):
-            create_calls.append(a)
-            raise AssertionError("index_create should not be called")
+def test_ensure_table_delegates_to_the_schema_registry(monkeypatch, unlatched_ensure):
+    """R25: index DDL lives in db/schema.py, which already declares
+    NexusStrategyCache's indexed fields. index_wait is gone -- CREATE INDEX
+    is synchronous."""
+    from db import schema as db_schema
 
-    ok = scp._ensure_table(object(), _R())
-    assert ok is True
-    assert create_calls == []
+    ensured = []
+    monkeypatch.setattr(scp.db_schema, "ensure_table", ensured.append)
+    assert scp._ensure_table(object(), None) is True
+    assert ensured == [scp.TABLE_NAME]
+    assert "instance_id" in set(db_schema.spec(scp.TABLE_NAME).indexed_fields)
 
 
-def test_save_strategy_cache_writes_origin_live_when_hash_provided():
-    fake_r = _FakeR()
+def test_ensure_table_is_latched_after_the_first_success(monkeypatch,
+                                                         unlatched_ensure):
+    """Called once a tick in live; ensure_schema takes an advisory lock."""
+    ensured = []
+    monkeypatch.setattr(scp.db_schema, "ensure_table", ensured.append)
+    assert scp._ensure_table() is True
+    assert scp._ensure_table() is True
+    assert ensured == [scp.TABLE_NAME]
+
+
+def test_ensure_table_returns_false_when_ddl_fails(monkeypatch, unlatched_ensure):
+    def _boom(_t):
+        raise RuntimeError("no permission")
+
+    monkeypatch.setattr(scp.db_schema, "ensure_table", _boom)
+    assert scp._ensure_table(object(), None) is False
+    # A failure must NOT latch -- the next call retries.
+    assert scp._TABLE_ENSURED == [False]
+
+
+def test_save_strategy_cache_writes_origin_live_when_hash_provided(scp_store):
     ok = scp.save_strategy_cache_to_db(
-        conn=object(), r=fake_r,
+        conn=object(), r=None,
         instance_id="main", strategy_name="graph_nexus_analysis",
         cache={"_momentum_watchlist": ["AAPL"]},
         config_hash="abc",
@@ -629,9 +440,9 @@ def test_save_strategy_cache_writes_origin_live_when_hash_provided():
         end_date=_today_iso(),
     )
     assert ok is True
-    inserts = [c for c in fake_r.recorder if c[0] == "insert"]
-    assert len(inserts) == 1
-    row = inserts[0][1]
+    rows = _rows(scp_store)
+    assert len(rows) == 1
+    row = rows[0]
     assert row["origin"] == "live"
     assert row["config_hash"] == "abc"
     assert row["nexus_module_hash"] == "mod"
@@ -640,18 +451,17 @@ def test_save_strategy_cache_writes_origin_live_when_hash_provided():
     assert row["record_version"] == 1
 
 
-def test_save_strategy_cache_back_compat_legacy_id_when_no_hash():
+def test_save_strategy_cache_back_compat_legacy_id_when_no_hash(scp_store):
     """Old callers that don't pass config_hash keep the original PK form."""
-    fake_r = _FakeR()
     ok = scp.save_strategy_cache_to_db(
-        conn=object(), r=fake_r,
+        conn=object(), r=None,
         instance_id="main", strategy_name="graph_nexus_analysis",
         cache={"_momentum_watchlist": ["AAPL"]},
     )
     assert ok is True
-    inserts = [c for c in fake_r.recorder if c[0] == "insert"]
-    assert len(inserts) == 1
-    row = inserts[0][1]
+    rows = _rows(scp_store)
+    assert len(rows) == 1
+    row = rows[0]
     assert row["id"] == "main|graph_nexus_analysis"
     # Legacy row MUST NOT have these new fields:
     assert "origin" not in row

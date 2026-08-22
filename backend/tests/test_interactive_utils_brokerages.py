@@ -22,13 +22,17 @@ class _Response:
 
 
 def _fake_rethink(monkeypatch, iu):
-    fake_r = MagicMock()
-    fake_r.db.return_value.table.return_value.insert.return_value.run.return_value = {
-        "generated_keys": ["new-id"]
-    }
-    monkeypatch.setattr(iu, "r", fake_r)
+    """Cage the WRITE. These tests assert the write is REFUSED, so the store's
+    insert must fail loudly if the refusal ever regresses."""
+    writes = []
+
+    def _refuse(*a, **k):
+        writes.append((a, k))
+        return {"inserted": 1, "generated_keys": ["new-id"]}
+
+    monkeypatch.setattr(iu.store, "insert", _refuse)
     monkeypatch.setattr(iu, "_ensure_brokerage_accounts_table", lambda conn: None)
-    return fake_r
+    return writes
 
 
 def test_link_alpaca_rejects_write_when_credential_key_is_missing(monkeypatch):
@@ -49,11 +53,12 @@ def test_model_writers_reject_plaintext_api_key_when_credential_key_is_missing(m
     import interactive_utils as iu
 
     monkeypatch.delenv("INTELLISTOCK_CRED_KEY", raising=False)
-    fake_r = MagicMock()
-    fake_r.db.return_value.table.return_value.insert.return_value.run.return_value = {"generated_keys": ["model-1"]}
-    fake_r.db.return_value.table.return_value.get.return_value.run.return_value = {
-        "id": "model-1", "provider": "openai", "model": "gpt-4o", "api_key": "old-key"}
-    monkeypatch.setattr(iu, "r", fake_r)
+    monkeypatch.setattr(iu.store, "insert",
+                        lambda *a, **k: {"inserted": 1,
+                                         "generated_keys": ["model-1"]})
+    monkeypatch.setattr(iu.store, "get", lambda *a, **k: {
+        "id": "model-1", "provider": "openai", "model": "gpt-4o",
+        "api_key": "old-key"})
     monkeypatch.setattr(iu, "_ensure_models_table", lambda conn: None)
 
     with pytest.raises(RuntimeError, match="INTELLISTOCK_CRED_KEY"):

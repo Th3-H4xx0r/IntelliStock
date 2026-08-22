@@ -24,12 +24,19 @@ import sys
 DB_NAME = "IntelliStock"
 
 
+class _StoreHandle:
+    """Truthy stand-in for the old driver connection (R26); the ``finally``
+    below still calls close() on it."""
+
+    def close(self, *_a, **_k):
+        return None
+
+
 def _get_conn():
-    from rethinkdb import RethinkDB
-    r = RethinkDB()
-    host = os.environ.get("RETHINKDB_HOST", "localhost")
-    port = int(os.environ.get("RETHINKDB_PORT", "28015"))
-    return r, r.connect(host=host, port=port, timeout=10)
+    """Kept at its original 2-tuple shape so the caller's unpacking and its
+    ``finally: conn.close()`` are unchanged; both halves are inert."""
+    from db import store
+    return store, _StoreHandle()
 
 
 def halt_live_trading(
@@ -61,11 +68,13 @@ def halt_live_trading(
         # Step 1: flip runCommand=False (triggers instance.py to exit).
         # Scoped to the one instance when instance_id is given.
         try:
-            _tbl = r.db(DB_NAME).table("Instances")
-            _q = _tbl.filter(lambda row: row["id"] == instance_id) if instance_id is not None else _tbl
-            res = _q.update(
-                {"runCommand": False, "halt_reason": reason, "halted_at": r.now()}
-            ).run(conn)
+            import datetime as _dt
+            _halted_at = _dt.datetime.now(_dt.timezone.utc).isoformat()   # R24
+            _sel = (r.filter("Instances", {"id": str(instance_id)})
+                    if instance_id is not None else r.Selection("Instances"))
+            res = r.update(
+                "Instances", _sel,
+                {"runCommand": False, "halt_reason": reason, "halted_at": _halted_at})
             summary["instances_halted"] = int(res.get("replaced", 0) or 0) + int(res.get("unchanged", 0) or 0)
         except Exception as e:
             summary["errors"].append(f"instances update: {e}")
@@ -73,7 +82,7 @@ def halt_live_trading(
         # Step 2: cancel open orders per linked brokerage.
         if cancel_open_orders:
             try:
-                brokerages = list(r.db(DB_NAME).table("BrokerageAccounts").run(conn))
+                brokerages = r.run("BrokerageAccounts")
             except Exception as e:
                 summary["errors"].append(f"brokerages fetch: {e}")
                 brokerages = []
@@ -83,7 +92,7 @@ def halt_live_trading(
             if instance_id is not None:
                 linked_bid = None
                 try:
-                    _inst = r.db(DB_NAME).table("Instances").get(instance_id).run(conn) or {}
+                    _inst = r.get("Instances", instance_id) or {}
                     linked_bid = _inst.get("brokerage_id")
                 except Exception as e:
                     summary["errors"].append(f"instance {instance_id} lookup: {e}")

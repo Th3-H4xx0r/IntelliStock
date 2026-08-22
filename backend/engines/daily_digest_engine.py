@@ -23,9 +23,9 @@ if _backend_dir not in sys.path:
 os.chdir(_backend_dir)
 
 import pytz
-from rethinkdb import RethinkDB
+from db import store as db_store
+from db import watch as db_watch
 
-r = RethinkDB()
 DB_NAME = 'IntelliStock'
 
 try:
@@ -468,7 +468,7 @@ def run_digest_send_now_changefeed():
 
             from engine_control import ENGINE_CONTROL_TABLE
             _log("Listening for changes on EngineControl document ID: %s" % DIGEST_CONTROL_ID, "white")
-            doc = r.db(DB_NAME).table(ENGINE_CONTROL_TABLE).get(DIGEST_CONTROL_ID).run(conn)
+            doc = db_store.get(ENGINE_CONTROL_TABLE, DIGEST_CONTROL_ID)
             if doc and doc.get('send_now'):
                 _log("Send-now already set on startup — sending digest immediately.", "green")
                 try:
@@ -476,7 +476,11 @@ def run_digest_send_now_changefeed():
                 except Exception as e:
                     _log("Error sending digest on startup: %s" % e, "red")
             _log("EngineControl (digest) changefeed started — waiting for send_now changes.", "green")
-            for change in r.db(DB_NAME).table(ENGINE_CONTROL_TABLE).get(DIGEST_CONTROL_ID).changes().run(conn):
+            # include_initial=False: the send_now-already-set case is handled
+            # above, before the feed opens, exactly as the ReQL version did.
+            for change in db_watch.feed(ENGINE_CONTROL_TABLE,
+                                        row_id=DIGEST_CONTROL_ID,
+                                        include_initial=False):
                 run_digest_send_now_change(change, conn)
             break
         except Exception as e:

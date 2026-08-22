@@ -1,4 +1,4 @@
-# Price Broker: fetches stock prices every minute and writes to RethinkDB.
+# Price Broker: fetches stock prices every minute and writes to the database.
 try:
     import time
     import os
@@ -9,9 +9,8 @@ try:
     from dotenv import load_dotenv
     import sys
     from os import system
-    from rethinkdb import RethinkDB
+    from db import store, watch
     from intellistock_logger import intellistock_logger
-    from rethink_changefeed import run_reconnecting_changefeed
 except Exception as e:
     import traceback
     traceback.print_exc()
@@ -21,10 +20,6 @@ BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BACKEND_DIR, '.env'))
 load_dotenv(os.path.join(os.path.dirname(BACKEND_DIR), '.env'))
 
-r = RethinkDB()
-DB_NAME = 'IntelliStock'
-RETHINKDB_HOST = os.environ.get('RETHINKDB_HOST', 'localhost')
-RETHINKDB_PORT = int(os.environ.get('RETHINKDB_PORT', '28015'))
 POLL_INTERVAL_SEC = 60
 
 if os.name == 'nt':
@@ -32,19 +27,25 @@ if os.name == 'nt':
 intellistock_logger.log("Price Broker starting (1-minute poll).", "green", service="PriceBroker")
 
 
-def get_conn():
-    """Create a new RethinkDB connection (connections are not thread-safe)."""
-    return r.connect(host=RETHINKDB_HOST, port=RETHINKDB_PORT)
+def _watch_pings(on_change):
+    """Config.Pings row watch (was the Config Pings changefeed)."""
+    return watch.watch_row('Config', 'Pings', on_change,
+                           label='pricebroker-pings', include_initial=True,
+                           log=intellistock_logger.log)
 
 
-intellistock_logger.log("Connecting to RethinkDB to load ticker list...", "white", service="PriceBroker")
-conn = get_conn()
-cursor = r.db(DB_NAME).table('LivePricesStocks').run(conn)
+def _watch_config(on_change):
+    """Config.Config row watch (was the Config changefeed)."""
+    return watch.watch_row('Config', 'Config', on_change,
+                           label='pricebroker-config', include_initial=True,
+                           log=intellistock_logger.log)
+
+
+intellistock_logger.log("Connecting to the database to load ticker list...", "white", service="PriceBroker")
 tickers = []
-for document in cursor:
+for document in store.run(store.Selection('LivePricesStocks')):
     data = document
     tickers.append('T.' + str(data['ticker']))
-conn.close()
 
 if not tickers:
     intellistock_logger.log("No tickers in LivePricesStocks; add tickers via CLI (add-ticker SYMBOL).", "yellow", service="PriceBroker")
@@ -60,25 +61,19 @@ def run_config_pings_changefeed():
     of dying on the first error."""
     intellistock_logger.log("Config Pings changefeed thread started; watching for pings.", "white", service="PriceBroker")
 
-    def _handle(change, c):
+    def _handle(change):
         new_val = change.get('new_val')
         if new_val and 'priceBrokerPing' in new_val:
             try:
                 request = new_val['priceBrokerPing']
-                r.db(DB_NAME).table('Config').get('Pings').update({
+                store.update('Config', 'Pings', {
                     'priceBrokerResponse': request
-                }).run(c)
+                })
                 intellistock_logger.log("Responded to priceBrokerPing.", "white", service="PriceBroker")
             except Exception as e:
                 intellistock_logger.log(str(e), "red", service="PriceBroker")
 
-    run_reconnecting_changefeed(
-        lambda c: r.db(DB_NAME).table('Config').get('Pings').changes().run(c),
-        _handle,
-        "Config Pings",
-        get_conn=get_conn,
-        log=intellistock_logger.log,
-    )
+    _watch_pings(_handle).start()
 
 
 def run_config_doc_changefeed():
@@ -87,7 +82,7 @@ def run_config_doc_changefeed():
     Self-heals: reconnects on any transient RethinkDB connection loss instead
     of dying on the first error (only the terminate/stop signal exits)."""
 
-    def _handle(change, c):
+    def _handle(change):
         new_val = change.get('new_val')
         if new_val is None:
             return
@@ -98,13 +93,7 @@ def run_config_doc_changefeed():
             intellistock_logger.log("runPriceService=False; exiting.", "yellow", service="PriceBroker")
             os._exit(0)
 
-    run_reconnecting_changefeed(
-        lambda c: r.db(DB_NAME).table('Config').get('Config').changes().run(c),
-        _handle,
-        "Config",
-        get_conn=get_conn,
-        log=intellistock_logger.log,
-    )
+    _watch_config(_handle).start()
 
 
 # Changefeed threads for terminate / runPriceService
@@ -114,14 +103,36 @@ config_pings_feed.start()
 config_doc_feed = threading.Thread(target=run_config_doc_changefeed, daemon=True)
 config_doc_feed.start()
 
-# Main thread: poll public market data every minute and write to RethinkDB.
-intellistock_logger.log("Opening RethinkDB connection for LivePrices / PriceHistory.", "white", service="PriceBroker")
-conn = get_conn()
+# Main thread: poll public market data every minute and write to the database.
 symbols = [t[2:] if t.startswith("T.") else t for t in tickers]
 # symbol -> ticker_id for writes
 symbol_to_ticker = {sym.upper(): tickers[i] for i, sym in enumerate(symbols)}
 
 _first_run = True
+
+
+def _insert_price_history(ticker_id, price, storage_ts):
+    """Append one PriceHistory row.
+
+    PriceHistory's primary key is compound -- (ticker, ts, id), so the
+    partition key can be part of it -- which is why this site once carried
+    hand-written SQL. It no longer needs to: the registry maps the ticker/ts
+    columns to this document's ticker/timestamp keys, the conflict target is
+    the table's real primary key, and a document with no ``id`` gets a uuid
+    written INTO it, exactly as the document database generated one server
+    side. The stored document is unchanged: {id, ticker, price, timestamp,
+    type}, one row per ticker per poll.
+
+    store.insert also creates the month's partition. The raw INSERT did not,
+    so a tick that arrived before pg_partman had premade the month failed
+    outright with "no partition of relation found for row".
+    """
+    return store.insert("PriceHistory", {
+        "ticker": ticker_id,
+        "price": price,
+        "timestamp": storage_ts,
+        "type": "minute",
+    })
 
 
 def _latest_prices(symbol_names):
@@ -178,17 +189,12 @@ while True:
         if not ticker_id:
             continue
         intellistock_logger.log(f"{ticker_id}: {price}", "white", service="PriceBroker")
-        r.db(DB_NAME).table('LivePrices').insert({
+        store.insert('LivePrices', {
             "id": ticker_id,
             "ticker": ticker_id,
             "price": price,
-        }, conflict='replace').run(conn)
-        r.db(DB_NAME).table('PriceHistory').insert({
-            "ticker": ticker_id,
-            "price": float(price),
-            "timestamp": storage_ts,
-            "type": "minute",
-        }).run(conn)
+        }, conflict='replace')
+        _insert_price_history(ticker_id, float(price), storage_ts)
         written += 1
 
     intellistock_logger.log(f"Cycle done at {storage_ts}: {written} tickers; sleeping {POLL_INTERVAL_SEC}s.", "white", service="PriceBroker")

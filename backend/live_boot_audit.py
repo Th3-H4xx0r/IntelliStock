@@ -10,8 +10,9 @@ scoped (id pattern ``<instance_id>|<iso-timestamp>``) so the existing
 sweeps it correctly.
 
 This module is intentionally small and dependency-free at import time so
-it can be unit-tested without RethinkDB connectivity. The persist function
-takes an injected rethinkdb instance + connection.
+it can be unit-tested without database connectivity. The persist function
+keeps its injected ``r`` + ``conn`` parameters (R26); ``r`` is now an optional
+store handle and ``conn`` is ignored.
 """
 from __future__ import annotations
 
@@ -71,29 +72,32 @@ def build_audit_row(
     }
 
 
-def persist_audit_row(*, r: Any, conn: Any, row: dict, db_name: str = DB_NAME) -> dict:
+def persist_audit_row(*, r: Any = None, conn: Any = None, row: dict,
+                      db_name: str = DB_NAME) -> dict:
     """Insert the audit row into the LiveBootAudit table.
 
-    Auto-creates the table (and useful secondary indices) on first call so
-    callers do not need a migration step. Index creation is best-effort —
-    if it fails, the insert still proceeds.
+    R25: the table and its ``instance_id`` index are declared in
+    db/schema.py, so ensure_table replaces the create/index/index_wait block
+    and is still best-effort -- the insert proceeds either way.
 
-    Returns the rethinkdb result dict from ``insert(...).run(conn)``.
+    NOTE: the ReQL block also created a ``boot_at_utc`` index. That field is
+    not in schema.TABLES["LiveBootAudit"].indexed_fields and nothing queries
+    on it (the only read path is by ``instance_id``), so it is dropped rather
+    than carried over.
+
+    Returns the store's InsertResult, which supports ``["inserted"]`` and
+    ``.get(...)`` exactly like the old driver's result dict.
     """
-    db = r.db(db_name)
+    store = r if r is not None else _default_store()
     try:
-        existing = list(db.table_list().run(conn))
-        if TABLE not in existing:
-            db.table_create(TABLE, primary_key="id").run(conn)
-            try:
-                db.table(TABLE).index_create("instance_id").run(conn)
-                db.table(TABLE).index_create("boot_at_utc").run(conn)
-                db.table(TABLE).index_wait("instance_id", "boot_at_utc").run(conn)
-            except Exception:
-                # Indices are an optimization, not a correctness requirement.
-                pass
+        from db import schema as db_schema
+        db_schema.ensure_table(TABLE)
     except Exception:
-        # Table-creation attempt failed (likely raced with another worker
-        # creating the table at the same time); fall through to insert.
+        # Ensure failed (likely raced with another worker); fall through.
         pass
-    return db.table(TABLE).insert(row, conflict="replace").run(conn)
+    return store.insert(TABLE, row, conflict="replace")
+
+
+def _default_store():
+    from db import store as _s
+    return _s

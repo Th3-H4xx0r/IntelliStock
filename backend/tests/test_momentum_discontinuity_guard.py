@@ -104,30 +104,15 @@ def test_degenerate_input_never_raises():
 # --------------------------------------------------------------------------
 # the real discovery function
 # --------------------------------------------------------------------------
-class _FakeQuery:
-    def run(self, conn):
-        return {"inserted": 1}
-
-
-class _FakeTable:
-    def insert(self, doc, conflict=None):
-        return _FakeQuery()
-
-
-class _FakeDB:
-    def table(self, name):
-        return _FakeTable()
-
-
-class _FakeR:
-    """Just enough rethinkdb for the insert at the end of discovery.
+class _FakeStore:
+    """Just enough of db.store for the insert at the end of discovery.
 
     The real function swallows insert failures, so without this every result
     comes back empty and the whole suite would pass while testing nothing.
     """
 
-    def db(self, name):
-        return _FakeDB()
+    def insert(self, _table, _doc, *, conflict=None, durability="hard"):
+        return {"inserted": 1}
 
 
 def _run_discovery(monkeypatch, data, config):
@@ -135,7 +120,7 @@ def _run_discovery(monkeypatch, data, config):
     from strategies import graph_nexus_analysis as gna
 
     monkeypatch.setattr(gna, "_get_all_discovered_stocks", lambda *a, **k: [])
-    monkeypatch.setattr(gna, "_r", _FakeR())
+    monkeypatch.setattr(gna, "store", _FakeStore())
     captured = []
     monkeypatch.setattr(gna, "_log", lambda msg, *a, **k: captured.append(str(msg)))
 

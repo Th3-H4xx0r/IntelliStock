@@ -205,15 +205,15 @@ def _build_filter(r, criteria, combine: str = "or"):
 
 def main(apply: bool, instance_id: str) -> int:
     try:
-        from rethinkdb import RethinkDB  # type: ignore
+        from db import store as _store  # type: ignore
     except ImportError:
         print("ERROR: rethinkdb driver not installed. `pip install rethinkdb`.", file=sys.stderr)
         return 2
-    r = RethinkDB()
+    r = _store
     host = os.environ.get("RETHINKDB_HOST", "localhost")
     port = int(os.environ.get("RETHINKDB_PORT", "28015"))
     try:
-        conn = r.connect(host=host, port=port)
+        conn = None
     except Exception as e:
         print(f"ERROR: connect({host}:{port}): {e}", file=sys.stderr)
         return 3
@@ -222,7 +222,7 @@ def main(apply: bool, instance_id: str) -> int:
     total_to_delete = 0
     summary: list = []
     try:
-        existing_tables = set(r.db(DB_NAME).table_list().run(conn))
+        existing_tables = set(r.table_list())
         for entry in targets:
             # Entries are (table, criteria) or (table, criteria, combine_mode).
             if len(entry) == 3:
@@ -239,13 +239,13 @@ def main(apply: bool, instance_id: str) -> int:
                 print(f"SKIP  {table}: no criteria resolved.")
                 summary.append((table, 0, "skipped"))
                 continue
-            count = int(r.db(DB_NAME).table(table).filter(expr).count().run(conn) or 0)
+            count = int(r.count(r.filter(table, expr)) or 0)
             total_to_delete += count
             verb = "WILL DELETE" if not apply else "DELETING   "
             print(f"{verb} {count:>5} rows from {table}")
             deleted = 0
             if apply and count > 0:
-                res = r.db(DB_NAME).table(table).filter(expr).delete().run(conn)
+                res = r.delete(table, r.filter(table, expr))
                 deleted = int((res or {}).get("deleted", 0) or 0)
                 print(f"           -> deleted={deleted}")
             summary.append((table, count, "deleted" if apply else "would_delete"))

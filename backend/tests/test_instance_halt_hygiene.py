@@ -7,8 +7,8 @@ un-halted) — must clear those stale fields alongside the crash flags.
 
 Side-effect safety: instance.py imports python-socketio at module load, so it is
 stubbed before import (as in test_instance_crash_handling.py). Inside the test,
-`inst.r` is replaced with a MagicMock and `get_conn`/`safe_close` are patched, so
-no real RethinkDB connection is ever opened. Execution is stopped right after the
+`inst.store` is replaced with a MagicMock, so no real database connection is
+ever opened. Execution is stopped right after the
 startup update (via a BaseException from a patched get_symbols_for_instance)
 before any socket, alert, or crash-keepalive path can run.
 """
@@ -33,10 +33,8 @@ class _StopAfterUpdate(BaseException):
 
 
 def test_startup_update_clears_stale_halt_fields(monkeypatch):
-    fake_r = MagicMock()
-    monkeypatch.setattr(inst, "r", fake_r)
-    monkeypatch.setattr(inst, "get_conn", lambda: MagicMock())
-    monkeypatch.setattr(inst, "safe_close", lambda conn: None)
+    fake_store = MagicMock()
+    monkeypatch.setattr(inst, "store", fake_store)
     monkeypatch.setattr(inst, "args_list", ["instance.py", "alpaca-main"])
     monkeypatch.setattr(inst.os, "system", lambda *a, **k: 0)
 
@@ -49,9 +47,8 @@ def test_startup_update_clears_stale_halt_fields(monkeypatch):
     with pytest.raises(_StopAfterUpdate):
         inst.run()
 
-    update = fake_r.db.return_value.table.return_value.get.return_value.update
-    update.assert_called_once()
-    payload = update.call_args[0][0]
+    fake_store.update.assert_called_once()
+    payload = fake_store.update.call_args[0][2]
 
     # Healthy-boot invariants preserved …
     assert payload["running"] is True

@@ -59,15 +59,28 @@ class FakeR:
 def test_legacy_context_and_outcome_reads_use_the_base_instance_index(monkeypatch):
     import interactive_utils as iu
     log = []
-    monkeypatch.setattr(iu, "r", FakeR(log, rows=[]))
     monkeypatch.setattr(iu, "_ensure_nexus_trade_tables", lambda conn: None)
+
+    # The store filters on the indexed column; the point of the test is
+    # unchanged -- the read must be driven by base_instance_id, never a scan.
+    def _filter(table, predicate):
+        log.append(("filter", table, predicate))
+        return table
+
+    monkeypatch.setattr(iu.store, "filter", _filter)
+    monkeypatch.setattr(iu.store, "run", lambda _sel: [])
     iu.action_nexus_trade_contexts(object(), "alpaca-main", limit=5)
-    assert ("get_all", ("alpaca-main",), "base_instance_id") in log
-    assert all(op[0] != "filter" for op in log)
+    assert any(op[0] == "filter"
+               and op[2] == {"base_instance_id": "alpaca-main"} for op in log)
     log.clear()
     iu.action_nexus_outcome_stats(object(), "alpaca-main")
-    assert ("get_all", ("alpaca-main",), "base_instance_id") in log
-    assert all(op[0] != "filter" for op in log)
+    assert any(op[0] == "filter"
+               and op[2] == {"base_instance_id": "alpaca-main"} for op in log)
+    # Under ReQL this also asserted "no .filter()", because .filter() meant a
+    # scan and .get_all(index=) meant an index read. store.filter on an
+    # indexed column IS the index read, so the equivalent guarantee is the
+    # predicate above: the read is keyed on base_instance_id, never unkeyed.
+    assert all(op[2] for op in log if op[0] == "filter")
 
 
 def test_outcome_scorecard_is_marked_legacy_untrusted():

@@ -534,28 +534,21 @@ class InMemoryRiskBackend:
         return True
 
 
-class RethinkRiskBackend:
+class PostgresRiskBackend:
     """CAS backend stored in the existing ``NexusRuntimeState`` table."""
 
     def __init__(self, r_module=None, conn_factory=None) -> None:
-        if r_module is None or conn_factory is None:
-            import nexus_runtime_state as runtime
-
-            r_module = runtime._r
-            conn_factory = runtime._conn
+        # Both parameters are accepted and ignored: the store takes its own
+        # pooled connection per operation. They stay in the signature because
+        # broker.py and the tests construct this class positionally.
         self._r = r_module
         self._conn_factory = conn_factory
 
     def get(self, key: str) -> Optional[dict]:
-        from nexus_runtime_state import DB_NAME, STATE_TABLE
+        from db import store
+        from nexus_runtime_state import STATE_TABLE
 
-        with self._conn_factory() as conn:
-            row = (
-                self._r.db(DB_NAME)
-                .table(STATE_TABLE)
-                .get(str(key))
-                .run(conn)
-            )
+        row = store.get(STATE_TABLE, str(key))
         if row is not None:
             row.pop("id", None)
         return row
@@ -563,27 +556,39 @@ class RethinkRiskBackend:
     def compare_and_swap(
         self, key: str, expected_version: int, doc: dict
     ) -> bool:
-        from nexus_runtime_state import DB_NAME, STATE_TABLE
+        """version==0 is a first write (insert, fails if the row exists);
+        otherwise a compare-and-swap.
+
+        The ReQL form was ``.update(lambda cur: r.branch(cur['version']
+        .default(-1).eq(expected), payload, {}))`` -- a DEEP MERGE of the
+        payload on match, not a replace. ``store.update`` over a Selection
+        carrying the identity AND the version guard is that same deep merge in
+        one server-side statement, and it reports a no-change write as
+        ``unchanged`` exactly as ReQL did.
+        """
+        from db import store
+        from nexus_runtime_state import STATE_TABLE
 
         payload = {"id": str(key), **dict(doc)}
-        with self._conn_factory() as conn:
-            table = self._r.db(DB_NAME).table(STATE_TABLE)
-            if int(expected_version) == 0:
-                try:
-                    table.insert(payload, conflict="error").run(conn)
-                    return True
-                except Exception:
-                    return False
-            result = table.get(str(key)).update(
-                lambda current: self._r.branch(
-                    current["version"].default(-1).eq(
-                        int(expected_version)
-                    ),
-                    payload,
-                    {},
-                )
-            ).run(conn)
+        if int(expected_version) == 0:
+            try:
+                res = store.insert(STATE_TABLE, payload, conflict="error")
+                return not res["errors"]
+            except Exception:
+                return False
+        rid = store.coerce_id(STATE_TABLE, str(key))
+        # The dict predicate carries the guarded ::numeric compare, so a
+        # version stored as 3.0 still matches an expected 3, as it did in ReQL.
+        guard = store.filter(
+            STATE_TABLE, {"version": int(expected_version)}
+        ).where("id = %s", (rid,))
+        result = store.update(STATE_TABLE, guard, payload)
         return int(result.get("replaced", 0) or 0) == 1
+
+
+# The class was named for the driver, not for what it does. Both names refer
+# to the same object so broker.py (a different port group) keeps importing.
+RethinkRiskBackend = PostgresRiskBackend
 
 
 class RiskStateStore:

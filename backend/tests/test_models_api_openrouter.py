@@ -115,14 +115,14 @@ def test_action_create_model_persists_openrouter_fields(monkeypatch):
     from cryptography.fernet import Fernet
     monkeypatch.setenv("INTELLISTOCK_CRED_KEY", Fernet.generate_key().decode())
     fake_r = MagicMock()
-    fake_r.db.return_value.table.return_value.insert.return_value.run.return_value = {"generated_keys": ["new-id"]}
-    monkeypatch.setattr(iu, "r", fake_r)
+    monkeypatch.setattr(iu.store, "insert", fake_r.insert)
+    fake_r.insert.return_value = {"inserted": 1, "generated_keys": ["new-id"]}
     monkeypatch.setattr(iu, "_ensure_models_table", lambda conn: None)
     iu.action_create_model(
         None, "or", "openrouter", "anthropic/claude-3.5-sonnet",
         api_key="key", openrouter_base_url="https://openrouter.ai/api/v1",
         openrouter_referer="https://intellistock.app", openrouter_title="IntelliStock")
-    doc = fake_r.db.return_value.table.return_value.insert.call_args.args[0]
+    doc = fake_r.insert.call_args.args[1]
     assert doc["provider"] == "openrouter"
     assert doc["openrouter_base_url"] == "https://openrouter.ai/api/v1"
     assert doc["openrouter_referer"] == "https://intellistock.app"
@@ -136,11 +136,13 @@ def test_action_edit_model_updates_openrouter_fields(monkeypatch):
                 "model": "anthropic/claude-3.5-sonnet",
                 "openrouter_base_url": "https://openrouter.ai/api/v1"}
     fake_r = MagicMock()
-    fake_r.db.return_value.table.return_value.get.return_value.run.return_value = existing
-    monkeypatch.setattr(iu, "r", fake_r)
+    fake_r.get.return_value = existing
+    monkeypatch.setattr(iu.store, "insert", fake_r.insert)
+    monkeypatch.setattr(iu.store, "update", fake_r.update)
+    monkeypatch.setattr(iu.store, "get", fake_r.get)
     monkeypatch.setattr(iu, "_ensure_models_table", lambda conn: None)
     iu.action_edit_model(None, "m1", openrouter_referer="https://new.app",
                          openrouter_title="New")
-    update = fake_r.db.return_value.table.return_value.get.return_value.update.call_args.args[0]
+    update = fake_r.update.call_args.args[2]
     assert update["openrouter_referer"] == "https://new.app"
     assert update["openrouter_title"] == "New"

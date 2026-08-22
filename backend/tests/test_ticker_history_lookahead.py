@@ -36,32 +36,14 @@ class _Doc(dict):
     pass
 
 
-class _Table:
+class _Store:
+    """The db.store surface `_get_ticker_history` uses, over a dict of docs."""
+
     def __init__(self, docs):
         self._docs = docs
 
-    def get(self, key):
-        self._key = key
-        return self
-
-    def run(self, _conn):
-        return self._docs.get(self._key)
-
-
-class _DB:
-    def __init__(self, docs):
-        self._docs = docs
-
-    def table(self, _name):
-        return _Table(self._docs)
-
-
-class _R:
-    def __init__(self, docs):
-        self._docs = docs
-
-    def db(self, _name):
-        return _DB(self._docs)
+    def get(self, _table, key):
+        return self._docs.get(key)
 
 
 # SNDK's real window is Jan-Feb 2026. The 2026-06 entries are what a later W3
@@ -81,7 +63,7 @@ DOCS = {
 
 def _patch(monkeypatch):
     import strategies.graph_nexus_analysis as gna
-    monkeypatch.setattr(gna, "_r", _R(DOCS))
+    monkeypatch.setattr(gna, "store", _Store(DOCS))
     monkeypatch.setattr(gna, "_ensure_ticker_history_table", lambda _c: None)
 
 
@@ -122,7 +104,7 @@ def test_undated_entries_are_dropped_not_kept(monkeypatch):
         {"d": "", "h": "empty date"},
         {"d": "   ", "h": "whitespace date"},
     ]}}
-    monkeypatch.setattr(gna, "_r", _R(docs))
+    monkeypatch.setattr(gna, "store", _Store(docs))
     monkeypatch.setattr(gna, "_ensure_ticker_history_table", lambda _c: None)
     out = _get_ticker_history(object(), ["X"], max_per_ticker=10,
                               as_of="2026-01-12")

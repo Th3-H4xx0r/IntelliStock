@@ -46,13 +46,13 @@ def _resolve_instance_ids(r, conn, bid: int) -> list[str]:
     discovered: set[str] = set()
 
     try:
-        existing_tables = set(r.db(DB_NAME).table_list().run(conn))
+        existing_tables = set(r.table_list())
     except Exception:
         existing_tables = set()
 
     if "BacktestResults" in existing_tables:
         try:
-            doc = r.db(DB_NAME).table("BacktestResults").get(bid).run(conn)
+            doc = r.get("BacktestResults", bid)
             if isinstance(doc, dict):
                 for key in (
                     "runtime_instance_id",
@@ -68,16 +68,10 @@ def _resolve_instance_ids(r, conn, bid: int) -> list[str]:
 
     if "LLMUsage" in existing_tables:
         try:
-            cursor = (
-                r.db(DB_NAME)
-                .table("LLMUsage")
-                .filter(
-                    (r.row["backtest_id"].default("").coerce_to("string") == str(bid))
-                    | (r.row["backtest_id"].default("").coerce_to("string") == str(int(bid)))
-                )
-                .pluck("instance_id")
-                .run(conn)
-            )
+            _bt = r.P.field("backtest_id").default("").coerce_to_string()
+            cursor = r.pluck(r.run(r.filter(
+                "LLMUsage", _bt.eq(str(bid)) | _bt.eq(str(int(bid))))),
+                "instance_id")
             for row in cursor:
                 val = row.get("instance_id") if isinstance(row, dict) else None
                 if isinstance(val, str) and val.strip():
@@ -163,26 +157,26 @@ def _build_filter(r, criteria, combine: str = "or"):
 
 def _delete_with_count(r, conn, table: str, expr, apply: bool) -> tuple[int, int]:
     """Returns (matched_count, deleted_count). deleted=0 in dry-run."""
-    count = int(r.db(DB_NAME).table(table).filter(expr).count().run(conn) or 0)
+    count = int(r.count(r.filter(table, expr)) or 0)
     if not apply or count == 0:
         return count, 0
-    res = r.db(DB_NAME).table(table).filter(expr).delete().run(conn)
+    res = r.delete(table, r.filter(table, expr))
     deleted = int((res or {}).get("deleted", 0) or 0)
     return count, deleted
 
 
 def main(apply: bool, bid: int, skip_llm_usage: bool, skip_results: bool) -> int:
     try:
-        from rethinkdb import RethinkDB  # type: ignore
+        from db import store as _store  # type: ignore
     except ImportError:
         print("ERROR: rethinkdb driver not installed. `pip install rethinkdb`.", file=sys.stderr)
         return 2
 
-    r = RethinkDB()
+    r = _store
     host = os.environ.get("RETHINKDB_HOST", "localhost")
     port = int(os.environ.get("RETHINKDB_PORT", "28015"))
     try:
-        conn = r.connect(host=host, port=port)
+        conn = None
     except Exception as e:
         print(f"ERROR: connect({host}:{port}): {e}", file=sys.stderr)
         return 3
@@ -190,7 +184,7 @@ def main(apply: bool, bid: int, skip_llm_usage: bool, skip_results: bool) -> int
     summary: list[tuple[str, int, int, str]] = []  # (table_or_section, matched, deleted, note)
 
     try:
-        existing = set(r.db(DB_NAME).table_list().run(conn))
+        existing = set(r.table_list())
 
         # 1. Resolve instance_ids.
         instance_ids = _resolve_instance_ids(r, conn, bid)
@@ -272,13 +266,13 @@ def main(apply: bool, bid: int, skip_llm_usage: bool, skip_results: bool) -> int
                     print(f"SKIP  {table}: table does not exist.")
                     summary.append((table, 0, 0, "table_missing"))
                     continue
-                doc = r.db(DB_NAME).table(table).get(bid).run(conn)
+                doc = r.get(table, bid)
                 if doc is None:
                     print(f"SKIP  {table}: no doc with id={bid}.")
                     summary.append((table, 0, 0, "not_found"))
                     continue
                 if apply:
-                    r.db(DB_NAME).table(table).get(bid).delete().run(conn)
+                    r.delete(table, bid)
                     print(f"DELETED  {table}/{bid}")
                     summary.append((table, 1, 1, "deleted"))
                 else:

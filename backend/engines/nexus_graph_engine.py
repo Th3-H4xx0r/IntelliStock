@@ -43,6 +43,10 @@ if _backend not in sys.path:
     sys.path.insert(0, _backend)
 os.chdir(_backend)
 
+from db import pool as db_pool          # noqa: E402  (needs _backend on sys.path)
+from db import schema as db_schema      # noqa: E402
+from db import store                    # noqa: E402
+
 try:
     from dotenv import load_dotenv
     load_dotenv(os.path.join(_backend, ".env"))
@@ -1555,42 +1559,64 @@ NEXUS_CONTROL_TABLE        = "EngineControl"
 NEXUS_CONTROL_ID           = "nexus_graph_engine"
 
 
+def _store_now() -> str:
+    """R24 replacement for ``r.now()``.
+
+    ReQL wrote a native TIME and the driver handed it back as a tz-aware
+    datetime; every consumer of these documents (interactive_utils'
+    stage-doc normaliser, the API, the Flutter Nexus card) immediately turns
+    that into an ISO-8601 string. Writing the string is therefore identical
+    at the consumer, and unlike a datetime it is JSON-serialisable for jsonb.
+    """
+    return datetime.now(timezone.utc).isoformat()
+
+
+class _StoreHandle:
+    """Stand-in for the old RethinkDB connection object.
+
+    ``store`` takes its own pooled connection per operation (R26), so there is
+    nothing left to hold open -- but every progress/control helper below is
+    gated on ``if conn:`` and several call ``conn.close()``. Dropping the
+    parameter would silently switch all of those guards on for good, so the
+    handle stays: truthy while the database answers, ``close()`` a no-op.
+    """
+
+    def close(self, *args, **kwargs):
+        return None
+
+
+_STORE_REACHABLE = [False]     # True once this process has talked to Postgres
+
+
 def _get_rethink_conn():
     try:
-        from rethinkdb import RethinkDB
-        r = RethinkDB()
-        return r.connect(host=RETHINKDB_HOST, port=RETHINKDB_PORT)
+        if not db_pool.health().get("ok"):
+            raise RuntimeError("Postgres pool is not answering")
+        _STORE_REACHABLE[0] = True
+        return _StoreHandle()
     except Exception as e:
-        _log(f"RethinkDB progress unavailable: {e}", "yellow")
+        # Drop the pool: psycopg_pool otherwise keeps a background thread
+        # retrying a dead server for 30s, where r.connect() failed at once.
+        try:
+            db_pool.close_pool()
+        except Exception:
+            pass
+        _log(f"Postgres progress unavailable: {e}", "yellow")
         return None
 
 
 def _ensure_progress_table(conn):
     try:
-        from rethinkdb import RethinkDB
-        r = RethinkDB()
-        dbs = list(r.db_list().run(conn))
-        if GRAPH_NEXUS_PROGRESS_DB not in dbs:
-            r.db_create(GRAPH_NEXUS_PROGRESS_DB).run(conn)
-        tables = list(r.db(GRAPH_NEXUS_PROGRESS_DB).table_list().run(conn))
-        if GRAPH_NEXUS_PROGRESS_TABLE not in tables:
-            r.db(GRAPH_NEXUS_PROGRESS_DB).table_create(GRAPH_NEXUS_PROGRESS_TABLE).run(conn)
+        db_schema.ensure_table(GRAPH_NEXUS_PROGRESS_TABLE)
     except Exception as e:
-        _log_stage_error("RethinkDB", "ensure progress table", str(e), e, color="yellow")
+        _log_stage_error("Postgres", "ensure progress table", str(e), e, color="yellow")
 
 
 def _ensure_stocks_table(conn):
     if not conn:
         return
     try:
-        from rethinkdb import RethinkDB
-        r = RethinkDB()
-        dbs = list(r.db_list().run(conn))
-        if GRAPH_NEXUS_PROGRESS_DB not in dbs:
-            r.db_create(GRAPH_NEXUS_PROGRESS_DB).run(conn)
-        tables = list(r.db(GRAPH_NEXUS_PROGRESS_DB).table_list().run(conn))
-        if STOCKS_TABLE not in tables:
-            r.db(GRAPH_NEXUS_PROGRESS_DB).table_create(STOCKS_TABLE, primary_key="id").run(conn)
+        db_schema.ensure_table(STOCKS_TABLE)
     except Exception as e:
         _log(f"Ensure Stocks table: {e}", "yellow")
 
@@ -1599,9 +1625,7 @@ def _get_cached_stock(conn, ticker: str) -> dict | None:
     if not conn or not ticker:
         return None
     try:
-        from rethinkdb import RethinkDB
-        r = RethinkDB()
-        doc = r.db(GRAPH_NEXUS_PROGRESS_DB).table(STOCKS_TABLE).get(ticker.strip().upper()).run(conn)
+        doc = store.get(STOCKS_TABLE, ticker.strip().upper())
         return doc if doc else None
     except Exception:
         return None
@@ -1611,9 +1635,7 @@ def _upsert_stock_cache(conn, doc: dict):
     if not conn or not doc or not doc.get("id"):
         return
     try:
-        from rethinkdb import RethinkDB
-        r = RethinkDB()
-        r.db(GRAPH_NEXUS_PROGRESS_DB).table(STOCKS_TABLE).insert(doc, conflict="replace").run(conn)
+        store.insert(STOCKS_TABLE, doc, conflict="replace")
     except Exception as e:
         _log(f"Stocks cache upsert: {e}", "yellow")
 
@@ -1622,22 +1644,23 @@ def _nexus_control_want_stop(conn) -> bool:
     if not conn:
         return False
     try:
-        from rethinkdb import RethinkDB
-        r = RethinkDB()
-        doc = r.db(GRAPH_NEXUS_PROGRESS_DB).table(NEXUS_CONTROL_TABLE).get(NEXUS_CONTROL_ID).run(conn)
+        # A missing row raises AttributeError here, exactly as it did on the
+        # ReQL path, and the except returns False: no doc means "keep going".
+        doc = store.get(NEXUS_CONTROL_TABLE, NEXUS_CONTROL_ID)
         return not bool(doc.get("running", False))
     except Exception:
         return False
 
 
 def _clear_nexus_control_on_exit():
+    # Gated on _STORE_REACHABLE rather than re-probing: a dead server costs
+    # the pool 3 x PG_RECONNECT_TIMEOUT before it gives up, where the old
+    # r.connect() refused instantly. A process that never reached Postgres
+    # has no control doc of its own to clear anyway.
+    if not _STORE_REACHABLE[0]:
+        return
     try:
-        conn = _get_rethink_conn()
-        if conn:
-            from rethinkdb import RethinkDB
-            r = RethinkDB()
-            r.db(GRAPH_NEXUS_PROGRESS_DB).table(NEXUS_CONTROL_TABLE).get(NEXUS_CONTROL_ID).update({"running": False}).run(conn)
-            conn.close()
+        store.update(NEXUS_CONTROL_TABLE, NEXUS_CONTROL_ID, {"running": False})
     except Exception:
         pass
 
@@ -1647,9 +1670,7 @@ atexit.register(_clear_nexus_control_on_exit)
 
 def _load_graph_nexus_progress(conn) -> dict | None:
     try:
-        from rethinkdb import RethinkDB
-        r = RethinkDB()
-        doc = r.db(GRAPH_NEXUS_PROGRESS_DB).table(GRAPH_NEXUS_PROGRESS_TABLE).get(PROGRESS_ID_GRAPH_NEXUS).run(conn)
+        doc = store.get(GRAPH_NEXUS_PROGRESS_TABLE, PROGRESS_ID_GRAPH_NEXUS)
         return doc if doc else None
     except Exception:
         return None
@@ -1671,16 +1692,14 @@ def _save_graph_nexus_progress(
     If stage_update is provided, merge it into doc['stages'] (by stage_index). When stage_update is None we merge
     into the existing doc so we never wipe the 'stages' array (e.g. periodic ETA save must preserve stages)."""
     try:
-        from rethinkdb import RethinkDB
         import datetime
-        r = RethinkDB()
         now_iso = datetime.datetime.utcnow().isoformat() + "Z"
         updates = {
             "id": PROGRESS_ID_GRAPH_NEXUS,
             "last_completed_phase": last_completed_phase,
             "progress_pct": progress_pct,
             "message": message,
-            "last_updated": r.now(),
+            "last_updated": _store_now(),
             "status": status,
         }
         if eta_remaining_sec is not None and eta_remaining_sec >= 0:
@@ -1748,9 +1767,9 @@ def _save_graph_nexus_progress(
         doc = dict(existing) if existing else {}
         doc.update(updates)
         doc["stages"] = stages
-        r.db(GRAPH_NEXUS_PROGRESS_DB).table(GRAPH_NEXUS_PROGRESS_TABLE).insert(doc, conflict="replace").run(conn)
+        store.insert(GRAPH_NEXUS_PROGRESS_TABLE, doc, conflict="replace")
     except Exception as e:
-        _log_stage_error("RethinkDB", "save progress", str(e), e, color="yellow")
+        _log_stage_error("Postgres", "save progress", str(e), e, color="yellow")
 
 
 # Phase 6 (corporate hierarchy) stage_index for live progress updates
@@ -1872,8 +1891,6 @@ def _nexus_report_stage_substep(conn, stage_index: int, substeps_completed: int)
         existing = _load_graph_nexus_progress(conn)
         if not existing:
             return
-        from rethinkdb import RethinkDB
-        r = RethinkDB()
         stages = [dict(s) for s in (existing.get("stages") or [])]
         for s in stages:
             if s.get("stage_index") == stage_index:
@@ -1881,8 +1898,8 @@ def _nexus_report_stage_substep(conn, stage_index: int, substeps_completed: int)
                 break
         doc = dict(existing)
         doc["stages"] = stages
-        doc["last_updated"] = r.now()
-        r.db(GRAPH_NEXUS_PROGRESS_DB).table(GRAPH_NEXUS_PROGRESS_TABLE).insert(doc, conflict="replace").run(conn)
+        doc["last_updated"] = _store_now()
+        store.insert(GRAPH_NEXUS_PROGRESS_TABLE, doc, conflict="replace")
     except Exception:
         pass
 
@@ -3801,18 +3818,16 @@ def _phase3_report_progress(conn, current: int, total: int, stage_message: str) 
         m = _re.search(r'(\d+)\s+merged\s+edges', stage_message)
         edges_count = int(m.group(1)) if m else 0
         scraper_pct = round((current / total) * 100, 1) if total > 0 else 0.0
-        from rethinkdb import RethinkDB as _RDB
-        _r = _RDB()
-        _r.db(GRAPH_NEXUS_PROGRESS_DB).table(GRAPH_NEXUS_PROGRESS_TABLE).insert({
+        store.insert(GRAPH_NEXUS_PROGRESS_TABLE, {
             "id": "sec_edgar_scraper",
             "last_ticker_index": current,
             "total_tickers": total,
             "edges_count": edges_count,
             "progress_pct": scraper_pct,
             "message": stage_message,
-            "last_updated": _r.now(),
+            "last_updated": _store_now(),
             "status": "running",
-        }, conflict="replace").run(conn)
+        }, conflict="replace")
     except Exception:
         pass
 
@@ -16954,8 +16969,12 @@ def _run_build(driver, conn) -> bool:
                 build_row_finalize as _ngb_row_finalize,
                 _neo4j_counts as _ngb_counts,
             )
-            from rethinkdb import RethinkDB as _NgbRDB
-            _r_ngb = _NgbRDB()
+            # nexus_graph_builds took (r, conn) and now ignores both: the
+            # store takes its own pooled connection per operation. The handle
+            # stays so the ~6 call sites below keep their arity. It must NOT
+            # be None-by-accident: build_row_start's r.now() used to sit
+            # OUTSIDE the try below, so a None here crashed a real build.
+            _r_ngb = None
             _ngb_ensure_log_dir()
             _ngb_rotate()
             _build_row_id = _ngb_make_id()
@@ -17158,18 +17177,16 @@ def _run_build(driver, conn) -> bool:
                     # Reset the sec_edgar_scraper card when Phase 3: Supply chain starts
                     if phase_num == 4:
                         try:
-                            from rethinkdb import RethinkDB as _RDB
-                            _r = _RDB()
-                            _r.db(GRAPH_NEXUS_PROGRESS_DB).table(GRAPH_NEXUS_PROGRESS_TABLE).insert({
+                            store.insert(GRAPH_NEXUS_PROGRESS_TABLE, {
                                 "id": "sec_edgar_scraper",
                                 "last_ticker_index": 0,
                                 "total_tickers": None,
                                 "edges_count": 0,
                                 "progress_pct": 0.0,
                                 "message": "Historical 10-K scraping starting...",
-                                "last_updated": _r.now(),
+                                "last_updated": _store_now(),
                                 "status": "running",
-                            }, conflict="replace").run(conn)
+                            }, conflict="replace")
                         except Exception:
                             pass
                 _nexus_stage_reset()
@@ -17255,13 +17272,11 @@ def _run_build(driver, conn) -> bool:
                     # Mark sec_edgar_scraper card as completed when Phase 3: Supply chain finishes
                     if phase_num == 4:
                         try:
-                            from rethinkdb import RethinkDB as _RDB
-                            _r = _RDB()
-                            _r.db(GRAPH_NEXUS_PROGRESS_DB).table(GRAPH_NEXUS_PROGRESS_TABLE).get("sec_edgar_scraper").update({
+                            store.update(GRAPH_NEXUS_PROGRESS_TABLE, "sec_edgar_scraper", {
                                 "status": "completed",
                                 "message": f"{phase_label} — done",
-                                "last_updated": _r.now(),
-                            }).run(conn)
+                                "last_updated": _store_now(),
+                            })
                         except Exception:
                             pass
 
@@ -17416,9 +17431,7 @@ def _load_nexus_control_doc(conn) -> dict:
     if conn is None:
         return {}
     try:
-        from rethinkdb import RethinkDB
-        r = RethinkDB()
-        doc = r.db(GRAPH_NEXUS_PROGRESS_DB).table(NEXUS_CONTROL_TABLE).get(NEXUS_CONTROL_ID).run(conn)
+        doc = store.get(NEXUS_CONTROL_TABLE, NEXUS_CONTROL_ID)
         if not isinstance(doc, dict):
             return {}
         schema_version = int(doc.get("phase_selector_schema_version") or 1)
@@ -17432,7 +17445,7 @@ def _load_nexus_control_doc(conn) -> dict:
                 "auto_update_end_phase": _migrate_legacy_nexus_control_phase_value(doc.get("auto_update_end_phase"), is_end_field=True),
             }
             try:
-                r.db(GRAPH_NEXUS_PROGRESS_DB).table(NEXUS_CONTROL_TABLE).get(NEXUS_CONTROL_ID).update(migrated).run(conn)
+                store.update(NEXUS_CONTROL_TABLE, NEXUS_CONTROL_ID, migrated)
             except Exception:
                 pass
             doc.update(migrated)
@@ -17445,11 +17458,9 @@ def _update_nexus_control_doc(conn, update: dict) -> None:
     if conn is None or not update:
         return
     try:
-        from rethinkdb import RethinkDB
-        r = RethinkDB()
         update = dict(update)
         update.setdefault("phase_selector_schema_version", 3)
-        r.db(GRAPH_NEXUS_PROGRESS_DB).table(NEXUS_CONTROL_TABLE).get(NEXUS_CONTROL_ID).update(update).run(conn)
+        store.update(NEXUS_CONTROL_TABLE, NEXUS_CONTROL_ID, update)
     except Exception as e:
         _log(f"Could not update Nexus control doc: {e}", "yellow")
 

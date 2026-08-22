@@ -40,11 +40,9 @@ if _BACKEND_DIR not in sys.path:
 
 
 def _connect_db():
-    from rethinkdb import RethinkDB
-    r = RethinkDB()
-    host = os.environ.get("RETHINKDB_HOST", "localhost")
-    port = int(os.environ.get("RETHINKDB_PORT", "28015"))
-    return r, r.connect(host=host, port=port, db="IntelliStock")
+    """R26: the store pools its own connection per operation."""
+    from db import store as _store
+    return _store, None
 
 
 def _derive_cid_prefix(instance_id: str) -> str:

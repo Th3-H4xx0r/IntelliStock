@@ -1,4 +1,4 @@
-"""Task 5: authoritative RethinkDB event/state store for benchmark alpha.
+"""Task 5: authoritative Postgres event/state store for benchmark alpha.
 
 Hard-durability append-only events, compare-and-swap versioned state, typed
 run phases that survive crash/restart, and the invariant that storage failure
@@ -12,9 +12,9 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from benchmark_alpha.rethink_store import (
+from benchmark_alpha.pg_store import (
     AlphaIntegrityError,
-    AlphaRethinkStore,
+    AlphaPostgresStore,
     AlphaStateConflictError,
     AlphaUnavailableError,
 )
@@ -77,9 +77,9 @@ class DownBackend(FakeBackend):
         return "rethinkdb unreachable"
 
 
-def test_rethink_store_uses_hard_writes_and_rejects_divergent_duplicate():
+def test_pg_store_uses_hard_writes_and_rejects_divergent_duplicate():
     backend = FakeBackend()
-    store = AlphaRethinkStore.for_backend(backend)
+    store = AlphaPostgresStore.for_backend(backend)
     ts = datetime(2026, 7, 11, tzinfo=timezone.utc)
     assert store.append_event("e1", EventKind.PREDICTION, {"symbol": "AAPL"}, ts)
     assert store.append_event("e1", EventKind.PREDICTION, {"symbol": "AAPL"}, ts) is False
@@ -90,13 +90,13 @@ def test_rethink_store_uses_hard_writes_and_rejects_divergent_duplicate():
 
 def test_duplicate_detection_is_content_based_not_key_order():
     backend = FakeBackend()
-    store = AlphaRethinkStore.for_backend(backend)
+    store = AlphaPostgresStore.for_backend(backend)
     assert store.append_event("e2", EventKind.GATE, {"a": 1, "b": 2}, TS)
     assert store.append_event("e2", EventKind.GATE, {"b": 2, "a": 1}, TS) is False
 
 
 def test_append_event_requires_aware_timestamp_and_known_kind():
-    store = AlphaRethinkStore.for_backend(FakeBackend())
+    store = AlphaPostgresStore.for_backend(FakeBackend())
     with pytest.raises(ValueError):
         store.append_event("e3", EventKind.RISK, {}, datetime(2026, 7, 11))
     with pytest.raises(ValueError):
@@ -105,7 +105,7 @@ def test_append_event_requires_aware_timestamp_and_known_kind():
 
 def test_put_state_compare_and_swap_and_stale_version():
     backend = FakeBackend()
-    store = AlphaRethinkStore.for_backend(backend)
+    store = AlphaPostgresStore.for_backend(backend)
     rec = store.put_state("risk:alpaca-main", {"level": "NORMAL"}, expected_version=0)
     assert rec.version == 1
     rec2 = store.put_state("risk:alpaca-main", {"level": "SOFT"}, expected_version=1)
@@ -118,7 +118,7 @@ def test_put_state_compare_and_swap_and_stale_version():
 
 
 def test_storage_failure_is_never_an_empty_read():
-    store = AlphaRethinkStore.for_backend(DownBackend())
+    store = AlphaPostgresStore.for_backend(DownBackend())
     with pytest.raises(AlphaUnavailableError):
         store.append_event("e1", EventKind.PREDICTION, {"s": "A"}, TS)
     with pytest.raises(AlphaUnavailableError):
@@ -131,20 +131,20 @@ def test_storage_failure_is_never_an_empty_read():
 
 
 def test_missing_state_reads_as_none_when_store_is_healthy():
-    store = AlphaRethinkStore.for_backend(FakeBackend())
+    store = AlphaPostgresStore.for_backend(FakeBackend())
     assert store.get_state("run:alpaca-main:never-written") is None
 
 
 def test_run_state_survives_restart_at_every_phase():
     backend = FakeBackend()
-    store = AlphaRethinkStore.for_backend(backend)
+    store = AlphaPostgresStore.for_backend(backend)
     for idx, phase in enumerate(RunPhase):
         run_id = f"run-{idx}"
         store.put_run_state("alpaca-main", run_id, phase,
                             {"target": {"SPY": 0.98}}, expected_version=0)
         # Simulated restart: a NEW store over the same backend must resume the
         # exact persisted phase — no date-only completed marker.
-        resumed = AlphaRethinkStore.for_backend(backend).get_run_state(
+        resumed = AlphaPostgresStore.for_backend(backend).get_run_state(
             "alpaca-main", run_id)
         assert resumed.phase is phase
         assert resumed.payload["target"] == {"SPY": 0.98}
@@ -256,10 +256,71 @@ def test_retention_plan_is_executable_and_scoped():
 def test_pagination_never_drops_rows_sharing_the_boundary_timestamp():
     """Audit finding 5: an as_of-only cursor with an open bound skipped every
     row sharing the boundary timestamp."""
-    from benchmark_alpha.rethink_store import advance_page
+    from benchmark_alpha.pg_store import advance_page
     rows = [{"id": f"r{i}", "as_of": "2026-07-10"} for i in range(3)]
     page1, cursor1 = advance_page(rows, limit=2, cursor=None)
     assert [r["id"] for r in page1] == ["r0", "r1"]
     assert cursor1 is not None
     page2, cursor2 = advance_page(rows, limit=2, cursor=cursor1)
     assert [r["id"] for r in page2] == ["r2"]
+
+
+# -- the ported PostgresBackend (real store, real Postgres) ----------------
+
+_needs_pg = pytest.mark.skipif(
+    not os.environ.get("PG_TEST_DSN"),
+    reason="exercises the module-level db.store; needs PG_TEST_DSN")
+
+
+@_needs_pg
+def test_pg_backend_insert_once_is_idempotent_and_reports_the_prior(store):
+    from benchmark_alpha.pg_store import EVENTS_TABLE, PostgresBackend
+
+    backend = PostgresBackend()
+    doc = {"id": "e1", "kind": "K", "payload": {"a": 1}, "created_at": "t"}
+    assert backend.insert_event(doc, durability="hard") is None
+    assert backend.insert_event(doc, durability="hard") == doc
+    assert store.count(EVENTS_TABLE) == 1
+
+
+@_needs_pg
+def test_pg_backend_list_and_count_records_honour_filters_and_order(store):
+    from benchmark_alpha.pg_store import EXPERIMENTS_TABLE, PostgresBackend
+
+    backend = PostgresBackend()
+    store.insert(EXPERIMENTS_TABLE, [
+        {"id": "b", "record_kind": "registration", "registered_at": "2026-01-02"},
+        {"id": "a", "record_kind": "registration", "registered_at": "2026-01-01"},
+        {"id": "c", "record_kind": "outcome", "registered_at": "2026-01-03"},
+    ])
+    rows = backend.list_records(EXPERIMENTS_TABLE,
+                                {"record_kind": "registration"}, "registered_at")
+    assert [r["id"] for r in rows] == ["a", "b"]
+    assert backend.count_records(EXPERIMENTS_TABLE,
+                                 {"record_kind": "registration"}) == 2
+    assert backend.count_records(EXPERIMENTS_TABLE) == 3
+
+
+@_needs_pg
+def test_pg_backend_read_by_index_pages_without_dropping_tied_rows(store):
+    from benchmark_alpha.pg_store import PostgresBackend
+
+    backend = PostgresBackend()
+    store.insert("AlphaOutcomes", [
+        {"id": "r%d" % n, "run_id": "run1", "as_of": "2026-01-01"}
+        for n in range(3)
+    ] + [{"id": "other", "run_id": "run2", "as_of": "2026-01-01"}])
+    page, cursor = backend.read_by_index("AlphaOutcomes", "run_asof", ("run1",),
+                                         limit=2, cursor=None)
+    assert [r["id"] for r in page] == ["r0", "r1"]
+    page2, cursor2 = backend.read_by_index("AlphaOutcomes", "run_asof", ("run1",),
+                                           limit=2, cursor=cursor)
+    assert [r["id"] for r in page2] == ["r2"]      # the tie is not dropped
+    assert cursor2 is None
+
+
+@_needs_pg
+def test_pg_backend_health_probe_names_the_missing_tables(store):
+    from benchmark_alpha.pg_store import PostgresBackend
+
+    assert PostgresBackend().health_probe() is None

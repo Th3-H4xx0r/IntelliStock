@@ -18,12 +18,12 @@ from datetime import datetime, timezone
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(_REPO, "backend"))
 
-from rethinkdb import RethinkDB                                   # noqa: E402
+from db import store as _store                   # noqa: E402
 
 from self_learning import store                                   # noqa: E402
 from self_learning.pipeline import process_backtest_document      # noqa: E402
 
-r = RethinkDB()
+r = _store
 DB_NAME = "IntelliStock"
 _TERMINAL = frozenset({"completed", "complete", "finished", "done"})
 _CRYPTO_HINTS = ("crypto", "coin")
@@ -63,7 +63,7 @@ def main() -> int:
     store.ensure_tables(conn)
     now = datetime.now(timezone.utc).isoformat()
 
-    rows = list(r.db(DB_NAME).table("BacktestResults").pluck("id", "status").run(conn))
+    rows = list(r.pluck(r.run("BacktestResults"), "id", "status"))
     done = [row for row in rows
             if str(row.get("status") or "").strip().lower() in _TERMINAL]
     done.sort(key=lambda d: str(d.get("id")), reverse=True)
@@ -74,7 +74,7 @@ def main() -> int:
           f"({'APPLY' if args.apply else 'DRY RUN'})")
     total_obs = total_find = 0
     for row in done:
-        doc = r.db(DB_NAME).table("BacktestResults").get(row["id"]).run(conn)
+        doc = r.get("BacktestResults", row["id"])
         if not doc:
             continue
         venue = _venue_for(doc)

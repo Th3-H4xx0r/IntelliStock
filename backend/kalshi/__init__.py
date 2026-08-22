@@ -5,7 +5,7 @@ Import convention matches the rest of backend/: no `backend.` prefix; relies on
 
 Only the dependency-light pure modules are re-exported here. The client,
 ingestion, fees, engine, and db modules pull in cryptography / requests /
-rethinkdb and are imported directly by their consumers, so importing this
+psycopg and are imported directly by their consumers, so importing this
 package stays cheap and side-effect-free for unit tests.
 """
 from kalshi.models import (

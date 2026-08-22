@@ -30,6 +30,7 @@ import re
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
+import datetime as _dt
 from datetime import datetime, timedelta
 from html.parser import HTMLParser
 from time import perf_counter, sleep as time_sleep
@@ -416,13 +417,12 @@ def _timed_stage(label: str, *, start_details: str = "", start_color: str = "cya
     _log(f"{label}: done in {_format_stage_elapsed(perf_counter() - started)}", done_color)
 
 
-# RethinkDB for article cache (same DB as rest of app)
+# Postgres store for the article cache (same DB as rest of app)
 try:
-    from rethinkdb import RethinkDB
-    _r = RethinkDB()
+    from db import store, P
+    from db import pool as _dbpool
+    from db import schema as _dbschema
     DB_NAME = "IntelliStock"
-    RETHINKDB_HOST = os.environ.get("RETHINKDB_HOST", "localhost")
-    RETHINKDB_PORT = int(os.environ.get("RETHINKDB_PORT", "28015"))
     NEXUS_NEWS_CACHE_TABLE = "GraphNexusNewsCache"
     TICKER_HISTORY_TABLE = "GraphNexusTickerHistory"
     TRENDS_TABLE = "GraphNexusMarketTrends"
@@ -445,7 +445,10 @@ try:
     NEXUS_OVERLAY_RESULT_CACHE_TABLE = "GraphNexusOverlayResultCache"
     _nexus_db_available = True
 except Exception:
-    _r = None
+    store = None
+    P = None
+    _dbpool = None
+    _dbschema = None
     _nexus_db_available = False
 
 # Alpaca news (all)
@@ -460,30 +463,68 @@ _nexus_cache_table_ensured = False
 _NEXUS_BACKTEST_CLEANED_INSTANCES: set[str] = set()
 
 
+class _StoreConn:
+    """Stand-in for the old RethinkDB connection handle.
+
+    ``store`` takes its own pooled connection per operation, so no call site
+    needs a connection object any more. The handle is kept because ~120 sites
+    gate on ``conn is None`` to mean "no database is reachable" — that meaning
+    is preserved exactly. ``close()`` is a no-op so the old
+    ``conn.close(...)`` calls stay harmless.
+    """
+
+    __slots__ = ()
+
+    def close(self, *args, **kwargs) -> None:
+        return None
+
+
+_STORE_CONN = _StoreConn()
+
+
+def _db_now():
+    """The jsonb equivalent of ReQL's ``r.now()``.
+
+    ``r.now()`` stored a native time that the driver handed back as a
+    tz-aware ``datetime``. jsonb has no time type, so the value is written as
+    an ISO-8601 UTC string and the fields are declared as ``time_fields`` in
+    ``db/schema.py`` — so a read decodes back to a tz-aware ``datetime``, the
+    same Python type the RethinkDB driver produced. (``db.store`` ships no
+    server-side ``now()``; every one of these writes is its own short
+    transaction either way, so the distinction is invisible.)
+    """
+    return _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+
+def _by_ids(table: str, ids):
+    """A Selection over the primary-key column -- ReQL ``get_all(*ids)``.
+
+    Used by the bulk delete/update paths so they stay ONE statement instead of
+    a per-id round trip, and so they hit the primary key rather than a
+    sequential scan over ``doc->>'id'``.
+    """
+    keys = [store.coerce_id(table, i) for i in ids]
+    return store.Selection(table).where("id = ANY(%s)", (keys,))
+
+
 def _get_nexus_db_conn(reuse: bool = True):
-    """Get RethinkDB connection for Graph Nexus article cache."""
+    """Get the Graph Nexus store handle (None when Postgres is unreachable)."""
     global _nexus_db_conn, _nexus_cache_table_ensured
-    if not _nexus_db_available or _r is None:
+    if not _nexus_db_available or store is None:
         return None
     if reuse and _nexus_db_conn is not None:
-        try:
-            # Health check with 5s timeout via daemon thread to prevent hang on half-open conn
-            import threading as _th
-            _hc_ok = [False]
-            def _hc():
-                try: _r.db_list().run(_nexus_db_conn); _hc_ok[0] = True
-                except Exception: pass
-            _t = _th.Thread(target=_hc, daemon=True); _t.start(); _t.join(timeout=5)
-            if _hc_ok[0]:
-                return _nexus_db_conn
-            _nexus_db_conn = None
-        except Exception:
-            _nexus_db_conn = None
+        return _nexus_db_conn
     try:
-        _nexus_db_conn = _r.connect(host=RETHINKDB_HOST, port=RETHINKDB_PORT, timeout=5)
+        # The pooled equivalent of the old half-open health check: the pool
+        # validates and replaces a broken connection itself, so one SELECT 1
+        # is enough and there is no thread/timeout dance to reproduce.
+        if not _dbpool.health().get("ok"):
+            raise RuntimeError("Postgres pool is not healthy")
+        _nexus_db_conn = _STORE_CONN
         return _nexus_db_conn
     except Exception as e:
-        _log(f"RethinkDB not available for article cache: {e}", "yellow")
+        _log(f"Postgres not available for article cache: {e}", "yellow")
+        _nexus_db_conn = None
         return None
 
 
@@ -493,12 +534,7 @@ def _ensure_nexus_cache_table(conn):
     if conn is None or _nexus_cache_table_ensured:
         return
     try:
-        dbs = list(_r.db_list().run(conn))
-        if DB_NAME not in dbs:
-            _r.db_create(DB_NAME).run(conn)
-        tables = list(_r.db(DB_NAME).table_list().run(conn))
-        if NEXUS_NEWS_CACHE_TABLE not in tables:
-            _r.db(DB_NAME).table_create(NEXUS_NEWS_CACHE_TABLE).run(conn)
+        _dbschema.ensure_table(NEXUS_NEWS_CACHE_TABLE)
         _nexus_cache_table_ensured = True
     except Exception as e:
         _log(f"Could not ensure Graph Nexus cache table: {e}", "yellow")
@@ -516,9 +552,7 @@ def _ensure_trends_table(conn):
     if conn is None or _trends_table_ensured:
         return
     try:
-        tables = list(_r.db(DB_NAME).table_list().run(conn))
-        if TRENDS_TABLE not in tables:
-            _r.db(DB_NAME).table_create(TRENDS_TABLE).run(conn)
+        _dbschema.ensure_table(TRENDS_TABLE)
         _trends_table_ensured = True
     except Exception as e:
         _log(f"Could not ensure trends table: {e}", "yellow")
@@ -530,9 +564,7 @@ def _ensure_discovered_stocks_table(conn):
     if conn is None or _discovered_table_ensured:
         return
     try:
-        tables = list(_r.db(DB_NAME).table_list().run(conn))
-        if DISCOVERED_TABLE not in tables:
-            _r.db(DB_NAME).table_create(DISCOVERED_TABLE).run(conn)
+        _dbschema.ensure_table(DISCOVERED_TABLE)
         _discovered_table_ensured = True
     except Exception as e:
         _log(f"Could not ensure discovered stocks table: {e}", "yellow")
@@ -553,9 +585,7 @@ def _ensure_discovery_snapshot_table(conn):
     if conn is None or _discovery_snapshot_table_ensured:
         return
     try:
-        tables = list(_r.db(DB_NAME).table_list().run(conn))
-        if DISCOVERY_SNAPSHOT_TABLE not in tables:
-            _r.db(DB_NAME).table_create(DISCOVERY_SNAPSHOT_TABLE).run(conn)
+        _dbschema.ensure_table(DISCOVERY_SNAPSHOT_TABLE)
         _discovery_snapshot_table_ensured = True
     except Exception as e:
         _log(f"Could not ensure discovery snapshot table: {e}", "yellow")
@@ -571,9 +601,7 @@ def _ensure_outcomes_table(conn):
     if conn is None or _outcomes_table_ensured:
         return
     try:
-        tables = list(_r.db(DB_NAME).table_list().run(conn))
-        if OUTCOMES_TABLE not in tables:
-            _r.db(DB_NAME).table_create(OUTCOMES_TABLE).run(conn)
+        _dbschema.ensure_table(OUTCOMES_TABLE)
         _outcomes_table_ensured = True
     except Exception as e:
         _log(f"Could not ensure outcomes table: {e}", "yellow")
@@ -585,9 +613,7 @@ def _ensure_learning_cache_table(conn):
     if conn is None or _learning_table_ensured:
         return
     try:
-        tables = list(_r.db(DB_NAME).table_list().run(conn))
-        if LEARNING_CACHE_TABLE not in tables:
-            _r.db(DB_NAME).table_create(LEARNING_CACHE_TABLE).run(conn)
+        _dbschema.ensure_table(LEARNING_CACHE_TABLE)
         _learning_table_ensured = True
     except Exception as e:
         _log(f"Could not ensure learning cache table: {e}", "yellow")
@@ -602,11 +628,14 @@ def _ensure_nexus_history_table(
     """Ensure the table exists AND each named simple-field index is built.
 
     ``indexes`` lets writers declare which secondary indexes the table
-    needs. The first call per (table, index) pair triggers
-    ``index_create`` + ``index_wait`` — on a heavy existing table this
-    can take a few minutes, but it runs at most once per process and
-    every subsequent startup pays nothing. Without the index, the
-    instance-scoped ``filter()`` queries the broker runs at lookback
+    needs. Under Postgres the index set is declared once, in
+    ``db/schema.py`` (``instance_id`` is an indexed_field on both
+    GraphNexusTradeContexts and GraphNexusTradeOutcomes), and
+    ``ensure_table`` builds it — ``CREATE INDEX`` is synchronous, so the
+    old ``index_wait`` has no counterpart. The argument stays so callers
+    keep documenting which indexes they depend on, and it is verified
+    against the registry rather than created ad hoc. Without the index,
+    the instance-scoped ``filter()`` queries the broker runs at lookback
     prep time degrade to multi-minute full-table scans
     (backtest 953929 stalled ~4 min on this exact query)."""
     if conn is None or not table_name:
@@ -617,36 +646,19 @@ def _ensure_nexus_history_table(
     if table_name in _nexus_history_tables_ensured and not needs_index_check:
         return
     try:
-        dbs = list(_r.db_list().run(conn))
-        if DB_NAME not in dbs:
-            _r.db_create(DB_NAME).run(conn)
-        tables = list(_r.db(DB_NAME).table_list().run(conn))
-        if table_name not in tables:
-            _r.db(DB_NAME).table_create(table_name).run(conn)
+        _dbschema.ensure_table(table_name)
         _nexus_history_tables_ensured.add(table_name)
         if indexes:
-            existing = set(
-                _r.db(DB_NAME).table(table_name).index_list().run(conn)
-            )
+            declared = set(_dbschema.spec(table_name).indexed_fields)
             for idx in indexes:
-                marker = f"{table_name}::{idx}"
-                if idx in existing:
-                    _nexus_history_tables_ensured.add(marker)
+                if idx not in declared:
+                    _log(
+                        f"Index '{idx}' on {table_name} is not declared in "
+                        f"db/schema.py — instance-scoped filters will scan",
+                        "yellow",
+                    )
                     continue
-                _log(
-                    f"Creating index '{idx}' on {table_name} "
-                    f"(one-time; may take a few minutes on first run)...",
-                    "cyan",
-                )
-                _t0 = perf_counter()
-                _r.db(DB_NAME).table(table_name).index_create(idx).run(conn)
-                _r.db(DB_NAME).table(table_name).index_wait(idx).run(conn)
-                _log(
-                    f"Index '{idx}' on {table_name} ready in "
-                    f"{perf_counter() - _t0:.1f}s",
-                    "cyan",
-                )
-                _nexus_history_tables_ensured.add(marker)
+                _nexus_history_tables_ensured.add(f"{table_name}::{idx}")
     except Exception as exc:
         _log(f"Could not ensure table {table_name}: {exc}", "yellow")
 
@@ -705,11 +717,11 @@ def _outcome_row_allowed(action_intent: str) -> bool:
 
 def _load_evict_cooldown_from_db(conn, instance_id: str) -> dict:
     """Load persisted rotation eviction cooldown for this instance."""
-    if conn is None or _r is None or not instance_id:
+    if conn is None or store is None or not instance_id:
         return {}
     try:
         _ensure_nexus_history_table(conn, NEXUS_ROTATION_COOLDOWN_TABLE)
-        doc = _r.db(DB_NAME).table(NEXUS_ROTATION_COOLDOWN_TABLE).get(instance_id).run(conn)
+        doc = store.get(NEXUS_ROTATION_COOLDOWN_TABLE, instance_id)
         if isinstance(doc, dict) and isinstance(doc.get("cooldown"), dict):
             return {str(k): int(v) for k, v in doc["cooldown"].items() if int(v or 0) > 0}
     except Exception:
@@ -718,15 +730,15 @@ def _load_evict_cooldown_from_db(conn, instance_id: str) -> dict:
 
 
 def _save_evict_cooldown_to_db(conn, instance_id: str, cooldown: dict) -> None:
-    """Persist rotation eviction cooldown to RethinkDB (fire-and-forget)."""
-    if conn is None or _r is None or not instance_id:
+    """Persist rotation eviction cooldown to the store (fire-and-forget)."""
+    if conn is None or store is None or not instance_id:
         return
     try:
         _ensure_nexus_history_table(conn, NEXUS_ROTATION_COOLDOWN_TABLE)
-        _r.db(DB_NAME).table(NEXUS_ROTATION_COOLDOWN_TABLE).insert({
+        store.insert(NEXUS_ROTATION_COOLDOWN_TABLE, {
             "id": instance_id,
             "cooldown": {str(k): int(v) for k, v in (cooldown or {}).items() if int(v or 0) > 0},
-        }, conflict="replace").run(conn, noreply=True)
+        }, conflict="replace")
     except Exception:
         pass
 
@@ -2945,7 +2957,8 @@ def _save_event_snapshots(
     doc_id = f"{instance_id}_{date_key}"
     config = config or {}
     try:
-        _r.db(DB_NAME).table(OUTCOMES_TABLE).insert(
+        store.insert(
+            OUTCOMES_TABLE,
             {
                 "id": doc_id,
                 "instance_id": instance_id,
@@ -2956,7 +2969,7 @@ def _save_event_snapshots(
                 "events": events,
             },
             conflict="replace",
-        ).run(conn)
+        )
         _log(f"Outcome snapshots saved: {len(events)} events for {date_key}", "cyan")
     except Exception as e:
         _log(f"Failed to save outcome snapshots: {e}", "yellow")
@@ -2973,9 +2986,10 @@ def _fill_outcome_prices(conn, instance_id: str, today: str, prices: dict, *, ov
         return
     _ensure_outcomes_table(conn)
     try:
-        cursor = _r.db(DB_NAME).table(OUTCOMES_TABLE).filter(
-            lambda doc: (doc["instance_id"] == instance_id) & (doc["date_key"].lt(today))
-        ).limit(500).run(conn)
+        cursor = store.run(store.limit(store.filter(
+            OUTCOMES_TABLE,
+            P.field("instance_id").eq(instance_id) & P.field("date_key").lt(today),
+        ), 500))
         docs = list(cursor)
     except Exception:
         return
@@ -3104,9 +3118,10 @@ def _fill_outcome_prices(conn, instance_id: str, today: str, prices: dict, *, ov
             updated_events.append(ev)
         if any_updated:
             try:
-                _r.db(DB_NAME).table(OUTCOMES_TABLE).get(doc["id"]).update(
-                    {"events": updated_events}
-                ).run(conn)
+                store.update(
+                    OUTCOMES_TABLE, doc["id"],
+                    {"events": updated_events},
+                )
             except Exception:
                 pass
 
@@ -3128,13 +3143,18 @@ def _load_outcome_context(
     try:
         if date_key:
             cutoff = (datetime.strptime(date_key, "%Y-%m-%d") - timedelta(days=limit_days)).strftime("%Y-%m-%d")
-            cursor = _r.db(DB_NAME).table(OUTCOMES_TABLE).filter(
-                lambda doc: (doc["instance_id"] == instance_id) & (doc["date_key"].ge(cutoff)) & (doc["date_key"].lt(date_key))
-            ).order_by(_r.desc("date_key")).limit(60).run(conn)
+            _sel = store.filter(
+                OUTCOMES_TABLE,
+                P.field("instance_id").eq(instance_id)
+                & P.field("date_key").ge(cutoff)
+                & P.field("date_key").lt(date_key),
+            )
+            cursor = store.run(store.limit(
+                store.order_by(_sel, fields=(store.desc("date_key"),)), 60))
         else:
-            cursor = _r.db(DB_NAME).table(OUTCOMES_TABLE).filter(
-                lambda doc: doc["instance_id"] == instance_id
-            ).order_by(_r.desc("date_key")).limit(60).run(conn)
+            _sel = store.filter(OUTCOMES_TABLE, P.field("instance_id").eq(instance_id))
+            cursor = store.run(store.limit(
+                store.order_by(_sel, fields=(store.desc("date_key"),)), 60))
         docs = list(cursor)
     except Exception:
         return ""
@@ -3171,7 +3191,7 @@ def _get_learning_cache(conn, instance_id: str, refresh_hours: float, *, config:
         return None
     _ensure_learning_cache_table(conn)
     try:
-        doc = _r.db(DB_NAME).table(LEARNING_CACHE_TABLE).get(instance_id).run(conn)
+        doc = store.get(LEARNING_CACHE_TABLE, instance_id)
         if not doc:
             return None
         expected_scope_id = _history_scope_id_from_config(config)
@@ -3205,10 +3225,11 @@ def _save_learning_cache(conn, instance_id: str, summary: str, *, config: dict |
             "cached_at": datetime.utcnow().isoformat(),
         }
         payload.update(_nexus_reuse_stamp_from_config(config, instance_id))
-        _r.db(DB_NAME).table(LEARNING_CACHE_TABLE).insert(
+        store.insert(
+            LEARNING_CACHE_TABLE,
             payload,
             conflict="replace",
-        ).run(conn)
+        )
     except Exception as e:
         _log(f"Failed to save learning cache: {e}", "yellow")
 
@@ -3248,9 +3269,14 @@ def _build_learning_context(
     _ensure_outcomes_table(conn)
     try:
         cutoff = (datetime.strptime(date_key, "%Y-%m-%d") - timedelta(days=learning_stage_days)).strftime("%Y-%m-%d")
-        cursor = _r.db(DB_NAME).table(OUTCOMES_TABLE).filter(
-            lambda doc: (doc["instance_id"] == instance_id) & (doc["date_key"].ge(cutoff)) & (doc["date_key"].lt(date_key))
-        ).order_by("date_key").run(conn)
+        # ASCENDING -- unlike its two neighbours in _load_outcome_context.
+        _sel = store.filter(
+            OUTCOMES_TABLE,
+            P.field("instance_id").eq(instance_id)
+            & P.field("date_key").ge(cutoff)
+            & P.field("date_key").lt(date_key),
+        )
+        cursor = store.run(store.order_by(_sel, fields=(store.asc("date_key"),)))
         docs = list(cursor)
     except Exception as e:
         _log(f"Learning stage: failed to load outcomes: {e}", "yellow")
@@ -3396,7 +3422,7 @@ def _load_news_raw_cache_rows(conn, article_hashes: list[str]) -> dict[str, dict
         return {}
     _ensure_nexus_history_table(conn, NEXUS_NEWS_RAW_TABLE)
     try:
-        cursor = _r.db(DB_NAME).table(NEXUS_NEWS_RAW_TABLE).get_all(*article_hashes).run(conn)
+        cursor = store.get_all(NEXUS_NEWS_RAW_TABLE, *article_hashes)
         return {str(doc.get("id")): dict(doc) for doc in cursor if doc and doc.get("id")}
     except Exception:
         return {}
@@ -3475,7 +3501,7 @@ def _store_nexus_news_raw(conn, date_key: str, source: str, articles: list[dict]
         payload["instance_id"] = instance_id
         docs.append(payload)
     try:
-        _r.db(DB_NAME).table(NEXUS_NEWS_RAW_TABLE).insert(docs, conflict="update").run(conn)
+        store.insert(NEXUS_NEWS_RAW_TABLE, docs, conflict="update")
     except Exception as exc:
         _log(f"GraphNexusNewsRaw insert error: {exc}", "yellow")
     return normalized
@@ -3486,7 +3512,7 @@ def _load_finbert_cache_rows(conn, article_hashes: list[str]) -> dict[str, dict]
         return {}
     _ensure_nexus_history_table(conn, NEXUS_NEWS_FINBERT_TABLE)
     try:
-        cursor = _r.db(DB_NAME).table(NEXUS_NEWS_FINBERT_TABLE).get_all(*article_hashes).run(conn)
+        cursor = store.get_all(NEXUS_NEWS_FINBERT_TABLE, *article_hashes)
         out = {}
         for doc in cursor:
             if not doc or not doc.get("id"):
@@ -3504,7 +3530,7 @@ def _store_finbert_rows(conn, rows: list[dict]) -> None:
         return
     _ensure_nexus_history_table(conn, NEXUS_NEWS_FINBERT_TABLE)
     try:
-        _r.db(DB_NAME).table(NEXUS_NEWS_FINBERT_TABLE).insert(rows, conflict="replace").run(conn)
+        store.insert(NEXUS_NEWS_FINBERT_TABLE, rows, conflict="replace")
     except Exception as exc:
         _log(f"GraphNexusNewsFinBERT insert error: {exc}", "yellow")
 
@@ -3613,7 +3639,7 @@ def _load_llm_cache_rows(conn, table_name: str, cache_ids: list[str]) -> dict[st
         return {}
     _ensure_nexus_history_table(conn, table_name)
     try:
-        cursor = _r.db(DB_NAME).table(table_name).get_all(*cache_ids).run(conn)
+        cursor = store.get_all(table_name, *cache_ids)
         rows: dict[str, dict] = {}
         repaired_rows: list[dict] = []
         for doc in cursor:
@@ -3655,7 +3681,7 @@ def _store_llm_cache_rows(conn, table_name: str, rows: list[dict]) -> None:
         return
     _ensure_nexus_history_table(conn, table_name)
     try:
-        _r.db(DB_NAME).table(table_name).insert(rows, conflict="replace").run(conn)
+        store.insert(table_name, rows, conflict="replace")
     except Exception as exc:
         _log(f"{table_name} insert error: {exc}", "yellow")
 
@@ -4359,9 +4385,13 @@ def _classify_macro_article_records(
     if articles and not results and conn is not None:
         try:
             _attempted_key = cache_pairs[0][1] if cache_pairs else "?"
-            sample_cursor = (
-                _r.db(DB_NAME).table(NEXUS_NEWS_LLM_MACRO_TABLE)
-                .filter({"schema_type": "macro"}).limit(3).pluck("id").run(conn)
+            # Deliberately unordered: an unordered LIMIT has no defined order
+            # in either store, and this is a diagnostic sample, not a ranking.
+            sample_cursor = store.pluck(
+                store.run(store.limit(
+                    store.filter(NEXUS_NEWS_LLM_MACRO_TABLE,
+                                 {"schema_type": "macro"}), 3)),
+                "id",
             )
             sample_ids = [str(d.get("id", ""))[:200] for d in sample_cursor if isinstance(d, dict)]
             if sample_ids:
@@ -4522,12 +4552,12 @@ def _aggregate_nexus_day_features(
     if conn is not None and features:
         _ensure_nexus_history_table(conn, NEXUS_NEWS_DAY_FEATURES_TABLE)
         try:
-            # Sanitize string fields to avoid UTF-8 codec errors on RethinkDB insert
+            # Sanitize string fields to avoid UTF-8 codec errors on insert
             for feat in features.values():
                 for k, v in feat.items():
                     if isinstance(v, str):
                         feat[k] = v.encode("utf-8", errors="replace").decode("utf-8")
-            _r.db(DB_NAME).table(NEXUS_NEWS_DAY_FEATURES_TABLE).insert(list(features.values()), conflict="replace").run(conn)
+            store.insert(NEXUS_NEWS_DAY_FEATURES_TABLE, list(features.values()), conflict="replace")
         except Exception as exc:
             _log(f"GraphNexusNewsDayFeatures insert error: {exc}", "yellow")
     return features
@@ -4622,9 +4652,10 @@ def _load_active_event_maintenance_cache_doc(
         return None
     _ensure_nexus_history_table(conn, NEXUS_ACTIVE_EVENT_MAINTENANCE_TABLE)
     try:
-        return _r.db(DB_NAME).table(NEXUS_ACTIVE_EVENT_MAINTENANCE_TABLE).get(
-            _active_event_maintenance_doc_id(history_scope_id, date_key)
-        ).run(conn)
+        return store.get(
+            NEXUS_ACTIVE_EVENT_MAINTENANCE_TABLE,
+            _active_event_maintenance_doc_id(history_scope_id, date_key),
+        )
     except Exception:
         return None
 
@@ -4637,7 +4668,7 @@ def _store_active_event_maintenance_cache_doc(conn, doc: dict[str, Any]) -> None
         return
     _ensure_nexus_history_table(conn, NEXUS_ACTIVE_EVENT_MAINTENANCE_TABLE)
     try:
-        _r.db(DB_NAME).table(NEXUS_ACTIVE_EVENT_MAINTENANCE_TABLE).insert(doc, conflict="replace").run(conn)
+        store.insert(NEXUS_ACTIVE_EVENT_MAINTENANCE_TABLE, doc, conflict="replace")
     except Exception as exc:
         _log(f"Active-event maintenance cache insert error: {exc}", "yellow")
 
@@ -4683,13 +4714,17 @@ def _load_active_events_as_of(conn, instance_id: str, date_key: str, history_sco
     try:
         history_scope_id = str(history_scope_id or "").strip()
         if history_scope_id:
-            cursor = _r.db(DB_NAME).table(NEXUS_ACTIVE_EVENT_HISTORY_TABLE).filter(
-                lambda doc: (doc["history_scope_id"].default("") == history_scope_id) & (doc["effective_date"].default("").le(date_key))
-            ).run(conn)
+            cursor = store.run(store.filter(
+                NEXUS_ACTIVE_EVENT_HISTORY_TABLE,
+                P.field("history_scope_id").default("").eq(history_scope_id)
+                & P.field("effective_date").default("").le(date_key),
+            ))
         else:
-            cursor = _r.db(DB_NAME).table(NEXUS_ACTIVE_EVENT_HISTORY_TABLE).filter(
-                lambda doc: (doc["instance_id"].default("") == instance_id) & (doc["effective_date"].default("").le(date_key))
-            ).run(conn)
+            cursor = store.run(store.filter(
+                NEXUS_ACTIVE_EVENT_HISTORY_TABLE,
+                P.field("instance_id").default("").eq(instance_id)
+                & P.field("effective_date").default("").le(date_key),
+            ))
         grouped: dict[str, dict] = {}
         for doc in cursor:
             key = str(doc.get("event_cluster_key") or "").strip()
@@ -4818,11 +4853,13 @@ def _maintain_active_events(
                 _ensure_nexus_history_table(conn, NEXUS_ACTIVE_EVENTS_TABLE)
                 _ensure_nexus_history_table(conn, NEXUS_ACTIVE_EVENT_HISTORY_TABLE)
                 active_ids = [f"{cache_scope_id}|{ck}" for ck in pruned_cluster_keys]
-                _r.db(DB_NAME).table(NEXUS_ACTIVE_EVENTS_TABLE).get_all(*active_ids).delete().run(conn)
-                _ck_set = pruned_cluster_keys  # captured for ReQL closure
-                _r.db(DB_NAME).table(NEXUS_ACTIVE_EVENT_HISTORY_TABLE).filter(
-                    lambda doc: _r.expr(_ck_set).contains(doc["event_cluster_key"])
-                ).delete().run(conn)
+                store.delete(NEXUS_ACTIVE_EVENTS_TABLE,
+                             _by_ids(NEXUS_ACTIVE_EVENTS_TABLE, active_ids))
+                _ck_set = pruned_cluster_keys
+                store.delete(NEXUS_ACTIVE_EVENT_HISTORY_TABLE, store.filter(
+                    NEXUS_ACTIVE_EVENT_HISTORY_TABLE,
+                    P.field("event_cluster_key").is_in(_ck_set),
+                ))
             except Exception as _prune_exc:
                 _log(f"Active-event pruning: DB delete failed (non-fatal): {_prune_exc}", "yellow")
         current_events = surviving
@@ -5123,8 +5160,8 @@ def _maintain_active_events(
                 "effective_date": date_key,
             })
         try:
-            _r.db(DB_NAME).table(NEXUS_ACTIVE_EVENTS_TABLE).insert(active_docs, conflict="replace").run(conn)
-            _r.db(DB_NAME).table(NEXUS_ACTIVE_EVENT_HISTORY_TABLE).insert(history_docs, conflict="replace").run(conn)
+            store.insert(NEXUS_ACTIVE_EVENTS_TABLE, active_docs, conflict="replace")
+            store.insert(NEXUS_ACTIVE_EVENT_HISTORY_TABLE, history_docs, conflict="replace")
         except Exception as exc:
             _log(f"Active-event persistence error: {exc}", "yellow")
     reloaded = _sorted_active_event_records(
@@ -11840,23 +11877,24 @@ def _retrieve_historical_analogs(conn, instance_id: str, as_of_date: str, candid
     gov_action = str(candidate.get("government_action_type") or "").strip().lower()
     event_type = str(candidate.get("dominant_event_type") or "").strip().lower()
     try:
-        cursor = (
-            _r.db(DB_NAME)
-            .table(NEXUS_TRADE_OUTCOMES_TABLE)
-            .get_all(instance_id, index="instance_id")
-            .filter(lambda doc: doc["entry_date"].lt(as_of_date))
-            # `id` is the tiebreak, not decoration. `_update_indefinite_outcomes`
-            # rewrites `latest_observation_date` to the current bar on every
-            # unresolved row, so by mid-window most of the table shares one
-            # value and this `order_by` is a single enormous tie that RethinkDB
-            # resolves in index-scan order. `.limit(80)` then makes that
-            # arbitrary order decide MEMBERSHIP, and the five survivors land in
-            # the overlay prompt — a different five per run, which is one of the
-            # reasons two replicate runs never shared a prompt-cache row.
-            .order_by(_r.desc("latest_observation_date"), _r.desc("id"))
-            .limit(80)
-            .run(conn)
+        # `id` is the tiebreak, not decoration. `_update_indefinite_outcomes`
+        # rewrites `latest_observation_date` to the current bar on every
+        # unresolved row, so by mid-window most of the table shares one
+        # value and this `order_by` is a single enormous tie that RethinkDB
+        # resolves in index-scan order. `.limit(80)` then makes that
+        # arbitrary order decide MEMBERSHIP, and the five survivors land in
+        # the overlay prompt — a different five per run, which is one of the
+        # reasons two replicate runs never shared a prompt-cache row.
+        # Under Postgres this is ORDER BY ... COLLATE "C" DESC — bytewise,
+        # matching RethinkDB.
+        _sel = store.filter(
+            NEXUS_TRADE_OUTCOMES_TABLE,
+            P.field("instance_id").eq(instance_id)
+            & P.field("entry_date").lt(as_of_date),
         )
+        _sel = store.order_by(_sel, fields=(store.desc("latest_observation_date"),
+                                            store.desc("id")))
+        cursor = store.run(store.limit(_sel, 80))
         analogs = []
         for doc in cursor:
             if gov_action and str(doc.get("government_action_type") or "").strip().lower() == gov_action:
@@ -12238,25 +12276,19 @@ def _save_trade_contexts_and_outcomes(
             })
         else:
             stale_outcome_doc_ids.append(trade_id)
-    # Use a dedicated connection so large writes don't block the main pipeline
-    _persist_conn = None
+    # The old code opened a dedicated RethinkDB connection here so large writes
+    # would not block the main pipeline; the store takes a pooled connection per
+    # operation, so the writes are already off the read path.
     try:
-        _persist_conn = _get_nexus_db_conn(reuse=False)
-        _c = _persist_conn or conn
         if docs:
-            _r.db(DB_NAME).table(NEXUS_TRADE_CONTEXTS_TABLE).insert(docs, conflict="replace").run(_c, noreply=True)
+            store.insert(NEXUS_TRADE_CONTEXTS_TABLE, docs, conflict="replace")
         if outcome_docs:
-            _r.db(DB_NAME).table(NEXUS_TRADE_OUTCOMES_TABLE).insert(outcome_docs, conflict="replace").run(_c, noreply=True)
+            store.insert(NEXUS_TRADE_OUTCOMES_TABLE, outcome_docs, conflict="replace")
         if stale_outcome_doc_ids:
-            _r.db(DB_NAME).table(NEXUS_TRADE_OUTCOMES_TABLE).get_all(*stale_outcome_doc_ids).delete().run(_c, noreply=True)
+            store.delete(NEXUS_TRADE_OUTCOMES_TABLE,
+                         _by_ids(NEXUS_TRADE_OUTCOMES_TABLE, stale_outcome_doc_ids))
     except Exception as exc:
         _log(f"Trade-context persistence error: {exc}", "yellow")
-    finally:
-        if _persist_conn is not None and _persist_conn is not conn:
-            try:
-                _persist_conn.close()
-            except Exception:
-                pass
 
 
 def _outcome_price_now(symbol: str, prices: dict, overlay_bars: dict | None, date_key: str) -> float | None:
@@ -12356,14 +12388,11 @@ def _update_indefinite_outcomes(conn, instance_id: str, date_key: str, prices: d
         conn, NEXUS_TRADE_OUTCOMES_TABLE, indexes=("instance_id",)
     )
     try:
-        cursor = (
-            _r.db(DB_NAME)
-            .table(NEXUS_TRADE_OUTCOMES_TABLE)
-            .get_all(instance_id, index="instance_id")
-            .filter(lambda doc: doc["entry_date"].lt(date_key))
-            .limit(500)
-            .run(conn)
-        )
+        cursor = store.run(store.limit(store.filter(
+            NEXUS_TRADE_OUTCOMES_TABLE,
+            P.field("instance_id").eq(instance_id)
+            & P.field("entry_date").lt(date_key),
+        ), 500))
         series_docs = []
         for doc in cursor:
             symbol = str(doc.get("symbol") or "").strip().upper()
@@ -12377,9 +12406,9 @@ def _update_indefinite_outcomes(conn, instance_id: str, date_key: str, prices: d
                 continue
             update, series_doc = progress
             series_docs.append(series_doc)
-            _r.db(DB_NAME).table(NEXUS_TRADE_OUTCOMES_TABLE).get(doc["id"]).update(update).run(conn)
+            store.update(NEXUS_TRADE_OUTCOMES_TABLE, doc["id"], update)
         if series_docs:
-            _r.db(DB_NAME).table(NEXUS_OUTCOME_SERIES_TABLE).insert(series_docs, conflict="replace").run(conn)
+            store.insert(NEXUS_OUTCOME_SERIES_TABLE, series_docs, conflict="replace")
     except Exception as exc:
         _log(f"Outcome series update error: {exc}", "yellow")
 
@@ -12395,29 +12424,21 @@ def _load_training_rows(conn, instance_id: str, date_key: str, lookback_days: in
     )
     try:
         start_key = (datetime.strptime(date_key, "%Y-%m-%d") - timedelta(days=max(1, int(lookback_days or 90)))).strftime("%Y-%m-%d")
-        # get_all(...) on the instance_id index scopes the scan to rows
-        # for this instance only — same shape as the old filter() but
-        # O(rows-for-this-instance) instead of O(everything in table).
-        contexts = list(
-            _r.db(DB_NAME)
-            .table(NEXUS_TRADE_CONTEXTS_TABLE)
-            .get_all(instance_id, index="instance_id")
-            .filter(
-                lambda doc: doc["date_key"].ge(start_key)
-                & doc["date_key"].lt(date_key)
-            )
-            .run(conn)
-        )
-        outcomes = list(
-            _r.db(DB_NAME)
-            .table(NEXUS_TRADE_OUTCOMES_TABLE)
-            .get_all(instance_id, index="instance_id")
-            .filter(
-                lambda doc: doc["entry_date"].ge(start_key)
-                & doc["entry_date"].lt(date_key)
-            )
-            .run(conn)
-        )
+        # The instance_id equality scopes the scan to rows for this instance
+        # only — same shape as the old get_all(index="instance_id"), and it
+        # rides the same generated-column index.
+        contexts = list(store.run(store.filter(
+            NEXUS_TRADE_CONTEXTS_TABLE,
+            P.field("instance_id").eq(instance_id)
+            & P.field("date_key").ge(start_key)
+            & P.field("date_key").lt(date_key),
+        )))
+        outcomes = list(store.run(store.filter(
+            NEXUS_TRADE_OUTCOMES_TABLE,
+            P.field("instance_id").eq(instance_id)
+            & P.field("entry_date").ge(start_key)
+            & P.field("entry_date").lt(date_key),
+        )))
     except Exception:
         return []
     outcome_by_id = {str(doc.get("id")): dict(doc) for doc in outcomes if doc.get("id")}
@@ -12468,13 +12489,14 @@ def _load_active_trends(
     Auto-ends trends where last_confirmed_date is older than max_age_days.
     Returns list of trend documents.
     """
-    if conn is None or _r is None:
+    if conn is None or store is None:
         return []
     _ensure_trends_table(conn)
     try:
-        cursor = _r.db(DB_NAME).table(TRENDS_TABLE).filter(
-            lambda doc: (doc["instance_id"] == instance_id) & (doc["status"].ne("ended"))
-        ).run(conn)
+        cursor = store.run(store.filter(
+            TRENDS_TABLE,
+            P.field("instance_id").eq(instance_id) & P.field("status").ne("ended"),
+        ))
         trends = list(cursor)
     except Exception as e:
         _log(f"Load trends error: {e}", "yellow")
@@ -12494,7 +12516,7 @@ def _load_active_trends(
         if stamp_updates:
             t.update(stamp_updates)
             try:
-                _r.db(DB_NAME).table(TRENDS_TABLE).get(t["id"]).update(stamp_updates).run(conn)
+                store.update(TRENDS_TABLE, t["id"], stamp_updates)
             except Exception:
                 pass
         cleaned_support = _sanitize_trend_supporting_articles(
@@ -12507,24 +12529,24 @@ def _load_active_trends(
         if cleaned_support != (t.get("supporting_articles") or []):
             t["supporting_articles"] = cleaned_support
             try:
-                _r.db(DB_NAME).table(TRENDS_TABLE).get(t["id"]).update({
+                store.update(TRENDS_TABLE, t["id"], {
                     "supporting_articles": cleaned_support,
                     **stamp_updates,
-                }).run(conn)
+                })
             except Exception:
                 pass
         last_confirmed = t.get("last_confirmed_date", t.get("start_date", ""))
         if last_confirmed and last_confirmed < cutoff:
             # Auto-end stale trend
             try:
-                _r.db(DB_NAME).table(TRENDS_TABLE).get(t["id"]).update({
+                store.update(TRENDS_TABLE, t["id"], {
                     "status": "ended",
                     "end_date": date_key,
                     "reversal_articles": (t.get("reversal_articles") or []) + [
                         {"date": date_key, "headline": f"Auto-ended: no confirmation for {max_age_days}+ days", "source": "system"}
                     ],
                     **reuse_stamp,
-                }).run(conn)
+                })
                 _log(f"  Trend auto-ended (stale): {t.get('name', t['id'])}", "yellow")
             except Exception:
                 pass
@@ -12566,7 +12588,7 @@ def _apply_trend_updates(
     Process LLM trend response: insert new, confirm existing, weaken, end.
     Returns the updated list of all active trends after applying changes.
     """
-    if conn is None or _r is None or not trend_updates:
+    if conn is None or store is None or not trend_updates:
         return _load_active_trends(conn, instance_id, date_key=date_key, config=config) if conn else []
 
     _ensure_trends_table(conn)
@@ -12621,16 +12643,20 @@ def _apply_trend_updates(
         }
         doc.update(reuse_stamp)
         try:
-            _r.db(DB_NAME).table(TRENDS_TABLE).insert(doc, conflict="error").run(conn)
+            store.insert(TRENDS_TABLE, doc, conflict="error")
             _log(f"  New trend: {name} ({direction}, str={strength:.2f}, tickers: {', '.join(tickers[:5])})", "green")
         except Exception:
             # Already exists — treat as confirmation
             try:
-                _r.db(DB_NAME).table(TRENDS_TABLE).get(full_id).update({
+                # ReQL did the +0.05 (capped at 1.0) server-side via r.row;
+                # the store has no expression update, so read-modify-write.
+                _existing_trend = store.get(TRENDS_TABLE, full_id) or {}
+                _bumped = min(1.0, float(_existing_trend.get("strength") or 0.0) + 0.05)
+                store.update(TRENDS_TABLE, full_id, {
                     "last_confirmed_date": date_key,
-                    "strength": _r.row["strength"].add(0.05).min(1.0),
+                    "strength": _bumped,
                     **reuse_stamp,
-                }).run(conn)
+                })
             except Exception:
                 pass
 
@@ -12653,7 +12679,7 @@ def _apply_trend_updates(
         }
         update_doc.update(reuse_stamp)
         try:
-            existing = _r.db(DB_NAME).table(TRENDS_TABLE).get(full_id).run(conn)
+            existing = store.get(TRENDS_TABLE, full_id)
             if existing:
                 if tickers_add:
                     current_tickers = existing.get("affected_tickers") or []
@@ -12688,7 +12714,7 @@ def _apply_trend_updates(
                 update_doc["supporting_articles"] = deduped_sup[:20]
                 if not update_doc["supporting_articles"] and articles:
                     _log(f"  Trend support articles: no relevant confirmations for {existing.get('name', full_id)[:60]}", "yellow")
-                _r.db(DB_NAME).table(TRENDS_TABLE).get(full_id).update(update_doc).run(conn)
+                store.update(TRENDS_TABLE, full_id, update_doc)
                 _log(f"  Trend confirmed: {existing.get('name', full_id)} (str={new_strength:.2f})", "cyan")
         except Exception:
             pass
@@ -12704,18 +12730,18 @@ def _apply_trend_updates(
         full_id = f"{instance_id}_{trend_id}" if not trend_id.startswith(instance_id) else trend_id
         reason = str(wk.get("reason", ""))[:200]
         try:
-            existing = _r.db(DB_NAME).table(TRENDS_TABLE).get(full_id).run(conn)
+            existing = store.get(TRENDS_TABLE, full_id)
             if existing:
                 old_str = existing.get("strength", 0.5)
                 new_str = max(0.1, old_str - 0.2)
                 rev_articles = (existing.get("reversal_articles") or [])[-9:]
                 rev_articles.append({"date": date_key, "headline": reason, "source": "llm"})
-                _r.db(DB_NAME).table(TRENDS_TABLE).get(full_id).update({
+                store.update(TRENDS_TABLE, full_id, {
                     "status": "weakening",
                     "strength": new_str,
                     "reversal_articles": rev_articles[:10],
                     **reuse_stamp,
-                }).run(conn)
+                })
                 _log(f"  Trend weakening: {existing.get('name', full_id)} (str {old_str:.2f}→{new_str:.2f}): {reason[:60]}", "yellow")
         except Exception:
             pass
@@ -12731,17 +12757,17 @@ def _apply_trend_updates(
         full_id = f"{instance_id}_{trend_id}" if not trend_id.startswith(instance_id) else trend_id
         reason = str(ed.get("reason", ""))[:200]
         try:
-            existing = _r.db(DB_NAME).table(TRENDS_TABLE).get(full_id).run(conn)
+            existing = store.get(TRENDS_TABLE, full_id)
             if existing:
                 rev_articles = (existing.get("reversal_articles") or [])[-9:]
                 rev_articles.append({"date": date_key, "headline": reason, "source": "llm"})
-                _r.db(DB_NAME).table(TRENDS_TABLE).get(full_id).update({
+                store.update(TRENDS_TABLE, full_id, {
                     "status": "ended",
                     "end_date": date_key,
                     "strength": 0.0,
                     "reversal_articles": rev_articles[:10],
                     **reuse_stamp,
-                }).run(conn)
+                })
                 _log(f"  Trend ENDED: {existing.get('name', full_id)}: {reason[:60]}", "red")
         except Exception:
             pass
@@ -12754,13 +12780,14 @@ def _apply_trend_updates(
 
 def _get_all_discovered_stocks(conn, instance_id: str) -> list[str]:
     """Return all active discovered tickers for this instance."""
-    if conn is None or _r is None:
+    if conn is None or store is None:
         return []
     _ensure_discovered_stocks_table(conn)
     try:
-        cursor = _r.db(DB_NAME).table(DISCOVERED_TABLE).filter(
-            lambda doc: (doc["instance_id"] == instance_id) & (doc["status"] == "active")
-        ).run(conn)
+        cursor = store.run(store.filter(
+            DISCOVERED_TABLE,
+            P.field("instance_id").eq(instance_id) & P.field("status").eq("active"),
+        ))
         return [doc["ticker"] for doc in cursor if doc.get("ticker")]
     except Exception:
         return []
@@ -12881,14 +12908,15 @@ def _save_discovery_snapshot(
     Idempotent — replaces any existing row for this base_instance_id. Cheap
     enough to call from each lookback bar; the table only has 1 row per base.
     """
-    if conn is None or _r is None or not base_instance_id:
+    if conn is None or store is None or not base_instance_id:
         return 0
     _ensure_discovery_snapshot_table(conn)
     _ensure_discovered_stocks_table(conn)
     try:
-        cursor = _r.db(DB_NAME).table(DISCOVERED_TABLE).filter(
-            lambda doc: (doc["instance_id"] == current_instance_id) & (doc["status"] == "active")
-        ).run(conn)
+        cursor = store.run(store.filter(
+            DISCOVERED_TABLE,
+            P.field("instance_id").eq(current_instance_id) & P.field("status").eq("active"),
+        ))
         ticker_rows: list[dict] = []
         for doc in cursor:
             tk = str(doc.get("ticker") or "").strip().upper()
@@ -12916,7 +12944,7 @@ def _save_discovery_snapshot(
         "snapshot_version": 1,
     }
     try:
-        _r.db(DB_NAME).table(DISCOVERY_SNAPSHOT_TABLE).insert(snap_doc, conflict="replace").run(conn, noreply=True)
+        store.insert(DISCOVERY_SNAPSHOT_TABLE, snap_doc, conflict="replace")
     except Exception as exc:
         _log(f"Discovery snapshot write WARN: {exc}", "yellow")
         return 0
@@ -12925,11 +12953,11 @@ def _save_discovery_snapshot(
 
 def _load_discovery_snapshot(conn, base_instance_id: str) -> dict | None:
     """Load the snapshot row for this base_instance_id, or None if absent/error."""
-    if conn is None or _r is None or not base_instance_id:
+    if conn is None or store is None or not base_instance_id:
         return None
     _ensure_discovery_snapshot_table(conn)
     try:
-        doc = _r.db(DB_NAME).table(DISCOVERY_SNAPSHOT_TABLE).get(str(base_instance_id)).run(conn)
+        doc = store.get(DISCOVERY_SNAPSHOT_TABLE, str(base_instance_id))
         return dict(doc) if isinstance(doc, dict) else None
     except Exception:
         return None
@@ -12963,15 +12991,16 @@ def _bootstrap_discoveries_from_snapshot(
        -1 = bootstrap rolled back due to too many config drift drops
             (caller should let lookback run fresh)
     """
-    if conn is None or _r is None or not current_instance_id or not base_instance_id:
+    if conn is None or store is None or not current_instance_id or not base_instance_id:
         return 0
     # 1. Read current scope's existing discoveries
     _ensure_discovered_stocks_table(conn)
     existing_tickers: set[str] = set()
     try:
-        cur = _r.db(DB_NAME).table(DISCOVERED_TABLE).filter(
-            lambda doc: (doc["instance_id"] == current_instance_id) & (doc["status"] == "active")
-        ).pluck("ticker").run(conn)
+        cur = store.pluck(store.run(store.filter(
+            DISCOVERED_TABLE,
+            P.field("instance_id").eq(current_instance_id) & P.field("status").eq("active"),
+        )), "ticker")
         for d in cur:
             t = str(d.get("ticker") or "").strip().upper()
             if t:
@@ -13073,7 +13102,7 @@ def _bootstrap_discoveries_from_snapshot(
             "bootstrap_original_date": str(tk.get("discovered_date") or ""),
         }
         try:
-            _r.db(DB_NAME).table(DISCOVERED_TABLE).insert(doc, conflict="replace").run(conn, noreply=True)
+            store.insert(DISCOVERED_TABLE, doc, conflict="replace")
             inserted += 1
         except Exception:
             continue
@@ -13092,13 +13121,14 @@ def _bootstrap_discoveries_from_snapshot(
 
 
 def _get_all_discovered_stock_docs(conn, instance_id: str) -> list[dict]:
-    if conn is None or _r is None:
+    if conn is None or store is None:
         return []
     _ensure_discovered_stocks_table(conn)
     try:
-        cursor = _r.db(DB_NAME).table(DISCOVERED_TABLE).filter(
-            lambda doc: (doc["instance_id"] == instance_id) & (doc["status"] == "active")
-        ).run(conn)
+        cursor = store.run(store.filter(
+            DISCOVERED_TABLE,
+            P.field("instance_id").eq(instance_id) & P.field("status").eq("active"),
+        ))
         return [dict(doc) for doc in cursor if isinstance(doc, dict) and doc.get("ticker")]
     except Exception:
         return []
@@ -13126,7 +13156,7 @@ def _prune_stale_propagation_discoveries(
 
     Returns: number of rows expired (0 if none / on error).
     """
-    if conn is None or _r is None or not instance_id or not today_iso:
+    if conn is None or store is None or not instance_id or not today_iso:
         return 0
     try:
         max_age = max(1, int(max_age_days))
@@ -13147,24 +13177,23 @@ def _prune_stale_propagation_discoveries(
         # would match `"" < cutoff` and get spuriously expired (the snapshot
         # bootstrap path can write empty `bootstrap_original_date` for some
         # legacy rows).
-        cursor = _r.db(DB_NAME).table(DISCOVERED_TABLE).filter(
-            lambda doc: (
-                (doc["instance_id"] == instance_id)
-                & (doc["status"] == "active")
-                & (doc["source"] == "propagation")
-                & (doc["discovered_date"].match("^\\d{4}-\\d{2}-\\d{2}"))
-                & (doc["discovered_date"] < cutoff)
-            )
-        ).run(conn)
+        cursor = store.run(store.filter(
+            DISCOVERED_TABLE,
+            P.field("instance_id").eq(instance_id)
+            & P.field("status").eq("active")
+            & P.field("source").eq("propagation")
+            & P.field("discovered_date").match("^\\d{4}-\\d{2}-\\d{2}")
+            & P.field("discovered_date").lt(cutoff),
+        ))
         stale_ids = [d.get("id") for d in cursor if isinstance(d, dict) and d.get("id")]
         if not stale_ids:
             return 0
-        # Bulk update status. RethinkDB's get_all + update is the cheapest path.
-        _r.db(DB_NAME).table(DISCOVERED_TABLE).get_all(*stale_ids).update({
+        # Bulk update status against the primary key — one statement.
+        store.update(DISCOVERED_TABLE, _by_ids(DISCOVERED_TABLE, stale_ids), {
             "status": "expired",
             "expired_date": today_iso,
             "expired_reason": f"propagation_ttl_{max_age}d",
-        }).run(conn, noreply=True)
+        })
         try:
             _log(
                 f"Pruned {len(stale_ids)} stale propagation discoveries "
@@ -13304,7 +13333,7 @@ def _trim_discovered_stock_cap(
     protect_days: int = 0,
 ) -> list[str]:
     max_allowed = max(0, int(max_discovered or 0))
-    if conn is None or _r is None or max_allowed <= 0:
+    if conn is None or store is None or max_allowed <= 0:
         return []
     to_trim = _select_discovered_to_trim(
         _get_all_discovered_stock_docs(conn, instance_id), max_allowed,
@@ -13532,7 +13561,7 @@ def _discover_stocks(
     For tickers in trend_buy_signals not in current_symbols, add to discovered stocks.
     Returns list of newly discovered tickers. Respects max_discovered_stocks cap.
     """
-    if conn is None or _r is None or not trend_buy_signals:
+    if conn is None or store is None or not trend_buy_signals:
         return []
     _ensure_discovered_stocks_table(conn)
 
@@ -13569,7 +13598,7 @@ def _discover_stocks(
         }
         doc.update(reuse_stamp)
         try:
-            _r.db(DB_NAME).table(DISCOVERED_TABLE).insert(doc, conflict="replace").run(conn)
+            store.insert(DISCOVERED_TABLE, doc, conflict="replace")
             newly_discovered.append(ticker)
             current_count += 1
             _log(f"  Discovered stock: {ticker} (from trends: {', '.join(source_trends[:3])})", "green")
@@ -13600,7 +13629,7 @@ def _discover_stocks_from_propagation(
     that aren't already in the symbols list or discovered. This feeds the 100+ propagated
     tickers back into the discovery pipeline so the active list can grow dynamically.
     """
-    if conn is None or _r is None or not propagated:
+    if conn is None or store is None or not propagated:
         return []
     if not config.get("propagation_discovery_enabled", True):
         return []
@@ -13679,7 +13708,7 @@ def _discover_stocks_from_propagation(
         }
         doc.update(reuse_stamp)
         try:
-            _r.db(DB_NAME).table(DISCOVERED_TABLE).insert(doc, conflict="replace").run(conn)
+            store.insert(DISCOVERED_TABLE, doc, conflict="replace")
             newly_discovered.append(ticker)
             current_count += 1
             _log(f"  Discovered stock (propagation): {ticker} (raw={raw_score:+.3f}, {n_paths} paths: {top_reason[:60]})", "green")
@@ -13697,7 +13726,7 @@ def _discover_stocks_from_sector_peers(
     Discover stocks via IN_SECTOR neighbors of strong-buy tickers.
     When NVDA is bullish, this finds MU, AMD, INTC via shared sector.
     """
-    if conn is None or _r is None or not strong_buy_tickers:
+    if conn is None or store is None or not strong_buy_tickers:
         return []
     if not config.get("sector_peer_discovery_enabled", True):
         return []
@@ -13750,7 +13779,7 @@ def _discover_stocks_from_sector_peers(
         }
         doc.update(reuse_stamp)
         try:
-            _r.db(DB_NAME).table(DISCOVERED_TABLE).insert(doc, conflict="replace").run(conn)
+            store.insert(DISCOVERED_TABLE, doc, conflict="replace")
             newly_discovered.append(ticker)
             current_count += 1
             _log(f"  Discovered stock (sector peer): {ticker} (peer of {source})", "green")
@@ -13764,7 +13793,7 @@ def _discover_stocks_from_etf_co_holdings(
     current_symbols: set[str], config: dict, date_key: str,
 ) -> list[str]:
     """Discover stocks held by the same ETFs as strong-buy tickers (e.g., SMH holds both NVDA and MU)."""
-    if conn is None or _r is None or not strong_buy_tickers or session is None:
+    if conn is None or store is None or not strong_buy_tickers or session is None:
         return []
     if not config.get("etf_co_holdings_discovery_enabled", True):
         return []
@@ -13807,7 +13836,7 @@ def _discover_stocks_from_etf_co_holdings(
         }
         doc.update(reuse_stamp)
         try:
-            _r.db(DB_NAME).table(DISCOVERED_TABLE).insert(doc, conflict="replace").run(conn)
+            store.insert(DISCOVERED_TABLE, doc, conflict="replace")
             newly_discovered.append(ticker)
             _log(f"  Discovered stock (ETF co-holding): {ticker} (shared ETF {etf} with {source})", "green")
         except Exception:
@@ -13845,7 +13874,7 @@ def _discover_stocks_from_sector_fill(
     they have no direct news or Benzinga mentions.  Uses the pre-loaded
     _neo4j_stock_sector_cache to avoid extra Neo4j queries.
     """
-    if conn is None or _r is None or not active_trends:
+    if conn is None or store is None or not active_trends:
         return []
     if not config.get("sector_fill_discovery_enabled", True):
         return []
@@ -13957,7 +13986,7 @@ def _discover_stocks_from_sector_fill(
             }
             doc.update(reuse_stamp)
             try:
-                _r.db(DB_NAME).table(DISCOVERED_TABLE).insert(doc, conflict="replace").run(conn)
+                store.insert(DISCOVERED_TABLE, doc, conflict="replace")
                 newly_discovered.append(ticker)
                 watchlist_added.append(ticker)
                 existing_set.add(ticker)
@@ -13994,7 +14023,7 @@ def _discover_stocks_from_sector_fill(
             }
             doc.update(reuse_stamp)
             try:
-                _r.db(DB_NAME).table(DISCOVERED_TABLE).insert(doc, conflict="replace").run(conn)
+                store.insert(DISCOVERED_TABLE, doc, conflict="replace")
                 newly_discovered.append(ticker)
                 current_count += 1
                 added_for_sector += 1
@@ -14023,7 +14052,7 @@ def _discover_stocks_from_competitors(
     """
     Discover stocks via COMPETES_WITH 1-hop neighbors of strong-buy tickers.
     """
-    if conn is None or _r is None or not strong_buy_tickers:
+    if conn is None or store is None or not strong_buy_tickers:
         return []
     if not config.get("competitor_discovery_enabled", True):
         return []
@@ -14076,7 +14105,7 @@ def _discover_stocks_from_competitors(
         }
         doc.update(reuse_stamp)
         try:
-            _r.db(DB_NAME).table(DISCOVERED_TABLE).insert(doc, conflict="replace").run(conn)
+            store.insert(DISCOVERED_TABLE, doc, conflict="replace")
             newly_discovered.append(ticker)
             current_count += 1
             _log(f"  Discovered stock (competitor): {ticker} (competes with {source})", "green")
@@ -14150,7 +14179,7 @@ def _discover_stocks_from_momentum(
     dynamically-built universe (benchmark ETFs, trend ETFs, active trend tickers)
     via overlay bars to find candidates exceeding configurable return thresholds.
     """
-    if conn is None or _r is None:
+    if conn is None or store is None:
         return []
     if not config.get("momentum_discovery_enabled", True):
         return []
@@ -14463,7 +14492,7 @@ def _discover_stocks_from_momentum(
         }
         doc.update(reuse_stamp)
         try:
-            _r.db(DB_NAME).table(DISCOVERED_TABLE).insert(doc, conflict="replace").run(conn)
+            store.insert(DISCOVERED_TABLE, doc, conflict="replace")
             newly_discovered.append(ticker)
             current_count += 1
             _log(f"  Discovered stock (momentum): {ticker} (20d={r20:+.1f}%, 60d={r60:+.1f}%)", "green")
@@ -14481,7 +14510,7 @@ def _rediscover_momentum_comebacks(
     """Scan ALL previously discovered stocks (sold or inactive) for comeback momentum.
     Returns list of dicts with ticker, ret_20d, ret_60d for rediscovered candidates.
     Uses two-phase: sets status='rediscovery_pending' (caller confirms after LLM scoring)."""
-    if conn is None or _r is None or not config.get("momentum_rediscovery_enabled", True):
+    if conn is None or store is None or not config.get("momentum_rediscovery_enabled", True):
         return []
     min_20d = float(config.get("momentum_rediscovery_min_20d_return", 15.0))
     min_60d = float(config.get("momentum_rediscovery_min_60d_return", 30.0))
@@ -14494,9 +14523,10 @@ def _rediscover_momentum_comebacks(
 
     _ensure_discovered_stocks_table(conn)
     try:
-        cursor = _r.db(DB_NAME).table(DISCOVERED_TABLE).filter(
-            lambda doc: (doc["instance_id"] == instance_id) & (doc["status"] == "sold")
-        ).run(conn)
+        cursor = store.run(store.filter(
+            DISCOVERED_TABLE,
+            P.field("instance_id").eq(instance_id) & P.field("status").eq("sold"),
+        ))
         sold_docs = [dict(d) for d in cursor]
     except Exception:
         return []
@@ -14568,7 +14598,7 @@ def _rediscover_momentum_comebacks(
                 "rediscovery_count": int(doc.get("rediscovery_count") or 0) + 1,
             }
             update.update(reuse_stamp)
-            _r.db(DB_NAME).table(DISCOVERED_TABLE).get(f"{instance_id}_{ticker}").update(update).run(conn)
+            store.update(DISCOVERED_TABLE, f"{instance_id}_{ticker}", update)
         except Exception:
             pass
 
@@ -14672,21 +14702,21 @@ def _momentum_amplifier_pass(
 
 def _update_discovered_stock_sell_streak(conn, instance_id: str, ticker: str, date_key: str, got_sell: bool):
     """Track consecutive sell days for a discovered stock. Returns the new count."""
-    if conn is None or _r is None:
+    if conn is None or store is None:
         return 0
     doc_id = f"{instance_id}_{ticker}"
     try:
-        doc = _r.db(DB_NAME).table(DISCOVERED_TABLE).get(doc_id).run(conn)
+        doc = store.get(DISCOVERED_TABLE, doc_id)
         if not doc or doc.get("status") != "active":
             return 0
         if got_sell:
             new_count = int(doc.get("consecutive_sell_days", 0) or 0) + 1
         else:
             new_count = 0
-        _r.db(DB_NAME).table(DISCOVERED_TABLE).get(doc_id).update({
+        store.update(DISCOVERED_TABLE, doc_id, {
             "consecutive_sell_days": new_count,
             "last_signal_date": date_key,
-        }).run(conn)
+        })
         return new_count
     except Exception:
         return 0
@@ -14714,7 +14744,7 @@ def _mark_discovered_stock_sold(
     discovery-cooldown logic (`_get_recently_sold_discovered_tickers`)
     keeps working.
     """
-    if conn is None or _r is None:
+    if conn is None or store is None:
         return
     _ensure_discovered_stocks_table(conn)
     doc_id = f"{instance_id}_{ticker}"
@@ -14733,7 +14763,7 @@ def _mark_discovered_stock_sold(
                     pass
             if entry_conviction_tier:
                 update["entry_conviction_tier"] = str(entry_conviction_tier)[:8]
-        _r.db(DB_NAME).table(DISCOVERED_TABLE).get(doc_id).update(update).run(conn)
+        store.update(DISCOVERED_TABLE, doc_id, update)
     except Exception:
         pass
 
@@ -14747,17 +14777,19 @@ def _get_recently_sold_discovered_tickers(conn, instance_id: str, date_key: str,
     triggers — pure re-discovery (which doesn't know the ticker is being
     monitored) must continue to be cooldown-blocked.
     """
-    if conn is None or _r is None or not date_key:
+    if conn is None or store is None or not date_key:
         return set()
     _ensure_discovered_stocks_table(conn)
     try:
         cutoff = (datetime.strptime(date_key, "%Y-%m-%d") - timedelta(days=cooldown_days)).strftime("%Y-%m-%d")
-        cursor = _r.db(DB_NAME).table(DISCOVERED_TABLE).filter(
-            lambda doc: (doc["instance_id"] == instance_id)
-            & ((doc["status"] == "sold") | (doc["status"] == "post_sell_watch"))
-            & (doc.has_fields("sold_date"))
-            & (doc["sold_date"] >= cutoff)
-        ).run(conn)
+        # has_fields("sold_date") is implicit: doc->>'sold_date' >= x is false
+        # when the key is absent or JSON null, exactly as ReQL had it.
+        cursor = store.run(store.filter(
+            DISCOVERED_TABLE,
+            P.field("instance_id").eq(instance_id)
+            & (P.field("status").eq("sold") | P.field("status").eq("post_sell_watch"))
+            & P.field("sold_date").ge(cutoff),
+        ))
         return {doc["ticker"] for doc in cursor if doc.get("ticker")}
     except Exception:
         return set()
@@ -14777,7 +14809,7 @@ def _get_post_sell_watch_candidates(
     the TTL sweep; this filter is a safety net.
     """
     out: list[dict] = []
-    if conn is None or _r is None or not date_key or not instance_id:
+    if conn is None or store is None or not date_key or not instance_id:
         return out
     try:
         _ensure_discovered_stocks_table(conn)
@@ -14788,12 +14820,12 @@ def _get_post_sell_watch_candidates(
     except Exception:
         return out
     try:
-        cursor = _r.db(DB_NAME).table(DISCOVERED_TABLE).filter(
-            lambda doc: (doc["instance_id"] == instance_id)
-            & (doc["status"] == "post_sell_watch")
-            & (doc.has_fields("sold_date"))
-            & (doc["sold_date"] >= cutoff)
-        ).run(conn)
+        cursor = store.run(store.filter(
+            DISCOVERED_TABLE,
+            P.field("instance_id").eq(instance_id)
+            & P.field("status").eq("post_sell_watch")
+            & P.field("sold_date").ge(cutoff),
+        ))
         for doc in cursor:
             ticker = doc.get("ticker")
             if not ticker:
@@ -14873,12 +14905,12 @@ def _mark_discovered_stock_re_entered(conn, instance_id: str, ticker: str, date_
     successful re-entry. Caller (run_once) sets this when the planner has
     actually allocated cash to the ticker, not just identified it as eligible.
     """
-    if conn is None or _r is None:
+    if conn is None or store is None:
         return
     doc_id = f"{instance_id}_{ticker}"
     try:
         update = {"status": "active", "re_entered_date": date_key} if date_key else {"status": "active"}
-        _r.db(DB_NAME).table(DISCOVERED_TABLE).get(doc_id).update(update).run(conn)
+        store.update(DISCOVERED_TABLE, doc_id, update)
     except Exception:
         pass
 
@@ -14888,11 +14920,11 @@ def _mark_discovered_stock_forgotten(conn, instance_id: str, ticker: str):
     ``status="forgotten"`` so they no longer block re-discovery via the
     cooldown filter and don't accumulate as stale state.
     """
-    if conn is None or _r is None:
+    if conn is None or store is None:
         return
     doc_id = f"{instance_id}_{ticker}"
     try:
-        _r.db(DB_NAME).table(DISCOVERED_TABLE).get(doc_id).update({"status": "forgotten"}).run(conn)
+        store.update(DISCOVERED_TABLE, doc_id, {"status": "forgotten"})
     except Exception:
         pass
 
@@ -15242,7 +15274,7 @@ def _detect_price_based_trends(
 
     Returns the number of trends created or updated.
     """
-    if conn is None or _r is None or not strategy_cache:
+    if conn is None or store is None or not strategy_cache:
         return 0
     if not config.get("price_trend_detection_enabled", True):
         return 0
@@ -15304,7 +15336,7 @@ def _detect_price_based_trends(
         # Check if trend already exists
         existing = None
         try:
-            existing = _r.db(DB_NAME).table(TRENDS_TABLE).get(full_id).run(conn)
+            existing = store.get(TRENDS_TABLE, full_id)
         except Exception:
             pass
 
@@ -15326,7 +15358,9 @@ def _detect_price_based_trends(
                 _resurrect_dir = "bullish" if is_bullish else "bearish"
                 _resurrect_strength = min(1.0, max(abs(r20 or 0) / 100.0, abs(r60 or 0) / 100.0))
                 try:
-                    _r.db(DB_NAME).table(TRENDS_TABLE).get(full_id).replace(lambda doc: {
+                    # The ReQL lambda ignored `doc` and returned a constant, so
+                    # this is a whole-document upsert, not a CAS.
+                    store.insert(TRENDS_TABLE, {
                         "id": full_id,
                         "instance_id": instance_id,
                         "name": f"{label} price momentum",
@@ -15338,7 +15372,7 @@ def _detect_price_based_trends(
                         "last_confirmed_date": date_key,
                         "affected_tickers": [],
                         "description": f"{label} resurrected: {_resurrect_dir} momentum detected",
-                    }).run(conn)
+                    }, conflict="replace")
                     _log(f"  Trend resurrected: {label} (was ended, new {_resurrect_dir} momentum detected)", "green")
                 except Exception:
                     pass
@@ -15350,12 +15384,12 @@ def _detect_price_based_trends(
             # Update existing trend
             if is_dead:
                 try:
-                    _r.db(DB_NAME).table(TRENDS_TABLE).get(full_id).update({
+                    store.update(TRENDS_TABLE, full_id, {
                         "status": "ended",
                         "end_date": date_key,
                         "last_confirmed_date": date_key,
                         **reuse_stamp,
-                    }).run(conn)
+                    })
                     count += 1
                     _log(f"  Price trend ended: {label} ({ticker}) 20d={r20:+.1f}%, 60d={r60:+.1f}%", "yellow")
                 except Exception:
@@ -15363,26 +15397,26 @@ def _detect_price_based_trends(
             elif is_weak:
                 new_strength = max(0.1, (existing.get("strength", 0.5) or 0.5) - 0.05)
                 try:
-                    _r.db(DB_NAME).table(TRENDS_TABLE).get(full_id).update({
+                    store.update(TRENDS_TABLE, full_id, {
                         "status": "weakening",
                         "strength": new_strength,
                         "last_confirmed_date": date_key,
                         "description": f"{label} ({ticker}) 20d={r20:+.1f}%, 60d={r60:+.1f}%",
                         **reuse_stamp,
-                    }).run(conn)
+                    })
                     count += 1
                 except Exception:
                     pass
             elif is_bullish or is_bearish:
                 new_strength = min(1.0, (existing.get("strength", 0.5) or 0.5) + 0.02)
                 try:
-                    _r.db(DB_NAME).table(TRENDS_TABLE).get(full_id).update({
+                    store.update(TRENDS_TABLE, full_id, {
                         "status": "active",
                         "strength": new_strength,
                         "last_confirmed_date": date_key,
                         "description": f"{label} ({ticker}) 20d={r20:+.1f}%, 60d={r60:+.1f}%",
                         **reuse_stamp,
-                    }).run(conn)
+                    })
                     count += 1
                 except Exception:
                     pass
@@ -15412,7 +15446,7 @@ def _detect_price_based_trends(
         }
         doc.update(reuse_stamp)
         try:
-            _r.db(DB_NAME).table(TRENDS_TABLE).insert(doc, conflict="replace").run(conn)
+            store.insert(TRENDS_TABLE, doc, conflict="replace")
             count += 1
             _log(f"  New trend: {label} price momentum ({direction}, str={strength:.2f}, 20d={r20:+.1f}%, 60d={r60:+.1f}%)", "green")
         except Exception:
@@ -16030,7 +16064,7 @@ def _discover_trend_etfs(
     Stores them in GraphNexusDiscoveredStocks with source='trend_etf'.
     Returns list of newly added ETF tickers.
     """
-    if conn is None or _r is None or not active_trends:
+    if conn is None or store is None or not active_trends:
         return []
     _ensure_discovered_stocks_table(conn)
     min_strength = float(config.get("etf_min_trend_strength", 0.4))
@@ -16039,12 +16073,12 @@ def _discover_trend_etfs(
 
     # Load existing active ETF discoveries to avoid duplicates
     try:
-        cursor = _r.db(DB_NAME).table(DISCOVERED_TABLE).filter(
-            lambda doc: (doc["instance_id"] == instance_id)
-                & doc.has_fields("source")
-                & (doc["source"] == "trend_etf")
-                & (doc["status"] == "active")
-        ).run(conn)
+        cursor = store.run(store.filter(
+            DISCOVERED_TABLE,
+            P.field("instance_id").eq(instance_id)
+            & P.field("source").eq("trend_etf")
+            & P.field("status").eq("active"),
+        ))
         existing_etf_ids = {doc["ticker"] for doc in cursor}
     except Exception:
         existing_etf_ids = set()
@@ -16087,7 +16121,7 @@ def _discover_trend_etfs(
         }
         doc.update(reuse_stamp)
         try:
-            _r.db(DB_NAME).table(DISCOVERED_TABLE).insert(doc, conflict="replace").run(conn)
+            store.insert(DISCOVERED_TABLE, doc, conflict="replace")
             newly_discovered.append(etf)
             _log(f"  Discovered trend ETF: {etf} (trends: {', '.join(source_ids[:3])})", "green")
         except Exception:
@@ -16097,16 +16131,16 @@ def _discover_trend_etfs(
 
 def _get_all_active_trend_etfs(conn, instance_id: str) -> list[str]:
     """Return all active ETF tickers discovered from trends for this instance."""
-    if conn is None or _r is None:
+    if conn is None or store is None:
         return []
     _ensure_discovered_stocks_table(conn)
     try:
-        cursor = _r.db(DB_NAME).table(DISCOVERED_TABLE).filter(
-            lambda doc: (doc["instance_id"] == instance_id)
-                & doc.has_fields("source")
-                & (doc["source"] == "trend_etf")
-                & (doc["status"] == "active")
-        ).run(conn)
+        cursor = store.run(store.filter(
+            DISCOVERED_TABLE,
+            P.field("instance_id").eq(instance_id)
+            & P.field("source").eq("trend_etf")
+            & P.field("status").eq("active"),
+        ))
         return [doc["ticker"] for doc in cursor if doc.get("ticker")]
     except Exception:
         return []
@@ -16117,16 +16151,16 @@ def _get_stale_trend_etfs(conn, instance_id: str, all_trends: list[dict]) -> set
     Return ETF tickers whose ALL source trends have ended or weakened (strength < 0.3).
     These ETFs should be sold.
     """
-    if conn is None or _r is None:
+    if conn is None or store is None:
         return set()
     _ensure_discovered_stocks_table(conn)
     try:
-        cursor = _r.db(DB_NAME).table(DISCOVERED_TABLE).filter(
-            lambda doc: (doc["instance_id"] == instance_id)
-                & doc.has_fields("source")
-                & (doc["source"] == "trend_etf")
-                & (doc["status"] == "active")
-        ).run(conn)
+        cursor = store.run(store.filter(
+            DISCOVERED_TABLE,
+            P.field("instance_id").eq(instance_id)
+            & P.field("source").eq("trend_etf")
+            & P.field("status").eq("active"),
+        ))
         etf_docs = list(cursor)
     except Exception:
         return set()
@@ -16158,15 +16192,15 @@ def _get_stale_trend_etfs(conn, instance_id: str, all_trends: list[dict]) -> set
 
 def _mark_trend_etf_sold(conn, instance_id: str, etf: str, reason: str = ""):
     """Mark a trend ETF discovery as sold."""
-    if conn is None or _r is None:
+    if conn is None or store is None:
         return
     _ensure_discovered_stocks_table(conn)
     doc_id = f"{instance_id}_etf_{etf}"
     try:
-        _r.db(DB_NAME).table(DISCOVERED_TABLE).get(doc_id).update({
+        store.update(DISCOVERED_TABLE, doc_id, {
             "status": "sold",
             "sell_reason": (reason or "Source trend ended")[:200],
-        }).run(conn)
+        })
     except Exception:
         pass
 
@@ -16177,9 +16211,7 @@ def _ensure_ticker_history_table(conn):
     if conn is None or _ticker_history_table_ensured:
         return
     try:
-        tables = list(_r.db(DB_NAME).table_list().run(conn))
-        if TICKER_HISTORY_TABLE not in tables:
-            _r.db(DB_NAME).table_create(TICKER_HISTORY_TABLE).run(conn)
+        _dbschema.ensure_table(TICKER_HISTORY_TABLE)
         _ticker_history_table_ensured = True
     except Exception as e:
         _log(f"Could not ensure ticker history table: {e}", "yellow")
@@ -16199,13 +16231,13 @@ def _update_ticker_history(conn, ticker_headlines: dict, date_key: str, max_age_
             if not headlines:
                 continue
             new_entries = [{"d": date_key, "h": h[:200]} for h in headlines[:15]]  # cap per day
-            doc = _r.db(DB_NAME).table(TICKER_HISTORY_TABLE).get(ticker).run(conn)
+            doc = store.get(TICKER_HISTORY_TABLE, ticker)
             if doc is None:
-                _r.db(DB_NAME).table(TICKER_HISTORY_TABLE).insert({
+                store.insert(TICKER_HISTORY_TABLE, {
                     "id": ticker,
                     "headlines": new_entries,
-                    "last_updated": _r.now(),
-                }).run(conn)
+                    "last_updated": _db_now(),
+                })
             else:
                 existing = doc.get("headlines") or []
                 # Deduplicate: skip if we already have entries for this date
@@ -16214,10 +16246,10 @@ def _update_ticker_history(conn, ticker_headlines: dict, date_key: str, max_age_
                     existing.extend(new_entries)
                 # Prune old entries
                 pruned = [e for e in existing if e.get("d", "") >= cutoff]
-                _r.db(DB_NAME).table(TICKER_HISTORY_TABLE).get(ticker).update({
+                store.update(TICKER_HISTORY_TABLE, ticker, {
                     "headlines": pruned,
-                    "last_updated": _r.now(),
-                }).run(conn)
+                    "last_updated": _db_now(),
+                })
     except Exception as e:
         _log(f"Update ticker history error: {e}", "yellow")
 
@@ -16255,7 +16287,7 @@ def _get_ticker_history(conn, tickers: list, max_per_ticker: int = 10,
     cutoff = str(as_of or "").strip()
     try:
         for ticker in tickers[:20]:  # cap to avoid huge queries
-            doc = _r.db(DB_NAME).table(TICKER_HISTORY_TABLE).get(ticker).run(conn)
+            doc = store.get(TICKER_HISTORY_TABLE, ticker)
             if doc and isinstance(doc.get("headlines"), list):
                 headlines = doc["headlines"]
                 if cutoff:
@@ -16374,7 +16406,7 @@ def _get_cached_articles(
     if conn is None:
         return None, None
     try:
-        doc = _r.db(DB_NAME).table(NEXUS_NEWS_CACHE_TABLE).get(date_key).run(conn)
+        doc = store.get(NEXUS_NEWS_CACHE_TABLE, date_key)
         if doc and isinstance(doc.get("articles"), list):
             articles = _filter_low_signal_alpaca_articles(
                 list(doc["articles"]),
@@ -16383,10 +16415,10 @@ def _get_cached_articles(
             )
             if len(articles) != len(doc.get("articles") or []):
                 try:
-                    _r.db(DB_NAME).table(NEXUS_NEWS_CACHE_TABLE).get(date_key).update({
+                    store.update(NEXUS_NEWS_CACHE_TABLE, date_key, {
                         "articles": articles,
                         "count": len(articles),
-                    }).run(conn)
+                    })
                 except Exception:
                     pass
             articles = _filter_articles_for_context(articles, context)
@@ -16463,7 +16495,7 @@ def _save_cached_sentiment(
     )
     scope_doc = dict(sentiment_cache_scope_doc or {})
     try:
-        doc = _r.db(DB_NAME).table(NEXUS_NEWS_CACHE_TABLE).get(date_key).run(conn)
+        doc = store.get(NEXUS_NEWS_CACHE_TABLE, date_key)
         if doc is not None:
             by_fp = dict(doc.get("sentiment_by_fingerprint") or {})
             by_scope = dict(doc.get("sentiment_by_scope") or {})
@@ -16486,12 +16518,12 @@ def _save_cached_sentiment(
                 "sentiment_by_scope": by_scope,
                 "sentiment_by_fingerprint": by_fp,
                 "sentiment_data": sentiment_data,
-                "sentiment_cached_at": _r.now(),
+                "sentiment_cached_at": _db_now(),
                 "sentiment_ticker_count": len(sentiment_data),
                 "sentiment_cache_scope_id": scope_id,
                 "sentiment_model_stamp": scope_doc,
             }
-            _r.db(DB_NAME).table(NEXUS_NEWS_CACHE_TABLE).get(date_key).update(update).run(conn)
+            store.update(NEXUS_NEWS_CACHE_TABLE, date_key, update)
             scope_suffix = f", scope={scope_id[:8]}..." if scope_id else ""
             _log(f"Sentiment cache SAVE for {date_key} (fp={fp[:8] if fp else 'n/a'}..., {len(sentiment_data)} tickers{scope_suffix})", "cyan")
         else:
@@ -16510,19 +16542,19 @@ def _save_cached_sentiment(
                     if fp
                     else {}
                 )
-            _r.db(DB_NAME).table(NEXUS_NEWS_CACHE_TABLE).insert({
+            store.insert(NEXUS_NEWS_CACHE_TABLE, {
                 "id": date_key,
                 "articles": articles or [],
                 "sentiment_data": sentiment_data,
                 "sentiment_by_fingerprint": by_fp,
                 "sentiment_by_scope": by_scope,
-                "sentiment_cached_at": _r.now(),
+                "sentiment_cached_at": _db_now(),
                 "sentiment_ticker_count": len(sentiment_data),
                 "sentiment_cache_scope_id": scope_id,
                 "sentiment_model_stamp": scope_doc,
-                "cached_at": _r.now(),
+                "cached_at": _db_now(),
                 "count": len(articles) if articles else 0,
-            }, conflict="replace").run(conn)
+            }, conflict="replace")
             scope_suffix = f", scope={scope_id[:8]}..." if scope_id else ""
             _log(f"Sentiment cache SAVE for {date_key} (fp={fp[:8] if fp else 'n/a'}..., {len(sentiment_data)} tickers{scope_suffix}, new doc)", "cyan")
     except Exception as e:
@@ -16540,10 +16572,10 @@ def _save_cached_articles(conn, date_key: str, articles: list, start_iso: str, e
             "articles": articles,
             "start_iso": start_iso,
             "end_iso": end_iso,
-            "cached_at": _r.now(),
+            "cached_at": _db_now(),
             "count": len(articles),
         }
-        _r.db(DB_NAME).table(NEXUS_NEWS_CACHE_TABLE).insert(doc, conflict="replace").run(conn)
+        store.insert(NEXUS_NEWS_CACHE_TABLE, doc, conflict="replace")
         _log(f"Article cache SAVE for {date_key} ({len(articles)} articles)", "cyan")
     except Exception as e:
         _log(f"Article cache save error: {e}", "yellow")
@@ -16560,7 +16592,7 @@ def _invalidate_cached_articles(conn, date_key: str, *, sentiment_cache_scope_id
     if conn is None:
         return
     try:
-        _r.db(DB_NAME).table(NEXUS_NEWS_CACHE_TABLE).get(date_key).delete().run(conn)
+        store.delete(NEXUS_NEWS_CACHE_TABLE, date_key)
         _log(f"Article cache INVALIDATE for {date_key} (force_fresh fetch returned empty)", "cyan")
     except Exception as e:
         _log(f"Article cache invalidate error: {e}", "yellow")
@@ -18202,9 +18234,7 @@ def _ensure_google_macro_table(conn) -> None:
     if conn is None or _google_macro_table_ensured:
         return
     try:
-        tables = list(_r.db(DB_NAME).table_list().run(conn))
-        if _NEXUS_NEWS_LLM_GOOGLE_TABLE not in tables:
-            _r.db(DB_NAME).table_create(_NEXUS_NEWS_LLM_GOOGLE_TABLE).run(conn)
+        _dbschema.ensure_table(_NEXUS_NEWS_LLM_GOOGLE_TABLE)
         _google_macro_table_ensured = True
     except Exception as _e:
         _log(f"Could not ensure Google macro cache table: {_e}", "yellow")
@@ -18248,7 +18278,7 @@ def _classify_macro_news_via_llm_cached(
         _sec_hash = hashlib.sha256("|".join(sorted(available_sectors or [])).encode("utf-8", errors="replace")).hexdigest()[:8]
         cache_id = f"google_macro|{today_str}|{instance_id[:24]}|{model_ref}|{fp_hash}|{_sec_hash}"
         _ensure_google_macro_table(conn)
-        cached = _r.db(DB_NAME).table(_NEXUS_NEWS_LLM_GOOGLE_TABLE).get(cache_id).run(conn)
+        cached = store.get(_NEXUS_NEWS_LLM_GOOGLE_TABLE, cache_id)
         if cached and isinstance(cached.get("signals"), list):
             _log(f"Google macro: cache hit for {today_str} ({len(cached['signals'])} signals)", "cyan")
             return cached["signals"]
@@ -18262,10 +18292,10 @@ def _classify_macro_news_via_llm_cached(
     )
     if result and cache_id:
         try:
-            _r.db(DB_NAME).table(_NEXUS_NEWS_LLM_GOOGLE_TABLE).insert(
+            store.insert(_NEXUS_NEWS_LLM_GOOGLE_TABLE,
                 {"id": cache_id, "signals": result, "cached_at": today_str},
                 conflict="replace",
-            ).run(conn)
+            )
         except Exception:
             pass
     return result
@@ -21396,9 +21426,7 @@ def _ensure_overlay_bars_table(conn):
     if conn is None or _overlay_bars_table_ensured:
         return
     try:
-        tables = list(_r.db(DB_NAME).table_list().run(conn))
-        if NEXUS_OVERLAY_BARS_TABLE not in tables:
-            _r.db(DB_NAME).table_create(NEXUS_OVERLAY_BARS_TABLE).run(conn)
+        _dbschema.ensure_table(NEXUS_OVERLAY_BARS_TABLE)
         _overlay_bars_table_ensured = True
     except Exception:
         pass
@@ -21421,7 +21449,7 @@ def _overlay_bars_cache_get(conn, symbol: str) -> dict | None:
         return None
     try:
         _ensure_overlay_bars_table(conn)
-        doc = _r.db(DB_NAME).table(NEXUS_OVERLAY_BARS_TABLE).get(symbol).run(conn)
+        doc = store.get(NEXUS_OVERLAY_BARS_TABLE, symbol)
         if not doc or not doc.get("bars"):
             return None
         # The row is keyed by symbol ALONE, so a row written before bars moved
@@ -21457,9 +21485,9 @@ def _overlay_bars_cache_set(conn, symbol: str, bars: list[dict],
             doc["fetch_start"] = fetch_start
         if fetch_end:
             doc["fetch_end"] = fetch_end
-        _r.db(DB_NAME).table(NEXUS_OVERLAY_BARS_TABLE).insert(
+        store.insert(NEXUS_OVERLAY_BARS_TABLE,
             doc, conflict="replace",
-        ).run(conn)
+        )
     except Exception:
         pass
 
@@ -22666,13 +22694,13 @@ def _check_overlay_result_cache(
     from _phase_alpha_helpers import evidence_cache_read_allowed
     if not evidence_cache_read_allowed("overlay_result"):
         return None
-    if conn is None or _r is None or not config.get("overlay_result_cache_enabled", False):
+    if conn is None or store is None or not config.get("overlay_result_cache_enabled", False):
         return None
     _ensure_nexus_history_table(conn, NEXUS_OVERLAY_RESULT_CACHE_TABLE)
     model = str(config.get("overlay_llm_model", "") or "").strip().lower()
     key = _overlay_result_cache_key(symbol, date_key, raw_net_score, active_events, model)
     try:
-        doc = _r.db(DB_NAME).table(NEXUS_OVERLAY_RESULT_CACHE_TABLE).get(key).run(conn)
+        doc = store.get(NEXUS_OVERLAY_RESULT_CACHE_TABLE, key)
         if doc and doc.get("result"):
             _log(f"Overlay CACHE HIT [fast]: {symbol} (key={key[:12]}…)", "cyan")
             return dict(doc["result"])
@@ -22689,18 +22717,18 @@ def _store_overlay_result_cache(
     from _phase_alpha_helpers import evidence_cache_write_allowed
     if not evidence_cache_write_allowed("overlay_result"):
         return
-    if conn is None or _r is None or not config.get("overlay_result_cache_enabled", False):
+    if conn is None or store is None or not config.get("overlay_result_cache_enabled", False):
         return
     if not result:
         return
     model = str(config.get("overlay_llm_model", "") or "").strip().lower()
     key = _overlay_result_cache_key(symbol, date_key, raw_net_score, active_events, model)
     try:
-        _r.db(DB_NAME).table(NEXUS_OVERLAY_RESULT_CACHE_TABLE).insert({
+        store.insert(NEXUS_OVERLAY_RESULT_CACHE_TABLE, {
             "id": key, "symbol": symbol, "date_key": date_key,
             "model": model, "result": result,
             "raw_net_score": round(raw_net_score, 4),
-        }, conflict="replace").run(conn, noreply=True)
+        }, conflict="replace")
     except Exception:
         pass
 
@@ -26305,11 +26333,11 @@ class GraphNexusAnalysis:
             ]
             _trading_hash = hashlib.sha256(json.dumps(_trading_config_keys, sort_keys=True).encode()).hexdigest()[:16]
             _cleanup_conn = _get_nexus_db_conn()
-            if _cleanup_conn and _r:
+            if _cleanup_conn and store is not None:
                 try:
                     _ensure_nexus_history_table(_cleanup_conn, LEARNING_CACHE_TABLE)
                     _marker_key = f"cleanup_done|{instance_id}"
-                    _marker = _r.db(DB_NAME).table(LEARNING_CACHE_TABLE).get(_marker_key).run(_cleanup_conn)
+                    _marker = store.get(LEARNING_CACHE_TABLE, _marker_key)
                     if _marker is not None:
                         _current_hash = str(config.get("history_scope_id") or config.get("strategy_config_hash") or "")
                         _stored_hash = str(_marker.get("config_hash") or "")
@@ -26337,7 +26365,7 @@ class GraphNexusAnalysis:
                                     NEXUS_OUTCOME_SERIES_TABLE,
                                 ]
                                 try:
-                                    _restart_tables = list(_r.db(DB_NAME).table_list().run(_cleanup_conn))
+                                    _restart_tables = store.table_list()
                                 except Exception:
                                     _restart_tables = []
                                 _post_lb_cleared = 0
@@ -26359,16 +26387,11 @@ class GraphNexusAnalysis:
                                         continue
                                     _date_field = _restart_date_fields.get(_tbl, "date_key")
                                     try:
-                                        _del_result = (
-                                            _r.db(DB_NAME).table(_tbl)
-                                            .filter(lambda doc, _df=_date_field:
-                                                (doc["instance_id"] == instance_id)
-                                                & (doc.has_fields(_df))
-                                                & (doc[_df] >= date_key)
-                                            )
-                                            .delete()
-                                            .run(_cleanup_conn)
-                                        )
+                                        _del_result = store.delete(_tbl, store.filter(
+                                            _tbl,
+                                            P.field("instance_id").eq(instance_id)
+                                            & P.field(_date_field).ge(date_key),
+                                        ))
                                         _post_lb_cleared += int(_del_result.get("deleted", 0))
                                     except Exception:
                                         pass
@@ -26377,37 +26400,34 @@ class GraphNexusAnalysis:
                                 if DISCOVERED_TABLE in _restart_tables:
                                     try:
                                         # Delete discoveries created during live trading (not during lookback)
-                                        _del_disc = (
-                                            _r.db(DB_NAME).table(DISCOVERED_TABLE)
-                                            .filter(lambda doc:
-                                                (doc["instance_id"] == instance_id)
-                                                & (doc.has_fields("discovered_date"))
-                                                & (doc["discovered_date"] >= date_key)
-                                            )
-                                            .delete()
-                                            .run(_cleanup_conn)
-                                        )
+                                        _del_disc = store.delete(DISCOVERED_TABLE, store.filter(
+                                            DISCOVERED_TABLE,
+                                            P.field("instance_id").eq(instance_id)
+                                            & P.field("discovered_date").ge(date_key),
+                                        ))
                                         _post_lb_cleared += int(_del_disc.get("deleted", 0))
                                     except Exception:
                                         pass
                                     try:
                                         # Reset lookback-era stocks that were sold during prior live trading
-                                        _r.db(DB_NAME).table(DISCOVERED_TABLE).filter(
-                                            lambda doc: (doc["instance_id"] == instance_id)
-                                            & ((doc["status"] == "sold") | (doc["status"] == "rediscovery_pending"))
-                                            & (doc.has_fields("sold_date"))
-                                            & (doc["sold_date"] >= date_key)
-                                        ).update({
+                                        store.update(DISCOVERED_TABLE, store.filter(
+                                            DISCOVERED_TABLE,
+                                            P.field("instance_id").eq(instance_id)
+                                            & (P.field("status").eq("sold")
+                                               | P.field("status").eq("rediscovery_pending"))
+                                            & P.field("sold_date").ge(date_key),
+                                        ), {
                                             "status": "active",
                                             "sell_reason": None,
                                             "sold_date": None,
                                             "consecutive_sell_days": 0,
-                                        }).run(_cleanup_conn)
+                                        })
                                         # Reset orphaned rediscovery_pending (no sold_date)
-                                        _r.db(DB_NAME).table(DISCOVERED_TABLE).filter(
-                                            lambda doc: (doc["instance_id"] == instance_id)
-                                            & (doc["status"] == "rediscovery_pending")
-                                        ).update({"status": "sold"}).run(_cleanup_conn)
+                                        store.update(DISCOVERED_TABLE, store.filter(
+                                            DISCOVERED_TABLE,
+                                            P.field("instance_id").eq(instance_id)
+                                            & P.field("status").eq("rediscovery_pending"),
+                                        ), {"status": "sold"})
                                     except Exception:
                                         pass
                                 # Clear learning cache to force fresh learning on first live bar
@@ -26416,10 +26436,11 @@ class GraphNexusAnalysis:
                                 if LEARNING_CACHE_TABLE in _restart_tables:
                                     try:
                                         _marker_prefix = f"cleanup_done|"
-                                        _r.db(DB_NAME).table(LEARNING_CACHE_TABLE).filter(
-                                            lambda doc: (doc["instance_id"] == instance_id)
-                                            & (~doc["id"].match("^cleanup_done\\\\|"))
-                                        ).delete().run(_cleanup_conn)
+                                        store.delete(LEARNING_CACHE_TABLE, store.filter(
+                                            LEARNING_CACHE_TABLE,
+                                            P.field("instance_id").eq(instance_id)
+                                            & ~P.field("id").starts_with("cleanup_done|"),
+                                        ))
                                     except Exception:
                                         pass
                                 if _post_lb_cleared:
@@ -26432,20 +26453,20 @@ class GraphNexusAnalysis:
                                     _log("Backtest restart: no post-lookback data to clear — clean start.", "cyan")
                                 # Re-write the cleanup_done marker (may have been deleted by learning cache clear)
                                 try:
-                                    _r.db(DB_NAME).table(LEARNING_CACHE_TABLE).insert({
+                                    store.insert(LEARNING_CACHE_TABLE, {
                                         "id": f"cleanup_done|{instance_id}",
                                         "instance_id": instance_id,
                                         "config_hash": str(config.get("history_scope_id") or config.get("strategy_config_hash") or ""),
                                         "trading_config_hash": _trading_hash,
                                         "cleaned_at": datetime.utcnow().isoformat() + "Z",
-                                    }, conflict="replace").run(_cleanup_conn)
+                                    }, conflict="replace")
                                 except Exception:
                                     pass
                         else:
                             _log(f"Backtest cleanup: config hash changed ({_stored_hash[:12]}→{_current_hash[:12]}), re-cleaning", "yellow")
                 except Exception:
                     pass  # Table may not exist yet — proceed with cleanup
-            if _cleanup_needed and _cleanup_conn and _r:
+            if _cleanup_needed and _cleanup_conn and store is not None:
                 # V32 REPRODUCIBILITY FIX: exclude trade-context / outcomes / outcome-series
                 # tables from the blanket wipe. They hold the pre-lookback date_keys the
                 # broker's `_historic_lookback_resume_dates()` probes to decide whether to
@@ -26469,7 +26490,7 @@ class GraphNexusAnalysis:
                 ]
                 _existing_tables = []
                 try:
-                    _existing_tables = list(_r.db(DB_NAME).table_list().run(_cleanup_conn))
+                    _existing_tables = store.table_list()
                 except Exception as _tbl_list_exc:
                     _log(f"Backtest cleanup WARN: failed to list tables before cleanup: {_tbl_list_exc}", "yellow")
                 _total_cleared = 0
@@ -26477,12 +26498,8 @@ class GraphNexusAnalysis:
                     if _tbl not in _existing_tables:
                         continue
                     try:
-                        result = (
-                            _r.db(DB_NAME).table(_tbl)
-                            .filter(lambda doc: doc["instance_id"] == instance_id)
-                            .delete()
-                            .run(_cleanup_conn)
-                        )
+                        result = store.delete(_tbl, store.filter(
+                            _tbl, P.field("instance_id").eq(instance_id)))
                         _n = result.get("deleted", 0)
                         if _n:
                             _total_cleared += _n
@@ -26498,13 +26515,13 @@ class GraphNexusAnalysis:
                     _log("Backtest cleanup: no stale instance data found — clean start.", "cyan")
                 # V17b: Store cleanup marker in DB so it survives container restarts
                 try:
-                    _r.db(DB_NAME).table(LEARNING_CACHE_TABLE).insert({
+                    store.insert(LEARNING_CACHE_TABLE, {
                         "id": f"cleanup_done|{instance_id}",
                         "instance_id": instance_id,
                         "config_hash": str(config.get("history_scope_id") or config.get("strategy_config_hash") or ""),
                         "trading_config_hash": _trading_hash,
                         "cleaned_at": datetime.utcnow().isoformat() + "Z",
-                    }, conflict="replace").run(_cleanup_conn)
+                    }, conflict="replace")
                 except Exception:
                     pass
             # Mark this instance as cleaned at the module level (survives cache swaps)
@@ -26528,13 +26545,12 @@ class GraphNexusAnalysis:
             if not strategy_cache.get("_nexus_persistence_logged"):
                 strategy_cache["_nexus_persistence_logged"] = True
                 _persist_conn = _get_nexus_db_conn()
-                if _persist_conn and _r:
+                if _persist_conn and store is not None:
                     _persist_counts = {}
                     for _tbl_name, _tbl_const in [("trends", TRENDS_TABLE), ("discovered", DISCOVERED_TABLE), ("outcomes", OUTCOMES_TABLE)]:
                         try:
-                            _n = _r.db(DB_NAME).table(_tbl_const).filter(
-                                lambda doc: doc["instance_id"] == instance_id
-                            ).count().run(_persist_conn)
+                            _n = store.count(store.filter(
+                                _tbl_const, P.field("instance_id").eq(instance_id)))
                             _persist_counts[_tbl_name] = _n
                         except Exception as _persist_exc:
                             _log(f"Data persistence WARN: failed to count {_tbl_name} rows: {_persist_exc}", "yellow")
@@ -27016,9 +27032,9 @@ class GraphNexusAnalysis:
                 return
             def _google_news_fetch():
                 try:
-                    _bg_conn = _r.connect(host=RETHINKDB_HOST, port=RETHINKDB_PORT, timeout=10) if _r else None
+                    _bg_conn = _get_nexus_db_conn() if store is not None else None
                 except Exception as _bg_conn_exc:
-                    _log(f"Google News background WARN: RethinkDB connection unavailable: {_bg_conn_exc}", "yellow")
+                    _log(f"Google News background WARN: store unavailable: {_bg_conn_exc}", "yellow")
                     _bg_conn = None
                 _bg_result = {"google_articles": [], "normalized": []}
                 try:
@@ -27113,14 +27129,14 @@ class GraphNexusAnalysis:
                         _log(f"Backtest time filter: removed {_bg_pre - len(_bg_google_articles)} Google articles published after {_bg_ct_iso}", "cyan")
                 if not _bg_gn_normalized:
                     return [], [], _bg_google_articles, _bg_gn_normalized
-                # Macro classification owns its own RethinkDB connection — _classify_*
-                # uses conn for response-cache hits, and the main `conn` belongs to
-                # the foreground thread.
+                # Macro classification used to own its own RethinkDB connection
+                # because connections are not thread-safe; the store's pool hands
+                # every thread its own connection, so the handle is just a gate.
                 _bg_macro_conn = None
                 try:
-                    _bg_macro_conn = _r.connect(host=RETHINKDB_HOST, port=RETHINKDB_PORT, timeout=10) if (_nexus_db_available and _r is not None) else None
+                    _bg_macro_conn = _get_nexus_db_conn() if (_nexus_db_available and store is not None) else None
                 except Exception as _bg_conn_exc:
-                    _log(f"Macro pipeline: RethinkDB connection unavailable, classifying without cache: {_bg_conn_exc}", "yellow")
+                    _log(f"Macro pipeline: store unavailable, classifying without cache: {_bg_conn_exc}", "yellow")
                     _bg_macro_conn = None
                 try:
                     with _timed_stage("Macro article classification", start_details=f"articles={len(_bg_gn_normalized)}"):
@@ -27408,7 +27424,7 @@ class GraphNexusAnalysis:
                     }
                     doc.update(reuse_stamp)
                     try:
-                        _r.db(DB_NAME).table(DISCOVERED_TABLE).insert(doc, conflict="replace").run(conn_trends)
+                        store.insert(DISCOVERED_TABLE, doc, conflict="replace")
                         _bz_newly_discovered.append(ticker)
                         current_discovered_count += 1
                         symbols_list.append(ticker)
@@ -27574,9 +27590,8 @@ class GraphNexusAnalysis:
             # Also load any recently-ended trends for sell signals
             all_instance_trends = []
             try:
-                cursor = _r.db(DB_NAME).table(TRENDS_TABLE).filter(
-                    lambda doc: doc["instance_id"] == instance_id
-                ).run(conn_trends)
+                cursor = store.run(store.filter(
+                    TRENDS_TABLE, P.field("instance_id").eq(instance_id)))
                 all_instance_trends = list(cursor)
             except Exception:
                 all_instance_trends = active_trends
@@ -27633,7 +27648,7 @@ class GraphNexusAnalysis:
                 for d_ticker in list(all_discovered):
                     d_doc_id = f"{instance_id}_{d_ticker}"
                     try:
-                        d_doc = _r.db(DB_NAME).table(DISCOVERED_TABLE).get(d_doc_id).run(conn_trends)
+                        d_doc = store.get(DISCOVERED_TABLE, d_doc_id)
                     except Exception as _disc_doc_exc:
                         _log(f"Discovered stock WARN: failed to load source-trend doc for {d_ticker}: {_disc_doc_exc}", "yellow")
                         d_doc = None
@@ -27909,16 +27924,16 @@ class GraphNexusAnalysis:
         # with the Google macro Neo4j + LLM call.
         if _gn_normalized:
             # Submit event maintenance to a background thread.
-            # RethinkDB connections are not thread-safe — the worker creates its own connection.
+            # The store's pool hands each thread its own connection.
             def _maint_worker(_cfg=config, _iid=instance_id, _dk=date_key, _rows=macro_rows):
                 try:
-                    if not _nexus_db_available or _r is None:
+                    if not _nexus_db_available or store is None:
                         # No DB available — run with None conn (same fallback as original code path)
                         return _maintain_active_events(
                             None, _cfg,
                             instance_id=_iid, date_key=_dk, macro_rows=_rows,
                         )
-                    _bg_conn = _r.connect(host=RETHINKDB_HOST, port=RETHINKDB_PORT, timeout=10)
+                    _bg_conn = _get_nexus_db_conn()
                     try:
                         return _maintain_active_events(
                             _bg_conn, _cfg,
@@ -28128,7 +28143,7 @@ class GraphNexusAnalysis:
         if config.get("_inst_co_holdings_cache") is None and conn is not None and _nexus_db_available:
             try:
                 _ensure_learning_cache_table(conn)
-                _inst_rdb_cached = _r.db(DB_NAME).table(LEARNING_CACHE_TABLE).get(_inst_rdb_key).run(conn)
+                _inst_rdb_cached = store.get(LEARNING_CACHE_TABLE, _inst_rdb_key)
                 if (
                     _inst_rdb_cached
                     and isinstance(_inst_rdb_cached.get("edges"), list)
@@ -28210,10 +28225,10 @@ class GraphNexusAnalysis:
                         "cached_at": date_key,
                         **_inst_scope_metadata,
                     }
-                    _r.db(DB_NAME).table(LEARNING_CACHE_TABLE).insert(
+                    store.insert(LEARNING_CACHE_TABLE,
                         _inst_cache_row,
                         conflict="replace",
-                    ).run(conn)
+                    )
                 except Exception as _inst_cache_write_exc:
                     _log(f"Institutional cache WARN: failed to persist co-holdings cache: {_inst_cache_write_exc}", "yellow")
 
@@ -28874,14 +28889,13 @@ class GraphNexusAnalysis:
                             - timedelta(days=int(_a4_window_days))
                         ).strftime("%Y-%m-%d")
                         _a4_expired = []
-                        _a4_cur = _r.db(DB_NAME).table(DISCOVERED_TABLE).filter(
-                            lambda doc: (doc["instance_id"] == instance_id)
-                            & (doc["status"] == "post_sell_watch")
-                            & (
-                                (~doc.has_fields("sold_date"))
-                                | (doc["sold_date"] < _a4_cutoff)
-                            )
-                        ).pluck("ticker").run(conn_trends)
+                        _a4_cur = store.pluck(store.run(store.filter(
+                            DISCOVERED_TABLE,
+                            P.field("instance_id").eq(instance_id)
+                            & P.field("status").eq("post_sell_watch")
+                            & (P.field("sold_date").is_null()
+                               | P.field("sold_date").lt(_a4_cutoff)),
+                        )), "ticker")
                         for _a4_row in _a4_cur:
                             _a4_t = str(_a4_row.get("ticker") or "").strip().upper()
                             if _a4_t:
@@ -32192,10 +32206,10 @@ class GraphNexusAnalysis:
                 _rpd_doc_id = f"{instance_id}_{_rpd_ticker}"
                 try:
                     if _rpd_final >= 1:
-                        _r.db(DB_NAME).table(DISCOVERED_TABLE).get(_rpd_doc_id).update({"status": "active"}).run(conn_trends)
+                        store.update(DISCOVERED_TABLE, _rpd_doc_id, {"status": "active"})
                         _log(f"Rediscovery confirmed: {_rpd_ticker} (score={_rpd_final})", "green")
                     else:
-                        _r.db(DB_NAME).table(DISCOVERED_TABLE).get(_rpd_doc_id).update({"status": "sold"}).run(conn_trends)
+                        store.update(DISCOVERED_TABLE, _rpd_doc_id, {"status": "sold"})
                         _log(f"Rediscovery rolled back: {_rpd_ticker} (score={_rpd_final}, LLM rejected)", "yellow")
                 except Exception:
                     pass

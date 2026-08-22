@@ -6,7 +6,7 @@ MlNews — ML-driven news sentiment strategy (run_once).
 
 Pipeline executed once per trading loop (before per-symbol strategies):
 1. INGEST:  Fetch Alpaca news for all universe symbols (headline + summary).
-            Store raw articles in RethinkDB NewsRaw table.
+            Store raw articles in the NewsRaw table.
 2. SCORE:   Run FinBERT on headline+summary for every new article.
             Store pos/neg/neu probabilities in NewsScored table.
             Compute sentiment_impulse = (pos - neg) * max(pos, neg, neu).
@@ -82,18 +82,16 @@ except Exception:
     def llm_call_context(**_kwargs):
         yield
 
-# ── RethinkDB ──────────────────────────────────────────────────────────────
+# ── Postgres store ─────────────────────────────────────────────────────────
 try:
-    from rethinkdb import RethinkDB
-    r = RethinkDB()
+    from db import schema as db_schema
+    from db import store
     DB_NAME = 'IntelliStock'
-    RETHINKDB_HOST = os.environ.get('RETHINKDB_HOST', 'localhost')
-    RETHINKDB_PORT = int(os.environ.get('RETHINKDB_PORT', '28015'))
     _db_available = True
 except Exception:
-    r = None
+    store = None
     _db_available = False
-    _log("RethinkDB not available; DB persistence disabled", "yellow")
+    _log("Postgres store not available; DB persistence disabled", "yellow")
 
 # Table names
 TBL_NEWS_RAW = 'NewsRaw'
@@ -146,14 +144,8 @@ def _ensure_tables(conn):
     if conn is None or _tables_ensured:
         return
     try:
-        dbs = list(r.db_list().run(conn))
-        if DB_NAME not in dbs:
-            r.db_create(DB_NAME).run(conn)
-        existing = list(r.db(DB_NAME).table_list().run(conn))
         for tbl in [TBL_NEWS_RAW, TBL_NEWS_SCORED, TBL_NEWS_LLM, TBL_TICKER_DAY]:
-            if tbl not in existing:
-                r.db(DB_NAME).table_create(tbl).run(conn)
-                _log(f"Created table {tbl}", "cyan")
+            db_schema.ensure_table(tbl)               # R25, idempotent
         _tables_ensured = True
     except Exception as e:
         _log(f"Table ensure error: {e}", "yellow")
@@ -393,7 +385,7 @@ def _store_news_raw(conn, articles: list[dict]) -> list[dict]:
     try:
         existing_ids = set()
         aids = [a["_aid"] for a in unique]
-        cursor = r.db(DB_NAME).table(TBL_NEWS_RAW).get_all(*aids).pluck("id").run(conn)
+        cursor = store.pluck(store.get_all(TBL_NEWS_RAW, *aids), "id")
         for doc in cursor:
             existing_ids.add(doc["id"])
     except Exception:
@@ -416,7 +408,7 @@ def _store_news_raw(conn, articles: list[dict]) -> list[dict]:
                 "ingested_at": now_iso,
             })
         try:
-            r.db(DB_NAME).table(TBL_NEWS_RAW).insert(docs, conflict="update").run(conn)
+            store.insert(TBL_NEWS_RAW, docs, conflict="update")
         except Exception as e:
             _log(f"NewsRaw insert error: {e}", "yellow")
 
@@ -570,7 +562,7 @@ def _store_news_scored(conn, scores: list[dict]):
             "scored_at": now_iso,
         })
     try:
-        r.db(DB_NAME).table(TBL_NEWS_SCORED).insert(docs, conflict="replace").run(conn)
+        store.insert(TBL_NEWS_SCORED, docs, conflict="replace")
     except Exception as e:
         _log(f"NewsScored insert error: {e}", "yellow")
 
@@ -707,7 +699,7 @@ def _store_news_llm(conn, classifications: list[dict]):
             "llm_at": c.get("llm_at", ""),
         })
     try:
-        r.db(DB_NAME).table(TBL_NEWS_LLM).insert(docs, conflict="replace").run(conn)
+        store.insert(TBL_NEWS_LLM, docs, conflict="replace")
     except Exception as e:
         _log(f"NewsLLM insert error: {e}", "yellow")
 
@@ -816,7 +808,7 @@ def _store_ticker_day_features(conn, features: dict[str, dict]):
         return
     docs = list(features.values())
     try:
-        r.db(DB_NAME).table(TBL_TICKER_DAY).insert(docs, conflict="replace").run(conn)
+        store.insert(TBL_TICKER_DAY, docs, conflict="replace")
     except Exception as e:
         _log(f"TickerDayFeatures insert error: {e}", "yellow")
 

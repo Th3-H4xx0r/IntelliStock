@@ -9,6 +9,10 @@ def _reset_state():
     importlib.reload(llm_critical_guard)
     importlib.reload(backtest_bar_snapshot)
     importlib.reload(backtest_critical_abort)
+    # The BacktestResults pause write goes through the split store now, so
+    # patching _get_store no longer cages it. Cage the seam itself: a
+    # unit test must never touch a real database.
+    backtest_critical_abort._write_backtest_pause_status = lambda *a, **kw: None
     yield
 
 
@@ -33,7 +37,7 @@ def test_handle_does_not_exit():
     from backend import backtest_critical_abort
     fake_conn = MagicMock()
     fake_r = MagicMock()
-    with patch.object(backtest_critical_abort, "_get_conn_and_r", return_value=(fake_conn, fake_r)), \
+    with patch.object(backtest_critical_abort, "_get_store", return_value=fake_r), \
          patch.object(backtest_critical_abort, "_enqueue_discord", return_value=None), \
          patch.object(backtest_critical_abort, "_bs_restore", return_value=({"x": 1}, {}, None)), \
          patch.object(backtest_critical_abort, "_apply_restore", return_value=None), \
@@ -48,7 +52,7 @@ def test_handle_calls_snapshot_restore():
     from backend import backtest_critical_abort
     mock_restore = MagicMock(return_value=({"strategy_state": "good"}, {"cash": 100}, None))
     mock_apply = MagicMock()
-    with patch.object(backtest_critical_abort, "_get_conn_and_r", return_value=(MagicMock(), MagicMock())), \
+    with patch.object(backtest_critical_abort, "_get_store", return_value=MagicMock()), \
          patch.object(backtest_critical_abort, "_enqueue_discord", return_value=None), \
          patch.object(backtest_critical_abort, "_bs_restore", mock_restore), \
          patch.object(backtest_critical_abort, "_apply_restore", mock_apply):
@@ -66,7 +70,7 @@ def test_handle_calls_snapshot_restore():
 def test_handle_survives_no_snapshot():
     """If no snapshot was ever captured (critical fires before first bar), pause still works."""
     from backend import backtest_critical_abort
-    with patch.object(backtest_critical_abort, "_get_conn_and_r", return_value=(MagicMock(), MagicMock())), \
+    with patch.object(backtest_critical_abort, "_get_store", return_value=MagicMock()), \
          patch.object(backtest_critical_abort, "_enqueue_discord", return_value=None), \
          patch.object(backtest_critical_abort, "_bs_restore", return_value=None):
         # Should NOT raise even though restore returned None
@@ -79,19 +83,17 @@ def test_handle_writes_paused_true_to_backtestinstances():
     from backend import backtest_critical_abort
     fake_conn = MagicMock()
     fake_r = MagicMock()
-    with patch.object(backtest_critical_abort, "_get_conn_and_r", return_value=(fake_conn, fake_r)), \
+    with patch.object(backtest_critical_abort, "_get_store", return_value=fake_r), \
          patch.object(backtest_critical_abort, "_enqueue_discord", return_value=None), \
          patch.object(backtest_critical_abort, "_bs_restore", return_value=({}, {}, None)), \
          patch.object(backtest_critical_abort, "_apply_restore", return_value=None):
         backtest_critical_abort.handle(
             backtest_id="357345", instance_id="main", failure=_make_failure(),
         )
-    # Verify .table("BacktestInstances").get(357345).update({"paused": True})
-    # was called somewhere in the call chain — inspect mock call args
-    found = False
-    for call in fake_r.db.return_value.table.call_args_list:
-        if call.args and call.args[0] == "BacktestInstances":
-            found = True
+    # Verify store.update("BacktestInstances", 357345, {"paused": True}) was
+    # called — the store takes the table by name, not a ReQL chain.
+    found = any(call.args and call.args[0] == "BacktestInstances"
+                for call in fake_r.update.call_args_list)
     assert found, "BacktestInstances was never written to"
 
 
@@ -101,15 +103,15 @@ def test_handle_writes_paused_llm_critical_status_with_diagnostic_fields():
     fake_r = MagicMock()
     captured_update = {}
 
-    def _record_update(payload):
-        # Each .update() call in the BacktestResults chain — capture the payload
+    def _record_update(backtest_id, payload):
+        # The BacktestResults pause write now goes through the split-store
+        # seam, not a ReQL chain — cage the seam and capture its payload.
         if isinstance(payload, dict) and payload.get("status") == "paused_llm_critical":
             captured_update.update(payload)
-        return fake_r  # chainable
 
-    fake_r.db.return_value.table.return_value.get.return_value.update.side_effect = _record_update
-
-    with patch.object(backtest_critical_abort, "_get_conn_and_r", return_value=(fake_conn, fake_r)), \
+    with patch.object(backtest_critical_abort, "_write_backtest_pause_status",
+                      side_effect=_record_update), \
+         patch.object(backtest_critical_abort, "_get_store", return_value=fake_r), \
          patch.object(backtest_critical_abort, "_enqueue_discord", return_value=None), \
          patch.object(backtest_critical_abort, "_bs_restore", return_value=({}, {}, None)), \
          patch.object(backtest_critical_abort, "_apply_restore", return_value=None):
@@ -130,7 +132,7 @@ def test_handle_does_not_set_skip_snapshot_persist():
     The new pause behavior does NOT set this flag — the bar will rerun on
     resume; eventual completion is fine to snapshot."""
     from backend import backtest_critical_abort
-    with patch.object(backtest_critical_abort, "_get_conn_and_r", return_value=(MagicMock(), MagicMock())), \
+    with patch.object(backtest_critical_abort, "_get_store", return_value=MagicMock()), \
          patch.object(backtest_critical_abort, "_enqueue_discord", return_value=None), \
          patch.object(backtest_critical_abort, "_bs_restore", return_value=({}, {}, None)), \
          patch.object(backtest_critical_abort, "_apply_restore", return_value=None):
@@ -147,7 +149,7 @@ def test_handle_discord_yellow_pause_styling():
         captured["channel"] = channel
         captured["content"] = content
         captured["embed"] = embed
-    with patch.object(backtest_critical_abort, "_get_conn_and_r", return_value=(MagicMock(), MagicMock())), \
+    with patch.object(backtest_critical_abort, "_get_store", return_value=MagicMock()), \
          patch.object(backtest_critical_abort, "_enqueue_discord", side_effect=fake_enqueue), \
          patch.object(backtest_critical_abort, "_bs_restore", return_value=({}, {}, None)), \
          patch.object(backtest_critical_abort, "_apply_restore", return_value=None):
@@ -161,43 +163,40 @@ def test_handle_discord_yellow_pause_styling():
 
 
 def test_handle_uses_int_backtest_id_for_db_lookup():
-    """BacktestResults PK is int; RethinkDB get('str') silently misses
-    (returns {skipped: 1} not an exception). Every .get() call in the DB
-    chain — both BacktestInstances and BacktestResults — must receive int."""
+    """BacktestResults PK is int, and the id must be passed as an int.
+
+    Under RethinkDB a get('str') on an int-keyed table silently missed
+    ({skipped: 1}, not an exception); the store raises instead, but the
+    contract this pins is the same one: the handler must not hand a string
+    to an int-keyed table."""
     from backend import backtest_critical_abort
     fake_conn = MagicMock()
     fake_r = MagicMock()
     captured_get_args = []
 
-    # Capture every .get(...) arg in the table chain (covers both
-    # BacktestInstances and BacktestResults — they share the same mock chain
-    # because fake_r.db.return_value.table.return_value resolves identically
-    # regardless of the table-name argument passed by the handler).
-    def _record_get(arg):
-        captured_get_args.append(arg)
-        return fake_r.db.return_value.table.return_value.get.return_value
-    fake_r.db.return_value.table.return_value.get.side_effect = _record_get
+    # Capture the row id the handler hands the store for BacktestInstances.
+    def _record_update(table, row_id, patch, *a, **k):
+        captured_get_args.append(row_id)
+        return {"replaced": 1}
+    fake_r.update.side_effect = _record_update
 
-    with patch.object(backtest_critical_abort, "_get_conn_and_r", return_value=(fake_conn, fake_r)), \
+    with patch.object(backtest_critical_abort, "_get_store", return_value=fake_r), \
          patch.object(backtest_critical_abort, "_enqueue_discord", return_value=None), \
          patch.object(backtest_critical_abort, "_bs_restore", return_value=({}, {}, None)), \
          patch.object(backtest_critical_abort, "_apply_restore", return_value=None):
         backtest_critical_abort.handle(
             backtest_id="357345", instance_id="main", failure=_make_failure(),
         )
-    # Both BacktestInstances and BacktestResults .get() must use int (not str)
     assert 357345 in captured_get_args, \
-        f"int 357345 not in get() args: {captured_get_args}"
-    # Belt-and-suspenders: NO string '357345' should appear — that would mean
-    # one of the two .get() calls is still using the str path.
+        f"int 357345 not in store row ids: {captured_get_args}"
     assert "357345" not in captured_get_args, \
-        f"str '357345' leaked into get() args: {captured_get_args}"
+        f"str '357345' leaked into store row ids: {captured_get_args}"
 
 
 def test_handle_idempotent():
     from backend import backtest_critical_abort
     mock_apply = MagicMock()
-    with patch.object(backtest_critical_abort, "_get_conn_and_r", return_value=(MagicMock(), MagicMock())), \
+    with patch.object(backtest_critical_abort, "_get_store", return_value=MagicMock()), \
          patch.object(backtest_critical_abort, "_enqueue_discord", return_value=None), \
          patch.object(backtest_critical_abort, "_bs_restore", return_value=({}, {}, None)), \
          patch.object(backtest_critical_abort, "_apply_restore", mock_apply):

@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-IntelliStock CLI - Control and inspect the backend server via RethinkDB.
+IntelliStock CLI - Control and inspect the backend server via the database.
 Run from project root: python backend/cli.py
 Or from backend: python cli.py
 """
@@ -10,14 +10,14 @@ import os
 import sys
 import time
 
-# Ensure backend dir is on path and cwd so imports and RethinkDB access work
+# Ensure backend dir is on path and cwd so imports and database access work
 _backend_dir = os.path.dirname(os.path.abspath(__file__))
 if _backend_dir not in sys.path:
     sys.path.insert(0, _backend_dir)
 os.chdir(_backend_dir)
 
-from rethinkdb import RethinkDB
-from rethinkdb.errors import ReqlDriverError
+from db import store
+from db.errors import UnavailableError as DbUnavailableError
 from intellistock_logger import intellistock_logger
 
 from interactive_utils import (
@@ -91,7 +91,6 @@ from interactive_utils import (
     _nexus_phase_selector_from_value,
 )
 
-r = RethinkDB()
 RETHINKDB_PRESET_REMOTE = os.environ.get('RETHINKDB_REMOTE_HOST', 'localhost')  # preset for 'r' option, override via env
 
 
@@ -218,7 +217,7 @@ def cmd_status(conn):
             for key, val in config.items():
                 intellistock_logger.log(f"  {key}: {val}", "white", service="CLI")
         intellistock_logger.log("", service="CLI")
-    except ReqlDriverError as e:
+    except DbUnavailableError as e:
         if "Connection is closed" in str(e):
             raise
         intellistock_logger.log(f"  Error: {e}", "red", service="CLI")
@@ -241,7 +240,7 @@ def cmd_tickers(conn):
         if count > 50:
             intellistock_logger.log(f"  ... and {count - 50} more", "white", service="CLI")
         intellistock_logger.log("", service="CLI")
-    except ReqlDriverError as e:
+    except DbUnavailableError as e:
         if "Connection is closed" in str(e):
             raise
         intellistock_logger.log(f"  Error: {e}", "red", service="CLI")
@@ -264,7 +263,7 @@ def cmd_add_ticker(conn, symbols):
             intellistock_logger.log("No valid symbols to add.", "yellow", service="CLI")
     except ValueError as e:
         intellistock_logger.log(str(e), "yellow", service="CLI")
-    except ReqlDriverError as e:
+    except DbUnavailableError as e:
         if "Connection is closed" in str(e):
             raise
         intellistock_logger.log(f"Error: {e}", "red", service="CLI")
@@ -286,7 +285,7 @@ def cmd_remove_ticker(conn, symbol):
             intellistock_logger.log(f"Ticker not found: {out.get('ticker', symbol)}", "yellow", service="CLI")
     except ValueError as e:
         intellistock_logger.log(str(e), "yellow", service="CLI")
-    except ReqlDriverError as e:
+    except DbUnavailableError as e:
         if "Connection is closed" in str(e):
             raise
         intellistock_logger.log(f"Error: {e}", "red", service="CLI")
@@ -309,7 +308,7 @@ def cmd_prices(conn):
         if len(prices) > 30:
             intellistock_logger.log(f"  ... and {len(prices) - 30} more", "white", service="CLI")
         intellistock_logger.log("", service="CLI")
-    except ReqlDriverError as e:
+    except DbUnavailableError as e:
         if "Connection is closed" in str(e):
             raise
         intellistock_logger.log(f"  Error: {e}", "red", service="CLI")
@@ -332,7 +331,7 @@ def cmd_history(conn, ticker=None, limit=30):
         if len(history) > 50:
             intellistock_logger.log(f"  ... and {len(history) - 50} more", "white", service="CLI")
         intellistock_logger.log("", service="CLI")
-    except ReqlDriverError as e:
+    except DbUnavailableError as e:
         if "Connection is closed" in str(e):
             raise
         intellistock_logger.log(f"  Error: {e}", "red", service="CLI")
@@ -424,7 +423,7 @@ def cmd_instances(conn):
             intellistock_logger.log(line(tr), "white", service="CLI")
         intellistock_logger.log(sep(), "cyan", service="CLI")
         intellistock_logger.log("", service="CLI")
-    except ReqlDriverError as e:
+    except DbUnavailableError as e:
         if "Connection is closed" in str(e):
             raise
         intellistock_logger.log("Error: %s" % e, "red", service="CLI")
@@ -452,7 +451,7 @@ def cmd_strategies(conn, instance_filter=None):
                 if isinstance(strat, dict):
                     intellistock_logger.log("    [%d] type=%s  weight=%s  execution_position=%s  phase=%s" % (idx, strat.get("strategy", "?"), strat.get("weight", "?"), strat.get("execution_position", "?"), strat.get("decision_phase", "pre")), "green", service="CLI")
         intellistock_logger.log("", service="CLI")
-    except ReqlDriverError as e:
+    except DbUnavailableError as e:
         if "Connection is closed" in str(e):
             raise
         intellistock_logger.log(f"  Error: {e}", "red", service="CLI")
@@ -1418,7 +1417,7 @@ def cmd_delete_strategy(conn, strategy_id):
         doc = action_get_strategy(conn, sid)
         strategy_name = doc.get("name", "id=%s" % sid)
         strategies_array = doc.get("strategies", [])
-        instances_using = list(r.db(DB_NAME).table("Instances").filter(r.row["strategy_id"] == sid).run(conn))
+        instances_using = store.run(store.filter("Instances", {"strategy_id": sid}))
         if instances_using:
             inst_ids = [str(inst.get("id", "?")) for inst in instances_using]
             intellistock_logger.log("\nWarning: Strategy id=%s '%s' is used by %d instance(s): %s" % (sid, strategy_name, len(instances_using), ", ".join(inst_ids)), "yellow", service="CLI")
@@ -1702,7 +1701,9 @@ def cmd_create_backtest(conn):
         except EOFError:
             gran_in = "60"
         granularity_sec = parse_granularity_to_seconds(gran_in)
-        instance_doc = r.db(DB_NAME).table("Instances").get(inst_in).run(conn) or (r.db(DB_NAME).table("Instances").get(int(inst_in)).run(conn) if str(inst_in).isdigit() else None)
+        # Instances has id_type="int", so store.get coerces both forms; the
+        # ReQL double-lookup (str then int) collapses to one call.
+        instance_doc = store.get("Instances", inst_in) if str(inst_in).isdigit() else None
         default_key = (instance_doc.get("key") or "") if instance_doc else ""
         default_secret = (instance_doc.get("secret") or "") if instance_doc else ""
         try:
@@ -2088,7 +2089,7 @@ def cmd_delete_instance(conn, instance_id):
         instance_doc = next((i for i in (out.get("instances") or []) if str(i.get("id")) == instance_id), None)
         if not instance_doc:
             try:
-                instance_doc = r.db(DB_NAME).table("Instances").get(instance_id).run(conn) or r.db(DB_NAME).table("Instances").get(int(instance_id)).run(conn)
+                instance_doc = store.get("Instances", instance_id)
             except (TypeError, ValueError):
                 pass
         if not instance_doc:
@@ -2102,7 +2103,7 @@ def cmd_delete_instance(conn, instance_id):
         strategy_name = None
         if strategy_id is not None:
             try:
-                strategy_doc = r.db(DB_NAME).table("Strategies").get(strategy_id).run(conn)
+                strategy_doc = store.get("Strategies", strategy_id)
                 if strategy_doc:
                     strategy_name = strategy_doc.get("name", "id=%s" % strategy_id)
                     strategies_list = strategy_doc.get("strategies") or []
@@ -2290,7 +2291,7 @@ def cmd_trends(conn, sub=None, arg=None, instance_id=None):
         intellistock_logger.log("", service="CLI")
     except ValueError as e:
         intellistock_logger.log(str(e), "yellow", service="CLI")
-    except ReqlDriverError as e:
+    except DbUnavailableError as e:
         if "Connection is closed" in str(e):
             raise
         intellistock_logger.log(f"Error: {e}", "red", service="CLI")
@@ -2322,7 +2323,7 @@ def cmd_discovered(conn, sub=None, instance_id=None, ticker=None):
         intellistock_logger.log("", service="CLI")
     except ValueError as e:
         intellistock_logger.log(str(e), "yellow", service="CLI")
-    except ReqlDriverError as e:
+    except DbUnavailableError as e:
         if "Connection is closed" in str(e):
             raise
         intellistock_logger.log(f"Error: {e}", "red", service="CLI")
@@ -2367,7 +2368,7 @@ def cmd_nexus_config(conn, instance_id=None, key=None, value=None):
         intellistock_logger.log("", service="CLI")
     except ValueError as e:
         intellistock_logger.log(str(e), "yellow", service="CLI")
-    except ReqlDriverError as e:
+    except DbUnavailableError as e:
         if "Connection is closed" in str(e):
             raise
         intellistock_logger.log(f"Error: {e}", "red", service="CLI")
@@ -2654,7 +2655,7 @@ def main():
                         intellistock_logger.log("AI backtesting agent started. The agent service will pick up and run.", "green", service="CLI")
                         if special_request:
                             intellistock_logger.log("  Special request: %s" % special_request, "cyan", service="CLI")
-                    except ReqlDriverError as e:
+                    except DbUnavailableError as e:
                         if "Connection is closed" in str(e):
                             raise
                         intellistock_logger.log("Error: %s" % e, "red", service="CLI")
@@ -2664,7 +2665,7 @@ def main():
                     try:
                         action_agent_control_set(conn, running=False)
                         intellistock_logger.log("AI backtesting agent stopped.", "green", service="CLI")
-                    except ReqlDriverError as e:
+                    except DbUnavailableError as e:
                         if "Connection is closed" in str(e):
                             raise
                         intellistock_logger.log("Error: %s" % e, "red", service="CLI")
@@ -2674,7 +2675,7 @@ def main():
                     try:
                         action_agent_control_set(conn, paused=True)
                         intellistock_logger.log("AI backtesting agent paused (current backtest will pause until agent resume).", "green", service="CLI")
-                    except ReqlDriverError as e:
+                    except DbUnavailableError as e:
                         if "Connection is closed" in str(e):
                             raise
                         intellistock_logger.log("Error: %s" % e, "red", service="CLI")
@@ -2684,7 +2685,7 @@ def main():
                     try:
                         action_agent_control_set(conn, paused=False)
                         intellistock_logger.log("AI backtesting agent resumed.", "green", service="CLI")
-                    except ReqlDriverError as e:
+                    except DbUnavailableError as e:
                         if "Connection is closed" in str(e):
                             raise
                         intellistock_logger.log("Error: %s" % e, "red", service="CLI")
@@ -2712,7 +2713,7 @@ def main():
                             intellistock_logger.log("  Time remaining: %d days, %d hours, %d minutes, %d seconds" % (days, hours, minutes, seconds), "cyan", service="CLI")
                     except ValueError as e:
                         intellistock_logger.log("  Error: %s" % str(e), "red", service="CLI")
-                    except ReqlDriverError as e:
+                    except DbUnavailableError as e:
                         if "Connection is closed" in str(e):
                             raise
                         intellistock_logger.log("Error: %s" % e, "red", service="CLI")
@@ -2749,7 +2750,7 @@ def main():
                                     intellistock_logger.log("  Scheduled resume: %s UTC (time reached)" % resume_dt.strftime("%Y-%m-%d %H:%M:%S"), "yellow", service="CLI")
                             except Exception:
                                 intellistock_logger.log("  Scheduled resume: %s" % resume_at, "cyan", service="CLI")
-                    except ReqlDriverError as e:
+                    except DbUnavailableError as e:
                         if "Connection is closed" in str(e):
                             raise
                         intellistock_logger.log("Error: %s" % e, "red", service="CLI")
@@ -2776,7 +2777,7 @@ def main():
                                     "    %d. %s (weight=%.2f, config=%s, conditions=%s)" % (i + 1, s.get("strategy"), float(s.get("weight", 0.5)), cfg, cond),
                                     "white", service="CLI",
                                 )
-                    except ReqlDriverError as e:
+                    except DbUnavailableError as e:
                         if "Connection is closed" in str(e):
                             raise
                         intellistock_logger.log("Error: %s" % e, "red", service="CLI")
@@ -2790,7 +2791,7 @@ def main():
                         intellistock_logger.log("AI backtesting agent restarted.", "green", service="CLI")
                         if special_request:
                             intellistock_logger.log("  Special request: %s" % special_request, "cyan", service="CLI")
-                    except ReqlDriverError as e:
+                    except DbUnavailableError as e:
                         if "Connection is closed" in str(e):
                             raise
                         intellistock_logger.log("Error: %s" % e, "red", service="CLI")
@@ -2804,7 +2805,7 @@ def main():
                     try:
                         action_digest_control_set(conn, running=True)
                         intellistock_logger.log("Daily digest engine started. Briefs will be sent at 6am and 6pm UTC to #briefs.", "green", service="CLI")
-                    except ReqlDriverError as e:
+                    except DbUnavailableError as e:
                         if "Connection is closed" in str(e):
                             raise
                         intellistock_logger.log("Error: %s" % e, "red", service="CLI")
@@ -2814,7 +2815,7 @@ def main():
                     try:
                         action_digest_control_set(conn, running=False)
                         intellistock_logger.log("Daily digest engine stopped.", "green", service="CLI")
-                    except ReqlDriverError as e:
+                    except DbUnavailableError as e:
                         if "Connection is closed" in str(e):
                             raise
                         intellistock_logger.log("Error: %s" % e, "red", service="CLI")
@@ -2824,7 +2825,7 @@ def main():
                     try:
                         action_digest_trigger_send_now(conn)
                         intellistock_logger.log("Digest send-now triggered (engine started if needed). Brief should appear in #briefs shortly.", "green", service="CLI")
-                    except ReqlDriverError as e:
+                    except DbUnavailableError as e:
                         if "Connection is closed" in str(e):
                             raise
                         intellistock_logger.log("Error: %s" % e, "red", service="CLI")
@@ -2838,7 +2839,7 @@ def main():
                         intellistock_logger.log("  Last sent: %s" % (out.get("last_sent_at") or "—"), "white", service="CLI")
                         intellistock_logger.log("  Last morning: %s" % (out.get("last_morning_at") or "—"), "white", service="CLI")
                         intellistock_logger.log("  Last evening: %s" % (out.get("last_evening_at") or "—"), "white", service="CLI")
-                    except ReqlDriverError as e:
+                    except DbUnavailableError as e:
                         if "Connection is closed" in str(e):
                             raise
                         intellistock_logger.log("Error: %s" % e, "red", service="CLI")
@@ -2864,7 +2865,7 @@ def main():
                                 _format_nexus_phase_selector(end_phase or 14, str(end_phase or 14)),
                             )
                         intellistock_logger.log(msg, "green", service="CLI")
-                    except ReqlDriverError as e:
+                    except DbUnavailableError as e:
                         if "Connection is closed" in str(e):
                             raise
                         intellistock_logger.log("Error: %s" % e, "red", service="CLI")
@@ -2874,7 +2875,7 @@ def main():
                     try:
                         action_nexus_control_set(conn, running=False)
                         intellistock_logger.log("Graph Nexus service stop requested. Nexus will save progress and exit.", "green", service="CLI")
-                    except ReqlDriverError as e:
+                    except DbUnavailableError as e:
                         if "Connection is closed" in str(e):
                             raise
                         intellistock_logger.log("Error: %s" % e, "red", service="CLI")
@@ -2887,7 +2888,7 @@ def main():
                         formatted = format_nexus_status_for_cli(out)
                         for line in formatted.split("\n"):
                             intellistock_logger.log(line, "white", service="CLI")
-                    except ReqlDriverError as e:
+                    except DbUnavailableError as e:
                         if "Connection is closed" in str(e):
                             raise
                         intellistock_logger.log("Error: %s" % e, "red", service="CLI")
@@ -2913,7 +2914,7 @@ def main():
                                     intellistock_logger.log("  %s" % out.get("error"), "red", service="CLI")
                         else:
                             intellistock_logger.log("Rebuild cancelled.", "cyan", service="CLI")
-                    except ReqlDriverError as e:
+                    except DbUnavailableError as e:
                         if "Connection is closed" in str(e):
                             raise
                         intellistock_logger.log("Error: %s" % e, "red", service="CLI")
@@ -2959,11 +2960,11 @@ def main():
 
         try:
             _handle_command()
-        except ReqlDriverError as e:
+        except DbUnavailableError as e:
             if "Connection is closed" in str(e) and _reconnect_conn():
                 try:
                     _handle_command()
-                except ReqlDriverError as e2:
+                except DbUnavailableError as e2:
                     intellistock_logger.log("Error: %s" % e2, "red", service="CLI")
             else:
                 intellistock_logger.log("Error: %s" % e, "red", service="CLI")

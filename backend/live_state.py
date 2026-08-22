@@ -23,6 +23,8 @@ from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
+from db import store
+from db import schema
 from live_orders import (
     DependencySnapshot,
     GateDecision,
@@ -84,32 +86,39 @@ def append_current_equity_point(portfolio_history, equity, now_iso, max_ph=MAX_P
 
 # ── Table bootstrap ─────────────────────────────────────────────────────────
 
-def ensure_tables(r, conn) -> None:
-    """Create LiveState + LiveCommands tables if missing. Safe to call often."""
-    try:
-        existing = set(r.db(DB_NAME).table_list().run(conn))
-    except Exception:
-        return
-    if LIVE_STATE_TABLE not in existing:
+def ensure_tables(r=None, conn=None) -> None:
+    """Create LiveState + LiveCommands tables if missing. Safe to call often.
+
+    ``r``/``conn`` are accepted and ignored: the store takes its own pooled
+    connection per operation. The parameters stay so the ~20 call sites (and
+    the test doubles that pass a stub pair) keep their arity.
+    """
+    for table in (LIVE_STATE_TABLE, LIVE_COMMANDS_TABLE):
         try:
-            r.db(DB_NAME).table_create(LIVE_STATE_TABLE).run(conn)
-        except Exception:
-            pass
-    if LIVE_COMMANDS_TABLE not in existing:
-        try:
-            r.db(DB_NAME).table_create(LIVE_COMMANDS_TABLE).run(conn)
-        except Exception:
-            pass
-        # index by instance_id so the broker's changefeed filter is cheap.
-        try:
-            r.db(DB_NAME).table(LIVE_COMMANDS_TABLE).index_create("instance_id").run(conn)
-            r.db(DB_NAME).table(LIVE_COMMANDS_TABLE).index_wait("instance_id").run(conn)
+            schema.ensure_table(table)
         except Exception:
             pass
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _jsonable(value):
+    """Datetimes -> ISO-8601 strings, the wire form for a jsonb document.
+
+    ``_command_claim_transition`` is a pure function shared with the tests and
+    still returns aware datetimes; ``LiveCommands.time_fields`` decodes them
+    back on read, so a round trip yields the same Python type RethinkDB's
+    driver produced.
+    """
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {k: _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    return value
 
 
 # ── LiveState helpers ───────────────────────────────────────────────────────
@@ -123,23 +132,21 @@ def upsert_live_state(r, conn, instance_id: str, payload: dict) -> None:
     """
     doc = dict(payload or {})
     doc["id"] = str(instance_id)
-    doc["last_updated"] = r.now()
+    # r.now() was a server-side time; an ISO-8601 string in the document is
+    # decoded back to a tz-aware datetime by LiveState.time_fields, so readers
+    # see the same Python type.
+    doc["last_updated"] = _now_iso()
     doc["last_updated_iso"] = _now_iso()
     try:
         # The broker boot path creates LiveState before this hot-path loop
-        # starts. Do not re-run table_list()/table_create() here: the Python
-        # driver has no query read timeout, and a stalled RethinkDB response
-        # can otherwise leave the snapshot watchdog with a zombie worker.
+        # starts. Do not re-run ensure_table() here.
         #
-        # Snapshot rows are best-effort/latest-wins telemetry, so avoid the
-        # response read entirely. If the connection is bad, the next broker
-        # tick reconnects and sends a fresh full snapshot.
-        (
-            r.db(DB_NAME)
-            .table(LIVE_STATE_TABLE)
-            .insert(doc, conflict="replace")
-            .run(conn, noreply=True)
-        )
+        # Snapshot rows are best-effort/latest-wins telemetry. RethinkDB's
+        # noreply=True skipped the response read to keep the snapshot watchdog
+        # from parking on a stalled server; Postgres has a statement timeout
+        # and the pool has a checkout timeout, so the write is issued normally
+        # and a failure is swallowed here exactly as it was before.
+        store.insert(LIVE_STATE_TABLE, _jsonable(doc), conflict="replace")
     except Exception:
         pass
 
@@ -148,7 +155,7 @@ def get_live_state(r, conn, instance_id: str) -> Optional[dict]:
     """Return this instance's LiveState row or None."""
     ensure_tables(r, conn)
     try:
-        return r.db(DB_NAME).table(LIVE_STATE_TABLE).get(str(instance_id)).run(conn)
+        return store.get(LIVE_STATE_TABLE, str(instance_id))
     except Exception:
         return None
 
@@ -156,7 +163,7 @@ def get_live_state(r, conn, instance_id: str) -> Optional[dict]:
 def clear_live_state(r, conn, instance_id: str) -> None:
     """Remove this instance's LiveState row. Called when the broker shuts down."""
     try:
-        r.db(DB_NAME).table(LIVE_STATE_TABLE).get(str(instance_id)).delete().run(conn)
+        store.delete(LIVE_STATE_TABLE, str(instance_id))
     except Exception:
         pass
 
@@ -192,7 +199,7 @@ def submit_command(
         "type": t,
         "payload": dict(payload or {}),
         "status": "pending",
-        "created_at": r.now(),
+        "created_at": _now_iso(),
         "created_at_iso": _now_iso(),
         "started_at": None,
         "completed_at": None,
@@ -204,27 +211,22 @@ def submit_command(
         "lease_expires_at_iso": None,
         "attempt_count": 0,
     }
-    # Narrow the duplicate-id fallback to ReqlOpFailedError so a transport or
-    # auth error doesn't get silently "recovered" via conflict=replace (which
-    # could overwrite a row that actually landed on the server after a retry).
-    try:
-        from rethinkdb.errors import ReqlOpFailedError as _ReqlOpFailedError  # type: ignore
-    except Exception:
-        _ReqlOpFailedError = Exception  # type: ignore[assignment]
-    try:
-        r.db(DB_NAME).table(LIVE_COMMANDS_TABLE).insert(doc, conflict="error").run(conn)
-    except _ReqlOpFailedError:
-        try:
-            r.db(DB_NAME).table(LIVE_COMMANDS_TABLE).insert(doc, conflict="replace").run(conn)
-        except _ReqlOpFailedError:
-            pass
+    # A duplicate id is the ONLY failure the conflict=replace fallback is for:
+    # a transport or auth error must not get silently "recovered" that way
+    # (it could overwrite a row that actually landed after a retry). The store
+    # reports a duplicate primary key in ``errors``/``first_error`` rather than
+    # by raising, so the two cases are separable without a driver exception
+    # class. A genuine outage raises StoreError and propagates, as it did.
+    res = store.insert(LIVE_COMMANDS_TABLE, doc, conflict="error")
+    if res["errors"]:
+        store.insert(LIVE_COMMANDS_TABLE, doc, conflict="replace")
     return doc["id"]
 
 
 def get_command(r, conn, command_id: str) -> Optional[dict]:
     ensure_tables(r, conn)
     try:
-        return r.db(DB_NAME).table(LIVE_COMMANDS_TABLE).get(str(command_id)).run(conn)
+        return store.get(LIVE_COMMANDS_TABLE, str(command_id))
     except Exception:
         return None
 
@@ -317,21 +319,20 @@ def claim_next_pending(
     prevents a crash-after-submit from becoming a duplicate live order.
     """
     ensure_tables(r, conn)
-    tbl = r.db(DB_NAME).table(LIVE_COMMANDS_TABLE)
     owner = str(worker_id or f"broker-{os.getpid()}").strip()
     now = datetime.now(timezone.utc)
     try:
-        candidates = list(
-            tbl
-            .get_all(str(instance_id), index="instance_id")
-            .filter(
-                lambda row: row["status"].eq("pending")
-                | row["status"].eq("running")
-            )
-            .order_by("created_at")
-            .limit(20)
-            .run(conn)
-        )
+        # get_all(instance_id, index="instance_id") + filter + order_by is one
+        # selection here: the instance_id generated column carries the index,
+        # created_at is an ISO-8601 string so its bytewise ASC order is the
+        # chronological order the datetime field had.
+        sel = store.filter(
+            LIVE_COMMANDS_TABLE,
+            store.P.field("instance_id").eq(str(instance_id))
+            & (store.P.field("status").eq("pending")
+               | store.P.field("status").eq("running")))
+        candidates = store.run(
+            store.limit(store.order_by(sel, fields=(store.asc("created_at"),)), 20))
     except Exception:
         return None
     for cmd in candidates:
@@ -355,17 +356,20 @@ def claim_next_pending(
         prior_status = str(cmd.get("status") or "")
         prior_owner = str(cmd.get("lease_owner") or "")
         try:
-            res = tbl.get(cmd_id).update(
-                lambda row: r.branch(
-                    row["status"].eq(prior_status)
-                    & row["lease_owner"].default("").eq(prior_owner),
-                    patch,
-                    {},
-                )
-            ).run(conn)
+            # The ReQL form was update(lambda row: r.branch(cond, patch, {})):
+            # a compare-and-swap that DEEP MERGES patch on match. A Selection
+            # carrying both the row identity and the CAS condition makes that
+            # one server-side statement with the same merge semantics.
+            rid = store.coerce_id(LIVE_COMMANDS_TABLE, cmd_id)
+            guard = store.filter(
+                LIVE_COMMANDS_TABLE,
+                store.P.field("status").eq(prior_status)
+                & store.P.field("lease_owner").default("").eq(prior_owner),
+            ).where("id = %s", (rid,))
+            res = store.update(LIVE_COMMANDS_TABLE, guard, _jsonable(patch))
             if int(res.get("replaced", 0) or 0) > 0:
                 if executable:
-                    return tbl.get(cmd_id).run(conn)
+                    return store.get(LIVE_COMMANDS_TABLE, cmd_id)
         except Exception:
             continue
     return None
@@ -373,30 +377,30 @@ def claim_next_pending(
 
 def complete_command(r, conn, command_id: str, *, result: Optional[dict] = None) -> None:
     try:
-        r.db(DB_NAME).table(LIVE_COMMANDS_TABLE).get(str(command_id)).update({
+        store.update(LIVE_COMMANDS_TABLE, str(command_id), {
             "status": "completed",
-            "completed_at": r.now(),
+            "completed_at": _now_iso(),
             "completed_at_iso": _now_iso(),
             "result": result or {},
             "lease_owner": None,
             "lease_expires_at": None,
             "lease_expires_at_iso": None,
-        }).run(conn)
+        })
     except Exception:
         pass
 
 
 def fail_command(r, conn, command_id: str, *, error: str) -> None:
     try:
-        r.db(DB_NAME).table(LIVE_COMMANDS_TABLE).get(str(command_id)).update({
+        store.update(LIVE_COMMANDS_TABLE, str(command_id), {
             "status": "failed",
-            "completed_at": r.now(),
+            "completed_at": _now_iso(),
             "completed_at_iso": _now_iso(),
             "error": str(error)[:2000],
             "lease_owner": None,
             "lease_expires_at": None,
             "lease_expires_at_iso": None,
-        }).run(conn)
+        })
     except Exception:
         pass
 

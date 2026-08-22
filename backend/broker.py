@@ -112,11 +112,12 @@ def _code_version_stamp():
 MODE_LIVE = "live"
 MODE_BACKTEST = "backtest"
 
-# Live-readiness Q1 (2026-04-29): hoist RethinkDB import for the kill-switch
+# Live-readiness Q1 (2026-04-29): hoist the store import for the kill-switch
 # tick poll so we don't pay an import cost every tick. None when the package
-# isn't available (e.g. unit tests with stubbed env).
+# isn't importable (e.g. unit tests with stubbed env). Tests that stub the
+# kill switch out set this to None, and the poll is skipped exactly as before.
 try:
-    from rethinkdb import RethinkDB as _KS_RDB  # type: ignore
+    from db import store as _KS_RDB  # type: ignore
 except Exception:
     _KS_RDB = None  # type: ignore
 
@@ -484,26 +485,18 @@ def _load_live_credentials_from_db(instance_id):
             print(f"[BROKER] {msg}")
 
     try:
-        from rethinkdb import RethinkDB
+        from db import store as _r
         from secret_store import decrypt
-        _r = RethinkDB()
-        host = os.environ.get("RETHINKDB_HOST", "localhost")
-        port = int(os.environ.get("RETHINKDB_PORT", "28015"))
-        conn = _r.connect(host=host, port=port, timeout=10)
+        conn = None
         try:
-            inst_doc = _r.db("IntelliStock").table("Instances").get(str(instance_id)).run(conn)
+            inst_doc = _r.get("Instances", str(instance_id))
             if not inst_doc:
                 return None, None, "alpaca", True, None
             brokerage_id = inst_doc.get("brokerage_id") or None
             if is_equity_stock_instance(inst_doc):
                 try:
                     brokerage_id = linked_alpaca_brokerage_id(inst_doc, data=False)
-                    b_doc = (
-                        _r.db("IntelliStock")
-                        .table("BrokerageAccounts")
-                        .get(brokerage_id)
-                        .run(conn)
-                    )
+                    b_doc = _r.get("BrokerageAccounts", brokerage_id)
                     credentials = resolve_linked_alpaca_credentials(
                         inst_doc,
                         b_doc,
@@ -543,7 +536,7 @@ def _load_live_credentials_from_db(instance_id):
                 paper = bool(_paper_field)
             if brokerage_id:
                 try:
-                    b_doc = _r.db("IntelliStock").table("BrokerageAccounts").get(brokerage_id).run(conn)
+                    b_doc = _r.get("BrokerageAccounts", brokerage_id)
                 except Exception as _e:
                     _early_log(f"BrokerageAccounts lookup for {brokerage_id} failed: {_e}", "red")
                     return None, None, broker_type, paper, brokerage_id
@@ -626,14 +619,11 @@ def _load_live_data_credentials_from_db(instance_id):
             print(f"[BROKER] {msg}")
 
     try:
-        from rethinkdb import RethinkDB
+        from db import store as _r
         from secret_store import decrypt
-        _r = RethinkDB()
-        host = os.environ.get("RETHINKDB_HOST", "localhost")
-        port = int(os.environ.get("RETHINKDB_PORT", "28015"))
-        conn = _r.connect(host=host, port=port, timeout=10)
+        conn = None
         try:
-            inst_doc = _r.db("IntelliStock").table("Instances").get(str(instance_id)).run(conn)
+            inst_doc = _r.get("Instances", str(instance_id))
             if not inst_doc:
                 return None, None, None, None
             data_bid = inst_doc.get("alpaca_data_brokerage_id") or None
@@ -642,10 +632,7 @@ def _load_live_data_credentials_from_db(instance_id):
             if is_equity_stock_instance(inst_doc):
                 try:
                     b_doc = (
-                        _r.db("IntelliStock")
-                        .table("BrokerageAccounts")
-                        .get(data_bid)
-                        .run(conn)
+                        _r.get("BrokerageAccounts", data_bid)
                     )
                     credentials = resolve_linked_alpaca_credentials(
                         inst_doc,
@@ -665,7 +652,7 @@ def _load_live_data_credentials_from_db(instance_id):
                     credentials.data_feed,
                 )
             try:
-                b_doc = _r.db("IntelliStock").table("BrokerageAccounts").get(data_bid).run(conn)
+                b_doc = _r.get("BrokerageAccounts", data_bid)
             except Exception as _e:
                 _early_log(f"Data BrokerageAccounts lookup for {data_bid} failed: {_e}", "red")
                 return None, None, data_bid, None
@@ -751,7 +738,7 @@ def _instance_kind_and_crypto_config():
     try:
         _c = get_conn()
         try:
-            _doc = r.db(DB_NAME).table("Instances").get(str(instance_id)).run(_c) or {}
+            _doc = r.get("Instances", str(instance_id)) or {}
             # broker_type for the fee model: the Instances row usually lacks it
             # (action_create_instance only stores brokerage_id), so resolve the
             # venue from the LINKED brokerage. Without this a Binance.US-linked
@@ -761,7 +748,7 @@ def _instance_kind_and_crypto_config():
                 _bid = _doc.get("brokerage_id")
                 if _bid:
                     try:
-                        _bdoc = r.db(DB_NAME).table("BrokerageAccounts").get(str(_bid)).run(_c) or {}
+                        _bdoc = r.get("BrokerageAccounts", str(_bid)) or {}
                         bt = (_bdoc.get("brokerage_type") or "").strip().lower() or None
                     except Exception:
                         pass
@@ -859,20 +846,9 @@ if mode == MODE_LIVE:
         try:
             _trading_feed = None
             if live_brokerage_id:
-                from rethinkdb import RethinkDB as _Rcheck
-                _rc = _Rcheck()
-                _cc = _rc.connect(
-                    host=os.environ.get("RETHINKDB_HOST", "localhost"),
-                    port=int(os.environ.get("RETHINKDB_PORT", "28015")),
-                )
-                try:
-                    _tdoc = _rc.db("IntelliStock").table("BrokerageAccounts").get(live_brokerage_id).run(_cc)
-                    _trading_feed = str((_tdoc or {}).get("alpaca_data_feed") or "").strip().lower()
-                finally:
-                    try:
-                        _cc.close()
-                    except Exception:
-                        pass
+                from db import store as _rc
+                _tdoc = _rc.get("BrokerageAccounts", live_brokerage_id)
+                _trading_feed = str((_tdoc or {}).get("alpaca_data_feed") or "").strip().lower()
             if _trading_feed in ("iex", "sip"):
                 data_feed = _trading_feed
             else:
@@ -1472,7 +1448,7 @@ def _load_backtest_evidence_options(row_id):
         try:
             conn = get_conn()
             key = int(row_id) if str(row_id).isdigit() else str(row_id)
-            row = r.db(DB_NAME).table("BacktestInstances").get(key).run(conn)
+            row = r.get("BacktestInstances", key)
             stored = (row or {}).get("evidence") or {}
         except Exception as exc:
             _log(f"Evidence contract: queue row unreadable ({exc}); running without evidence", "yellow")
@@ -1691,7 +1667,7 @@ def _resolve_data_brokerage_creds_now():
     retain the historical global-account discovery behavior.
     """
     try:
-        from rethinkdb import RethinkDB as _Rcheck
+        from db import store as _r17
         from secret_store import decrypt as _decrypt
     except Exception as _import_exc:
         try:
@@ -1699,24 +1675,13 @@ def _resolve_data_brokerage_creds_now():
         except NameError:
             pass
         return None, None, None
-    try:
-        _r17 = _Rcheck()
-        _conn = _r17.connect(
-            host=os.environ.get("RETHINKDB_HOST", "localhost"),
-            port=int(os.environ.get("RETHINKDB_PORT", "28015")),
-        )
-    except Exception as _conn_exc:
-        try:
-            _log(f"R17 cred resolve: RethinkDB connect failed — {_conn_exc}", "yellow")
-        except NameError:
-            pass
-        return None, None, None
+    _conn = None
     try:
         _data_bid = None
         _inst = None
         if instance_id:
             try:
-                _inst = _r17.db("IntelliStock").table("Instances").get(str(instance_id)).run(_conn)
+                _inst = _r17.get("Instances", str(instance_id))
                 if _inst:
                     _data_bid = linked_alpaca_brokerage_id(
                         _inst,
@@ -1728,11 +1693,8 @@ def _resolve_data_brokerage_creds_now():
         # Preserve global discovery only for explicitly non-equity runtimes.
         if not _data_bid and not _equity_stock:
             try:
-                _rows = list(
-                    _r17.db("IntelliStock").table("BrokerageAccounts")
-                    .filter(lambda doc: doc["brokerage_type"] == "alpaca")
-                    .run(_conn)
-                )
+                _rows = list(_r17.run(_r17.filter(
+                    "BrokerageAccounts", {"brokerage_type": "alpaca"})))
                 # Prefer paper=False (live, holds data subscription)
                 for _row in _rows:
                     if not bool(_row.get("alpaca_paper", False)) and _row.get("alpaca_data_feed"):
@@ -1750,7 +1712,7 @@ def _resolve_data_brokerage_creds_now():
                 pass
             return None, None, None
         try:
-            _row = _r17.db("IntelliStock").table("BrokerageAccounts").get(_data_bid).run(_conn)
+            _row = _r17.get("BrokerageAccounts", _data_bid)
         except Exception as _e:
             try:
                 _log("Alpaca data credential lookup failed.", "yellow")
@@ -1879,27 +1841,45 @@ def _ensure_backtest_history_for_symbols(data, symbols, key=None, secret=None):
     return loaded
 
 # ---------------------------------------------------------------------------
-# RethinkDB: check if instance should keep broker alive (runCommand=True)
+# Database: check if instance should keep broker alive (runCommand=True)
 # ---------------------------------------------------------------------------
+class _StoreConn:
+    """Stands in for the RethinkDB connection ~30 call sites still pass around.
+
+    The store pools its own connection per operation, so there is nothing to
+    hold -- but `get_conn_retry()` returning None has always MEANT "database
+    unreachable", and several call sites branch on exactly that. So success
+    returns this truthy shim and failure still returns None. `.close()` is the
+    only method any of those sites ever called."""
+
+    __slots__ = ()
+
+    def close(self, *_a, **_k):
+        return None
+
+
+_STORE_CONN = _StoreConn()
+
 try:
-    from rethinkdb import RethinkDB
-    r = RethinkDB()
+    from db import store as r
+    from db import watch as db_watch
     DB_NAME = 'IntelliStock'
-    RETHINKDB_HOST = os.environ.get('RETHINKDB_HOST', 'localhost')
-    RETHINKDB_PORT = int(os.environ.get('RETHINKDB_PORT', '28015'))
 
     def get_conn():
-        # 2026-05-05 live-hang investigation: bound r.connect() with an
-        # explicit timeout so a half-open TCP socket on the rdb side
-        # cannot wedge the snapshot/SCP-flush threads forever.
-        return r.connect(host=RETHINKDB_HOST, port=RETHINKDB_PORT, timeout=10)
+        """R26: the store pools its own connection per operation. The shim is
+        truthy because call sites test the result before using it."""
+        return _STORE_CONN
 
     def get_conn_retry(max_attempts=5, delay=2):
-        """Try get_conn() up to max_attempts with delay between attempts. Returns conn or None."""
+        """Prove the database answers, then return the (absent) connection.
+
+        The retry is what callers actually depended on: None used to mean
+        "database unreachable", and several call sites branch on it."""
         for attempt in range(1, max_attempts + 1):
             try:
-                return get_conn()
-            except Exception as e:
+                r.table_list()
+                return _STORE_CONN
+            except Exception:
                 if attempt == max_attempts:
                     return None
                 try:
@@ -1914,22 +1894,17 @@ try:
         if not instance_id:
             return False
         try:
-            conn = get_conn()
-            try:
-                doc = r.db(DB_NAME).table('Instances').get(instance_id).run(conn)
-                return doc is not None and doc.get('runCommand', False) is True
-            finally:
-                conn.close()
+            doc = r.get('Instances', instance_id)
+            return doc is not None and doc.get('runCommand', False) is True
         except Exception:
             return True  # On error, assume keep alive and let reconnect retry
 except Exception:
     r = None
+    db_watch = None
     DB_NAME = 'IntelliStock'
-    RETHINKDB_HOST = os.environ.get('RETHINKDB_HOST', 'localhost')
-    RETHINKDB_PORT = int(os.environ.get('RETHINKDB_PORT', '28015'))
 
     def get_conn():
-        raise RuntimeError("RethinkDB is not available (import or init failed)")
+        raise RuntimeError("The database is not available (import or init failed)")
 
     def get_conn_retry(max_attempts=5, delay=2):
         return None
@@ -1965,7 +1940,7 @@ def _init_llm_telemetry() -> None:
             try:
                 conn = get_conn()
                 if model_id:
-                    res = _extract(r.db(DB_NAME).table("Models").get(model_id).run(conn))
+                    res = _extract(r.get("Models", model_id))
                     if res is not None:
                         return res
                 # Fall back to a (provider, model) match so per-model price
@@ -1978,10 +1953,8 @@ def _init_llm_telemetry() -> None:
                     hit = _override_pm_cache.get(ck)
                     if hit and (time.time() - hit[0]) < 60.0:
                         return hit[1]
-                    matches = list(
-                        r.db(DB_NAME).table("Models")
-                        .filter({"provider": provider, "model": model}).run(conn)
-                    )
+                    matches = list(r.iter(r.filter(
+                        "Models", {"provider": provider, "model": model})))
                     chosen = next((m for m in matches if _extract(m) is not None), None)
                     res = _extract(chosen)
                     _override_pm_cache[ck] = (time.time(), res)
@@ -5730,7 +5703,7 @@ def watch_strategies_changefeed():
         # instance_id can be int or string (e.g. "ai-temp-xxx" or numeric); use as-is for DB .get()
         conn = get_conn()
         try:
-            instance_doc = r.db(DB_NAME).table('Instances').get(instance_id).run(conn)
+            instance_doc = r.get('Instances', instance_id)
             strategy_id = instance_doc.get('strategy_id') if instance_doc else None
         finally:
             conn.close()
@@ -5745,7 +5718,11 @@ def watch_strategies_changefeed():
                 conn_inst = None
                 try:
                     conn_inst = get_conn()
-                    for change in r.db(DB_NAME).table('Instances').get(instance_id).changes().run(conn_inst):
+                    # include_initial=False: ReQL's point changefeed did not
+                    # replay the current row, and this watcher only acts on a
+                    # real old->new transition.
+                    for change in db_watch.feed('Instances', row_id=instance_id,
+                                                include_initial=False):
                         if change.get('old_val') and change.get('new_val'):
                             old_sid = change['old_val'].get('strategy_id')
                             new_sid = change['new_val'].get('strategy_id')
@@ -5801,7 +5778,11 @@ def watch_strategies_changefeed():
                 conn_strat = None
                 try:
                     conn_strat = get_conn()
-                    for change in r.db(DB_NAME).table('Strategies').get(strategy_id).changes().run(conn_strat):
+                    # include_initial=False is LOAD-BEARING here: this watcher
+                    # exits the broker on ANY change, so a replayed initial row
+                    # would restart it in a loop.
+                    for change in db_watch.feed('Strategies', row_id=strategy_id,
+                                                include_initial=False):
                         _log("Strategy config changed. Exiting broker to reload...", "yellow")
                         shutdown_requested = True
                         return
@@ -5850,7 +5831,10 @@ def watch_backtest_run_command():
     conn = None
     try:
         conn = get_conn()
-        for change in r.db(DB_NAME).table('BacktestInstances').get(row_id).changes().run(conn):
+        # include_initial=False: matches ReQL's point changefeed, and this
+        # watcher treats new_val=None as "row deleted -> stop the backtest".
+        for change in db_watch.feed('BacktestInstances', row_id=row_id,
+                                    include_initial=False):
             new_val = change.get('new_val')
             # Row deleted (e.g. stop-all) or run=false: stop this backtest and exit
             if new_val is None:
@@ -5858,10 +5842,9 @@ def watch_backtest_run_command():
                 try:
                     from datetime import datetime
                     if _backtest_result_id is not None:
-                        r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).update({
-                            'status': 'stopped',
-                            'timestamp': datetime.utcnow().isoformat() + 'Z',
-                        }).run(conn)
+                        import backtest_result_store as _brs
+                        _brs.set_status(_backtest_result_id, 'stopped',
+                                        timestamp=datetime.utcnow().isoformat() + 'Z')
                     msg_key = str(backtest_row_id) if backtest_row_id is not None else str(_backtest_result_id)
                     diff_str = _backtest_difficulty_discord_str()
                     try:
@@ -5907,13 +5890,13 @@ def watch_backtest_run_command():
                         # pause fields. Only when transitioning out of the critical
                         # pause (gated on status), so manual pauses aren't stomped.
                         from backtest_critical_abort import cleared_pause_fields as _bca_cleared_pause
-                        r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).update(
-                            lambda row: r.branch(
-                                row["status"].default("").eq("paused_llm_critical"),
-                                {"status": "running", "resumed_at": r.now(), **_bca_cleared_pause()},
-                                {}
-                            )
-                        ).run(conn)
+                        import backtest_result_store as _brs
+                        # One conditional UPDATE on the hot row, then the doc
+                        # patch -- both only when the CAS held. resumed_at is
+                        # stamped by resume_from_critical_pause itself, so the
+                        # r.now() the ReQL branch carried is gone.
+                        _brs.resume_from_critical_pause(_backtest_result_id,
+                                                        _bca_cleared_pause())
                 except Exception:
                     pass
                 try:
@@ -5927,10 +5910,9 @@ def watch_backtest_run_command():
                 try:
                     from datetime import datetime
                     if _backtest_result_id is not None:
-                        r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).update({
-                            'status': 'stopped',
-                            'timestamp': datetime.utcnow().isoformat() + 'Z',
-                        }).run(conn)
+                        import backtest_result_store as _brs
+                        _brs.set_status(_backtest_result_id, 'stopped',
+                                        timestamp=datetime.utcnow().isoformat() + 'Z')
                         _log("BacktestResults status set to stopped", "yellow")
                     # Edit #backtests Discord message to show Stopped (same message_key as Queued/Running)
                     msg_key = str(backtest_row_id) if backtest_row_id is not None else str(_backtest_result_id)
@@ -5949,7 +5931,7 @@ def watch_backtest_run_command():
                         })
                     except Exception:
                         pass
-                    r.db(DB_NAME).table('BacktestInstances').get(row_id).delete().run(conn)
+                    r.delete('BacktestInstances', row_id)
                     _log("Removed backtest from BacktestInstances queue", "yellow")
                 except Exception as e:
                     _log(f"Error updating DB on stop: {e}", "red")
@@ -5969,13 +5951,10 @@ def _ensure_strategies_table(conn):
     if r is None:
         return
     try:
-        dbs = list(r.db_list().run(conn))
-        if DB_NAME not in dbs:
-            r.db_create(DB_NAME).run(conn)
-        tables = list(r.db(DB_NAME).table_list().run(conn))
-        if 'Strategies' not in tables:
-            r.db(DB_NAME).table_create('Strategies').run(conn)
-            _log("Created Strategies table", "green")
+        # R25: the DDL lives in db.schema and is idempotent, so this is a cheap
+        # no-op on every boot while keeping the fresh-deploy self-heal.
+        from db import schema as _s
+        _s.ensure_schema(tables=['Strategies'])
     except Exception as e:
         _log(f"Could not ensure Strategies table: {e}", "yellow")
 
@@ -6029,13 +6008,11 @@ def load_strategies_from_db():
         conn = get_conn()
         try:
             _ensure_strategies_table(conn)
-            tables = list(r.db(DB_NAME).table_list().run(conn))
-            if 'Strategies' not in tables:
-                return [], None, None
+            # _ensure_strategies_table above created it if it was missing.
             # Get instance doc to find strategy_id (instance_id can be int or string, e.g. "ai-temp-xxx")
             if not instance_id:
                 return [], None, None
-            instance_doc = r.db(DB_NAME).table('Instances').get(instance_id).run(conn)
+            instance_doc = r.get('Instances', instance_id)
             if not instance_doc:
                 return [], None, None
             # Crypto instances run the strategy named in crypto_config.strategy
@@ -6048,7 +6025,7 @@ def load_strategies_from_db():
             if strategy_id is None:
                 return [], None, None
             # Get strategy by id
-            strategy_doc = r.db(DB_NAME).table('Strategies').get(strategy_id).run(conn)
+            strategy_doc = r.get('Strategies', strategy_id)
             if not strategy_doc:
                 return [], None, None
             strategies_array = strategy_doc.get('strategies', [])
@@ -6943,10 +6920,11 @@ def _iter_backtest_trading_session_opens(start_dt, end_dt):
 
 def _nexus_lookback_update_db(current: int, total: int, current_date: str, start_date: str, end_date: str) -> None:
     """Write Nexus lookback training progress to BacktestResults (best-effort, never raises)."""
-    if _backtest_result_id is None or _backtest_db_conn is None or r is None:
+    if _backtest_result_id is None:
         return
     try:
-        r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).update({
+        import backtest_result_store as _brs
+        _brs.patch_metadata(_backtest_result_id, {
             "nexus_lookback": {
                 "current": current,
                 "total": total,
@@ -6954,20 +6932,23 @@ def _nexus_lookback_update_db(current: int, total: int, current_date: str, start
                 "start_date": start_date,
                 "end_date": end_date,
             },
+        })
+        # _last_active is a hot-row key: written to doc it would be shadowed
+        # by the heartbeat's overlay, so the liveness signal must go there.
+        _brs.write_progress(_backtest_result_id, {
             "_last_active": __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
-        }).run(_backtest_db_conn)
+        })
     except Exception:
         pass
 
 
 def _nexus_lookback_clear_db() -> None:
     """Clear the nexus_lookback field from BacktestResults once training is done."""
-    if _backtest_result_id is None or _backtest_db_conn is None or r is None:
+    if _backtest_result_id is None:
         return
     try:
-        r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).update(
-            {"nexus_lookback": None}
-        ).run(_backtest_db_conn)
+        import backtest_result_store as _brs
+        _brs.patch_metadata(_backtest_result_id, {"nexus_lookback": None})
     except Exception:
         pass
 
@@ -7646,14 +7627,9 @@ def _run_live_historic_lookback(
                     # graph_nexus_analysis.py OUTCOMES_TABLE constant). Each
                     # row is keyed by instance_id+date and carries the
                     # history_scope_id field that lookback/live share.
-                    _oc_count = int(
-                        r.db(DB_NAME)
-                        .table("GraphNexusOutcomes")
-                        .filter({"history_scope_id": history_scope_id})
-                        .count()
-                        .default(0)
-                        .run(_conn_oc)
-                    )
+                    _oc_count = int(r.count(r.filter(
+                        "GraphNexusOutcomes",
+                        {"history_scope_id": history_scope_id})) or 0)
                     _log(
                         f"Live lookback warmup check: {_oc_count} outcomes recorded for scope="
                         f"{history_scope_id[:12]} (Learning threshold: 5).",
@@ -8028,11 +8004,7 @@ def _load_containment_state(instance_id_val):
         if conn is None:
             conn = get_conn()
         try:
-            tables = list(r.db(DB_NAME).table_list().run(conn))
-            if 'AlphaState' not in tables:
-                return {}
-            row = r.db(DB_NAME).table('AlphaState').get(
-                f"containment:{instance_id_val}").run(conn)
+            row = r.get('AlphaState', f"containment:{instance_id_val}")
             return (row or {}).get("payload") or {}
         finally:
             conn.close()
@@ -8052,12 +8024,12 @@ def _write_containment_gate_event(instance_id_val, sym, side, reason):
             ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
             eid = "gate-" + hashlib.sha256(
                 f"{instance_id_val}|{sym}|{side}|{ts}".encode()).hexdigest()[:24]
-            r.db(DB_NAME).table('AlphaEvents').insert({
+            r.insert('AlphaEvents', {
                 "id": eid, "kind": "GATE",
                 "payload": {"instance_id": instance_id_val, "symbol": sym,
                             "side": side, "reason": reason},
                 "created_at": ts,
-            }, durability="hard").run(conn)
+            }, durability="hard")
         finally:
             conn.close()
     except Exception:
@@ -8420,8 +8392,7 @@ def _compute_live_state_snapshot(instance_id_val: str, adapter) -> dict:
     try:
         _risk_conn = get_conn()
         try:
-            _risk_row = r.db(DB_NAME).table('AlphaState').get(
-                f"risk:{instance_id_val}").run(_risk_conn)
+            _risk_row = r.get('AlphaState', f"risk:{instance_id_val}")
             if _risk_row:
                 _risk_payload = dict(_risk_row.get("payload") or {})
             # Audit 2026-07-18: the independent watchdog compares direct
@@ -8434,14 +8405,14 @@ def _compute_live_state_snapshot(instance_id_val: str, adapter) -> dict:
                     str(_sym): float(_mk.price)
                     for _sym, _mk in (adapter.get_market_marks() or {}).items()
                 } if hasattr(adapter, "get_market_marks") else {}
-                r.db(DB_NAME).table('AlphaState').insert({
+                r.insert('AlphaState', {
                     "id": f"live_snapshot:{instance_id_val}",
                     "version": 0,
                     "payload": {"equity": float(equity or 0.0),
                                 "marks": _snap_marks},
                     "updated_at": datetime.datetime.now(
                         datetime.timezone.utc).isoformat(),
-                }, conflict="replace", durability="soft").run(_risk_conn)
+                }, conflict="replace", durability="soft")
             except Exception:
                 pass
         finally:
@@ -9184,11 +9155,14 @@ def _execute_live_command(adapter, cmd: dict, order_service=None) -> tuple[bool,
             try:
                 if halt_conn is not None:
                     try:
-                        r.db(DB_NAME).table("Instances").get(str(instance_id)).update({
+                        # R24: r.now() -> an ISO-8601 UTC string, which is
+                        # what every reader of halted_at already parses.
+                        r.update("Instances", str(instance_id), {
                             "runCommand": False,
                             "halt_reason": _halt_reason_text,
-                            "halted_at": r.now(),
-                        }).run(halt_conn)
+                            "halted_at": datetime.datetime.now(
+                                datetime.timezone.utc).isoformat(),
+                        })
                     except Exception as _he:
                         return (False, f"instances update failed: {_he}", {})
                 # 2026-04-22 Round 4 Fix 7: page on manual halt. UI users and
@@ -10149,8 +10123,7 @@ elif mode == MODE_LIVE:
             if _cr_conn is not None:
                 try:
                     _instance_row_for_clean_room = (
-                        r.db("IntelliStock").table("Instances").get(str(instance_id)).run(_cr_conn)
-                        or {}
+                        r.get("Instances", str(instance_id)) or {}
                     )
                 finally:
                     try:
@@ -10469,21 +10442,10 @@ elif mode == MODE_LIVE:
             _stored_account_number = ""
             if live_brokerage_id:
                 try:
-                    import rethinkdb as _rdb_i
-                    _ri = _rdb_i.RethinkDB()
-                    _ci = _ri.connect(host=os.environ.get("RETHINKDB_HOST", "localhost"),
-                                      port=int(os.environ.get("RETHINKDB_PORT", "28015")),
-                                      timeout=10)
-                    try:
-                        _bi = _ri.db("IntelliStock").table("BrokerageAccounts").get(
-                            live_brokerage_id).run(_ci)
-                        _stored_account_number = str(
-                            (_bi or {}).get("alpaca_account_number") or "").strip()
-                    finally:
-                        try:
-                            _ci.close()
-                        except Exception:
-                            pass
+                    from db import store as _ri
+                    _bi = _ri.get("BrokerageAccounts", live_brokerage_id)
+                    _stored_account_number = str(
+                        (_bi or {}).get("alpaca_account_number") or "").strip()
                 except Exception as _sa_err:
                     _log(f"[account-identity] stored account lookup failed: {_sa_err}",
                          "yellow")
@@ -11896,6 +11858,10 @@ backtest_start_time = None
 # Backtest progress tracking: document id for DB updates, last progress % updated, last loop time
 _backtest_result_id = None
 _last_progress_updated = -2.0  # so first update at 0%; then every 2% so progress is visible in DB
+# BacktestSteps watermarks: kind -> highest seq this process has written.
+# Re-seeded from backtest_result_store.watermarks() after any write failure so
+# a reconnecting writer neither duplicates nor skips.
+_steps_written = {}
 # Throttle "Could not fetch price" to once per symbol per run (avoid log spam)
 _fetch_price_fail_logged = set()
 _backtest_last_loop_time = None
@@ -11958,6 +11924,7 @@ if mode == MODE_BACKTEST:
     _backtest_result_id = int(backtest_id_raw) if backtest_id_raw and str(backtest_id_raw).isdigit() else backtest_id_raw
     # Start capturing logs to buffer (last 500 lines) for live DB progress writes
     _backtest_log_buffer = []
+    _steps_written = {}
     try:
         from intellistock_logger import intellistock_logger
         intellistock_logger.set_backtest_log_buffer(_backtest_log_buffer, max_lines=500)
@@ -11973,6 +11940,7 @@ if mode == MODE_BACKTEST:
             pass
     except Exception:
         _backtest_log_buffer = []
+        _steps_written = {}
     # Phase γ.2 (2026-05-18, BT232179 follow-up): the α.3 seed-log block
     # below MUST emit AFTER the log buffer + file sink are wired so the
     # `RNG seed: ...` and PYTHONHASHSEED confirmation lines land in the
@@ -12036,9 +12004,15 @@ if mode == MODE_BACKTEST:
             sys.stderr.flush()
             sys.exit(1)
         try:
-            tables = list(r.db(DB_NAME).table_list().run(conn))
-            if 'BacktestResults' not in tables:
-                r.db(DB_NAME).table_create('BacktestResults').run(conn)
+            # BacktestResults is split across three Postgres tables.
+            # ensure_schema is idempotent (CREATE ... IF NOT EXISTS under an
+            # advisory lock), so this is a cheap no-op on every boot but keeps
+            # the self-heal the table_create bootstrap used to provide: the
+            # store.get below would otherwise raise UndefinedTable on a fresh
+            # deploy, inside a try/finally with no except.
+            from db import schema as _db_schema
+            _db_schema.ensure_schema(tables=["BacktestResults", "BacktestSteps",
+                                             "BacktestProgress"])
             # instance_id can be numeric (8) or string (e.g. "ai-temp-xxx"); store as-is for BacktestResults
             instance_id_for_db = int(instance_id) if (instance_id and str(instance_id).isdigit()) else instance_id
             try:
@@ -12047,30 +12021,30 @@ if mode == MODE_BACKTEST:
             except NameError:
                 backtest_start_date = backtest_end_date = None
             backtest_id_int = _backtest_result_id if isinstance(_backtest_result_id, int) else (int(_backtest_result_id) if _backtest_result_id else None)
-            existing_result = r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).run(conn)
+            import backtest_result_store as _brs
+            from db import store as _store
+            existing_result = _store.get('BacktestResults', _backtest_result_id)
             # Duplicate-run guard: if another container is actively running this backtest, exit.
-            # Uses _last_active heartbeat (updated on every progress write) to detect live runs.
-            if existing_result is not None and existing_result.get('status') == 'running':
-                _last_active = existing_result.get('_last_active', '')
-                if _last_active:
+            # Uses the _last_active heartbeat to detect live runs. status and
+            # _last_active now live on the hot BacktestProgress row, not in the
+            # multi-MB document (the doc's status is advisory after the split),
+            # so brs.active_run_age() answers both in one small read. It
+            # returns None when there is no live-run evidence and 9999 when the
+            # heartbeat will not parse -- the legacy "stale, overwrite" case.
+            _active_age = _brs.active_run_age(_backtest_result_id)
+            if _active_age is not None:
+                if _active_age < 120:
+                    _log(f"Backtest id={_backtest_result_id} is already running (heartbeat {int(_active_age)}s ago). "
+                         "Exiting duplicate to avoid double LLM costs and race conditions.", "yellow")
                     try:
-                        _la_dt = __import__('datetime').datetime.fromisoformat(_last_active.replace('Z', '+00:00'))
-                        _now_utc = __import__('datetime').datetime.now(__import__('datetime').timezone.utc)
-                        _active_age = (_now_utc - _la_dt).total_seconds()
+                        conn.close()
                     except Exception:
-                        _active_age = 9999
-                    if _active_age < 120:
-                        _log(f"Backtest id={_backtest_result_id} is already running (heartbeat {int(_active_age)}s ago). "
-                             "Exiting duplicate to avoid double LLM costs and race conditions.", "yellow")
-                        try:
-                            conn.close()
-                        except Exception:
-                            pass
-                        sys.stdout.flush()
-                        sys.stderr.flush()
-                        sys.exit(0)
-                    else:
-                        _log(f"Backtest id={_backtest_result_id} has stale 'running' status (heartbeat {int(_active_age)}s ago, likely crashed). Overwriting.", "yellow")
+                        pass
+                    sys.stdout.flush()
+                    sys.stderr.flush()
+                    sys.exit(0)
+                else:
+                    _log(f"Backtest id={_backtest_result_id} has stale 'running' status (heartbeat {int(_active_age)}s ago, likely crashed). Overwriting.", "yellow")
             _now_iso = __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()
             stub = {
                 'id': _backtest_result_id,
@@ -12138,7 +12112,7 @@ if mode == MODE_BACKTEST:
                 stub['progress'] = 100.0
                 stub['error'] = err_msg[:2000]
                 assert_secret_free(stub)
-                r.db(DB_NAME).table('BacktestResults').insert(stub, conflict='replace').run(conn)
+                _brs.write_stub(stub)
                 _log("Backtest validation failed: %s" % err_msg, "red")
                 _log("BacktestResults row written with status=error, progress=100.", "yellow")
                 try:
@@ -12149,9 +12123,10 @@ if mode == MODE_BACKTEST:
                 sys.stdout.flush()
                 sys.stderr.flush()
                 sys.exit(1)
-            # Ensure row exists: insert with conflict='replace' so it works when broker runs standalone (no engine)
+            # Ensure row exists: write_stub upserts, so this works when the
+            # broker runs standalone (no engine).
             assert_secret_free(stub)
-            r.db(DB_NAME).table('BacktestResults').insert(stub, conflict='replace').run(conn)
+            _brs.write_stub(stub)
             _log(f"Backtest result row (id={_backtest_result_id}) ensured in DB, status=running", "green")
             # Keep connection open for all progress updates (avoids repeated connect/disconnect that can cause "lost connection")
             _backtest_db_conn = conn
@@ -12172,7 +12147,7 @@ if mode == MODE_BACKTEST:
         try:
             row_id = int(backtest_row_id)
             c = get_conn()
-            row = r.db(DB_NAME).table('BacktestInstances').get(row_id).run(c)
+            row = r.get('BacktestInstances', row_id)
             _backtest_paused = bool(row.get('paused', False)) if row else False
             c.close()
         except Exception:
@@ -12193,38 +12168,47 @@ if mode == MODE_BACKTEST:
     _heartbeat_stop = threading.Event()
     def _backtest_heartbeat():
         import datetime as _dt_hb
-        hb_conn = None
         while not _heartbeat_stop.is_set() and not shutdown_requested:
             _heartbeat_stop.wait(15)
             if _heartbeat_stop.is_set() or shutdown_requested:
                 break
             try:
-                if hb_conn is None:
-                    hb_conn = get_conn_retry(max_attempts=3, delay=2)
-                if hb_conn is None:
-                    continue
+                import backtest_result_store as _brs
+                from intellistock_logger import intellistock_logger as _hb_logger
                 now_hb = _dt_hb.datetime.now(_dt_hb.timezone.utc).isoformat()
                 elapsed_hb = max(0, int(time.time() - backtest_start_time)) if backtest_start_time else None
-                hb_payload = {'_last_active': now_hb}
-                if elapsed_hb is not None:
-                    hb_payload['time_elapsed_seconds'] = elapsed_hb
+                # Append only the log lines past our watermark. The legacy
+                # write re-sent the whole last-500 list every 15 seconds;
+                # assemble() still tails 500 on read, so the UI is unchanged.
+                #
+                # The watermark keys off the logger's monotonic emitted count,
+                # NOT len(buffer): the buffer is trimmed FIFO to 500 lines
+                # (intellistock_logger.py fan-out) and its length saturates.
+                new_lines, start_seq = [], _steps_written.get('log', 0)
                 if _backtest_log_buffer is not None:
-                    hb_payload['logs'] = list(_backtest_log_buffer)[-500:]
-                r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).update(hb_payload).run(hb_conn)
+                    buffered = list(_backtest_log_buffer)
+                    emitted = _hb_logger.context_log_lines_emitted("backtest")
+                    n_new = min(max(emitted - start_seq, 0), len(buffered))
+                    if n_new:
+                        new_lines = buffered[len(buffered) - n_new:]
+                        # If more than 500 lines were emitted since the last
+                        # tick the buffer already dropped the overflow; start
+                        # the seq run where the surviving lines actually are,
+                        # so seq stays aligned with the emitted index and
+                        # nothing is duplicated.
+                        start_seq = emitted - n_new
+                _steps_written['log'] = _brs.heartbeat(
+                    _backtest_result_id, last_active=now_hb,
+                    elapsed_seconds=elapsed_hb, new_log_lines=new_lines,
+                    log_seq=start_seq)
             except Exception:
-                # Connection lost — reset so next iteration reconnects
+                # Write failed -- re-seed the watermarks from the DB on the
+                # next tick so we neither duplicate nor skip.
                 try:
-                    if hb_conn:
-                        hb_conn.close()
+                    import backtest_result_store as _brs2
+                    _steps_written.update(_brs2.watermarks(_backtest_result_id))
                 except Exception:
                     pass
-                hb_conn = None
-        # Cleanup
-        try:
-            if hb_conn:
-                hb_conn.close()
-        except Exception:
-            pass
     try:
         _heartbeat_thread = threading.Thread(target=_backtest_heartbeat, daemon=True)
         _heartbeat_thread.start()
@@ -12268,14 +12252,22 @@ def _backtest_save_error_and_exit(error_msg, progress_pct=None):
                     }
                     if _backtest_log_buffer is not None:
                         update_payload['logs'] = list(_backtest_log_buffer)[-500:]
-                    r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).update(update_payload).run(conn)
+                    # Terminal-ish: the run is over, so the last-500 log
+                    # slice this payload carries is the authoritative array
+                    # and is finalized, exactly as the legacy update stored it.
+                    import backtest_result_store as _brs_err
+                    _brs_err.write_terminal(_backtest_result_id, update_payload)
                     _log("Saved error status and logs to BacktestResults.", "yellow")
                     # Edit #backtests Discord message to Failed (same message that was Queued/Running)
                     try:
                         from interactive_utils import action_enqueue_discord_edit
                         err_short = (str(error_msg)[:300] + "...") if len(str(error_msg)) > 300 else str(error_msg)
                         msg_key = str(backtest_row_id) if backtest_row_id is not None else str(_backtest_result_id)
-                        _res = r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).run(conn)
+                        # Metadata-only read: difficulty lives in doc, so
+                        # store.get is right -- assemble() would fetch every
+                        # step row of a finished run for one scalar.
+                        from db import store as _store_err
+                        _res = _store_err.get('BacktestResults', _backtest_result_id)
                         _d = _res.get('difficulty') if _res else None
                         diff_str = ("%.1f" % float(_d) + (" (HIGH USAGE)" if backtest_high_usage else "")) if _d is not None else _backtest_difficulty_discord_str()
                         action_enqueue_discord_edit(conn, "backtests", msg_key, content=None, embed={
@@ -12438,22 +12430,16 @@ def _log_live_trade_decision(symbol, decision, price, ts, strategy_summary,
         def _persist():
             conn = None
             try:
-                from rethinkdb import RethinkDB
-                _rb = RethinkDB()
-                conn = _rb.connect(
-                    host=os.environ.get("RETHINKDB_HOST", "localhost"),
-                    port=int(os.environ.get("RETHINKDB_PORT", "28015")),
-                    timeout=10,
-                )
-                db = "IntelliStock"
-                if _bdl.TABLE not in list(_rb.db(db).table_list().run(conn)):
-                    try:
-                        _rb.db(db).table_create(_bdl.TABLE).run(conn)
-                    except Exception:
-                        pass
+                from db import schema as _bdl_schema
+                from db import store as _rb
+                conn = None
+                try:
+                    _bdl_schema.ensure_schema(tables=[_bdl.TABLE])
+                except Exception:
+                    pass
                 bid = ""
                 try:
-                    inst = _rb.db(db).table("Instances").get(str(iid)).run(conn)
+                    inst = _rb.get("Instances", str(iid))
                     if inst:
                         bid = str(inst.get("brokerage_id") or "")
                 except Exception:
@@ -12463,7 +12449,7 @@ def _log_live_trade_decision(symbol, decision, price, ts, strategy_summary,
                     strategy_summary, post_decision_trace,
                     pre_override_decision, normalized,
                 )
-                _rb.db(db).table(_bdl.TABLE).insert(doc).run(conn)
+                _rb.insert(_bdl.TABLE, doc, conflict="replace")
             except Exception:
                 pass
             finally:
@@ -12741,11 +12727,13 @@ while not shutdown_requested:
                         if conn is None:
                             conn = get_conn()
                         try:
-                            # Ensure BacktestResults table exists
-                            tables = list(r.db(DB_NAME).table_list().run(conn))
-                            if 'BacktestResults' not in tables:
-                                r.db(DB_NAME).table_create('BacktestResults').run(conn)
-                                _log("Created BacktestResults table", "green")
+                            # Self-heal the three Postgres tables before the
+                            # terminal write, the way the table_create
+                            # bootstrap used to. ensure_schema is idempotent.
+                            from db import schema as _db_schema_term
+                            _db_schema_term.ensure_schema(
+                                tables=["BacktestResults", "BacktestSteps",
+                                        "BacktestProgress"])
 
                             # Get instance_id and strategy_row_id (instance_id can be int or string)
                             instance_id_for_db = int(instance_id) if (instance_id and str(instance_id).isdigit()) else instance_id
@@ -12950,12 +12938,14 @@ while not shutdown_requested:
                             if _evidence_projection is not None:
                                 backtest_result["evidence"] = _evidence_projection
                             assert_secret_free(backtest_result)
+                            import backtest_result_store as _brs
+                            # R16: no insert branch. A broker without a row id
+                            # exits at the stub write, long before here, and
+                            # backtest_result carries backtest_id, never id --
+                            # so the legacy insert path could only ever raise.
                             if _backtest_result_id is not None:
-                                r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).update(backtest_result).run(conn)
+                                _brs.write_terminal(_backtest_result_id, backtest_result)
                                 _log(f"Updated backtest results in database (id={_backtest_result_id}, status=finished, P&L={final_pnl})", "green")
-                            else:
-                                r.db(DB_NAME).table('BacktestResults').insert(backtest_result).run(conn)
-                                _log(f"Saved backtest results to database (instance_id={instance_id_for_db}, strategy_id={strategy_row_id})", "green")
                             # Phase 1 snapshot: persist final _strategy_cache for live-boot reuse.
                             # Helpers live in broker_snapshot_helpers.py so they're testable without
                             # broker.py's module-level argparse + DB bootstrap (extraction pattern
@@ -13043,7 +13033,11 @@ while not shutdown_requested:
                                             wstr = ("%.2f" % w) if w is not None else "?"
                                             parts.append("%s (w=%s)" % (st, wstr))
                                         strategy_detail = "\n".join(parts) if len(parts) <= 8 else "\n".join(parts[:8]) + "\n... +%d more" % (len(parts) - 8)
-                                _res = r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).run(conn)
+                                # Metadata-only read: difficulty lives in
+                                # doc, so store.get is right -- assemble()
+                                # would fetch every step row for one scalar.
+                                from db import store as _store_fin
+                                _res = _store_fin.get('BacktestResults', _backtest_result_id)
                                 _d = _res.get('difficulty') if _res else None
                                 diff_str = ("%.1f" % float(_d) + (" (HIGH USAGE)" if backtest_high_usage else "")) if _d is not None else _backtest_difficulty_discord_str()
                                 fields = [
@@ -14978,36 +14972,17 @@ while not shutdown_requested:
             # Live-readiness P0 #5 / HIGH #6: poll kill-switch pre-strategy.
             # `live_kill_switch.halt_live_trading()` flips runCommand=False on
             # the Instances row. Old code only noticed when the socket dropped;
-            # this gates submission per-tick. Reads the live row from RethinkDB
+            # this gates submission per-tick. Reads the live row from Postgres
             # (cheap: single get by id, ~5ms typical). 2026-05-06: bound with
-            # 10s timeout — RethinkDB degradation could otherwise hang the tick.
+            # 10s timeout — database degradation could otherwise hang the tick.
             if mode == MODE_LIVE and instance_id is not None and _KS_RDB is not None:
                 def _ks_poll_blocking():
-                    _ks_r = _KS_RDB()
-                    _ks_conn = _ks_r.connect(
-                        host=os.environ.get("RETHINKDB_HOST", "localhost"),
-                        port=int(os.environ.get("RETHINKDB_PORT", "28015")),
-                        timeout=5,
-                    )
-                    try:
-                        _instance_row = (
-                            _ks_r.db("IntelliStock")
-                            .table("Instances")
-                            .get(str(instance_id))
-                            .run(_ks_conn)
-                        )
-                        _watchdog_row = (
-                            _ks_r.db("IntelliStock")
-                            .table("AlphaState")
-                            .get(f"control_health:{str(instance_id)}")
-                            .run(_ks_conn)
-                        )
-                        return _instance_row, _watchdog_row
-                    finally:
-                        try:
-                            _ks_conn.close(noreply_wait=False)
-                        except Exception:
-                            pass
+                    # Two point reads; the store pools its own connection per
+                    # operation, so there is nothing to open or close here.
+                    _instance_row = _KS_RDB.get("Instances", str(instance_id))
+                    _watchdog_row = _KS_RDB.get(
+                        "AlphaState", f"control_health:{str(instance_id)}")
+                    return _instance_row, _watchdog_row
                 try:
                     _ks_fut = _PRICE_FETCH_EXECUTOR.submit(_ks_poll_blocking)
                     try:
@@ -17849,43 +17824,51 @@ while not shutdown_requested:
                         backtest_id_raw = backtest_row_id
                         backtest_id_int = int(backtest_id_raw) if backtest_id_raw and str(backtest_id_raw).isdigit() else None
                         current_tickers = sorted(set(symbols or []) | set((portfolio_emulator.get_positions() or {}).keys()))
-                        update_payload = {
-                            'backtest_id': backtest_id_int,
-                            'progress': round(progress_pct, 2),
-                            'pnl': pnl,
-                            'pnl_percent': round(pnl_percent, 4) if pnl_percent is not None else None,
+                        import backtest_result_store as _brs
+                        _hot = {
                             'status': 'running',
-                            'timestamp': __import__('datetime').datetime.now().isoformat(),
+                            'progress': round(progress_pct, 2),
                             '_last_active': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
-                            'tickers': current_tickers,
                         }
-                        try:
-                            update_payload['backtest_trades'] = _convert_datetimes_to_iso(
-                                list(portfolio_emulator.get_trade_history() or [])[-1000:]
-                            )
-                        except Exception:
-                            pass
-                        try:
-                            # Downsample (keep true start + shape), not tail-slice,
-                            # so a long/high-cadence RUNNING backtest shows the real
-                            # start value and curve instead of a mid-run window.
-                            from broker_snapshot_helpers import downsample_history as _downsample_history
-                            update_payload['portfolio_value_history'] = _convert_datetimes_to_iso(
-                                _downsample_history(list(portfolio_emulator.get_portfolio_history() or []), 3000)
-                            )
-                        except Exception:
-                            pass
                         if backtest_start_time is not None:
                             try:
-                                update_payload['time_elapsed_seconds'] = max(0, int(now_loop - backtest_start_time))
+                                _hot['time_elapsed_seconds'] = max(0, int(now_loop - backtest_start_time))
                             except Exception:
                                 pass
-                        if _backtest_log_buffer is not None:
-                            update_payload['logs'] = list(_backtest_log_buffer)[-500:]
+                        _meta = {
+                            'backtest_id': backtest_id_int,
+                            'pnl': pnl,
+                            'pnl_percent': round(pnl_percent, 4) if pnl_percent is not None else None,
+                            'timestamp': __import__('datetime').datetime.now().isoformat(),
+                            'tickers': current_tickers,
+                        }
+                        # FULL uncapped sources: assemble() applies the legacy
+                        # caps (trades tail-1000, pv downsample-3000, logs
+                        # tail-500) on read, so the document is unchanged while
+                        # the write stops rewriting megabytes every 2%.
+                        _appended = {}
+                        try:
+                            _appended['trade'] = _convert_datetimes_to_iso(
+                                list(portfolio_emulator.get_trade_history() or []))
+                        except Exception:
+                            pass
+                        try:
+                            _appended['pv'] = _convert_datetimes_to_iso(
+                                list(portfolio_emulator.get_portfolio_history() or []))
+                        except Exception:
+                            pass
+                        # NOTE: logs are deliberately NOT appended here. The
+                        # heartbeat owns the log stream, because the log buffer
+                        # is trimmed FIFO to 500 lines and only the heartbeat's
+                        # emitted-count watermark can slice it correctly. Two
+                        # owners keying off the same bounded list would either
+                        # duplicate or drop lines.
                         if _backtest_decisions is not None:
-                            update_payload['backtest_decisions'] = _convert_datetimes_to_iso(list(_backtest_decisions))
-                            update_payload['backtest_refusals'] = _convert_datetimes_to_iso(list(_backtest_refusals))
-                        r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).update(update_payload).run(conn)
+                            _appended['decision'] = _convert_datetimes_to_iso(list(_backtest_decisions))
+                            _appended['refusal'] = _convert_datetimes_to_iso(list(_backtest_refusals))
+                        _brs.write_progress_tick(
+                            _backtest_result_id, hot=_hot, metadata=_meta,
+                            appended=_appended, seqs=_steps_written)
                         progress_update_ok = True
                         _backtest_progress_fail_count = 0
                         try:
@@ -17901,7 +17884,12 @@ while not shutdown_requested:
                                 tickers_str = ", ".join((current_tickers or [])[:8])
                                 if current_tickers and len(current_tickers) > 8:
                                     tickers_str += " (+%d)" % (len(current_tickers) - 8)
-                                result_doc = r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).run(conn)
+                                # Metadata-only read: difficulty lives in the
+                                # BacktestResults document, so do NOT assemble()
+                                # here -- that would fetch every step row for
+                                # one scalar.
+                                from db import store as _store_diff
+                                result_doc = _store_diff.get('BacktestResults', _backtest_result_id)
                                 diff_from_db = result_doc.get('difficulty') if result_doc else None
                                 if diff_from_db is not None:
                                     diff_str = "%.1f" % float(diff_from_db)

@@ -23,9 +23,8 @@ from pathlib import Path
 _REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO / "scripts"))
 from reset_backtest_event_state import conn as _conn  # noqa: E402
-from rethinkdb import RethinkDB  # noqa: E402
+from db import store as _store  # noqa: E402
 
-r = RethinkDB()
 DB = "IntelliStock"
 
 # The windows the objective's validation clause names, plus the ones the
@@ -42,8 +41,8 @@ VALIDATION_SET = [
 
 def daily_closes(c, symbol):
     out = {}
-    for doc in r.db(DB).table("AlpacaBarsCache").filter(
-            r.row["symbol"].eq(symbol)).run(c):
+    for doc in _store.run(_store.filter("AlpacaBarsCache",
+                                       {"symbol": symbol})):
         raw = doc.get("bars")
         if not raw:
             continue

@@ -16,45 +16,21 @@ if _backend not in sys.path:
 import strategies.graph_nexus_analysis as g
 
 
-class _FakeOp:
-    def __init__(self, fn):
-        self._fn = fn
+class _FakeStore:
+    """The db.store surface `_overlay_bars_cache_{get,set}` uses, over a dict."""
 
-    def run(self, conn):
-        return self._fn()
+    def __init__(self, rows):
+        self._rows = rows
 
+    def get(self, _table, key):
+        return self._rows.get(key)
 
-class _FakeTable:
-    def __init__(self, store):
-        self._store = store
-
-    def get(self, key):
-        return _FakeOp(lambda: self._store.get(key))
-
-    def insert(self, doc, conflict=None):
-        def _do():
-            self._store[doc["id"]] = doc
-            return {"inserted": 1}
-        return _FakeOp(_do)
-
-
-class _FakeDB:
-    def __init__(self, store):
-        self._store = store
-
-    def table(self, name):
-        return _FakeTable(self._store)
+    def insert(self, _table, doc, *, conflict=None, durability="hard"):
+        self._rows[doc["id"]] = doc
+        return {"inserted": 1}
 
     def table_list(self):
-        return _FakeOp(lambda: [g.NEXUS_OVERLAY_BARS_TABLE])
-
-
-class _FakeR:
-    def __init__(self, store):
-        self._store = store
-
-    def db(self, name):
-        return _FakeDB(self._store)
+        return [g.NEXUS_OVERLAY_BARS_TABLE]
 
 
 def _bars(start: str, n: int, close: float = 100.0):
@@ -66,7 +42,7 @@ def _bars(start: str, n: int, close: float = 100.0):
 
 
 def _with_fake_rdb(monkeypatch, store):
-    monkeypatch.setattr(g, "_r", _FakeR(store))
+    monkeypatch.setattr(g, "store", _FakeStore(store))
     monkeypatch.setattr(g, "_overlay_bars_table_ensured", True)
 
 

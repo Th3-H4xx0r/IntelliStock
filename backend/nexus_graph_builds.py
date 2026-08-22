@@ -6,7 +6,7 @@ Mirrors the BacktestResults / /app/backtest_logs pattern so operators can:
   - see per-phase work_units (cached vs downloaded), nodes/edges delta, warnings
 
 HARD RULE: This module must not touch the Strategies table. It owns three
-new RethinkDB tables: NexusGraphBuilds, and optionally re-uses the existing
+new tables: NexusGraphBuilds, and optionally re-uses the existing
 GraphNexusProgress singleton (not written here).
 """
 
@@ -18,6 +18,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from db import schema, store
+
 
 NEXUS_BUILDS_TABLE = "NexusGraphBuilds"
 DEFAULT_LOG_DIR = os.environ.get("NEXUS_GRAPH_LOG_DIR", "/app/nexus_graph_logs")
@@ -26,17 +28,34 @@ DEFAULT_MAX_FILES = int(os.environ.get("NEXUS_GRAPH_LOG_MAX_FILES", "50"))
 DB_NAME = "IntelliStock"
 
 
-def _ensure_table(r, conn) -> None:
+def _ensure_table(r=None, conn=None) -> None:
+    """``r``/``conn`` are accepted and ignored: the store takes its own pooled
+    connection per operation. The parameters stay so callers keep their arity."""
     try:
-        tables = list(r.db(DB_NAME).table_list().run(conn))
-        if NEXUS_BUILDS_TABLE not in tables:
-            r.db(DB_NAME).table_create(NEXUS_BUILDS_TABLE).run(conn)
+        schema.ensure_table(NEXUS_BUILDS_TABLE)
     except Exception:
         pass
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _append_to_array(build_id: str, key: str, value) -> None:
+    """Append one element to a JSON array on a build row.
+
+    ReQL had ``r.row[key].append(v)``; a deep merge REPLACES arrays, so the
+    read and the write are separate here. ReQL raised on a missing key and the
+    caller swallowed it; a missing key starts a new array instead, which is
+    strictly more forgiving and cannot lose a value.
+    """
+    row = store.get(NEXUS_BUILDS_TABLE, build_id)
+    if row is None:
+        return
+    current = row.get(key)
+    current = list(current) if isinstance(current, list) else []
+    current.append(value)
+    store.update(NEXUS_BUILDS_TABLE, build_id, {key: current})
 
 
 def _make_build_id() -> str:
@@ -164,7 +183,7 @@ def build_row_start(
     before = _neo4j_counts(session) if session else {"nodes": 0, "edges": 0}
     doc = {
         "id": build_id,
-        "started_at": r.now(),
+        "started_at": _now_iso(),
         "started_at_iso": _now_iso(),
         "completed_at": None,
         "duration_seconds": None,
@@ -184,22 +203,16 @@ def build_row_start(
         "log_file_path": log_file_path,
         "final_status": "running",
     }
-    # Narrow catch: ReqlOpFailedError is what RethinkDB raises on duplicate-id inserts
-    # (conflict="error"). Everything else — network loss, auth, serialization — should
-    # surface so we don't silently lose build rows.
-    try:
-        from rethinkdb.errors import ReqlOpFailedError as _ReqlOpFailedError  # type: ignore
-    except Exception:
-        _ReqlOpFailedError = Exception  # type: ignore[assignment]
-    try:
-        r.db(DB_NAME).table(NEXUS_BUILDS_TABLE).insert(doc, conflict="error").run(conn)
-    except _ReqlOpFailedError:
+    # Narrow fallback: only a duplicate id falls through to conflict="replace".
+    # Everything else — network loss, auth, serialization — raises StoreError
+    # and surfaces, so we don't silently lose build rows. The store reports a
+    # duplicate primary key in ``errors``/``first_error`` rather than raising,
+    # which is what separates the two cases without a driver exception class.
+    res = store.insert(NEXUS_BUILDS_TABLE, doc, conflict="error")
+    if res["errors"]:
         # Duplicate id (extremely unlikely: UTC second + 8 hex chars of uuid4).
         # Fall back to replace so the build row still exists for phase appends.
-        try:
-            r.db(DB_NAME).table(NEXUS_BUILDS_TABLE).insert(doc, conflict="replace").run(conn)
-        except _ReqlOpFailedError:
-            pass
+        store.insert(NEXUS_BUILDS_TABLE, doc, conflict="replace")
     return build_id
 
 
@@ -236,19 +249,19 @@ def build_row_append_phase(
         "warnings": list(warnings or []),
         "error": error,
     }
+    # r.row["phases_run"].append(x) is a server-side array append with no
+    # store equivalent (a deep merge REPLACES arrays), so it becomes a
+    # read-modify-write. Only nexus_graph_engine appends to a build row, and
+    # only from the single thread that owns that build.
     try:
-        r.db(DB_NAME).table(NEXUS_BUILDS_TABLE).get(build_id).update(
-            {"phases_run": r.row["phases_run"].append(phase_doc)}
-        ).run(conn)
+        _append_to_array(build_id, "phases_run", phase_doc)
     except Exception:
         pass
 
 
 def build_row_append_warning(r, conn, build_id: str, warning: str) -> None:
     try:
-        r.db(DB_NAME).table(NEXUS_BUILDS_TABLE).get(build_id).update(
-            {"warnings": r.row["warnings"].append(warning)}
-        ).run(conn)
+        _append_to_array(build_id, "warnings", warning)
     except Exception:
         pass
 
@@ -256,9 +269,9 @@ def build_row_append_warning(r, conn, build_id: str, warning: str) -> None:
 def build_row_update_tail(r, conn, build_id: str, log_tail: list) -> None:
     """Periodically refresh the last-500 log lines onto the row for live UI tail."""
     try:
-        r.db(DB_NAME).table(NEXUS_BUILDS_TABLE).get(build_id).update(
-            {"log_tail": list(log_tail)[-500:], "last_tail_update": r.now()}
-        ).run(conn)
+        store.update(NEXUS_BUILDS_TABLE, build_id,
+                     {"log_tail": list(log_tail)[-500:],
+                      "last_tail_update": _now_iso()})
     except Exception:
         pass
 
@@ -276,7 +289,7 @@ def build_row_finalize(
     """Mark a build row completed/failed. Returns the summary dict written."""
     after = _neo4j_counts(session) if session else {}
     try:
-        existing = r.db(DB_NAME).table(NEXUS_BUILDS_TABLE).get(build_id).run(conn) or {}
+        existing = store.get(NEXUS_BUILDS_TABLE, build_id) or {}
     except Exception:
         existing = {}
     totals = dict(existing.get("totals") or {})
@@ -296,7 +309,7 @@ def build_row_finalize(
         except Exception:
             duration = None
     updates = {
-        "completed_at": r.now(),
+        "completed_at": _now_iso(),
         "completed_at_iso": _now_iso(),
         "duration_seconds": duration,
         "final_status": status,
@@ -307,7 +320,9 @@ def build_row_finalize(
     if log_tail is not None:
         updates["log_tail"] = list(log_tail)[-500:]
     try:
-        r.db(DB_NAME).table(NEXUS_BUILDS_TABLE).get(build_id).update(updates).run(conn)
+        # ``totals`` is rebuilt whole from the row that was just read, and a
+        # deep merge of it over the same subtree is identical to a replace.
+        store.update(NEXUS_BUILDS_TABLE, build_id, updates)
     except Exception:
         pass
     return {"duration_seconds": duration, **updates}

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sys
 
+from db import store
 from kalshi import db as kdb
 from kalshi.engine import EngineConfig, run_instance
 from kalshi.instance_config import inplay_caps_from_config, risk_caps_from_config
@@ -21,24 +22,24 @@ def _configure_telemetry() -> None:  # pragma: no cover - integration
     try:
         import os
         import llm_telemetry
-        from rethinkdb import RethinkDB
-        r = RethinkDB()
+        from db import schema
         pricing_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "llm_pricing.yaml")
+        from db import store as db_store
         llm_telemetry.configure(
-            db_conn_factory=kdb.get_conn, enabled=True, flush_interval_s=2.0,
-            max_buffer=50, pricing_yaml_path=pricing_path if os.path.exists(pricing_path) else None,
-            r_module=r, db_name=kdb.DB_NAME,
+            # The flusher's gate is `conn_factory is None or r_module is None`,
+            # so BOTH must be supplied or every row is dropped silently -- which
+            # is exactly what happened here: the Kalshi analyst's tokens never
+            # reached the Token Usage page. The factory returns None because the
+            # store takes its own pooled connection per operation (R26).
+            db_conn_factory=lambda: None,
+            r_module=db_store,
+            enabled=True, flush_interval_s=2.0, max_buffer=50,
+            pricing_yaml_path=pricing_path if os.path.exists(pricing_path) else None,
         )
         try:
-            from llm_telemetry import ensure_llm_usage_tables
-            c = kdb.get_conn()
-            try:
-                ensure_llm_usage_tables(conn=c, r=r, db_name=kdb.DB_NAME)
-            finally:
-                try:
-                    c.close()
-                except Exception:
-                    pass
+            # The usage tables are ordinary registry tables now; llm_telemetry's
+            # own ensure-block goes away with its port (G11).
+            schema.ensure_schema(tables=("LLMUsage", "LLMUsageDaily"))
         except Exception:
             pass
     except Exception:
@@ -84,7 +85,7 @@ def _start_training_worker(instance_id, cfg) -> None:  # pragma: no cover - inte
             from notifications import notify as _notify
         except Exception:
             _notify = None
-        training_worker.start_worker(kdb.get_conn, refit, refresh_secs=3600, notify=_notify)
+        training_worker.start_worker(None, refit, refresh_secs=3600, notify=_notify)
     except Exception:
         pass
 
@@ -125,21 +126,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     instance_id = argv[0]
 
-    conn = kdb.get_conn()
-    try:
-        inst = kdb._r.db(kdb.DB_NAME).table("Instances").get(instance_id).run(conn) or {}
-        if inst.get("kind") != "kalshi":
-            print(f"instance {instance_id} is not a kalshi instance", file=sys.stderr)
-            return 1
-        cfg = inst.get("kalshi_config") or {}
-        brokerage_id = inst.get("brokerage_id")
-        brokerage = kdb._r.db(kdb.DB_NAME).table("BrokerageAccounts").get(brokerage_id).run(conn) or {}
-        environment = brokerage.get("kalshi_environment") or "demo"
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+    inst = store.get("Instances", instance_id) or {}
+    if inst.get("kind") != "kalshi":
+        print(f"instance {instance_id} is not a kalshi instance", file=sys.stderr)
+        return 1
+    cfg = inst.get("kalshi_config") or {}
+    brokerage_id = inst.get("brokerage_id")
+    brokerage = store.get("BrokerageAccounts", brokerage_id) or {}
+    environment = brokerage.get("kalshi_environment") or "demo"
 
     _configure_telemetry()
     _start_training_worker(instance_id, cfg)

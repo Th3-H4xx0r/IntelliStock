@@ -69,48 +69,39 @@ def test_build_audit_row_legacy_mode_default_timestamp():
     assert row["strategy_owned_count"] == 0
 
 
-def test_persist_audit_row_inserts_into_table():
-    """persist_audit_row queries table_list and inserts the row."""
+def test_persist_audit_row_inserts_into_table(store):
+    """persist_audit_row writes the row through the store."""
     from live_boot_audit import persist_audit_row
-
-    fake_r = MagicMock()
-    fake_conn = MagicMock()
-    fake_db = MagicMock()
-    fake_table = MagicMock()
-    fake_r.db.return_value = fake_db
-    fake_db.table_list.return_value.run.return_value = ["LiveBootAudit"]
-    fake_db.table.return_value = fake_table
-    fake_table.insert.return_value.run.return_value = {"inserted": 1}
 
     row = {"id": "main|2026-05-28T00:00:00+00:00", "instance_id": "main"}
-    result = persist_audit_row(r=fake_r, conn=fake_conn, row=row)
+    result = persist_audit_row(r=store, conn=None, row=row)
 
-    fake_r.db.assert_called_with("IntelliStock")
-    fake_db.table.assert_called_with("LiveBootAudit")
-    fake_table.insert.assert_called_once()
-    assert result == {"inserted": 1}
+    assert result["inserted"] == 1
+    assert store.get("LiveBootAudit", row["id"])["instance_id"] == "main"
 
 
-def test_persist_audit_row_creates_table_when_missing():
-    """First call should create the LiveBootAudit table + indices."""
+def test_persist_audit_row_replaces_on_repeat(store):
+    """conflict="replace" keeps the audit row idempotent across boots."""
     from live_boot_audit import persist_audit_row
 
-    fake_r = MagicMock()
-    fake_conn = MagicMock()
-    fake_db = MagicMock()
-    fake_table = MagicMock()
-    fake_r.db.return_value = fake_db
-    # First time: table is missing
-    fake_db.table_list.return_value.run.return_value = ["Instances"]  # no LiveBootAudit
-    fake_db.table.return_value = fake_table
-    fake_db.table_create.return_value.run.return_value = {"tables_created": 1}
-    fake_table.index_create.return_value.run.return_value = {"created": 1}
-    fake_table.index_wait.return_value.run.return_value = []
-    fake_table.insert.return_value.run.return_value = {"inserted": 1}
+    row = {"id": "main|t", "instance_id": "main", "mode": "legacy"}
+    persist_audit_row(r=store, conn=None, row=row)
+    persist_audit_row(r=store, conn=None, row=dict(row, mode="clean_room"))
 
-    row = {"id": "main|t", "instance_id": "main"}
-    persist_audit_row(r=fake_r, conn=fake_conn, row=row)
+    assert store.count("LiveBootAudit") == 1
+    assert store.get("LiveBootAudit", "main|t")["mode"] == "clean_room"
 
-    fake_db.table_create.assert_called_with("LiveBootAudit", primary_key="id")
-    # Insert still proceeded after table creation
-    fake_table.insert.assert_called_once()
+
+def test_persist_audit_row_still_inserts_when_ensure_table_fails(store, monkeypatch):
+    """Schema DDL is best-effort: the insert proceeds either way."""
+    import live_boot_audit
+    from db import schema as db_schema
+
+    def _boom(_t):
+        raise RuntimeError("ddl race")
+
+    monkeypatch.setattr(db_schema, "ensure_table", _boom)
+    row = {"id": "main|u", "instance_id": "main"}
+    result = live_boot_audit.persist_audit_row(r=store, conn=None, row=row)
+
+    assert result["inserted"] == 1

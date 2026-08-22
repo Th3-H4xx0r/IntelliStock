@@ -40,7 +40,7 @@ from pull_backtest_logs import _load_dotenv  # noqa: E402
 
 _load_dotenv(_REPO)
 
-from rethinkdb import RethinkDB  # noqa: E402
+from db import store as _store  # noqa: E402
 
 import clear_instance_state as cis  # noqa: E402
 
@@ -48,10 +48,8 @@ DB = "IntelliStock"
 
 
 def _conn():
-    r = RethinkDB()
-    return r, r.connect(host=os.environ["RETHINKDB_HOST"],
-                        port=int(os.environ.get("RETHINKDB_PORT", "28015")),
-                        timeout=30)
+    """R26: the store pools its own connection per operation."""
+    return _store, None
 
 
 def _targets(instance_id):
@@ -65,7 +63,7 @@ def _targets(instance_id):
 
 def _select_rows(r, conn, table, criteria, combine):
     pred = cis._build_filter(r, criteria, combine)
-    return list(r.db(DB).table(table).filter(pred).run(conn))
+    return list(r.run(r.filter(table, pred)))
 
 
 def _digest(tables):
@@ -119,7 +117,7 @@ def do_restore(instance_id, in_path, apply):
     for table, criteria, combine in _targets(instance_id):
         try:
             pred = cis._build_filter(r, criteria, combine)
-            n = r.db(DB).table(table).filter(pred).count().run(conn)
+            n = r.count(r.filter(table, pred))
         except Exception:
             n = 0
         if n:
@@ -138,7 +136,7 @@ def do_restore(instance_id, in_path, apply):
             print(f"  would insert {len(rows)} row(s) into {table}")
             total += len(rows)
             continue
-        res = r.db(DB).table(table).insert(rows, conflict="error").run(conn)
+        res = r.insert(table, rows, conflict="error")
         errs = int(res.get("errors", 0) or 0)
         if errs:
             print(f"  {table}: {errs} INSERT ERROR(S) — "

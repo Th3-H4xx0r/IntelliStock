@@ -32,6 +32,10 @@ def _reset_modules():
                 _mod.reset_state()
             except Exception:
                 pass
+    # The BacktestResults pause write goes through the split store now, so
+    # patching _get_store no longer cages it. Cage the seam itself: a
+    # unit test must never touch a real database.
+    backtest_critical_abort._write_backtest_pause_status = lambda *a, **kw: None
     yield
 
 
@@ -74,15 +78,16 @@ def test_e2e_backtest_pause_flow(monkeypatch):
     # Capture the BacktestResults update payload to verify the new pause status fields
     captured_results_update = {}
 
-    def _record_update(payload):
+    def _record_update(backtest_id, payload):
+        # The BacktestResults pause write now goes through the split-store
+        # seam, not a ReQL chain — cage the seam and capture its payload.
         if isinstance(payload, dict) and payload.get("status") == "paused_llm_critical":
             captured_results_update.update(payload)
-        return fake_r  # chainable
 
-    fake_r.db.return_value.table.return_value.get.return_value.update.side_effect = _record_update
-
-    with patch.object(backtest_critical_abort, "_get_conn_and_r",
-                      return_value=(fake_conn, fake_r)), \
+    with patch.object(backtest_critical_abort, "_write_backtest_pause_status",
+                      side_effect=_record_update), \
+         patch.object(backtest_critical_abort, "_get_store",
+                      return_value=fake_r), \
          patch.object(backtest_critical_abort, "_enqueue_discord",
                       side_effect=fake_enqueue), \
          patch.object(backtest_critical_abort, "_bs_restore",

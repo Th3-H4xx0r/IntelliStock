@@ -21,6 +21,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import strategy_cache_persistence as scp  # noqa: E402
 from strategy_cache_persistence import (  # noqa: E402
     _is_risk_critical,
     save_strategy_cache_to_db,
@@ -54,61 +55,28 @@ def test_ordinary_caches_are_not_protected():
 # --------------------------------------------------------------------------
 # the real save path
 # --------------------------------------------------------------------------
-class _FakeTable:
+class _FakeStore:
+    """db.store stand-in that records every written row.
+
+    Postgres port (G11): strategy_cache_persistence keeps its ``(conn, r)``
+    parameters but ignores them and talks to the module-level ``store``, so
+    this is monkeypatched in rather than passed.
+    """
+
     def __init__(self, sink):
         self._sink = sink
 
-    def insert(self, row, conflict=None):
+    def insert(self, _table, row, conflict=None):
         self._sink.append(row)
-        return _FakeQuery()
-
-    def index_list(self):
-        return _FakeQuery(result=[])
-
-    def index_create(self, *a, **k):
-        return _FakeQuery()
-
-    def index_wait(self, *a, **k):
-        return _FakeQuery()
+        return {"inserted": 1}
 
 
-class _FakeQuery:
-    def __init__(self, result=None):
-        self._result = result if result is not None else {"inserted": 1}
-
-    def run(self, conn):
-        return self._result
-
-
-class _FakeDB:
-    def __init__(self, sink):
-        self._sink = sink
-
-    def table(self, name):
-        return _FakeTable(self._sink)
-
-    def table_list(self):
-        return _FakeQuery(result=["NexusStrategyCache"])
-
-    def table_create(self, *a, **k):
-        return _FakeQuery()
-
-
-class _FakeR:
-    def __init__(self, sink):
-        self._sink = sink
-
-    def db(self, name):
-        return _FakeDB(self._sink)
-
-    def now(self):
-        return "NOW"
-
-
-def _save(cache, max_blob_bytes):
+def _save(cache, max_blob_bytes, monkeypatch):
     sink = []
+    monkeypatch.setattr(scp, "store", _FakeStore(sink))
+    monkeypatch.setattr(scp, "_ensure_table", lambda conn=None, r=None: True)
     ok = save_strategy_cache_to_db(
-        object(), _FakeR(sink), "inst", "graph_nexus_analysis", cache,
+        object(), None, "inst", "graph_nexus_analysis", cache,
         max_blob_bytes=max_blob_bytes,
     )
     written = json.loads(sink[-1]["cache_json"]) if sink else {}
@@ -138,8 +106,8 @@ def test_the_cache_really_is_oversized_first():
     assert len(blob) > 20_000, len(blob)
 
 
-def test_risk_state_survives_eviction_and_the_bulk_is_dropped():
-    ok, written = _save(_oversized_cache(), max_blob_bytes=20_000)
+def test_risk_state_survives_eviction_and_the_bulk_is_dropped(monkeypatch):
+    ok, written = _save(_oversized_cache(), max_blob_bytes=20_000, monkeypatch=monkeypatch)
     assert ok is True
 
     # the money keys are all still there
@@ -153,21 +121,21 @@ def test_risk_state_survives_eviction_and_the_bulk_is_dropped():
     assert "_backfill_queue" not in written or "_momentum_watchlist" not in written
 
 
-def test_a_cache_that_fits_is_written_untouched():
+def test_a_cache_that_fits_is_written_untouched(monkeypatch):
     small = {"_peak_X_1": 10.0, "_momentum_watchlist": ["a", "b"]}
-    ok, written = _save(small, max_blob_bytes=1_000_000)
+    ok, written = _save(small, max_blob_bytes=1_000_000, monkeypatch=monkeypatch)
     assert ok is True
     assert written == small
 
 
-def test_risk_keys_are_evicted_only_as_a_last_resort():
+def test_risk_keys_are_evicted_only_as_a_last_resort(monkeypatch):
     """When even the risk keys cannot all fit, the row is still written.
 
     Refusing to write at all would be worse: the previous boot's state would go
     stale silently rather than partially.
     """
     cache = {f"_peak_SYM{i}_2026-01-01": float(i) for i in range(200)}
-    ok, written = _save(cache, max_blob_bytes=500)
+    ok, written = _save(cache, max_blob_bytes=500, monkeypatch=monkeypatch)
     assert ok is True
     assert len(written) < len(cache)
     assert len(json.dumps(written)) <= 500

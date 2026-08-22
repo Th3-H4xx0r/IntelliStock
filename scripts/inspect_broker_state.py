@@ -1,6 +1,6 @@
 """Read-only pre-flight inspector for a live trading instance.
 
-Connects to RethinkDB to resolve the instance's brokerage + WAL, then
+Connects to Postgres to resolve the instance's brokerage + WAL, then
 queries the brokerage account directly to print exactly what an adapter
 boot under ``clean_room_mode=True`` WOULD adopt as strategy-owned vs
 quarantine as external. Does NOT boot the broker daemon, submit orders,
@@ -36,22 +36,19 @@ except ImportError:
 
 
 def _connect_db():
-    from rethinkdb import RethinkDB
-    r = RethinkDB()
-    host = os.environ.get("RETHINKDB_HOST", "localhost")
-    port = int(os.environ.get("RETHINKDB_PORT", "28015"))
-    conn = r.connect(host=host, port=port, db="IntelliStock")
-    return r, conn
+    """R26: the store pools its own connection per operation."""
+    from db import store as _store
+    return _store, None
 
 
 def _resolve_instance(r, conn, instance_id: str):
-    inst = r.table("Instances").get(instance_id).run(conn)
+    inst = r.get("Instances", instance_id)
     if inst is None:
         return None, None
     brokerage_id = inst.get("brokerage_id")
     if not brokerage_id:
         return inst, None
-    bra = r.table("BrokerageAccounts").get(brokerage_id).run(conn)
+    bra = r.get("BrokerageAccounts", brokerage_id)
     return inst, bra
 
 
@@ -60,7 +57,7 @@ def _scan_wal_rows_for_instance(r, conn, cid_prefix: str, retention_days: int) -
     — acceptable for a single-instance WAL with thousands of rows."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat()
     out: list[dict] = []
-    for row in r.table("LiveOrderWAL").run(conn):
+    for row in r.iter("LiveOrderWAL"):
         cid = row.get("client_order_id") or ""
         if not cid.startswith(cid_prefix):
             continue

@@ -1,5 +1,5 @@
 """Central LLM telemetry sink: captures per-call token usage from every
-provider, computes USD cost from a pricing registry, persists to RethinkDB
+provider, computes USD cost from a pricing registry, persists to Postgres
 asynchronously, and exposes a small public API for the FastAPI layer to
 query recent calls and aggregates.
 
@@ -49,47 +49,35 @@ def load_pricing_yaml(path: str) -> Dict[str, Dict[str, Any]]:
 _LLM_USAGE_TABLE = "LLMUsage"
 _LLM_USAGE_DAILY_TABLE = "LLMUsageDaily"
 
+def _default_store():
+    """The real store, imported lazily so this module stays importable (and
+    testable) without a database."""
+    from db import store as _s
+    return _s
+
+
 _LLM_USAGE_INDEXES = ("ts", "provider", "model", "backtest_id", "instance_id")
 _LLM_USAGE_DAILY_INDEXES = ("date",)
 
 
-def ensure_llm_usage_tables(*, conn, r, db_name: str) -> None:
+def ensure_llm_usage_tables(*, conn=None, r=None, db_name: str = "IntelliStock") -> None:
     """Idempotently create the LLMUsage + LLMUsageDaily tables and their
     secondary indexes. Safe to call on every process start.
+
+    R25: the index set is declared in db/schema.py -- LLMUsage carries
+    _LLM_USAGE_INDEXES and LLMUsageDaily carries _LLM_USAGE_DAILY_INDEXES
+    there. index_wait is gone: CREATE INDEX is synchronous, so the
+    per-backtest cost endpoints cannot read a half-built index.
+
+    ``conn``, ``r`` and ``db_name`` are kept and ignored (R26) so the two
+    call sites and their doubles keep their arity.
     """
-    if db_name not in list(r.db_list().run(conn)):
-        r.db_create(db_name).run(conn)
-    existing = list(r.db(db_name).table_list().run(conn))
-    if _LLM_USAGE_TABLE not in existing:
-        r.db(db_name).table_create(_LLM_USAGE_TABLE).run(conn)
-    if _LLM_USAGE_DAILY_TABLE not in existing:
-        r.db(db_name).table_create(_LLM_USAGE_DAILY_TABLE).run(conn)
-
-    def _ensure_indexes(table: str, indexes: tuple[str, ...]) -> None:
-        existing_idx = list(r.db(db_name).table(table).index_list().run(conn))
-        for idx in indexes:
-            if idx not in existing_idx:
-                try:
-                    r.db(db_name).table(table).index_create(idx).run(conn)
-                except Exception as e:
-                    print(
-                        f"[llm_telemetry] index_create {table}.{idx} failed: {e}",
-                        flush=True,
-                    )
-        # RethinkDB builds secondary indexes asynchronously — queries against
-        # an in-progress index error out. Wait so the per-backtest cost
-        # endpoints don't silently return empty rows immediately after a
-        # fresh deploy adds a new index.
+    from db import schema as db_schema
+    for table in (_LLM_USAGE_TABLE, _LLM_USAGE_DAILY_TABLE):
         try:
-            r.db(db_name).table(table).index_wait(*indexes).run(conn)
+            db_schema.ensure_table(table)
         except Exception as e:
-            print(
-                f"[llm_telemetry] index_wait {table} failed (will retry on use): {e}",
-                flush=True,
-            )
-
-    _ensure_indexes(_LLM_USAGE_TABLE, _LLM_USAGE_INDEXES)
-    _ensure_indexes(_LLM_USAGE_DAILY_TABLE, _LLM_USAGE_DAILY_INDEXES)
+            print(f"[llm_telemetry] ensure_table {table} failed: {e}", flush=True)
 
 
 _COST_FIELDS = (
@@ -484,17 +472,20 @@ def _do_flush() -> None:
         return
     if conn_factory is None or r_module is None:
         # Not configured for DB writes - drop silently (test scenario).
+        # ``r_module`` is now the STORE handle (db.store, or a test double);
+        # the gate is unchanged so a test that configures neither still
+        # writes nothing.
         return
     conn = None
     try:
         conn = conn_factory()
-        r_module.db(db_name).table(_LLM_USAGE_TABLE).insert(rows).run(conn)
+        r_module.insert(_LLM_USAGE_TABLE, rows)
         with _state_lock:
             _state["last_flush_ts"] = int(time.time() * 1000)
             _state["consecutive_flush_failures"] = 0   # recovered
     except Exception as e:
         # Re-queue the failed batch so the next flush retries instead of
-        # silently dropping the rows. Without this, a 30-second RethinkDB
+        # silently dropping the rows. Without this, a 30-second database
         # outage at 50 rows/flush burns ~300 records. We bound the re-queue
         # by the hard cap so a permanently-down DB can't OOM the process —
         # if the buffer is already full of newer rows, drop the oldest of
@@ -509,7 +500,7 @@ def _do_flush() -> None:
                 _buffer.extendleft(reversed(rows[-remaining_capacity:]))
         # THROTTLE + TRUNCATE: a transient DB blip must not flood the log. Log only
         # the FIRST failure of an outage, then every 20th — and only the error's first
-        # line, never the giant insert payload (a rethinkdb write error stringifies the
+        # line, never the giant insert payload (a driver write error stringifies the
         # ENTIRE query otherwise, which is the wall of text we saw).
         if fails == 1 or fails % 20 == 0:
             first_line = (str(e).splitlines() or [str(e)])[0][:180]
@@ -550,9 +541,9 @@ def _start_flusher() -> None:
 
 def rollup_daily(
     *,
-    conn,
-    r,
-    db_name: str,
+    conn=None,
+    r=None,
+    db_name: str = "IntelliStock",
     date_iso: str,
     _seed_rows_for_test: Optional[List[Dict[str, Any]]] = None,
 ) -> int:
@@ -567,10 +558,12 @@ def rollup_daily(
         import datetime as _dt
         start = int(_dt.datetime.fromisoformat(date_iso + "T00:00:00").timestamp() * 1000)
         end = start + 24 * 3600 * 1000
-        rows = list(
-            r.db(db_name).table(_LLM_USAGE_TABLE)
-            .filter(lambda x: (x["ts"] >= start) & (x["ts"] < end)).run(conn)
-        )
+        # ts is epoch MILLISECONDS and the generated column is text, so the
+        # bounds are stringified: every value from 2001 to 2286 is 13 digits,
+        # where a COLLATE "C" compare IS the numeric compare.
+        _store = r if r is not None else _default_store()
+        rows = _store.run(_store.between(
+            _LLM_USAGE_TABLE, str(int(start)), str(int(end)), index="ts"))
 
     buckets: Dict[str, Dict[str, Any]] = {}
     for row in rows:
@@ -595,7 +588,8 @@ def rollup_daily(
         b["last_updated_ts"] = now_ms
         out.append(b)
     if out:
-        r.db(db_name).table(_LLM_USAGE_DAILY_TABLE).insert(out, conflict="replace").run(conn)
+        _store = r if r is not None else _default_store()
+        _store.insert(_LLM_USAGE_DAILY_TABLE, out, conflict="replace")
     return len(out)
 
 

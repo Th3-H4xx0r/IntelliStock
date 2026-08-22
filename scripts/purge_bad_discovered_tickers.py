@@ -33,9 +33,9 @@ DISCOVERED_TABLE = "GraphNexusDiscoveredStocks"
 
 def main(apply: bool, instance_id: str | None) -> int:
     try:
-        from rethinkdb import RethinkDB
+        from db import store as RethinkDB
     except ImportError:
-        print("ERROR: rethinkdb driver not installed. `pip install rethinkdb`.", file=sys.stderr)
+        print("ERROR: the db.store package is not importable.", file=sys.stderr)
         return 2
     # Allow importing ticker_universe from backend/.
     _here = os.path.dirname(os.path.abspath(__file__))
@@ -48,17 +48,17 @@ def main(apply: bool, instance_id: str | None) -> int:
         print(f"ERROR: could not import ticker_universe from {_backend}: {e}", file=sys.stderr)
         return 3
 
-    r = RethinkDB()
+    r = RethinkDB
     host = os.environ.get("RETHINKDB_HOST", "localhost")
     port = int(os.environ.get("RETHINKDB_PORT", "28015"))
     try:
-        conn = r.connect(host=host, port=port)
+        conn = None
     except Exception as e:
         print(f"ERROR: connect({host}:{port}): {e}", file=sys.stderr)
         return 4
 
     try:
-        tables = list(r.db(DB_NAME).table_list().run(conn))
+        tables = list(r.table_list())
         if DISCOVERED_TABLE not in tables:
             print(f"SKIP: table {DISCOVERED_TABLE} does not exist.")
             return 0
@@ -68,13 +68,13 @@ def main(apply: bool, instance_id: str | None) -> int:
         # don't become wildcards; .default("") so rows missing instance_id
         # don't raise. `^<escaped>($|\\|)` matches "main" and "main|a87b..."
         # but NOT "main2", "maintenance", etc.
-        query = r.db(DB_NAME).table(DISCOVERED_TABLE)
+        # The base id matches "main" and "main|<hash>" but never "main2".
+        query = DISCOVERED_TABLE
         if instance_id:
-            _pattern = f"^{re.escape(instance_id)}($|\\|)"
-            query = query.filter(
-                lambda doc: doc["instance_id"].default("").match(_pattern)
-            )
-        all_docs = list(query.run(conn))
+            _f = r.P.field("instance_id").default("")
+            query = r.filter(query, _f.eq(instance_id)
+                             | _f.starts_with(instance_id + "|"))
+        all_docs = list(r.run(query))
         by_ticker: dict[str, list] = {}
         for doc in all_docs:
             t = str(doc.get("ticker") or "").strip().upper()
@@ -94,13 +94,12 @@ def main(apply: bool, instance_id: str | None) -> int:
             return 0
         deleted = 0
         for t in bad_tickers:
-            q = r.db(DB_NAME).table(DISCOVERED_TABLE).filter({"ticker": t})
+            _pred = r.P.field("ticker").eq(t)
             if instance_id:
-                _pattern = f"^{re.escape(instance_id)}($|\\|)"
-                q = q.filter(
-                    lambda doc: doc["instance_id"].default("").match(_pattern)
-                )
-            res = q.delete().run(conn)
+                _f = r.P.field("instance_id").default("")
+                _pred = _pred & (_f.eq(instance_id)
+                                 | _f.starts_with(instance_id + "|"))
+            res = r.delete(DISCOVERED_TABLE, r.filter(DISCOVERED_TABLE, _pred))
             deleted += int((res or {}).get("deleted", 0) or 0)
         print(f"\nDone. Deleted {deleted} row(s) from {DISCOVERED_TABLE}.")
         return 0

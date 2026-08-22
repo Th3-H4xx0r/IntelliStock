@@ -49,9 +49,9 @@ import os
 import sys
 from pathlib import Path
 
-from rethinkdb import RethinkDB
+from db import store as _store
 
-r = RethinkDB()
+r = _store
 
 DB_NAME = "IntelliStock"
 REPO = Path(__file__).resolve().parent.parent
@@ -89,13 +89,9 @@ def _load_env() -> None:
 
 
 def conn(timeout: int = 30):
+    """R26: the store pools its own connection per operation."""
     _load_env()
-    return r.connect(
-        host=os.environ.get("RETHINKDB_HOST"),
-        port=int(os.environ.get("RETHINKDB_PORT", 28015)),
-        db=os.environ.get("RETHINKDB_DB", DB_NAME),
-        timeout=timeout,
-    )
+    return None
 
 
 def main(argv=None) -> int:
@@ -106,7 +102,7 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
 
     c = conn()
-    tables = set(r.db(DB_NAME).table_list().run(c))
+    tables = set(r.table_list())
     prefix = str(a.instance).strip()
 
     total = 0
@@ -117,16 +113,16 @@ def main(argv=None) -> int:
         # instance_id is scope-suffixed ("<base>|<scope_id>"), so match on the
         # BASE id with a prefix match, never equality.
         expr = r.row["instance_id"].match(f"^{prefix}(\\||$)")
-        n = int(r.db(DB_NAME).table(table).filter(expr).count().run(c) or 0)
+        n = int(r.count(r.filter(table, expr)) or 0)
         total += n
         print(f"  {table:36} {n:6} row(s) {'-> DELETE' if a.apply else '(dry-run)'}")
         if a.apply and n:
-            r.db(DB_NAME).table(table).filter(expr).delete().run(c)
+            r.delete(table, r.filter(table, expr))
 
     for table in KEEP_TABLES:
         if table not in tables:
             continue
-        n = int(r.db(DB_NAME).table(table).count().run(c) or 0)
+        n = int(r.count(table) or 0)
         print(f"  {table:36} {n:6} row(s) KEPT — this is the cache we want to hit")
 
     print("")

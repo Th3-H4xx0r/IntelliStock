@@ -3,7 +3,7 @@ Runtime resolver for model_id references in strategy configs.
 
 When a strategy config contains keys like ``llm_model_id`` or
 ``sentiment_llm_model_id``, this module looks up the corresponding
-document in the RethinkDB ``Models`` table and injects the credentials
+document in the Postgres ``Models`` table and injects the credentials
 as inline config fields.  Downstream strategy code continues to read
 ``config.get("llm_provider")`` etc. unchanged — the resolution is
 transparent.
@@ -13,21 +13,14 @@ import os
 import threading
 import time
 
-from rethinkdb import RethinkDB
+from db import store
 
-r = RethinkDB()
 DB_NAME = "IntelliStock"
-RETHINKDB_HOST = os.environ.get("RETHINKDB_HOST", "localhost")
-RETHINKDB_PORT = int(os.environ.get("RETHINKDB_PORT", "28015"))
 
 # Thread-safe in-memory cache with TTL
 _model_cache: dict = {}
 _cache_lock = threading.Lock()
 _CACHE_TTL = 300  # seconds
-
-
-def _get_conn():
-    return r.connect(host=RETHINKDB_HOST, port=RETHINKDB_PORT)
 
 
 def _get_model_from_cache_or_db(conn, model_id: str):
@@ -38,7 +31,7 @@ def _get_model_from_cache_or_db(conn, model_id: str):
         if cached and (now - cached["ts"]) < _CACHE_TTL:
             return cached["doc"]
     try:
-        doc = r.db(DB_NAME).table("Models").get(model_id).run(conn)
+        doc = store.get("Models", model_id)
     except Exception:
         return None
     if doc:

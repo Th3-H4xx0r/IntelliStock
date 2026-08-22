@@ -18,6 +18,28 @@ if _BACKEND_DIR not in sys.path:
     sys.path.insert(0, _BACKEND_DIR)
 
 
+_SEL = object()
+
+
+def _stub_store_for_rows(rows):
+    """A db.store stand-in that yields ``rows`` from between()/get_all()."""
+    class _FakeStore:
+        def between(self, *_a, **_k): return _SEL
+        def get_all(self, *_a, **_k): return list(rows)
+        def run(self, _selection): return list(rows)
+    return _FakeStore()
+
+
+def _stub_store_raising(message):
+    """A db.store stand-in whose every read raises, proving the endpoints
+    still degrade to an empty/zeroed envelope instead of 500ing."""
+    class _BoomStore:
+        def between(self, *_a, **_k): raise RuntimeError(message)
+        def get_all(self, *_a, **_k): raise RuntimeError(message)
+        def run(self, *_a, **_k): raise RuntimeError(message)
+    return _BoomStore()
+
+
 @pytest.fixture
 def seed_recent_calls():
     """Seed three calls into the in-memory ring buffer."""
@@ -223,19 +245,7 @@ def test_by_backtest_aggregates_and_sorts_by_cost(monkeypatch):
          "total_cost_usd": 0.001, "ts": 1_700_000_030_000, "ok": True},
     ]
 
-    class _FakeQuery:
-        def __init__(self, rows): self._rows = rows
-        def between(self, *_a, **_k): return self
-        def run(self, _conn): return iter(self._rows)
-
-    class _FakeDb:
-        def __init__(self, rows): self._rows = rows
-        def table(self, _name): return _FakeQuery(self._rows)
-
-    class _FakeR:
-        def db(self, _name): return _FakeDb(rows)
-
-    monkeypatch.setattr(main_mod, "_r_auth", _FakeR())
+    monkeypatch.setattr(main_mod, "db_store", _stub_store_for_rows(rows))
     out = main_mod._llm_usage_by_backtest(range_str="30d", limit=10, conn=object())
 
     assert isinstance(out, list)
@@ -256,15 +266,11 @@ def test_by_backtest_aggregates_and_sorts_by_cost(monkeypatch):
 
 
 def test_by_backtest_returns_empty_on_db_error(monkeypatch):
-    """When the RethinkDB query raises, we degrade to an empty list
+    """When the store query raises, we degrade to an empty list
     rather than 500ing the cost-screen request."""
     import api.main as main_mod
 
-    class _FakeR:
-        def db(self, *_a, **_k):
-            raise RuntimeError("connection refused")
-
-    monkeypatch.setattr(main_mod, "_r_auth", _FakeR())
+    monkeypatch.setattr(main_mod, "db_store", _stub_store_raising("connection refused"))
     out = main_mod._llm_usage_by_backtest(range_str="24h", limit=10, conn=object())
     assert out == []
 
@@ -278,17 +284,7 @@ def test_by_backtest_limit_honoured(monkeypatch):
         for i in range(20)
     ]
 
-    class _FakeR:
-        def db(self, _name):
-            class _T:
-                def table(self_inner, _n):
-                    class _Q:
-                        def between(self_q, *_a, **_k): return self_q
-                        def run(self_q, _conn): return iter(rows)
-                    return _Q()
-            return _T()
-
-    monkeypatch.setattr(main_mod, "_r_auth", _FakeR())
+    monkeypatch.setattr(main_mod, "db_store", _stub_store_for_rows(rows))
     out = main_mod._llm_usage_by_backtest(range_str="30d", limit=5, conn=object())
     assert len(out) == 5
     # Top 5 should be ids 19..15 (highest cost first).
@@ -313,17 +309,7 @@ def test_for_backtest_aggregates_by_dimension(monkeypatch):
          "ok": False, "call_site": "sentiment", "strategy": "GraphNexusAnalysis"},
     ]
 
-    class _FakeR:
-        def db(self, _name):
-            class _T:
-                def table(self_inner, _n):
-                    class _Q:
-                        def get_all(self_q, *_a, **_k): return self_q
-                        def run(self_q, _conn): return iter(rows)
-                    return _Q()
-            return _T()
-
-    monkeypatch.setattr(main_mod, "_r_auth", _FakeR())
+    monkeypatch.setattr(main_mod, "db_store", _stub_store_for_rows(rows))
     out = main_mod._llm_usage_for_backtest(backtest_id="42", conn=object())
 
     assert out["backtest_id"] == "42"
@@ -360,11 +346,7 @@ def test_for_backtest_returns_zeroed_doc_on_db_error(monkeypatch):
     AI-credits card can render its empty state without a 500."""
     import api.main as main_mod
 
-    class _FakeR:
-        def db(self, *_a, **_k):
-            raise RuntimeError("rethinkdb_unreachable")
-
-    monkeypatch.setattr(main_mod, "_r_auth", _FakeR())
+    monkeypatch.setattr(main_mod, "db_store", _stub_store_raising("postgres_unreachable"))
     out = main_mod._llm_usage_for_backtest(backtest_id="42", conn=object())
     assert out["backtest_id"] == "42"
     assert out["total_calls"] == 0
@@ -375,21 +357,6 @@ def test_for_backtest_returns_zeroed_doc_on_db_error(monkeypatch):
 
 
 # ── Phase 1.1 cost-attribution fix — live vs backtest partition ───────────
-
-
-def _stub_r_for_rows(rows):
-    """Return a _FakeR that yields the given rows from any LLMUsage.between()."""
-    class _FakeQuery:
-        def between(self, *_a, **_k): return self
-        def run(self, _conn): return iter(rows)
-
-    class _FakeDb:
-        def table(self, _name): return _FakeQuery()
-
-    class _FakeR:
-        def db(self, _name): return _FakeDb()
-
-    return _FakeR()
 
 
 def test_by_backtest_groups_backtest_rows_with_kind_and_display_label(monkeypatch):
@@ -404,7 +371,7 @@ def test_by_backtest_groups_backtest_rows_with_kind_and_display_label(monkeypatc
         {"backtest_id": "200", "instance_id": "main", "ts": 1_200,
          "input_tokens": 10, "output_tokens": 10, "total_cost_usd": 0.01, "ok": False},
     ]
-    monkeypatch.setattr(main_mod, "_r_auth", _stub_r_for_rows(rows))
+    monkeypatch.setattr(main_mod, "db_store", _stub_store_for_rows(rows))
     out = main_mod._llm_usage_by_backtest(range_str="24h", limit=100, conn=object())
 
     rows_by_key = {(r.get("kind"), r.get("key")): r for r in out}
@@ -433,7 +400,7 @@ def test_by_backtest_includes_live_rows_with_null_backtest_id(monkeypatch):
         {"backtest_id": None, "instance_id": None, "ts": 1_300,
          "input_tokens": 10, "output_tokens": 5, "total_cost_usd": 0.001, "ok": True},
     ]
-    monkeypatch.setattr(main_mod, "_r_auth", _stub_r_for_rows(rows))
+    monkeypatch.setattr(main_mod, "db_store", _stub_store_for_rows(rows))
     out = main_mod._llm_usage_by_backtest(range_str="24h", limit=100, conn=object())
 
     rows_by_key = {(r.get("kind"), r.get("key")): r for r in out}
@@ -461,7 +428,7 @@ def test_by_backtest_emits_kind_and_display_label_on_every_row(monkeypatch):
         {"backtest_id": None, "instance_id": "main", "ts": 1_100,
          "input_tokens": 20, "output_tokens": 10, "total_cost_usd": 0.50, "ok": True},
     ]
-    monkeypatch.setattr(main_mod, "_r_auth", _stub_r_for_rows(rows))
+    monkeypatch.setattr(main_mod, "db_store", _stub_store_for_rows(rows))
     out = main_mod._llm_usage_by_backtest(range_str="24h", limit=100, conn=object())
 
     for row in out:

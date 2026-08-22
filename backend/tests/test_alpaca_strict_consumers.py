@@ -41,11 +41,31 @@ class _FakeDb:
 
 
 class _FakeR:
+    """ReQL-shaped double, still needed for interactive_utils (group G3's
+    file, not yet ported)."""
+
     def __init__(self, rows):
         self._rows = rows
 
     def db(self, _name):
         return _FakeDb(self._rows)
+
+
+class _FakeStore:
+    """db.store stand-in keyed by (table, id). Postgres port (G11)."""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def get(self, table, row_id):
+        return self._rows.get((table, str(row_id)))
+
+    def run(self, selection):
+        table = getattr(selection, "table", selection)
+        return [row for (t, _id), row in self._rows.items() if t == table]
+
+    def filter(self, table, _predicate):
+        return table
 
 
 class _FakeConn:
@@ -105,11 +125,9 @@ def test_portfolio_history_rejects_plaintext_alpaca_row_before_fetch(monkeypatch
 
     row = _plaintext_alpaca_row()
     monkeypatch.setattr(iu, "_ensure_brokerage_accounts_table", lambda _conn: None)
-    monkeypatch.setattr(
-        iu,
-        "r",
-        _FakeR({("BrokerageAccounts", row["id"]): row}),
-    )
+    _rows = {("BrokerageAccounts", row["id"]): row}
+    monkeypatch.setattr(iu.store, "get",
+                        lambda table, row_id: _rows.get((table, row_id)))
     called = []
     monkeypatch.setattr(
         iu,
@@ -143,7 +161,7 @@ def test_live_state_loader_rejects_plaintext_and_instance_fallback(monkeypatch):
     monkeypatch.setattr(
         live_fetch,
         "_open_db_conn",
-        lambda: (_FakeR(rows), _FakeConn()),
+        lambda: (_FakeStore(rows), _FakeConn()),
     )
 
     result = live_fetch._load_credentials(instance["id"])
@@ -159,20 +177,27 @@ def test_kill_switch_rejects_plaintext_before_alpaca_client(monkeypatch):
     import live_kill_switch as kill_switch
 
     row = _plaintext_alpaca_row()
-    r = MagicMock()
-    db = MagicMock()
-    instances = MagicMock()
-    brokerages = MagicMock()
-    r.db.return_value = db
-    db.table.side_effect = (
-        lambda name: instances if name == "Instances" else brokerages
-    )
-    instances.update.return_value.run.return_value = {
-        "replaced": 1,
-        "unchanged": 0,
-    }
-    brokerages.run.return_value = iter([row])
-    monkeypatch.setattr(kill_switch, "_get_conn", lambda: (r, _FakeConn()))
+
+    class _KillStore:
+        """The store handle live_kill_switch unpacks from _get_conn()."""
+
+        def Selection(self, table):
+            return table
+
+        def filter(self, table, _predicate):
+            return table
+
+        def update(self, _table, _selector, _patch):
+            return {"replaced": 1, "unchanged": 0}
+
+        def run(self, selection):
+            return [row] if selection == "BrokerageAccounts" else []
+
+        def get(self, _table, _row_id):
+            return None
+
+    monkeypatch.setattr(kill_switch, "_get_conn",
+                        lambda: (_KillStore(), _FakeConn()))
 
     constructions = []
     _install_fake_alpaca(monkeypatch, constructions)
@@ -196,8 +221,8 @@ def test_stored_alpaca_diagnostic_rejects_plaintext_before_probe(monkeypatch):
     row = _plaintext_alpaca_row()
     monkeypatch.setattr(
         main,
-        "_r_auth",
-        _FakeR({("BrokerageAccounts", row["id"]): row}),
+        "db_store",
+        _FakeStore({("BrokerageAccounts", row["id"]): row}),
     )
     called = []
     monkeypatch.setattr(
@@ -225,8 +250,8 @@ def test_holding_opens_rejects_plaintext_before_client(monkeypatch):
     row = _plaintext_alpaca_row()
     monkeypatch.setattr(
         main,
-        "_r_auth",
-        _FakeR({("BrokerageAccounts", row["id"]): row}),
+        "db_store",
+        _FakeStore({("BrokerageAccounts", row["id"]): row}),
     )
     main._HOLDING_OPENS_CACHE.clear()
     constructions = []
@@ -250,8 +275,8 @@ def test_movers_rejects_plaintext_before_http_request(monkeypatch):
     row = _plaintext_alpaca_row()
     monkeypatch.setattr(
         main,
-        "_r_auth",
-        _FakeR({("BrokerageAccounts", row["id"]): row}),
+        "db_store",
+        _FakeStore({("BrokerageAccounts", row["id"]): row}),
     )
     calls = []
     monkeypatch.setattr(

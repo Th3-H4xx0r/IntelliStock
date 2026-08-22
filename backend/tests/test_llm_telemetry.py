@@ -41,57 +41,39 @@ def test_pricing_loader_returns_empty_on_missing_file(tmp_path):
     assert pricing == {}
 
 
-def test_ensure_llm_usage_table_creates_table_and_indexes():
-    """Verify the table-creation helper creates the table and the expected
-    secondary indexes on a fresh connection."""
-    from llm_telemetry import ensure_llm_usage_tables
+def test_ensure_llm_usage_table_creates_table_and_indexes(monkeypatch):
+    """The table-creation helper asks the schema registry for both tables.
 
-    # Fake rethinkdb connection that tracks calls.
-    created_tables = []
-    created_indexes = []
+    Postgres port (G11): R25 moved DDL into db/schema.py, so the assertion is
+    that both tables are ensured AND that the registry declares the indexes
+    the cost endpoints query on. index_wait is gone -- CREATE INDEX is
+    synchronous, so a query can never hit a half-built index.
+    """
+    import llm_telemetry
+    from db import schema as db_schema
 
-    class _FakeQuery:
-        def __init__(self, log_target=None, log_value=None):
-            self._log = log_target
-            self._val = log_value
-        def run(self, conn):
-            if self._log is not None and self._val is not None:
-                self._log.append(self._val)
-            if self._val == "table_list":
-                return []
-            if self._val == "index_list":
-                return []
-            if self._val == "db_list":
-                return ["IntelliStock"]
-            return None
-        def table_create(self, name):
-            return _FakeQuery(created_tables, name)
-        def index_create(self, name, *args, **kw):
-            return _FakeQuery(created_indexes, name)
-        def db_list(self):
-            return _FakeQuery(None, "db_list")
-        def table_list(self):
-            return _FakeQuery(None, "table_list")
-        def index_list(self):
-            return _FakeQuery(None, "index_list")
-        def db(self, _name):
-            return self
-        def table(self, _name):
-            return self
+    ensured = []
+    monkeypatch.setattr(db_schema, "ensure_table", ensured.append)
 
-    class _FakeR:
-        def db_list(self): return _FakeQuery(None, "db_list")
-        def db_create(self, _name): return _FakeQuery(None, "db_create")
-        def db(self, _name): return _FakeQuery()
-        def table(self, _name): return _FakeQuery()
+    llm_telemetry.ensure_llm_usage_tables(conn=object(), r=object(),
+                                          db_name="IntelliStock")
 
-    ensure_llm_usage_tables(conn=object(), r=_FakeR(), db_name="IntelliStock")
-    assert "LLMUsage" in created_tables
-    assert "LLMUsageDaily" in created_tables
-    # Indexes we care about
-    assert "ts" in created_indexes
-    assert "provider" in created_indexes
-    assert "date" in created_indexes
+    assert ensured == ["LLMUsage", "LLMUsageDaily"]
+    usage_idx = set(db_schema.spec("LLMUsage").indexed_fields)
+    assert {"ts", "provider", "model", "backtest_id"} <= usage_idx
+    assert "date" in set(db_schema.spec("LLMUsageDaily").indexed_fields)
+
+
+def test_ensure_llm_usage_table_never_raises(monkeypatch):
+    """Telemetry setup must never take down API startup."""
+    import llm_telemetry
+    from db import schema as db_schema
+
+    def _boom(_t):
+        raise RuntimeError("ddl failed")
+
+    monkeypatch.setattr(db_schema, "ensure_table", _boom)
+    llm_telemetry.ensure_llm_usage_tables(conn=None, r=None)
 
 
 def test_compute_cost_from_yaml():
@@ -249,25 +231,18 @@ def test_flush_drains_buffer_via_db_factory():
     _reset_for_tests()
 
     inserted_batches = []
-    class _FakeTable:
-        def insert(self, rows):
-            return _FakeQuery(rows)
-    class _FakeQuery:
-        def __init__(self, rows): self.rows = rows
-        def run(self, conn):
-            inserted_batches.append(list(self.rows))
-            return {"inserted": len(self.rows)}
-    class _FakeDb:
-        def table(self, _name): return _FakeTable()
-    class _FakeR:
-        def db(self, _name): return _FakeDb()
+
+    class _FakeStore:
+        def insert(self, _table, rows, **_kw):
+            inserted_batches.append(list(rows))
+            return {"inserted": len(rows)}
 
     configure(
         db_conn_factory=lambda: object(),
         enabled=True,
         auto_start_flusher=False,
         pricing_yaml_path=None,
-        r_module=_FakeR(),
+        r_module=_FakeStore(),
     )
     for i in range(3):
         record_llm_call(provider="azure", model=f"m{i}",
@@ -371,25 +346,15 @@ def test_rollup_aggregates_today(monkeypatch):
     ]
 
     upserted = []
-    class _Q:
-        def __init__(self, rows=None): self.rows = rows
-        def run(self, conn): return list(seed_rows) if self.rows is None else None
-        def filter(self, *_a, **_k): return self
-        def between(self, *_a, **_k): return self
-        def get_all(self, *_a, **_k): return self
-        def insert(self, rows, **_k):
-            upserted.extend(rows if isinstance(rows, list) else [rows]); return self
-        def replace(self, rows): upserted.append(rows); return self
-        def index_create(self, *_a, **_k): return self
-    class _Db:
-        def table(self, _n): return _Q()
-        def table_list(self): return _Q()
-    class _R:
-        def db(self, _n): return _Db()
-        def db_list(self): return _Q()
-        epoch_time = staticmethod(lambda x: x)
 
-    rollup_daily(conn=object(), r=_R(), db_name="IntelliStock",
+    class _FakeStore:
+        def between(self, *_a, **_k): return "sel"
+        def run(self, _sel): return list(seed_rows)
+        def insert(self, _table, rows, **_kw):
+            upserted.extend(rows if isinstance(rows, list) else [rows])
+            return {"inserted": 1}
+
+    rollup_daily(conn=object(), r=_FakeStore(), db_name="IntelliStock",
                  date_iso="2026-05-06",
                  _seed_rows_for_test=seed_rows)
 

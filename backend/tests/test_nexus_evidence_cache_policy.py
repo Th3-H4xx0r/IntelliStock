@@ -102,17 +102,32 @@ def test_off_mode_ignores_inert_fixture_artifact_config():
     ) is True
 
 
+class _TripwireStore:
+    """Stands in for llm_utils._db_store. Any call is a database touch.
+
+    The prompt cache used to reach the database through
+    ``_prompt_cache_new_conn()``; after the Postgres port it reaches it through
+    the module-level store, so that is what these tests watch.
+    """
+
+    def __init__(self, touched):
+        self._touched = touched
+
+    def get(self, *args, **kwargs):
+        self._touched.append("database")
+        return None
+
+    def insert(self, *args, **kwargs):
+        self._touched.append("database")
+
+
 def test_ordinary_prompt_reader_consults_policy_before_database(monkeypatch):
     activate_model_evidence_session(ModelEvidenceSession(mode="record", arm_id="arm"))
     touched = []
     monkeypatch.setattr(llm_utils, "_rethink", object())
     monkeypatch.setattr(llm_utils, "_prompt_cache_enabled", True)
     monkeypatch.setattr(llm_utils, "_prompt_cache_tbl_ok", True)
-    monkeypatch.setattr(
-        llm_utils,
-        "_prompt_cache_new_conn",
-        lambda: touched.append("database") or object(),
-    )
+    monkeypatch.setattr(llm_utils, "_db_store", _TripwireStore(touched))
     assert llm_utils._check_prompt_cache("prompt", "model", "") is None
     assert touched == []
 
@@ -124,11 +139,7 @@ def test_ordinary_prompt_writer_is_bypassed_in_every_evidence_mode(monkeypatch, 
     monkeypatch.setattr(llm_utils, "_rethink", object())
     monkeypatch.setattr(llm_utils, "_prompt_cache_enabled", True)
     monkeypatch.setattr(llm_utils, "_prompt_cache_tbl_ok", True)
-    monkeypatch.setattr(
-        llm_utils,
-        "_prompt_cache_new_conn",
-        lambda: touched.append("database") or object(),
-    )
+    monkeypatch.setattr(llm_utils, "_db_store", _TripwireStore(touched))
     llm_utils._store_prompt_cache("prompt", "model", "", "response long enough")
     assert touched == []
 
@@ -185,7 +196,7 @@ def test_graph_nexus_llm_cache_readers_consult_central_policy(monkeypatch, mode)
     touched = []
     monkeypatch.setattr(gna, "_ensure_learning_cache_table", lambda conn: touched.append("learning"))
     monkeypatch.setattr(gna, "_ensure_nexus_history_table", lambda *args: touched.append("history"))
-    monkeypatch.setattr(gna, "_r", object())
+    monkeypatch.setattr(gna, "store", object())
 
     assert gna._get_learning_cache(object(), "instance", 12.0, config={}) is None
     assert (
@@ -324,7 +335,7 @@ def test_evidence_modes_bypass_all_llm_cache_database_writes(monkeypatch, mode):
     monkeypatch.setattr(
         gna, "_ensure_nexus_history_table", lambda *args: touched.append("history")
     )
-    monkeypatch.setattr(gna, "_r", object())
+    monkeypatch.setattr(gna, "store", object())
     monkeypatch.setattr(panel, "_r", object())
     monkeypatch.setattr(
         panel, "_get_panel_db_conn", lambda: touched.append("panel") or db
@@ -365,7 +376,7 @@ def test_run_once_does_not_read_or_mutate_llm_strategy_caches(monkeypatch, mode)
     panel_stocks = []
     monkeypatch.setattr(gna, "_get_nexus_db_conn", lambda *args, **kwargs: None)
     monkeypatch.setattr(gna, "_nexus_db_available", False)
-    monkeypatch.setattr(gna, "_r", None)
+    monkeypatch.setattr(gna, "store", None)
     monkeypatch.setattr(
         gna, "_NEXUS_BACKTEST_CLEANED_INSTANCES", {"evidence-test"}
     )
@@ -487,7 +498,7 @@ def test_run_once_never_swallows_model_evidence_error(monkeypatch, lane):
 
     monkeypatch.setattr(gna, "_get_nexus_db_conn", lambda *args, **kwargs: None)
     monkeypatch.setattr(gna, "_nexus_db_available", False)
-    monkeypatch.setattr(gna, "_r", None)
+    monkeypatch.setattr(gna, "store", None)
     monkeypatch.setattr(
         gna, "_get_cached_articles", lambda *args, **kwargs: (alpaca_articles, None)
     )

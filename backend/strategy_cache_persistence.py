@@ -8,7 +8,7 @@ wiped the cache, which reset the deployment ramp to bar=1 (50% cap),
 which left `ramp_room=0` once the portfolio MTM grew past 50% of initial
 equity. Backtest was unaffected because backtest never restarts mid-run.
 
-This module persists the dict to a RethinkDB table so live mode survives
+This module persists the dict to a Postgres table so live mode survives
 restarts. Strategy code is NOT modified — the broker just loads the cache
 before calling `run_run_once_strategies` and saves it after.
 
@@ -19,16 +19,27 @@ Design:
   so LLM trace/prompt buffers don't bloat the row. Persist everything else.
 - Cap each dict-of-cooldowns to the most recent 500 entries before saving.
 - Rows older than 14 days are considered stale and ignored on load.
-- Fail-open on ANY error (corrupt JSON, schema drift, Rethink outage) — the
+- Fail-open on ANY error (corrupt JSON, schema drift, store outage) — the
   broker continues with the empty cache it would have had today.
+
+Every public function keeps its ``(conn, r)`` leading parameters (R26): the
+broker, broker_snapshot_helpers and api/main.py all pass them, and several
+tests monkeypatch around that arity. Both are accepted and ignored -- the
+store takes its own pooled connection. They are NO LONGER guards: api/main.py
+already passes ``r=None``, so refusing on a falsy ``r`` would have made three
+Nexus endpoints silently return nothing.
 """
 
 from __future__ import annotations
 
+import datetime as _dt
 import hashlib
 import json
 import time
 from typing import Any, Optional
+
+from db import schema as db_schema
+from db import store
 
 TABLE_NAME = "NexusStrategyCache"
 DB_NAME = "IntelliStock"
@@ -305,38 +316,32 @@ def _deserialize_cache_from_blob(blob: str) -> dict:
     return _decode_json(raw)
 
 
-def _ensure_table(conn, r) -> bool:
-    """Ensure NexusStrategyCache exists with the compound secondary index
-    required for load_with_fallback's get_all query.
+def _now_iso() -> str:
+    """R24 replacement for ``r.now()``. Only ever read for display -- the
+    staleness logic reads ``updated_at_epoch`` -- and unlike a datetime it is
+    jsonb-serialisable."""
+    return _dt.datetime.now(_dt.timezone.utc).isoformat()
 
-    Returns True if the table+index are usable, False on any error.
+
+_TABLE_ENSURED = [False]
+
+
+def _ensure_table(conn=None, r=None) -> bool:
+    """Ensure NexusStrategyCache exists. R25: the index set lives in
+    db/schema.py's registry. Returns True if usable, False on any error.
+
+    Latched after the first success: this is called on EVERY save (once a
+    tick in live) and ensure_schema takes an advisory lock and four catalog
+    queries. Only the success latches, so a failure still retries.
     """
+    if _TABLE_ENSURED[0]:
+        return True
     try:
-        tables = list(r.db(DB_NAME).table_list().run(conn))
+        db_schema.ensure_table(TABLE_NAME)
+        _TABLE_ENSURED[0] = True
+        return True
     except Exception:
         return False
-    if TABLE_NAME not in tables:
-        try:
-            r.db(DB_NAME).table_create(TABLE_NAME).run(conn)
-        except Exception:
-            return False
-    try:
-        existing_indexes = list(r.db(DB_NAME).table(TABLE_NAME).index_list().run(conn))
-    except Exception:
-        return False
-    if _COMPOUND_INDEX_NAME not in existing_indexes:
-        try:
-            r.db(DB_NAME).table(TABLE_NAME).index_create(
-                _COMPOUND_INDEX_NAME,
-                lambda doc: [doc["instance_id"], doc["config_hash"]],
-            ).run(conn)
-            r.db(DB_NAME).table(TABLE_NAME).index_wait(_COMPOUND_INDEX_NAME).run(conn)
-        except Exception:
-            # If create fails (e.g., existing rows lack the fields), the load
-            # query will fall back to None; persistent failures will be
-            # visible via the load_with_fallback "db_error" path.
-            return False
-    return True
 
 
 def load_strategy_cache_from_db(
@@ -350,13 +355,13 @@ def load_strategy_cache_from_db(
     Never raises — fail-open on any error. Caller treats None as "start with
     empty cache".
     """
-    if conn is None or r is None or not instance_id or not strategy_name:
+    if not instance_id or not strategy_name:
         return None
     row_id = f"{instance_id}|{strategy_name}"
     try:
-        if not _ensure_table(conn, r):
+        if not _ensure_table():
             return None
-        row = r.db(DB_NAME).table(TABLE_NAME).get(row_id).run(conn)
+        row = store.get(TABLE_NAME, row_id)
         if not row:
             return None
         updated_at = row.get("updated_at_epoch") or 0.0
@@ -392,7 +397,7 @@ def save_strategy_cache_to_db(
     pick it up on next boot. Otherwise writes with the legacy 2-segment PK
     (back-compat for callers that haven't been updated yet).
     """
-    if conn is None or r is None or not instance_id or not strategy_name:
+    if not instance_id or not strategy_name:
         return False
     if not isinstance(cache, dict):
         return False
@@ -448,7 +453,7 @@ def save_strategy_cache_to_db(
                     )
                 except Exception:
                     pass
-        if not _ensure_table(conn, r):
+        if not _ensure_table():
             return False
         row = {
             "id": row_id,
@@ -456,7 +461,7 @@ def save_strategy_cache_to_db(
             "strategy_name": strategy_name,
             "cache_json": blob,
             "size_bytes": len(blob),
-            "updated_at": r.now(),
+            "updated_at": _now_iso(),
             "updated_at_epoch": time.time(),
         }
         if use_new_schema:
@@ -469,7 +474,7 @@ def save_strategy_cache_to_db(
                     "record_version": 1,
                 }
             )
-        r.db(DB_NAME).table(TABLE_NAME).insert(row, conflict="replace").run(conn)
+        store.insert(TABLE_NAME, row, conflict="replace")
         return True
     except Exception:
         return False
@@ -525,7 +530,7 @@ def persist_backtest_snapshot(
     except Exception:
         pass
 
-    if conn is None or r is None or not instance_id or not strategy_name:
+    if not instance_id or not strategy_name:
         return False
     if not config_hash or not module_hash:
         return False
@@ -533,7 +538,7 @@ def persist_backtest_snapshot(
         return False
     row_id = f"{instance_id}|{strategy_name}|{config_hash}|backtest|{end_date}"
     try:
-        if not _ensure_table(conn, r):
+        if not _ensure_table():
             return False
         blob = _serialize_cache_for_blob(cache or {})
         if len(blob) > max_blob_bytes:
@@ -551,7 +556,8 @@ def persist_backtest_snapshot(
                 blob = json.dumps(payload, default=str)
                 if len(blob) <= max_blob_bytes:
                     break
-        r.db(DB_NAME).table(TABLE_NAME).insert(
+        store.insert(
+            TABLE_NAME,
             {
                 "id": row_id,
                 "instance_id": instance_id,
@@ -563,12 +569,12 @@ def persist_backtest_snapshot(
                 "end_date": end_date,
                 "cache_json": blob,
                 "size_bytes": len(blob),
-                "updated_at": r.now(),
+                "updated_at": _now_iso(),
                 "updated_at_epoch": time.time(),
                 "record_version": 1,
             },
             conflict="replace",
-        ).run(conn)
+        )
         return True
     except Exception:
         return False
@@ -595,25 +601,27 @@ def load_with_fallback(
     import os as _os
     if (_os.environ.get("NEXUS_LIVE_SNAPSHOT_LOAD", "on") or "on").lower() == "off":
         return None, "disabled", None
-    if conn is None or r is None or not instance_id or not strategy_name:
+    if not instance_id or not strategy_name:
         return None, "no_match", None
     try:
-        if not _ensure_table(conn, r):
+        if not _ensure_table():
             return None, "db_error", None
         # Phase 1 bug-sweep (2026-05-21): tiebreaker was ``created_at``, which
         # neither writer (persist_backtest_snapshot, save_strategy_cache_to_db)
         # sets -- so the secondary sort was undefined. Use ``updated_at_epoch``,
         # which both writers DO set on every upsert.
-        row = (
-            r.db(DB_NAME).table(TABLE_NAME)
-             .get_all([instance_id, current_config_hash], index="instance_id_config_hash")
-             .filter(r.row["strategy_name"].eq(strategy_name))
-             .order_by(r.desc("end_date"), r.desc("updated_at_epoch"))
-             .limit(1)
-             .nth(0)
-             .default(None)
-             .run(conn)
-        )
+        # The ReQL index was an ARRAY index over [instance_id, config_hash];
+        # no document carries a scalar "instance_id_config_hash" key, so this
+        # is a plain three-key filter. The table holds a handful of rows per
+        # instance.
+        sel = store.filter(TABLE_NAME, {"instance_id": instance_id,
+                                        "config_hash": current_config_hash,
+                                        "strategy_name": strategy_name})
+        sel = store.order_by(sel, fields=(store.desc("end_date"),
+                                          store.desc("updated_at_epoch",
+                                                     numeric=True)))
+        rows = store.run(store.limit(sel, 1))
+        row = rows[0] if rows else None
     except Exception:
         return None, "db_error", None
     if not row:

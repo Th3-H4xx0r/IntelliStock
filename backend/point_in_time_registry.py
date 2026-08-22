@@ -139,7 +139,7 @@ def encode_snapshot_payload(payload: Any) -> dict:
     Content identity is ALWAYS taken over the canonical uncompressed payload,
     so compression can never change a snapshot's hash, its dedupe behaviour, or
     an existing fixture's replay. This only changes how the same bytes are
-    parked in RethinkDB.
+    parked in the store.
     """
     import base64
     import json
@@ -583,8 +583,24 @@ class InMemoryPointInTimeRegistry(_RegistryBase):
         return self._snapshots.get(source_hash)
 
 
+class _StoreHandle:
+    """Truthy stand-in for the old driver connection (R26)."""
+
+    def close(self, *_a, **_k):
+        return None
+
+
 class RethinkPointInTimeRegistry(_RegistryBase):
-    """Append-only production registry stored in the shared RethinkDB."""
+    """Append-only production registry stored in the shared database.
+
+    The class name is unchanged on purpose: strategies/graph_nexus_analysis.py
+    (group G4) and backend/scripts/import_point_in_time_bundle.py both import
+    it by name, and a rename has to go through gitnexus_rename across those
+    groups rather than land here.
+
+    ``r_module``, ``connect`` and ``db_name`` are kept and ignored (R26) so
+    the constructor's callers and test doubles are unchanged.
+    """
 
     def __init__(
         self,
@@ -593,10 +609,6 @@ class RethinkPointInTimeRegistry(_RegistryBase):
         connect=None,
         db_name: str | None = None,
     ):
-        if r_module is None:
-            from rethinkdb import RethinkDB
-
-            r_module = RethinkDB()
         self._r = r_module
         self._connect_override = connect
         self._db_name = str(
@@ -608,11 +620,7 @@ class RethinkPointInTimeRegistry(_RegistryBase):
         if self._connect_override is not None:
             conn = self._connect_override()
         else:
-            conn = self._r.connect(
-                host=os.environ.get("RETHINKDB_HOST", "localhost"),
-                port=int(os.environ.get("RETHINKDB_PORT", "28015")),
-                timeout=10,
-            )
+            conn = _StoreHandle()
         try:
             yield conn
         finally:
@@ -621,19 +629,21 @@ class RethinkPointInTimeRegistry(_RegistryBase):
             except Exception:
                 pass
 
+    _tables_ensured = False
+
     def _ensure_tables(self, conn):
-        databases = set(self._r.db_list().run(conn))
-        if self._db_name not in databases:
-            self._r.db_create(self._db_name).run(conn)
-        tables = set(self._r.db(self._db_name).table_list().run(conn))
+        """R25. Latched per process after the first success: this runs on
+        every read, and ensure_schema takes an advisory lock."""
+        if RethinkPointInTimeRegistry._tables_ensured:
+            return
+        from db import schema as db_schema
         for table in (SNAPSHOT_TABLE, MANIFEST_TABLE):
-            if table not in tables:
-                self._r.db(self._db_name).table_create(table).run(conn)
+            db_schema.ensure_table(table)                    # R25
+        RethinkPointInTimeRegistry._tables_ensured = True
 
     def _insert_immutable(self, conn, table: str, row: Mapping[str, Any]):
-        existing = (
-            self._r.db(self._db_name).table(table).get(row["id"]).run(conn)
-        )
+        from db import store
+        existing = store.get(table, row["id"])
         if existing is not None:
             rows_match = (
                 _snapshot_rows_match(existing, row)
@@ -645,9 +655,10 @@ class RethinkPointInTimeRegistry(_RegistryBase):
                     f"divergent immutable {table} row"
                 )
             return
-        self._r.db(self._db_name).table(table).insert(
-            dict(row), conflict="error"
-        ).run(conn)
+        # conflict="error" counts a duplicate into the result rather than
+        # raising, exactly as the ReQL form did; the divergence check above
+        # is what actually guards immutability.
+        store.insert(table, dict(row), conflict="error")
 
     def finalize_bundle(
         self,
@@ -675,28 +686,21 @@ class RethinkPointInTimeRegistry(_RegistryBase):
     def _resolve_manifest_record(self, as_of: datetime):
         with self._connection() as conn:
             self._ensure_tables(conn)
-            rows = list(
-                self._r.db(self._db_name)
-                .table(MANIFEST_TABLE)
-                .filter(
-                    lambda row: (row["status"] == "finalized")
-                    & (row["as_of"] <= _iso_z(as_of))
-                )
-                .order_by(self._r.desc("as_of"))
-                .limit(1)
-                .run(conn)
-            )
+            from db import store
+            from db.store import P
+            sel = store.filter(
+                MANIFEST_TABLE,
+                P.field("status").eq("finalized")
+                & P.field("as_of").le(_iso_z(as_of)))
+            rows = store.run(store.limit(
+                store.order_by(sel, fields=(store.desc("as_of"),)), 1))
         return StoredManifest.from_doc(rows[0]) if rows else None
 
     def _read_snapshot(self, source_hash: str):
         with self._connection() as conn:
             self._ensure_tables(conn)
-            return (
-                self._r.db(self._db_name)
-                .table(SNAPSHOT_TABLE)
-                .get(source_hash)
-                .run(conn)
-            )
+            from db import store
+            return store.get(SNAPSHOT_TABLE, source_hash)
 
 
 def resolve_default_bundle(as_of: datetime) -> ResolvedPointInTimeBundle:

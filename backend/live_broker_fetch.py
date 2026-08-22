@@ -18,7 +18,7 @@ from typing import Any, Optional
 
 import requests
 
-from rethinkdb import RethinkDB
+from db import store
 from secret_store import decrypt
 from stock_credential_boundary import (
     StockCredentialError,
@@ -64,15 +64,27 @@ def _hash_creds(*parts: Optional[str]) -> str:
     return h.hexdigest()
 
 
+class _StoreHandle:
+    """Truthy stand-in for the old driver connection (R26)."""
+
+    def close(self, *_a, **_k):
+        return None
+
+
 def _open_db_conn():
-    rdb = RethinkDB()
-    host = os.environ.get("RETHINKDB_HOST", "localhost")
-    port = int(os.environ.get("RETHINKDB_PORT", "28015"))
-    return rdb, rdb.connect(host=host, port=port)
+    """Return ``(store_handle, conn)``, keeping the original 2-tuple shape.
+
+    The handle is the real ``db.store`` module in production; the reads below
+    go through it rather than through the module global so this stays the
+    single injection seam the tests monkeypatch. ``conn`` is inert -- the store
+    takes its own pooled connection -- but the caller's ``finally: conn.close()``
+    still runs against it.
+    """
+    return store, _StoreHandle()
 
 
 def _load_credentials(instance_id: str) -> dict:
-    """Load broker credentials for this instance from RethinkDB.
+    """Load broker credentials for this instance from the store.
 
     Returns a dict with ``error`` (None on success) plus broker-specific fields.
     Mirrors broker._load_live_credentials_from_db without importing broker.py.
@@ -85,7 +97,7 @@ def _load_credentials(instance_id: str) -> dict:
         return out
     try:
         try:
-            inst = rdb.db(_DB_NAME).table("Instances").get(str(instance_id)).run(conn)
+            inst = rdb.get("Instances", str(instance_id))
         except Exception as e:
             out["error"] = f"instance_lookup_failed: {type(e).__name__}: {e}"
             return out
@@ -101,12 +113,7 @@ def _load_credentials(instance_id: str) -> dict:
                 return out
             out["brokerage_id"] = brokerage_id
             try:
-                brokerage = (
-                    rdb.db(_DB_NAME)
-                    .table("BrokerageAccounts")
-                    .get(brokerage_id)
-                    .run(conn)
-                )
+                brokerage = rdb.get("BrokerageAccounts", brokerage_id)
             except Exception as exc:
                 out["error"] = (
                     "brokerage_lookup_failed: "
@@ -150,7 +157,7 @@ def _load_credentials(instance_id: str) -> dict:
             out["error"] = "no_brokerage_linked_and_no_legacy_creds"
             return out
         try:
-            b = rdb.db(_DB_NAME).table("BrokerageAccounts").get(brokerage_id).run(conn)
+            b = rdb.get("BrokerageAccounts", brokerage_id)
         except Exception as e:
             out["error"] = f"brokerage_lookup_failed: {type(e).__name__}: {e}"
             return out

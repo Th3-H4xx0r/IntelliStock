@@ -1,8 +1,8 @@
 """
 Price/bar data utilities for IntelliStock.
-Alpaca bars cache: cache bars by (symbol, date range, timeframe, feed) in RethinkDB
+Alpaca bars cache: cache bars by (symbol, date range, timeframe, feed) in Postgres
 to avoid repeated API calls and 429 rate limits.
-Large payloads are gzip-compressed to stay under RethinkDB document size limits.
+Large payloads are gzip-compressed to keep the cached document small.
 """
 from __future__ import annotations
 
@@ -21,14 +21,15 @@ from datetime import datetime, timedelta
 # bars without re-fetching every time on minor gaps.
 _CACHE_COVERAGE_TOLERANCE_DAYS = 7
 
-# Compress bars JSON when larger than this to avoid RethinkDB doc size / truncation
+# Compress bars JSON when larger than this to keep the cached document small
 _BARS_COMPRESS_THRESHOLD = 400_000
 
 try:
-    from rethinkdb import RethinkDB
-    _rethink = RethinkDB()
+    from db import schema as _db_schema
+    from db import store as _store
 except Exception:
-    _rethink = None
+    _store = None
+    _db_schema = None
 
 DEFAULT_DB_NAME = "IntelliStock"
 ALPACA_BARS_CACHE_TABLE = "AlpacaBarsCache"
@@ -75,12 +76,7 @@ def _ensure_bars_cache_table(conn, db_name: str, table_name: str) -> None:
     if _table_ensured.get(key):
         return
     try:
-        dbs = list(_rethink.db_list().run(conn))
-        if db_name not in dbs:
-            _rethink.db_create(db_name).run(conn)
-        tables = list(_rethink.db(db_name).table_list().run(conn))
-        if table_name not in tables:
-            _rethink.db(db_name).table_create(table_name).run(conn)
+        _db_schema.ensure_table(table_name)           # R25
         _table_ensured[key] = True
     except Exception:
         pass
@@ -102,7 +98,7 @@ def get_bars_chunk_cached(
     Return bars for one chunk: from cache if present, otherwise call fetch_fn() and store.
 
     Args:
-        conn: RethinkDB connection (or None to skip cache).
+        conn: truthy cache handle (or None to skip the cache).
         symbol: Ticker (e.g. "AAPL").
         chunk_start: Chunk start (datetime or date or YYYY-MM-DD str).
         chunk_end: Chunk end (datetime or date or YYYY-MM-DD str).
@@ -119,7 +115,7 @@ def get_bars_chunk_cached(
         _ensure_bars_cache_table(conn, db_name, table_name)
         cache_id = alpaca_bars_cache_key(symbol, chunk_start, chunk_end, timeframe, feed, adjustment)
         try:
-            doc = _rethink.db(db_name).table(table_name).get(cache_id).run(conn)
+            doc = _store.get(table_name, cache_id)
             if doc and "bars" in doc:
                 raw = doc.get("bars")
                 if raw:
@@ -146,7 +142,7 @@ def get_bars_chunk_cached(
             # responses ARE legitimately cached (delisted symbols, gaps).
             should_persist = (not bars) or _cache_chunk_is_complete(bars, chunk_start, chunk_end)
             if should_persist:
-                _rethink.db(db_name).table(table_name).insert({
+                _store.insert(table_name, {
                     "id": cache_id,
                     "symbol": symbol.upper(),
                     "start_date": _to_date_str(chunk_start),
@@ -156,7 +152,7 @@ def get_bars_chunk_cached(
                     "bars": payload,
                     "compressed": compressed,
                     "cached_at": datetime.utcnow().isoformat() + "Z",
-                }, conflict="replace").run(conn)
+                }, conflict="replace")
         except Exception:
             pass
     return (bars if isinstance(bars, list) else [], False)
