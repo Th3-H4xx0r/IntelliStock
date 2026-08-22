@@ -30,5 +30,16 @@ Adopt ra iff arms diverge AND treatment > control by +1pp AND no guard breach. E
 adoptable on mechanism alone — divergence without improvement means the old number was draw
 luck, not reasoning value.
 
-## Result (appended after the runs)
+## Result window d (bt 138148 control +1.35% / bt 608532 treatment +2.81%)
+PRIMARY FIRED: 25% overlap — the rationale request rewires decisions wholesale (implicit
+chain-of-thought confirmed as a real mechanism, not telemetry). SECONDARY: +1.46pp nominal but
+**VOID by the overlap rule** — adopting on a VOID delta is the documented anti-pattern, even
+though the preregistered rule's letter was met. Evidence state: three same-direction draws
+(ra-era +3.09 / slim +0.58 and +1.35 / ra-restored +2.81). Cache note: the control re-paid full
+price ($2.06) because f68af81's own prompt changes re-keyed the cache AND changed decisions
+(+0.58 → +1.35) — at temp 0.2, every prompt edit is a strategy change and must be A/B'd as one.
+
+DECISION DEFERRED to the window-c cold pair (readable regime) — running.
+
+## Result window c (cold pair)
 _pending_
