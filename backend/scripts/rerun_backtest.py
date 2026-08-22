@@ -36,15 +36,14 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    from rethinkdb import RethinkDB
+    from db import store as _store
     from interactive_utils import action_create_backtest  # type: ignore[import-not-found]
 
     host = os.environ.get("RETHINKDB_HOST", "localhost")
     port = int(os.environ.get("RETHINKDB_PORT", "28015"))
-    r = RethinkDB()
-    conn = r.connect(host=host, port=port)
+    r, conn = _store, None
     try:
-        src = r.db("IntelliStock").table("BacktestInstances").get(args.backtest_id).run(conn)
+        src = r.get("BacktestInstances", args.backtest_id)
         if src is None:
             print(f"[rerun] Backtest {args.backtest_id!r} not found in BacktestInstances.", file=sys.stderr)
             return 2

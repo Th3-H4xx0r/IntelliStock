@@ -66,31 +66,26 @@ class RethinkBackend:
             load_dotenv(os.path.join(os.path.dirname(_BACKEND_ROOT), ".env"))
         except Exception:
             pass
-        from rethinkdb import RethinkDB
-        self._r = RethinkDB()
-        self._conn = self._r.connect(
-            host=host or os.environ.get("RETHINKDB_HOST", "localhost"),
-            port=int(port or os.environ.get("RETHINKDB_PORT", "28015") or 28015),
-            timeout=20,
-        )
+        from db import store as _store
+        self._r = _store
+        self._conn = None
         # Audit 2026-07-18: defaulted to "test" while every other module
         # (interactive_utils, server, rethink_store) defaults "IntelliStock".
         self._db = os.environ.get("RETHINKDB_DB", "IntelliStock")
 
     def _table(self):
-        return self._r.db(self._db).table(TABLE)
+        return TABLE
 
     def iter_rows(self, batch_size):
         last_id = None
         while True:
-            query = self._table().order_by(index="id")
+            sel = self._table()
             if last_id is not None:
-                query = self._table().between(
-                    last_id, self._r.maxval, left_bound="open"
-                ).order_by(index="id")
-            batch = list(
-                query.pluck("id", "strategy_schema").limit(batch_size).run(self._conn)
-            )
+                sel = self._r.between(sel, last_id, self._r.MAXVAL,
+                                      index="id", left_bound="open")
+            batch = list(self._r.pluck(self._r.run(self._r.limit(
+                self._r.order_by(sel, index="id"), batch_size)),
+                "id", "strategy_schema"))
             if not batch:
                 return
             for row in batch:
@@ -100,14 +95,14 @@ class RethinkBackend:
     def update_row(self, row_id, patch, *, durability):
         # r.literal prevents ReQL's recursive object merge from RETAINING
         # nested secret fields under the redaction marker (audit 2026-07-18).
-        wrapped = {key: self._r.literal(value) if isinstance(value, dict) else value
+        wrapped = {key: self._r.Literal(value) if isinstance(value, dict) else value
                    for key, value in patch.items()}
-        self._table().get(row_id).update(
-            wrapped, durability=durability
-        ).run(self._conn)
+        self._r.update(self._table(), row_id, wrapped)
 
     def get_row(self, row_id):
-        return self._table().get(row_id).pluck("id", "strategy_schema").run(self._conn)
+        row = self._r.get(self._table(), row_id)
+        return self._r.pluck([row] if row else [], "id", "strategy_schema")[0] \
+            if row else None
 
 
 def main(argv=None, backend=None):
