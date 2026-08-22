@@ -61,6 +61,19 @@ def test_watch_progress_rows_never_carries_the_document(progress_schema):
         w.stop()
 
 
+def test_current_rows_projects_the_same_two_keys_as_the_feed(progress_schema):
+    """The snapshot accessor and the feed must not drift: a caller that seeds
+    from one and then follows the other has to see the same shape."""
+    import self_learning_progress as slp
+    brs.write_progress(820004, {"status": "running", "progress": 7})
+    brs.write_progress(820005, {"progress": 0})           # no status yet
+    rows = {r["id"]: r for r in slp.current_rows()}
+    assert set(rows) == {"820004", "820005"}
+    assert set(rows["820004"]) == {"id", "status"}
+    assert rows["820004"]["status"] == "running"
+    assert rows["820005"]["status"] is None
+
+
 def test_include_initial_replays_existing_rows(progress_schema):
     import self_learning_progress as slp
     brs.write_progress(820003, {"status": "finished", "progress": 100})
