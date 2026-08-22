@@ -42,3 +42,35 @@ This project is indexed by GitNexus as **IntelliStock** (58888 symbols, 107351 r
 | Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
 
 <!-- gitnexus:end -->
+
+## Datastore
+
+PostgreSQL 17 + JSONB, through `backend/db/`. **No module outside `backend/db/`
+opens a connection**, and nothing outside `scripts/migrate_rethinkdb_to_postgres.py`
+imports `rethinkdb` (`scripts/dev_fetch_backtest_fixture.py` is the one
+read-only exception, and it imports lazily).
+
+- Reads and writes: `from db import store` — `store.get / get_all / insert /
+  update / delete / between / filter / order_by / limit / count / run / iter`.
+- `store.update()` **deep-merges** (objects merge, arrays replace), matching
+  ReQL. Never write `||`.
+- `store.between(lo, hi)` is `[lo, hi)`, matching ReQL. Never write SQL
+  `BETWEEN`, which is inclusive at both ends.
+- `store.run()` raises above `PG_MAX_ROWS` (100k). Use `store.iter()` for the
+  unbounded path.
+- Change notification: `from db import watch` — `watch_row` / `watch_table` /
+  `watch_filter`. Watchers re-read on start and on every reconnect.
+- Every ordered read is `COLLATE "C"` (bytewise), because RethinkDB ordered
+  bytewise and one 80-row window decides what reaches an LLM prompt. No GIN
+  indexes anywhere.
+- DDL lives in `backend/db/schema.py` — table registry, partitioning, retention.
+  Do not write `CREATE INDEX` at a call site.
+- Local test database: `scripts/dev_pg.sh up`, then export the `PG_TEST_DSN` it
+  prints. Without it the suite runs against the in-process `FakeStore`.
+- Which `scripts/` still speak ReQL, and which will never be ported:
+  `docs/superpowers/specs/2026-08-22-postgres-port-script-triage.md`.
+- Cutover: `docs/runbooks/postgres-cutover.md`.
+
+RethinkDB is retained — service, volume, and every `RETHINKDB_*` variable —
+until the store is decommissioned. The flip is setting `PG_DSN`; the rollback is
+unsetting it, and that only works while the old configuration is still there.
