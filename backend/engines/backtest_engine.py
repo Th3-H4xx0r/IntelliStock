@@ -33,10 +33,10 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(BACKEND_DIR, '.env'))
 load_dotenv(os.path.join(os.path.dirname(BACKEND_DIR), '.env'))
 
-from rethinkdb import RethinkDB
+from db import store as db_store
+from db import watch as db_watch
 from intellistock_logger import intellistock_logger
 
-r = RethinkDB()
 DB_NAME = 'IntelliStock'
 RETHINKDB_HOST = os.environ.get('RETHINKDB_HOST', 'localhost')
 RETHINKDB_PORT = int(os.environ.get('RETHINKDB_PORT', '28015'))
@@ -192,11 +192,13 @@ def _get_instance_doc(conn, instance_id):
     """Return instance document by id. Tries string and int so BacktestInstances.instance (string) matches Instances.id (int or string)."""
     if instance_id is None:
         return None
-    inst = r.db(DB_NAME).table("Instances").get(instance_id).run(conn)
+    inst = db_store.get("Instances", instance_id)
     if inst is not None:
         return inst
+    # Instances keys are TEXT (see db/schema.py), so the int fallback the ReQL
+    # version needed can only match when the key is a numeric STRING.
     try:
-        return r.db(DB_NAME).table("Instances").get(int(instance_id)).run(conn)
+        return db_store.get("Instances", str(int(instance_id)))
     except (TypeError, ValueError):
         return None
 
@@ -223,7 +225,7 @@ def _resolve_data_brokerage_creds(conn, instance_id):
         data_bid = inst.get("alpaca_data_brokerage_id") or None
         if not data_bid:
             return None, None
-        b_doc = r.db(DB_NAME).table("BrokerageAccounts").get(data_bid).run(conn)
+        b_doc = db_store.get("BrokerageAccounts", data_bid)
         if not b_doc or (b_doc.get("brokerage_type") or "").strip().lower() != "alpaca":
             intellistock_logger.log(
                 f"alpaca_data_brokerage_id {data_bid} on instance {instance_id} "
@@ -270,7 +272,7 @@ def _backtest_avg_difficulty(conn, row) -> float:
         strategy_id = inst.get("strategy_id")
         if strategy_id is None:
             return DEFAULT_DIFFICULTY
-        strat_doc = r.db(DB_NAME).table("Strategies").get(strategy_id).run(conn)
+        strat_doc = db_store.get("Strategies", strategy_id)
         if not strat_doc:
             return DEFAULT_DIFFICULTY
         subs = strat_doc.get("strategies") or []
@@ -297,7 +299,7 @@ def _backtest_high_difficulty_trigger(conn, row):
         strategy_id = inst.get("strategy_id")
         if strategy_id is None:
             return False, None
-        strat_doc = r.db(DB_NAME).table("Strategies").get(strategy_id).run(conn)
+        strat_doc = db_store.get("Strategies", strategy_id)
         if not strat_doc:
             return False, None
         subs = strat_doc.get("strategies") or []
@@ -320,12 +322,14 @@ def _backtest_has_high_difficulty_sub(conn, row) -> bool:
 
 
 def get_conn():
-    return r.connect(host=RETHINKDB_HOST, port=RETHINKDB_PORT)
+    """R26: the store pools its own connection per operation, so there is
+    nothing to hand out. Kept for call-site arity."""
+    return None
 
 
 def wait_for_rethinkdb(max_attempts=30, delay=2):
     """
-    Wait until RethinkDB is ready and BacktestInstances table has a primary replica.
+    Wait until Postgres is ready and the BacktestInstances table is readable.
     If RETHINKDB_HOST is 'rethinkdb' (Docker) and connection is refused, tries localhost
     so the same .env works when running the engine outside Docker.
     Returns (conn, True) on success or (None, False) on failure.
@@ -336,7 +340,7 @@ def wait_for_rethinkdb(max_attempts=30, delay=2):
         try:
             conn = get_conn()
             ensure_table(conn)
-            list(r.db(DB_NAME).table(TABLE_NAME).limit(1).run(conn))
+            db_store.table_list()
             return conn, True
         except Exception as e:
             try:
@@ -349,7 +353,7 @@ def wait_for_rethinkdb(max_attempts=30, delay=2):
             # If running outside Docker with .env set for Docker (host=rethinkdb), try localhost once
             if refused and RETHINKDB_HOST == "rethinkdb" and attempt == 1:
                 intellistock_logger.log(
-                    "RethinkDB at 'rethinkdb' unreachable (running outside Docker?). Trying localhost...",
+                    "Postgres unreachable (running outside Docker?). Trying localhost...",
                     "yellow", service="BACKTEST_ENGINE",
                 )
                 RETHINKDB_HOST = "localhost"
@@ -357,23 +361,23 @@ def wait_for_rethinkdb(max_attempts=30, delay=2):
                 continue
             if attempt == max_attempts:
                 intellistock_logger.log(
-                    f"RethinkDB not ready after {max_attempts} attempts: {e}",
+                    f"Postgres not ready after {max_attempts} attempts: {e}",
                     "red", service="BACKTEST_ENGINE",
                 )
                 if refused:
                     intellistock_logger.log(
-                        "Hint: If running outside Docker, ensure RethinkDB is running (e.g. docker run -p 28015:28015 rethinkdb:2.4) and set RETHINKDB_HOST=localhost in .env",
+                        "Hint: If running outside Docker, ensure Postgres is running and PG_DSN (or POSTGRES_HOST) points at it in .env",
                         "yellow", service="BACKTEST_ENGINE",
                     )
                 return None, False
             if "primary replica" in msg or "not available" in msg or "not ready" in msg:
                 intellistock_logger.log(
-                    f"RethinkDB/table not ready (attempt {attempt}/{max_attempts}), retrying in {delay}s...",
+                    f"Postgres/table not ready (attempt {attempt}/{max_attempts}), retrying in {delay}s...",
                     "yellow", service="BACKTEST_ENGINE",
                 )
             else:
                 intellistock_logger.log(
-                    f"RethinkDB connection error (attempt {attempt}/{max_attempts}): {e}",
+                    f"Postgres connection error (attempt {attempt}/{max_attempts}): {e}",
                     "yellow", service="BACKTEST_ENGINE",
                 )
             time.sleep(delay)
@@ -385,13 +389,8 @@ RESULTS_TABLE = 'BacktestResults'
 
 def ensure_table(conn):
     """Ensure the BacktestInstances table exists."""
-    dbs = list(r.db_list().run(conn))
-    if DB_NAME not in dbs:
-        r.db_create(DB_NAME).run(conn)
-    tables = list(r.db(DB_NAME).table_list().run(conn))
-    if TABLE_NAME not in tables:
-        r.db(DB_NAME).table_create(TABLE_NAME).run(conn)
-        intellistock_logger.log(f"Created table {TABLE_NAME}", "green", service="BACKTEST_ENGINE")
+    from db import schema as _s
+    _s.ensure_schema(tables=[TABLE_NAME])
     # BacktestResults is split across three Postgres tables. ensure_schema is
     # idempotent (CREATE ... IF NOT EXISTS under an advisory lock), so this is
     # a cheap no-op on every boot but keeps the self-heal the table_create
@@ -463,15 +462,8 @@ def _check_dead_backtest_containers():
         # Pending/deferred rows also carry run=True, but do not have a container
         # yet and must remain queued until a worker slot is available.
         ensure_table(conn)
-        running_rows = list(
-            r.db(DB_NAME).table(TABLE_NAME)
-            .filter(
-                r.row["run"].eq(True)
-                & r.row["status"].eq("running")
-            )
-            .pluck("id", "instance", "status")
-            .run(conn)
-        )
+        running_rows = list(db_store.iter(db_store.filter(
+            TABLE_NAME, {"run": True, "status": "running"})))
         if not running_rows:
             return
 
@@ -515,7 +507,7 @@ def _check_dead_backtest_containers():
                     is_paused = False
                 if is_paused:
                     try:
-                        r.db(DB_NAME).table(TABLE_NAME).get(bid).update({"run": False}).run(conn)
+                        db_store.update(TABLE_NAME, bid, {"run": False})
                     except Exception:
                         pass
                 else:
@@ -524,7 +516,7 @@ def _check_dead_backtest_containers():
                     # status='running'/run=False accumulated 100+ zombies
                     # that clutter every scan (observed 2026-07-18).
                     try:
-                        r.db(DB_NAME).table(TABLE_NAME).get(bid).delete().run(conn)
+                        db_store.delete(TABLE_NAME, bid)
                     except Exception:
                         pass
                     try:
@@ -846,7 +838,7 @@ def _remove_row_and_mark_done(row_id):
     conn = None
     try:
         conn = get_conn()
-        r.db(DB_NAME).table(TABLE_NAME).get(row_id).delete().run(conn)
+        db_store.delete(TABLE_NAME, row_id)
         intellistock_logger.log(f"Backtest {row_id}: row removed from queue", "white", service="BACKTEST_ENGINE")
     except Exception as e:
         intellistock_logger.log(f"Backtest {row_id}: failed to delete row: {e}", "red", service="BACKTEST_ENGINE")
@@ -865,7 +857,9 @@ def _is_replica_unavailable_error(e):
 
 
 def _changefeed_run_once(conn):
-    for change in r.db(DB_NAME).table(TABLE_NAME).changes().run(conn):
+    # include_initial=False: _sweep_pending owns the backlog, at boot and on
+    # every reconnect, exactly as the ReQL version did.
+    for change in db_watch.feed(TABLE_NAME, include_initial=False):
         new_val = change.get('new_val')
         if new_val is None:
             continue
@@ -890,9 +884,8 @@ def _sweep_pending(conn, label="sweep"):
     engine restart. Called at boot, on every changefeed (re)connect, and
     periodically from the main loop. Dedup-guarded: never double-queues."""
     try:
-        cursor = r.db(DB_NAME).table(TABLE_NAME).filter(
-            r.row['status'].eq('pending')
-        ).order_by('id').run(conn)
+        cursor = db_store.iter(db_store.order_by(
+            db_store.filter(TABLE_NAME, {"status": "pending"}), index="id"))
         picked = 0
         for row in cursor:
             row_id = row.get('id')
@@ -1119,9 +1112,11 @@ def main():
                 row_id = row.get('id')
                 try:
                     # Only transition pending -> running so we never start the same backtest twice (avoid duplicate containers / 409)
-                    update_result = r.db(DB_NAME).table(TABLE_NAME).filter(
-                        r.row['id'].eq(row_id) & r.row['status'].eq('pending')
-                    ).update({'status': 'running', 'run': True}).run(conn_here)
+                    update_result = db_store.update(
+                        TABLE_NAME,
+                        db_store.filter(TABLE_NAME,
+                                        {"id": row_id, "status": "pending"}),
+                        {'status': 'running', 'run': True})
                     if (update_result.get('replaced') or 0) < 1:
                         intellistock_logger.log(
                             "Backtest %s: skipped (already running or removed)." % row_id,

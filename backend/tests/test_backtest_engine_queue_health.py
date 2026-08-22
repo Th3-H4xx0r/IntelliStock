@@ -125,66 +125,55 @@ class _Connection:
         return None
 
 
-def test_container_health_check_preserves_pending_row_without_container(monkeypatch):
+def test_container_health_check_preserves_pending_row_without_container(
+        pg_schema, monkeypatch):
     """A queued job is not dead merely because its container has not launched."""
+    from db import schema as dbschema
+    from db import store as dbstore
+    dbschema.ensure_schema(tables=["BacktestInstances"])
+    dbstore.insert("BacktestInstances", {
+        "id": 276226, "instance": "alpaca-main", "status": "pending",
+        "run": True,
+    }, conflict="replace")
+
     original_cwd = os.getcwd()
     try:
         from engines import backtest_engine as engine
     finally:
         os.chdir(original_cwd)
 
-    state = _State(
-        queue_rows=[
-            {
-                "id": 276226,
-                "instance": "alpaca-main",
-                "status": "pending",
-                "run": True,
-            }
-        ]
-    )
-    monkeypatch.setattr(engine, "r", _Rethink(state))
     monkeypatch.setattr(engine, "_get_docker_client", lambda: _DockerClient())
-    monkeypatch.setattr(engine, "get_conn", lambda: _Connection())
-    monkeypatch.setattr(engine, "ensure_table", lambda _conn: None)
+    monkeypatch.setattr(engine, "get_conn", lambda: None)
+    monkeypatch.setattr(engine, "ensure_table", lambda _conn=None: None)
     monkeypatch.setattr(engine, "_container_launch_times", {})
     monkeypatch.setattr(engine, "_queued_or_active_ids", {276226})
 
     engine._check_dead_backtest_containers()
 
-    assert state.queue_deletes == []
-    assert state.result_updates == []
+    # The row is still queued: not deleted, and not flipped to run=False.
+    row = dbstore.get("BacktestInstances", 276226)
+    assert row is not None, "the pending queue row was deleted"
+    assert row.get("run") is True
+    assert row.get("status") == "pending"
 
 
-class _RethinkWithoutBacktestResults(_Rethink):
-    """The endpoint state of the Postgres port: the vestigial RethinkDB
-    "BacktestResults" table has been dropped, so table_list() no longer names
-    it. The engine's paused-run protection reads Postgres and must survive
-    that (controller ruling R17)."""
-
-    def db(self, _name):
-        return _DbWithoutBacktestResults(self.state)
-
-
-class _DbWithoutBacktestResults(_Db):
-    def table_list(self):
-        query = _Query(self.state, operation="table_list")
-        query.tables_override = ["BacktestInstances"]
-        return query
-
-
-def test_paused_run_survives_when_the_reql_table_list_lacks_backtestresults(
+def test_paused_run_survives_when_backtestresults_lives_in_postgres(
         pg_schema, monkeypatch):
-    """R17 regression: the queue row of a PAUSED run must be kept (run=False),
-    not deleted, even though the RethinkDB table list no longer carries
-    "BacktestResults" -- the status now lives in Postgres."""
+    """R17 regression: the queue row of a PAUSED run must be KEPT (run=False),
+    not deleted. The status lives in Postgres, so the old RethinkDB table-list
+    gate that used to guard this read is gone entirely."""
     from db import schema as dbschema
+    from db import store as dbstore
     dbschema.ensure_schema(tables=["BacktestResults", "BacktestSteps",
                                    "BacktestProgress", "BacktestInstances"])
     import backtest_result_store as brs
     brs.write_stub({"id": 700123, "backtest_id": 700123, "status": "running",
                     "progress": 0})
     brs.write_progress(700123, {"status": "paused_llm_critical"})
+    dbstore.insert("BacktestInstances", {
+        "id": 700123, "instance": "alpaca-main", "status": "running",
+        "run": True,
+    }, conflict="replace")
 
     original_cwd = os.getcwd()
     try:
@@ -192,22 +181,16 @@ def test_paused_run_survives_when_the_reql_table_list_lacks_backtestresults(
     finally:
         os.chdir(original_cwd)
 
-    state = _State(
-        queue_rows=[
-            {"id": 700123, "instance": "alpaca-main", "status": "running",
-             "run": True},
-        ]
-    )
-    monkeypatch.setattr(engine, "r", _RethinkWithoutBacktestResults(state))
     monkeypatch.setattr(engine, "_get_docker_client", lambda: _DockerClient())
-    monkeypatch.setattr(engine, "get_conn", lambda: _Connection())
-    monkeypatch.setattr(engine, "ensure_table", lambda _conn: None)
+    monkeypatch.setattr(engine, "get_conn", lambda: None)
+    monkeypatch.setattr(engine, "ensure_table", lambda _conn=None: None)
     monkeypatch.setattr(engine, "_container_launch_times", {})
     monkeypatch.setattr(engine, "_queued_or_active_ids", {700123})
 
     engine._check_dead_backtest_containers()
 
     # Kept, not deleted: the paused row waits for the operator to resume it.
-    assert state.queue_deletes == []
-    assert state.result_updates == [(700123, {"run": False})]
+    row = dbstore.get("BacktestInstances", 700123)
+    assert row is not None, "the paused run's queue row was deleted"
+    assert row.get("run") is False
     assert brs.read_status(700123) == "paused_llm_critical"
