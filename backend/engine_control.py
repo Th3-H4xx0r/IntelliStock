@@ -1,15 +1,12 @@
 """
-Single RethinkDB table EngineControl: one document per engine.
+Single EngineControl table: one document per engine.
 Each engine listens to its document for control changes (running, config, etc.).
 Server and API/CLI use this for all engine setup and config.
 """
 
 from datetime import datetime, timezone
 
-from rethinkdb import RethinkDB
-
-r = RethinkDB()
-DB_NAME = "IntelliStock"
+from db import schema, store
 
 ENGINE_CONTROL_TABLE = "EngineControl"
 
@@ -128,32 +125,28 @@ def default_doc(engine_id: str) -> dict:
     return {"id": engine_id, "running": False, "config": {}}
 
 
-def ensure_engine_control_table(conn):
-    """Ensure EngineControl table exists and has a default document for each engine."""
-    dbs = list(r.db_list().run(conn))
-    if DB_NAME not in dbs:
-        r.db_create(DB_NAME).run(conn)
-    tables = list(r.db(DB_NAME).table_list().run(conn))
-    if ENGINE_CONTROL_TABLE not in tables:
-        r.db(DB_NAME).table_create(ENGINE_CONTROL_TABLE).run(conn)
+def ensure_engine_control_table(conn=None):
+    """Ensure EngineControl exists and has a default document for each engine.
+
+    ``conn`` is kept for call-site arity and ignored -- the store pools its own
+    connection per operation.
+    """
+    schema.ensure_table(ENGINE_CONTROL_TABLE)
     for engine_id in ALL_ENGINE_IDS:
-        doc = r.db(DB_NAME).table(ENGINE_CONTROL_TABLE).get(engine_id).run(conn)
+        doc = store.get(ENGINE_CONTROL_TABLE, engine_id)
         if doc is None:
-            r.db(DB_NAME).table(ENGINE_CONTROL_TABLE).insert(default_doc(engine_id)).run(conn)
+            store.insert(ENGINE_CONTROL_TABLE, default_doc(engine_id))
 
 
 def get_engine_doc(conn, engine_id: str) -> dict | None:
-    """Get the control document for an engine."""
+    """Get the control document for an engine. ``conn`` is ignored."""
     ensure_engine_control_table(conn)
-    return r.db(DB_NAME).table(ENGINE_CONTROL_TABLE).get(engine_id).run(conn)
+    return store.get(ENGINE_CONTROL_TABLE, engine_id)
 
 
 def update_engine_doc(conn, engine_id: str, update: dict):
-    """Update fields in an engine's control document. Merges with existing."""
+    """Update fields in an engine's control document. Merges with existing.
+
+    ``conn`` is ignored."""
     ensure_engine_control_table(conn)
-    r.db(DB_NAME).table(ENGINE_CONTROL_TABLE).get(engine_id).update(update).run(conn)
-
-
-def engine_changes(conn, engine_id: str):
-    """Changefeed for a single engine document."""
-    return r.db(DB_NAME).table(ENGINE_CONTROL_TABLE).get(engine_id).changes().run(conn)
+    store.update(ENGINE_CONTROL_TABLE, engine_id, update)

@@ -24,8 +24,7 @@ import hashlib
 import re
 from datetime import datetime
 from typing import Dict
-from rethinkdb import RethinkDB
-from rethink_changefeed import run_reconnecting_changefeed
+from db import schema, store, watch
 import socketio
 from waitress import serve
 from os import system
@@ -40,10 +39,10 @@ load_dotenv(os.path.join(os.path.dirname(BACKEND_DIR), '.env'))
 # GLOBAL VARIABLES
 ############################
 
-r = RethinkDB()
+# Coordinates handed to spawned containers via their environment. The server
+# itself no longer opens a document-database connection -- db.pool owns that.
 RETHINKDB_HOST = os.environ.get('RETHINKDB_HOST', 'localhost')
 RETHINKDB_PORT = os.environ.get('RETHINKDB_PORT', '28015')
-DB_NAME = 'IntelliStock'
 
 running_threads = []
 running_threads_objs = {}
@@ -91,7 +90,7 @@ nexus_container_poll_thread = None
 
 callback_done = threading.Event()
 
-# RethinkDB connection (set in run() after connecting)
+# Legacy handle; the store owns pooling now.
 conn = None
 
 clientList = {}
@@ -102,9 +101,18 @@ clientOwners = {}
 # Price service runs separately. Discover and Nexus are server-managed engine containers.
 
 
-def get_conn():
-    """Create a new RethinkDB connection (connections are not thread-safe)."""
-    return r.connect(host=RETHINKDB_HOST, port=RETHINKDB_PORT)
+def _watch_engine_control(on_change, *, label='engine-control',
+                          should_continue=None):
+    """Whole-table EngineControl watch. Replaces the 5 identical changefeeds.
+
+    The handlers take (change, conn); the connection was only ever used to
+    issue queries, which now go through the store, so None is passed.
+    """
+    return watch.watch_table(
+        ENGINE_CONTROL_TABLE, lambda change: on_change(change, None),
+        label=label, include_initial=True,
+        log=intellistock_logger.log, should_continue=should_continue,
+    )
 
 
 def register_socket_client(sio, sid, data, *, master_key=None):
@@ -219,66 +227,49 @@ def _preflight_instance_launch(instance_id, *, client=None):
 
 
 def _fresh_instance_docs(instance_id):
-    connection = get_conn()
-    try:
-        instance = r.db(DB_NAME).table("Instances").get(str(instance_id)).run(connection)
-        if type(instance) is not dict:
-            raise LiveReadinessError("instance configuration is unavailable")
-        brokerage = r.db(DB_NAME).table("BrokerageAccounts").get(instance.get("brokerage_id")).run(connection) if instance.get("brokerage_id") else {}
-        return instance, brokerage if type(brokerage) is dict else {}
-    finally:
-        connection.close()
+    instance = store.get("Instances", str(instance_id))
+    if type(instance) is not dict:
+        raise LiveReadinessError("instance configuration is unavailable")
+    brokerage = store.get("BrokerageAccounts", instance.get("brokerage_id")) if instance.get("brokerage_id") else {}
+    return instance, brokerage if type(brokerage) is dict else {}
 
 
-def wait_for_rethinkdb(max_attempts=30, delay=2):
+def wait_for_database(max_attempts=30, delay=2):
     """
-    Wait until RethinkDB is ready (connection + primary replica available).
-    Returns (conn, True) on success or (None, False) on failure.
+    Wait until the database is ready (schema present + Instances readable).
+    Returns (None, True) on success or (None, False) on failure.
     """
     for attempt in range(1, max_attempts + 1):
         try:
-            c = get_conn()
-            ensure_db_and_tables(c)
-            # Verify Instances table is readable (primary replica ready)
-            list(r.db(DB_NAME).table('Instances').run(c))
-            return c, True
+            ensure_db_and_tables(None)
+            # Verify Instances table is readable
+            store.count('Instances')
+            return None, True
         except Exception as e:
-            try:
-                c.close()
-            except Exception:
-                pass
             if attempt == max_attempts:
-                intellistock_logger.log(f"RethinkDB not ready after {max_attempts} attempts: {e}", "red", service="SERVER")
+                intellistock_logger.log(f"Database not ready after {max_attempts} attempts: {e}", "red", service="SERVER")
                 return None, False
-            intellistock_logger.log(f"RethinkDB not ready (attempt {attempt}/{max_attempts}), retrying in {delay}s...", "yellow", service="SERVER")
+            intellistock_logger.log(f"Database not ready (attempt {attempt}/{max_attempts}), retrying in {delay}s...", "yellow", service="SERVER")
             time.sleep(delay)
     return None, False
 
 
-def ensure_db_and_tables(c):
-    """Ensure IntelliStock database and all required tables exist."""
-    try:
-        r.db_list().run(c)
-    except Exception:
-        raise
-    dbs = list(r.db_list().run(c))
-    if DB_NAME not in dbs:
-        r.db_create(DB_NAME).run(c)
+def ensure_db_and_tables(c=None):
+    """Ensure all required tables exist. ``c`` is ignored (the store pools)."""
     tables = ('Config', 'Instances', 'LivePricesStocks', 'LivePrices', 'PriceHistory', 'Strategies', 'BacktestResults', 'BacktestInstances', 'AIBacktestingResults', 'AgentBest', 'GraphNexusNewsCache', 'GraphNexusProgress', 'EngineControl', 'EarningsLLMCache', 'BrokerageAccounts', 'Models', 'LearningObservations', 'LearningObservationRollups', 'LearningFindings', 'LearningFunnels', 'LearningConfig')
     for table in tables:
-        if table not in list(r.db(DB_NAME).table_list().run(c)):
-            r.db(DB_NAME).table_create(table).run(c)
+        schema.ensure_table(table)
     # Ensure Config has Pings and Config documents (Pings for core/price/discover ping; Config kept for backward compat)
-    if r.db(DB_NAME).table('Config').get('Pings').run(c) is None:
-        r.db(DB_NAME).table('Config').insert({'id': 'Pings', 'corePing': None, 'coreResponse': None}).run(c)
-    if r.db(DB_NAME).table('Config').get('Config').run(c) is None:
-        r.db(DB_NAME).table('Config').insert({
+    if store.get('Config', 'Pings') is None:
+        store.insert('Config', {'id': 'Pings', 'corePing': None, 'coreResponse': None})
+    if store.get('Config', 'Config') is None:
+        store.insert('Config', {
             'id': 'Config',
             'runPriceService': True,
             'terminatePriceService': False,
             'terminatePriceBroker': False,
             'terminateDiscoverService': False,
-        }).run(c)
+        })
     # Single EngineControl table: one document per engine (all setup/config here)
     try:
         from engine_control import ensure_engine_control_table
@@ -1040,10 +1031,8 @@ def start_discover_container():
         intellistock_logger.log("Failed to start Discover container: %s" % e, "red", service="SERVER")
         discover_container_obj = None
         try:
-            c = get_conn()
             from engine_control import update_engine_doc
-            update_engine_doc(c, ENGINE_ID_DISCOVER, {"running": False})
-            c.close()
+            update_engine_doc(None, ENGINE_ID_DISCOVER, {"running": False})
         except Exception:
             pass
         return None
@@ -1146,10 +1135,8 @@ def start_self_learning_container():
         intellistock_logger.log("Failed to start Self-Learning container: %s" % e, "red", service="SERVER")
         self_learning_container_obj = None
         try:
-            c = get_conn()
             from engine_control import update_engine_doc
-            update_engine_doc(c, ENGINE_ID_SELF_LEARNING, {"running": False})
-            c.close()
+            update_engine_doc(None, ENGINE_ID_SELF_LEARNING, {"running": False})
         except Exception:
             pass
         return None
@@ -1207,22 +1194,14 @@ def run_self_learning_control_change(change, c):
 def run_self_learning_control_changefeed():
     """Run changefeed on EngineControl; start/stop the Self-Learning container
     when self_learning_engine.running changes."""
-    run_reconnecting_changefeed(
-        lambda c: r.db(DB_NAME).table(ENGINE_CONTROL_TABLE).changes().run(c),
-        run_self_learning_control_change,
-        "SelfLearningControl",
-        get_conn=get_conn,
-        log=intellistock_logger.log,
-    )
+    _watch_engine_control(run_self_learning_control_change, label="SelfLearningControl").start()
 
 
 def launch_self_learning_from_db():
     """On startup, start the Self-Learning container if it is flagged running."""
     global self_learning_container_obj
     try:
-        c = get_conn()
-        doc = get_engine_doc(c, ENGINE_ID_SELF_LEARNING)
-        c.close()
+        doc = get_engine_doc(None, ENGINE_ID_SELF_LEARNING)
         if doc and doc.get("running") and self_learning_container_obj is None:
             start_self_learning_container()
     except Exception as e:
@@ -1413,10 +1392,8 @@ def start_nexus_container():
         intellistock_logger.log("Failed to start Graph Nexus container: %s" % e, "red", service="SERVER")
         nexus_container_obj = None
         try:
-            c = get_conn()
             from engine_control import update_engine_doc
-            update_engine_doc(c, ENGINE_ID_NEXUS_GRAPH, {"running": False})
-            c.close()
+            update_engine_doc(None, ENGINE_ID_NEXUS_GRAPH, {"running": False})
         except Exception:
             pass
         return None
@@ -1474,13 +1451,7 @@ def run_nexus_control_changefeed():
 
     Self-healing: reconnects on any transient RethinkDB connection loss instead
     of letting the daemon thread die (2026-07-06 outage regression)."""
-    run_reconnecting_changefeed(
-        lambda c: r.db(DB_NAME).table(ENGINE_CONTROL_TABLE).changes().run(c),
-        run_nexus_control_change,
-        "NexusControl",
-        get_conn=get_conn,
-        log=intellistock_logger.log,
-    )
+    _watch_engine_control(run_nexus_control_change, label="NexusControl").start()
 
 
 def run_discover_control_change(change, c):
@@ -1515,22 +1486,14 @@ def run_discover_control_changefeed():
 
     Self-healing: reconnects on any transient RethinkDB connection loss instead
     of letting the daemon thread die (2026-07-06 outage regression)."""
-    run_reconnecting_changefeed(
-        lambda c: r.db(DB_NAME).table(ENGINE_CONTROL_TABLE).changes().run(c),
-        run_discover_control_change,
-        "DiscoverControl",
-        get_conn=get_conn,
-        log=intellistock_logger.log,
-    )
+    _watch_engine_control(run_discover_control_change, label="DiscoverControl").start()
 
 
 def launch_digest_from_db():
     """On startup, start the digest container if EngineControl.daily_digest_engine.running is True."""
     global digest_container_obj
     try:
-        c = get_conn()
-        doc = get_engine_doc(c, ENGINE_ID_DAILY_DIGEST)
-        c.close()
+        doc = get_engine_doc(None, ENGINE_ID_DAILY_DIGEST)
         if doc and doc.get("running") and digest_container_obj is None:
             start_digest_container()
     except Exception as e:
@@ -1541,9 +1504,7 @@ def launch_discover_from_db():
     """On startup, start the discover container if EngineControl.discover_engine.running is True."""
     global discover_container_obj
     try:
-        c = get_conn()
-        doc = get_engine_doc(c, ENGINE_ID_DISCOVER)
-        c.close()
+        doc = get_engine_doc(None, ENGINE_ID_DISCOVER)
         if doc and doc.get("running") and discover_container_obj is None:
             start_discover_container()
     except Exception as e:
@@ -1554,9 +1515,7 @@ def launch_nexus_from_db():
     """On startup, start the Graph Nexus container if EngineControl.nexus_graph_engine.running is True."""
     global nexus_container_obj
     try:
-        c = get_conn()
-        doc = get_engine_doc(c, ENGINE_ID_NEXUS_GRAPH)
-        c.close()
+        doc = get_engine_doc(None, ENGINE_ID_NEXUS_GRAPH)
         if doc and doc.get("running") and nexus_container_obj is None:
             start_nexus_container()
     except Exception as e:
@@ -1569,7 +1528,7 @@ def status_service_change(change, c):
         new_val = change.get('new_val')
         if new_val and 'corePing' in new_val:
             request = new_val['corePing']
-            r.db(DB_NAME).table('Config').get('Pings').update({'coreResponse': request}).run(c)
+            store.update('Config', 'Pings', {'coreResponse': request})
     except Exception as e:
         print(e)
 
@@ -1687,13 +1646,7 @@ def run_digest_control_changefeed():
 
     Self-healing: reconnects on any transient RethinkDB connection loss instead
     of letting the daemon thread die (2026-07-06 outage regression)."""
-    run_reconnecting_changefeed(
-        lambda c: r.db(DB_NAME).table(ENGINE_CONTROL_TABLE).changes().run(c),
-        run_digest_control_change,
-        "DigestControl",
-        get_conn=get_conn,
-        log=intellistock_logger.log,
-    )
+    _watch_engine_control(run_digest_control_change, label="DigestControl").start()
 
 
 def launch_instances_from_db():
@@ -1703,16 +1656,9 @@ def launch_instances_from_db():
     global thread_count
     for attempt in range(1, 16):
         try:
-            c = get_conn()
-            cursor = r.db(DB_NAME).table('Instances').run(c)
-            docs = list(cursor)
-            c.close()
+            docs = store.run(store.Selection('Instances'))
             break
         except Exception as e:
-            try:
-                c.close()
-            except Exception:
-                pass
             if "primary replica" in str(e).lower() or "not available" in str(e).lower():
                 if attempt < 15:
                     intellistock_logger.log(f"Instances table not ready (attempt {attempt}/15), retrying in 2s...", "yellow", service="SERVER")
@@ -1744,17 +1690,11 @@ def launch_agent_from_db():
     global agent_container_obj
     for attempt in range(1, 6):
         try:
-            c = get_conn()
-            doc = get_engine_doc(c, ENGINE_ID_AI_BACKTEST)
-            c.close()
+            doc = get_engine_doc(None, ENGINE_ID_AI_BACKTEST)
             if doc and doc.get('running') and agent_container_obj is None:
                 start_agent_container()
             return
         except Exception as e:
-            try:
-                c.close()
-            except Exception:
-                pass
             if attempt < 5:
                 time.sleep(2)
     intellistock_logger.log("Could not read EngineControl (agent) for startup", "yellow", service="SERVER")
@@ -1766,8 +1706,7 @@ def check_resume_timer():
     from engine_control import update_engine_doc
     while True:
         try:
-            c = get_conn()
-            doc = get_engine_doc(c, ENGINE_ID_AI_BACKTEST)
+            doc = get_engine_doc(None, ENGINE_ID_AI_BACKTEST)
             if doc:
                 resume_at_str = doc.get('resume_at')
                 if resume_at_str:
@@ -1776,7 +1715,7 @@ def check_resume_timer():
                         now = datetime.utcnow().replace(tzinfo=resume_at.tzinfo) if resume_at.tzinfo else datetime.utcnow()
                         if resume_at <= now:
                             intellistock_logger.log("Scheduled resume time reached; clearing resume_at, ensuring running=True, and clearing paused.", "green", service="SERVER")
-                            update_engine_doc(c, ENGINE_ID_AI_BACKTEST, {
+                            update_engine_doc(None, ENGINE_ID_AI_BACKTEST, {
                                 'resume_at': None,
                                 'running': True,
                                 'paused': False,
@@ -1784,7 +1723,6 @@ def check_resume_timer():
                             })
                     except Exception as e:
                         intellistock_logger.log(f"Error checking resume_at: {e}", "yellow", service="SERVER")
-            c.close()
         except Exception as e:
             intellistock_logger.log(f"Resume timer check error: {e}", "yellow", service="SERVER")
         time.sleep(10)
@@ -1795,13 +1733,7 @@ def run_agent_control_changefeed():
 
     Self-healing: reconnects on any transient RethinkDB connection loss instead
     of letting the daemon thread die (2026-07-06 outage regression)."""
-    run_reconnecting_changefeed(
-        lambda c: r.db(DB_NAME).table(ENGINE_CONTROL_TABLE).changes().run(c),
-        run_agent_control_change,
-        "AgentControl",
-        get_conn=get_conn,
-        log=intellistock_logger.log,
-    )
+    _watch_engine_control(run_agent_control_change, label="AgentControl").start()
 
 
 def run():
@@ -1821,12 +1753,12 @@ def run():
 
     intellistock_logger.log("Service is currently \033[31mOffline", "green", service="STATUS")
 
-    intellistock_logger.log("\nConnecting to RethinkDB...", "yellow", service="SERVER")
-    conn, ok = wait_for_rethinkdb(max_attempts=30, delay=2)
+    intellistock_logger.log("\nConnecting to the database...", "yellow", service="SERVER")
+    conn, ok = wait_for_database(max_attempts=30, delay=2)
     if not ok:
-        intellistock_logger.log("Exiting: could not connect to RethinkDB.", "red", service="SERVER")
+        intellistock_logger.log("Exiting: could not connect to the database.", "red", service="SERVER")
         return
-    intellistock_logger.log("RethinkDB connected.", "green", service="SERVER")
+    intellistock_logger.log("Database connected.", "green", service="SERVER")
 
     intellistock_logger.log("\nService starting", "yellow", service="SERVER")
 
@@ -1846,69 +1778,62 @@ def run():
     },)
 
     def socketServer():
-        # Use a dedicated connection per thread (RethinkDB connections are not thread-safe)
-        thread_conn = get_conn()
-        try:
-            @sio.event
-            def connect(sid, environ):
-                pass
+        @sio.event
+        def connect(sid, environ):
+            pass
 
-            @sio.event
-            def clientType(sid, data):
-                register_socket_client(sio, sid, data)
+        @sio.event
+        def clientType(sid, data):
+            register_socket_client(sio, sid, data)
 
-            @sio.event
-            def disconnect(sid):
-                global clientList
-                global priceBrokerUID
-                global brokersList
+        @sio.event
+        def disconnect(sid):
+            global clientList
+            global priceBrokerUID
+            global brokersList
 
-                unregister_socket_client(sid)
+            unregister_socket_client(sid)
 
-                if priceBrokerUID == sid:
-                    r.db(DB_NAME).table('Config').get('Config').update({'runPriceService': True}).run(thread_conn)
-                    try:
-                        from engine_control import ENGINE_ID_PRICE, update_engine_doc
-                        update_engine_doc(thread_conn, ENGINE_ID_PRICE, {"run_price_service": True})
-                    except Exception:
-                        pass
-                    sio.emit('priceBroker', {'run': True})
-                    print("PRICE BROKER STOPPED")
-                    priceBrokerUID = ''
+            if priceBrokerUID == sid:
+                store.update('Config', 'Config', {'runPriceService': True})
+                try:
+                    from engine_control import ENGINE_ID_PRICE, update_engine_doc
+                    update_engine_doc(None, ENGINE_ID_PRICE, {"run_price_service": True})
+                except Exception:
+                    pass
+                sio.emit('priceBroker', {'run': True})
+                print("PRICE BROKER STOPPED")
+                priceBrokerUID = ''
 
-                clientList = {key: val for key, val in clientList.items() if val != sid}
+            clientList = {key: val for key, val in clientList.items() if val != sid}
 
-            serve(app, host='0.0.0.0', port=5000, threads=8)
-        finally:
-            thread_conn.close()
+        serve(app, host='0.0.0.0', port=5000, threads=8)
 
     socketThread = threading.Thread(target=socketServer)
     socketThread.start()
     intellistock_logger.log("\nService is currently \033[04m\033[01mOnline", "green", service="STATUS")
 
     def run_config_changefeed():
-        """Run changefeed on Config.Pings and call status_service_change.
+        """Watch Config.Pings and call status_service_change.
 
-        Self-healing: reconnects on any transient RethinkDB connection loss."""
-        run_reconnecting_changefeed(
-            lambda c: r.db(DB_NAME).table('Config').get('Pings').changes().run(c),
-            status_service_change,
-            "Config",
-            get_conn=get_conn,
+        Self-healing: the watcher reconnects on any transient connection loss
+        and re-reads on every reconnect."""
+        watch.watch_row(
+            'Config', 'Pings', lambda change: status_service_change(change, None),
+            label='pings', include_initial=True,
             log=intellistock_logger.log,
-        )
+        ).start()
 
     def run_instances_changefeed():
-        """Run changefeed on Instances and call run_thread_service_change.
+        """Watch Instances and call run_thread_service_change.
 
-        Self-healing: reconnects on any transient RethinkDB connection loss."""
-        run_reconnecting_changefeed(
-            lambda c: r.db(DB_NAME).table('Instances').changes().run(c),
-            run_thread_service_change,
-            "Instances",
-            get_conn=get_conn,
+        Self-healing: the watcher reconnects on any transient connection loss
+        and re-reads on every reconnect."""
+        watch.watch_table(
+            'Instances', lambda change: run_thread_service_change(change, None),
+            label='instances', include_initial=True,
             log=intellistock_logger.log,
-        )
+        ).start()
 
     config_feed_thread = threading.Thread(target=run_config_changefeed, daemon=True)
     config_feed_thread.start()

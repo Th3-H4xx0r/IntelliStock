@@ -19,11 +19,12 @@ import subprocess
 import threading
 import traceback
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 from os import system
 
-from rethinkdb import RethinkDB
 from dotenv import load_dotenv
+
+from db import store, watch
 
 from intellistock_logger import intellistock_logger
 
@@ -39,7 +40,7 @@ _crash_loop_latched = False
 # so the live-trading log stays viewable in logs-history and the operator gets a
 # notification. Operator Stop (runCommand=False) still exits cleanly. Gated to
 # equities — Kalshi keeps its own kalshi/runner.py crash handling.
-from rethink_changefeed import is_transient_rethinkdb_error
+from rethink_changefeed import is_transient_db_error
 
 CHANGEFEED_RETRY_MAX = int(os.environ.get("INSTANCE_CHANGEFEED_RETRY_MAX", "3"))
 _KEEPALIVE_ENABLED = True   # set from the Instances row 'kind' at startup
@@ -51,10 +52,6 @@ _crash_entered = False
 ############################
 
 load_dotenv()
-r = RethinkDB()
-RETHINKDB_HOST = os.environ.get('RETHINKDB_HOST', 'localhost')
-RETHINKDB_PORT = int(os.environ.get('RETHINKDB_PORT', '28015'))
-DB_NAME = 'IntelliStock'
 
 BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -191,19 +188,22 @@ instance_secret = ''   # from Instances[instance_id].secret (loaded from DB)
 args_list = sys.argv
 
 
-def get_conn():
-    """Create a new RethinkDB connection (connections are not thread-safe)."""
-    return r.connect(host=RETHINKDB_HOST, port=RETHINKDB_PORT)
+def _now_iso():
+    """UTC now as an ISO-8601 string.
+
+    The old `r.now()` wrote a native time value that JSON-serialised to
+    `{"$reql_type$": "TIME", "epoch_time": ...}`. The store exposes no server
+    now(), and every reader of these three fields already accepts the ISO
+    string form (interactive_utils.py:1477-1483), which is also what
+    `started_at` has always been written as.
+    """
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def safe_close(conn):
-    """Close RethinkDB connection without raising when the connection is already dead (e.g. server shut down)."""
-    if conn is None:
-        return
-    try:
-        conn.close()
-    except Exception:
-        pass  # Socket may already be None or closed when RethinkDB server shuts down first
+    """No-op kept for call-site arity: the store owns its own pooled
+    connections, so there is nothing left to close."""
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +227,7 @@ def _operator_stop_requested(conn, instance_id):
     that may end a crash keep-alive block. DB errors read as 'no stop' so a flaky
     DB never ends the block prematurely."""
     try:
-        doc = r.db(DB_NAME).table('Instances').get(instance_id).run(conn)
+        doc = store.get('Instances', instance_id)
         return bool(doc) and doc.get('runCommand', True) is False
     except Exception:
         return False
@@ -250,16 +250,12 @@ def _mark_instance_crashed(instance_id, reason):
     """Flag the Instances row crashed (running stays True so the container is not
     reaped and the dashboard can show a 'crashed' badge). Best-effort."""
     try:
-        conn = get_conn()
-        try:
-            r.db(DB_NAME).table('Instances').get(str(instance_id)).update({
-                'crashed': True,
-                'crashed_at': r.now(),
-                'running': True,
-                'status': 'crashed',
-            }).run(conn)
-        finally:
-            safe_close(conn)
+        store.update('Instances', str(instance_id), {
+            'crashed': True,
+            'crashed_at': _now_iso(),
+            'running': True,
+            'status': 'crashed',
+        })
     except Exception as e:
         intellistock_logger.log(f"Failed to record crashed status: {e}", "yellow", service="INSTANCE")
 
@@ -275,19 +271,14 @@ def _block_until_operator_stop(poll_sec=2.0, max_iterations=None):
     while max_iterations is None or i < max_iterations:
         i += 1
         time.sleep(poll_sec)
-        conn = None
         try:
-            conn = get_conn()
-            if _operator_stop_requested(conn, instance_id):
+            if _operator_stop_requested(None, instance_id):
                 intellistock_logger.log(
                     "Operator Stop during crash keep-alive; exiting.", "green", service="STATUS",
                 )
-                safe_close(conn)
                 os._exit(0)
         except Exception:
             pass  # DB unreachable → keep blocking
-        finally:
-            safe_close(conn)
 
 
 def trip_crash(reason, exc=None):
@@ -358,19 +349,19 @@ def enter_crash_keepalive(reason, exc=None):
     _block_until_operator_stop()
 
 
-def terminate_thread_on_command(conn):
+def terminate_thread_on_command(conn=None):
     """Watch this instance's document in Instances; exit when runCommand becomes False.
 
-    On a changefeed error, reconnect up to CHANGEFEED_RETRY_MAX times with backoff
-    so a transient RethinkDB blip self-heals. A persistent failure trips crash
+    On a watcher error, reconnect up to CHANGEFEED_RETRY_MAX times with backoff
+    so a transient database blip self-heals. A persistent failure trips crash
     keep-alive (equities) instead of silently stopping the container. Kalshi keeps
-    the original behavior (exit on the first error)."""
+    the original behavior (exit on the first error). ``conn`` is ignored."""
     global args_list, broker_process
     instance_id = args_list[1]
     attempts = 0
     while True:
         try:
-            for change in r.db(DB_NAME).table('Instances').get(instance_id).changes().run(conn):
+            for change in watch.feed('Instances', row_id=instance_id):
                 attempts = 0  # a healthy feed resets the retry budget
                 new_val = change.get('new_val')
                 if new_val is None:
@@ -379,46 +370,39 @@ def terminate_thread_on_command(conn):
                 if run_cmd is False:
                     intellistock_logger.log("Exiting program (runCommand=False)", "yellow", service="INSTANCE")
                     try:
-                        r.db(DB_NAME).table('Instances').get(instance_id).update({'running': False}).run(conn)
+                        store.update('Instances', instance_id, {'running': False})
                     except Exception:
                         pass
                     if broker_process and broker_process.poll() is None:
                         broker_process.terminate()
                     intellistock_logger.log("Instance stopped by command", "green", service="STATUS")
-                    safe_close(conn)
                     os._exit(0)
             # Changefeed ended without raising (server closed the cursor).
             if not _KEEPALIVE_ENABLED:
                 # Original behavior: the daemon thread ends quietly; process continues.
-                safe_close(conn)
                 return
             raise RuntimeError("Instances changefeed closed")
         except Exception as e:
-            safe_close(conn)
-            intellistock_logger.log(f"Instances changefeed error: {e}", "red", service="RethinkDB")
+            intellistock_logger.log(f"Instances changefeed error: {e}", "red", service="Postgres")
             if not _KEEPALIVE_ENABLED:
-                # Original behavior: RethinkDB likely shut down; exit so container stops.
+                # Original behavior: the database is likely gone; exit so container stops.
                 os._exit(0)
-            # A transient RethinkDB blip (connection drop / primary-replica
+            # A transient database blip (connection drop / failover
             # reconfiguration during a restart) must NOT burn the crash budget —
             # reconnect indefinitely with backoff. Only a non-transient failure
             # counts toward CHANGEFEED_RETRY_MAX -> crash keep-alive.
-            if not is_transient_rethinkdb_error(e):
+            if not is_transient_db_error(e):
                 attempts += 1
                 if attempts > CHANGEFEED_RETRY_MAX:
                     trip_crash(f"Instances changefeed lost after {attempts} attempts: {e}", e)
                     return
             time.sleep(_changefeed_backoff(attempts))
-            try:
-                conn = get_conn()
-            except Exception:
-                conn = None  # next iteration's query will raise and re-enter retry
 
 
 def get_symbols_for_instance(conn, instance_id):
     """Return list of symbol strings for this instance from Instances[instance_id].stocks."""
     try:
-        doc = r.db(DB_NAME).table('Instances').get(instance_id).run(conn)
+        doc = store.get('Instances', instance_id)
         if doc is None:
             return []
         stocks = doc.get('stocks')
@@ -448,34 +432,24 @@ def _assert_live_broker_start_allowed(instance_id, instance_doc):
 
 def _load_instance_and_brokerage(instance_id):
     """Read the exact linked stock brokerage immediately before broker spawn."""
-    connection = get_conn()
-    try:
-        instance = (
-            r.db(DB_NAME).table("Instances").get(str(instance_id))
-            .run(connection)
-        )
-        if type(instance) is not dict or instance.get("id") != str(instance_id):
-            raise RuntimeError("instance configuration is unavailable")
-        brokerage_id = instance.get("brokerage_id")
-        if type(brokerage_id) is not str or not brokerage_id:
-            raise RuntimeError("linked brokerage is unavailable")
-        brokerage = (
-            r.db(DB_NAME).table("BrokerageAccounts").get(brokerage_id)
-            .run(connection)
-        )
-        if (type(brokerage) is not dict
-                or brokerage.get("id") != brokerage_id):
-            raise RuntimeError("linked brokerage is unavailable")
-        return instance, brokerage
-    finally:
-        safe_close(connection)
+    instance = store.get("Instances", str(instance_id))
+    if type(instance) is not dict or instance.get("id") != str(instance_id):
+        raise RuntimeError("instance configuration is unavailable")
+    brokerage_id = instance.get("brokerage_id")
+    if type(brokerage_id) is not str or not brokerage_id:
+        raise RuntimeError("linked brokerage is unavailable")
+    brokerage = store.get("BrokerageAccounts", brokerage_id)
+    if (type(brokerage) is not dict
+            or brokerage.get("id") != brokerage_id):
+        raise RuntimeError("linked brokerage is unavailable")
+    return instance, brokerage
 
 
 def start_broker(symbols):
     """Start a single broker process with all tickers.
 
     Secrets are NOT passed on the command line - broker.py re-reads them from
-    the Instances RethinkDB row inside the subprocess. This prevents
+    the Instances row inside the subprocess. This prevents
     `ps -ef` / WMI / crash-dump leakage of API credentials.
     """
     global broker_process, args_list, current_granularity_time_increment
@@ -510,14 +484,10 @@ def start_broker(symbols):
             "red", service="INSTANCE",
         )
         try:
-            conn = get_conn()
-            try:
-                r.db(DB_NAME).table('Instances').get(str(args_list[1])).update({
-                    'status': 'crash-looping',
-                    'crash_loop_latched_at': r.now(),
-                }).run(conn)
-            finally:
-                safe_close(conn)
+            store.update('Instances', str(args_list[1]), {
+                'status': 'crash-looping',
+                'crash_loop_latched_at': _now_iso(),
+            })
         except Exception as e:
             intellistock_logger.log(f"Failed to record crash-loop status: {e}", "yellow", service="INSTANCE")
         try:
@@ -623,9 +593,7 @@ def run_instance_change(change):
     """Handle Instances changefeed: when this instance's document changes, restart broker with new stocks or granularity."""
     global current_symbols, current_granularity_time_increment, instance_key, instance_secret, args_list
     instance_id = args_list[1]
-    conn = None
     try:
-        conn = get_conn()
         new_val = change.get('new_val')
         if new_val is None:
             return
@@ -651,46 +619,37 @@ def run_instance_change(change):
                 intellistock_logger.log("Broker stopped (no tickers in instance.stocks)", "yellow", service="INSTANCE")
     except Exception as e:
         intellistock_logger.log(str(e), "red", service="INSTANCE")
-    finally:
-        safe_close(conn)
 
 
 def run_instance_stocks_changefeed():
     """Watch this instance's document in Instances; restart broker when stocks list
     changes. Same retry-then-keep-alive policy as terminate_thread_on_command."""
-    conn = get_conn()
     instance_id = args_list[1]
     attempts = 0
     while True:
         try:
-            for change in r.db(DB_NAME).table('Instances').get(instance_id).changes().run(conn):
+            for change in watch.feed('Instances', row_id=instance_id):
                 attempts = 0  # a healthy feed resets the retry budget
                 run_instance_change(change)
             # Changefeed ended without raising (server closed the cursor).
             if not _KEEPALIVE_ENABLED:
                 # Original behavior: the daemon thread ends quietly; process continues.
-                safe_close(conn)
                 return
             raise RuntimeError("Instances (stocks) changefeed closed")
         except Exception as e:
-            safe_close(conn)
-            intellistock_logger.log(f"Instances (stocks) changefeed error: {e}", "red", service="RethinkDB")
+            intellistock_logger.log(f"Instances (stocks) changefeed error: {e}", "red", service="Postgres")
             if not _KEEPALIVE_ENABLED:
-                # Original behavior: RethinkDB likely shut down; exit so container stops.
+                # Original behavior: the database is likely gone; exit so container stops.
                 os._exit(0)
-            # Transient RethinkDB blips reconnect indefinitely (see
+            # Transient database blips reconnect indefinitely (see
             # terminate_thread_on_command); only non-transient errors count
             # toward the crash-keepalive budget.
-            if not is_transient_rethinkdb_error(e):
+            if not is_transient_db_error(e):
                 attempts += 1
                 if attempts > CHANGEFEED_RETRY_MAX:
                     trip_crash(f"Instances (stocks) changefeed lost after {attempts} attempts: {e}", e)
                     return
             time.sleep(_changefeed_backoff(attempts))
-            try:
-                conn = get_conn()
-            except Exception:
-                conn = None  # next iteration's query will raise and re-enter retry
 
 
 def run():
@@ -712,22 +671,20 @@ def run():
 
     instance_id = args_list[1]
     intellistock_logger.log(f"Running as instance ID: {instance_id} (usage: python backend/instance.py <instance_id>; key/secret from DB)", "green", service="INSTANCE")
-    conn = None
     try:
-        conn = get_conn()
         # Fresh start clears any prior crash flags (crashed badge) too, plus any
         # stale halt fields — the server only spawns this process for a row with
         # runCommand=True, i.e. the operator has already un-halted it.
-        r.db(DB_NAME).table('Instances').get(instance_id).update({
-            'uptimeStart': r.now(),
+        store.update('Instances', instance_id, {
+            'uptimeStart': _now_iso(),
             'running': True,
             'crashed': False,
             'crashed_at': None,
             'halt_reason': None,
             'halted_at': None,
-        }).run(conn)
-        current_symbols = get_symbols_for_instance(conn, instance_id)
-        doc = r.db(DB_NAME).table('Instances').get(instance_id).run(conn)
+        })
+        current_symbols = get_symbols_for_instance(None, instance_id)
+        doc = store.get('Instances', instance_id)
         if doc:
             instance_key = (doc.get('key') or '') if isinstance(doc.get('key'), str) else str(doc.get('key') or '')
             instance_secret = (doc.get('secret') or '') if isinstance(doc.get('secret'), str) else str(doc.get('secret') or '')
@@ -736,15 +693,12 @@ def run():
         # Crash keep-alive is for equities instances only (Kalshi has its own runner).
         _KEEPALIVE_ENABLED = _keepalive_enabled_for_kind(doc.get('kind') if doc else None)
     except Exception as e:
-        intellistock_logger.log(f"Cannot connect to RethinkDB or failed to load instance: {e}", "red", service="RethinkDB")
-        safe_close(conn)
+        intellistock_logger.log(f"Cannot connect to the database or failed to load instance: {e}", "red", service="Postgres")
         if _KEEPALIVE_ENABLED:
             # Hold the container open + notify instead of vanishing on a startup DB blip.
             enter_crash_keepalive(f"startup DB connect/load failed: {e}", e)
             return
         os._exit(1)
-    finally:
-        safe_close(conn)
 
     intellistock_logger.log("Service starting", "yellow", service="SERVER")
     service_status = 0
@@ -775,7 +729,7 @@ def run():
 
     # Watch Instances for runCommand (terminate when False)
     instances_feed_thread = threading.Thread(
-        target=lambda: terminate_thread_on_command(get_conn()),
+        target=lambda: terminate_thread_on_command(),
         daemon=True,
     )
     instances_feed_thread.start()
