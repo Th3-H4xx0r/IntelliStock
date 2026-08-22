@@ -1,6 +1,6 @@
 """Self-Learning Engine (Phase 1: OBSERVE).
 
-Watches BacktestResults for completed runs, normalizes their decisions into
+Watches backtest runs for completions, normalizes their decisions into
 LearningObservations, and raises findings when a guard trips. It writes NO
 strategy config and takes NO autonomous action — later phases add that behind
 the permission matrix in LearningConfig.
@@ -16,7 +16,12 @@ deserialize every document to emit two fields, and a single row here carries
 deserialization 2,880 times a day against a 5GB cache on a VM that already
 suffered 17 restarts in 12 days. `run_reconnecting_changefeed` is the house
 idiom for exactly this (six uses in `server.py`), and a server-side projection
-keeps the 5-13MB document off the wire.
+kept the 5-13MB document off the wire.
+
+After the BacktestResults split the projection stops being an optimisation at
+all: the watched table is the hot `BacktestProgress` row, which IS `id` +
+`status`. The whole document is read once, on a completion, through
+`backtest_result_store.assemble`.
 """
 from __future__ import annotations
 
@@ -48,6 +53,8 @@ except Exception:                                    # pragma: no cover
     def _log(msg, color="white"):
         print(f"[SELF_LEARNING] {msg}")
 
+import backtest_result_store as brs
+import self_learning_progress as slp
 from rethink_changefeed import run_reconnecting_changefeed
 from self_learning import approvals as learning_approvals
 from self_learning import hypotheses as learning_hypotheses
@@ -458,7 +465,10 @@ def _handle_run(conn, run_id, status, processed) -> None:
     except Exception:
         pass
     try:
-        doc = r.db(DB_NAME).table("BacktestResults").get(run_id).run(conn)
+        # The whole document, reassembled from the split tables. is_watched()
+        # and _process() both read the legacy shape, so nothing narrower will
+        # do -- and this is the ONE read per completion, not per progress tick.
+        doc = brs.assemble(run_id)
         if doc:
             config = store.get_config(conn)
             watched = config.get("watched_instances") or []
@@ -525,11 +535,17 @@ def main() -> None:
     processed = set(store.get_config(conn).get("processed_run_ids") or [])
 
     def _open_feed(c):
-        # Server-side projection: without it `new_val` is the whole 5-13MB
-        # document on every progress tick of a running backtest.
-        return (r.db(DB_NAME).table("BacktestResults")
-                .changes(squash=True, include_initial=True)
-                .pluck({"new_val": ["id", "status"]}).run(c))
+        # The old feed needed a server-side pluck because `new_val` was
+        # otherwise the whole 5-13MB document on every progress tick of a
+        # running backtest. After the split the hot BacktestProgress row IS
+        # that projection, so this watches it directly. include_initial
+        # replays every row on each reconnect and the persisted
+        # processed_run_ids watermark dedupes, exactly as before.
+        #
+        # `c` is the self-learning store's connection: the LearningConfig /
+        # LearningObservations tables the handler reads and writes have not
+        # been ported, so the handler still needs it and the feed ignores it.
+        return slp.progress_feed()
 
     def _handle(change, c):
         try:

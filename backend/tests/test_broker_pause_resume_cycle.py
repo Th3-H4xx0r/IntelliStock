@@ -22,6 +22,10 @@ def _reset_state():
     sys.modules["backtest_bar_snapshot"] = backtest_bar_snapshot
     sys.modules["llm_critical_guard"] = llm_critical_guard
     sys.modules["backtest_critical_abort"] = backtest_critical_abort
+    # The BacktestResults pause write goes through the split store now, so
+    # patching _get_conn_and_r no longer cages it. Cage the seam itself: a
+    # unit test must never touch a real database.
+    backtest_critical_abort._write_backtest_pause_status = lambda *a, **kw: None
     yield
 
 

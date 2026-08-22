@@ -5838,10 +5838,9 @@ def watch_backtest_run_command():
                 try:
                     from datetime import datetime
                     if _backtest_result_id is not None:
-                        r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).update({
-                            'status': 'stopped',
-                            'timestamp': datetime.utcnow().isoformat() + 'Z',
-                        }).run(conn)
+                        import backtest_result_store as _brs
+                        _brs.set_status(_backtest_result_id, 'stopped',
+                                        timestamp=datetime.utcnow().isoformat() + 'Z')
                     msg_key = str(backtest_row_id) if backtest_row_id is not None else str(_backtest_result_id)
                     diff_str = _backtest_difficulty_discord_str()
                     try:
@@ -5887,13 +5886,13 @@ def watch_backtest_run_command():
                         # pause fields. Only when transitioning out of the critical
                         # pause (gated on status), so manual pauses aren't stomped.
                         from backtest_critical_abort import cleared_pause_fields as _bca_cleared_pause
-                        r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).update(
-                            lambda row: r.branch(
-                                row["status"].default("").eq("paused_llm_critical"),
-                                {"status": "running", "resumed_at": r.now(), **_bca_cleared_pause()},
-                                {}
-                            )
-                        ).run(conn)
+                        import backtest_result_store as _brs
+                        # One conditional UPDATE on the hot row, then the doc
+                        # patch -- both only when the CAS held. resumed_at is
+                        # stamped by resume_from_critical_pause itself, so the
+                        # r.now() the ReQL branch carried is gone.
+                        _brs.resume_from_critical_pause(_backtest_result_id,
+                                                        _bca_cleared_pause())
                 except Exception:
                     pass
                 try:
@@ -5907,10 +5906,9 @@ def watch_backtest_run_command():
                 try:
                     from datetime import datetime
                     if _backtest_result_id is not None:
-                        r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).update({
-                            'status': 'stopped',
-                            'timestamp': datetime.utcnow().isoformat() + 'Z',
-                        }).run(conn)
+                        import backtest_result_store as _brs
+                        _brs.set_status(_backtest_result_id, 'stopped',
+                                        timestamp=datetime.utcnow().isoformat() + 'Z')
                         _log("BacktestResults status set to stopped", "yellow")
                     # Edit #backtests Discord message to show Stopped (same message_key as Queued/Running)
                     msg_key = str(backtest_row_id) if backtest_row_id is not None else str(_backtest_result_id)
@@ -6923,10 +6921,11 @@ def _iter_backtest_trading_session_opens(start_dt, end_dt):
 
 def _nexus_lookback_update_db(current: int, total: int, current_date: str, start_date: str, end_date: str) -> None:
     """Write Nexus lookback training progress to BacktestResults (best-effort, never raises)."""
-    if _backtest_result_id is None or _backtest_db_conn is None or r is None:
+    if _backtest_result_id is None:
         return
     try:
-        r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).update({
+        import backtest_result_store as _brs
+        _brs.patch_metadata(_backtest_result_id, {
             "nexus_lookback": {
                 "current": current,
                 "total": total,
@@ -6934,20 +6933,23 @@ def _nexus_lookback_update_db(current: int, total: int, current_date: str, start
                 "start_date": start_date,
                 "end_date": end_date,
             },
+        })
+        # _last_active is a hot-row key: written to doc it would be shadowed
+        # by the heartbeat's overlay, so the liveness signal must go there.
+        _brs.write_progress(_backtest_result_id, {
             "_last_active": __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
-        }).run(_backtest_db_conn)
+        })
     except Exception:
         pass
 
 
 def _nexus_lookback_clear_db() -> None:
     """Clear the nexus_lookback field from BacktestResults once training is done."""
-    if _backtest_result_id is None or _backtest_db_conn is None or r is None:
+    if _backtest_result_id is None:
         return
     try:
-        r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).update(
-            {"nexus_lookback": None}
-        ).run(_backtest_db_conn)
+        import backtest_result_store as _brs
+        _brs.patch_metadata(_backtest_result_id, {"nexus_lookback": None})
     except Exception:
         pass
 
@@ -11875,6 +11877,10 @@ backtest_start_time = None
 # Backtest progress tracking: document id for DB updates, last progress % updated, last loop time
 _backtest_result_id = None
 _last_progress_updated = -2.0  # so first update at 0%; then every 2% so progress is visible in DB
+# BacktestSteps watermarks: kind -> highest seq this process has written.
+# Re-seeded from backtest_result_store.watermarks() after any write failure so
+# a reconnecting writer neither duplicates nor skips.
+_steps_written = {}
 # Throttle "Could not fetch price" to once per symbol per run (avoid log spam)
 _fetch_price_fail_logged = set()
 _backtest_last_loop_time = None
@@ -11937,6 +11943,7 @@ if mode == MODE_BACKTEST:
     _backtest_result_id = int(backtest_id_raw) if backtest_id_raw and str(backtest_id_raw).isdigit() else backtest_id_raw
     # Start capturing logs to buffer (last 500 lines) for live DB progress writes
     _backtest_log_buffer = []
+    _steps_written = {}
     try:
         from intellistock_logger import intellistock_logger
         intellistock_logger.set_backtest_log_buffer(_backtest_log_buffer, max_lines=500)
@@ -11952,6 +11959,7 @@ if mode == MODE_BACKTEST:
             pass
     except Exception:
         _backtest_log_buffer = []
+        _steps_written = {}
     # Phase γ.2 (2026-05-18, BT232179 follow-up): the α.3 seed-log block
     # below MUST emit AFTER the log buffer + file sink are wired so the
     # `RNG seed: ...` and PYTHONHASHSEED confirmation lines land in the
@@ -12015,9 +12023,15 @@ if mode == MODE_BACKTEST:
             sys.stderr.flush()
             sys.exit(1)
         try:
-            tables = list(r.db(DB_NAME).table_list().run(conn))
-            if 'BacktestResults' not in tables:
-                r.db(DB_NAME).table_create('BacktestResults').run(conn)
+            # BacktestResults is split across three Postgres tables.
+            # ensure_schema is idempotent (CREATE ... IF NOT EXISTS under an
+            # advisory lock), so this is a cheap no-op on every boot but keeps
+            # the self-heal the table_create bootstrap used to provide: the
+            # store.get below would otherwise raise UndefinedTable on a fresh
+            # deploy, inside a try/finally with no except.
+            from db import schema as _db_schema
+            _db_schema.ensure_schema(tables=["BacktestResults", "BacktestSteps",
+                                             "BacktestProgress"])
             # instance_id can be numeric (8) or string (e.g. "ai-temp-xxx"); store as-is for BacktestResults
             instance_id_for_db = int(instance_id) if (instance_id and str(instance_id).isdigit()) else instance_id
             try:
@@ -12026,30 +12040,30 @@ if mode == MODE_BACKTEST:
             except NameError:
                 backtest_start_date = backtest_end_date = None
             backtest_id_int = _backtest_result_id if isinstance(_backtest_result_id, int) else (int(_backtest_result_id) if _backtest_result_id else None)
-            existing_result = r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).run(conn)
+            import backtest_result_store as _brs
+            from db import store as _store
+            existing_result = _store.get('BacktestResults', _backtest_result_id)
             # Duplicate-run guard: if another container is actively running this backtest, exit.
-            # Uses _last_active heartbeat (updated on every progress write) to detect live runs.
-            if existing_result is not None and existing_result.get('status') == 'running':
-                _last_active = existing_result.get('_last_active', '')
-                if _last_active:
+            # Uses the _last_active heartbeat to detect live runs. status and
+            # _last_active now live on the hot BacktestProgress row, not in the
+            # multi-MB document (the doc's status is advisory after the split),
+            # so brs.active_run_age() answers both in one small read. It
+            # returns None when there is no live-run evidence and 9999 when the
+            # heartbeat will not parse -- the legacy "stale, overwrite" case.
+            _active_age = _brs.active_run_age(_backtest_result_id)
+            if _active_age is not None:
+                if _active_age < 120:
+                    _log(f"Backtest id={_backtest_result_id} is already running (heartbeat {int(_active_age)}s ago). "
+                         "Exiting duplicate to avoid double LLM costs and race conditions.", "yellow")
                     try:
-                        _la_dt = __import__('datetime').datetime.fromisoformat(_last_active.replace('Z', '+00:00'))
-                        _now_utc = __import__('datetime').datetime.now(__import__('datetime').timezone.utc)
-                        _active_age = (_now_utc - _la_dt).total_seconds()
+                        conn.close()
                     except Exception:
-                        _active_age = 9999
-                    if _active_age < 120:
-                        _log(f"Backtest id={_backtest_result_id} is already running (heartbeat {int(_active_age)}s ago). "
-                             "Exiting duplicate to avoid double LLM costs and race conditions.", "yellow")
-                        try:
-                            conn.close()
-                        except Exception:
-                            pass
-                        sys.stdout.flush()
-                        sys.stderr.flush()
-                        sys.exit(0)
-                    else:
-                        _log(f"Backtest id={_backtest_result_id} has stale 'running' status (heartbeat {int(_active_age)}s ago, likely crashed). Overwriting.", "yellow")
+                        pass
+                    sys.stdout.flush()
+                    sys.stderr.flush()
+                    sys.exit(0)
+                else:
+                    _log(f"Backtest id={_backtest_result_id} has stale 'running' status (heartbeat {int(_active_age)}s ago, likely crashed). Overwriting.", "yellow")
             _now_iso = __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()
             stub = {
                 'id': _backtest_result_id,
@@ -12117,7 +12131,7 @@ if mode == MODE_BACKTEST:
                 stub['progress'] = 100.0
                 stub['error'] = err_msg[:2000]
                 assert_secret_free(stub)
-                r.db(DB_NAME).table('BacktestResults').insert(stub, conflict='replace').run(conn)
+                _brs.write_stub(stub)
                 _log("Backtest validation failed: %s" % err_msg, "red")
                 _log("BacktestResults row written with status=error, progress=100.", "yellow")
                 try:
@@ -12128,9 +12142,10 @@ if mode == MODE_BACKTEST:
                 sys.stdout.flush()
                 sys.stderr.flush()
                 sys.exit(1)
-            # Ensure row exists: insert with conflict='replace' so it works when broker runs standalone (no engine)
+            # Ensure row exists: write_stub upserts, so this works when the
+            # broker runs standalone (no engine).
             assert_secret_free(stub)
-            r.db(DB_NAME).table('BacktestResults').insert(stub, conflict='replace').run(conn)
+            _brs.write_stub(stub)
             _log(f"Backtest result row (id={_backtest_result_id}) ensured in DB, status=running", "green")
             # Keep connection open for all progress updates (avoids repeated connect/disconnect that can cause "lost connection")
             _backtest_db_conn = conn
@@ -12172,38 +12187,47 @@ if mode == MODE_BACKTEST:
     _heartbeat_stop = threading.Event()
     def _backtest_heartbeat():
         import datetime as _dt_hb
-        hb_conn = None
         while not _heartbeat_stop.is_set() and not shutdown_requested:
             _heartbeat_stop.wait(15)
             if _heartbeat_stop.is_set() or shutdown_requested:
                 break
             try:
-                if hb_conn is None:
-                    hb_conn = get_conn_retry(max_attempts=3, delay=2)
-                if hb_conn is None:
-                    continue
+                import backtest_result_store as _brs
+                from intellistock_logger import intellistock_logger as _hb_logger
                 now_hb = _dt_hb.datetime.now(_dt_hb.timezone.utc).isoformat()
                 elapsed_hb = max(0, int(time.time() - backtest_start_time)) if backtest_start_time else None
-                hb_payload = {'_last_active': now_hb}
-                if elapsed_hb is not None:
-                    hb_payload['time_elapsed_seconds'] = elapsed_hb
+                # Append only the log lines past our watermark. The legacy
+                # write re-sent the whole last-500 list every 15 seconds;
+                # assemble() still tails 500 on read, so the UI is unchanged.
+                #
+                # The watermark keys off the logger's monotonic emitted count,
+                # NOT len(buffer): the buffer is trimmed FIFO to 500 lines
+                # (intellistock_logger.py fan-out) and its length saturates.
+                new_lines, start_seq = [], _steps_written.get('log', 0)
                 if _backtest_log_buffer is not None:
-                    hb_payload['logs'] = list(_backtest_log_buffer)[-500:]
-                r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).update(hb_payload).run(hb_conn)
+                    buffered = list(_backtest_log_buffer)
+                    emitted = _hb_logger.context_log_lines_emitted("backtest")
+                    n_new = min(max(emitted - start_seq, 0), len(buffered))
+                    if n_new:
+                        new_lines = buffered[len(buffered) - n_new:]
+                        # If more than 500 lines were emitted since the last
+                        # tick the buffer already dropped the overflow; start
+                        # the seq run where the surviving lines actually are,
+                        # so seq stays aligned with the emitted index and
+                        # nothing is duplicated.
+                        start_seq = emitted - n_new
+                _steps_written['log'] = _brs.heartbeat(
+                    _backtest_result_id, last_active=now_hb,
+                    elapsed_seconds=elapsed_hb, new_log_lines=new_lines,
+                    log_seq=start_seq)
             except Exception:
-                # Connection lost — reset so next iteration reconnects
+                # Write failed -- re-seed the watermarks from the DB on the
+                # next tick so we neither duplicate nor skip.
                 try:
-                    if hb_conn:
-                        hb_conn.close()
+                    import backtest_result_store as _brs2
+                    _steps_written.update(_brs2.watermarks(_backtest_result_id))
                 except Exception:
                     pass
-                hb_conn = None
-        # Cleanup
-        try:
-            if hb_conn:
-                hb_conn.close()
-        except Exception:
-            pass
     try:
         _heartbeat_thread = threading.Thread(target=_backtest_heartbeat, daemon=True)
         _heartbeat_thread.start()
@@ -12247,14 +12271,22 @@ def _backtest_save_error_and_exit(error_msg, progress_pct=None):
                     }
                     if _backtest_log_buffer is not None:
                         update_payload['logs'] = list(_backtest_log_buffer)[-500:]
-                    r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).update(update_payload).run(conn)
+                    # Terminal-ish: the run is over, so the last-500 log
+                    # slice this payload carries is the authoritative array
+                    # and is finalized, exactly as the legacy update stored it.
+                    import backtest_result_store as _brs_err
+                    _brs_err.write_terminal(_backtest_result_id, update_payload)
                     _log("Saved error status and logs to BacktestResults.", "yellow")
                     # Edit #backtests Discord message to Failed (same message that was Queued/Running)
                     try:
                         from interactive_utils import action_enqueue_discord_edit
                         err_short = (str(error_msg)[:300] + "...") if len(str(error_msg)) > 300 else str(error_msg)
                         msg_key = str(backtest_row_id) if backtest_row_id is not None else str(_backtest_result_id)
-                        _res = r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).run(conn)
+                        # Metadata-only read: difficulty lives in doc, so
+                        # store.get is right -- assemble() would fetch every
+                        # step row of a finished run for one scalar.
+                        from db import store as _store_err
+                        _res = _store_err.get('BacktestResults', _backtest_result_id)
                         _d = _res.get('difficulty') if _res else None
                         diff_str = ("%.1f" % float(_d) + (" (HIGH USAGE)" if backtest_high_usage else "")) if _d is not None else _backtest_difficulty_discord_str()
                         action_enqueue_discord_edit(conn, "backtests", msg_key, content=None, embed={
@@ -12720,11 +12752,13 @@ while not shutdown_requested:
                         if conn is None:
                             conn = get_conn()
                         try:
-                            # Ensure BacktestResults table exists
-                            tables = list(r.db(DB_NAME).table_list().run(conn))
-                            if 'BacktestResults' not in tables:
-                                r.db(DB_NAME).table_create('BacktestResults').run(conn)
-                                _log("Created BacktestResults table", "green")
+                            # Self-heal the three Postgres tables before the
+                            # terminal write, the way the table_create
+                            # bootstrap used to. ensure_schema is idempotent.
+                            from db import schema as _db_schema_term
+                            _db_schema_term.ensure_schema(
+                                tables=["BacktestResults", "BacktestSteps",
+                                        "BacktestProgress"])
 
                             # Get instance_id and strategy_row_id (instance_id can be int or string)
                             instance_id_for_db = int(instance_id) if (instance_id and str(instance_id).isdigit()) else instance_id
@@ -12929,12 +12963,14 @@ while not shutdown_requested:
                             if _evidence_projection is not None:
                                 backtest_result["evidence"] = _evidence_projection
                             assert_secret_free(backtest_result)
+                            import backtest_result_store as _brs
+                            # R16: no insert branch. A broker without a row id
+                            # exits at the stub write, long before here, and
+                            # backtest_result carries backtest_id, never id --
+                            # so the legacy insert path could only ever raise.
                             if _backtest_result_id is not None:
-                                r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).update(backtest_result).run(conn)
+                                _brs.write_terminal(_backtest_result_id, backtest_result)
                                 _log(f"Updated backtest results in database (id={_backtest_result_id}, status=finished, P&L={final_pnl})", "green")
-                            else:
-                                r.db(DB_NAME).table('BacktestResults').insert(backtest_result).run(conn)
-                                _log(f"Saved backtest results to database (instance_id={instance_id_for_db}, strategy_id={strategy_row_id})", "green")
                             # Phase 1 snapshot: persist final _strategy_cache for live-boot reuse.
                             # Helpers live in broker_snapshot_helpers.py so they're testable without
                             # broker.py's module-level argparse + DB bootstrap (extraction pattern
@@ -13022,7 +13058,11 @@ while not shutdown_requested:
                                             wstr = ("%.2f" % w) if w is not None else "?"
                                             parts.append("%s (w=%s)" % (st, wstr))
                                         strategy_detail = "\n".join(parts) if len(parts) <= 8 else "\n".join(parts[:8]) + "\n... +%d more" % (len(parts) - 8)
-                                _res = r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).run(conn)
+                                # Metadata-only read: difficulty lives in
+                                # doc, so store.get is right -- assemble()
+                                # would fetch every step row for one scalar.
+                                from db import store as _store_fin
+                                _res = _store_fin.get('BacktestResults', _backtest_result_id)
                                 _d = _res.get('difficulty') if _res else None
                                 diff_str = ("%.1f" % float(_d) + (" (HIGH USAGE)" if backtest_high_usage else "")) if _d is not None else _backtest_difficulty_discord_str()
                                 fields = [
@@ -17827,43 +17867,51 @@ while not shutdown_requested:
                         backtest_id_raw = backtest_row_id
                         backtest_id_int = int(backtest_id_raw) if backtest_id_raw and str(backtest_id_raw).isdigit() else None
                         current_tickers = sorted(set(symbols or []) | set((portfolio_emulator.get_positions() or {}).keys()))
-                        update_payload = {
-                            'backtest_id': backtest_id_int,
-                            'progress': round(progress_pct, 2),
-                            'pnl': pnl,
-                            'pnl_percent': round(pnl_percent, 4) if pnl_percent is not None else None,
+                        import backtest_result_store as _brs
+                        _hot = {
                             'status': 'running',
-                            'timestamp': __import__('datetime').datetime.now().isoformat(),
+                            'progress': round(progress_pct, 2),
                             '_last_active': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
-                            'tickers': current_tickers,
                         }
-                        try:
-                            update_payload['backtest_trades'] = _convert_datetimes_to_iso(
-                                list(portfolio_emulator.get_trade_history() or [])[-1000:]
-                            )
-                        except Exception:
-                            pass
-                        try:
-                            # Downsample (keep true start + shape), not tail-slice,
-                            # so a long/high-cadence RUNNING backtest shows the real
-                            # start value and curve instead of a mid-run window.
-                            from broker_snapshot_helpers import downsample_history as _downsample_history
-                            update_payload['portfolio_value_history'] = _convert_datetimes_to_iso(
-                                _downsample_history(list(portfolio_emulator.get_portfolio_history() or []), 3000)
-                            )
-                        except Exception:
-                            pass
                         if backtest_start_time is not None:
                             try:
-                                update_payload['time_elapsed_seconds'] = max(0, int(now_loop - backtest_start_time))
+                                _hot['time_elapsed_seconds'] = max(0, int(now_loop - backtest_start_time))
                             except Exception:
                                 pass
-                        if _backtest_log_buffer is not None:
-                            update_payload['logs'] = list(_backtest_log_buffer)[-500:]
+                        _meta = {
+                            'backtest_id': backtest_id_int,
+                            'pnl': pnl,
+                            'pnl_percent': round(pnl_percent, 4) if pnl_percent is not None else None,
+                            'timestamp': __import__('datetime').datetime.now().isoformat(),
+                            'tickers': current_tickers,
+                        }
+                        # FULL uncapped sources: assemble() applies the legacy
+                        # caps (trades tail-1000, pv downsample-3000, logs
+                        # tail-500) on read, so the document is unchanged while
+                        # the write stops rewriting megabytes every 2%.
+                        _appended = {}
+                        try:
+                            _appended['trade'] = _convert_datetimes_to_iso(
+                                list(portfolio_emulator.get_trade_history() or []))
+                        except Exception:
+                            pass
+                        try:
+                            _appended['pv'] = _convert_datetimes_to_iso(
+                                list(portfolio_emulator.get_portfolio_history() or []))
+                        except Exception:
+                            pass
+                        # NOTE: logs are deliberately NOT appended here. The
+                        # heartbeat owns the log stream, because the log buffer
+                        # is trimmed FIFO to 500 lines and only the heartbeat's
+                        # emitted-count watermark can slice it correctly. Two
+                        # owners keying off the same bounded list would either
+                        # duplicate or drop lines.
                         if _backtest_decisions is not None:
-                            update_payload['backtest_decisions'] = _convert_datetimes_to_iso(list(_backtest_decisions))
-                            update_payload['backtest_refusals'] = _convert_datetimes_to_iso(list(_backtest_refusals))
-                        r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).update(update_payload).run(conn)
+                            _appended['decision'] = _convert_datetimes_to_iso(list(_backtest_decisions))
+                            _appended['refusal'] = _convert_datetimes_to_iso(list(_backtest_refusals))
+                        _brs.write_progress_tick(
+                            _backtest_result_id, hot=_hot, metadata=_meta,
+                            appended=_appended, seqs=_steps_written)
                         progress_update_ok = True
                         _backtest_progress_fail_count = 0
                         try:
@@ -17879,7 +17927,12 @@ while not shutdown_requested:
                                 tickers_str = ", ".join((current_tickers or [])[:8])
                                 if current_tickers and len(current_tickers) > 8:
                                     tickers_str += " (+%d)" % (len(current_tickers) - 8)
-                                result_doc = r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).run(conn)
+                                # Metadata-only read: difficulty lives in the
+                                # BacktestResults document, so do NOT assemble()
+                                # here -- that would fetch every step row for
+                                # one scalar.
+                                from db import store as _store_diff
+                                result_doc = _store_diff.get('BacktestResults', _backtest_result_id)
                                 diff_from_db = result_doc.get('difficulty') if result_doc else None
                                 if diff_from_db is not None:
                                     diff_str = "%.1f" % float(diff_from_db)

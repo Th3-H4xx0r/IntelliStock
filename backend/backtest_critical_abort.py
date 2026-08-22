@@ -34,6 +34,25 @@ def _get_conn_and_r():
     return r.connect(host=host, port=port, timeout=10), r
 
 
+def _write_backtest_pause_status(backtest_id, payload: dict) -> None:
+    """DB seam (tests cage this). ``status`` goes to the hot BacktestProgress
+    row and the diagnostic pause_* fields deep-merge into BacktestResults.doc,
+    so every partial-result field already on the row survives -- the same
+    merge semantics the legacy ``.update(payload)`` had.
+
+    BacktestResults.id is written as an int by the engine (and by every other
+    writer). store.coerce_id accepts an int or a string and RAISES on garbage,
+    so the old failure mode -- a string id silently no-opping against
+    RethinkDB's type-strict get() with {skipped: 1} -- is now impossible
+    rather than merely avoided.
+    """
+    import backtest_result_store as _brs
+    _brs.set_status(backtest_id,
+                    payload.get("status") or "paused_llm_critical",
+                    extra_metadata={k: v for k, v in payload.items()
+                                    if k != "status"})
+
+
 def _enqueue_discord(channel: str, content: str, embed: dict) -> None:
     from discord_sender import enqueue_discord_message
     from interactive_utils import get_conn
@@ -160,14 +179,11 @@ def handle(*, backtest_id: str, instance_id: str, failure) -> None:
                     "pause_call_site": failure.attribution.get("call_site") or "unknown",
                     "pause_attempts": len(failure.attempts),
                     "pause_bar_time": _fmt_ts(restored_time),
-                    "paused_at": r.now(),
+                    "paused_at": __import__("datetime").datetime.now(
+                        __import__("datetime").timezone.utc).isoformat(),
                     "pause_sample": (failure.attempts[-1].get("body_sample") or "")[:500] if failure.attempts else "",
                 }
-                # RethinkDB primary keys are type-strict; BacktestResults.id
-                # is written as int by the engine (broker.py:5842 and every
-                # other writer), so a get("357345") string silently misses
-                # (returns {skipped: 1} instead of raising). Coerce to int.
-                r.db("IntelliStock").table("BacktestResults").get(int(backtest_id)).update(payload).run(conn)
+                _write_backtest_pause_status(backtest_id, payload)
             except Exception as e:
                 _log_red(f"BacktestResults pause status update failed: {e}")
         finally:
@@ -292,31 +308,27 @@ def _build_credit_pause_payload(failure, sim_date) -> dict:
 
 
 def _write_backtest_credit_pause(conn, rrow_id, payload) -> None:
-    """DB seam (tests cage this). Try the caller's connection first; on any
-    failure (or conn=None) retry once on a fresh connection — the pause must
-    land even if the broker's long-lived conn went stale mid-run.
+    """DB seam (tests cage this). The retry-on-a-fresh-connection dance is
+    gone: the pool owns connections now, so there is no long-lived broker conn
+    to go stale mid-run. ``conn`` stays in the signature because the caller
+    and ~10 tests pass it; it is unused.
 
-    int() coercion mirrors handle(): BacktestResults.id is written as int by
-    the engine, and RethinkDB get() is type-strict (a string id silently
-    no-ops with {skipped: 1})."""
-    def _do(c, rdb):
-        rdb.db("IntelliStock").table("BacktestResults").get(int(rrow_id)).update(payload).run(c)
+    ``status`` lands on the hot BacktestProgress row and the other two keys
+    deep-merge into doc, so partial results are preserved exactly as the
+    legacy merge-only update() preserved them.
 
-    if conn is not None:
-        try:
-            from rethinkdb import RethinkDB
-            _do(conn, RethinkDB())
-            return
-        except Exception as e:
-            _log_red(f"credit-pause write on caller conn failed ({e}); retrying on fresh conn")
-    c2, r2 = _get_conn_and_r()
-    try:
-        _do(c2, r2)
-    finally:
-        try:
-            c2.close()
-        except Exception:
-            pass
+    The int() coercion mirrors handle(): BacktestResults.id is written as an
+    int by the engine, and store.coerce_id accepts an int or a string and
+    raises on garbage -- so the old failure mode, a string id silently
+    no-opping against RethinkDB's type-strict get() with {skipped: 1}, cannot
+    happen rather than merely being avoided."""
+    def _do():
+        import backtest_result_store as _brs
+        _brs.set_status(rrow_id, payload.get("status") or "paused_credits",
+                        extra_metadata={k: v for k, v in payload.items()
+                                        if k != "status"})
+
+    _do()
 
 
 def _pause_backtest_on_credit_exhaustion(rrow_id, failure, sim_date, conn) -> dict:
