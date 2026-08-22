@@ -316,6 +316,21 @@ def _structured_usage_for_record(usage_data: dict[str, int] | None) -> dict[str,
             break
         except (TypeError, ValueError):
             continue
+    # 2026-08-22 LLM-cost forensics: this projection collected cache_read_tokens
+    # upstream and then DROPPED it, so provider prompt-caching was invisible in
+    # LLMUsage. Carry it through; _safe_record maps it to
+    # cache_read_input_tokens.
+    for cache_key in ("cache_read_tokens", "detail_cached_tokens", "cached_tokens"):
+        value = src.get(cache_key)
+        if value is None:
+            continue
+        try:
+            _c = int(value)
+        except (TypeError, ValueError):
+            continue
+        if _c > 0:
+            out["cache_read_tokens"] = _c
+            break
     return out
 
 
@@ -3645,9 +3660,22 @@ def _extract_openrouter_usage(usage: Any) -> tuple[dict[str, int], float | None]
             reasoning = int(details.get("reasoning_tokens") or 0)
         except (TypeError, ValueError):
             reasoning = 0
+    # 2026-08-22 LLM-cost forensics: cached_tokens was silently dropped on
+    # this path (and Bedrock's), so cache_read_input_tokens read 0 on every
+    # LLMUsage row regardless of what the provider did — any provider-caching
+    # work was unobservable. Read it; write it; never infer from its absence.
+    cached = 0
+    p_details = usage.get("prompt_tokens_details")
+    if isinstance(p_details, dict):
+        try:
+            cached = int(p_details.get("cached_tokens") or 0)
+        except (TypeError, ValueError):
+            cached = 0
     u: dict[str, int] = {"input_tokens": inp, "output_tokens": out}
     if reasoning:
         u["reasoning_tokens"] = reasoning
+    if cached:
+        u["cache_read_tokens"] = cached
     cost_override: float | None = None
     _cost = usage.get("cost")
     try:

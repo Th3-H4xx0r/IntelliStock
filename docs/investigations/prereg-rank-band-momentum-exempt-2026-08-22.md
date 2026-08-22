@@ -30,5 +30,20 @@ This is window 1 of ≥2. Adopt only after a second readable window (c cold) agr
 AND mechanism fires in both. One positive window = promising, not adopted (split-endpoint
 discipline).
 
-## Result (appended after the runs)
-_pending_
+## Result (bt 172501 control / bt 443898 treatment — both +1.3487%)
+**PRIMARY FAILED — the lever is INERT AS WIRED, and the reason is a real wiring defect.**
+Byte-identical arms (100% overlap, +0.00pp), **0 exemption lines across 44 band evaluations**,
+AAOI still blocked. The exemption tests `sc.get("momentum_watchlist_score")` — a field stamped
+ONLY on the momentum-watchlist lane's own picks (:22316, :29751). Discovery-lane movers (the
+AAOI/VICR/AMAT class the band's comment names as the victims) never carry the field, so the
+exemption structurally cannot reach them. The cure the band ships cannot fix the defect the
+band documents. NEXT: code change — stamp the momentum score on every scored name that has
+momentum data, or exempt on the 20d/60d momentum qualification directly; then re-pair.
+
+Incidental deliveries (both significant):
+1. **Cross-run byte-determinism now holds** post-f68af81: this control reproduced bt 138148 to
+   the fourth decimal (+1.3487%) hours apart — the corpus-drift problem is closed for
+   same-deploy repeats.
+2. **The LLM cache proof at the limit: the ENTIRE PAIR ran at $0.00 paid LLM calls** (control
+   0, treatment 1 stray). Two days ago one arm cost $2.96. A/B backtests are now free, and the
+   pair completed in ~35 minutes.
