@@ -22,13 +22,12 @@ TABLE = "GraphNexusOverlayBarsCache"
 
 
 def _conn():
+    """R26: the store pools its own connection per operation; the pair is kept
+    so the call site below reads as it did."""
     from dotenv import load_dotenv
     load_dotenv(os.path.join(_REPO, ".env"))
-    from rethinkdb import RethinkDB
-    r = RethinkDB()
-    return r, r.connect(host=os.environ["RETHINKDB_HOST"],
-                        port=int(os.environ.get("RETHINKDB_PORT", "28015")),
-                        timeout=20)
+    from db import store as _store
+    return _store, None
 
 
 def main(argv=None):
@@ -39,7 +38,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     r, conn = _conn()
-    rows = r.db("IntelliStock").table(TABLE).run(conn)
+    rows = r.iter(TABLE)   # a cursor: this table is large
     doomed = []
     kept = 0
     for doc in rows:
@@ -54,9 +53,10 @@ def main(argv=None):
         else:
             kept += 1
     if args.apply and doomed:
-        res = (r.db("IntelliStock").table(TABLE)
-               .get_all(*doomed).delete().run(conn))
-        print(f"DELETED {res.get('deleted', 0)} row(s); kept {kept}.")
+        deleted = 0
+        for _id in doomed:
+            deleted += int((r.delete(TABLE, _id) or {}).get("deleted", 0))
+        print(f"DELETED {deleted} row(s); kept {kept}.")
     else:
         print(f"Would delete {len(doomed)} row(s); keep {kept}. "
               "Re-run with --apply to execute.")

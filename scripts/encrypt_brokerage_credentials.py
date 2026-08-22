@@ -61,14 +61,13 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    from rethinkdb import RethinkDB
+    from db import store as r
     from secret_store import encrypt, is_encrypted
 
-    r = RethinkDB()
-    conn = r.connect(host=args.host, port=args.port)
+    conn = None
 
     try:
-        rows = list(r.db("IntelliStock").table("BrokerageAccounts").run(conn))
+        rows = list(r.run("BrokerageAccounts"))
     except Exception as e:
         print(f"FATAL: could not read BrokerageAccounts: {e}", file=sys.stderr)
         return 3
@@ -103,7 +102,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  [{account_name}] would encrypt: {fields_list}")
         else:
             try:
-                r.db("IntelliStock").table("BrokerageAccounts").get(rid).update(patch).run(conn)
+                r.update("BrokerageAccounts", rid, patch)
                 total_encrypted += len(patch)
                 print(f"  [{account_name}] encrypted: {fields_list}")
             except Exception as e:

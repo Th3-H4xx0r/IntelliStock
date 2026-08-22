@@ -28,7 +28,7 @@ import datetime as dt
 sys.path.insert(0, "/app")  # so `secret_store` / backend modules import inside the container
 
 import requests  # noqa: E402
-from rethinkdb import RethinkDB  # noqa: E402
+from db import store as _store  # noqa: E402
 from secret_store import decrypt  # backend/secret_store.py  # noqa: E402
 
 INSTANCE_ID = os.environ.get("DIAG_INSTANCE", "alpaca-main")
@@ -37,20 +37,16 @@ LOOKBACK_DAYS = int(os.environ.get("DIAG_LOOKBACK_DAYS", "3"))
 
 
 def main():
-    r = RethinkDB()
-    conn = r.connect(
-        host=os.environ.get("RETHINKDB_HOST", "rethinkdb"),
-        port=int(os.environ.get("RETHINKDB_PORT", "28015")),
-        timeout=10,
-    )
+    # R26: the store pools its own connection per operation.
+    r, conn = _store, None
 
     # ---- resolve creds exactly like broker.py:585-643 (read-only) ----
-    inst = r.db(DB).table("Instances").get(INSTANCE_ID).run(conn)
+    inst = _store.get("Instances", INSTANCE_ID)
     if not inst:
         print(f"!! no Instances row {INSTANCE_ID!r}", file=sys.stderr)
         sys.exit(2)
     bid = inst.get("brokerage_id")
-    brow = r.db(DB).table("BrokerageAccounts").get(bid).run(conn)
+    brow = r.get("BrokerageAccounts", bid)
     key = decrypt(brow.get("alpaca_key")) or ""
     secret = decrypt(brow.get("alpaca_secret")) or ""
     paper = bool(brow.get("alpaca_paper", inst.get("alpaca_paper", True)))
@@ -126,12 +122,12 @@ def main():
         if fa is None:
             continue
         try:
-            d = list(
-                r.db(DB).table("BotTradeDecisions")
-                .filter(lambda x: (x["symbol"] == sym.upper()) & (x["side"] == side)
-                        & (x["instance_id"].match(f"^{INSTANCE_ID}")))
-                .order_by(r.desc("ts")).limit(1).run(conn)
-            )
+            d = list(r.run(r.limit(r.order_by(r.filter(
+                "BotTradeDecisions",
+                r.P.field("symbol").eq(sym.upper())
+                & r.P.field("side").eq(side)
+                & r.P.field("instance_id").starts_with(INSTANCE_ID)),
+                index="ts", desc=True), 1)))
         except Exception:
             d = []
         ref = d[0]["price"] if d and d[0].get("price") else None

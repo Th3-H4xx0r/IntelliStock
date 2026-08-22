@@ -56,18 +56,17 @@ _SCOPE = {
 
 
 def _connect():
-    from rethinkdb import RethinkDB  # noqa: PLC0415
+    """R26: the store pools its own connection per operation. The pair is kept
+    so the call sites below read as they did."""
+    from db import store as _store  # noqa: PLC0415
 
-    r = RethinkDB()
-    host = os.environ.get("RETHINKDB_HOST", "localhost")
-    port = int(os.environ.get("RETHINKDB_PORT", "28015"))
-    return r, r.connect(host=host, port=port, db=DB_NAME)
+    return _store, None
 
 
 def _read_tables(instance_id):
     r, conn = _connect()
     try:
-        present = set(r.db(DB_NAME).table_list().run(conn))
+        present = set(r.table_list())
     except Exception:
         present = set()
     out = {}
@@ -75,7 +74,7 @@ def _read_tables(instance_id):
         if name not in present:
             continue                      # absent stays absent — a distinct claim
         field, _mode = _SCOPE.get(name, ("instance_id", "exact"))
-        q = r.db(DB_NAME).table(name)
+        q = name
         try:
             # ALWAYS base-id prefix, never exact. Nexus tables key the instance
             # SCOPE-SUFFIXED (`v2-conv-trt|<config-hash>`), so an exact match on the
@@ -84,18 +83,14 @@ def _read_tables(instance_id):
             # in a scoped row, which is the exact failure it exists to catch. The base-id
             # trap is already recorded in this project's memory for the dashboard cards.
             base = str(instance_id).split("|", 1)[0]
-            q = q.filter(
-                lambda row: (row[field].default("") == base)
-                | row[field].default("").match(f"^{base}\\|")
-                | row[field].default("").match(f"^{base}:")
-            )
-            out[name] = list(q.run(conn))
+            _f = r.P.field(field).default("")
+            out[name] = list(r.run(r.filter(
+                q,
+                _f.eq(base)
+                | _f.starts_with(base + "|")
+                | _f.starts_with(base + ":"))))
         except Exception as exc:
             print(f"  WARN {name}: {exc}", file=sys.stderr)
-    try:
-        conn.close()
-    except Exception:
-        pass
     return out
 
 
