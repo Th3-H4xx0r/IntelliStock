@@ -15,9 +15,19 @@ Read the whole runbook before starting step 1. Budget a weekend.
 
 ## 1. Pre-flight
 
-Backend redeployed from `feat/postgres-port` but **still pointed at RethinkDB**
-(`PG_DSN` unset, `POSTGRES_*` present). The code is Postgres-capable and
-RethinkDB-resident; that is the safe resting state.
+**Do NOT deploy the branch yet.** An earlier draft of this runbook claimed the
+backend could be redeployed from `feat/postgres-port` while "still pointed at
+RethinkDB", with `PG_DSN` unset as the safe resting state. That is false, and
+believing it takes the live account down.
+
+The port removed every ReQL call site: no module under `backend/` imports the
+driver any more, and `dsn_from_env()` falls back to `POSTGRES_HOST` when
+`PG_DSN` is unset. So the deployed code reads Postgres and ONLY Postgres. Ship
+it before the data is migrated and `alpaca-main` boots to an empty database —
+no instance row, no strategy document, no live state.
+
+Deploying is therefore step 5 (Flip), not step 1. Prod keeps running the
+pre-port commit until the data is in Postgres and verified.
 
 Bring the database up on its own and inspect it:
 
@@ -192,7 +202,12 @@ membership or order.
 
 ## 8. Rollback
 
-    # unset PG_DSN in .env
+Rollback is **redeploying the pre-port commit**, not an env-var change. There is
+no RethinkDB code path left in the branch, so unsetting `PG_DSN` does not fall
+back to RethinkDB — it just points the store at a default Postgres that is not
+there.
+
+    git -C <deploy checkout> checkout <last pre-port commit on main>
     docker compose up -d --force-recreate \
       backend api price-service backtest-engine discord-bot
 
