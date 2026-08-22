@@ -185,7 +185,7 @@ def test_graph_nexus_llm_cache_readers_consult_central_policy(monkeypatch, mode)
     touched = []
     monkeypatch.setattr(gna, "_ensure_learning_cache_table", lambda conn: touched.append("learning"))
     monkeypatch.setattr(gna, "_ensure_nexus_history_table", lambda *args: touched.append("history"))
-    monkeypatch.setattr(gna, "_r", object())
+    monkeypatch.setattr(gna, "store", object())
 
     assert gna._get_learning_cache(object(), "instance", 12.0, config={}) is None
     assert (
@@ -324,7 +324,7 @@ def test_evidence_modes_bypass_all_llm_cache_database_writes(monkeypatch, mode):
     monkeypatch.setattr(
         gna, "_ensure_nexus_history_table", lambda *args: touched.append("history")
     )
-    monkeypatch.setattr(gna, "_r", object())
+    monkeypatch.setattr(gna, "store", object())
     monkeypatch.setattr(panel, "_r", object())
     monkeypatch.setattr(
         panel, "_get_panel_db_conn", lambda: touched.append("panel") or db
@@ -365,7 +365,7 @@ def test_run_once_does_not_read_or_mutate_llm_strategy_caches(monkeypatch, mode)
     panel_stocks = []
     monkeypatch.setattr(gna, "_get_nexus_db_conn", lambda *args, **kwargs: None)
     monkeypatch.setattr(gna, "_nexus_db_available", False)
-    monkeypatch.setattr(gna, "_r", None)
+    monkeypatch.setattr(gna, "store", None)
     monkeypatch.setattr(
         gna, "_NEXUS_BACKTEST_CLEANED_INSTANCES", {"evidence-test"}
     )
@@ -487,7 +487,7 @@ def test_run_once_never_swallows_model_evidence_error(monkeypatch, lane):
 
     monkeypatch.setattr(gna, "_get_nexus_db_conn", lambda *args, **kwargs: None)
     monkeypatch.setattr(gna, "_nexus_db_available", False)
-    monkeypatch.setattr(gna, "_r", None)
+    monkeypatch.setattr(gna, "store", None)
     monkeypatch.setattr(
         gna, "_get_cached_articles", lambda *args, **kwargs: (alpaca_articles, None)
     )

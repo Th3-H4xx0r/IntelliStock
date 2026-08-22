@@ -114,36 +114,30 @@ def test_quality_filter_only_processes_buys_not_sells():
 # ─── Fix 3: propagation TTL pruner ────────────────────────────────────────
 
 
-class _FakeR:
-    """Minimal RethinkDB driver shim. Captures filter expressions and
-    reports back a pre-baked cursor + update payload. Real RethinkDB is
-    not required for unit tests of this helper.
+class _FakeStore:
+    """Minimal db.store shim. Returns a pre-baked cursor for the scan and
+    captures the bulk update's primary-key selector + payload. Real Postgres
+    is not required for unit tests of this helper.
     """
+    from db import store as _real
+
+    Selection = _real.Selection
+    coerce_id = staticmethod(_real.coerce_id)
+    filter = staticmethod(_real.filter)
+
     def __init__(self, cursor_rows):
         self._cursor_rows = cursor_rows
         self.update_calls = []
         self.last_get_all_ids = None
 
-    def db(self, _name):
-        return self
+    def run(self, _selection):
+        return list(self._cursor_rows)
 
-    def table(self, _name):
-        return self
-
-    def filter(self, _lambda):
-        # Return self so .run(conn) can be chained.
-        return self
-
-    def run(self, _conn, **kwargs):
-        return iter(self._cursor_rows)
-
-    def get_all(self, *ids):
-        self.last_get_all_ids = list(ids)
-        return self
-
-    def update(self, payload):
+    def update(self, _table, selector, payload):
+        # `selector` is the _by_ids Selection: one term, params = (keys,).
+        self.last_get_all_ids = list(selector.terms[0][1][0])
         self.update_calls.append(payload)
-        return self
+        return self._real.WriteResult(replaced=len(self.last_get_all_ids))
 
 
 def _make_doc(id_, source="propagation", discovered_date="2025-11-10", status="active"):
@@ -155,9 +149,9 @@ def _make_doc(id_, source="propagation", discovered_date="2025-11-10", status="a
 
 def test_prune_returns_zero_on_empty_cursor(monkeypatch):
     """No stale rows → returns 0, no update call."""
-    fake = _FakeR(cursor_rows=[])
+    fake = _FakeStore(cursor_rows=[])
     import strategies.graph_nexus_analysis as gna
-    monkeypatch.setattr(gna, "_r", fake)
+    monkeypatch.setattr(gna, "store", fake)
     monkeypatch.setattr(gna, "_ensure_discovered_stocks_table", lambda c: None)
     out = _prune_stale_propagation_discoveries(
         conn="any", instance_id="main", today_iso="2026-05-07", max_age_days=30,
@@ -172,9 +166,9 @@ def test_prune_marks_stale_propagation_rows_as_expired(monkeypatch):
         _make_doc("p1", source="propagation", discovered_date="2025-11-10"),
         _make_doc("p2", source="propagation", discovered_date="2025-11-11"),
     ]
-    fake = _FakeR(cursor_rows=stale_rows)
+    fake = _FakeStore(cursor_rows=stale_rows)
     import strategies.graph_nexus_analysis as gna
-    monkeypatch.setattr(gna, "_r", fake)
+    monkeypatch.setattr(gna, "store", fake)
     monkeypatch.setattr(gna, "_ensure_discovered_stocks_table", lambda c: None)
     out = _prune_stale_propagation_discoveries(
         conn="any", instance_id="main", today_iso="2026-05-07", max_age_days=30,
@@ -190,9 +184,9 @@ def test_prune_marks_stale_propagation_rows_as_expired(monkeypatch):
 
 def test_prune_handles_malformed_today_iso(monkeypatch):
     """Bad date string → return 0 cleanly."""
-    fake = _FakeR(cursor_rows=[])
+    fake = _FakeStore(cursor_rows=[])
     import strategies.graph_nexus_analysis as gna
-    monkeypatch.setattr(gna, "_r", fake)
+    monkeypatch.setattr(gna, "store", fake)
     out = _prune_stale_propagation_discoveries(
         conn="any", instance_id="main", today_iso="not-a-date", max_age_days=30,
     )
@@ -200,7 +194,7 @@ def test_prune_handles_malformed_today_iso(monkeypatch):
 
 
 def test_prune_returns_zero_when_conn_or_r_missing():
-    """Defensive: missing conn or _r returns 0."""
+    """Defensive: missing conn returns 0."""
     out = _prune_stale_propagation_discoveries(
         conn=None, instance_id="main", today_iso="2026-05-07",
     )
@@ -209,9 +203,9 @@ def test_prune_returns_zero_when_conn_or_r_missing():
 
 def test_prune_clamps_negative_max_age_days(monkeypatch):
     """max_age_days <= 0 should not error; falls back to 1-day floor."""
-    fake = _FakeR(cursor_rows=[])
+    fake = _FakeStore(cursor_rows=[])
     import strategies.graph_nexus_analysis as gna
-    monkeypatch.setattr(gna, "_r", fake)
+    monkeypatch.setattr(gna, "store", fake)
     monkeypatch.setattr(gna, "_ensure_discovered_stocks_table", lambda c: None)
     out = _prune_stale_propagation_discoveries(
         conn="any", instance_id="main", today_iso="2026-05-07", max_age_days=-5,

@@ -330,66 +330,56 @@ def test_historic_resume_requires_strict_rows_by_default():
 
 def test_ensure_nexus_history_table_passes_indexes_through():
     """The strategy-side ``_ensure_nexus_history_table`` must accept the
-    new ``indexes`` kwarg and call index_create when the named index is
-    missing on the table."""
+    ``indexes`` kwarg, create the table through db.schema, and record the
+    marker for every index the registry declares.
+
+    Under Postgres the index set lives in ``db/schema.py`` and
+    ``CREATE INDEX`` is synchronous, so there is no index_create/index_wait
+    pair to assert on -- the contract is "ensure_table was called and the
+    named index is declared".
+    """
     from strategies import graph_nexus_analysis as gna
 
-    chain = _build_reql_chain()
-    chain.db_list.return_value.run.return_value = ["IntelliStock"]
-    chain.table_list.return_value.run.return_value = ["GraphNexusTradeContexts"]
-    chain.index_list.return_value.run.return_value = []  # missing!
-
+    ensured = []
     gna._nexus_history_tables_ensured.clear()
 
     fake_conn = MagicMock()
-    with patch.object(gna, "_r", chain):
+    with patch.object(gna._dbschema, "ensure_table", side_effect=ensured.append):
         gna._ensure_nexus_history_table(
             fake_conn, "GraphNexusTradeContexts", indexes=("instance_id",)
         )
 
-    chain.index_create.assert_called_with("instance_id")
-    chain.index_wait.assert_called_with("instance_id")
+    assert ensured == ["GraphNexusTradeContexts"]
     assert "GraphNexusTradeContexts::instance_id" in gna._nexus_history_tables_ensured
 
 
-def test_ensure_nexus_history_table_no_index_create_when_already_present():
-    """If the index already exists, do NOT issue a redundant
-    index_create — it would error in real RethinkDB."""
+def test_ensure_nexus_history_table_undeclared_index_is_not_marked():
+    """An index the registry does not declare must NOT be recorded as ready --
+    silently marking it would hide a missing index behind a memo."""
     from strategies import graph_nexus_analysis as gna
-
-    chain = _build_reql_chain()
-    chain.db_list.return_value.run.return_value = ["IntelliStock"]
-    chain.table_list.return_value.run.return_value = ["GraphNexusTradeContexts"]
-    chain.index_list.return_value.run.return_value = ["instance_id"]
 
     gna._nexus_history_tables_ensured.clear()
 
     fake_conn = MagicMock()
-    with patch.object(gna, "_r", chain):
+    with patch.object(gna._dbschema, "ensure_table"):
         gna._ensure_nexus_history_table(
-            fake_conn, "GraphNexusTradeContexts", indexes=("instance_id",)
+            fake_conn, "GraphNexusTradeContexts", indexes=("not_a_real_field",)
         )
 
-    chain.index_create.assert_not_called()
-    chain.index_wait.assert_not_called()
-    assert "GraphNexusTradeContexts::instance_id" in gna._nexus_history_tables_ensured
+    assert ("GraphNexusTradeContexts::not_a_real_field"
+            not in gna._nexus_history_tables_ensured)
 
 
-def test_ensure_nexus_history_table_no_indexes_keeps_legacy_behavior():
-    """Existing callers that pass no ``indexes`` kwarg must not be
-    forced into the index-check codepath — backward-compat for the dozen
-    other tables created via the same helper."""
+def test_ensure_nexus_history_table_memoises_per_table():
+    """A second call for an already-ensured table does no further DDL work."""
     from strategies import graph_nexus_analysis as gna
 
-    chain = _build_reql_chain()
-    chain.db_list.return_value.run.return_value = ["IntelliStock"]
-    chain.table_list.return_value.run.return_value = ["SomeOtherTable"]
-
+    ensured = []
     gna._nexus_history_tables_ensured.clear()
 
     fake_conn = MagicMock()
-    with patch.object(gna, "_r", chain):
+    with patch.object(gna._dbschema, "ensure_table", side_effect=ensured.append):
+        gna._ensure_nexus_history_table(fake_conn, "SomeOtherTable")
         gna._ensure_nexus_history_table(fake_conn, "SomeOtherTable")
 
-    chain.index_list.assert_not_called()
-    chain.index_create.assert_not_called()
+    assert ensured == ["SomeOtherTable"]

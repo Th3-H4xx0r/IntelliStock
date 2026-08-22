@@ -616,39 +616,22 @@ def test_strict_institutional_cache_rejects_legacy_unscoped_row():
 def test_trade_context_persists_strict_point_in_time_provenance(monkeypatch):
     inserted: list[dict] = []
 
-    class _Insert:
-        def __init__(self, docs):
-            self.docs = list(docs)
+    from db import store as _store
 
-        def run(self, _conn, **_kwargs):
-            inserted.extend(self.docs)
+    class _Store:
+        Selection = _store.Selection
+        coerce_id = staticmethod(_store.coerce_id)
 
-    class _Delete:
-        def run(self, _conn, **_kwargs):
-            return None
+        def insert(self, _table, docs, *, conflict=None, durability="hard"):
+            inserted.extend(docs if isinstance(docs, list) else [docs])
+            return _store.InsertResult(inserted=1)
 
-    class _Selection:
-        def delete(self):
-            return _Delete()
-
-    class _Table:
-        def insert(self, docs, conflict=None):
-            return _Insert(docs)
-
-        def get_all(self, *_ids):
-            return _Selection()
-
-    class _DB:
-        def table(self, _name):
-            return _Table()
-
-    class _R:
-        def db(self, _name):
-            return _DB()
+        def delete(self, _table, _selector):
+            return _store.WriteResult(deleted=0)
 
     monkeypatch.setattr(graph, "_ensure_nexus_history_table", lambda *_a, **_k: None)
     monkeypatch.setattr(graph, "_get_nexus_db_conn", lambda reuse=False: None)
-    monkeypatch.setattr(graph, "_r", _R())
+    monkeypatch.setattr(graph, "store", _Store())
 
     graph._save_trade_contexts_and_outcomes(
         object(),
@@ -672,31 +655,22 @@ def test_trade_context_persists_strict_point_in_time_provenance(monkeypatch):
 def test_trade_context_without_context_is_explicitly_legacy(monkeypatch):
     inserted: list[dict] = []
 
-    class _Insert:
-        def __init__(self, docs):
-            self.docs = list(docs)
+    from db import store as _store
 
-        def run(self, _conn, **_kwargs):
-            inserted.extend(self.docs)
+    class _Store:
+        Selection = _store.Selection
+        coerce_id = staticmethod(_store.coerce_id)
 
-    class _Table:
-        def insert(self, docs, conflict=None):
-            return _Insert(docs)
+        def insert(self, _table, docs, *, conflict=None, durability="hard"):
+            inserted.extend(docs if isinstance(docs, list) else [docs])
+            return _store.InsertResult(inserted=1)
 
-        def get_all(self, *_ids):
+        def delete(self, _table, _selector):
             raise AssertionError("no stale outcome deletion expected")
-
-    class _DB:
-        def table(self, _name):
-            return _Table()
-
-    class _R:
-        def db(self, _name):
-            return _DB()
 
     monkeypatch.setattr(graph, "_ensure_nexus_history_table", lambda *_a, **_k: None)
     monkeypatch.setattr(graph, "_get_nexus_db_conn", lambda reuse=False: None)
-    monkeypatch.setattr(graph, "_r", _R())
+    monkeypatch.setattr(graph, "store", _Store())
 
     graph._save_trade_contexts_and_outcomes(
         object(),

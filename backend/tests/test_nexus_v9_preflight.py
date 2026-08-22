@@ -364,7 +364,7 @@ def test_active_event_maintenance_retry_shrinks_prompt_context_for_gpt_oss():
          patch.object(gna, "_load_active_event_maintenance_cache_doc", return_value=None), \
          patch.object(gna, "_store_active_event_maintenance_cache_doc"), \
          patch.object(gna, "_ensure_nexus_history_table"), \
-         patch.object(gna, "_r", None), \
+         patch.object(gna, "store", None), \
          patch.object(gna, "call_structured_llm_by_provider", side_effect=_fake_call), \
          patch.object(gna, "_scl_guarded", side_effect=_fake_call), \
          patch.object(gna, "get_last_structured_llm_call_metadata", return_value={"provider": "azure", "effective_model": "gpt-oss-120b", "ok": False, "usage": {}}):

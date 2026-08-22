@@ -235,6 +235,12 @@ _SPECS = [
               indexed_fields=("instance_id",), prefix_fields=("instance_id",)),
     TableSpec("GraphNexusMarketTrends",
               indexed_fields=("instance_id",), prefix_fields=("instance_id",)),
+    # r.now() wrote a native time on these two; the ported writer stores an
+    # ISO-8601 string and time_fields decodes it back to a tz-aware datetime,
+    # so readers see the same Python type they saw under RethinkDB.
+    TableSpec("GraphNexusNewsCache",
+              time_fields=("cached_at", "sentiment_cached_at")),
+    TableSpec("GraphNexusTickerHistory", time_fields=("last_updated",)),
     TableSpec("GraphNexusRotationCooldown", prefix_fields=("id",)),
     TableSpec("GraphNexusLearningCache", prefix_fields=("id",)),
     TableSpec("GraphNexusDiscoverySnapshots", prefix_fields=("id",)),

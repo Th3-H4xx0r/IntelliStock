@@ -114,51 +114,22 @@ def test_saved_sentiment_is_partitioned_by_point_in_time_scope(monkeypatch):
         }
     }
 
-    class _Op:
-        def __init__(self, operation):
-            self._operation = operation
+    from db.merge import deep_merge
 
-        def run(self, conn):
-            return self._operation()
+    class _Store:
+        def get(self, _table, key):
+            return store.get(key)
 
-    class _Row:
-        def get(self, key):
-            return _Op(lambda: store.get(key))
+        def update(self, _table, key, patch):
+            store[key] = deep_merge(store.get(key, {}), patch)
+            return {"replaced": 1}
 
-        def update(self, patch):
-            def _update():
-                store["2026-03-02"].update(patch)
-                return {"replaced": 1}
-
-            return _Op(_update)
-
-    class _Table:
-        def get(self, key):
-            row = _Row()
-            original_get = row.get
-
-            class _BoundRow:
-                def run(self, conn):
-                    return original_get(key).run(conn)
-
-                def update(self, patch):
-                    return row.update(patch)
-
-            return _BoundRow()
-
-    class _Db:
-        def table(self, name):
-            return _Table()
-
-    class _R:
-        def db(self, name):
-            return _Db()
-
-        def now(self):
-            return "now"
+        def insert(self, _table, doc, *, conflict=None, durability="hard"):
+            store[doc["id"]] = doc
+            return {"inserted": 1}
 
     context = _context("2026-03-02T14:00:00Z")
-    monkeypatch.setattr(graph, "_r", _R())
+    monkeypatch.setattr(graph, "store", _Store())
 
     graph._save_cached_sentiment(
         object(),
@@ -246,8 +217,8 @@ def test_strict_news_context_rejects_an_undated_cached_article(monkeypatch):
 def test_cached_article_reader_does_not_swallow_strict_timestamp_errors(
     monkeypatch,
 ):
-    class _Query:
-        def run(self, conn):
+    class _Store:
+        def get(self, _table, _key):
             return {
                 "id": "2026-03-02",
                 "articles": [
@@ -255,19 +226,7 @@ def test_cached_article_reader_does_not_swallow_strict_timestamp_errors(
                 ],
             }
 
-    class _Table:
-        def get(self, key):
-            return _Query()
-
-    class _Db:
-        def table(self, name):
-            return _Table()
-
-    class _R:
-        def db(self, name):
-            return _Db()
-
-    monkeypatch.setattr(graph, "_r", _R())
+    monkeypatch.setattr(graph, "store", _Store())
 
     with pytest.raises(PointInTimeDataError, match="availability timestamp"):
         graph._get_cached_articles(

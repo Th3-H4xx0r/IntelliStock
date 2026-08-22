@@ -31,6 +31,21 @@ from .merge import deep_merge
 class FakeStore:
     """The db.store module surface, backed by ``{table: {id: doc}}``."""
 
+    # The query builders are the real ones -- a FakeStore query carries the
+    # identical Selection, so nothing about the predicate grammar is
+    # re-derived here. Exposed as attributes so a call site that holds the
+    # store as one object (``store.filter(...)`` on a monkeypatched module
+    # attribute) works against the fake exactly as it does against db.store.
+    filter = staticmethod(_s.filter)
+    between = staticmethod(_s.between)
+    order_by = staticmethod(_s.order_by)
+    limit = staticmethod(_s.limit)
+    slice = staticmethod(_s.slice)
+    asc = staticmethod(_s.asc)
+    desc = staticmethod(_s.desc)
+    coerce_id = staticmethod(_s.coerce_id)
+    Selection = _s.Selection
+
     def __init__(self) -> None:
         self._tables: dict = {}
 

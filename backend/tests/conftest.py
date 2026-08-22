@@ -19,6 +19,16 @@ if _BACKEND_DIR not in sys.path:
 
 import pytest
 
+if not os.environ.get("PG_TEST_DSN"):
+    # No database in this run, but a unit test can still reach db.store through
+    # a module it exercises (the ported call sites no longer take a connection
+    # object that fails fast on a dummy). The pool would then spend
+    # PG_POOL_TIMEOUT + PG_RECONNECT_TIMEOUT -- 60s by default -- discovering
+    # there is nothing to connect to. Fail in a second instead.
+    os.environ.setdefault("PG_POOL_TIMEOUT", "1")
+    os.environ.setdefault("PG_RECONNECT_TIMEOUT", "1")
+    os.environ.setdefault("PG_CONNECT_RETRIES", "0")
+
 
 @pytest.fixture
 def store():
