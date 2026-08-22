@@ -223,3 +223,19 @@ def test_overlay_rationale_lever_defaults_off_and_gates_all_surfaces():
         start = max(0, m.start() - 400)
         assert "_req_ra" in src[start:m.end() + 200], (
             "an ra example appears outside the _req_ra gate")
+
+
+def test_bar_snapshot_lever_defaults_on_and_gates_both_capture_sites():
+    """2026-08-22 profiling: per-bar rewind capture = ~2.4s/bar on a warm
+    cache (~19min of a 52min run). `backtest_bar_snapshot_enabled` must
+    default True (behaviour unchanged) and gate BOTH capture call sites."""
+    assert _SRC.count('cfg.get("backtest_bar_snapshot_enabled", True)') == 1
+    assert _SRC.count("if _bar_snapshot_enabled(_cached_strategies):") == 2, (
+        "both _bs_capture sites must be gated")
+    # anti-vacuity: the ungated call pattern must no longer exist
+    import re
+    ungated = [
+        m for m in re.finditer(r"_bs_capture\(", _SRC)
+        if "_bar_snapshot_enabled" not in _SRC[max(0, m.start() - 300):m.start()]
+    ]
+    assert not ungated, f"{len(ungated)} ungated _bs_capture call(s) remain"

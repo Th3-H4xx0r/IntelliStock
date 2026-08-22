@@ -3266,6 +3266,26 @@ def _benchmark_quote_logging(cached_strategies) -> bool:
         return False
 
 
+def _bar_snapshot_enabled(cached_strategies) -> bool:
+    """Per-bar LLM-crash rewind snapshots. Default ON (behaviour unchanged).
+
+    2026-08-22 profiling: the capture serializes the FULL strategy cache and
+    deep-copies the portfolio EVERY BAR — ~2.4s/bar on a warm cache = ~19min
+    of a 52min window-d run (it was the largest single time sink, initially
+    misattributed to network fetches because the pause lands just before the
+    BENCHMARK QUOTE log line). On a deterministic run whose LLM calls are all
+    prompt-cache hits, the failure the snapshot insures against is nearly
+    unreachable, and a crashed run can be relaunched byte-identically for $0 —
+    so the paired-experiment runner turns this OFF for its arms.
+    `backtest_bar_snapshot_enabled=false` => an LLMCriticalFailure kills the
+    run instead of rewinding; that is the accepted trade."""
+    try:
+        cfg = _core_sleeve_cfg_raw(cached_strategies) or {}
+        return bool(cfg.get("backtest_bar_snapshot_enabled", True))
+    except (TypeError, ValueError, AttributeError):
+        return True
+
+
 def _price_history_diagnostics(cached_strategies) -> bool:
     """Report price_history coverage at the scoring call. Default OFF, log-only."""
     try:
@@ -7113,11 +7133,12 @@ def _run_backtest_historic_lookback(run_once_specs, symbols, data, start_dt, por
             # Mirrors the main-loop snapshot capture at ~line 7397.
             try:
                 from backtest_bar_snapshot import capture as _bs_capture
-                _bs_capture(
-                    strategy_caches=(_strategy_cache if isinstance(_strategy_cache, dict) else {}),
-                    portfolio_emulator=portfolio_emulator,
-                    current_time=lookback_time,
-                )
+                if _bar_snapshot_enabled(_cached_strategies):
+                    _bs_capture(
+                        strategy_caches=(_strategy_cache if isinstance(_strategy_cache, dict) else {}),
+                        portfolio_emulator=portfolio_emulator,
+                        current_time=lookback_time,
+                    )
             except Exception as _capture_err:
                 try:
                     _log(f"lookback bar snapshot capture failed (non-fatal): {_capture_err}", "yellow")
@@ -13946,11 +13967,12 @@ while not shutdown_requested:
                             if mode == MODE_BACKTEST:
                                 try:
                                     from backtest_bar_snapshot import capture as _bs_capture
-                                    _bs_capture(
-                                        strategy_caches=(_strategy_cache if isinstance(_strategy_cache, dict) else {}),
-                                        portfolio_emulator=portfolio_emulator if 'portfolio_emulator' in dir() else None,
-                                        current_time=current_time,
-                                    )
+                                    if _bar_snapshot_enabled(_cached_strategies):
+                                        _bs_capture(
+                                            strategy_caches=(_strategy_cache if isinstance(_strategy_cache, dict) else {}),
+                                            portfolio_emulator=portfolio_emulator if 'portfolio_emulator' in dir() else None,
+                                            current_time=current_time,
+                                        )
                                 except Exception as _capture_err:
                                     try:
                                         _log(f"bar snapshot capture failed (non-fatal): {_capture_err}", "yellow")

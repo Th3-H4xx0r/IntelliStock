@@ -41,5 +41,18 @@ price ($2.06) because f68af81's own prompt changes re-keyed the cache AND change
 
 DECISION DEFERRED to the window-c cold pair (readable regime) — running.
 
-## Result window c (cold pair)
-_pending_
+## Result window c (bt 186463 control +5.79% / bt 143282 treatment +4.58%)
+**READABLE (67% overlap) — and the treatment LOST 1.21pp.** (Within single-slot noise: the
+treatment-only names AVNT/CF alone can carry ~1pp, so read it as "no benefit", not "harm".)
+
+## FINAL VERDICT: ra NOT ADOPTED — the slim prompt stands
+The preregistered adoption rule required treatment > +1pp in a readable window; window c is the
+readable one and it points the other way. The window-d +2.5pp chain-of-thought story does not
+replicate — the original swing that motivated this A/B was draw luck, caught by the two-window
+discipline before it cost anything. `overlay_request_rationale` stays available as a per-doc
+lever (default OFF); doc 195 verified restored. Question closed; savings banked.
+
+Operational note: both wrappers for this pair were killed by the mid-session worktree switch;
+the arms themselves ran to completion server-side and were adjudicated with
+scripts/_resume_arm_b.py + check_pair_validity.py. Long pair-runners should launch from the
+session's current worktree.

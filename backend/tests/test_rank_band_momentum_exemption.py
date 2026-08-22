@@ -121,3 +121,58 @@ def test_missing_or_malformed_momentum_score_does_not_exempt():
     scores2 = _book()
     scores2["VICR"]["momentum_watchlist_score"] = "not-a-number"
     assert _apply_rank_band(scores2, list(scores2), _Emu(), cfg)["VICR"]["score"] == 0
+
+
+def test_ranked_cache_fallback_reaches_discovery_lane_names():
+    """2026-08-22 wiring fix (bt 443898: 0 exemptions in 44 evaluations with
+    the lever armed): `momentum_watchlist_score` is stamped only on the
+    watchlist lane's own picks, so a discovery-lane mover carries NO score
+    field and the exemption never fired for exactly the names it was written
+    for. `_momentum_ranked_cache` (full momentum ranking, prior bar) is the
+    fallback."""
+    scores = _book()
+    # A discovery-lane mover: buy signal, mid-pack blend, NO watchlist stamp.
+    scores["AAOI"] = {"score": 1, "raw_net_score": 0.25}
+    cache = {"_momentum_ranked_cache": [("AAOI", 1.4), ("VICR", 1.25)]}
+    cfg = dict(BASE, rank_band_momentum_exempt_min_score=1.0)
+    out = _apply_rank_band(scores, list(scores), _Emu(), cfg,
+                           strategy_cache=cache)
+    assert out["AAOI"]["score"] == 1, "ranked-cache fallback must exempt it"
+    assert "RANK_BAND" not in str(out["AAOI"].get("reason") or "")
+
+
+def test_ranked_cache_fallback_does_not_rescue_weak_names():
+    """Anti-vacuity: a discovery name below the exemption floor stays blocked
+    even when it appears in the ranked cache."""
+    scores = _book()
+    scores["WEAK"] = {"score": 1, "raw_net_score": 0.20}
+    cache = {"_momentum_ranked_cache": [("WEAK", 0.4)]}
+    cfg = dict(BASE, rank_band_momentum_exempt_min_score=1.0)
+    out = _apply_rank_band(scores, list(scores), _Emu(), cfg,
+                           strategy_cache=cache)
+    assert out["WEAK"]["score"] == 0
+    assert "RANK_BAND" in out["WEAK"]["reason"]
+
+
+def test_no_cache_and_no_stamp_behaves_as_before():
+    """Without a strategy_cache the fallback is empty and the pre-fix
+    behaviour is byte-identical (the stamped-score path still works)."""
+    scores = _book()
+    scores["AAOI"] = {"score": 1, "raw_net_score": 0.25}
+    cfg = dict(BASE, rank_band_momentum_exempt_min_score=1.0)
+    out = _apply_rank_band(scores, list(scores), _Emu(), cfg)
+    assert out["AAOI"]["score"] == 0, "no stamp + no cache = still blocked"
+    assert out["VICR"]["score"] == 1, "stamped path unchanged"
+
+
+def test_stamped_score_wins_over_ranked_cache():
+    """A positive stamped score is authoritative; the cache is only a
+    fallback for names the watchlist lane never stamped."""
+    scores = _book()
+    scores["MIXD"] = {"score": 1, "raw_net_score": 0.22,
+                      "momentum_watchlist_score": 0.5}
+    cache = {"_momentum_ranked_cache": [("MIXD", 2.0)]}
+    cfg = dict(BASE, rank_band_momentum_exempt_min_score=1.0)
+    out = _apply_rank_band(scores, list(scores), _Emu(), cfg,
+                           strategy_cache=cache)
+    assert out["MIXD"]["score"] == 0, "stamped value is authoritative"
