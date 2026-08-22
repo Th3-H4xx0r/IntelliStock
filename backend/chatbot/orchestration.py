@@ -13,7 +13,7 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from rethinkdb import RethinkDB
+from db import store
 
 _log = logging.getLogger(__name__)
 
@@ -24,17 +24,16 @@ from chatbot.tools import all_tools, get_tool, openai_tool_definitions
 from interactive_utils import action_list_brokerages, action_list_models, action_strategies, action_instances, action_list_backtests, action_get_model
 
 
-r = RethinkDB()
 DB_NAME = os.environ.get("INTELLISTOCK_DB_NAME", "IntelliStock")
 MODELS_TABLE = "Models"
 
 
 def _fetch_model_doc(conn, model_id: str):
-    """Fetch the raw model doc (with the unmasked api_key) from RethinkDB."""
+    """Fetch the raw model doc (with the unmasked api_key) from the store."""
     if not model_id:
         return None
     try:
-        return r.db(DB_NAME).table(MODELS_TABLE).get(model_id).run(conn)
+        return store.get(MODELS_TABLE, model_id)
     except Exception:
         return None
 

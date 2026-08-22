@@ -1,6 +1,10 @@
 """
-Auth utilities: user storage in RethinkDB, password hashing, JWT.
+Auth utilities: user storage in Postgres, password hashing, JWT.
 Used by server.py (default admin) and api/main.py (auth endpoints + protection).
+
+Every function keeps its leading ``conn`` parameter (R26): ~20 call sites and
+half a dozen test doubles pass one. It is accepted and ignored -- the store
+takes its own pooled connection per operation.
 """
 
 import calendar
@@ -15,11 +19,12 @@ _backend_dir = os.path.dirname(os.path.abspath(__file__))
 if _backend_dir not in sys.path:
     sys.path.insert(0, _backend_dir)
 
-from rethinkdb import RethinkDB
+from db import schema as db_schema
+from db import store
 
-r = RethinkDB()
 DB_NAME = os.environ.get("INTELLISTOCK_DB_NAME", "IntelliStock")
 USERS_TABLE = "Users"
+USERNAME_INDEX = "username"
 
 # Lazy imports for optional deps (bcrypt, jwt)
 _bcrypt_available = None
@@ -48,22 +53,14 @@ def _check_jwt():
     return _jwt_available
 
 
-def get_conn():
-    from interactive_utils import get_conn as _get_conn
-    return _get_conn()
+def ensure_users_table(conn=None) -> None:
+    """Create the Users table + its username index if they do not exist.
 
-
-def ensure_users_table(conn) -> None:
-    """Create Users table if it does not exist."""
-    dbs = list(r.db_list().run(conn))
-    if DB_NAME not in dbs:
-        r.db_create(DB_NAME).run(conn)
-    tables = list(r.db(DB_NAME).table_list().run(conn))
-    if USERS_TABLE not in tables:
-        r.db(DB_NAME).table_create(USERS_TABLE).run(conn)
-        # Unique index on username
-        r.db(DB_NAME).table(USERS_TABLE).index_create("username").run(conn)
-        r.db(DB_NAME).table(USERS_TABLE).index_wait("username").run(conn)
+    The index set comes from db/schema.py's registry, where Users already
+    declares indexed_fields=("username",) -- so this is R25's one-liner and
+    index_wait is gone (CREATE INDEX is synchronous).
+    """
+    db_schema.ensure_table(USERS_TABLE)
 
 
 # Bcrypt only uses the first 72 bytes. We always truncate so bcrypt never raises.
@@ -118,10 +115,10 @@ def set_onboarding_completed(conn, user_id: str, completed: bool) -> Dict[str, A
     if doc is None:
         raise ValueError("User not found")
     now = datetime.utcnow().isoformat() + "Z"
-    r.db(DB_NAME).table(USERS_TABLE).get(user_id).update({
+    store.update(USERS_TABLE, user_id, {
         "has_completed_onboarding": bool(completed),
         "updated_at": now,
-    }).run(conn)
+    })
     return user_doc_to_public(get_user_by_id(conn, user_id))
 
 
@@ -141,8 +138,7 @@ def create_user(
     if role not in ("admin", "user"):
         raise ValueError("Role must be admin or user")
     ensure_users_table(conn)
-    existing = r.db(DB_NAME).table(USERS_TABLE).get_all(username, index="username").run(conn)
-    existing = list(existing)
+    existing = store.get_all(USERS_TABLE, username, index=USERNAME_INDEX)
     if existing:
         raise ValueError("Username already exists")
     user_id = str(uuid.uuid4())
@@ -158,26 +154,25 @@ def create_user(
     }
     if email is not None:
         doc["email"] = email.strip()
-    r.db(DB_NAME).table(USERS_TABLE).insert(doc).run(conn)
+    res = store.insert(USERS_TABLE, doc)
+    if res["errors"]:
+        raise ValueError(res["first_error"] or "Could not create user")
     return user_doc_to_public(doc)
 
 
 def get_user_by_username(conn, username: str) -> Optional[Dict]:
     username = username.strip().lower()
-    cursor = r.db(DB_NAME).table(USERS_TABLE).get_all(username, index="username").run(conn)
-    rows = list(cursor)
+    rows = store.get_all(USERS_TABLE, username, index=USERNAME_INDEX)
     return rows[0] if rows else None
 
 
 def get_user_by_id(conn, user_id: str) -> Optional[Dict]:
-    doc = r.db(DB_NAME).table(USERS_TABLE).get(user_id).run(conn)
-    return doc
+    return store.get(USERS_TABLE, user_id)
 
 
 def list_users(conn) -> List[Dict]:
     ensure_users_table(conn)
-    cursor = r.db(DB_NAME).table(USERS_TABLE).run(conn)
-    rows = list(cursor)
+    rows = store.run(USERS_TABLE)
     return [user_doc_to_public(row) for row in rows if isinstance(row, dict)]
 
 
@@ -204,13 +199,13 @@ def update_user(
         update["role"] = role
     if email is not None:
         update["email"] = email.strip() if email else None
-    r.db(DB_NAME).table(USERS_TABLE).get(user_id).update(update).run(conn)
+    store.update(USERS_TABLE, user_id, update)
     updated = get_user_by_id(conn, user_id)
     return user_doc_to_public(updated)
 
 
 def delete_user(conn, user_id: str) -> None:
-    result = r.db(DB_NAME).table(USERS_TABLE).get(user_id).delete().run(conn)
+    result = store.delete(USERS_TABLE, user_id)
     if result.get("deleted", 0) == 0:
         raise ValueError("User not found")
 

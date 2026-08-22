@@ -1,4 +1,4 @@
-"""Chatbot conversation storage (RethinkDB).
+"""Chatbot conversation storage (Postgres).
 
 The first per-user resource in this codebase: conversations are scoped by
 ``user_id`` and queried via a secondary index. Conversations carry their
@@ -12,9 +12,10 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from rethinkdb import RethinkDB
+from db import json as db_json
+from db import schema as db_schema
+from db import store
 
-r = RethinkDB()
 DB_NAME = os.environ.get("INTELLISTOCK_DB_NAME", "IntelliStock")
 TABLE = "ChatbotConversations"
 USER_INDEX = "user_id"
@@ -28,18 +29,15 @@ def _now() -> str:
     return datetime.utcnow().isoformat() + "Z"
 
 
-def ensure_chatbot_tables(conn) -> None:
-    """Create the ChatbotConversations table + user_id index if needed."""
-    dbs = list(r.db_list().run(conn))
-    if DB_NAME not in dbs:
-        r.db_create(DB_NAME).run(conn)
-    tables = list(r.db(DB_NAME).table_list().run(conn))
-    if TABLE not in tables:
-        r.db(DB_NAME).table_create(TABLE).run(conn)
-    indexes = list(r.db(DB_NAME).table(TABLE).index_list().run(conn))
-    if USER_INDEX not in indexes:
-        r.db(DB_NAME).table(TABLE).index_create(USER_INDEX).run(conn)
-        r.db(DB_NAME).table(TABLE).index_wait(USER_INDEX).run(conn)
+def ensure_chatbot_tables(conn=None) -> None:
+    """Create the ChatbotConversations table + user_id index if needed.
+
+    R25: the index set lives in db/schema.py, which already declares
+    ChatbotConversations with indexed_fields=("user_id",). ``conn`` is kept
+    and ignored -- api/main.py's startup hook and _ensure_chatbot_ready both
+    pass one.
+    """
+    db_schema.ensure_table(TABLE)
 
 
 # ── Public message envelope ────────────────────────────────────────────────
@@ -89,29 +87,27 @@ def _require_user_id(user_id: str) -> str:
 
 def list_conversations(conn, user_id: str) -> List[Dict[str, Any]]:
     _require_user_id(user_id)
-    cursor = (
-        r.db(DB_NAME)
-        .table(TABLE)
-        .get_all(user_id, index=USER_INDEX)
-        .pluck(
-            "id",
-            "title",
-            "model_id",
-            "model_name",
-            "created_at",
-            "updated_at",
-            "last_message_preview",
-            "message_count",
-        )
-        .order_by(r.desc("updated_at"))
-        .run(conn)
+    # ORDER BY runs in Postgres under COLLATE "C" (R21), then pluck drops the
+    # keys the list view does not need. pluck OMITS a missing key rather than
+    # emitting null, exactly as ReQL did.
+    sel = store.order_by(store.filter(TABLE, {USER_INDEX: user_id}),
+                         fields=(store.desc("updated_at"),))
+    return store.pluck(
+        store.run(sel),
+        "id",
+        "title",
+        "model_id",
+        "model_name",
+        "created_at",
+        "updated_at",
+        "last_message_preview",
+        "message_count",
     )
-    return list(cursor)
 
 
 def get_conversation(conn, user_id: str, conv_id: str) -> Optional[Dict[str, Any]]:
     _require_user_id(user_id)
-    doc = r.db(DB_NAME).table(TABLE).get(conv_id).run(conn)
+    doc = store.get(TABLE, conv_id)
     if not doc or doc.get("user_id") != user_id:
         return None
     doc.setdefault("messages", [])
@@ -143,7 +139,7 @@ def create_conversation(
         "created_at": now,
         "updated_at": now,
     }
-    r.db(DB_NAME).table(TABLE).insert(doc).run(conn)
+    store.insert(TABLE, doc)
     return doc
 
 
@@ -170,7 +166,7 @@ def update_conversation(
     if settings is not None:
         merged = {**(doc.get("settings") or {}), **settings}
         update["settings"] = merged
-    r.db(DB_NAME).table(TABLE).get(conv_id).update(update).run(conn)
+    store.update(TABLE, conv_id, update)
     return get_conversation(conn, user_id, conv_id)
 
 
@@ -178,7 +174,7 @@ def delete_conversation(conn, user_id: str, conv_id: str) -> bool:
     doc = get_conversation(conn, user_id, conv_id)
     if not doc:
         return False
-    r.db(DB_NAME).table(TABLE).get(conv_id).delete().run(conn)
+    store.delete(TABLE, conv_id)
     return True
 
 
@@ -186,12 +182,12 @@ def clear_messages(conn, user_id: str, conv_id: str) -> Optional[Dict[str, Any]]
     doc = get_conversation(conn, user_id, conv_id)
     if not doc:
         return None
-    r.db(DB_NAME).table(TABLE).get(conv_id).update({
+    store.update(TABLE, conv_id, {
         "messages": [],
         "message_count": 0,
         "last_message_preview": "",
         "updated_at": _now(),
-    }).run(conn)
+    })
     return get_conversation(conn, user_id, conv_id)
 
 
@@ -216,10 +212,14 @@ def append_messages(
 ) -> Optional[Dict[str, Any]]:
     """Append validated messages to a conversation atomically.
 
-    Uses RethinkDB's ``r.row['messages'].add(new)`` so two concurrent writers
-    can't clobber each other (read-modify-write would lose the earlier
-    write's appends). Also derives the preview / counter inside the same
-    atomic update."""
+    The ReQL form was ``r.row['messages'].default([]).add(new)`` -- one
+    server-side statement, so two concurrent writers can't clobber each other
+    the way a read-modify-write would. store.update() deep-merges and
+    REPLACES arrays wholesale, which is the opposite of what this needs, so
+    this is one of the few sites that drops to hand-written SQL (spec 2.7:
+    "a site needing more gets hand-written SQL in its owning module").
+    ``doc`` inside an UPDATE ... SET expression is always the pre-update row,
+    so message_count is derived from the old length exactly as ReQL did."""
     _require_user_id(user_id)
     if not messages:
         return get_conversation(conn, user_id, conv_id)
@@ -236,24 +236,33 @@ def append_messages(
             preview = str(m["content"])[:240]
             break
 
-    update_doc: Dict[str, Any] = {
-        "messages": r.row["messages"].default([]).add(messages),
-        "message_count": r.row["messages"].default([]).count().add(len(messages)),
-        "updated_at": _now(),
-    }
+    scalars: Dict[str, Any] = {"updated_at": _now()}
     if preview:
-        update_doc["last_message_preview"] = preview
-    r.db(DB_NAME).table(TABLE).get(conv_id).update(update_doc).run(conn)
+        scalars["last_message_preview"] = preview
+    store.sql(
+        'UPDATE "%s" SET doc = jsonb_set('
+        "    jsonb_set(doc, '{messages}',"
+        "              coalesce(doc->'messages', '[]'::jsonb) || %%(msgs)s::jsonb),"
+        "    '{message_count}',"
+        "    to_jsonb(coalesce("
+        "        jsonb_array_length(coalesce(doc->'messages', '[]'::jsonb)), 0)"
+        "      + %%(added)s)"
+        ") || %%(scalars)s::jsonb, updated_at = now() WHERE id = %%(id)s" % TABLE,
+        {"msgs": db_json.dumps(messages),
+         "added": len(messages),
+         "scalars": db_json.dumps(scalars),
+         "id": store.coerce_id(TABLE, conv_id)},
+    )
 
     # Refresh and only trim if we crossed the cap. Trimming is non-atomic but
     # idempotent — the worst-case is two writers each trim once.
     fresh = get_conversation(conn, user_id, conv_id)
     if fresh and len(fresh.get("messages") or []) > MAX_MESSAGES_PER_CONVERSATION:
         trimmed = _trim_to_max(fresh["messages"])
-        r.db(DB_NAME).table(TABLE).get(conv_id).update({
+        store.update(TABLE, conv_id, {
             "messages": trimmed,
             "message_count": len(trimmed),
-        }).run(conn)
+        })
         fresh = get_conversation(conn, user_id, conv_id)
     return fresh
 
@@ -280,10 +289,10 @@ def replace_message(
             break
     if not found:
         return None
-    r.db(DB_NAME).table(TABLE).get(conv_id).update({
+    store.update(TABLE, conv_id, {
         "messages": msgs,
         "updated_at": _now(),
-    }).run(conn)
+    })
     return get_conversation(conn, user_id, conv_id)
 
 

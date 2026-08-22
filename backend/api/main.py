@@ -37,8 +37,10 @@ from llm_utils import (
     normalize_reasoning_effort,
     resolve_api_key_for_provider,
 )
+from db import pool as db_pool
+from db import store as db_store
+from db.store import P as _Pred
 from auth_utils import (
-    r as _r_auth,  # R16 phase-3: shared RethinkDB driver instance for direct queries
     create_user,
     get_user_by_username,
     get_user_by_id,
@@ -382,6 +384,29 @@ def api_shutdown_close_claude_cli_sessions():
         # Provider module may not be importable yet on a partial install;
         # never block API shutdown on this.
         pass
+
+
+def _store_now() -> str:
+    """R24 replacement for ``r.now()``.
+
+    ReQL wrote a native TIME; the driver read it back as a tz-aware datetime,
+    which FastAPI then serialised to exactly this string on the way out. A
+    datetime is not jsonb-serialisable, so the string is written directly.
+    """
+    import datetime as _dt
+    return _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+
+def _ts_key(ms) -> str:
+    """LLMUsage.ts as the generated column stores it.
+
+    ``ts`` is ``int(time.time() * 1000)`` (llm_telemetry.py:414), so every
+    value from 2001 to 2286 is exactly 13 digits -- and over fixed-width digit
+    strings a bytewise COLLATE "C" comparison is the numeric comparison. The
+    generated column is text (doc->>'ts'), so the bounds must be text too:
+    an int bound would ask Postgres to compare text against integer.
+    """
+    return str(int(ms))
 
 
 def conn_dependency():
@@ -1005,42 +1030,29 @@ def _code_fingerprint() -> "dict[str, str]":
 def api_health():
     """Liveness probe for load balancers / Dockploy / monitoring.
 
-    Returns 200 with RethinkDB ping result and version. No authentication
-    required so external probes can hit it. Uses a 2-second timeout so a
-    hung DB connection doesn't block the health response.
+    Returns 200 with a Postgres ping result. No authentication required so
+    external probes can hit it.
+
+    The old ``rethinkdb`` key is gone: nothing consumes it. The Flutter probe
+    (mobile/lib/features/connect/presentation/connect_screen.dart) only reads
+    the status code, and the web frontend never reads this payload at all --
+    its only "rethinkdb" reference is the unrelated ``rethinkdb_cleared`` flag
+    on the Nexus rebuild response.
 
     Live-readiness OPS #1 (2026-04-29): added so Dockploy and external
     probes can verify the API container is responding (not just running).
     """
-    import os as _os
     import socket as _sock
-    _ok = True
-    _db_status = "unknown"
     try:
-        from rethinkdb import RethinkDB as _R
-        _r = _R()
-        _host = _os.environ.get("RETHINKDB_HOST", "localhost")
-        _port = int(_os.environ.get("RETHINKDB_PORT", "28015"))
-        # Q10 fix: rethinkdb-python `timeout` kwarg support varies by version;
-        # try with timeout first, fall back to no-timeout if TypeError.
-        try:
-            _conn = _r.connect(host=_host, port=_port, timeout=2)
-        except TypeError:
-            _conn = _r.connect(host=_host, port=_port)
-        try:
-            list(_r.db_list().run(_conn))
-            _db_status = "ok"
-        finally:
-            try:
-                _conn.close()
-            except Exception:
-                pass
+        _db_status = db_pool.health()
+        _ok = bool(_db_status.get("ok"))
     except Exception as _e:
-        _db_status = f"error: {type(_e).__name__}"
+        _db_status = {"ok": False, "size": 0, "dsn_host": "unknown",
+                      "error": type(_e).__name__}
         _ok = False
     payload = {
         "status": "ok" if _ok else "degraded",
-        "rethinkdb": _db_status,
+        "postgres": _db_status,
         "host": _sock.gethostname(),
         "code": _code_fingerprint(),
     }
@@ -1266,7 +1278,7 @@ def api_onboarding_state(
 
     def _safe_count(table_name: str) -> int:
         try:
-            return int(_r_auth.db(os.environ.get("INTELLISTOCK_DB_NAME", "IntelliStock")).table(table_name).count().run(conn))
+            return int(db_store.count(table_name))
         except Exception as e:
             # Missing-table is expected on a brand-new install; logging keeps
             # connection-drop failures observable instead of silently reporting
@@ -2116,19 +2128,20 @@ def api_start_instance(instance_id: str, conn=Depends(conn_dependency), current_
     # bots trading it at once (they'd fight over balance/positions). Block the start
     # if a sibling Kalshi instance on the same brokerage is already running.
     try:
-        row = _r_auth.db("IntelliStock").table("Instances").get(instance_id).run(conn)
+        row = db_store.get("Instances", instance_id)
     except Exception:
         row = None
     if row and str(row.get("kind")) == "kalshi":
         bid = row.get("brokerage_id")
-        others = list(
-            _r_auth.db("IntelliStock").table("Instances")
-            .filter(lambda i: (i["kind"] == "kalshi")
-                    & (i["brokerage_id"] == bid)
-                    & (i["id"] != instance_id)
-                    & (i["runCommand"].default(False) == True))
-            .run(conn)
-        )
+        # runCommand is a JSON boolean; doc->>'runCommand' renders it as the
+        # text 'true'/'false', so the ReQL .default(False) == True becomes a
+        # coalesce to the text 'false' compared against the text 'true'.
+        others = db_store.run(db_store.filter(
+            "Instances",
+            _Pred.field("kind").eq("kalshi")
+            & _Pred.field("brokerage_id").eq(str(bid))
+            & _Pred.field("id").ne(str(instance_id))
+            & _Pred.field("runCommand").default("false").eq("true")))
         if others:
             nm = others[0].get("name") or others[0].get("id")
             msg = (f"Another Kalshi instance ('{nm}') is already running on this "
@@ -3073,10 +3086,8 @@ def api_migrate_credentials(
         build_strategy_scrub_patch,
         verify_patch,
     )
-    from interactive_utils import DB_NAME as _DB, r as _r
-
-    available = set(_r.db(_DB).table_list().run(conn))
-    rows = {t: (list(_r.db(_DB).table(t).run(conn)) if t in available else [])
+    available = set(db_store.table_list())
+    rows = {t: (db_store.run(t) if t in available else [])
             for t in AUDITED_TABLES}
 
     findings = scan_secret_fields(rows)
@@ -3101,13 +3112,13 @@ def api_migrate_credentials(
                 patch = build_encrypted_patch(row, fields=fields)
                 verify_patch(patch, fields=fields)   # must decrypt back cleanly
                 if patch:
-                    _r.db(_DB).table(table).get(row.get("id")).update(patch).run(conn)
+                    db_store.update(table, row.get("id"), patch)
                     switched += 1
         if body.scrub_strategies:
             for row in rows.get("Strategies", ()):
                 patch = build_strategy_scrub_patch(row)
                 if patch:
-                    _r.db(_DB).table("Strategies").get(row.get("id")).update(patch).run(conn)
+                    db_store.update("Strategies", row.get("id"), patch)
                     switched += 1
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"migration aborted: {exc}")
@@ -4075,9 +4086,9 @@ def api_link_brokerage(body: LinkBrokerageBody, conn=Depends(conn_dependency), c
             "kalshi_key_id": body.kalshi_key_id.strip(),
             "kalshi_private_key": _encrypt(body.kalshi_private_key),  # Fernet at rest
             "kalshi_environment": (body.kalshi_environment or "demo"),
-            "created_at": _r_auth.now(),
+            "created_at": _store_now(),
         }
-        _r_auth.db("IntelliStock").table("BrokerageAccounts").insert(row).run(conn)
+        db_store.insert("BrokerageAccounts", row)
         try:
             from kalshi.db import ensure_tables as _ensure_kalshi_tables
             _ensure_kalshi_tables(conn)
@@ -4099,9 +4110,9 @@ def api_link_brokerage(body: LinkBrokerageBody, conn=Depends(conn_dependency), c
             # Reuse the row-level paper flag broker.py reads (alpaca_paper);
             # Binance.US has no native sandbox so paper == platform-simulated.
             "alpaca_paper": (body.paper if body.paper is not None else True),
-            "created_at": _r_auth.now(),
+            "created_at": _store_now(),
         }
-        _r_auth.db("IntelliStock").table("BrokerageAccounts").insert(row).run(conn)
+        db_store.insert("BrokerageAccounts", row)
         return {"ok": True, "id": bid, "brokerage_type": "binanceus", "paper": row["alpaca_paper"]}
     raise HTTPException(status_code=400, detail="unsupported brokerage type")
 
@@ -4167,12 +4178,7 @@ def api_test_alpaca_brokerage(
                 StockCredentialError,
                 resolve_alpaca_brokerage_credentials,
             )
-            row = (
-                _r_auth.db("IntelliStock")
-                .table("BrokerageAccounts")
-                .get(str(body.brokerage_id))
-                .run(conn)
-            )
+            row = db_store.get("BrokerageAccounts", str(body.brokerage_id))
             if not row:
                 raise HTTPException(status_code=404, detail=f"Brokerage {body.brokerage_id!r} not found")
             if str(row.get("brokerage_type") or "").strip().lower() != "alpaca":
@@ -4338,7 +4344,7 @@ def api_brokerage_holding_opens(
     meta: dict = {}
     try:
         from stock_credential_boundary import resolve_alpaca_brokerage_credentials
-        row = _r_auth.db("IntelliStock").table("BrokerageAccounts").get(str(brokerage_id)).run(conn)
+        row = db_store.get("BrokerageAccounts", str(brokerage_id))
         btype = str((row or {}).get("brokerage_type") or "").strip().lower()
         if not row or btype != "alpaca":
             _log.info("holding-opens b=%s skip: brokerage_type=%r", brokerage_id, btype)
@@ -4630,7 +4636,7 @@ def api_brokerage_trends(brokerage_id: str, status: str = "active", limit: int =
 # ---------------------------------------------------------------------------
 
 def _kalshi_brokerage_row(conn, brokerage_id: str) -> dict:
-    row = _r_auth.db("IntelliStock").table("BrokerageAccounts").get(str(brokerage_id)).run(conn)
+    row = db_store.get("BrokerageAccounts", str(brokerage_id))
     if not row:
         raise HTTPException(status_code=404, detail=f"Brokerage {brokerage_id!r} not found")
     if str(row.get("brokerage_type") or "").strip().lower() != "kalshi":
@@ -4650,9 +4656,7 @@ def _kalshi_client_from_row(row: dict):
 
 def _kalshi_rows(conn, table: str, brokerage_id: str) -> list:
     try:
-        return list(
-            _r_auth.db("IntelliStock").table(table).filter({"brokerage_id": brokerage_id}).run(conn)
-        )
+        return db_store.run(db_store.filter(table, {"brokerage_id": brokerage_id}))
     except Exception:
         return []  # table may not exist yet / transient outage -> empty
 
@@ -4698,8 +4702,8 @@ def api_kalshi_positions(brokerage_id: str, request: Request, conn=Depends(conn_
     # rows (any league/club); fall back to the ticker parser (national-team flags).
     names = {}
     try:
-        for r in list(_r_auth.db("IntelliStock").table("kalshi_decisions")
-                      .filter({"brokerage_id": str(brokerage_id)}).run(conn)):
+        for r in db_store.run(db_store.filter(
+                "kalshi_decisions", {"brokerage_id": str(brokerage_id)})):
             mt = r.get("market_ticker")
             if mt and (r.get("home") or r.get("away")):
                 pk = parse_market_ticker(mt, r.get("side"))
@@ -4763,7 +4767,7 @@ def api_kalshi_scan_budget(brokerage_id: str, conn=Depends(conn_dependency), cur
     window = scan_budget_window(now.isoformat())
     used = 0
     try:
-        r0 = _r_auth.db("IntelliStock").table("kalshi_scan_budget").get(window).run(conn)
+        r0 = db_store.get("kalshi_scan_budget", window)
         used = int((r0 or {}).get("used", 0))
     except Exception:
         pass
@@ -4780,7 +4784,7 @@ def api_kalshi_instance_model(brokerage_id: str, instance_id: str, conn=Depends(
     # Cross-instance guard: the path instance_id must belong to this brokerage, else
     # any authenticated user could read another instance's calibrator metrics.
     try:
-        _inst = _r_auth.db("IntelliStock").table("Instances").get(instance_id).run(conn) or {}
+        _inst = db_store.get("Instances", instance_id) or {}
     except Exception:
         _inst = {}
     if _inst.get("kind") != "kalshi" or _inst.get("brokerage_id") != brokerage_id:
@@ -4880,11 +4884,8 @@ def api_kalshi_list_instances(brokerage_id: str, conn=Depends(conn_dependency), 
     tab's instance-awareness: no rows -> prompt to create one."""
     _kalshi_brokerage_row(conn, brokerage_id)
     try:
-        rows = list(
-            _r_auth.db("IntelliStock").table("Instances")
-            .filter({"brokerage_id": brokerage_id, "kind": "kalshi"})
-            .run(conn)
-        )
+        rows = db_store.run(db_store.filter(
+            "Instances", {"brokerage_id": brokerage_id, "kind": "kalshi"}))
     except Exception:
         rows = []
     out = [
@@ -4918,7 +4919,7 @@ def api_kalshi_create_instance(brokerage_id: str, body: CreateKalshiInstanceBody
     config = normalize_config({**raw, "paper_mode": paper}, live_enabled=live_enabled)
     iid = str(_uuid.uuid4())
     doc = build_kalshi_instance_doc(iid, brokerage_id=brokerage_id, name=body.name.strip(), config=config)
-    _r_auth.db("IntelliStock").table("Instances").insert(doc, conflict="replace").run(conn)
+    db_store.insert("Instances", doc, conflict="replace")
     try:
         _ensure_kalshi_tables(conn)
     except Exception:
@@ -4936,7 +4937,7 @@ def api_kalshi_update_instance(instance_id: str, body: UpdateKalshiInstanceBody,
     live = False
     bk = {}
     try:
-        bk = _r_auth.db("IntelliStock").table("BrokerageAccounts").get(bid).run(conn) or {}
+        bk = db_store.get("BrokerageAccounts", bid) or {}
         live = (bk.get("kalshi_environment") or "demo") == "live"
     except Exception:
         pass
@@ -4961,9 +4962,8 @@ def api_kalshi_update_instance(instance_id: str, body: UpdateKalshiInstanceBody,
             canceled_orders = int(_kalshi_client_from_row(bk).cancel_all_open_orders() or 0)
         except Exception:
             canceled_orders = 0
-    _r_auth.db("IntelliStock").table("Instances").get(str(instance_id)).update(
-        {"name": body.name.strip(), "kalshi_config": config}
-    ).run(conn)
+    db_store.update("Instances", str(instance_id),
+                    {"name": body.name.strip(), "kalshi_config": config})
     return {"ok": True, "id": instance_id, "name": body.name.strip(), "config": config,
             "canceled_orders": canceled_orders}
 
@@ -5003,8 +5003,8 @@ def api_kalshi_create_backtest(brokerage_id: str, body: KalshiBacktestBody, conn
             # once and prefilled on subsequent backtests (deep-merged into config).
             new_key = cfg.get("oddspapi_api_key")
             if new_key and new_key != icfg.get("oddspapi_api_key"):
-                _r_auth.db("IntelliStock").table("Instances").get(str(body.instance_id)).update(
-                    {"kalshi_config": {"oddspapi_api_key": new_key}}).run(conn)
+                db_store.update("Instances", str(body.instance_id),
+                                {"kalshi_config": {"oddspapi_api_key": new_key}})
         except Exception:
             pass
     jid = str(_uuid.uuid4())
@@ -5089,7 +5089,7 @@ def _startup_kalshi_backtest_worker():
 
 
 def _kalshi_instance_row(conn, instance_id: str) -> dict:
-    row = _r_auth.db("IntelliStock").table("Instances").get(str(instance_id)).run(conn)
+    row = db_store.get("Instances", str(instance_id))
     if not row or row.get("kind") != "kalshi":
         raise HTTPException(status_code=404, detail=f"Kalshi instance {instance_id!r} not found")
     return row
@@ -5104,7 +5104,7 @@ def _kalshi_show_paper(conn, instance_row: dict) -> bool:
     cfg = instance_row.get("kalshi_config") or {}
     env = "demo"
     try:
-        bk = _r_auth.db("IntelliStock").table("BrokerageAccounts").get(instance_row.get("brokerage_id")).run(conn) or {}
+        bk = db_store.get("BrokerageAccounts", instance_row.get("brokerage_id")) or {}
         env = bk.get("kalshi_environment") or "demo"
     except Exception:
         pass
@@ -5118,13 +5118,13 @@ def _kalshi_brokerage_show_paper(conn, brokerage_id: str) -> bool:
     from kalshi.mode import is_real_mode
     env = "demo"
     try:
-        bk = _r_auth.db("IntelliStock").table("BrokerageAccounts").get(brokerage_id).run(conn) or {}
+        bk = db_store.get("BrokerageAccounts", brokerage_id) or {}
         env = bk.get("kalshi_environment") or "demo"
     except Exception:
         pass
     try:
-        insts = list(_r_auth.db("IntelliStock").table("Instances")
-                     .filter({"brokerage_id": str(brokerage_id), "kind": "kalshi"}).run(conn))
+        insts = db_store.run(db_store.filter(
+            "Instances", {"brokerage_id": str(brokerage_id), "kind": "kalshi"}))
     except Exception:
         insts = []
     for i in insts:
@@ -5141,7 +5141,7 @@ def api_kalshi_instance_detail(instance_id: str, conn=Depends(conn_dependency), 
     bid = row.get("brokerage_id")
     env = "demo"
     try:
-        bk = _r_auth.db("IntelliStock").table("BrokerageAccounts").get(bid).run(conn) or {}
+        bk = db_store.get("BrokerageAccounts", bid) or {}
         env = bk.get("kalshi_environment") or "demo"
     except Exception:
         pass
@@ -5171,10 +5171,8 @@ def api_kalshi_instance_decisions(instance_id: str, request: Request, limit: int
     row = _kalshi_instance_row(conn, instance_id)
     rows = []
     try:
-        rows = list(
-            _r_auth.db("IntelliStock").table("kalshi_decisions")
-            .filter({"instance_id": str(instance_id)}).run(conn)
-        )
+        rows = db_store.run(db_store.filter(
+            "kalshi_decisions", {"instance_id": str(instance_id)}))
     except Exception:
         rows = []
     # Scope to the ACTIVE mode: a real-money instance never surfaces paper rows (and a
@@ -5214,8 +5212,8 @@ def api_kalshi_instance_decisions(instance_id: str, request: Request, limit: int
     # Per-side edge sparkline series (instance|market_ticker -> [{ts, edge}, ...]).
     hist_by_ticker: dict = {}
     try:
-        for h in list(_r_auth.db("IntelliStock").table("kalshi_edge_history")
-                      .filter({"instance_id": str(instance_id)}).run(conn)):
+        for h in db_store.run(db_store.filter(
+                "kalshi_edge_history", {"instance_id": str(instance_id)})):
             hist_by_ticker[h.get("market_ticker")] = h.get("history") or []
     except Exception:
         hist_by_ticker = {}
@@ -5315,10 +5313,8 @@ def api_kalshi_instance_live(instance_id: str, request: Request, conn=Depends(co
     _kalshi_instance_row(conn, instance_id)
     rows = []
     try:
-        rows = list(
-            _r_auth.db("IntelliStock").table("kalshi_live")
-            .filter({"instance_id": str(instance_id)}).run(conn)
-        )
+        rows = db_store.run(db_store.filter(
+            "kalshi_live", {"instance_id": str(instance_id)}))
     except Exception:
         rows = []
     rows.sort(key=lambda d: d.get("updated_at", ""), reverse=True)
@@ -5384,8 +5380,8 @@ def api_kalshi_instance_orders(instance_id: str, request: Request, limit: int = 
     info_by_ticker: dict = {}
     edge_by_ticker: dict = {}
     try:
-        for r in list(_r_auth.db("IntelliStock").table("kalshi_decisions")
-                      .filter({"instance_id": str(instance_id)}).run(conn)):
+        for r in db_store.run(db_store.filter(
+                "kalshi_decisions", {"instance_id": str(instance_id)})):
             mt = r.get("market_ticker")
             if not mt:
                 continue
@@ -5413,7 +5409,7 @@ def api_kalshi_instance_orders(instance_id: str, request: Request, limit: int = 
                 "home_logo": p["home_flag"], "away_logo": p["away_flag"],
                 "pick_label": p["pick_label"], "pick_logo": p["pick_flag"]}
 
-    bk = _r_auth.db("IntelliStock").table("BrokerageAccounts").get(row.get("brokerage_id")).run(conn) or {}
+    bk = db_store.get("BrokerageAccounts", row.get("brokerage_id")) or {}
     client = None
     try:
         client = _kalshi_client_from_row(bk)
@@ -5451,8 +5447,9 @@ def api_kalshi_instance_orders(instance_id: str, request: Request, limit: int = 
     _paper_placed = []
     if show_paper:
         try:
-            _paper_placed = list(_r_auth.db("IntelliStock").table("kalshi_decisions")
-                                 .filter({"instance_id": str(instance_id), "decision": "placed", "paper": True}).run(conn))
+            _paper_placed = db_store.run(db_store.filter(
+                "kalshi_decisions",
+                {"instance_id": str(instance_id), "decision": "placed", "paper": True}))
         except Exception:
             _paper_placed = []
     try:
@@ -5495,7 +5492,7 @@ def api_kalshi_instance_equity(instance_id: str, conn=Depends(conn_dependency), 
     bid = row.get("brokerage_id")
     value_cents = cash_cents = 0
     try:
-        bk = _r_auth.db("IntelliStock").table("BrokerageAccounts").get(bid).run(conn) or {}
+        bk = db_store.get("BrokerageAccounts", bid) or {}
         bal = _kalshi_client_from_row(bk).get_balance()
         value_cents, cash_cents = bal.portfolio_value_cents, bal.cash_cents
     except Exception:
@@ -5571,7 +5568,7 @@ def api_brokerage_movers(brokerage_id: str, top: int = 6, conn=Depends(conn_depe
     empty = {"gainers": [], "losers": []}
     try:
         from stock_credential_boundary import resolve_alpaca_brokerage_credentials
-        row = _r_auth.db("IntelliStock").table("BrokerageAccounts").get(str(brokerage_id)).run(conn)
+        row = db_store.get("BrokerageAccounts", str(brokerage_id))
         if not row or str(row.get("brokerage_type") or "").strip().lower() != "alpaca":
             return empty
         stored_creds = resolve_alpaca_brokerage_credentials(
@@ -5626,7 +5623,7 @@ def api_brokerage_nexus_momentum(brokerage_id: str, conn=Depends(conn_dependency
         return {"momentum": []}
     try:
         from strategy_cache_persistence import load_strategy_cache_from_db
-        cache = load_strategy_cache_from_db(conn, _r_auth, iid, "graph_nexus_analysis")
+        cache = load_strategy_cache_from_db(conn, None, iid, "graph_nexus_analysis")
         ranked = (cache or {}).get("_momentum_ranked_top") or []
         out = []
         for t in ranked:
@@ -5647,7 +5644,7 @@ def api_brokerage_backfill_queue(brokerage_id: str, conn=Depends(conn_dependency
     try:
         from strategy_cache_persistence import load_strategy_cache_from_db
         from nexus_telemetry import normalize_backfill_item
-        cache = load_strategy_cache_from_db(conn, _r_auth, iid, "graph_nexus_analysis")
+        cache = load_strategy_cache_from_db(conn, None, iid, "graph_nexus_analysis")
         raw = (cache or {}).get("_backfill_queue") or []
         items = [normalize_backfill_item(q) for q in raw if isinstance(q, dict)]
         items = [q for q in items if q["ticker"]]
@@ -5666,7 +5663,7 @@ def api_brokerage_momentum_watchlist(brokerage_id: str, conn=Depends(conn_depend
     try:
         from strategy_cache_persistence import load_strategy_cache_from_db
         from nexus_telemetry import newest_watchlist
-        cache = load_strategy_cache_from_db(conn, _r_auth, iid, "graph_nexus_analysis")
+        cache = load_strategy_cache_from_db(conn, None, iid, "graph_nexus_analysis")
         wl = (cache or {}).get("_momentum_watchlist") or {}
         return {"count": len(wl), "newest": newest_watchlist(wl, limit=12)}
     except Exception:
@@ -6076,11 +6073,8 @@ def _llm_usage_summary(*, range_str: str, conn) -> dict:
         # Use the `ts` secondary index (created by ensure_llm_usage_tables)
         # so the dashboard stays sub-second at 100K+ rows. The .filter()
         # alternative forces a full table scan.
-        rows = list(
-            _r_auth.db("IntelliStock").table("LLMUsage")
-            .between(start, end, index="ts")
-            .run(conn)
-        )
+        rows = db_store.run(db_store.between(
+            "LLMUsage", _ts_key(start), _ts_key(end), index="ts"))
     except Exception:
         rows = []
 
@@ -6128,11 +6122,8 @@ def _llm_usage_timeseries(*, range_str, bucket, provider, conn) -> list:
     start, end = _range_to_ms_window(range_str)
     bucket_ms = 3600_000 if bucket == "hour" else 86400_000
     try:
-        rows = list(
-            _r_auth.db("IntelliStock").table("LLMUsage")
-            .between(start, end, index="ts")
-            .run(conn)
-        )
+        rows = db_store.run(db_store.between(
+            "LLMUsage", _ts_key(start), _ts_key(end), index="ts"))
     except Exception:
         rows = []
     if provider:
@@ -6156,11 +6147,8 @@ def _llm_usage_timeseries(*, range_str, bucket, provider, conn) -> list:
 def _llm_usage_top_spenders(*, range_str, group_by, limit, conn) -> list:
     start, end = _range_to_ms_window(range_str)
     try:
-        rows = list(
-            _r_auth.db("IntelliStock").table("LLMUsage")
-            .between(start, end, index="ts")
-            .run(conn)
-        )
+        rows = db_store.run(db_store.between(
+            "LLMUsage", _ts_key(start), _ts_key(end), index="ts"))
     except Exception:
         rows = []
     key_field = group_by if group_by in ("model", "strategy", "call_site", "provider") else "model"
@@ -6190,11 +6178,8 @@ def _llm_usage_by_backtest(*, range_str: str, limit: int, conn) -> list:
     """
     start, end = _range_to_ms_window(range_str)
     try:
-        rows = list(
-            _r_auth.db("IntelliStock").table("LLMUsage")
-            .between(start, end, index="ts")
-            .run(conn)
-        )
+        rows = db_store.run(db_store.between(
+            "LLMUsage", _ts_key(start), _ts_key(end), index="ts"))
     except Exception:
         rows = []
 
@@ -6260,11 +6245,7 @@ def _llm_usage_for_backtest(*, backtest_id: str, conn) -> dict:
     so this stays O(rows-for-this-backtest), not full table scan."""
     rows: list = []
     try:
-        rows = list(
-            _r_auth.db("IntelliStock").table("LLMUsage")
-            .get_all(backtest_id, index="backtest_id")
-            .run(conn)
-        )
+        rows = db_store.get_all("LLMUsage", backtest_id, index="backtest_id")
     except Exception:
         rows = []
     total_calls = len(rows)
@@ -6366,22 +6347,15 @@ def _llm_usage_calls_db(*, limit, offset, range_str, provider, model,
         # Push the time-range + filters + ordering INTO the query so we
         # never materialize the whole window. between(index="ts") uses the
         # secondary index; order_by(index=r.desc("ts")) reverses the scan.
-        q = _r_auth.db("IntelliStock").table("LLMUsage").between(
-            start, end, index="ts"
-        ).order_by(index=_r_auth.desc("ts"))
-        if provider:
-            q = q.filter({"provider": provider})
-        if model:
-            q = q.filter({"model": model})
-        if backtest_id:
-            q = q.filter({"backtest_id": backtest_id})
-        if strategy:
-            q = q.filter({"strategy": strategy})
-        rows = list(
-            q.skip(int(offset))
-            .limit(int(limit))
-            .run(conn)
-        )
+        sel = db_store.between("LLMUsage", _ts_key(start), _ts_key(end), index="ts")
+        for _field, _value in (("provider", provider), ("model", model),
+                               ("backtest_id", backtest_id), ("strategy", strategy)):
+            if _value:
+                _frag, _params = _Pred.field(_field).eq(_value).to_sql()
+                sel = sel.where(_frag, _params)
+        sel = db_store.order_by(sel, index="ts", desc=True)
+        # ReQL .skip(n).limit(m) is SQL OFFSET n LIMIT m -- store.slice(a, b).
+        rows = db_store.run(db_store.slice(sel, int(offset), int(offset) + int(limit)))
     except Exception:
         rows = []
     return rows
