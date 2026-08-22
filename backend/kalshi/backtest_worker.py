@@ -1,7 +1,7 @@
 """In-process background worker for Kalshi backtests.
 
 A queued `KalshiBacktests` row (status 'pending') is picked up — on boot (drain)
-and via a RethinkDB changefeed — and run to completion by `run_job`, which
+and via a change watcher — and run to completion by `run_job`, which
 writes throttled progress back to the row and the result into
 `KalshiBacktestResults`. Unlike the heavy Docker-per-backtest stock engine, the
 Kalshi pre-match replay is cheap, so it runs in a small thread pool in-process.
@@ -16,6 +16,7 @@ import datetime
 import logging
 import threading
 
+from db import store, watch
 from kalshi import db as _db
 from kalshi.backtest import config_from_body, run_backtest as _run_backtest
 
@@ -103,16 +104,29 @@ def run_job(job, *, conn, provider, model_fn, store=_db, stop_check=None,
 
 # --- production wiring (integration; not unit-tested) --------------------
 
-def _used_this_month(conn) -> int:  # pragma: no cover - integration
+def _used_this_month(conn=None) -> int:  # pragma: no cover - integration
     try:
         window = _db.scan_budget_window(_iso_now())
-        row = _db._r.db(_db.DB_NAME).table("kalshi_scan_budget").get(window).run(conn)
+        row = store.get("kalshi_scan_budget", window)
         return int((row or {}).get("used", 0))
     except Exception:
         return 0
 
 
-def _build_job_context(job, conn):  # pragma: no cover - integration
+def _watch_pending(on_change, *, poll_interval=watch.DEFAULT_POLL):
+    """Watch for newly-queued jobs.
+
+    `include_initial=False`: rows that already exist are the DRAIN's job, and
+    delivering them here too would run every pending backtest twice. The drain
+    (`pending_or_running_backtests`) stays the belt to this watcher's braces —
+    it also re-queues rows orphaned mid-run, which no feed ever reports.
+    """
+    return watch.watch_filter("KalshiBacktests", {"status": "pending"},
+                              on_change, label="kalshi-pending",
+                              include_initial=False, poll_interval=poll_interval)
+
+
+def _build_job_context(job, conn=None):  # pragma: no cover - integration
     """Build the (provider, model_fn) a job needs. Kalshi candlestick/settled
     endpoints are PUBLIC, so a credential-less client suffices; OddsPapi (sharp
     line) is optional — absent key -> model-only replay."""
@@ -133,8 +147,8 @@ def _build_job_context(job, conn):  # pragma: no cover - integration
         kalshi_client=kalshi_client,
         oddspapi_client=oddspapi_client,
         conn=conn,
-        budget_used_getter=lambda: _used_this_month(conn),
-        budget_bumper=lambda: _db.bump_scan_budget(conn, _iso_now()),
+        budget_used_getter=lambda: _used_this_month(),
+        budget_bumper=lambda: _db.bump_scan_budget(None, _iso_now()),
     )
 
     # NO LOOK-AHEAD: the model's team strength must not reflect results from
@@ -156,7 +170,7 @@ def _build_job_context(job, conn):  # pragma: no cover - integration
     return provider, model_fn, analyst_fn
 
 
-def _build_analyst_fn(cfg, conn):  # pragma: no cover - integration
+def _build_analyst_fn(cfg, conn=None):  # pragma: no cover - integration
     """Build the LLM analyst closure for a backtest, or None. Uses the configured
     Models-table model; news is intentionally empty (a past fixture has no
     time-faithful news feed), so the analyst adjusts on the feature bundle only.
@@ -164,7 +178,7 @@ def _build_analyst_fn(cfg, conn):  # pragma: no cover - integration
     if not cfg.get("use_llm") or not cfg.get("model"):
         return None
     try:
-        model_doc = _db._r.db(_db.DB_NAME).table("Models").get(cfg["model"]).run(conn)
+        model_doc = store.get("Models", cfg["model"])
     except Exception:
         model_doc = None
     if not model_doc:
@@ -193,16 +207,18 @@ def _build_analyst_fn(cfg, conn):  # pragma: no cover - integration
     return analyst_fn
 
 
-def _run_job_production(job, conn):  # pragma: no cover - integration
+def _run_job_production(job, conn=None):  # pragma: no cover - integration
     provider, model_fn, analyst_fn = _build_job_context(job, conn)
     return run_job(job, conn=conn, provider=provider, model_fn=model_fn, analyst_fn=analyst_fn)
 
 
-def start_worker(conn_factory, *, max_workers: int = 2):  # pragma: no cover - integration
-    """Start the background worker: drain existing pending rows, then watch the
-    changefeed for new ones, running each in a small thread pool. `conn_factory`
-    returns a fresh RethinkDB connection (one per job thread — connections are
-    not thread-safe)."""
+def start_worker(conn_factory=None, *, max_workers: int = 2):  # pragma: no cover - integration
+    """Start the background worker: drain existing pending rows, then watch for
+    new ones, running each in a small thread pool.
+
+    `conn_factory` is vestigial — the pool hands every store call its own
+    connection — and is accepted so the callers that still pass one are
+    unchanged."""
     import concurrent.futures
 
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
@@ -215,58 +231,40 @@ def start_worker(conn_factory, *, max_workers: int = 2):  # pragma: no cover - i
         seen.add(jid)
 
         def _task():
-            c = conn_factory()
             try:
-                _run_job_production(job, c)
+                _run_job_production(job)
             finally:
                 seen.discard(jid)
-                try:
-                    c.close()
-                except Exception:
-                    pass
 
         pool.submit(_task)
 
-    def _loop():
-        # Self-healing: a dropped changefeed connection (idle timeout, DB restart,
-        # network blip) must NOT silently kill the worker thread and stop picking up
-        # new backtests. Reconnect + re-watch forever, with a short backoff.
-        import time as _time
-        backoff = 2
-        while True:
-            try:
-                c = conn_factory()
-            except Exception:
-                log.exception("backtest worker: DB connect failed; retrying in %ss", backoff)
-                _time.sleep(backoff); backoff = min(backoff * 2, 30); continue
-            backoff = 2  # connected — reset
-            # Drain rows left pending/running from a prior process.
-            try:
-                for row in _db.pending_or_running_backtests(c):
-                    if row.get("status") == "running":
-                        # orphaned mid-run -> re-queue as pending
-                        _db.update_backtest_progress(c, row["id"], status="pending")
-                        row = {**row, "status": "pending"}
-                    _dispatch(row)
-            except Exception:
-                log.exception("backtest worker drain failed")
-            # Watch for new pending jobs.
-            try:
-                feed = (_db._r.db(_db.DB_NAME).table("KalshiBacktests")
-                        .filter({"status": "pending"}).changes(include_initial=False).run(c))
-                for change in feed:
-                    new = (change or {}).get("new_val")
-                    if new and new.get("status") == "pending":
-                        _dispatch(new)
-            except Exception:
-                log.exception("backtest worker changefeed ended; reconnecting in %ss", backoff)
-            # Feed ended (conn drop / server close) -> close, back off, reconnect + re-watch.
-            try:
-                c.close(noreply_wait=False)
-            except Exception:
-                pass
-            _time.sleep(backoff)
+    def _on_change(change):
+        new = (change or {}).get("new_val")
+        if new and new.get("status") == "pending":
+            _dispatch(new)
 
-    threading.Thread(target=_loop, name="kalshi-backtest-worker", daemon=True).start()
+    def _drain():
+        """Rows left pending/running by a prior process. The watcher never
+        reports these — it skips the initial state — and a row orphaned
+        mid-run has to be re-queued before it can be picked up at all."""
+        try:
+            for row in _db.pending_or_running_backtests(None):
+                if row.get("status") == "running":
+                    # orphaned mid-run -> re-queue as pending
+                    _db.update_backtest_progress(None, row["id"], status="pending")
+                    row = {**row, "status": "pending"}
+                _dispatch(row)
+        except Exception:
+            log.exception("backtest worker drain failed")
+
+    # The watcher self-heals: it reconnects with backoff and re-reads on every
+    # reconnect against the cache it kept, so a dropped connection can no longer
+    # silently kill the worker AND a row queued while it was down is still
+    # delivered — which the old changefeed lost. The drain therefore only has to
+    # cover what no feed ever reports: rows a PRIOR PROCESS left mid-run.
+    watcher = _watch_pending(_on_change)
+    threading.Thread(target=_drain, name="kalshi-backtest-drain",
+                     daemon=True).start()
+    watcher.start()
     log.info("kalshi backtest worker started")
     return pool

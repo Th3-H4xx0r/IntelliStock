@@ -1,7 +1,7 @@
 """Background training worker: continuously refit the probability calibrator from
 settled outcomes and promote it to champion ONLY when it beats the raw model on a
-held-out split. Mirrors the backtest worker's self-heal loop (reconnect on a
-dropped DB connection instead of dying) — PR #84 pattern.
+held-out split. Mirrors the backtest worker's self-heal loop (back off and
+retry on an unreachable DB instead of dying) — PR #84 pattern.
 
 `refit_once` is the pure-ish core (inject conn + samples + id/timestamp) so the
 promotion gate is unit-tested without a DB. `start_worker` wraps it in the
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 
+from db.errors import UnavailableError
 from kalshi import db as _db, training
 
 log = logging.getLogger("kalshi.training_worker")
@@ -107,11 +108,15 @@ def build_refit_fn(*, provider_factory, model_fn, leagues, start_date,
     return refit
 
 
-def start_worker(conn_factory, refit_fn, *, refresh_secs: int = 3600, notify=None,
-                 run_once_now: bool = True, _max_cycles=None):
-    """Daemon loop: periodically call `refit_fn(conn)`; reconnect + retry on a
-    dropped connection; alert the operator when a new champion is promoted.
-    `_max_cycles` bounds the loop for tests."""
+def start_worker(conn_factory=None, refit_fn=None, *, refresh_secs: int = 3600,
+                 notify=None, run_once_now: bool = True, _max_cycles=None):
+    """Daemon loop: periodically call `refit_fn(conn)`; back off and retry when
+    the database is unreachable; alert the operator when a new champion is
+    promoted. `_max_cycles` bounds the loop for tests.
+
+    `conn_factory` is vestigial — the pool hands every store call its own
+    connection — and is still called (and its result still passed to
+    `refit_fn`) so injected test doubles are unchanged."""
     import threading
     import time as _time
 
@@ -142,7 +147,7 @@ def start_worker(conn_factory, refit_fn, *, refresh_secs: int = 3600, notify=Non
             first = False
             cycles += 1
             try:
-                if conn is None:
+                if conn is None and conn_factory is not None:
                     conn = conn_factory()
                 v = refit_fn(conn)
                 _alert(v)
@@ -150,12 +155,9 @@ def start_worker(conn_factory, refit_fn, *, refresh_secs: int = 3600, notify=Non
                     log.info("training: refit ok (promoted=%s)", v.get("promoted"))
                 backoff = 2
             except Exception as e:
-                if _db.is_conn_error(e):
-                    log.warning("training: DB connection lost (%s); reconnecting", type(e).__name__)
-                    try:
-                        conn = _db.reconnect(conn)
-                    except Exception:
-                        conn = None
+                if isinstance(e, UnavailableError):
+                    log.warning("training: DB unreachable (%s); backing off",
+                                type(e).__name__)
                     _time.sleep(backoff)
                     backoff = min(backoff * 2, 30)
                 else:

@@ -17,7 +17,7 @@ Design:
 - All OddsPapi calls (the metered ~250/mo free tier) are guarded by
   `ingest_odds.should_scan`; a budget-exhausted call returns cached-or-None and
   LOGS the skip — it is never silently dropped.
-- The RethinkDB table access is abstracted behind `_table_get`/`_table_put` so
+- The table access is abstracted behind `_table_get`/`_table_put` so
   tests can inject a plain in-memory dict (`tables={}`) instead of a live `conn`.
 """
 from __future__ import annotations
@@ -106,12 +106,12 @@ class BacktestDataProvider:
         logger: Optional[logging.Logger] = None,
     ):
         self.kalshi_client = kalshi_client
+        # Vestigial: the pool hands every store call its own connection. Kept so
+        # the callers that still pass one are unchanged.
         self.oddspapi_client = oddspapi_client
         self.conn = conn
         # `tables` (even an empty dict) opts into the in-memory fake store used
-        # by unit tests; `None` means "use the real `conn`" (or no-op if that's
-        # also None — a provider with zero storage backend still functions, it
-        # just never caches).
+        # by unit tests; `None` means "use the real store".
         self._tables = tables
         self._budget_used_getter = budget_used_getter or (lambda: 0)
         self._budget_bumper = budget_bumper or (lambda: None)
@@ -119,18 +119,16 @@ class BacktestDataProvider:
         self.api_calls = 0
         self.cache_hits = 0
 
-    # --- table access (fake dict OR live RethinkDB `conn`) ---
+    # --- table access (fake dict OR the real store) ---
 
     def _table_get(self, table: str, key: Optional[str]) -> Optional[dict]:
         if key is None:
             return None
         if self._tables is not None:
             return self._tables.get(table, {}).get(key)
-        if self.conn is None:
-            return None
         try:
-            from kalshi import db
-            return db._r.db(db.DB_NAME).table(table).get(key).run(self.conn)
+            from db import store
+            return store.get(table, key)
         except Exception:
             return None
 
@@ -141,11 +139,9 @@ class BacktestDataProvider:
         if self._tables is not None:
             self._tables.setdefault(table, {})[key] = doc
             return
-        if self.conn is None:
-            return
         try:
-            from kalshi import db
-            db._r.db(db.DB_NAME).table(table).insert(doc, conflict="replace").run(self.conn)
+            from db import store
+            store.insert(table, doc, conflict="replace")
         except Exception:
             pass
 

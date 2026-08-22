@@ -75,15 +75,19 @@ def test_no_promotion_when_holdout_too_small(monkeypatch):
     assert v["promoted"] is False and champs == []
 
 
-def test_start_worker_self_heals_on_conn_error(monkeypatch):
-    # First cycle raises a connection error, second succeeds -> loop reconnects.
-    calls = {"n": 0, "reconnected": 0}
+def test_start_worker_self_heals_on_db_outage(monkeypatch):
+    # First cycle hits an unreachable DB, second succeeds -> the loop backs off
+    # and retries instead of dying. The pool owns reconnection now, so there is
+    # no handle to rebuild; UnavailableError is the signal.
+    from db.errors import UnavailableError
+    calls = {"n": 0}
     def refit(conn):
         calls["n"] += 1
         if calls["n"] == 1:
-            raise RuntimeError("Connection is closed.")
+            raise UnavailableError("postgres unavailable")
         return {"promoted": False}
-    monkeypatch.setattr(db, "reconnect", lambda c=None: calls.__setitem__("reconnected", calls["reconnected"] + 1) or FakeConn())
+    import time
+    monkeypatch.setattr(time, "sleep", lambda s: None)   # skip the 2s backoff
     training_worker.start_worker(lambda: FakeConn(), refit, refresh_secs=0,
                                  run_once_now=True, _max_cycles=2)
-    assert calls["n"] == 2 and calls["reconnected"] == 1
+    assert calls["n"] == 2

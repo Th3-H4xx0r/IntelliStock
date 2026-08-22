@@ -1,21 +1,15 @@
-"""RethinkDB persistence for the Kalshi feature. New tables live alongside the
-existing IntelliStock tables. Table creation is idempotent (mirrors
-credential_service._ensure_table / server.py). Doc builders are pure so they
-unit-test without a live DB.
+"""Postgres persistence for the Kalshi feature. New tables live alongside the
+existing IntelliStock tables. Table creation is idempotent (`db.schema` owns
+the DDL). Doc builders are pure so they unit-test without a live DB.
+
+`KALSHI_TABLES` is the source of truth for the 27 tables and, crucially, for
+the ones whose primary key is NOT called `id` — `db.schema.TABLES` declares the
+same `pk_field` for each, so `store.get(table, key)` resolves the physical `id`
+column while the named field stays in the document.
 """
 from __future__ import annotations
 
-import os
-
-try:
-    from rethinkdb import RethinkDB  # type: ignore
-    _r = RethinkDB()
-except Exception:  # pragma: no cover - unit tests stub the connection
-    _r = None
-
-DB_NAME = "IntelliStock"
-RETHINKDB_HOST = os.environ.get("RETHINKDB_HOST", "localhost")
-RETHINKDB_PORT = int(os.environ.get("RETHINKDB_PORT", "28015"))
+from db import P, schema, store
 
 # (table_name, primary_key)
 KALSHI_TABLES: list[tuple[str, str]] = [
@@ -52,54 +46,20 @@ KALSHI_TABLES: list[tuple[str, str]] = [
 ]
 
 
-def get_conn():
-    if _r is None:
-        raise RuntimeError("rethinkdb driver unavailable")
-    return _r.connect(host=RETHINKDB_HOST, port=RETHINKDB_PORT)
+# `get_conn`, `is_conn_error` and `reconnect` are gone: the pool owns
+# reconnection. A connection-level failure is retried inside
+# `db.pool.connection()` and surfaces as `db.errors.UnavailableError`, so the
+# long-running loops back off on that instead of rebuilding a handle.
 
 
-def is_conn_error(exc) -> bool:
-    """True when `exc` looks like a dropped/closed/unreachable DB connection (the
-    signal to reconnect and self-heal) rather than a genuine query/logic error.
-    Matches by exception type AND message so it works across rethinkdb driver
-    versions without importing their exception classes."""
-    name = type(exc).__name__
-    if name in ("ReqlDriverError", "ReqlTimeoutError", "ReqlAvailabilityError",
-                "ReqlOpFailedError", "ConnectionError", "ConnectionResetError",
-                "ConnectionAbortedError", "BrokenPipeError", "TimeoutError"):
-        return True
-    msg = str(exc).lower()
-    return any(s in msg for s in (
-        "connection is closed", "connection closed", "connection reset",
-        "broken pipe", "not connected", "connection refused", "lost connection",
-        "connection already closed", "socket is closed", "eof",
-    ))
+def ensure_tables(conn=None) -> list[str]:
+    """Create any missing kalshi tables. Returns the names created.
 
-
-def reconnect(old_conn=None):
-    """Return a FRESH DB connection, best-effort closing a dead one first. Used by
-    the long-running engine loop to recover from a closed connection (idle timeout,
-    DB restart, network blip) instead of retrying forever on a dead handle. Prefers
-    the driver's own `.reconnect()` (reuses auth/host), else opens a new connection."""
-    if old_conn is not None:
-        try:
-            return old_conn.reconnect(noreply_wait=False)
-        except Exception:
-            try:
-                old_conn.close(noreply_wait=False)
-            except Exception:
-                pass
-    return get_conn()
-
-
-def ensure_tables(conn) -> list[str]:
-    """Create any missing kalshi_* tables. Returns the names created."""
-    existing = set(_r.db(DB_NAME).table_list().run(conn))
-    created = []
-    for name, pk in KALSHI_TABLES:
-        if name not in existing:
-            _r.db(DB_NAME).table_create(name, primary_key=pk).run(conn)
-            created.append(name)
+    The DDL lives in `db.schema`, which reads the same `pk_field` this registry
+    declares."""
+    existing = set(store.table_list())
+    created = [name for name, _pk in KALSHI_TABLES if name not in existing]
+    schema.ensure_schema(tables=[name for name, _pk in KALSHI_TABLES])
     return created
 
 
@@ -138,9 +98,8 @@ def scan_budget_window(ts_iso: str) -> str:
 # --- thin DB helpers (exercised against a live DB, not unit-tested) ---
 
 def save_portfolio_snapshot(conn, **kw) -> None:
-    _r.db(DB_NAME).table("kalshi_portfolio_snapshots").insert(
-        portfolio_snapshot_doc(**kw), conflict="replace"
-    ).run(conn)
+    store.insert("kalshi_portfolio_snapshots", portfolio_snapshot_doc(**kw),
+                 conflict="replace")
 
 
 def paper_pnl_totals(conn, instance_id) -> dict:
@@ -148,33 +107,30 @@ def paper_pnl_totals(conn, instance_id) -> dict:
     (open marks). Thin DB wrapper over telemetry.paper_pnl_from_rows."""
     from kalshi.telemetry import paper_pnl_from_rows
     try:
-        rows = list(_r.db(DB_NAME).table("kalshi_decisions")
-                    .filter({"instance_id": str(instance_id), "decision": "placed", "paper": True})
-                    .pluck("paper", "decision", "outcome",
-                           "realized_pnl_cents", "unrealized_pnl_cents").run(conn))
+        sel = store.filter("kalshi_decisions",
+                           {"instance_id": str(instance_id),
+                            "decision": "placed", "paper": True})
+        rows = store.pluck(store.run(sel), "paper", "decision", "outcome",
+                           "realized_pnl_cents", "unrealized_pnl_cents")
     except Exception:
         return {"realized_cents": 0, "unrealized_cents": 0, "total_cents": 0}
     return paper_pnl_from_rows(rows)
 
 
 def read_portfolio_snapshots(conn, brokerage_id: str, limit: int = 5000) -> list[dict]:
-    return list(
-        _r.db(DB_NAME)
-        .table("kalshi_portfolio_snapshots")
-        .filter({"brokerage_id": brokerage_id})
-        .order_by("ts")
-        .limit(limit)
-        .run(conn)
-    )
+    sel = store.filter("kalshi_portfolio_snapshots",
+                       {"brokerage_id": brokerage_id})
+    return store.run(store.limit(
+        store.order_by(sel, fields=(store.asc("ts"),)), limit))
 
 
 def bump_scan_budget(conn, ts_iso: str, n: int = 1) -> int:
     """Increment and return the OddsPapi request count for the month."""
     window = scan_budget_window(ts_iso)
-    tbl = _r.db(DB_NAME).table("kalshi_scan_budget")
-    row = tbl.get(window).run(conn)
+    row = store.get("kalshi_scan_budget", window)
     used = int((row or {}).get("used", 0)) + n
-    tbl.insert({"window": window, "used": used}, conflict="replace").run(conn)
+    store.insert("kalshi_scan_budget", {"window": window, "used": used},
+                 conflict="replace")
     return used
 
 
@@ -183,7 +139,7 @@ def bump_scan_budget(conn, ts_iso: str, n: int = 1) -> int:
 def write_order(conn, *, client_order_id, decision_id, market_ticker, status,
                 requested, filled=0, ts="") -> None:
     """Persist a submitted order so fills can be joined back to the decision."""
-    _r.db(DB_NAME).table("kalshi_orders").insert({
+    store.insert("kalshi_orders", {
         "client_order_id": client_order_id,
         "decision_id": decision_id,
         "market_ticker": market_ticker,
@@ -191,7 +147,7 @@ def write_order(conn, *, client_order_id, decision_id, market_ticker, status,
         "requested": int(requested),
         "filled": int(filled),
         "ts": ts,
-    }, conflict="replace").run(conn)
+    }, conflict="replace")
 
 
 def upsert_fills(conn, fills) -> int:
@@ -210,7 +166,7 @@ def upsert_fills(conn, fills) -> int:
                      "price_cents": price, "contracts": cnt,
                      "action": f.get("action", ""), "side": f.get("side", "")})
     if docs:
-        _r.db(DB_NAME).table("kalshi_fills").insert(docs, conflict="replace").run(conn)
+        store.insert("kalshi_fills", docs, conflict="replace")
     return len(docs)
 
 
@@ -226,15 +182,16 @@ def append_edge_history(conn, instance_id, decisions, ts, cap: int = 60) -> int:
             continue
         rid = f"{instance_id}|{mt}"
         try:
-            existing = _r.db(DB_NAME).table("kalshi_edge_history").get(rid).run(conn)
+            existing = store.get("kalshi_edge_history", rid)
             hist = list((existing or {}).get("history") or [])
             # de-dupe identical consecutive ts (re-runs of the same tick) by ts.
             if not hist or hist[-1].get("ts") != ts:
                 hist.append({"ts": ts, "edge": e})
             hist = hist[-cap:]
-            _r.db(DB_NAME).table("kalshi_edge_history").insert(
-                {"id": rid, "instance_id": str(instance_id), "market_ticker": mt,
-                 "side": d.get("side"), "history": hist}, conflict="replace").run(conn)
+            store.insert("kalshi_edge_history",
+                         {"id": rid, "instance_id": str(instance_id),
+                          "market_ticker": mt, "side": d.get("side"),
+                          "history": hist}, conflict="replace")
             n += 1
         except Exception:
             pass
@@ -249,11 +206,10 @@ def mark_paper_positions(conn, instance_id, price_map) -> dict:
     Returns {marked, unrealized_pnl_cents}. Measurement only — never trades."""
     import datetime
     try:
-        rows = list(
-            _r.db(DB_NAME).table("kalshi_decisions")
-            .filter({"instance_id": str(instance_id), "decision": "placed", "paper": True})
-            .run(conn)
-        )
+        rows = store.run(store.filter(
+            "kalshi_decisions",
+            {"instance_id": str(instance_id), "decision": "placed",
+             "paper": True}))
     except Exception:
         return {"marked": 0, "unrealized_pnl_cents": 0}
     now = datetime.datetime.utcnow().isoformat() + "Z"
@@ -269,9 +225,9 @@ def mark_paper_positions(conn, instance_id, price_map) -> dict:
         upl = int(round((float(mark) - float(entry)) * size))
         total += upl
         try:
-            _r.db(DB_NAME).table("kalshi_decisions").get(r["id"]).update(
-                {"mark_cents": int(round(float(mark))),
-                 "unrealized_pnl_cents": upl, "mark_ts": now}).run(conn)
+            store.update("kalshi_decisions", r["id"],
+                         {"mark_cents": int(round(float(mark))),
+                          "unrealized_pnl_cents": upl, "mark_ts": now})
             marked += 1
         except Exception:
             pass
@@ -285,16 +241,18 @@ def update_close_refs(conn, instance_id, sharp_map, mid_map) -> int:
     Measurement only — never trades. Returns the number of rows updated."""
     from kalshi.reconcile import close_ref_updates
     try:
-        rows = list(_r.db(DB_NAME).table("kalshi_decisions")
-                    .filter({"instance_id": str(instance_id), "decision": "placed"})
-                    .pluck("id", "decision", "market_ticker", "outcome").run(conn))
+        sel = store.filter("kalshi_decisions",
+                           {"instance_id": str(instance_id),
+                            "decision": "placed"})
+        rows = store.pluck(store.run(sel), "id", "decision", "market_ticker",
+                           "outcome")
     except Exception:
         return 0
     n = 0
     for u in close_ref_updates(rows, sharp_map, mid_map):
         try:
-            _r.db(DB_NAME).table("kalshi_decisions").get(u["id"]).update(
-                {k: v for k, v in u.items() if k != "id"}).run(conn)
+            store.update("kalshi_decisions", u["id"],
+                         {k: v for k, v in u.items() if k != "id"})
             n += 1
         except Exception:
             pass
@@ -313,10 +271,9 @@ def prune_finished(conn, instance_id, open_tickers, now_iso, *,
     if not open_tickers:
         return {"deleted": 0, "expired": 0}
     try:
-        rows = list(_r.db(DB_NAME).table("kalshi_decisions")
-                    .filter({"instance_id": str(instance_id)})
-                    .pluck("id", "decision", "market_ticker", "outcome", "ts", "mark_ts",
-                           "unrealized_pnl_cents").run(conn))
+        sel = store.filter("kalshi_decisions", {"instance_id": str(instance_id)})
+        rows = store.pluck(store.run(sel), "id", "decision", "market_ticker",
+                           "outcome", "ts", "mark_ts", "unrealized_pnl_cents")
     except Exception:
         return {"deleted": 0, "expired": 0}
     plan = prune_finished_decisions(rows, open_tickers, now_iso,
@@ -326,15 +283,16 @@ def prune_finished(conn, instance_id, open_tickers, now_iso, *,
     deleted = expired = 0
     for did in plan["delete"]:
         try:
-            _r.db(DB_NAME).table("kalshi_decisions").get(did).delete().run(conn)
+            store.delete("kalshi_decisions", did)
             deleted += 1
         except Exception:
             pass
     for e in plan["expire"]:
         try:
             # Realize at the last mark (becomes filled-orders history with realized P&L).
-            _r.db(DB_NAME).table("kalshi_decisions").get(e["id"]).update(
-                {"outcome": "expired", "realized_pnl_cents": int(e.get("realized_pnl_cents") or 0)}).run(conn)
+            store.update("kalshi_decisions", e["id"],
+                         {"outcome": "expired",
+                          "realized_pnl_cents": int(e.get("realized_pnl_cents") or 0)})
             expired += 1
         except Exception:
             pass
@@ -359,13 +317,11 @@ def settle_and_learn(conn, client, brokerage_id, *, fee_rate: float = 0.07) -> d
             result_by_ticker[tk] = res
     if not result_by_ticker:
         return {"settled": 0}
-    rows = list(
-        _r.db(DB_NAME).table("kalshi_decisions")
-        .filter(lambda d: (d["brokerage_id"] == brokerage_id)
-                & (d["decision"] == "placed")
-                & (d["realized_pnl_cents"].default(None).eq(None)))
-        .run(conn)
-    )
+    rows = store.run(store.filter(
+        "kalshi_decisions",
+        P.field("brokerage_id").eq(brokerage_id)
+        & P.field("decision").eq("placed")
+        & P.field("realized_pnl_cents").is_null()))
     rows = [r for r in rows if r.get("market_ticker") in result_by_ticker]
     if not rows:
         return {"settled": 0}
@@ -374,16 +330,15 @@ def settle_and_learn(conn, client, brokerage_id, *, fee_rate: float = 0.07) -> d
     # (they aren't positions; P&L is captured at the net-position level).
     for r in rows:
         if r.get("live_action") in ("exit", "reduce"):
-            _r.db(DB_NAME).table("kalshi_decisions").get(r["id"]).update(
-                {"realized_pnl_cents": 0, "outcome": "exit"}).run(conn)
+            store.update("kalshi_decisions", r["id"],
+                         {"realized_pnl_cents": 0, "outcome": "exit"})
     # Ground-truth fills per settled ticker — ONLY positions that actually FILLED get
     # reconciled (a maker post_only rest can stay unfilled; never grade a phantom fill).
     settled_tickers = list({r.get("market_ticker") for r in rows})
     fills_by_ticker: dict = {}
     try:
-        fl = list(_r.db(DB_NAME).table("kalshi_fills")
-                  .filter(lambda f: _r.expr(settled_tickers).contains(f["market_ticker"]))
-                  .run(conn))
+        fl = store.run(store.filter(
+            "kalshi_fills", P.field("market_ticker").is_in(settled_tickers)))
     except Exception:
         fl = []
     for f in fl:
@@ -409,14 +364,15 @@ def settle_and_learn(conn, client, brokerage_id, *, fee_rate: float = 0.07) -> d
             fb = fills_by_ticker.get(pos["market_ticker"])
             if not fb or fb["buy_c"] <= 0:
                 for did in pos["decision_ids"]:
-                    _r.db(DB_NAME).table("kalshi_decisions").get(did).update(
-                        {"realized_pnl_cents": 0, "outcome": "unfilled"}).run(conn)
+                    store.update("kalshi_decisions", did,
+                                 {"realized_pnl_cents": 0,
+                                  "outcome": "unfilled"})
                 continue
             net_c = fb["buy_c"] - fb["sell_c"]
             if net_c <= 0:                   # fully exited before settlement
                 for did in pos["decision_ids"]:
-                    _r.db(DB_NAME).table("kalshi_decisions").get(did).update(
-                        {"realized_pnl_cents": 0, "outcome": "closed"}).run(conn)
+                    store.update("kalshi_decisions", did,
+                                 {"realized_pnl_cents": 0, "outcome": "closed"})
                 continue
             # ground-truth contracts + cost-weighted entry from actual buy fills
             pos = {**pos, "contracts": net_c, "avg_entry_cents": fb["buy_cost"] / fb["buy_c"]}
@@ -442,20 +398,20 @@ def settle_and_learn(conn, client, brokerage_id, *, fee_rate: float = 0.07) -> d
             else:
                 part = int(round(full_pnl * (int(row.get("size") or 0) / total)))
                 allocated += part
-            _r.db(DB_NAME).table("kalshi_decisions").get(did).update({
+            store.update("kalshi_decisions", did, {
                 "outcome": rec["outcome"],
                 "clv": rec["clv"],
                 "realized_pnl_cents": part,
-            }).run(conn)
+            })
         if rec.get("clv_graded"):
-            _r.db(DB_NAME).table("kalshi_clv_log").insert({
+            store.insert("kalshi_clv_log", {
                 "id": f"{brokerage_id}|{pos['market_ticker']}",
                 "brokerage_id": brokerage_id,
                 "league": rep.get("league", ""),
                 "market_ticker": pos["market_ticker"],
                 "clv": rec["clv"],
                 "ts": rep.get("ts", ""),
-            }, conflict="replace").run(conn)
+            }, conflict="replace")
         settled += 1
     return {"settled": settled}
 
@@ -520,7 +476,7 @@ def backtest_result_doc(id, result) -> dict:
 
 
 def create_backtest_job(conn, doc) -> None:
-    _r.db(DB_NAME).table("KalshiBacktests").insert(doc, conflict="replace").run(conn)
+    store.insert("KalshiBacktests", doc, conflict="replace")
 
 
 def update_backtest_progress(conn, id, *, status=None, progress=None, error=None,
@@ -539,42 +495,42 @@ def update_backtest_progress(conn, id, *, status=None, progress=None, error=None
     if summary is not None:
         upd["summary"] = summary
     if upd:
-        _r.db(DB_NAME).table("KalshiBacktests").get(id).update(upd).run(conn)
+        store.update("KalshiBacktests", id, upd)
 
 
 def save_backtest_result(conn, id, result) -> None:
-    _r.db(DB_NAME).table("KalshiBacktestResults").insert(
-        backtest_result_doc(id, result), conflict="replace").run(conn)
+    store.insert("KalshiBacktestResults", backtest_result_doc(id, result),
+                 conflict="replace")
 
 
 def list_backtests(conn, brokerage_id, limit: int = 100) -> list:
-    rows = list(_r.db(DB_NAME).table("KalshiBacktests")
-                .filter({"brokerage_id": brokerage_id}).run(conn))
+    rows = store.run(store.filter("KalshiBacktests",
+                                  {"brokerage_id": brokerage_id}))
     rows.sort(key=lambda r: r.get("created_at", ""), reverse=True)
     return rows[:limit]
 
 
 def get_backtest(conn, id):
-    return _r.db(DB_NAME).table("KalshiBacktests").get(id).run(conn)
+    return store.get("KalshiBacktests", id)
 
 
 def get_backtest_result(conn, id):
-    return _r.db(DB_NAME).table("KalshiBacktestResults").get(id).run(conn)
+    return store.get("KalshiBacktestResults", id)
 
 
 def set_backtest_run(conn, id, run: bool) -> None:
-    _r.db(DB_NAME).table("KalshiBacktests").get(id).update({"run": bool(run)}).run(conn)
+    store.update("KalshiBacktests", id, {"run": bool(run)})
 
 
 def delete_backtest(conn, id) -> None:
-    _r.db(DB_NAME).table("KalshiBacktests").get(id).delete().run(conn)
-    _r.db(DB_NAME).table("KalshiBacktestResults").get(id).delete().run(conn)
+    store.delete("KalshiBacktests", id)
+    store.delete("KalshiBacktestResults", id)
 
 
 def pending_or_running_backtests(conn) -> list:
-    return list(_r.db(DB_NAME).table("KalshiBacktests")
-                .filter(lambda d: (d["status"] == "pending") | (d["status"] == "running"))
-                .run(conn))
+    return store.run(store.filter(
+        "KalshiBacktests",
+        P.field("status").eq("pending") | P.field("status").eq("running")))
 
 
 # --- model registry (self-improving training pipeline) ---
@@ -582,7 +538,7 @@ def pending_or_running_backtests(conn) -> list:
 def save_model_version(conn, doc: dict) -> str:
     """Persist a model-registry version (fitted calibrator + held-out metrics).
     Caller stamps id/instance_id/kind/created_at. Returns the id."""
-    _r.db(DB_NAME).table("KalshiModelRegistry").insert(doc, conflict="replace").run(conn)
+    store.insert("KalshiModelRegistry", doc, conflict="replace")
     return doc["id"]
 
 
@@ -591,10 +547,10 @@ def get_champion(conn, instance_id: str, kind: str = "calibrator"):
     '__default__' scope when the instance has none. None if neither exists.
     Degrade-safe: returns None on any error (engine then uses identity)."""
     try:
-        tbl = _r.db(DB_NAME).table("KalshiModelRegistry")
         for scope in (instance_id, "__default__"):
-            rows = list(tbl.filter({"instance_id": scope, "kind": kind,
-                                    "is_champion": True}).run(conn))
+            rows = store.run(store.filter(
+                "KalshiModelRegistry",
+                {"instance_id": scope, "kind": kind, "is_champion": True}))
             if rows:
                 # Deterministic if a non-atomic set_champion race ever left >1: newest wins.
                 return max(rows, key=lambda r: str(r.get("created_at") or ""))
@@ -606,7 +562,9 @@ def get_champion(conn, instance_id: str, kind: str = "calibrator"):
 def set_champion(conn, id: str, instance_id: str, kind: str = "calibrator") -> None:
     """Promote `id` to champion for (instance, kind), demoting any prior champion in
     the same scope so exactly one is live."""
-    tbl = _r.db(DB_NAME).table("KalshiModelRegistry")
-    tbl.filter({"instance_id": instance_id, "kind": kind, "is_champion": True}) \
-       .update({"is_champion": False}).run(conn)
-    tbl.get(id).update({"is_champion": True}).run(conn)
+    store.update("KalshiModelRegistry",
+                 store.filter("KalshiModelRegistry",
+                              {"instance_id": instance_id, "kind": kind,
+                               "is_champion": True}),
+                 {"is_champion": False})
+    store.update("KalshiModelRegistry", id, {"is_champion": True})

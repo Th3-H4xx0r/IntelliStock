@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from db import store
+from db.errors import UnavailableError
 from kalshi.models import KalshiMarket
 from kalshi.edge import compute_edge
 from kalshi.fees import fee_as_prob
@@ -224,9 +226,11 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
     log(f"Kalshi engine starting — instance={config.instance_id} · env={config.environment} · "
         f"live_enabled={config.live_enabled}", "green")
 
-    conn = kdb.get_conn()
-    kdb.ensure_tables(conn)
-    brokerage = kdb._r.db(kdb.DB_NAME).table("BrokerageAccounts").get(config.brokerage_id).run(conn) or {}
+    # No connection handle: the pool hands every store call its own. `conn` stays
+    # only as the ignored first argument the kdb.* helpers still take.
+    conn = None
+    kdb.ensure_tables()
+    brokerage = store.get("BrokerageAccounts", config.brokerage_id) or {}
     from secret_store import decrypt
     client = KalshiClient(
         key_id=(brokerage.get("kalshi_key_id") or "").strip(),
@@ -256,10 +260,10 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
     llm_call = None
     _model_name = ""
     try:
-        _cfg0 = inst.get("kalshi_config") or {} if (inst := kdb._r.db(kdb.DB_NAME).table("Instances").get(config.instance_id).run(conn)) else {}
+        _cfg0 = inst.get("kalshi_config") or {} if (inst := store.get("Instances", config.instance_id)) else {}
         _model_id = _cfg0.get("model")
         if _model_id:
-            _mdoc = kdb._r.db(kdb.DB_NAME).table("Models").get(_model_id).run(conn) or {}
+            _mdoc = store.get("Models", _model_id) or {}
             _model_name = _mdoc.get("name") or _model_id
             log(f"Resolving analyst LLM '{_model_name}' (provider={_mdoc.get('provider')!r})…", "white")
             llm_call = make_llm_call(_mdoc, log=log, instance_id=config.instance_id)   # logs provider/model + every call; tags token usage
@@ -293,9 +297,9 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
     if not config.odds_api_key:
         log("No odds API key — pricing model-only. Set odds_api_key (or ODDS_API_KEY env) "
             "to anchor fair value to sharp bookmaker odds and trade where Kalshi disagrees.", "yellow")
-    # DB self-heal state: the loop shares ONE `conn`, so a poll-level reconnect
-    # heals every DB op in the tick. Alert the operator ONCE per outage (not every
-    # tick for 20h) on loss and again on recovery.
+    # DB self-heal state: the pool reconnects underneath every store call, so a
+    # poll-level failure heals itself. Alert the operator ONCE per outage (not
+    # every tick for 20h) on loss and again on recovery.
     _db_down = False
     _db_fail_streak = 0
 
@@ -315,7 +319,7 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
         # Control-plane poll. A transient DB/connection blip must NOT kill the
         # 24/7 engine — log and retry next tick instead of propagating.
         try:
-            inst = kdb._r.db(kdb.DB_NAME).table("Instances").get(config.instance_id).run(conn) or {}
+            inst = store.get("Instances", config.instance_id) or {}
             if _db_down:  # a successful poll after an outage == recovered
                 log(f"control-plane: DB connection RECOVERED after {_db_fail_streak} "
                     f"failed poll(s); engine resumed.", "green")
@@ -326,24 +330,20 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                     "Kalshi DB recovered", "Connection re-established — engine resumed.")
                 _db_down, _db_fail_streak = False, 0
         except Exception as e:
-            # A closed/dropped connection (idle timeout, DB restart, network blip) must
-            # not wedge the engine on a dead handle — rebuild it and retry. This is the
-            # fix for the 20h "Connection is closed" stall. Non-connection errors are
-            # logged but not treated as an outage (no reconnect churn).
-            if kdb.is_conn_error(e):
+            # A dropped connection (idle timeout, DB restart, network blip) must not
+            # wedge the engine — the pool has already retried and rebuilt itself, so
+            # the tick simply retries. This is the fix for the 20h "Connection is
+            # closed" stall. Non-connection errors are logged but not treated as an
+            # outage (no alert churn).
+            if isinstance(e, UnavailableError):
                 _db_fail_streak += 1
-                try:
-                    conn = kdb.reconnect(conn)
-                    log(f"control-plane: DB connection lost ({type(e).__name__}); "
-                        f"reconnected (attempt {_db_fail_streak}), will re-poll next tick.", "yellow")
-                except Exception as e2:
-                    log(f"control-plane: DB lost ({type(e).__name__}); reconnect FAILED "
-                        f"({type(e2).__name__}: {e2}); retrying next tick.", "red")
+                log(f"control-plane: DB unreachable ({type(e).__name__}); "
+                    f"attempt {_db_fail_streak}, will re-poll next tick.", "yellow")
                 if not _db_down:  # first failure of this outage -> alert once
                     _db_down = True
                     _notify_kalshi(
                         f"KALSHI DB connection lost [{config.instance_id}]",
-                        f"{type(e).__name__}: {e}\n\nEngine is SELF-HEALING — auto-reconnecting "
+                        f"{type(e).__name__}: {e}\n\nEngine is SELF-HEALING — retrying "
                         f"every {config.poll_seconds}s until the database is reachable. "
                         f"You'll get a follow-up when it recovers.",
                         "Kalshi DB connection lost", f"{type(e).__name__} — self-healing…")
@@ -758,10 +758,13 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
             _pp: list = []   # this instance's PAPER placed rows (dedup + cash accounting)
             if dry:
                 try:
-                    _pp = list(kdb._r.db(kdb.DB_NAME).table("kalshi_decisions")
-                               .filter({"instance_id": config.instance_id, "decision": "placed", "paper": True})
-                               .pluck("market_ticker", "decision", "paper", "outcome", "size",
-                                      "entry_avg_cents", "realized_pnl_cents", "live_action").run(conn))
+                    _pp = store.pluck(
+                        store.run(store.filter(
+                            "kalshi_decisions",
+                            {"instance_id": config.instance_id,
+                             "decision": "placed", "paper": True})),
+                        "market_ticker", "decision", "paper", "outcome", "size",
+                        "entry_avg_cents", "realized_pnl_cents", "live_action")
                     # Only OPEN paper positions count as "held" for dedup — a settled/
                     # expired market is done (finished markets won't re-list anyway).
                     placed_markets |= {row.get("market_ticker") for row in _pp
@@ -896,7 +899,7 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                 # skipped/blocked/real rows carry paper=False explicitly.)
                 d["paper"] = bool(dry)
                 try:
-                    kdb._r.db(kdb.DB_NAME).table("kalshi_decisions").insert(d, conflict="replace").run(conn)
+                    store.insert("kalshi_decisions", d, conflict="replace")
                 except Exception:
                     pass
 
@@ -990,9 +993,12 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                 # From the placed decision rows: a placed row WITHOUT in_play=True is pregame.
                 position_origin: dict = {}
                 try:
-                    for _od in kdb._r.db(kdb.DB_NAME).table("kalshi_decisions").filter(
-                            {"instance_id": config.instance_id, "decision": "placed"}).pluck(
-                            "market_ticker", "in_play").run(conn):
+                    for _od in store.pluck(
+                            store.run(store.filter(
+                                "kalshi_decisions",
+                                {"instance_id": config.instance_id,
+                                 "decision": "placed"})),
+                            "market_ticker", "in_play"):
                         _otk = _od.get("market_ticker")
                         if not _otk:
                             continue
@@ -1017,7 +1023,7 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                     # the feedback loop + API/UI scope in-play decisions by mode too.
                     r["paper"] = bool(live_dry)
                     try:
-                        kdb._r.db(kdb.DB_NAME).table("kalshi_decisions").insert(r, conflict="replace").run(conn)
+                        store.insert("kalshi_decisions", r, conflict="replace")
                     except Exception:
                         pass
 
@@ -1058,7 +1064,7 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
                         home_logo=(sc or {}).get("home_logo", ""),
                         away_logo=(sc or {}).get("away_logo", ""))
                     try:
-                        kdb._r.db(kdb.DB_NAME).table("kalshi_live").insert(card, conflict="replace").run(conn)
+                        store.insert("kalshi_live", card, conflict="replace")
                     except Exception:
                         pass
 
@@ -1066,10 +1072,12 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
             if config.live_monitoring:
                 try:
                     keep = {f"{config.instance_id}|{m['fixture_id']}" for m in live_matches}
-                    for row in kdb._r.db(kdb.DB_NAME).table("kalshi_live").filter(
-                            {"instance_id": config.instance_id}).pluck("id").run(conn):
+                    for row in store.pluck(
+                            store.run(store.filter(
+                                "kalshi_live",
+                                {"instance_id": config.instance_id})), "id"):
                         if row["id"] not in keep:
-                            kdb._r.db(kdb.DB_NAME).table("kalshi_live").get(row["id"]).delete().run(conn)
+                            store.delete("kalshi_live", row["id"])
                 except Exception:
                     pass
 
@@ -1101,10 +1109,6 @@ def run_instance(config: EngineConfig) -> None:  # pragma: no cover - integratio
         time.sleep(config.live_poll_seconds if (config.live_monitoring and any_live)
                    else config.poll_seconds)
 
-    try:
-        conn.close()
-    except Exception:
-        pass
     log("Kalshi engine stopped.", "yellow")
 
 
