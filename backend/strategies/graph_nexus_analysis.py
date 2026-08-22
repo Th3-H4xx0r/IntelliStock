@@ -402,14 +402,6 @@ def _log_stage_progress(
     state["time"] = now
 
 
-def _log_lookback_banner(title: str, *, date_key: str = "", lookback_days: int = 0, end: bool = False) -> None:
-    line = "=" * 28
-    suffix = f" | date={date_key} | lookback_days={lookback_days}" if date_key or lookback_days else ""
-    label = f"{title} END" if end else title
-    _log(line, "cyan")
-    _log(f"{label}{suffix}", "cyan")
-    _log(line, "cyan")
-
 
 @contextmanager
 def _timed_stage(label: str, *, start_details: str = "", start_color: str = "cyan", done_color: str = "cyan"):
@@ -458,8 +450,6 @@ except Exception:
 
 # Alpaca news (all)
 ALPACA_NEWS_BASE = "https://data.alpaca.markets/v1beta1"
-SECONDS_PER_DAY = 86400
-
 _nexus_db_conn = None
 _nexus_cache_table_ensured = False
 
@@ -1817,10 +1807,6 @@ def _fetch_article_content_excerpt(url: str, *, max_chars: int = _NEXUS_ARTICLE_
     except Exception:
         return ""
 
-
-def _chunked(items: list[Any], size: int) -> list[list[Any]]:
-    n = max(1, int(size or 1))
-    return [items[i:i + n] for i in range(0, len(items), n)]
 
 
 def _build_llm_trace(role: str, provider: str, model: str, prompt: str, system_prompt: str | list[str] | tuple[str, ...] | None, prompt_version: str, ok: bool) -> dict[str, Any]:
@@ -5021,7 +5007,7 @@ def _maintain_active_events(
                     _log(f"Active-event maintenance batch retry {attempt + 1}/{max_outer_retries} (prev attempt returned no result)", "yellow")
             return r, t
 
-        from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
+        from concurrent.futures import ThreadPoolExecutor
         batch_results = []
         # In lookback mode, cap parallelism. Provider here is azure (gpt-oss-120b),
         # not subject to the CLAUDE_CLI_MAX_CONCURRENT semaphore. Old cap was 2,
@@ -17572,24 +17558,6 @@ class _MacroSignalsResponse(BaseModel):
     macro_signals: list[_MacroSignalRecord] = Field(default_factory=list)
 
 
-class _SearchEvidenceSelection(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    use_search: bool = False
-    queries: list[str] = Field(default_factory=list)
-    reason: str = ""
-    selected_urls: list[str] = Field(default_factory=list)
-
-
-class _AliasDisambiguationResponse(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    keep: bool = False
-    best_entity_key: str = ""
-    best_parent: str = ""
-    best_entity_kind: str = "legal_entity"
-    confidence_bucket: str = "low"
-    reason: str = ""
-    evidence_urls: list[str] = Field(default_factory=list)
-
 
 class _PrivateEntityNewsResolutionResponse(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -17719,62 +17687,6 @@ class _TradeOverlayResponse(BaseModel):
     rationale: str = Field("", alias="ra")
 
 
-def _extract_sentiment_json(resp: str):
-    """
-    Extract a single JSON object (ticker -> {s, e} or ticker -> int) from LLM response.
-    Handles deepseek-reasoner: long reasoning_content with final JSON at the end.
-    Returns parsed dict or None.
-    """
-    import json
-    if not resp or not resp.strip():
-        return None
-    s = resp.strip()
-    # 1) Prefer ```json ... ``` block
-    for marker in ("```json", "```"):
-        start = s.find(marker)
-        if start >= 0:
-            start = s.find("{", start)
-            if start >= 0:
-                end = s.find("```", start)
-                if end < 0:
-                    end = len(s)
-                chunk = s[start:end]
-                brace_end = chunk.rfind("}") + 1
-                if brace_end > 0:
-                    try:
-                        return json.loads(chunk[:brace_end])
-                    except json.JSONDecodeError:
-                        pass
-    # 2) First { to last } (whole response)
-    first_brace = s.find("{")
-    last_brace = s.rfind("}")
-    if first_brace >= 0 and last_brace > first_brace:
-        try:
-            return json.loads(s[first_brace:last_brace + 1])
-        except json.JSONDecodeError:
-            pass
-    # 3) Last complete JSON object (for reasoner: final answer at end)
-    end_idx = last_brace
-    while end_idx >= first_brace >= 0:
-        depth = 1  # we are inside the closing } at end_idx
-        start_idx = -1
-        for j in range(end_idx - 1, first_brace - 1, -1):
-            if s[j] == "}":
-                depth += 1
-            elif s[j] == "{":
-                depth -= 1
-                if depth == 0:
-                    start_idx = j
-                    break
-        if start_idx >= 0:
-            try:
-                return json.loads(s[start_idx:end_idx + 1])
-            except json.JSONDecodeError:
-                pass
-        end_idx = s.rfind("}", 0, end_idx)
-        if end_idx <= first_brace:
-            break
-    return None
 
 
 def _enhanced_sentiment_from_llm(articles: list, provider: str, api_key: str, model: str, num_articles: int = 30, today_str: str = "", pending_trades: list | None = None, ticker_history: dict | None = None, active_trends: list | None = None, additional_context: str = "", provider_config: dict[str, Any] | None = None, config: dict[str, Any] | None = None, _retry_stage: int = 0) -> tuple[dict, list, list, dict]:
