@@ -77,17 +77,16 @@ def main():
     ap.add_argument("--cleanup", action="store_true", help="delete old ids after re-keying")
     args = ap.parse_args()
 
-    from rethinkdb import RethinkDB
-    r = RethinkDB()
-    conn = r.connect(host=args.host, port=args.port, db=args.db, timeout=10)
-    existing = set(r.db(args.db).table_list().run(conn))
+    from db import store as r
+    conn = None
+    existing = set(r.table_list())
     for table in TABLES:
         if table not in existing:
             print(f"{table}: not present, skipping")
             continue
         # Materialize first (don't iterate a cursor while writing to the same
         # table), then batch — these tables can hold tens of thousands of rows.
-        rows = list(r.db(args.db).table(table).run(conn))
+        rows = list(r.run(table))
         new_rows = []
         old_ids = []
         skipped = 0
@@ -105,13 +104,14 @@ def main():
             old_ids.append(old_id)
         if args.apply:
             for i in range(0, len(new_rows), _BATCH):
-                r.db(args.db).table(table).insert(new_rows[i:i + _BATCH], conflict="replace").run(conn)
+                r.insert(table, new_rows[i:i + _BATCH], conflict="replace")
             if args.cleanup:
                 # Old ids are 5-part (carry a provider segment); new ids are
                 # 4-part — they can never collide, so deleting old ids never
                 # removes a row we just wrote.
                 for i in range(0, len(old_ids), _BATCH):
-                    r.db(args.db).table(table).get_all(*old_ids[i:i + _BATCH]).delete().run(conn)
+                    for _oid in old_ids[i:i + _BATCH]:
+                        r.delete(table, _oid)
         print(f"{table}: {len(new_rows)} re-keyed, {skipped} unchanged "
               f"({'APPLIED' if args.apply else 'DRY-RUN'}{', cleaned' if args.cleanup and args.apply else ''})")
     conn.close()

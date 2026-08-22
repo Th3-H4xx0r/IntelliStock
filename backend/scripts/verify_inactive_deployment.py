@@ -15,7 +15,7 @@ from decimal import Decimal, InvalidOperation
 from dataclasses import dataclass
 from typing import Callable, Iterable, Mapping
 
-from rethinkdb import RethinkDB
+from db import store as _store
 
 
 @dataclass(frozen=True)
@@ -290,8 +290,8 @@ def verify_inactive_deployment(read_snapshot: Callable[[], InactiveSnapshot],
 
 
 def _snapshot_reader(conn, instance_id: str, broker_snapshot_reader, worker_state_reader, expected_artifact_hash) -> InactiveSnapshot:
-    r = RethinkDB()
-    instance = r.db("IntelliStock").table("Instances").get(instance_id).run(conn)
+    r = _store
+    instance = r.get("Instances", instance_id)
     if not isinstance(instance, Mapping):
         raise RuntimeError("instance state is unavailable")
     if type(instance.get("runCommand")) is not bool:
@@ -303,7 +303,7 @@ def _snapshot_reader(conn, instance_id: str, broker_snapshot_reader, worker_stat
     brokerage_id = instance.get("brokerage_id")
     if not isinstance(brokerage_id, str) or not brokerage_id:
         raise RuntimeError("linked brokerage is unavailable")
-    brokerage = r.db("IntelliStock").table("BrokerageAccounts").get(brokerage_id).run(conn)
+    brokerage = r.get("BrokerageAccounts", brokerage_id)
     if not isinstance(brokerage, Mapping):
         raise RuntimeError("linked brokerage is unavailable")
     state = broker_snapshot_reader(instance, brokerage)
@@ -373,8 +373,7 @@ def main(argv=None) -> int:
         print(json.dumps({"passed": False, "reasons": ["deployed artifact identity is unavailable"]}))
         return 1
     from read_only_broker_snapshot import read_authoritative_snapshot
-    r = RethinkDB()
-    conn = r.connect(host=args.host, port=args.port)
+    r, conn = _store, None
     try:
         result = verify_inactive_deployment(
             lambda: _snapshot_reader(conn, args.instance_id, read_authoritative_snapshot, _docker_worker_state, expected_hash),

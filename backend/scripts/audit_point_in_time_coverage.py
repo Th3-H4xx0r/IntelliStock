@@ -114,50 +114,29 @@ def _read_metadata() -> tuple[list[dict], int]:
         load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
     except Exception:
         pass
-    from rethinkdb import RethinkDB
+    from db import store as _store
 
-    r = RethinkDB()
-    conn = r.connect(
-        host=os.environ.get("RETHINKDB_HOST", "localhost"),
-        port=int(os.environ.get("RETHINKDB_PORT", "28015")),
-        timeout=20,
-    )
+    r = _store
+    conn = None
     try:
         db_name = os.environ.get("RETHINKDB_DB", "IntelliStock")
-        tables = set(r.db(db_name).table_list().run(conn))
+        tables = set(r.table_list())
         manifests = []
         if MANIFEST_TABLE in tables:
-            manifests = list(
-                r.db(db_name)
-                .table(MANIFEST_TABLE)
-                .pluck(
-                    "as_of",
-                    "status",
-                    "provenance",
-                    "source_hashes",
-                )
-                .run(conn)
-            )
+            manifests = list(r.pluck(
+                r.run(MANIFEST_TABLE),
+                "as_of", "status", "provenance", "source_hashes"))
         legacy_count = 0
         if "GraphNexusTradeContexts" in tables:
-            legacy_count = int(
-                r.db(db_name)
-                .table("GraphNexusTradeContexts")
-                .filter(
-                    lambda row: (
-                        row["pit_provenance"].default("")
-                        != "strict_verified"
-                    )
-                    | (row["pit_manifest_id"].default("") == "")
-                    | (row["pit_as_of"].default("") == "")
-                )
-                .count()
-                .run(conn)
-            )
+            legacy_count = int(r.count(r.filter(
+                "GraphNexusTradeContexts",
+                r.P.field("pit_provenance").default("").ne("strict_verified")
+                | r.P.field("pit_manifest_id").default("").eq("")
+                | r.P.field("pit_as_of").default("").eq("")))) 
         return manifests, legacy_count
     finally:
         try:
-            conn.close()
+            pass
         except Exception:
             pass
 

@@ -22,14 +22,14 @@ DB_NAME = "IntelliStock"
 
 def _connect_rethinkdb():
     try:
-        from rethinkdb import RethinkDB  # type: ignore
+        from db import store as _store  # type: ignore
     except ImportError:
         return None, None
-    r = RethinkDB()
+    r = _store
     host = os.environ.get("RETHINKDB_HOST", "localhost")
     port = int(os.environ.get("RETHINKDB_PORT", "28015"))
     try:
-        conn = r.connect(host=host, port=port)
+        conn = None
         return r, conn
     except Exception:
         return r, None
@@ -38,12 +38,11 @@ def _connect_rethinkdb():
 def _check_snapshot_present(r, conn, instance_id: str):
     """Return (level, message). level in {'green', 'yellow', 'red'}."""
     try:
-        rows = list(
-            r.db(DB_NAME).table("NexusStrategyCache")
-             .filter((r.row["instance_id"] == instance_id) & (r.row["origin"].default("") == "backtest"))
-             .pluck("id", "end_date", "config_hash", "size_bytes")
-             .run(conn)
-        )
+        rows = list(r.pluck(r.run(r.filter(
+            "NexusStrategyCache",
+            r.P.field("instance_id").eq(instance_id)
+            & r.P.field("origin").default("").eq("backtest"))),
+            "id", "end_date", "config_hash", "size_bytes"))
     except Exception as e:
         return "red", f"snapshot query failed: {e}"
     if not rows:
@@ -62,11 +61,10 @@ def _check_snapshot_present(r, conn, instance_id: str):
 
 def _check_no_legacy_live_strategy_cache(r, conn, instance_id: str):
     try:
-        count = int(
-            r.db(DB_NAME).table("NexusStrategyCache")
-             .filter((r.row["instance_id"] == instance_id) & (r.row["origin"].default("") == "live"))
-             .count().run(conn) or 0
-        )
+        count = int(r.count(r.filter(
+            "NexusStrategyCache",
+            r.P.field("instance_id").eq(instance_id)
+            & r.P.field("origin").default("").eq("live"))) or 0)
     except Exception as e:
         return "yellow", f"cannot check live cache rows: {e}"
     if count > 0:
@@ -87,7 +85,7 @@ def _check_per_instance_residue(r, conn, instance_id: str):
         "GraphNexusAnalystPanel",
     )
     try:
-        existing = set(r.db(DB_NAME).table_list().run(conn))
+        existing = set(r.table_list())
     except Exception as e:
         return "yellow", f"table_list failed: {e}"
     by_table = {}
@@ -95,11 +93,8 @@ def _check_per_instance_residue(r, conn, instance_id: str):
         if tbl not in existing:
             continue
         try:
-            c = int(
-                r.db(DB_NAME).table(tbl)
-                 .filter(r.row["instance_id"] == instance_id)
-                 .count().run(conn) or 0
-            )
+            c = int(r.count(r.filter(
+                tbl, {"instance_id": instance_id})) or 0)
             if c > 0:
                 by_table[tbl] = c
         except Exception:
