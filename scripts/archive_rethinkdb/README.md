@@ -37,3 +37,11 @@ Four dated one-shots stayed in `backend/scripts/` even though they belong here:
 and exercise their pure config-building logic, so moving them would delete
 working test coverage to tidy a directory. The triage document explains the
 call.
+
+## Not archived, out of scope
+
+`.gitignore` excludes `scripts/_*.py` — one-off diagnostics, underscore-prefixed
+by convention. Those files are not in the repository, so nothing here applies to
+them: an ignored file cannot be moved into this directory without committing the
+very thing the ignore rule keeps out. The triage census asks `git ls-files`, not
+the filesystem, for exactly that reason.

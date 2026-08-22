@@ -1,7 +1,7 @@
 # Postgres port — scripts triage
 
-43 `.py` files under `scripts/` and `backend/scripts/` speak ReQL (they match
-`rethinkdb` or `r.db(`). Porting them is 43 diffs; deciding which ones deserve a
+43 git-tracked `.py` files under `scripts/` and `backend/scripts/` speak ReQL
+(they match `rethinkdb` or `r.db(`). Porting them is 43 diffs; deciding which ones deserve a
 diff is one document. This is that document, and
 `backend/tests/test_script_triage.py` fails the build if it ever stops matching
 the tree.
@@ -19,7 +19,8 @@ Two buckets were not in the rule and reality required them:
   fixture puller), or moving it would break a live test for no gain.
 - **DELETED** — subsumed by `db.schema.ensure_schema()`.
 
-Counts: **22 PORTED, 14 ARCHIVED, 5 RETAINED, 2 DELETED** = 43. The PORTED table
+Counts: **22 PORTED, 14 ARCHIVED, 5 RETAINED, 2 DELETED** = 43. The census counts
+what **git tracks**, not what happens to sit in the working directory. The PORTED table
 carries one extra row (`run_paired_experiment.py`) that has no ReQL at all but is
 the cutover's re-certification gate, so task 6 owns it.
 
@@ -113,6 +114,28 @@ block is unported ReQL that plan C rewrites wholesale, so editing the comment no
 would only collide with that rewrite. Whoever ports it points the comment at
 `backend/db/schema.py`.
 
+## Out of scope: gitignored scratch
+
+`.gitignore` has excluded `scripts/_*.py` since long before this port —
+"Diagnostic / one-off scripts (underscore-prefixed by convention)". Files matching
+it are not in the repository, so they are not triaged, not ported and not
+archived. An ignored file cannot be `git mv`'d into `scripts/archive_rethinkdb/`
+without committing exactly what the ignore rule exists to keep out.
+
+This matters because the census used to walk the filesystem. On a checkout that
+happened to hold `scripts/_kalshi_analyze.py`, `scripts/_kalshi_recon.py` and
+`scripts/_kalshi_recreate_instance.py` — untracked scratch from 2026-06-28 — the
+build failed demanding they be classified, while the same commit passed on a
+checkout without them. The census now asks `git ls-files`, so the answer is a
+property of the commit rather than of the developer's directory, and
+`test_gitignored_scratch_scripts_are_out_of_scope_by_construction` pins it: it
+drops a scratch file with a `rethinkdb` import into `scripts/` and asserts the
+triage stays green.
+
+An earlier draft listed those three `_kalshi_*` files as ARCHIVED. That was wrong
+twice over — they were never repository files, and the move it prescribed was
+impossible.
+
 ## How to regenerate
 
 ```bash
@@ -120,6 +143,9 @@ for f in $(grep -rl "rethinkdb\|r\.db(" scripts backend/scripts --include='*.py'
   printf '%s|%s\n' "$(grep -c 'r\.db(' "$f")" "$f"
 done
 ```
+
+That is the filesystem view. The test uses `git ls-files` instead, so ignored
+scratch never enters the set.
 
 `backend/tests/test_script_triage.py` fails if that set stops being covered by
 PORTED ∪ RETAINED, if any bucket claims a script twice, or if an ARCHIVED row is

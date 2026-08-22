@@ -8,6 +8,9 @@ claimed by two buckets at once, or if an ARCHIVED row does not actually live in
 """
 import pathlib
 import re
+import subprocess
+
+import pytest
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 TRIAGE = REPO / "docs/superpowers/specs/2026-08-22-postgres-port-script-triage.md"
@@ -26,14 +29,32 @@ def _rows(section: str) -> set:
     return out
 
 
+def _tracked_scripts() -> list:
+    """Every .py under scripts/ and backend/scripts/ that git actually tracks.
+
+    Deliberately NOT a filesystem walk. `.gitignore` excludes `scripts/_*.py` --
+    underscore-prefixed one-off diagnostics, by long-standing convention -- and a
+    walk picks those up from whichever developer happens to have some lying
+    around, then fails the build asking them to triage a scratch file that is not
+    in the repository. The triage is a claim about the repository.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "ls-files", "--", "scripts", "backend/scripts"],
+            cwd=str(REPO), capture_output=True, text=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError) as exc:
+        pytest.skip("git is not usable here, so the tracked set is unknowable: %s" % exc)
+    return [line for line in out.splitlines() if line.endswith(".py")]
+
+
 def _reql_scripts() -> set:
     found = set()
-    for base in ("scripts", "backend/scripts"):
-        for path in (REPO / base).rglob("*.py"):
-            if "archive_rethinkdb" in path.parts:
-                continue
-            if REQL.search(path.read_text(encoding="utf-8", errors="replace")):
-                found.add(str(path.relative_to(REPO)))
+    for rel in _tracked_scripts():
+        path = REPO / rel
+        if "archive_rethinkdb" in path.parts or not path.exists():
+            continue
+        if REQL.search(path.read_text(encoding="utf-8", errors="replace")):
+            found.add(rel)
     return found
 
 
@@ -86,3 +107,21 @@ def test_archive_readme_states_the_contract():
     readme = (REPO / "scripts/archive_rethinkdb/README.md").read_text()
     assert "do not run against Postgres" in readme
     assert "read it first" in readme
+
+
+def test_gitignored_scratch_scripts_are_out_of_scope_by_construction():
+    """`scripts/_*.py` is gitignored one-off scratch. It is not in the
+    repository, nothing ports it, and nothing archives it -- an ignored file
+    cannot be `git mv`'d anywhere without committing the very thing the ignore
+    rule exists to keep out. The census must therefore never see one.
+    """
+    ignore = (REPO / ".gitignore").read_text()
+    assert "scripts/_*.py" in ignore, "the scratch convention this test relies on is gone"
+
+    scratch = REPO / "scripts/_triage_probe_scratch.py"
+    scratch.write_text("from rethinkdb import RethinkDB\n")
+    try:
+        assert str(scratch.relative_to(REPO)) not in _reql_scripts()
+        test_every_reql_script_is_classified_exactly_once()
+    finally:
+        scratch.unlink()
