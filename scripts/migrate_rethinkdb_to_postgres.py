@@ -55,6 +55,7 @@ from db.json import canonical_sha256, dumps              # noqa: E402
 MIGRATION_STATE_TABLE = "_migration_state"
 DEFAULT_BATCH = 2000
 BACKTEST_BATCH = 200
+STEP_CHUNK = 20000        # BacktestSteps rows per COPY
 MISMATCH_DIR = ".migration-mismatches"
 
 #: RethinkDB pseudotypes must arrive RAW. ``native`` hands back ``datetime``
@@ -367,22 +368,27 @@ def copy_batch(table: str, rows: list) -> int:
 
 
 def _write_backtest_rows(rows: list) -> int:
-    """Split every document, then three COPYs. Returns the SOURCE row count."""
-    metas, steps, progress = [], [], []
+    """Split every document, then three COPYs. Returns the SOURCE row count.
+
+    Steps are flushed PER DOCUMENT, not accumulated across the batch: the live
+    sample is 3.1 MB and ~14k step entries per backtest, so holding a whole
+    200-document batch's step rows in Python would be gigabytes for no gain.
+    Metadata lands last, so a killed run leaves orphan step rows -- which
+    assemble() reports as a missing backtest and the rerun upserts away --
+    rather than a metadata row with half its steps.
+    """
+    metas, progress = [], []
     for doc in rows:
         meta, step_rows, prog = split_backtest_row(doc)
         bid = pg_id(brs.RESULTS_TABLE, doc)
         metas.append(meta)
-        for kind, seq, entry in step_rows:
-            steps.append({"backtest_id": bid, "kind": kind, "seq": seq,
-                          "final": True, "doc": entry})
         if prog is not None:
             progress.append(prog)
+        steps = [{"backtest_id": bid, "kind": kind, "seq": seq,
+                  "final": True, "doc": entry} for kind, seq, entry in step_rows]
+        for start in range(0, len(steps), STEP_CHUNK):
+            copy_batch(brs.STEPS_TABLE, steps[start:start + STEP_CHUNK])
     copy_batch(brs.RESULTS_TABLE, metas)
-    # Chunked: one backtest can carry 14k step entries, and a 200-document
-    # batch is therefore ~3M rows in a single statement.
-    for start in range(0, len(steps), 20000):
-        copy_batch(brs.STEPS_TABLE, steps[start:start + 20000])
     copy_batch(brs.PROGRESS_TABLE, progress)
     return len(rows)
 
