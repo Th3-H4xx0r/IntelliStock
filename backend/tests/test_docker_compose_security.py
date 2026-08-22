@@ -73,3 +73,30 @@ def test_powershell_installer_securely_provisions_missing_socket_key_without_a_f
     assert "-cnotmatch '^[0-9a-f]{64}$'" in installer
     assert "SOCKET_CONTROL_MASTER_KEY:-" not in installer
     assert "Write-Host $socketControlMasterKey" not in installer
+
+
+def test_postgres_binds_to_loopback_by_default_unlike_rethinkdb():
+    """Postgres is authenticated, but the RethinkDB service next to it defaults
+    to 0.0.0.0 and copying that default would export a database to every
+    interface by accident. The Postgres publish address therefore defaults to
+    127.0.0.1; an operator who needs Tailscale access sets POSTGRES_BIND_ADDR
+    explicitly. A bare "5432:5432" would publish it with no way to override.
+    """
+    compose = (REPO_ROOT / "docker-compose.yml").read_text()
+    assert '"${POSTGRES_BIND_ADDR:-127.0.0.1}:5432:5432"' in compose
+    assert '\n      - "5432:5432"' not in compose
+    assert "${POSTGRES_BIND_ADDR:-0.0.0.0}" not in compose
+
+
+def test_postgres_password_is_mandatory_at_compose_interpolation():
+    """":?" makes compose refuse to start rather than silently booting a
+    database with an empty password."""
+    compose = (REPO_ROOT / "docker-compose.yml").read_text()
+    assert "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}" in compose
+
+
+def test_postgres_declares_shm_size():
+    """The Docker default /dev/shm is 64MB and is NOT shared_buffers; parallel
+    scans fail with a confusing error without an explicit shm_size."""
+    compose = (REPO_ROOT / "docker-compose.yml").read_text()
+    assert "shm_size: 1gb" in compose
