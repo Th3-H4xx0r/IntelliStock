@@ -44,6 +44,7 @@ def store():
     from db import store as real_store
     name = "t_" + uuid.uuid4().hex[:16]
     dbpool.close_pool()
+    prior_dsn = os.environ.get("PG_DSN")
     os.environ["PG_DSN"] = dsn
     os.environ.pop("PG_SEARCH_PATH", None)
     with dbpool.connection(autocommit=True) as conn:
@@ -59,3 +60,9 @@ def store():
         with dbpool.connection(autocommit=True) as conn:
             conn.execute('DROP SCHEMA IF EXISTS "%s" CASCADE' % name)
         dbpool.close_pool()
+        # Restore, never leak: the test DSN outliving the fixture pointed the
+        # rest of the session's pool at the scratch cluster.
+        if prior_dsn is None:
+            os.environ.pop("PG_DSN", None)
+        else:
+            os.environ["PG_DSN"] = prior_dsn

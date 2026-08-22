@@ -36,11 +36,14 @@ def test_ensure_partitions_creates_one_partition_per_month(pg_schema):
     with dbpool.cursor() as cur:
         # relkind='r': pg_class also holds each partition's primary-key
         # INDEX, whose name starts with the partition name.
-        cur.execute("SELECT count(*) AS n FROM pg_class c "
+        cur.execute("SELECT relname FROM pg_class c "
                     "JOIN pg_namespace n ON n.oid = c.relnamespace "
                     "WHERE n.nspname = %s AND c.relkind = 'r' "
                     "AND c.relname LIKE 'PriceHistory\\_p%%'", (pg_schema,))
-        assert cur.fetchone()["n"] == 3
+        names = {r["relname"] for r in cur.fetchall()}
+    # ensure_schema premakes the rolling window, so only assert these three.
+    assert {"PriceHistory_p2026_01", "PriceHistory_p2026_02",
+            "PriceHistory_p2026_03"} <= names
 
 
 @requires_pg

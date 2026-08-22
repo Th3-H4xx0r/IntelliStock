@@ -14,7 +14,7 @@ from db.store import P
 
 from .conftest import PG_TEST_DSN
 
-_TABLES = ["Instances", "DiscordOutbox"]
+_TABLES = ["Instances", "DiscordOutbox", "kalshi_markets"]
 
 
 @pytest.fixture
@@ -296,10 +296,12 @@ def test_limit_and_slice(s):
     assert [r["id"] for r in s.run(s.slice(ordered, 1, 3))] == ["b", "c"]
 
 
-def test_count_ignores_limit(s):
+def test_count_honours_limit(s):
+    """ReQL's .limit(n).count() is min(n, total)."""
     for rid in ("a", "b", "c"):
         s.insert("DiscordOutbox", {"id": rid})
-    assert s.count(s.limit(s.filter("DiscordOutbox", {}), 1)) == 3
+    assert s.count(s.limit(s.filter("DiscordOutbox", {}), 1)) == 1
+    assert s.count(s.filter("DiscordOutbox", {})) == 3
 
 
 def test_iter_yields_every_row(s):
@@ -332,9 +334,13 @@ def test_replace_if_missing_row_raises_unless_allowed(s):
                         insert_if_absent=True) == {"id": "zz"}
 
 
-def test_missing_pk_field_raises(s):
-    with pytest.raises(StoreError):
-        s.insert("kalshi_markets", {"yes_bid": 1})
+def test_missing_pk_field_is_generated(s):
+    """RethinkDB generated a uuid for the primary key and returned it in
+    generated_keys; priceBroker.py:186 has always relied on that."""
+    res = s.insert("kalshi_markets", {"yes_bid": 1})
+    assert res.inserted == 1 and len(res.generated_keys) == 1
+    assert s.get("kalshi_markets", res.generated_keys[0])["market_ticker"] == \
+        res.generated_keys[0]
 
 
 def test_bad_conflict_mode_raises(s):

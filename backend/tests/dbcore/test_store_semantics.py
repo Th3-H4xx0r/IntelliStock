@@ -61,7 +61,7 @@ COVERAGE = {
     "unimplemented ReQL ops": "test_unimplemented_reql_ops_are_absent",
     "table_create / index_wait": "test_store_reads.py::test_table_list_and_table_create",
     "ReQL 100k array limit": "test_store_reads.py::test_run_raises_above_pg_max_rows",
-    "missing primary key rejected": "test_a_missing_pk_field_write_is_rejected_like_rethinkdb",
+    "missing primary key generated": "test_a_missing_pk_field_is_generated_like_rethinkdb",
     "COLLATE \"C\" everywhere": "test_collation.py::test_order_by_id_desc_is_bytewise",
     "monthly partitions": "test_partitions_retention.py::test_rows_route_to_the_right_partition",
     "retention sweeper": "test_partitions_retention.py::test_sweep_deletes_only_rows_past_the_cutoff",
@@ -71,7 +71,10 @@ COVERAGE = {
 def test_every_spec_row_names_a_test():
     assert len(COVERAGE) == 50
     for row, target in COVERAGE.items():
-        assert target and "::" in target or not target.endswith(".py"), row
+        # Parenthesised: the old form was (target and "::" in target) or
+        # (not target.endswith(".py")), which is true for any non-empty
+        # string that does not end in .py -- it could never fail.
+        assert target and ("::" in target or not target.endswith(".py")), row
 
 
 def test_every_coverage_target_in_this_file_exists():
@@ -179,7 +182,12 @@ def test_package_exports_the_public_surface():
 
 
 @requires_pg
-def test_a_missing_pk_field_write_is_rejected_like_rethinkdb(pg_schema):
-    schema.ensure_schema(tables=["kalshi_markets"])
+def test_a_missing_pk_field_is_generated_like_rethinkdb(pg_schema):
+    """ReQL generated a uuid4 for a document with no primary key and returned
+    it in generated_keys. An id_type="int" table still refuses: a uuid there
+    is the shadow row coerce_id exists to forbid."""
+    schema.ensure_schema(tables=["kalshi_markets", "Instances"])
+    res = store.insert("kalshi_markets", {"yes_bid": 1})
+    assert res.inserted == 1 and len(res.generated_keys) == 1
     with pytest.raises(StoreError):
-        store.insert("kalshi_markets", {"yes_bid": 1})
+        store.insert("Instances", {"name": "x"})

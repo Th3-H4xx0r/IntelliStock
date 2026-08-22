@@ -8,11 +8,13 @@ from db import pool as dbpool
 from .conftest import requires_pg
 
 
-def test_all_tables_has_the_125_live_tables():
-    assert len(schema.ALL_TABLES) == 125
-    assert len(set(schema.ALL_TABLES)) == 125
+def test_all_tables_has_the_125_live_tables_plus_the_two_split_tables():
+    assert len(schema.ALL_TABLES) == 127
+    assert len(set(schema.ALL_TABLES)) == 127
     for name in ("BacktestResults", "PriceHistory", "GraphNexusTradeContexts",
-                 "kalshi_decisions", "sports_fixtures", "Users"):
+                 "kalshi_decisions", "sports_fixtures", "Users",
+                 # both have specs, so a bare ensure_schema() must create them
+                 "BacktestSteps", "BacktestProgress"):
         assert name in schema.ALL_TABLES
 
 

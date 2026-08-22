@@ -141,9 +141,9 @@ def test_non_id_primary_key_is_copied_from_its_doc_field(tables):
 
 
 @requires_pg
-def test_writing_a_document_without_its_pk_field_raises(tables):
-    with pytest.raises(StoreError):
-        store.insert("kalshi_markets", {"yes_bid": 40})
+def test_writing_a_document_without_its_pk_field_generates_one(tables):
+    res = store.insert("kalshi_markets", {"yes_bid": 40})
+    assert res.inserted == 1 and len(res.generated_keys) == 1
 
 
 @requires_pg
