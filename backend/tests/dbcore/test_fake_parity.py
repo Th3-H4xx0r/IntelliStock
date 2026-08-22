@@ -14,7 +14,7 @@ from db.store import P
 
 from .conftest import PG_TEST_DSN
 
-_TABLES = ["Instances", "DiscordOutbox", "kalshi_markets"]
+_TABLES = ["Instances", "Strategies", "DiscordOutbox", "kalshi_markets"]
 
 
 @pytest.fixture
@@ -53,7 +53,17 @@ def test_int_ids_coerce_both_ways(s):
 
 def test_non_integer_id_on_an_int_table_raises(s):
     with pytest.raises(StoreError):
-        s.get("Instances", "not-a-number")
+        s.get("Strategies", "not-a-number")
+
+
+def test_a_text_table_keeps_a_numeric_looking_string_key(s):
+    """Instances is text-keyed and holds '10' as a string. Fake and real must
+    both return it under the string, never under a parsed int."""
+    s.insert("Instances", {"id": "10", "name": "ten"})
+    s.insert("Instances", {"id": "alpaca-main", "name": "live"})
+    assert s.get("Instances", "10") == {"id": "10", "name": "ten"}
+    assert s.get("Instances", "alpaca-main") == {"id": "alpaca-main",
+                                                 "name": "live"}
 
 
 def test_update_deep_merges(s):

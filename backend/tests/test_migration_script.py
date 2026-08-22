@@ -356,11 +356,17 @@ def test_verify_ordering_parity_names_the_position_that_diverged(
 
 def test_verify_id_types_reports_a_registry_disagreement(store, exported,
                                                          monkeypatch):
-    """Instances is declared id_type="int" but every live key is a string.
-    store.coerce_id rejects those, so the rows would be unreadable after the
-    cutover -- the copy is faithful and this is what says so out loud."""
+    """A table declared id_type="int" whose live keys are strings would be
+    unreadable after the cutover -- store.coerce_id rejects those keys. The
+    copy is faithful either way, so this check is what says it out loud.
+
+    This is the check that CAUGHT the Instances declaration. Instances is now
+    declared text, so it reports nothing; feed its string keys to an int-keyed
+    table and the checker still names them."""
     monkeypatch.setattr(mig, "export_table", _feed(exported["Instances"]))
-    offenders = mig.verify_id_types("Instances")
+    assert mig.verify_id_types("Instances") == []
+    # Strategies really is int-keyed: the same string keys are offenders there.
+    offenders = mig.verify_id_types("Strategies")
     assert "alpaca-main" in offenders
     monkeypatch.setattr(mig, "export_table", _feed(exported["BacktestResults"]))
     assert mig.verify_id_types("BacktestResults") == []
@@ -410,11 +416,12 @@ def test_since_id_is_coerced_to_the_primary_key_type():
         "alpaca-main|a"
     with pytest.raises(ValueError):
         mig.coerce_since_id("Strategies", "not-a-number")
-    # ...and Instances raises here for the same reason store.coerce_id rejects
-    # its live keys: the registry declares id_type="int" and every one of them
-    # is a string. See verify_id_types.
-    with pytest.raises(ValueError):
-        mig.coerce_since_id("Instances", "alpaca-main")
+    # ...and Instances passes its keys through UNTOUCHED, because they are
+    # strings: 'alpaca-main' resumes from 'alpaca-main', and the numeric-
+    # looking '10' resumes from the string '10', never the number 10 (which
+    # RethinkDB sorts before every string, so it would restart the table).
+    assert mig.coerce_since_id("Instances", "alpaca-main") == "alpaca-main"
+    assert mig.coerce_since_id("Instances", "10") == "10"
 
 
 def test_since_id_needs_exactly_one_table(store):

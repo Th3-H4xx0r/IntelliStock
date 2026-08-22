@@ -187,10 +187,10 @@ def test_a_missing_pk_field_is_generated_like_rethinkdb(pg_schema):
     generated_keys. Two kinds of table still refuse: an id_type="int" one,
     where a uuid is the shadow row coerce_id exists to forbid, and a
     CUSTOM-pk one, where ReQL raised rather than mint."""
-    schema.ensure_schema(tables=["DiscordOutbox", "kalshi_markets", "Instances"])
+    schema.ensure_schema(tables=["DiscordOutbox", "kalshi_markets", "Strategies"])
     res = store.insert("DiscordOutbox", {"body": "hi"})
     assert res.inserted == 1 and len(res.generated_keys) == 1
     with pytest.raises(StoreError):
-        store.insert("Instances", {"name": "x"})
+        store.insert("Strategies", {"name": "x"})
     with pytest.raises(StoreError):
         store.insert("kalshi_markets", {"yes_bid": 1})

@@ -10,8 +10,8 @@ from .conftest import requires_pg
 
 @pytest.fixture
 def tables(pg_schema):
-    schema.ensure_schema(tables=["Instances", "DiscordOutbox", "kalshi_markets",
-                                 "NexusRuntimeState"])
+    schema.ensure_schema(tables=["Instances", "Strategies", "DiscordOutbox",
+                                 "kalshi_markets", "NexusRuntimeState"])
     return pg_schema
 
 
@@ -165,7 +165,19 @@ def test_nan_is_rejected_at_the_client(tables):
 @requires_pg
 def test_int_table_rejects_a_non_integer_id(tables):
     with pytest.raises(StoreError):
-        store.insert("Instances", {"id": "abc"})
+        store.insert("Strategies", {"id": "abc"})
+
+
+@requires_pg
+def test_a_text_table_keeps_a_numeric_looking_string_key(tables):
+    """Instances holds the key '10' as a STRING. Nothing may parse it: the
+    row must come back under the string, and the doc must be untouched."""
+    store.insert("Instances", {"id": "10", "name": "ten"})
+    assert store.get("Instances", "10") == {"id": "10", "name": "ten"}
+    assert store.sql('SELECT id FROM "Instances" WHERE id = %s', ("10",))[0] == \
+        {"id": "10"}
+    store.insert("Instances", {"id": "alpaca-main", "name": "live"})
+    assert store.get("Instances", "alpaca-main")["name"] == "live"
 
 
 @requires_pg

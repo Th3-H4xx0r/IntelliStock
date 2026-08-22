@@ -149,10 +149,14 @@ def test_a_missing_primary_key_is_generated_like_rethinkdb(pg_schema):
 @requires_pg
 def test_an_int_keyed_table_still_refuses_a_missing_primary_key(pg_schema):
     """A uuid in an id_type='int' table is exactly the shadow row coerce_id
-    exists to forbid, so generation stops at the registry."""
-    schema.ensure_schema(tables=["Instances"])
+    exists to forbid, so generation stops at the registry.
+
+    Strategies, not Instances: Instances is text-keyed (every live key is a
+    string, and its uuid-shaped keys were minted exactly this way).
+    """
+    schema.ensure_schema(tables=["Strategies"])
     with pytest.raises(StoreError):
-        store.insert("Instances", {"name": "x"})
+        store.insert("Strategies", {"name": "x"})
 
 
 # ---------------------------------------------------------------- I1 ------

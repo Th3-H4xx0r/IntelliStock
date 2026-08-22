@@ -66,8 +66,15 @@ def test_the_eight_high_volume_tables_have_notifications_off():
 
 
 def test_int_id_tables_are_declared():
-    for name in ("BacktestResults", "BacktestInstances", "Instances", "Strategies"):
+    for name in ("BacktestResults", "BacktestInstances", "Strategies"):
         assert schema.spec(name).id_type == "int"
+
+
+def test_instances_is_text_keyed_not_int():
+    """Every live Instances key is a string -- uuid4s, 'main', 'alpaca-main',
+    and '10'. Declaring it int made coerce_id reject all of them. The full
+    live-key evidence for every table is in test_id_type_registry.py."""
+    assert schema.spec("Instances").id_type == "text"
 
 
 def test_backtest_results_compound_indexes_reproduce_the_reql_lambdas():

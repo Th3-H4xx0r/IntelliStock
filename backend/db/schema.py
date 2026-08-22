@@ -12,7 +12,10 @@ BacktestProgress -- which have specs and so must be created by a bare
 TABLES holds an entry only where a table needs something beyond the default:
 a non-id primary key, an index, a partition, a retention policy, an int id,
 time fields, or suppressed notifications. The other ~85 tables are created
-from the default template by name, with no entry to maintain.
+from the default template by name, with no entry to maintain. The one
+exception is Instances, which carries a default-only entry so the registry
+states out loud that its keys are text -- it was declared int, and every one
+of its live keys is a string.
 """
 from __future__ import annotations
 
@@ -186,8 +189,26 @@ _SPECS = [
                 "((CASE WHEN lower(status) LIKE 'paused%' THEN 'paused' "
                 "      ELSE lower(status) END) COLLATE \"C\")",
         }),
+    # BacktestInstances is EMPTY live, so nothing observed contradicts the
+    # declaration -- and broker.py builds its key with int(backtest_row_id),
+    # so an int row_id is what the writer actually produces. Left as int.
     TableSpec("BacktestInstances", id_type="int", indexed_fields=("instance",)),
-    TableSpec("Instances", id_type="int"),
+    # Instances is TEXT, not int -- the entry stays, with nothing but the
+    # default, so the registry records the finding instead of going silent.
+    # Every live primary key is a string (10 rows, sampled 2026-08-22):
+    # '032f0c62-23a6-45a9-ad39-ed60ed13d106', 'main', 'alpaca-main',
+    # 'alpaca-paper-pit', 'v2-conv-trt' -- and '10', a string that merely
+    # LOOKS numeric. between(r.minval, "", index="id") returns nothing, so
+    # there is not one numeric key in the table. Declared int, coerce_id
+    # raised on every non-numeric key: get("Instances", "alpaca-main") -- the
+    # live real-money instance -- was a StoreError, not a row. '10' is why a
+    # "coerce it if it parses as an int" shortcut is wrong too: the stored key
+    # is the string, and only leaving it untouched round-trips it. Every
+    # id-keyed table in ALL_TABLES was probed the same way and this was the
+    # only disagreement -- see tests/dbcore/test_id_type_registry.py.
+    TableSpec("Instances"),
+    # Strategies IS int: 125 rows, ids 20/4/5/3/15/13, and
+    # between("", r.maxval, index="id") returns nothing -- no string keys.
     TableSpec("Strategies", id_type="int"),
 
     TableSpec(

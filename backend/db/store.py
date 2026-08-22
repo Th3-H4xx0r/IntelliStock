@@ -125,6 +125,12 @@ def coerce_id(table: str, value: Any) -> str:
     table, so an int-keyed table coerces both ways: get(t, 460555) and
     get(t, "460555") must return the same row. A non-integer input to an
     id_type="int" table raises rather than creating a shadow row.
+
+    A TEXT table is the opposite: the string is the key, and it is returned
+    UNTOUCHED. That is load-bearing for a numeric-looking string key --
+    Instances holds the key '10' as a string, and any "normalise it if it
+    parses as an int" step would be a no-op at best and, on '007' or '1.0',
+    would silently look up a row that does not exist.
     """
     spec_ = dbschema.spec(table)
     if spec_.id_type == "int":
