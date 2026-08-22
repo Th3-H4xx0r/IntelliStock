@@ -5,6 +5,11 @@ termcolor
 python-socketio
 waitress
 multiprocess
+# The RethinkDB driver is no longer a runtime dependency: nothing under
+# backend/ imports it. It stays installed because the one-way migration tool
+# (scripts/migrate_rethinkdb_to_postgres.py) reads the old database, and four
+# archived one-shots under backend/scripts/ are still imported by tests.
+# Remove this line once the cutover is done and those are retired.
 rethinkdb
 websocket-client
 docker
@@ -77,7 +82,6 @@ boto3>=1.43.34
 # Postgres store (backend/db). The >=3.2.10 floor is the notifies() memory-leak
 # fix; watchers use notifies() exclusively. [pool] pulls psycopg_pool, which
 # pool.py needs; [binary] avoids needing libpq headers in the slim image.
-# rethinkdb above stays pinned until the last ReQL call site is ported.
 psycopg[binary,pool]>=3.2.10,<4
 # Test-only: the jsonb_deep_merge property test (backend/tests/dbcore) generates
 # 10k (base, patch) pairs and asserts the SQL and Python merges agree.
