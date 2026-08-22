@@ -281,20 +281,51 @@ _DEFAULT_TEMPLATE = '''CREATE TABLE IF NOT EXISTS {q} (
   updated_at  timestamptz NOT NULL DEFAULT now()
 )'''
 
+STRIP_FN = '''
+CREATE OR REPLACE FUNCTION jsonb_strip_literal(v jsonb)
+RETURNS jsonb LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $fn$
+  SELECT CASE
+    WHEN jsonb_typeof(v) = 'object' AND v ? '__db_literal__'
+         AND (SELECT count(*) FROM jsonb_object_keys(v)) = 1
+      THEN jsonb_strip_literal(v -> '__db_literal__')
+    WHEN jsonb_typeof(v) = 'object' THEN
+      coalesce((SELECT jsonb_object_agg(k, jsonb_strip_literal(val))
+                FROM jsonb_each(v) AS e(k, val)), '{}'::jsonb)
+    WHEN jsonb_typeof(v) = 'array' THEN
+      coalesce((SELECT jsonb_agg(jsonb_strip_literal(el) ORDER BY ord)
+                FROM jsonb_array_elements(v) WITH ORDINALITY AS a(el, ord)),
+               '[]'::jsonb)
+    ELSE v
+  END
+$fn$;
+'''
+
+# The SQL twin of merge._strip: a value that REPLACES rather than merges is
+# stripped of every r.literal wire sentinel inside it, at any depth. Without
+# it Literal(Literal(x)) -- and any Literal nested in a replacement subtree or
+# array -- left a raw {"__db_literal__": ...} object in the stored document.
 MERGE_FN = '''
 CREATE OR REPLACE FUNCTION jsonb_deep_merge(a jsonb, b jsonb)
 RETURNS jsonb LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $fn$
   SELECT CASE
-    WHEN b ? '__db_literal__' THEN b -> '__db_literal__'
-    WHEN jsonb_typeof(a) <> 'object' OR jsonb_typeof(b) <> 'object' THEN b
+    WHEN jsonb_typeof(b) = 'object' AND b ? '__db_literal__'
+         AND (SELECT count(*) FROM jsonb_object_keys(b)) = 1
+      THEN jsonb_strip_literal(b -> '__db_literal__')
+    WHEN jsonb_typeof(a) <> 'object' OR jsonb_typeof(b) <> 'object'
+      THEN jsonb_strip_literal(b)
     ELSE (
-      SELECT jsonb_object_agg(k, v) FROM (
+      -- COALESCE: jsonb_object_agg over ZERO rows returns SQL NULL, so
+      -- merging two empty objects returned null instead of '{}' -- and
+      -- nested, jsonb_deep_merge('{"a":{}}','{"a":{}}') produced
+      -- '{"a": null}', silently corrupting the document. Python's
+      -- deep_merge returns {} there.
+      SELECT coalesce(jsonb_object_agg(k, v), '{}'::jsonb) FROM (
         SELECT k, CASE
                     WHEN a ? k AND b ? k THEN jsonb_deep_merge(a -> k, b -> k)
                     WHEN b ? k            THEN
                       CASE WHEN jsonb_typeof(b -> k) = 'object'
                            THEN jsonb_deep_merge('{}'::jsonb, b -> k)
-                           ELSE b -> k END
+                           ELSE jsonb_strip_literal(b -> k) END
                     ELSE a -> k
                   END AS v
         FROM (SELECT jsonb_object_keys(a) AS k
@@ -423,8 +454,12 @@ def ensure_schema(*, tables: Optional[Iterable[str]] = None) -> list:
                     # CREATE TRIGGER then failed with "function notify_row()
                     # does not exist". Probe both functions, not just one.
                     cur.execute("SELECT to_regprocedure('jsonb_deep_merge(jsonb,jsonb)') "
-                                "AS m, to_regprocedure('notify_row()') AS n")
+                                "AS m, to_regprocedure('jsonb_strip_literal(jsonb)') "
+                                "AS s, to_regprocedure('notify_row()') AS n")
                     fns = cur.fetchone()
+                    if fns["s"] is None:
+                        cur.execute(STRIP_FN)
+                        applied.append("jsonb_strip_literal")
                     if fns["m"] is None:
                         cur.execute(MERGE_FN)
                         applied.append("jsonb_deep_merge")

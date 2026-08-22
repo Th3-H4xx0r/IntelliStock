@@ -18,9 +18,32 @@ import json as _json
 from typing import Any, Union
 
 
+def _has_nul(value: Any) -> bool:
+    """Exact NUL scan. Only ever called when the cheap check already hit."""
+    if isinstance(value, str):
+        return "\x00" in value
+    if isinstance(value, dict):
+        return any(_has_nul(k) or _has_nul(v) for k, v in value.items())
+    if isinstance(value, (list, tuple)):
+        return any(_has_nul(v) for v in value)
+    return False
+
+
 def dumps(value: Any) -> str:
-    """Compact JSON. Raises ValueError on NaN/Infinity."""
-    return _json.dumps(value, allow_nan=False, separators=(",", ":"))
+    """Compact JSON. Raises ValueError on NaN/Infinity and on NUL.
+
+    Postgres ``jsonb`` cannot represent U+0000 anywhere in a string -- the
+    server answers with "unsupported Unicode escape sequence". Rejecting it
+    here, like NaN, keeps the failure at the client with a message naming the
+    cause instead of a driver error three layers away.
+    """
+    out = _json.dumps(value, allow_nan=False, separators=(",", ":"))
+    # The cheap check can false-positive on a literal backslash-u-0000 in the
+    # data, so confirm with an exact scan before raising.
+    if "\\u0000" in out and _has_nul(value):
+        raise ValueError(
+            "NUL (U+0000) cannot be stored in a Postgres jsonb document")
+    return out
 
 
 def loads(value: Union[str, bytes]) -> Any:
