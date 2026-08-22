@@ -261,3 +261,104 @@ def test_the_heartbeat_slice_survives_a_buffer_that_overflowed(split_schema):
     assert len(logs) == len(set(logs))          # nothing duplicated
     assert [l.split("] ")[-1] for l in logs] == (
         ["a0", "a1", "a2"] + ["b%d" % i for i in range(15, 20)] + ["c0"])
+
+
+# ---- the progress writer (broker.py:17823) -------------------------------
+
+def test_progress_tick_writes_scalars_to_the_hot_row(split_schema):
+    brs.write_stub(dict(STUB))
+    seqs = {}
+    brs.write_progress_tick(
+        700001,
+        hot={"status": "running", "progress": 42.5,
+             "time_elapsed_seconds": 812, "_last_active": "t"},
+        metadata={"pnl": 123.45, "pnl_percent": 1.2345,
+                  "timestamp": "2026-08-22T03:37:00", "tickers": ["AACI"]},
+        appended={}, seqs=seqs)
+    assert brs.read_progress(700001)["progress"] == 42.5
+    row = store.get("BacktestResults", 700001)
+    assert row["pnl"] == 123.45 and row["tickers"] == ["AACI"]
+
+
+def test_progress_tick_appends_only_the_new_entries(split_schema):
+    brs.write_stub(dict(STUB))
+    seqs = {}
+    decisions = [{"n": i} for i in range(10)]
+    brs.write_progress_tick(700001, hot={"status": "running", "progress": 10},
+                            metadata={}, appended={"decision": decisions[:4]},
+                            seqs=seqs)
+    assert seqs["decision"] == 4
+    brs.write_progress_tick(700001, hot={"status": "running", "progress": 20},
+                            metadata={}, appended={"decision": decisions},
+                            seqs=seqs)
+    assert seqs["decision"] == 10
+    n = store.sql('SELECT count(*) AS n FROM "BacktestSteps" '
+                  "WHERE backtest_id='700001' AND kind='decision'")[0]["n"]
+    assert n == 10          # 10 rows written, not 14
+    assert brs.assemble(700001)["backtest_decisions"] == decisions
+
+
+def test_progress_tick_metadata_is_a_deep_merge_not_a_replace(split_schema):
+    stub = dict(STUB)
+    stub["strategy_schema"] = {"name": "gna", "config": {"a": 1, "b": 2}}
+    brs.write_stub(stub)
+    brs.write_progress_tick(700001, hot={}, metadata={"pnl": 1.0},
+                            appended={}, seqs={})
+    row = store.get("BacktestResults", 700001)
+    assert row["strategy_schema"]["config"] == {"a": 1, "b": 2}
+    assert row["pnl"] == 1.0
+
+
+def test_progress_tick_refuses_to_write_the_log_kind(split_schema):
+    """Only the heartbeat writes logs: the log buffer is trimmed FIFO, so
+    exactly one writer may own that watermark."""
+    brs.write_stub(dict(STUB))
+    with pytest.raises(Exception) as excinfo:
+        brs.write_progress_tick(700001, hot={}, metadata={},
+                                appended={"log": ["a"]}, seqs={})
+    assert "log" in str(excinfo.value)
+    assert brs.assemble(700001)["logs"] == []
+
+
+def test_the_assembled_document_matches_a_legacy_progress_write(split_schema):
+    """What the legacy writer would have stored, from the same sources."""
+    from broker_snapshot_helpers import downsample_history
+    from db.json import canonical
+    brs.write_stub(dict(STUB))
+    trades = [{"n": i} for i in range(1500)]
+    history = [{"t": i, "v": float(i)} for i in range(5000)]
+    decisions = [{"d": i} for i in range(300)]
+    refusals = [{"r": i} for i in range(5)]
+    seqs = {}
+    brs.write_progress_tick(
+        700001,
+        hot={"status": "running", "progress": 50.0,
+             "time_elapsed_seconds": 100, "_last_active": "t"},
+        metadata={"backtest_id": 700001, "pnl": 1.0, "pnl_percent": 0.01,
+                  "timestamp": "2026-08-22T03:37:00", "tickers": ["AACI"]},
+        appended={"trade": trades, "pv": history,
+                  "decision": decisions, "refusal": refusals},
+        seqs=seqs)
+    got = brs.assemble(700001)
+    legacy = dict(STUB)
+    legacy.update({
+        "backtest_id": 700001, "progress": 50.0, "pnl": 1.0,
+        "pnl_percent": 0.01, "status": "running",
+        "timestamp": "2026-08-22T03:37:00", "_last_active": "t",
+        "tickers": ["AACI"], "time_elapsed_seconds": 100,
+        "backtest_trades": trades[-1000:],
+        "portfolio_value_history": list(downsample_history(history, 3000)),
+        # logs stay [] here: the heartbeat owns the log stream, so a progress
+        # tick never touches them.
+        "backtest_decisions": decisions, "backtest_refusals": refusals,
+    })
+    assert canonical(got) == canonical(dict(sorted(legacy.items())))
+
+
+def test_progress_tick_with_a_shrinking_source_does_not_rewind(split_schema):
+    brs.write_stub(dict(STUB))
+    seqs = {"decision": 4}
+    brs.write_progress_tick(700001, hot={}, metadata={},
+                            appended={"decision": [{"n": 0}]}, seqs=seqs)
+    assert seqs["decision"] == 4
+    assert brs.watermarks(700001) == {}

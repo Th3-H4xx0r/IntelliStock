@@ -17840,43 +17840,51 @@ while not shutdown_requested:
                         backtest_id_raw = backtest_row_id
                         backtest_id_int = int(backtest_id_raw) if backtest_id_raw and str(backtest_id_raw).isdigit() else None
                         current_tickers = sorted(set(symbols or []) | set((portfolio_emulator.get_positions() or {}).keys()))
-                        update_payload = {
-                            'backtest_id': backtest_id_int,
-                            'progress': round(progress_pct, 2),
-                            'pnl': pnl,
-                            'pnl_percent': round(pnl_percent, 4) if pnl_percent is not None else None,
+                        import backtest_result_store as _brs
+                        _hot = {
                             'status': 'running',
-                            'timestamp': __import__('datetime').datetime.now().isoformat(),
+                            'progress': round(progress_pct, 2),
                             '_last_active': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
-                            'tickers': current_tickers,
                         }
-                        try:
-                            update_payload['backtest_trades'] = _convert_datetimes_to_iso(
-                                list(portfolio_emulator.get_trade_history() or [])[-1000:]
-                            )
-                        except Exception:
-                            pass
-                        try:
-                            # Downsample (keep true start + shape), not tail-slice,
-                            # so a long/high-cadence RUNNING backtest shows the real
-                            # start value and curve instead of a mid-run window.
-                            from broker_snapshot_helpers import downsample_history as _downsample_history
-                            update_payload['portfolio_value_history'] = _convert_datetimes_to_iso(
-                                _downsample_history(list(portfolio_emulator.get_portfolio_history() or []), 3000)
-                            )
-                        except Exception:
-                            pass
                         if backtest_start_time is not None:
                             try:
-                                update_payload['time_elapsed_seconds'] = max(0, int(now_loop - backtest_start_time))
+                                _hot['time_elapsed_seconds'] = max(0, int(now_loop - backtest_start_time))
                             except Exception:
                                 pass
-                        if _backtest_log_buffer is not None:
-                            update_payload['logs'] = list(_backtest_log_buffer)[-500:]
+                        _meta = {
+                            'backtest_id': backtest_id_int,
+                            'pnl': pnl,
+                            'pnl_percent': round(pnl_percent, 4) if pnl_percent is not None else None,
+                            'timestamp': __import__('datetime').datetime.now().isoformat(),
+                            'tickers': current_tickers,
+                        }
+                        # FULL uncapped sources: assemble() applies the legacy
+                        # caps (trades tail-1000, pv downsample-3000, logs
+                        # tail-500) on read, so the document is unchanged while
+                        # the write stops rewriting megabytes every 2%.
+                        _appended = {}
+                        try:
+                            _appended['trade'] = _convert_datetimes_to_iso(
+                                list(portfolio_emulator.get_trade_history() or []))
+                        except Exception:
+                            pass
+                        try:
+                            _appended['pv'] = _convert_datetimes_to_iso(
+                                list(portfolio_emulator.get_portfolio_history() or []))
+                        except Exception:
+                            pass
+                        # NOTE: logs are deliberately NOT appended here. The
+                        # heartbeat owns the log stream, because the log buffer
+                        # is trimmed FIFO to 500 lines and only the heartbeat's
+                        # emitted-count watermark can slice it correctly. Two
+                        # owners keying off the same bounded list would either
+                        # duplicate or drop lines.
                         if _backtest_decisions is not None:
-                            update_payload['backtest_decisions'] = _convert_datetimes_to_iso(list(_backtest_decisions))
-                            update_payload['backtest_refusals'] = _convert_datetimes_to_iso(list(_backtest_refusals))
-                        r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).update(update_payload).run(conn)
+                            _appended['decision'] = _convert_datetimes_to_iso(list(_backtest_decisions))
+                            _appended['refusal'] = _convert_datetimes_to_iso(list(_backtest_refusals))
+                        _brs.write_progress_tick(
+                            _backtest_result_id, hot=_hot, metadata=_meta,
+                            appended=_appended, seqs=_steps_written)
                         progress_update_ok = True
                         _backtest_progress_fail_count = 0
                         try:
@@ -17892,7 +17900,12 @@ while not shutdown_requested:
                                 tickers_str = ", ".join((current_tickers or [])[:8])
                                 if current_tickers and len(current_tickers) > 8:
                                     tickers_str += " (+%d)" % (len(current_tickers) - 8)
-                                result_doc = r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).run(conn)
+                                # Metadata-only read: difficulty lives in the
+                                # BacktestResults document, so do NOT assemble()
+                                # here -- that would fetch every step row for
+                                # one scalar.
+                                from db import store as _store_diff
+                                result_doc = _store_diff.get('BacktestResults', _backtest_result_id)
                                 diff_from_db = result_doc.get('difficulty') if result_doc else None
                                 if diff_from_db is not None:
                                     diff_str = "%.1f" % float(diff_from_db)

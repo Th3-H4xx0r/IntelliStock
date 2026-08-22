@@ -246,6 +246,43 @@ def heartbeat(backtest_id, *, last_active: str, elapsed_seconds=None,
     return log_seq
 
 
+def write_progress_tick(backtest_id, *, hot: dict, metadata: dict,
+                        appended, seqs) -> dict:
+    """The +2%-of-progress write.
+
+    The legacy version rewrote backtest_trades (last 1000), the downsampled
+    portfolio history, the last 500 logs, and backtest_decisions +
+    backtest_refusals IN THEIR ENTIRETY every tick -- 2.7 MB on the live
+    sample, growing with every tick. This writes four scalars to the hot row,
+    a small deep-merge patch to doc, and only the entries past each kind's
+    watermark.
+
+    ``appended`` maps a kind to its FULL uncapped source list; the caps are
+    applied by assemble() on read. It may NOT carry ``log``: the log buffer is
+    trimmed FIFO to 500 lines, so slicing it correctly needs the logger's
+    monotonic emitted counter and exactly one writer -- the heartbeat -- may
+    own that watermark.
+    """
+    if "log" in (appended or {}):
+        raise StoreError(
+            "write_progress_tick may not append the 'log' kind: the heartbeat "
+            "is its only writer (the buffer is trimmed FIFO, so two owners "
+            "would duplicate or drop lines)")
+    if hot:
+        write_progress(backtest_id, hot)
+    if metadata:
+        store.update(RESULTS_TABLE, backtest_id, metadata)
+    for kind, values in (appended or {}).items():
+        written = int(seqs.get(kind, 0))
+        rows = list(values or [])
+        if len(rows) > written:
+            seqs[kind] = append_steps(backtest_id, kind, rows[written:],
+                                      start_seq=written)
+        else:
+            seqs.setdefault(kind, written)
+    return dict(seqs)
+
+
 def active_run_age(backtest_id) -> Optional[float]:
     """Seconds since the last heartbeat of a run the hot row still calls
     ``running``, or None when no live-run evidence exists.
