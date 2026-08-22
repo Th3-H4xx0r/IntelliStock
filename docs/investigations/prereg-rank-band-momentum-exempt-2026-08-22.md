@@ -40,7 +40,25 @@ exemption structurally cannot reach them. The cure the band ships cannot fix the
 band documents. NEXT: code change — stamp the momentum score on every scored name that has
 momentum data, or exempt on the 20d/60d momentum qualification directly; then re-pair.
 
-Incidental deliveries (both significant):
+## Result take 2, exemption wired (bt 743847 control / bt 974390 treatment)
+**MECHANISM FIRED (40 exemption events: AAOI 0.85-1.16, AXTI 0.73-1.10, FSLY 1.54, SNSE, DOCN,
+APA) — AND THE OUTCOME WAS STILL BYTE-IDENTICAL (100% overlap, +0.00pp, both +1.3487%).**
+The movers cleared the band and died at the NEXT serial gate: AAOI repeatedly logged
+`full_priority_blocked` (backfill queue full) and `deferred_unfunded_buy` — the metals book,
+bought at full size on tick 1 with zero sells all window, left no slot and no cash. The
+conversion funnel has serial gates; clearing the band revealed the funding/slot gate.
+
+Adoption: the exemption is proven SAFE (byte-identical when downstream is blocked) and
+NECESSARY-BUT-INSUFFICIENT. Keep testing it as part of the unblocking chain, not alone.
+CRITICAL unlock: `deferred_unfunded_buy` fires in warm runs — **displacement's trigger is
+reachable here**, so the displacement probe that was vacuous in cold runs (bt 596938) is now
+testable on this exact snapshot. Next pair: control = exemption alone (≡ baseline, proven),
+treatment = exemption + satellite_displacement_enabled.
+
+Control also byte-reproduced +1.3487% across the f08a7a1 deploy — gated-change neutrality and
+cross-deploy determinism both hold.
+
+Incidental deliveries from take 1 (both significant):
 1. **Cross-run byte-determinism now holds** post-f68af81: this control reproduced bt 138148 to
    the fourth decimal (+1.3487%) hours apart — the corpus-drift problem is closed for
    same-deploy repeats.
