@@ -171,6 +171,11 @@ def main(argv=None):
     p.add_argument("--granularity", default="3600")
     p.add_argument("--control", action="append", default=[], metavar="KEY=VALUE")
     p.add_argument("--treatment", action="append", default=[], metavar="KEY=VALUE")
+    p.add_argument("--snapshot", metavar="PATH", help=(
+        "Warm protocol without re-running the warmup: start BOTH arms from "
+        "this existing snapshot file (produced by an earlier --warmup-start "
+        "run's export). The snapshot is a COMMON starting state, so pair "
+        "comparability holds regardless of which code version built it."))
     p.add_argument("--warmup-start", metavar="DATE", help=(
         "Warm-but-clean protocol: run ONE warmup backtest from this date to "
         "--start under the doc's base config, snapshot the accumulated state, "
@@ -183,6 +188,13 @@ def main(argv=None):
         p.error("--doc is required when --control/--treatment settings are given")
 
     snapshot_path = None
+    if a.snapshot:
+        if a.warmup_start:
+            p.error("--snapshot and --warmup-start are mutually exclusive")
+        if not Path(a.snapshot).is_file():
+            p.error(f"snapshot file not found: {a.snapshot}")
+        snapshot_path = a.snapshot
+        print(f"=== WARM (reusing snapshot {a.snapshot}) ===")
     if a.warmup_start:
         print(f"=== WARMUP {a.warmup_start} -> {a.start} (base config) ===")
         print(f"  cleared {_clear(a.instance)} row(s)")
