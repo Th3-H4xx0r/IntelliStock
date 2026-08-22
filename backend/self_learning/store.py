@@ -1,4 +1,4 @@
-"""The only module in `self_learning` that touches RethinkDB.
+"""The only module in `self_learning` that touches the database.
 
 Everything else is pure so it unit-tests without a database. Writes are
 `conflict="update"` on a content id, which makes both the changefeed path and
@@ -7,7 +7,7 @@ duplicating them.
 
 Two constraints shape everything here, both learned from this deployment:
 
-* **RethinkDB is the bottleneck.** `PriceHistory` at ~2.3M rows drove 17
+* **The database is the bottleneck.** `PriceHistory` at ~2.3M rows drove 17
   restarts in 12 days on a memory-starved VM, and a single `BacktestResults` row
   carries 5-13MB (`interactive_utils.py:5220`). So: no full-table reads, no
   full-document pulls, ordering and limits pushed into the database, and a
@@ -20,14 +20,9 @@ Two constraints shape everything here, both learned from this deployment:
 """
 from __future__ import annotations
 
-import os
+import uuid
 
-from rethinkdb import RethinkDB
-
-r = RethinkDB()
-DB_NAME = "IntelliStock"
-RETHINKDB_HOST = os.environ.get("RETHINKDB_HOST", "localhost")
-RETHINKDB_PORT = int(os.environ.get("RETHINKDB_PORT", "28015"))
+from db import P, schema, store
 
 OBSERVATIONS = "LearningObservations"
 ROLLUPS = "LearningObservationRollups"
@@ -123,44 +118,42 @@ _MUTABLE_KEYS = frozenset({
 })
 
 
-def get_conn():
-    return r.connect(host=RETHINKDB_HOST, port=RETHINKDB_PORT)
+def _generated_id(doc) -> dict:
+    """RethinkDB minted a UUID primary key for a document that carried none;
+    the store requires the key to be in the document, so mint it here."""
+    if doc.get("id") is None:
+        return {**doc, "id": str(uuid.uuid4())}
+    return doc
 
 
-def ensure_tables(conn) -> None:
-    dbs = list(r.db_list().run(conn))
-    if DB_NAME not in dbs:
-        r.db_create(DB_NAME).run(conn)
-    existing = list(r.db(DB_NAME).table_list().run(conn))
-    for table in LEARNING_TABLES:
-        if table not in existing:
-            r.db(DB_NAME).table_create(table).run(conn)
-    idxs = list(r.db(DB_NAME).table(OBSERVATIONS).index_list().run(conn))
-    # `run_id` serves the per-run read; `as_of` serves the retention range
-    # delete. A `strategy_id` index was created by an earlier version and never
-    # queried — pure write amplification on the largest table.
-    for index in ("run_id", "as_of"):
-        if index not in idxs:
-            r.db(DB_NAME).table(OBSERVATIONS).index_create(index).run(conn)
-            r.db(DB_NAME).table(OBSERVATIONS).index_wait(index).run(conn)
-    out_idx = list(r.db(DB_NAME).table(OUTCOMES).index_list().run(conn))
-    # `as_of` is required for the retention RANGE delete. Without it the sweep
-    # degrades to a full-table scan-and-delete on the largest table here.
-    for index in ("run_id", "observation_id", "as_of"):
-        if index not in out_idx:
-            r.db(DB_NAME).table(OUTCOMES).index_create(index).run(conn)
-            r.db(DB_NAME).table(OUTCOMES).index_wait(index).run(conn)
-    exp_idx = list(r.db(DB_NAME).table(EXPERIMENTS).index_list().run(conn))
-    for index in ("status", "registered_at"):
-        if index not in exp_idx:
-            r.db(DB_NAME).table(EXPERIMENTS).index_create(index).run(conn)
-            r.db(DB_NAME).table(EXPERIMENTS).index_wait(index).run(conn)
-    for table, index in ((FINDINGS, "detected_at"), (FUNNELS, "observed_at")):
-        existing_idx = list(r.db(DB_NAME).table(table).index_list().run(conn))
-        if index not in existing_idx:
-            r.db(DB_NAME).table(table).index_create(index).run(conn)
-            r.db(DB_NAME).table(table).index_wait(index).run(conn)
+def ensure_tables(conn=None) -> None:
+    """Idempotent DDL for the learning tables.
+
+    The index set lives in `db.schema.TABLES`, which already declares every
+    index this module needs: `run_id`/`as_of` on OBSERVATIONS (the per-run read
+    and the retention RANGE delete), `run_id`/`observation_id`/`as_of` on
+    OUTCOMES, `status`/`registered_at` on EXPERIMENTS, `detected_at` on
+    FINDINGS and `observed_at` on FUNNELS.
+    """
+    schema.ensure_schema(tables=LEARNING_TABLES)
     seed_config(conn)
+
+
+def _defaulted(value, fallback):
+    """ReQL `.default(x)`: the fallback applies to a MISSING or null field,
+    never to a present-but-falsy one."""
+    return fallback if value is None else value
+
+
+def _set_union(old, new) -> list:
+    """ReQL `set_union`: the elements of `new` that are not already in `old`,
+    appended in order. Never a Python set — that would lose the order the UI
+    and the trial count both read."""
+    out = list(old or [])
+    for item in (new or []):
+        if item not in out:
+            out.append(item)
+    return out
 
 
 def merge_config(doc) -> dict:
@@ -177,8 +170,8 @@ def seed_config(conn) -> None:
     shipped thirteen of those.
     """
     try:
-        if r.db(DB_NAME).table(CONFIG).get(CONFIG_DOC_ID).run(conn) is None:
-            r.db(DB_NAME).table(CONFIG).insert(dict(DEFAULT_CONFIG)).run(conn)
+        if store.get(CONFIG, CONFIG_DOC_ID) is None:
+            store.insert(CONFIG, dict(DEFAULT_CONFIG))
     except Exception:
         pass
 
@@ -190,7 +183,7 @@ def get_config(conn) -> dict:
     database outage, i.e. the kill switch failed OPEN exactly when back-off was
     wanted.
     """
-    doc = r.db(DB_NAME).table(CONFIG).get(CONFIG_DOC_ID).run(conn)
+    doc = store.get(CONFIG, CONFIG_DOC_ID)
     return merge_config(doc)
 
 
@@ -289,16 +282,26 @@ def put_config(conn, patch: dict) -> dict:
         clean[key] = _validated(key, value)
     if clean:
         clean["id"] = CONFIG_DOC_ID
-        r.db(DB_NAME).table(CONFIG).insert(clean, conflict="update").run(conn)
+        store.insert(CONFIG, clean, conflict="update")
     return get_config(conn)
 
 
 def mark_processed(conn, run_id) -> None:
-    """Record a run as handled, so a restart does not re-pull every document."""
-    r.db(DB_NAME).table(CONFIG).get(CONFIG_DOC_ID).update(
-        lambda doc: {"processed_run_ids": doc["processed_run_ids"]
-                     .default([]).set_insert(str(run_id))}
-    ).run(conn)
+    """Record a run as handled, so a restart does not re-pull every document.
+
+    `set_insert` becomes a read-modify-write: the store deep-merges, and a deep
+    merge REPLACES an array rather than appending to it, so the union is
+    computed here. A missing config row stays a no-op, exactly as the ReQL
+    `.get(...).update(...)` was.
+    """
+    doc = store.get(CONFIG, CONFIG_DOC_ID)
+    if doc is None:
+        return
+    seen = list(doc.get("processed_run_ids") or [])
+    if str(run_id) in seen:
+        return
+    seen.append(str(run_id))
+    store.update(CONFIG, CONFIG_DOC_ID, {"processed_run_ids": seen})
 
 
 def persistable(observations) -> list:
@@ -319,7 +322,7 @@ def _insert_chunked(conn, table, payloads) -> int:
     written = 0
     for start in range(0, len(payloads), WRITE_CHUNK):
         chunk = payloads[start:start + WRITE_CHUNK]
-        r.db(DB_NAME).table(table).insert(chunk, conflict="update").run(conn)
+        store.insert(table, chunk, conflict="update")
         written += len(chunk)
     return written
 
@@ -340,12 +343,23 @@ def put_findings(conn, findings) -> int:
         # doc that always carries status="open" would silently reopen every
         # resolved finding on the next detection.
         payload.pop("status", None)
-    r.db(DB_NAME).table(FINDINGS).insert(
-        payloads, conflict=lambda _id, old, new: new.merge(
-            {"status": old["status"].default("open"),
-             "first_detected_at": old["first_detected_at"].default(
-                 new["detected_at"])})
-    ).run(conn)
+    for payload in payloads:
+        old = store.get(FINDINGS, payload.get("id"))
+        if old is None:
+            # First sighting: the document is written as-is. The conflict
+            # resolver never ran on an insert, so no status is stamped here.
+            store.insert(FINDINGS, payload)
+            continue
+        # `new.merge({...})` REPLACES the row with the new document plus the two
+        # preserved fields, so old-only keys do not survive -- store.replace,
+        # not a merge.
+        merged = dict(payload)
+        merged["status"] = (old["status"] if old.get("status") is not None
+                            else "open")
+        first = old.get("first_detected_at")
+        merged["first_detected_at"] = (first if first is not None
+                                       else payload.get("detected_at"))
+        store.replace(FINDINGS, payload["id"], merged)
     return len(payloads)
 
 
@@ -353,31 +367,31 @@ def put_funnel(conn, run_id, summary, *, origin="backtest", target="",
                observed_at="") -> None:
     """`observed_at` must be the RUN's time, not the processing time — stamping
     "now" makes every restart rewrite the ordering the UI reads."""
-    r.db(DB_NAME).table(FUNNELS).insert({
+    store.insert(FUNNELS, {
         "id": f"{origin}|{run_id}", "run_id": str(run_id), "origin": origin,
         "target": target, "observed_at": observed_at, **(summary or {}),
-    }, conflict="update").run(conn)
+    }, conflict="update")
 
 
 def list_findings(conn, limit: int = 100) -> list:
     """Ordered and limited in the DATABASE. Loading the table into Python and
     slicing afterwards is an OOM waiting for the table to grow."""
     limit = max(1, min(int(limit or 100), 1000))
-    return list(r.db(DB_NAME).table(FINDINGS)
-                .order_by(index=r.desc("detected_at")).limit(limit).run(conn))
+    return store.run(store.limit(
+        store.order_by(FINDINGS, index="detected_at", desc=True), limit))
 
 
 def list_funnels(conn, limit: int = 100) -> list:
     limit = max(1, min(int(limit or 100), 1000))
-    return list(r.db(DB_NAME).table(FUNNELS)
-                .order_by(index=r.desc("observed_at")).limit(limit).run(conn))
+    return store.run(store.limit(
+        store.order_by(FUNNELS, index="observed_at", desc=True), limit))
 
 
 def list_observations(conn, run_id, limit: int = 500) -> list:
     limit = max(1, min(int(limit or 500), 2000))
-    return list(r.db(DB_NAME).table(OBSERVATIONS)
-                .get_all(str(run_id), index="run_id")
-                .order_by("as_of").limit(limit).run(conn))
+    sel = store.filter(OBSERVATIONS, P.field("run_id").eq(str(run_id)))
+    return store.run(store.limit(
+        store.order_by(sel, fields=(store.asc("as_of"),)), limit))
 
 
 def counts(conn) -> dict:
@@ -387,24 +401,26 @@ def counts(conn) -> dict:
     the run count and the decision count silently pinned once the table passed
     the limit.
     """
-    findings_open = r.db(DB_NAME).table(FINDINGS).filter(
-        lambda doc: doc["status"].default("open").eq("open")).count().run(conn)
-    by_severity = r.db(DB_NAME).table(FINDINGS).filter(
-        lambda doc: doc["status"].default("open").eq("open")
-    ).group("severity").count().run(conn)
-    runs = r.db(DB_NAME).table(FUNNELS).count().run(conn)
-    sums = r.db(DB_NAME).table(FUNNELS).map(lambda doc: {
-        "decided": doc["decided"].default(0),
-        "refused": doc["refused"].default(0),
-    }).reduce(lambda a, b: {"decided": a["decided"] + b["decided"],
-                            "refused": a["refused"] + b["refused"]}
-              ).default({"decided": 0, "refused": 0}).run(conn)
+    open_findings = store.filter(
+        FINDINGS, P.field("status").default("open").eq("open"))
+    findings_open = store.count(open_findings)
+    by_severity = {}
+    for row in store.pluck(store.run(open_findings), "severity"):
+        key = str(row.get("severity"))
+        by_severity[key] = by_severity.get(key, 0) + 1
+    runs = store.count(FUNNELS)
+    # Streamed, never materialised: the counter must not silently become "the
+    # newest 500 runs" once the table grows.
+    decided = refused = 0
+    for doc in store.iter(store.Selection(FUNNELS)):
+        decided += int(doc.get("decided") or 0)
+        refused += int(doc.get("refused") or 0)
     return {
         "open_findings": int(findings_open or 0),
-        "by_severity": {str(k): int(v) for k, v in (by_severity or {}).items()},
+        "by_severity": {str(k): int(v) for k, v in by_severity.items()},
         "runs_observed": int(runs or 0),
-        "decisions_observed": int((sums or {}).get("decided") or 0),
-        "refusals_observed": int((sums or {}).get("refused") or 0),
+        "decisions_observed": int(decided),
+        "refusals_observed": int(refused),
     }
 
 
@@ -417,10 +433,10 @@ def sweep_expired(conn, *, cutoff: str) -> int:
     """
     if not cutoff:
         return 0
-    result = (r.db(DB_NAME).table(OBSERVATIONS)
-              .between(r.minval, cutoff, index="as_of")
-              .delete().run(conn))
-    return int((result or {}).get("deleted") or 0)
+    result = store.delete(
+        OBSERVATIONS,
+        store.between(OBSERVATIONS, store.MINVAL, cutoff, index="as_of"))
+    return int(result["deleted"] or 0)
 
 
 # ── Phase 2: outcomes, floors, experiments, lease ─────────────────────────────
@@ -435,18 +451,16 @@ def put_outcomes(conn, outcomes) -> int:
 
 
 def put_noise_floor(conn, floor) -> None:
-    r.db(DB_NAME).table(NOISE_FLOORS).insert(
-        floor.to_doc(), conflict="update").run(conn)
+    store.insert(NOISE_FLOORS, floor.to_doc(), conflict="update")
 
 
 def get_noise_floor(conn, *, target, window_class):
-    return r.db(DB_NAME).table(NOISE_FLOORS).get(
-        f"{target}|{window_class}").run(conn)
+    return store.get(NOISE_FLOORS, f"{target}|{window_class}")
 
 
 def list_noise_floors(conn, limit: int = 200) -> list:
     limit = max(1, min(int(limit or 200), 1000))
-    rows = list(r.db(DB_NAME).table(NOISE_FLOORS).limit(limit).run(conn))
+    rows = store.run(store.limit(NOISE_FLOORS, limit))
     rows.sort(key=lambda d: (str(d.get("target") or ""),
                              str(d.get("window_class") or "")))
     return rows
@@ -464,49 +478,52 @@ def put_experiment(conn, spec) -> None:
     doc.setdefault("run_ids", [])
     doc.setdefault("refusal_reason", "")
     doc.setdefault("registered_at", "")
-    r.db(DB_NAME).table(EXPERIMENTS).insert(
-        doc,
-        # Status is MONOTONIC toward terminal and run_ids only ever grow.
-        # Re-registering an identical spec (same content hash) would otherwise
-        # reset a `failed` experiment to `registered` and wipe its run ids —
-        # which is exactly the "ledger becomes a highlight reel" failure this
-        # table exists to prevent, and it would silently undercount the trials
-        # any multiple-comparisons correction depends on.
-        conflict=lambda _id, old, new: old.merge({
-            "status": r.branch(
-                old["status"].default("registered").eq("registered"),
-                new["status"].default("registered"),
-                old["status"].default("registered")),
-            "run_ids": old["run_ids"].default([]).set_union(
-                new["run_ids"].default([])),
-            "refusal_reason": r.branch(
-                new["refusal_reason"].default("").eq(""),
-                old["refusal_reason"].default(""),
-                new["refusal_reason"].default("")),
-        }),
-    ).run(conn)
+    doc = _generated_id(doc)
+    old = store.get(EXPERIMENTS, doc["id"])
+    if old is None:
+        store.insert(EXPERIMENTS, doc)
+        return
+    # Status is MONOTONIC toward terminal and run_ids only ever grow.
+    # Re-registering an identical spec (same content hash) would otherwise
+    # reset a `failed` experiment to `registered` and wipe its run ids —
+    # which is exactly the "ledger becomes a highlight reel" failure this
+    # table exists to prevent, and it would silently undercount the trials
+    # any multiple-comparisons correction depends on.
+    #
+    # The resolver merged onto OLD, so an existing row keeps every field it
+    # already had and only these three can move.
+    old_status = _defaulted(old.get("status"), "registered")
+    new_status = _defaulted(doc.get("status"), "registered")
+    new_reason = _defaulted(doc.get("refusal_reason"), "")
+    store.replace(EXPERIMENTS, doc["id"], {
+        **old,
+        "status": new_status if old_status == "registered" else old_status,
+        "run_ids": _set_union(old.get("run_ids"), doc.get("run_ids")),
+        "refusal_reason": (_defaulted(old.get("refusal_reason"), "")
+                           if new_reason == "" else new_reason),
+    })
 
 
 def list_experiments(conn, limit: int = 100) -> list:
     limit = max(1, min(int(limit or 100), 1000))
-    return list(r.db(DB_NAME).table(EXPERIMENTS)
-                .order_by(index=r.desc("registered_at")).limit(limit).run(conn))
+    return store.run(store.limit(
+        store.order_by(EXPERIMENTS, index="registered_at", desc=True), limit))
 
 
 def get_lease(conn):
     try:
-        return r.db(DB_NAME).table(LEASE).get(LEASE_DOC_ID).run(conn)
+        return store.get(LEASE, LEASE_DOC_ID)
     except Exception:
         return None
 
 
 def put_lease(conn, lease_doc) -> None:
-    r.db(DB_NAME).table(LEASE).insert(
-        {**(lease_doc or {}), "id": LEASE_DOC_ID}, conflict="update").run(conn)
+    store.insert(LEASE, {**(lease_doc or {}), "id": LEASE_DOC_ID},
+                 conflict="update")
 
 
 def clear_lease(conn) -> None:
-    r.db(DB_NAME).table(LEASE).get(LEASE_DOC_ID).delete().run(conn)
+    store.delete(LEASE, LEASE_DOC_ID)
 
 
 def sweep_expired_outcomes(conn, *, cutoff: str) -> int:
@@ -520,10 +537,10 @@ def sweep_expired_outcomes(conn, *, cutoff: str) -> int:
     """
     if not cutoff:
         return 0
-    result = (r.db(DB_NAME).table(OUTCOMES)
-              .between("", cutoff, index="as_of", left_bound="open")
-              .delete().run(conn))
-    return int((result or {}).get("deleted") or 0)
+    result = store.delete(
+        OUTCOMES,
+        store.between(OUTCOMES, "", cutoff, index="as_of", left_bound="open"))
+    return int(result["deleted"] or 0)
 
 
 # ── Phase 3: hypotheses, approvals, reports ───────────────────────────────────
@@ -548,21 +565,25 @@ def resolved_config(conn) -> dict:
 
 def put_hypothesis(conn, hypothesis) -> None:
     doc = hypothesis.to_doc() if hasattr(hypothesis, "to_doc") else dict(hypothesis)
-    r.db(DB_NAME).table(HYPOTHESES).insert(
-        doc,
-        # Status is operator/judge-owned; re-proposing must never reopen a
-        # closed hypothesis, or the generator's memory resets every round and
-        # the loop re-proposes what it already disproved.
-        conflict=lambda _id, old, new: old.merge({
-            "experiment_ids": old["experiment_ids"].default([]).set_union(
-                new["experiment_ids"].default([])),
-        }),
-    ).run(conn)
+    doc = _generated_id(doc)
+    old = store.get(HYPOTHESES, doc["id"])
+    if old is None:
+        store.insert(HYPOTHESES, doc)
+        return
+    # Status is operator/judge-owned; re-proposing must never reopen a
+    # closed hypothesis, or the generator's memory resets every round and
+    # the loop re-proposes what it already disproved. The resolver merged onto
+    # OLD, so nothing else in the new document lands either.
+    store.replace(HYPOTHESES, doc["id"], {
+        **old,
+        "experiment_ids": _set_union(old.get("experiment_ids"),
+                                     doc.get("experiment_ids")),
+    })
 
 
 def set_hypothesis_status(conn, hypothesis_id, status, reason="") -> None:
-    r.db(DB_NAME).table(HYPOTHESES).get(str(hypothesis_id)).update(
-        {"status": str(status), "status_reason": str(reason)}).run(conn)
+    store.update(HYPOTHESES, str(hypothesis_id),
+                 {"status": str(status), "status_reason": str(reason)})
 
 
 def list_hypotheses(conn, limit: int = 200, target=None) -> list:
@@ -575,19 +596,20 @@ def list_hypotheses(conn, limit: int = 200, target=None) -> list:
     the "do not re-propose" guarantee.
     """
     limit = max(1, min(int(limit or 200), 1000))
-    selection = r.db(DB_NAME).table(HYPOTHESES)
+    selection = store.Selection(HYPOTHESES)
     if target:
-        selection = selection.filter({"target": str(target)})
-    return list(selection.order_by(r.desc("created_at")).limit(limit).run(conn))
+        selection = store.filter(HYPOTHESES, {"target": str(target)})
+    return store.run(store.limit(
+        store.order_by(selection, fields=(store.desc("created_at"),)), limit))
 
 
 def put_approval(conn, approval) -> None:
     doc = approval.to_doc() if hasattr(approval, "to_doc") else dict(approval)
-    r.db(DB_NAME).table(APPROVALS).insert(doc, conflict="update").run(conn)
+    store.insert(APPROVALS, _generated_id(doc), conflict="update")
 
 
 def get_approval(conn, approval_id):
-    return r.db(DB_NAME).table(APPROVALS).get(str(approval_id)).run(conn)
+    return store.get(APPROVALS, str(approval_id))
 
 
 def list_approvals(conn, limit: int = 200) -> list:
@@ -595,18 +617,18 @@ def list_approvals(conn, limit: int = 200) -> list:
     subset, so past 200 approvals a pending LIVE row — the one that waits
     indefinitely for a human — could simply not be in the queue's input."""
     limit = max(1, min(int(limit or 200), 1000))
-    return list(r.db(DB_NAME).table(APPROVALS)
-                .order_by(r.desc("requested_at")).limit(limit).run(conn))
+    return store.run(store.limit(
+        store.order_by(APPROVALS, fields=(store.desc("requested_at"),)), limit))
 
 
 def put_report(conn, report) -> None:
-    r.db(DB_NAME).table(REPORTS).insert(
-        dict(report or {}), conflict="update").run(conn)
+    store.insert(REPORTS, _generated_id(dict(report or {})),
+                 conflict="update")
 
 
 def list_reports(conn, limit: int = 50) -> list:
     limit = max(1, min(int(limit or 50), 500))
-    rows = list(r.db(DB_NAME).table(REPORTS).limit(limit).run(conn))
+    rows = store.run(store.limit(REPORTS, limit))
     rows.sort(key=lambda d: str(d.get("created_at") or ""), reverse=True)
     return rows
 
@@ -615,36 +637,35 @@ def list_reports(conn, limit: int = 50) -> list:
 
 def put_intent(conn, intent_doc, *, at="") -> None:
     """Record what the loop decided, so its reasoning is readable afterwards."""
-    r.db(DB_NAME).table(INTENTS).insert(
-        {**(intent_doc or {}), "at": str(at)}).run(conn)
+    store.insert(INTENTS, _generated_id({**(intent_doc or {}), "at": str(at)}))
 
 
 def list_intents(conn, limit: int = 200) -> list:
     limit = max(1, min(int(limit or 200), 1000))
-    rows = list(r.db(DB_NAME).table(INTENTS).limit(limit).run(conn))
+    rows = store.run(store.limit(INTENTS, limit))
     rows.sort(key=lambda d: str(d.get("at") or ""), reverse=True)
     return rows
 
 
 def list_budget_ledger(conn, limit: int = 1000) -> list:
     limit = max(1, min(int(limit or 1000), 5000))
-    return list(r.db(DB_NAME).table(BUDGET_LEDGER).limit(limit).run(conn))
+    return store.run(store.limit(BUDGET_LEDGER, limit))
 
 
 def put_budget_row(conn, row) -> None:
-    r.db(DB_NAME).table(BUDGET_LEDGER).insert(
-        dict(row or {}), conflict="update").run(conn)
+    store.insert(BUDGET_LEDGER, _generated_id(dict(row or {})),
+                 conflict="update")
 
 
 def list_active_changes(conn, limit: int = 200) -> list:
     """Changes currently applied at some rung."""
     limit = max(1, min(int(limit or 200), 1000))
-    return list(r.db(DB_NAME).table(ACTIVE_CHANGES).limit(limit).run(conn))
+    return store.run(store.limit(ACTIVE_CHANGES, limit))
 
 
 def put_active_change(conn, change) -> None:
-    r.db(DB_NAME).table(ACTIVE_CHANGES).insert(
-        dict(change or {}), conflict="update").run(conn)
+    store.insert(ACTIVE_CHANGES, _generated_id(dict(change or {})),
+                 conflict="update")
 
 
 def running_backtests(conn) -> list:
@@ -655,9 +676,9 @@ def running_backtests(conn) -> list:
     exactly how the lease is written.
     """
     try:
-        rows = list(r.db(DB_NAME).table("BacktestResults")
-                    .filter(lambda doc: doc["status"].default("").eq("running"))
-                    .pluck("id", "status").limit(50).run(conn))
+        sel = store.filter("BacktestResults",
+                           P.field("status").default("").eq("running"))
+        rows = store.pluck(store.run(store.limit(sel, 50)), "id", "status")
     except Exception:
         return []
     return [{"id": row.get("id"), "origin": "human"} for row in rows]
@@ -678,9 +699,7 @@ def llm_usage(conn, *, limit: int = 500) -> dict:
     prices — and a role's spend is attributable to the role.
     """
     try:
-        rows = list(r.db(DB_NAME).table(LLM_USAGE_TABLE)
-                    .get_all(LEARNING_TAG, index="instance_id")
-                    .run(conn))
+        rows = store.get_all(LLM_USAGE_TABLE, LEARNING_TAG, index="instance_id")
     except Exception:
         return {"available": False, "by_role": {}, "totals": {},
                 "reason": "no LLM usage recorded for the subsystem yet"}
@@ -732,19 +751,18 @@ ACTIVITY_STALE_SECONDS = 600
 
 def begin_activity(conn, *, role, target="", finding_id="", step="", at="") -> None:
     try:
-        r.db(DB_NAME).table(ACTIVITY).insert(
-            {"id": str(role), "role": str(role), "target": str(target),
-             "finding_id": str(finding_id), "step": str(step),
-             "started_at": str(at), "active": True},
-            conflict="update").run(conn)
+        store.insert(ACTIVITY,
+                     {"id": str(role), "role": str(role), "target": str(target),
+                      "finding_id": str(finding_id), "step": str(step),
+                      "started_at": str(at), "active": True},
+                     conflict="update")
     except Exception:
         pass
 
 
 def end_activity(conn, *, role) -> None:
     try:
-        r.db(DB_NAME).table(ACTIVITY).get(str(role)).update(
-            {"active": False}).run(conn)
+        store.update(ACTIVITY, str(role), {"active": False})
     except Exception:
         pass
 
@@ -758,7 +776,7 @@ def list_activity(conn, *, now_iso="") -> list:
     """
     from self_learning.timeline import to_naive_utc
     try:
-        rows = list(r.db(DB_NAME).table(ACTIVITY).run(conn))
+        rows = store.run(store.Selection(ACTIVITY))
     except Exception:
         return []
     now = to_naive_utc(now_iso)
@@ -799,13 +817,12 @@ def purge(conn, *, confirm: bool = False) -> dict:
     deleted = {}
     for table in PURGEABLE_TABLES:
         try:
-            result = r.db(DB_NAME).table(table).delete().run(conn)
-            deleted[table] = int((result or {}).get("deleted") or 0)
+            result = store.delete(table, store.Selection(table))
+            deleted[table] = int(result["deleted"] or 0)
         except Exception as exc:
             deleted[table] = f"error: {type(exc).__name__}"
     try:
-        r.db(DB_NAME).table(CONFIG).get(CONFIG_DOC_ID).update(
-            {"processed_run_ids": []}).run(conn)
+        store.update(CONFIG, CONFIG_DOC_ID, {"processed_run_ids": []})
         deleted["_watermark_cleared"] = True
     except Exception:
         deleted["_watermark_cleared"] = False
@@ -828,15 +845,14 @@ ENGINE_STATUS_ID = "engine"
 
 def put_engine_status(conn, **fields) -> None:
     try:
-        r.db(DB_NAME).table(ENGINE_STATUS).insert(
-            {"id": ENGINE_STATUS_ID, **fields}, conflict="update").run(conn)
+        store.insert(ENGINE_STATUS, {"id": ENGINE_STATUS_ID, **fields},
+                     conflict="update")
     except Exception:
         pass
 
 
 def get_engine_status(conn) -> dict:
     try:
-        return r.db(DB_NAME).table(ENGINE_STATUS).get(
-            ENGINE_STATUS_ID).run(conn) or {}
+        return store.get(ENGINE_STATUS, ENGINE_STATUS_ID) or {}
     except Exception:
         return {}
