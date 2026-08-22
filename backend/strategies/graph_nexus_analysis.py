@@ -22431,23 +22431,37 @@ def _rotate_momentum_vs_portfolio_weakest(
 
 
 def _format_benzinga_for_symbol(bz_data: dict[str, list], symbol: str, use_toon: bool = True) -> str:
-    """Build a compact per-symbol Benzinga context string for the trade overlay."""
+    """Build a compact per-symbol Benzinga context string for the trade overlay.
+
+    2026-08-22 cache forensics: every section slices [:5]/[:3] off lists whose
+    order was API/cache ARRIVAL order, so arrival nondeterminism decided both
+    line order and which rows survived truncation — a prompt-cache buster on
+    every symbol with Benzinga data. Each list is now sorted (newest first,
+    deterministic tiebreaks) BEFORE the slice, so membership and order are
+    functions of the data alone.
+    """
     if not bz_data:
         return ""
     sym_upper = symbol.upper()
     sections: list[str] = []
     # Ratings
-    sym_ratings = [r for r in bz_data.get("ratings", []) if (r.get("ticker") or "").upper() == sym_upper]
+    sym_ratings = sorted(
+        (r for r in bz_data.get("ratings", []) if (r.get("ticker") or "").upper() == sym_upper),
+        key=lambda r: (str(r.get("date") or ""), str(r.get("analyst") or ""), str(r.get("action") or "")), reverse=True)
     if sym_ratings:
         lines = [f"  {r.get('date','')} {r.get('action','')} → {r.get('rating','')} by {r.get('analyst','')} PT={r.get('pt','')}" for r in sym_ratings[:5]]
         sections.append("Analyst ratings:\n" + "\n".join(lines))
     # Insider trades
-    sym_insider = [r for r in bz_data.get("insider_trades", []) if (r.get("ticker") or "").upper() == sym_upper]
+    sym_insider = sorted(
+        (r for r in bz_data.get("insider_trades", []) if (r.get("ticker") or "").upper() == sym_upper),
+        key=lambda r: (str(r.get("date") or ""), str(r.get("insider") or ""), str(r.get("shares") or "")), reverse=True)
     if sym_insider:
         lines = [f"  {r.get('date','')} {r.get('insider','')} ({r.get('title','')}) {r.get('direction','')} {r.get('shares','')} shares @{r.get('price','')}" for r in sym_insider[:5]]
         sections.append("Insider trades:\n" + "\n".join(lines))
     # Earnings
-    sym_earn = [r for r in bz_data.get("earnings", []) if (r.get("ticker") or "").upper() == sym_upper]
+    sym_earn = sorted(
+        (r for r in bz_data.get("earnings", []) if (r.get("ticker") or "").upper() == sym_upper),
+        key=lambda r: (str(r.get("date") or ""), str(r.get("period") or "")), reverse=True)
     if sym_earn:
         lines = []
         for r in sym_earn[:3]:
@@ -22455,12 +22469,16 @@ def _format_benzinga_for_symbol(bz_data: dict[str, list], symbol: str, use_toon:
             lines.append(f"  {r.get('date','')} {r.get('period','')} {eps_str}")
         sections.append("Earnings:\n" + "\n".join(lines))
     # Gov trades
-    sym_gov = [r for r in bz_data.get("gov_trades", []) if (r.get("ticker") or "").upper() == sym_upper]
+    sym_gov = sorted(
+        (r for r in bz_data.get("gov_trades", []) if (r.get("ticker") or "").upper() == sym_upper),
+        key=lambda r: (str(r.get("date") or ""), str(r.get("politician") or ""), str(r.get("value_usd") or "")), reverse=True)
     if sym_gov:
         lines = [f"  {r.get('date','')} {r.get('politician','')} ({r.get('chamber','')}) {r.get('direction','')} ~${r.get('value_usd','')}" for r in sym_gov[:3]]
         sections.append("Gov trades:\n" + "\n".join(lines))
     # M&A
-    sym_ma = [r for r in bz_data.get("ma", []) if (r.get("ticker") or "").upper() == sym_upper]
+    sym_ma = sorted(
+        (r for r in bz_data.get("ma", []) if (r.get("ticker") or "").upper() == sym_upper),
+        key=lambda r: (str(r.get("date") or ""), str(r.get("acquirer") or ""), str(r.get("deal_type") or "")), reverse=True)
     if sym_ma:
         lines = [f"  {r.get('date','')} {r.get('deal_type','')} by {r.get('acquirer','')} status={r.get('deal_status','')}" for r in sym_ma[:3]]
         sections.append("M&A:\n" + "\n".join(lines))
@@ -22547,9 +22565,30 @@ def _canonicalize_overlay_base_doc(base_score_doc: Any) -> dict:
     """Strip run-scoped keys and band `ml_training_rows` in the base-score doc."""
     doc = _strip_run_scoped(base_score_doc if isinstance(base_score_doc, dict) else {})
     ml = doc.get("ml")
-    if isinstance(ml, dict) and "ml_training_rows" in ml:
+    if isinstance(ml, dict):
         ml = dict(ml)
-        ml["ml_training_rows"] = _training_row_band(ml.get("ml_training_rows"))
+        if "ml_training_rows" in ml:
+            ml["ml_training_rows"] = _training_row_band(ml.get("ml_training_rows"))
+        # 2026-08-22 cache forensics: ml_data_confidence is the banded row
+        # count's unbanded twin — (rows-8)/200 rounded to 4dp, so ONE extra
+        # training row moved it by 0.005 and re-keyed every overlay prompt.
+        # Band to 0.05 steps for the prompt (decisions read the original).
+        # The model predictions are re-fit each bar on a growing table and
+        # differ at 4dp between otherwise-identical books; 2dp keeps every
+        # decision-relevant distinction while dropping refit noise.
+        if "ml_data_confidence" in ml:
+            try:
+                ml["ml_data_confidence"] = round(
+                    round(float(ml["ml_data_confidence"] or 0.0) / 0.05) * 0.05, 2)
+            except (TypeError, ValueError):
+                pass
+        for _mlk in ("ml_up_probability", "ml_down_probability",
+                     "ml_expected_return", "ml_confidence"):
+            if _mlk in ml:
+                try:
+                    ml[_mlk] = round(float(ml[_mlk] or 0.0), 2)
+                except (TypeError, ValueError):
+                    pass
         doc["ml"] = ml
     return doc
 
@@ -22793,7 +22832,7 @@ def _apply_trade_overlay(
         graph_ctx = (
             f"Graph signal context (propagation raw={base_score_doc.get('graph_raw_score', 0):.3f}, "
             f"{base_score_doc.get('graph_n_paths', 0)} paths):\n"
-            + "\n".join(f"  - {r}" for r in _graph_rels) + "\n"
+            + "\n".join(f"  - {r}" for r in sorted(str(r) for r in _graph_rels)) + "\n"
             "These relationships represent real supply-chain, institutional, or competitive connections "
             "discovered via Neo4j graph analysis. Strong multi-path graph signals indicate structural "
             "tailwinds — weight them accordingly even if news sentiment is neutral.\n"
@@ -22808,7 +22847,7 @@ def _apply_trade_overlay(
         + bz_ctx
         + f"Active events as of evaluation date: {_to_prompt_payload(stripped_events, use_toon=use_toon)}\n"
         f"Historical analogs: {_to_prompt_payload(_canonical_historical_analogs(historical_analogs)[:5], use_toon=use_toon)}\n"
-        'Output example: {"ds":0.1,"cd":0.05,"db":"buy","rc":["strong_earnings"],"ra":"Q3 beat estimates"}\n'
+        'Output example: {"ds":0.1,"cd":0.05,"db":"buy","rc":["strong_earnings"]}\n'
         "Return only the bounded overlay decision."
     )
     _overlay_timeout = int(config.get("overlay_llm_timeout_sec", 60) or 60)
@@ -22961,7 +23000,7 @@ def _apply_etf_trade_overlay(
         f"Base score context: {_to_prompt_payload(base_score_doc, use_toon=use_toon)}\n"
         + price_ctx
         + f"Active events as of evaluation date: {_to_prompt_payload(stripped_events, use_toon=use_toon)}\n"
-        'Output example: {"ds":0.1,"cd":0.05,"db":"buy","rc":["trend_strengthening"],"ra":"Gold trend accelerating on Fed pivot"}\n'
+        'Output example: {"ds":0.1,"cd":0.05,"db":"buy","rc":["trend_strengthening"]}\n'
         "Return only the bounded overlay decision."
     )
     # Enter the telemetry context INSIDE the worker (runs in a ThreadPoolExecutor
