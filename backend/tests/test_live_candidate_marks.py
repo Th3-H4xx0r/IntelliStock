@@ -203,3 +203,23 @@ def test_bar_coverage_gate_exists_is_backtest_scoped_and_default_off():
             backtest_scoped = True
             break
     assert backtest_scoped, "coverage gate must be inside a MODE_BACKTEST branch"
+
+
+def test_overlay_rationale_lever_defaults_off_and_gates_all_surfaces():
+    """overlay_request_rationale (2026-08-22): default False must reproduce the
+    slim prompt byte-for-byte; True must gate the instruction text, the output
+    example, and the response model — on BOTH the stock and ETF overlays."""
+    import re
+    src = open(os.path.join(_BACKEND, "strategies",
+                            "graph_nexus_analysis.py"),
+               encoding="utf-8").read()
+    assert src.count('config.get("overlay_request_rationale", False)') == 2, (
+        "flag must be read in both overlay functions with default False")
+    assert src.count('(", ra (rationale)" if _req_ra else "")') == 2
+    assert src.count('("Keep rationale under 15 words. " if _req_ra else "")') == 2
+    assert src.count("_TradeOverlayResponseWithRationale if _req_ra") == 2
+    # the ra-bearing example must be gated, never unconditional
+    for m in re.finditer(r'"ra":"[^"]+"', src):
+        start = max(0, m.start() - 400)
+        assert "_req_ra" in src[start:m.end() + 200], (
+            "an ra example appears outside the _req_ra gate")

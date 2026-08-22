@@ -17684,6 +17684,17 @@ class _TradeOverlayResponse(BaseModel):
     reason_codes: list[str] = Field(default_factory=list, alias="rc")
 
 
+class _TradeOverlayResponseWithRationale(_TradeOverlayResponse):
+    """2026-08-22: the fb/fp/ra slim moved window-d warm from +3.09% to +0.58%
+    on one draw — forcing the model to justify its call may act as implicit
+    chain-of-thought, so the cost cut may have been paid for in decision
+    quality. `overlay_request_rationale` (default False = slim behaviour)
+    restores ONLY the ra field per-doc so the effect can be A/B'd instead of
+    argued about. fb/fp stay dropped — nothing ever read them and they carry
+    no plausible reasoning benefit."""
+    rationale: str = Field("", alias="ra")
+
+
 
 
 def _enhanced_sentiment_from_llm(articles: list, provider: str, api_key: str, model: str, num_articles: int = 30, today_str: str = "", pending_trades: list | None = None, ticker_history: dict | None = None, active_trends: list | None = None, additional_context: str = "", provider_config: dict[str, Any] | None = None, config: dict[str, Any] | None = None, _retry_stage: int = 0) -> tuple[dict, list, list, dict]:
@@ -22731,6 +22742,13 @@ def _apply_trade_overlay(
     if not api_key or not config.get("llm_overlay_enabled", True):
         return {}, {}
     use_toon = bool(config.get("use_toon_format", True))
+    # 2026-08-22: `overlay_request_rationale` (default False) restores the ra
+    # field per-doc. The slim that removed it moved window-d warm +3.09% →
+    # +0.58% on one draw — justification may act as implicit chain-of-thought,
+    # so the A/B decides, not the cost argument. The generated rationale is
+    # deliberately NOT stored anywhere: its value, if any, is in the
+    # generation process; the tokens buy reasoning, not telemetry.
+    _req_ra = bool(config.get("overlay_request_rationale", False))
     system_prompt = (
         "Return only a bounded structured trade overlay as minimal JSON. "
         "Use all supplied context (graph, news, ML, price history, analyst/insider data if present, "
@@ -22738,15 +22756,18 @@ def _apply_trade_overlay(
         "When graph relationships show strong multi-path signals (raw >= 0.30), favor 'buy' bias "
         "unless there is clear negative evidence (bad earnings, downtrend, sell-side downgrades). "
         "Use short alias keys: ds (delta_score), cd (confidence_delta), db (decision_bias), "
-        "bb (buy_block), sb (sell_block), rc (reason_codes). "
-        # 2026-08-22 audit: fb/fp/ra were requested from the LLM on every
+        "bb (buy_block), sb (sell_block), rc (reason_codes"
+        + (", ra (rationale)" if _req_ra else "")
+        + "). "
+        # 2026-08-22 audit: fb/fp were requested from the LLM on every
         # overlay call and consumed by NOTHING (readers use only ds/cd/db/
         # bb/sb/rc) — paid output tokens, discarded. Dropped from the
-        # prompt and schema. NOTE: this changes the overlay prompt hash,
-        # so sentiment/overlay cache scopes re-key (one-time cold refill).
+        # prompt and schema. NOTE: prompt-text changes re-key the overlay
+        # cache (one-time cold refill per variant).
         "Omit fields with default/empty values. "
         "Keep reason_codes to max 3 items, max 5 words per item. "
-        "Minimize total output tokens."
+        + ("Keep rationale under 15 words. " if _req_ra else "")
+        + "Minimize total output tokens."
     )
     # Canonicalize the two payloads that were previously handed to the prompt
     # exactly as built: `base_score_doc` carries `ml.ml_training_rows`, which
@@ -22847,8 +22868,10 @@ def _apply_trade_overlay(
         + bz_ctx
         + f"Active events as of evaluation date: {_to_prompt_payload(stripped_events, use_toon=use_toon)}\n"
         f"Historical analogs: {_to_prompt_payload(_canonical_historical_analogs(historical_analogs)[:5], use_toon=use_toon)}\n"
-        'Output example: {"ds":0.1,"cd":0.05,"db":"buy","rc":["strong_earnings"]}\n'
-        "Return only the bounded overlay decision."
+        + ('Output example: {"ds":0.1,"cd":0.05,"db":"buy","rc":["strong_earnings"],"ra":"Q3 beat estimates"}\n'
+         if _req_ra else
+         'Output example: {"ds":0.1,"cd":0.05,"db":"buy","rc":["strong_earnings"]}\n')
+        + "Return only the bounded overlay decision."
     )
     _overlay_timeout = int(config.get("overlay_llm_timeout_sec", 60) or 60)
     # Enter the telemetry context INSIDE the worker (this body runs in a
@@ -22866,7 +22889,8 @@ def _apply_trade_overlay(
             api_key,
             model,
             prompt,
-            _TradeOverlayResponse,
+            (_TradeOverlayResponseWithRationale if _req_ra
+             else _TradeOverlayResponse),
             attribution_keys={
                 "backtest_id": (config or {}).get("_telemetry_backtest_id"),
                 "instance_id": (config or {}).get("_telemetry_instance_id"),
@@ -22964,6 +22988,8 @@ def _apply_etf_trade_overlay(
     if not api_key or not config.get("llm_overlay_enabled", True):
         return {}, {}
     use_toon = bool(config.get("use_toon_format", True))
+    # Same lever as the stock overlay — see _TradeOverlayResponseWithRationale.
+    _req_ra = bool(config.get("overlay_request_rationale", False))
     system_prompt = (
         "Return only a bounded structured trade overlay as minimal JSON. "
         "You are evaluating an ETF (exchange-traded fund), NOT an individual stock. "
@@ -22971,15 +22997,17 @@ def _apply_etf_trade_overlay(
         "sector momentum, and whether the trend is strengthening or weakening. "
         "Company-specific signals do not apply to ETFs. "
         "Use short alias keys: ds (delta_score), cd (confidence_delta), db (decision_bias), "
-        "bb (buy_block), sb (sell_block), rc (reason_codes). "
-        # 2026-08-22 audit: fb/fp/ra were requested from the LLM on every
-        # overlay call and consumed by NOTHING (readers use only ds/cd/db/
-        # bb/sb/rc) — paid output tokens, discarded. Dropped from the
-        # prompt and schema. NOTE: this changes the overlay prompt hash,
-        # so sentiment/overlay cache scopes re-key (one-time cold refill).
+        "bb (buy_block), sb (sell_block), rc (reason_codes"
+        + (", ra (rationale)" if _req_ra else "")
+        + "). "
+        # 2026-08-22 audit: fb/fp were dropped (nothing read them); ra is
+        # restorable per-doc via overlay_request_rationale for the
+        # reasoning-quality A/B. NOTE: prompt-text changes re-key the overlay
+        # cache (one-time cold refill per variant).
         "Omit fields with default/empty values. "
         "Keep reason_codes to max 3 items, max 5 words per item. "
-        "Minimize total output tokens."
+        + ("Keep rationale under 15 words. " if _req_ra else "")
+        + "Minimize total output tokens."
     )
     base_score_doc = _canonicalize_overlay_base_doc(base_score_doc)
     date_key = str(date_key or (feature_row or {}).get("date_key") or "")
@@ -23000,8 +23028,10 @@ def _apply_etf_trade_overlay(
         f"Base score context: {_to_prompt_payload(base_score_doc, use_toon=use_toon)}\n"
         + price_ctx
         + f"Active events as of evaluation date: {_to_prompt_payload(stripped_events, use_toon=use_toon)}\n"
-        'Output example: {"ds":0.1,"cd":0.05,"db":"buy","rc":["trend_strengthening"]}\n'
-        "Return only the bounded overlay decision."
+        + ('Output example: {"ds":0.1,"cd":0.05,"db":"buy","rc":["trend_strengthening"],"ra":"Gold trend accelerating"}\n'
+         if _req_ra else
+         'Output example: {"ds":0.1,"cd":0.05,"db":"buy","rc":["trend_strengthening"]}\n')
+        + "Return only the bounded overlay decision."
     )
     # Enter the telemetry context INSIDE the worker (runs in a ThreadPoolExecutor
     # thread with no ambient context) so usage rows attribute call_site="overlay_etf"
@@ -23017,7 +23047,8 @@ def _apply_etf_trade_overlay(
             api_key,
             model,
             prompt,
-            _TradeOverlayResponse,
+            (_TradeOverlayResponseWithRationale if _req_ra
+             else _TradeOverlayResponse),
             attribution_keys={
                 "backtest_id": (config or {}).get("_telemetry_backtest_id"),
                 "instance_id": (config or {}).get("_telemetry_instance_id"),
