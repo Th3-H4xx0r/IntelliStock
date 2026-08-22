@@ -169,14 +169,17 @@ Then check the collation window explicitly. `graph_nexus_analysis.py` orders
 the first 80. By mid-window most rows share one `latest_observation_date`, so
 `id` alone decides *membership* — and those 80 rows land in an LLM prompt.
 
-    docker compose exec postgres psql -U intellistock -d IntelliStock -c '
-      SELECT id FROM "GraphNexusTradeOutcomes"
-      WHERE doc->>'"'"'instance_id'"'"' = '"'"'<scoped-instance-id>'"'"'
-      ORDER BY doc->>'"'"'latest_observation_date'"'"' COLLATE "C" DESC,
-               id COLLATE "C" DESC
-      LIMIT 80;'
+    docker compose exec -T postgres psql -U intellistock -d IntelliStock <<'SQL'
+    SELECT id FROM "GraphNexusTradeOutcomes"
+     WHERE doc->>'instance_id' = '<scoped-instance-id>'
+       AND doc->>'entry_date' < '<as-of-date>'
+     ORDER BY doc->>'latest_observation_date' COLLATE "C" DESC,
+              id COLLATE "C" DESC
+     LIMIT 80;
+    SQL
 
-Compare against the same 80 ids read from RethinkDB before the freeze. A
+The scoped instance id is `"<instance>|<config-hash>"`, not the bare instance
+name. Compare against the same 80 ids read from RethinkDB before the freeze. A
 non-bytewise collation reorders `"AACI"` against `"aaci"` and changes which five
 analogs reach the prompt, silently, with no error anywhere. This is the single
 most likely silent failure in the migration.
