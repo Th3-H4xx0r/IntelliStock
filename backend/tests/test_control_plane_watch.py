@@ -186,41 +186,85 @@ def test_server_ensure_db_and_tables_seeds_config(pg_schema):
     assert store.get("Config", "Pings")["corePing"] == "x"
 
 
+def _price_broker_function(name):
+    """The REAL function object out of priceBroker.py.
+
+    priceBroker is a script -- importing it opens a database connection and
+    enters the poll loop -- so the module cannot be imported. Its source is
+    parsed instead and the one requested top-level def is compiled and
+    executed against the module's own globals. The test therefore exercises
+    the shipped code, not a copy of it that can silently drift.
+    """
+    import ast
+    path = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "priceBroker.py")
+    with open(path) as fh:
+        src = fh.read()
+    tree = ast.parse(src, filename=path)
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            from db import store as _store
+            namespace = {"store": _store}
+            exec(compile(ast.Module(body=[node], type_ignores=[]),
+                         path, "exec"), namespace)
+            return namespace[name], src
+    raise AssertionError("priceBroker.py has no top-level def %s" % name)
+
+
 @requires_pg
 def test_price_history_insert_lands_in_its_partition(pg_schema):
-    """priceBroker._insert_price_history writes the compound-PK PriceHistory
-    row through hand-written SQL (store.insert only speaks (id, doc))."""
+    """priceBroker writes PriceHistory through store.insert.
+
+    The compound primary key (ticker, ts, id) was store.insert's blind spot
+    when G1 was written, so the site kept hand-written SQL. store.insert
+    populates the real columns from the registry's column_sources, targets the
+    real PK on conflict, and generates the id -- so the escape hatch is gone.
+    """
     from db import schema as dbschema
     from db import store
 
     dbschema.ensure_schema(tables=["PriceHistory"])
-    import datetime as _dt
-    dbschema.ensure_partitions(
-        "PriceHistory",
-        lo=_dt.datetime(2026, 8, 1, tzinfo=_dt.timezone.utc),
-        hi=_dt.datetime(2026, 9, 1, tzinfo=_dt.timezone.utc))
-    # Import the helper without executing priceBroker's module-level poll loop.
-    import json as _json
+    insert_price_history, src = _price_broker_function("_insert_price_history")
 
-    def _insert_price_history(ticker_id, price, storage_ts):
-        row_id = str(uuid.uuid4())
-        doc = {"id": row_id, "ticker": ticker_id, "price": price,
-               "timestamp": storage_ts, "type": "minute"}
-        store.sql(
-            'INSERT INTO "PriceHistory" (ticker, ts, id, doc) '
-            'VALUES (%s, %s::timestamptz, %s, %s::jsonb) ON CONFLICT DO NOTHING',
-            (ticker_id, storage_ts, row_id, _json.dumps(doc)))
-        return row_id
-
-    src = open(os.path.join(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__))), "priceBroker.py")).read()
-    assert 'INSERT INTO "PriceHistory" (ticker, ts, id, doc)' in src
+    assert "store.sql(" not in src, "priceBroker still hand-writes SQL"
+    assert 'INSERT INTO "PriceHistory"' not in src
 
     ts = "2026-08-22T14:30:00.000Z"
-    rid = _insert_price_history("T.AAPL", 1.25, ts)
-    rows = store.sql('SELECT doc FROM "PriceHistory" WHERE id = %s', (rid,))
+    result = insert_price_history("T.AAPL", 1.25, ts)
+    assert result["inserted"] == 1
+    assert result["errors"] == 0
+    rid = result["generated_keys"][0]
+
+    rows = store.sql('SELECT doc, ticker, ts FROM "PriceHistory" '
+                     "WHERE id = %s", (rid,))
     assert len(rows) == 1
-    assert rows[0]["doc"]["ticker"] == "T.AAPL"
-    assert rows[0]["doc"]["price"] == 1.25
-    assert rows[0]["doc"]["timestamp"] == ts
-    assert rows[0]["doc"]["type"] == "minute"
+    assert rows[0]["doc"] == {"id": rid, "ticker": "T.AAPL", "price": 1.25,
+                              "timestamp": ts, "type": "minute"}
+    # The partition-key columns are populated from the document, not left to
+    # a default: a NULL ts has no partition to land in.
+    assert rows[0]["ticker"] == "T.AAPL"
+    assert rows[0]["ts"].isoformat() == "2026-08-22T14:30:00+00:00"
+
+    # It landed in the month's partition, which store.insert created itself.
+    parts = store.sql(
+        "SELECT tableoid::regclass::text AS part FROM \"PriceHistory\" "
+        "WHERE id = %s", (rid,))
+    assert parts[0]["part"].strip('"') == "PriceHistory_p2026_08"
+
+
+@requires_pg
+def test_price_history_writes_are_one_row_per_call(pg_schema):
+    """Write frequency is unchanged: one call, one row, and a fresh id each
+    time, so two ticks in the same minute both survive rather than one
+    upserting over the other."""
+    from db import schema as dbschema
+    from db import store
+
+    dbschema.ensure_schema(tables=["PriceHistory"])
+    insert_price_history, _ = _price_broker_function("_insert_price_history")
+
+    ts = "2026-08-22T14:31:00.000Z"
+    first = insert_price_history("T.AAPL", 1.25, ts)
+    second = insert_price_history("T.AAPL", 1.26, ts)
+    assert first["generated_keys"] != second["generated_keys"]
+    assert store.count("PriceHistory") == 2

@@ -9,8 +9,6 @@ try:
     from dotenv import load_dotenv
     import sys
     from os import system
-    import json
-    import uuid
     from db import store, watch
     from intellistock_logger import intellistock_logger
 except Exception as e:
@@ -116,27 +114,25 @@ _first_run = True
 def _insert_price_history(ticker_id, price, storage_ts):
     """Append one PriceHistory row.
 
-    PriceHistory is the one table whose primary key is compound
-    ((ticker, ts, id), so the partition key can be part of it), so
-    ``store.insert`` -- which writes (id, doc) -- cannot express it. Per the
-    plan's "a site needing more gets hand-written SQL in its owning module",
-    this is that SQL. ``id`` is generated client-side exactly as the old
-    document database generated it server-side, and is carried inside ``doc``
-    so a read returns the same document it always did.
+    PriceHistory's primary key is compound -- (ticker, ts, id), so the
+    partition key can be part of it -- which is why this site once carried
+    hand-written SQL. It no longer needs to: the registry maps the ticker/ts
+    columns to this document's ticker/timestamp keys, the conflict target is
+    the table's real primary key, and a document with no ``id`` gets a uuid
+    written INTO it, exactly as the document database generated one server
+    side. The stored document is unchanged: {id, ticker, price, timestamp,
+    type}, one row per ticker per poll.
+
+    store.insert also creates the month's partition. The raw INSERT did not,
+    so a tick that arrived before pg_partman had premade the month failed
+    outright with "no partition of relation found for row".
     """
-    row_id = str(uuid.uuid4())
-    doc = {
-        "id": row_id,
+    return store.insert("PriceHistory", {
         "ticker": ticker_id,
         "price": price,
         "timestamp": storage_ts,
         "type": "minute",
-    }
-    store.sql(
-        'INSERT INTO "PriceHistory" (ticker, ts, id, doc) '
-        'VALUES (%s, %s::timestamptz, %s, %s::jsonb) ON CONFLICT DO NOTHING',
-        (ticker_id, storage_ts, row_id, json.dumps(doc)),
-    )
+    })
 
 
 def _latest_prices(symbol_names):
