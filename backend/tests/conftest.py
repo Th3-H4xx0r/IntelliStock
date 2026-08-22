@@ -20,15 +20,25 @@ if _BACKEND_DIR not in sys.path:
 
 import pytest
 
-if not os.environ.get("PG_TEST_DSN"):
-    # No database in this run, but a unit test can still reach db.store through
-    # a module it exercises (the ported call sites no longer take a connection
-    # object that fails fast on a dummy). The pool would then spend
-    # PG_POOL_TIMEOUT + PG_RECONNECT_TIMEOUT -- 60s by default -- discovering
-    # there is nothing to connect to. Fail in a second instead.
-    os.environ.setdefault("PG_POOL_TIMEOUT", "1")
-    os.environ.setdefault("PG_RECONNECT_TIMEOUT", "1")
-    os.environ.setdefault("PG_CONNECT_RETRIES", "0")
+# A test must never BLOCK on the pool. Two ways it otherwise can:
+#
+#   * no database in this run, but a unit test still reaches db.store through
+#     a module it exercises (the ported call sites no longer take a connection
+#     object that fails fast on a dummy);
+#   * a database IS configured, but a degradation path asks for a connection
+#     the pool cannot hand out -- a per-test schema that has since been
+#     dropped, say. Production wants to wait out a blip; a test wants the
+#     answer now, and the code under test degrades either way.
+#
+# Either way the pool would spend PG_POOL_TIMEOUT + PG_RECONNECT_TIMEOUT --
+# 60s by default -- to reach a conclusion the test already tolerates. Both
+# cases fail in a second instead. setdefault, so a test that means to
+# exercise the real timings can still set them.
+os.environ.setdefault("PG_POOL_TIMEOUT", "2")
+os.environ.setdefault("PG_RECONNECT_TIMEOUT", "2")
+# The test database is local and answers instantly or not at all, so the
+# connect-retry ladder only adds latency to a conclusion the test tolerates.
+os.environ.setdefault("PG_CONNECT_RETRIES", "0")
 
 
 # ---------------------------------------------------------------------------
