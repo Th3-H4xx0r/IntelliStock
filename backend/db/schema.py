@@ -416,11 +416,21 @@ def ensure_schema(*, tables: Optional[Iterable[str]] = None) -> list:
             with conn.cursor() as cur:
                 cur.execute("SELECT pg_advisory_lock(hashtext('intellistock.ddl'))")
                 try:
-                    cur.execute("SELECT proname FROM pg_proc WHERE proname = 'notify_row'")
-                    if cur.fetchone() is None:
+                    # to_regprocedure resolves through search_path. A bare
+                    # pg_proc lookup does NOT: it sees the function in ANY
+                    # schema of the database, so a sibling schema that has
+                    # notify_row made this skip the CREATEs and every
+                    # CREATE TRIGGER then failed with "function notify_row()
+                    # does not exist". Probe both functions, not just one.
+                    cur.execute("SELECT to_regprocedure('jsonb_deep_merge(jsonb,jsonb)') "
+                                "AS m, to_regprocedure('notify_row()') AS n")
+                    fns = cur.fetchone()
+                    if fns["m"] is None:
                         cur.execute(MERGE_FN)
+                        applied.append("jsonb_deep_merge")
+                    if fns["n"] is None:
                         cur.execute(NOTIFY_FN)
-                        applied += ["jsonb_deep_merge", "notify_row"]
+                        applied.append("notify_row")
                     for name in names:
                         s = spec(name)
                         if _already_applied(cur, s):
