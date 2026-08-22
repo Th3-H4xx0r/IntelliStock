@@ -4,7 +4,7 @@ Runs OUT-OF-PROCESS from the broker. Disabled by default: `instance.py`
 launches it only when ``ALPHA_MARK_WATCHDOG_ENABLED=1``, and this entrypoint
 refuses to start without its own scoped credentials
 (``ALPACA_WATCHDOG_KEY``/``ALPACA_WATCHDOG_SECRET``) and a reachable
-RethinkDB — the deployment prerequisites named by the plan. If Alpaca cannot
+Postgres — the deployment prerequisites named by the plan. If Alpaca cannot
 issue a separately scoped credential for the account, the operator may set
 these to the shared runtime credential, accepting the residual risk recorded
 in the LIVE_40 sign-off (Task 6 Step 8a).
@@ -20,10 +20,10 @@ def _build_runtime(instance_id):
     from alpaca.trading.client import TradingClient
     from alpaca.trading.requests import GetOrdersRequest
     from alpaca.trading.enums import QueryOrderStatus
-    from rethinkdb import RethinkDB
 
-    from benchmark_alpha.rethink_store import (
-        AlphaRethinkStore,
+    from db import store as db_store
+    from benchmark_alpha.pg_store import (
+        AlphaPostgresStore,
         AlphaStateConflictError,
     )
     from benchmark_alpha.watchdog import AlphaWatchdog
@@ -33,23 +33,7 @@ def _build_runtime(instance_id):
     paper = os.environ.get("ALPACA_WATCHDOG_PAPER", "0") == "1"
     client = TradingClient(api_key=key, secret_key=secret, paper=paper)
 
-    r = RethinkDB()
-
-    class _ConnCtx:
-        def __enter__(self):
-            self._c = r.connect(
-                host=os.environ.get("RETHINKDB_HOST", "localhost"),
-                port=int(os.environ.get("RETHINKDB_PORT", "28015")),
-                timeout=10)
-            return self._c
-
-        def __exit__(self, *exc):
-            try:
-                self._c.close()
-            except Exception:
-                pass
-
-    store = AlphaRethinkStore(r, _ConnCtx)
+    store = AlphaPostgresStore()
 
     class Probe:
         def broker_equity(self):
@@ -74,9 +58,7 @@ def _build_runtime(instance_id):
                         continue
 
         def halt_instance(self):
-            with _ConnCtx() as conn:
-                r.db("IntelliStock").table("Instances").get(instance_id).update(
-                    {"runCommand": False}).run(conn)
+            db_store.update("Instances", instance_id, {"runCommand": False})
 
     def write_health(evidence):
         key = f"control_health:{instance_id}"
@@ -108,8 +90,10 @@ def main(argv=None):
                         default=float(os.environ.get("WATCHDOG_POLL_SEC", "30")))
     args = parser.parse_args(argv)
 
-    missing = [name for name in ("ALPACA_WATCHDOG_KEY", "ALPACA_WATCHDOG_SECRET",
-                                 "RETHINKDB_HOST") if not os.environ.get(name)]
+    missing = [name for name in ("ALPACA_WATCHDOG_KEY", "ALPACA_WATCHDOG_SECRET")
+               if not os.environ.get(name)]
+    if not (os.environ.get("PG_DSN") or os.environ.get("PGHOST")):
+        missing.append("PG_DSN")
     if missing:
         print(f"[watchdog] refusing to start: missing env {missing} "
               "(scoped watchdog credentials are a deployment prerequisite)",

@@ -80,7 +80,11 @@ class TableSpec:
 
 ALL_TABLES: tuple = (
     "AIBacktestingResults", "AgentBest", "AgentCycleLog", "AgentTop5",
-    "AlpacaBarsCache", "AlphaState", "BacktestInstances", "BacktestProgress",
+    "AlpacaBarsCache", "AlphaAllocations", "AlphaBrokerOrders",
+    "AlphaCashActivities", "AlphaEvents", "AlphaExperiments", "AlphaFills",
+    "AlphaGates", "AlphaIncidents", "AlphaOrderIntents", "AlphaOutcomes",
+    "AlphaPortfolioSnapshots", "AlphaPredictions", "AlphaState",
+    "BacktestInstances", "BacktestProgress",
     "BacktestResults", "BacktestSteps", "BotTradeDecisions", "BrokerageAccounts",
     "ChatbotConversations", "Config",
     "DiscordMessageIds", "DiscordOutbox", "DiscoverPriceCache", "DiscoverStocks",
@@ -249,7 +253,22 @@ _SPECS = [
               indexed_fields=("instance_id", "instance_id_config_hash", "origin"),
               prefix_fields=("id",)),
     TableSpec("LiveBootAudit", indexed_fields=("instance_id",), prefix_fields=("id",)),
-    TableSpec("LiveCommands", indexed_fields=("instance_id",)),
+    # r.now() wrote a native time on these; the ported writer stores an
+    # ISO-8601 string and time_fields decodes it back to a tz-aware datetime,
+    # so readers see the same Python type they saw under RethinkDB.
+    TableSpec("LiveCommands", indexed_fields=("instance_id",),
+              time_fields=("created_at", "started_at", "completed_at",
+                           "lease_expires_at")),
+    TableSpec("LiveState", time_fields=("last_updated",)),
+    TableSpec("NexusGraphBuilds",
+              time_fields=("started_at", "completed_at", "last_tail_update")),
+    # nexus_runtime_state.ensure_alpha_wal_indexes() created these two.
+    TableSpec("LiveOrderWAL", indexed_fields=("instance_id", "client_order_id"),
+              prefix_fields=("client_order_id",)),
+    TableSpec("LiveOrderLifecycle", indexed_fields=("instance_id",)),
+    TableSpec("AlphaEvents", indexed_fields=("kind",)),
+    TableSpec("AlphaExperiments",
+              indexed_fields=("record_kind", "search_scope", "registered_at")),
 
     # Cache tables index the ISO timestamp STRING, not a timestamptz: a
     # text->timestamptz cast is STABLE (it reads DateStyle/TimeZone) and PG
@@ -288,6 +307,23 @@ _SPECS = [
                                       default_days=90)),
     TableSpec("LearningOutcomes",
               indexed_fields=("as_of", "observation_id", "run_id")),
+    # benchmark_alpha/records.py's ten typed-record tables. api_reads.py pages
+    # them through the run_asof / instance_origin_asof compound indexes
+    # (pg_store._INDEX_FIELDS); the leading components carry the equality and
+    # as_of carries the order, so each component is indexed on its own.
+    ] + [
+    TableSpec(_name, indexed_fields=("run_id", "instance_id", "origin", "as_of"),
+              compound_indexes={
+                  "run_asof": '(doc->>\'run_id\')' + _C + ", (doc->>'as_of')" + _C,
+                  "instance_origin_asof":
+                      '(doc->>\'instance_id\')' + _C + ", (doc->>'origin')" + _C
+                      + ", (doc->>'as_of')" + _C,
+              })
+    for _name in ("AlphaPredictions", "AlphaGates", "AlphaAllocations",
+                  "AlphaOrderIntents", "AlphaBrokerOrders", "AlphaFills",
+                  "AlphaPortfolioSnapshots", "AlphaCashActivities",
+                  "AlphaOutcomes", "AlphaIncidents")
+    ] + [
     TableSpec("KalshiBacktests", indexed_fields=("status",)),
 
     # Non-`id` primary keys (live table_config; == kalshi/db.py registry).

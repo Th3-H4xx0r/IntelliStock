@@ -471,6 +471,14 @@ def _predicate_from(predicate) -> Predicate:
     raise StoreError("filter needs a dict or a Predicate, got %r" % type(predicate))
 
 
+def predicate(spec) -> Predicate:
+    """A dict-or-Predicate as a Predicate. The dict form is the one that
+    carries jsonb-typed equality (the guarded ``::numeric`` compare), so a CAS
+    on a numeric ``version`` field goes through here rather than through
+    ``P.field('version').eq(str(n))``, which would miss a 3.0 stored for 3."""
+    return _predicate_from(spec)
+
+
 def filter(table: str, predicate) -> Selection:      # noqa: A001 - ReQL's name
     frag, params = _predicate_from(predicate).to_sql()
     return Selection(table).where(frag, params)

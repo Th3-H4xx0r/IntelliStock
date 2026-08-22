@@ -156,6 +156,7 @@ class FakeStore:
     asc = staticmethod(_s.asc)
     desc = staticmethod(_s.desc)
     escape_like = staticmethod(_s.escape_like)
+    predicate = staticmethod(_s.predicate)
     coerce_id = staticmethod(_s.coerce_id)
     Selection = _s.Selection
     Predicate = _s.Predicate

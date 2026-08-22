@@ -31,9 +31,21 @@ except Exception:
     _repair_json_with_library = None
 
 try:
-    from rethinkdb import RethinkDB
-    _rethink = RethinkDB()
+    from db import schema as _db_schema
+    from db import store as _db_store
+    from db.errors import StoreError as _StoreError
+    # Historical gate: every prompt-cache path was skipped outright when the
+    # driver was absent. The store is always importable, so the gate is now
+    # "the store module loaded" -- it still short-circuits every cache path if
+    # this import ever fails.
+    _rethink = _db_store
 except Exception:
+    _db_schema = None
+    _db_store = None
+
+    class _StoreError(Exception):
+        pass
+
     _rethink = None
 
 try:
@@ -5769,28 +5781,8 @@ _PROMPT_CACHE_POISON_MARKERS = (
 )
 
 
-def _prompt_cache_new_conn():
-    """Create a fresh RethinkDB connection for a single cache operation.
-    Returns None silently on failure — no error output."""
-    if not _rethink:
-        return None
-    import io, sys
-    _orig_stderr = sys.stderr
-    try:
-        # Suppress RethinkDB driver connection noise (Errno 107, etc.)
-        sys.stderr = io.StringIO()
-        host = os.environ.get("RETHINKDB_HOST", "localhost")
-        port = int(os.environ.get("RETHINKDB_PORT", "28015"))
-        conn = _rethink.connect(host=host, port=port, timeout=5)
-        sys.stderr = _orig_stderr
-        return conn
-    except Exception:
-        sys.stderr = _orig_stderr
-        return None
-
-
 def _ensure_prompt_cache_table_if_needed() -> None:
-    """Create the prompt-cache RethinkDB table if it doesn't exist.
+    """Create the prompt-cache table if it doesn't exist.
 
     Idempotent. Sets ``_prompt_cache_tbl_ok`` on success. Used by both
     ``configure_llm_prompt_cache`` (global path) and the scoped ``force_cache``
@@ -5800,21 +5792,11 @@ def _ensure_prompt_cache_table_if_needed() -> None:
     global _prompt_cache_tbl_ok
     if _prompt_cache_tbl_ok or not _rethink:
         return
-    _setup_conn = _prompt_cache_new_conn()
-    if _setup_conn is None:
-        return
     try:
-        tables = _rethink.db(_prompt_cache_db).table_list().run(_setup_conn)
-        if _PROMPT_CACHE_TABLE not in tables:
-            _rethink.db(_prompt_cache_db).table_create(_PROMPT_CACHE_TABLE).run(_setup_conn)
+        _db_schema.ensure_table(_PROMPT_CACHE_TABLE)
         _prompt_cache_tbl_ok = True
     except Exception:
         _prompt_cache_tbl_ok = False
-    finally:
-        try:
-            _setup_conn.close()
-        except Exception:
-            pass
 
 
 def configure_llm_prompt_cache(
@@ -5857,7 +5839,7 @@ def _check_prompt_cache(prompt: str, model: str, effort: str, *, force_cache: bo
 
     When ``force_cache=True`` the global ``_prompt_cache_enabled`` flag is
     bypassed (used by scoped callers like the analyst panel that opt-in
-    independently of the global cache toggle). The RethinkDB table is
+    independently of the global cache toggle). The cache table is
     auto-ensured on the scoped path.
     """
     try:
@@ -5877,14 +5859,14 @@ def _check_prompt_cache(prompt: str, model: str, effort: str, *, force_cache: bo
         return None
     if _prompt_cache_fail_count >= _PROMPT_CACHE_MAX_FAILS:
         return None
-    _conn = _prompt_cache_new_conn()
-    if _conn is None:
-        with _prompt_cache_lock:
-            _prompt_cache_fail_count += 1
-        return None
     try:
         key = _prompt_cache_key(prompt, model, effort)
-        doc = _rethink.db(_prompt_cache_db).table(_PROMPT_CACHE_TABLE).get(key).run(_conn)
+        # The connection-per-operation that _prompt_cache_new_conn() opened
+        # (and its stderr suppression, which only ever hid driver noise) is
+        # gone: the pool hands out a connection per store call. The
+        # self-disable-after-_PROMPT_CACHE_MAX_FAILS behaviour below is
+        # verbatim, counting StoreError where it counted driver exceptions.
+        doc = _db_store.get(_PROMPT_CACHE_TABLE, key)
         if doc and doc.get("response"):
             with _prompt_cache_lock:
                 _prompt_cache_stats["hits"] += 1
@@ -5899,11 +5881,6 @@ def _check_prompt_cache(prompt: str, model: str, effort: str, *, force_cache: bo
     except Exception:
         with _prompt_cache_lock:
             _prompt_cache_fail_count += 1
-    finally:
-        try:
-            _conn.close()
-        except Exception:
-            pass
     with _prompt_cache_lock:
         _prompt_cache_stats["misses"] += 1
     return None
@@ -5913,7 +5890,7 @@ def _store_prompt_cache(prompt: str, model: str, effort: str, response: str, *, 
     """Store a new LLM response in the prompt cache.
 
     When ``force_cache=True`` the global ``_prompt_cache_enabled`` flag is
-    bypassed (scoped opt-in path). The RethinkDB table is auto-ensured.
+    bypassed (scoped opt-in path). The cache table is auto-ensured.
     """
     try:
         from backend._phase_alpha_helpers import evidence_cache_write_allowed
@@ -5942,9 +5919,6 @@ def _store_prompt_cache(prompt: str, model: str, effort: str, response: str, *, 
             json.loads(_stripped)
         except (json.JSONDecodeError, ValueError):
             return  # truncated/malformed JSON — don't cache
-    _conn = _prompt_cache_new_conn()
-    if _conn is None:
-        return
     try:
         key = _prompt_cache_key(prompt, model, effort)
         doc = {
@@ -5957,7 +5931,7 @@ def _store_prompt_cache(prompt: str, model: str, effort: str, response: str, *, 
             "cached_at": datetime.utcnow().isoformat() + "Z",
             "hit_count": 0,
         }
-        _rethink.db(_prompt_cache_db).table(_PROMPT_CACHE_TABLE).insert(doc, conflict="replace").run(_conn, noreply=True)
+        _db_store.insert(_PROMPT_CACHE_TABLE, doc, conflict="replace")
         with _prompt_cache_lock:
             _prompt_cache_stats["stores"] += 1
         import sys
@@ -5968,11 +5942,6 @@ def _store_prompt_cache(prompt: str, model: str, effort: str, response: str, *, 
         )
     except Exception:
         pass
-    finally:
-        try:
-            _conn.close()
-        except Exception:
-            pass
 
 
 def _fire_llm_output_log(provider: str, model: str, prompt: str, raw_output: str) -> None:
@@ -7076,18 +7045,17 @@ _prompt_cache_table_ensured: dict[str, bool] = {}  # table_name -> ensured
 
 
 def _prompt_cache_ensure_table(conn, db_name: str, table_name: str) -> None:
+    """``conn`` is accepted and ignored EXCEPT as the caller's opt-in flag:
+    ``conn is None`` still means "no cache", which is how every caller turns
+    this off. The store takes its own pooled connection per operation.
+    """
     if _rethink is None or conn is None:
         return
     key = f"{db_name}:{table_name}"
     if _prompt_cache_table_ensured.get(key):
         return
     try:
-        dbs = list(_rethink.db_list().run(conn))
-        if db_name not in dbs:
-            _rethink.db_create(db_name).run(conn)
-        tables = list(_rethink.db(db_name).table_list().run(conn))
-        if table_name not in tables:
-            _rethink.db(db_name).table_create(table_name).run(conn)
+        _db_schema.ensure_table(table_name)
         _prompt_cache_table_ensured[key] = True
     except Exception:
         pass
@@ -7099,10 +7067,10 @@ def _prompt_cache_get(conn, cache_ids: list[str], db_name: str, table_name: str)
         return {}
     try:
         _prompt_cache_ensure_table(conn, db_name, table_name)
-        cursor = _rethink.db(db_name).table(table_name).get_all(*cache_ids).run(conn)
+        rows = _db_store.get_all(table_name, *cache_ids)
         return {
             doc["id"]: (doc.get("raw_output") or "")
-            for doc in cursor
+            for doc in rows
             if doc and "id" in doc and "raw_output" in doc
         }
     except Exception:
@@ -7120,7 +7088,7 @@ def _prompt_cache_save(
         return
     try:
         _prompt_cache_ensure_table(conn, db_name, table_name)
-        _rethink.db(db_name).table(table_name).insert(entries, conflict="replace").run(conn)
+        _db_store.insert(table_name, entries, conflict="replace")
     except Exception:
         pass
 
@@ -7146,7 +7114,7 @@ def call_llm_with_prompt_cache(
         prompt: Full prompt text (hashed for cache key).
         max_output_tokens: Max tokens for the call.
         provider_config: Optional provider-specific settings (e.g. Azure endpoint/api_version).
-        db_conn: Optional RethinkDB connection. If None, cache is skipped.
+        db_conn: Optional cache opt-in handle. If None, cache is skipped.
         db_name: Database name for cache table.
         prompt_cache_table: Table name for raw output cache.
 

@@ -850,8 +850,13 @@ class InMemoryReplayStore:
         return receipt
 
 
-class RethinkReplayStore(InMemoryReplayStore):
-    """Immutable replay persistence adapter over the existing Rethink backend seam."""
+class PostgresReplayStore(InMemoryReplayStore):
+    """Immutable replay persistence adapter over the immutable-record seam.
+
+    Takes a *backend* object (``insert_record``/``get_record``), never a
+    connection, so the class body is unchanged by the Postgres port: only the
+    backend it is constructed with moved.
+    """
 
     def __init__(self, backend: Any) -> None:
         super().__init__()
@@ -969,3 +974,8 @@ class RethinkReplayStore(InMemoryReplayStore):
             self._fixtures[receipt.fixture.fixture_id] = receipt.fixture
         self._persist(RECEIPT_TABLE, receipt.to_doc())
         return super().publish_receipt(receipt)
+
+
+# The class was named for the driver, not for what it does. Both names refer
+# to the same object so the call sites in other port groups keep importing.
+RethinkReplayStore = PostgresReplayStore
