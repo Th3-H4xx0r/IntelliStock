@@ -16,12 +16,19 @@ Identities come from :mod:`nexus_config_identity`, the same module the broker
 boot path uses, so a re-stamped row can never carry an identity boot won't match.
 
 DB access is funneled through the small ``_fetch_*`` / ``_write_*`` / ``_update_*``
-helpers so tests can substitute in-memory fakes without emulating RethinkDB.
+helpers so tests can substitute in-memory fakes without emulating the store.
+
+``conn`` and ``r`` stay on every helper's signature (R26) -- the CLI and
+backend/tests/test_nexus_restamp.py both pass them -- and are ignored.
 """
 
 from __future__ import annotations
 
+import datetime as _dt
 import time
+
+from db import store
+from db.store import P
 
 from model_resolver import resolve_model_refs_in_config
 import nexus_config_identity as nci
@@ -95,12 +102,15 @@ def _nexus_config_from_strategies(strategies) -> dict:
 # DB access helpers (monkeypatched in tests)                                   #
 # --------------------------------------------------------------------------- #
 
+def _now_iso() -> str:
+    """R24 replacement for ``r.now()``; a jsonb-safe UTC ISO-8601 string."""
+    return _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+
 def _fetch_linked_base_instance_ids(conn, r, strategy_id) -> list[str]:
-    rows = list(
-        r.db(DB_NAME).table(INSTANCES_TABLE)
-        .filter(lambda d: d["strategy_id"] == strategy_id)
-        .pluck("id")
-        .run(conn)
+    rows = store.pluck(
+        store.run(store.filter(INSTANCES_TABLE, {"strategy_id": strategy_id})),
+        "id",
     )
     return [str(row.get("id")) for row in rows if row.get("id") is not None]
 
@@ -114,27 +124,24 @@ def _fetch_snapshot_rows(conn, r, base_instance_id: str) -> list[dict]:
     day has been saved). So we must re-stamp every row the loader can consume,
     not just live ones, or boot finds a stale-hash backtest row and rebuilds.
     """
-    rows = list(
-        r.db(DB_NAME).table(SNAPSHOT_TABLE)
-        .filter(lambda d: (d["instance_id"] == base_instance_id)
-                & (d["strategy_name"] == NEXUS_STRATEGY_NAME)
-                & ((d["origin"] == "live") | (d["origin"] == "backtest")))
-        .run(conn)
-    )
+    rows = store.run(store.filter(
+        SNAPSHOT_TABLE,
+        P.field("instance_id").eq(base_instance_id)
+        & P.field("strategy_name").eq(NEXUS_STRATEGY_NAME)
+        & (P.field("origin").eq("live") | P.field("origin").eq("backtest"))))
     return [row for row in rows if row.get("config_hash") and row.get("end_date")]
 
 
 def _write_snapshot_row(conn, r, row: dict) -> None:
-    r.db(DB_NAME).table(SNAPSHOT_TABLE).insert(row, conflict="replace").run(conn)
+    store.insert(SNAPSHOT_TABLE, row, conflict="replace")
 
 
 def _fetch_cleanup_markers(conn, r, base_instance_id: str) -> list[dict]:
     """Cleanup markers whose scoped instance id belongs to this base id."""
-    rows = list(
-        r.db(DB_NAME).table(LEARNING_CACHE_TABLE)
-        .filter(lambda d: d["id"].match("^cleanup_done\\|"))
-        .run(conn)
-    )
+    # R17: the ReQL regex anchor becomes a prefix scan, which is backed by
+    # GraphNexusLearningCache's "_pfx" text_pattern_ops index.
+    rows = store.run(store.filter(
+        LEARNING_CACHE_TABLE, P.field("id").starts_with("cleanup_done|")))
     out = []
     for row in rows:
         iid = str(row.get("instance_id") or "")
@@ -144,9 +151,7 @@ def _fetch_cleanup_markers(conn, r, base_instance_id: str) -> list[dict]:
 
 
 def _update_marker_hash(conn, r, marker_id: str, new_scope: str) -> None:
-    r.db(DB_NAME).table(LEARNING_CACHE_TABLE).get(marker_id).update(
-        {"config_hash": new_scope}
-    ).run(conn)
+    store.update(LEARNING_CACHE_TABLE, marker_id, {"config_hash": new_scope})
 
 
 # --------------------------------------------------------------------------- #
@@ -179,7 +184,7 @@ def restamp_instance(conn, r, base_instance_id: str, resolved_cfg: dict) -> dict
         new_row = dict(row)
         new_row["config_hash"] = new_hash
         new_row["id"] = f"{base_instance_id}|{NEXUS_STRATEGY_NAME}|{new_hash}|{seg}|{end_date}"
-        new_row["updated_at"] = r.now()
+        new_row["updated_at"] = _now_iso()
         new_row["updated_at_epoch"] = time.time()
         _write_snapshot_row(conn, r, new_row)
         snapshots_restamped += 1

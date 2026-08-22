@@ -9,7 +9,6 @@ try:
     from os import system
 
     from dotenv import load_dotenv
-    from rethinkdb import RethinkDB
     from intellistock_logger import intellistock_logger
     from tqdm import tqdm
     from stock_metrics import add_all_metrics, StockMetrics
@@ -97,7 +96,7 @@ try:
     def _get_cached_price_data(conn, ticker):
         """Load cached price data for ticker. Returns (DataFrame or None, lastDate str or None)."""
         try:
-            doc = r.db(DB_NAME).table(CACHE_TABLE).get(ticker).run(conn)
+            doc = store.get(CACHE_TABLE, ticker)
             if not doc or not doc.get("rows"):
                 return None, None
             last = doc.get("lastDate")
@@ -114,13 +113,13 @@ try:
         last_date = df.index[-1]
         last_str = last_date.strftime("%Y-%m-%d") if hasattr(last_date, 'strftime') else str(last_date)[:10]
         rows = _df_to_cache_rows(df)
-        r.db(DB_NAME).table(CACHE_TABLE).insert({
+        store.insert(CACHE_TABLE, {
             "id": ticker,
             "ticker": ticker,
             "lastDate": last_str,
             "rows": rows,
             "updatedAt": datetime.datetime.now().isoformat(),
-        }, conflict="replace").run(conn)
+        }, conflict="replace")
 
     def get_or_fetch_price_data(ticker, start_date, end_date, conn):
         """
@@ -171,68 +170,68 @@ try:
     intellistock_logger.log("Discover process started", "green", service="Discover")
     intellistock_logger.log("=" * 60, "cyan", service="Discover")
 
-    r = RethinkDB()
+    from db import schema as db_schema
+    from db import store
     DB_NAME = 'IntelliStock'
-    RETHINKDB_HOST = os.environ.get('RETHINKDB_HOST', 'localhost')
-    RETHINKDB_PORT = int(os.environ.get('RETHINKDB_PORT', '28015'))
 
-    def _is_retryable_rethink_error(exc):
-        msg = str(exc).lower()
-        return "primary replica" in msg or "not available" in msg or "connection refused" in msg
+    def _is_retryable_db_error(exc):
+        from rethink_changefeed import is_transient_db_error
+        return is_transient_db_error(exc)
+
+    class _StoreHandle:
+        """Truthy stand-in for the old driver connection (R26); the cache
+        helpers below are gated on it and the store takes its own."""
+
+        def close(self, *_a, **_k):
+            return None
 
     def _get_conn():
-        return r.connect(host=RETHINKDB_HOST, port=RETHINKDB_PORT)
+        return _StoreHandle()
 
-    def _run_rethink_with_retry(description, fn, max_attempts=30, delay=2):
+    def _run_db_with_retry(description, fn, max_attempts=30, delay=2):
+        """Retry a store operation while the database is still coming up.
+
+        Unchanged in shape; ``fn`` still takes a connection argument so no
+        call site changes arity, and retryability now comes from
+        rethink_changefeed.is_transient_db_error rather than three substrings.
+        """
         last_error = None
         current_delay = delay
         for attempt in range(1, max_attempts + 1):
-            connection = None
             try:
-                connection = _get_conn()
-                return fn(connection)
+                return fn(_StoreHandle())
             except Exception as e:
                 last_error = e
-                if attempt == max_attempts or not _is_retryable_rethink_error(e):
+                if attempt == max_attempts or not _is_retryable_db_error(e):
                     raise
                 intellistock_logger.log(
-                    f"{description}: RethinkDB primary not ready (attempt {attempt}/{max_attempts}), retrying in {current_delay}s...",
+                    f"{description}: database not ready (attempt {attempt}/{max_attempts}), retrying in {current_delay}s...",
                     "yellow",
                     service="Discover",
                 )
                 time.sleep(current_delay)
                 current_delay = min(current_delay * 1.5, 30)
-            finally:
-                if connection:
-                    try:
-                        connection.close()
-                    except Exception:
-                        pass
         raise last_error
 
-    # Ensure database and DiscoverStocks table exist
-    dbs = list(_run_rethink_with_retry("Checking databases", lambda connection: r.db_list().run(connection)))
-    if DB_NAME not in dbs:
-        _run_rethink_with_retry("Creating IntelliStock database", lambda connection: r.db_create(DB_NAME).run(connection))
-    tables = list(_run_rethink_with_retry("Checking Discover tables", lambda connection: r.db(DB_NAME).table_list().run(connection)))
-    if 'DiscoverStocks' not in tables:
-        intellistock_logger.log("Creating table 'DiscoverStocks'", "yellow", service="Discover")
-        _run_rethink_with_retry("Creating DiscoverStocks table", lambda connection: r.db(DB_NAME).table_create('DiscoverStocks').run(connection))
-    if 'DiscoverPriceCache' not in tables:
-        intellistock_logger.log("Creating table 'DiscoverPriceCache'", "yellow", service="Discover")
-        _run_rethink_with_retry("Creating DiscoverPriceCache table", lambda connection: r.db(DB_NAME).table_create('DiscoverPriceCache').run(connection))
+    # Ensure the Discover tables exist (R25).
+    for _tbl in ('DiscoverStocks', 'DiscoverPriceCache'):
+        _run_db_with_retry(
+            f"Creating {_tbl} table",
+            lambda _c, t=_tbl: db_schema.ensure_table(t),
+        )
 
-    _run_rethink_with_retry(
+    _run_db_with_retry(
         "Waiting for Discover tables",
-        lambda connection: list(r.db(DB_NAME).table('DiscoverStocks').limit(1).run(connection)),
+        lambda _c: store.run(store.limit(store.Selection('DiscoverStocks'), 1)),
     )
     connection = _get_conn()
 
     # Clear existing discover results for this run
     intellistock_logger.log("Clearing previous discover results", "yellow", service="Discover")
-    deleted_count = _run_rethink_with_retry(
+    deleted_count = _run_db_with_retry(
         "Clearing previous discover results",
-        lambda retry_conn: r.db(DB_NAME).table('DiscoverStocks').delete().run(retry_conn).get('deleted', 0),
+        lambda _c: store.delete('DiscoverStocks',
+                                store.Selection('DiscoverStocks')).get('deleted', 0),
     )
     intellistock_logger.log(f"Deleted {deleted_count} previous results", "cyan", service="Discover")
 
@@ -395,7 +394,7 @@ try:
                         "green",
                         service="Discover",
                     )
-                    r.db(DB_NAME).table("DiscoverStocks").insert({
+                    store.insert("DiscoverStocks", {
                         "id": ticker,
                         "ticker": ticker,
                         "short_term": short_term,
@@ -414,7 +413,7 @@ try:
                         "pegRatio": fund.get("pegRatio"),
                         "returnOnEquity": fund.get("returnOnEquity"),
                         "debtToEquity": fund.get("debtToEquity"),
-                    }, conflict="replace").run(connection)
+                    }, conflict="replace")
                     if short_term:
                         short_count += 1
                     if long_term:
@@ -448,11 +447,11 @@ try:
     intellistock_logger.log(f"Completion time: {now.strftime('%Y-%m-%d %H:%M:%S')}", "cyan", service="Discover")
     intellistock_logger.log("=" * 60, "cyan", service="Discover")
 
-    # Store last discover run time in RethinkDB Config (no Firebase)
-    r.db(DB_NAME).table('Config').insert({
+    # Store last discover run time in the Config table (no Firebase)
+    store.insert('Config', {
         'id': 'Cache',
         'discoverLastUpdate': str(now),
-    }, conflict='update').run(connection)
+    }, conflict='update')
 
     connection.close()
     intellistock_logger.log("Database connection closed", "cyan", service="Discover")

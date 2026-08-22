@@ -95,9 +95,7 @@ SEC_EDGAR_GLOBAL_COOLDOWN_MAX_SEC = float(os.environ.get("SEC_EDGAR_GLOBAL_COOLD
 SEC_EDGAR_CACHE_DIR  = os.environ.get("GRAPH_NEXUS_CACHE_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache"))
 SEC_EDGAR_FILINGS_DIR = os.path.join(SEC_EDGAR_CACHE_DIR, "sec_edgar_filings")
 
-# RethinkDB progress (resume on restart)
-RETHINKDB_HOST  = os.environ.get("RETHINKDB_HOST", "localhost")
-RETHINKDB_PORT  = int(os.environ.get("RETHINKDB_PORT", "28015"))
+# Progress persistence (resume on restart)
 PROGRESS_DB     = os.environ.get("RETHINKDB_DB", "IntelliStock")
 PROGRESS_TABLE  = "GraphNexusProgress"
 PROGRESS_ID_SCRAPER = "sec_edgar_scraper"
@@ -432,37 +430,52 @@ def _fuzzy_score(a: str, b: str) -> float:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# RethinkDB helpers
+# Progress helpers
 # ──────────────────────────────────────────────────────────────────────────────
+def _store_now() -> str:
+    """R24 replacement for ``r.now()``: an ISO-8601 UTC string, which is what
+    every reader of this document already turned the driver's datetime into
+    (interactive_utils' stage-doc normaliser, the API, the Nexus card)."""
+    import datetime as _dt
+    return _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+
+class _StoreHandle:
+    """Truthy stand-in for the old driver connection (R26): the progress
+    writers are all gated on ``if conn`` / ``if conn is None``."""
+
+    def close(self, *_a, **_k):
+        return None
+
+
 def _get_rethink_conn():
     try:
-        from rethinkdb import RethinkDB
-        r = RethinkDB()
-        return r.connect(host=RETHINKDB_HOST, port=RETHINKDB_PORT)
+        from db import pool as db_pool
+        if not db_pool.health().get("ok"):
+            raise RuntimeError("Postgres pool is not answering")
+        return _StoreHandle()
     except Exception as e:
-        _log(f"RethinkDB progress unavailable: {e}", "yellow")
+        try:
+            from db import pool as db_pool
+            db_pool.close_pool()
+        except Exception:
+            pass
+        _log(f"Postgres progress unavailable: {e}", "yellow")
         return None
 
 
 def _ensure_progress_table(conn):
     try:
-        from rethinkdb import RethinkDB
-        r = RethinkDB()
-        dbs = list(r.db_list().run(conn))
-        if PROGRESS_DB not in dbs:
-            r.db_create(PROGRESS_DB).run(conn)
-        tables = list(r.db(PROGRESS_DB).table_list().run(conn))
-        if PROGRESS_TABLE not in tables:
-            r.db(PROGRESS_DB).table_create(PROGRESS_TABLE).run(conn)
+        from db import schema as db_schema
+        db_schema.ensure_table(PROGRESS_TABLE)               # R25
     except Exception as e:
         _log(f"Ensure progress table: {e}", "yellow")
 
 
 def _load_scraper_progress(conn) -> dict | None:
     try:
-        from rethinkdb import RethinkDB
-        r = RethinkDB()
-        doc = r.db(PROGRESS_DB).table(PROGRESS_TABLE).get(PROGRESS_ID_SCRAPER).run(conn)
+        from db import store
+        doc = store.get(PROGRESS_TABLE, PROGRESS_ID_SCRAPER)
         return doc if doc else None
     except Exception:
         return None
@@ -471,8 +484,7 @@ def _load_scraper_progress(conn) -> dict | None:
 def _save_scraper_progress(conn, last_ticker_index: int, total_tickers: int,
                             edges_count: int, progress_pct: float, message: str, status: str):
     try:
-        from rethinkdb import RethinkDB
-        r = RethinkDB()
+        from db import store
         doc = {
             "id": PROGRESS_ID_SCRAPER,
             "last_ticker_index": last_ticker_index,
@@ -480,10 +492,10 @@ def _save_scraper_progress(conn, last_ticker_index: int, total_tickers: int,
             "edges_count": edges_count,
             "progress_pct": progress_pct,
             "message": message,
-            "last_updated": r.now(),
+            "last_updated": _store_now(),
             "status": status,
         }
-        r.db(PROGRESS_DB).table(PROGRESS_TABLE).insert(doc, conflict="replace").run(conn)
+        store.insert(PROGRESS_TABLE, doc, conflict="replace")
     except Exception as e:
         _log(f"Save scraper progress: {e}", "yellow")
 
@@ -2748,7 +2760,7 @@ def run_sec_edgar_supply_chain_scraper(
     Scrape 10-K filings for significant customer/supplier disclosures.
     Returns list of EdgeRecords (with confidence, source, revenue_pct metadata).
     Also writes to CSV if output_csv_path is set (columns: sup, cust, confidence, source, revenue_pct).
-    Progress is persisted in RethinkDB; resume on restart.
+    Progress is persisted in the store; resume on restart.
     If progress_callback is set, it is called every 50 companies (for ETA logging).
     If edges_callback is set, it is called every 50 companies with the new edges batch for that chunk (for incremental Neo4j merge).
     """

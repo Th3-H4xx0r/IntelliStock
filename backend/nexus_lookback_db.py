@@ -1,5 +1,5 @@
 """Helpers for resolving the resume window of the Nexus historic
-lookback against RethinkDB.
+lookback against the store.
 
 Lives outside ``broker.py`` so it can be imported by tests — broker.py
 is an entrypoint script that argparses and dispatches at module load
@@ -16,6 +16,10 @@ import os
 import time
 from datetime import datetime
 from typing import Iterable
+
+from db import schema as db_schema
+from db import store
+from db.store import P
 
 
 DB_NAME = "IntelliStock"
@@ -90,22 +94,19 @@ def _log(msg: str, color: str = "white") -> None:
             pass
 
 
-def _import_rethinkdb():
-    """Lazy-import the RethinkDB driver so this module is importable in
-    environments where the driver is absent (the tests inject a mock)."""
-    from rethinkdb import RethinkDB  # type: ignore
+class _StoreHandle:
+    """Truthy stand-in for the old driver connection (R26); the caller's
+    ``finally: conn.close()`` still runs against it."""
 
-    return RethinkDB()
+    def close(self, *_a, **_k):
+        return None
 
 
 def _connect():
-    """Open a fresh RethinkDB connection using the same env contract as
-    ``broker.get_conn``. Tests patch ``connect`` so the real driver is
-    never spoken to."""
-    r = _import_rethinkdb()
-    host = os.environ.get("RETHINKDB_HOST", "localhost")
-    port = int(os.environ.get("RETHINKDB_PORT", "28015"))
-    return r, r.connect(host=host, port=port, timeout=10)
+    """Return ``(store_handle, conn)``, keeping the original 2-tuple shape so
+    the caller's unpacking and its ``finally: conn.close()`` are unchanged.
+    Both halves are inert: the store takes its own pooled connection."""
+    return store, _StoreHandle()
 
 
 def ensure_nexus_trade_contexts_instance_id_index(r_module, conn) -> bool:
@@ -114,19 +115,20 @@ def ensure_nexus_trade_contexts_instance_id_index(r_module, conn) -> bool:
     can switch from a full ``filter()`` scan to ``get_all(...,
     index="instance_id")``.
 
-    ``r_module`` is the RethinkDB driver instance (broker has a module-
-    level one; tests pass a MagicMock).
+    R25: the index set is declared in db/schema.py -- GraphNexusTradeContexts
+    already carries indexed_fields=("instance_id", ...) -- so this is
+    ensure_table plus the module-level "already done" flag. index_wait is
+    gone: CREATE INDEX is synchronous.
 
-    Returns True when the index is ready (existing or freshly built),
-    False if creation/wait failed — callers should fall back to the
-    legacy filter scan in that case."""
+    ``r_module`` and ``conn`` are kept and ignored (R26).
+
+    Returns True when the index is ready, False if the DDL failed -- callers
+    fall back to the unindexed scan, which returns the same rows."""
     global _NEXUS_TRADE_CONTEXTS_INDEX_READY
     if _NEXUS_TRADE_CONTEXTS_INDEX_READY:
         return True
     try:
-        existing = set(
-            r_module.db(DB_NAME).table("GraphNexusTradeContexts").index_list().run(conn)
-        )
+        existing = set(store.index_list("GraphNexusTradeContexts"))
         if "instance_id" in existing:
             _NEXUS_TRADE_CONTEXTS_INDEX_READY = True
             return True
@@ -136,12 +138,7 @@ def ensure_nexus_trade_contexts_instance_id_index(r_module, conn) -> bool:
             "cyan",
         )
         _t0 = time.time()
-        r_module.db(DB_NAME).table("GraphNexusTradeContexts").index_create(
-            "instance_id"
-        ).run(conn)
-        r_module.db(DB_NAME).table("GraphNexusTradeContexts").index_wait(
-            "instance_id"
-        ).run(conn)
+        db_schema.ensure_table("GraphNexusTradeContexts")
         _log(
             f"Index 'instance_id' on GraphNexusTradeContexts ready in "
             f"{time.time() - _t0:.1f}s",
@@ -179,40 +176,25 @@ def load_nexus_processed_trade_context_dates(
     except Exception:
         return set()
     try:
-        tables = set(r_module.db(DB_NAME).table_list().run(conn))
+        tables = set(store.table_list())
         if "GraphNexusTradeContexts" not in tables:
             return set()
-        use_index = ensure_nexus_trade_contexts_instance_id_index(r_module, conn)
-        if use_index:
-            rows = list(
-                r_module.db(DB_NAME)
-                .table("GraphNexusTradeContexts")
-                .get_all(instance_id_value, index="instance_id")
-                .filter(lambda doc: r_module.expr(date_keys).contains(doc["date_key"]))
-                .pluck(
-                    "date_key",
-                    "pit_provenance",
-                    "pit_manifest_id",
-                    "pit_as_of",
-                )
-                .run(conn)
-            )
-        else:
-            rows = list(
-                r_module.db(DB_NAME)
-                .table("GraphNexusTradeContexts")
-                .filter(
-                    lambda doc: (doc["instance_id"] == instance_id_value)
-                    & r_module.expr(date_keys).contains(doc["date_key"])
-                )
-                .pluck(
-                    "date_key",
-                    "pit_provenance",
-                    "pit_manifest_id",
-                    "pit_as_of",
-                )
-                .run(conn)
-            )
+        # The ReQL fast path (get_all on the index) and the fallback
+        # (unindexed filter) selected the SAME rows; only the access path
+        # differed. In SQL they are one statement -- the planner picks the
+        # index -- so the branch collapses. ensure_index is still called for
+        # its DDL side effect and its log line.
+        ensure_nexus_trade_contexts_instance_id_index(r_module, conn)
+        rows = store.pluck(
+            store.run(store.filter(
+                "GraphNexusTradeContexts",
+                P.field("instance_id").eq(instance_id_value)
+                & P.field("date_key").is_in(date_keys))),
+            "date_key",
+            "pit_provenance",
+            "pit_manifest_id",
+            "pit_as_of",
+        )
         return {
             str(row.get("date_key") or "").strip()
             for row in rows

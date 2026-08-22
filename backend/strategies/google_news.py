@@ -6,7 +6,7 @@ Fetches news articles from Google News RSS feeds with:
 - Date range filtering (critical for backtest safety / no data leakage)
 - Scrapling for anti-bot HTTP fetching (Chrome TLS impersonation)
 - feedparser for RSS/XML parsing
-- RethinkDB caching by (date_key, keywords_hash)
+- Postgres caching by (date_key, keywords_hash)
 - Optional full article text extraction via Scrapling
 
 URL patterns adapted from the GNews project
@@ -423,7 +423,7 @@ def fetch_full_article(url: str) -> str | None:
         return None
 
 
-# ── Caching helpers (RethinkDB) ─────────────────────────────────────────────
+# ── Caching helpers (Postgres store) ────────────────────────────────────────
 
 _CACHE_TABLE = "GoogleNewsCache"
 _cache_table_ensured = False
@@ -434,24 +434,20 @@ def _ensure_cache_table(conn, db_name: str = "IntelliStock"):
     if _cache_table_ensured or conn is None:
         return
     try:
-        from rethinkdb import RethinkDB
-        r = RethinkDB()
-        tables = list(r.db(db_name).table_list().run(conn))
-        if _CACHE_TABLE not in tables:
-            r.db(db_name).table_create(_CACHE_TABLE).run(conn)
+        from db import schema as db_schema
+        db_schema.ensure_table(_CACHE_TABLE)          # R25
         _cache_table_ensured = True
     except Exception:
         pass
 
 
 def cache_articles(conn, date_key: str, articles: list[dict], keywords_hash: str, db_name: str = "IntelliStock"):
-    """Cache fetched articles to RethinkDB."""
+    """Cache fetched articles to the store."""
     if conn is None:
         return
     _ensure_cache_table(conn, db_name)
     try:
-        from rethinkdb import RethinkDB
-        r = RethinkDB()
+        from db import store
         # Serialize datetimes for storage
         serializable = []
         for a in articles:
@@ -466,21 +462,20 @@ def cache_articles(conn, date_key: str, articles: list[dict], keywords_hash: str
             "articles": serializable,
             "cached_at": datetime.now(timezone.utc).isoformat(),
         }
-        r.db(db_name).table(_CACHE_TABLE).insert(doc, conflict="replace").run(conn)
+        store.insert(_CACHE_TABLE, doc, conflict="replace")
     except Exception as e:
         _log(f"Cache write error: {e}", "yellow")
 
 
 def load_cached_articles(conn, date_key: str, keywords_hash: str, db_name: str = "IntelliStock") -> list[dict] | None:
-    """Load cached articles from RethinkDB. Returns None on cache miss."""
+    """Load cached articles from the store. Returns None on cache miss."""
     if conn is None:
         return None
     _ensure_cache_table(conn, db_name)
     try:
-        from rethinkdb import RethinkDB
-        r = RethinkDB()
+        from db import store
         doc_id = f"{date_key}_{keywords_hash}"
-        doc = r.db(db_name).table(_CACHE_TABLE).get(doc_id).run(conn)
+        doc = store.get(_CACHE_TABLE, doc_id)
         if doc and doc.get("articles"):
             # Deserialize datetimes
             articles = []

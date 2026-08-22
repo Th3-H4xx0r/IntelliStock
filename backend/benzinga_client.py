@@ -1,5 +1,5 @@
 """
-Benzinga REST API client with RethinkDB caching.
+Benzinga REST API client with Postgres caching.
 
 Data sources:
   1. Analyst Ratings          GET /api/v2/calendar/ratings
@@ -15,7 +15,7 @@ Data sources:
 
 Authentication: token query parameter
 Base URL: https://api.benzinga.com
-Cache: RethinkDB table "GraphNexusBenzingaCache", key="{type}_{date_key}[_{ticker_hash}]"
+Cache: table "GraphNexusBenzingaCache", key="{type}_{date_key}[_{ticker_hash}]"
 """
 
 from __future__ import annotations
@@ -30,13 +30,14 @@ from datetime import datetime, timedelta
 import requests
 
 try:
-    from rethinkdb import RethinkDB as _RDB
-    _r = _RDB()
+    from db import schema as _db_schema
+    from db import store as _store
     _BZ_DB_NAME = "IntelliStock"
     _BZ_CACHE_TABLE = "GraphNexusBenzingaCache"
     _BZ_DB_AVAILABLE = True
 except Exception:
-    _r = None
+    _store = None
+    _db_schema = None
     _BZ_DB_AVAILABLE = False
 
 try:
@@ -66,7 +67,7 @@ _BZ_PERSISTED_STATE_LOADED = False
 
 # Backtest mode: when True, skip the daily budget check.
 # During backtests the entire run happens on the same real day, so the budget
-# counter exhausts after the first bulk fetch (~200 calls).  RethinkDB cache
+# counter exhausts after the first bulk fetch (~200 calls).  The store cache
 # prevents duplicate HTTP calls, so bypassing the counter is safe.
 _BZ_BACKTEST_MODE = False
 _BZ_401_ALERTED = False  # one-shot Discord alert per process on Benzinga 401
@@ -106,31 +107,37 @@ def set_benzinga_backtest_mode(enabled: bool):
     _BZ_BACKTEST_MODE = enabled
 
 # ---------------------------------------------------------------------------
-# RethinkDB cache helpers
+# Cache helpers
 # ---------------------------------------------------------------------------
 
 _bz_conn = None
 _bz_table_ensured = False
 
 
+class _StoreHandle:
+    """Truthy stand-in for the old driver connection (R26). Every cache read
+    and write below is gated on ``if conn is None``, which is what turns
+    caching off when the database is unreachable."""
+
+    def close(self, *_a, **_k):
+        return None
+
+
 def _get_bz_conn(reuse: bool = True):
     global _bz_conn, _bz_table_ensured
-    if not _BZ_DB_AVAILABLE or _r is None:
+    if not _BZ_DB_AVAILABLE:
         return None
-    rethink_host = os.environ.get("RETHINKDB_HOST", "localhost")
-    rethink_port = int(os.environ.get("RETHINKDB_PORT", "28015"))
     if reuse and _bz_conn is not None:
-        try:
-            _r.db_list().run(_bz_conn)
-            return _bz_conn
-        except Exception:
-            _bz_conn = None
+        return _bz_conn
     try:
-        _bz_conn = _r.connect(host=rethink_host, port=rethink_port)
-        _ensure_bz_table(_bz_conn)
+        handle = _StoreHandle()
+        _ensure_bz_table(handle)
+        if not _bz_table_ensured:
+            return None
+        _bz_conn = handle
         return _bz_conn
     except Exception as e:
-        _log(f"RethinkDB unavailable for cache: {e}", "yellow")
+        _log(f"Store unavailable for cache: {e}", "yellow")
         return None
 
 
@@ -139,12 +146,7 @@ def _ensure_bz_table(conn):
     if conn is None or _bz_table_ensured:
         return
     try:
-        dbs = list(_r.db_list().run(conn))
-        if _BZ_DB_NAME not in dbs:
-            _r.db_create(_BZ_DB_NAME).run(conn)
-        tables = list(_r.db(_BZ_DB_NAME).table_list().run(conn))
-        if _BZ_CACHE_TABLE not in tables:
-            _r.db(_BZ_DB_NAME).table_create(_BZ_CACHE_TABLE).run(conn)
+        _db_schema.ensure_table(_BZ_CACHE_TABLE)      # R25
         _bz_table_ensured = True
     except Exception as e:
         _log(f"Failed to ensure Benzinga cache table: {e}", "yellow")
@@ -163,7 +165,7 @@ def _cache_get(conn, key: str, max_age_hours: int = 12) -> list | None:
     if conn is None:
         return None
     try:
-        doc = _r.db(_BZ_DB_NAME).table(_BZ_CACHE_TABLE).get(key).run(conn)
+        doc = _store.get(_BZ_CACHE_TABLE, key)
         if not doc:
             return None
         cached_at = doc.get("cached_at")
@@ -184,10 +186,11 @@ def _cache_set(conn, key: str, data: list) -> None:
     if conn is None:
         return
     try:
-        _r.db(_BZ_DB_NAME).table(_BZ_CACHE_TABLE).insert(
+        _store.insert(
+            _BZ_CACHE_TABLE,
             {"id": key, "data": data, "cached_at": datetime.utcnow().isoformat()},
             conflict="replace",
-        ).run(conn)
+        )
     except Exception as e:
         _log(f"Cache write failed for {key}: {e}", "yellow")
 
@@ -198,7 +201,7 @@ def _cache_set(conn, key: str, data: list) -> None:
 
 
 def _load_persisted_state():
-    """Load unavailable endpoints and daily call count from RethinkDB on first use."""
+    """Load unavailable endpoints and daily call count from the store on first use."""
     global _BZ_PERSISTED_STATE_LOADED
     if _BZ_PERSISTED_STATE_LOADED:
         return
@@ -230,7 +233,7 @@ def _load_persisted_state():
 
 
 def _persist_unavailable():
-    """Save unavailable endpoints to RethinkDB cache."""
+    """Save unavailable endpoints to the store cache."""
     conn = _get_bz_conn()
     if conn and _BZ_UNAVAILABLE_ENDPOINTS:
         data = [{"key": k, "status": v} for k, v in _BZ_UNAVAILABLE_ENDPOINTS.items()]
@@ -238,7 +241,7 @@ def _persist_unavailable():
 
 
 def _track_api_call():
-    """Increment daily call counter and persist to RethinkDB."""
+    """Increment daily call counter and persist to the store."""
     today = datetime.utcnow().strftime("%Y-%m-%d")
     _BZ_DAILY_CALLS[today] = _BZ_DAILY_CALLS.get(today, 0) + 1
     count = _BZ_DAILY_CALLS[today]
@@ -1002,7 +1005,7 @@ def fetch_benzinga_bulk(
 
     For long ranges (>35 days), automatically splits into ~30-day chunks so
     dense sources (e.g. broad ratings) don't hit the per-query result cap.
-    Each chunk is cached individually in RethinkDB; the combined result is
+    Each chunk is cached individually; the combined result is
     also cached under the full-range key.
 
     If any chunk returns exactly max_results records (likely truncated), the
@@ -1091,7 +1094,7 @@ def fetch_benzinga_data(
     cache_hours: int = 12,
 ) -> list[dict]:
     """
-    Fetch Benzinga data for `data_type` with RethinkDB caching.
+    Fetch Benzinga data for `data_type` with store-backed caching.
 
     data_type: one of "ratings", "insights", "insider_trades", "gov_trades",
                "ma", "ipos", "splits", "earnings", "company_actions",

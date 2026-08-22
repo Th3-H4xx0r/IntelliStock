@@ -271,7 +271,7 @@ def _startup_init_telemetry():
     """Wire the LLM telemetry sink into the FastAPI lifecycle.
 
     The sink runs a background flusher that batches LLMUsage rows to
-    RethinkDB. Pricing comes from backend/llm_pricing.yaml with optional
+    Postgres. Pricing comes from backend/llm_pricing.yaml with optional
     per-model overrides via the Models table (see Task 10). The sink is
     idempotent — calling configure() twice just re-applies the last set
     of parameters; the flusher thread is reused.
@@ -280,17 +280,13 @@ def _startup_init_telemetry():
     log = logging.getLogger("uvicorn.error")
     try:
         import llm_telemetry
-        from interactive_utils import (
-            r as _r_iu,
-            RETHINKDB_HOST as _RDB_HOST,
-            RETHINKDB_PORT as _RDB_PORT,
-        )
 
         def _conn_factory():
-            # Fresh, short-lived connection per flush attempt. Mirrors the
-            # interactive_utils.get_conn pattern with the same 10s socket
-            # timeout to avoid half-open hangs.
-            return _r_iu.connect(host=_RDB_HOST, port=_RDB_PORT, timeout=10)
+            # R26: the store takes its own pooled connection per operation.
+            # The factory stays because llm_telemetry's "not configured for DB
+            # writes" gate is `conn_factory is None or r_module is None`, and
+            # the tests that must NOT write configure neither.
+            return None
 
         _override_pm_cache = {}  # (provider, model) -> (ts, override|None)
 
@@ -314,12 +310,9 @@ def _startup_init_telemetry():
                 out = {k: row.get(k) for k in keys if row.get(k) is not None}
                 return out or None
 
-            conn = None
             try:
-                conn = _conn_factory()
-                models = _r_iu.db("IntelliStock").table("Models")
                 if model_id:
-                    res = _extract(models.get(model_id).run(conn))
+                    res = _extract(db_store.get("Models", model_id))
                     if res is not None:
                         return res
                 if provider and model:
@@ -327,7 +320,8 @@ def _startup_init_telemetry():
                     hit = _override_pm_cache.get(ck)
                     if hit and (time.time() - hit[0]) < 60.0:
                         return hit[1]
-                    matches = list(models.filter({"provider": provider, "model": model}).run(conn))
+                    matches = db_store.run(db_store.filter(
+                        "Models", {"provider": provider, "model": model}))
                     chosen = next((m for m in matches if _extract(m) is not None), None)
                     res = _extract(chosen)
                     _override_pm_cache[ck] = (time.time(), res)
@@ -335,12 +329,6 @@ def _startup_init_telemetry():
                 return None
             except Exception:
                 return None
-            finally:
-                if conn is not None:
-                    try:
-                        conn.close()
-                    except Exception:
-                        pass
 
         pricing_path = os.path.join(_backend_dir, "llm_pricing.yaml")
         llm_telemetry.configure(
@@ -349,20 +337,14 @@ def _startup_init_telemetry():
             flush_interval_s=5.0,
             max_buffer=50,
             pricing_yaml_path=pricing_path,
-            r_module=_r_iu,
+            # `r_module` is now the STORE handle the flusher writes through.
+            r_module=db_store,
             db_name="IntelliStock",
             models_override_lookup=_models_override_lookup,
         )
         try:
             from llm_telemetry import ensure_llm_usage_tables
-            setup_conn = _conn_factory()
-            try:
-                ensure_llm_usage_tables(conn=setup_conn, r=_r_iu, db_name="IntelliStock")
-            finally:
-                try:
-                    setup_conn.close()
-                except Exception:
-                    pass
+            ensure_llm_usage_tables(conn=None, r=db_store, db_name="IntelliStock")
         except Exception as e:
             log.warning("llm telemetry table setup failed: %s", e)
     except Exception as e:
@@ -5078,12 +5060,9 @@ def _startup_kalshi_backtest_worker():
     _wlog = _logging.getLogger("uvicorn.error")
     try:
         from kalshi.backtest_worker import start_worker
-        from interactive_utils import r as _r_iu, RETHINKDB_HOST as _H, RETHINKDB_PORT as _P
 
-        def _cf():
-            return _r_iu.connect(host=_H, port=_P, timeout=10)
-
-        start_worker(_cf)
+        # R27: the changefeed runner's get_conn is pool.listen_connection.
+        start_worker(db_pool.listen_connection)
     except Exception:
         _wlog.exception("kalshi backtest worker failed to start")
 

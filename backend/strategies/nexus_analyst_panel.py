@@ -1,7 +1,7 @@
 """
 Adversarial Analyst Panel for the Nexus strategy.
 Round 1: Independent parallel analysis. Round 2: Debate with inter-agent views.
-Round 3: Moderator synthesis. Accuracy tracked in RethinkDB; weights auto-calibrate.
+Round 3: Moderator synthesis. Accuracy tracked in Postgres; weights auto-calibrate.
 """
 from __future__ import annotations
 import math, os, sys, signal, threading
@@ -13,14 +13,18 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 def _rdb_run_safe(query, conn, timeout_sec: float = 5.0):
-    """Run a RethinkDB query with a hard wall-clock timeout to prevent hangs on half-open connections.
-    Returns the result on success, raises TimeoutError or the original exception on failure.
-    On timeout, force-discards the panel connection so the next call creates a fresh one."""
+    """Run a store operation with a hard wall-clock timeout so a wedged
+    connection cannot hang a panel worker.
+
+    ``query`` is now a zero-argument CALLABLE rather than a ReQL query object
+    -- the store has no lazily-runnable query handle. Returns the result on
+    success, raises TimeoutError or the original exception on failure. On
+    timeout, force-discards the panel handle so the next call makes a fresh one."""
     result_box: list = []
     error_box: list = []
     def _run():
         try:
-            result_box.append(query.run(conn))
+            result_box.append(query())
         except Exception as e:
             error_box.append(e)
     t = threading.Thread(target=_run, daemon=True)
@@ -31,7 +35,7 @@ def _rdb_run_safe(query, conn, timeout_sec: float = 5.0):
         # Force-discard so next _get_panel_db_conn() creates a fresh one.
         global _panel_db_conn
         _panel_db_conn = None
-        raise TimeoutError(f"RethinkDB query timed out after {timeout_sec}s")
+        raise TimeoutError(f"store query timed out after {timeout_sec}s")
     if error_box:
         raise error_box[0]
     return result_box[0] if result_box else None
@@ -108,10 +112,13 @@ except ImportError:
     except ImportError:
         def _format_stage_elapsed(s: float) -> str: return f"{s*1000:.0f}ms" if s < 1 else f"{s:.2f}s"  # type: ignore[misc]
 try:
-    from rethinkdb import RethinkDB
-    _r = RethinkDB()
+    from db import schema as _db_schema
+    from db import store as _r          # name kept: ~20 `if _r is None` guards
+    from db.store import P as _P
 except Exception:
     _r = None
+    _db_schema = None
+    _P = None
 
 # --- Constants ---------------------------------------------------------------
 PANEL_TABLE = "GraphNexusAnalystPanel"
@@ -186,39 +193,42 @@ class _ModeratorResponse(BaseModel):
     stock_ratings: list[_StockPrediction] = Field(default_factory=list); agreements: list[str] = Field(default_factory=list)
     disagreements: list[str] = Field(default_factory=list); risk_warnings: list[str] = Field(default_factory=list)
 
-# --- RethinkDB helpers -------------------------------------------------------
+# --- Store helpers -----------------------------------------------------------
 def _ensure_analyst_panel_table(conn):
     global _analyst_panel_table_ensured
     if conn is None or _r is None or _analyst_panel_table_ensured: return
     try:
-        if PANEL_TABLE not in list(_rdb_run_safe(_r.db(DB_NAME).table_list(), conn, 5)): _rdb_run_safe(_r.db(DB_NAME).table_create(PANEL_TABLE), conn, 5)
+        _rdb_run_safe(lambda: _db_schema.ensure_table(PANEL_TABLE), conn, 5)   # R25
         _analyst_panel_table_ensured = True
     except Exception as e: _log(f"Could not ensure analyst panel table: {e}", "yellow")
 
 _panel_db_conn = None
 _panel_db_lock = threading.Lock()
 
+class _StoreHandle:
+    """Truthy stand-in for the old dedicated panel connection (R26). Every
+    panel read and write is gated on ``if conn is None``; the store takes its
+    own pooled connection per operation, and the pool is already thread-safe,
+    so there is no longer a connection to hand between workers."""
+
+    def is_open(self):
+        return True
+
+    def close(self, *_a, **_k):
+        return None
+
+
 def _get_panel_db_conn():
-    """Get a DEDICATED RethinkDB connection for the panel — separate from the main strategy's.
-    Thread-safe: uses a lock to prevent race conditions from ThreadPoolExecutor workers."""
+    """Get the panel's store handle. Thread-safe: the lock is kept so the
+    force-discard on timeout in _rdb_run_safe stays race-free."""
     global _panel_db_conn
     with _panel_db_lock:
         if _panel_db_conn is not None:
-            try:
-                if _panel_db_conn.is_open():
-                    return _panel_db_conn
-            except Exception:
-                pass
-            _panel_db_conn = None
+            return _panel_db_conn
         if _r is None:
             return None
-        try:
-            host = os.environ.get("RETHINKDB_HOST", "localhost")
-            port = int(os.environ.get("RETHINKDB_PORT", 28015))
-            _panel_db_conn = _r.connect(host=host, port=port, timeout=5)
-            return _panel_db_conn
-        except Exception:
-            return None
+        _panel_db_conn = _StoreHandle()
+        return _panel_db_conn
 
 def _save_round_results(conn, instance_id, date_key, agent_role, round1=None, round2=None,
                         prediction_prices: dict[str, float] | None = None):
@@ -233,7 +243,7 @@ def _save_round_results(conn, instance_id, date_key, agent_role, round1=None, ro
     if round1 is not None: doc["round1"] = round1
     if round2 is not None: doc["round2"] = round2
     if prediction_prices: doc["_prediction_prices"] = prediction_prices
-    try: _rdb_run_safe(_r.db(DB_NAME).table(PANEL_TABLE).insert(doc, conflict="update"), conn, 5)
+    try: _rdb_run_safe(lambda: _r.insert(PANEL_TABLE, doc, conflict="update"), conn, 5)
     except Exception as e: _log(f"Failed to save panel result for {agent_role}: {e}", "yellow")
 def _load_agent_memory(conn, instance_id: str, agent_role: str, date_key: str,
                        memory_days: int = 14) -> str:
@@ -246,10 +256,13 @@ def _load_agent_memory(conn, instance_id: str, agent_role: str, date_key: str,
     _ensure_analyst_panel_table(conn)
     try:
         cutoff = (datetime.strptime(date_key, "%Y-%m-%d") - timedelta(days=memory_days)).strftime("%Y-%m-%d")
-        docs = list(_rdb_run_safe(_r.db(DB_NAME).table(PANEL_TABLE).filter(
-            lambda doc: (doc["instance_id"] == instance_id) & (doc["agent_role"] == agent_role)
-            & (doc["date_key"].ge(cutoff)) & (doc["date_key"].lt(date_key))
-        ).order_by(_r.desc("date_key")).limit(5), conn, 5))
+        _sel = _r.filter(PANEL_TABLE,
+                         _P.field("instance_id").eq(instance_id)
+                         & _P.field("agent_role").eq(agent_role)
+                         & _P.field("date_key").ge(cutoff)
+                         & _P.field("date_key").lt(date_key))
+        _sel = _r.limit(_r.order_by(_sel, fields=(_r.desc("date_key"),)), 5)
+        docs = list(_rdb_run_safe(lambda: _r.run(_sel), conn, 5))
     except Exception:
         return ""
     if not docs:
@@ -277,9 +290,14 @@ def fill_analyst_panel_outcomes(conn, instance_id: str, date_key: str,
     if conn is None: return
     _ensure_analyst_panel_table(conn)
     try:
-        docs = list(_rdb_run_safe(_r.db(DB_NAME).table(PANEL_TABLE).filter(
-            lambda doc: (doc["instance_id"] == instance_id) & (~doc["outcome_filled"]) & (doc["date_key"].lt(date_key))
-        ).limit(200), conn, 5))
+        # outcome_filled is always written (False at insert), so the ReQL
+        # `~doc["outcome_filled"]` is an equality against the text 'false'
+        # that doc->>'outcome_filled' renders.
+        _sel = _r.filter(PANEL_TABLE,
+                         _P.field("instance_id").eq(instance_id)
+                         & _P.field("outcome_filled").eq("false")
+                         & _P.field("date_key").lt(date_key))
+        docs = list(_rdb_run_safe(lambda: _r.run(_r.limit(_sel, 200)), conn, 5))
     except Exception:
         return
     n_filled = 0
@@ -301,7 +319,9 @@ def fill_analyst_panel_outcomes(conn, instance_id: str, date_key: str,
             accuracy[tkr] = {"rating": rating, "correct": correct, "price": price_now, "pred_price": pred_price}
         if accuracy:
             try:
-                _rdb_run_safe(_r.db(DB_NAME).table(PANEL_TABLE).get(doc["id"]).update({"outcome_filled": True, "outcome_accuracy": accuracy}), conn, 5)
+                _rdb_run_safe(lambda d=doc, a=accuracy: _r.update(
+                    PANEL_TABLE, d["id"],
+                    {"outcome_filled": True, "outcome_accuracy": a}), conn, 5)
                 n_filled += 1
             except Exception:
                 pass
@@ -322,7 +342,13 @@ def _compute_agent_weights(conn, instance_id: str, date_key: str, agents: list[d
     raw: dict[str, float] = {}
     for agent in agents:
         role = agent["role"]
-        try: docs = list(_rdb_run_safe(_r.db(DB_NAME).table(PANEL_TABLE).filter(lambda doc, r=role: (doc["instance_id"] == instance_id) & (doc["agent_role"] == r) & (doc["outcome_filled"]) & (doc["date_key"].ge(cutoff))).limit(30), conn, 5))
+        try:
+            _sel = _r.filter(PANEL_TABLE,
+                             _P.field("instance_id").eq(instance_id)
+                             & _P.field("agent_role").eq(role)
+                             & _P.field("outcome_filled").eq("true")
+                             & _P.field("date_key").ge(cutoff))
+            docs = list(_rdb_run_safe(lambda s=_sel: _r.run(_r.limit(s, 30)), conn, 5))
         except Exception: docs = []
         if not docs: raw[role] = 0.0; continue
         c = sum(1 for d in docs for v in (d.get("outcome_accuracy") or {}).values() if v.get("correct"))

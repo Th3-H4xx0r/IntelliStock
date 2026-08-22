@@ -67,55 +67,58 @@ except Exception:
     def llm_call_context(**_kwargs):
         yield
 
-# ── RethinkDB persistent cache ──────────────────────────────────────────────
+# ── Postgres persistent cache ───────────────────────────────────────────────
 try:
-    from rethinkdb import RethinkDB
-    r = RethinkDB()
+    from db import schema as db_schema
+    from db import store
+    from db.store import P
     DB_NAME = 'IntelliStock'
-    RETHINKDB_HOST = os.environ.get('RETHINKDB_HOST', 'localhost')
-    RETHINKDB_PORT = int(os.environ.get('RETHINKDB_PORT', '28015'))
     EARNINGS_CACHE_TABLE = 'EarningsLLMCache'
     _db_available = True
 except Exception:
-    r = None
+    store = None
     _db_available = False
-    _log("RethinkDB not available; persistent LLM caching will be disabled", "yellow")
+    _log("Postgres store not available; persistent LLM caching will be disabled",
+         "yellow")
 
 _earnings_db_conn = None
 _cache_table_ensured = False
 
 
+class _StoreHandle:
+    """Truthy stand-in for the old driver connection (R26).
+
+    Every read/write below is gated on ``if conn is None``; the store takes
+    its own pooled connection per operation, so there is nothing to hold --
+    but dropping the parameter would switch all of those guards on for good.
+    """
+
+    def close(self, *_a, **_k):
+        return None
+
+    def is_open(self):
+        return True
+
+
 def _get_db_conn(reuse: bool = True):
-    """Get database connection for persistent caching. Reuses single connection per process."""
+    """Get a cache handle. Kept as a factory so the ``if conn is None`` guards
+    at every call site still mean "caching is off"."""
     global _earnings_db_conn
-    if not _db_available or r is None:
+    if not _db_available or store is None:
         return None
     if reuse and _earnings_db_conn is not None:
-        try:
-            r.db_list().run(_earnings_db_conn)
-            return _earnings_db_conn
-        except Exception:
-            _earnings_db_conn = None
-    try:
-        _earnings_db_conn = r.connect(host=RETHINKDB_HOST, port=RETHINKDB_PORT)
         return _earnings_db_conn
-    except Exception as e:
-        _log(f"Could not connect to DB for caching: {e}", "yellow")
-        return None
+    _earnings_db_conn = _StoreHandle()
+    return _earnings_db_conn
 
 
 def _ensure_cache_table(conn):
-    """Ensure EarningsLLMCache table exists. Called once per process."""
+    """Ensure EarningsLLMCache table exists. Called once per process (R25)."""
     global _cache_table_ensured
     if conn is None or _cache_table_ensured:
         return
     try:
-        dbs = list(r.db_list().run(conn))
-        if DB_NAME not in dbs:
-            r.db_create(DB_NAME).run(conn)
-        tables = list(r.db(DB_NAME).table_list().run(conn))
-        if EARNINGS_CACHE_TABLE not in tables:
-            r.db(DB_NAME).table_create(EARNINGS_CACHE_TABLE).run(conn)
+        db_schema.ensure_table(EARNINGS_CACHE_TABLE)
         _cache_table_ensured = True
     except Exception as e:
         _log(f"Could not ensure cache table: {e}", "yellow")
@@ -133,7 +136,7 @@ def _db_cache_key(
     research_hash: str = "",
     market_ctx_hash: str = "",
 ) -> str:
-    """Create a deterministic cache key for RethinkDB.
+    """Create a deterministic cache key for the store.
     Includes model and all LLM-relevant inputs so stale decisions are not reused."""
     raw = (
         f"{_EARNINGS_DB_KEY_SCHEMA_VERSION}|{provider}|{model}|{symbol}|{earn_date}|{headlines_hash}|{eps_str}|"
@@ -143,13 +146,13 @@ def _db_cache_key(
 
 
 def _db_get_cached_decisions(conn, cache_keys: list[str]) -> dict[str, dict]:
-    """Batch-fetch cached LLM decisions from RethinkDB."""
+    """Batch-fetch cached LLM decisions from the store."""
     if conn is None or not cache_keys:
         return {}
     try:
         _ensure_cache_table(conn)
         results = {}
-        cursor = r.db(DB_NAME).table(EARNINGS_CACHE_TABLE).get_all(*cache_keys).run(conn)
+        cursor = store.get_all(EARNINGS_CACHE_TABLE, *cache_keys)
         for doc in cursor:
             if doc and 'id' in doc:
                 results[doc['id']] = {
@@ -174,15 +177,18 @@ def _db_get_cached_decisions_by_symbol_earn(
         return {}
     try:
         _ensure_cache_table(conn)
-        # RethinkDB: filter by provider, model, and (symbol, earn_date) in sym_earn_list (use lambda so no r.row in nested query)
-        sym_earn_expr = r.expr([list(k) for k in sym_earn_list])
-        cursor = r.db(DB_NAME).table(EARNINGS_CACHE_TABLE).filter(
-            lambda row: r.and_(
-                row["provider"].eq(provider),
-                row["model"].eq(model),
-                sym_earn_expr.contains([row["symbol"], row["earn_date"]]),
-            )
-        ).run(conn)
+        # R23: the ReQL r.expr(pairs).contains([symbol, earn_date]) was a
+        # membership test over PAIRS, which SQL's = ANY() cannot express. The
+        # store narrows on the symbol set (one indexable column) and the exact
+        # pair test happens in the loop below, which already re-derives
+        # (symbol, earn_date) per document.
+        wanted = {((s or "").strip().upper(), (d or "")[:10])
+                  for s, d in sym_earn_list}
+        cursor = store.run(store.filter(
+            EARNINGS_CACHE_TABLE,
+            P.field("provider").eq(provider)
+            & P.field("model").eq(model)
+            & P.field("symbol").is_in(sorted({s for s, _ in wanted}))))
         # Build (sym, earn_date) -> best doc (latest cached_at)
         by_key: dict[tuple[str, str], tuple[str, dict]] = {}  # (sym, earn_date) -> (cached_at, decision)
         for doc in cursor:
@@ -193,6 +199,8 @@ def _db_get_cached_decisions_by_symbol_earn(
             if not sym or not earn_date:
                 continue
             key = (sym, earn_date)
+            if key not in wanted:
+                continue
             decision = {
                 "sentiment": doc.get("sentiment", 0),
                 "allocation_pct": doc.get("allocation_pct", 0.0),
@@ -210,13 +218,13 @@ def _db_get_cached_decisions_by_symbol_earn(
 
 
 def _db_save_cached_decisions(conn, entries: list[dict]):
-    """Batch-save LLM decisions to RethinkDB. Each entry: {id, symbol, provider, model, ...}."""
+    """Batch-save LLM decisions to the store. Each entry: {id, symbol, provider, model, ...}."""
     if conn is None or not entries:
         return
     try:
         _ensure_cache_table(conn)
-        r.db(DB_NAME).table(EARNINGS_CACHE_TABLE).insert(entries, conflict='replace').run(conn)
-        _log(f"DB cache: saved {len(entries)} LLM decisions to RethinkDB", "cyan")
+        store.insert(EARNINGS_CACHE_TABLE, entries, conflict='replace')
+        _log(f"DB cache: saved {len(entries)} LLM decisions to the store", "cyan")
     except Exception as e:
         _log(f"DB cache save error: {e}", "yellow")
 
@@ -1684,7 +1692,7 @@ class Earnings:
         with_headlines = sum(1 for x in symbols_with_news if (x[2] or "").strip() and x[2] != "No recent headlines.")
         _log(f"News gathered: {len(symbols_with_news)} symbols ({with_headlines} with headlines)", "cyan")
 
-        # ── LLM sentiment: RethinkDB persistent cache → in-memory cache → LLM call ──
+        # ── LLM sentiment: persistent store cache → in-memory cache → LLM call ──
         # 1) Build cache keys for all symbols
         item_cache_keys: list[tuple[tuple[str, str, str, str], str]] = []  # (item, db_cache_key)
         for item in symbols_with_news:
@@ -1722,7 +1730,7 @@ class Earnings:
             else:
                 mem_misses.append((item, db_key))
 
-        # 3) Check RethinkDB persistent cache for memory-cache misses
+        # 3) Check the persistent store cache for memory-cache misses
         db_conn = _get_db_conn()
         db_misses: list[tuple[tuple[str, str, str, str], str]] = []  # items not in DB either
 
@@ -1739,7 +1747,7 @@ class Earnings:
                 else:
                     db_misses.append((item, db_key))
             if db_hit_count:
-                _log(f"LLM cache: {len(llm_result) - len(db_misses)} from cache ({db_hit_count} from RethinkDB), {len(db_misses)} to fetch from LLM", "cyan")
+                _log(f"LLM cache: {len(llm_result) - len(db_misses)} from cache ({db_hit_count} from the store), {len(db_misses)} to fetch from LLM", "cyan")
         else:
             db_misses = mem_misses
 
@@ -1773,7 +1781,7 @@ class Earnings:
                 , provider_config=llm_provider_config
                 )
 
-            # Save fresh results to both in-memory and RethinkDB
+            # Save fresh results to both in-memory and the store
             db_entries_to_save: list[dict] = []
             for item, db_key in db_misses:
                 sym = item[0]
@@ -1789,7 +1797,7 @@ class Earnings:
                     }
                     llm_result[sym] = fresh[sym]
                     llm_cache[db_key] = dict(decision)
-                    # Prepare RethinkDB entry
+                    # Prepare the store entry
                     db_entries_to_save.append({
                         "id": db_key,
                         "symbol": sym.upper(),
@@ -1804,7 +1812,7 @@ class Earnings:
                         "avoid_reason": decision["avoid_reason"],
                         "cached_at": datetime.utcnow().isoformat() + "Z",
                     })
-            # Batch-save to RethinkDB
+            # Batch-save to the store
             if db_entries_to_save and db_conn is not None:
                 _db_save_cached_decisions(db_conn, db_entries_to_save)
 

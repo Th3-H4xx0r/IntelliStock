@@ -32,9 +32,14 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from db import schema as db_schema
+from db import store
 
 _DB_NAME = "IntelliStock"
 _AUDIT_TABLE = "LiveBootAudit"
+
+# ``r`` and ``conn`` are kept on every signature (R26) -- broker.py and
+# backend/tests/test_live_boot_setup.py both pass them -- and ignored.
 
 
 def is_first_clean_room_boot(r: Any, conn: Any, instance_id: str) -> bool:
@@ -51,20 +56,16 @@ def is_first_clean_room_boot(r: Any, conn: Any, instance_id: str) -> bool:
     re-runs the cleanup next boot, which is harmless (the wipe is idempotent and
     preserves the origin=backtest snapshot).
 
-    Best-effort: any RethinkDB error returns False (default to NOT re-running
+    Best-effort: any store error returns False (default to NOT re-running
     cleanup) so a transient DB hiccup doesn't trigger an unnecessary wipe.
     """
     if not instance_id:
         return False
     try:
-        tables = set(r.db(_DB_NAME).table_list().run(conn))
-        if _AUDIT_TABLE not in tables:
+        if _AUDIT_TABLE not in set(store.table_list()):
             return True
-        rows = list(
-            r.db(_DB_NAME).table(_AUDIT_TABLE)
-            .filter(lambda row: row["instance_id"] == str(instance_id))
-            .run(conn)
-        )
+        rows = store.run(store.filter(
+            _AUDIT_TABLE, {"instance_id": str(instance_id)}))
         clean_room_rows = [x for x in rows if (x or {}).get("mode") == "clean_room"]
         return len(clean_room_rows) == 0
     except Exception:
@@ -94,10 +95,8 @@ def write_clean_room_cleanup_marker(r: Any, conn: Any, instance_id: str) -> bool
         return False
     try:
         from datetime import datetime, timezone
-        db = r.db(_DB_NAME)
         try:
-            if _AUDIT_TABLE not in set(db.table_list().run(conn)):
-                db.table_create(_AUDIT_TABLE, primary_key="id").run(conn)
+            db_schema.ensure_table(_AUDIT_TABLE)      # R25
         except Exception:
             # Likely a create race with another worker; fall through to insert.
             pass
@@ -108,7 +107,7 @@ def write_clean_room_cleanup_marker(r: Any, conn: Any, instance_id: str) -> bool
             "marker": "cleanup-done",
             "boot_at_utc": datetime.now(timezone.utc).isoformat(),
         }
-        db.table(_AUDIT_TABLE).insert(row, conflict="replace").run(conn)
+        store.insert(_AUDIT_TABLE, row, conflict="replace")
         return True
     except Exception:
         return False
@@ -213,7 +212,7 @@ def run_first_clean_room_boot_cleanup(
     Preserves ``origin="backtest"`` NexusStrategyCache snapshots — same
     filter the CLI script uses, identical safety semantics.
 
-    NEVER raises on RethinkDB failure — returns a dict with ``error`` set
+    NEVER raises on a store failure — returns a dict with ``error`` set
     so the broker daemon can log and continue (the cleanup is a hygiene
     step, not a safety-critical operation; the migration detector + clean-
     room WAL classifier still cover the actual safety surface).
