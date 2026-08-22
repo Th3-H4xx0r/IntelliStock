@@ -27,5 +27,20 @@ paper remains the only source for: real broker execution (fills/latency/halts), 
 `paper_observation` promotion gate, and PIT-certified claims (research mode has lookahead).
 Paper keeps running in parallel either way — but stops being the bottleneck for lever decisions.
 
-## Result (appended after the runs)
-_pending_
+## Result (warmup bt 491889 / arm A bt 198193 / arm B bt 137269)
+**PRIMARY: PASS — the warm protocol is byte-identical across arms.** Both arms restored the same
+snapshot (digest f834ac925a6b4f86…, 15,421 rows, 337 steering rows attested), verdict
+IDENTICAL_WARM, **100% traded-name overlap (AGMI/GDX/GLD/PSLV/SPY), delta +0.00pp.** Warm pairs
+are now as trustworthy as cold ones — and because both arms share one pool, chop levers become
+A/B-able for the first time.
+
+**SECONDARY: FAIL, informatively.** The clean warm pool does NOT produce the mover-class book:
+arm A returned +3.09% (vs cold +10.16%, SPY +16.66%) holding four metals ETFs bought on tick 1
+via the trend-expansion lane (the warmup regime's gold trend, sentiment saturated at +1.000),
+while AAOI/AEHR/AXTI were discovered AND rank-band blocked all window. Conclusions: (a) the
+contaminated-warm +20.53% was lookahead; (b) the honest bull-window gap is the trend-expansion
+lane front-running the book with last-regime ETFs while the rank band blocks the movers — a
+code-level fix, now measurable under this protocol.
+
+Cost sheet: warmup ~2.1h, snapshot 15,421 rows exported/restored with digest verification,
+arms ~1.6h each.
