@@ -39,25 +39,17 @@ def sle():
 
 
 class _FakeReQL:
-    """Stands in for the module-level ReQL handle.
+    """Stands in for the module-level STORE handle.
 
-    EngineControl is the one table this engine has NOT been ported off, so its
-    read still goes through the driver and still fails the driver's way.
+    EngineControl is an ordinary registry table now, so the control read goes
+    through ``db.store.get`` -- but the failure MODES this pins are unchanged:
+    a transient connection error must raise, anything else must fail closed.
     """
 
     def __init__(self, exc=None, doc=None):
         self._exc, self._doc = exc, doc
 
-    def db(self, *a, **k):
-        return self
-
-    def table(self, *a, **k):
-        return self
-
     def get(self, *a, **k):
-        return self
-
-    def run(self, conn):
         if self._exc is not None:
             raise self._exc
         return self._doc
@@ -79,7 +71,7 @@ def test_a_transient_control_read_failure_raises_instead_of_going_inert(
     Returning False here is indistinguishable from `running: False`, so a
     single blip used to disable completion processing permanently.
     """
-    monkeypatch.setattr(sle, "r",
+    monkeypatch.setattr(sle, "dbstore",
                         _FakeReQL(ConnectionResetError("connection is closed")))
     with pytest.raises(sle.ControlPlaneUnreadable):
         sle._should_run(object())
@@ -94,7 +86,7 @@ def test_a_non_transient_control_error_still_fails_closed_but_is_logged(
     What changed is only that it is no longer SILENT -- and that it does not
     trigger a reconnect storm for what is really a programming error.
     """
-    monkeypatch.setattr(sle, "r",
+    monkeypatch.setattr(sle, "dbstore",
                         _FakeReQL(ValueError("malformed control document")))
     assert sle._should_run(object()) is False
     assert any("cannot read EngineControl" in m for m, _ in logged)
@@ -108,7 +100,7 @@ def test_an_unreadable_config_raises_too(sle, monkeypatch, logged):
     classifies by isinstance, not by string matching.
     """
     from db.errors import UnavailableError
-    monkeypatch.setattr(sle, "r", _FakeReQL(doc={"running": True}))
+    monkeypatch.setattr(sle, "dbstore", _FakeReQL(doc={"running": True}))
 
     def _boom(conn):
         raise UnavailableError("pool exhausted")
@@ -122,7 +114,7 @@ def test_an_unreadable_config_raises_too(sle, monkeypatch, logged):
 def test_a_control_document_that_says_off_is_still_just_off(
         sle, monkeypatch, logged):
     """No raise, no log: the operator answering "no" is not a failure."""
-    monkeypatch.setattr(sle, "r", _FakeReQL(doc={"running": False}))
+    monkeypatch.setattr(sle, "dbstore", _FakeReQL(doc={"running": False}))
     assert sle._should_run(object()) is False
     assert logged == []
 

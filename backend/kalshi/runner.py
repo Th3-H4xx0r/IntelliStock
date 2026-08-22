@@ -24,7 +24,15 @@ def _configure_telemetry() -> None:  # pragma: no cover - integration
         import llm_telemetry
         from db import schema
         pricing_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "llm_pricing.yaml")
+        from db import store as db_store
         llm_telemetry.configure(
+            # The flusher's gate is `conn_factory is None or r_module is None`,
+            # so BOTH must be supplied or every row is dropped silently -- which
+            # is exactly what happened here: the Kalshi analyst's tokens never
+            # reached the Token Usage page. The factory returns None because the
+            # store takes its own pooled connection per operation (R26).
+            db_conn_factory=lambda: None,
+            r_module=db_store,
             enabled=True, flush_interval_s=2.0, max_buffer=50,
             pricing_yaml_path=pricing_path if os.path.exists(pricing_path) else None,
         )

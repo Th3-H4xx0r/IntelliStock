@@ -39,10 +39,18 @@ if _backend_dir not in sys.path:
     sys.path.insert(0, _backend_dir)
 os.chdir(_backend_dir)
 
-from rethinkdb import RethinkDB
+from db import store as dbstore
 
-r = RethinkDB()
 DB_NAME = "IntelliStock"
+
+
+def _telemetry_conn_factory():
+    """R26: the store takes its own pooled connection per operation, so there
+    is no connection to hand out. The factory stays because llm_telemetry's
+    "not configured for DB writes" gate is ``conn_factory is None or r_module
+    is None``, and the tests that must NOT write configure neither.
+    """
+    return None
 
 try:
     from intellistock_logger import intellistock_logger
@@ -448,8 +456,7 @@ def _should_run(conn) -> bool:
     unaffected: nothing downstream of a raise gets to run either.
     """
     try:
-        doc = r.db(DB_NAME).table("EngineControl").get(
-            "self_learning_engine").run(conn)
+        doc = dbstore.get("EngineControl", "self_learning_engine")
     except Exception as exc:
         _refuse("EngineControl", exc)
         return False
@@ -548,17 +555,19 @@ def _make_handler(processed):
 
 
 def main() -> None:
+    # R26: the store takes its own pooled connection per operation, so there
+    # is no connection to hold. The retry loop stays: the daemon still starts
+    # before Postgres is reachable, and ensure_tables is what proves it is.
     conn = None
     for attempt in range(1, 31):
         try:
-            conn = store.get_conn()
             store.ensure_tables(conn)
             break
         except Exception as exc:
             if attempt == 30:
-                _log(f"RethinkDB not ready after 30 attempts: {exc}", "red")
+                _log(f"Postgres not ready after 30 attempts: {exc}", "red")
                 return
-            _log(f"RethinkDB not ready (attempt {attempt}/30), retrying", "yellow")
+            _log(f"Postgres not ready (attempt {attempt}/30), retrying", "yellow")
             time.sleep(2)
 
     # Telemetry is opt-in per process: `record_llm_call` returns immediately
@@ -570,22 +579,16 @@ def main() -> None:
         import llm_telemetry
         from llm_telemetry import ensure_llm_usage_tables
         llm_telemetry.configure(
-            db_conn_factory=store.get_conn,
+            db_conn_factory=_telemetry_conn_factory,
             enabled=True,
             flush_interval_s=2.0,
             max_buffer=25,
             pricing_yaml_path=os.path.join(_backend_dir, "llm_pricing.yaml"),
-            r_module=r,
+            # `r_module` is the STORE handle the flusher writes through.
+            r_module=dbstore,
             db_name=DB_NAME,
         )
-        setup_conn = store.get_conn()
-        try:
-            ensure_llm_usage_tables(conn=setup_conn, r=r, db_name=DB_NAME)
-        finally:
-            try:
-                setup_conn.close()
-            except Exception:
-                pass
+        ensure_llm_usage_tables(conn=None, r=dbstore, db_name=DB_NAME)
         _log("LLM telemetry configured — token and cost recording is on", "green")
     except Exception as exc:
         _log(f"LLM telemetry NOT configured ({type(exc).__name__}: {exc}) — "
@@ -617,32 +620,22 @@ def main() -> None:
         while True:
             time.sleep(_TURN_INTERVAL_SECONDS)
             try:
-                if beat_conn is None:
-                    beat_conn = store.get_conn()
                 if not _should_run(beat_conn):
                     continue
                 config = store.get_config(beat_conn)
                 _plan_and_log_turn(beat_conn, config)
                 _maybe_sweep(beat_conn, config)
             except Exception as exc:
+                # Kept: ControlPlaneUnreadable still reaches here, and the next
+                # tick retries against a fresh pooled connection.
                 _log(f"heartbeat error: {type(exc).__name__}: {exc}", "yellow")
-                try:
-                    beat_conn.close()
-                except Exception:
-                    pass
-                beat_conn = None
 
     threading.Thread(target=_heartbeat, daemon=True).start()
     _log(f"Heartbeat started — a turn every {_TURN_INTERVAL_SECONDS}s", "green")
 
-    try:
-        conn.close()
-    except Exception:
-        pass
-
     run_reconnecting_changefeed(
         _open_feed, _handle, "SelfLearning",
-        get_conn=store.get_conn, log=intellistock_logger.log,
+        get_conn=_telemetry_conn_factory, log=intellistock_logger.log,
     )
 
 
