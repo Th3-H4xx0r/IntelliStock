@@ -484,3 +484,94 @@ def test_terminal_write_inserts_when_the_row_is_absent(split_schema):
     result.update({"id": 700009, "backtest_id": 700009, "status": "finished"})
     brs.write_terminal(700009, result, insert_if_absent=True)
     assert brs.assemble(700009)["status"] == "finished"
+
+
+# ---- Task 7: stop, pause, and side-channel writers ----------------------
+
+def test_set_status_writes_the_hot_row_and_the_doc_timestamp(split_schema):
+    brs.write_stub(dict(STUB))
+    brs.set_status(700001, "stopped", timestamp="2026-08-22T04:00:00Z")
+    assert brs.read_progress(700001)["status"] == "stopped"
+    assert store.get("BacktestResults", 700001)["timestamp"] == "2026-08-22T04:00:00Z"
+    assert brs.assemble(700001)["status"] == "stopped"
+
+
+def test_patch_metadata_touches_neither_the_hot_row_nor_the_steps(split_schema):
+    brs.write_stub(dict(STUB))
+    brs.append_steps(700001, "decision", [{"n": 1}], start_seq=0)
+    before = brs.read_progress(700001)
+    brs.patch_metadata(700001, {"nexus_lookback": {"current": 5, "total": 10}})
+    assert brs.read_progress(700001) == before
+    assert brs.watermarks(700001) == {"decision": 1}
+    assert store.get("BacktestResults", 700001)["nexus_lookback"]["current"] == 5
+
+
+def test_patch_metadata_can_null_a_field(split_schema):
+    """broker.py's nexus_lookback clear sends {"nexus_lookback": None}."""
+    brs.write_stub(dict(STUB))
+    brs.patch_metadata(700001, {"nexus_lookback": {"current": 5}})
+    brs.patch_metadata(700001, {"nexus_lookback": None})
+    row = store.get("BacktestResults", 700001)
+    assert "nexus_lookback" in row and row["nexus_lookback"] is None
+
+
+def test_resume_from_critical_pause_only_fires_on_the_critical_status(split_schema):
+    brs.write_stub(dict(STUB))
+    brs.write_progress(700001, {"status": "paused_llm_critical"})
+    brs.patch_metadata(700001, {"pause_reason": "llm", "pause_attempts": 3})
+    cleared = {"pause_reason": None, "pause_attempts": None}
+    assert brs.resume_from_critical_pause(700001, cleared) is True
+    assert brs.read_progress(700001)["status"] == "running"
+    assert store.get("BacktestResults", 700001)["pause_reason"] is None
+
+
+def test_resume_from_critical_pause_does_not_stomp_a_manual_pause(split_schema):
+    brs.write_stub(dict(STUB))
+    brs.write_progress(700001, {"status": "paused"})     # manual
+    assert brs.resume_from_critical_pause(700001, {"pause_reason": None}) is False
+    assert brs.read_progress(700001)["status"] == "paused"
+
+
+def test_resume_from_critical_pause_leaves_the_doc_untouched_when_it_does_not_fire(split_schema):
+    brs.write_stub(dict(STUB))
+    brs.write_progress(700001, {"status": "paused"})
+    brs.patch_metadata(700001, {"pause_reason": "manual"})
+    assert brs.resume_from_critical_pause(700001, {"pause_reason": None}) is False
+    row = store.get("BacktestResults", 700001)
+    assert row["pause_reason"] == "manual" and "resumed_at" not in row
+
+
+def test_set_status_accepts_an_int_or_string_backtest_id(split_schema):
+    brs.write_stub(dict(STUB))
+    brs.set_status("700001", "error")
+    assert brs.read_progress(700001)["status"] == "error"
+
+
+def test_read_status_prefers_the_hot_row_over_the_stale_doc(split_schema):
+    brs.write_stub(dict(STUB))                      # doc + hot row: running
+    brs.write_progress(700001, {"status": "paused_llm_critical"})
+    assert store.get("BacktestResults", 700001)["status"] == "running"
+    assert brs.read_status(700001) == "paused_llm_critical"
+
+
+def test_read_status_is_none_for_an_unknown_backtest(split_schema):
+    assert brs.read_status(700099) is None
+
+
+def test_stop_running_marks_only_the_running_hot_rows(split_schema):
+    for bid, status in ((700001, "running"), (700002, "finished"),
+                        (700003, "running")):
+        stub = dict(STUB, id=bid, backtest_id=bid, status=status)
+        brs.write_stub(stub)
+    assert brs.stop_running() == 2
+    assert brs.read_status(700001) == "stopped"
+    assert brs.read_status(700002) == "finished"
+    assert brs.read_status(700003) == "stopped"
+
+
+def test_delete_removes_the_row_from_all_three_tables(split_schema):
+    brs.write_stub(dict(STUB))
+    brs.append_steps(700001, "decision", [{"n": 1}], start_seq=0)
+    assert brs.delete_backtest(700001) is True
+    assert store.sql('SELECT count(*) AS n FROM "BacktestSteps" '
+                     "WHERE backtest_id='700001'")[0]["n"] == 0

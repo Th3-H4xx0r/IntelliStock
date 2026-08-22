@@ -506,8 +506,12 @@ def _check_dead_backtest_containers():
                 is_paused = False
                 if has_results_table:
                     try:
-                        _res = r.db(DB_NAME).table("BacktestResults").get(bid).pluck("status").run(conn)
-                        is_paused = "paused" in str((_res or {}).get("status") or "").lower()
+                        # R4: the status predicate reads the hot
+                        # BacktestProgress row, never BacktestResults' stale
+                        # advisory copy.
+                        import backtest_result_store as _brs
+                        is_paused = "paused" in str(
+                            _brs.read_status(bid) or "").lower()
                     except Exception:
                         is_paused = False
                 if is_paused:
@@ -526,7 +530,8 @@ def _check_dead_backtest_containers():
                         pass
                     if has_results_table:
                         try:
-                            r.db(DB_NAME).table("BacktestResults").get(bid).update({"status": "stopped"}).run(conn)
+                            import backtest_result_store as _brs
+                            _brs.set_status(bid, "stopped")
                         except Exception:
                             pass
                 with _queued_or_active_lock:

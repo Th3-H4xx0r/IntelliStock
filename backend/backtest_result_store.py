@@ -319,6 +319,80 @@ def write_terminal(backtest_id, result: dict, *,
         write_progress(backtest_id, progress)
 
 
+def set_status(backtest_id, status: str, *, timestamp: Optional[str] = None,
+               extra_metadata: Optional[dict] = None) -> None:
+    """Status goes to the hot row; timestamp and anything else deep-merges
+    into doc. This is the stop/error/pause path."""
+    write_progress(backtest_id, {"status": status})
+    patch = dict(extra_metadata or {})
+    if timestamp is not None:
+        patch["timestamp"] = timestamp
+    if patch:
+        store.update(RESULTS_TABLE, backtest_id, patch)
+
+
+def patch_metadata(backtest_id, patch: dict) -> None:
+    """Deep-merge into doc. Never touches the hot row or the steps.
+
+    ``{"k": None}`` sets JSON null, it does not delete the key -- which is
+    what broker.py's nexus_lookback clear expects.
+    """
+    if patch:
+        store.update(RESULTS_TABLE, backtest_id, patch)
+
+
+def read_status(backtest_id) -> Optional[str]:
+    """The run's status, hot row first (R4: doc.status is advisory after the
+    split). Falls back to doc only when no hot row exists, which is exactly
+    the precedence assemble() applies."""
+    progress = read_progress(backtest_id)
+    if progress is not None and "status" in progress:
+        return progress.get("status")
+    row = store.get(RESULTS_TABLE, backtest_id)
+    return None if row is None else row.get("status")
+
+
+def stop_running(ids: Optional[Sequence] = None) -> int:
+    """Mark every run the hot row still calls ``running`` as ``stopped`` and
+    return how many rows changed.
+
+    The stop-all sweep (interactive_utils) used to be
+    ``filter(status == "running").update(status = "stopped")`` on the
+    multi-MB document. Under R4 that predicate reads BacktestProgress, never
+    BacktestResults' stale generated column.
+    """
+    query = ('UPDATE "BacktestProgress" SET '
+             "  payload = jsonb_deep_merge(payload, '{\"status\":\"stopped\"}'::jsonb), "
+             "  updated_at = now() "
+             "WHERE payload ->> 'status' = 'running'")
+    params: tuple = ()
+    if ids is not None:
+        query += " AND id = ANY(%s)"
+        params = ([_bid(i) for i in ids],)
+    return len(store.sql(query + " RETURNING id", params))
+
+
+def resume_from_critical_pause(backtest_id, cleared_fields: dict) -> bool:
+    """Compare-and-swap: flip the hot row to "running" and clear the stale
+    pause_* metadata ONLY when the status is "paused_llm_critical", so a
+    manual pause is never stomped. Replaces the server-side r.branch inside
+    .replace(lambda row: ...) the changefeed used to run.
+    """
+    rows = store.sql(
+        'UPDATE "BacktestProgress" SET '
+        "  payload = jsonb_deep_merge(payload, '{\"status\":\"running\"}'::jsonb), "
+        "  updated_at = now() "
+        "WHERE id = %s AND payload ->> 'status' = 'paused_llm_critical' "
+        "RETURNING id",
+        (_bid(backtest_id),))
+    if not rows:
+        return False
+    patch = dict(cleared_fields or {})
+    patch["resumed_at"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
+    store.update(RESULTS_TABLE, backtest_id, patch)
+    return True
+
+
 def active_run_age(backtest_id) -> Optional[float]:
     """Seconds since the last heartbeat of a run the hot row still calls
     ``running``, or None when no live-run evidence exists.

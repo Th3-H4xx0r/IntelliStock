@@ -5838,10 +5838,9 @@ def watch_backtest_run_command():
                 try:
                     from datetime import datetime
                     if _backtest_result_id is not None:
-                        r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).update({
-                            'status': 'stopped',
-                            'timestamp': datetime.utcnow().isoformat() + 'Z',
-                        }).run(conn)
+                        import backtest_result_store as _brs
+                        _brs.set_status(_backtest_result_id, 'stopped',
+                                        timestamp=datetime.utcnow().isoformat() + 'Z')
                     msg_key = str(backtest_row_id) if backtest_row_id is not None else str(_backtest_result_id)
                     diff_str = _backtest_difficulty_discord_str()
                     try:
@@ -5887,13 +5886,13 @@ def watch_backtest_run_command():
                         # pause fields. Only when transitioning out of the critical
                         # pause (gated on status), so manual pauses aren't stomped.
                         from backtest_critical_abort import cleared_pause_fields as _bca_cleared_pause
-                        r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).update(
-                            lambda row: r.branch(
-                                row["status"].default("").eq("paused_llm_critical"),
-                                {"status": "running", "resumed_at": r.now(), **_bca_cleared_pause()},
-                                {}
-                            )
-                        ).run(conn)
+                        import backtest_result_store as _brs
+                        # One conditional UPDATE on the hot row, then the doc
+                        # patch -- both only when the CAS held. resumed_at is
+                        # stamped by resume_from_critical_pause itself, so the
+                        # r.now() the ReQL branch carried is gone.
+                        _brs.resume_from_critical_pause(_backtest_result_id,
+                                                        _bca_cleared_pause())
                 except Exception:
                     pass
                 try:
@@ -5907,10 +5906,9 @@ def watch_backtest_run_command():
                 try:
                     from datetime import datetime
                     if _backtest_result_id is not None:
-                        r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).update({
-                            'status': 'stopped',
-                            'timestamp': datetime.utcnow().isoformat() + 'Z',
-                        }).run(conn)
+                        import backtest_result_store as _brs
+                        _brs.set_status(_backtest_result_id, 'stopped',
+                                        timestamp=datetime.utcnow().isoformat() + 'Z')
                         _log("BacktestResults status set to stopped", "yellow")
                     # Edit #backtests Discord message to show Stopped (same message_key as Queued/Running)
                     msg_key = str(backtest_row_id) if backtest_row_id is not None else str(_backtest_result_id)
@@ -6923,10 +6921,11 @@ def _iter_backtest_trading_session_opens(start_dt, end_dt):
 
 def _nexus_lookback_update_db(current: int, total: int, current_date: str, start_date: str, end_date: str) -> None:
     """Write Nexus lookback training progress to BacktestResults (best-effort, never raises)."""
-    if _backtest_result_id is None or _backtest_db_conn is None or r is None:
+    if _backtest_result_id is None:
         return
     try:
-        r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).update({
+        import backtest_result_store as _brs
+        _brs.patch_metadata(_backtest_result_id, {
             "nexus_lookback": {
                 "current": current,
                 "total": total,
@@ -6934,20 +6933,23 @@ def _nexus_lookback_update_db(current: int, total: int, current_date: str, start
                 "start_date": start_date,
                 "end_date": end_date,
             },
+        })
+        # _last_active is a hot-row key: written to doc it would be shadowed
+        # by the heartbeat's overlay, so the liveness signal must go there.
+        _brs.write_progress(_backtest_result_id, {
             "_last_active": __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
-        }).run(_backtest_db_conn)
+        })
     except Exception:
         pass
 
 
 def _nexus_lookback_clear_db() -> None:
     """Clear the nexus_lookback field from BacktestResults once training is done."""
-    if _backtest_result_id is None or _backtest_db_conn is None or r is None:
+    if _backtest_result_id is None:
         return
     try:
-        r.db(DB_NAME).table('BacktestResults').get(_backtest_result_id).update(
-            {"nexus_lookback": None}
-        ).run(_backtest_db_conn)
+        import backtest_result_store as _brs
+        _brs.patch_metadata(_backtest_result_id, {"nexus_lookback": None})
     except Exception:
         pass
 

@@ -5824,9 +5824,10 @@ def action_delete_backtest(conn, backtest_id):
             r.db(DB_NAME).table("BacktestInstances").get(bid).delete().run(conn)
             found = True
     if "BacktestResults" in tables:
-        result_doc = r.db(DB_NAME).table("BacktestResults").get(bid).run(conn)
-        if result_doc is not None:
-            r.db(DB_NAME).table("BacktestResults").get(bid).delete().run(conn)
+        # delete_backtest clears all three split tables, not just the
+        # metadata row.
+        import backtest_result_store as _brs
+        if _brs.delete_backtest(bid):
             found = True
     if not found:
         raise ValueError("Backtest not found: %s" % bid)
@@ -5849,7 +5850,8 @@ def action_stop_backtest(conn, backtest_id):
     tables = list(r.db(DB_NAME).table_list().run(conn))
     if "BacktestResults" in tables:
         try:
-            r.db(DB_NAME).table("BacktestResults").get(bid).update({"status": "stopped"}).run(conn)
+            import backtest_result_store as _brs
+            _brs.set_status(bid, "stopped")
         except Exception:
             pass
     return {"stop_requested": True, "id": bid}
@@ -5894,9 +5896,11 @@ def action_stop_all_backtests(conn):
     tables = list(r.db(DB_NAME).table_list().run(conn))
     if "BacktestResults" in tables:
         try:
-            r.db(DB_NAME).table("BacktestResults").filter(
-                r.row["status"].eq("running")
-            ).update({"status": "stopped"}).run(conn)
+            # R4: the "still running?" predicate reads the hot
+            # BacktestProgress row. BacktestResults' generated status column
+            # is advisory after the split and would be stale here.
+            import backtest_result_store as _brs
+            _brs.stop_running()
         except Exception:
             pass
     return {"stopped": len(ids), "ids": ids, "containers_stopped": containers_stopped}
