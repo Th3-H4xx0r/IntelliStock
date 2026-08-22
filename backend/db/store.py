@@ -628,13 +628,25 @@ def _row_id_or_generate(table: str, doc: Doc):
     PriceHistory rows that way and has never supplied an id. The generated
     value is written INTO the document, as ReQL did, so a later read sees it.
 
-    An ``id_type="int"`` table is the exception: a uuid there is exactly the
-    shadow row coerce_id exists to forbid, so it still raises.
+    Two kinds of table are the exception, and both still raise:
+
+    * a CUSTOM primary key (``pk_field`` is not ``id`` -- the 9 kalshi tables
+      key on fixture_id / market_ticker / client_order_id / window /
+      instance_id / fixture_key). ReQL minted a uuid only for ``id``; a
+      document missing a custom key raised "Primary key `fixture_key` not
+      found in document". Minting there writes the row under a key nothing
+      ever looks up -- silent data loss where RethinkDB was loud.
+    * an ``id_type="int"`` table: a uuid there is exactly the shadow row
+      coerce_id exists to forbid.
+
+    PriceHistory keeps the mint: its ``pk_field`` IS ``id`` (only its
+    compound ``pk`` names the partition columns), which is why
+    priceBroker.py:186 may still write a document with no id at all.
     """
     spec_ = dbschema.spec(table)
     if spec_.pk_field in doc and doc[spec_.pk_field] is not None:
         return coerce_id(table, doc[spec_.pk_field]), doc, None
-    if spec_.id_type == "int":
+    if spec_.pk_field != "id" or spec_.id_type == "int":
         raise StoreError("%s: document is missing its primary key field %r"
                          % (table, spec_.pk_field))
     import uuid as _uuid

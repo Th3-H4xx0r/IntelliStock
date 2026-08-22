@@ -133,11 +133,17 @@ def test_price_history_has_an_id_index(pg_schema):
 # ---------------------------------------------------------------- I4 ------
 @requires_pg
 def test_a_missing_primary_key_is_generated_like_rethinkdb(pg_schema):
-    schema.ensure_schema(tables=["kalshi_markets"])
-    res = store.insert("kalshi_markets", {"yes_bid": 1})
+    """Only on an ``id``-keyed table: that is the one place ReQL minted."""
+    schema.ensure_schema(tables=["DiscordOutbox", "kalshi_markets"])
+    res = store.insert("DiscordOutbox", {"body": "hi"})
     assert res.inserted == 1 and len(res.generated_keys) == 1
     key = res.generated_keys[0]
-    assert store.get("kalshi_markets", key)["market_ticker"] == key
+    assert store.get("DiscordOutbox", key)["id"] == key
+    # A CUSTOM primary key is not minted: ReQL raised "Primary key
+    # `market_ticker` not found in document", and a minted uuid would hide
+    # the dropped key under a row nothing ever reads.
+    with pytest.raises(StoreError):
+        store.insert("kalshi_markets", {"yes_bid": 1})
 
 
 @requires_pg

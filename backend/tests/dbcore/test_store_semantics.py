@@ -183,11 +183,14 @@ def test_package_exports_the_public_surface():
 
 @requires_pg
 def test_a_missing_pk_field_is_generated_like_rethinkdb(pg_schema):
-    """ReQL generated a uuid4 for a document with no primary key and returned
-    it in generated_keys. An id_type="int" table still refuses: a uuid there
-    is the shadow row coerce_id exists to forbid."""
-    schema.ensure_schema(tables=["kalshi_markets", "Instances"])
-    res = store.insert("kalshi_markets", {"yes_bid": 1})
+    """ReQL generated a uuid4 for a document with no ``id`` and returned it in
+    generated_keys. Two kinds of table still refuse: an id_type="int" one,
+    where a uuid is the shadow row coerce_id exists to forbid, and a
+    CUSTOM-pk one, where ReQL raised rather than mint."""
+    schema.ensure_schema(tables=["DiscordOutbox", "kalshi_markets", "Instances"])
+    res = store.insert("DiscordOutbox", {"body": "hi"})
     assert res.inserted == 1 and len(res.generated_keys) == 1
     with pytest.raises(StoreError):
         store.insert("Instances", {"name": "x"})
+    with pytest.raises(StoreError):
+        store.insert("kalshi_markets", {"yes_bid": 1})

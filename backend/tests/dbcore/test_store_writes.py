@@ -141,9 +141,19 @@ def test_non_id_primary_key_is_copied_from_its_doc_field(tables):
 
 
 @requires_pg
-def test_writing_a_document_without_its_pk_field_generates_one(tables):
-    res = store.insert("kalshi_markets", {"yes_bid": 40})
+def test_writing_a_document_without_an_id_generates_one(tables):
+    """An ``id``-keyed table mints, as ReQL did."""
+    res = store.insert("DiscordOutbox", {"body": "hi"})
     assert res.inserted == 1 and len(res.generated_keys) == 1
+
+
+@requires_pg
+def test_writing_a_document_without_its_CUSTOM_pk_field_raises(tables):
+    """kalshi_markets keys on market_ticker, and ReQL minted only for ``id``
+    -- minting here writes a row under a key nothing ever looks up."""
+    with pytest.raises(StoreError):
+        store.insert("kalshi_markets", {"yes_bid": 40})
+    assert store.count("kalshi_markets") == 0
 
 
 @requires_pg

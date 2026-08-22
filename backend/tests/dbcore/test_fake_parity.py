@@ -334,13 +334,22 @@ def test_replace_if_missing_row_raises_unless_allowed(s):
                         insert_if_absent=True) == {"id": "zz"}
 
 
-def test_missing_pk_field_is_generated(s):
-    """RethinkDB generated a uuid for the primary key and returned it in
+def test_missing_id_is_generated(s):
+    """RethinkDB generated a uuid for a missing ``id`` and returned it in
     generated_keys; priceBroker.py:186 has always relied on that."""
-    res = s.insert("kalshi_markets", {"yes_bid": 1})
+    res = s.insert("DiscordOutbox", {"body": "hi"})
     assert res.inserted == 1 and len(res.generated_keys) == 1
-    assert s.get("kalshi_markets", res.generated_keys[0])["market_ticker"] == \
+    assert s.get("DiscordOutbox", res.generated_keys[0])["id"] == \
         res.generated_keys[0]
+
+
+def test_missing_custom_pk_field_raises_in_both_backends(s):
+    """ReQL minted only for ``id``; a document missing a CUSTOM primary key
+    raised. FakeStore must refuse it too, or a unit test would green-light a
+    write production rejects."""
+    with pytest.raises(StoreError):
+        s.insert("kalshi_markets", {"yes_bid": 1})
+    assert s.count("kalshi_markets") == 0
 
 
 def test_bad_conflict_mode_raises(s):

@@ -189,6 +189,10 @@ class FakeStore:
         # The whole batch is validated before anything is written, exactly as
         # db.store does it: a NaN or a bad primary key is a client-side
         # rejection, so no row of the batch may land.
+        #
+        # _row_id_or_generate is SHARED with db.store on purpose, so the two
+        # backends cannot drift on which document gets a minted uuid and which
+        # is rejected (an id-keyed table mints; a custom-pk table raises).
         encoded = []
         for doc in docs:
             rid, doc, generated = _s._row_id_or_generate(table, doc)
