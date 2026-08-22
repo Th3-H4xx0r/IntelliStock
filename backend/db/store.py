@@ -429,6 +429,11 @@ class FieldRef:
     def is_null(self) -> Predicate:
         return Predicate("%s IS NULL" % self.expr, self.params)
 
+    def is_not_null(self) -> Predicate:
+        # NOT the ``~`` of is_null(): that wraps in COALESCE(NOT (...), false),
+        # which is opaque to the planner. ``IS NOT NULL`` is indexable.
+        return Predicate("%s IS NOT NULL" % self.expr, self.params)
+
 
 class P:
     @staticmethod
@@ -477,6 +482,59 @@ def _bound_column(table: str, index: Optional[str]) -> str:
     return '"%s"' % index
 
 
+# The doc keys each named index is built from. Missing from this map means the
+# index is a plain generated column, whose name IS the doc key.
+#
+# An inner tuple is a coalesce chain (present when ANY of its keys is present);
+# the outer tuple is a compound index (present when EVERY component is).
+_INDEX_KEYS = {
+    "list_ts": (("timestamp",),),
+    "instance_ts": (("instance_id", "instance"), ("timestamp",)),
+    "instance_or_instance_id": (("instance_id", "instance"),),
+    "instance_base": (("instance_id",),),
+}
+
+
+def index_presence(index: Optional[str]) -> Optional[Predicate]:
+    """"This row is IN the ``index``" -- or None when every row always is.
+
+    RethinkDB builds a secondary index by evaluating the index function over
+    each document and SKIPPING the document when the result is missing or
+    null. An index-driven read therefore never sees those rows, in either sort
+    direction. Postgres keeps them (the generated column is simply NULL), and
+    on a DESC scan it puts them FIRST, so a ported ``order_by(index=...)``
+    silently led with rows ReQL would not have returned at all.
+
+    ``doc ->> 'k'`` is NULL for a missing key and for an explicit JSON null
+    alike, which is exactly the conflation ReQL makes: an index function that
+    returns null omits its document.
+
+    A plain field index is tested on the generated COLUMN -- identical truth
+    value to the doc key, and it is what the B-tree is built on, so the
+    planner still uses the index.
+    """
+    if index in (None, "id"):
+        return None
+    chains = _INDEX_KEYS.get(index)
+    if chains is None:
+        return Predicate('"%s" IS NOT NULL' % index)
+    out = None
+    for chain in chains:
+        term = None
+        for key in chain:
+            present = P.field(key).is_not_null()
+            term = present if term is None else (term | present)
+        out = term if out is None else (out & term)
+    return out
+
+
+def _with_index_presence(sel: Selection, index: Optional[str]) -> Selection:
+    pred = index_presence(index)
+    if pred is None:
+        return sel
+    return sel.where(*pred.to_sql())
+
+
 def between(table: str, lo, hi, *, index: Optional[str] = None,
             left_bound: str = "closed", right_bound: str = "open") -> Selection:
     """NEVER SQL BETWEEN: ReQL is [lo, hi); SQL BETWEEN is [lo, hi].
@@ -486,7 +544,10 @@ def between(table: str, lo, hi, *, index: Optional[str] = None,
     on a compound index becomes a plain equality on the instance.
     """
     col = _bound_column(table, index)
-    sel = Selection(table)
+    # A row with no value for the index is not IN the index, so between()
+    # never returns it -- including the r.minval..r.maxval scan, whose bounds
+    # are both omitted and which therefore emitted no WHERE clause at all.
+    sel = _with_index_presence(Selection(table), index)
     if lo is not None and not isinstance(lo, _Sentinel):
         op = ">" if left_bound == "open" else ">="
         sel = sel.where("%s %s %%s" % (col, op),
@@ -514,6 +575,8 @@ def order_by(selection, *, index: Optional[str] = None,
     if expr is None:
         expr = "id" if index == "id" else '"%s"' % index
     direction = "DESC" if desc else "ASC"
+    # Ordering THROUGH an index cannot surface a row the index does not hold.
+    sel = _with_index_presence(sel, index)
     return sel.ordered(sel.orders + (_RawOrder("%s%s %s" % (expr, _C, direction)),))
 
 

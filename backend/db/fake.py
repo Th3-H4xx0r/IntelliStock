@@ -375,7 +375,7 @@ def _row_key(table: str, row: dict):
 # eats its own placeholders, so a fragment is split on the number of "%s" its
 # left-hand side contains.
 _FRAG_RE = re.compile(
-    r"^(?P<expr>.+?)\s*(?P<op>= ANY|IS NULL|LIKE|~|<=|>=|<>|=|<|>)"
+    r"^(?P<expr>.+?)\s*(?P<op>= ANY|IS NOT NULL|IS NULL|LIKE|~|<=|>=|<>|=|<|>)"
     r"\s*(?P<rhs>\(%s\)|%s)?$")
 
 _JSON_NULL_RE = re.compile(r"^doc -> '(?P<key>[^']+)' = 'null'::jsonb$")
@@ -447,6 +447,8 @@ def _eval_fragment(fragment: str, params, row: dict, table: str):
     op = m.group("op")
     if op == "IS NULL":
         return value is None
+    if op == "IS NOT NULL":
+        return value is not None
     rhs = params[consumed]
     if op == "= ANY":
         if value is None:
