@@ -89,6 +89,12 @@ class IntelliStockLogger:
         # Multi-context sinks: ctx_name -> (file_obj, buffer_list, max_lines)
         self._ctx_files: dict[str, object] = {}
         self._ctx_buffers: dict[str, tuple[list, int]] = {}
+        # ctx -> total lines EVER emitted into that context's buffer. The
+        # buffer itself is trimmed FIFO to max_lines below, so its length
+        # saturates and cannot be used as a watermark. The BacktestSteps log
+        # watermark keys off this counter instead
+        # (backend/backtest_result_store.py).
+        self._ctx_emitted: dict[str, int] = {}
 
     # --- Generic context API (preferred) ---
 
@@ -105,9 +111,20 @@ class IntelliStockLogger:
             self._ctx_buffers.pop(ctx, None)
         else:
             self._ctx_buffers[ctx] = (buffer_list, max(int(max_lines), 1))
+        self._ctx_emitted[ctx] = 0
 
     def clear_context_log_buffer(self, ctx: str):
         self._ctx_buffers.pop(ctx, None)
+        self._ctx_emitted.pop(ctx, None)
+
+    def context_log_lines_emitted(self, ctx: str) -> int:
+        """Total lines ever emitted into ``ctx``'s buffer.
+
+        The buffer is trimmed FIFO to max_lines, so ``len(buffer)`` saturates
+        and an index-into-the-buffer watermark silently stops advancing once
+        it reaches the cap. Incremental writers must key off this counter.
+        """
+        return int(self._ctx_emitted.get(ctx, 0))
 
     def close_context_log_file(self, ctx: str):
         f = self._ctx_files.pop(ctx, None)
@@ -208,9 +225,12 @@ class IntelliStockLogger:
             except Exception:
                 pass
         # Fan out to every attached context buffer, trimming FIFO to max_lines.
-        for buf_list, max_lines in list(self._ctx_buffers.values()):
+        # Count before trimming: the count is what incremental writers use as a
+        # watermark, and the buffer's length saturates at max_lines.
+        for ctx_name, (buf_list, max_lines) in list(self._ctx_buffers.items()):
             if isinstance(buf_list, list):
                 buf_list.append(line)
+                self._ctx_emitted[ctx_name] = self._ctx_emitted.get(ctx_name, 0) + 1
                 while len(buf_list) > max_lines:
                     buf_list.pop(0)
 
