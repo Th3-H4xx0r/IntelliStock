@@ -44,26 +44,37 @@ def sweep(table: str, *, dry_run: bool = False, batch: int = 10000) -> dict:
     cutoff = _cutoff_iso(days)
     field = spec_.retention.field
     q = schema.quoted(table)
-    # The predicate is deliberately explicit about parseability: a row whose
-    # timestamp is not a valid timestamptz never matches, so it is never
-    # deleted. pg_input_is_valid is PG16+; PG17 is the target.
-    where = ("doc ->> %s IS NOT NULL "
-             "AND pg_input_is_valid(doc ->> %s, 'timestamptz') "
-             "AND (doc ->> %s)::timestamptz < %s::timestamptz")
-    params = (field, field, field, cutoff)
+    if spec_.retention.is_column:
+        # PriceHistory's retention field "ts" is a real timestamptz COLUMN.
+        # Filtering on doc->>'ts' there is always NULL, so the sweep reported
+        # deleted:0 forever while main() happily kept calling it.
+        where = '"%s" IS NOT NULL AND "%s" < %%s::timestamptz' % (field, field)
+        params = (cutoff,)
+    else:
+        # The predicate is deliberately explicit about parseability: a row
+        # whose timestamp is not a valid timestamptz never matches, so it is
+        # never deleted. pg_input_is_valid is PG16+; PG17 is the target.
+        where = ("doc ->> %s IS NOT NULL "
+                 "AND pg_input_is_valid(doc ->> %s, 'timestamptz') "
+                 "AND (doc ->> %s)::timestamptz < %s::timestamptz")
+        params = (field, field, field, cutoff)
     if dry_run:
         with dbpool.cursor() as cur:
             cur.execute("SELECT count(*) AS n FROM %s WHERE %s" % (q, where), params)
             return {"table": table, "would_delete": cur.fetchone()["n"],
                     "cutoff": cutoff}
+    # Batched on the PRIMARY KEY, never on ctid: a ctid is unique only WITHIN
+    # a partition, so on a partitioned table the subquery could name a tuple
+    # id that matches a different row in a sibling partition.
+    pk = ", ".join('"%s"' % c for c in spec_.pk)
     deleted = 0
     while True:
         with dbpool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "DELETE FROM {q} WHERE ctid IN "
-                    "(SELECT ctid FROM {q} WHERE {w} LIMIT {n})".format(
-                        q=q, w=where, n=int(batch)), params)
+                    "DELETE FROM {q} WHERE ({pk}) IN "
+                    "(SELECT {pk} FROM {q} WHERE {w} LIMIT {n})".format(
+                        q=q, pk=pk, w=where, n=int(batch)), params)
                 n = cur.rowcount
             conn.commit()
         deleted += n
