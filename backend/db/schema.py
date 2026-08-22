@@ -532,10 +532,19 @@ def ensure_partitions(table: str, *, lo, hi) -> list:
                 cur.execute("SELECT to_regclass(%s) AS t", (quoted(part),))
                 if cur.fetchone()["t"] is not None:
                     continue
+                # CREATE TABLE is a utility statement: PG accepts no bind
+                # parameters in FOR VALUES and answers "could not determine
+                # data type of parameter $1". The bounds are therefore
+                # inlined as literals -- they are formatted from date objects
+                # this module computed, never from caller input. The explicit
+                # +00 offset keeps the month boundary from shifting with the
+                # session's TimeZone.
                 cur.execute(
-                    "CREATE TABLE %s PARTITION OF %s FOR VALUES FROM (%%s) TO (%%s)"
-                    % (quoted(part), quoted(table)),
-                    (start.isoformat(), nxt.isoformat()))
+                    "CREATE TABLE %s PARTITION OF %s FOR VALUES "
+                    "FROM ('%s 00:00:00+00'::timestamptz) "
+                    "TO ('%s 00:00:00+00'::timestamptz)"
+                    % (quoted(part), quoted(table),
+                       start.isoformat(), nxt.isoformat()))
                 if s.tune_autovacuum:
                     # The 0.2 default scale factor means 570,050 dead tuples on
                     # PriceHistory before autovacuum reacts. Leaf partitions
