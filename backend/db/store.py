@@ -366,11 +366,17 @@ class Predicate:
 class FieldRef:
     """One doc key, plus the transforms the ported call sites actually use."""
 
-    __slots__ = ("expr", "params")
+    __slots__ = ("expr", "params", "jsonb_expr")
 
-    def __init__(self, expr: str, params: tuple = ()) -> None:
+    def __init__(self, expr: str, params: tuple = (),
+                 jsonb_expr: "str | None" = None) -> None:
         self.expr = expr
         self.params = params
+        # The `doc->'key'` form of the SAME key, kept only while the ref is an
+        # untransformed field. ReQL compared numbers NUMERICALLY; `->>` yields
+        # text, so without this a range compare against a number is either an
+        # error ("text <= double precision") or silently wrong ("10" < "9").
+        self.jsonb_expr = jsonb_expr
 
     def default(self, value: Any) -> "FieldRef":
         return FieldRef("coalesce(%s, %%s)" % self.expr, self.params + (value,))
@@ -394,6 +400,17 @@ class FieldRef:
     _ORDERING_OPS = ("<", "<=", ">", ">=")
 
     def _cmp(self, op: str, value: Any) -> Predicate:
+        # A number on the right means ReQL was comparing numbers. Compare the
+        # value as numeric, guarded so a non-numeric row is simply not a match
+        # (ReQL's own behaviour: a string never satisfied a numeric range).
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if self.jsonb_expr is not None:
+                guard = "jsonb_typeof(%s) = 'number'" % self.jsonb_expr
+            else:
+                guard = "%s ~ '^-?[0-9]+(\\.[0-9]+)?([eE][-+]?[0-9]+)?$'" % self.expr
+            return Predicate(
+                "(CASE WHEN %s THEN (%s)::numeric END) %s %%s"
+                % (guard, self.expr, op), self.params + (value,))
         expr = self.expr + (_C if op in self._ORDERING_OPS else "")
         return Predicate("%s %s %%s" % (expr, op), self.params + (value,))
 
@@ -446,7 +463,7 @@ class P:
     def field(key: str) -> FieldRef:
         if "'" in key:
             raise StoreError("illegal doc key %r" % key)
-        return FieldRef("doc->>'%s'" % key)
+        return FieldRef("doc->>'%s'" % key, jsonb_expr="doc->'%s'" % key)
 
 
 def _predicate_from(predicate) -> Predicate:

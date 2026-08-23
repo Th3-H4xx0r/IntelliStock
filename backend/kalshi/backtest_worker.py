@@ -248,6 +248,13 @@ def start_worker(conn_factory=None, *, max_workers: int = 2):  # pragma: no cove
         reports these — it skips the initial state — and a row orphaned
         mid-run has to be re-queued before it can be picked up at all."""
         try:
+            # The engine calls kdb.ensure_tables(), but this worker is its own
+            # process: on a fresh database it reached KalshiBacktests first and
+            # logged UndefinedTable every tick. Idempotent, so the drain owns it.
+            _db.ensure_tables()
+        except Exception:
+            pass
+        try:
             for row in _db.pending_or_running_backtests(None):
                 if row.get("status") == "running":
                     # orphaned mid-run -> re-queue as pending

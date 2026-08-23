@@ -19,6 +19,7 @@ if _backend_dir not in sys.path:
     sys.path.insert(0, _backend_dir)
 
 from db import schema
+from db import pool as _dbpool
 from db import store
 from db import watch  # noqa: F401  (re-exported for callers that watch rows)
 from strategy_secret_boundary import scrub_inline_strategy_secrets
@@ -38,7 +39,7 @@ def get_conn(host=None, port=None):
     """R26: the store pools its own connection per operation, so there is
     nothing to hand out. Kept because ~200 call sites take `conn` as their
     first argument and pass it on to helpers that now ignore it."""
-    return None
+    return _dbpool.STORE_CONN
 
 
 def _resolve_instance_doc(conn, instance_id):

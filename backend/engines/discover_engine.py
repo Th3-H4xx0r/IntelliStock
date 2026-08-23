@@ -12,6 +12,7 @@ if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 os.chdir(BACKEND_DIR)
 
+from db import pool as _dbpool
 from db import store as db_store
 from db import watch as db_watch
 from intellistock_logger import intellistock_logger
@@ -28,7 +29,7 @@ def get_conn():
     """R26: the store takes its own pooled connection per operation, so there
     is nothing to hand out. Kept so the readiness probe below reads as it did.
     """
-    return None
+    return _dbpool.STORE_CONN
 
 
 def _is_retryable_rethink_error(exc) -> bool:

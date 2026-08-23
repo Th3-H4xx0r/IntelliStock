@@ -33,6 +33,7 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(BACKEND_DIR, '.env'))
 load_dotenv(os.path.join(os.path.dirname(BACKEND_DIR), '.env'))
 
+from db import pool as _dbpool
 from db import store as db_store
 from db import watch as db_watch
 from intellistock_logger import intellistock_logger
@@ -324,7 +325,7 @@ def _backtest_has_high_difficulty_sub(conn, row) -> bool:
 def get_conn():
     """R26: the store pools its own connection per operation, so there is
     nothing to hand out. Kept for call-site arity."""
-    return None
+    return _dbpool.STORE_CONN
 
 
 def wait_for_rethinkdb(max_attempts=30, delay=2):

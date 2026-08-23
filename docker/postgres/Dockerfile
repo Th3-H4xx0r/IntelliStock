@@ -14,3 +14,7 @@ RUN apt-get update \
 # lz4 TOAST compression is a disk win, not a correctness one. If this image's
 # build lacks it, `SHOW default_toast_compression` reports pglz and the
 # compose flag is a no-op -- check it in the cutover pre-flight.
+
+# Runs once against an empty data directory: creates the pg_partman extension
+# and the role its background worker logs in as.
+COPY initdb/ /docker-entrypoint-initdb.d/

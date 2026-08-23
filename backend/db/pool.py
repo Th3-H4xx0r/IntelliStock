@@ -23,6 +23,25 @@ from typing import Any, Iterator, Optional
 from . import json as dbjson
 from .errors import UnavailableError
 
+class StoreConn:
+    """Stands in for the connection the call sites still pass around.
+
+    The store pools its own connection per operation, so there is nothing to
+    hold — but ~88 sites still call `conn.close()`, some in a bare `finally`,
+    and several test `if conn:`. Returning None made the first group raise
+    AttributeError; this is truthy and its close() is a no-op."""
+
+    __slots__ = ()
+
+    def close(self, *_a, **_k):
+        return None
+
+    def __bool__(self):
+        return True
+
+
+STORE_CONN = StoreConn()
+
 DEFAULT_MIN_SIZE = 1
 DEFAULT_MAX_SIZE = 8            # env PG_POOL_MAX
 

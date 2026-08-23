@@ -13,6 +13,7 @@ os.chdir(BACKEND_DIR)
 
 from dotenv import load_dotenv
 from db import schema as db_schema
+from db import pool as _dbpool
 from db import store as db_store
 from db import watch as db_watch
 from intellistock_logger import intellistock_logger
@@ -34,7 +35,7 @@ except ImportError:
 def get_conn():
     """R26: the store pools its own connection per operation, so there is
     nothing to hand out. Kept for call-site arity."""
-    return None
+    return _dbpool.STORE_CONN
 
 
 def ensure_tables(c=None):
