@@ -27,7 +27,7 @@ distinction is the whole design, and §3 is why.
 ## 2. Measured behaviour
 
 Numbers below come from **replaying this module bar by bar**
-(`scripts/_strategy_x_replay.py`) over 15.7 years of real closes: next-bar
+(`scripts/strategy_x_replay.py`) over 15.7 years of real closes: next-bar
 fills, point-in-time filtering, NY session grouping, 2 bps one-way. That is the
 honest figure. A vectorised study of the same rule
 (`scripts/_strategy_x_final.py`) reports ~5pp higher because it fills at the
@@ -61,7 +61,7 @@ into recoveries, and costs 5pp of CAGR for 3pp of drawdown. Tighten it only if
 ## 3. What was killed, and by what
 
 The original design scored five voters into a signed conviction that chose
-between TQQQ and SQQQ. Before writing it, `scripts/_voter_hitrate_study.py`
+between TQQQ and SQQQ. Before writing it, `scripts/strategy_x_voter_study.py`
 measured every voter against **non-overlapping** 5-day forward QQQ returns, with
 the threshold pre-registered at p >= 0.58:
 

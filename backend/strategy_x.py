@@ -7,7 +7,7 @@ WHAT THE EVIDENCE SAYS
 This module is what survived an adversarial review of a much larger design. The
 original proposal was a five-voter "council" that would choose between TQQQ and
 SQQQ by scoring news, macro-LLM output and a Neo4j graph traversal. A
-pre-registered offline study (`scripts/_voter_hitrate_study.py`) measured every
+pre-registered offline study (`scripts/strategy_x_voter_study.py`) measured every
 proposed voter against non-overlapping 5-day forward QQQ returns and killed it:
 
     fraction of 5d windows that are UP      0.6045   <- the bar to beat
@@ -23,7 +23,7 @@ into 0%.
 
 What DOES survive is a de-lever FILTER, which does not predict direction — it
 avoids the convex tail. Measured by replaying THIS MODULE bar by bar over 15.7
-years of real closes (`scripts/_strategy_x_replay.py`, 2 bps one-way, next-bar
+years of real closes (`scripts/strategy_x_replay.py`, 2 bps one-way, next-bar
 fills, point-in-time filtering):
 
     config                        CAGR    maxDD   Sharpe   yrs>=100%
@@ -98,7 +98,7 @@ DEFAULTS = {
     "core_vol_bars": 20,
     # 0 disables. The gate should be LOOSE — it exists to refuse leverage in a
     # genuinely disordered tape, not to trade ordinary chop. Measured through
-    # this module over 15.7y (scripts/_strategy_x_replay.py), CAGR / maxDD /
+    # this module over 15.7y (scripts/strategy_x_replay.py), CAGR / maxDD /
     # Sharpe / yrs>=100%:
     #   1.20  28.87 / -45.7 / 0.87 / 2   (8.3 flips/yr — de-levers into recoveries)
     #   2.00  33.37 / -48.7 / 0.87 / 4

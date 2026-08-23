@@ -13,7 +13,7 @@ WHY IT IS NOT A "COUNCIL"
 The original design scored five voters — price trend, realised vol, an LLM macro
 read, LLM news breadth, and a Neo4j graph traversal — into a signed conviction
 that chose between TQQQ and SQQQ. A pre-registered study
-(`scripts/_voter_hitrate_study.py`) measured all of them against non-overlapping
+(`scripts/strategy_x_voter_study.py`) measured all of them against non-overlapping
 5-day forward QQQ returns before any of it was written:
 
     fraction of 5d windows that are UP    0.6045   <- the bar to beat
