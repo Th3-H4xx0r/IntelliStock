@@ -2487,12 +2487,12 @@ def main():
         for attempt in range(1, max_attempts + 1):
             try:
                 intellistock_logger.log(
-                    f"RethinkDB connection lost. Reconnecting (attempt {attempt}/{max_attempts})...",
+                    f"Database connection lost. Reconnecting (attempt {attempt}/{max_attempts})...",
                     "yellow",
                     service="CLI",
                 )
-                conn = get_conn(host=host, port=default_port)
-                intellistock_logger.log("Reconnected to RethinkDB.", "green", service="CLI")
+                conn = get_conn()
+                intellistock_logger.log("Reconnected to the database.", "green", service="CLI")
                 return True
             except Exception as e:
                 if attempt == max_attempts:

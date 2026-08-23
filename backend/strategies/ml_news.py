@@ -122,21 +122,15 @@ _tables_ensured = False
 
 
 def _get_db_conn(reuse: bool = True):
-    global _ml_news_db_conn
-    if not _db_available or r is None:
+    """R26: the store pools its own connection per operation, so there is
+    nothing to open, reuse or reconnect. Callers still branch on a falsy
+    return to mean "no database", and several of THEM treat a falsy conn as
+    "caching off" — so this must stay truthy whenever the store imported.
+    """
+    if not _db_available or store is None:
         return None
-    if reuse and _ml_news_db_conn is not None:
-        try:
-            r.db_list().run(_ml_news_db_conn)
-            return _ml_news_db_conn
-        except Exception:
-            _ml_news_db_conn = None
-    try:
-        _ml_news_db_conn = r.connect(host=RETHINKDB_HOST, port=RETHINKDB_PORT)
-        return _ml_news_db_conn
-    except Exception as e:
-        _log(f"DB connect error: {e}", "yellow")
-        return None
+    from db import pool as _dbpool
+    return _dbpool.STORE_CONN
 
 
 def _ensure_tables(conn):

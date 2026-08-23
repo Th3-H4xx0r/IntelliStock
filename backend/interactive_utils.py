@@ -26,6 +26,11 @@ from strategy_secret_boundary import scrub_inline_strategy_secrets
 
 DB_NAME = "IntelliStock"
 
+# Used by the agent-cycle-log actions and never defined — a latent NameError
+# that predates the Postgres port. The table is "AgentCycleLog" (it is in
+# db.schema's registry and carried 255 rows through the migration).
+AGENT_CYCLE_LOG_TABLE = "AgentCycleLog"
+
 # The pluck list the backtest-queue page returns. It was inline in the ReQL
 # chain; the store plucks after the read, so it needs a name.
 _QUEUE_FIELDS = (

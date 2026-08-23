@@ -13421,7 +13421,7 @@ while not shutdown_requested:
                     _ct_dc = (
                         current_time
                         if current_time.tzinfo
-                        else current_time.replace(tzinfo=timezone.utc)
+                        else current_time.replace(tzinfo=datetime.timezone.utc)
                     )
                     within_session = bool(_live_isoe(_ct_dc))
                 except Exception:

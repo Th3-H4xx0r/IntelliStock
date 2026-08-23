@@ -70,7 +70,7 @@ def alpaca_bars_cache_key(symbol: str, start_dt, end_dt, timeframe: str,
 
 
 def _ensure_bars_cache_table(conn, db_name: str, table_name: str) -> None:
-    if _rethink is None or conn is None:
+    if _store is None or conn is None:
         return
     key = f"{db_name}:{table_name}"
     if _table_ensured.get(key):
@@ -111,7 +111,7 @@ def get_bars_chunk_cached(
     Returns:
         Tuple of (list of bar dicts for this chunk, from_cache: bool).
     """
-    if conn is not None and _rethink is not None:
+    if conn is not None and _store is not None:
         _ensure_bars_cache_table(conn, db_name, table_name)
         cache_id = alpaca_bars_cache_key(symbol, chunk_start, chunk_end, timeframe, feed, adjustment)
         try:
@@ -128,7 +128,7 @@ def get_bars_chunk_cached(
         except Exception:
             pass
     bars = fetch_fn()
-    if conn is not None and _rethink is not None and isinstance(bars, list):
+    if conn is not None and _store is not None and isinstance(bars, list):
         try:
             cache_id = alpaca_bars_cache_key(symbol, chunk_start, chunk_end, timeframe, feed, adjustment)
             bars_json = json.dumps(bars)

@@ -4,6 +4,7 @@ Auth: JWT Bearer; signup requires SECRET_AUTH_KEY. Default admin created on serv
 Run from backend: uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
 """
 
+import json
 import os
 import sys
 
