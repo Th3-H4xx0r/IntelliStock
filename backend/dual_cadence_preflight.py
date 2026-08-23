@@ -161,8 +161,18 @@ def dual_cadence_backtest_preflight(data, time_increment, symbols):
                 continue
             ny = d.astimezone(ny_tz)
             sym_days.add(ny.strftime("%Y-%m-%d"))
-            hh, mm = ny.hour, ny.minute
-            if (hh == 9 and mm >= 30) or (10 <= hh <= 15):
+            # A bar counts as RTH when the interval it COVERS overlaps
+            # 09:30-16:00, not when its start label happens to land inside.
+            #
+            # Alpaca's hourly bars are aligned to the top of the hour, so the
+            # bar that actually contains the 09:30 open is stamped 09:00. The
+            # old test (`hh == 9 and mm >= 30`) never matched it, while
+            # bars_per_rth_day still expected 7 — capping every symbol at 6/7 =
+            # 85.7% and making the 90% gate unsatisfiable at 1Hour granularity.
+            # Every symbol failing with the SAME ratio is the tell.
+            start_s = ny.hour * 3600 + ny.minute * 60 + ny.second
+            end_s = start_s + ti_seconds
+            if end_s > (9 * 3600 + 30 * 60) and start_s < (16 * 3600):
                 rth_count += 1
         sym_expected = max(1, bars_per_rth_day * len(sym_days))
         ratio = rth_count / float(sym_expected)
