@@ -670,6 +670,27 @@ def run_one_backtest(row, avg_difficulty=None, is_high=False):
         'USE_NNPACK': '0',
         'GLOG_minloglevel': '2',
     }
+    # The spawned container needs the DATABASE too, and its `localhost` is not
+    # this process's: without these it fell back to db/pool.py's localhost
+    # default and every backtest died on "connection to server at 127.0.0.1,
+    # port 5432 failed". server.py spawns its six containers through the same
+    # helper; this is the seventh, and it was missed.
+    try:
+        from server import _pg_container_env
+        env.update(_pg_container_env())
+    except Exception:
+        # server.py imports docker/socketio; if it will not load, fall back to
+        # forwarding the coordinates directly rather than shipping none.
+        _host = (os.environ.get('INSTANCE_POSTGRES_HOST')
+                 or os.environ.get('POSTGRES_HOST') or '').strip()
+        for _k in ('PG_DSN', 'POSTGRES_HOST', 'POSTGRES_PORT', 'POSTGRES_USER',
+                   'POSTGRES_PASSWORD', 'POSTGRES_DB'):
+            _v = os.environ.get(_k)
+            if _v:
+                env[_k] = str(_v)
+        if _host:
+            env['POSTGRES_HOST'] = _host
+            env.pop('PG_DSN', None)   # PG_DSN wins over POSTGRES_HOST
     # Phase α.3 (2026-05-18, BT109429 follow-up): forward determinism env
     # vars into the spawned broker container. PYTHONHASHSEED must be set
     # in the container env BEFORE python starts (the interpreter reads it
