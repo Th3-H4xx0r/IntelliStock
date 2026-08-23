@@ -12,6 +12,12 @@ void showMoreSheet(BuildContext context) {
     context: context,
     backgroundColor: AppColors.panel,
     showDragHandle: true,
+    // The default sheet caps at 9/16 of the screen, which is ~105px short
+    // of the eleven rows below. Let it size to its content instead.
+    isScrollControlled: true,
+    constraints: BoxConstraints(
+      maxHeight: MediaQuery.sizeOf(context).height * 0.85,
+    ),
     builder: (_) => const _MoreSheet(),
   );
 }
@@ -35,36 +41,41 @@ class _MoreSheet extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final session = ref.watch(sessionProvider);
     return SafeArea(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          for (final item in _items)
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final item in _items)
+              ListTile(
+                leading: Icon(symbol(item.$1), color: AppColors.textMuted),
+                title: Text(item.$2, style: AppTextStyles.bodyHi),
+                onTap: () {
+                  Navigator.pop(context);
+                  context.push(item.$3);
+                },
+              ),
+            const Divider(height: 1, color: AppColors.border),
             ListTile(
-              leading: Icon(symbol(item.$1), color: AppColors.textMuted),
-              title: Text(item.$2, style: AppTextStyles.bodyHi),
-              onTap: () {
-                Navigator.pop(context);
-                context.push(item.$3);
-              },
+              leading: const CircleAvatar(
+                radius: 16,
+                backgroundColor: AppColors.surface,
+                child: Icon(
+                  Icons.person_outline,
+                  size: 18,
+                  color: AppColors.textMuted,
+                ),
+              ),
+              title: Text(session.username, style: AppTextStyles.bodyHi),
+              trailing: IconButton(
+                icon: Icon(symbol('logout'), color: AppColors.textDim),
+                onPressed: () async {
+                  Navigator.pop(context);
+                  await session.clear();
+                },
+              ),
             ),
-          const Divider(height: 1, color: AppColors.border),
-          ListTile(
-            leading: const CircleAvatar(
-              radius: 16,
-              backgroundColor: AppColors.surface,
-              child: Icon(Icons.person_outline,
-                  size: 18, color: AppColors.textMuted),
-            ),
-            title: Text(session.username, style: AppTextStyles.bodyHi),
-            trailing: IconButton(
-              icon: Icon(symbol('logout'), color: AppColors.textDim),
-              onPressed: () async {
-                Navigator.pop(context);
-                await session.clear();
-              },
-            ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

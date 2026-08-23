@@ -28,6 +28,12 @@ dependencies:
   # Charts
   syncfusion_flutter_charts: ^33.2.12
 
+  # Brand logos (brokerage marks, tinted to a single colour)
+  flutter_svg: ^2.0.10+1
+
+  # 3D model viewer (the login screen's coin)
+  flutter_3d_controller: ^2.3.0
+
   # Markdown (chatbot)
   flutter_markdown: ^0.7.5
 
@@ -69,3 +75,7 @@ flutter:
     # Inter + JetBrains Mono bundled so google_fonts loads them locally (no
     # runtime fetch / fallback-font flash on first launch; deterministic tests).
     - assets/google_fonts/
+    # Brokerage brand marks, tinted at render time by BrokerageLogo.
+    - assets/brands/
+    # glTF models (the login coin).
+    - assets/models/

@@ -32,7 +32,7 @@ class ChatbotDock extends ConsumerStatefulWidget {
 }
 
 class _ChatbotDockState extends ConsumerState<ChatbotDock>
-    with TickerProviderStateMixin {
+    with TickerProviderStateMixin, WidgetsBindingObserver {
   final _scrollCtrl = ScrollController();
   final _navigateHandled = <String>{};
 
@@ -43,6 +43,7 @@ class _ChatbotDockState extends ConsumerState<ChatbotDock>
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _glowAnim = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 2400),
@@ -52,9 +53,33 @@ class _ChatbotDockState extends ConsumerState<ChatbotDock>
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _glowAnim.dispose();
     _scrollCtrl.dispose();
     super.dispose();
+  }
+
+  /// A repeating controller asks for a frame every vsync for as long as it
+  /// runs. Backgrounded, that is pure waste.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _syncGlow(ref.read(chatbotProvider).isOpen);
+    } else if (_glowAnim.isAnimating) {
+      _glowAnim.stop();
+    }
+  }
+
+  /// The pulse only means anything while the collapsed FAB is on screen.
+  void _syncGlow(bool dockOpen) {
+    final wanted =
+        !dockOpen &&
+        WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
+    if (wanted && !_glowAnim.isAnimating) {
+      _glowAnim.repeat(reverse: true);
+    } else if (!wanted && _glowAnim.isAnimating) {
+      _glowAnim.stop();
+    }
   }
 
   bool _wasOpen = false;
@@ -67,8 +92,7 @@ class _ChatbotDockState extends ConsumerState<ChatbotDock>
   bool _settingsOpen = false;
   ChatConfirmRequest? _confirm;
 
-  void _requestConfirm(ChatConfirmRequest r) =>
-      setState(() => _confirm = r);
+  void _requestConfirm(ChatConfirmRequest r) => setState(() => _confirm = r);
 
   void _scrollToBottom({bool animate = true}) {
     void run() {
@@ -161,6 +185,8 @@ class _ChatbotDockState extends ConsumerState<ChatbotDock>
       }
     }
     _wasOpen = st.isOpen;
+    // The pulse is only meaningful while the collapsed FAB is on screen.
+    _syncGlow(st.isOpen);
     _lastKbInset = kbInset;
 
     // Sit above the bottom nav bar + home-indicator safe area.
@@ -303,15 +329,17 @@ class _ExpandedPanel extends ConsumerWidget {
                     title: st.activeConversation?.title ?? 'Assistant',
                     modelName: st.activeConversation?.modelName ?? '',
                     onSettings: onOpenSettings,
-                    onClear: () => onConfirm(ChatConfirmRequest(
-                      title: 'Clear conversation',
-                      body:
-                          'This will delete all messages. This cannot be undone.',
-                      confirmLabel: 'Clear',
-                      confirmColor: AppColors.danger,
-                      icon: Icons.delete_sweep,
-                      onConfirm: notifier.clearConversation,
-                    )),
+                    onClear: () => onConfirm(
+                      ChatConfirmRequest(
+                        title: 'Clear conversation',
+                        body:
+                            'This will delete all messages. This cannot be undone.',
+                        confirmLabel: 'Clear',
+                        confirmColor: AppColors.danger,
+                        icon: Icons.delete_sweep,
+                        onConfirm: notifier.clearConversation,
+                      ),
+                    ),
                     onMinimise: () => notifier.minimise(),
                   ),
 

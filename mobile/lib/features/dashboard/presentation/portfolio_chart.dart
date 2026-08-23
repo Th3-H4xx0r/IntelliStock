@@ -11,6 +11,7 @@ import '../../../core/polling/poller.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_text_styles.dart';
 import '../../../core/widgets/glass_card.dart';
+import '../../../core/widgets/brokerage_logo.dart';
 import '../../../core/widgets/material_symbols.dart';
 import '../../../core/widgets/skeleton.dart';
 import '../../../core/formatters/formatters.dart';
@@ -189,9 +190,14 @@ class _PortfolioChartState extends ConsumerState<PortfolioChart>
   // the old setState-per-frame scrubber jank.
   final ScrubController _scrub = ScrubController();
 
-  // Animate the chart only on first reveal — not every time it scrolls back
-  // into view or polls.
+  // The range _lastHistory was loaded for, so the outgoing curve can be drawn
+  // with its own axis while the incoming range loads.
+  String _lastLoadedRange = '1D';
+
+  // Animate the chart on its first reveal and on every range switch — but not
+  // when it merely polls or scrolls back into view.
   bool _animatedOnce = false;
+  bool _animateNextData = false;
 
   // Keep the chart alive while scrolled off-screen so it isn't recreated
   // (which would re-fetch and re-run the entry animation).
@@ -209,7 +215,11 @@ class _PortfolioChartState extends ConsumerState<PortfolioChart>
   void _setRange(String r) {
     if (r == _range) return;
     _scrub.clear();
-    setState(() => _range = r);
+    setState(() {
+      _range = r;
+      // The incoming curve should draw itself in rather than appear.
+      _animateNextData = true;
+    });
   }
 
   @override
@@ -221,7 +231,10 @@ class _PortfolioChartState extends ConsumerState<PortfolioChart>
     // Cache the freshest data; render the value/P&L from it even while a range
     // switch is loading (skeleton the value only on the very first load).
     final current = histAsync.valueOrNull;
-    if (current != null) _lastHistory = current;
+    if (current != null) {
+      _lastHistory = current;
+      _lastLoadedRange = _range;
+    }
     final valueHistory = current ?? _lastHistory;
 
     final content = Column(
@@ -266,22 +279,38 @@ class _PortfolioChartState extends ConsumerState<PortfolioChart>
         ),
         SizedBox(height: hero ? 22 : 8),
         histAsync.when(
-          loading: () => const _ChartSkeleton(),
+          // The skeleton is a FIRST-LOAD affordance only. Once a curve exists,
+          // a range switch keeps the outgoing one on screen until the new data
+          // lands — so the switch reads as an animation, not a blank reload.
+          loading: () {
+            final held = _lastHistory;
+            if (held == null || held.isEmpty) return const _ChartSkeleton();
+            return _ChartArea(
+              key: ValueKey(_lastLoadedRange),
+              history: held,
+              scrub: _scrub,
+              range: _lastLoadedRange,
+              animate: false,
+            );
+          },
           error: (_, _) => const _ChartEmpty(message: 'Failed to load'),
           data: (history) {
             if (history.isEmpty) {
               return const _ChartEmpty(message: 'No data for this range');
             }
-            // Play the entrance animation only the first time the chart
-            // renders with data; flip the flag afterwards so scrolling away
-            // and back (state kept alive) doesn't re-animate.
-            final shouldAnimate = !_animatedOnce;
+            // Draw in on the very first curve and on every range switch; stay
+            // still for polls and for scrolling back into view. The ValueKey
+            // remounts the series on a range change, which is what makes
+            // Syncfusion replay its entrance animation.
+            final shouldAnimate = !_animatedOnce || _animateNextData;
             if (shouldAnimate) {
-              WidgetsBinding.instance.addPostFrameCallback(
-                (_) => _animatedOnce = true,
-              );
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                _animatedOnce = true;
+                _animateNextData = false;
+              });
             }
             return _ChartArea(
+              key: ValueKey(_range),
               history: history,
               scrub: _scrub,
               range: _range,
@@ -312,7 +341,6 @@ class _CardHeader extends StatelessWidget {
     final label = type == 'alpaca'
         ? (isPaper ? 'Alpaca · Paper' : 'Alpaca')
         : type;
-    final icon = type == 'alpaca' ? symbol('show_chart') : symbol('savings');
     final isActive = (account.status as String? ?? '') == 'active';
     final statusColor = isActive ? AppColors.success : AppColors.danger;
 
@@ -321,7 +349,7 @@ class _CardHeader extends StatelessWidget {
         Expanded(
           child: Row(
             children: [
-              Icon(icon, color: AppColors.primary, size: 16),
+              BrokerageLogo(brokerageType: type, size: 16),
               const SizedBox(width: 6),
               Text(
                 label.toUpperCase(),
@@ -529,6 +557,7 @@ class _ChartEmpty extends StatelessWidget {
 
 class _ChartArea extends StatelessWidget {
   const _ChartArea({
+    super.key,
     required this.history,
     required this.scrub,
     required this.range,

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'app.dart';
@@ -9,6 +10,11 @@ import 'core/lock/app_lock_controller.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  // The app is portrait-only. The native manifests (Info.plist /
+  // AndroidManifest) are what actually bind the device; this keeps the
+  // engine's own preference in step with them.
+  await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+
   // Read persisted auth + lock state DIRECTLY from secure storage before the
   // ProviderContainer is created, so the very first frame already reflects the
   // correct lock state (no async gap / cold-launch flash of unprotected UI).
@@ -17,9 +23,11 @@ Future<void> main() async {
     aOptions: AndroidOptions(encryptedSharedPreferences: true),
   );
   final token = await storage.read(key: 'intellistock_token');
-  final lockEnabled = (await storage.read(key: 'biometric_lock_enabled')) == 'true';
-  final lockTimeout =
-      LockTimeout.fromStorageString(await storage.read(key: 'lock_timeout'));
+  final lockEnabled =
+      (await storage.read(key: 'biometric_lock_enabled')) == 'true';
+  final lockTimeout = LockTimeout.fromStorageString(
+    await storage.read(key: 'lock_timeout'),
+  );
   final isAuthed = token != null && token.isNotEmpty;
   final seedState = AppLockState(
     enabled: lockEnabled,
