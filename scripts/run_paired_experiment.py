@@ -108,7 +108,13 @@ def _launch_and_wait(instance, start, end, cash, granularity, poll=120):
     print(f"  launched bt {bid}")
     while True:
         time.sleep(poll)
-        st = _get(f"/backtests/{bid}/status")
+        try:
+            st = _get(f"/backtests/{bid}/status")
+        except Exception as _poll_exc:
+            # 2026-08-22: a transient 500 mid-poll killed a wrapper while its
+            # backtest ran on fine — a poll must outlive API hiccups.
+            print(f"    status poll error ({type(_poll_exc).__name__}) — retrying", flush=True)
+            continue
         s = str(st.get("status") or "").lower()
         if s in ("finished", "error", "stopped", "completed"):
             print(f"  bt {bid} -> {s} ({st.get('progress')}%)")
@@ -143,18 +149,29 @@ def _snapshot(action, instance, path, apply=False):
         raise SystemExit(f"snapshot {action} failed — arms would not be comparable")
 
 
-def _run_arm(label, args, settings, snapshot_path=None):
-    """One arm. Cold protocol: clear -> attest cold -> run. Warm protocol
-    (snapshot_path set): clear -> restore the warmup snapshot -> attest
-    (IDENTICAL_WARM by construction) -> run."""
+def _run_arm(label, args, settings, snapshot_path=None, warmup_per_arm=None,
+             base_settings=None):
+    """One arm. Cold protocol: clear -> attest cold -> run. Warm-snapshot
+    protocol: clear -> restore -> attest -> run. Warm-per-arm (API-only):
+    clear -> warmup run under BASE config -> arm config -> measurement run;
+    no direct-DB access, determinism substitutes for the snapshot."""
     print(f"\n=== ARM {label} ===")
     print(f"  cleared {_clear(args.instance)} row(s)")
     if snapshot_path:
         _snapshot("restore", args.instance, snapshot_path, apply=True)
-    fp = _attest(args.instance)
-    print(f"  start: {fp['total_rows']} steering row(s), cold={is_cold(fp)}")
-    if snapshot_path is None and not is_cold(fp):
-        print("  WARNING: arm did not start cold — the comparison will be flagged")
+    if warmup_per_arm:
+        # Base config for the warmup so both arms warm IDENTICALLY; the arm
+        # lever must not touch the warmup phase.
+        _apply(args.doc, base_settings or [])
+        print(f"  warmup {warmup_per_arm} -> {args.start} (base config)")
+        _launch_and_wait(args.instance, warmup_per_arm, args.start,
+                         args.cash, args.granularity)
+        fp = {"total_rows": -1, "warm_per_arm": True}
+    else:
+        fp = _attest(args.instance)
+        print(f"  start: {fp['total_rows']} steering row(s), cold={is_cold(fp)}")
+        if snapshot_path is None and not is_cold(fp):
+            print("  WARNING: arm did not start cold — the comparison will be flagged")
     _apply(args.doc, settings)
     bid, status = _launch_and_wait(args.instance, args.start, args.end,
                                    args.cash, args.granularity)
@@ -171,6 +188,13 @@ def main(argv=None):
     p.add_argument("--granularity", default="3600")
     p.add_argument("--control", action="append", default=[], metavar="KEY=VALUE")
     p.add_argument("--treatment", action="append", default=[], metavar="KEY=VALUE")
+    p.add_argument("--warmup-per-arm", metavar="DATE", help=(
+        "API-only warm protocol (no direct-DB snapshot): EACH arm runs "
+        "clear -> warmup backtest (DATE to --start, base config) -> arm "
+        "config -> measurement run. Valid because same-config runs "
+        "byte-reproduce (proven 4x on 2026-08-22: +1.3487%% to the 4th "
+        "decimal across hours and a deploy) — determinism IS the snapshot. "
+        "Skips direct-DB attestation entirely."))
     p.add_argument("--keep-bar-snapshots", action="store_true", help=(
         "Keep per-bar LLM-crash rewind snapshots ON during the arms (the old "
         "behaviour, ~19min slower per run). Default: off for both arms — a "
@@ -219,14 +243,22 @@ def main(argv=None):
         a.control = list(a.control) + ["backtest_bar_snapshot_enabled=false"]
         a.treatment = list(a.treatment) + ["backtest_bar_snapshot_enabled=false"]
 
-    ctl = _run_arm("CONTROL", a, a.control, snapshot_path=snapshot_path)
-    trt = _run_arm("TREATMENT", a, a.treatment, snapshot_path=snapshot_path)
+    _base = ["backtest_bar_snapshot_enabled=false"] if not a.keep_bar_snapshots else []
+    ctl = _run_arm("CONTROL", a, a.control, snapshot_path=snapshot_path,
+                   warmup_per_arm=a.warmup_per_arm, base_settings=_base)
+    trt = _run_arm("TREATMENT", a, a.treatment, snapshot_path=snapshot_path,
+                   warmup_per_arm=a.warmup_per_arm, base_settings=_base)
 
     print("\n" + "=" * 72)
     # Warm protocol: IDENTICAL_WARM is by construction (same restored
     # snapshot), not the coincidence the cold-only rule guards against.
-    start_verdict = compare_arm_starts(ctl["fingerprint"], trt["fingerprint"],
-                                       require_cold=(snapshot_path is None))
+    if a.warmup_per_arm:
+        start_verdict = {"verdict": "IDENTICAL_WARM_PER_ARM",
+                         "reason": "both arms warmed identically from clear "
+                                   "(byte-reproduction protocol; no direct-DB attestation)"}
+    else:
+        start_verdict = compare_arm_starts(ctl["fingerprint"], trt["fingerprint"],
+                                           require_cold=(snapshot_path is None))
     print(f"START STATE : {start_verdict['verdict']} — {start_verdict['reason']}")
 
     ctext, ttext = _log_text(ctl["bid"]), _log_text(trt["bid"])
