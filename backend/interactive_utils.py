@@ -5487,7 +5487,22 @@ def action_create_backtest(
     _evidence_in = {k: v for k, v in (evidence_options or {}).items() if v is not None}
     _evidence = validate_evidence_options(_evidence_in)
     ensure_backtest_instances_table(conn)
-    instance_doc = _resolve_instance_doc(conn, instance_id) if instance_id else None
+    # The broker REQUIRES an instance: it validates instance_id on boot and
+    # writes status=error when it is blank (broker.py, "instance_id is missing
+    # or empty"). Accepting the create anyway queued a row, span a container,
+    # and let it die there — and one such run stuck at status='running' with
+    # its queue row already reaped, which reads as a hang rather than a
+    # rejection. The chatbot tool passes args.get("instance_id"), so a model
+    # that omits it produced exactly that. Refuse here, where the caller can
+    # still act on the message.
+    if not instance_id or not str(instance_id).strip():
+        raise ValueError(
+            "instance_id is required: a backtest runs a specific instance's "
+            "strategy, and the broker refuses to start without one")
+    instance_doc = _resolve_instance_doc(conn, instance_id)
+    if instance_doc is None:
+        raise ValueError(
+            "instance_id %r does not exist" % (str(instance_id).strip(),))
     kind_normalized = str((instance_doc or {}).get("kind") or "").strip().lower()
     non_equity_compatibility = kind_normalized in {"crypto", "kalshi"}
     direct_key = (key or "").strip()
