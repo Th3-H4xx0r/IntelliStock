@@ -2829,6 +2829,13 @@ def _residual_sleeve_config(cached_strategies):
                 "buffer_pct": float(cfg.get("residual_sleeve_buffer_pct", 0.02) or 0.02),
                 "min_deploy_pct": float(cfg.get("residual_sleeve_min_deploy_pct", 0.05) or 0.05),
                 "release_cash_pct": float(cfg.get("residual_sleeve_release_cash_pct", 0.15) or 0.15),
+                # 2026-08-22 hedge-leak guard: skip the bear-leg cash refill
+                # while the leg is up >= this % from entry. Measured leak
+                # (window-c sweep): refill sold 31.5 sh at avg 75.94 INTO a
+                # rising leg and re-bought 26.6 sh at avg 76.53 — the book
+                # reached the payoff move with a 7.7% smaller hedge. 0 = OFF
+                # (byte-identical legacy behaviour).
+                "bear_refill_skip_min_leg_gain_pct": float(cfg.get("residual_sleeve_bear_refill_skip_min_leg_gain_pct", 0.0) or 0.0),
                 "min_park_hours": float(cfg.get("residual_sleeve_min_park_hours", 24.0) or 24.0),
                 # 2026-07-19 bear leg: park into an inverse ETF during
                 # CONFIRMED bear/crash so the sleeve earns the downtrend
@@ -4878,7 +4885,21 @@ def _residual_sleeve_release(
                     # point the sale has settled into get_cash().
                     _inflight = _sleeve_pending_qty(
                         portfolio_emulator, bsym, "sell", order_service) * bpx
-                    if _bnav > 0 and (_bcash + _inflight) < _brel * _bnav:
+                    _brf_skip_gain = float(cfg.get("bear_refill_skip_min_leg_gain_pct", 0.0) or 0.0)
+                    if (_brf_skip_gain > 0.0 and _bentry is not None
+                            and float(_bentry or 0.0) > 0.0
+                            and bpx >= float(_bentry) * (1.0 + _brf_skip_gain / 100.0)):
+                        # De-risking a WORKING hedge into strength re-buys it
+                        # higher and shrinks the leg for the payoff move —
+                        # the exact leak the 2026-08-22 window-c sweep measured.
+                        # The leg trail/stop still governs risk; only the
+                        # cash-floor trim stands down while the leg is up.
+                        _log(f"[sleeve] bear refill SKIPPED — leg appreciating "
+                             f"({bpx:.2f} >= entry {float(_bentry):.2f} "
+                             f"+{_brf_skip_gain:.0f}%); cash floor waits for "
+                             "the trail/stop rather than trimming a working "
+                             "hedge into strength", "cyan")
+                    elif _bnav > 0 and (_bcash + _inflight) < _brel * _bnav:
                         _bneeded = max(0.0, _brel * _bnav - _bcash - _inflight)
                         _bsell_qty = min(bqty, _bneeded / bpx)
                         if _bsell_qty > 0:

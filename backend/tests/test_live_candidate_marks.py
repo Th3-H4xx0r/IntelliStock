@@ -239,3 +239,19 @@ def test_bar_snapshot_lever_defaults_on_and_gates_both_capture_sites():
         if "_bar_snapshot_enabled" not in _SRC[max(0, m.start() - 300):m.start()]
     ]
     assert not ungated, f"{len(ungated)} ungated _bs_capture call(s) remain"
+
+
+def test_bear_refill_appreciation_guard_defaults_off_and_is_whitelisted():
+    """2026-08-22 hedge-leak guard: the refill must consult
+    bear_refill_skip_min_leg_gain_pct (default 0 = legacy byte-identical),
+    and the key MUST be in the _residual_sleeve_config whitelist — a key read
+    only at the read site ships INERT (the documented 13-inert-levers trap)."""
+    assert _SRC.count(
+        '"bear_refill_skip_min_leg_gain_pct": float(cfg.get('
+        '"residual_sleeve_bear_refill_skip_min_leg_gain_pct", 0.0) or 0.0)'
+    ) == 1, "whitelist entry missing — the lever would be inert"
+    assert _SRC.count(
+        'cfg.get("bear_refill_skip_min_leg_gain_pct", 0.0)') == 1, (
+        "read-site guard missing")
+    assert "bear refill SKIPPED — leg appreciating" in _SRC, (
+        "the guard must announce itself (unlogged lever = unprovable lever)")
