@@ -6029,37 +6029,45 @@ def _range_to_ms_window(range_str: str) -> tuple:
     return now_ms - 24 * 3600 * 1000, now_ms
 
 
+# The Token Usage page used to pull whole LLMUsage documents and add them up in
+# Python: a 30-day window moved 122MB and built 182k dicts, an all-time one
+# 199MB and 300k, and the page issues several of these at once. The aggregates
+# below push the arithmetic into SQL, so the same window returns a few dozen
+# rows. The `ts` index still drives the range; only the SUM moved.
+_LLM_TOKENS_SQL = ("coalesce((doc->>'input_tokens')::numeric, 0) "
+                   "+ coalesce((doc->>'output_tokens')::numeric, 0)")
+_LLM_COST_SQL = "coalesce((doc->>'total_cost_usd')::numeric, 0)"
+_LLM_WINDOW_SQL = 'FROM "LLMUsage" WHERE ts >= %(start)s AND ts < %(end)s'
+
+
 def _llm_usage_summary(*, range_str: str, conn) -> dict:
     import llm_telemetry
     start, end = _range_to_ms_window(range_str)
-    rows: list = []
-    try:
-        # Use the `ts` secondary index (created by ensure_llm_usage_tables)
-        # so the dashboard stays sub-second at 100K+ rows. The .filter()
-        # alternative forces a full table scan.
-        rows = db_store.run(db_store.between(
-            "LLMUsage", _ts_key(start), _ts_key(end), index="ts"))
-    except Exception:
-        rows = []
-
     by_key: dict = {}
+    total_calls = 0
     total_tokens = 0
     total_cost = 0.0
     cli_cost_for_max_est = 0.0
-    for row in rows:
-        key = (row.get("provider"), row.get("model"))
-        b = by_key.setdefault(key, {
-            "provider": key[0], "model": key[1],
-            "calls": 0, "tokens": 0, "cost_usd": 0.0,
-        })
-        b["calls"] += 1
-        tk = int(row.get("input_tokens", 0) or 0) + int(row.get("output_tokens", 0) or 0)
-        b["tokens"] += tk
-        c = float(row.get("total_cost_usd", 0.0) or 0.0)
-        b["cost_usd"] += c
+    try:
+        agg = db_store.sql(
+            "SELECT provider, model, count(*) AS calls,"
+            " sum(%s) AS tokens, sum(%s) AS cost_usd "
+            "%s GROUP BY provider, model"
+            % (_LLM_TOKENS_SQL, _LLM_COST_SQL, _LLM_WINDOW_SQL),
+            {"start": _ts_key(start), "end": _ts_key(end)})
+    except Exception:
+        agg = []
+    for r in agg:
+        tk = int(r["tokens"] or 0)
+        c = float(r["cost_usd"] or 0.0)
+        by_key[(r["provider"], r["model"])] = {
+            "provider": r["provider"], "model": r["model"],
+            "calls": int(r["calls"] or 0), "tokens": tk, "cost_usd": c,
+        }
+        total_calls += int(r["calls"] or 0)
         total_tokens += tk
         total_cost += c
-        if row.get("provider") in ("claude-cli", "claude-cli-chat"):
+        if r["provider"] in ("claude-cli", "claude-cli-chat"):
             cli_cost_for_max_est += c
 
     cli_usage_file = llm_telemetry.probe_local_cli_usage_file()
@@ -6068,7 +6076,7 @@ def _llm_usage_summary(*, range_str: str, conn) -> dict:
     return {
         "period_start": start,
         "period_end": end,
-        "total_calls": len(rows),
+        "total_calls": total_calls,
         "total_tokens": total_tokens,
         "total_cost_usd": round(total_cost, 6),
         "by_provider": list(by_key.values()),
@@ -6085,46 +6093,41 @@ def _llm_usage_summary(*, range_str: str, conn) -> dict:
 def _llm_usage_timeseries(*, range_str, bucket, provider, conn) -> list:
     start, end = _range_to_ms_window(range_str)
     bucket_ms = 3600_000 if bucket == "hour" else 86400_000
-    try:
-        rows = db_store.run(db_store.between(
-            "LLMUsage", _ts_key(start), _ts_key(end), index="ts"))
-    except Exception:
-        rows = []
+    params = {"start": _ts_key(start), "end": _ts_key(end), "b": bucket_ms}
+    where = _LLM_WINDOW_SQL
     if provider:
-        rows = [x for x in rows if x.get("provider") == provider]
-    by_key: dict = {}
-    for row in rows:
-        bucket_start = (int(row.get("ts", 0)) // bucket_ms) * bucket_ms
-        key = (bucket_start, row.get("provider"), row.get("model"))
-        b = by_key.setdefault(key, {
-            "bucket_start_ts": bucket_start,
-            "provider": key[1],
-            "model": key[2],
-            "tokens": 0,
-            "cost_usd": 0.0,
-        })
-        b["tokens"] += int(row.get("input_tokens", 0) or 0) + int(row.get("output_tokens", 0) or 0)
-        b["cost_usd"] += float(row.get("total_cost_usd", 0.0) or 0.0)
-    return sorted(by_key.values(), key=lambda x: x["bucket_start_ts"])
+        where += " AND doc->>'provider' = %(provider)s"
+        params["provider"] = provider
+    try:
+        agg = db_store.sql(
+            "SELECT ((doc->>'ts')::bigint / %%(b)s) * %%(b)s AS bucket_start_ts,"
+            " provider, model, sum(%s) AS tokens, sum(%s) AS cost_usd "
+            "%s GROUP BY 1, 2, 3 ORDER BY 1"
+            % (_LLM_TOKENS_SQL, _LLM_COST_SQL, where), params)
+    except Exception:
+        agg = []
+    return [{"bucket_start_ts": int(r["bucket_start_ts"] or 0),
+             "provider": r["provider"], "model": r["model"],
+             "tokens": int(r["tokens"] or 0),
+             "cost_usd": float(r["cost_usd"] or 0.0)} for r in agg]
 
 
 def _llm_usage_top_spenders(*, range_str, group_by, limit, conn) -> list:
     start, end = _range_to_ms_window(range_str)
-    try:
-        rows = db_store.run(db_store.between(
-            "LLMUsage", _ts_key(start), _ts_key(end), index="ts"))
-    except Exception:
-        rows = []
     key_field = group_by if group_by in ("model", "strategy", "call_site", "provider") else "model"
-    by_key: dict = {}
-    for row in rows:
-        key = row.get(key_field) or "(unset)"
-        b = by_key.setdefault(key, {"key": key, "calls": 0, "tokens": 0, "cost_usd": 0.0})
-        b["calls"] += 1
-        b["tokens"] += int(row.get("input_tokens", 0) or 0) + int(row.get("output_tokens", 0) or 0)
-        b["cost_usd"] += float(row.get("total_cost_usd", 0.0) or 0.0)
-    out = sorted(by_key.values(), key=lambda x: x["cost_usd"], reverse=True)
-    return out[: max(1, int(limit))]
+    try:
+        agg = db_store.sql(
+            "SELECT coalesce(nullif(doc->>'%s', ''), '(unset)') AS key,"
+            " count(*) AS calls, sum(%s) AS tokens, sum(%s) AS cost_usd "
+            "%s GROUP BY 1 ORDER BY 4 DESC LIMIT %%(lim)s"
+            % (key_field, _LLM_TOKENS_SQL, _LLM_COST_SQL, _LLM_WINDOW_SQL),
+            {"start": _ts_key(start), "end": _ts_key(end),
+             "lim": max(1, int(limit))})
+    except Exception:
+        agg = []
+    return [{"key": r["key"], "calls": int(r["calls"] or 0),
+             "tokens": int(r["tokens"] or 0),
+             "cost_usd": float(r["cost_usd"] or 0.0)} for r in agg]
 
 
 def _llm_usage_by_backtest(*, range_str: str, limit: int, conn) -> list:
