@@ -66,6 +66,11 @@ class _LoginCoinState extends State<LoginCoin> with WidgetsBindingObserver {
   bool _started = false;
   Timer? _idle;
 
+  /// The entrance is a one-time event. Returning to idle after a REJECTED
+  /// sign-in must not replay it — that made a wrong password look like the
+  /// screen had just opened.
+  bool _introDone = false;
+
   @override
   void initState() {
     super.initState();
@@ -93,6 +98,12 @@ class _LoginCoinState extends State<LoginCoin> with WidgetsBindingObserver {
     if (!_started && mounted) setState(() => _started = true);
     switch (widget.phase) {
       case CoinPhase.idle:
+        if (_introDone) {
+          // Back from a failed attempt: settle straight into the bob.
+          _controller.playAnimation(animationName: 'Idle');
+          return;
+        }
+        _introDone = true;
         _controller.playAnimation(animationName: 'Intro', loopCount: 1);
         // The player reports no completion event, so hand over to the
         // looping bob on a timer matched to the Intro clip's length.
