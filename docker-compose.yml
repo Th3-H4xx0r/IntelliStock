@@ -95,9 +95,15 @@ services:
       - codex_auth:/root/.codex
     restart: unless-stopped
     depends_on:
-      - postgres
-      - rethinkdb
-      - neo4j
+      postgres:
+        # service_started is not enough: postgres runs initdb on
+        # first boot, and every service raced it with a bare
+        # depends_on, logging connection-refused until it caught up.
+        condition: service_healthy
+      rethinkdb:
+        condition: service_started
+      neo4j:
+        condition: service_started
     env_file:
       - .env
     environment:
@@ -197,9 +203,15 @@ services:
       - LIVE_TRADING_LOG_DIR=/app/live_trading_logs
     restart: unless-stopped
     depends_on:
-      - postgres
-      - rethinkdb
-      - neo4j
+      postgres:
+        # service_started is not enough: postgres runs initdb on
+        # first boot, and every service raced it with a bare
+        # depends_on, logging connection-refused until it caught up.
+        condition: service_healthy
+      rethinkdb:
+        condition: service_started
+      neo4j:
+        condition: service_started
 
   price-service:
     image: intellistock-backend
@@ -207,8 +219,13 @@ services:
     command: ["python", "engines/price_engine.py"]
     restart: unless-stopped
     depends_on:
-      - postgres
-      - rethinkdb
+      postgres:
+        # service_started is not enough: postgres runs initdb on
+        # first boot, and every service raced it with a bare
+        # depends_on, logging connection-refused until it caught up.
+        condition: service_healthy
+      rethinkdb:
+        condition: service_started
     environment:
       - RETHINKDB_HOST=rethinkdb
       - POSTGRES_HOST=postgres
@@ -224,9 +241,15 @@ services:
     command: ["python", "engines/backtest_engine.py"]
     restart: unless-stopped
     depends_on:
-      - postgres
-      - rethinkdb
-      - neo4j
+      postgres:
+        # service_started is not enough: postgres runs initdb on
+        # first boot, and every service raced it with a bare
+        # depends_on, logging connection-refused until it caught up.
+        condition: service_healthy
+      rethinkdb:
+        condition: service_started
+      neo4j:
+        condition: service_started
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - backtest_logs:/app/backtest_logs
@@ -318,9 +341,15 @@ services:
     command: ["python", "engines/discord_bot.py"]
     restart: unless-stopped
     depends_on:
-      - postgres
-      - rethinkdb
-      - neo4j
+      postgres:
+        # service_started is not enough: postgres runs initdb on
+        # first boot, and every service raced it with a bare
+        # depends_on, logging connection-refused until it caught up.
+        condition: service_healthy
+      rethinkdb:
+        condition: service_started
+      neo4j:
+        condition: service_started
     ports:
       - "${DISCORD_BOT_HTTP_PORT:-8050}:8050"   # HTTP API for other services to send messages
     env_file:

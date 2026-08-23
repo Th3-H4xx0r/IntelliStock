@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """
 IntelliStock Discord Bot - Same interface as the CLI, via Discord.
-Requires: DISCORD_BOT_TOKEN in environment. RethinkDB connection via RETHINKDB_HOST, RETHINKDB_PORT.
+Requires: DISCORD_BOT_TOKEN in environment. Database connection via PG_DSN / POSTGRES_*.
 Enable in Discord Developer Portal: Bot → Privileged Gateway Intents → "Message Content Intent" ON
 (needed so the bot can read !commands). Run: python engines/discord_bot.py (from backend dir)
 """
@@ -47,8 +47,6 @@ load_dotenv(os.path.join(os.path.dirname(_backend_dir), '.env'))
 
 from db import store as _store
 from interactive_utils import (
-    RETHINKDB_HOST,
-    RETHINKDB_PORT,
     get_conn,
     parse_granularity_to_seconds,
     ensure_discord_outbox_table,
@@ -132,7 +130,9 @@ def _code_block(text: str, lang: str = "") -> str:
 
 
 def _get_conn_sync():
-    return get_conn(host=RETHINKDB_HOST, port=RETHINKDB_PORT)
+    # R26: the store pools its own connection per operation; get_conn takes no
+    # host/port any more (and returns None).
+    return get_conn()
 
 
 async def run_sync(sync_func, *args, **kwargs):
@@ -1588,7 +1588,7 @@ async def on_message(message: discord.Message):
 
     conn = None
     try:
-        log.debug("on_message: connecting to RethinkDB (%s:%s)", RETHINKDB_HOST, RETHINKDB_PORT)
+        log.debug("on_message: acquiring a database handle")
         conn = await run_sync(_get_conn)
         log.debug("on_message: RethinkDB connected")
     except Exception as err:

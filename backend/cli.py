@@ -22,8 +22,6 @@ from intellistock_logger import intellistock_logger
 
 from interactive_utils import (
     DB_NAME,
-    RETHINKDB_HOST,
-    RETHINKDB_PORT,
     get_conn,
     ensure_live_prices_stocks_table,
     ensure_instances_table,
@@ -2464,33 +2462,16 @@ def cmd_unlink_brokerage(conn, brokerage_id):
 
 
 def main():
-    default_port = os.environ.get('RETHINKDB_PORT', str(RETHINKDB_PORT))
-
-    intellistock_logger.log("IntelliStock CLI (backend control via RethinkDB)", "cyan", service="CLI")
-    try:
-        prompt = (
-            "RethinkDB host: enter IP address, or l=localhost, r=preset ({}) : ".format(RETHINKDB_PRESET_REMOTE)
-        )
-        host_input = input(prompt).strip().lower()
-        if not host_input:
-            host = RETHINKDB_HOST  # env or localhost
-        elif host_input == 'l':
-            host = 'localhost'
-        elif host_input == 'r':
-            host = RETHINKDB_PRESET_REMOTE
-        else:
-            host = host_input  # user typed an IP or hostname (already stripped)
-    except (EOFError, KeyboardInterrupt):
-        intellistock_logger.log("Bye.", "green", service="CLI")
-        sys.exit(0)
-    intellistock_logger.log("Connecting to RethinkDB at {} ...".format(host), "white", service="CLI")
+    intellistock_logger.log("IntelliStock CLI (backend control via Postgres)", "cyan", service="CLI")
+    # R26: the store reads PG_DSN / POSTGRES_* and pools its own connection,
+    # so there is no host to prompt for any more.
     intellistock_logger.log("Type 'help' for commands.", "white", service="CLI")
 
     try:
-        conn = get_conn(host=host, port=default_port)
+        conn = get_conn()
     except Exception as e:
-        intellistock_logger.log(f"Cannot connect to RethinkDB: {e}", "red", service="CLI")
-        intellistock_logger.log("Check host and RETHINKDB_PORT (default 28015).", "yellow", service="CLI")
+        intellistock_logger.log(f"Cannot connect to the database: {e}", "red", service="CLI")
+        intellistock_logger.log("Check PG_DSN (or POSTGRES_HOST/PORT/USER/DB) in .env.", "yellow", service="CLI")
         sys.exit(1)
 
     def _reconnect_conn(max_attempts=3, delay=1.0):
