@@ -845,6 +845,24 @@ def run_one_backtest(row, avg_difficulty=None, is_high=False):
                 "Exit 137 usually means the container was killed (e.g. out of memory).",
                 "yellow", service="BACKTEST_ENGINE",
             )
+        # The container's stderr is the ONLY record of why it died, and it was
+        # going to this process's stdout and nowhere else: the queue row is
+        # deleted a few lines below, so the run was left as a permanent
+        # status='running' zombie with no error and zero steps. That reads as a
+        # hang and is undiagnosable without host-side docker logs. Persist the
+        # tail so the failure is visible wherever the run is.
+        try:
+            import backtest_result_store as _brs
+            _tail = err_str[-4000:]
+            _brs.set_status(row_id, "error")
+            _brs.patch_metadata(row_id, {
+                "error": "backtest container exited abnormally: " + _tail,
+            })
+        except Exception as _persist_exc:
+            intellistock_logger.log(
+                f"Backtest {row_id}: could not persist the container error: {_persist_exc}",
+                "yellow", service="BACKTEST_ENGINE",
+            )
         try:
             client = _get_docker_client()
             if client:
