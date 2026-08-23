@@ -204,6 +204,66 @@ def _get_instance_doc(conn, instance_id):
         return None
 
 
+def _instance_single_position_pct(conn, instance_doc):
+    """The instance's opt-in single-position cap, as a FRACTION, or None.
+
+    Read from the linked strategy document's config
+    (`broker_max_single_position_pct`). None means "not declared" and the
+    spawned broker keeps its 0.15 default, so this is inert for every existing
+    instance.
+
+    Bounded to (0, 1]: a value of 0 disables the broker's failsafe entirely and
+    a value above 1 is meaningless, and neither should be reachable by editing a
+    strategy document. An unparseable value returns None rather than raising —
+    a malformed config key must not take a backtest down.
+
+    The declaring entry must ALSO be enabled. The env var is process-wide inside
+    the container, not lane-scoped, so honouring the key on a disabled entry
+    would lift the broker failsafe from 15% to 95% for every sibling strategy in
+    the same document while the strategy that asked for it does nothing.
+    """
+    try:
+        sid = (instance_doc or {}).get("strategy_id")
+        if sid is None:
+            return None
+        # No str() fallback: db/store.py coerces the key via the table's
+        # declared id_type, so both forms normalise to the same string and a
+        # second lookup could only repeat the first.
+        doc = db_store.get("Strategies", sid)
+        if not doc:
+            return None
+        for entry in (doc.get("strategies") or []):
+            if not isinstance(entry, dict):
+                continue
+            cfg = entry.get("config") or {}
+            raw = cfg.get("broker_max_single_position_pct")
+            if raw is None or raw == "":
+                continue
+            enabled = cfg.get("strategy_x_enabled", False)
+            if isinstance(enabled, str):
+                enabled = enabled.strip().lower() in ("1", "true", "yes", "on")
+            if not enabled:
+                continue
+            # `float(True) == 1.0` would sail through the band below and
+            # silently disable the trim, which is exactly what the bound exists
+            # to prevent.
+            if isinstance(raw, bool):
+                continue
+            val = float(raw)
+            if not (0.0 < val <= 1.0):
+                continue        # a bad entry must not mask a later good one
+            return val
+    except Exception:
+        # Deliberately broad, matching the sibling lookups _backtest_avg_difficulty
+        # and _backtest_high_difficulty_trigger. db_store raises StoreError (not a
+        # ValueError) on a malformed key or an unreachable pool, and letting that
+        # escape would be caught by the CALLER's handler — which blanks the
+        # brokerage credentials and reclassifies the run, so an unrelated cap
+        # lookup would strip a crypto backtest's keys.
+        return None
+    return None
+
+
 def _resolve_data_brokerage_creds(conn, instance_id):
     """If the instance has a separate market-data Alpaca brokerage linked
     (`alpaca_data_brokerage_id`), decrypt its key/secret and return them.
@@ -594,10 +654,21 @@ def run_one_backtest(row, avg_difficulty=None, is_high=False):
     key = ""
     secret = ""
     non_equity_compatibility = False
+    # 2026-08-23: per-instance single-position cap. BROKER_MAX_SINGLE_POSITION_PCT
+    # is read from os.environ inside the spawned broker, and the backtest engine
+    # is ONE shared service process — so forwarding the engine's own value would
+    # set it globally for every instance, including the real-money one. Reading
+    # it from THIS instance's strategy document instead keeps it scoped to the
+    # run: an instance that does not declare the key gets the 0.15 default, so
+    # alpaca-main is untouched. Strategy X needs it because a ~90% levered core
+    # is otherwise clipped to 15% (index_core_tilt asked for $6,000 and got $900).
+    _single_position_pct = None
     try:
         _conn = get_conn()
         try:
             _instance_doc = _get_instance_doc(_conn, instance_id) or {}
+            _single_position_pct = _instance_single_position_pct(
+                _conn, _instance_doc)
             _kind = str(_instance_doc.get("kind") or "").strip().lower()
             non_equity_compatibility = _kind in {"crypto", "kalshi"}
             if non_equity_compatibility:
@@ -616,6 +687,10 @@ def run_one_backtest(row, avg_difficulty=None, is_high=False):
         key = ""
         secret = ""
         non_equity_compatibility = False
+        # ...and do not ship a raised position cap off a half-completed read.
+        # Without this the run drops its credentials, logs that it could not be
+        # classified, and still lifts the broker failsafe to 95%.
+        _single_position_pct = None
         intellistock_logger.log(
             f"Backtest {row_id}: instance credential mode could not be classified; "
             "launching without argv/env broker credentials.",
@@ -703,6 +778,14 @@ def run_one_backtest(row, avg_difficulty=None, is_high=False):
     # it. Helper is unit-tested in tests/test_phase_alpha_variance.py.
     from _phase_alpha_helpers import backtest_determinism_env_vars
     env.update(backtest_determinism_env_vars(os.environ))
+    if _single_position_pct is not None:
+        env['BROKER_MAX_SINGLE_POSITION_PCT'] = str(_single_position_pct)
+        intellistock_logger.log(
+            f"Backtest {row_id}: single-position cap raised to "
+            f"{_single_position_pct:.0%} of equity for this run "
+            f"(instance {instance_id} declares broker_max_single_position_pct).",
+            "yellow", service="BACKTEST_ENGINE",
+        )
     if avg_difficulty is not None:
         env['BACKTEST_DIFFICULTY'] = str(avg_difficulty)
     neo4j_uri = os.environ.get('NEO4J_URI', 'bolt://localhost:7687')
