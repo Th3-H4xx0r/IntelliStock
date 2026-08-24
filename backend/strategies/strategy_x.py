@@ -262,16 +262,24 @@ class StrategyX:
             # a memory — Nexus rotates its candidate set daily, so a held name
             # is usually absent from it entirely.
             ages = dict(cache.get("_sx_sat_ages") or {})
-            mine = {s for s in ages if s in held_syms}
-            ranked = select_satellite(self._ranked(cfg, data),
-                                      held_syms & (mine | set(ages)), cfg,
+            # The sleeve's book is what it TARGETED, not what the emulator
+            # currently reports. Fills land on the NEXT bar, so a name chosen
+            # last bar is not in `positions` yet — gating the minimum hold on
+            # observed holdings meant every new pick was unprotected for exactly
+            # the bar it most needed protecting, and the book churned anyway.
+            # Measured: with the holdings gate, only 1 of 4 names survived a bar.
+            mine = set(ages) | {s for s in ages if s in held_syms}
+            ranked = select_satellite(self._ranked(cfg, data), set(ages), cfg,
                                       ages=ages)
             # EVERY name this sleeve has ever bought and still holds must stay
             # in `owned`, or `targets_to_orders` cannot sell it: a position that
             # drops out of the ranking would fall outside the sell scope and
             # accumulate forever. Observed live as targets churning while
             # orders=1 — the buys landed and the exits never fired.
-            owned |= set(ranked) | mine
+            owned |= set(ranked) | mine | held_syms & set(ages)
+            # Age only the names still selected. A name that drops out leaves
+            # `ages`, which is what makes it exitable — but it stays in `owned`
+            # via `mine` for this bar so the SELL can actually be emitted.
             ages = {s: ages.get(s, 0) + 1 for s in ranked}
             cache["_sx_sat_ages"] = ages
 

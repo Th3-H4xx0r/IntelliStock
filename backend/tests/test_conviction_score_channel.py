@@ -103,6 +103,57 @@ def test_strategy_x_consumes_the_injected_scores():
     assert "AAPL" in (out.get("_nexus_executable_buys") or [])
 
 
+def test_the_sleeve_keeps_its_picks_when_fills_have_not_landed_yet():
+    """THE case that broke min-hold in production.
+
+    The broker fills on the NEXT bar, so a name chosen this bar is not in
+    `positions` when the strategy re-decides. Gating the minimum hold on
+    OBSERVED holdings left every new pick unprotected for exactly the bar it
+    most needed protecting, and the book churned anyway — measured live, 1 of 4
+    names survived a bar. The sleeve must track its own book by INTENT.
+    """
+    from strategies.strategy_x import StrategyX
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 6, 1, 20, 0, tzinfo=timezone.utc)
+
+    def bars(n):
+        return [{"t": (now - timedelta(days=(n - 1 - i))).isoformat(),
+                 "c": 100.0 + i * 0.5} for i in range(n)]
+
+    class Emu:                      # positions stay EMPTY: nothing filled yet
+        def get_cash(self):
+            return 10000.0
+
+        def get_positions(self):
+            return {}
+
+        def get_portfolio_value(self, prices=None):
+            return 10000.0
+
+    cfg = {"strategy_x_enabled": True, "satellite_pct": 0.2,
+           "satellite_max_names": 2, "satellite_min_hold_bars": 21,
+           "core_filter_symbol": "QQQ", "core_weight": 0.8}
+    prices = {"TQQQ": 50.0, "SPY": 500.0, "QQQ": 400.0,
+              "AAA": 10.0, "BBB": 10.0, "CCC": 10.0, "DDD": 10.0}
+    cache = {}
+
+    def run(scores, ts):
+        return StrategyX().run_once(
+            ["TQQQ"], prices, ts, cfg, {},
+            data={"QQQ": {"bars": bars(260)}, "conviction_scores": scores},
+            portfolio_emulator=Emu(), strategy_cache=cache)
+
+    run({"AAA": 2.0, "BBB": 1.9}, now)
+    first = set(cache["_sx_sat_ages"])
+    assert first == {"AAA", "BBB"}
+    # Next bar the candidate set rotates ENTIRELY, as Nexus really does, and
+    # nothing has filled. The young picks must survive.
+    run({"CCC": 2.0, "DDD": 1.9}, now + timedelta(days=1))
+    assert set(cache["_sx_sat_ages"]) == {"AAA", "BBB"}, (
+        "the sleeve re-drew its book because fills had not landed yet")
+
+
 def test_sleeve_holds_nothing_when_no_scores_are_published():
     """The inert case must be SAFE, not a crash or an arbitrary pick."""
     from strategies.strategy_x import StrategyX
