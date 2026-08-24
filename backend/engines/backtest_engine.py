@@ -466,6 +466,88 @@ def _backtest_container_name(instance_id, row_id):
     return f"backtest-instance-{safe_inst}-{row_id}"
 
 
+def _reconcile_high_difficulty_running():
+    """Rebuild `_high_difficulty_running` from the containers Docker actually
+    reports, and do it before the scheduler makes any launch decision.
+
+    The counter is a module-level integer: incremented on launch, decremented on
+    completion, and living only in memory. Every push redeploys the backend,
+    which restarts this process and resets the counter to 0 while the containers
+    it was counting are still running — so the engine sees a free slot and
+    launches a second high-difficulty backtest next to the first.
+
+    Observed 2026-08-24 after a day of deploys: bt 274278 and bt 352668 running
+    concurrently on one instance, both driven by graph_nexus_analysis
+    (difficulty 8 against a threshold of 8). Classification was never wrong; the
+    counter simply did not survive the restart.
+
+    Docker is the source of truth here, deliberately. `BacktestResults.status`
+    is not trustworthy for liveness — stale 'running' rows are a known failure
+    mode in this file — and a DB-driven count would be wrong in exactly the
+    situation this exists to handle.
+    """
+    global _high_difficulty_running
+    client = None
+    try:
+        client = _get_docker_client()
+        if client is None:
+            return
+        names = [c.name for c in client.containers.list()
+                 if str(c.name or "").startswith("backtest-instance-")]
+        if not names:
+            with _high_difficulty_lock:
+                _high_difficulty_running = 0
+            return
+        conn = None
+        n_high = 0
+        try:
+            conn = get_conn()
+            for name in names:
+                # backtest-instance-<instance>-<row_id>
+                row_id = name.rsplit("-", 1)[-1]
+                row = None
+                try:
+                    row = db_store.get(TABLE_NAME, row_id)
+                except Exception:
+                    row = None
+                if not row:
+                    # No queue row left to classify it. Count it as high: the
+                    # conservative direction is to serialise, never to invent a
+                    # free slot for a machine that is already busy.
+                    n_high += 1
+                    continue
+                try:
+                    is_high, _ = _backtest_high_difficulty_trigger(conn, row)
+                except Exception:
+                    is_high = True
+                if is_high:
+                    n_high += 1
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        with _high_difficulty_lock:
+            _high_difficulty_running = n_high
+        intellistock_logger.log(
+            "Reconciled high-difficulty slots from Docker: %d running "
+            "container(s), %d counted high (cap %d)."
+            % (len(names), n_high, MAX_CONCURRENT_HIGH_DIFFICULTY),
+            "cyan", service="BACKTEST_ENGINE",
+        )
+    except Exception as exc:
+        intellistock_logger.log(
+            f"High-difficulty slot reconciliation failed: {exc}",
+            "yellow", service="BACKTEST_ENGINE")
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+
 def _get_docker_client():
     try:
         import docker
@@ -1217,6 +1299,11 @@ def main():
     )
     _load_strategy_difficulties()
     _cleanup_stale_backtest_containers()
+    # AFTER the stale-container cleanup (so it counts only survivors) and BEFORE
+    # any launch decision. `_high_difficulty_running` is in-memory, so a deploy
+    # restart resets it to 0 while its containers are still alive — which is how
+    # two high-difficulty backtests ended up running side by side.
+    _reconcile_high_difficulty_running()
     conn, ok = wait_for_rethinkdb()
     if not ok or not conn:
         return
