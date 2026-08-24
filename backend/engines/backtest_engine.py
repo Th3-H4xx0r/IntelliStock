@@ -523,8 +523,25 @@ def _check_dead_backtest_containers():
         # Pending/deferred rows also carry run=True, but do not have a container
         # yet and must remain queued until a worker slot is available.
         ensure_table(conn)
+        # NOT gated on `run: True`. A stop request sets run=False, and if the
+        # container then dies without running its own cleanup — killed, hung and
+        # reaped, OOM, or preempted — the row is stranded at
+        # run=False/status='running' and the old `run: True` filter excluded it
+        # from the only thing that would ever reconcile it. Observed 2026-08-24:
+        # three backtests displayed RUNNING with ELAPSED past 5 hours while
+        # exactly ONE container was alive; the two corpses had made no LLM call
+        # in 4.9 and 5.3 hours. That is the same "status='running'/run=False
+        # accumulated 100+ zombies" failure the delete path below warns about.
+        #
+        # It is not cosmetic: a stale running row for an instance BLOCKS that
+        # instance's next launch, which silently stopped two backtests from ever
+        # starting — the API accepted them and returned an id, and no container
+        # ever came up.
+        #
+        # Queued rows are unaffected: they do not carry status='running'. Paused
+        # rows and freshly launched ones keep their existing exemptions below.
         running_rows = list(db_store.iter(db_store.filter(
-            TABLE_NAME, {"run": True, "status": "running"})))
+            TABLE_NAME, {"status": "running"})))
         if not running_rows:
             return
 
