@@ -96,6 +96,11 @@ def test_strategy_x_consumes_the_injected_scores():
     assert out.get("AAPL") == 1, "the graph-ranked sleeve did not buy"
     sizes = out["_nexus_position_sizes"]
     assert sizes["AAPL"]["buy_cash"] > 0
+    # The auto-discovered satellite name must be DECLARED, or the broker's
+    # per-spec `allowed_syms` drops the buy before execution — silently.
+    assert "AAPL" in (out.get("_nexus_discovered") or []), (
+        "an auto-discovered satellite name was not declared to the broker")
+    assert "AAPL" in (out.get("_nexus_executable_buys") or [])
 
 
 def test_sleeve_holds_nothing_when_no_scores_are_published():

@@ -112,6 +112,22 @@ DEFAULTS = {
     "core_vol_gate_mult": 2.25,
     "core_vol_median_bars": 252,
     "core_vol_median_min_samples": 60,
+    # ── bear leg: SQQQ, engaged ONLY on an auto-detected bad regime ──
+    # This is NOT the symmetric flip (risk-off -> short), which was measured to
+    # turn 99.6x into 0.52x: that version shorts every ordinary pullback and is
+    # held through the recoveries. The gate below demands that ALL of a set of
+    # crisis conditions agree, sizes the leg smaller than the bull core, and
+    # bounds how long it can stay on.
+    #
+    # `core_bear_min_confirm` is how many of the four must hold:
+    #   below the long MA / below the short MA / vol EXPANDING / deep drawdown
+    "core_bear_weight": 0.35,        # of the core budget, not of NAV
+    "core_bear_short_ma_bars": 50,
+    "core_bear_vol_expansion": 1.40,  # rv10/rv60 above this = disorderly
+    "core_bear_drawdown_pct": 0.15,   # this far below the 252-bar high
+    "core_bear_lookback_bars": 252,
+    "core_bear_min_confirm": 4,       # 4 = unanimous; 3 = looser
+    "core_bear_max_bars": 40,         # hard time limit; decay is -6*sigma^2
     # ── satellite (OFF) ──
     "satellite_pct": 0.0,
     "satellite_max_names": 6,
@@ -388,6 +404,88 @@ def core_signal(closes, config) -> CoreSignal:
                       price, ma, rvol, median)
 
 
+@dataclass(frozen=True)
+class BearSignal:
+    """Whether the tape is bad enough to hold an inverse leg, and why."""
+
+    engaged: bool
+    reason: str
+    confirms: int = 0
+    detail: tuple = ()
+
+
+def bear_signal(closes, config, bars_engaged: int = 0) -> BearSignal:
+    """Auto-detect a genuinely bad regime — not merely 'not risk-on'.
+
+    Four independent conditions, each answering a different question:
+
+        below_long   price under its 200-bar MA        is the trend broken?
+        below_short  price under its 50-bar MA         is it broken NOW?
+        vol_expand   rv10 / rv60 above the threshold   is it disorderly?
+        deep_dd      >= X% below the 252-bar high      has it actually fallen?
+
+    `core_bear_min_confirm` of them must hold. Requiring several is the whole
+    point: any ONE of these fires on an ordinary pullback, and shorting ordinary
+    pullbacks is what made the symmetric version lose 99% of its value. Depth
+    plus disorder plus a broken trend is a different state from "off its highs".
+
+    `bars_engaged` enforces the time limit. A -3x inverse fund carries a
+    -6*sigma^2 drag, so time is the enemy even when the direction is right:
+    past `core_bear_max_bars` the leg stands down regardless of the tape.
+
+    Pure — the caller owns the bar counter. Fails CLOSED: insufficient history
+    or a bad close means NOT engaged, because the expensive error here is
+    holding a leveraged short by accident.
+    """
+    cfg = config or {}
+    if not _s(cfg, "core_bear_symbol"):
+        return BearSignal(False, "bear leg disabled (no core_bear_symbol)")
+
+    long_bars = max(2, _i(cfg, "core_filter_ma_bars"))
+    short_bars = max(2, _i(cfg, "core_bear_short_ma_bars"))
+    look = max(2, _i(cfg, "core_bear_lookback_bars"))
+    vol_bars = max(2, _i(cfg, "core_vol_bars"))
+    need = max(1, _i(cfg, "core_bear_min_confirm"))
+
+    max_bars = _i(cfg, "core_bear_max_bars")
+    if max_bars > 0 and int(bars_engaged or 0) >= max_bars:
+        return BearSignal(False, f"time limit: {bars_engaged} bars >= "
+                                 f"{max_bars}, standing down")
+
+    px = _finite(closes)
+    if px is None or len(px) < max(long_bars, look, vol_bars * 4) + 1:
+        return BearSignal(False, "insufficient history for the bear gate")
+
+    price = round(px[-1], Q)
+    ma_long = round(sum(px[-long_bars:]) / long_bars, Q)
+    ma_short = round(sum(px[-short_bars:]) / short_bars, Q)
+    hi = max(px[-look:])
+    off_high = round((hi - price) / hi, Q) if hi > 0 else 0.0
+
+    rets = [px[i] / px[i - 1] - 1.0 for i in range(1, len(px))]
+    ann = math.sqrt(252.0)
+    rv_short = round(_stdev(rets[-vol_bars:]) * ann, Q)
+    rv_long = round(_stdev(rets[-vol_bars * 3:]) * ann, Q)
+    ratio = round(rv_short / rv_long, Q) if rv_long > 0 else 0.0
+
+    checks = (
+        ("below_long", price < ma_long),
+        ("below_short", price < ma_short),
+        ("vol_expand", ratio > _f(cfg, "core_bear_vol_expansion")),
+        ("deep_dd", off_high >= _f(cfg, "core_bear_drawdown_pct")),
+    )
+    hits = [n for n, ok in checks if ok]
+    if len(hits) < need:
+        return BearSignal(False,
+                          f"bear gate {len(hits)}/{need}: {'+'.join(hits) or 'none'}",
+                          len(hits), tuple(n for n, _ in checks))
+    return BearSignal(True,
+                      f"BEAR REGIME {len(hits)}/{need}: {'+'.join(hits)} "
+                      f"(off_high {off_high:.1%}, rv {ratio:.2f}x, "
+                      f"bar {bars_engaged})",
+                      len(hits), tuple(hits))
+
+
 def rank_commodities(closes_by_symbol: dict, config) -> list:
     """Commodity ETFs worth holding, best first. Pure.
 
@@ -419,8 +517,32 @@ def rank_commodities(closes_by_symbol: dict, config) -> list:
     return [s for _, s in scored[:max(0, _i(cfg, "commodity_max_names"))]]
 
 
+def strategy_x_universe(config) -> list:
+    """Every symbol this strategy can trade or read, deterministic order.
+
+    The strategy owns its universe rather than depending on the instance's
+    watchlist — the same thing the residual sleeve does via
+    `_residual_sleeve_universe_symbols`. Without this the filter symbol has no
+    bars and the traded legs have no price, and BOTH failures are silent: the
+    strategy simply emits nothing.
+    """
+    cfg = config or {}
+    syms = [_s(cfg, k) for k in ("core_filter_symbol", "core_bull_symbol",
+                                 "core_chop_symbol", "core_bear_symbol")]
+    if _f(cfg, "commodity_pct") > 0:
+        syms += [str(s).strip().upper()
+                 for s in (cfg.get("commodity_symbols") or []) if s]
+    seen, out = set(), []
+    for s in syms:
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
+
+
 def plan_targets(*, risk_on: bool, config, satellite_ranked=None,
-                 held_core: str = "", commodity_ranked=None) -> tuple[dict, list]:
+                 held_core: str = "", commodity_ranked=None,
+                 bear_engaged: bool = False) -> tuple[dict, list]:
     """Target weight per symbol as a fraction of NAV, plus why.
 
     The chop occupant is a RESIDUAL, exactly as in `index_core_tilt.plan_targets`
@@ -489,21 +611,29 @@ def plan_targets(*, risk_on: bool, config, satellite_ranked=None,
         return targets, notes
 
     # ── risk-off ──
-    if bear:
+    # The bear leg engages ONLY when the crisis gate says the regime is bad, not
+    # merely because the bull filter is off. Risk-off is common; a bad regime is
+    # rare. Shorting every risk-off bar is the symmetric flip that lost 99% of
+    # its value.
+    if bear and bear_engaged:
         # Never flip a levered long straight into a levered short: that is two
         # 3x round trips at full core size in one bar, the most expensive trade
         # the system can make. One bar in the un-levered occupant first.
         if held_core and held_core.strip().upper() == bull:
             targets[chop] = round(targets.get(chop, 0.0) + core_budget, Q)
-            notes.append(f"risk-off: direct {bull}->{bear} flip blocked, "
+            notes.append(f"bear regime: direct {bull}->{bear} flip blocked, "
                          f"routing via {chop} for one bar")
             return targets, notes
-        targets[bear] = round(core_budget * weight, Q)
+        # Sized by core_bear_weight, NOT core_weight: a -3x inverse carries a
+        # -6*sigma^2 drag against the long leg's -3*sigma^2, so the short side
+        # is deliberately the smaller position.
+        bear_w = max(0.0, min(1.0, _f(cfg, "core_bear_weight")))
+        targets[bear] = round(core_budget * bear_w, Q)
         rest = round(core_budget - targets[bear], Q)
         if rest > 0:
             targets[chop] = round(targets.get(chop, 0.0) + rest, Q)
-        notes.append(f"risk-off: {targets[bear]:.1%} {bear} (bear leg ENABLED — "
-                     "measured -4.2% CAGR over 15.4y)")
+        notes.append(f"BEAR REGIME: {targets[bear]:.1%} {bear}, "
+                     f"{rest:.1%} {chop}")
         return targets, notes
 
     targets[chop] = round(targets.get(chop, 0.0) + core_budget, Q)

@@ -183,9 +183,26 @@ def test_bear_leg_is_inert_by_default():
     assert "SQQQ" not in t
 
 
-def test_bear_leg_engages_only_when_explicitly_configured():
-    t, _ = plan_targets(risk_on=False, config=cfg(core_bear_symbol="SQQQ"))
-    assert t["SQQQ"] > 0.0
+def test_bear_leg_needs_BOTH_a_symbol_and_an_engaged_gate():
+    """Risk-off is common; a bad regime is rare. Shorting every risk-off bar is
+    the symmetric flip that lost 99% of its value."""
+    off = plan_targets(risk_on=False, config=cfg(core_bear_symbol="SQQQ"),
+                       bear_engaged=False)[0]
+    assert "SQQQ" not in off
+    on = plan_targets(risk_on=False, config=cfg(core_bear_symbol="SQQQ"),
+                      bear_engaged=True)[0]
+    assert on["SQQQ"] > 0.0
+
+
+def test_bear_leg_is_sized_smaller_than_the_bull_core():
+    """A -3x inverse carries -6*sigma^2 drag vs the long leg's -3*sigma^2, so
+    the short side is deliberately the smaller position."""
+    t = plan_targets(risk_on=False,
+                     config=cfg(core_bear_symbol="SQQQ", core_weight=0.9,
+                                core_bear_weight=0.35),
+                     bear_engaged=True)[0]
+    assert t["SQQQ"] == pytest.approx(0.35, abs=1e-4)
+    assert t["SPY"] == pytest.approx(0.65, abs=1e-4)   # remainder, not cash
 
 
 def test_satellite_is_zero_by_default():
@@ -347,7 +364,93 @@ def test_direct_bull_to_bear_flip_is_blocked():
     size. Always pass through the un-levered occupant for at least one bar."""
     t, notes = plan_targets(risk_on=False,
                             config=cfg(core_bear_symbol="SQQQ"),
-                            held_core="TQQQ")
+                            held_core="TQQQ", bear_engaged=True)
     assert t.get("SQQQ", 0.0) == 0.0
     assert t.get("SPY", 0.0) > 0.0
     assert any("flip" in n.lower() for n in notes)
+
+
+# ── bear gate ──────────────────────────────────────────────────────────────
+
+from strategy_x import BearSignal, bear_signal, strategy_x_universe  # noqa: E402
+
+
+def bcfg(**over):
+    c = dict(DEFAULTS)
+    c.update({"core_bear_symbol": "SQQQ", "core_bear_min_confirm": 4})
+    c.update(over)
+    return c
+
+
+def _crisis_series(n=400, shock=14):
+    """Down, below both MAs, deep off the high, AND disorderly.
+
+    The shock must be RECENT and short: `vol_expand` compares the 20-bar
+    realised vol against the 60-bar, so a decline long enough to fill both
+    windows shows no expansion at all — which is the correct reading of a
+    grinding bear, and is what `test_gate_stays_shut_on_an_orderly_decline`
+    pins separately.
+    """
+    px = [300.0 + i * 0.4 for i in range(n - shock)]        # long calm uptrend
+    last = px[-1]
+    for i in range(shock):                                  # violent, recent
+        last *= (0.94 if i % 2 else 1.01)
+        px.append(last)
+    return px
+
+
+def test_gate_is_closed_when_no_bear_symbol_is_configured():
+    s = bear_signal(_crisis_series(), bcfg(core_bear_symbol=""))
+    assert s.engaged is False
+    assert "disabled" in s.reason
+
+
+def test_gate_opens_on_a_genuine_crisis():
+    s = bear_signal(_crisis_series(), bcfg())
+    assert s.engaged is True
+    assert s.confirms == 4
+
+
+def test_gate_stays_shut_on_an_orderly_decline():
+    """A smooth drift down is below both MAs and off its high, but it is not
+    DISORDERLY — that is an ordinary bear, not a crisis."""
+    s = bear_signal([300.0 - i * 0.2 for i in range(400)], bcfg())
+    assert s.engaged is False
+    assert s.confirms < 4
+
+
+def test_gate_stays_shut_in_an_uptrend():
+    s = bear_signal([100.0 + i * 0.5 for i in range(400)], bcfg())
+    assert s.engaged is False
+
+
+def test_a_looser_quorum_opens_the_gate_earlier():
+    orderly = [300.0 - i * 0.2 for i in range(400)]
+    assert bear_signal(orderly, bcfg(core_bear_min_confirm=4)).engaged is False
+    assert bear_signal(orderly, bcfg(core_bear_min_confirm=3)).engaged is True
+
+
+def test_the_time_limit_stands_the_leg_down():
+    """Decay is -6*sigma^2, so time is the enemy even when direction is right."""
+    px = _crisis_series()
+    assert bear_signal(px, bcfg(core_bear_max_bars=40), bars_engaged=39).engaged
+    s = bear_signal(px, bcfg(core_bear_max_bars=40), bars_engaged=40)
+    assert s.engaged is False
+    assert "time limit" in s.reason
+
+
+def test_gate_fails_closed_on_short_history():
+    assert bear_signal([100.0] * 50, bcfg()).engaged is False
+
+
+def test_universe_is_declared_from_config_not_the_watchlist():
+    u = strategy_x_universe(bcfg(commodity_pct=0.2,
+                                 commodity_symbols=["GLD", "USO"]))
+    assert u[:4] == ["QQQ", "TQQQ", "SPY", "SQQQ"]
+    assert "GLD" in u and "USO" in u
+
+
+def test_universe_omits_the_commodity_sleeve_when_it_is_off():
+    u = strategy_x_universe(bcfg(commodity_pct=0.0,
+                                 commodity_symbols=["GLD", "USO"]))
+    assert "GLD" not in u

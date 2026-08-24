@@ -4237,6 +4237,109 @@ def _core_sleeve_log_hold(order, where):
         pass
 
 
+def _strategy_x_specs(cached_strategies):
+    """Every ENABLED strategy_x spec, with settings merged the way the
+    dispatcher merges them.
+
+    Name matching ignores case and underscores because
+    `_strategy_name_to_module_and_class` accepts both `strategy_x` and the
+    legacy PascalCase `StrategyX`; matching only the snake_case spelling meant a
+    PascalCase document ran the strategy but fetched no bars for it.
+
+    Settings come from `conditions` UNION `config`, matching
+    `_merged_strategy_settings`, because the dispatcher reads both and a value
+    set in `conditions` would otherwise be invisible here.
+    """
+    out = []
+    for spec in (cached_strategies or []):
+        if not isinstance(spec, dict):
+            continue
+        name = str(spec.get("strategy") or "").strip().lower().replace("_", "")
+        if name != "strategyx":
+            continue
+        merged = {}
+        merged.update(spec.get("conditions") or {})
+        merged.update(spec.get("config") or {})
+        enabled = merged.get("strategy_x_enabled", False)
+        if isinstance(enabled, str):
+            enabled = enabled.strip().lower() in ("1", "true", "yes", "on")
+        if not enabled:
+            continue
+        try:
+            if float(spec.get("weight", 0) or 0) <= 0:
+                continue        # run_run_once_strategies would skip it anyway
+        except (TypeError, ValueError):
+            continue
+        out.append(merged)
+    return out
+
+
+def _strategy_x_universe_symbols(cached_strategies):
+    """Symbols strategy_x needs bars for, from its own config.
+
+    Mirrors `_residual_sleeve_universe_symbols`: a strategy that trades symbols
+    the operator never listed must declare them, or `price_history` is built
+    without them and the strategy is silently inert. Returns [] when strategy_x
+    is absent or disabled, so this is a no-op for every other instance.
+
+    Delegates to the STRATEGY's own `strategy_x_universe` over `DEFAULTS`-filled
+    settings, so the fetch list and the strategy's own list are definitionally
+    identical. Computing it twice is how they drift: a config that relies on the
+    documented defaults would fetch zero bars here while the strategy happily
+    looked up QQQ/TQQQ/SPY.
+    """
+    try:
+        from strategy_x import DEFAULTS as _SX_DEFAULTS, strategy_x_universe
+    except Exception:
+        return []
+    out = []
+    try:
+        for merged in _strategy_x_specs(cached_strategies):
+            for s in strategy_x_universe({**_SX_DEFAULTS, **merged}):
+                if s and s not in out:
+                    out.append(s)
+    except Exception:
+        return []
+    return out
+
+
+def _strategy_x_prepare(data, prices, current_time, cached_strategies,
+                        key=None, secret=None):
+    """Make strategy_x's own symbols priceable this bar.
+
+    `prices` is built from `symbols` — the operator's watchlist — not from the
+    bar universe, so a leg this strategy declared has BARS but no PRICE, and
+    `targets_to_orders` skips anything with `px <= 0`. The strategy then returns
+    `{}`, which also means its `_nexus_discovered` is never published, so the
+    discovery channel cannot bootstrap itself. Same defect and same remedy as
+    `_residual_sleeve_prepare`; the difference is that strategy_x is a run_once
+    strategy, so this must run BEFORE the dispatch rather than after it.
+    """
+    try:
+        syms = [s for s in _strategy_x_universe_symbols(cached_strategies)
+                if s and not (prices or {}).get(s)]
+        for sym in syms:
+            if mode == MODE_BACKTEST and isinstance(data, dict):
+                if sym not in data:
+                    _ensure_backtest_history_for_symbols(
+                        data, [sym], key=key, secret=secret)
+                if data.get(sym):
+                    p = (_get_prices_at_time(data, [sym], current_time) or {}).get(sym)
+                    if p and float(p) > 0 and isinstance(prices, dict):
+                        prices[sym] = float(p)
+            elif mode == MODE_LIVE and isinstance(prices, dict):
+                p = _fetch_price_for_symbol(
+                    sym, current_time, key=key, secret=secret, feed=data_feed,
+                    allow_non_alpaca_fallback=True)
+                if p and float(p) > 0:
+                    prices[sym] = float(p)
+    except Exception as _sx_exc:
+        try:
+            _log(f"[strategy_x] prepare skipped: {_sx_exc}", "yellow")
+        except Exception:
+            pass
+
+
 def _residual_sleeve_universe_symbols(cached_strategies, include_bear=True):
     """Symbols the residual sleeve trades on its own account.
 
@@ -9932,6 +10035,16 @@ if mode == MODE_BACKTEST:
         if _sleeve_sym not in symbols_for_fetch:
             symbols_for_fetch.append(_sleeve_sym)
             _log(f"Adding {_sleeve_sym} to bar data for the residual sleeve", "cyan")
+    # 2026-08-24: same treatment for strategy_x. It owns a fixed universe — the
+    # filter symbol it reads, the legs it trades, and its commodity sleeve — and
+    # NONE of them need to be in the instance watchlist. Without bars here the
+    # filter is blind and the legs have no price, and both failures are silent:
+    # the strategy just emits nothing. `_nexus_discovered` gets the symbols
+    # ADMITTED by the allocator; this is what gets them FETCHED.
+    for _sx_sym in _strategy_x_universe_symbols(_cached_strategies):
+        if _sx_sym not in symbols_for_fetch:
+            symbols_for_fetch.append(_sx_sym)
+            _log(f"Adding {_sx_sym} to bar data for strategy_x", "cyan")
     symbols_for_data = symbols_for_fetch
     # Convert time_increment to Alpaca timeframe format
     alpaca_timeframe = _time_increment_to_alpaca_timeframe(time_increment)
@@ -13522,6 +13635,18 @@ while not shutdown_requested:
                     )
                 except Exception as _e_pos_px:
                     _log(f"Held-position price patch failed (non-fatal): {_e_pos_px}", "yellow")
+            # strategy_x declares its own universe, so its legs may have bars
+            # but no price — `prices` is keyed off the watchlist, and the
+            # held-position patch above only covers what is ALREADY held. Must
+            # run before the run_once dispatch below, or the strategy skips
+            # every unpriced leg and returns nothing.
+            try:
+                _strategy_x_prepare(
+                    data if mode == MODE_BACKTEST else None, prices,
+                    current_time, _cached_strategies, key=key, secret=secret)
+            except Exception as _e_sx_px:
+                _log(f"strategy_x price patch failed (non-fatal): {_e_sx_px}",
+                     "yellow")
             run_once_results = []
             if _run_once_specs:
                 # V32 Phase 5: pass DATA creds (not trading creds) to strategies.

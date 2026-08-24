@@ -109,10 +109,12 @@ if _HERE not in sys.path:
 
 from strategy_x import (  # noqa: E402
     DEFAULTS,
+    bear_signal,
     core_signal,
     pit_daily_closes,
     plan_targets,
     rank_commodities,
+    strategy_x_universe,
     targets_to_orders,
 )
 
@@ -214,6 +216,27 @@ class StrategyX:
                 return {}
 
         closes = pit_daily_closes(_bars_for(data, filt), current_time)
+
+        # REFUSE rather than degrade when the filter cannot see. `core_signal`
+        # fails closed to risk-off, which sounds safe and is not: risk-off is an
+        # ACTIVE order for `core_weight` of NAV into the chop occupant, not a
+        # flat. In live the broker passes `data=None`, so a blind filter would
+        # buy 100% of the book into SPY and hold it forever. A strategy that
+        # cannot evaluate its own signal must do NOTHING.
+        need = int(cfg.get("core_filter_ma_bars", 200) or 200)
+        if len(closes) < need:
+            _log(f"StrategyX: REFUSING to trade — {len(closes)} daily closes "
+                 f"for {filt}, need {need}. The filter cannot arm, and "
+                 "'risk-off' would be a real buy, not a flat. "
+                 + ("Live mode passes data=None: this strategy is "
+                    "backtest-only until a live bar source exists."
+                    if not _bars_for(data, filt) else
+                    "Widen the window or use granularity=86400."), "red")
+            cache["_strategy_x_last"] = {"risk_on": False, "reason": "refused: "
+                                         f"{len(closes)} < {need} closes",
+                                         "n_closes": len(closes)}
+            return {}
+
         sig = core_signal(closes, cfg)
 
         held_core = ""
@@ -244,10 +267,24 @@ class StrategyX:
                      f"{', '.join(missing)} — those cannot be ranked or held. "
                      "Add them to the instance's stock list.", "red")
 
+        # ── bear gate: SQQQ only on an auto-detected bad regime ──
+        # The bar counter enforces the time limit. It lives in the cache because
+        # bear_signal is pure; it resets the moment the gate stops firing, so a
+        # brief pullback cannot accumulate toward the limit.
+        bsig = None
+        if bear:
+            engaged_bars = int(cache.get("_sx_bear_bars", 0) or 0)
+            bsig = bear_signal(closes, cfg, bars_engaged=engaged_bars)
+            cache["_sx_bear_bars"] = engaged_bars + 1 if bsig.engaged else 0
+
         targets, notes = plan_targets(risk_on=sig.risk_on, config=cfg,
                                       satellite_ranked=ranked,
                                       held_core=held_core,
-                                      commodity_ranked=com_ranked)
+                                      commodity_ranked=com_ranked,
+                                      bear_engaged=bool(bsig and bsig.engaged))
+        if bsig is not None and not sig.risk_on:
+            _log(f"  bear gate: {bsig.reason}",
+                 "red" if bsig.engaged else "white")
         decisions, sizes = targets_to_orders(
             targets, nav=nav, positions=positions, prices=prices,
             cash=cash, config=cfg, owned=owned)
@@ -304,6 +341,21 @@ class StrategyX:
         if not decisions:
             return {}
         out = dict(decisions)
+        # Declare the universe this strategy owns so the broker admits its
+        # symbols even when the instance watchlist does not list them. Nexus
+        # uses the same channel: `allowed_syms = set(symbols) |
+        # set(nexus_discovered) | ...`, and discovery also triggers the price
+        # backfill. Bars for the FIXED legs come from the broker-side fetch list
+        # (`_strategy_x_universe_symbols` in broker.py).
+        #
+        # The satellite names MUST be included. They are auto-discovered by
+        # Nexus, so they are not in the instance watchlist and not in this
+        # strategy's own fixed universe — and `allowed_syms` is computed
+        # PER-SPEC, so a satellite buy for a name absent from THIS strategy's
+        # discovered list is dropped by the broker before it ever reaches
+        # execution. That drop is silent: the order simply never appears.
+        out["_nexus_discovered"] = strategy_x_universe(cfg) + [
+            s for s in ranked if s not in strategy_x_universe(cfg)]
         # Release the broker's cash-reserve floor for this strategy. The floor
         # defaults to 10% of the INITIAL account value and can only be bypassed
         # by a high-conviction Nexus buy with >= 5 open positions — neither of

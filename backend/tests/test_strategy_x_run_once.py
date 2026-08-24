@@ -118,14 +118,68 @@ def test_bear_leg_is_inert_at_its_default():
     assert "SQQQ" not in out
 
 
-def test_bear_leg_fires_when_configured_and_not_flipping_directly():
+def _crisis_bars(n=400, shock=14):
+    """An ORDERLY decline is not a crisis. The gate wants depth AND disorder,
+    so the shock has to be violent and recent enough to expand short-window vol
+    against the long window."""
+    px = [300.0 + i * 0.4 for i in range(n - shock)]
+    last = px[-1]
+    for i in range(shock):
+        last *= (0.94 if i % 2 else 1.01)
+        px.append(last)
+    end = NOW
+    return [{"t": (end - timedelta(days=(n - 1 - i))).isoformat(), "c": p}
+            for i, p in enumerate(px)]
+
+
+def test_bear_leg_does_NOT_fire_on_an_ordinary_downtrend():
+    """Risk-off is common; a bad regime is rare. This is the case the symmetric
+    flip got wrong, and it is most of the risk-off bars in a real run."""
     data = {"QQQ": {"bars": bars(260, start=250.0, step=-0.5)}}
-    cfg = base_cfg(core_bear_symbol="SQQQ")
     prices = dict(PRICES, SQQQ=20.0)
-    emu = FakeEmulator(cash=10000.0, prices=prices)
-    out = StrategyX().run_once(["TQQQ"], prices, NOW, cfg, {}, data=data,
-                               portfolio_emulator=emu, strategy_cache={})
+    out = StrategyX().run_once(["TQQQ"], prices, NOW,
+                               base_cfg(core_bear_symbol="SQQQ"), {}, data=data,
+                               portfolio_emulator=FakeEmulator(cash=10000.0,
+                                                               prices=prices),
+                               strategy_cache={})
+    assert out.get("SQQQ") is None
+    assert out.get("SPY") == 1          # risk-off routes to the chop occupant
+
+
+def test_bear_leg_fires_on_a_detected_crisis():
+    data = {"QQQ": {"bars": _crisis_bars()}}
+    prices = dict(PRICES, SQQQ=20.0)
+    out = StrategyX().run_once(["TQQQ"], prices, NOW,
+                               base_cfg(core_bear_symbol="SQQQ"), {}, data=data,
+                               portfolio_emulator=FakeEmulator(cash=10000.0,
+                                                               prices=prices),
+                               strategy_cache={})
     assert out.get("SQQQ") == 1
+
+
+def test_bear_leg_stands_down_after_the_time_limit():
+    data = {"QQQ": {"bars": _crisis_bars()}}
+    prices = dict(PRICES, SQQQ=20.0)
+    cache = {"_sx_bear_bars": 40}       # already at the limit
+    out = StrategyX().run_once(["TQQQ"], prices, NOW,
+                               base_cfg(core_bear_symbol="SQQQ",
+                                        core_bear_max_bars=40), {}, data=data,
+                               portfolio_emulator=FakeEmulator(cash=10000.0,
+                                                               prices=prices),
+                               strategy_cache=cache)
+    assert out.get("SQQQ") is None
+
+
+def test_the_strategy_declares_its_own_universe():
+    """It must not depend on the instance watchlist listing TQQQ/SQQQ/QQQ."""
+    data = {"QQQ": {"bars": bars(260)}}
+    out = StrategyX().run_once([], PRICES, NOW,
+                               base_cfg(core_bear_symbol="SQQQ"), {}, data=data,
+                               portfolio_emulator=FakeEmulator(cash=10000.0,
+                                                               prices=PRICES),
+                               strategy_cache={})
+    assert set(out.get("_nexus_discovered") or []) >= {"QQQ", "TQQQ", "SPY",
+                                                       "SQQQ"}
 
 
 def test_holding_the_bull_leg_blocks_a_direct_flip_to_the_bear_leg():
