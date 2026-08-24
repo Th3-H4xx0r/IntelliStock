@@ -1,4 +1,4 @@
-# INTELLISTOCK_SCHEMA: {"strategy": "strategy_x", "weight": 1.0, "execution_position": 0, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_x_enabled": false, "core_bull_symbol": "TQQQ", "core_chop_symbol": "SPY", "core_bear_symbol": "", "core_weight": 0.9, "core_band_pct": 0.05, "core_filter_symbol": "QQQ", "core_filter_ma_bars": 200, "core_vol_bars": 20, "core_vol_gate_mult": 2.25, "core_vol_median_bars": 252, "core_vol_median_min_samples": 60, "core_once_per_session": true, "satellite_pct": 0.0, "satellite_max_names": 6, "min_order_usd": 50.0, "cost_haircut_pct": 0.006, "broker_max_single_position_pct": 0.95, "commodity_pct": 0.0, "commodity_symbols": ["GLD", "SLV", "USO", "UNG", "GDX", "XLE", "DBA", "CPER"], "commodity_max_names": 2, "commodity_mom_bars": 60, "commodity_trend_bars": 100}}
+# INTELLISTOCK_SCHEMA: {"strategy": "strategy_x", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_x_enabled": false, "core_bull_symbol": "TQQQ", "core_chop_symbol": "SPY", "core_bear_symbol": "", "core_weight": 0.9, "core_band_pct": 0.05, "core_filter_symbol": "QQQ", "core_filter_ma_bars": 200, "core_vol_bars": 20, "core_vol_gate_mult": 2.25, "core_vol_median_bars": 252, "core_vol_median_min_samples": 60, "core_once_per_session": true, "satellite_pct": 0.0, "satellite_max_names": 6, "min_order_usd": 50.0, "cost_haircut_pct": 0.006, "broker_max_single_position_pct": 0.95, "commodity_pct": 0.0, "commodity_symbols": ["GLD", "SLV", "USO", "UNG", "GDX", "XLE", "DBA", "CPER"], "commodity_max_names": 2, "commodity_mom_bars": 60, "commodity_trend_bars": 100}}
 # INTELLISTOCK_DESCRIPTION: Leveraged Nasdaq core (TQQQ) with a de-lever filter to SPY. Direction is NOT predicted — a trend + volatility filter decides only WHETHER to be levered. Replaying this module over 15.7y of real closes (next-bar fills, point-in-time): CAGR 33.97%, maxDD -48.5%, Sharpe 0.88, 99.6x vs SPY's 8.5x, 4 years above +100%. The inverse (SQQQ) leg and the stock satellite DEFAULT OFF because both were measured to destroy it (-4.2% CAGR and -4.0pp). Needs QQQ+TQQQ+SPY in the instance universe and granularity 86400. DIFFICULTY: 2
 """IntelliStock — Strategy X: leveraged core, filtered.
 
@@ -42,10 +42,28 @@ it takes 3 distinct values, and `confidence` is bimodal with 77% of rows at
 exactly 0.0 or 1.0. Ranking on it means ranking on a tie, broken by ticker
 spelling.
 
-`satellite_pct > 0` still wires a graph/LLM-ranked sleeve through
-`data["conviction_scores"]`, but note that contract has NO producer in this repo
-and `data` is None in live mode — so it is inert until someone builds the
-plumbing AND repairs the score. Do both before turning it on.
+THE STOCK SLEEVE (graph-ranked) — WIRED, BUT READ THIS
+------------------------------------------------------
+`satellite_pct > 0` funds a stock sleeve out of the core, ranked by Graph Nexus
+conviction. The channel now EXISTS: graph_nexus_analysis publishes
+`_nexus_conviction_scores` (its per-candidate `raw_net_score`), the broker pops
+that and merges it into the shared `data["conviction_scores"]` map, and this
+strategy reads it. Before 2026-08-23 that contract had two readers and zero
+writers, so the sleeve was silently inert.
+
+To use it, BOTH strategies go on the same document. Ordering is load-bearing:
+graph_nexus_analysis ships `execution_position: 0` and this ships `10`, so Nexus
+runs first and its scores are in `data` by the time this reads them. Reverse the
+order and the sleeve sees an empty map and quietly holds nothing.
+
+TWO LIMITS THAT ARE NOT FIXED HERE:
+  * `raw_net_score` is saturated — 3 distinct values across 506,498 stored trade
+    contexts — so the ranking is mostly a tie broken by ticker spelling. Nexus
+    now LOGS the distinct-value count each bar, so this is visible rather than
+    silent, but the repair is in the scorer, not here.
+  * The broker passes `data=None` in LIVE mode (`price_history if mode ==
+    MODE_BACKTEST else None`), so this channel is backtest-only. A live sleeve
+    needs a separate carrier.
 
 THE COMMODITY SLEEVE
 --------------------

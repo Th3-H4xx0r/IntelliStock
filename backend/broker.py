@@ -6842,6 +6842,23 @@ def run_run_once_strategies(specs, symbols, prices, current_time, data=None, por
                 nexus_max_positions = raw.pop("_nexus_max_positions", None)
                 if nexus_max_positions is not None:
                     metadata["_nexus_max_positions"] = nexus_max_positions
+                # 2026-08-23: hand per-candidate conviction scores to SIBLING
+                # run_once strategies. `data["conviction_scores"]` was a
+                # consumer-only contract (index_core_tilt and strategy_x read
+                # it; nothing wrote it), so a graph-ranked satellite sleeve was
+                # silently inert. Injecting into the shared `data` map is the
+                # cheapest correct channel: `data` is already the object passed
+                # to every run_once strategy in this loop, so a strategy with a
+                # HIGHER execution_position sees scores published by one with a
+                # lower one. Ordering is the caller's responsibility.
+                nexus_conviction = raw.pop("_nexus_conviction_scores", {})
+                if nexus_conviction:
+                    metadata["_nexus_conviction_scores"] = dict(nexus_conviction)
+                    if isinstance(data, dict):
+                        prior = data.get("conviction_scores")
+                        merged = dict(prior) if isinstance(prior, dict) else {}
+                        merged.update(nexus_conviction)
+                        data["conviction_scores"] = merged
                 if nexus_discovered:
                     metadata["_nexus_discovered"] = list(nexus_discovered)
                 if nexus_sell_enforcement:

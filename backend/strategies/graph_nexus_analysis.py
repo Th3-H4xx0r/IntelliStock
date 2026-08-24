@@ -33945,6 +33945,42 @@ class GraphNexusAnalysis:
         nexus_position_sizes["_momentum_partial_trim_execution_enabled"] = bool(config.get("momentum_partial_trim_execution_enabled", False))
         scores["_nexus_position_sizes"] = nexus_position_sizes
         scores["_nexus_executable_buys"] = _nexus_executable_buys
+        # 2026-08-23: publish the per-candidate conviction score so a SIBLING
+        # run_once strategy can rank on it. `data["conviction_scores"]` has been
+        # a consumer-only contract since index_core_tilt was written — two
+        # readers, zero producers — so any strategy wiring a graph-ranked sleeve
+        # was silently inert. The broker pops this key and injects it into the
+        # shared `data` map for strategies with a higher execution_position.
+        #
+        # `raw_net_score` is published, NOT the ternary `score`: the ternary is
+        # the buy/sell decision and cannot rank. Be aware the raw value is itself
+        # heavily saturated today (measured: 3 distinct values across 506,498
+        # stored trade contexts, and no cross-sectional IC), so a consumer will
+        # be ranking on a near-tie until that is repaired. Publishing it is what
+        # makes the saturation VISIBLE to the consumer instead of invisible.
+        try:
+            # Built from `scores` itself, skipping the `_nexus_*` control keys
+            # that are being added around it. Sorted so the emitted map is
+            # deterministic.
+            _cs_map = {}
+            for _cs_sym in sorted(scores):
+                if str(_cs_sym).startswith("_"):
+                    continue
+                _cs_doc = scores.get(_cs_sym)
+                if not isinstance(_cs_doc, dict):
+                    continue
+                _cs_map[str(_cs_sym)] = float(
+                    _cs_doc.get("raw_net_score", 0.0) or 0.0)
+            scores["_nexus_conviction_scores"] = _cs_map
+            _cs_uniq = len(set(_cs_map.values()))
+            _log(f"Conviction scores published: {len(_cs_map)} symbols, "
+                 f"{_cs_uniq} distinct value(s)"
+                 + ("  <- SATURATED: a consumer ranking on this is ranking on a "
+                    "tie" if _cs_uniq <= 3 and len(_cs_map) > 10 else ""),
+                 "yellow" if (_cs_uniq <= 3 and len(_cs_map) > 10) else "cyan")
+        except Exception as _cs_exc:
+            _log(f"Conviction-score publish skipped: {type(_cs_exc).__name__}",
+                 "yellow")
         # 2026-08-08 (bt 820236): publish the REGIME-ADJUSTED position cap.
         #
         # Z4.1 lifts the cap (chop 6->8, bull 6->14) and logs it 164 times, but
