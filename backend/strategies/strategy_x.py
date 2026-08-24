@@ -263,6 +263,30 @@ class StrategyX:
                 held_core = bull
                 break
 
+        # ── effective prices: quotes, plus a point-in-time last close ──
+        # The broker's price map carries the instance watchlist; every
+        # graph-discovered satellite candidate is absent from it, because
+        # discoveries are collected AFTER run_once and only gate execution. That
+        # left the sleeve unable to rank or size any of its own picks (bt 186584:
+        # 3 symbols emitted a bar, 20% of NAV idle).
+        #
+        # Nexus already loads bars for those names and they arrive in the shared
+        # `data` map, so the last VISIBLE close is available and is the same
+        # number a quote would carry on this bar. `pit_daily_closes` applies the
+        # same cutoff the core filter uses, so this adds no lookahead. Quotes
+        # always win where they exist; this only fills gaps.
+        eff_prices = dict(prices or {})
+        if float(cfg.get("satellite_pct", 0.0) or 0.0) > 0 and isinstance(data, dict):
+            _conv = data.get("conviction_scores") or {}
+            if isinstance(_conv, dict):
+                for _sym in _conv:
+                    _s = str(_sym).strip().upper()
+                    if not _s or float(eff_prices.get(_s) or 0.0) > 0:
+                        continue
+                    _c = pit_daily_closes(_bars_for(data, _s), current_time)
+                    if _c and _c[-1] > 0:
+                        eff_prices[_s] = float(_c[-1])
+
         ranked = []
         if float(cfg.get("satellite_pct", 0.0) or 0.0) > 0:
             # Buy/hold spread applied HERE, where holdings are known: a held
@@ -286,7 +310,7 @@ class StrategyX:
             # Measured: with the holdings gate, only 1 of 4 names survived a bar.
             mine = set(ages) | {s for s in ages if s in held_syms}
             ranked = select_satellite(
-                self._ranked(cfg, data, prices=prices, as_of=current_time),
+                self._ranked(cfg, data, prices=eff_prices, as_of=current_time),
                 set(ages), cfg, ages=ages)
             # EVERY name this sleeve has ever bought and still holds must stay
             # in `owned`, or `targets_to_orders` cannot sell it: a position that
@@ -398,7 +422,7 @@ class StrategyX:
                     if cache.get("_sx_bear_cooldown") else ""),
                  "red" if bear_on else "white")
         decisions, sizes = targets_to_orders(
-            targets, nav=nav, positions=positions, prices=prices,
+            targets, nav=nav, positions=positions, prices=eff_prices,
             cash=cash, config=cfg, owned=owned)
 
         # A traded leg with no quote is not a no-op — it is the whole strategy
@@ -535,17 +559,28 @@ class StrategyX:
         floor = float((cfg or {}).get(
             "satellite_min_price", DEFAULTS["satellite_min_price"]) or 0.0)
         px = prices or {}
-        if floor > 0:
-            kept = {}
-            for s, score in scores.items():
-                try:
-                    p = float(px.get(s) or 0.0)
-                except (TypeError, ValueError):
-                    p = 0.0
-                # p == 0 means "no price quoted", not "worthless" — keep it.
-                if p <= 0.0 or p >= floor:
-                    kept[s] = score
-            scores = kept
+        # INVESTABILITY — the production blocker, not a nicety. Nexus discovers
+        # a name and scores it in the SAME bar, but the broker builds the price
+        # map BEFORE run_once and never expands it with those discoveries
+        # (`nexus_discovered_syms` is gathered afterwards and only gates
+        # execution). So the top-ranked candidates routinely have no price,
+        # `targets_to_orders` drops them at `px <= 0`, and the sleeve burns every
+        # `satellite_max_names` slot on names it cannot buy — measured in
+        # bt 186584 as 3 emitted symbols a bar (core + 2 commodity) with the
+        # whole 20% sitting in cash, on four names that were re-picked bar after
+        # bar because the minimum hold kept them.
+        #
+        # A candidate with no price is not investable THIS bar. Drop it so the
+        # slot goes to one that is; it returns as soon as a price exists.
+        kept = {}
+        for s, score in scores.items():
+            try:
+                p = float(px.get(s) or 0.0)
+            except (TypeError, ValueError):
+                p = 0.0
+            if p > 0.0 and (floor <= 0.0 or p >= floor):
+                kept[s] = score
+        scores = kept
 
         mom_bars = max(2, int((cfg or {}).get(
             "satellite_momentum_bars",

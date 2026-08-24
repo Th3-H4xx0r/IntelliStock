@@ -119,7 +119,83 @@ def test_the_floor_still_works_when_an_operator_turns_it_on():
     assert ranked == ["GOOD"], f"an explicit floor was not honoured: {ranked}"
 
 
-def test_missing_price_does_not_silently_drop_a_name_when_floor_is_off():
+def test_an_unpriced_candidate_never_takes_a_sleeve_slot():
+    """THE production blocker, found in bt 186584.
+
+    Nexus discovers a name and publishes a conviction score for it in the SAME
+    bar, but the broker's price map is built BEFORE run_once and never expanded
+    with those discoveries — `nexus_discovered_syms` is collected after the fact
+    and only gates execution. So the top-ranked candidates had no price, all
+    four sleeve slots went to names that could not be bought, and the sleeve
+    emitted 3 symbols a bar (core + 2 commodity) with 20% of NAV idle.
+
+    A candidate with no price is not investable this bar. It must not consume a
+    slot that a priced name could use.
+    """
+    cfg = {"satellite_max_names": 2, "satellite_min_price": 0.0}
+    data = {
+        "conviction_scores": {"APD": 1.0, "BBSI": 1.0, "REAL": 1.0},
+        "APD": {"bars": _bars(_flat_then(0.9))},
+        "BBSI": {"bars": _bars(_flat_then(0.8))},
+        "REAL": {"bars": _bars(_flat_then(0.1))},
+    }
+    # APD and BBSI rank higher but are unpriced; only REAL can actually be bought.
+    ranked = StrategyX._ranked(cfg, data, prices={"REAL": 40.0}, as_of=NOW)
+    assert ranked == ["REAL"], (
+        f"unpriced candidates consumed the sleeve's slots: {ranked}")
+
+
+def test_a_discovered_name_with_bars_but_no_quote_is_still_tradable():
+    """The complete repair for bt 186584.
+
+    Dropping unpriced candidates stops them wasting slots, but on its own it
+    just empties the sleeve — the broker's price map holds the 11 watchlist
+    tickers, and every graph-discovered candidate is missing from it. Nexus DOES
+    load bars for those names ("loaded 522 1Day bars for IDAI"), and they land in
+    the shared `data` map, so a point-in-time last close is available and is the
+    same number the quote would carry. Deriving it makes the name rankable and
+    sizable; without it the 20% sleeve can never fill in production.
+    """
+    from datetime import timedelta
+    from strategies.strategy_x import StrategyX as SX
+
+    now = NOW
+    cfg = {"strategy_x_enabled": True, "satellite_pct": 0.2,
+           "satellite_max_names": 2, "core_weight": 0.8,
+           "core_filter_symbol": "QQQ", "satellite_min_price": 0.0}
+
+    def qqq_bars(n):
+        return [{"t": (now - timedelta(days=(n - 1 - i))).isoformat(),
+                 "c": 100.0 + i * 0.5} for i in range(n)]
+
+    class Emu:
+        def get_cash(self):
+            return 10000.0
+
+        def get_positions(self):
+            return {}
+
+        def get_portfolio_value(self, prices=None):
+            return 10000.0
+
+    data = {
+        "QQQ": {"bars": qqq_bars(260)},
+        # DISC has bars (Nexus loaded them) but is absent from `prices`.
+        "DISC": {"bars": _bars(_flat_then(0.40))},
+        "conviction_scores": {"DISC": 1.0},
+    }
+    out = SX().run_once(["TQQQ"], {"TQQQ": 50.0, "SPY": 500.0, "QQQ": 400.0},
+                        now, cfg, {}, data=data, portfolio_emulator=Emu(),
+                        strategy_cache={})
+    assert out.get("DISC") == 1, (
+        f"a discovered name with bars was never bought: "
+        f"{ {k: v for k, v in out.items() if not k.startswith('_')} }")
+    assert out["_nexus_position_sizes"]["DISC"]["buy_cash"] > 0
+
+
+def test_an_empty_price_map_yields_no_candidates_rather_than_unbuyable_ones():
+    """The degenerate case must be empty, not a book of names that cannot fill."""
     cfg = {"satellite_max_names": 3, "satellite_min_price": 0.0}
-    data = {"conviction_scores": {"AAA": 1.0}, "AAA": {"bars": _bars(_flat_then(0.1))}}
-    assert StrategyX._ranked(cfg, data, prices={}, as_of=NOW) == ["AAA"]
+    data = {"conviction_scores": {"AAA": 1.0},
+            "AAA": {"bars": _bars(_flat_then(0.1))}}
+    assert StrategyX._ranked(cfg, data, prices={}, as_of=NOW) == []
