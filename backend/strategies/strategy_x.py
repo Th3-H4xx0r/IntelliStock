@@ -109,6 +109,7 @@ if _HERE not in sys.path:
 
 from strategy_x import (  # noqa: E402
     DEFAULTS,
+    BearSignal,
     bear_signal,
     core_signal,
     pit_daily_closes,
@@ -268,23 +269,85 @@ class StrategyX:
                      "Add them to the instance's stock list.", "red")
 
         # ── bear gate: SQQQ only on an auto-detected bad regime ──
-        # The bar counter enforces the time limit. It lives in the cache because
-        # bear_signal is pure; it resets the moment the gate stops firing, so a
-        # brief pullback cannot accumulate toward the limit.
+        # Three pieces of cache state, all owned here because bear_signal is
+        # pure: `_sx_bear_bars` counts bars the leg is actually HELD (not bars
+        # the gate is open), `_sx_bear_grace` rides out a one-bar confirm
+        # flicker so the leg is not liquidated and rebought on consecutive days,
+        # and `_sx_bear_cooldown` keeps it down after the time limit instead of
+        # letting it re-engage immediately.
         bsig = None
+        bear_on = False
         if bear:
             engaged_bars = int(cache.get("_sx_bear_bars", 0) or 0)
-            bsig = bear_signal(closes, cfg, bars_engaged=engaged_bars)
-            cache["_sx_bear_bars"] = engaged_bars + 1 if bsig.engaged else 0
+            cooldown = int(cache.get("_sx_bear_cooldown", 0) or 0)
+            grace = int(cache.get("_sx_bear_grace", 0) or 0)
+            max_bars = int(cfg.get("core_bear_max_bars", 0) or 0)
+
+            # The time limit is enforced HERE, not inside bear_signal, because
+            # the caller owns the counter. Detecting it in the pure function and
+            # reacting here meant the limit bar looked like an ordinary
+            # non-confirming bar, which reset the counter to 0 and let the leg
+            # re-engage immediately — a 40-on / 1-off cycle forever.
+            if cooldown <= 0 and max_bars > 0 and engaged_bars >= max_bars:
+                cache["_sx_bear_cooldown"] = int(
+                    cfg.get("core_bear_cooldown_bars", 20) or 0)
+                cache["_sx_bear_bars"] = 0
+                cache["_sx_bear_grace"] = 0
+                bsig = BearSignal(False, f"time limit {engaged_bars} >= "
+                                         f"{max_bars} bars — cooling down for "
+                                         f"{cache['_sx_bear_cooldown']}")
+                bear_on = False
+                cooldown = -1          # skip the branches below this bar
+
+            if cooldown < 0:
+                pass                   # handled above
+            elif cooldown > 0:
+                # A time-limited leg must STAY down. Resetting the counter on
+                # the stand-down bar made the limit meaningless: it cycled
+                # 40-on / 1-off / 40-on forever, and each cycle is a full
+                # round trip of the leg at the widest spreads of the episode.
+                cache["_sx_bear_cooldown"] = cooldown - 1
+                cache["_sx_bear_bars"] = 0
+                bsig = BearSignal(False, f"cooldown {cooldown} bars remaining")
+                bear_on = False
+            elif (bsig := bear_signal(closes, cfg,
+                                      bars_engaged=engaged_bars)).engaged:
+                # Count bars the leg is actually HELD, not bars the gate is
+                # open: the gate can be open while the trend filter is still
+                # risk-on, in which case no SQQQ exists and the -6*sigma^2
+                # clock should not be running.
+                bear_on = not sig.risk_on
+                cache["_sx_bear_bars"] = engaged_bars + (1 if bear_on else 0)
+                cache["_sx_bear_grace"] = int(cfg.get("core_bear_exit_grace_bars", 2) or 0)
+                if (int(cfg.get("core_bear_max_bars", 0) or 0) > 0
+                        and cache["_sx_bear_bars"] >= int(cfg["core_bear_max_bars"])):
+                    cache["_sx_bear_cooldown"] = int(
+                        cfg.get("core_bear_cooldown_bars", 20) or 0)
+            elif grace > 0 and engaged_bars > 0:
+                # EXIT HYSTERESIS. One non-confirming bar used to liquidate the
+                # whole leg and rebuy it the next day — measured as two full
+                # 35%-of-NAV round trips in a -3x fund on consecutive days in
+                # March 2020. Hold through a brief flicker; a genuine turn
+                # spends the grace bars and then stands down.
+                cache["_sx_bear_grace"] = grace - 1
+                bear_on = not sig.risk_on
+                cache["_sx_bear_bars"] = engaged_bars + (1 if bear_on else 0)
+            else:
+                cache["_sx_bear_bars"] = 0
+                bear_on = False
 
         targets, notes = plan_targets(risk_on=sig.risk_on, config=cfg,
                                       satellite_ranked=ranked,
                                       held_core=held_core,
                                       commodity_ranked=com_ranked,
-                                      bear_engaged=bool(bsig and bsig.engaged))
+                                      bear_engaged=bear_on)
         if bsig is not None and not sig.risk_on:
-            _log(f"  bear gate: {bsig.reason}",
-                 "red" if bsig.engaged else "white")
+            _log(f"  bear gate: {bsig.reason}"
+                 + (f" | held {cache.get('_sx_bear_bars', 0)} bars"
+                    if bear_on else "")
+                 + (f" | COOLDOWN {cache.get('_sx_bear_cooldown', 0)}"
+                    if cache.get("_sx_bear_cooldown") else ""),
+                 "red" if bear_on else "white")
         decisions, sizes = targets_to_orders(
             targets, nav=nav, positions=positions, prices=prices,
             cash=cash, config=cfg, owned=owned)

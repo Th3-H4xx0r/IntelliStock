@@ -170,6 +170,47 @@ def test_bear_leg_stands_down_after_the_time_limit():
     assert out.get("SQQQ") is None
 
 
+def _run_bear(cache, cfg_over=None, bars_override=None):
+    prices = dict(PRICES, SQQQ=20.0)
+    cfg = base_cfg(core_bear_symbol="SQQQ")
+    cfg.update(cfg_over or {})
+    data = {"QQQ": {"bars": bars_override or _crisis_bars()}}
+    return StrategyX().run_once(["TQQQ"], prices, NOW, cfg, {}, data=data,
+                                portfolio_emulator=FakeEmulator(cash=10000.0,
+                                                                prices=prices),
+                                strategy_cache=cache)
+
+
+def test_the_time_limit_is_a_real_bound_not_a_cycle():
+    """Resetting the counter on the stand-down bar made the limit meaningless:
+    it cycled 40-on / 1-off / 40-on forever, and each cycle is a full round trip
+    of a -3x leg at the widest spreads of the episode."""
+    cache = {"_sx_bear_bars": 40}
+    out = _run_bear(cache, {"core_bear_max_bars": 40,
+                            "core_bear_cooldown_bars": 20})
+    assert out.get("SQQQ") is None
+    assert cache.get("_sx_bear_cooldown", 0) > 0, "no cooldown — it re-engages"
+    out2 = _run_bear(cache, {"core_bear_max_bars": 40,
+                             "core_bear_cooldown_bars": 20})
+    assert out2.get("SQQQ") is None
+    assert cache["_sx_bear_bars"] == 0
+
+
+def test_the_counter_only_ticks_while_the_leg_is_actually_held():
+    """The gate can be open while the trend filter is still risk-on, in which
+    case no SQQQ exists and the -6*sigma^2 clock must not be running."""
+    cache = {}
+    _run_bear(cache, bars_override=bars(400))          # uptrend -> risk-on
+    assert cache.get("_sx_bear_bars", 0) == 0
+
+
+def test_the_leg_engages_and_starts_its_clock():
+    cache = {}
+    assert _run_bear(cache).get("SQQQ") == 1
+    assert cache["_sx_bear_bars"] == 1
+    assert cache["_sx_bear_grace"] > 0                 # exit hysteresis armed
+
+
 def test_the_strategy_declares_its_own_universe():
     """It must not depend on the instance watchlist listing TQQQ/SQQQ/QQQ."""
     data = {"QQQ": {"bars": bars(260)}}

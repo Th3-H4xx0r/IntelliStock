@@ -74,8 +74,9 @@ from zoneinfo import ZoneInfo
 #: `pit_daily_closes` for the measurement that made this necessary.
 _NY = ZoneInfo("America/New_York")
 
-__all__ = ["DEFAULTS", "CoreSignal", "core_signal", "pit_daily_closes",
-           "plan_targets", "targets_to_orders"]
+__all__ = ["DEFAULTS", "BearSignal", "CoreSignal", "bear_signal",
+           "core_signal", "pit_daily_closes", "plan_targets",
+           "rank_commodities", "strategy_x_universe", "targets_to_orders"]
 
 #: Quantization grid for every value that crosses a decision boundary. The
 #: review's defect 13: quantizing inputs does not quantize the DECISION, and a
@@ -121,13 +122,32 @@ DEFAULTS = {
     #
     # `core_bear_min_confirm` is how many of the four must hold:
     #   below the long MA / below the short MA / vol EXPANDING / deep drawdown
+    # MEASURED, 15.2y, the broker's own cost model, terminal NAV on $100k:
+    #   core_bear_symbol = ""      $6,648,971
+    #   core_bear_symbol = "SQQQ"  $4,626,814   <- destroys 30.4% of terminal
+    #                                              wealth across just 32 bars
+    # And it CANNOT open in a grinding bear: `vol_expand` compares a 20-bar
+    # window NESTED inside a 60-bar one, so the ratio is analytically bounded at
+    # ~1.76 and a 1.40 threshold demands realised vol roughly DOUBLE against the
+    # prior 40 sessions. 2022 (QQQ -33.2%) peaked at 1.31 and opened the gate on
+    # 0 of 251 days; 2018Q4 (-23%) likewise 0. Every one of the 32 opens in
+    # 15.2 years falls in March-2020 or April-2025 — fast crashes only.
+    # Loosening to 3/4 makes 2022 WORSE ($58,258 vs $58,440 with the leg off).
+    #
+    # So the leg is DEFAULT OFF: it does not cover the common bad market, and it
+    # loses money in the rare one it does cover. Kept configurable because the
+    # numbers above are the argument, not an opinion.
     "core_bear_weight": 0.35,        # of the core budget, not of NAV
     "core_bear_short_ma_bars": 50,
-    "core_bear_vol_expansion": 1.40,  # rv10/rv60 above this = disorderly
+    # rv(core_vol_bars) / rv(3 x core_vol_bars) = rv20/rv60 at defaults. The
+    # windows are NESTED, which is what bounds the ratio near 1.76.
+    "core_bear_vol_expansion": 1.40,
     "core_bear_drawdown_pct": 0.15,   # this far below the 252-bar high
     "core_bear_lookback_bars": 252,
     "core_bear_min_confirm": 4,       # 4 = unanimous; 3 = looser
     "core_bear_max_bars": 40,         # hard time limit; decay is -6*sigma^2
+    "core_bear_cooldown_bars": 20,    # stay down after the limit, or it cycles
+    "core_bear_exit_grace_bars": 2,   # ride out a 1-bar confirm flicker
     # ── satellite (OFF) ──
     "satellite_pct": 0.0,
     "satellite_max_names": 6,
@@ -421,8 +441,16 @@ def bear_signal(closes, config, bars_engaged: int = 0) -> BearSignal:
 
         below_long   price under its 200-bar MA        is the trend broken?
         below_short  price under its 50-bar MA         is it broken NOW?
-        vol_expand   rv10 / rv60 above the threshold   is it disorderly?
+        vol_expand   rv20 / rv60 above the threshold   is it disorderly?
         deep_dd      >= X% below the 252-bar high      has it actually fallen?
+
+    KNOWN LIMIT, measured: `vol_expand` compares a short window NESTED inside
+    the long one, so the ratio is analytically bounded near 1.76 and the default
+    1.40 demands realised vol roughly double against the prior 40 sessions. That
+    is a CRASH signature, not a BEAR signature — 2022 (-33.2%) never exceeded
+    1.31 and the gate opened on 0 of 251 days. With `core_bear_min_confirm=4`
+    this condition is a hard veto on the other three. Treat this detector as
+    "fast crash", not "bad market".
 
     `core_bear_min_confirm` of them must hold. Requiring several is the whole
     point: any ONE of these fires on an ordinary pullback, and shorting ordinary
@@ -712,18 +740,25 @@ def targets_to_orders(targets: dict, *, nav: float, positions: dict,
             continue
         if delta <= 0 or delta < min_usd:
             continue
-        # Sell proceeds from THIS bar are spendable: the sells above are in the
-        # same returned payload, so the cash is known. Without this the book
-        # sits ~100% in cash for a full bar on every regime change — a whole
-        # session of gap risk per flip, in both directions.
-        spend = min(delta, (cash + proceeds) * (1.0 - haircut))
+        # Size off SETTLED cash only. Counting this bar's sell proceeds looks
+        # right — the sells are in the same payload — but the equity lane only
+        # QUEUES them: `NextEventExecutionSimulator` fills next bar, and the
+        # broker sizes every buy from `portfolio_emulator.get_cash()`, which
+        # still excludes the pending sell. Asking for more than settled cash
+        # does not borrow against the sell, it gets CLIPPED: measured, a
+        # $29,863 SQQQ buy became $500 and a $90,930 SPY buy became $60,
+        # leaving the book ~90% in cash for a full session on 64 bars.
+        #
+        # The cost of being correct here is one bar of cash on a flip. That is
+        # real, bounded, and much cheaper than a stub position. The broker has
+        # its own credit mechanism for this (`backtest_credit_pending_sell_
+        # proceeds` / `buy_ceiling`); routing through that is the supported way
+        # to close the gap, not guessing at the balance from in here.
+        spend = min(delta, cash * (1.0 - haircut))
         if spend < min_usd:
             continue
         decisions[sym] = 1
         sizes[sym] = {"buy_cash": round(spend, 2)}
-        # Draw down own cash first, then the pending proceeds.
-        from_cash = min(cash, spend)
-        cash -= from_cash
-        proceeds = max(0.0, proceeds - (spend - from_cash))
+        cash = max(0.0, cash - spend)
 
     return decisions, sizes
