@@ -115,6 +115,7 @@ from strategy_x import (  # noqa: E402
     pit_daily_closes,
     plan_targets,
     rank_commodities,
+    select_satellite,
     strategy_x_universe,
     targets_to_orders,
 )
@@ -248,8 +249,16 @@ class StrategyX:
 
         ranked = []
         if float(cfg.get("satellite_pct", 0.0) or 0.0) > 0:
-            ranked = self._ranked(cfg, data)
-            owned |= set(ranked)
+            # Buy/hold spread applied HERE, where holdings are known: a held
+            # name survives while inside satellite_exit_rank, a new one must be
+            # inside satellite_max_names. Without it the sleeve re-draws its
+            # entire book every bar, because the conviction score is saturated
+            # and "top N" is a tie broken by ticker spelling.
+            held_syms = {str(s).strip().upper()
+                         for s, q in (positions or {}).items()
+                         if float(q or 0) > 0}
+            ranked = select_satellite(self._ranked(cfg, data), held_syms, cfg)
+            owned |= set(ranked) | (held_syms & set(self._ranked(cfg, data)))
 
         com_ranked = []
         com_syms = [str(s).strip().upper()

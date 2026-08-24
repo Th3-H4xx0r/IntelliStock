@@ -76,7 +76,8 @@ _NY = ZoneInfo("America/New_York")
 
 __all__ = ["DEFAULTS", "BearSignal", "CoreSignal", "bear_signal",
            "core_signal", "pit_daily_closes", "plan_targets",
-           "rank_commodities", "strategy_x_universe", "targets_to_orders"]
+           "rank_commodities", "select_satellite", "strategy_x_universe",
+           "targets_to_orders"]
 
 #: Quantization grid for every value that crosses a decision boundary. The
 #: review's defect 13: quantizing inputs does not quantize the DECISION, and a
@@ -151,6 +152,18 @@ DEFAULTS = {
     # ── satellite (OFF) ──
     "satellite_pct": 0.0,
     "satellite_max_names": 6,
+    # BUY/HOLD SPREAD (Novy-Marx & Velikov's sS rule): a name must rank inside
+    # `satellite_max_names` to be BOUGHT, but only drops out once it falls
+    # outside `satellite_exit_rank`. Stricter to establish a position than to
+    # maintain one.
+    #
+    # This is load-bearing, not a refinement. Without it the sleeve re-draws its
+    # whole book every bar — observed live: GBR/FURY/AEHR/MRVL, then
+    # CETX/AEHR/CPHI/MRVL, then ATMU/USO/LUNR/CETX on three consecutive days.
+    # The conviction score is saturated (3 distinct values over 506,498 trade
+    # contexts), so "top N" is mostly a tie broken by ticker spelling and
+    # reshuffles daily. The spread is what stops a tie from becoming turnover.
+    "satellite_exit_rank": 12,
     # ── commodity sleeve (OFF) ──
     # Holds the top-K commodity ETFs by 60d momentum, among those above their
     # own 100d MA, rebalanced monthly. Funded proportionally out of the core.
@@ -568,6 +581,29 @@ def strategy_x_universe(config) -> list:
     return out
 
 
+def select_satellite(ranked, held, config) -> list:
+    """Satellite membership with the buy/hold spread. Pure.
+
+    A HELD name survives while it is still inside `satellite_exit_rank`; a NEW
+    name must be inside `satellite_max_names`. Selling on "left the top N" would
+    round-trip every name that wobbles across the boundary, which on a saturated
+    score is all of them, every bar.
+
+    Order is deterministic: survivors first in rank order, then additions.
+    """
+    cfg = config or {}
+    keep_n = max(0, _i(cfg, "satellite_max_names"))
+    exit_n = max(keep_n, _i(cfg, "satellite_exit_rank"))
+    names = [str(s).strip().upper() for s in (ranked or []) if s]
+    names = list(dict.fromkeys(names))
+    holding = {str(s).strip().upper() for s in (held or set())}
+
+    survivors = [s for s in names[:exit_n] if s in holding]
+    room = max(0, keep_n - len(survivors))
+    adds = [s for s in names[:keep_n] if s not in holding][:room]
+    return survivors + adds
+
+
 def plan_targets(*, risk_on: bool, config, satellite_ranked=None,
                  held_core: str = "", commodity_ranked=None,
                  bear_engaged: bool = False) -> tuple[dict, list]:
@@ -589,12 +625,18 @@ def plan_targets(*, risk_on: bool, config, satellite_ranked=None,
     # ── satellite first; the core takes what is left ──
     sat_pct = max(0.0, min(1.0, _f(cfg, "satellite_pct")))
     names = [str(s).strip().upper() for s in (satellite_ranked or []) if s]
-    names = [s for s in names if s not in (bull, chop, bear)]
+    # Exclude the core legs AND the commodity candidates. Observed live: the
+    # satellite ranked USO into the stock sleeve while the commodity sleeve was
+    # also holding energy, concentrating 25% of NAV into one sector by accident.
+    # The two sleeves must not compete for the same names.
+    _com_syms = {str(s).strip().upper()
+                 for s in (cfg.get("commodity_symbols") or []) if s}
+    names = [s for s in names if s not in (bull, chop, bear)
+             and s not in _com_syms]
     # Dedupe, preserving rank order. A repeated name is written once but was
     # charged to the budget once per occurrence, silently leaving the difference
     # in cash.
     names = list(dict.fromkeys(names))
-    names = names[:max(0, _i(cfg, "satellite_max_names"))]
     if sat_pct > 0 and names:
         # Floor to the grid, never round. Rounding each share UP breaches the
         # budget (0.5/3 rounded to 6dp three times is 0.500001), and a weight

@@ -84,6 +84,66 @@ def test_commodity_budget_returns_to_the_core_when_nothing_trends():
     assert any("no commodity" in n.lower() for n in notes)
 
 
+# ── satellite buy/hold spread ──────────────────────────────────────────────
+
+from strategy_x import select_satellite  # noqa: E402
+
+
+def scfg(**over):
+    c = dict(DEFAULTS)
+    c.update({"satellite_max_names": 4, "satellite_exit_rank": 12})
+    c.update(over)
+    return c
+
+
+def test_a_held_name_survives_outside_the_entry_rank():
+    """The whole point of the spread: stricter to ESTABLISH than to MAINTAIN."""
+    ranked = [f"N{i}" for i in range(12)]
+    held = {"N7"}                      # rank 8 — outside entry, inside exit
+    got = select_satellite(ranked, held, scfg())
+    assert "N7" in got
+
+
+def test_a_held_name_outside_the_exit_rank_is_dropped():
+    ranked = [f"N{i}" for i in range(20)]
+    got = select_satellite(ranked, {"N15"}, scfg(satellite_exit_rank=12))
+    assert "N15" not in got
+
+
+def test_survivors_consume_the_slots_so_the_book_does_not_grow():
+    ranked = [f"N{i}" for i in range(12)]
+    got = select_satellite(ranked, {"N5", "N6", "N7"}, scfg())
+    assert len(got) == 4
+
+
+def test_a_saturated_ranking_does_not_rebuild_the_book_every_bar():
+    """The defect this exists to stop, reproduced: with a tie-broken ranking
+    that reshuffles, the spread must keep holdings rather than re-draw.
+    Observed live before the fix: GBR/FURY/AEHR/MRVL -> CETX/AEHR/CPHI/MRVL ->
+    ATMU/USO/LUNR/CETX on three consecutive days."""
+    day1 = select_satellite(["A", "B", "C", "D", "E", "F", "G", "H"],
+                            set(), scfg())
+    # next bar the tie reshuffles, but every held name is still inside exit_rank
+    day2 = select_satellite(["E", "F", "G", "H", "A", "B", "C", "D"],
+                            set(day1), scfg())
+    assert set(day2) == set(day1), "the book was re-drawn on a reshuffle"
+
+
+def test_names_leaving_the_ranking_entirely_are_exited():
+    got = select_satellite(["A", "B"], {"ZZZ"}, scfg())
+    assert "ZZZ" not in got
+
+
+def test_a_commodity_candidate_is_never_taken_into_the_stock_sleeve():
+    """Observed live: the satellite ranked USO while the commodity sleeve held
+    energy, concentrating ~25% of NAV into one sector by accident."""
+    t, _ = plan_targets(risk_on=True,
+                        config=cfg(satellite_pct=0.2,
+                                   commodity_symbols=["USO", "XLE"]),
+                        satellite_ranked=["USO", "AAPL"])
+    assert "USO" not in t or t.get("USO", 0) == 0
+
+
 def test_commodity_sleeve_is_inert_at_its_default():
     t, _ = plan_targets(risk_on=True, config=dict(DEFAULTS),
                         commodity_ranked=["GLD"])
