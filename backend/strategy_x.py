@@ -818,7 +818,18 @@ def targets_to_orders(targets: dict, *, nav: float, positions: dict,
             continue
         current = held.get(sym, 0.0) * px
         delta = want[sym] * nav - current
-        if round(abs(delta) / nav, Q) <= band:
+        # The band is a NO-CHURN rule: it suppresses small drifts around a
+        # position you already hold. Applying it to an OPEN starves any sleeve
+        # whose per-name target is no bigger than the band itself — a 20%
+        # satellite over 4 names targets exactly 0.05 of NAV each, which is
+        # exactly `core_band_pct`, so `abs(delta)/nav <= band` was true on the
+        # first bar and every bar after. Measured: the sleeve never opened a
+        # single position, 19% of the book sat in cash, and two arms of a
+        # tiebreak study came back BYTE-IDENTICAL because neither held anything.
+        # Exits are already unconditional for the mirror-image reason; an entry
+        # from a flat book is not churn either. `min_order_usd` remains the
+        # floor that keeps this from opening dust.
+        if current > 0 and round(abs(delta) / nav, Q) <= band:
             continue
         if delta <= 0 or delta < min_usd:
             continue
