@@ -29,6 +29,10 @@ import os
 import re
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
+# `as_completed(..., timeout=)` raises concurrent.futures.TimeoutError, which is
+# NOT the builtin TimeoutError on every supported version — alias it explicitly
+# so the overlay abandon-deadline catches the right exception.
+from concurrent.futures import TimeoutError as _FuturesTimeoutError
 from contextlib import contextmanager
 import datetime as _dt
 from datetime import datetime, timedelta
@@ -23385,27 +23389,65 @@ def _apply_ml_and_overlay_to_scores(
                     if _overlay_cooldown > 0 and _submit_idx < len(all_overlay_inputs):
                         time_sleep(_overlay_cooldown)
                 _total_overlay = len(all_overlay_inputs)
-                for idx, future in enumerate(as_completed(future_map), 1):
-                    item = future_map[future]
-                    try:
-                        overlay_results[item["sym"]] = _normalize_overlay_worker_result(
-                            future.result(),
-                            context=f"overlay_worker:{item['sym']}",
+                # ABANDON DEADLINE. `as_completed(future_map)` was bare, so a
+                # single OpenRouter worker that never returns wedged the whole
+                # run — no error, no progress, forever. Measured 2026-08-24:
+                # bt 331865 hung at overlay 32/33, bt 186584 at 12/33,
+                # bt 613323 at 32/33 (1825s idle, killed at 48%). Two of four
+                # backtests died this way. The sibling event-maintenance batch
+                # already abandons stragglers after its own deadline.
+                #
+                # DEFAULT 0 == OFF: the live path stays byte-identical unless an
+                # operator opts in. This function is HIGH blast radius (1 direct
+                # caller, 5 run_once flow hits, 3 modules) and this module runs
+                # the live real-money instance. A dropped worker degrades to
+                # `({}, {})`, which is exactly what the consume site below
+                # already substitutes for a missing symbol.
+                try:
+                    _overlay_deadline = float(
+                        config.get("overlay_batch_timeout_sec", 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    _overlay_deadline = 0.0
+                _overlay_seen = set()
+                try:
+                    _overlay_futures = (
+                        as_completed(future_map) if _overlay_deadline <= 0
+                        else as_completed(future_map, timeout=_overlay_deadline))
+                    for idx, future in enumerate(_overlay_futures, 1):
+                        _overlay_seen.add(future)
+                        item = future_map[future]
+                        try:
+                            overlay_results[item["sym"]] = _normalize_overlay_worker_result(
+                                future.result(),
+                                context=f"overlay_worker:{item['sym']}",
+                            )
+                        except Exception as exc:
+                            _raise_model_evidence_error(exc)
+                            _log(f"Trade overlay worker failed for {item['sym']}: {exc}", "yellow")
+                            overlay_results[item["sym"]] = ({}, {})
+                        _log_stage_progress(
+                            "Trade overlay LLM",
+                            idx,
+                            _total_overlay,
+                            started=overlay_started,
+                            last_state=progress_state,
+                            every_items=1,
+                            every_seconds=4.0,
+                            extra=f"symbol={item['sym']}" + (" [ETF]" if item["sym"] in _etf_overlay_syms else ""),
                         )
-                    except Exception as exc:
-                        _raise_model_evidence_error(exc)
-                        _log(f"Trade overlay worker failed for {item['sym']}: {exc}", "yellow")
-                        overlay_results[item["sym"]] = ({}, {})
-                    _log_stage_progress(
-                        "Trade overlay LLM",
-                        idx,
-                        _total_overlay,
-                        started=overlay_started,
-                        last_state=progress_state,
-                        every_items=1,
-                        every_seconds=4.0,
-                        extra=f"symbol={item['sym']}" + (" [ETF]" if item["sym"] in _etf_overlay_syms else ""),
-                    )
+                except _FuturesTimeoutError:
+                    _overlay_dropped = sorted(
+                        future_map[f]["sym"] for f in future_map
+                        if f not in _overlay_seen)
+                    for f in future_map:
+                        if f not in _overlay_seen:
+                            f.cancel()
+                            overlay_results.setdefault(future_map[f]["sym"], ({}, {}))
+                    _log(f"Trade overlay batch: abandoned "
+                         f"{len(_overlay_dropped)} worker(s) after "
+                         f"{_overlay_deadline:.0f}s — results are INCOMPLETE for "
+                         f"{', '.join(_overlay_dropped[:12])}"
+                         + (" ..." if len(_overlay_dropped) > 12 else ""), "red")
 
     add_buy_min_raw_net = float(config.get("add_buy_min_raw_net", max(0.35, buy_threshold + 0.10)) or max(0.35, buy_threshold + 0.10))
     add_buy_min_ml_up = float(config.get("add_buy_min_ml_up_probability", 0.55) or 0.55)
