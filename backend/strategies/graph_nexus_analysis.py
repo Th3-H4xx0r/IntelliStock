@@ -23334,7 +23334,17 @@ def _apply_ml_and_overlay_to_scores(
                 _log(f"Trade overlay price history fetch failed: {_ph_exc}", "yellow")
             progress_state: dict[str, Any] = {}
             _overlay_cooldown = float(config.get("overlay_llm_cooldown_seconds", 0))  # V7.4: default 0 — llm_utils retry handles 429s
-            with ThreadPoolExecutor(max_workers=workers) as ex:
+            # NOT a `with` block, on purpose. `ThreadPoolExecutor.__exit__`
+            # calls `shutdown(wait=True)`, which joins every worker — so a
+            # single hung LLM call blocks the exit forever and the abandon
+            # deadline below is useless: it would log, then hang anyway.
+            # `Future.cancel()` cannot interrupt a thread that has already
+            # started, so the only way past a wedged worker is to stop waiting
+            # for it. The `finally` shuts down without waiting when the deadline
+            # fired, and normally (wait=True) when it did not.
+            ex = ThreadPoolExecutor(max_workers=workers)
+            _overlay_timed_out = False
+            try:
                 _use_toon = bool(config.get("use_toon_format", True))
                 future_map = {}
                 _submit_idx = 0
@@ -23436,6 +23446,7 @@ def _apply_ml_and_overlay_to_scores(
                             extra=f"symbol={item['sym']}" + (" [ETF]" if item["sym"] in _etf_overlay_syms else ""),
                         )
                 except _FuturesTimeoutError:
+                    _overlay_timed_out = True
                     _overlay_dropped = sorted(
                         future_map[f]["sym"] for f in future_map
                         if f not in _overlay_seen)
@@ -23448,6 +23459,15 @@ def _apply_ml_and_overlay_to_scores(
                          f"{_overlay_deadline:.0f}s — results are INCOMPLETE for "
                          f"{', '.join(_overlay_dropped[:12])}"
                          + (" ..." if len(_overlay_dropped) > 12 else ""), "red")
+            finally:
+                # wait=False ONLY on the timeout path: a wedged worker is
+                # already unreachable, and joining it is precisely the hang this
+                # deadline exists to escape. The leaked thread dies with the
+                # process, which for a backtest container is moments later.
+                try:
+                    ex.shutdown(wait=not _overlay_timed_out)
+                except Exception:
+                    pass
 
     add_buy_min_raw_net = float(config.get("add_buy_min_raw_net", max(0.35, buy_threshold + 0.10)) or max(0.35, buy_threshold + 0.10))
     add_buy_min_ml_up = float(config.get("add_buy_min_ml_up_probability", 0.55) or 0.55)
