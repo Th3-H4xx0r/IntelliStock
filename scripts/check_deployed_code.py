@@ -31,6 +31,8 @@ FILES = (
     "backend/llm_utils.py",
     "backend/model_resolver.py",
     "backend/api/main.py",
+    "backend/strategy_x.py",
+    "backend/strategies/strategy_x.py",
 )
 
 

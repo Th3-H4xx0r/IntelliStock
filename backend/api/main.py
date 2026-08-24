@@ -971,6 +971,15 @@ _CODE_FINGERPRINT_FILES = (
     "llm_utils.py",
     "model_resolver.py",
     "api/main.py",
+    # Strategy X decides the whole book on the instances that run it — the core
+    # leg, both sleeves, and every order size. It was omitted at first because
+    # the schema endpoint echoes its DEFAULTS, which felt like proof enough; it
+    # is not. DEFAULTS and the sizing logic live in the same file but ship in
+    # different commits, so a stale image can serve a current-looking schema
+    # while running the old `targets_to_orders` — exactly the sizing bug that
+    # left a 20% sleeve unfunded for an entire run.
+    "strategy_x.py",
+    "strategies/strategy_x.py",
 )
 _CODE_FINGERPRINT_CACHE: "dict[str, str] | None" = None
 
