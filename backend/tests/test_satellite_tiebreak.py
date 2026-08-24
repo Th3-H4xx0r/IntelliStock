@@ -85,21 +85,38 @@ def test_a_name_with_no_bars_sorts_last_but_is_not_dropped():
     assert ranked == ["ZZZ", "AAA"], f"unranked name was not sorted last: {ranked}"
 
 
-def test_a_config_written_before_these_keys_existed_still_gets_the_guard():
-    """Doc 198 predates both keys. Falling back to a hardcoded 0.0 instead of
-    DEFAULTS would ship the floor inert in production while every other test in
-    this file still passed — the same way `weight: 0` and the empty conviction
-    map stayed invisible for days."""
-    cfg = {"satellite_max_names": 4}          # NEITHER new key present
+def test_the_price_floor_is_OFF_by_default_because_it_was_measured_to_cost():
+    """The floor defaults to 0.0 — measured, not assumed.
+
+    A $5 floor costs 3,205pp of compounded return over 81 windows
+    (+7,140.3% -> +3,935.2%), drops beat-SPY 68% -> 65%, and flips chop from
+    +0.65 back to -1.01, buying only -5.74 -> -5.46 in bear. It stays available
+    as a lever; it must not be on by default.
+    """
+    cfg = {"satellite_max_names": 4}          # no explicit floor
     data = {
         "conviction_scores": {"IPDN": 1.0, "GOOD": 1.0},
-        "IPDN": {"bars": _bars(_flat_then(0.90))},   # best momentum, but $1.40
+        "IPDN": {"bars": _bars(_flat_then(0.90))},   # best momentum, $1.40
         "GOOD": {"bars": _bars(_flat_then(0.10))},
     }
     ranked = StrategyX._ranked(cfg, data, prices={"IPDN": 1.40, "GOOD": 55.0},
                                as_of=NOW)
-    assert "IPDN" not in ranked, (
-        f"the $5 floor did not apply to a config lacking the key: {ranked}")
+    assert ranked[0] == "IPDN", (
+        f"a low-priced name was excluded by default; the floor should be off "
+        f"and momentum should rank it first: {ranked}")
+
+
+def test_the_floor_still_works_when_an_operator_turns_it_on():
+    """Off by default is not the same as removed."""
+    cfg = {"satellite_max_names": 4, "satellite_min_price": 5.0}
+    data = {
+        "conviction_scores": {"IPDN": 1.0, "GOOD": 1.0},
+        "IPDN": {"bars": _bars(_flat_then(0.90))},
+        "GOOD": {"bars": _bars(_flat_then(0.10))},
+    }
+    ranked = StrategyX._ranked(cfg, data, prices={"IPDN": 1.40, "GOOD": 55.0},
+                               as_of=NOW)
+    assert ranked == ["GOOD"], f"an explicit floor was not honoured: {ranked}"
 
 
 def test_missing_price_does_not_silently_drop_a_name_when_floor_is_off():

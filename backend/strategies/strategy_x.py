@@ -1,5 +1,5 @@
-# INTELLISTOCK_SCHEMA: {"strategy": "strategy_x", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_x_enabled": false, "core_bull_symbol": "TQQQ", "core_chop_symbol": "SPY", "core_bear_symbol": "", "core_weight": 0.9, "core_band_pct": 0.05, "core_filter_symbol": "QQQ", "core_filter_ma_bars": 200, "core_vol_bars": 20, "core_vol_gate_mult": 2.25, "core_vol_median_bars": 252, "core_vol_median_min_samples": 60, "core_bear_weight": 0.35, "core_bear_short_ma_bars": 50, "core_bear_vol_expansion": 1.4, "core_bear_drawdown_pct": 0.15, "core_bear_lookback_bars": 252, "core_bear_min_confirm": 4, "core_bear_max_bars": 40, "core_bear_cooldown_bars": 20, "core_bear_exit_grace_bars": 2, "satellite_pct": 0.0, "satellite_max_names": 6, "satellite_exit_rank": 12, "satellite_min_hold_bars": 21, "satellite_momentum_bars": 60, "satellite_min_price": 5.0, "commodity_pct": 0.0, "commodity_symbols": ["GLD", "SLV", "USO", "UNG", "GDX", "XLE", "DBA", "CPER"], "commodity_max_names": 2, "commodity_mom_bars": 60, "commodity_trend_bars": 100, "min_order_usd": 50.0, "cost_haircut_pct": 0.006, "broker_max_single_position_pct": 0.95, "core_once_per_session": true}}
-# INTELLISTOCK_DESCRIPTION: Leveraged Nasdaq core (TQQQ) with a de-lever filter to SPY. Direction is NOT predicted — a trend + volatility filter decides only WHETHER to be levered. Replaying this module over 15.7y of real closes (next-bar fills, point-in-time): CAGR 33.97%, maxDD -48.5%, Sharpe 0.88, 99.6x vs SPY's 8.5x, 4 years above +100%. The inverse (SQQQ) leg and the stock satellite DEFAULT OFF because both were measured to destroy it (-4.2% CAGR and -4.0pp). Needs QQQ+TQQQ+SPY in the instance universe and granularity 86400. DIFFICULTY: 2
+# INTELLISTOCK_SCHEMA: {"strategy": "strategy_x", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_x_enabled": false, "core_bull_symbol": "TQQQ", "core_chop_symbol": "SPY", "core_bear_symbol": "", "core_weight": 0.9, "core_band_pct": 0.05, "core_filter_symbol": "QQQ", "core_filter_ma_bars": 200, "core_vol_bars": 20, "core_vol_gate_mult": 2.25, "core_vol_median_bars": 252, "core_vol_median_min_samples": 60, "core_bear_weight": 0.35, "core_bear_short_ma_bars": 50, "core_bear_vol_expansion": 1.4, "core_bear_drawdown_pct": 0.15, "core_bear_lookback_bars": 252, "core_bear_min_confirm": 4, "core_bear_max_bars": 40, "core_bear_cooldown_bars": 20, "core_bear_exit_grace_bars": 2, "satellite_pct": 0.0, "satellite_max_names": 6, "satellite_exit_rank": 12, "satellite_min_hold_bars": 21, "satellite_momentum_bars": 60, "satellite_min_price": 0.0, "commodity_pct": 0.0, "commodity_symbols": ["GLD", "SLV", "USO", "UNG", "GDX", "XLE", "DBA", "CPER"], "commodity_max_names": 2, "commodity_mom_bars": 60, "commodity_trend_bars": 100, "min_order_usd": 50.0, "cost_haircut_pct": 0.006, "broker_max_single_position_pct": 0.95, "core_once_per_session": true}}
+# INTELLISTOCK_DESCRIPTION: Leveraged Nasdaq core (TQQQ) with a de-lever filter to SPY. Direction is NOT predicted — a trend + volatility filter decides only WHETHER to be levered. Replaying this module over 15.7y of real closes (next-bar fills, point-in-time): CAGR 33.97%, maxDD -48.5%, Sharpe 0.88, 99.6x vs SPY's 8.5x, 4 years above +100%. The inverse (SQQQ) leg DEFAULTS OFF (-4.2% CAGR). The stock satellite is worth turning ON: with `satellite_pct=0.2` + `commodity_pct=0.2` it measures +7,140% compounded over 81 rolling 2-month windows vs SPY's +473%, beating SPY in 68% of them. (The old "satellite costs -4.0pp" figure was measured while a band bug kept the sleeve from ever opening a position - it held nothing.) Needs QQQ+TQQQ+SPY in the instance universe and granularity 86400. DIFFICULTY: 2
 """IntelliStock — Strategy X: leveraged core, filtered.
 
 WHAT THIS IS
@@ -56,14 +56,30 @@ graph_nexus_analysis ships `execution_position: 0` and this ships `10`, so Nexus
 runs first and its scores are in `data` by the time this reads them. Reverse the
 order and the sleeve sees an empty map and quietly holds nothing.
 
-TWO LIMITS THAT ARE NOT FIXED HERE:
+THE SATURATION IS HANDLED HERE; THE LIVE GAP IS NOT:
   * `raw_net_score` is saturated — 3 distinct values across 506,498 stored trade
-    contexts — so the ranking is mostly a tie broken by ticker spelling. Nexus
-    now LOGS the distinct-value count each bar, so this is visible rather than
-    silent, but the repair is in the scorer, not here.
+    contexts — so ranking on it alone is a tie, and sorting ties by ticker made
+    this sleeve buy the alphabet (it held AAL/IDAI/IPDN/PW: the first four
+    candidates, two of them sub-$100M microcaps). Ties now break on trailing
+    momentum over `satellite_momentum_bars`, which is worth +3,136pp compounded
+    over 81 windows and is what turns CHOP positive (-1.76 -> +0.65). A real
+    score difference still wins; momentum only orders what the graph cannot
+    separate. Nexus also logs the distinct-value count per bar, so the
+    saturation stays visible — the proper repair is still in the scorer.
+  * `satellite_min_price` exists but DEFAULTS OFF: a $5 floor was measured to
+    cost 3,205pp and to flip chop negative again. Excluding cheap names removes
+    more return than it saves in spread.
   * The broker passes `data=None` in LIVE mode (`price_history if mode ==
     MODE_BACKTEST else None`), so this channel is backtest-only. A live sleeve
     needs a separate carrier.
+
+THE BAND BUG, because it will look like a rounding detail and is not:
+`core_band_pct` is a fraction of NAV, and a 20% sleeve over 4 names targets
+exactly 0.05 of NAV each. `targets_to_orders` therefore skipped every satellite
+OPEN as "inside the no-churn band" — on the first bar and every bar after — so
+the sleeve never held anything while the log printed a full seven-name target
+book. ANY sleeve whose per-name target is <= `core_band_pct` is silently dead.
+Check `satellite_pct / satellite_max_names > core_band_pct`.
 
 THE COMMODITY SLEEVE
 --------------------

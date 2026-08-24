@@ -178,9 +178,21 @@ DEFAULTS = {
     # to hold AAL, IDAI, IPDN, PW, the alphabet's first four candidates. Ties
     # now break on trailing momentum over this many daily closes.
     "satellite_momentum_bars": 60,
-    # Two of those four were sub-$100M microcaps. At the 45.6bps spread the
-    # engine models for microcaps, a $1.40 stock cannot pay for its round trip.
-    "satellite_min_price": 5.0,
+    # Price floor for satellite candidates. DEFAULT OFF, and that is a measured
+    # reversal of the reasoning that introduced it.
+    #
+    # The argument for a floor was sound-sounding: two of the four names this
+    # sleeve first bought were sub-$100M microcaps, and a $1.40 stock cannot pay
+    # a 45.6bps spread. Measured over 81 rolling 2-month windows against the
+    # momentum tiebreak alone, a $5 floor COSTS 3,205pp of compounded return
+    # (+7,140.3% -> +3,935.2%), drops beat-SPY 68% -> 65%, and flips chop back
+    # negative (+0.65 -> -1.01). It buys only -5.74 -> -5.46 in bear.
+    #
+    # The harness models a flat 2bps cost and NOT the microcap spread, so it is
+    # biased in the floor's favour to leave it off — but the bias is worth about
+    # 1%/yr (20% of NAV, ~12 round trips, ~44bps extra), nowhere near the gap.
+    # The names the floor removes earn much more than they cost.
+    "satellite_min_price": 0.0,
     # ── commodity sleeve (OFF) ──
     # Holds the top-K commodity ETFs by 60d momentum, among those above their
     # own 100d MA, rebalanced monthly. Funded proportionally out of the core.
