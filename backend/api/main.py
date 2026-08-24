@@ -1007,13 +1007,23 @@ def _code_fingerprint() -> "dict[str, str]":
     # .../backend/api/main.py -> .../backend  (== /app in the container)
     root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
     out: "dict[str, str]" = {}
+    # Key on the basename, EXCEPT where two entries share one. `strategy_x.py`
+    # exists at both the backend root and under `strategies/`, and keying both
+    # to "strategy_x.py" made the second silently overwrite the first — the
+    # check then reported "all match" while never hashing the module that owns
+    # order sizing. A collision must widen the key, not drop a file.
+    _seen: "dict[str, int]" = {}
     for rel in _CODE_FINGERPRINT_FILES:
+        _seen[rel.split("/")[-1]] = _seen.get(rel.split("/")[-1], 0) + 1
+    for rel in _CODE_FINGERPRINT_FILES:
+        base = rel.split("/")[-1]
+        key = base if _seen.get(base, 0) == 1 else rel
         path = _os.path.join(root, rel)
         try:
             with open(path, "rb") as fh:
-                out[rel.split("/")[-1]] = _hashlib.sha256(fh.read()).hexdigest()[:12]
+                out[key] = _hashlib.sha256(fh.read()).hexdigest()[:12]
         except Exception as exc:  # missing file is itself a deploy signal
-            out[rel.split("/")[-1]] = f"unreadable: {type(exc).__name__}"
+            out[key] = f"unreadable: {type(exc).__name__}"
     _CODE_FINGERPRINT_CACHE = out
     return out
 

@@ -38,6 +38,12 @@ FILES = (
 
 def local_hashes(ref=None):
     out = {}
+    # Mirror the server's keying exactly: basename, widened to the full relative
+    # path when two entries share one. `strategy_x.py` exists twice, and keying
+    # both to the basename dropped one file from the comparison entirely.
+    seen = {}
+    for rel in FILES:
+        seen[rel.split("/")[-1]] = seen.get(rel.split("/")[-1], 0) + 1
     for rel in FILES:
         if ref:
             blob = subprocess.run(["git", "show", f"{ref}:{rel}"],
@@ -45,7 +51,12 @@ def local_hashes(ref=None):
         else:
             with open(rel, "rb") as fh:
                 blob = fh.read()
-        out[rel.split("/")[-1]] = hashlib.sha256(blob).hexdigest()[:12]
+        base = rel.split("/")[-1]
+        key = base if seen.get(base, 0) == 1 else rel
+        # The server hashes paths relative to the BACKEND root, not the repo
+        # root, so strip the leading "backend/" to match its keys.
+        out[key[len("backend/"):] if key.startswith("backend/") else key] = \
+            hashlib.sha256(blob).hexdigest()[:12]
     return out
 
 
