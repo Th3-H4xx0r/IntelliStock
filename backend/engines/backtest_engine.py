@@ -606,6 +606,12 @@ def _check_dead_backtest_containers():
                     _queued_or_active_ids.discard(bid)
                 with _container_launch_times_lock:
                     _container_launch_times.pop(bid, None)
+        # Queue-row-driven reconciliation cannot see a BacktestResults row whose
+        # queue row is already gone, and the queue is delete-on-completion — so
+        # that row stays 'running' forever. Observed 2026-08-24: bt 984041 sat
+        # at status='running' for 41 HOURS with no queue row and no container,
+        # and the UI reported it as a second concurrent backtest.
+        _sweep_orphaned_result_rows(running_names)
     except Exception as e:
         intellistock_logger.log(f"Container health check failed: {e}", "yellow", service="BACKTEST_ENGINE")
     finally:
@@ -618,6 +624,71 @@ def _check_dead_backtest_containers():
             docker_client.close()
         except Exception:
             pass
+
+
+def _sweep_orphaned_result_rows(running_names):
+    """Mark `stopped` any BacktestResults row still claiming 'running' whose
+    container is gone AND which has no queue row left to reconcile it.
+
+    This is the other half of the liveness check. The queue-driven pass above
+    handles rows that still exist in BacktestInstances; this one handles the
+    ones that do not, which is the state a completed-then-crashed or
+    externally-killed run ends in. Without it those rows are immortal: the UI
+    shows phantom concurrent runs, and — the expensive part — a stale 'running'
+    row BLOCKS that instance's next launch, so new backtests are accepted, given
+    an id, and never started.
+
+    Conservative by construction: a row is touched only when its container is
+    absent from `running_names`, it is outside the launch grace period, and it
+    is not paused (a paused run idles deliberately with its container alive).
+    """
+    try:
+        rows = list(db_store.iter(db_store.filter(
+            RESULTS_TABLE, {"status": "running"})))
+    except Exception as exc:
+        intellistock_logger.log(
+            f"Orphan sweep: could not scan {RESULTS_TABLE}: {exc}",
+            "yellow", service="BACKTEST_ENGINE")
+        return
+
+    now = time.time()
+    for row in rows:
+        bid = row.get("id")
+        if bid is None:
+            continue
+        instance_id = str(row.get("instance_id") or "")
+        if _backtest_container_name(instance_id, bid) in running_names:
+            continue                      # alive — never touch a live run
+        with _container_launch_times_lock:
+            launched = _container_launch_times.get(bid)
+        if launched is not None and (now - launched) < CONTAINER_LAUNCH_GRACE_SEC:
+            continue                      # still starting up
+        try:
+            import backtest_result_store as _brs
+            if "paused" in str(_brs.read_status(bid) or "").lower():
+                continue                  # deliberate idle, container alive
+        except Exception:
+            pass
+        try:
+            if db_store.get(TABLE_NAME, bid):
+                continue                  # the queue pass above owns this one
+        except Exception:
+            pass
+        try:
+            import backtest_result_store as _brs
+            _brs.set_status(bid, "stopped")
+            intellistock_logger.log(
+                f"Orphan sweep: backtest {bid} claimed 'running' with no "
+                f"container and no queue row — marked stopped.",
+                "yellow", service="BACKTEST_ENGINE")
+        except Exception as exc:
+            intellistock_logger.log(
+                f"Orphan sweep: could not stop {bid}: {exc}",
+                "yellow", service="BACKTEST_ENGINE")
+        with _queued_or_active_lock:
+            _queued_or_active_ids.discard(bid)
+        with _container_launch_times_lock:
+            _container_launch_times.pop(bid, None)
 
 
 def _get_network(client):
