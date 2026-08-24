@@ -1,4 +1,4 @@
-# INTELLISTOCK_SCHEMA: {"strategy": "strategy_x", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_x_enabled": false, "core_bull_symbol": "TQQQ", "core_chop_symbol": "SPY", "core_bear_symbol": "", "core_weight": 0.9, "core_band_pct": 0.05, "core_filter_symbol": "QQQ", "core_filter_ma_bars": 200, "core_vol_bars": 20, "core_vol_gate_mult": 2.25, "core_vol_median_bars": 252, "core_vol_median_min_samples": 60, "core_bear_weight": 0.35, "core_bear_short_ma_bars": 50, "core_bear_vol_expansion": 1.4, "core_bear_drawdown_pct": 0.15, "core_bear_lookback_bars": 252, "core_bear_min_confirm": 4, "core_bear_max_bars": 40, "core_bear_cooldown_bars": 20, "core_bear_exit_grace_bars": 2, "satellite_pct": 0.0, "satellite_max_names": 6, "satellite_exit_rank": 12, "satellite_min_hold_bars": 21, "commodity_pct": 0.0, "commodity_symbols": ["GLD", "SLV", "USO", "UNG", "GDX", "XLE", "DBA", "CPER"], "commodity_max_names": 2, "commodity_mom_bars": 60, "commodity_trend_bars": 100, "min_order_usd": 50.0, "cost_haircut_pct": 0.006, "broker_max_single_position_pct": 0.95, "core_once_per_session": true}}
+# INTELLISTOCK_SCHEMA: {"strategy": "strategy_x", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_x_enabled": false, "core_bull_symbol": "TQQQ", "core_chop_symbol": "SPY", "core_bear_symbol": "", "core_weight": 0.9, "core_band_pct": 0.05, "core_filter_symbol": "QQQ", "core_filter_ma_bars": 200, "core_vol_bars": 20, "core_vol_gate_mult": 2.25, "core_vol_median_bars": 252, "core_vol_median_min_samples": 60, "core_bear_weight": 0.35, "core_bear_short_ma_bars": 50, "core_bear_vol_expansion": 1.4, "core_bear_drawdown_pct": 0.15, "core_bear_lookback_bars": 252, "core_bear_min_confirm": 4, "core_bear_max_bars": 40, "core_bear_cooldown_bars": 20, "core_bear_exit_grace_bars": 2, "satellite_pct": 0.0, "satellite_max_names": 6, "satellite_exit_rank": 12, "satellite_min_hold_bars": 21, "satellite_momentum_bars": 60, "satellite_min_price": 5.0, "commodity_pct": 0.0, "commodity_symbols": ["GLD", "SLV", "USO", "UNG", "GDX", "XLE", "DBA", "CPER"], "commodity_max_names": 2, "commodity_mom_bars": 60, "commodity_trend_bars": 100, "min_order_usd": 50.0, "cost_haircut_pct": 0.006, "broker_max_single_position_pct": 0.95, "core_once_per_session": true}}
 # INTELLISTOCK_DESCRIPTION: Leveraged Nasdaq core (TQQQ) with a de-lever filter to SPY. Direction is NOT predicted — a trend + volatility filter decides only WHETHER to be levered. Replaying this module over 15.7y of real closes (next-bar fills, point-in-time): CAGR 33.97%, maxDD -48.5%, Sharpe 0.88, 99.6x vs SPY's 8.5x, 4 years above +100%. The inverse (SQQQ) leg and the stock satellite DEFAULT OFF because both were measured to destroy it (-4.2% CAGR and -4.0pp). Needs QQQ+TQQQ+SPY in the instance universe and granularity 86400. DIFFICULTY: 2
 """IntelliStock — Strategy X: leveraged core, filtered.
 
@@ -269,8 +269,9 @@ class StrategyX:
             # the bar it most needed protecting, and the book churned anyway.
             # Measured: with the holdings gate, only 1 of 4 names survived a bar.
             mine = set(ages) | {s for s in ages if s in held_syms}
-            ranked = select_satellite(self._ranked(cfg, data), set(ages), cfg,
-                                      ages=ages)
+            ranked = select_satellite(
+                self._ranked(cfg, data, prices=prices, as_of=current_time),
+                set(ages), cfg, ages=ages)
             # EVERY name this sleeve has ever bought and still holds must stay
             # in `owned`, or `targets_to_orders` cannot sell it: a position that
             # drops out of the ranking would fall outside the sell scope and
@@ -466,7 +467,7 @@ class StrategyX:
         return out
 
     @staticmethod
-    def _ranked(cfg, data):
+    def _ranked(cfg, data, prices=None, as_of=None):
         """Conviction-ordered satellite candidates, best first.
 
         Reads `data["conviction_scores"]` — the same channel `index_core_tilt`
@@ -474,6 +475,24 @@ class StrategyX:
         to an EMPTY list, never to an arbitrary order: a fake ranking makes a
         dead signal look alive, which is exactly how 677/677 `raw_score=0.000`
         stayed invisible for so long.
+
+        TWO GUARDS, both added after watching this sleeve trade for real:
+
+        1. TIEBREAK. `raw_net_score` is saturated — 3 distinct values across
+           506,498 trade contexts — so ordering by `(-score, ticker)` decays
+           into ALPHABETICAL order. Production bt 331865 bought AAL, IDAI,
+           IPDN, PW: literally the first four candidates in the alphabet. Ties
+           now break on trailing momentum over `satellite_momentum_bars`,
+           computed from the same point-in-time closes the core filter uses, so
+           it is deterministic and carries no lookahead. A real score
+           difference still wins — momentum only orders what the graph cannot
+           separate.
+
+        2. PRICE FLOOR. Two of those four picks were sub-$100M microcaps. At a
+           45.6bps modelled spread a $1.40 stock cannot pay for its own round
+           trip. `satellite_min_price` drops them. A name with NO price is kept
+           — absent data is not evidence of a penny stock, and dropping it
+           silently is how sleeves go quietly empty.
         """
         scores = {}
         if isinstance(data, dict):
@@ -492,4 +511,40 @@ class StrategyX:
                     s = str(sym).strip().upper()
                     if s and s not in skip and score > 0:
                         scores[s] = score
-        return [s for s, _ in sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+        # Fall back to DEFAULTS, NOT to a hardcoded 0.0. A live document was
+        # written before these keys existed, so `cfg` does not carry them; a
+        # literal default here means the floor is 0 in production and the guard
+        # ships inert while every test still passes.
+        floor = float((cfg or {}).get(
+            "satellite_min_price", DEFAULTS["satellite_min_price"]) or 0.0)
+        px = prices or {}
+        if floor > 0:
+            kept = {}
+            for s, score in scores.items():
+                try:
+                    p = float(px.get(s) or 0.0)
+                except (TypeError, ValueError):
+                    p = 0.0
+                # p == 0 means "no price quoted", not "worthless" — keep it.
+                if p <= 0.0 or p >= floor:
+                    kept[s] = score
+            scores = kept
+
+        mom_bars = max(2, int((cfg or {}).get(
+            "satellite_momentum_bars",
+            DEFAULTS["satellite_momentum_bars"]) or 60))
+        mom = {}
+        for s in scores:
+            closes = pit_daily_closes(_bars_for(data, s), as_of)
+            if len(closes) > mom_bars and closes[-1 - mom_bars] > 0:
+                mom[s] = closes[-1] / closes[-1 - mom_bars] - 1.0
+
+        # Sort key: score first, then momentum, then ticker as the final
+        # deterministic fallback. `s in mom` ranks ahead of `s not in mom` so a
+        # name with no history sorts last rather than at momentum 0.0, which
+        # would place it above every genuine decliner.
+        return [s for s, _ in sorted(
+            scores.items(),
+            key=lambda kv: (-kv[1], 0 if kv[0] in mom else 1,
+                            -mom.get(kv[0], 0.0), kv[0]))]

@@ -172,6 +172,15 @@ DEFAULTS = {
     # 1-month for a third of the trading. A hold period is the mechanism that
     # matches a slow signal; daily re-selection is what destroys it.
     "satellite_min_hold_bars": 21,
+    # TIEBREAK + LIQUIDITY, both forced by watching this sleeve trade live.
+    # The graph score is saturated (3 distinct values over 506,498 contexts), so
+    # ties decide the book — and ordering ties by ticker is how bt 331865 came
+    # to hold AAL, IDAI, IPDN, PW, the alphabet's first four candidates. Ties
+    # now break on trailing momentum over this many daily closes.
+    "satellite_momentum_bars": 60,
+    # Two of those four were sub-$100M microcaps. At the 45.6bps spread the
+    # engine models for microcaps, a $1.40 stock cannot pay for its round trip.
+    "satellite_min_price": 5.0,
     # ── commodity sleeve (OFF) ──
     # Holds the top-K commodity ETFs by 60d momentum, among those above their
     # own 100d MA, rebalanced monthly. Funded proportionally out of the core.
