@@ -917,6 +917,13 @@ def _backtest_difficulty_discord_str():
 # Alpaca historical API: fetch 5-minute bars for backtest
 # ---------------------------------------------------------------------------
 ALPACA_DATA_BASE = "https://data.alpaca.markets/v2"
+
+# Hard ceiling on how long ONE chunk fetch may spend paginating. The page cap
+# (500) bounds iterations but not TIME — at a 60s request that is 8+ hours, and
+# no line is logged between pages, so a wedged fetch looks exactly like a
+# working one. Generous enough that a legitimately slow multi-page window still
+# completes; short enough that a stuck fetch surfaces in minutes.
+_CHUNK_FETCH_MAX_SECONDS = 300.0
 # ALPACA_TIMEFRAME is now determined dynamically from time_increment
 
 
@@ -1146,8 +1153,43 @@ def fetch_alpaca_historical_bars(
         # = 5M bars per chunk — vastly more than any legitimate hourly window.
         _page_count = 0
         _max_pages = 500
+        # WALL-CLOCK DEADLINE. The page cap alone is not a time bound: 500 pages
+        # x a 60s request is over EIGHT HOURS for a single chunk, and nothing is
+        # logged between pages, so the run is indistinguishable from a hang the
+        # entire time. bt 821959 froze right here after
+        # "Fetched chunk 1/2 for VAC" — log stuck at exactly 7,085 lines, no LLM
+        # calls, no error — and had to be killed by hand.
+        #
+        # Note also that `requests`' timeout= is a BETWEEN-BYTES timeout, not a
+        # total-duration one: a server trickling bytes holds the connection open
+        # indefinitely without ever tripping it. Only a deadline we enforce here
+        # bounds the chunk.
+        _chunk_deadline = time.time() + _CHUNK_FETCH_MAX_SECONDS
         while True:
             _page_count += 1
+            if time.time() > _chunk_deadline:
+                try:
+                    _log(
+                        f"Alpaca chunk fetch DEADLINE for {sym} after "
+                        f"{_CHUNK_FETCH_MAX_SECONDS:.0f}s and {_page_count - 1} "
+                        f"page(s); returning the {len(collected)} bar(s) "
+                        f"collected so far rather than blocking the run.",
+                        "red",
+                    )
+                except NameError:
+                    pass
+                break
+            # A slow paginate must be visible, not silent.
+            if _page_count > 1 and _page_count % 5 == 0:
+                try:
+                    _log(
+                        f"Alpaca still paginating {sym}: page {_page_count}, "
+                        f"{len(collected)} bar(s), "
+                        f"{time.time() - (_chunk_deadline - _CHUNK_FETCH_MAX_SECONDS):.0f}s elapsed.",
+                        "cyan",
+                    )
+                except NameError:
+                    pass
             if _page_count > _max_pages:
                 try:
                     _log(

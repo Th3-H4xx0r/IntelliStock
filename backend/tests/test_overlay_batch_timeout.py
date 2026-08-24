@@ -43,13 +43,22 @@ def test_as_completed_is_not_called_bare_on_the_overlay_futures():
         "as_completed(future_map) is still called without a timeout")
 
 
-def test_the_timeout_defaults_to_off():
-    """Live trading must be byte-identical unless an operator opts in."""
+def test_the_timeout_is_on_by_default_and_generously_sized():
+    """Turned ON 2026-08-24 at the operator's request.
+
+    It shipped off because this module runs the live real-money instance, but
+    the hang is not hypothetical — it killed four of seven backtests in a day,
+    and the same wedge stalls LIVE trading silently. The default must still be
+    far above a healthy batch (~90s observed) so it cannot fire on a merely slow
+    run, and 0 must still disable it.
+    """
     m = re.search(r'overlay_batch_timeout_sec["\']\s*,\s*([0-9.]+)', _SRC)
     assert m, "could not find the overlay_batch_timeout_sec default"
-    assert float(m.group(1)) == 0.0, (
-        f"overlay batch timeout defaults to {m.group(1)}, not 0 (off) — this "
-        "module runs the live real-money instance")
+    secs = float(m.group(1))
+    assert secs > 0, "the overlay deadline is disabled by default again"
+    assert 300 <= secs <= 1800, (
+        f"default deadline {secs}s is outside the sane band: it must clear a "
+        "healthy ~90s batch by a wide margin and still bound a wedge")
 
 
 def test_abandoned_workers_are_logged_not_silent():

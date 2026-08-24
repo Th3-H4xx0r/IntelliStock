@@ -23413,11 +23413,20 @@ def _apply_ml_and_overlay_to_scores(
                 # the live real-money instance. A dropped worker degrades to
                 # `({}, {})`, which is exactly what the consume site below
                 # already substitutes for a missing symbol.
+                # DEFAULT ON (600s) as of 2026-08-24, at the operator's request.
+                # It shipped default-off because this module runs the live
+                # real-money instance and the function is HIGH blast radius, but
+                # the hang it prevents is not hypothetical: it killed four of
+                # seven backtests in one day, and the same wedge stalls LIVE
+                # trading silently — no error, no orders, just nothing. A
+                # bounded, logged, partial overlay beats an unbounded stall.
+                # 600s is ~7x the observed healthy batch time (~90s), so it
+                # cannot fire on a merely slow run. Set 0 to disable.
                 try:
                     _overlay_deadline = float(
-                        config.get("overlay_batch_timeout_sec", 0.0) or 0.0)
+                        config.get("overlay_batch_timeout_sec", 600.0) or 0.0)
                 except (TypeError, ValueError):
-                    _overlay_deadline = 0.0
+                    _overlay_deadline = 600.0
                 _overlay_seen = set()
                 try:
                     _overlay_futures = (
