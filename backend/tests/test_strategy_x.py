@@ -26,8 +26,68 @@ from strategy_x import (  # noqa: E402
     core_signal,
     pit_daily_closes,
     plan_targets,
+    rank_commodities,
     targets_to_orders,
 )
+
+
+def _series(n, start, step):
+    return [start + i * step for i in range(n)]
+
+
+def ccfg(**over):
+    c = dict(DEFAULTS)
+    c.update({"commodity_pct": 0.15, "commodity_max_names": 2})
+    c.update(over)
+    return c
+
+
+def test_only_commodities_in_their_own_uptrend_are_ranked():
+    closes = {"GLD": _series(160, 100, 0.5),     # uptrend
+              "USO": _series(160, 200, -0.5)}    # downtrend
+    assert rank_commodities(closes, ccfg()) == ["GLD"]
+
+
+def test_ranking_is_by_momentum_best_first():
+    closes = {"GLD": _series(160, 100, 0.2),
+              "SLV": _series(160, 100, 1.0)}     # much stronger
+    assert rank_commodities(closes, ccfg()) == ["SLV", "GLD"]
+
+
+def test_ranking_respects_max_names():
+    closes = {s: _series(160, 100, 0.5 + i * 0.1)
+              for i, s in enumerate(["GLD", "SLV", "USO"])}
+    assert len(rank_commodities(closes, ccfg(commodity_max_names=2))) == 2
+
+
+def test_no_commodity_in_an_uptrend_returns_empty():
+    closes = {"GLD": _series(160, 200, -0.5), "USO": _series(160, 200, -0.4)}
+    assert rank_commodities(closes, ccfg()) == []
+
+
+def test_short_history_is_skipped_not_guessed():
+    assert rank_commodities({"GLD": _series(20, 100, 0.5)}, ccfg()) == []
+
+
+def test_commodity_sleeve_takes_its_weight_out_of_the_core():
+    t, _ = plan_targets(risk_on=True, config=ccfg(core_weight=0.9),
+                        commodity_ranked=["GLD", "SLV"])
+    assert t["GLD"] == pytest.approx(0.075, abs=1e-5)
+    assert t["SLV"] == pytest.approx(0.075, abs=1e-5)
+    assert t["TQQQ"] == pytest.approx(0.765, abs=1e-4)   # 0.85 core budget * 0.9
+    assert sum(t.values()) <= 1.0 + 1e-9
+
+
+def test_commodity_budget_returns_to_the_core_when_nothing_trends():
+    t, notes = plan_targets(risk_on=True, config=ccfg(), commodity_ranked=[])
+    assert t["TQQQ"] == pytest.approx(0.9)
+    assert any("no commodity" in n.lower() for n in notes)
+
+
+def test_commodity_sleeve_is_inert_at_its_default():
+    t, _ = plan_targets(risk_on=True, config=dict(DEFAULTS),
+                        commodity_ranked=["GLD"])
+    assert "GLD" not in t
 
 
 def cfg(**over):

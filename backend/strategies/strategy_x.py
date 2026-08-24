@@ -1,4 +1,4 @@
-# INTELLISTOCK_SCHEMA: {"strategy": "strategy_x", "weight": 1.0, "execution_position": 0, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_x_enabled": false, "core_bull_symbol": "TQQQ", "core_chop_symbol": "SPY", "core_bear_symbol": "", "core_weight": 0.9, "core_band_pct": 0.05, "core_filter_symbol": "QQQ", "core_filter_ma_bars": 200, "core_vol_bars": 20, "core_vol_gate_mult": 2.25, "core_vol_median_bars": 252, "core_vol_median_min_samples": 60, "core_once_per_session": true, "satellite_pct": 0.0, "satellite_max_names": 6, "min_order_usd": 50.0, "cost_haircut_pct": 0.006, "broker_max_single_position_pct": 0.95}}
+# INTELLISTOCK_SCHEMA: {"strategy": "strategy_x", "weight": 1.0, "execution_position": 0, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_x_enabled": false, "core_bull_symbol": "TQQQ", "core_chop_symbol": "SPY", "core_bear_symbol": "", "core_weight": 0.9, "core_band_pct": 0.05, "core_filter_symbol": "QQQ", "core_filter_ma_bars": 200, "core_vol_bars": 20, "core_vol_gate_mult": 2.25, "core_vol_median_bars": 252, "core_vol_median_min_samples": 60, "core_once_per_session": true, "satellite_pct": 0.0, "satellite_max_names": 6, "min_order_usd": 50.0, "cost_haircut_pct": 0.006, "broker_max_single_position_pct": 0.95, "commodity_pct": 0.0, "commodity_symbols": ["GLD", "SLV", "USO", "UNG", "GDX", "XLE", "DBA", "CPER"], "commodity_max_names": 2, "commodity_mom_bars": 60, "commodity_trend_bars": 100}}
 # INTELLISTOCK_DESCRIPTION: Leveraged Nasdaq core (TQQQ) with a de-lever filter to SPY. Direction is NOT predicted — a trend + volatility filter decides only WHETHER to be levered. Replaying this module over 15.7y of real closes (next-bar fills, point-in-time): CAGR 33.97%, maxDD -48.5%, Sharpe 0.88, 99.6x vs SPY's 8.5x, 4 years above +100%. The inverse (SQQQ) leg and the stock satellite DEFAULT OFF because both were measured to destroy it (-4.2% CAGR and -4.0pp). Needs QQQ+TQQQ+SPY in the instance universe and granularity 86400. DIFFICULTY: 2
 """IntelliStock — Strategy X: leveraged core, filtered.
 
@@ -29,10 +29,40 @@ re-adding a voter.
 
 WHAT THE GRAPH AND THE LLM STILL DO
 -----------------------------------
-Nothing here, by default — and that is a measured decision, not an oversight.
-`satellite_pct > 0` re-enables a graph/LLM-ranked stock sleeve funded out of the
-core, and the ranking arrives through `data["conviction_scores"]` exactly as
-`index_core_tilt` consumes it. It costs 4.8pp of CAGR at 20%, so it is off.
+Nothing, and this is now measured rather than assumed. The graph score has no
+CROSS-SECTIONAL skill either: Spearman IC vs forward returns is negative in all
+20 lag x horizon cells over 197,797 observations, never significant, and
+orthogonal to momentum (rho -0.026). The "+0.17 IC" that used to justify it is a
+publication-timestamp artifact — `date_key` is the UTC publication date and 52%
+of ticker-tagged articles publish at or after the 20:00 UTC close; pre-close
+articles give -0.015, post-close +0.109. See `scripts/graph_signal_ic_study.py`.
+
+The score is also a constant in practice: across 506,498 stored trade contexts
+it takes 3 distinct values, and `confidence` is bimodal with 77% of rows at
+exactly 0.0 or 1.0. Ranking on it means ranking on a tie, broken by ticker
+spelling.
+
+`satellite_pct > 0` still wires a graph/LLM-ranked sleeve through
+`data["conviction_scores"]`, but note that contract has NO producer in this repo
+and `data` is None in live mode — so it is inert until someone builds the
+plumbing AND repairs the score. Do both before turning it on.
+
+THE COMMODITY SLEEVE
+--------------------
+`commodity_pct > 0` holds the top-`commodity_max_names` commodity ETFs by 60d
+momentum, among those above their own 100d MA, funded out of the core. It is the
+one added sleeve that beat its control: against SPY dilution at the SAME weight
+it delivers ~3pp better max drawdown at matched return, consistently at 10/15/20%.
+
+It is OFF by default because it trades against the stated objective — at 15% it
+costs 4.3pp of CAGR and halves the years above +100%. Turn it on to buy
+drawdown, not return.
+
+Today it is momentum-driven, not news-driven. That is deliberate: production
+"commodity trends" in graph_nexus are already 20d/60d price momentum on
+GLD/SLV/USO/UNG, and the news->commodity bridge does not exist (nothing reads
+`affected_commodities`; only ~658 articles in three years name a tradable
+commodity). `rank_commodities` is the seam a news signal would plug into.
 
 EXECUTION NOTE — THE 15% CAP
 ---------------------------
@@ -64,6 +94,7 @@ from strategy_x import (  # noqa: E402
     core_signal,
     pit_daily_closes,
     plan_targets,
+    rank_commodities,
     targets_to_orders,
 )
 
@@ -178,9 +209,27 @@ class StrategyX:
             ranked = self._ranked(cfg, data)
             owned |= set(ranked)
 
+        com_ranked = []
+        com_syms = [str(s).strip().upper()
+                    for s in (cfg.get("commodity_symbols") or []) if s]
+        if float(cfg.get("commodity_pct", 0.0) or 0.0) > 0 and com_syms:
+            com_closes = {s: pit_daily_closes(_bars_for(data, s), current_time)
+                          for s in com_syms}
+            com_ranked = rank_commodities(com_closes, cfg)
+            # Own the whole candidate set, not just today's picks — otherwise a
+            # name that drops out of the ranking is outside `owned` and can
+            # never be sold.
+            owned |= set(com_syms)
+            missing = [s for s in com_syms if not com_closes.get(s)]
+            if missing:
+                _log(f"StrategyX: commodity sleeve has NO bars for "
+                     f"{', '.join(missing)} — those cannot be ranked or held. "
+                     "Add them to the instance's stock list.", "red")
+
         targets, notes = plan_targets(risk_on=sig.risk_on, config=cfg,
                                       satellite_ranked=ranked,
-                                      held_core=held_core)
+                                      held_core=held_core,
+                                      commodity_ranked=com_ranked)
         decisions, sizes = targets_to_orders(
             targets, nav=nav, positions=positions, prices=prices,
             cash=cash, config=cfg, owned=owned)

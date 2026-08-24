@@ -153,6 +153,32 @@ def test_satellite_buys_ranked_names_when_enabled_and_scored():
     assert out.get("AAPL") == 1
 
 
+def test_commodity_sleeve_buys_a_trending_commodity_end_to_end():
+    """Proves the sleeve is not inert through the real run_once path — the
+    failure mode this repo hits most is a lever that ships and does nothing."""
+    prices = dict(PRICES, GLD=200.0, USO=70.0)
+    data = {
+        "QQQ": {"bars": bars(260)},
+        "GLD": {"bars": bars(200, start=100.0, step=0.6)},    # uptrend
+        "USO": {"bars": bars(200, start=200.0, step=-0.4)},   # downtrend
+    }
+    cfg = base_cfg(commodity_pct=0.15, commodity_max_names=2,
+                   commodity_symbols=["GLD", "USO"])
+    out = StrategyX().run_once(["TQQQ", "SPY"], prices, NOW, cfg, {}, data=data,
+                               portfolio_emulator=FakeEmulator(cash=10000.0,
+                                                               prices=prices),
+                               strategy_cache={})
+    assert out.get("GLD") == 1          # trending -> held
+    assert out.get("USO") is None       # falling -> not held
+    assert out.get("TQQQ") == 1         # core still funded, just smaller
+
+
+def test_commodity_sleeve_is_inert_at_its_default():
+    out = run(base_cfg(), {"QQQ": {"bars": bars(260)}},
+              FakeEmulator(cash=10000.0, prices=PRICES))
+    assert "GLD" not in out
+
+
 def test_cache_records_the_decision_for_the_operator():
     cache = {}
     StrategyX().run_once(["TQQQ"], PRICES, NOW, base_cfg(), {},

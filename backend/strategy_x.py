@@ -115,6 +115,28 @@ DEFAULTS = {
     # ── satellite (OFF) ──
     "satellite_pct": 0.0,
     "satellite_max_names": 6,
+    # ── commodity sleeve (OFF) ──
+    # Holds the top-K commodity ETFs by 60d momentum, among those above their
+    # own 100d MA, rebalanced monthly. Funded proportionally out of the core.
+    #
+    # Measured over 13.7y against a SPY-dilution control at the SAME weight —
+    # the control matters, because a sleeve that merely de-levers will improve
+    # Sharpe while adding nothing:
+    #   15% top2 commodity   CAGR 40.15  maxDD -44.84  ret/DD 0.90  Sharpe 1.09
+    #   15% SPY dilution     CAGR 40.50  maxDD -47.77  ret/DD 0.85  Sharpe 1.08
+    #   shipped, no sleeve   CAGR 44.46  maxDD -50.07  ret/DD 0.89  Sharpe 1.07
+    # So it IS real diversification (~3pp better drawdown at matched return, and
+    # the same shape at 10/15/20%, a plateau not a spike) — but it costs 4.3pp
+    # of CAGR and halves the years above +100%. That is a risk trade against the
+    # stated objective, so it defaults OFF and the operator opts in.
+    #
+    # top2 beats top3 at every size: concentration is doing work here, because
+    # commodities are few and only some of them trend at any one time.
+    "commodity_pct": 0.0,
+    "commodity_symbols": ["GLD", "SLV", "USO", "UNG", "GDX", "XLE", "DBA", "CPER"],
+    "commodity_max_names": 2,
+    "commodity_mom_bars": 60,
+    "commodity_trend_bars": 100,
     # ── execution ──
     "min_order_usd": 50.0,
     "cost_haircut_pct": 0.006,       # size against the all-in cost, not the mid
@@ -366,8 +388,39 @@ def core_signal(closes, config) -> CoreSignal:
                       price, ma, rvol, median)
 
 
+def rank_commodities(closes_by_symbol: dict, config) -> list:
+    """Commodity ETFs worth holding, best first. Pure.
+
+    Two gates, both required: the ETF must be in its OWN uptrend (above its
+    `commodity_trend_bars` MA) and it is then ranked by `commodity_mom_bars`
+    return. The uptrend gate is what lets the sleeve hold NOTHING — commodities
+    spend long stretches with none of them trending, and a sleeve that must
+    always be full would be forced into whichever one is falling least.
+
+    Deterministic: ties break on symbol, never on dict order.
+    """
+    cfg = config or {}
+    mom_bars = max(2, _i(cfg, "commodity_mom_bars"))
+    trend_bars = max(2, _i(cfg, "commodity_trend_bars"))
+    scored = []
+    for sym in sorted(closes_by_symbol or {}):
+        px = _finite(closes_by_symbol.get(sym))
+        if not px or len(px) < max(mom_bars, trend_bars) + 1:
+            continue
+        ma = sum(px[-trend_bars:]) / trend_bars
+        if ma <= 0 or px[-1] <= ma:
+            continue                      # not in its own uptrend
+        prior = px[-1 - mom_bars]
+        if prior <= 0:
+            continue
+        scored.append((round(px[-1] / prior - 1.0, Q), sym))
+    # Highest momentum first; symbol ascending as the tie-break.
+    scored.sort(key=lambda kv: (-kv[0], kv[1]))
+    return [s for _, s in scored[:max(0, _i(cfg, "commodity_max_names"))]]
+
+
 def plan_targets(*, risk_on: bool, config, satellite_ranked=None,
-                 held_core: str = "") -> tuple[dict, list]:
+                 held_core: str = "", commodity_ranked=None) -> tuple[dict, list]:
     """Target weight per symbol as a fraction of NAV, plus why.
 
     The chop occupant is a RESIDUAL, exactly as in `index_core_tilt.plan_targets`
@@ -407,7 +460,25 @@ def plan_targets(*, risk_on: bool, config, satellite_ranked=None,
         notes.append("no satellite names ranked — core absorbs the sleeve")
         sat_pct = 0.0
 
-    core_budget = round(max(0.0, 1.0 - sat_pct), Q)
+    # ── commodity sleeve, funded out of the core budget ──
+    com_pct = max(0.0, min(1.0, _f(cfg, "commodity_pct")))
+    com = [str(s).strip().upper() for s in (commodity_ranked or []) if s]
+    com = [s for s in com if s not in (bull, chop, bear) and s not in targets]
+    com = list(dict.fromkeys(com))[:max(0, _i(cfg, "commodity_max_names"))]
+    if com_pct > 0 and com:
+        scale = 10 ** Q
+        each = math.floor(com_pct / len(com) * scale) / scale
+        for s in com:
+            targets[s] = each
+        com_pct = round(each * len(com), Q)
+        notes.append(f"commodity {com_pct:.0%} across {len(com)}: {', '.join(com)}")
+    elif com_pct > 0:
+        # No commodity is in its own uptrend. Holding none is the correct
+        # answer; the budget returns to the core rather than forcing a pick.
+        notes.append("no commodity in an uptrend — core absorbs the sleeve")
+        com_pct = 0.0
+
+    core_budget = round(max(0.0, 1.0 - sat_pct - com_pct), Q)
 
     if risk_on:
         targets[bull] = round(core_budget * weight, Q)
