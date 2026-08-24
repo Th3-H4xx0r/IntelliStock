@@ -1,4 +1,4 @@
-# INTELLISTOCK_SCHEMA: {"strategy": "strategy_x", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_x_enabled": false, "core_bull_symbol": "TQQQ", "core_chop_symbol": "SPY", "core_bear_symbol": "", "core_weight": 0.9, "core_band_pct": 0.05, "core_filter_symbol": "QQQ", "core_filter_ma_bars": 200, "core_vol_bars": 20, "core_vol_gate_mult": 2.25, "core_vol_median_bars": 252, "core_vol_median_min_samples": 60, "core_once_per_session": true, "satellite_pct": 0.0, "satellite_max_names": 6, "min_order_usd": 50.0, "cost_haircut_pct": 0.006, "broker_max_single_position_pct": 0.95, "commodity_pct": 0.0, "commodity_symbols": ["GLD", "SLV", "USO", "UNG", "GDX", "XLE", "DBA", "CPER"], "commodity_max_names": 2, "commodity_mom_bars": 60, "commodity_trend_bars": 100}}
+# INTELLISTOCK_SCHEMA: {"strategy": "strategy_x", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_x_enabled": false, "core_bull_symbol": "TQQQ", "core_chop_symbol": "SPY", "core_bear_symbol": "", "core_weight": 0.9, "core_band_pct": 0.05, "core_filter_symbol": "QQQ", "core_filter_ma_bars": 200, "core_vol_bars": 20, "core_vol_gate_mult": 2.25, "core_vol_median_bars": 252, "core_vol_median_min_samples": 60, "core_bear_weight": 0.35, "core_bear_short_ma_bars": 50, "core_bear_vol_expansion": 1.4, "core_bear_drawdown_pct": 0.15, "core_bear_lookback_bars": 252, "core_bear_min_confirm": 4, "core_bear_max_bars": 40, "core_bear_cooldown_bars": 20, "core_bear_exit_grace_bars": 2, "satellite_pct": 0.0, "satellite_max_names": 6, "satellite_exit_rank": 12, "satellite_min_hold_bars": 21, "commodity_pct": 0.0, "commodity_symbols": ["GLD", "SLV", "USO", "UNG", "GDX", "XLE", "DBA", "CPER"], "commodity_max_names": 2, "commodity_mom_bars": 60, "commodity_trend_bars": 100, "min_order_usd": 50.0, "cost_haircut_pct": 0.006, "broker_max_single_position_pct": 0.95, "core_once_per_session": true}}
 # INTELLISTOCK_DESCRIPTION: Leveraged Nasdaq core (TQQQ) with a de-lever filter to SPY. Direction is NOT predicted — a trend + volatility filter decides only WHETHER to be levered. Replaying this module over 15.7y of real closes (next-bar fills, point-in-time): CAGR 33.97%, maxDD -48.5%, Sharpe 0.88, 99.6x vs SPY's 8.5x, 4 years above +100%. The inverse (SQQQ) leg and the stock satellite DEFAULT OFF because both were measured to destroy it (-4.2% CAGR and -4.0pp). Needs QQQ+TQQQ+SPY in the instance universe and granularity 86400. DIFFICULTY: 2
 """IntelliStock — Strategy X: leveraged core, filtered.
 
@@ -257,8 +257,23 @@ class StrategyX:
             held_syms = {str(s).strip().upper()
                          for s, q in (positions or {}).items()
                          if float(q or 0) > 0}
-            ranked = select_satellite(self._ranked(cfg, data), held_syms, cfg)
-            owned |= set(ranked) | (held_syms & set(self._ranked(cfg, data)))
+            # Names this sleeve has bought, with how many bars they have been
+            # held. Tracked in the cache because the ranking cannot be used as
+            # a memory — Nexus rotates its candidate set daily, so a held name
+            # is usually absent from it entirely.
+            ages = dict(cache.get("_sx_sat_ages") or {})
+            mine = {s for s in ages if s in held_syms}
+            ranked = select_satellite(self._ranked(cfg, data),
+                                      held_syms & (mine | set(ages)), cfg,
+                                      ages=ages)
+            # EVERY name this sleeve has ever bought and still holds must stay
+            # in `owned`, or `targets_to_orders` cannot sell it: a position that
+            # drops out of the ranking would fall outside the sell scope and
+            # accumulate forever. Observed live as targets churning while
+            # orders=1 — the buys landed and the exits never fired.
+            owned |= set(ranked) | mine
+            ages = {s: ages.get(s, 0) + 1 for s in ranked}
+            cache["_sx_sat_ages"] = ages
 
         com_ranked = []
         com_syms = [str(s).strip().upper()

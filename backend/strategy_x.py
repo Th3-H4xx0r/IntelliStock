@@ -164,6 +164,14 @@ DEFAULTS = {
     # contexts), so "top N" is mostly a tie broken by ticker spelling and
     # reshuffles daily. The spread is what stops a tie from becoming turnover.
     "satellite_exit_rank": 12,
+    # MINIMUM HOLD, in decision bars. The rank band alone cannot stabilise this
+    # sleeve because Nexus rotates its whole candidate set daily, so a held name
+    # is usually ABSENT from the next bar's ranking rather than lower in it.
+    # Cohen & Frazzini: skipping a full week retains 93% of the links alpha, and
+    # Ali & Hirshleifer measure the 12-month version netting 41% more than the
+    # 1-month for a third of the trading. A hold period is the mechanism that
+    # matches a slow signal; daily re-selection is what destroys it.
+    "satellite_min_hold_bars": 21,
     # ── commodity sleeve (OFF) ──
     # Holds the top-K commodity ETFs by 60d momentum, among those above their
     # own 100d MA, rebalanced monthly. Funded proportionally out of the core.
@@ -581,27 +589,50 @@ def strategy_x_universe(config) -> list:
     return out
 
 
-def select_satellite(ranked, held, config) -> list:
-    """Satellite membership with the buy/hold spread. Pure.
+def select_satellite(ranked, held, config, ages=None) -> list:
+    """Satellite membership with a buy/hold spread AND a minimum hold. Pure.
 
-    A HELD name survives while it is still inside `satellite_exit_rank`; a NEW
-    name must be inside `satellite_max_names`. Selling on "left the top N" would
-    round-trip every name that wobbles across the boundary, which on a saturated
-    score is all of them, every bar.
+    Two mechanisms, and the second one is the load-bearing half here:
 
-    Order is deterministic: survivors first in rank order, then additions.
+    1. RANK BAND — a HELD name survives while inside `satellite_exit_rank`; a
+       NEW name must be inside `satellite_max_names`.
+    2. MINIMUM HOLD — a name younger than `satellite_min_hold_bars` is kept
+       REGARDLESS of whether it is ranked at all.
+
+    The band alone does not work against this signal, measured: Nexus discovers
+    a different candidate set every bar, so yesterday's picks are not merely
+    lower-ranked today, they are ABSENT. Survivors is then always empty and the
+    book re-draws daily — observed live as AAL/PW/IPDN/IDAI -> CAR/AAOI/CPHI/AAL
+    -> ATMU/LUNR on consecutive bars. A rank band cannot stabilise a rotating
+    universe; only a hold period can.
+
+    `ages` maps symbol -> bars held. Missing means new.
     """
     cfg = config or {}
     keep_n = max(0, _i(cfg, "satellite_max_names"))
     exit_n = max(keep_n, _i(cfg, "satellite_exit_rank"))
+    min_hold = max(0, _i(cfg, "satellite_min_hold_bars"))
     names = [str(s).strip().upper() for s in (ranked or []) if s]
     names = list(dict.fromkeys(names))
     holding = {str(s).strip().upper() for s in (held or set())}
+    ages = {str(k).strip().upper(): int(v or 0) for k, v in (ages or {}).items()}
 
-    survivors = [s for s in names[:exit_n] if s in holding]
-    room = max(0, keep_n - len(survivors))
+    # Young holdings are kept whether or not they rank today. Sorted by age
+    # (oldest first) so the set is deterministic and the oldest retire first.
+    #
+    # `s in ages` is required, not just an age lookup: a holding with NO age
+    # record is not one this sleeve is tracking (a cleared cache, or another
+    # strategy's position), and granting it a minimum hold would freeze
+    # whatever happened to be in the book. Untracked names fall through to the
+    # ordinary rank band.
+    young = sorted((s for s in holding
+                    if s in ages and ages[s] < min_hold),
+                   key=lambda s: (-ages[s], s))[:keep_n]
+    survivors = [s for s in names[:exit_n] if s in holding and s not in young]
+    keep = young + survivors
+    room = max(0, keep_n - len(keep))
     adds = [s for s in names[:keep_n] if s not in holding][:room]
-    return survivors + adds
+    return keep + adds
 
 
 def plan_targets(*, risk_on: bool, config, satellite_ranked=None,

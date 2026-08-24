@@ -116,6 +116,33 @@ def test_survivors_consume_the_slots_so_the_book_does_not_grow():
     assert len(got) == 4
 
 
+def test_a_young_holding_survives_a_ranking_it_is_absent_from():
+    """THE case the rank band cannot handle. Nexus rotates its candidate set
+    daily, so a held name is usually ABSENT from the next bar's ranking, not
+    merely lower in it — survivors is empty and the book re-draws. Only a hold
+    period stabilises that. Observed live: AAL/PW/IPDN/IDAI -> CAR/AAOI/CPHI/AAL
+    -> ATMU/LUNR on consecutive bars."""
+    got = select_satellite(["NEW1", "NEW2", "NEW3", "NEW4"], {"OLD1", "OLD2"},
+                           scfg(satellite_min_hold_bars=21),
+                           ages={"OLD1": 3, "OLD2": 5})
+    assert "OLD1" in got and "OLD2" in got, "young holdings were dumped"
+
+
+def test_a_name_past_its_minimum_hold_can_be_replaced():
+    got = select_satellite(["NEW1", "NEW2", "NEW3", "NEW4"], {"OLD1"},
+                           scfg(satellite_min_hold_bars=21),
+                           ages={"OLD1": 21})
+    assert "OLD1" not in got
+
+
+def test_minimum_hold_never_exceeds_the_slot_count():
+    got = select_satellite(["N1"], {"A", "B", "C", "D", "E", "F"},
+                           scfg(satellite_max_names=4,
+                                satellite_min_hold_bars=21),
+                           ages={s: 1 for s in "ABCDEF"})
+    assert len(got) <= 4
+
+
 def test_a_saturated_ranking_does_not_rebuild_the_book_every_bar():
     """The defect this exists to stop, reproduced: with a tie-broken ranking
     that reshuffles, the spread must keep holdings rather than re-draw.
