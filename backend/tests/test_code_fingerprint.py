@@ -59,6 +59,17 @@ def test_every_file_hashes_and_none_are_unreadable():
         int(digest, 16)  # must be hex
 
 
+def _expected_key(files, rel):
+    """Mirror the fingerprint's keying: basename, widened to the full relative
+    path when two entries share one. `strategy_x.py` exists at both the backend
+    root and under `strategies/`, and keying both to the basename made the
+    second silently overwrite the first — the check then reported "all match"
+    while never hashing the module that owns order sizing."""
+    base = rel.split("/")[-1]
+    collides = sum(1 for r in files if r.split("/")[-1] == base) > 1
+    return rel if collides else base
+
+
 def test_hashes_match_the_actual_files():
     """A fingerprint that does not track the file it names is decorative."""
     mod = _load_fingerprint_fn()
@@ -67,7 +78,21 @@ def test_hashes_match_the_actual_files():
         path = os.path.join(BACKEND, rel)
         with open(path, "rb") as fh:
             expected = hashlib.sha256(fh.read()).hexdigest()[:12]
-        assert fp[rel.split("/")[-1]] == expected, rel
+        assert fp[_expected_key(mod._CODE_FINGERPRINT_FILES, rel)] == expected, rel
+
+
+def test_every_listed_file_gets_its_own_entry():
+    """A basename collision must widen the key, never drop a file.
+
+    Before this, two files named `strategy_x.py` produced ONE entry: the second
+    overwrote the first, and both the server and the checker collided
+    identically, so the comparison was self-agreeing and blind to a whole file.
+    """
+    mod = _load_fingerprint_fn()
+    fp = mod._code_fingerprint()
+    assert len(fp) == len(mod._CODE_FINGERPRINT_FILES), (
+        f"{len(mod._CODE_FINGERPRINT_FILES)} files listed but only {len(fp)} "
+        f"entries produced — a collision dropped one: {sorted(fp)}")
 
 
 def test_paths_are_relative_to_the_backend_root_not_the_repo_root():
