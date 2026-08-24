@@ -722,15 +722,35 @@ def plan_targets(*, risk_on: bool, config, satellite_ranked=None,
         notes.append("no commodity in an uptrend — core absorbs the sleeve")
         com_pct = 0.0
 
-    core_budget = round(max(0.0, 1.0 - sat_pct - com_pct), Q)
+    # AN UNFILLED SLEEVE MUST NOT RAISE LEVERAGE. `sat_pct`/`com_pct` are zeroed
+    # when a sleeve finds nothing, so subtracting them here handed the freed
+    # weight to `targets[bull]` — the 3x fund. Measured in bt 773215: bar 1 went
+    # 80% TQQQ instead of the designed 60% because the graph sleeve had no picks
+    # yet, it filled at the HIGHEST QQQ print of the window (beta 2.34x vs a
+    # designed 1.8x), and TQQQ alone accounted for -$1,046.85 of a -$787.51
+    # loss — 133% of it, with every other sleeve positive.
+    #
+    # The core is sized off the DESIGNED sleeve budget, so its leverage is the
+    # same whether or not the sleeves fill. The shortfall goes to the unlevered
+    # chop occupant, which is what "degrade to the index, never to cash" always
+    # meant — the previous behaviour degraded to the LEVERED index.
+    designed = round(max(0.0, min(1.0, _f(cfg, "satellite_pct")))
+                     + max(0.0, min(1.0, _f(cfg, "commodity_pct"))), Q)
+    core_budget = round(max(0.0, 1.0 - designed), Q)
+    unfilled = round(max(0.0, designed - sat_pct - com_pct), Q)
 
     if risk_on:
         targets[bull] = round(core_budget * weight, Q)
-        rest = round(core_budget - targets[bull], Q)
+        rest = round(core_budget - targets[bull] + unfilled, Q)
         if rest > 0:
             targets[chop] = round(targets.get(chop, 0.0) + rest, Q)
-        notes.append(f"risk-on: {targets[bull]:.1%} {bull}")
+        notes.append(f"risk-on: {targets[bull]:.1%} {bull}"
+                     + (f" | {unfilled:.1%} unfilled sleeve -> {chop}"
+                        if unfilled > 0 else ""))
         return targets, notes
+
+    # Risk-off: the core is already unlevered, so the shortfall simply joins it.
+    core_budget = round(core_budget + unfilled, Q)
 
     # ── risk-off ──
     # The bear leg engages ONLY when the crisis gate says the regime is bad, not

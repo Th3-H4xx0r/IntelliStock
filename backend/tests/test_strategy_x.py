@@ -78,9 +78,15 @@ def test_commodity_sleeve_takes_its_weight_out_of_the_core():
     assert sum(t.values()) <= 1.0 + 1e-9
 
 
-def test_commodity_budget_returns_to_the_core_when_nothing_trends():
+def test_commodity_budget_returns_to_the_UNLEVERED_core_when_nothing_trends():
+    """Same correction as the satellite case: an empty sleeve returns its budget
+    to the index, not to additional leverage. See test_empty_sleeve_leverage.py
+    for the bt 773215 measurement that forced this."""
+    # ccfg sets commodity_pct=0.15, so the designed core budget is 0.85.
     t, notes = plan_targets(risk_on=True, config=ccfg(), commodity_ranked=[])
-    assert t["TQQQ"] == pytest.approx(0.9)
+    assert t["TQQQ"] == pytest.approx(0.85 * 0.9), (
+        f"an empty commodity sleeve levered the core up: {t}")
+    assert t["SPY"] == pytest.approx(1.0 - 0.85 * 0.9)
     assert any("no commodity" in n.lower() for n in notes)
 
 
@@ -305,11 +311,21 @@ def test_satellite_reduces_core_when_enabled():
     assert t["MSFT"] == pytest.approx(0.1)
 
 
-def test_satellite_budget_falls_back_to_core_when_no_names_rank():
-    """A dead signal must degrade to the index, never to cash."""
+def test_satellite_budget_falls_back_to_the_UNLEVERED_index_when_no_names_rank():
+    """A dead signal degrades to the index — the UNLEVERED one.
+
+    This assertion used to demand `TQQQ == 0.9`, i.e. the freed sleeve weight
+    went into the 3x fund. Measured in bt 773215: bar 1 went 80% TQQQ instead of
+    the designed 60% for exactly that reason, filled at the highest QQQ print of
+    the window, and TQQQ then produced -$1,046.85 of a -$787.51 loss. An empty
+    sleeve must not change the strategy's leverage. See
+    test_empty_sleeve_leverage.py.
+    """
     t, notes = plan_targets(risk_on=True, config=cfg(satellite_pct=0.2),
                             satellite_ranked=[])
-    assert t["TQQQ"] == pytest.approx(0.9)
+    assert t["TQQQ"] == pytest.approx(0.8 * 0.9), (
+        f"an empty sleeve levered the core up: {t}")
+    assert t["SPY"] == pytest.approx(1.0 - 0.8 * 0.9)
     assert any("no satellite" in n.lower() for n in notes)
 
 
