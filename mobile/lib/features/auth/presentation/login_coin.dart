@@ -64,7 +64,7 @@ class _LoginCoinState extends State<LoginCoin> with WidgetsBindingObserver {
   final _controller = Flutter3DController();
   bool _loaded = false;
   bool _failed = false;
-  Timer? _loadTimeout;
+  Timer? _kick;
 
   /// Set the moment a clip is actually told to play. The viewer stays
   /// invisible until then — otherwise the model's default rest pose (all
@@ -82,19 +82,20 @@ class _LoginCoinState extends State<LoginCoin> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    // Never leave a blank WebView while iOS initializes the 3D renderer.
-    // The fallback is visible immediately; this timeout only decides when to
-    // keep that deliberate fallback if the bridge never becomes ready.
-    _loadTimeout = Timer(const Duration(milliseconds: 1800), () {
-      if (!mounted || _loaded || _failed) return;
-      _onError('coin viewer timed out while loading');
+    // iOS can finish loading before the JavaScript bridge subscribes to
+    // onLoad. Start the model's baked Intro clip regardless, matching the
+    // original mobile-ui-changes implementation.
+    _kick = Timer(const Duration(milliseconds: 1100), () {
+      if (!mounted || _loaded || _failed || _started) return;
+      debugPrint('[coin] onLoad never fired — starting the clip anyway');
+      _play();
     });
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _loadTimeout?.cancel();
+    _kick?.cancel();
     _idle?.cancel();
     super.dispose();
   }
@@ -105,26 +106,33 @@ class _LoginCoinState extends State<LoginCoin> with WidgetsBindingObserver {
       setState(() => _started = true);
       _notifyEntranceStarted();
     }
-    switch (widget.phase) {
-      case CoinPhase.idle:
-        if (_introDone) {
-          // Back from a failed attempt: settle straight into the bob.
-          _controller.playAnimation(animationName: 'Idle');
-          return;
-        }
-        _introDone = true;
-        _controller.playAnimation(animationName: 'Intro', loopCount: 1);
-        // The player reports no completion event, so hand over to the
-        // looping bob on a timer matched to the Intro clip's length.
-        _idle = Timer(const Duration(milliseconds: 2400), () {
-          if (!mounted || widget.phase != CoinPhase.idle) return;
-          _controller.playAnimation(animationName: 'Idle');
-        });
-      case CoinPhase.working:
-        // loopCount 0 loops until the outcome is known.
-        _controller.playAnimation(animationName: 'Spin');
-      case CoinPhase.success:
-        _controller.playAnimation(animationName: 'Success', loopCount: 1);
+    try {
+      switch (widget.phase) {
+        case CoinPhase.idle:
+          if (_introDone) {
+            // Back from a failed attempt: settle straight into the bob.
+            _controller.playAnimation(animationName: 'Idle');
+            return;
+          }
+          _introDone = true;
+          _controller.playAnimation(animationName: 'Intro', loopCount: 1);
+          // The player reports no completion event, so hand over to the
+          // looping bob on a timer matched to the Intro clip's length.
+          _idle = Timer(const Duration(milliseconds: 2400), () {
+            if (!mounted || widget.phase != CoinPhase.idle) return;
+            _controller.playAnimation(animationName: 'Idle');
+          });
+        case CoinPhase.working:
+          // loopCount 0 loops until the outcome is known.
+          _controller.playAnimation(animationName: 'Spin');
+        case CoinPhase.success:
+          _controller.playAnimation(animationName: 'Success', loopCount: 1);
+      }
+    } on Exception catch (error) {
+      // Keep the intended Intro clip queued for a late onLoad callback.
+      // Otherwise a slow renderer would skip straight to Idle.
+      if (widget.phase == CoinPhase.idle) _introDone = false;
+      debugPrint('[coin] animation waiting for the renderer: $error');
     }
   }
 
@@ -157,21 +165,15 @@ class _LoginCoinState extends State<LoginCoin> with WidgetsBindingObserver {
 
   void _onLoad(String src) {
     debugPrint('[coin] loaded: $src');
-    _loadTimeout?.cancel();
+    _kick?.cancel();
     if (!mounted) return;
-    setState(() {
-      _loaded = true;
-      _failed = false;
-    });
-    // Let the newly visible WebView paint before issuing its first clip.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _play();
-    });
+    setState(() => _loaded = true);
+    _play();
   }
 
   void _onError(String error) {
     debugPrint('[coin] FAILED: $error');
-    _loadTimeout?.cancel();
+    _kick?.cancel();
     if (mounted) {
       setState(() => _failed = true);
       _notifyEntranceStarted();
@@ -213,21 +215,16 @@ class _LoginCoinState extends State<LoginCoin> with WidgetsBindingObserver {
             ),
           ),
 
-          // This appears in the very first frame, giving the coin slot an
-          // intentional silhouette while the WebView/GL renderer warms up.
-          AnimatedOpacity(
-            opacity: _loaded && !_failed ? 0 : 1,
-            duration: const Duration(milliseconds: 220),
-            child: _Fallback(size: widget.size),
-          ),
-          if (!_failed) ...[
+          if (_failed)
+            _Fallback(size: widget.size)
+          else ...[
             // OverflowBox lets the oversized viewer live inside the
             // smaller slot the layout reserves for it.
             OverflowBox(
               maxWidth: LoginCoin._viewport,
               maxHeight: LoginCoin._viewport,
               child: AnimatedOpacity(
-                opacity: _loaded && _started ? 1 : 0,
+                opacity: _started ? 1 : 0,
                 duration: const Duration(milliseconds: 180),
                 curve: Curves.easeOut,
                 child: AnimatedScale(
