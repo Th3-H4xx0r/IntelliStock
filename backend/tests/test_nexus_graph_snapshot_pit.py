@@ -366,7 +366,14 @@ def test_live_context_opens_current_graph_instead_of_snapshot_store():
         or current_driver,
     )
 
-    assert driver is current_driver
+    # The live driver is now returned inside `_BoundedNeo4jDriver`, which bounds
+    # every Cypher query (nothing did before: `connection_timeout` bounds
+    # ACQUIRING a connection, not running a query, and bt 232783 froze on
+    # "Macro sector flow query" for that reason). The assertion here is about
+    # WHICH graph was opened — live, not the snapshot store — so it unwraps the
+    # proxy rather than demanding object identity. Note the pre-existing
+    # `RecordingGraphDriver` breaks that identity too whenever capture is on.
+    assert getattr(driver, "_driver", driver) is current_driver
     assert calls[0][0] == "bolt://neo4j:7687"
 
 

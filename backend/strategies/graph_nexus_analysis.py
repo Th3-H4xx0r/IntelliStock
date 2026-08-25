@@ -355,6 +355,98 @@ DEFAULT_NEO4J_USER = "neo4j"
 DEFAULT_NEO4J_PASSWORD = "intellistock"
 
 
+_NEO4J_QUERY_TIMEOUT_DEFAULT = 90.0
+
+
+def _neo4j_query_timeout(config: dict | None = None) -> float:
+    """Seconds a single Cypher query may run. 0 disables the bound.
+
+    Reads the strategy config when one is available, else NEO4J_QUERY_TIMEOUT_SEC
+    from the environment. The driver is built in a helper that has no `config`
+    in scope, so the env var is what makes this tunable without threading config
+    through a seam that does not otherwise need it.
+    """
+    raw = None
+    if isinstance(config, dict):
+        raw = config.get("neo4j_query_timeout_sec")
+    if raw is None:
+        raw = os.environ.get("NEO4J_QUERY_TIMEOUT_SEC")
+    if raw is None or raw == "":
+        return _NEO4J_QUERY_TIMEOUT_DEFAULT
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return _NEO4J_QUERY_TIMEOUT_DEFAULT
+
+
+class _BoundedNeo4jSession:
+    """Wraps a driver session so every string query carries a timeout.
+
+    `neo4j.Query(text, timeout=...)` is handed straight to the real
+    `session.run()`, which returns the SAME Result object — so `.single()`,
+    `.data()` and streaming iteration behave exactly as before. That
+    pass-through is the whole reason this is safe to apply to 31 call sites at
+    once on the module that runs the live instance: a wrapper that materialised
+    rows inside a bounded transaction would have changed the interface at every
+    one of them.
+    """
+
+    def __init__(self, session, timeout: float):
+        self._session = session
+        self._timeout = float(timeout or 0.0)
+
+    def run(self, query, *args, **kwargs):
+        if self._timeout > 0 and isinstance(query, str):
+            try:
+                from neo4j import Query
+                query = Query(query, timeout=self._timeout)
+            except Exception:
+                pass          # older driver: fall back to the raw string
+        return self._session.run(query, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._session, name)
+
+    def __enter__(self):
+        enter = getattr(self._session, "__enter__", None)
+        if enter is not None:
+            enter()
+        return self
+
+    def __exit__(self, *exc):
+        ex = getattr(self._session, "__exit__", None)
+        return ex(*exc) if ex is not None else False
+
+
+class _BoundedNeo4jDriver:
+    """Driver proxy whose sessions bound every query. See _BoundedNeo4jSession.
+
+    Mirrors the existing `RecordingGraphDriver` pattern in point_in_time_graph:
+    wrapping the driver is how this module already adds cross-cutting behaviour.
+    """
+
+    def __init__(self, driver, timeout: float):
+        self._driver = driver
+        self._timeout = float(timeout or 0.0)
+
+    def session(self, *args, **kwargs):
+        return _BoundedNeo4jSession(
+            self._driver.session(*args, **kwargs), self._timeout)
+
+    def __getattr__(self, name):
+        return getattr(self._driver, name)
+
+    def __enter__(self):
+        enter = getattr(self._driver, "__enter__", None)
+        if enter is not None:
+            enter()
+        return self
+
+    def __exit__(self, *exc):
+        ex = getattr(self._driver, "__exit__", None)
+        return ex(*exc) if ex is not None else False
+
+
 def _resolve_neo4j_runtime_config(config: dict | None = None) -> tuple[str, str, str]:
     cfg = config or {}
     uri = str(cfg.get("neo4j_uri") or "").strip() or str(os.environ.get("NEO4J_URI") or "").strip() or DEFAULT_NEO4J_URI
@@ -6800,6 +6892,12 @@ def _create_nexus_graph_driver(
         connection_acquisition_timeout=60,
         max_connection_pool_size=10,
     )
+    # `connection_timeout` bounds getting a connection; NOTHING here bounded a
+    # query already running. bt 232783 froze at "Macro sector flow query:
+    # start | seeds=75" on bar 39 of ~45 — the third independent unbounded
+    # blocking call found that day, after the overlay LLM batch and the bar
+    # fetch. Applied once at this seam rather than at 31 `session.run(` sites.
+    driver = _BoundedNeo4jDriver(driver, _neo4j_query_timeout())
     if capture_enabled:
         from point_in_time_graph import RecordingGraphDriver
 
