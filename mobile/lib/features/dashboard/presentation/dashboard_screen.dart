@@ -95,6 +95,23 @@ class DashboardScreen extends ConsumerWidget {
   }
 }
 
+/// The dashboard's lone top action. Keeping it separate from the account hero
+/// preserves the original mobile-ui layout while giving search a dependable,
+/// top-right home on the screen.
+class DashboardTopActions extends StatelessWidget {
+  const DashboardTopActions({super.key});
+
+  @override
+  Widget build(BuildContext context) => Align(
+        alignment: Alignment.centerRight,
+        child: IconButton(
+          tooltip: 'Search symbols',
+          onPressed: () => context.push('/search'),
+          icon: Icon(symbol('search'), color: AppColors.textHi),
+        ),
+      );
+}
+
 // ── Dashboard backdrop ────────────────────────────────────────────────────────
 
 /// The professional violet gradient field behind the dashboard, modelled on a
@@ -198,42 +215,11 @@ class _PortfolioSectionState extends ConsumerState<_PortfolioSection> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Slim section header: just a label + a quiet "Manage" affordance.
-        Row(
-          children: [
-            Text('Portfolio', style: AppTextStyles.h3),
-            const Spacer(),
-            GestureDetector(
-              onTap: () => context.push('/brokerages'),
-              behavior: HitTestBehavior.opaque,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    'Manage',
-                    style: AppTextStyles.micro.copyWith(
-                      color: AppColors.textMuted,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  const SizedBox(width: 2),
-                  Icon(
-                    symbol('arrow_forward'),
-                    size: 13,
-                    color: AppColors.textMuted,
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: 12),
-            IconButton(
-              tooltip: 'Search symbols',
-              onPressed: () => context.push('/search'),
-              icon: Icon(symbol('search'), color: AppColors.textHi),
-            ),
-          ],
-        ),
-        const SizedBox(height: 14),
+        // The original dashboard design begins directly with the account
+        // hero. Keep search in the upper-right without restoring a section
+        // heading or management row above it.
+        const DashboardTopActions(),
+        const SizedBox(height: 6),
 
         // Content — one hero for the selected account, switchable via a
         // dropdown on the account label.
