@@ -5792,6 +5792,68 @@ def fetch_symbol_historicals(
     return {"range": rng, "results": out}
 
 
+_SEARCHABLE_QUOTE_TYPES = {
+    "EQUITY": "Stock",
+    "ETF": "ETF",
+    "CRYPTOCURRENCY": "Crypto",
+}
+
+
+def _yahoo_symbol_search(query: str) -> dict:
+    """Fetch Yahoo's compact symbol search response for an authenticated UI."""
+    import requests
+
+    response = requests.get(
+        "https://query1.finance.yahoo.com/v1/finance/search",
+        params={"q": query, "quotesCount": 12, "newsCount": 0},
+        headers={"user-agent": "IntelliStock/1.0"},
+        timeout=4,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def search_symbol_instruments(query: str, *, provider=None) -> list[dict]:
+    """Return stock, ETF, and crypto search results in the mobile UI shape."""
+    text = (query or "").strip()
+    if not text:
+        return []
+    payload = (provider or _yahoo_symbol_search)(text)
+    if not isinstance(payload, dict):
+        return []
+    results = []
+    seen = set()
+    for quote in payload.get("quotes") or []:
+        if not isinstance(quote, dict):
+            continue
+        ticker = str(quote.get("symbol") or "").strip().upper()
+        result_type = _SEARCHABLE_QUOTE_TYPES.get(
+            str(quote.get("quoteType") or "").strip().upper()
+        )
+        if not ticker or not result_type or ticker in seen:
+            continue
+        name = str(
+            quote.get("longname")
+            or quote.get("shortname")
+            or quote.get("displayName")
+            or ticker
+        ).strip()
+        seen.add(ticker)
+        results.append({"symbol": ticker, "name": name, "type": result_type})
+    return results
+
+
+@app.get("/symbols/search", response_class=JSONResponse)
+def api_symbol_search(q: str, current_user: dict = Depends(get_current_user)):
+    """Search tradable stocks, ETFs, and cryptocurrencies by name or ticker."""
+    try:
+        return {"results": search_symbol_instruments(q)}
+    except Exception:
+        # Search must stay optional: a provider outage should not break a user
+        # already viewing the dashboard or a stock detail screen.
+        return {"results": []}
+
+
 @app.get("/symbols/{symbol}/info", response_class=JSONResponse)
 def api_symbol_info(symbol: str, current_user: dict = Depends(get_current_user)):
     """Display info/stats for a stock (via yfinance): name, sector, market cap,

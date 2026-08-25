@@ -32,6 +32,7 @@ import '../../features/token_usage/presentation/token_usage_screen.dart';
 import '../../features/settings/presentation/settings_screen.dart';
 import '../../features/settings/presentation/notification_settings_screen.dart';
 import '../../features/stock/presentation/stock_screen.dart';
+import '../../features/symbol_search/presentation/symbol_search_screen.dart';
 
 final _rootKey = GlobalKey<NavigatorState>();
 
@@ -182,6 +183,11 @@ final goRouterProvider = Provider<GoRouter>((ref) {
         parentNavigatorKey: _rootKey,
         builder: (_, s) =>
             CryptoInstanceDetailScreen(instanceId: s.pathParameters['id']!),
+      ),
+      GoRoute(
+        path: '/search',
+        parentNavigatorKey: _rootKey,
+        builder: (_, _) => const SymbolSearchScreen(),
       ),
       GoRoute(
         path: '/stock/:symbol',

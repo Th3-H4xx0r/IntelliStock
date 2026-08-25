@@ -224,6 +224,12 @@ class _PortfolioSectionState extends ConsumerState<_PortfolioSection> {
                 ],
               ),
             ),
+            const SizedBox(width: 12),
+            IconButton(
+              tooltip: 'Search symbols',
+              onPressed: () => context.push('/search'),
+              icon: Icon(symbol('search'), color: AppColors.textHi),
+            ),
           ],
         ),
         const SizedBox(height: 14),
