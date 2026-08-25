@@ -177,6 +177,16 @@ DEFAULTS = {
     # ties decide the book — and ordering ties by ticker is how bt 331865 came
     # to hold AAL, IDAI, IPDN, PW, the alphabet's first four candidates. Ties
     # now break on trailing momentum over this many daily closes.
+    # ── volatility targeting on the levered core (OFF) ──
+    # Scale the levered leg by target_vol / (leverage * realised_vol), clamped,
+    # sending what it gives up to the unlevered occupant. Continuous, unlike the
+    # twelve BINARY protective levers already measured and rejected — those all
+    # failed because fully exiting misses the recovery, so the bull cost beat
+    # the bear saving every time. 0 == OFF.
+    "core_vol_target": 0.0,
+    "core_vol_scale_min": 0.3,
+    "core_vol_scale_max": 1.0,
+    "core_leverage_factor": 3.0,
     "satellite_momentum_bars": 60,
     # Price floor for satellite candidates. DEFAULT OFF, and that is a measured
     # reversal of the reasoning that introduced it.
@@ -390,6 +400,47 @@ class CoreSignal:
     ma: float = 0.0
     rvol: float = 0.0
     rvol_median: float = 0.0
+
+
+def core_vol_scale(closes, config) -> float:
+    """How much of the LEVERED core to hold, in [scale_min, 1.0]. Pure.
+
+    Every protective lever measured before this one was BINARY — hold the
+    levered fund or hold none of it — and all twelve failed the same way: fully
+    exiting means missing the recovery, so the bull cost exceeded the bear
+    saving every time (SQQQ at four gates, three defensive chop occupants, four
+    de-lever stops, dip re-entry).
+
+    This is continuous instead: hold LESS of the same position when it is more
+    dangerous. `scale = target_vol / (leverage * realised_vol)`, clamped, so
+    exposure falls smoothly as vol rises rather than snapping to zero. The
+    freed weight goes to the unlevered occupant, never to cash.
+
+    Capped at 1.0 on purpose — this can only ever REDUCE exposure below design,
+    never add leverage the operator did not ask for.
+
+    Returns 1.0 (no change) when the target is off or history is too short: a
+    cold start must not silently de-lever to the floor, which is the mirror of
+    the bug where a cold start silently levered UP.
+    """
+    cfg = config or {}
+    target = _f(cfg, "core_vol_target", 0.0)
+    if target <= 0:
+        return 1.0
+    lo = max(0.0, min(1.0, _f(cfg, "core_vol_scale_min", 0.3)))
+    hi = max(lo, min(1.0, _f(cfg, "core_vol_scale_max", 1.0)))
+    lev = max(1.0, _f(cfg, "core_leverage_factor", 3.0))
+    px = _finite(closes)
+    vol_bars = max(2, _i(cfg, "core_vol_bars"))
+    if len(px) < vol_bars + 1:
+        return 1.0
+    rets = [px[i] / px[i - 1] - 1.0 for i in range(1, len(px))]
+    if len(rets) < vol_bars:
+        return 1.0
+    rv = _stdev(rets[-vol_bars:]) * math.sqrt(252.0)
+    if rv <= 0:
+        return 1.0
+    return round(max(lo, min(hi, target / (lev * rv))), Q)
 
 
 def core_signal(closes, config) -> CoreSignal:
@@ -658,7 +709,8 @@ def select_satellite(ranked, held, config, ages=None) -> list:
 
 def plan_targets(*, risk_on: bool, config, satellite_ranked=None,
                  held_core: str = "", commodity_ranked=None,
-                 bear_engaged: bool = False) -> tuple[dict, list]:
+                 bear_engaged: bool = False,
+                 vol_scale: float = 1.0) -> tuple[dict, list]:
     """Target weight per symbol as a fraction of NAV, plus why.
 
     The chop occupant is a RESIDUAL, exactly as in `index_core_tilt.plan_targets`
@@ -740,11 +792,17 @@ def plan_targets(*, risk_on: bool, config, satellite_ranked=None,
     unfilled = round(max(0.0, designed - sat_pct - com_pct), Q)
 
     if risk_on:
-        targets[bull] = round(core_budget * weight, Q)
+        # Volatility targeting scales the LEVERED leg only, and only downward.
+        # What it gives up goes to the unlevered occupant — the same route an
+        # unfilled sleeve takes, and for the same reason: reducing risk must
+        # never mean reducing invested capital.
+        vs = 1.0 if vol_scale is None else max(0.0, min(1.0, float(vol_scale)))
+        targets[bull] = round(core_budget * weight * vs, Q)
         rest = round(core_budget - targets[bull] + unfilled, Q)
         if rest > 0:
             targets[chop] = round(targets.get(chop, 0.0) + rest, Q)
         notes.append(f"risk-on: {targets[bull]:.1%} {bull}"
+                     + (f" | vol scale {vs:.2f}" if vs < 1.0 else "")
                      + (f" | {unfilled:.1%} unfilled sleeve -> {chop}"
                         if unfilled > 0 else ""))
         return targets, notes
