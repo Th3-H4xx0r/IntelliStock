@@ -6,10 +6,18 @@ void main() {
   testWidgets('keeps the dashboard hero free of a Portfolio heading',
       (tester) async {
     await tester.pumpWidget(
-      const MaterialApp(home: Scaffold(body: DashboardTopActions())),
+      const MaterialApp(
+        home: Scaffold(
+          body: Stack(children: [DashboardTopActions(top: 8)]),
+        ),
+      ),
     );
 
     expect(find.text('Portfolio'), findsNothing);
     expect(find.byTooltip('Search symbols'), findsOneWidget);
+    expect(
+      tester.getRect(find.byTooltip('Search symbols')).top,
+      lessThanOrEqualTo(12),
+    );
   });
 }

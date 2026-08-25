@@ -90,6 +90,7 @@ class DashboardScreen extends ConsumerWidget {
             ),
           ],
         ),
+        DashboardTopActions(top: topInset + 8),
       ],
     );
   }
@@ -99,11 +100,14 @@ class DashboardScreen extends ConsumerWidget {
 /// preserves the original mobile-ui layout while giving search a dependable,
 /// top-right home on the screen.
 class DashboardTopActions extends StatelessWidget {
-  const DashboardTopActions({super.key});
+  const DashboardTopActions({super.key, required this.top});
+
+  final double top;
 
   @override
-  Widget build(BuildContext context) => Align(
-        alignment: Alignment.centerRight,
+  Widget build(BuildContext context) => Positioned(
+        top: top,
+        right: 16,
         child: IconButton(
           tooltip: 'Search symbols',
           onPressed: () => context.push('/search'),
@@ -218,9 +222,6 @@ class _PortfolioSectionState extends ConsumerState<_PortfolioSection> {
         // The original dashboard design begins directly with the account
         // hero. Keep search in the upper-right without restoring a section
         // heading or management row above it.
-        const DashboardTopActions(),
-        const SizedBox(height: 6),
-
         // Content — one hero for the selected account, switchable via a
         // dropdown on the account label.
         bkAsync.when(
