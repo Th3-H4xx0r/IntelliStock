@@ -4236,6 +4236,62 @@ def api_portfolio_history(
     return _run(action_get_portfolio_history, conn, brokerage_id, range)
 
 
+def normalize_alpaca_positions(raw_positions) -> list[dict]:
+    """Map Alpaca's direct positions payload to the mobile holdings contract."""
+    def number(value):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    positions = []
+    for raw in raw_positions or []:
+        raw = raw or {}
+        symbol = str(raw.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        fraction = number(raw.get("unrealized_plpc"))
+        positions.append({
+            "symbol": symbol,
+            "qty": number(raw.get("qty")) or 0.0,
+            "avgEntryPrice": number(raw.get("avg_entry_price")),
+            "lastPrice": number(raw.get("current_price")),
+            "marketValue": number(raw.get("market_value")) or 0.0,
+            "unrealizedPnl": number(raw.get("unrealized_pl")) or 0.0,
+            "unrealizedPnlPct": round(fraction * 100, 4) if fraction is not None else 0.0,
+        })
+    return sorted(positions, key=lambda position: position["marketValue"], reverse=True)
+
+
+def _fetch_direct_alpaca_positions(brokerage_id: str) -> tuple[float | None, list[dict]]:
+    """Fetch account holdings even when no strategy instance is running."""
+    from stock_credential_boundary import resolve_alpaca_brokerage_credentials
+    import requests as _requests
+
+    row = db_store.get("BrokerageAccounts", str(brokerage_id))
+    if not row or str(row.get("brokerage_type") or "").strip().lower() != "alpaca":
+        return None, []
+    creds = resolve_alpaca_brokerage_credentials(
+        row,
+        expected_brokerage_id=str(brokerage_id),
+    )
+    base_url = str(row.get("alpaca_base_url") or "https://paper-api.alpaca.markets").rstrip("/")
+    headers = {
+        "APCA-API-KEY-ID": creds.key,
+        "APCA-API-SECRET-KEY": creds.secret,
+    }
+    account = _requests.get(f"{base_url}/v2/account", headers=headers, timeout=10)
+    positions = _requests.get(f"{base_url}/v2/positions", headers=headers, timeout=10)
+    account.raise_for_status()
+    positions.raise_for_status()
+    cash = None
+    try:
+        cash = float((account.json() or {}).get("cash"))
+    except (TypeError, ValueError):
+        pass
+    return cash, normalize_alpaca_positions(positions.json())
+
+
 @app.get("/brokerages/{brokerage_id}/positions", response_class=JSONResponse)
 def api_brokerage_positions(
     brokerage_id: str,
@@ -4295,6 +4351,16 @@ def api_brokerage_positions(
                 "unrealizedPnl": _f(p.get("unrealized_pnl")) or 0.0,
                 "unrealizedPnlPct": _f(p.get("unrealized_pnl_pct")) or 0.0,
             })
+    # A brokerage account may be linked but have no running strategy instance.
+    # Fall back to Alpaca directly so the dashboard remains an account view.
+    if not positions:
+        try:
+            direct_cash, direct_positions = _fetch_direct_alpaca_positions(brokerage_id)
+            if direct_cash is not None:
+                cash = direct_cash
+            positions = direct_positions
+        except Exception:
+            pass
     positions.sort(key=lambda x: x.get("marketValue") or 0.0, reverse=True)
     return {"brokerage_id": brokerage_id, "cash": cash, "positions": positions}
 

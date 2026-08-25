@@ -9,6 +9,7 @@ import '../../../core/network/api_error.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_text_styles.dart';
 import '../../../core/widgets/app_background.dart';
+import '../../../core/widgets/app_button.dart';
 import '../../../core/widgets/glass_card.dart';
 import '../../../core/widgets/material_symbols.dart';
 import '../../../core/widgets/skeleton.dart';
@@ -154,11 +155,9 @@ class _SymbolSearchScreenState extends ConsumerState<SymbolSearchScreen> {
   Widget _body() {
     if (_loading && _results == null) return const _SearchSkeletonList();
     if (_error != null) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(32),
-          child: Text(_error!, style: AppTextStyles.body.copyWith(color: AppColors.danger)),
-        ),
+      return _SearchErrorState(
+        message: _error!,
+        onRetry: () => _onQueryChanged(_controller.text),
       );
     }
     final results = _results;
@@ -191,6 +190,49 @@ class _SymbolSearchScreenState extends ConsumerState<SymbolSearchScreen> {
       ),
     );
   }
+}
+
+class _SearchErrorState extends StatelessWidget {
+  const _SearchErrorState({required this.message, required this.onRetry});
+
+  final String message;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) => Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: GlassCard(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 52,
+                  height: 52,
+                  decoration: BoxDecoration(
+                    color: AppColors.fill(AppColors.warning),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(symbol('cloud_off'), color: AppColors.warning),
+                ),
+                const SizedBox(height: 16),
+                Text('Search is unavailable', style: AppTextStyles.h3),
+                const SizedBox(height: 8),
+                Text(
+                  message == 'Not Found'
+                      ? 'The search service is updating. Try again in a moment.'
+                      : 'We could not load results right now. Check your connection and retry.',
+                  textAlign: TextAlign.center,
+                  style: AppTextStyles.body.copyWith(color: AppColors.textMuted),
+                ),
+                const SizedBox(height: 18),
+                AppButton.ghost(label: 'Try again', icon: symbol('refresh'), onPressed: onRetry),
+              ],
+            ),
+          ),
+        ),
+      );
 }
 
 class _SearchResultRow extends StatelessWidget {
