@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:intellistock_mobile/features/symbol_search/data/symbol_search_models.dart';
+import 'package:intellistock_mobile/features/symbol_search/presentation/symbol_search_screen.dart';
 
 void main() {
   test('matches ticker and company name without losing the result metadata', () {
@@ -24,5 +25,12 @@ void main() {
     ];
 
     expect(searchSymbolsForSparklines(results), ['AAPL', 'SPY']);
+  });
+
+  test('explains an unavailable search service without exposing a raw 404', () {
+    expect(
+      searchUnavailableMessage('Not Found'),
+      'Search is taking a moment to come online. Your dashboard is still up to date.',
+    );
   });
 }

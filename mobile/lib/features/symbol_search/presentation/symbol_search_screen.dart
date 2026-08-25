@@ -17,6 +17,13 @@ import '../../live_trading/data/live_repository.dart';
 import '../data/symbol_search_models.dart';
 import '../data/symbol_search_repository.dart';
 
+String searchUnavailableMessage(String message) {
+  if (message == 'Not Found') {
+    return 'Search is taking a moment to come online. Your dashboard is still up to date.';
+  }
+  return 'We could not reach market search. Check your connection and try again.';
+}
+
 class SymbolSearchScreen extends ConsumerStatefulWidget {
   const SymbolSearchScreen({super.key});
 
@@ -200,35 +207,46 @@ class _SearchErrorState extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: GlassCard(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  width: 52,
-                  height: 52,
-                  decoration: BoxDecoration(
-                    color: AppColors.fill(AppColors.warning),
-                    shape: BoxShape.circle,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 360),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 24),
+            child: GlassCard(
+              padding: const EdgeInsets.fromLTRB(24, 28, 24, 24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    width: 48,
+                    height: 48,
+                    decoration: BoxDecoration(
+                      color: AppColors.fill(AppColors.primary),
+                      border: Border.all(color: AppColors.stroke(AppColors.primary)),
+                      borderRadius: BorderRadius.circular(15),
+                    ),
+                    child: Icon(symbol('query_stats'), color: AppColors.primary),
                   ),
-                  child: Icon(symbol('cloud_off'), color: AppColors.warning),
-                ),
-                const SizedBox(height: 16),
-                Text('Search is unavailable', style: AppTextStyles.h3),
-                const SizedBox(height: 8),
-                Text(
-                  message == 'Not Found'
-                      ? 'The search service is updating. Try again in a moment.'
-                      : 'We could not load results right now. Check your connection and retry.',
-                  textAlign: TextAlign.center,
-                  style: AppTextStyles.body.copyWith(color: AppColors.textMuted),
-                ),
-                const SizedBox(height: 18),
-                AppButton.ghost(label: 'Try again', icon: symbol('refresh'), onPressed: onRetry),
-              ],
+                  const SizedBox(height: 22),
+                  Text('MARKET SEARCH', style: AppTextStyles.eyebrow),
+                  const SizedBox(height: 6),
+                  Text('We’re reconnecting', style: AppTextStyles.h2),
+                  const SizedBox(height: 8),
+                  Text(
+                    searchUnavailableMessage(message),
+                    style: AppTextStyles.body.copyWith(color: AppColors.textMuted, height: 1.45),
+                  ),
+                  const SizedBox(height: 24),
+                  SizedBox(
+                    width: double.infinity,
+                    child: AppButton.primary(
+                      label: 'Retry search',
+                      icon: symbol('refresh'),
+                      onPressed: onRetry,
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ),
