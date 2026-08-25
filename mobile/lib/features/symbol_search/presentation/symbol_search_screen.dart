@@ -1,10 +1,10 @@
 import 'dart:async';
-import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../core/formatters/formatters.dart';
 import '../../../core/network/api_error.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_text_styles.dart';
@@ -185,15 +185,15 @@ class _SymbolSearchScreenState extends ConsumerState<SymbolSearchScreen> {
       );
     }
     final symbols = searchSymbolsForSparklines(results);
-    final sparklines = ref.watch(searchSparklinesProvider(symbols.join(',')));
+    final quotes = ref.watch(searchQuotesProvider(symbols.join(',')));
     return ListView.separated(
       padding: const EdgeInsets.fromLTRB(16, 4, 16, 28),
       itemCount: results.length,
       separatorBuilder: (_, _) => const SizedBox(height: 8),
       itemBuilder: (_, index) => _SearchResultRow(
         result: results[index],
-        sparkline: sparklines.valueOrNull?[results[index].symbol],
-        sparklineLoading: sparklines.isLoading,
+        quote: quotes.valueOrNull?[results[index].symbol],
+        quoteLoading: quotes.isLoading,
       ),
     );
   }
@@ -256,13 +256,13 @@ class _SearchErrorState extends StatelessWidget {
 class _SearchResultRow extends StatelessWidget {
   const _SearchResultRow({
     required this.result,
-    required this.sparkline,
-    required this.sparklineLoading,
+    required this.quote,
+    required this.quoteLoading,
   });
 
   final SearchInstrument result;
-  final List<double>? sparkline;
-  final bool sparklineLoading;
+  final SearchQuote? quote;
+  final bool quoteLoading;
 
   @override
   Widget build(BuildContext context) {
@@ -271,13 +271,31 @@ class _SearchResultRow extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       child: Row(
         children: [
-          _TypeBadge(type: result.type),
-          const SizedBox(width: 12),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(result.symbol, style: AppTextStyles.bodyHi.copyWith(fontWeight: FontWeight.w800)),
+                Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        result.symbol,
+                        overflow: TextOverflow.ellipsis,
+                        style: AppTextStyles.bodyHi.copyWith(fontWeight: FontWeight.w800),
+                      ),
+                    ),
+                    if (quote?.changePct != null) ...[
+                      const SizedBox(width: 8),
+                      Text(
+                        fmtPct(quote!.changePct),
+                        style: AppTextStyles.meta.copyWith(
+                          color: pnlColor(quote!.changePct),
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
                 const SizedBox(height: 3),
                 Text(
                   result.name,
@@ -289,42 +307,16 @@ class _SearchResultRow extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 12),
-          SizedBox(
-            width: 72,
-            height: 30,
-            child: sparklineLoading
-                ? const Skeleton(height: 30, radius: 7)
-                : (sparkline == null || sparkline!.length < 2)
-                    ? const SizedBox.shrink()
-                    : CustomPaint(painter: _SparklinePainter(sparkline!)),
-          ),
-          Icon(symbol('arrow_forward'), size: 18, color: AppColors.textDim),
+          if (quoteLoading)
+            const Skeleton(width: 70, height: 16, radius: 4)
+          else
+            Text(
+              fmtMoney(quote?.price),
+              textAlign: TextAlign.end,
+              style: AppTextStyles.bodyHi.copyWith(fontWeight: FontWeight.w700),
+            ),
         ],
       ),
-    );
-  }
-}
-
-class _TypeBadge extends StatelessWidget {
-  const _TypeBadge({required this.type});
-
-  final String type;
-
-  @override
-  Widget build(BuildContext context) {
-    final icon = switch (type) {
-      'ETF' => 'stacked_line_chart',
-      'Crypto' => 'currency_bitcoin',
-      _ => 'business',
-    };
-    return Container(
-      width: 38,
-      height: 38,
-      decoration: BoxDecoration(
-        color: AppColors.fill(AppColors.primary),
-        borderRadius: BorderRadius.circular(11),
-      ),
-      child: Icon(symbol(icon), size: 20, color: AppColors.primary),
     );
   }
 }
@@ -341,8 +333,6 @@ class _SearchSkeletonList extends StatelessWidget {
           padding: EdgeInsets.all(14),
           child: Row(
             children: [
-              Skeleton(width: 38, height: 38, radius: 11),
-              SizedBox(width: 12),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -354,59 +344,23 @@ class _SearchSkeletonList extends StatelessWidget {
                 ),
               ),
               SizedBox(width: 12),
-              Skeleton(width: 72, height: 30, radius: 7),
+              Skeleton(width: 70, height: 16, radius: 4),
             ],
           ),
         ),
       );
 }
 
-final searchSparklinesProvider = FutureProvider.autoDispose
-    .family<Map<String, List<double>>, String>((ref, symbolsCsv) async {
+final searchQuotesProvider = FutureProvider.autoDispose
+    .family<Map<String, SearchQuote>, String>((ref, symbolsCsv) async {
   final symbols = symbolsCsv.split(',').where((symbol) => symbol.isNotEmpty).toList();
   final values = await ref
       .read(liveRepositoryProvider)
       .symbolHistoricals(symbols, '1D');
-  return values.map(
-    (symbol, points) => MapEntry(
-      symbol,
-      points.map((point) => point.value).toList(),
-    ),
-  );
+  final quotes = <String, SearchQuote>{};
+  values.forEach((symbol, points) {
+    final quote = searchQuoteFromHistory(points.map((point) => point.value).toList());
+    if (quote != null) quotes[symbol] = quote;
+  });
+  return quotes;
 });
-
-class _SparklinePainter extends CustomPainter {
-  _SparklinePainter(this.values);
-
-  final List<double> values;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final minValue = values.reduce(math.min);
-    final maxValue = values.reduce(math.max);
-    final delta = maxValue - minValue;
-    final up = values.last >= values.first;
-    final paint = Paint()
-      ..color = up ? AppColors.success : AppColors.danger
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.8
-      ..strokeCap = StrokeCap.round
-      ..strokeJoin = StrokeJoin.round;
-    final path = Path();
-    for (var index = 0; index < values.length; index++) {
-      final x = size.width * index / (values.length - 1);
-      final y = delta == 0
-          ? size.height / 2
-          : size.height - ((values[index] - minValue) / delta * size.height);
-      if (index == 0) {
-        path.moveTo(x, y);
-      } else {
-        path.lineTo(x, y);
-      }
-    }
-    canvas.drawPath(path, paint);
-  }
-
-  @override
-  bool shouldRepaint(_SparklinePainter oldDelegate) => oldDelegate.values != values;
-}

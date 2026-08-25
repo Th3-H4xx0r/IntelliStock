@@ -25,7 +25,27 @@ class SearchInstrument {
   }
 }
 
-/// Builds the single price-history batch needed to draw the visible results.
+/// The latest quote shown alongside a search result.
+class SearchQuote {
+  const SearchQuote({required this.price, this.changePct});
+
+  final double price;
+  final double? changePct;
+}
+
+SearchQuote? searchQuoteFromHistory(List<double> values) {
+  if (values.isEmpty) return null;
+  final price = values.last;
+  if (values.length < 2 || values.first == 0) {
+    return SearchQuote(price: price);
+  }
+  return SearchQuote(
+    price: price,
+    changePct: (price - values.first) / values.first * 100,
+  );
+}
+
+/// Builds the single quote batch needed for the visible results.
 List<String> searchSymbolsForSparklines(List<SearchInstrument> results) {
   final symbols = <String>{};
   for (final result in results) {

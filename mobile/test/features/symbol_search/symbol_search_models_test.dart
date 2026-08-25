@@ -27,6 +27,13 @@ void main() {
     expect(searchSymbolsForSparklines(results), ['AAPL', 'SPY']);
   });
 
+  test('turns a day of prices into the latest price and today change', () {
+    final quote = searchQuoteFromHistory([594.25, 600.19, 601.12]);
+
+    expect(quote?.price, 601.12);
+    expect(quote?.changePct, closeTo(1.16, 0.01));
+  });
+
   test('explains an unavailable search service without exposing a raw 404', () {
     expect(
       searchUnavailableMessage('Not Found'),
