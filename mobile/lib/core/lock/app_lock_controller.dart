@@ -105,16 +105,16 @@ class AppLockController extends Notifier<AppLockState>
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
   @override
-  void didChangeAppLifecycleState(AppLifecycleState lifecycle) {
+  void didChangeAppLifecycleState(AppLifecycleState state) {
     // Record pausedAt on BOTH inactive AND paused so iOS (which fires
     // inactive→resumed without a paused event during a biometric prompt)
     // does not see a null pausedAt after unlock, which would cause an
     // immediate re-lock.
-    if (lifecycle == AppLifecycleState.paused ||
-        lifecycle == AppLifecycleState.inactive) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive) {
       pausedAt = DateTime.now();
-    } else if (lifecycle == AppLifecycleState.resumed) {
-      if (!state.enabled) return;
+    } else if (state == AppLifecycleState.resumed) {
+      if (!this.state.enabled) return;
       // The lock protects a SESSION. Logging out deliberately keeps the
       // preference, so `enabled` stays true on /login — without this the
       // gate would raise itself over the login screen and demand Face ID
@@ -125,10 +125,10 @@ class AppLockController extends Notifier<AppLockState>
       // after a successful unlock cleared it) — do NOT lock in that case.
       if (paused == null) return;
       final elapsed = DateTime.now().difference(paused);
-      final timeout = state.timeout.duration;
+      final timeout = this.state.timeout.duration;
       // Duration.zero means "immediately", so any elapsed time triggers lock.
       if (timeout == Duration.zero || elapsed >= timeout) {
-        state = state.copyWith(locked: true);
+        this.state = this.state.copyWith(locked: true);
       }
       pausedAt = null;
     }
