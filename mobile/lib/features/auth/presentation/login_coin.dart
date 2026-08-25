@@ -36,13 +36,19 @@ enum CoinPhase {
 }
 
 class LoginCoin extends StatefulWidget {
-  const LoginCoin({super.key, required this.phase, this.size = 322});
+  const LoginCoin({
+    super.key,
+    required this.phase,
+    this.size = 322,
+    this.onEntranceStarted,
+  });
 
   final CoinPhase phase;
 
   /// The coin's visual size at rest. The viewer itself always renders at
   /// [_viewport] and is scaled DOWN to this — see below.
   final double size;
+  final VoidCallback? onEntranceStarted;
 
   /// The WebView's true render size. A WebView is rasterised at its own
   /// dimensions, so scaling one UP magnifies pixels and goes soft. Render
@@ -58,12 +64,13 @@ class _LoginCoinState extends State<LoginCoin> with WidgetsBindingObserver {
   final _controller = Flutter3DController();
   bool _loaded = false;
   bool _failed = false;
-  Timer? _kick;
+  Timer? _loadTimeout;
 
   /// Set the moment a clip is actually told to play. The viewer stays
   /// invisible until then — otherwise the model's default rest pose (all
   /// three coins already out) flashes before the entrance begins.
   bool _started = false;
+  bool _entranceNotified = false;
   Timer? _idle;
 
   /// The entrance is a one-time event. Returning to idle after a REJECTED
@@ -75,27 +82,29 @@ class _LoginCoinState extends State<LoginCoin> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    // onLoad is not guaranteed to fire on iOS — the model can finish
-    // loading before the JavaScript bridge is listening. Never gate what
-    // the user SEES on it; just start the clip late if it stayed silent.
-    _kick = Timer(const Duration(milliseconds: 1100), () {
-      if (!mounted || _loaded || _failed || _started) return;
-      debugPrint('[coin] onLoad never fired — starting the clip anyway');
-      _play();
+    // Never leave a blank WebView while iOS initializes the 3D renderer.
+    // The fallback is visible immediately; this timeout only decides when to
+    // keep that deliberate fallback if the bridge never becomes ready.
+    _loadTimeout = Timer(const Duration(milliseconds: 1800), () {
+      if (!mounted || _loaded || _failed) return;
+      _onError('coin viewer timed out while loading');
     });
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _kick?.cancel();
+    _loadTimeout?.cancel();
     _idle?.cancel();
     super.dispose();
   }
 
   void _play() {
     _idle?.cancel();
-    if (!_started && mounted) setState(() => _started = true);
+    if (!_started && mounted) {
+      setState(() => _started = true);
+      _notifyEntranceStarted();
+    }
     switch (widget.phase) {
       case CoinPhase.idle:
         if (_introDone) {
@@ -117,6 +126,12 @@ class _LoginCoinState extends State<LoginCoin> with WidgetsBindingObserver {
       case CoinPhase.success:
         _controller.playAnimation(animationName: 'Success', loopCount: 1);
     }
+  }
+
+  void _notifyEntranceStarted() {
+    if (_entranceNotified) return;
+    _entranceNotified = true;
+    widget.onEntranceStarted?.call();
   }
 
   @override
@@ -142,16 +157,25 @@ class _LoginCoinState extends State<LoginCoin> with WidgetsBindingObserver {
 
   void _onLoad(String src) {
     debugPrint('[coin] loaded: $src');
-    _kick?.cancel();
+    _loadTimeout?.cancel();
     if (!mounted) return;
-    setState(() => _loaded = true);
-    _play();
+    setState(() {
+      _loaded = true;
+      _failed = false;
+    });
+    // Let the newly visible WebView paint before issuing its first clip.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _play();
+    });
   }
 
   void _onError(String error) {
     debugPrint('[coin] FAILED: $error');
-    _kick?.cancel();
-    if (mounted) setState(() => _failed = true);
+    _loadTimeout?.cancel();
+    if (mounted) {
+      setState(() => _failed = true);
+      _notifyEntranceStarted();
+    }
   }
 
   @override
@@ -189,16 +213,21 @@ class _LoginCoinState extends State<LoginCoin> with WidgetsBindingObserver {
             ),
           ),
 
-          if (_failed)
-            _Fallback(size: widget.size)
-          else ...[
+          // This appears in the very first frame, giving the coin slot an
+          // intentional silhouette while the WebView/GL renderer warms up.
+          AnimatedOpacity(
+            opacity: _loaded && !_failed ? 0 : 1,
+            duration: const Duration(milliseconds: 220),
+            child: _Fallback(size: widget.size),
+          ),
+          if (!_failed) ...[
             // OverflowBox lets the oversized viewer live inside the
             // smaller slot the layout reserves for it.
             OverflowBox(
               maxWidth: LoginCoin._viewport,
               maxHeight: LoginCoin._viewport,
               child: AnimatedOpacity(
-                opacity: _started ? 1 : 0,
+                opacity: _loaded && _started ? 1 : 0,
                 duration: const Duration(milliseconds: 180),
                 curve: Curves.easeOut,
                 child: AnimatedScale(

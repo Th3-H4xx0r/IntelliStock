@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/theme/app_colors.dart';
@@ -43,6 +45,29 @@ const double _columnWidth = 340;
 /// over. Matches the model's `Success` clip (1.7s) with a beat to breathe.
 const Duration _successHold = Duration(milliseconds: 1850);
 
+/// Coordinates the quiet handoff from the coin entrance to the login form.
+class LoginEntranceController extends ChangeNotifier {
+  static const revealDelay = Duration(milliseconds: 450);
+  Timer? _timer;
+  bool _showForm = false;
+
+  bool get showForm => _showForm;
+
+  void onCoinEntranceStarted() {
+    if (_showForm || _timer != null) return;
+    _timer = Timer(revealDelay, () {
+      _showForm = true;
+      notifyListeners();
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+}
+
 class _LoginScreenState extends ConsumerState<LoginScreen> {
   final _usernameCtrl = TextEditingController();
   final _passwordCtrl = TextEditingController();
@@ -55,11 +80,17 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   String _bioMethod = 'Face ID';
   bool _bioIsFace = true;
   bool _bioBusy = false;
+  late final LoginEntranceController _entrance;
 
   @override
   void initState() {
     super.initState();
+    _entrance = LoginEntranceController()..addListener(_onEntranceChanged);
     _resolveBiometrics();
+  }
+
+  void _onEntranceChanged() {
+    if (mounted) setState(() {});
   }
 
   Future<void> _resolveBiometrics() async {
@@ -106,6 +137,9 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   void dispose() {
     _usernameCtrl.dispose();
     _passwordCtrl.dispose();
+    _entrance
+      ..removeListener(_onEntranceChanged)
+      ..dispose();
     super.dispose();
   }
 
@@ -182,7 +216,10 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                               mainAxisSize: MainAxisSize.min,
                               crossAxisAlignment: CrossAxisAlignment.stretch,
                               children: [
-                                LoginCoin(phase: phase),
+                                LoginCoin(
+                                  phase: phase,
+                                  onEntranceStarted: _entrance.onCoinEntranceStarted,
+                                ),
                                 // Everything below the coin collapses on
                                 // success. Because the column is centred,
                                 // that lifts the coin to the middle of the
@@ -193,11 +230,23 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                                   alignment: Alignment.topCenter,
                                   child: succeeded
                                       ? const SizedBox(width: double.infinity)
-                                      : Column(
-                                          mainAxisSize: MainAxisSize.min,
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.stretch,
-                                          children: [
+                                      : IgnorePointer(
+                                          ignoring: !_entrance.showForm,
+                                          child: AnimatedOpacity(
+                                            opacity: _entrance.showForm ? 1 : 0,
+                                            duration: const Duration(milliseconds: 420),
+                                            curve: Curves.easeOutCubic,
+                                            child: AnimatedSlide(
+                                              offset: _entrance.showForm
+                                                  ? Offset.zero
+                                                  : const Offset(0, 0.04),
+                                              duration: const Duration(milliseconds: 420),
+                                              curve: Curves.easeOutCubic,
+                                              child: Column(
+                                                mainAxisSize: MainAxisSize.min,
+                                                crossAxisAlignment:
+                                                    CrossAxisAlignment.stretch,
+                                                children: [
                                             const SizedBox(height: 20),
                                             AnimatedOpacity(
                                               opacity: succeeded ? 0 : 1,
@@ -402,7 +451,10 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                                                 ),
                                               ),
                                             ),
-                                          ],
+                                                ],
+                                              ),
+                                            ),
+                                          ),
                                         ),
                                 ),
                               ],
