@@ -6,6 +6,7 @@ import 'package:go_router/go_router.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_text_styles.dart';
 import '../../../core/widgets/app_button.dart';
+import '../../../core/widgets/brokerage_logo.dart';
 import '../../../core/widgets/common_widgets.dart';
 import '../../../core/widgets/glass_card.dart';
 import '../../../core/widgets/material_symbols.dart';
@@ -59,7 +60,7 @@ class DashboardScreen extends ConsumerWidget {
           cacheExtent: 10000,
           slivers: [
             SliverPadding(
-              padding: EdgeInsets.fromLTRB(16, topInset + 12, 16, 24),
+              padding: EdgeInsets.fromLTRB(16, topInset + 32, 16, 24),
               sliver: SliverList(
                 delegate: SliverChildListDelegate([
                   // ── Portfolio section ──────────────────────────────────────
@@ -332,12 +333,8 @@ String _accountLabel(BrokerageAccount a) {
   return a.accountName.isNotEmpty ? a.accountName : a.brokerageType;
 }
 
-IconData _accountIcon(BrokerageAccount a) =>
-    a.brokerageType == 'alpaca' ? symbol('show_chart') : symbol('savings');
-
 /// The hero's account identity — an uppercase eyebrow with a chevron (when more
-/// than one account exists) that toggles the [_AccountDropdown], plus a status
-/// dot on the right. Mirrors the look of the chart card header.
+/// than one account exists) that toggles the [_AccountDropdown].
 class _AccountSelector extends StatelessWidget {
   const _AccountSelector({
     required this.account,
@@ -353,11 +350,10 @@ class _AccountSelector extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final statusColor = account.isActive ? AppColors.success : AppColors.danger;
     final left = Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Icon(_accountIcon(account), color: AppColors.primary, size: 16),
+        BrokerageLogo(brokerageType: account.brokerageType, size: 16),
         const SizedBox(width: 6),
         Text(
           _accountLabel(account).toUpperCase(),
@@ -388,17 +384,6 @@ class _AccountSelector extends StatelessWidget {
           )
         else
           left,
-        const Spacer(),
-        Container(
-          width: 6,
-          height: 6,
-          decoration: BoxDecoration(shape: BoxShape.circle, color: statusColor),
-        ),
-        const SizedBox(width: 4),
-        Text(
-          account.status,
-          style: AppTextStyles.nano.copyWith(color: statusColor),
-        ),
       ],
     );
   }
@@ -460,7 +445,6 @@ class _AccountRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final statusColor = account.isActive ? AppColors.success : AppColors.danger;
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: onTap,
@@ -472,7 +456,7 @@ class _AccountRow extends StatelessWidget {
         ),
         child: Row(
           children: [
-            Icon(_accountIcon(account), color: AppColors.primary, size: 16),
+            BrokerageLogo(brokerageType: account.brokerageType, size: 16),
             const SizedBox(width: 10),
             Expanded(
               child: Text(
@@ -482,20 +466,8 @@ class _AccountRow extends StatelessWidget {
                 ),
               ),
             ),
-            Container(
-              width: 6,
-              height: 6,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: statusColor,
-              ),
-            ),
-            const SizedBox(width: 10),
-            Icon(
-              selected ? symbol('check') : symbol('arrow_forward'),
-              size: 15,
-              color: selected ? AppColors.primary : AppColors.textFaint,
-            ),
+            if (selected)
+              Icon(symbol('check'), size: 15, color: AppColors.primary),
           ],
         ),
       ),
@@ -508,12 +480,23 @@ class _AccountRow extends StatelessWidget {
 /// The selected account's uninvested cash + holdings, shown below the hero
 /// chart like a modern brokerage app. Hidden while it has
 /// no data, so it never shows a blank box.
-class _HoldingsList extends ConsumerWidget {
+class _HoldingsList extends ConsumerStatefulWidget {
   const _HoldingsList({required this.brokerageId});
   final String brokerageId;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_HoldingsList> createState() => _HoldingsListState();
+}
+
+class _HoldingsListState extends ConsumerState<_HoldingsList> {
+  // The last non-null sparkline map. A Daily/Total toggle re-fetches, and
+  // holding the previous curves means the toggle animates instead of blanking
+  // every row to a skeleton.
+  Map<String, List<double>>? _lastSparks;
+
+  @override
+  Widget build(BuildContext context) {
+    final brokerageId = widget.brokerageId;
     final holdings = ref
         .watch(accountHoldingsProvider(brokerageId))
         .valueOrNull;
@@ -525,8 +508,11 @@ class _HoldingsList extends ConsumerWidget {
     final sparksAsync = ref.watch(
       holdingsSparklinesProvider((brokerageId: brokerageId, range: sparkRange)),
     );
-    final sparks = sparksAsync.valueOrNull;
-    final sparksLoading = sparksAsync.isLoading;
+    final fresh = sparksAsync.valueOrNull;
+    if (fresh != null) _lastSparks = fresh;
+    final sparks = fresh ?? _lastSparks;
+    // Skeleton is a first-load affordance: only when no curve has ever drawn.
+    final sparksLoading = sparks == null;
     // Total account value → each row's ring shows its share of the portfolio.
     final total =
         (holdings.cash ?? 0) +
@@ -590,7 +576,7 @@ class _HoldingDivider extends StatelessWidget {
 /// A tiny intraday (1D, since 12 AM) line for one holding — green if the day's
 /// move is up, red if down, mirroring the live-trading position cards.
 class _MiniSpark extends StatelessWidget {
-  const _MiniSpark({required this.values});
+  const _MiniSpark({super.key, required this.values});
   final List<double> values;
 
   @override
@@ -600,10 +586,18 @@ class _MiniSpark extends StatelessWidget {
     return SizedBox(
       height: 28,
       width: double.infinity, // fill the Expanded slot in the row
-      child: CustomPaint(
-        painter: _SparkPainter(
-          values,
-          up ? AppColors.success : AppColors.danger,
+      // Draws the line on left-to-right, echoing the hero chart's entrance.
+      // Remounting (a new ValueKey on mode change) replays it.
+      child: TweenAnimationBuilder<double>(
+        tween: Tween(begin: 0.0, end: 1.0),
+        duration: const Duration(milliseconds: 650),
+        curve: Curves.easeOutCubic,
+        builder: (_, t, _) => CustomPaint(
+          painter: _SparkPainter(
+            values,
+            up ? AppColors.success : AppColors.danger,
+            t,
+          ),
         ),
       ),
     );
@@ -611,9 +605,13 @@ class _MiniSpark extends StatelessWidget {
 }
 
 class _SparkPainter extends CustomPainter {
-  _SparkPainter(this.values, this.color);
+  _SparkPainter(this.values, this.color, [this.progress = 1.0]);
   final List<double> values;
   final Color color;
+
+  /// 0 → nothing drawn, 1 → the whole line. Anything between draws that
+  /// fraction of the path's length, which reads as the line growing.
+  final double progress;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -631,20 +629,27 @@ class _SparkPainter extends CustomPainter {
       final y = pad + (1 - (values[i] - lo) / range) * h;
       i == 0 ? path.moveTo(x, y) : path.lineTo(x, y);
     }
-    canvas.drawPath(
-      path,
-      Paint()
-        ..color = color
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.5
-        ..strokeCap = StrokeCap.round
-        ..strokeJoin = StrokeJoin.round,
-    );
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.5
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+
+    final t = progress.clamp(0.0, 1.0);
+    if (t >= 1.0) {
+      canvas.drawPath(path, paint);
+      return;
+    }
+    if (t <= 0.0) return;
+    for (final m in path.computeMetrics()) {
+      canvas.drawPath(m.extractPath(0, m.length * t), paint);
+    }
   }
 
   @override
   bool shouldRepaint(covariant _SparkPainter old) =>
-      old.values != values || old.color != color;
+      old.values != values || old.color != color || old.progress != progress;
 }
 
 /// Compact segmented pill to switch the Holdings P&L between Total and Daily.
@@ -916,13 +921,17 @@ class _HoldingRow extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 10),
-            // Sparkline fills the middle (wide); a skeleton shows while it
-            // re-fetches on a Daily/Total toggle.
+            // Sparkline fills the middle (wide). It draws itself in on first
+            // paint and again on a Daily/Total toggle; the skeleton is only
+            // for the very first load, before any curve exists.
             Expanded(
               child: sparkLoading
                   ? const Skeleton(height: 28, radius: 6)
                   : (spark != null
-                        ? _MiniSpark(values: spark!)
+                        ? _MiniSpark(
+                            key: ValueKey('${p.symbol}-${mode.name}'),
+                            values: spark!,
+                          )
                         : const SizedBox.shrink()),
             ),
             const SizedBox(width: 16), // …with margin before the value column.

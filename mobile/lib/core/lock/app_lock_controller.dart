@@ -57,11 +57,7 @@ class AppLockState {
   final bool locked;
   final LockTimeout timeout;
 
-  AppLockState copyWith({
-    bool? enabled,
-    bool? locked,
-    LockTimeout? timeout,
-  }) =>
+  AppLockState copyWith({bool? enabled, bool? locked, LockTimeout? timeout}) =>
       AppLockState(
         enabled: enabled ?? this.enabled,
         locked: locked ?? this.locked,
@@ -78,9 +74,7 @@ class AppLockState {
 ///   container.updateOverrides([
 ///     appLockSeedProvider.overrideWithValue(AppLockState(...)),
 ///   ]);
-final appLockSeedProvider = Provider<AppLockState>(
-  (_) => const AppLockState(),
-);
+final appLockSeedProvider = Provider<AppLockState>((_) => const AppLockState());
 
 // ── Controller ────────────────────────────────────────────────────────────────
 
@@ -111,31 +105,41 @@ class AppLockController extends Notifier<AppLockState>
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
   @override
-  void didChangeAppLifecycleState(AppLifecycleState lifecycle) {
+  void didChangeAppLifecycleState(AppLifecycleState state) {
     // Record pausedAt on BOTH inactive AND paused so iOS (which fires
     // inactive→resumed without a paused event during a biometric prompt)
     // does not see a null pausedAt after unlock, which would cause an
     // immediate re-lock.
-    if (lifecycle == AppLifecycleState.paused ||
-        lifecycle == AppLifecycleState.inactive) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive) {
       pausedAt = DateTime.now();
-    } else if (lifecycle == AppLifecycleState.resumed) {
-      if (!state.enabled) return;
+    } else if (state == AppLifecycleState.resumed) {
+      if (!this.state.enabled) return;
+      // The lock protects a SESSION. Logging out deliberately keeps the
+      // preference, so `enabled` stays true on /login — without this the
+      // gate would raise itself over the login screen and demand Face ID
+      // from someone who is not signed in.
+      if (!ref.read(sessionProvider).isAuthenticated) return;
       final paused = pausedAt;
       // pausedAt == null means we never backgrounded (e.g. trailing resumed
       // after a successful unlock cleared it) — do NOT lock in that case.
       if (paused == null) return;
       final elapsed = DateTime.now().difference(paused);
-      final timeout = state.timeout.duration;
+      final timeout = this.state.timeout.duration;
       // Duration.zero means "immediately", so any elapsed time triggers lock.
       if (timeout == Duration.zero || elapsed >= timeout) {
-        state = state.copyWith(locked: true);
+        this.state = this.state.copyWith(locked: true);
       }
       pausedAt = null;
     }
   }
 
   // ── Public API ─────────────────────────────────────────────────────────────
+
+  /// Whether the gate should actually be raised right now: the user asked
+  /// for it, the app locked, and there is a session behind it to protect.
+  bool get shouldGate =>
+      state.locked && ref.read(sessionProvider).isAuthenticated;
 
   /// Presents biometric prompt; unlocks on success.
   Future<bool> unlock() async {
@@ -184,13 +188,10 @@ class AppLockController extends Notifier<AppLockState>
 
   /// Change the auto-lock timeout and persist.
   Future<void> setTimeout(LockTimeout timeout) async {
-    await _storage.write(
-        key: _kLockTimeout, value: timeout.toStorageString());
+    await _storage.write(key: _kLockTimeout, value: timeout.toStorageString());
     state = state.copyWith(timeout: timeout);
   }
 }
 
 final appLockControllerProvider =
-    NotifierProvider<AppLockController, AppLockState>(
-  AppLockController.new,
-);
+    NotifierProvider<AppLockController, AppLockState>(AppLockController.new);

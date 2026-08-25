@@ -237,6 +237,7 @@ void main() {
         biometrics: bio,
         storedEnabled: 'true',
         storedTimeout: '60', // 1 minute
+        authenticated: true,
       );
       addTearDown(container.dispose);
 
@@ -263,6 +264,7 @@ void main() {
         biometrics: bio,
         storedEnabled: 'true',
         storedTimeout: '300', // 5 minutes
+        authenticated: true,
       );
       addTearDown(container.dispose);
 
@@ -287,6 +289,7 @@ void main() {
         biometrics: bio,
         storedEnabled: 'true',
         storedTimeout: '0', // Immediately
+        authenticated: true,
       );
       addTearDown(container.dispose);
 
@@ -301,6 +304,55 @@ void main() {
       notifier.didChangeAppLifecycleState(AppLifecycleState.resumed);
 
       expect(container.read(appLockControllerProvider).locked, isTrue);
+    });
+
+    test('resume with NO session does not lock (login screen stays reachable)',
+        () async {
+      // Logging out deliberately keeps the biometric-lock PREFERENCE, so
+      // `enabled` is still true while sitting on /login. Backgrounding there
+      // must not raise the lock gate over the login screen.
+      final bio = FakeBiometricService(available: true, authResult: true);
+      final container = _makeContainer(
+        biometrics: bio,
+        storedEnabled: 'true',
+        storedTimeout: '0', // Immediately — the most aggressive setting.
+        authenticated: false,
+      );
+      addTearDown(container.dispose);
+
+      container.read(appLockControllerProvider);
+      await Future.delayed(const Duration(milliseconds: 50));
+
+      final notifier = container.read(appLockControllerProvider.notifier);
+      notifier.state = notifier.state.copyWith(enabled: true, locked: false);
+      notifier.pausedAt = DateTime.now().subtract(const Duration(minutes: 2));
+
+      notifier.didChangeAppLifecycleState(AppLifecycleState.resumed);
+
+      expect(container.read(appLockControllerProvider).locked, isFalse);
+    });
+
+    test('logging out clears an existing lock', () async {
+      final bio = FakeBiometricService(available: true, authResult: true);
+      final container = _makeContainer(
+        biometrics: bio,
+        storedEnabled: 'true',
+        storedTimeout: '0',
+        authenticated: false,
+      );
+      addTearDown(container.dispose);
+
+      container.read(appLockControllerProvider);
+      await Future.delayed(const Duration(milliseconds: 50));
+
+      final notifier = container.read(appLockControllerProvider.notifier);
+      notifier.state = notifier.state.copyWith(enabled: true, locked: true);
+
+      notifier.releaseLock();
+
+      expect(container.read(appLockControllerProvider).locked, isFalse);
+      // The preference survives, so the next real sign-in is still protected.
+      expect(container.read(appLockControllerProvider).enabled, isTrue);
     });
 
     test('no-biometrics: enable() returns false and lock stays disabled',

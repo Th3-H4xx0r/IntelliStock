@@ -35,8 +35,10 @@ class SectionHeader extends StatelessWidget {
               Text(title, style: AppTextStyles.h1),
               if (subtitle != null) ...[
                 const SizedBox(height: 4),
-                Text(subtitle!,
-                    style: AppTextStyles.body.copyWith(color: AppColors.textDim)),
+                Text(
+                  subtitle!,
+                  style: AppTextStyles.body.copyWith(color: AppColors.textDim),
+                ),
               ],
             ],
           ),
@@ -74,10 +76,12 @@ class StatTile extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(label, style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),
+          Text(
+            label,
+            style: AppTextStyles.nano.copyWith(color: AppColors.textDim),
+          ),
           const SizedBox(height: 4),
-          Text(value,
-              style: AppTextStyles.value.copyWith(color: valueColor)),
+          Text(value, style: AppTextStyles.value.copyWith(color: valueColor)),
           if (sub != null) Text('$sub', style: AppTextStyles.nano),
         ],
       ),
@@ -165,14 +169,18 @@ class EmptyState extends StatelessWidget {
         children: [
           Icon(icon, size: 48, color: AppColors.textFaint),
           const SizedBox(height: 16),
-          Text(title,
-              textAlign: TextAlign.center,
-              style: AppTextStyles.cardTitle.copyWith(color: AppColors.textMd)),
+          Text(
+            title,
+            textAlign: TextAlign.center,
+            style: AppTextStyles.cardTitle.copyWith(color: AppColors.textMd),
+          ),
           if (subtitle != null) ...[
             const SizedBox(height: 8),
-            Text(subtitle!,
-                textAlign: TextAlign.center,
-                style: AppTextStyles.meta.copyWith(color: AppColors.textDim)),
+            Text(
+              subtitle!,
+              textAlign: TextAlign.center,
+              style: AppTextStyles.meta.copyWith(color: AppColors.textDim),
+            ),
           ],
           if (actionLabel != null && onAction != null) ...[
             const SizedBox(height: 20),
@@ -205,8 +213,10 @@ class ErrorBanner extends StatelessWidget {
           const Icon(Icons.error_outline, color: AppColors.danger, size: 20),
           const SizedBox(width: 12),
           Expanded(
-            child: Text(message,
-                style: AppTextStyles.body.copyWith(color: AppColors.danger)),
+            child: Text(
+              message,
+              style: AppTextStyles.body.copyWith(color: AppColors.danger),
+            ),
           ),
           if (onRetry != null)
             TextButton(onPressed: onRetry, child: const Text('Retry')),
@@ -223,11 +233,25 @@ class IconTile extends StatelessWidget {
     required this.icon,
     this.color = AppColors.primary,
     this.size = 40,
-  });
+  }) : child = null;
 
-  final IconData icon;
+  /// The same tile chrome hosting an arbitrary glyph — a brand mark, say —
+  /// instead of a Material icon. The child is drawn at the icon's size, so it
+  /// lines up with every other tile on screen.
+  const IconTile.custom({
+    super.key,
+    required this.child,
+    this.color = AppColors.primary,
+    this.size = 40,
+  }) : icon = null;
+
+  final IconData? icon;
+  final Widget? child;
   final Color color;
   final double size;
+
+  /// The glyph box side — tiles draw their icon at half the tile.
+  double get glyphSize => size * 0.5;
 
   @override
   Widget build(BuildContext context) {
@@ -239,7 +263,9 @@ class IconTile extends StatelessWidget {
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: AppColors.stroke(color)),
       ),
-      child: Icon(icon, color: color, size: size * 0.5),
+      child: Center(
+        child: child ?? Icon(icon, color: color, size: glyphSize),
+      ),
     );
   }
 }

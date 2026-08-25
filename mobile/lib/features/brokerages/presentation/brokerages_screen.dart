@@ -5,6 +5,7 @@ import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_text_styles.dart';
 import '../../../core/widgets/app_background.dart';
 import '../../../core/widgets/app_button.dart';
+import '../../../core/widgets/brokerage_logo.dart';
 import '../../../core/widgets/common_widgets.dart';
 import '../../../core/widgets/confirm_dialog.dart';
 import '../../../core/widgets/glass_card.dart';
@@ -182,9 +183,8 @@ class _AccountCard extends ConsumerWidget {
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              IconTile(
-                icon: symbol(isAlpaca ? 'show_chart' : 'savings'),
-                color: isAlpaca ? AppColors.primary : AppColors.success,
+              IconTile.custom(
+                child: BrokerageLogo(brokerageType: a.brokerageType, size: 20),
               ),
               const SizedBox(width: 12),
               Expanded(
