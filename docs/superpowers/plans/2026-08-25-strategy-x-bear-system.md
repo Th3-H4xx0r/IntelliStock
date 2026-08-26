@@ -4,7 +4,7 @@
 
 **Goal:** Add a default-off, shadowable Strategy X bear subsystem, then evaluate its bounded settings grid with point-in-time, next-bar backtests across frozen bear, bull, recovery, and chop windows.
 
-**Architecture:** Keep all bear signal, state-transition, eligibility, and allocation math pure in `backend/strategy_x_bear.py`. The existing `StrategyX.run_once` orchestrator supplies point-in-time histories, persists namespaced state, records shadow telemetry, and sends either unchanged baseline targets or research-authorized active overlay targets through the existing order-sizing path. The repository's existing production backtest engine and authenticated API drive continuous runs and persist the authoritative ledger; search data ends in 2022 and one frozen candidate alone reaches the 2023+ locked holdout. No second simulator or fill engine is introduced.
+**Architecture:** Keep all bear signal, state-transition, eligibility, and allocation math pure in `backend/strategy_x_bear.py`. The existing `StrategyX.run_once` orchestrator supplies point-in-time histories, persists namespaced state, records shadow telemetry, and sends either unchanged baseline targets or research-authorized active overlay targets through the existing order-sizing path. The repository's existing production backtest engine and authenticated API drive exactly five continuous runs and persist the authoritative ledger; settings are frozen before launch, selection uses only slices ending in 2022, and 2023+ slices are reported separately. No second simulator or fill engine is introduced.
 
 **Tech Stack:** Python 3, dataclasses, pytest, the existing `POST /backtests` API, `backend/engines/backtest_engine.py`, `backend/broker.py`, `BacktestResults` graph data, and the existing Strategy X API helpers.
 
@@ -26,8 +26,8 @@
 - Research arms run continuously from one common inception and retain portfolio, pending orders, provenance, and cache state across window boundaries; window metrics are ledger slices, not fresh simulations.
 - Only provenance-recorded bear holdings may be managed or unwound. An unprovenanced holding or a symbol-role collision suppresses the overlay rather than claiming another strategy's position.
 - Use the production engine's nominal execution-cost model identically for every arm and record its version and realized fees/spread/slippage; the API does not support an artificial 2-basis-point nominal override. Search windows end on `2022-12-31`; windows beginning `2023-01-01` or later cannot affect candidate selection.
-- The predeclared grid is `crisis_alpha_pct=(0.10,0.20,0.30)`, `bear_kicker_pct=(0.00,0.025,0.05)`, `bear_kicker_max_bars=(3,5)`, and `bear_kicker_cooldown_bars=(5,10)`, with duplicate zero-kicker combinations removed.
-- The 2023+ period is a locked holdout/pseudo-out-of-sample check, not unseen validation. Select and freeze one candidate using search rows only before computing its holdout results.
+- Start no more than five new API backtests for this task. The five frozen arms are: `off`; `shadow`; defense-only (`crisis_alpha_pct=0.20`, `bear_kicker_pct=0`); conservative full (`crisis_alpha_pct=0.10`, `bear_kicker_pct=0.025`, `bear_kicker_max_bars=3`, `bear_kicker_cooldown_bars=10`); and central full (`crisis_alpha_pct=0.20`, `bear_kicker_pct=0.05`, `bear_kicker_max_bars=5`, `bear_kicker_cooldown_bars=10`). All other Strategy X settings and the production cost model stay identical.
+- Freeze all five configurations, common dates, windows, and selection key before launch. Select the diagnostic best tested active arm using only slices ending by `2022-12-31`; report 2023+ slices separately. Because the five full-period ledgers are generated together and the search is intentionally bounded, call 2023+ a pseudo-out-of-sample diagnostic—not a pristine locked holdout or exhaustive optimization.
 - A completed implementation is not an investment-performance claim. Report separate defense and kicker verdicts; if a component does not clear every applicable gate, leave it disabled, identify the diagnostic best candidate, and label it non-promotable.
 
 ---
@@ -641,17 +641,17 @@ The production broker call omits the dispatcher scheduler-mode parameter. Add a 
 
 Use strategy document 198 and instance `strategy-x`. Before the first mutation, save the complete document to a permission-restricted temporary backup and record a secret-free hash/config snapshot. For research arms, set the Graph Nexus entry weight to zero, set `satellite_pct=0.0`, `commodity_pct=0.0`, `core_weight=0.9`, `core_bear_symbol=""`, and vary only `bear_system_mode` plus the four frozen grid keys. Do not change any other strategy document.
 
-Use the 27-candidate grid already declared in Global Constraints. Generate stable candidate IDs from the four normalized settings and sort them before launch. The engine runs one backtest at a time: never mutate the document for the next arm until the current run is terminal and its `strategy_schema` exactly matches the requested config.
+Freeze one manifest containing the exact five arms declared in Global Constraints, their stable IDs, the common full-period dates, named windows, non-overlapping two-month slices, production cost model, and the search-only selection key. The engine runs one backtest at a time: never mutate the document for the next arm until the current run is terminal and its `strategy_schema` exactly matches the requested config. Count each successfully queued API backtest against the cap even if it fails; do not launch a replacement without explicit user approval.
 
 - [ ] **Step 3: Preserve continuous state and frozen selection**
 
-Each arm is one continuous API backtest from common inception through `2023-01-01`; named and non-overlapping two-month search windows are slices of that stored ledger, never fresh runs. Run baseline `off`, `shadow`, and every active candidate under the identical production cost model. Confirm off/shadow equality in terminal equity, full equity series, and trades.
+Each of the five arms is one continuous API backtest from common inception through the latest complete session; named and non-overlapping two-month windows are slices of that stored ledger, never fresh runs. Confirm off/shadow equality in terminal equity, full equity series, and trades.
 
-Candidate ranking uses only search-partition two-month lattice rows and the frozen lexicographic key: `(search_violations, -search_worst_bear_excess, -search_median_bear_excess, search_turnover, candidate_id)`. Named search windows are strict post-selection gates, not ranking inputs. Freeze the winning candidate ID/config plus the baseline/winner result IDs and strategy-schema hashes before requesting any 2023+ result.
+Rank only the three frozen active arms using pre-2023 two-month lattice rows and the frozen lexicographic key: `(search_violations, -search_worst_bear_excess, -search_median_bear_excess, search_turnover, candidate_id)`. Named search windows are strict post-selection gates, not ranking inputs. Record the winning tested arm/config plus all five result IDs and strategy-schema hashes before computing any 2023+ aggregate.
 
-- [ ] **Step 4: Run only the frozen winner through the holdout**
+- [ ] **Step 4: Report the frozen 2023+ diagnostic without launching more runs**
 
-After the selection freeze is written, run full-period baseline, shadow, selected defense-only, and selected full arms from common inception through the latest complete session. No losing candidate may receive a holdout run. Slice these continuous ledgers into the frozen named windows and non-overlapping two-month lattice; classify auto windows from QQQ return with the predeclared thresholds.
+After the pre-2023 selection freeze is written, slice the already-completed five continuous ledgers into the frozen 2023+ named windows and non-overlapping two-month lattice; classify auto windows from QQQ return with the predeclared thresholds. Do not launch any additional backtest. Treat every 2023+ comparison as diagnostic and report all three active arms so the bounded-search limitation is visible.
 
 - [ ] **Step 5: Validate API artifacts independently**
 
@@ -661,7 +661,7 @@ Compute terminal return, max drawdown, excess versus baseline and SPY, turnover,
 
 - [ ] **Step 6: Deploy using the authorized workflow**
 
-Run local verification and `gitnexus_detect_changes()`, push `main`, wait about five minutes, and use the existing deployed-code checker plus a safe API read to prove the expected revision is serving. Only then snapshot/update document 198 and start backtests. Never print `.env` contents or credentials.
+Run local verification and `gitnexus_detect_changes()`, push `main`, wait about five minutes, and use the existing deployed-code checker plus a safe API read to prove the expected revision is serving. Only then snapshot/update document 198 and start backtests. Queue exactly the five frozen arms sequentially and never exceed five new backtests. Never print `.env` contents or credentials.
 
 ---
 
@@ -672,17 +672,17 @@ Run local verification and `gitnexus_detect_changes()`, push `main`, wait about 
 - Create: `docs/superpowers/research/2026-08-26-strategy-x-bear-results.md`
 - Create if compact and secret-free: `docs/superpowers/research/2026-08-26-strategy-x-bear-results.json`
 
-- [ ] **Step 1: Execute baseline, shadow, and search candidates sequentially through the API**
+- [ ] **Step 1: Execute exactly five frozen arms sequentially through the API**
 
 Maintain a durable, secret-free run manifest containing candidate ID, requested config hash, backtest ID, status, deployed revision, stored schema hash, dates, and cost model. Refuse duplicate launches and refuse to launch while another backtest is active.
 
-- [ ] **Step 2: Freeze selection before holdout access**
+- [ ] **Step 2: Freeze pre-2023 selection before computing 2023+ aggregates**
 
-Write the search-only aggregates and selected candidate to the manifest before making a holdout API request. Independently recompute the sort from search lattice rows and require the same winner.
+Write the pre-2023 aggregates and selected tested arm to the manifest before computing any 2023+ aggregate. Independently recompute the sort from pre-2023 lattice rows and require the same winner. No additional API request may start a backtest.
 
-- [ ] **Step 3: Run and validate the frozen holdout arms**
+- [ ] **Step 3: Validate all five full-period ledgers and slice 2023+ diagnostics**
 
-Run only the required baseline/shadow and frozen defense/full arms through the full interval, then validate graph-data and summary artifacts. Preserve the current-survivor and fund-inception caveats.
+Use only the five already-completed full-interval ledgers, then validate graph-data and summary artifacts. Preserve the current-survivor and fund-inception caveats.
 
 - [ ] **Step 4: Write the evidence report**
 
