@@ -182,6 +182,63 @@ def _normalized_symbols(values) -> tuple[str, ...]:
         return ()
 
 
+_BEAR_EVIDENCE_KEY = "_sx_bear_ownership_evidence"
+_BEAR_EVIDENCE_VERSION = 1
+_BEAR_EVIDENCE_ROLES = {"cash", "manager", "kicker"}
+
+
+def _validated_bear_evidence(raw) -> dict[str, dict]:
+    """Return only exact, internally consistent ownership evidence records.
+
+    Shadow telemetry is observational and must never authorize an order.  This
+    separate cache entry is written only from an executable active-backtest
+    target below, and its deliberately closed schema keeps loose JSON values
+    (notably bools and numeric strings) from becoming provenance.
+    """
+    if (not isinstance(raw, dict)
+            or set(raw) != {"version", "records"}
+            or type(raw.get("version")) is not int
+            or raw.get("version") != _BEAR_EVIDENCE_VERSION
+            or not isinstance(raw.get("records"), dict)):
+        return {}
+    valid = {}
+    for key, record in raw["records"].items():
+        if (type(key) is not str or not isinstance(record, dict)
+                or set(record) != {"symbol", "role", "target_weight"}):
+            continue
+        symbol = record.get("symbol")
+        role = record.get("role")
+        weight = record.get("target_weight")
+        if (type(symbol) is not str or not symbol
+                or symbol != symbol.strip().upper() or symbol != key
+                or type(role) is not str or role not in _BEAR_EVIDENCE_ROLES
+                or isinstance(weight, bool)
+                or not isinstance(weight, (int, float))):
+            continue
+        try:
+            normalized_weight = float(weight)
+        except (OverflowError, ValueError):
+            continue
+        if (not math.isfinite(normalized_weight)
+                or normalized_weight <= 0.0 or normalized_weight > 1.0):
+            continue
+        valid[symbol] = {
+            "symbol": symbol,
+            "role": role,
+            "target_weight": normalized_weight,
+        }
+    return valid
+
+
+def _store_bear_evidence(cache, records, *, force=False):
+    if force or records:
+        cache[_BEAR_EVIDENCE_KEY] = {
+            "version": _BEAR_EVIDENCE_VERSION,
+            "records": {symbol: dict(records[symbol])
+                        for symbol in sorted(records)},
+        }
+
+
 def _ny_session(current_time):
     """The NY calendar date of a decision, or "" if it cannot be determined.
 
@@ -251,41 +308,31 @@ class StrategyX:
         raw_prior_bear_owned = set(_normalized_symbols(
             cache.get("_sx_bear_owned") or []
         ))
-        prior_shadow = cache.get("_sx_bear_shadow")
-        if not isinstance(prior_shadow, dict):
-            prior_shadow = {}
-        prior_kicker = prior_shadow.get("kicker")
-        if not isinstance(prior_kicker, dict):
-            prior_kicker = {}
-        recorded_kicker = str(
-            prior_kicker.get("symbol") or ""
-        ).strip().upper()
-        corroborated_bear_owned = set(configured_bear_symbols)
-        prior_delta = prior_shadow.get("target_delta")
-        if isinstance(prior_delta, dict):
-            for symbol, raw_delta in prior_delta.items():
-                try:
-                    delta = float(raw_delta)
-                except (TypeError, ValueError, OverflowError):
-                    continue
-                normalized = str(symbol or "").strip().upper()
-                if (normalized and not isinstance(raw_delta, bool)
-                        and math.isfinite(delta) and delta > 0):
-                    corroborated_bear_owned.add(normalized)
-        if recorded_kicker:
-            corroborated_bear_owned.add(recorded_kicker)
-        prior_bear_owned = raw_prior_bear_owned & corroborated_bear_owned
+        evidence_was_present = _BEAR_EVIDENCE_KEY in cache
+        prior_evidence = _validated_bear_evidence(
+            cache.get(_BEAR_EVIDENCE_KEY)
+        )
+        _store_bear_evidence(
+            cache, prior_evidence, force=evidence_was_present
+        )
+        # Raw ownership remains a compatibility path only for roles in the
+        # current configuration. Retired roles require the strict evidence
+        # record above; `_sx_bear_shadow` is telemetry, never authority.
+        current_role_compat = raw_prior_bear_owned & configured_bear_symbols
+        prior_bear_owned = set(prior_evidence) | current_role_compat
         if raw_prior_bear_owned != prior_bear_owned:
             cache["_sx_bear_owned"] = sorted(prior_bear_owned)
         raw_prior_kicker_targeted = cache.get(
             "_sx_bear_kicker_targeted", False
         )
-        prior_pending_kicker = (
-            recorded_kicker
-            if (raw_prior_kicker_targeted is True
-                and recorded_kicker in prior_bear_owned)
-            else ""
-        )
+        evidenced_kickers = {
+            symbol for symbol, record in prior_evidence.items()
+            if record["role"] == "kicker"
+        }
+        prior_pending_kicker = ""
+        if raw_prior_kicker_targeted is True:
+            if len(evidenced_kickers) == 1:
+                prior_pending_kicker = next(iter(evidenced_kickers))
         pending_state_consistent = (
             type(raw_prior_kicker_targeted) is bool
             and (raw_prior_kicker_targeted is False
@@ -365,15 +412,45 @@ class StrategyX:
                     "backtest-only until a live bar source exists."
                     if not _bars_for(data, filt) else
                     "Widen the window or use granularity=86400."), "red")
+            early_bear_reason = (
+                ownership_conflict
+                or ("research-only runtime" if research_only_runtime else
+                    "insufficient filter history")
+            )
             cache["_strategy_x_last"] = {"risk_on": False, "reason": "refused: "
                                          f"{len(closes)} < {need} closes",
                                          "n_closes": len(closes),
                                          "targets": {},
                                          "bear_system_mode": bear_mode,
-                                         "bear_overlay_reason":
-                                             ("research-only runtime"
-                                              if research_only_runtime else
-                                              "insufficient filter history")}
+                                         "bear_overlay_reason": early_bear_reason}
+            if bear_mode in {"shadow", "active"}:
+                cache["_sx_bear_shadow"] = {
+                    "mode": bear_mode,
+                    "core_state": "unknown",
+                    "core_reason": f"{len(closes)} < {need} closes",
+                    "state": cache.get("_sx_bear_system_state", "idle"),
+                    "reason": early_bear_reason,
+                    "refusal_reason": early_bear_reason,
+                    "eligible_managers": [],
+                    "unavailable_managers": sorted(bear_managers),
+                    "signal": {
+                        "stacked": False,
+                        "fresh": False,
+                        "below_fast": False,
+                        "reason": "insufficient filter history",
+                    },
+                    "kicker": {
+                        "symbol": kicker_symbol,
+                        "state": cache.get("_sx_bear_system_state", "idle"),
+                        "engaged": False,
+                        "bars": cache.get("_sx_bear_kicker_bars", 0),
+                        "cooldown": cache.get("_sx_bear_kicker_cooldown", 0),
+                        "reason": early_bear_reason,
+                    },
+                    "baseline_targets": {},
+                    "proposed_targets": {},
+                    "target_delta": {},
+                }
             if not prior_bear_owned:
                 return {}
             exit_prices = dict(prices)
@@ -387,10 +464,19 @@ class StrategyX:
                 {}, nav=nav, positions=positions, prices=exit_prices,
                 cash=cash, config=cfg, owned=prior_bear_owned,
             )
-            cache["_sx_bear_owned"] = sorted(
+            retained_owned = {
                 symbol for symbol in prior_bear_owned
                 if (symbol in held_symbols
                     or symbol == prior_pending_kicker)
+            }
+            cache["_sx_bear_owned"] = sorted(retained_owned)
+            retained_evidence = {
+                symbol: record for symbol, record in prior_evidence.items()
+                if symbol in retained_owned
+            }
+            _store_bear_evidence(
+                cache, retained_evidence,
+                force=evidence_was_present or bool(prior_evidence),
             )
             cache["_sx_bear_kicker_targeted"] = False
             if not decisions:
@@ -597,6 +683,7 @@ class StrategyX:
                 "_sx_bear_kicker_cooldown",
                 "_sx_bear_state_version",
                 "_sx_bear_kicker_entry_day",
+                "_sx_bear_kicker_state_symbol",
             )
             state_before = {
                 key: (key in cache, cache.get(key)) for key in state_keys
@@ -642,6 +729,13 @@ class StrategyX:
             state_name = str(raw_state or "").strip().lower()
             raw_bars = cache.get("_sx_bear_kicker_bars", 0)
             raw_cooldown = cache.get("_sx_bear_kicker_cooldown", 0)
+            raw_state_kicker = cache.get("_sx_bear_kicker_state_symbol", "")
+            state_kicker = (
+                raw_state_kicker
+                if (type(raw_state_kicker) is str and raw_state_kicker
+                    and raw_state_kicker == raw_state_kicker.strip().upper())
+                else ""
+            )
             persisted_state_present = any(
                 key in cache for key in (
                     "_sx_bear_system_state",
@@ -650,11 +744,12 @@ class StrategyX:
                     "_sx_bear_state_version",
                     "_sx_bear_kicker_entry_day",
                     "_sx_bear_kicker_targeted",
+                    "_sx_bear_kicker_state_symbol",
                 )
             )
             state_bound_to_kicker = (
-                recorded_kicker == kicker
-                if persisted_state_present else not recorded_kicker
+                state_kicker == kicker
+                if persisted_state_present else not state_kicker
             )
             current_prior_targeted = (
                 prior_pending_kicker == kicker and state_bound_to_kicker
@@ -806,6 +901,7 @@ class StrategyX:
             cache["_sx_bear_kicker_bars"] = kicker_decision.bars
             cache["_sx_bear_kicker_cooldown"] = kicker_decision.cooldown
             cache["_sx_bear_state_version"] = 1
+            cache["_sx_bear_kicker_state_symbol"] = kicker
             prior_entry = cache.get("_sx_bear_kicker_entry_day", "")
             if kicker_decision.state == "holding":
                 cache["_sx_bear_kicker_entry_day"] = (
@@ -815,12 +911,16 @@ class StrategyX:
                 cache["_sx_bear_kicker_entry_day"] = ""
             kicker_targeted = (active_backtest and kicker in selected_targets)
             cache["_sx_bear_kicker_targeted"] = bool(kicker_targeted)
+            can_mint_evidence = (
+                active_backtest and allocation.applied and not dynamic_overlap
+                and not ownership_conflict and not static_conflict and not bear
+            )
             newly_owned = (
                 {
                     symbol for symbol in configured_bear_symbols
                     if float(selected_targets.get(symbol, 0.0) or 0.0) > 0
                 }
-                if active_backtest and allocation.applied and not dynamic_overlap
+                if can_mint_evidence
                 else set()
             )
             retained_owned = {
@@ -831,6 +931,27 @@ class StrategyX:
             }
             cache["_sx_bear_owned"] = sorted(retained_owned | newly_owned)
             owned |= retained_owned | newly_owned
+            retained_evidence = {
+                symbol: record for symbol, record in prior_evidence.items()
+                if symbol in retained_owned
+            }
+            if can_mint_evidence:
+                for symbol in newly_owned:
+                    role = (
+                        "cash" if symbol == bear_cash else
+                        "kicker" if symbol == kicker else
+                        "manager"
+                    )
+                    retained_evidence[symbol] = {
+                        "symbol": symbol,
+                        "role": role,
+                        "target_weight": float(selected_targets[symbol]),
+                    }
+            _store_bear_evidence(
+                cache, retained_evidence,
+                force=evidence_was_present or bool(prior_evidence)
+                or bool(newly_owned),
+            )
             cache["_sx_bear_shadow"] = {
                 "mode": bear_mode,
                 "core_state": "risk_on" if sig.risk_on else "risk_off",
@@ -887,10 +1008,19 @@ class StrategyX:
             prices={**eff_prices, **bear_prices},
             cash=cash, config=cfg, owned=owned)
         if bear_mode == "off" and prior_bear_owned:
-            cache["_sx_bear_owned"] = sorted(
+            retained_owned = {
                 symbol for symbol in prior_bear_owned
                 if (symbol in held_symbols
                     or symbol == prior_pending_kicker)
+            }
+            cache["_sx_bear_owned"] = sorted(retained_owned)
+            retained_evidence = {
+                symbol: record for symbol, record in prior_evidence.items()
+                if symbol in retained_owned
+            }
+            _store_bear_evidence(
+                cache, retained_evidence,
+                force=evidence_was_present or bool(prior_evidence),
             )
             cache["_sx_bear_kicker_targeted"] = False
 
