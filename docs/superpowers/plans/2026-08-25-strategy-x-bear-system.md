@@ -4,16 +4,16 @@
 
 **Goal:** Add a default-off, shadowable Strategy X bear subsystem, then evaluate its bounded settings grid with point-in-time, next-bar backtests across frozen bear, bull, recovery, and chop windows.
 
-**Architecture:** Keep all bear signal, state-transition, eligibility, and allocation math pure in `backend/strategy_x_bear.py`. The existing `StrategyX.run_once` orchestrator supplies point-in-time histories, persists namespaced state, records shadow telemetry, and sends either unchanged baseline targets or research-authorized active overlay targets through the existing order-sizing path. A separate research script drives the real strategy class continuously with next-bar fills and fixed costs; search data ends in 2022 and one frozen candidate alone reaches the 2023+ locked holdout.
+**Architecture:** Keep all bear signal, state-transition, eligibility, and allocation math pure in `backend/strategy_x_bear.py`. The existing `StrategyX.run_once` orchestrator supplies point-in-time histories, persists namespaced state, records shadow telemetry, and sends either unchanged baseline targets or research-authorized active overlay targets through the existing order-sizing path. The repository's existing production backtest engine and authenticated API drive continuous runs and persist the authoritative ledger; search data ends in 2022 and one frozen candidate alone reaches the 2023+ locked holdout. No second simulator or fill engine is introduced.
 
-**Tech Stack:** Python 3, dataclasses, pytest, pandas, NumPy, yfinance, the existing `StrategyX` run-once interface, and the existing portfolio-emulator order contract.
+**Tech Stack:** Python 3, dataclasses, pytest, the existing `POST /backtests` API, `backend/engines/backtest_engine.py`, `backend/broker.py`, `BacktestResults` graph data, and the existing Strategy X API helpers.
 
 **Spec:** `docs/superpowers/specs/2026-08-25-strategy-x-bear-system-design.md`
 
 ## Global Constraints
 
 - Work directly on the already-isolated `main-session` linked worktree on branch `main`; the user explicitly approved direct work on `main`.
-- Do not push, publish, deploy, alter a live strategy document, or enable the subsystem in a production configuration.
+- After local review and verification, push `main`; the user confirmed that this auto-deploys. Wait for the deployment and verify the deployed code before launching evidence runs. The user explicitly authorized edits to the non-real-money Strategy X document (ID 198) and instance `strategy-x`; snapshot it first and touch no other strategy document or brokerage setting.
 - Follow strict red-green TDD: write and observe each behavior test fail before its production implementation.
 - Before modifying an existing function, class, or method, run GitNexus upstream impact analysis for that exact symbol and report direct callers, affected processes, and risk. Warn before proceeding if the result is HIGH or CRITICAL. If the index remains degraded, record risk as UNKNOWN and manually inspect callers and covering tests.
 - Before every commit, run `git diff --check` and `gitnexus_detect_changes()`; stage only files owned by the task.
@@ -25,7 +25,7 @@
 - All histories pass through `pit_daily_closes`; quotes override the last visible close; decisions use only data visible at the decision time; simulated orders fill on the next bar.
 - Research arms run continuously from one common inception and retain portfolio, pending orders, provenance, and cache state across window boundaries; window metrics are ledger slices, not fresh simulations.
 - Only provenance-recorded bear holdings may be managed or unwound. An unprovenanced holding or a symbol-role collision suppresses the overlay rather than claiming another strategy's position.
-- Fixed research costs are 2 basis points one-way. Search windows end on `2022-12-31`; windows beginning `2023-01-01` or later cannot affect candidate selection.
+- Use the production engine's nominal execution-cost model identically for every arm and record its version and realized fees/spread/slippage; the API does not support an artificial 2-basis-point nominal override. Search windows end on `2022-12-31`; windows beginning `2023-01-01` or later cannot affect candidate selection.
 - The predeclared grid is `crisis_alpha_pct=(0.10,0.20,0.30)`, `bear_kicker_pct=(0.00,0.025,0.05)`, `bear_kicker_max_bars=(3,5)`, and `bear_kicker_cooldown_bars=(5,10)`, with duplicate zero-kicker combinations removed.
 - The 2023+ period is a locked holdout/pseudo-out-of-sample check, not unseen validation. Select and freeze one candidate using search rows only before computing its holdout results.
 - A completed implementation is not an investment-performance claim. Report separate defense and kicker verdicts; if a component does not clear every applicable gate, leave it disabled, identify the diagnostic best candidate, and label it non-promotable.
@@ -615,7 +615,88 @@ git commit -m "feat(strategy-x): integrate shadow bear system"
 
 ---
 
-### Task 4: Point-in-Time Research Harness and Frozen Settings Search
+### Task 4: Existing Production Harness and Frozen Settings Search
+
+**User-approved execution amendment (2026-08-26):** The repository already has the authoritative backtest harness. Do not create `scripts/strategy_x_bear_research.py`, a second portfolio emulator, or a second fill clock. The former Task 4 and Task 5 below are retained only as superseded historical detail; do not execute them.
+
+**Existing execution path:**
+
+- `scripts/_api.py` authenticates from `.env` without exposing credentials.
+- `POST /backtests` queues `backend/engines/backtest_engine.py`.
+- The engine launches the real `backend/broker.py` backtest path.
+- `GET /backtests/{id}/graph-data` returns the continuous `portfolio_value_history`, trades, prices, and decisions used for slicing and reconciliation.
+- `GET /backtests/{id}/summary` returns the immutable `strategy_schema` snapshot and aggregate metrics.
+
+**Files:**
+
+- Modify only for production compatibility defects with tests: existing Strategy X/broker files from Tasks 1–3.
+- Reuse: `scripts/_api.py`, `scripts/_strategy_x_deploy.py`, `scripts/pull_backtest_logs.py`, and the API endpoints above.
+- Create only evidence artifacts under `docs/superpowers/research/`; a read-only result analyzer is allowed only if existing reporting commands cannot compute the frozen slices. Such an analyzer may consume completed API results but may not simulate decisions, orders, fills, or portfolio state.
+
+- [ ] **Step 1: Prove the API backtest authorization boundary**
+
+The production broker call omits the dispatcher scheduler-mode parameter. Add a focused AST regression proving that module run mode `MODE_BACKTEST` reaches Strategy X aliases as literal `mode="backtest"`, while sibling strategies and all live scheduler modes retain their existing values. Run the full Task 3 suite and independent review before deployment.
+
+- [ ] **Step 2: Freeze the API research protocol**
+
+Use strategy document 198 and instance `strategy-x`. Before the first mutation, save the complete document to a permission-restricted temporary backup and record a secret-free hash/config snapshot. For research arms, set the Graph Nexus entry weight to zero, set `satellite_pct=0.0`, `commodity_pct=0.0`, `core_weight=0.9`, `core_bear_symbol=""`, and vary only `bear_system_mode` plus the four frozen grid keys. Do not change any other strategy document.
+
+Use the 27-candidate grid already declared in Global Constraints. Generate stable candidate IDs from the four normalized settings and sort them before launch. The engine runs one backtest at a time: never mutate the document for the next arm until the current run is terminal and its `strategy_schema` exactly matches the requested config.
+
+- [ ] **Step 3: Preserve continuous state and frozen selection**
+
+Each arm is one continuous API backtest from common inception through `2023-01-01`; named and non-overlapping two-month search windows are slices of that stored ledger, never fresh runs. Run baseline `off`, `shadow`, and every active candidate under the identical production cost model. Confirm off/shadow equality in terminal equity, full equity series, and trades.
+
+Candidate ranking uses only search-partition two-month lattice rows and the frozen lexicographic key: `(search_violations, -search_worst_bear_excess, -search_median_bear_excess, search_turnover, candidate_id)`. Named search windows are strict post-selection gates, not ranking inputs. Freeze the winning candidate ID/config plus the baseline/winner result IDs and strategy-schema hashes before requesting any 2023+ result.
+
+- [ ] **Step 4: Run only the frozen winner through the holdout**
+
+After the selection freeze is written, run full-period baseline, shadow, selected defense-only, and selected full arms from common inception through the latest complete session. No losing candidate may receive a holdout run. Slice these continuous ledgers into the frozen named windows and non-overlapping two-month lattice; classify auto windows from QQQ return with the predeclared thresholds.
+
+- [ ] **Step 5: Validate API artifacts independently**
+
+For every run require: terminal `finished`; exact requested `strategy_schema`; daily portfolio snapshots spanning the request; finite equity and prices; no impossible target/order evidence; and production cost metadata. Reconcile trades and position snapshots where the API fields permit it. SPY uses `backtest_prices` on the same snapshot dates. Any unavailable required slice, stale deployment, schema mismatch, missing graph-data ledger, or nonterminal run invalidates that arm.
+
+Compute terminal return, max drawdown, excess versus baseline and SPY, turnover, trades, and component P&L where stored fields permit. Promotion gates and the search/holdout firewall remain exactly as specified in the design. Report production nominal costs rather than claiming the superseded 2-basis-point convention.
+
+- [ ] **Step 6: Deploy using the authorized workflow**
+
+Run local verification and `gitnexus_detect_changes()`, push `main`, wait about five minutes, and use the existing deployed-code checker plus a safe API read to prove the expected revision is serving. Only then snapshot/update document 198 and start backtests. Never print `.env` contents or credentials.
+
+---
+
+### Task 5: API Real-Data Matrix, Best Settings, and Evidence Report
+
+**Files:**
+
+- Create: `docs/superpowers/research/2026-08-26-strategy-x-bear-results.md`
+- Create if compact and secret-free: `docs/superpowers/research/2026-08-26-strategy-x-bear-results.json`
+
+- [ ] **Step 1: Execute baseline, shadow, and search candidates sequentially through the API**
+
+Maintain a durable, secret-free run manifest containing candidate ID, requested config hash, backtest ID, status, deployed revision, stored schema hash, dates, and cost model. Refuse duplicate launches and refuse to launch while another backtest is active.
+
+- [ ] **Step 2: Freeze selection before holdout access**
+
+Write the search-only aggregates and selected candidate to the manifest before making a holdout API request. Independently recompute the sort from search lattice rows and require the same winner.
+
+- [ ] **Step 3: Run and validate the frozen holdout arms**
+
+Run only the required baseline/shadow and frozen defense/full arms through the full interval, then validate graph-data and summary artifacts. Preserve the current-survivor and fund-inception caveats.
+
+- [ ] **Step 4: Write the evidence report**
+
+State exact API result IDs, deployed revision, schema/config hashes, dates, production cost model, available data, search/holdout rule, window counts, off/shadow parity, named-window and regime tables, full-period metrics, failed gates, best settings, and separate defense/kicker promotability verdicts. If no candidate clears every no-harm gate, leave the subsystem off/shadow and label the best settings diagnostic only.
+
+End with the small-bullet mechanics required by the approved design.
+
+- [ ] **Step 5: Restore or deliberately park document 198**
+
+After evidence capture, either restore the exact pre-research document or park the reviewed configuration in `shadow`; never leave an unreviewed candidate active. Verify the final API document and record its hash.
+
+---
+
+### Superseded Task 4 (do not execute): Point-in-Time Research Harness and Frozen Settings Search
 
 **Files:**
 - Create: `scripts/strategy_x_bear_research.py`
@@ -789,7 +870,7 @@ git commit -m "feat(strategy-x): add frozen bear research harness"
 
 ---
 
-### Task 5: Real-Data Matrix, Best Settings, and Evidence Report
+### Superseded Task 5 (do not execute): Real-Data Matrix, Best Settings, and Evidence Report
 
 **Files:**
 - Create: `docs/superpowers/research/2026-08-25-strategy-x-bear-results.md`
