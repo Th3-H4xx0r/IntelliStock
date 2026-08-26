@@ -33,6 +33,7 @@ FILES = (
     "backend/api/main.py",
     "backend/strategy_x.py",
     "backend/strategies/strategy_x.py",
+    "backend/price_utils.py",
 )
 
 

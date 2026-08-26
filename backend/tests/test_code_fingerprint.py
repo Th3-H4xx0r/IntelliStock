@@ -116,6 +116,12 @@ def test_broker_is_covered():
     assert "broker.py" in mod._CODE_FINGERPRINT_FILES
 
 
+def test_market_data_cache_code_is_covered():
+    """Backtests cannot be trusted when their bar-cache policy is stale."""
+    mod = _load_fingerprint_fn()
+    assert "price_utils.py" in mod._CODE_FINGERPRINT_FILES
+
+
 def test_result_is_cached():
     mod = _load_fingerprint_fn()
     first = mod._code_fingerprint()

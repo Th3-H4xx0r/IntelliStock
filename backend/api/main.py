@@ -980,6 +980,9 @@ _CODE_FINGERPRINT_FILES = (
     # left a 20% sleeve unfunded for an entire run.
     "strategy_x.py",
     "strategies/strategy_x.py",
+    # Backtests share this cache policy. A stale image here can serve empty or
+    # incomplete market data even when the strategy and broker hashes match.
+    "price_utils.py",
 )
 _CODE_FINGERPRINT_CACHE: "dict[str, str] | None" = None
 
