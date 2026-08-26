@@ -54,6 +54,12 @@ def test_shadow_universe_normalizes_and_deduplicates_declared_order():
     assert got == ["BIL", "DBMF", "KMLM", "SQQQ"]
 
 
+def test_shadow_universe_treats_a_single_manager_string_as_one_symbol():
+    got = bear_system_universe(cfg(
+        bear_system_mode="shadow", crisis_alpha_symbols=" dbmf "))
+    assert got == ["BIL", "DBMF", "SQQQ"]
+
+
 def test_fresh_breakdown_compares_two_point_in_time_states():
     closes = [300.0] * 201
     closes[-2] = 301.0
@@ -166,6 +172,19 @@ def test_nonfinite_hold_and_cooldown_settings_fail_safely():
     assert out.state == "cooldown"
 
 
+def test_invalid_runtime_counters_fail_to_safe_cooldown():
+    bad_bars = advance_kicker(signal(), state="holding", bars=float("nan"),
+        cooldown=0, risk_on=False, bull_held=False, kicker_held=True,
+        kicker_priceable=True, shadow=False, prior_targeted=True, config=cfg())
+    bad_cooldown = advance_kicker(signal(), state="cooldown", bars=0,
+        cooldown="ten", risk_on=False, bull_held=False, kicker_held=False,
+        kicker_priceable=True, shadow=False, prior_targeted=False, config=cfg())
+    assert (bad_bars.state, bad_bars.engaged, bad_bars.cooldown) == \
+        ("cooldown", False, 10)
+    assert (bad_cooldown.state, bad_cooldown.engaged, bad_cooldown.cooldown) == \
+        ("cooldown", False, 10)
+
+
 def test_allocator_equal_weights_only_eligible_funds_and_uses_bil_residual():
     histories = {"DBMF": [10.0] * 60, "KMLM": [20.0] * 60, "CTA": [30.0] * 59}
     prices = {"DBMF": 10.0, "KMLM": 20.0, "CTA": 30.0, "BIL": 91.0, "SQQQ": 8.0}
@@ -194,6 +213,17 @@ def test_invalid_manager_history_does_not_disqualify_other_managers():
     assert eligible_crisis_alpha(histories, prices, cfg()) == ("KMLM",)
 
 
+def test_nonfinite_manager_history_is_ineligible_and_budget_returns_to_bil():
+    histories = {"DBMF": [float("nan")] * 60, "KMLM": [20.0] * 60}
+    prices = {"DBMF": 10.0, "KMLM": 20.0, "BIL": 91.0}
+    eligible = eligible_crisis_alpha(histories, prices, cfg())
+    out = plan_bear_overlay({"SPY": 0.9}, risk_on=False,
+        config=cfg(bear_system_mode="active"), eligible_symbols=eligible,
+        kicker_engaged=False, prices=prices)
+    assert eligible == ("KMLM",)
+    assert out.targets == {"KMLM": 0.2, "BIL": 0.7}
+
+
 def test_missing_bil_or_legacy_conflict_returns_baseline_unchanged():
     baseline = {"SPY": 0.9, "GLD": 0.1}
     missing = plan_bear_overlay(baseline, risk_on=False,
@@ -207,6 +237,15 @@ def test_missing_bil_or_legacy_conflict_returns_baseline_unchanged():
     assert conflict.targets == baseline and conflict.applied is False
 
 
+def test_unique_legacy_bear_configuration_returns_baseline_unchanged():
+    baseline = {"SPY": 0.9, "GLD": 0.1}
+    out = plan_bear_overlay(baseline, risk_on=False,
+        config=cfg(bear_system_mode="active", core_bear_symbol="SH"),
+        eligible_symbols=("DBMF",), kicker_engaged=True,
+        prices={"BIL": 91.0, "DBMF": 10.0, "SQQQ": 8.0})
+    assert out.targets == baseline and out.applied is False
+
+
 def test_allocator_clamps_percentages_and_never_exceeds_defensive_budget():
     out = plan_bear_overlay({"SPY": 0.12, "GLD": 0.88}, risk_on=False,
         config=cfg(bear_system_mode="active", crisis_alpha_pct=2,
@@ -214,6 +253,25 @@ def test_allocator_clamps_percentages_and_never_exceeds_defensive_budget():
         kicker_engaged=True, prices={"BIL": 91, "DBMF": 10, "SQQQ": 8})
     assert out.targets == {"GLD": 0.88, "DBMF": 0.12}
     assert sum(out.targets.values()) == 1.0
+
+
+def test_kicker_is_suppressed_when_its_full_fixed_weight_does_not_fit():
+    out = plan_bear_overlay({"SPY": 0.22}, risk_on=False,
+        config=cfg(bear_system_mode="active"), eligible_symbols=("DBMF",),
+        kicker_engaged=True, prices={"BIL": 91.0, "DBMF": 10.0, "SQQQ": 8.0})
+    assert out.targets == {"DBMF": 0.2, "BIL": 0.02}
+    assert "SQQQ" not in out.targets
+
+
+def test_nonfinite_baseline_returns_the_original_targets_unchanged():
+    baseline = {"SPY": float("nan"), "GLD": 0.1}
+    out = plan_bear_overlay(baseline, risk_on=False,
+        config=cfg(bear_system_mode="active"), eligible_symbols=("DBMF",),
+        kicker_engaged=False, prices={"BIL": 91.0, "DBMF": 10.0})
+    assert set(out.targets) == {"SPY", "GLD"}
+    assert out.targets["SPY"] != out.targets["SPY"]
+    assert out.targets["GLD"] == 0.1
+    assert out.applied is False
 
 
 def test_colliding_roles_or_nonfinite_weights_fail_closed():

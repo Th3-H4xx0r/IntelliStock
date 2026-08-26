@@ -74,9 +74,10 @@ def bear_system_universe(config) -> list[str]:
     cfg = config or {}
     if bear_system_mode(cfg) == "off":
         return []
+    managers = _symbols(cfg.get("crisis_alpha_symbols") or [])
     return _symbols([
         cfg.get("bear_cash_symbol", "BIL"),
-        *(cfg.get("crisis_alpha_symbols") or []),
+        *managers,
         cfg.get("bear_kicker_symbol", "SQQQ"),
     ])
 
@@ -160,9 +161,11 @@ def _kicker_limits(config) -> tuple[int, int, bool]:
     return max(max_bars, 1), max(cooldown_bars, 0), True
 
 
-def _counter(value, upper: int) -> int:
+def _counter(value, upper: int) -> tuple[int, bool]:
     parsed = _finite_int(value)
-    return min(max(parsed if parsed is not None else 0, 0), upper)
+    if parsed is None:
+        return 0, False
+    return min(max(parsed, 0), upper), True
 
 
 def _cooldown_decision(cooldown_bars: int, reason: str) -> KickerDecision:
@@ -177,11 +180,13 @@ def advance_kicker(signal, *, state, bars, cooldown, risk_on, bull_held,
     normalized_state = str(state or "idle").strip().lower()
     if normalized_state not in {"idle", "armed", "holding", "cooldown"}:
         normalized_state = "idle"
-    held_bars = _counter(bars, max_bars)
-    cooldown_left = _counter(cooldown, cooldown_bars)
+    held_bars, bars_valid = _counter(bars, max_bars)
+    cooldown_left, cooldown_valid = _counter(cooldown, cooldown_bars)
 
     if not settings_valid:
         return _cooldown_decision(cooldown_bars, "invalid kicker limits")
+    if not bars_valid or not cooldown_valid:
+        return _cooldown_decision(cooldown_bars, "invalid persisted kicker counter")
     if not kicker_priceable:
         return _cooldown_decision(cooldown_bars, "kicker unavailable or unpriceable")
     if risk_on:
@@ -270,7 +275,9 @@ def eligible_crisis_alpha(closes_by_symbol, prices, config) -> tuple[str, ...]:
     selected = []
     for symbol in _symbols((config or {}).get("crisis_alpha_symbols") or []):
         try:
-            enough_history = len(histories.get(symbol, ())) >= minimum
+            history = list(histories.get(symbol, ()))
+            enough_history = (len(history) >= minimum
+                              and _positive_finite(history[-minimum:]) is not None)
         except (AttributeError, TypeError):
             enough_history = False
         if _positive_price(prices, symbol) and enough_history:
@@ -278,16 +285,16 @@ def eligible_crisis_alpha(closes_by_symbol, prices, config) -> tuple[str, ...]:
     return tuple(selected)
 
 
-def _baseline(base_targets) -> dict[str, float] | None:
+def _baseline(base_targets) -> tuple[dict[str, float] | None, bool]:
     try:
         copied = dict(base_targets or {})
     except (TypeError, ValueError):
-        return None
+        return None, False
     for weight in copied.values():
         number = _finite_number(weight)
         if number is None or number < 0:
-            return None
-    return copied
+            return copied, False
+    return copied, True
 
 
 def _configured_pct(config, key: str, default: float) -> float | None:
@@ -309,9 +316,11 @@ def _unchanged(base: dict[str, float], reason: str,
 def plan_bear_overlay(base_targets, *, risk_on, config, eligible_symbols,
                       kicker_engaged, prices) -> BearAllocation:
     """Replace only the risk-off chop allocation with defensive bear sleeves."""
-    baseline = _baseline(base_targets)
+    baseline, baseline_valid = _baseline(base_targets)
     if baseline is None:
         return BearAllocation({}, False, "invalid baseline targets", ())
+    if not baseline_valid:
+        return _unchanged(baseline, "invalid baseline targets")
     cfg = config or {}
     declared_eligible = tuple(_symbols(cfg.get("crisis_alpha_symbols") or []))
     allowed = set(_symbols(eligible_symbols))
@@ -320,6 +329,8 @@ def plan_bear_overlay(base_targets, *, risk_on, config, eligible_symbols,
         return _unchanged(baseline, "risk-on regime", eligible)
     if bear_system_mode(cfg) != "active":
         return _unchanged(baseline, "bear system is not active", eligible)
+    if _symbol(cfg.get("core_bear_symbol", "")):
+        return _unchanged(baseline, "legacy bear configuration is enabled", eligible)
     conflict = bear_role_conflict(cfg)
     if conflict:
         return _unchanged(baseline, f"role conflict: {conflict}", eligible)
@@ -348,10 +359,9 @@ def plan_bear_overlay(base_targets, *, risk_on, config, eligible_symbols,
             targets[symbol] = per_manager
         remaining -= per_manager * len(eligible)
     if kicker_engaged and _positive_price(prices, kicker):
-        kicker_weight = min(kicker_pct, remaining)
-        if kicker_weight > 0:
-            targets[kicker] = kicker_weight
-            remaining -= kicker_weight
+        if kicker_pct > 0 and kicker_pct <= remaining:
+            targets[kicker] = kicker_pct
+            remaining -= kicker_pct
     if remaining > 0:
         targets[cash] = round(remaining, Q)
 
