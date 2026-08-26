@@ -409,6 +409,16 @@ class StrategyX:
         runtime_pending_kickers = (
             evidenced_kickers & execution_pending_symbols
         )
+        # Every active bear leg uses the same next-event execution book.  A
+        # regime may flip before yesterday's cash/manager entries receive a
+        # price event, so their ownership evidence must survive just like the
+        # kicker's.  If the book cannot be read, preserve prior evidence: an
+        # unknown pending set is not proof that no Strategy X order can fill.
+        runtime_pending_bear = (
+            set(prior_evidence)
+            if pending_status_failed else
+            prior_bear_owned & execution_pending_symbols
+        )
         blocking_evidenced_kickers = sorted(
             symbol for symbol in evidenced_kickers
             if symbol != kicker_symbol
@@ -530,7 +540,7 @@ class StrategyX:
             retained_owned = {
                 symbol for symbol in prior_bear_owned
                 if (symbol in held_symbols
-                    or symbol in runtime_pending_kickers
+                    or symbol in runtime_pending_bear
                     or (retain_all_kicker_evidence
                         and symbol in evidenced_kickers))
             }
@@ -1024,7 +1034,7 @@ class StrategyX:
                 symbol for symbol in prior_bear_owned
                 if (symbol in held_symbols
                     or float(selected_targets.get(symbol, 0.0) or 0.0) > 0
-                    or symbol in runtime_pending_kickers
+                    or symbol in runtime_pending_bear
                     or (retain_all_kicker_evidence
                         and symbol in evidenced_kickers))
             }
@@ -1115,7 +1125,7 @@ class StrategyX:
             retained_owned = {
                 symbol for symbol in prior_bear_owned
                 if (symbol in held_symbols
-                    or symbol in runtime_pending_kickers
+                    or symbol in runtime_pending_bear
                     or (retain_all_kicker_evidence
                         and symbol in evidenced_kickers))
             }

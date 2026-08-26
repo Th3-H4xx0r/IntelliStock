@@ -19,6 +19,8 @@ required.
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from nexus_broker_utils import (  # noqa: E402
@@ -257,6 +259,17 @@ def _nexus_spec(config):
 def test_resolve_cap_from_real_config():
     cap, reason = resolve_max_positions_cap([_nexus_spec(real_config())])
     assert (cap, reason) == (10, "armed")
+
+
+@pytest.mark.parametrize("disabled_weight", [0.0, -1.0])
+def test_resolve_cap_ignores_explicitly_disabled_nexus_specs(disabled_weight):
+    disabled = _nexus_spec({"max_positions": 6})
+    disabled["weight"] = disabled_weight
+    assert resolve_max_positions_cap([disabled]) == (None, "no_nexus_spec")
+
+    enabled = _nexus_spec({"max_positions": 11})
+    enabled["weight"] = 1.0
+    assert resolve_max_positions_cap([disabled, enabled]) == (11, "armed")
 
 
 def test_resolve_cap_missing_key_and_warning_line():

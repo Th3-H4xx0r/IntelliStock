@@ -139,11 +139,20 @@ def resolve_max_positions_cap(cached_strategies) -> tuple:
     gate stays inert rather than crashing the cycle.
     """
     try:
-        spec = next(
-            (s for s in (cached_strategies or [])
-             if str((s or {}).get("strategy") or "").strip() == "graph_nexus_analysis"),
-            None,
-        )
+        spec = None
+        for candidate in (cached_strategies or []):
+            if (str((candidate or {}).get("strategy") or "").strip()
+                    != "graph_nexus_analysis"):
+                continue
+            # The run-once dispatcher skips explicit non-positive weights, so
+            # a disabled Graph lane must not keep imposing its broker limits on
+            # another executable lane (for example Strategy X).  Missing
+            # weight remains backward compatible with legacy loaded specs.
+            if ("weight" in candidate
+                    and float(candidate.get("weight", 0)) <= 0):
+                continue
+            spec = candidate
+            break
         if spec is None:
             return (None, "no_nexus_spec")
         cfg = spec.get("config") or {}

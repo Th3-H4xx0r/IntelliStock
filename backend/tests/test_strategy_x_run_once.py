@@ -2053,6 +2053,90 @@ def test_real_pending_same_symbol_buy_suppresses_retries_and_topups():
     assert "SQQQ" in cache["_sx_bear_ownership_evidence"]["records"]
 
 
+def test_pending_bear_sleeve_fill_keeps_provenance_across_regime_flip():
+    """A prior risk-off order may fill after the next risk-on decision.
+
+    Cash and manager entries use the same next-event execution book as the
+    kicker.  Their evidence must survive while those entries are pending so a
+    delayed fill is recognized as Strategy X-owned and can be exited safely.
+    """
+    bear_data, prices = bear_ready_downtrend_fixture()
+    cfg = base_cfg(bear_system_mode="active", min_order_usd=1.0)
+    cache = {}
+
+    risk_off = StrategyX().run_once(
+        list(prices), prices, NOW, cfg, {}, data=bear_data,
+        portfolio_emulator=FakeEmulator(prices=prices),
+        strategy_cache=cache, mode="backtest",
+    )
+    pending_bear = {"BIL", "DBMF", "KMLM", "CTA"}
+    assert pending_bear <= set(risk_off.get("_nexus_executable_buys", []))
+    assert pending_bear <= set(
+        cache["_sx_bear_ownership_evidence"]["records"]
+    )
+
+    risk_on_data = dict(bear_data)
+    risk_on_data["QQQ"] = {"bars": bars(260)}
+    StrategyX().run_once(
+        list(prices), prices, NOW + timedelta(days=1), cfg, {},
+        data=risk_on_data,
+        portfolio_emulator=FakeEmulator(
+            prices=prices, pending_symbols=tuple(sorted(pending_bear)),
+        ),
+        strategy_cache=cache, mode="backtest",
+    )
+    assert pending_bear <= set(
+        cache["_sx_bear_ownership_evidence"]["records"]
+    )
+
+    delayed_positions = {
+        "BIL": 5.0, "DBMF": 5.0, "KMLM": 5.0, "CTA": 5.0,
+    }
+    after_fill = StrategyX().run_once(
+        list(prices), prices, NOW + timedelta(days=2), cfg, {},
+        data=risk_on_data,
+        portfolio_emulator=FakeEmulator(
+            cash=500.0, positions=delayed_positions, prices=prices,
+        ),
+        strategy_cache=cache, mode="backtest",
+    )
+    assert pending_bear <= set(after_fill.get("_nexus_sell_enforcement", []))
+    assert pending_bear <= set(
+        cache["_sx_bear_ownership_evidence"]["records"]
+    )
+
+    StrategyX().run_once(
+        list(prices), prices, NOW + timedelta(days=3), cfg, {},
+        data=risk_on_data,
+        portfolio_emulator=FakeEmulator(prices=prices),
+        strategy_cache=cache, mode="backtest",
+    )
+    assert not cache["_sx_bear_ownership_evidence"]["records"]
+
+
+def test_failed_pending_reader_retains_only_strict_manager_evidence():
+    data, prices = bear_ready_downtrend_fixture()
+    data["QQQ"] = {"bars": bars(260)}
+    cache = {
+        "_sx_bear_owned": ["CTA", "DBMF"],
+        "_sx_bear_ownership_evidence": ownership_evidence(
+            "DBMF", "manager", 0.2,
+        ),
+    }
+
+    StrategyX().run_once(
+        list(prices), prices, NOW,
+        base_cfg(bear_system_mode="active"), {}, data=data,
+        portfolio_emulator=FakeEmulator(
+            prices=prices, pending_symbols=RuntimeError("book unavailable"),
+        ),
+        strategy_cache=cache, mode="backtest",
+    )
+
+    assert cache["_sx_bear_owned"] == ["DBMF"]
+    assert set(cache["_sx_bear_ownership_evidence"]["records"]) == {"DBMF"}
+
+
 def test_retired_kicker_blocks_new_kicker_until_exit_then_delayed_fill_is_owned():
     cache, _, _ = _prime_active_kicker_evidence()
 

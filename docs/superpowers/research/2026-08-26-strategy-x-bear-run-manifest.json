@@ -1,0 +1,198 @@
+{
+  "manifest_version": 1,
+  "status": "completed_with_active_run_error_and_unvalidated_fixes",
+  "queued_count": 5,
+  "queued_cap": 5,
+  "remaining_queue_slots": 0,
+  "deployed_revision": "6a5ccd412079e875a4da39d1a6c31f6592f5018a",
+  "strategy_document": {
+    "id": 198,
+    "name": "Strategy X — leveraged core",
+    "pre_research_sha256": "fa33e56d3290605b31be85ab8d54dc0e9e508d7cf1fd4d20edeccec7f6eda8b4",
+    "graph_lane_index": 0,
+    "strategy_x_lane_index": 1,
+    "restore_required": false,
+    "restored_sha256": "fa33e56d3290605b31be85ab8d54dc0e9e508d7cf1fd4d20edeccec7f6eda8b4"
+  },
+  "instance_id": "strategy-x",
+  "clear_state_before_every_arm": true,
+  "empty_state_attestation_before_every_arm": true,
+  "backtest": {
+    "start_date": "2021-11-01",
+    "end_date": "2026-08-25",
+    "granularity": "86400",
+    "initial_cash": 10000.0,
+    "stocks": ["QQQ", "TQQQ", "SPY", "BIL", "SQQQ", "DBMF", "KMLM", "CTA", "GLD", "SLV", "USO", "UNG", "GDX", "XLE", "DBA", "CPER"],
+    "execution_cost_model": "production_default",
+    "coverage_reason": "Linked Alpaca IEX data is unavailable for the 2010-era start; 2021-11 provides a 700-day warmup reaching the IEX 2020 boundary before the first scored bar."
+  },
+  "common_config": {
+    "graph_lane_weight": 0.01,
+    "strategy_x_lane_weight": 1.0,
+    "strategy_x_enabled": true,
+    "core_weight": 1.0,
+    "core_bear_symbol": "",
+    "satellite_pct": 0.1,
+    "commodity_pct": 0.1,
+    "broker_max_single_position_pct": 0.95,
+    "bear_cash_symbol": "BIL",
+    "crisis_alpha_symbols": ["DBMF", "KMLM", "CTA"],
+    "crisis_alpha_min_history_bars": 60,
+    "bear_kicker_symbol": "SQQQ",
+    "bear_kicker_fast_ma_bars": 20,
+    "bear_kicker_mid_ma_bars": 50,
+    "bear_kicker_long_ma_bars": 200
+  },
+  "arms": [
+    {
+      "arm_id": "off",
+      "config": {"bear_system_mode": "off", "crisis_alpha_pct": 0.2, "bear_kicker_pct": 0.05, "bear_kicker_max_bars": 5, "bear_kicker_cooldown_bars": 10},
+      "document_sha256": "c23631bc8ca6c95c8a8c10e08b1461e7e618f205ca476a6c1b4dc6e8a126b331",
+      "prelaunch_clear_deleted": 17068,
+      "attestation_second_clear_deleted": 0,
+      "backtest_id": 902983,
+      "status": "stopped_at_25.3_pct_inert_wrong_allocation_and_empty_market_data",
+      "api_log_path": "/tmp/strategy-x-bt902983.log",
+      "invalid_reasons": [
+        "graph_lane_weight_0",
+        "satellite_pct_0",
+        "commodity_pct_0",
+        "zero_price_history",
+        "zero_orders_or_fills"
+      ],
+      "valid_for_selection": false
+    },
+    {
+      "arm_id": "off_corrected",
+      "config": {"bear_system_mode": "off", "crisis_alpha_pct": 0.2, "bear_kicker_pct": 0.05, "bear_kicker_max_bars": 5, "bear_kicker_cooldown_bars": 10},
+      "document_sha256": "58dae1335e595eeb5d3a58bb1e2bb84636d32ac47221362db7f0ceea89e30851",
+      "prelaunch_clear_deleted": 0,
+      "attestation_second_clear_deleted": 0,
+      "backtest_id": 794182,
+      "status": "stopped_at_0.06_pct_iex_no_2010_history",
+      "api_log_path": "/tmp/strategy-x-bt794182.log",
+      "invalid_reasons": [
+        "linked_iex_feed_has_no_2010_history",
+        "zero_qqq_closes",
+        "graph_scores_all_neutral",
+        "zero_orders_or_fills"
+      ],
+      "valid_for_selection": false
+    },
+    {
+      "arm_id": "off_2021_coverage",
+      "config": {"bear_system_mode": "off", "crisis_alpha_pct": 0.2, "bear_kicker_pct": 0.05, "bear_kicker_max_bars": 5, "bear_kicker_cooldown_bars": 10},
+      "graph_research_overrides": {"google_news_enabled": false},
+      "document_sha256": "da839f10a915a6a4f461972fafb020f2f91d544029105261068c90b0afd4877d",
+      "prelaunch_clear_deleted": 0,
+      "attestation_second_clear_deleted": 0,
+      "backtest_id": 775122,
+      "status": "stopped_at_0.03_pct_integration_gate_only",
+      "api_log_path": "/tmp/strategy-x-bt775122.log",
+      "log_review_path": ".superpowers/sdd/2026-08-25-strategy-x-bear-system/bt775122-log-gate.md",
+      "observed_first_session_targets": {"UNG": 0.05, "USO": 0.05, "TQQQ": 0.8, "SPY": 0.1},
+      "invalid_reasons": [
+        "graph_history_used_legacy_current_state_path_with_explicit_lookahead_bias",
+        "no_frozen_point_in_time_graph_snapshots",
+        "neo4j_market_cap_cache_empty",
+        "graph_stock_sleeve_unfilled_on_observed_session",
+        "no_confirmed_fills_before_stop",
+        "full_graph_cycle_took_210_seconds_for_one_session"
+      ],
+      "valid_for_selection": false
+    },
+    {
+      "arm_id": "shadow_10_10_80",
+      "config": {"bear_system_mode": "shadow", "crisis_alpha_pct": 0.2, "bear_kicker_pct": 0.05, "bear_kicker_max_bars": 5, "bear_kicker_cooldown_bars": 10},
+      "graph_research_overrides": {"weight": 0.0, "reason": "Historical Graph path has no frozen PIT snapshots and is too slow for a causal comparison"},
+      "document_sha256": "cd8df2104c8c48223c668ca8ac42813789b76580d10669375327ed2e07b9f1f8",
+      "prelaunch_clear_deleted": 160,
+      "attestation_second_clear_deleted": 0,
+      "backtest_id": 244790,
+      "status": "finished",
+      "api_log_path": "/tmp/strategy-x-bt244790.log",
+      "log_review_path": ".superpowers/sdd/2026-08-25-strategy-x-bear-system/bt244790-shadow-gate.md",
+      "metrics": {"pnl_percent": 120.8291, "spy_change_percent": 66.2804, "max_drawdown_pct": 44.67732817372677, "total_trades": 663, "year_2022_pnl_percent": -31.8149, "year_2022_spy_change_percent": -19.4905},
+      "interpretation": "Graph-free shadow baseline; the reserved 10% satellite sleeve routes to SPY and is not a realized Graph-stock allocation"
+    },
+    {
+      "arm_id": "full_central_10_10_80",
+      "config": {"bear_system_mode": "active", "crisis_alpha_pct": 0.2, "bear_kicker_pct": 0.05, "bear_kicker_max_bars": 5, "bear_kicker_cooldown_bars": 10},
+      "graph_research_overrides": {"weight": 0.0, "reason": "Historical Graph path has no frozen PIT snapshots and is too slow for a causal comparison"},
+      "document_sha256": "df9d14a91659bd535968069042570cc81d919fa63c28399d1f65ad31a88653b6",
+      "prelaunch_clear_deleted": 0,
+      "attestation_second_clear_deleted": 0,
+      "backtest_id": 867475,
+      "status": "error_at_26.07_pct_next_event_provenance_race",
+      "api_log_path": "/tmp/strategy-x-bt867475.log",
+      "log_review_path": ".superpowers/sdd/2026-08-25-strategy-x-bear-system/bt867475-active-gate.md",
+      "partial_metrics": {"pnl_percent": -21.0688, "max_drawdown_pct": 30.7534, "total_trades": 223, "year_2022_pnl_percent": -23.8418, "year_2022_spy_change_percent": -19.4905, "year_2022_max_drawdown_pct": 28.5108},
+      "invalid_reasons": [
+        "prior_risk_off_orders_filled_after_a_risk_on_decision_cleared_bear_ownership_provenance",
+        "next_bar_failed_closed_on_unprovenanced_BIL_CTA_DBMF_KMLM_holdings",
+        "SQQQ_kicker_was_intermittently_blocked_by_max_positions_6",
+        "run_ended_before_the_full_comparison_window"
+      ],
+      "valid_for_selection": false,
+      "interpretation": "Graph-free active bear-overlay comparison; the reserved 10% satellite sleeve routes to SPY and may join the defensive replacement during risk-off periods"
+    }
+  ],
+  "observed_window_returns_pct": {
+    "2022_inflation_bear": {"shadow": -31.8149, "active_partial": -23.8418, "spy": -19.4905},
+    "2022_h1_selloff": {"shadow": -34.8949, "active_partial": -21.8788, "spy": -20.3662},
+    "2022_summer_recovery": {"shadow": 10.9905, "active_partial": -1.3141, "spy": 12.6134},
+    "2022_q3_selloff": {"shadow": -13.0784, "active_partial": 0.6661, "spy": -16.5117},
+    "2023_recovery": {"shadow": 61.9087, "active_partial": null, "spy": 24.3472},
+    "2024_bull": {"shadow": 58.4776, "active_partial": null, "spy": 26.1071},
+    "2025_spring_drawdown": {"shadow": -34.6079, "active_partial": null, "spy": -17.2612},
+    "2025_spring_recovery": {"shadow": 28.4174, "active_partial": null, "spy": 21.8813},
+    "2026_h1": {"shadow": 10.9587, "active_partial": null, "spy": 6.1753}
+  },
+  "post_run_fixes": [
+    {
+      "symbol": "StrategyX.run_once",
+      "reason": "retain strict ownership evidence for all pending next-event bear legs across regime flips",
+      "api_revalidated": false
+    },
+    {
+      "symbol": "resolve_max_positions_cap",
+      "reason": "ignore explicitly disabled Graph specs when resolving broker position limits",
+      "api_revalidated": false
+    }
+  ],
+  "verification": {"focused_tests_passed": 307, "python_compile_passed": true, "manifest_json_valid": true},
+  "report_path": "docs/superpowers/research/2026-08-26-strategy-x-bear-results.md",
+  "selection": {
+    "search_end_inclusive": "2022-12-31",
+    "lattice_start": "2013-01-01",
+    "lattice_frequency": "2MS",
+    "regime_thresholds_qqq_return_pct": {"bear_below": -4.0, "bull_above": 4.0, "otherwise": "chop"},
+    "key": ["search_violations", "negative_search_worst_bear_excess", "negative_search_median_bear_excess", "search_turnover", "arm_id"],
+    "selected_arm": null,
+    "decision": "no_promotion_active_run_incomplete_and_full_2022_still_trailed_spy",
+    "selected_before_2023_diagnostics": false
+  },
+  "named_windows": [
+    ["2022_inflation_bear", "2022-01-01", "2023-01-01", "bear", "search"],
+    ["2022_h1_selloff", "2022-01-03", "2022-06-17", "bear", "search"],
+    ["2022_summer_recovery", "2022-06-17", "2022-08-16", "recovery", "search"],
+    ["2022_q3_selloff", "2022-08-16", "2022-10-14", "bear", "search"],
+    ["2023_recovery", "2023-01-01", "2024-01-01", "recovery", "diagnostic"],
+    ["2024_bull", "2024-01-01", "2025-01-01", "bull", "diagnostic"],
+    ["2025_spring_drawdown", "2025-02-18", "2025-04-09", "bear", "diagnostic"],
+    ["2025_spring_recovery", "2025-04-09", "2025-07-01", "recovery", "diagnostic"],
+    ["2026_h1", "2026-01-01", "2026-07-01", "auto", "diagnostic"]
+  ],
+  "limitations": [
+    "Two stopped diagnostics consumed two of five queue slots; only one corrected baseline, one shadow control, and one active central setting remain, so this is not exhaustive optimization.",
+    "The second diagnostic proved the linked IEX source cannot support 2010-era bars; pre-2021 evaluation windows are excluded.",
+    "The third run proved the deployed market-data cache fix (342 QQQ bars loaded) and the 80% core plus 10% commodity targets, but its Graph path was explicitly lookahead-biased and took 210 seconds for one session, so it is integration evidence only.",
+    "No point-in-time Graph Nexus snapshots exist for the requested historical interval; Graph-stock performance cannot be promoted from the legacy current-state path.",
+    "The 10% Graph-stock and 10% commodity sleeves are target caps, not guaranteed holdings; missing eligible candidates route unfilled sleeve capital to SPY.",
+    "The final paired shadow/active study disables the non-PIT Graph lane; it evaluates the bear overlay against a conservative SPY fallback, not Graph selection or exact realized 10/10/80.",
+    "Graph Nexus top-level weight is vote influence rather than NAV allocation; a 0.01 ranking lane publishes conviction ahead of Strategy X, which owns all sizing.",
+    "The 2023+ slices are pseudo-out-of-sample diagnostics, not a pristine locked holdout.",
+    "Active mode remains research-only and is refused outside exact production backtest mode.",
+    "Current-survivor managed-futures ETF selection and fund inception dates limit historical inference."
+  ]
+}
