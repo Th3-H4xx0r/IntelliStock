@@ -1,6 +1,6 @@
 # Strategy X Bear System Design
 
-**Status:** proposed for implementation; default-off and backtest-only
+**Status:** approved for implementation; default-off and backtest-only
 **Date:** 2026-08-25
 **Extends:** `docs/superpowers/specs/2026-08-23-strategy-x-design.md`
 
@@ -54,7 +54,7 @@ home-built long/short futures engine.
 - No claim that the system profits in every bear market.
 - No options, futures, VIX products, naked shorts, or short-SQQQ decay trades.
 - No LLM, news, graph, or macro model decides market direction.
-- No parameter search in the implementation script.
+- No unconstrained optimizer or tuning against the validation windows.
 - No rewrite of the existing commodity or stock satellite sleeves.
 - No live activation or production strategy-document mutation.
 - No synthetic managed-futures history presented as actual fund performance.
@@ -258,8 +258,26 @@ crises are untested rather than fill them with synthetic fund returns. SQQQ-only
 event diagnostics may use its actual post-2010 history, but they cannot validate
 the managed-futures sleeve.
 
-The script has no optimizer and accepts no parameter grid. Changing a frozen
-value requires editing the research declaration and produces a reviewable diff.
+The research script evaluates this bounded, predeclared sensitivity grid:
+
+```python
+crisis_alpha_pct = (0.10, 0.20, 0.30)
+bear_kicker_pct = (0.00, 0.025, 0.05)
+bear_kicker_max_bars = (3, 5)
+bear_kicker_cooldown_bars = (5, 10)
+```
+
+Duplicate combinations created by a zero kicker weight are removed. The moving
+averages, fund universe, minimum history, defensive symbol, costs, and fill
+model remain frozen. The search period ends on 2022-12-31. Windows beginning in
+2023 or later are locked validation and may not influence candidate selection.
+
+Candidate selection is lexicographic: first minimize the count of search-window
+no-harm violations, then maximize the worst bear-window excess return over the
+baseline, then maximize median bear excess return, then minimize turnover. The
+script reports a diagnostic winner even when every candidate fails, but labels
+it non-promotable. Changing the grid or ranking rule requires a reviewable source
+diff.
 
 ## 13. Tests
 
