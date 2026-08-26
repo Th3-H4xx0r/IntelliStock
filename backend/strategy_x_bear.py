@@ -359,7 +359,7 @@ def plan_bear_overlay(base_targets, *, risk_on, config, eligible_symbols,
             targets[symbol] = per_manager
         remaining -= per_manager * len(eligible)
     if kicker_engaged and _positive_price(prices, kicker):
-        if kicker_pct > 0 and kicker_pct <= remaining:
+        if kicker_pct > 0 and round(kicker_pct, Q) <= round(remaining, Q):
             targets[kicker] = kicker_pct
             remaining -= kicker_pct
     if remaining > 0:

@@ -263,6 +263,14 @@ def test_kicker_is_suppressed_when_its_full_fixed_weight_does_not_fit():
     assert "SQQQ" not in out.targets
 
 
+def test_kicker_receives_its_fixed_weight_at_the_six_decimal_exact_fit():
+    out = plan_bear_overlay({"SPY": 0.25}, risk_on=False,
+        config=cfg(bear_system_mode="active"), eligible_symbols=("DBMF",),
+        kicker_engaged=True, prices={"BIL": 91.0, "DBMF": 10.0, "SQQQ": 8.0})
+    assert out.targets == {"DBMF": 0.2, "SQQQ": 0.05}
+    assert "BIL" not in out.targets
+
+
 def test_nonfinite_baseline_returns_the_original_targets_unchanged():
     baseline = {"SPY": float("nan"), "GLD": 0.1}
     out = plan_bear_overlay(baseline, risk_on=False,
