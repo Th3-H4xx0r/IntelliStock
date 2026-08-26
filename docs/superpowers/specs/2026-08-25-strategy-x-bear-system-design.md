@@ -88,7 +88,13 @@ Create `backend/strategy_x_bear.py` for pure calculations and immutable result
 types. It will not read clocks, files, the network, broker state, or environment
 variables.
 
-`backend/strategies/strategy_x.py` remains the stateful orchestrator:
+`backend/strategies/strategy_x.py` remains the stateful orchestrator. An
+`active` configuration is honored only when its `mode` argument is exactly
+`"backtest"`; every other runtime computes at most shadow telemetry and leaves
+the baseline target book selected. This is a runtime boundary, not only a
+deployment convention.
+
+The orchestration sequence is:
 
 1. Build visible daily closes through `pit_daily_closes`.
 2. Obtain the existing `CoreSignal`.
@@ -96,7 +102,7 @@ variables.
 4. Evaluate the new bear policy and SQQQ state machine.
 5. In `off`, execute the baseline targets without fetching bear-system symbols.
 6. In `shadow`, execute the baseline targets and record proposed bear targets.
-7. In `active`, replace only the baseline risk-off `core_chop_symbol`
+7. In research-authorized `active`, replace only the baseline risk-off `core_chop_symbol`
    allocation with the defensive allocation.
 8. Convert the selected targets through the existing `targets_to_orders` path.
 
@@ -126,6 +132,16 @@ All new behavior is disabled by default.
 Invalid modes normalize to `off`. Percentages clamp to `[0, 1]`. Lookbacks
 clamp to at least two sessions. Symbols normalize to uppercase and deduplicate
 in declared order.
+
+Nonfinite lookbacks or counters never reach `int(...)`: shared finite parsers
+either return the documented default or a refusal, depending on whether the
+value can change an allocation. This includes all MA, minimum-history,
+maximum-hold, and cooldown settings.
+
+Cash, kicker, manager, filter, core, legacy-bear, and commodity roles must not
+collide. A dynamic collision with a selected/age-tracked satellite or an
+unprovenanced holding also suppresses the overlay. Nonfinite percentages or
+target values reject the overlay instead of being coerced into a trade.
 
 `core_bear_symbol` and the new bear system are mutually exclusive. When
 `core_bear_symbol` is non-empty, the new subsystem refuses to engage, records a
@@ -185,9 +201,11 @@ target. A direct TQQQ-to-SQQQ transition is prohibited; the first risk-off
 session routes through the defensive book. With next-bar fills, five active
 target sessions produce at most approximately five sessions of market exposure.
 A missing cache cannot manufacture a fresh entry because freshness is derived
-from the last two visible price states. If a cache reset occurs while SQQQ is
-actually held, the wrapper adopts and exits that position under the recovery and
-time-limit rules rather than abandoning it outside the owned-symbol set.
+from the last two visible price states. If the state keys reset while SQQQ is
+still recorded in `_sx_bear_owned`, the wrapper treats its age as unknown and
+exits it immediately. A full cache reset loses provenance too; in that case the
+wrapper refuses to claim the holding, because it cannot distinguish its own
+position from another strategy's.
 
 Cache keys are new and namespaced:
 
@@ -196,7 +214,21 @@ _sx_bear_system_state
 _sx_bear_kicker_bars
 _sx_bear_kicker_cooldown
 _sx_bear_shadow
+_sx_bear_state_version
+_sx_bear_kicker_entry_day
+_sx_bear_kicker_targeted
+_sx_bear_owned
 ```
+
+Malformed state, counters outside configured ranges, or an unknown-age SQQQ
+holding fail safely to an exit and cooldown. A held symbol recorded in
+`_sx_bear_owned` remains owned until it is flat, including after a mode/config
+change or an ordinary filter-data refusal. This provenance set is the only way
+the subsystem claims an existing position: an unrecorded holding in the
+configured bear universe is an ownership conflict and suppresses the overlay
+rather than being liquidated. If QQQ history is missing but a priceable
+provenance-owned bear holding exists, the wrapper emits its emergency exit
+before returning the usual filter refusal.
 
 ## 10. Shadow telemetry
 
@@ -212,7 +244,10 @@ Shadow mode records, per decision session:
 
 It writes this structure to `strategy_cache["_sx_bear_shadow"]` and emits one
 concise Strategy X log line. Shadow mode may add metadata and data fetches, but
-its decisions and `_nexus_position_sizes` must match `off` mode exactly.
+its executable decisions and `_nexus_position_sizes` must match `off` mode from
+the same clean starting state. A provenance-owned position left by an earlier
+active research run is the sole exception: safe unwind takes precedence over
+A/A parity.
 
 ## 11. Universe and price handling
 
@@ -220,10 +255,25 @@ its decisions and `_nexus_position_sizes` must match `off` mode exactly.
 `active` mode. The broker already delegates to this function, so one source of
 truth controls both bar fetching and strategy ownership.
 
-Managed-futures and defensive symbols are excluded from the stock satellite
-ranking. The run-once wrapper owns the whole configured bear-system universe so
-a previously held fund remains sellable after it becomes unavailable or leaves
-the target.
+The baseline stock satellite ranking is not mutated, because doing so would
+violate off/shadow parity and risk-on invariance. Instead, the overlay refuses
+to engage while a configured bear symbol is selected or age-tracked by the
+satellite sleeve, or while an unprovenanced holding creates a role collision.
+Only symbols actually targeted by this subsystem enter `_sx_bear_owned`, and
+they remain sellable after becoming unavailable, leaving the target, or
+changing mode until their position is flat.
+
+Shadow's extra broker fetches do not leak into baseline satellite selection.
+The wrapper uses an off-equivalent baseline price view: bear-only prices added
+by shadow preparation are excluded unless the symbol was already in the
+incoming strategy symbol set. Overlay evaluation uses a separate effective
+bear-price view. If an active backtest sees an unprovenanced bear holding, it
+raises `BearSystemStateError` and invalidates the research run for explicit
+reconciliation rather than silently managing or abandoning the position.
+
+The broker also injects `_strategy_x_bear_residual_conflict` when its configured
+bear leg matches the Strategy X kicker. That flag suppresses the Strategy X
+kicker before it can establish ownership, avoiding two allocators for SQQQ.
 
 All history passes through `pit_daily_closes`. Quotes take precedence over the
 last visible close. A fund with insufficient history is unavailable rather than
@@ -232,8 +282,12 @@ backfilled, guessed, or treated as a zero-return asset.
 ## 12. Research harness
 
 Add `scripts/strategy_x_bear_research.py`. It drives the real `StrategyX` class
-bar by bar with next-bar fills and a fixed two-basis-point one-way cost. It
-compares four predeclared arms:
+continuously from a common inception, preserving positions, pending orders, and
+cache state across every reporting boundary. Window metrics are slices from
+those continuous ledgers, never fresh portfolio resets. A decision after
+session `t` receives that session's now-visible adjusted close and bars; orders
+fill exactly at the next trading session's adjusted close `t+1`, with a fixed
+two-basis-point one-way cost. It compares four predeclared arms:
 
 1. current baseline (`off`);
 2. `shadow`, which must have identical equity and orders;
@@ -244,6 +298,20 @@ The script downloads adjusted QQQ, TQQQ, SPY, BIL, SQQQ, DBMF, KMLM, and CTA
 prices. It uses the expanding fund universe point in time: a fund becomes
 eligible only after 60 actual observations. It reports missing-history periods
 explicitly.
+
+The canonical report retains the normalized input matrix (or a lossless
+compressed copy) plus its SHA-256 digest, provider timestamps, and package
+versions. Custom date ranges or CSVs are diagnostic and cannot emit a
+promotable verdict. Any unavailable required slice or requested order that
+cannot fill on its next row invalidates the run. SPY uses the same executable
+entry date and two-basis-point cost convention as the strategy arms. The report
+states that the three currently surviving managed-futures ETFs create product
+selection and survivorship bias.
+
+For any sliced interval, component P&L is ending market value minus starting
+market value, plus net sale proceeds, minus buys. Costs are already embedded in
+those cash flows: they are disclosed separately but never added twice. Symbol
+P&L must sum to the interval's change in NAV.
 
 Frozen evaluation slices include:
 
@@ -269,15 +337,23 @@ bear_kicker_cooldown_bars = (5, 10)
 
 Duplicate combinations created by a zero kicker weight are removed. The moving
 averages, fund universe, minimum history, defensive symbol, costs, and fill
-model remain frozen. The search period ends on 2022-12-31. Windows beginning in
-2023 or later are locked validation and may not influence candidate selection.
+model remain frozen. The pipeline first evaluates candidates only through
+2022-12-31, freezes the selected candidate ID/config and normalized-input
+digest, and only then runs that one candidate through the 2023+ locked holdout.
+Holdout rows are not computed for losing candidates and may not influence
+candidate selection. Because those dates were observed before this design was
+written, the report calls them a locked holdout or pseudo-out-of-sample check,
+not unseen validation.
 
 Candidate selection is lexicographic: first minimize the count of search-window
 no-harm violations, then maximize the worst bear-window excess return over the
 baseline, then maximize median bear excess return, then minimize turnover. The
+non-overlapping two-month lattice is the only input to candidate ranking. Named
+crisis and recovery windows remain independent strict gates and reporting
+slices, so overlapping events are not double-weighted during selection. The
 script reports a diagnostic winner even when every candidate fails, but labels
-it non-promotable. Changing the grid or ranking rule requires a reviewable source
-diff.
+it non-promotable. Changing the grid or ranking rule requires a reviewable
+source diff.
 
 ## 13. Tests
 
@@ -293,7 +369,10 @@ Unit tests cover:
 - no direct TQQQ-to-SQQQ flip;
 - mutual exclusion with the legacy bear leg;
 - universe declaration and symbol normalization;
-- exclusion from the stock satellite sleeve;
+- role-collision refusal without changing the baseline stock satellite ranking;
+- provenance-based ownership, active-to-off unwind, and refusal to claim an
+  unprovenanced holding;
+- research-only runtime authorization for active mode;
 - exact `off` versus `shadow` order and sizing parity; and
 - active end-to-end buy and exit behavior through `StrategyX.run_once`.
 
@@ -313,7 +392,11 @@ research-only setting until all gates pass on frozen data:
    than baseline.
 5. The full comparable interval has CAGR no lower than baseline and maximum
    drawdown no worse than baseline.
-6. The full system beats the defense-only arm; otherwise SQQQ remains disabled.
+6. Defense-only and SQQQ receive separate verdicts. The defensive subsystem may
+   promote only if its arm clears every no-harm gate. SQQQ may promote only if
+   the full arm also clears every no-harm gate and has strictly higher terminal
+   return than defense-only over the all-funds common interval; otherwise the
+   kicker remains disabled without automatically rejecting a passing defense.
 7. Results include actual fund availability, next-bar fills, costs, trade count,
    turnover, and component P&L.
 8. A future paper-trading shadow period shows no order-parity or data failures.
@@ -325,11 +408,19 @@ shadow and the current Strategy X behavior stays in force.
 ## 15. Failure handling
 
 - Invalid mode: act as `off` and log the invalid value once per session.
-- Missing QQQ history: retain Strategy X's existing refusal to trade.
+- Missing QQQ history: retain Strategy X's existing refusal to open or resize,
+  but first unwind any priceable provenance-owned bear position.
 - Missing BIL price: use baseline targets unchanged.
 - Missing managed-futures history: omit that fund and reweight eligible funds.
 - Missing SQQQ price: suppress the kicker and retain the defensive allocation.
 - Legacy/new-system conflict: suppress the new system and retain legacy behavior.
+- Runtime mode other than `backtest`: active acts as shadow and cannot change
+  executable targets.
+- Active-backtest provenance loss: raise a bear-state error and invalidate the
+  run for explicit reconciliation.
+- Residual-sleeve kicker collision: suppress the Strategy X kicker before entry.
+- Unavailable required research window or missed simulated fill: invalidate the
+  artifact and make every promotion verdict false.
 - Weight or finite-number error: reject the overlay and retain baseline targets.
 
 No failure may silently increase TQQQ, SQQQ, total target weight, or cash demand.
