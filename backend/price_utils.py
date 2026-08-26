@@ -122,9 +122,13 @@ def get_bars_chunk_cached(
                     if doc.get("compressed"):
                         raw = gzip.decompress(base64.b64decode(raw)).decode("utf-8")
                     bars = json.loads(raw)
-                    if isinstance(bars, list) and _cache_chunk_is_complete(bars, chunk_start, chunk_end):
+                    if (isinstance(bars, list) and bars
+                            and _cache_chunk_is_complete(
+                                bars, chunk_start, chunk_end)):
                         return (bars, True)
-                    # Coverage check failed — fall through to refetch and overwrite.
+                    # Coverage failed, or an earlier credential/network failure
+                    # cached ``[]`` as if it proved there were no market bars.
+                    # Empty history is not authoritative: refetch it.
         except Exception:
             pass
     bars = fetch_fn()
@@ -137,10 +141,13 @@ def get_bars_chunk_cached(
             if len(bars_json) > _BARS_COMPRESS_THRESHOLD:
                 payload = base64.b64encode(gzip.compress(bars_json.encode("utf-8"))).decode("ascii")
                 compressed = True
-            # Skip cache write when coverage looks bad — better to re-hit
-            # the API next time than to lock in another stale chunk. Empty
-            # responses ARE legitimately cached (delisted symbols, gaps).
-            should_persist = (not bars) or _cache_chunk_is_complete(bars, chunk_start, chunk_end)
+            # Skip cache writes when coverage looks bad or the response is
+            # empty. The fetch layer cannot distinguish a legitimate gap from
+            # missing credentials, a 401, or another transient failure, so an
+            # empty response must remain retryable rather than poisoning every
+            # later backtest that shares this cache key.
+            should_persist = bool(bars) and _cache_chunk_is_complete(
+                bars, chunk_start, chunk_end)
             if should_persist:
                 _store.insert(table_name, {
                     "id": cache_id,
