@@ -1,4 +1,4 @@
-# INTELLISTOCK_SCHEMA: {"strategy": "strategy_x", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_x_enabled": false, "core_bull_symbol": "TQQQ", "core_chop_symbol": "SPY", "core_bear_symbol": "", "core_weight": 0.9, "core_band_pct": 0.05, "core_filter_symbol": "QQQ", "core_filter_ma_bars": 200, "core_vol_bars": 20, "core_vol_gate_mult": 2.25, "core_vol_median_bars": 252, "core_vol_median_min_samples": 60, "core_bear_weight": 0.35, "core_bear_short_ma_bars": 50, "core_bear_vol_expansion": 1.4, "core_bear_drawdown_pct": 0.15, "core_bear_lookback_bars": 252, "core_bear_min_confirm": 4, "core_bear_max_bars": 40, "core_bear_cooldown_bars": 20, "core_bear_exit_grace_bars": 2, "satellite_pct": 0.0, "satellite_max_names": 6, "satellite_exit_rank": 12, "satellite_min_hold_bars": 21, "core_vol_target": 0.0, "core_vol_scale_min": 0.3, "core_vol_scale_max": 1.0, "core_leverage_factor": 3.0, "satellite_momentum_bars": 60, "satellite_min_price": 0.0, "commodity_pct": 0.0, "commodity_symbols": ["GLD", "SLV", "USO", "UNG", "GDX", "XLE", "DBA", "CPER"], "commodity_max_names": 2, "commodity_mom_bars": 60, "commodity_trend_bars": 100, "min_order_usd": 50.0, "cost_haircut_pct": 0.006, "broker_max_single_position_pct": 0.95, "core_once_per_session": true}}
+# INTELLISTOCK_SCHEMA: {"strategy": "strategy_x", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_x_enabled": false, "core_bull_symbol": "TQQQ", "core_chop_symbol": "SPY", "core_bear_symbol": "", "core_weight": 0.9, "core_band_pct": 0.05, "core_filter_symbol": "QQQ", "core_filter_ma_bars": 200, "core_vol_bars": 20, "core_vol_gate_mult": 2.25, "core_vol_median_bars": 252, "core_vol_median_min_samples": 60, "core_bear_weight": 0.35, "core_bear_short_ma_bars": 50, "core_bear_vol_expansion": 1.4, "core_bear_drawdown_pct": 0.15, "core_bear_lookback_bars": 252, "core_bear_min_confirm": 4, "core_bear_max_bars": 40, "core_bear_cooldown_bars": 20, "core_bear_exit_grace_bars": 2, "bear_system_mode": "off", "bear_cash_symbol": "BIL", "crisis_alpha_symbols": ["DBMF", "KMLM", "CTA"], "crisis_alpha_pct": 0.2, "crisis_alpha_min_history_bars": 60, "bear_kicker_symbol": "SQQQ", "bear_kicker_pct": 0.05, "bear_kicker_fast_ma_bars": 20, "bear_kicker_mid_ma_bars": 50, "bear_kicker_long_ma_bars": 200, "bear_kicker_max_bars": 5, "bear_kicker_cooldown_bars": 10, "satellite_pct": 0.0, "satellite_max_names": 6, "satellite_exit_rank": 12, "satellite_min_hold_bars": 21, "core_vol_target": 0.0, "core_vol_scale_min": 0.3, "core_vol_scale_max": 1.0, "core_leverage_factor": 3.0, "satellite_momentum_bars": 60, "satellite_min_price": 0.0, "commodity_pct": 0.0, "commodity_symbols": ["GLD", "SLV", "USO", "UNG", "GDX", "XLE", "DBA", "CPER"], "commodity_max_names": 2, "commodity_mom_bars": 60, "commodity_trend_bars": 100, "min_order_usd": 50.0, "cost_haircut_pct": 0.006, "broker_max_single_position_pct": 0.95, "core_once_per_session": true}}
 # INTELLISTOCK_DESCRIPTION: Leveraged Nasdaq core (TQQQ) with a de-lever filter to SPY. Direction is NOT predicted — a trend + volatility filter decides only WHETHER to be levered. Replaying this module over 15.7y of real closes (next-bar fills, point-in-time): CAGR 33.97%, maxDD -48.5%, Sharpe 0.88, 99.6x vs SPY's 8.5x, 4 years above +100%. The inverse (SQQQ) leg DEFAULTS OFF (-4.2% CAGR). The stock satellite is worth turning ON: with `satellite_pct=0.2` + `commodity_pct=0.2` it measures +7,140% compounded over 81 rolling 2-month windows vs SPY's +473%, beating SPY in 68% of them. (The old "satellite costs -4.0pp" figure was measured while a band bug kept the sleeve from ever opening a position - it held nothing.) Needs QQQ+TQQQ+SPY in the instance universe and granularity 86400. DIFFICULTY: 2
 # DIFFICULTY: 2
 """IntelliStock — Strategy X: leveraged core, filtered.
@@ -117,6 +117,7 @@ DEFAULT OFF. `strategy_x_enabled` is false, so attaching this changes nothing.
 """
 from __future__ import annotations
 
+import math
 import os
 import sys
 
@@ -136,6 +137,15 @@ from strategy_x import (  # noqa: E402
     select_satellite,
     strategy_x_universe,
     targets_to_orders,
+)
+from strategy_x_bear import (  # noqa: E402
+    BearSystemStateError,
+    advance_kicker,
+    bear_role_conflict,
+    bear_system_mode,
+    eligible_crisis_alpha,
+    fast_crash_signal,
+    plan_bear_overlay,
 )
 
 # Route through intellistock_logger, NOT print(). The backtest engine runs the
@@ -205,6 +215,22 @@ class StrategyX:
 
         prices = prices or {}
         cache = strategy_cache if isinstance(strategy_cache, dict) else {}
+        bear_mode = bear_system_mode(cfg)
+        raw_bear_mode = str(
+            cfg.get("bear_system_mode", "off") or "off"
+        ).strip().lower()
+        invalid_bear_mode = raw_bear_mode not in {"off", "shadow", "active"}
+        active_backtest = (bear_mode == "active"
+                           and str(mode or "").strip().lower() == "backtest")
+        incoming_symbols = {
+            str(symbol).strip().upper() for symbol in (symbols or []) if symbol
+        }
+        prior_bear_owned = {
+            str(symbol).strip().upper()
+            for symbol in (cache.get("_sx_bear_owned") or []) if symbol
+        }
+        prior_kicker_targeted = bool(cache.get("_sx_bear_kicker_targeted", False))
+        prior_satellite_ages = set(cache.get("_sx_sat_ages") or {})
 
         try:
             nav = float(portfolio_emulator.get_portfolio_value(prices) or 0.0)
@@ -221,7 +247,36 @@ class StrategyX:
         bull = str(cfg.get("core_bull_symbol", "TQQQ") or "TQQQ").strip().upper()
         chop = str(cfg.get("core_chop_symbol", "SPY") or "SPY").strip().upper()
         bear = str(cfg.get("core_bear_symbol", "") or "").strip().upper()
-        owned = {s for s in (bull, chop, bear) if s}
+        owned = {s for s in (bull, chop, bear) if s} | prior_bear_owned
+        bear_cash = str(cfg.get("bear_cash_symbol", "BIL") or "").strip().upper()
+        bear_managers = {
+            str(symbol).strip().upper()
+            for symbol in (cfg.get("crisis_alpha_symbols") or []) if symbol
+        }
+        kicker_symbol = str(
+            cfg.get("bear_kicker_symbol", "SQQQ") or ""
+        ).strip().upper()
+        configured_bear_symbols = ({bear_cash, kicker_symbol} | bear_managers) - {""}
+        held_symbols = {
+            str(symbol).strip().upper()
+            for symbol, quantity in positions.items()
+            if float(quantity or 0.0) > 0
+        }
+        static_conflict = bear_role_conflict(cfg)
+        if (active_backtest and not bear and not static_conflict
+                and (held_symbols & configured_bear_symbols) - prior_bear_owned):
+            unknown = sorted((held_symbols & configured_bear_symbols)
+                             - prior_bear_owned)
+            raise BearSystemStateError(
+                "unprovenanced active bear holding(s): " + ", ".join(unknown)
+            )
+        if (active_backtest
+                and _truthy(cfg.get("_strategy_x_bear_residual_conflict", False))
+                and kicker_symbol in prior_bear_owned):
+            raise BearSystemStateError(
+                f"{kicker_symbol} already has Strategy X provenance while the "
+                "broker residual sleeve reports competing ownership"
+            )
 
         # ── ONE DECISION PER SESSION ──────────────────────────────────────
         # This is a daily strategy: the filter reads daily closes and it was
@@ -234,6 +289,9 @@ class StrategyX:
         if cfg.get("core_once_per_session", True) and day_key:
             if cache.get("_sx_last_decision_day") == day_key:
                 return {}
+        if invalid_bear_mode:
+            _log(f"StrategyX: invalid bear_system_mode={raw_bear_mode!r}; "
+                 "using off", "yellow")
 
         closes = pit_daily_closes(_bars_for(data, filt), current_time)
 
@@ -254,8 +312,41 @@ class StrategyX:
                     "Widen the window or use granularity=86400."), "red")
             cache["_strategy_x_last"] = {"risk_on": False, "reason": "refused: "
                                          f"{len(closes)} < {need} closes",
-                                         "n_closes": len(closes)}
-            return {}
+                                         "n_closes": len(closes),
+                                         "targets": {},
+                                         "bear_system_mode": bear_mode,
+                                         "bear_overlay_reason":
+                                             "insufficient filter history"}
+            if not prior_bear_owned:
+                return {}
+            exit_prices = dict(prices)
+            for symbol in prior_bear_owned:
+                if float(exit_prices.get(symbol) or 0.0) > 0:
+                    continue
+                visible = pit_daily_closes(_bars_for(data, symbol), current_time)
+                if visible and float(visible[-1]) > 0:
+                    exit_prices[symbol] = float(visible[-1])
+            decisions, sizes = targets_to_orders(
+                {}, nav=nav, positions=positions, prices=exit_prices,
+                cash=cash, config=cfg, owned=prior_bear_owned,
+            )
+            cache["_sx_bear_owned"] = sorted(
+                symbol for symbol in prior_bear_owned
+                if symbol in held_symbols or prior_kicker_targeted
+            )
+            cache["_sx_bear_kicker_targeted"] = False
+            if not decisions:
+                return {}
+            sizes["_cash_reserve_floor_pct"] = 0.0
+            sizes["_cash_reserve_floor_hard"] = False
+            out = dict(decisions)
+            out["_nexus_discovered"] = strategy_x_universe(cfg)
+            out["_nexus_position_sizes"] = sizes
+            out["_nexus_executable_buys"] = []
+            out["_nexus_sell_enforcement"] = sorted(
+                symbol for symbol, decision in decisions.items() if decision == -1
+            )
+            return out
 
         sig = core_signal(closes, cfg)
         # Continuous de-levering, computed from the same PIT closes the
@@ -281,13 +372,20 @@ class StrategyX:
         # number a quote would carry on this bar. `pit_daily_closes` applies the
         # same cutoff the core filter uses, so this adds no lookahead. Quotes
         # always win where they exist; this only fills gaps.
-        eff_prices = dict(prices or {})
+        broker_only_bear = (configured_bear_symbols - incoming_symbols
+                            if bear_mode in {"shadow", "active"} else set())
+        eff_prices = {
+            str(symbol).strip().upper(): value
+            for symbol, value in (prices or {}).items()
+            if str(symbol).strip().upper() not in broker_only_bear
+        }
         if float(cfg.get("satellite_pct", 0.0) or 0.0) > 0 and isinstance(data, dict):
             _conv = data.get("conviction_scores") or {}
             if isinstance(_conv, dict):
                 for _sym in _conv:
                     _s = str(_sym).strip().upper()
-                    if not _s or float(eff_prices.get(_s) or 0.0) > 0:
+                    if (not _s or _s in broker_only_bear
+                            or float(eff_prices.get(_s) or 0.0) > 0):
                         continue
                     _c = pit_daily_closes(_bars_for(data, _s), current_time)
                     if _c and _c[-1] > 0:
@@ -421,6 +519,214 @@ class StrategyX:
                                       commodity_ranked=com_ranked,
                                       bear_engaged=bear_on,
                                       vol_scale=vol_scale)
+        selected_targets = dict(targets)
+        overlay_reason = "bear system is off"
+        bear_prices = dict(eff_prices)
+        if bear_mode in {"shadow", "active"}:
+            state_keys = (
+                "_sx_bear_system_state",
+                "_sx_bear_kicker_bars",
+                "_sx_bear_kicker_cooldown",
+                "_sx_bear_state_version",
+                "_sx_bear_kicker_entry_day",
+            )
+            state_before = {
+                key: (key in cache, cache.get(key)) for key in state_keys
+            }
+            manager_symbols = [
+                str(symbol).strip().upper()
+                for symbol in (cfg.get("crisis_alpha_symbols") or []) if symbol
+            ]
+            bear_prices.update({
+                str(symbol).strip().upper(): value
+                for symbol, value in prices.items()
+            })
+            for symbol in [
+                str(cfg.get("bear_cash_symbol", "BIL") or "").strip().upper(),
+                *manager_symbols,
+                str(cfg.get("bear_kicker_symbol", "SQQQ") or "").strip().upper(),
+            ]:
+                if not symbol or float(bear_prices.get(symbol) or 0.0) > 0:
+                    continue
+                visible = pit_daily_closes(_bars_for(data, symbol), current_time)
+                if visible and float(visible[-1]) > 0:
+                    bear_prices[symbol] = float(visible[-1])
+            manager_closes = {
+                symbol: pit_daily_closes(_bars_for(data, symbol), current_time)
+                for symbol in manager_symbols
+            }
+            eligible = eligible_crisis_alpha(manager_closes, bear_prices, cfg)
+            unavailable = tuple(symbol for symbol in manager_symbols
+                                if symbol not in eligible)
+            crash = fast_crash_signal(closes, cfg)
+            kicker = kicker_symbol
+            cached_state = cache.get("_sx_bear_system_state", "idle")
+            cached_bars = cache.get("_sx_bear_kicker_bars", 0)
+            cached_cooldown = cache.get("_sx_bear_kicker_cooldown", 0)
+            cache_valid = (
+                cache.get("_sx_bear_state_version") == 1
+                and str(cached_state or "").strip().lower()
+                in {"idle", "armed", "holding", "cooldown"}
+            )
+            if not cache_valid:
+                cached_state, cached_bars, cached_cooldown = "idle", 0, 0
+                if kicker in prior_bear_owned and kicker in held_symbols:
+                    # Provenance proves the holding is ours, but the missing
+                    # state cannot prove its age. An invalid counter forces the
+                    # pure policy into a full cooldown and immediate exit.
+                    cached_bars = float("nan")
+            elif str(cached_state).strip().lower() == "holding":
+                try:
+                    from datetime import date as _date
+
+                    entry_date = _date.fromisoformat(str(
+                        cache.get("_sx_bear_kicker_entry_day") or ""
+                    ))
+                    decision_date = _date.fromisoformat(day_key)
+                    if entry_date > decision_date:
+                        raise ValueError("future kicker entry day")
+                except (TypeError, ValueError):
+                    cached_bars = float("nan")
+
+            def _safe_persisted_count(value):
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    return float("nan")
+                number = float(value)
+                if (not math.isfinite(number) or not number.is_integer()
+                        or number < 0 or number > 100_000):
+                    return float("nan")
+                return int(number)
+
+            kicker_decision = advance_kicker(
+                crash,
+                state=cached_state,
+                bars=_safe_persisted_count(cached_bars),
+                cooldown=_safe_persisted_count(cached_cooldown),
+                risk_on=bool(sig.risk_on),
+                bull_held=bull in held_symbols,
+                kicker_held=kicker in held_symbols,
+                kicker_priceable=float(bear_prices.get(kicker) or 0.0) > 0,
+                shadow=bear_mode == "shadow",
+                prior_targeted=prior_kicker_targeted,
+                config=cfg,
+            )
+            overlay_cfg = dict(cfg, bear_system_mode="active")
+            dynamic_overlap = sorted(
+                configured_bear_symbols
+                & (set(ranked) | prior_satellite_ages
+                   | set(cache.get("_sx_sat_ages") or {}))
+            )
+            residual_conflict = _truthy(
+                cfg.get("_strategy_x_bear_residual_conflict", False)
+            )
+            if dynamic_overlap:
+                overlay_cfg["bear_system_mode"] = "off"
+            allocation = plan_bear_overlay(
+                targets, risk_on=bool(sig.risk_on), config=overlay_cfg,
+                eligible_symbols=eligible,
+                kicker_engaged=(kicker_decision.engaged
+                                and not residual_conflict),
+                prices=bear_prices,
+            )
+            proposed_targets = dict(allocation.targets)
+            reason = allocation.reason
+            refusal_reason = ""
+            if dynamic_overlap:
+                reason = "role conflict: satellite selection/age contains " + ", ".join(
+                    dynamic_overlap
+                )
+                refusal_reason = reason
+                proposed_targets = dict(targets)
+            elif static_conflict:
+                refusal_reason = f"role conflict: {static_conflict}"
+            elif bear:
+                refusal_reason = "legacy bear configuration is enabled"
+            if residual_conflict:
+                refusal_reason = "broker residual-sleeve kicker conflict"
+                if allocation.applied:
+                    reason = "bear overlay applied; kicker suppressed by residual sleeve"
+            if bear_mode == "active" and not active_backtest:
+                refusal_reason = "research-only runtime"
+            delta = {
+                symbol: round(proposed_targets.get(symbol, 0.0)
+                              - targets.get(symbol, 0.0), 6)
+                for symbol in sorted(set(targets) | set(proposed_targets))
+                if round(proposed_targets.get(symbol, 0.0)
+                         - targets.get(symbol, 0.0), 6) != 0
+            }
+            overlay_reason = reason
+            if active_backtest and allocation.applied and not dynamic_overlap:
+                selected_targets = dict(proposed_targets)
+            cache["_sx_bear_system_state"] = kicker_decision.state
+            cache["_sx_bear_kicker_bars"] = kicker_decision.bars
+            cache["_sx_bear_kicker_cooldown"] = kicker_decision.cooldown
+            cache["_sx_bear_state_version"] = 1
+            prior_entry = cache.get("_sx_bear_kicker_entry_day", "")
+            if kicker_decision.state == "holding":
+                cache["_sx_bear_kicker_entry_day"] = (
+                    str(prior_entry) if prior_entry else day_key
+                )
+            else:
+                cache["_sx_bear_kicker_entry_day"] = ""
+            kicker_targeted = (active_backtest and kicker in selected_targets)
+            cache["_sx_bear_kicker_targeted"] = bool(kicker_targeted)
+            newly_owned = (
+                configured_bear_symbols & set(selected_targets)
+                if active_backtest and allocation.applied and not dynamic_overlap
+                else set()
+            )
+            retained_owned = {
+                symbol for symbol in prior_bear_owned
+                if (symbol in held_symbols
+                    or float(selected_targets.get(symbol, 0.0) or 0.0) > 0
+                    or prior_kicker_targeted)
+            }
+            cache["_sx_bear_owned"] = sorted(retained_owned | newly_owned)
+            owned |= retained_owned | newly_owned
+            cache["_sx_bear_shadow"] = {
+                "mode": bear_mode,
+                "core_state": "risk_on" if sig.risk_on else "risk_off",
+                "core_reason": sig.reason,
+                "state": kicker_decision.state,
+                "reason": reason,
+                "refusal_reason": refusal_reason,
+                "eligible_managers": list(eligible),
+                "unavailable_managers": list(unavailable),
+                "signal": {
+                    "stacked": crash.stacked,
+                    "fresh": crash.fresh,
+                    "below_fast": crash.below_fast,
+                    "reason": crash.reason,
+                },
+                "kicker": {
+                    "symbol": kicker,
+                    "state": kicker_decision.state,
+                    "engaged": kicker_decision.engaged,
+                    "bars": kicker_decision.bars,
+                    "cooldown": kicker_decision.cooldown,
+                    "reason": kicker_decision.reason,
+                },
+                "baseline_targets": dict(targets),
+                "proposed_targets": proposed_targets,
+                "target_delta": delta,
+            }
+            _log(
+                f"StrategyX bear mode={bear_mode} | {reason}"
+                f"{f' | refused={refusal_reason}' if refusal_reason else ''}"
+                f" | eligible={list(eligible)} | kicker={kicker_decision.state}"
+                f" | provenance={sorted(cache['_sx_bear_owned'])}"
+                f" | delta={delta}",
+                "cyan" if allocation.applied else "yellow",
+            )
+            if bear or static_conflict or dynamic_overlap:
+                # A hard ownership/configuration conflict is observational:
+                # it may publish refusal telemetry and unwind old provenance,
+                # but it cannot move the new kicker state machine forward.
+                for key, (was_present, value) in state_before.items():
+                    if was_present:
+                        cache[key] = value
+                    else:
+                        cache.pop(key, None)
         if bsig is not None and not sig.risk_on:
             _log(f"  bear gate: {bsig.reason}"
                  + (f" | held {cache.get('_sx_bear_bars', 0)} bars"
@@ -429,8 +735,15 @@ class StrategyX:
                     if cache.get("_sx_bear_cooldown") else ""),
                  "red" if bear_on else "white")
         decisions, sizes = targets_to_orders(
-            targets, nav=nav, positions=positions, prices=eff_prices,
+            selected_targets, nav=nav, positions=positions,
+            prices={**eff_prices, **bear_prices},
             cash=cash, config=cfg, owned=owned)
+        if bear_mode == "off" and prior_bear_owned:
+            cache["_sx_bear_owned"] = sorted(
+                symbol for symbol in prior_bear_owned
+                if symbol in held_symbols or prior_kicker_targeted
+            )
+            cache["_sx_bear_kicker_targeted"] = False
 
         # A traded leg with no quote is not a no-op — it is the whole strategy
         # silently not running, and the self-censor in targets_to_orders (skip
@@ -446,7 +759,7 @@ class StrategyX:
         # bar, whether or not it produced an order.
         _log(f"StrategyX {'RISK-ON' if sig.risk_on else 'RISK-OFF'} | "
              f"{sig.reason} | targets="
-             f"{ {k: round(v, 4) for k, v in targets.items()} } | "
+             f"{ {k: round(v, 4) for k, v in selected_targets.items()} } | "
              f"orders={len(decisions)} | nav=${nav:,.0f} | closes={len(closes)}",
              "cyan" if sig.risk_on else "yellow")
         for note in notes:
@@ -475,8 +788,10 @@ class StrategyX:
             "ma": sig.ma,
             "rvol": sig.rvol,
             "rvol_median": sig.rvol_median,
-            "targets": dict(targets),
+            "targets": dict(selected_targets),
             "n_closes": len(closes),
+            "bear_system_mode": bear_mode,
+            "bear_overlay_reason": overlay_reason,
         }
 
         if day_key:

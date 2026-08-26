@@ -6934,6 +6934,31 @@ def run_run_once_strategies(specs, symbols, prices, current_time, data=None, por
             config["_telemetry_instance_id"] = broker_instance_id or None
             conditions["_telemetry_backtest_id"] = broker_backtest_id or None
             conditions["_telemetry_instance_id"] = broker_instance_id or None
+            if name.strip().lower() in {"strategy_x", "strategyx"}:
+                # Strategy X's research kicker and the residual sleeve must
+                # never both own the same inverse ETF. This is injected into
+                # the per-call copy only; the stored strategy spec is untouched.
+                try:
+                    _sx_residual = _residual_sleeve_config(specs) or {}
+                    _sx_kicker = str(
+                        config.get("bear_kicker_symbol", "SQQQ") or ""
+                    ).strip().upper()
+                    _sx_residual_bear = str(
+                        _sx_residual.get("bear_symbol", "") or ""
+                    ).strip().upper()
+                    _sx_residual_conflict = bool(
+                        _sx_residual.get("enabled", False)
+                        and _sx_kicker
+                        and _sx_kicker == _sx_residual_bear
+                    )
+                except Exception:
+                    # An unverifiable owner is not evidence that the ticker is
+                    # free. Strategy X may continue its defense-only overlay,
+                    # but the kicker is suppressed.
+                    _sx_residual_conflict = True
+                config["_strategy_x_bear_residual_conflict"] = (
+                    _sx_residual_conflict
+                )
             with telemetry_llm_call_context(
                 backtest_id=broker_backtest_id or None,
                 instance_id=broker_instance_id or None,
