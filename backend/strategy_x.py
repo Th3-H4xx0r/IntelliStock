@@ -70,6 +70,8 @@ import math
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 
+from strategy_x_bear import bear_system_universe
+
 #: Sessions are grouped on the exchange calendar, never on UTC. See
 #: `pit_daily_closes` for the measurement that made this necessary.
 _NY = ZoneInfo("America/New_York")
@@ -149,6 +151,19 @@ DEFAULTS = {
     "core_bear_max_bars": 40,         # hard time limit; decay is -6*sigma^2
     "core_bear_cooldown_bars": 20,    # stay down after the limit, or it cycles
     "core_bear_exit_grace_bars": 2,   # ride out a 1-bar confirm flicker
+    # ── bear system (OFF) ──
+    "bear_system_mode": "off",
+    "bear_cash_symbol": "BIL",
+    "crisis_alpha_symbols": ["DBMF", "KMLM", "CTA"],
+    "crisis_alpha_pct": 0.20,
+    "crisis_alpha_min_history_bars": 60,
+    "bear_kicker_symbol": "SQQQ",
+    "bear_kicker_pct": 0.05,
+    "bear_kicker_fast_ma_bars": 20,
+    "bear_kicker_mid_ma_bars": 50,
+    "bear_kicker_long_ma_bars": 200,
+    "bear_kicker_max_bars": 5,
+    "bear_kicker_cooldown_bars": 10,
     # ── satellite (OFF) ──
     "satellite_pct": 0.0,
     "satellite_max_names": 6,
@@ -653,6 +668,7 @@ def strategy_x_universe(config) -> list:
     if _f(cfg, "commodity_pct") > 0:
         syms += [str(s).strip().upper()
                  for s in (cfg.get("commodity_symbols") or []) if s]
+    syms += bear_system_universe(cfg)
     seen, out = set(), []
     for s in syms:
         if s and s not in seen:

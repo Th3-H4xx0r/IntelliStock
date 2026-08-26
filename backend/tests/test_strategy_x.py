@@ -557,3 +557,24 @@ def test_universe_omits_the_commodity_sleeve_when_it_is_off():
     u = strategy_x_universe(bcfg(commodity_pct=0.0,
                                  commodity_symbols=["GLD", "USO"]))
     assert "GLD" not in u
+
+
+def test_bear_system_defaults_are_inert_and_preserve_the_core_universe():
+    """Removing the mode guard must not expand the ordinary Strategy X feed."""
+    assert DEFAULTS["bear_system_mode"] == "off"
+    assert strategy_x_universe(DEFAULTS) == ["QQQ", "TQQQ", "SPY"]
+
+
+@pytest.mark.parametrize("mode", ["shadow", "active"])
+def test_bear_system_modes_declare_the_complete_research_universe(mode):
+    """A shadow/active overlay cannot decide from bars the broker never got."""
+    assert strategy_x_universe({**DEFAULTS, "bear_system_mode": mode}) == [
+        "QQQ", "TQQQ", "SPY", "BIL", "DBMF", "KMLM", "CTA", "SQQQ",
+    ]
+
+
+def test_invalid_bear_system_mode_does_not_expand_the_core_universe():
+    """A typo must fail closed rather than quietly start a research sleeve."""
+    assert strategy_x_universe({**DEFAULTS, "bear_system_mode": "paper"}) == [
+        "QQQ", "TQQQ", "SPY",
+    ]
