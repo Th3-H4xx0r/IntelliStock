@@ -7077,6 +7077,14 @@ def run_run_once_strategies(specs, symbols, prices, current_time, data=None, por
                 _log(f"Run-once strategy '{name}' returned scores for {len(out_scores)} symbols{extra}", "cyan")
         except Exception as e:
             _log(f"Run-once strategy '{name}' error: {e}", "red")
+            if name.strip().lower() in {"strategy_x", "strategyx"}:
+                from strategy_x_bear import BearSystemStateError
+
+                if isinstance(e, BearSystemStateError):
+                    # This error means continuing would let two subsystems
+                    # exercise authority over the same holding. A backtest that
+                    # suppresses it is invalid, not a strategy no-op.
+                    raise
             if name.strip().lower() == "graph_nexus_analysis":
                 from point_in_time_data import PointInTimeDataError
 

@@ -263,7 +263,7 @@ class StrategyX:
             if float(quantity or 0.0) > 0
         }
         static_conflict = bear_role_conflict(cfg)
-        if (active_backtest and not bear and not static_conflict
+        if (active_backtest
                 and (held_symbols & configured_bear_symbols) - prior_bear_owned):
             unknown = sorted((held_symbols & configured_bear_symbols)
                              - prior_bear_owned)
@@ -406,6 +406,10 @@ class StrategyX:
             # a memory — Nexus rotates its candidate set daily, so a held name
             # is usually absent from it entirely.
             ages = dict(cache.get("_sx_sat_ages") or {})
+            selection_ages = {
+                symbol: age for symbol, age in ages.items()
+                if symbol not in prior_bear_owned
+            }
             # The sleeve's book is what it TARGETED, not what the emulator
             # currently reports. Fills land on the NEXT bar, so a name chosen
             # last bar is not in `positions` yet — gating the minimum hold on
@@ -413,9 +417,15 @@ class StrategyX:
             # the bar it most needed protecting, and the book churned anyway.
             # Measured: with the holdings gate, only 1 of 4 names survived a bar.
             mine = set(ages) | {s for s in ages if s in held_syms}
+            ranked_candidates = [
+                symbol for symbol in self._ranked(
+                    cfg, data, prices=eff_prices, as_of=current_time,
+                )
+                if symbol not in prior_bear_owned
+            ]
             ranked = select_satellite(
-                self._ranked(cfg, data, prices=eff_prices, as_of=current_time),
-                set(ages), cfg, ages=ages)
+                ranked_candidates, set(selection_ages), cfg,
+                ages=selection_ages)
             # EVERY name this sleeve has ever bought and still holds must stay
             # in `owned`, or `targets_to_orders` cannot sell it: a position that
             # drops out of the ranking would fall outside the sell scope and
@@ -425,7 +435,7 @@ class StrategyX:
             # Age only the names still selected. A name that drops out leaves
             # `ages`, which is what makes it exitable — but it stays in `owned`
             # via `mine` for this bar so the SELL can actually be emitted.
-            ages = {s: ages.get(s, 0) + 1 for s in ranked}
+            ages = {s: selection_ages.get(s, 0) + 1 for s in ranked}
             cache["_sx_sat_ages"] = ages
 
         com_ranked = []
@@ -560,22 +570,110 @@ class StrategyX:
                                 if symbol not in eligible)
             crash = fast_crash_signal(closes, cfg)
             kicker = kicker_symbol
-            cached_state = cache.get("_sx_bear_system_state", "idle")
-            cached_bars = cache.get("_sx_bear_kicker_bars", 0)
-            cached_cooldown = cache.get("_sx_bear_kicker_cooldown", 0)
+            valid_states = {"idle", "armed", "holding", "cooldown"}
+
+            def _safe_persisted_count(value):
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    return float("nan")
+                number = float(value)
+                if (not math.isfinite(number) or not number.is_integer()
+                        or number < 0 or number > 100_000):
+                    return float("nan")
+                return int(number)
+
+            raw_state = cache.get("_sx_bear_system_state", "idle")
+            state_name = str(raw_state or "").strip().lower()
+            raw_bars = cache.get("_sx_bear_kicker_bars", 0)
+            raw_cooldown = cache.get("_sx_bear_kicker_cooldown", 0)
+            persisted_state_present = any(
+                key in cache for key in (
+                    "_sx_bear_system_state",
+                    "_sx_bear_kicker_bars",
+                    "_sx_bear_kicker_cooldown",
+                    "_sx_bear_state_version",
+                    "_sx_bear_kicker_entry_day",
+                    "_sx_bear_kicker_targeted",
+                )
+            )
+            prior_shadow = cache.get("_sx_bear_shadow")
+            if not isinstance(prior_shadow, dict):
+                prior_shadow = {}
+            prior_kicker = prior_shadow.get("kicker")
+            if not isinstance(prior_kicker, dict):
+                prior_kicker = {}
+            recorded_kicker = str(
+                prior_kicker.get("symbol") or ""
+            ).strip().upper()
+            if recorded_kicker:
+                state_bound_to_kicker = recorded_kicker == kicker
+            elif prior_kicker_targeted and kicker in prior_bear_owned:
+                state_bound_to_kicker = True
+            else:
+                state_bound_to_kicker = not persisted_state_present
+            current_prior_targeted = (
+                prior_kicker_targeted and state_bound_to_kicker
+            )
+
+            safe_bars = _safe_persisted_count(raw_bars)
+            safe_cooldown = _safe_persisted_count(raw_cooldown)
+            max_bars_limit = _safe_persisted_count(
+                cfg.get("bear_kicker_max_bars", 5)
+            )
+            cooldown_limit = _safe_persisted_count(
+                cfg.get("bear_kicker_cooldown_bars", 10)
+            )
+            limits_valid = (
+                isinstance(max_bars_limit, int) and max_bars_limit >= 1
+                and isinstance(cooldown_limit, int)
+            )
+            counters_consistent = False
+            if (state_name in valid_states and isinstance(safe_bars, int)
+                    and isinstance(safe_cooldown, int) and limits_valid):
+                if state_name == "idle":
+                    counters_consistent = (
+                        safe_bars == 0 and safe_cooldown == 0
+                        and not current_prior_targeted
+                    )
+                elif state_name == "armed":
+                    counters_consistent = (
+                        safe_bars == 0 and safe_cooldown == 0
+                        and not current_prior_targeted
+                        and kicker not in held_symbols
+                    )
+                elif state_name == "holding":
+                    counters_consistent = (
+                        1 <= safe_bars <= max_bars_limit
+                        and safe_cooldown == 0
+                        and (bear_mode == "shadow" or kicker in held_symbols
+                             or current_prior_targeted)
+                    )
+                else:
+                    counters_consistent = (
+                        safe_bars == 0
+                        and safe_cooldown <= cooldown_limit
+                        and not current_prior_targeted
+                    )
             cache_valid = (
                 cache.get("_sx_bear_state_version") == 1
-                and str(cached_state or "").strip().lower()
-                in {"idle", "armed", "holding", "cooldown"}
+                and state_bound_to_kicker and counters_consistent
             )
-            if not cache_valid:
+            if cache_valid:
+                cached_state = state_name
+                cached_bars = safe_bars
+                cached_cooldown = safe_cooldown
+            elif persisted_state_present:
+                cached_state = state_name if state_name in valid_states else "idle"
+                cached_bars = float("nan")
+                cached_cooldown = safe_cooldown
+            else:
                 cached_state, cached_bars, cached_cooldown = "idle", 0, 0
-                if kicker in prior_bear_owned and kicker in held_symbols:
-                    # Provenance proves the holding is ours, but the missing
-                    # state cannot prove its age. An invalid counter forces the
-                    # pure policy into a full cooldown and immediate exit.
-                    cached_bars = float("nan")
-            elif str(cached_state).strip().lower() == "holding":
+                current_prior_targeted = False
+            if (not cache_valid and kicker in prior_bear_owned
+                    and kicker in held_symbols):
+                # Provenance proves the holding is ours, but invalid/missing
+                # state cannot prove its age. Force cooldown and exit.
+                cached_bars = float("nan")
+            if cache_valid and state_name == "holding":
                 try:
                     from datetime import date as _date
 
@@ -588,15 +686,6 @@ class StrategyX:
                 except (TypeError, ValueError):
                     cached_bars = float("nan")
 
-            def _safe_persisted_count(value):
-                if isinstance(value, bool) or not isinstance(value, (int, float)):
-                    return float("nan")
-                number = float(value)
-                if (not math.isfinite(number) or not number.is_integer()
-                        or number < 0 or number > 100_000):
-                    return float("nan")
-                return int(number)
-
             kicker_decision = advance_kicker(
                 crash,
                 state=cached_state,
@@ -607,7 +696,7 @@ class StrategyX:
                 kicker_held=kicker in held_symbols,
                 kicker_priceable=float(bear_prices.get(kicker) or 0.0) > 0,
                 shadow=bear_mode == "shadow",
-                prior_targeted=prior_kicker_targeted,
+                prior_targeted=current_prior_targeted,
                 config=cfg,
             )
             overlay_cfg = dict(cfg, bear_system_mode="active")
@@ -654,7 +743,11 @@ class StrategyX:
                 if round(proposed_targets.get(symbol, 0.0)
                          - targets.get(symbol, 0.0), 6) != 0
             }
-            overlay_reason = reason
+            overlay_reason = (
+                refusal_reason
+                if refusal_reason == "research-only runtime"
+                else reason
+            )
             if active_backtest and allocation.applied and not dynamic_overlap:
                 selected_targets = dict(proposed_targets)
             cache["_sx_bear_system_state"] = kicker_decision.state
@@ -671,7 +764,10 @@ class StrategyX:
             kicker_targeted = (active_backtest and kicker in selected_targets)
             cache["_sx_bear_kicker_targeted"] = bool(kicker_targeted)
             newly_owned = (
-                configured_bear_symbols & set(selected_targets)
+                {
+                    symbol for symbol in configured_bear_symbols
+                    if float(selected_targets.get(symbol, 0.0) or 0.0) > 0
+                }
                 if active_backtest and allocation.applied and not dynamic_overlap
                 else set()
             )

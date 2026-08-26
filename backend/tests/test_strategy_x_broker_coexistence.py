@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from strategy_x_bear import BearSystemStateError
+
 
 BROKER_PATH = Path(__file__).resolve().parents[1] / "broker.py"
 
@@ -118,3 +120,22 @@ def test_unverifiable_residual_configuration_fails_closed():
         data={}, portfolio_emulator=object(), strategy_caches={}, mode="backtest",
     )
     assert namespace["captured"]["_strategy_x_bear_residual_conflict"] is True
+
+
+def test_strategy_x_state_error_propagates_and_invalidates_broker_run():
+    namespace = _dispatcher_namespace()
+
+    class InvalidStrategyX:
+        def run_once(self, *args, **kwargs):
+            raise BearSystemStateError("unprovenanced SQQQ")
+
+    namespace["_strategy_class_cache"]["strategy_x"] = InvalidStrategyX
+    with pytest.raises(BearSystemStateError, match="unprovenanced SQQQ"):
+        namespace["run_run_once_strategies"](
+            [{"strategy": "strategy_x", "weight": 1.0,
+              "config": {"strategy_x_enabled": True}}],
+            ["QQQ"], {"QQQ": 400.0},
+            datetime(2026, 6, 1, 20, tzinfo=timezone.utc),
+            data={}, portfolio_emulator=object(), strategy_caches={},
+            mode="backtest",
+        )
