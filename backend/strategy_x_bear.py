@@ -215,7 +215,7 @@ def advance_kicker(signal, *, state, bars, cooldown, risk_on, bull_held,
         return _cooldown_decision(cooldown_bars, "bull holding blocks kicker entry")
     if signal.stacked and signal.below_fast:
         return KickerDecision("holding", True, 1, 0, "armed breakdown confirmed")
-    return KickerDecision("idle", False, 0, 0, "armed breakdown did not confirm")
+    return _cooldown_decision(cooldown_bars, "armed breakdown did not confirm")
 
 
 def _finite_number(value) -> float | None:

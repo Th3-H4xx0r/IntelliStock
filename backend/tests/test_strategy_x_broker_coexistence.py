@@ -177,7 +177,7 @@ def test_production_backtest_call_preserves_legacy_none_for_other_strategies():
     assert namespace["received_modes"] == [None]
 
 
-@pytest.mark.parametrize("scheduler_mode", [None, "FULL", "MONITOR"])
+@pytest.mark.parametrize("scheduler_mode", [None, "IDLE", "FULL", "MONITOR"])
 def test_live_strategy_x_preserves_scheduler_mode(scheduler_mode):
     namespace = _dispatcher_namespace(run_mode="backtest")
     namespace["mode"] = namespace["MODE_LIVE"]
@@ -190,3 +190,20 @@ def test_live_strategy_x_preserves_scheduler_mode(scheduler_mode):
     )
     assert namespace["received_modes"] == [scheduler_mode]
     assert namespace["received_modes"] != ["backtest"]
+
+
+@pytest.mark.parametrize("scheduler_mode", [None, "IDLE", "FULL", "MONITOR"])
+def test_live_sibling_strategy_preserves_scheduler_mode(scheduler_mode):
+    namespace = _dispatcher_namespace(run_mode="backtest")
+    namespace["mode"] = namespace["MODE_LIVE"]
+    namespace["_strategy_class_cache"]["sibling_strategy"] = (
+        namespace["_strategy_class_cache"]["strategy_x"]
+    )
+    namespace["run_run_once_strategies"](
+        [{"strategy": "sibling_strategy", "weight": 1.0, "config": {}}],
+        ["QQQ"], {"QQQ": 400.0},
+        datetime(2026, 6, 1, 20, tzinfo=timezone.utc),
+        data={}, portfolio_emulator=object(), strategy_caches={},
+        mode=scheduler_mode,
+    )
+    assert namespace["received_modes"] == [scheduler_mode]

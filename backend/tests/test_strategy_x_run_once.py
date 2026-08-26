@@ -184,6 +184,26 @@ def test_active_risk_off_buys_managed_futures_and_bil():
     }
 
 
+def test_single_manager_string_is_one_eligible_allocated_symbol_end_to_end():
+    data, prices = bear_ready_downtrend_fixture()
+    cache = {}
+    out = StrategyX().run_once(
+        list(prices), prices, NOW,
+        base_cfg(
+            bear_system_mode="active", crisis_alpha_symbols="DBMF",
+        ),
+        {}, data=data, portfolio_emulator=FakeEmulator(prices=prices),
+        strategy_cache=cache, mode="backtest",
+    )
+    assert out["DBMF"] == 1
+    assert cache["_sx_bear_shadow"]["eligible_managers"] == ["DBMF"]
+    assert cache["_sx_bear_shadow"]["unavailable_managers"] == []
+    assert cache["_strategy_x_last"]["targets"] == {
+        "DBMF": 0.2,
+        "BIL": 0.8,
+    }
+
+
 def test_active_request_cannot_change_orders_outside_backtest_runtime():
     data, prices = bear_ready_downtrend_fixture()
     baseline = StrategyX().run_once(
@@ -205,6 +225,58 @@ def test_active_request_cannot_change_orders_outside_backtest_runtime():
     assert cache["_strategy_x_last"]["bear_overlay_reason"] == (
         "research-only runtime"
     )
+
+
+def test_research_refused_active_advances_state_exactly_like_shadow():
+    prices = bear_session_data()[1]
+    shadow_cache, active_cache = {}, {}
+    for day, follow_through in enumerate((False, True, True)):
+        data, _ = bear_session_data(follow_through=follow_through)
+        current_time = NOW + timedelta(days=day)
+        shadow = StrategyX().run_once(
+            list(prices), prices, current_time,
+            base_cfg(bear_system_mode="shadow"), {}, data=data,
+            portfolio_emulator=FakeEmulator(prices=prices),
+            strategy_cache=shadow_cache, mode="FULL",
+        )
+        refused = StrategyX().run_once(
+            list(prices), prices, current_time,
+            base_cfg(bear_system_mode="active"), {}, data=data,
+            portfolio_emulator=FakeEmulator(prices=prices),
+            strategy_cache=active_cache, mode="FULL",
+        )
+        assert {k: v for k, v in refused.items() if not k.startswith("_")} == {
+            k: v for k, v in shadow.items() if not k.startswith("_")
+        }
+        assert refused.get("_nexus_position_sizes") == shadow.get(
+            "_nexus_position_sizes"
+        )
+        assert {
+            key: active_cache.get(key)
+            for key in (
+                "_sx_bear_system_state",
+                "_sx_bear_kicker_bars",
+                "_sx_bear_kicker_cooldown",
+                "_sx_bear_kicker_entry_day",
+            )
+        } == {
+            key: shadow_cache.get(key)
+            for key in (
+                "_sx_bear_system_state",
+                "_sx_bear_kicker_bars",
+                "_sx_bear_kicker_cooldown",
+                "_sx_bear_kicker_entry_day",
+            )
+        }
+        assert active_cache["_sx_bear_shadow"]["kicker"] == (
+            shadow_cache["_sx_bear_shadow"]["kicker"]
+        )
+        assert active_cache["_sx_bear_shadow"]["refusal_reason"] == (
+            "research-only runtime"
+        )
+
+    assert active_cache["_sx_bear_system_state"] == "holding"
+    assert active_cache["_sx_bear_kicker_bars"] == 2
 
 
 @pytest.mark.parametrize("runtime_mode", ["BACKTEST", " backtest "])
@@ -344,7 +416,7 @@ def test_shadow_broker_added_manager_quote_does_not_change_satellite_ranking():
 def test_nonactive_modes_do_not_claim_unprovenanced_bear_holdings(bear_mode):
     data, prices = bear_ready_downtrend_fixture()
     cache = {}
-    StrategyX().run_once(
+    out = StrategyX().run_once(
         list(prices), prices, NOW, base_cfg(bear_system_mode=bear_mode), {},
         data=data,
         portfolio_emulator=FakeEmulator(
@@ -353,7 +425,58 @@ def test_nonactive_modes_do_not_claim_unprovenanced_bear_holdings(bear_mode):
         ),
         strategy_cache=cache,
     )
+    assert not {"BIL", "DBMF", "SQQQ"}.intersection(out)
+    assert not {"BIL", "DBMF", "SQQQ"}.intersection(
+        out.get("_nexus_sell_enforcement", [])
+    )
     assert not cache.get("_sx_bear_owned")
+
+
+@pytest.mark.parametrize("symbol", ["BIL", "DBMF", "SQQQ"])
+@pytest.mark.parametrize(
+    "bear_mode,runtime_mode", [("shadow", None), ("active", "FULL")],
+)
+def test_nonexecuting_bear_modes_refuse_unprovenanced_holding_without_overlay(
+    symbol, bear_mode, runtime_mode,
+):
+    data, prices = bear_ready_downtrend_fixture()
+    emu = FakeEmulator(cash=0.0, positions={symbol: 5.0}, prices=prices)
+    baseline = StrategyX().run_once(
+        list(prices), prices, NOW, base_cfg(bear_system_mode="off"), {},
+        data=data, portfolio_emulator=emu, strategy_cache={}, mode=runtime_mode,
+    )
+    cache = {}
+    refused = StrategyX().run_once(
+        list(prices), prices, NOW, base_cfg(bear_system_mode=bear_mode), {},
+        data=data, portfolio_emulator=emu, strategy_cache=cache,
+        mode=runtime_mode,
+    )
+    assert refused == baseline
+    telemetry = cache["_sx_bear_shadow"]
+    assert telemetry["refusal_reason"] == (
+        f"ownership conflict: unprovenanced bear holding(s): {symbol}"
+    )
+    assert telemetry["proposed_targets"] == telemetry["baseline_targets"]
+    assert telemetry["target_delta"] == {}
+    assert not cache.get("_sx_bear_owned")
+
+
+@pytest.mark.parametrize("bear_mode", ["off", "shadow", "active"])
+def test_raw_aapl_provenance_never_grants_sell_or_retention_authority(bear_mode):
+    data, prices = bear_ready_downtrend_fixture()
+    cache = {"_sx_bear_owned": ["AAPL"]}
+    out = StrategyX().run_once(
+        list(prices), prices, NOW, base_cfg(bear_system_mode=bear_mode), {},
+        data=data,
+        portfolio_emulator=FakeEmulator(
+            cash=0.0, positions={"AAPL": 5.0}, prices=prices,
+        ),
+        strategy_cache=cache,
+        mode="backtest" if bear_mode == "active" else None,
+    )
+    assert "AAPL" not in out
+    assert "AAPL" not in out.get("_nexus_sell_enforcement", [])
+    assert "AAPL" not in cache.get("_sx_bear_owned", [])
 
 
 @pytest.mark.parametrize("symbol", ["BIL", "DBMF", "SQQQ"])
@@ -501,7 +624,7 @@ def test_pending_kicker_requires_exact_true_flag_and_matching_provenance(
     assert "SQQQ" not in cache["_sx_bear_owned"]
 
 
-def test_missing_kicker_identity_cannot_transfer_state_to_new_role():
+def test_missing_kicker_identity_grants_no_old_or_new_kicker_authority():
     data, prices = bear_session_data(follow_through=True)
     prices["PSQ"] = 10.0
     data["PSQ"] = {"bars": bars(80, start=10.0, step=0.01)}
@@ -527,9 +650,9 @@ def test_missing_kicker_identity_cannot_transfer_state_to_new_role():
         ),
         strategy_cache=cache, mode="backtest",
     )
-    assert out["SQQQ"] == -1
-    assert out["_nexus_position_sizes"]["SQQQ"]["sell_fraction"] == 1.0
+    assert "SQQQ" not in out
     assert "PSQ" not in out
+    assert "SQQQ" not in cache["_sx_bear_owned"]
     assert "PSQ" not in cache["_sx_bear_owned"]
     assert cache["_sx_bear_system_state"] == "cooldown"
 
@@ -560,7 +683,13 @@ def test_prior_owned_manager_unwinds_after_switching_off():
 def test_prior_owned_manager_unwinds_after_role_configuration_changes():
     data, prices = bear_ready_downtrend_fixture()
     data["conviction_scores"] = {"DBMF": 9.0, "AAPL": 1.0}
-    cache = {"_sx_bear_owned": ["DBMF"]}
+    cache = {
+        "_sx_bear_owned": ["DBMF"],
+        "_sx_bear_shadow": {
+            "target_delta": {"DBMF": 0.066666},
+            "kicker": {"symbol": "SQQQ"},
+        },
+    }
     out = StrategyX().run_once(
         list(prices), prices, NOW,
         base_cfg(
@@ -607,6 +736,7 @@ def test_invalid_kicker_entry_day_forces_owned_holding_exit():
         "_sx_bear_kicker_entry_day": "not-a-date",
         "_sx_bear_kicker_targeted": True,
         "_sx_bear_owned": ["SQQQ"],
+        "_sx_bear_shadow": {"kicker": {"symbol": "SQQQ"}},
     }
     out = StrategyX().run_once(
         list(prices), prices, NOW, base_cfg(bear_system_mode="active"), {},
@@ -618,6 +748,9 @@ def test_invalid_kicker_entry_day_forces_owned_holding_exit():
     )
     assert out["SQQQ"] == -1
     assert cache["_sx_bear_system_state"] == "cooldown"
+    assert cache["_sx_bear_shadow"]["kicker"]["reason"] == (
+        "invalid persisted kicker counter"
+    )
 
 
 def test_missing_filter_history_still_unwinds_priceable_provenance():
@@ -818,6 +951,7 @@ def test_kicker_max_hold_targets_exit_and_requires_full_cooldown():
         "_sx_bear_kicker_entry_day": NOW.date().isoformat(),
         "_sx_bear_kicker_targeted": True,
         "_sx_bear_owned": ["SQQQ"],
+        "_sx_bear_shadow": {"kicker": {"symbol": "SQQQ"}},
     }
     cfg = base_cfg(
         bear_system_mode="active",
@@ -833,6 +967,9 @@ def test_kicker_max_hold_targets_exit_and_requires_full_cooldown():
     )
     assert exit_order["SQQQ"] == -1
     assert cache["_sx_bear_kicker_cooldown"] == 10
+    assert cache["_sx_bear_shadow"]["kicker"]["reason"] == (
+        "kicker maximum hold reached"
+    )
 
     for decision in range(1, 11):
         out = StrategyX().run_once(
@@ -863,6 +1000,7 @@ def test_kicker_recovery_targets_exit_on_the_decision_row():
         "_sx_bear_kicker_entry_day": NOW.date().isoformat(),
         "_sx_bear_kicker_targeted": True,
         "_sx_bear_owned": ["SQQQ"],
+        "_sx_bear_shadow": {"kicker": {"symbol": "SQQQ"}},
     }
     out = StrategyX().run_once(
         list(prices), prices, NOW, base_cfg(bear_system_mode="active"), {},
@@ -874,6 +1012,9 @@ def test_kicker_recovery_targets_exit_on_the_decision_row():
     )
     assert out["SQQQ"] == -1
     assert cache["_sx_bear_system_state"] == "cooldown"
+    assert cache["_sx_bear_shadow"]["kicker"]["reason"] == (
+        "kicker recovery exit"
+    )
 
 
 def test_residual_conflict_suppresses_only_kicker_and_keeps_defense():

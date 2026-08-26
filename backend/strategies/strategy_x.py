@@ -170,6 +170,18 @@ def _truthy(value) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _normalized_symbols(values) -> tuple[str, ...]:
+    if isinstance(values, str):
+        values = [values]
+    try:
+        normalized = (
+            str(value or "").strip().upper() for value in (values or [])
+        )
+        return tuple(dict.fromkeys(symbol for symbol in normalized if symbol))
+    except TypeError:
+        return ()
+
+
 def _ny_session(current_time):
     """The NY calendar date of a decision, or "" if it cannot be determined.
 
@@ -222,13 +234,23 @@ class StrategyX:
         invalid_bear_mode = raw_bear_mode not in {"off", "shadow", "active"}
         active_backtest = bear_mode == "active" and mode == "backtest"
         research_only_runtime = bear_mode == "active" and not active_backtest
+        logical_shadow = bear_mode == "shadow" or research_only_runtime
+        bear_cash = str(cfg.get("bear_cash_symbol", "BIL") or "").strip().upper()
+        bear_managers = set(_normalized_symbols(
+            cfg.get("crisis_alpha_symbols") or []
+        ))
+        kicker_symbol = str(
+            cfg.get("bear_kicker_symbol", "SQQQ") or ""
+        ).strip().upper()
+        configured_bear_symbols = (
+            {bear_cash, kicker_symbol} | bear_managers
+        ) - {""}
         incoming_symbols = {
             str(symbol).strip().upper() for symbol in (symbols or []) if symbol
         }
-        prior_bear_owned = {
-            str(symbol).strip().upper()
-            for symbol in (cache.get("_sx_bear_owned") or []) if symbol
-        }
+        raw_prior_bear_owned = set(_normalized_symbols(
+            cache.get("_sx_bear_owned") or []
+        ))
         prior_shadow = cache.get("_sx_bear_shadow")
         if not isinstance(prior_shadow, dict):
             prior_shadow = {}
@@ -238,6 +260,23 @@ class StrategyX:
         recorded_kicker = str(
             prior_kicker.get("symbol") or ""
         ).strip().upper()
+        corroborated_bear_owned = set(configured_bear_symbols)
+        prior_delta = prior_shadow.get("target_delta")
+        if isinstance(prior_delta, dict):
+            for symbol, raw_delta in prior_delta.items():
+                try:
+                    delta = float(raw_delta)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                normalized = str(symbol or "").strip().upper()
+                if (normalized and not isinstance(raw_delta, bool)
+                        and math.isfinite(delta) and delta > 0):
+                    corroborated_bear_owned.add(normalized)
+        if recorded_kicker:
+            corroborated_bear_owned.add(recorded_kicker)
+        prior_bear_owned = raw_prior_bear_owned & corroborated_bear_owned
+        if raw_prior_bear_owned != prior_bear_owned:
+            cache["_sx_bear_owned"] = sorted(prior_bear_owned)
         raw_prior_kicker_targeted = cache.get(
             "_sx_bear_kicker_targeted", False
         )
@@ -270,28 +309,22 @@ class StrategyX:
         chop = str(cfg.get("core_chop_symbol", "SPY") or "SPY").strip().upper()
         bear = str(cfg.get("core_bear_symbol", "") or "").strip().upper()
         owned = {s for s in (bull, chop, bear) if s} | prior_bear_owned
-        bear_cash = str(cfg.get("bear_cash_symbol", "BIL") or "").strip().upper()
-        bear_managers = {
-            str(symbol).strip().upper()
-            for symbol in (cfg.get("crisis_alpha_symbols") or []) if symbol
-        }
-        kicker_symbol = str(
-            cfg.get("bear_kicker_symbol", "SQQQ") or ""
-        ).strip().upper()
-        configured_bear_symbols = ({bear_cash, kicker_symbol} | bear_managers) - {""}
         held_symbols = {
             str(symbol).strip().upper()
             for symbol, quantity in positions.items()
             if float(quantity or 0.0) > 0
         }
+        unprovenanced_bear_holdings = sorted(
+            (held_symbols & configured_bear_symbols) - prior_bear_owned
+        )
+        ownership_conflict = (
+            "ownership conflict: unprovenanced bear holding(s): "
+            + ", ".join(unprovenanced_bear_holdings)
+            if unprovenanced_bear_holdings else ""
+        )
         static_conflict = bear_role_conflict(cfg)
-        if (active_backtest
-                and (held_symbols & configured_bear_symbols) - prior_bear_owned):
-            unknown = sorted((held_symbols & configured_bear_symbols)
-                             - prior_bear_owned)
-            raise BearSystemStateError(
-                "unprovenanced active bear holding(s): " + ", ".join(unknown)
-            )
+        if active_backtest and ownership_conflict:
+            raise BearSystemStateError(ownership_conflict)
         if (active_backtest
                 and _truthy(cfg.get("_strategy_x_bear_residual_conflict", False))
                 and kicker_symbol in prior_bear_owned):
@@ -568,10 +601,9 @@ class StrategyX:
             state_before = {
                 key: (key in cache, cache.get(key)) for key in state_keys
             }
-            manager_symbols = [
-                str(symbol).strip().upper()
-                for symbol in (cfg.get("crisis_alpha_symbols") or []) if symbol
-            ]
+            manager_symbols = list(_normalized_symbols(
+                cfg.get("crisis_alpha_symbols") or []
+            ))
             bear_prices.update({
                 str(symbol).strip().upper(): value
                 for symbol, value in prices.items()
@@ -658,7 +690,7 @@ class StrategyX:
                     counters_consistent = (
                         1 <= safe_bars <= max_bars_limit
                         and safe_cooldown == 0
-                        and (bear_mode == "shadow" or kicker in held_symbols
+                        and (logical_shadow or kicker in held_symbols
                              or current_prior_targeted)
                     )
                 else:
@@ -711,7 +743,7 @@ class StrategyX:
                 bull_held=bull in held_symbols,
                 kicker_held=kicker in held_symbols,
                 kicker_priceable=float(bear_prices.get(kicker) or 0.0) > 0,
-                shadow=bear_mode == "shadow",
+                shadow=logical_shadow,
                 prior_targeted=current_prior_targeted,
                 config=cfg,
             )
@@ -736,7 +768,11 @@ class StrategyX:
             proposed_targets = dict(allocation.targets)
             reason = allocation.reason
             refusal_reason = ""
-            if dynamic_overlap:
+            if ownership_conflict:
+                reason = ownership_conflict
+                refusal_reason = ownership_conflict
+                proposed_targets = dict(targets)
+            elif dynamic_overlap:
                 reason = "role conflict: satellite selection/age contains " + ", ".join(
                     dynamic_overlap
                 )
@@ -746,11 +782,11 @@ class StrategyX:
                 refusal_reason = f"role conflict: {static_conflict}"
             elif bear:
                 refusal_reason = "legacy bear configuration is enabled"
-            if residual_conflict:
+            if residual_conflict and not ownership_conflict:
                 refusal_reason = "broker residual-sleeve kicker conflict"
                 if allocation.applied:
                     reason = "bear overlay applied; kicker suppressed by residual sleeve"
-            if research_only_runtime:
+            if research_only_runtime and not refusal_reason:
                 refusal_reason = "research-only runtime"
             delta = {
                 symbol: round(proposed_targets.get(symbol, 0.0)
@@ -830,7 +866,7 @@ class StrategyX:
                 f" | delta={delta}",
                 "cyan" if allocation.applied else "yellow",
             )
-            if bear or static_conflict or dynamic_overlap:
+            if bear or static_conflict or dynamic_overlap or ownership_conflict:
                 # A hard ownership/configuration conflict is observational:
                 # it may publish refusal telemetry and unwind old provenance,
                 # but it cannot move the new kicker state machine forward.

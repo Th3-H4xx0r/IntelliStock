@@ -135,6 +135,43 @@ def test_recovery_exits_and_cooldown_spends_ten_decision_sessions():
     assert out.state == "idle"
 
 
+def test_armed_expiry_cools_down_for_ten_complete_decisions_before_rearming():
+    c = cfg(bear_kicker_cooldown_bars=10)
+    armed = advance_kicker(
+        signal(fresh=True), state="idle", bars=0, cooldown=0,
+        risk_on=False, bull_held=False, kicker_held=False,
+        kicker_priceable=True, shadow=False, prior_targeted=False, config=c,
+    )
+    expired = advance_kicker(
+        signal(stacked=False, below_fast=False), state=armed.state,
+        bars=armed.bars, cooldown=armed.cooldown, risk_on=False,
+        bull_held=False, kicker_held=False, kicker_priceable=True,
+        shadow=False, prior_targeted=False, config=c,
+    )
+    assert (expired.state, expired.engaged, expired.cooldown) == (
+        "cooldown", False, 10,
+    )
+
+    decision = expired
+    for remaining in range(9, -1, -1):
+        decision = advance_kicker(
+            signal(fresh=True), state=decision.state, bars=decision.bars,
+            cooldown=decision.cooldown, risk_on=False, bull_held=False,
+            kicker_held=False, kicker_priceable=True, shadow=False,
+            prior_targeted=False, config=c,
+        )
+        assert decision.cooldown == remaining
+        assert decision.state == ("cooldown" if remaining else "idle")
+
+    rearmed = advance_kicker(
+        signal(fresh=True), state=decision.state, bars=decision.bars,
+        cooldown=decision.cooldown, risk_on=False, bull_held=False,
+        kicker_held=False, kicker_priceable=True, shadow=False,
+        prior_targeted=False, config=c,
+    )
+    assert (rearmed.state, rearmed.engaged) == ("armed", False)
+
+
 def test_cache_reset_adopts_a_real_kicker_holding_but_never_invents_one():
     adopted = advance_kicker(signal(fresh=False), state="idle", bars=0,
         cooldown=0, risk_on=False, bull_held=False, kicker_held=True,
