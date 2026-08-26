@@ -220,8 +220,8 @@ class StrategyX:
             cfg.get("bear_system_mode", "off") or "off"
         ).strip().lower()
         invalid_bear_mode = raw_bear_mode not in {"off", "shadow", "active"}
-        active_backtest = (bear_mode == "active"
-                           and str(mode or "").strip().lower() == "backtest")
+        active_backtest = bear_mode == "active" and mode == "backtest"
+        research_only_runtime = bear_mode == "active" and not active_backtest
         incoming_symbols = {
             str(symbol).strip().upper() for symbol in (symbols or []) if symbol
         }
@@ -229,7 +229,29 @@ class StrategyX:
             str(symbol).strip().upper()
             for symbol in (cache.get("_sx_bear_owned") or []) if symbol
         }
-        prior_kicker_targeted = bool(cache.get("_sx_bear_kicker_targeted", False))
+        prior_shadow = cache.get("_sx_bear_shadow")
+        if not isinstance(prior_shadow, dict):
+            prior_shadow = {}
+        prior_kicker = prior_shadow.get("kicker")
+        if not isinstance(prior_kicker, dict):
+            prior_kicker = {}
+        recorded_kicker = str(
+            prior_kicker.get("symbol") or ""
+        ).strip().upper()
+        raw_prior_kicker_targeted = cache.get(
+            "_sx_bear_kicker_targeted", False
+        )
+        prior_pending_kicker = (
+            recorded_kicker
+            if (raw_prior_kicker_targeted is True
+                and recorded_kicker in prior_bear_owned)
+            else ""
+        )
+        pending_state_consistent = (
+            type(raw_prior_kicker_targeted) is bool
+            and (raw_prior_kicker_targeted is False
+                 or bool(prior_pending_kicker))
+        )
         prior_satellite_ages = set(cache.get("_sx_sat_ages") or {})
 
         try:
@@ -316,7 +338,9 @@ class StrategyX:
                                          "targets": {},
                                          "bear_system_mode": bear_mode,
                                          "bear_overlay_reason":
-                                             "insufficient filter history"}
+                                             ("research-only runtime"
+                                              if research_only_runtime else
+                                              "insufficient filter history")}
             if not prior_bear_owned:
                 return {}
             exit_prices = dict(prices)
@@ -332,7 +356,8 @@ class StrategyX:
             )
             cache["_sx_bear_owned"] = sorted(
                 symbol for symbol in prior_bear_owned
-                if symbol in held_symbols or prior_kicker_targeted
+                if (symbol in held_symbols
+                    or symbol == prior_pending_kicker)
             )
             cache["_sx_bear_kicker_targeted"] = False
             if not decisions:
@@ -595,23 +620,12 @@ class StrategyX:
                     "_sx_bear_kicker_targeted",
                 )
             )
-            prior_shadow = cache.get("_sx_bear_shadow")
-            if not isinstance(prior_shadow, dict):
-                prior_shadow = {}
-            prior_kicker = prior_shadow.get("kicker")
-            if not isinstance(prior_kicker, dict):
-                prior_kicker = {}
-            recorded_kicker = str(
-                prior_kicker.get("symbol") or ""
-            ).strip().upper()
-            if recorded_kicker:
-                state_bound_to_kicker = recorded_kicker == kicker
-            elif prior_kicker_targeted and kicker in prior_bear_owned:
-                state_bound_to_kicker = True
-            else:
-                state_bound_to_kicker = not persisted_state_present
+            state_bound_to_kicker = (
+                recorded_kicker == kicker
+                if persisted_state_present else not recorded_kicker
+            )
             current_prior_targeted = (
-                prior_kicker_targeted and state_bound_to_kicker
+                prior_pending_kicker == kicker and state_bound_to_kicker
             )
 
             safe_bars = _safe_persisted_count(raw_bars)
@@ -655,7 +669,9 @@ class StrategyX:
                     )
             cache_valid = (
                 cache.get("_sx_bear_state_version") == 1
-                and state_bound_to_kicker and counters_consistent
+                and state_bound_to_kicker
+                and pending_state_consistent
+                and counters_consistent
             )
             if cache_valid:
                 cached_state = state_name
@@ -734,7 +750,7 @@ class StrategyX:
                 refusal_reason = "broker residual-sleeve kicker conflict"
                 if allocation.applied:
                     reason = "bear overlay applied; kicker suppressed by residual sleeve"
-            if bear_mode == "active" and not active_backtest:
+            if research_only_runtime:
                 refusal_reason = "research-only runtime"
             delta = {
                 symbol: round(proposed_targets.get(symbol, 0.0)
@@ -775,7 +791,7 @@ class StrategyX:
                 symbol for symbol in prior_bear_owned
                 if (symbol in held_symbols
                     or float(selected_targets.get(symbol, 0.0) or 0.0) > 0
-                    or prior_kicker_targeted)
+                    or symbol == prior_pending_kicker)
             }
             cache["_sx_bear_owned"] = sorted(retained_owned | newly_owned)
             owned |= retained_owned | newly_owned
@@ -837,7 +853,8 @@ class StrategyX:
         if bear_mode == "off" and prior_bear_owned:
             cache["_sx_bear_owned"] = sorted(
                 symbol for symbol in prior_bear_owned
-                if symbol in held_symbols or prior_kicker_targeted
+                if (symbol in held_symbols
+                    or symbol == prior_pending_kicker)
             )
             cache["_sx_bear_kicker_targeted"] = False
 
