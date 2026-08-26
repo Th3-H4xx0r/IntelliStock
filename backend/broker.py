@@ -6988,7 +6988,13 @@ def run_run_once_strategies(specs, symbols, prices, current_time, data=None, por
                         portfolio_emulator=portfolio_emulator,
                         strategy_cache=strategy_cache,
                         time_increment=time_increment,
-                        mode=mode,
+                        mode=(
+                            "backtest"
+                            if (name.strip().lower()
+                                in {"strategy_x", "strategyx"}
+                                and globals().get("mode") == MODE_BACKTEST)
+                            else mode
+                        ),
                     )
             if isinstance(raw, dict):
                 out_scores = {}

@@ -14,7 +14,7 @@ from strategy_x_bear import BearSystemStateError
 BROKER_PATH = Path(__file__).resolve().parents[1] / "broker.py"
 
 
-def _dispatcher_namespace():
+def _dispatcher_namespace(run_mode="backtest"):
     tree = ast.parse(BROKER_PATH.read_text())
     wanted = {"run_run_once_strategies", "_residual_sleeve_config"}
     nodes = [
@@ -23,16 +23,18 @@ def _dispatcher_namespace():
     ]
     assert {node.name for node in nodes} == wanted
     captured = {}
+    received_modes = []
 
     class CapturingStrategyX:
         def run_once(self, *args, **kwargs):
             captured.update(args[3])
+            received_modes.append(kwargs.get("mode"))
             return {}
 
     namespace = {
         "MODE_BACKTEST": "backtest",
         "MODE_LIVE": "live",
-        "mode": "backtest",
+        "mode": run_mode,
         "os": __import__("os"),
         "_strategy_cache": {},
         "_strategy_class_cache": {"strategy_x": CapturingStrategyX},
@@ -52,6 +54,7 @@ def _dispatcher_namespace():
     for node in nodes:
         exec(compile(ast.Module([node], []), str(BROKER_PATH), "exec"), namespace)
     namespace["captured"] = captured
+    namespace["received_modes"] = received_modes
     return namespace
 
 
@@ -139,3 +142,51 @@ def test_strategy_x_state_error_propagates_and_invalidates_broker_run():
             data={}, portfolio_emulator=object(), strategy_caches={},
             mode="backtest",
         )
+
+
+@pytest.mark.parametrize("strategy_name", ["strategy_x", "StrategyX"])
+def test_production_backtest_call_translates_run_mode_for_strategy_x_aliases(
+    strategy_name,
+):
+    namespace = _dispatcher_namespace(run_mode="live")
+    namespace["mode"] = namespace["MODE_BACKTEST"]
+    namespace["_strategy_class_cache"][strategy_name] = (
+        namespace["_strategy_class_cache"]["strategy_x"]
+    )
+    namespace["run_run_once_strategies"](
+        [{"strategy": strategy_name, "weight": 1.0, "config": {}}],
+        ["QQQ"], {"QQQ": 400.0},
+        datetime(2026, 6, 1, 20, tzinfo=timezone.utc),
+        data={}, portfolio_emulator=object(), strategy_caches={},
+    )
+    assert namespace["received_modes"] == ["backtest"]
+
+
+def test_production_backtest_call_preserves_legacy_none_for_other_strategies():
+    namespace = _dispatcher_namespace(run_mode="live")
+    namespace["mode"] = namespace["MODE_BACKTEST"]
+    namespace["_strategy_class_cache"]["other_strategy"] = (
+        namespace["_strategy_class_cache"]["strategy_x"]
+    )
+    namespace["run_run_once_strategies"](
+        [{"strategy": "other_strategy", "weight": 1.0, "config": {}}],
+        ["QQQ"], {"QQQ": 400.0},
+        datetime(2026, 6, 1, 20, tzinfo=timezone.utc),
+        data={}, portfolio_emulator=object(), strategy_caches={},
+    )
+    assert namespace["received_modes"] == [None]
+
+
+@pytest.mark.parametrize("scheduler_mode", [None, "FULL", "MONITOR"])
+def test_live_strategy_x_preserves_scheduler_mode(scheduler_mode):
+    namespace = _dispatcher_namespace(run_mode="backtest")
+    namespace["mode"] = namespace["MODE_LIVE"]
+    namespace["run_run_once_strategies"](
+        [{"strategy": "strategy_x", "weight": 1.0, "config": {}}],
+        ["QQQ"], {"QQQ": 400.0},
+        datetime(2026, 6, 1, 20, tzinfo=timezone.utc),
+        data={}, portfolio_emulator=object(), strategy_caches={},
+        mode=scheduler_mode,
+    )
+    assert namespace["received_modes"] == [scheduler_mode]
+    assert namespace["received_modes"] != ["backtest"]
