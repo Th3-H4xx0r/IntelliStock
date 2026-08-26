@@ -308,6 +308,12 @@ def _floor_weight(weight: float) -> float:
     return math.floor(weight * (10 ** Q)) / (10 ** Q)
 
 
+def _fits_budget(requested: float, remaining: float) -> bool:
+    """Allow only the few ulps of error introduced by prior float subtraction."""
+    tolerance = 4 * max(math.ulp(requested), math.ulp(remaining))
+    return requested <= remaining + tolerance
+
+
 def _unchanged(base: dict[str, float], reason: str,
                eligible: tuple[str, ...] = ()) -> BearAllocation:
     return BearAllocation(base, False, reason, eligible)
@@ -359,7 +365,7 @@ def plan_bear_overlay(base_targets, *, risk_on, config, eligible_symbols,
             targets[symbol] = per_manager
         remaining -= per_manager * len(eligible)
     if kicker_engaged and _positive_price(prices, kicker):
-        if kicker_pct > 0 and round(kicker_pct, Q) <= round(remaining, Q):
+        if kicker_pct > 0 and _fits_budget(kicker_pct, remaining):
             targets[kicker] = kicker_pct
             remaining -= kicker_pct
     if remaining > 0:
