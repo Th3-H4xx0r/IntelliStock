@@ -140,6 +140,7 @@ from strategy_x import (  # noqa: E402
 )
 from strategy_x_bear import (  # noqa: E402
     BearSystemStateError,
+    KickerDecision,
     advance_kicker,
     bear_role_conflict,
     bear_system_mode,
@@ -185,6 +186,7 @@ def _normalized_symbols(values) -> tuple[str, ...]:
 _BEAR_EVIDENCE_KEY = "_sx_bear_ownership_evidence"
 _BEAR_EVIDENCE_VERSION = 1
 _BEAR_EVIDENCE_ROLES = {"cash", "manager", "kicker"}
+_BEAR_PENDING_KICKER_KEY = "_sx_bear_pending_kicker_symbol"
 
 
 def _validated_bear_evidence(raw) -> dict[str, dict]:
@@ -329,15 +331,32 @@ class StrategyX:
             symbol for symbol, record in prior_evidence.items()
             if record["role"] == "kicker"
         }
-        prior_pending_kicker = ""
-        if raw_prior_kicker_targeted is True:
-            if len(evidenced_kickers) == 1:
-                prior_pending_kicker = next(iter(evidenced_kickers))
+        pending_identity_was_present = _BEAR_PENDING_KICKER_KEY in cache
+        raw_pending_kicker = cache.get(_BEAR_PENDING_KICKER_KEY, "")
+        pending_kicker_identity = (
+            raw_pending_kicker
+            if (type(raw_pending_kicker) is str and raw_pending_kicker
+                and raw_pending_kicker == raw_pending_kicker.strip().upper())
+            else ""
+        )
+        prior_pending_kicker = (
+            pending_kicker_identity
+            if (raw_prior_kicker_targeted is True
+                and pending_kicker_identity in evidenced_kickers)
+            else ""
+        )
         pending_state_consistent = (
             type(raw_prior_kicker_targeted) is bool
-            and (raw_prior_kicker_targeted is False
-                 or bool(prior_pending_kicker))
+            and ((raw_prior_kicker_targeted is False
+                  and not pending_kicker_identity)
+                 or (raw_prior_kicker_targeted is True
+                     and bool(prior_pending_kicker)))
         )
+        if not pending_state_consistent:
+            cache["_sx_bear_kicker_targeted"] = False
+            prior_pending_kicker = ""
+        if pending_identity_was_present:
+            cache[_BEAR_PENDING_KICKER_KEY] = prior_pending_kicker
         prior_satellite_ages = set(cache.get("_sx_sat_ages") or {})
 
         try:
@@ -361,6 +380,50 @@ class StrategyX:
             for symbol, quantity in positions.items()
             if float(quantity or 0.0) > 0
         }
+        execution_pending_symbols = set()
+        pending_status_failed = False
+        pending_symbols_reader = getattr(
+            portfolio_emulator, "pending_execution_symbols", None
+        )
+        if callable(pending_symbols_reader):
+            try:
+                raw_pending_symbols = pending_symbols_reader()
+                if not isinstance(
+                    raw_pending_symbols, (list, tuple, set, frozenset)
+                ):
+                    raise ValueError("invalid pending-symbol collection")
+                if any(
+                    type(symbol) is not str or not symbol
+                    or symbol != symbol.strip().upper()
+                    for symbol in raw_pending_symbols
+                ):
+                    raise ValueError("invalid pending symbol")
+                execution_pending_symbols = set(raw_pending_symbols)
+            except Exception:
+                # A real execution book that cannot be read is unknown, not
+                # empty. Every kicker buy/mint is refused below, whether or not
+                # the cache still carries usable evidence for an earlier order.
+                pending_status_failed = True
+        else:
+            pending_status_failed = True
+        runtime_pending_kickers = (
+            evidenced_kickers & execution_pending_symbols
+        )
+        blocking_evidenced_kickers = sorted(
+            symbol for symbol in evidenced_kickers
+            if symbol != kicker_symbol
+        )
+        kicker_buy_blocked = bool(
+            pending_status_failed
+            or execution_pending_symbols
+            or blocking_evidenced_kickers
+            or len(evidenced_kickers) > 1
+        )
+        retain_all_kicker_evidence = bool(
+            pending_status_failed
+            or execution_pending_symbols
+            or len(evidenced_kickers) > 1
+        )
         unprovenanced_bear_holdings = sorted(
             (held_symbols & configured_bear_symbols) - prior_bear_owned
         )
@@ -467,7 +530,9 @@ class StrategyX:
             retained_owned = {
                 symbol for symbol in prior_bear_owned
                 if (symbol in held_symbols
-                    or symbol == prior_pending_kicker)
+                    or symbol in runtime_pending_kickers
+                    or (retain_all_kicker_evidence
+                        and symbol in evidenced_kickers))
             }
             cache["_sx_bear_owned"] = sorted(retained_owned)
             retained_evidence = {
@@ -478,7 +543,13 @@ class StrategyX:
                 cache, retained_evidence,
                 force=evidence_was_present or bool(prior_evidence),
             )
-            cache["_sx_bear_kicker_targeted"] = False
+            retained_pending_kicker = (
+                prior_pending_kicker if retain_all_kicker_evidence else ""
+            )
+            cache["_sx_bear_kicker_targeted"] = bool(
+                retained_pending_kicker
+            )
+            cache[_BEAR_PENDING_KICKER_KEY] = retained_pending_kicker
             if not decisions:
                 return {}
             sizes["_cash_reserve_floor_pct"] = 0.0
@@ -842,6 +913,13 @@ class StrategyX:
                 prior_targeted=current_prior_targeted,
                 config=cfg,
             )
+            if (blocking_evidenced_kickers
+                    and kicker_decision.state in {"armed", "holding"}):
+                kicker_decision = KickerDecision(
+                    "idle", False, 0, 0,
+                    "different evidenced kicker blocks entry: "
+                    + ", ".join(blocking_evidenced_kickers),
+                )
             overlay_cfg = dict(cfg, bear_system_mode="active")
             dynamic_overlap = sorted(
                 configured_bear_symbols
@@ -862,6 +940,11 @@ class StrategyX:
             )
             proposed_targets = dict(allocation.targets)
             reason = allocation.reason
+            if blocking_evidenced_kickers and allocation.applied:
+                reason = (
+                    "bear overlay applied; kicker blocked by prior evidence: "
+                    + ", ".join(blocking_evidenced_kickers)
+                )
             refusal_reason = ""
             if ownership_conflict:
                 reason = ownership_conflict
@@ -909,8 +992,20 @@ class StrategyX:
                 )
             else:
                 cache["_sx_bear_kicker_entry_day"] = ""
-            kicker_targeted = (active_backtest and kicker in selected_targets)
-            cache["_sx_bear_kicker_targeted"] = bool(kicker_targeted)
+            kicker_targeted = (
+                active_backtest
+                and float(selected_targets.get(kicker, 0.0) or 0.0) > 0
+                and not kicker_buy_blocked
+            )
+            next_pending_kicker = ""
+            if kicker_targeted:
+                next_pending_kicker = kicker
+            elif prior_pending_kicker and retain_all_kicker_evidence:
+                next_pending_kicker = prior_pending_kicker
+            elif len(runtime_pending_kickers) == 1:
+                next_pending_kicker = next(iter(runtime_pending_kickers))
+            cache["_sx_bear_kicker_targeted"] = bool(next_pending_kicker)
+            cache[_BEAR_PENDING_KICKER_KEY] = next_pending_kicker
             can_mint_evidence = (
                 active_backtest and allocation.applied and not dynamic_overlap
                 and not ownership_conflict and not static_conflict and not bear
@@ -923,11 +1018,15 @@ class StrategyX:
                 if can_mint_evidence
                 else set()
             )
+            if kicker_buy_blocked:
+                newly_owned.discard(kicker)
             retained_owned = {
                 symbol for symbol in prior_bear_owned
                 if (symbol in held_symbols
                     or float(selected_targets.get(symbol, 0.0) or 0.0) > 0
-                    or symbol == prior_pending_kicker)
+                    or symbol in runtime_pending_kickers
+                    or (retain_all_kicker_evidence
+                        and symbol in evidenced_kickers))
             }
             cache["_sx_bear_owned"] = sorted(retained_owned | newly_owned)
             owned |= retained_owned | newly_owned
@@ -1007,11 +1106,18 @@ class StrategyX:
             selected_targets, nav=nav, positions=positions,
             prices={**eff_prices, **bear_prices},
             cash=cash, config=cfg, owned=owned)
+        if kicker_buy_blocked:
+            for blocked_symbol in evidenced_kickers | {kicker_symbol}:
+                if decisions.get(blocked_symbol) == 1:
+                    decisions.pop(blocked_symbol, None)
+                    sizes.pop(blocked_symbol, None)
         if bear_mode == "off" and prior_bear_owned:
             retained_owned = {
                 symbol for symbol in prior_bear_owned
                 if (symbol in held_symbols
-                    or symbol == prior_pending_kicker)
+                    or symbol in runtime_pending_kickers
+                    or (retain_all_kicker_evidence
+                        and symbol in evidenced_kickers))
             }
             cache["_sx_bear_owned"] = sorted(retained_owned)
             retained_evidence = {
@@ -1022,7 +1128,13 @@ class StrategyX:
                 cache, retained_evidence,
                 force=evidence_was_present or bool(prior_evidence),
             )
-            cache["_sx_bear_kicker_targeted"] = False
+            retained_pending_kicker = (
+                prior_pending_kicker if retain_all_kicker_evidence else ""
+            )
+            cache["_sx_bear_kicker_targeted"] = bool(
+                retained_pending_kicker
+            )
+            cache[_BEAR_PENDING_KICKER_KEY] = retained_pending_kicker
 
         # A traded leg with no quote is not a no-op — it is the whole strategy
         # silently not running, and the self-censor in targets_to_orders (skip

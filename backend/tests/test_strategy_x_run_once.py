@@ -19,15 +19,23 @@ if _backend not in sys.path:
 
 from strategies.strategy_x import StrategyX  # noqa: E402
 import strategies.strategy_x as strategy_x_module  # noqa: E402
+from portfolio_emulator import PortfolioEmulator  # noqa: E402
+from simulated_execution import (  # noqa: E402
+    DEFAULT_EQUITY_EXECUTION_COST_MODEL,
+    NextEventExecutionSimulator,
+    SimulationQuote,
+)
 from strategy_x import DEFAULTS  # noqa: E402
 from strategy_x_bear import BearSystemStateError  # noqa: E402
 
 
 class FakeEmulator:
-    def __init__(self, cash=10000.0, positions=None, prices=None):
+    def __init__(self, cash=10000.0, positions=None, prices=None,
+                 pending_symbols=()):
         self._cash = cash
         self._positions = dict(positions or {})
         self._prices = dict(prices or {})
+        self._pending_symbols = pending_symbols
 
     def get_cash(self):
         return self._cash
@@ -39,6 +47,11 @@ class FakeEmulator:
         px = prices or self._prices
         return self._cash + sum(q * float(px.get(s, 0.0))
                                 for s, q in self._positions.items())
+
+    def pending_execution_symbols(self):
+        if isinstance(self._pending_symbols, BaseException):
+            raise self._pending_symbols
+        return self._pending_symbols
 
 
 def bars(n, start=100.0, step=0.5, end_day=None, mult=None):
@@ -561,6 +574,7 @@ def test_pending_kicker_never_retains_retired_manager_provenance():
         "_sx_bear_kicker_entry_day": NOW.date().isoformat(),
         "_sx_bear_kicker_state_symbol": "SQQQ",
         "_sx_bear_kicker_targeted": True,
+        "_sx_bear_pending_kicker_symbol": "SQQQ",
         "_sx_bear_owned": ["DBMF", "SQQQ"],
         "_sx_bear_ownership_evidence": ownership_evidence(
             "SQQQ", "kicker", 0.05,
@@ -588,9 +602,10 @@ def test_pending_kicker_never_retains_retired_manager_provenance():
     assert "DBMF" not in next_out
 
 
+@pytest.mark.parametrize("pending_symbols", [("SQQQ",), RuntimeError("boom")])
 @pytest.mark.parametrize("bear_mode,with_history", [("off", True), ("active", False)])
 def test_pending_kicker_retention_never_carries_unrelated_provenance(
-    bear_mode, with_history,
+    bear_mode, with_history, pending_symbols,
 ):
     data, prices = bear_ready_downtrend_fixture()
     cache = {
@@ -601,6 +616,7 @@ def test_pending_kicker_retention_never_carries_unrelated_provenance(
         "_sx_bear_kicker_entry_day": NOW.date().isoformat(),
         "_sx_bear_kicker_state_symbol": "SQQQ",
         "_sx_bear_kicker_targeted": True,
+        "_sx_bear_pending_kicker_symbol": "SQQQ",
         "_sx_bear_owned": ["DBMF", "SQQQ"],
         "_sx_bear_ownership_evidence": ownership_evidence(
             "SQQQ", "kicker", 0.05,
@@ -610,11 +626,14 @@ def test_pending_kicker_retention_never_carries_unrelated_provenance(
     StrategyX().run_once(
         list(prices), prices, NOW, base_cfg(bear_system_mode=bear_mode), {},
         data=data if with_history else {},
-        portfolio_emulator=FakeEmulator(prices=prices),
+        portfolio_emulator=FakeEmulator(
+            prices=prices, pending_symbols=pending_symbols,
+        ),
         strategy_cache=cache, mode="FULL",
     )
     assert cache["_sx_bear_owned"] == ["SQQQ"]
-    assert cache["_sx_bear_kicker_targeted"] is False
+    assert cache["_sx_bear_kicker_targeted"] is True
+    assert cache["_sx_bear_pending_kicker_symbol"] == "SQQQ"
 
 
 @pytest.mark.parametrize(
@@ -637,6 +656,7 @@ def test_pending_kicker_requires_exact_true_flag_and_matching_provenance(
         "_sx_bear_shadow": {"kicker": {"symbol": "SQQQ"}},
     }
     if provenance:
+        cache["_sx_bear_pending_kicker_symbol"] = "SQQQ"
         cache["_sx_bear_ownership_evidence"] = ownership_evidence(
             "SQQQ", "kicker", 0.05,
         )
@@ -647,6 +667,39 @@ def test_pending_kicker_requires_exact_true_flag_and_matching_provenance(
     )
     assert "SQQQ" not in out
     assert cache["_sx_bear_system_state"] == "cooldown"
+    assert "SQQQ" not in cache["_sx_bear_owned"]
+
+
+@pytest.mark.parametrize(
+    "pending_symbol", [True, 1, "sqqq", " SQQQ ", "AAPL", ""],
+)
+def test_pending_kicker_symbol_requires_strict_evidence_bound_identity(
+    pending_symbol,
+):
+    data, prices = bear_session_data(follow_through=True)
+    cache = {
+        "_sx_bear_state_version": 1,
+        "_sx_bear_system_state": "holding",
+        "_sx_bear_kicker_bars": 1,
+        "_sx_bear_kicker_cooldown": 0,
+        "_sx_bear_kicker_entry_day": NOW.date().isoformat(),
+        "_sx_bear_kicker_state_symbol": "SQQQ",
+        "_sx_bear_kicker_targeted": True,
+        "_sx_bear_pending_kicker_symbol": pending_symbol,
+        "_sx_bear_owned": ["SQQQ"],
+        "_sx_bear_ownership_evidence": ownership_evidence(
+            "SQQQ", "kicker", 0.05,
+        ),
+    }
+    out = StrategyX().run_once(
+        list(prices), prices, NOW, base_cfg(bear_system_mode="active"), {},
+        data=data, portfolio_emulator=FakeEmulator(prices=prices),
+        strategy_cache=cache, mode="backtest",
+    )
+    assert "SQQQ" not in out
+    assert cache["_sx_bear_system_state"] == "cooldown"
+    assert cache["_sx_bear_kicker_targeted"] is False
+    assert cache["_sx_bear_pending_kicker_symbol"] == ""
     assert "SQQQ" not in cache["_sx_bear_owned"]
 
 
@@ -772,6 +825,7 @@ def test_invalid_kicker_entry_day_forces_owned_holding_exit():
         "_sx_bear_kicker_entry_day": "not-a-date",
         "_sx_bear_kicker_state_symbol": "SQQQ",
         "_sx_bear_kicker_targeted": True,
+        "_sx_bear_pending_kicker_symbol": "SQQQ",
         "_sx_bear_owned": ["SQQQ"],
         "_sx_bear_ownership_evidence": ownership_evidence(
             "SQQQ", "kicker", 0.05,
@@ -863,6 +917,7 @@ def test_changing_kicker_symbol_unwinds_old_without_buying_new_symbol():
         "_sx_bear_kicker_entry_day": NOW.date().isoformat(),
         "_sx_bear_kicker_state_symbol": "SQQQ",
         "_sx_bear_kicker_targeted": True,
+        "_sx_bear_pending_kicker_symbol": "SQQQ",
         "_sx_bear_owned": ["SQQQ"],
         "_sx_bear_ownership_evidence": {
             "version": 1,
@@ -979,6 +1034,7 @@ def test_missing_kicker_fill_price_cancels_request_without_carry_forward():
         "_sx_bear_kicker_entry_day": NOW.date().isoformat(),
         "_sx_bear_kicker_state_symbol": "SQQQ",
         "_sx_bear_kicker_targeted": True,
+        "_sx_bear_pending_kicker_symbol": "SQQQ",
         "_sx_bear_owned": ["SQQQ"],
         "_sx_bear_ownership_evidence": ownership_evidence(
             "SQQQ", "kicker", 0.05,
@@ -1008,6 +1064,7 @@ def test_kicker_max_hold_targets_exit_and_requires_full_cooldown():
         "_sx_bear_kicker_entry_day": NOW.date().isoformat(),
         "_sx_bear_kicker_state_symbol": "SQQQ",
         "_sx_bear_kicker_targeted": True,
+        "_sx_bear_pending_kicker_symbol": "SQQQ",
         "_sx_bear_owned": ["SQQQ"],
         "_sx_bear_ownership_evidence": ownership_evidence(
             "SQQQ", "kicker", 0.05,
@@ -1061,6 +1118,7 @@ def test_kicker_recovery_targets_exit_on_the_decision_row():
         "_sx_bear_kicker_entry_day": NOW.date().isoformat(),
         "_sx_bear_kicker_state_symbol": "SQQQ",
         "_sx_bear_kicker_targeted": True,
+        "_sx_bear_pending_kicker_symbol": "SQQQ",
         "_sx_bear_owned": ["SQQQ"],
         "_sx_bear_ownership_evidence": ownership_evidence(
             "SQQQ", "kicker", 0.05,
@@ -1860,3 +1918,374 @@ def test_shadow_telemetry_cannot_retain_flat_raw_kicker_ownership(bear_mode):
     )
     assert "SQQQ" not in cache.get("_sx_bear_owned", [])
     assert cache["_sx_bear_kicker_targeted"] is False
+
+
+def test_multiple_kicker_evidence_records_block_replacement_without_inference():
+    data, prices = bear_session_data(follow_through=True)
+    prices["PSQ"] = 10.0
+    data["PSQ"] = {"bars": bars(80, start=10.0, step=0.01)}
+    cache = {
+        "_sx_bear_state_version": 1,
+        "_sx_bear_system_state": "holding",
+        "_sx_bear_kicker_bars": 1,
+        "_sx_bear_kicker_cooldown": 0,
+        "_sx_bear_kicker_entry_day": NOW.date().isoformat(),
+        "_sx_bear_kicker_state_symbol": "PSQ",
+        "_sx_bear_kicker_targeted": True,
+        "_sx_bear_pending_kicker_symbol": "PSQ",
+        "_sx_bear_owned": ["PSQ", "SQQQ"],
+        "_sx_bear_ownership_evidence": {
+            "version": 1,
+            "records": {
+                "PSQ": {
+                    "symbol": "PSQ",
+                    "role": "kicker",
+                    "target_weight": 0.05,
+                },
+                "SQQQ": {
+                    "symbol": "SQQQ",
+                    "role": "kicker",
+                    "target_weight": 0.05,
+                },
+            },
+        },
+    }
+    out = StrategyX().run_once(
+        list(prices), prices, NOW,
+        base_cfg(bear_system_mode="active", bear_kicker_symbol="PSQ"), {},
+        data=data, portfolio_emulator=FakeEmulator(prices=prices),
+        strategy_cache=cache, mode="backtest",
+    )
+    assert "PSQ" not in out
+    assert "PSQ" not in out.get("_nexus_executable_buys", [])
+    assert cache["_sx_bear_kicker_targeted"] is True
+    assert cache["_sx_bear_pending_kicker_symbol"] == "PSQ"
+    assert {
+        symbol for symbol, record
+        in cache["_sx_bear_ownership_evidence"]["records"].items()
+        if record["role"] == "kicker"
+    } == {"PSQ", "SQQQ"}
+
+
+@pytest.mark.parametrize(
+    "pending_result",
+    [
+        "missing-reader", None, "SQQQ", {"SQQQ": True}, ["sqqq"], [1],
+        RuntimeError("boom"),
+    ],
+    ids=[
+        "missing-reader", "none", "scalar", "mapping", "unnormalized",
+        "non-string", "error",
+    ],
+)
+def test_invalid_or_throwing_pending_read_blocks_kicker_buy_and_mint(
+    pending_result,
+):
+    data, prices = bear_session_data(follow_through=True)
+    cache = {
+        "_sx_bear_state_version": 1,
+        "_sx_bear_system_state": "armed",
+        "_sx_bear_kicker_bars": 0,
+        "_sx_bear_kicker_cooldown": 0,
+        "_sx_bear_kicker_entry_day": "",
+        "_sx_bear_kicker_state_symbol": "SQQQ",
+        "_sx_bear_kicker_targeted": False,
+        "_sx_bear_pending_kicker_symbol": "",
+        "_sx_bear_owned": [],
+    }
+    emulator = FakeEmulator(prices=prices, pending_symbols=pending_result)
+    if pending_result == "missing-reader":
+        emulator.pending_execution_symbols = None
+    out = StrategyX().run_once(
+        list(prices), prices, NOW, base_cfg(bear_system_mode="active"), {},
+        data=data,
+        portfolio_emulator=emulator,
+        strategy_cache=cache, mode="backtest",
+    )
+    assert "SQQQ" not in out
+    assert "SQQQ" not in out.get("_nexus_executable_buys", [])
+    assert "SQQQ" not in cache.get("_sx_bear_owned", [])
+    assert "SQQQ" not in cache.get(
+        "_sx_bear_ownership_evidence", {}
+    ).get("records", {})
+
+
+def test_real_pending_same_symbol_buy_suppresses_retries_and_topups():
+    data, prices = bear_session_data(follow_through=True)
+    cache = {
+        "_sx_bear_state_version": 1,
+        "_sx_bear_system_state": "armed",
+        "_sx_bear_kicker_bars": 0,
+        "_sx_bear_kicker_cooldown": 0,
+        "_sx_bear_kicker_entry_day": "",
+        "_sx_bear_kicker_state_symbol": "SQQQ",
+        "_sx_bear_kicker_targeted": False,
+        "_sx_bear_pending_kicker_symbol": "",
+        "_sx_bear_owned": [],
+    }
+    simulator = NextEventExecutionSimulator(
+        DEFAULT_EQUITY_EXECUTION_COST_MODEL
+    )
+    emulator = PortfolioEmulator(1000.0, execution_simulator=simulator)
+    first = StrategyX().run_once(
+        list(prices), prices, NOW, base_cfg(
+            bear_system_mode="active", min_order_usd=1.0,
+        ), {}, data=data, portfolio_emulator=emulator,
+        strategy_cache=cache, mode="backtest",
+    )
+    assert first["SQQQ"] == 1
+    receipt = emulator.execute_signal(
+        "SQQQ", 1, prices["SQQQ"], timestamp=NOW,
+        cash_per_trade=40.0, order_source="strategy_x",
+    )
+    assert receipt and simulator.pending_order_count == 1
+
+    retry = StrategyX().run_once(
+        list(prices), prices, NOW + timedelta(days=1), base_cfg(
+            bear_system_mode="active", min_order_usd=1.0,
+        ), {}, data=data, portfolio_emulator=emulator,
+        strategy_cache=cache, mode="backtest",
+    )
+    assert "SQQQ" not in retry
+    assert "SQQQ" not in retry.get("_nexus_executable_buys", [])
+    assert simulator.pending_order_count == 1
+    assert cache["_sx_bear_pending_kicker_symbol"] == "SQQQ"
+    assert "SQQQ" in cache["_sx_bear_ownership_evidence"]["records"]
+
+
+def test_retired_kicker_blocks_new_kicker_until_exit_then_delayed_fill_is_owned():
+    cache, _, _ = _prime_active_kicker_evidence()
+
+    def kicker_records():
+        return {
+            symbol for symbol, record
+            in cache["_sx_bear_ownership_evidence"]["records"].items()
+            if record["role"] == "kicker"
+        }
+
+    assert kicker_records() == {"SQQQ"}
+
+    cfg = base_cfg(
+        bear_system_mode="active", bear_kicker_symbol="PSQ",
+        min_order_usd=1.0,
+    )
+
+    def changed_market(*, fresh=False, sqqq_priceable=False):
+        data, prices = bear_session_data(follow_through=not fresh)
+        data["PSQ"] = {"bars": bars(80, start=10.0, step=0.01)}
+        prices["PSQ"] = 10.0
+        if not sqqq_priceable:
+            data.pop("SQQQ", None)
+            prices.pop("SQQQ", None)
+        return data, prices
+
+    held_old = {"SQQQ": 10.0}
+    day = 2
+
+    # The ticker change invalidates SQQQ-bound state and starts PSQ cooldown.
+    data, prices = changed_market()
+    first = StrategyX().run_once(
+        list(prices), prices, NOW + timedelta(days=day), cfg, {}, data=data,
+        portfolio_emulator=FakeEmulator(
+            cash=1000.0, positions=held_old, prices=prices,
+        ),
+        strategy_cache=cache, mode="backtest",
+    )
+    assert "PSQ" not in first and "SQQQ" not in first
+    assert cache["_sx_bear_kicker_cooldown"] == 10
+    assert kicker_records() == {"SQQQ"}
+
+    # Spend all ten PSQ cooldown decisions while the retired SQQQ exit has no
+    # quote. No session may target the replacement ticker.
+    for _ in range(10):
+        day += 1
+        data, prices = changed_market()
+        out = StrategyX().run_once(
+            list(prices), prices, NOW + timedelta(days=day), cfg, {}, data=data,
+            portfolio_emulator=FakeEmulator(
+                cash=1000.0, positions=held_old, prices=prices,
+            ),
+            strategy_cache=cache, mode="backtest",
+        )
+        assert "PSQ" not in out and "SQQQ" not in out
+        assert kicker_records() == {"SQQQ"}
+    assert cache["_sx_bear_system_state"] == "idle"
+
+    # A new fresh event and its confirmation are ignored while SQQQ remains.
+    day += 1
+    data, prices = changed_market(fresh=True)
+    armed_attempt = StrategyX().run_once(
+        list(prices), prices, NOW + timedelta(days=day), cfg, {}, data=data,
+        portfolio_emulator=FakeEmulator(
+            cash=1000.0, positions=held_old, prices=prices,
+        ),
+        strategy_cache=cache, mode="backtest",
+    )
+    assert "PSQ" not in armed_attempt
+    assert cache["_sx_bear_system_state"] == "idle"
+
+    day += 1
+    data, prices = changed_market()
+    confirmation_attempt = StrategyX().run_once(
+        list(prices), prices, NOW + timedelta(days=day), cfg, {}, data=data,
+        portfolio_emulator=FakeEmulator(
+            cash=1000.0, positions=held_old, prices=prices,
+        ),
+        strategy_cache=cache, mode="backtest",
+    )
+    assert "PSQ" not in confirmation_attempt
+    assert kicker_records() == {"SQQQ"}
+
+    # When SQQQ becomes priceable, keep its evidence while issuing a full exit.
+    day += 1
+    data, prices = changed_market(sqqq_priceable=True)
+    retired_exit = StrategyX().run_once(
+        list(prices), prices, NOW + timedelta(days=day), cfg, {}, data=data,
+        portfolio_emulator=FakeEmulator(
+            cash=1000.0, positions=held_old, prices=prices,
+        ),
+        strategy_cache=cache, mode="backtest",
+    )
+    assert retired_exit["SQQQ"] == -1
+    assert retired_exit["_nexus_position_sizes"]["SQQQ"]["sell_fraction"] == 1.0
+    assert "PSQ" not in retired_exit
+    assert kicker_records() == {"SQQQ"}
+
+    # Observe the exit fill before allowing a later fresh PSQ event.
+    day += 1
+    data, prices = changed_market(sqqq_priceable=True)
+    StrategyX().run_once(
+        list(prices), prices, NOW + timedelta(days=day), cfg, {}, data=data,
+        portfolio_emulator=FakeEmulator(cash=1000.0, prices=prices),
+        strategy_cache=cache, mode="backtest",
+    )
+    assert kicker_records() == set()
+
+    day += 1
+    data, prices = changed_market(fresh=True, sqqq_priceable=True)
+    StrategyX().run_once(
+        list(prices), prices, NOW + timedelta(days=day), cfg, {}, data=data,
+        portfolio_emulator=FakeEmulator(cash=1000.0, prices=prices),
+        strategy_cache=cache, mode="backtest",
+    )
+    assert cache["_sx_bear_system_state"] == "armed"
+
+    # Confirm PSQ, leave the buy unfilled for one decision, then deliver the
+    # fill one decision later. Explicit pending identity must keep provenance.
+    day += 1
+    data, prices = changed_market(sqqq_priceable=True)
+    target = StrategyX().run_once(
+        list(prices), prices, NOW + timedelta(days=day), cfg, {}, data=data,
+        portfolio_emulator=FakeEmulator(cash=1000.0, prices=prices),
+        strategy_cache=cache, mode="backtest",
+    )
+    assert target["PSQ"] == 1
+    assert cache["_sx_bear_pending_kicker_symbol"] == "PSQ"
+    assert kicker_records() == {"PSQ"}
+
+    day += 1
+    unfilled = StrategyX().run_once(
+        list(prices), prices, NOW + timedelta(days=day), cfg, {}, data=data,
+        portfolio_emulator=FakeEmulator(cash=1000.0, prices=prices),
+        strategy_cache=cache, mode="backtest",
+    )
+    assert unfilled["PSQ"] == 1
+    assert cache["_sx_bear_pending_kicker_symbol"] == "PSQ"
+    assert kicker_records() == {"PSQ"}
+
+    day += 1
+    delayed_fill = StrategyX().run_once(
+        list(prices), prices, NOW + timedelta(days=day), cfg, {}, data=data,
+        portfolio_emulator=FakeEmulator(
+            cash=900.0, positions={"PSQ": 10.0}, prices=prices,
+        ),
+        strategy_cache=cache, mode="backtest",
+    )
+    assert "PSQ" not in delayed_fill.get("_nexus_sell_enforcement", [])
+    assert kicker_records() == {"PSQ"}
+
+
+def test_real_pending_retired_buy_blocks_replacement_through_delayed_fill():
+    cache, _, _ = _prime_active_kicker_evidence()
+    simulator = NextEventExecutionSimulator(
+        DEFAULT_EQUITY_EXECUTION_COST_MODEL
+    )
+    emulator = PortfolioEmulator(1000.0, execution_simulator=simulator)
+    receipt = emulator.execute_signal(
+        "SQQQ", 1, 8.0, timestamp=NOW + timedelta(days=1),
+        cash_per_trade=40.0, order_source="strategy_x",
+    )
+    assert receipt and simulator.pending_symbols == ("SQQQ",)
+    assert emulator.get_positions() == {}
+
+    cfg = base_cfg(
+        bear_system_mode="active", bear_kicker_symbol="PSQ",
+        min_order_usd=1.0,
+    )
+
+    def changed_market(*, fresh=False, sqqq_priceable=False):
+        data, prices = bear_session_data(follow_through=not fresh)
+        data["PSQ"] = {"bars": bars(80, start=10.0, step=0.01)}
+        prices["PSQ"] = 10.0
+        if not sqqq_priceable:
+            data.pop("SQQQ", None)
+            prices.pop("SQQQ", None)
+        return data, prices
+
+    def decide(day, *, fresh=False, sqqq_priceable=False):
+        data, prices = changed_market(
+            fresh=fresh, sqqq_priceable=sqqq_priceable,
+        )
+        return StrategyX().run_once(
+            list(prices), prices, NOW + timedelta(days=day), cfg, {}, data=data,
+            portfolio_emulator=emulator, strategy_cache=cache,
+            mode="backtest",
+        )
+
+    # The old buy remains in the real next-event book without an SQQQ quote.
+    # It must block PSQ throughout its config-reset cooldown and later signals.
+    for day in range(2, 13):
+        out = decide(day)
+        assert "PSQ" not in out
+        assert simulator.pending_symbols == ("SQQQ",)
+        assert cache["_sx_bear_pending_kicker_symbol"] == "SQQQ"
+        assert "SQQQ" in cache["_sx_bear_ownership_evidence"]["records"]
+
+    assert cache["_sx_bear_system_state"] == "idle"
+    assert "PSQ" not in decide(13, fresh=True)
+    assert cache["_sx_bear_system_state"] == "idle"
+    assert "PSQ" not in decide(14)
+
+    # A much later quote fills the original buy. Provenance and the blocker
+    # must still exist when Strategy X next observes the position.
+    fills = emulator.process_quote(SimulationQuote.from_mid(
+        symbol="SQQQ", timestamp=NOW + timedelta(days=15), mid=8.0,
+        spread_bps=5.0,
+    ))
+    assert fills and simulator.pending_symbols == ()
+    assert emulator.get_positions().get("SQQQ", 0.0) > 0
+    after_fill = decide(15)
+    assert "PSQ" not in after_fill
+    assert "SQQQ" in cache["_sx_bear_ownership_evidence"]["records"]
+
+    # Once priceable, the retired fill exits completely. Only a later fresh
+    # event may start PSQ's state machine.
+    retired_exit = decide(16, sqqq_priceable=True)
+    assert retired_exit["SQQQ"] == -1
+    emulator.execute_signal(
+        "SQQQ", -1, 8.0, timestamp=NOW + timedelta(days=16),
+        sell_fraction=1.0, order_source="strategy_x",
+    )
+    emulator.process_quote(SimulationQuote.from_mid(
+        symbol="SQQQ", timestamp=NOW + timedelta(days=17), mid=8.0,
+        spread_bps=5.0,
+    ))
+    assert "SQQQ" not in emulator.get_positions()
+    decide(17, sqqq_priceable=True)
+    assert "SQQQ" not in cache["_sx_bear_ownership_evidence"]["records"]
+
+    assert "PSQ" not in decide(18, fresh=True, sqqq_priceable=True)
+    assert cache["_sx_bear_system_state"] == "armed"
+    replacement = decide(19, sqqq_priceable=True)
+    assert replacement["PSQ"] == 1
+    assert "SQQQ" not in emulator.get_positions()
