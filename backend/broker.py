@@ -14253,6 +14253,75 @@ while not shutdown_requested:
                                             f"skipping strategies this tick.",
                                             "red",
                                         )
+                                # 2026-08-27: LIVE daily bars for equity
+                                # run_once strategies. Until now live passed
+                                # data=None and strategy_x / _xs / _eb all
+                                # correctly REFUSED to trade — a strategy that
+                                # cannot see its own filter must do nothing, so
+                                # the live lane was inert by construction.
+                                # Scoped to instances that actually declare an
+                                # EB universe, so every other equity instance
+                                # stays byte-identical (data=None).
+                                elif _tick_mode != "IDLE":
+                                    try:
+                                        _eb_syms = _strategy_eb_universe_symbols(
+                                            _cached_strategies)
+                                    except Exception:
+                                        _eb_syms = []
+                                    if _eb_syms:
+                                        try:
+                                            from live_equity_bars import (
+                                                build_live_equity_data as _leb_build,
+                                            )
+
+                                            def _leb_fetch(_syms, _start, _end,
+                                                           _k=_strat_data_key,
+                                                           _s=_strat_data_secret):
+                                                _db = None
+                                                try:
+                                                    _db = get_conn()
+                                                except Exception:
+                                                    _db = None
+                                                try:
+                                                    return fetch_alpaca_historical_bars(
+                                                        _syms, _start, _end, _k, _s,
+                                                        timeframe="1Day",
+                                                        db_conn=_db, feed=data_feed,
+                                                    )
+                                                finally:
+                                                    try:
+                                                        if _db is not None:
+                                                            _db.close()
+                                                    except Exception:
+                                                        pass
+
+                                            _rr_data = _leb_build(
+                                                _leb_fetch, _eb_syms,
+                                                datetime.datetime.now(
+                                                    datetime.timezone.utc),
+                                                last_good=globals().get(
+                                                    "_live_equity_bars_last_good"),
+                                                log=_log,
+                                            )
+                                            if _rr_data:
+                                                globals()["_live_equity_bars_last_good"] = _rr_data
+                                            elif _rr_data is None:
+                                                _rr_specs_eff = []
+                                                _log(
+                                                    "Live equity bars unavailable (fetch "
+                                                    "failed, no last-good) — skipping "
+                                                    "strategies this tick; will retry.",
+                                                    "red",
+                                                )
+                                        except Exception as _leb_e:
+                                            _rr_data = None
+                                            _rr_specs_eff = []
+                                            _log(
+                                                f"Live equity bars error: "
+                                                f"{type(_leb_e).__name__}: {_leb_e} — "
+                                                f"skipping strategies this tick.",
+                                                "red",
+                                            )
                                 _rr_fut = _PRICE_FETCH_EXECUTOR.submit(
                                     run_run_once_strategies,
                                     _rr_specs_eff, list(symbols or []), prices, current_time,
