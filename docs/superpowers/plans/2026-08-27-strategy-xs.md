@@ -156,10 +156,50 @@ from __future__ import annotations
 
 import math
 
-from strategy_x import Q, _f, _finite, _i, _s
+from strategy_x import Q, _finite
 
 __all__ = ["DEFAULTS", "diversifier_basket", "strategy_xs_universe",
            "xs_targets"]
+
+
+# Own parsers rather than strategy_x's, for two measured reasons. Its `_i`
+# raises OverflowError on float("inf") instead of falling back — `int(inf)` is
+# not caught by its (TypeError, ValueError, AttributeError) — and it resolves a
+# missing default against strategy_x's DEFAULTS, so any XS-only key without an
+# explicit default raises TypeError. Both fail OPEN, which is the wrong
+# direction for a parser guarding a levered position.
+def _f(cfg, key, default=None):
+    if default is None:
+        default = DEFAULTS.get(key, 0.0)
+    try:
+        value = (cfg or {}).get(key, default)
+        if value is None or value == "":
+            return float(default)
+        out = float(value)
+    except (TypeError, ValueError, AttributeError, OverflowError):
+        return float(default)
+    return out if math.isfinite(out) else float(default)
+
+
+def _i(cfg, key, default=None):
+    if default is None:
+        default = DEFAULTS.get(key, 0)
+    try:
+        value = (cfg or {}).get(key, default)
+        if value is None or value == "":
+            return int(default)
+        if isinstance(value, float) and not math.isfinite(value):
+            return int(default)
+        return int(value)
+    except (TypeError, ValueError, AttributeError, OverflowError):
+        return int(default)
+
+
+def _s(cfg, key, default=None):
+    if default is None:
+        default = DEFAULTS.get(key, "")
+    value = (cfg or {}).get(key, default)
+    return str(value if value is not None else default).strip().upper()
 
 
 def diversifier_basket(closes_by_symbol, prices, config) -> tuple:
