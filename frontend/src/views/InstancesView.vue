@@ -1103,14 +1103,14 @@ onMounted(async () => {
               <span
                 v-for="sym in inst.stocks"
                 :key="sym"
-                class="group flex items-center gap-1 px-2 py-0.5 rounded-md bg-surface border border-border-subtle text-xs font-mono text-slate-300"
+                class="flex items-center gap-1 px-2 py-0.5 rounded-md bg-surface border border-border-subtle text-xs font-mono text-slate-300"
               >
                 {{ sym }}
                 <button
                   @click="removeStock(inst.id, sym)"
                   :disabled="busy[inst.id]"
-                  class="text-slate-600 hover:text-red-400 transition-colors disabled:opacity-40 opacity-0 group-hover:opacity-100"
-                  title="Remove"
+                  class="text-slate-600 hover:text-red-400 transition-colors disabled:opacity-40"
+                  :title="`Remove ${sym}`"
                 >
                   <span class="material-symbols-outlined text-[12px]">close</span>
                 </button>

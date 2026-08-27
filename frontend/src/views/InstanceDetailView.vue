@@ -128,6 +128,62 @@ async function toggleRun() {
   }
 }
 
+// ── Stocks ────────────────────────────────────────────────────────────────────
+const showAddStock  = ref(false)
+const addStockSym   = ref('')
+const addStockBusy  = ref(false)
+const addStockMsg   = ref('')
+const removingStock = ref('')
+
+function openAddStock() {
+  addStockSym.value  = ''
+  addStockMsg.value  = ''
+  addStockBusy.value = false
+  showAddStock.value = true
+}
+
+function closeAddStock() {
+  if (addStockBusy.value) return
+  showAddStock.value = false
+}
+
+async function submitAddStock() {
+  const sym = addStockSym.value.trim().toUpperCase()
+  if (!sym) { addStockMsg.value = 'Symbol is required'; return }
+  addStockBusy.value = true
+  addStockMsg.value  = ''
+  try {
+    const res = await fetch(`${API_BASE}/instances/${encodeURIComponent(instanceId.value)}/stocks`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ symbol: sym }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`)
+    await fetchInstance()
+    showAddStock.value = false
+  } catch (e) {
+    addStockMsg.value = e.message || 'Failed to add stock'
+  } finally {
+    addStockBusy.value = false
+  }
+}
+
+async function removeStock(symbol) {
+  removingStock.value = symbol
+  try {
+    const res = await fetch(`${API_BASE}/instances/${encodeURIComponent(instanceId.value)}/stocks/${encodeURIComponent(symbol)}`, {
+      method: 'DELETE', headers: authHeaders(),
+    })
+    if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.detail || `HTTP ${res.status}`) }
+    await fetchInstance()
+  } catch (e) {
+    alert(`Remove failed: ${e.message}`)
+  } finally {
+    removingStock.value = ''
+  }
+}
+
 // ── Formatting ────────────────────────────────────────────────────────────────
 const showEditInfo   = ref(false)
 const editInfoSaving = ref(false)
@@ -1583,14 +1639,34 @@ async function submitCreateBacktest() {
             <p class="text-xs font-bold uppercase tracking-widest text-slate-500">
               Stocks <span class="text-slate-700 ml-1">({{ (inst.stocks || []).length }})</span>
             </p>
+            <button
+              @click="openAddStock"
+              class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-primary hover:bg-primary/10 border border-primary/20 transition-colors"
+            >
+              <span class="material-symbols-outlined text-[14px]">add</span>
+              Add Stock
+            </button>
           </div>
           <div v-if="(inst.stocks || []).length === 0" class="text-xs text-slate-600 italic">No stocks added</div>
           <div v-else class="flex flex-wrap gap-2">
             <span
               v-for="sym in inst.stocks"
               :key="sym"
-              class="px-2.5 py-1 rounded-lg bg-surface border border-border-subtle text-xs font-mono text-slate-300"
-            >{{ sym }}</span>
+              class="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-surface border border-border-subtle text-xs font-mono text-slate-300"
+            >
+              {{ sym }}
+              <button
+                @click="removeStock(sym)"
+                :disabled="removingStock === sym"
+                class="text-slate-600 hover:text-red-400 transition-colors disabled:opacity-40"
+                :title="`Remove ${sym}`"
+              >
+                <span
+                  class="material-symbols-outlined text-[13px] align-middle"
+                  :class="removingStock === sym ? 'animate-spin' : ''"
+                >{{ removingStock === sym ? 'progress_activity' : 'close' }}</span>
+              </button>
+            </span>
           </div>
         </section>
 
@@ -2964,6 +3040,52 @@ async function submitCreateBacktest() {
             <button @click="submitUnlinkBrokerage" :disabled="unlinkBrokerageBusy" class="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-red-600 hover:bg-red-500 disabled:opacity-40 transition-colors">
               <span v-if="unlinkBrokerageBusy" class="material-symbols-outlined text-[14px] animate-spin align-middle mr-1">progress_activity</span>
               Unlink
+            </button>
+          </div>
+        </div>
+      </div>
+    </Transition>
+  </Teleport>
+
+  <!-- ── Add Stock ────────────────────────────────────────────────────────── -->
+  <Teleport to="body">
+    <Transition name="fade">
+      <div
+        v-if="showAddStock"
+        class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+        @click.self="closeAddStock"
+      >
+        <div class="relative w-full max-w-xs bg-[#0f1318] border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
+          <div class="flex items-center justify-between px-6 py-5 border-b border-border-subtle">
+            <h2 class="text-base font-bold">Add Stock</h2>
+            <button @click="closeAddStock" class="text-slate-500 hover:text-slate-300 transition-colors">
+              <span class="material-symbols-outlined">close</span>
+            </button>
+          </div>
+          <div class="px-6 py-5 space-y-4">
+            <div>
+              <label class="block text-xs font-medium text-slate-400 mb-1.5">Ticker Symbol</label>
+              <input
+                v-model="addStockSym"
+                type="text"
+                placeholder="e.g. AAPL"
+                @keydown.enter="submitAddStock"
+                class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono uppercase"
+              />
+            </div>
+            <div v-if="addStockMsg" class="rounded-lg px-4 py-3 text-sm bg-red-500/10 border border-red-500/20 text-red-400">
+              {{ addStockMsg }}
+            </div>
+          </div>
+          <div class="px-6 pb-6 flex gap-3">
+            <button @click="closeAddStock" :disabled="addStockBusy"
+              class="flex-1 py-2.5 rounded-lg border border-border-subtle text-sm font-medium text-slate-400 hover:text-slate-200 transition-colors disabled:opacity-40">
+              Cancel
+            </button>
+            <button @click="submitAddStock" :disabled="addStockBusy"
+              class="flex-1 py-2.5 rounded-lg bg-primary text-background-dark text-sm font-bold hover:brightness-110 transition-all disabled:opacity-50 flex items-center justify-center gap-2">
+              <span v-if="addStockBusy" class="material-symbols-outlined text-base animate-spin">progress_activity</span>
+              {{ addStockBusy ? 'Adding...' : 'Add Stock' }}
             </button>
           </div>
         </div>
