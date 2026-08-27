@@ -4377,6 +4377,21 @@ def _strategy_xs_universe_symbols(cached_strategies):
     return out
 
 
+def _truthy(value) -> bool:
+    """The strategies' own enabled-flag semantics, mirrored for broker-side reads.
+
+    `strategies/strategy_eb.py:_truthy` is what decides whether the strategy
+    actually runs, and it treats the string "false" as DISABLED. Raw Python
+    truthiness does not: `bool("false")` is True. A config that stores the flag
+    as a string would then leave the strategy inert while broker.py widened the
+    live risk envelope to 70/70/70 on its behalf -- the one direction that must
+    never happen by accident.
+    """
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _strategy_eb_risk_limits(cached_strategies):
     """The enabled strategy_eb lane's live risk envelope, or None.
 
@@ -4388,7 +4403,12 @@ def _strategy_eb_risk_limits(cached_strategies):
     try:
         from live_risk_state import RiskLimits
         from strategy_eb import DEFAULTS as _EB_DEFAULTS
-    except Exception:
+    except Exception as _eb_import_exc:
+        try:
+            _log("[live-risk] strategy_eb limits unavailable "
+                 f"({_eb_import_exc}); using the module defaults", "yellow")
+        except Exception:
+            pass
         return None
     try:
         for spec in (cached_strategies or []):
@@ -4398,7 +4418,7 @@ def _strategy_eb_risk_limits(cached_strategies):
                     "strategy_eb", "strategyeb"}:
                 continue
             merged = {**_EB_DEFAULTS, **(spec.get("config") or {})}
-            if not merged.get("strategy_eb_enabled", False):
+            if not _truthy(merged.get("strategy_eb_enabled", False)):
                 continue
             return RiskLimits(
                 max_order_fraction=merged["live_max_order_fraction"],
@@ -4416,6 +4436,48 @@ def _strategy_eb_risk_limits(cached_strategies):
             pass
         return None
     return None
+
+
+#: Set once, so a live loop does not repeat the same envelope line every tick.
+_live_risk_envelope_logged = False
+_live_risk_caps_rescaled_logged = False
+
+
+def _live_risk_limits_for_this_document():
+    """This instance's live risk envelope, from strategies that are LOADED.
+
+    `_initialize_live_risk_authority` runs inside the MODE_LIVE branch, which
+    executes before the module-level `load_strategies_from_db()` near the bottom
+    of this file. At that moment `_cached_strategies` is still None, so reading
+    it would create the risk row at the module defaults (10/20/10%) and then
+    block every strategy_eb buy on `max_order_notional` -- silently, until some
+    later refresh happened to widen it. Falling back to a fresh load closes that
+    window, and reading the cache first keeps the steady-state path free of an
+    extra query.
+    """
+    from live_risk_state import DEFAULT_RISK_LIMITS
+
+    specs = _cached_strategies
+    if not specs:
+        try:
+            specs, _unused_row_id, _unused_schema = load_strategies_from_db()
+        except Exception:
+            specs = None
+    limits = _strategy_eb_risk_limits(specs)
+    if limits is None:
+        return DEFAULT_RISK_LIMITS
+    global _live_risk_envelope_logged
+    if not _live_risk_envelope_logged:
+        _live_risk_envelope_logged = True
+        try:
+            _log("[live-risk] strategy_eb limits applied: "
+                 f"order {limits.max_order_fraction} / "
+                 f"symbol {limits.max_symbol_fraction} / "
+                 f"leveraged {limits.max_leveraged_fraction}; ladder "
+                 f"{limits.soft}/{limits.hard}/{limits.kill}", "green")
+        except Exception:
+            pass
+    return limits
 
 
 def _strategy_eb_universe_symbols(cached_strategies):
@@ -4440,7 +4502,7 @@ def _strategy_eb_universe_symbols(cached_strategies):
             if name not in {"strategy_eb", "strategyeb"}:
                 continue
             merged = {**_EB_DEFAULTS, **(spec.get("config") or {})}
-            if not merged.get("strategy_eb_enabled", False):
+            if not _truthy(merged.get("strategy_eb_enabled", False)):
                 continue
             for sym in strategy_eb_universe(merged):
                 if sym and sym not in out:
@@ -9083,7 +9145,6 @@ def _initialize_live_risk_authority(
 
     global _live_risk_store, _live_risk_state
     from live_risk_state import (
-        DEFAULT_RISK_LIMITS,
         RethinkRiskBackend,
         RiskStateStore,
         RiskStateUnavailable,
@@ -9093,8 +9154,9 @@ def _initialize_live_risk_authority(
     )
 
     # The enabled strategy_eb lane's envelope, or the module defaults for every
-    # other document. Resolved once so bootstrap and refresh cannot disagree.
-    _risk_limits = _strategy_eb_risk_limits(_cached_strategies) or DEFAULT_RISK_LIMITS
+    # other document. Resolved through the helper rather than off
+    # `_cached_strategies`, which is still None this early in a live boot.
+    _risk_limits = _live_risk_limits_for_this_document()
 
     store = RiskStateStore(RethinkRiskBackend())
     try:
@@ -9208,20 +9270,37 @@ def _initialize_live_risk_authority(
 def _refresh_live_account_risk_state(adapter, observed_at):
     """Persist one fresh broker-equity drawdown observation."""
 
-    global _live_risk_state
-    from live_risk_state import DEFAULT_RISK_LIMITS, evaluate_drawdown
+    global _live_risk_state, _live_risk_caps_rescaled_logged
+    from live_risk_state import evaluate_drawdown
 
     if _live_risk_store is None or _live_risk_state is None:
         raise RuntimeError("durable risk state is unavailable")
     equity = getattr(adapter, "_account_equity", None)
     if equity is None:
         raise RuntimeError("fresh broker equity is unavailable")
+    limits = _live_risk_limits_for_this_document()
+    previous_order_cap = _live_risk_state.max_order_notional
+    previous_equity = _live_risk_state.last_equity
     evaluated = evaluate_drawdown(
         _live_risk_state,
         equity,
         observed_at,
-        limits=_strategy_eb_risk_limits(_cached_strategies) or DEFAULT_RISK_LIMITS,
+        limits=limits,
     )
+    # A row persisted under one envelope is only moved onto another here, on the
+    # refresh that re-derives the caps from the fractions. Say so once, so an
+    # operator can see the tick on which the caps stopped matching the row.
+    if not _live_risk_caps_rescaled_logged and previous_order_cap is not None:
+        try:
+            was = previous_order_cap / previous_equity
+            if was != limits.max_order_fraction:
+                _live_risk_caps_rescaled_logged = True
+                _log("[live-risk] exposure caps re-derived: order fraction "
+                     f"{was} -> {limits.max_order_fraction} "
+                     f"(symbol {limits.max_symbol_fraction}, leveraged "
+                     f"{limits.max_leveraged_fraction})", "green")
+        except Exception:
+            pass
     _live_risk_state = _live_risk_store.save(evaluated)
     snapshot_id = (
         f"risk-state:{_live_risk_state.version}:"

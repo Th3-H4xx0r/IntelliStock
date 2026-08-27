@@ -114,13 +114,28 @@ def test_the_broker_no_longer_inlines_its_own_leveraged_set():
     assert "DEFAULT_LEVERAGED_SYMBOLS" in source
 
 
+#: broker.py is unimportable under pytest, so its top-level helpers are lifted
+#: out of the AST and executed in a bare namespace. These are the names those
+#: helpers close over.
+_BROKER_HELPERS = ("_truthy", "_strategy_eb_risk_limits",
+                   "_strategy_eb_universe_symbols",
+                   "_live_risk_limits_for_this_document")
+
+
 def _extract(*names):
     broker = os.path.join(_backend, "broker.py")
     tree = ast.parse(open(broker).read())
+    keep = set(names) | set(_BROKER_HELPERS)
     wanted = [n for n in tree.body
-              if isinstance(n, ast.FunctionDef) and n.name in names]
-    assert wanted, f"none of {names} found in broker.py"
-    ns = {"_log": lambda *a, **k: None}
+              if isinstance(n, ast.FunctionDef) and n.name in keep]
+    found = {n.name for n in wanted}
+    assert set(names) <= found, f"missing from broker.py: {set(names) - found}"
+    ns = {
+        "_log": lambda *a, **k: None,
+        "_cached_strategies": None,
+        "_live_risk_envelope_logged": False,
+        "load_strategies_from_db": lambda: ([], None, None),
+    }
     exec(compile(ast.Module(body=wanted, type_ignores=[]), broker, "exec"), ns)
     return ns
 
@@ -148,3 +163,99 @@ def test_a_malformed_eb_limit_set_degrades_to_the_module_defaults():
         [{"strategy": "strategy_eb",
           "config": {"strategy_eb_enabled": True,
                      "live_soft_drawdown": 0.9}}]) is None
+
+
+# --- review round 1 -----------------------------------------------------------
+
+@pytest.mark.parametrize("flag", [True, "true", "True", " on ", "yes", "1"])
+def test_a_truthy_enabled_flag_widens_the_envelope(flag):
+    ns = _extract("_strategy_eb_risk_limits")
+    assert ns["_strategy_eb_risk_limits"](
+        [{"strategy": "strategy_eb",
+          "config": {"strategy_eb_enabled": flag}}]) == EB
+
+
+@pytest.mark.parametrize("flag", [False, "false", "False", "no", "off", "0", ""])
+def test_a_string_false_does_not_widen_the_envelope(flag):
+    """`bool("false")` is True. The strategy's own `_truthy` calls that string
+    DISABLED, so a document storing the flag as a string would sit inert while
+    the broker widened its real-money envelope to 70/70/70 on its behalf."""
+    ns = _extract("_strategy_eb_risk_limits")
+    assert ns["_strategy_eb_risk_limits"](
+        [{"strategy": "strategy_eb",
+          "config": {"strategy_eb_enabled": flag}}]) is None
+
+
+def test_the_universe_reader_agrees_with_the_limits_reader():
+    ns = _extract("_strategy_eb_universe_symbols")
+    disabled = [{"strategy": "strategy_eb",
+                 "config": {"strategy_eb_enabled": "false"}}]
+    enabled = [{"strategy": "strategy_eb",
+                "config": {"strategy_eb_enabled": "true"}}]
+    assert ns["_strategy_eb_universe_symbols"](disabled) == []
+    assert ns["_strategy_eb_universe_symbols"](enabled)
+
+
+def test_the_resolver_loads_strategies_when_the_module_cache_is_empty():
+    """`_initialize_live_risk_authority` runs BEFORE the module-level
+    `load_strategies_from_db()`, so `_cached_strategies` is still None there. A
+    resolver that trusted it would create the row at 10/20/10% and block every
+    strategy_eb buy until some later refresh widened it."""
+    ns = _extract("_live_risk_limits_for_this_document")
+    calls = []
+
+    def _load():
+        calls.append(1)
+        return ([{"strategy": "strategy_eb",
+                  "config": {"strategy_eb_enabled": True}}], None, None)
+
+    ns["_cached_strategies"] = None
+    ns["load_strategies_from_db"] = _load
+    assert ns["_live_risk_limits_for_this_document"]() == EB
+    assert calls == [1]
+
+
+def test_the_resolver_prefers_a_populated_cache_over_a_query():
+    ns = _extract("_live_risk_limits_for_this_document")
+
+    def _load():
+        raise AssertionError("the loaded cache must be used as-is")
+
+    ns["_cached_strategies"] = [{"strategy": "strategy_eb",
+                                 "config": {"strategy_eb_enabled": True}}]
+    ns["load_strategies_from_db"] = _load
+    assert ns["_live_risk_limits_for_this_document"]() == EB
+
+
+def test_the_resolver_falls_back_to_the_defaults_when_the_load_fails():
+    ns = _extract("_live_risk_limits_for_this_document")
+
+    def _load():
+        raise RuntimeError("database is unreachable")
+
+    ns["_cached_strategies"] = None
+    ns["load_strategies_from_db"] = _load
+    assert ns["_live_risk_limits_for_this_document"]() is DEFAULT_RISK_LIMITS
+
+
+def _function_source(name):
+    broker = os.path.join(_backend, "broker.py")
+    tree = ast.parse(open(broker).read())
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    raise AssertionError(f"{name} not found in broker.py")
+
+
+@pytest.mark.parametrize("func", ["_initialize_live_risk_authority",
+                                  "_refresh_live_account_risk_state"])
+def test_the_live_risk_path_never_reads_the_module_strategy_cache(func):
+    """The ordering sentinel. `_cached_strategies` is assigned at the bottom of
+    broker.py, after the MODE_LIVE branch has already bootstrapped risk state, so
+    reading it on this path is only ever correct by accident."""
+    node = _function_source(func)
+    names = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+    assert "_cached_strategies" not in names
+    called = {n.func.id for n in ast.walk(node)
+              if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    assert "_live_risk_limits_for_this_document" in called

@@ -14,9 +14,14 @@ def _extract(*names):
     """AST-extract broker functions into a stub namespace. broker.py argparses
     at module scope and SystemExits under pytest, so it cannot be imported."""
     tree = ast.parse(open(_BROKER).read())
+    # `_truthy` comes along because the EB config readers call it, and their
+    # blanket `except Exception` would turn the resulting NameError into an
+    # empty result rather than a failure.
+    keep = set(names) | {"_truthy"}
     wanted = [n for n in tree.body
-              if isinstance(n, ast.FunctionDef) and n.name in names]
-    assert wanted, f"none of {names} found in broker.py"
+              if isinstance(n, ast.FunctionDef) and n.name in keep]
+    found = {n.name for n in wanted}
+    assert set(names) <= found, f"missing from broker.py: {set(names) - found}"
     ns = {"mode": "backtest", "MODE_BACKTEST": "backtest",
           "MODE_LIVE": "live", "data_feed": None,
           "_log": lambda *a, **k: None}
