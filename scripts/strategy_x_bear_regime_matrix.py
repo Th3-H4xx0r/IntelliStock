@@ -83,11 +83,12 @@ BASE_CFG = {
     "core_vol_gate_mult": 2.25,
     "core_vol_median_bars": 252,
     "core_vol_median_min_samples": 60,
-    # 10 / 10 / 80 — the intended allocation. The stock sleeve is off here
-    # because the historical Graph ranking is current-state biased; its 10%
-    # routes to SPY, exactly as the API run did.
-    "satellite_pct": 0.0,
-    "commodity_pct": 0.10,
+    # 15 / 15 / 70 — the operator's allocation. The stock sleeve is declared
+    # but unfilled here, because the historical Graph ranking is current-state
+    # biased and ~5 minutes per simulated day; its 15% routes to unlevered SPY,
+    # which is the honest stand-in for a sleeve whose skill is unproven.
+    "satellite_pct": 0.15,
+    "commodity_pct": 0.15,
     "commodity_symbols": COMMOD,
     "commodity_max_names": 2,
     "commodity_mom_bars": 60,
@@ -102,8 +103,7 @@ BASE_CFG = {
     "min_order_usd": 50.0,
     "cost_haircut_pct": 0.006,
 }
-#: The unfilled 10% stock sleeve must land in SPY, not in the levered core.
-BASE_CFG["satellite_pct"] = 0.10
+
 
 
 class Emu:

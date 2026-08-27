@@ -132,12 +132,32 @@ def test_recovering_falls_back_to_defensive_when_the_fast_signal_breaks():
     assert decision.state == "defensive"
 
 
-def test_the_slow_signal_returning_promotes_straight_to_full():
-    for name in ("defensive", "recovering"):
-        state = RegimeState(name, "", 0, 0)
-        decision, _ = step(state, signal(slow_on=True, fast_good=True),
-                           observation_id=1, times=2)
-        assert decision.state == "full", name
+def test_the_slow_signal_returning_re_enters_through_recovering_not_full():
+    """Re-entry is staged; de-risking is not.
+
+    The slow filter whipsaws hardest at a bottom — 2018 Q4 flipped risk-on and
+    back off three times, 2022 H1 ten times, and 2025 flipped on 03-25 one
+    session before the April crash. Promoting DEFENSIVE straight to FULL put
+    the whole levered core back on for each of those false dawns.
+    """
+    state = RegimeState("defensive", "", 0, 0)
+    first, state = step(state, signal(slow_on=True), observation_id=1)
+    assert first.state == "recovering" and first.risk_fraction == 0.5
+
+
+def test_a_confirmed_slow_reclaim_finally_restores_full_exposure():
+    state = RegimeState("defensive", "", 0, 0)
+    decision, _ = step(state, signal(slow_on=True), observation_id=1, times=3)
+    assert decision.state == "full" and decision.risk_fraction == 1.0
+
+
+def test_a_false_dawn_cannot_reach_full_before_it_breaks_again():
+    state = RegimeState("defensive", "", 0, 0)
+    dawn, state = step(state, signal(slow_on=True), observation_id=1)
+    assert dawn.state == "recovering"
+    relapse, state = step(state, signal(slow_on=False, fast_bad=True),
+                          observation_id=2, times=2)
+    assert relapse.state == "defensive"
 
 
 def test_the_slow_signal_breaking_drops_straight_to_defensive_from_either_side():

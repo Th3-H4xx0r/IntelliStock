@@ -452,19 +452,33 @@ def advance_regime_state(signal, previous, *, observation_id,
         return RegimeDecision("defensive", 0.0, "", 0, current,
                               "emergency: " + signal.reason)
 
-    # ── the slow edges, taken immediately ──
+    # ── de-risking is immediate; re-risking is staged ──
+    # Not a symmetry for its own sake. The slow filter whipsaws hardest at a
+    # bottom — 2018 Q4 flipped risk-on and back off three times, 2022 H1 ten
+    # times, and 2025 flipped on 03-25, one session before the April crash.
+    # Sending DEFENSIVE straight to FULL bought the whole levered core back for
+    # every one of those false dawns. Going down costs nothing if it is wrong;
+    # going up costs the next leg of the decline.
     if name in ("full", "caution") and not signal.slow_on:
         return RegimeDecision("defensive", 0.0, "", 0, current,
                               "slow filter risk-off")
-    if name in ("defensive", "recovering") and signal.slow_on:
-        return RegimeDecision("full", 1.0, "", 0, current,
-                              "slow filter risk-on")
+    if name == "defensive" and signal.slow_on:
+        return RegimeDecision("recovering", fraction_for("recovering"), "", 0,
+                              current, "slow filter risk-on: staging re-entry")
+    if name == "recovering" and not signal.slow_on and not signal.fast_good:
+        # Immediate, and NOT a confirmed edge. This state is a half position
+        # held on the strength of a reclaim; once both the slow filter and the
+        # reclaim are gone there is nothing holding it up, and spending two
+        # confirmation sessions at 38.5% TQQQ inside a decline cost more than
+        # the whipsaw the confirmation was there to avoid.
+        return RegimeDecision("defensive", 0.0, "", 0, current,
+                              "reclaim lost while the slow filter is off")
 
-    # ── the confirmed fast edges ──
+    # ── the confirmed edges ──
     wanted = {"full": ("mid_break", signal.fast_bad, "caution"),
               "caution": ("mid_reclaim", signal.fast_good, "full"),
               "defensive": ("fast_reclaim", signal.fast_good, "recovering"),
-              "recovering": ("fast_break", signal.fast_bad, "defensive")}[name]
+              "recovering": ("slow_reclaim", signal.slow_on, "full")}[name]
     edge, evidence, destination = wanted
     if not evidence:
         return RegimeDecision(name, fraction_for(name), "", 0, current,

@@ -189,27 +189,42 @@ DEFAULTS = {
     # exposure and a 5% inverse sleeve should not share a tuning knob.
     # MEASURED through this module over 15.0y of real closes
     # (scripts/strategy_x_bear_regime_matrix.py, one continuous replay, 2bps,
-    # next-bar fills), 10/10/80 with the bear system active:
-    #   config                       CAGR   maxDD   bearWins  2021bull  2022H1
-    #   ladder OFF (deployed)       30.17  -46.32     1/6       71.8    -24.8
-    #   fraction 0.50               26.94  -38.94     3/6       46.4     -4.0
-    #   fraction 0.55  <- shipped   27.86  -38.63     3/6       48.9     -5.4
-    #   fraction 0.60               28.70  -38.34     2/6       51.5     -6.7
-    #   fraction 0.70               30.19  -38.19     1/6       58.8     -9.8
-    #   SPY buy & hold              15.12  -33.72       -       28.7    -20.0
-    # `bearWins` counts the six frozen bear windows in which the strategy beat
-    # SPY. The fraction trades bull participation for bear protection smoothly
-    # while max drawdown barely moves — the drawdown saving comes from
-    # DEFENSIVE, not from CAUTION. 0.5-0.6 is a plateau, so 0.55 is chosen as
-    # its middle rather than an endpoint, the same way `core_vol_gate_mult`
-    # took 2.25 out of its 2.0-2.5 plateau.
+    # next-bar fills), at the operator's 15/15/70 allocation with the bear
+    # system active. `bearWins` counts the six frozen bear windows in which the
+    # strategy beat SPY:
+    #   config                     CAGR   maxDD   bearWins  2022full  2015chop
+    #   ladder OFF                31.29  -41.69     1/6      -27.8      -6.9
+    #   SHIPPED                   27.02  -35.92     4/6       -2.5     -20.8
+    #   SPY buy & hold            15.12  -33.72       -      -18.2      +1.2
     #
-    # WHAT THIS DOES NOT FIX, and why. The ladder beats SPY across every 2022
-    # window — a slow grinding bear, which is what a trend signal can turn
-    # short in time for. It still loses to SPY in the three FAST crashes
-    # (2018 Q4 -27.8, 2020 covid -24.9, 2025 spring -24.3), because a 3x core
-    # cannot exit a 20%+ drop that completes in weeks. That is the documented
-    # failure mode of trend following, not a defect in this implementation.
+    # Everything below was swept and every pre-registered default survived
+    # except the two that had evidence to move:
+    #   transition fraction  0.50 -> 26.9 CAGR, 0.55 -> 27.9, 0.60 -> 28.7,
+    #       0.70 -> 30.2, while bearWins falls 3/6 -> 1/6 and maxDD barely
+    #       moves. The drawdown saving comes from DEFENSIVE, not CAUTION, so
+    #       this dial only trades bull participation for bear protection.
+    #       0.5-0.6 is a plateau; 0.55 is its middle, the same way
+    #       core_vol_gate_mult took 2.25 out of its 2.0-2.5 plateau.
+    #   mid MA               50 kept. 100 buys bull participation but is too
+    #       slow for a fast drawdown (2025 spring -27.6 vs -23.3); 75 is worse
+    #       than both on CAGR *and* drawdown, which is how you know this axis
+    #       is at the edge of what the sample can resolve.
+    #   confirm bars         2 kept. 1 -> higher CAGR but 3/6 bears; 3 and 4
+    #       are worse everywhere, and they make CHOP worse, not better, which
+    #       kills the "more confirmation means less churn" story.
+    #   core_band_pct        0.05 kept. Widening to 0.15 does improve 2015 chop
+    #       (-20.8 -> -16.4) but costs 2.2pp of CAGR and a bear window.
+    #   kicker size/hold     inert. 4x the size and 2x the hold move nothing,
+    #       because DEFENSIVE is reached only after the FRESH breakdown
+    #       advance_kicker requires has already passed.
+    #
+    # WHAT THIS DOES NOT FIX, and why. The ladder beats SPY across the 2022
+    # windows — a slow grinding bear, which is what a trend signal can turn
+    # short in time for. It still loses to SPY in 2018 Q4 and 2025 spring,
+    # because a levered core cannot exit a 20%+ drop that completes in weeks,
+    # and it is WORSE than no ladder in chop (2015: -20.8 against -6.9),
+    # because chop is nothing but transitions. Both are the documented failure
+    # modes of trend following, not defects in this implementation.
     "bear_regime_enabled": False,
     "bear_regime_fast_ma_bars": 20,
     "bear_regime_mid_ma_bars": 50,
