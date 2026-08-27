@@ -10,7 +10,7 @@ _backend = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _backend not in sys.path:
     sys.path.insert(0, _backend)
 
-from strategies.strategy_xs import StrategyXS  # noqa: E402
+from strategies.strategy_xs import StrategyXs  # noqa: E402
 from strategy_xs import DEFAULTS  # noqa: E402
 
 NOW = datetime(2026, 6, 1, 20, 0, tzinfo=timezone.utc)
@@ -65,14 +65,14 @@ def data_for(filter_bars):
 
 
 def test_disabled_by_default_emits_nothing():
-    out = StrategyXS().run_once(["QLD"], PRICES, NOW, dict(DEFAULTS), {},
+    out = StrategyXs().run_once(["QLD"], PRICES, NOW, dict(DEFAULTS), {},
                                 data=data_for(bars(260)),
                                 portfolio_emulator=FakeEmulator())
     assert out == {}
 
 
 def test_an_uptrend_buys_the_levered_core_and_the_diversifier():
-    out = StrategyXS().run_once(["QLD"], PRICES, NOW, cfg(), {},
+    out = StrategyXs().run_once(["QLD"], PRICES, NOW, cfg(), {},
                                 data=data_for(bars(260)),
                                 portfolio_emulator=FakeEmulator(),
                                 strategy_cache={})
@@ -83,7 +83,7 @@ def test_an_uptrend_buys_the_levered_core_and_the_diversifier():
 
 def test_a_downtrend_holds_cash_and_still_holds_the_diversifier():
     cache = {}
-    out = StrategyXS().run_once(["QLD"], PRICES, NOW, cfg(), {},
+    out = StrategyXs().run_once(["QLD"], PRICES, NOW, cfg(), {},
                                 data=data_for(falling(260)),
                                 portfolio_emulator=FakeEmulator(),
                                 strategy_cache=cache)
@@ -96,7 +96,7 @@ def test_a_downtrend_holds_cash_and_still_holds_the_diversifier():
 def test_it_refuses_to_trade_without_enough_filter_history():
     """A cold start must never read as risk-on, and 'risk-off' here would be a
     real cash buy rather than a flat."""
-    out = StrategyXS().run_once(["QLD"], PRICES, NOW, cfg(), {},
+    out = StrategyXs().run_once(["QLD"], PRICES, NOW, cfg(), {},
                                 data=data_for(bars(30)),
                                 portfolio_emulator=FakeEmulator(),
                                 strategy_cache={})
@@ -104,7 +104,7 @@ def test_it_refuses_to_trade_without_enough_filter_history():
 
 
 def test_it_publishes_its_own_universe():
-    out = StrategyXS().run_once(["QLD"], PRICES, NOW, cfg(), {},
+    out = StrategyXs().run_once(["QLD"], PRICES, NOW, cfg(), {},
                                 data=data_for(bars(260)),
                                 portfolio_emulator=FakeEmulator(),
                                 strategy_cache={})
@@ -117,7 +117,7 @@ def test_every_sell_carries_an_action_intent():
     whitelists only graph_nexus's enum. Strategy X shipped without this and all
     965 of its sells logged would_block_in_phase2=True."""
     emu = FakeEmulator(cash=0.0, positions={"QLD": 100.0})
-    out = StrategyXS().run_once(["QLD"], PRICES, NOW, cfg(), {},
+    out = StrategyXs().run_once(["QLD"], PRICES, NOW, cfg(), {},
                                 data=data_for(falling(260)),
                                 portfolio_emulator=emu, strategy_cache={})
     sells = [s for s, d in out.items()
@@ -131,7 +131,7 @@ def test_a_missing_diversifier_price_does_not_raise_core_leverage():
     prices = dict(PRICES)
     prices.pop("UUP")
     cache = {}
-    StrategyXS().run_once(["QLD"], prices, NOW, cfg(), {},
+    StrategyXs().run_once(["QLD"], prices, NOW, cfg(), {},
                           data={"SPY": {"bars": bars(260)},
                                 "GLD": {"bars": bars(260)},
                                 "BIL": {"bars": bars(260)},
@@ -151,3 +151,15 @@ def test_the_schema_header_contains_every_default():
     header = re.search(r"# INTELLISTOCK_SCHEMA: (.*)", open(path).read())
     schema = json.loads(header.group(1))
     assert set(schema["config"]) == set(DEFAULTS)
+
+
+def test_the_class_name_matches_what_the_broker_derives_from_the_id():
+    """broker.py resolves a run-once strategy by CamelCasing its id, so the
+    class name is part of the contract. Shipped once as `StrategyXS` and
+    BT634331 ran 1,259 sessions completely inert — the only sign was one log
+    line, and every unit test still passed because they import by name."""
+    import strategies.strategy_xs as mod
+    derived = "".join(p.capitalize() for p in "strategy_xs".split("_"))
+    assert derived == "StrategyXs"
+    assert hasattr(mod, derived), f"broker looks for {derived}"
+    assert hasattr(getattr(mod, derived), "run_once")

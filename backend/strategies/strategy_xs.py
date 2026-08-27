@@ -54,7 +54,13 @@ def _bars_for(data, symbol):
     return entry or []
 
 
-class StrategyXS:
+class StrategyXs:
+    # The class name is NOT free. `broker.py` resolves a run-once strategy by
+    # CamelCasing its id — `strategy_xs` -> `StrategyXs` — and logs
+    # "Class not found ... has no run_once method; skipping" when it misses,
+    # then runs the whole backtest inert. Shipped once as `StrategyXS` and
+    # BT634331 completed 1,259 sessions with zero fills before the log said so.
+
     def run_once(self, symbols, prices, current_time, config, conditions,
                  data=None, portfolio_emulator=None, strategy_cache=None,
                  time_increment=None, mode=None, **kwargs):
@@ -71,7 +77,7 @@ class StrategyXS:
 
         ma_bars = max(2, int(cfg.get("core_filter_ma_bars", 200) or 200))
         if len(closes) < ma_bars:
-            _log(f"StrategyXS: REFUSING to trade — {len(closes)} daily closes "
+            _log(f"StrategyXs: REFUSING to trade — {len(closes)} daily closes "
                  f"for {filt}, need {ma_bars}. The filter cannot arm, and "
                  "'risk-off' would be a real cash buy, not a flat.", "red")
             return {}
@@ -113,7 +119,7 @@ class StrategyXS:
             "targets": dict(targets), "basket": list(basket),
             "vol_scale": vol_scale, "notes": list(notes),
         }
-        _log(f"StrategyXS {'RISK-ON' if sig.risk_on else 'RISK-OFF'} | "
+        _log(f"StrategyXs {'RISK-ON' if sig.risk_on else 'RISK-OFF'} | "
              f"{sig.reason} | targets="
              + ", ".join(f"{s} {w:.1%}" for s, w in sorted(targets.items()))
              + f" | orders={len(decisions)} | nav=${nav:,.0f}", "cyan")
