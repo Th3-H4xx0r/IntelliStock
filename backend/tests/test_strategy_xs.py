@@ -164,3 +164,30 @@ def test_weights_never_sum_past_one_for_any_sleeve_split():
         basket = tuple(f"D{i}" for i in range(n))
         targets, _ = xs_targets(risk_on=True, config=acfg(), basket=basket)
         assert total(targets) <= 1.0
+
+
+from strategy_xs import strategy_xs_universe  # noqa: E402
+
+
+def test_the_universe_is_declared_from_config_not_the_watchlist():
+    """The strategy owns its universe. Without this the filter symbol has no
+    bars and the traded legs have no price, and BOTH failures are silent."""
+    assert strategy_xs_universe(acfg()) == [
+        "QQQ", "TQQQ", "BIL", "GLD", "UUP", "DBMF"]
+
+
+def test_the_universe_includes_the_inverse_leg_only_when_armed():
+    assert "SQQQ" not in strategy_xs_universe(acfg())
+    armed = acfg(inverse_symbol="SQQQ", inverse_pct=0.2)
+    assert "SQQQ" in strategy_xs_universe(armed)
+
+
+def test_the_universe_omits_the_diversifier_when_the_sleeve_is_off():
+    assert strategy_xs_universe(acfg(diversifier_pct=0.0)) == [
+        "QQQ", "TQQQ", "BIL"]
+
+
+def test_the_universe_is_freshly_allocated_so_callers_cannot_mutate_defaults():
+    first = strategy_xs_universe(acfg())
+    first.append("JUNK")
+    assert "JUNK" not in strategy_xs_universe(acfg())

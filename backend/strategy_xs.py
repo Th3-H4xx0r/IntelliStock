@@ -281,3 +281,27 @@ def xs_targets(*, risk_on: bool, config, basket=(), satellite_ranked=None,
         targets[cash] = round(targets.get(cash, 0.0) + parked, Q)
     notes.append(f"risk-off: {targets.get(cash, 0.0):.1%} {cash}")
     return targets, notes
+
+
+def strategy_xs_universe(config) -> list:
+    """Every symbol this strategy can trade or read, deterministic order.
+
+    The strategy owns its universe rather than depending on the instance's
+    watchlist. Without this the filter symbol has no bars and the traded legs
+    have no price, and BOTH failures are silent — the strategy simply emits
+    nothing. `broker._strategy_x_prepare` reads this to decide what to fetch.
+    """
+    cfg = config or {}
+    syms = [_s(cfg, "core_filter_symbol"), _s(cfg, "core_bull_symbol"),
+            _s(cfg, "core_cash_symbol")]
+    if _f(cfg, "diversifier_pct") > 0:
+        syms += [str(s).strip().upper()
+                 for s in (cfg.get("diversifier_symbols") or []) if s]
+    if _s(cfg, "inverse_symbol", "") and _f(cfg, "inverse_pct") > 0:
+        syms.append(_s(cfg, "inverse_symbol", ""))
+    seen, out = set(), []
+    for s in syms:
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
