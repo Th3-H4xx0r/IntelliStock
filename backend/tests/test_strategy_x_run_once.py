@@ -134,6 +134,28 @@ def bear_session_data(*, follow_through=False, recovery=False):
     return data, prices
 
 
+def at_day(data, day):
+    """The same tape, `day` sessions later.
+
+    The kicker's hold and cooldown counters advance on the last COMPLETED
+    filter session, not on the call — at 15m cadence run_once fires ~26 times
+    inside one session, and a holiday row repeats the last completed close. A
+    test that moves the wall clock without moving the tape is therefore asking
+    the same question twice, and the answer must not change.
+
+    Every bar is re-stamped rather than extended, because `fast_crash_signal`
+    reads today against yesterday: padding the end with a repeated close would
+    make every fresh breakdown look stale and silently disarm the kicker.
+    """
+    series = list((data.get("QQQ") or {}).get("bars") or [])
+    if day <= 0 or not series:
+        return data
+    return {**data, "QQQ": {"bars": [
+        {**bar, "t": (datetime.fromisoformat(str(bar["t"]))
+                      + timedelta(days=day)).isoformat()}
+        for bar in series]}}
+
+
 NOW = datetime(2026, 6, 1, 20, 0, tzinfo=timezone.utc)
 PRICES = {"TQQQ": 50.0, "SPY": 500.0, "QQQ": 400.0, "AAPL": 200.0}
 
@@ -203,10 +225,10 @@ def test_active_risk_off_buys_managed_futures_and_bil():
         out["_nexus_position_sizes"]["DBMF"]["buy_cash"]
     )
     assert cache["_strategy_x_last"]["targets"] == {
-        "DBMF": 0.066666,
-        "KMLM": 0.066666,
-        "CTA": 0.066666,
-        "BIL": 0.800002,
+        "DBMF": 0.166666,
+        "KMLM": 0.166666,
+        "CTA": 0.166666,
+        "BIL": 0.500002,
     }
 
 
@@ -225,8 +247,8 @@ def test_single_manager_string_is_one_eligible_allocated_symbol_end_to_end():
     assert cache["_sx_bear_shadow"]["eligible_managers"] == ["DBMF"]
     assert cache["_sx_bear_shadow"]["unavailable_managers"] == []
     assert cache["_strategy_x_last"]["targets"] == {
-        "DBMF": 0.2,
-        "BIL": 0.8,
+        "DBMF": 0.5,
+        "BIL": 0.5,
     }
 
 
@@ -257,7 +279,7 @@ def test_research_refused_active_advances_state_exactly_like_shadow():
     prices = bear_session_data()[1]
     shadow_cache, active_cache = {}, {}
     for day, follow_through in enumerate((False, True, True)):
-        data, _ = bear_session_data(follow_through=follow_through)
+        data = at_day(bear_session_data(follow_through=follow_through)[0], day)
         current_time = NOW + timedelta(days=day)
         shadow = StrategyX().run_once(
             list(prices), prices, current_time,
@@ -770,12 +792,12 @@ def test_prior_owned_manager_unwinds_after_role_configuration_changes():
                 "DBMF": {
                     "symbol": "DBMF",
                     "role": "manager",
-                    "target_weight": 0.066666,
+                    "target_weight": 0.166666,
                 },
             },
         },
         "_sx_bear_shadow": {
-            "target_delta": {"DBMF": 0.066666},
+            "target_delta": {"DBMF": 0.166666},
             "kicker": {"symbol": "SQQQ"},
         },
     }
@@ -1092,7 +1114,8 @@ def test_kicker_max_hold_targets_exit_and_requires_full_cooldown():
     for decision in range(1, 11):
         out = StrategyX().run_once(
             list(prices), prices, NOW + timedelta(days=decision), cfg, {},
-            data=data, portfolio_emulator=FakeEmulator(prices=prices),
+            data=at_day(data, decision),
+            portfolio_emulator=FakeEmulator(prices=prices),
             strategy_cache=cache, mode="backtest",
         )
         assert "SQQQ" not in out
@@ -1100,7 +1123,8 @@ def test_kicker_max_hold_targets_exit_and_requires_full_cooldown():
 
     fresh, _ = bear_session_data()
     armed = StrategyX().run_once(
-        list(prices), prices, NOW + timedelta(days=11), cfg, {}, data=fresh,
+        list(prices), prices, NOW + timedelta(days=11), cfg, {},
+        data=at_day(fresh, 11),
         portfolio_emulator=FakeEmulator(prices=prices),
         strategy_cache=cache, mode="backtest",
     )
@@ -1616,7 +1640,7 @@ def test_exact_active_selection_writes_strict_manager_evidence():
     assert record == {
         "symbol": "DBMF",
         "role": "manager",
-        "target_weight": 0.066666,
+        "target_weight": 0.166666,
     }
     assert cache["_sx_bear_ownership_evidence"]["version"] == 1
 
@@ -2169,7 +2193,8 @@ def test_retired_kicker_blocks_new_kicker_until_exit_then_delayed_fill_is_owned(
     # The ticker change invalidates SQQQ-bound state and starts PSQ cooldown.
     data, prices = changed_market()
     first = StrategyX().run_once(
-        list(prices), prices, NOW + timedelta(days=day), cfg, {}, data=data,
+        list(prices), prices, NOW + timedelta(days=day), cfg, {},
+        data=at_day(data, day),
         portfolio_emulator=FakeEmulator(
             cash=1000.0, positions=held_old, prices=prices,
         ),
@@ -2185,7 +2210,8 @@ def test_retired_kicker_blocks_new_kicker_until_exit_then_delayed_fill_is_owned(
         day += 1
         data, prices = changed_market()
         out = StrategyX().run_once(
-            list(prices), prices, NOW + timedelta(days=day), cfg, {}, data=data,
+            list(prices), prices, NOW + timedelta(days=day), cfg, {},
+            data=at_day(data, day),
             portfolio_emulator=FakeEmulator(
                 cash=1000.0, positions=held_old, prices=prices,
             ),
@@ -2321,7 +2347,8 @@ def test_real_pending_retired_buy_blocks_replacement_through_delayed_fill():
             fresh=fresh, sqqq_priceable=sqqq_priceable,
         )
         return StrategyX().run_once(
-            list(prices), prices, NOW + timedelta(days=day), cfg, {}, data=data,
+            list(prices), prices, NOW + timedelta(days=day), cfg, {},
+            data=at_day(data, day),
             portfolio_emulator=emulator, strategy_cache=cache,
             mode="backtest",
         )

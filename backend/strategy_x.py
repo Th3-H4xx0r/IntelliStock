@@ -77,9 +77,9 @@ from strategy_x_bear import bear_system_universe
 _NY = ZoneInfo("America/New_York")
 
 __all__ = ["DEFAULTS", "BearSignal", "CoreSignal", "bear_signal",
-           "core_signal", "pit_daily_closes", "plan_targets",
-           "rank_commodities", "select_satellite", "strategy_x_universe",
-           "targets_to_orders"]
+           "core_signal", "pit_daily_closes", "pit_daily_observations",
+           "plan_targets", "rank_commodities", "regime_core_budget",
+           "select_satellite", "strategy_x_universe", "targets_to_orders"]
 
 #: Quantization grid for every value that crosses a decision boundary. The
 #: review's defect 13: quantizing inputs does not quantize the DECISION, and a
@@ -155,7 +155,13 @@ DEFAULTS = {
     "bear_system_mode": "off",
     "bear_cash_symbol": "BIL",
     "crisis_alpha_symbols": ["DBMF", "KMLM", "CTA"],
-    "crisis_alpha_pct": 0.20,
+    # 0.20 -> 0.50 of the DEFENSIVE budget. Measured on the same replay, at
+    # fraction 0.60: 0.35 and 0.50 both give CAGR 28.70 / maxDD -38.34, and
+    # 0.65 gives 29.15 / -38.34 — a plateau, so the middle is taken. The whole
+    # gain is 2022 (H1 -10.1 -> -6.7 -> -2.7 across those three), because that
+    # is the only window in which the managed-futures funds both existed and
+    # trended. Inert unless `bear_system_mode` is active.
+    "crisis_alpha_pct": 0.50,
     "crisis_alpha_min_history_bars": 60,
     "bear_kicker_symbol": "SQQQ",
     "bear_kicker_pct": 0.05,
@@ -164,6 +170,51 @@ DEFAULTS = {
     "bear_kicker_long_ma_bars": 200,
     "bear_kicker_max_bars": 5,
     "bear_kicker_cooldown_bars": 10,
+    # ── regime ladder (OFF) ──
+    # FULL -> CAUTION -> DEFENSIVE -> RECOVERING, holding 100% / 50% / 0% / 50%
+    # of the regime core budget. It exists because the shipped filter is late
+    # at BOTH ends. Measured on real closes, TQQQ at the moment MA200 + the vol
+    # gate first flip risk-off, against the moment the faster averages break:
+    #   window        at first risk-OFF   at QQQ<MA50   at QQQ<MA20
+    #   2018 Q4            -25.1%            -9.4%         -6.6%
+    #   2020 covid         -21.1%           -20.7%        -13.7%
+    #   2022 H1            -25.4%            -9.0%         -7.6%
+    #   2025 spring        -22.9%            -5.8%         -2.3%
+    # and at the other end, the deployed system returned -1.31% across the 2022
+    # summer recovery while SPY returned +12.61%, because DEFENSIVE only ends
+    # when MA200 is reclaimed. CAUTION cuts the first loss, RECOVERING buys the
+    # second one back at half size.
+    #
+    # These are named separately from the kicker's MA settings on purpose: core
+    # exposure and a 5% inverse sleeve should not share a tuning knob.
+    # MEASURED through this module over 15.0y of real closes
+    # (scripts/strategy_x_bear_regime_matrix.py, one continuous replay, 2bps,
+    # next-bar fills), 10/10/80 with the bear system active:
+    #   config                       CAGR   maxDD   bearWins  2021bull  2022H1
+    #   ladder OFF (deployed)       30.17  -46.32     1/6       71.8    -24.8
+    #   fraction 0.50               26.94  -38.94     3/6       46.4     -4.0
+    #   fraction 0.55  <- shipped   27.86  -38.63     3/6       48.9     -5.4
+    #   fraction 0.60               28.70  -38.34     2/6       51.5     -6.7
+    #   fraction 0.70               30.19  -38.19     1/6       58.8     -9.8
+    #   SPY buy & hold              15.12  -33.72       -       28.7    -20.0
+    # `bearWins` counts the six frozen bear windows in which the strategy beat
+    # SPY. The fraction trades bull participation for bear protection smoothly
+    # while max drawdown barely moves — the drawdown saving comes from
+    # DEFENSIVE, not from CAUTION. 0.5-0.6 is a plateau, so 0.55 is chosen as
+    # its middle rather than an endpoint, the same way `core_vol_gate_mult`
+    # took 2.25 out of its 2.0-2.5 plateau.
+    #
+    # WHAT THIS DOES NOT FIX, and why. The ladder beats SPY across every 2022
+    # window — a slow grinding bear, which is what a trend signal can turn
+    # short in time for. It still loses to SPY in the three FAST crashes
+    # (2018 Q4 -27.8, 2020 covid -24.9, 2025 spring -24.3), because a 3x core
+    # cannot exit a 20%+ drop that completes in weeks. That is the documented
+    # failure mode of trend following, not a defect in this implementation.
+    "bear_regime_enabled": False,
+    "bear_regime_fast_ma_bars": 20,
+    "bear_regime_mid_ma_bars": 50,
+    "bear_regime_confirm_bars": 2,
+    "bear_regime_transition_risk_fraction": 0.55,
     # ── satellite (OFF) ──
     "satellite_pct": 0.0,
     "satellite_max_names": 6,
@@ -324,6 +375,16 @@ def _as_utc(value):
 def pit_daily_closes(bars, as_of) -> list:
     """Daily closes visible at `as_of`, oldest first.
 
+    A thin projection of `pit_daily_observations`; see there for the boundary
+    rules. Kept as the primary read because almost every caller wants prices
+    and nothing else.
+    """
+    return [close for _, close in pit_daily_observations(bars, as_of)]
+
+
+def pit_daily_observations(bars, as_of) -> list:
+    """`(session_id, close)` pairs visible at `as_of`, oldest first.
+
     THE point-in-time boundary for this strategy. A bar stamped later than the
     decision time is not knowable at the decision, and at the 15m/1h cadence
     these backtests actually run, "today's daily bar" IS that session's 16:00
@@ -400,7 +461,11 @@ def pit_daily_closes(bars, as_of) -> list:
         # `>=` keeps the last one in a stable input order.
         if prior is None or ts >= prior[0]:
             by_day[day] = (ts, close)
-    return [by_day[d][1] for d in sorted(by_day)]
+    # The session date IS the identity. A holiday or weekend row repeats the
+    # last completed session's close, and anything that counts confirmation
+    # bars must be able to see that it is the same observation — at 15m
+    # cadence this function is called ~26 times per session.
+    return [(day, by_day[day][1]) for day in sorted(by_day)]
 
 
 @dataclass(frozen=True)
@@ -721,6 +786,21 @@ def select_satellite(ranked, held, config, ages=None) -> list:
     room = max(0, keep_n - len(keep))
     adds = [s for s in names[:keep_n] if s not in holding][:room]
     return keep + adds
+
+
+def regime_core_budget(config) -> float:
+    """The share of NAV the regime core owns, once the named sleeves are paid.
+
+    Exported so the bear overlay can be told exactly how much of the chop
+    target is the CORE, rather than inferring it. `plan_targets` merges the
+    core residual and any unfilled sleeve fallback into one chop number, and
+    those two are not the same money: the fallback belongs to a sleeve that
+    found nothing and must stay in the unlevered index.
+    """
+    cfg = config or {}
+    designed = round(max(0.0, min(1.0, _f(cfg, "satellite_pct")))
+                     + max(0.0, min(1.0, _f(cfg, "commodity_pct"))), Q)
+    return round(max(0.0, 1.0 - designed), Q)
 
 
 def plan_targets(*, risk_on: bool, config, satellite_ranked=None,

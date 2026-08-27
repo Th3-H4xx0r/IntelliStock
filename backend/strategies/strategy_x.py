@@ -1,4 +1,4 @@
-# INTELLISTOCK_SCHEMA: {"strategy": "strategy_x", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_x_enabled": false, "core_bull_symbol": "TQQQ", "core_chop_symbol": "SPY", "core_bear_symbol": "", "core_weight": 0.9, "core_band_pct": 0.05, "core_filter_symbol": "QQQ", "core_filter_ma_bars": 200, "core_vol_bars": 20, "core_vol_gate_mult": 2.25, "core_vol_median_bars": 252, "core_vol_median_min_samples": 60, "core_bear_weight": 0.35, "core_bear_short_ma_bars": 50, "core_bear_vol_expansion": 1.4, "core_bear_drawdown_pct": 0.15, "core_bear_lookback_bars": 252, "core_bear_min_confirm": 4, "core_bear_max_bars": 40, "core_bear_cooldown_bars": 20, "core_bear_exit_grace_bars": 2, "bear_system_mode": "off", "bear_cash_symbol": "BIL", "crisis_alpha_symbols": ["DBMF", "KMLM", "CTA"], "crisis_alpha_pct": 0.2, "crisis_alpha_min_history_bars": 60, "bear_kicker_symbol": "SQQQ", "bear_kicker_pct": 0.05, "bear_kicker_fast_ma_bars": 20, "bear_kicker_mid_ma_bars": 50, "bear_kicker_long_ma_bars": 200, "bear_kicker_max_bars": 5, "bear_kicker_cooldown_bars": 10, "satellite_pct": 0.0, "satellite_max_names": 6, "satellite_exit_rank": 12, "satellite_min_hold_bars": 21, "core_vol_target": 0.0, "core_vol_scale_min": 0.3, "core_vol_scale_max": 1.0, "core_leverage_factor": 3.0, "satellite_momentum_bars": 60, "satellite_min_price": 0.0, "commodity_pct": 0.0, "commodity_symbols": ["GLD", "SLV", "USO", "UNG", "GDX", "XLE", "DBA", "CPER"], "commodity_max_names": 2, "commodity_mom_bars": 60, "commodity_trend_bars": 100, "min_order_usd": 50.0, "cost_haircut_pct": 0.006, "broker_max_single_position_pct": 0.95, "core_once_per_session": true}}
+# INTELLISTOCK_SCHEMA: {"strategy": "strategy_x", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_x_enabled": false, "core_bull_symbol": "TQQQ", "core_chop_symbol": "SPY", "core_bear_symbol": "", "core_weight": 0.9, "core_band_pct": 0.05, "core_filter_symbol": "QQQ", "core_filter_ma_bars": 200, "core_vol_bars": 20, "core_vol_gate_mult": 2.25, "core_vol_median_bars": 252, "core_vol_median_min_samples": 60, "core_bear_weight": 0.35, "core_bear_short_ma_bars": 50, "core_bear_vol_expansion": 1.4, "core_bear_drawdown_pct": 0.15, "core_bear_lookback_bars": 252, "core_bear_min_confirm": 4, "core_bear_max_bars": 40, "core_bear_cooldown_bars": 20, "core_bear_exit_grace_bars": 2, "bear_system_mode": "off", "bear_cash_symbol": "BIL", "crisis_alpha_symbols": ["DBMF", "KMLM", "CTA"], "crisis_alpha_pct": 0.5, "crisis_alpha_min_history_bars": 60, "bear_kicker_symbol": "SQQQ", "bear_kicker_pct": 0.05, "bear_kicker_fast_ma_bars": 20, "bear_kicker_mid_ma_bars": 50, "bear_kicker_long_ma_bars": 200, "bear_kicker_max_bars": 5, "bear_kicker_cooldown_bars": 10, "bear_regime_enabled": false, "bear_regime_fast_ma_bars": 20, "bear_regime_mid_ma_bars": 50, "bear_regime_confirm_bars": 2, "bear_regime_transition_risk_fraction": 0.55, "satellite_pct": 0.0, "satellite_max_names": 6, "satellite_exit_rank": 12, "satellite_min_hold_bars": 21, "core_vol_target": 0.0, "core_vol_scale_min": 0.3, "core_vol_scale_max": 1.0, "core_leverage_factor": 3.0, "satellite_momentum_bars": 60, "satellite_min_price": 0.0, "commodity_pct": 0.0, "commodity_symbols": ["GLD", "SLV", "USO", "UNG", "GDX", "XLE", "DBA", "CPER"], "commodity_max_names": 2, "commodity_mom_bars": 60, "commodity_trend_bars": 100, "min_order_usd": 50.0, "cost_haircut_pct": 0.006, "broker_max_single_position_pct": 0.95, "core_once_per_session": true}}
 # INTELLISTOCK_DESCRIPTION: Leveraged Nasdaq core (TQQQ) with a de-lever filter to SPY. Direction is NOT predicted — a trend + volatility filter decides only WHETHER to be levered. Replaying this module over 15.7y of real closes (next-bar fills, point-in-time): CAGR 33.97%, maxDD -48.5%, Sharpe 0.88, 99.6x vs SPY's 8.5x, 4 years above +100%. The inverse (SQQQ) leg DEFAULTS OFF (-4.2% CAGR). The stock satellite is worth turning ON: with `satellite_pct=0.2` + `commodity_pct=0.2` it measures +7,140% compounded over 81 rolling 2-month windows vs SPY's +473%, beating SPY in 68% of them. (The old "satellite costs -4.0pp" figure was measured while a band bug kept the sleeve from ever opening a position - it held nothing.) Needs QQQ+TQQQ+SPY in the instance universe and granularity 86400. DIFFICULTY: 2
 # DIFFICULTY: 2
 """IntelliStock — Strategy X: leveraged core, filtered.
@@ -138,7 +138,17 @@ from strategy_x import (  # noqa: E402
     strategy_x_universe,
     targets_to_orders,
 )
+from strategy_x import (  # noqa: E402,F811
+    pit_daily_observations,
+    regime_core_budget,
+)
 from strategy_x_bear import (  # noqa: E402
+    RegimeState,
+    advance_regime_state,
+    blend_target_books,
+    decode_regime_state,
+    dual_timescale_signal,
+    encode_regime_state,
     BearSystemStateError,
     KickerDecision,
     advance_kicker,
@@ -187,6 +197,8 @@ _BEAR_EVIDENCE_KEY = "_sx_bear_ownership_evidence"
 _BEAR_EVIDENCE_VERSION = 1
 _BEAR_EVIDENCE_ROLES = {"cash", "manager", "kicker"}
 _BEAR_PENDING_KICKER_KEY = "_sx_bear_pending_kicker_symbol"
+_BEAR_REGIME_KEY = "_sx_bear_regime"
+_BEAR_KICKER_OBS_KEY = "_sx_bear_kicker_obs"
 
 
 def _validated_bear_evidence(raw) -> dict[str, dict]:
@@ -259,6 +271,29 @@ def _ny_session(current_time):
         return ts.astimezone(ZoneInfo("America/New_York")).date().isoformat()
     except Exception:
         return ""
+
+
+#: Days since this epoch, not the proleptic ordinal. The bear module bounds
+#: every counter it parses at 100,000 so untrusted input cannot become a loop
+#: bound, and a raw ordinal is ~739,000 — it would read as corruption on every
+#: bar. Days-since-1970 is ~20,700 today and stays inside the bound past 2200.
+_SESSION_EPOCH_ORDINAL = 719163  # date(1970, 1, 1).toordinal()
+
+
+def _session_ordinal(session_id) -> int:
+    """A monotonic integer per NY session, or 0 when the label is unusable.
+
+    Derived from the session DATE rather than a bar count: bar buffers get
+    trimmed, and a clock that ran backwards whenever the cache was trimmed
+    would read as corruption and force the ladder defensive for no reason.
+    """
+    from datetime import date as _date
+
+    try:
+        return max(0, _date.fromisoformat(str(session_id)).toordinal()
+                   - _SESSION_EPOCH_ORDINAL)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _bars_for(data, symbol):
@@ -468,7 +503,12 @@ class StrategyX:
             _log(f"StrategyX: invalid bear_system_mode={raw_bear_mode!r}; "
                  "using off", "yellow")
 
-        closes = pit_daily_closes(_bars_for(data, filt), current_time)
+        observations = pit_daily_observations(_bars_for(data, filt), current_time)
+        closes = [close for _, close in observations]
+        # The SESSION clock. Everything that counts confirmation bars reads
+        # this, never the call count: at 15m cadence run_once fires ~26 times a
+        # session, and a holiday row repeats the last completed close.
+        observation_id = _session_ordinal(observations[-1][0]) if observations else 0
 
         # REFUSE rather than degrade when the filter cannot see. `core_signal`
         # fails closed to risk-off, which sounds safe and is not: risk-off is an
@@ -765,6 +805,8 @@ class StrategyX:
                 "_sx_bear_state_version",
                 "_sx_bear_kicker_entry_day",
                 "_sx_bear_kicker_state_symbol",
+                _BEAR_REGIME_KEY,
+                _BEAR_KICKER_OBS_KEY,
             )
             state_before = {
                 key: (key in cache, cache.get(key)) for key in state_keys
@@ -794,6 +836,43 @@ class StrategyX:
             unavailable = tuple(symbol for symbol in manager_symbols
                                 if symbol not in eligible)
             crash = fast_crash_signal(closes, cfg)
+
+            # ── the four-state regime ladder ──
+            # Shadow state is never readable under active authority: flipping
+            # the mode must not promote a counter that was never allowed to
+            # trade. A settings change invalidates the counters for the same
+            # reason.
+            regime_authority = "active_backtest" if active_backtest else "shadow"
+            regime_fingerprint = "|".join(str(part) for part in (
+                filt,
+                cfg.get("bear_regime_enabled"),
+                cfg.get("bear_regime_fast_ma_bars"),
+                cfg.get("bear_regime_mid_ma_bars"),
+                cfg.get("bear_regime_confirm_bars"),
+                cfg.get("bear_regime_transition_risk_fraction"),
+            ))
+            prior_regime = decode_regime_state(
+                cache.get(_BEAR_REGIME_KEY), authority=regime_authority,
+                fingerprint=regime_fingerprint)
+            if prior_regime is None:
+                # Missing or untrusted state starts DEFENSIVE and climbs. The
+                # slow filter promotes it to FULL on the next observation when
+                # the tape is fine, so a cold start costs nothing in a bull —
+                # and nothing can mint leverage out of absent state.
+                prior_regime = RegimeState("defensive", "", 0, 0)
+            # Recomputed from the values `core_signal` already published rather
+            # than matched against its reason string, which is prose.
+            vol_unsafe = bool(
+                not sig.risk_on and sig.rvol > 0 and sig.rvol_median > 0
+                and sig.rvol > sig.rvol_median * float(
+                    cfg.get("core_vol_gate_mult", 0) or 0))
+            regime_signal = dual_timescale_signal(
+                closes, slow_on=bool(sig.risk_on), vol_unsafe=vol_unsafe,
+                config=cfg)
+            regime = advance_regime_state(
+                regime_signal, prior_regime, observation_id=observation_id,
+                config=cfg)
+
             kicker = kicker_symbol
             valid_states = {"idle", "armed", "holding", "cooldown"}
 
@@ -915,13 +994,19 @@ class StrategyX:
                 state=cached_state,
                 bars=_safe_persisted_count(cached_bars),
                 cooldown=_safe_persisted_count(cached_cooldown),
-                risk_on=bool(sig.risk_on),
+                # SQQQ is a DEFENSIVE-only sleeve. Every rung above it holds
+                # some levered long, and a 5% inverse position against a 40%
+                # TQQQ position is a fee, not a hedge. With the ladder off this
+                # is exactly `sig.risk_on`, so the shipped path is unchanged.
+                risk_on=regime.state != "defensive",
                 bull_held=bull in held_symbols,
                 kicker_held=kicker in held_symbols,
                 kicker_priceable=float(bear_prices.get(kicker) or 0.0) > 0,
                 shadow=logical_shadow,
                 prior_targeted=current_prior_targeted,
                 config=cfg,
+                observation_id=observation_id,
+                last_observation_id=cache.get(_BEAR_KICKER_OBS_KEY),
             )
             if (blocking_evidenced_kickers
                     and kicker_decision.state in {"armed", "holding"}):
@@ -941,15 +1026,38 @@ class StrategyX:
             )
             if dynamic_overlap:
                 overlay_cfg["bear_system_mode"] = "off"
+            # ── the two component books, blended by the ladder ──
+            # Both are built from the SAME `plan_targets` the shipped path
+            # uses, so the fixed sleeves are identical in each and only the
+            # regime core differs between them. At risk fraction 1.0 or 0.0 the
+            # blend IS one of the two books, which is why a disabled ladder
+            # reproduces the deployed behaviour exactly.
+            risk_book, _ = plan_targets(
+                risk_on=True, config=cfg, satellite_ranked=ranked,
+                held_core=held_core, commodity_ranked=com_ranked,
+                bear_engaged=False, vol_scale=vol_scale)
+            defensive_book, _ = plan_targets(
+                risk_on=False, config=cfg, satellite_ranked=ranked,
+                held_core=held_core, commodity_ranked=com_ranked,
+                bear_engaged=bear_on, vol_scale=vol_scale)
             allocation = plan_bear_overlay(
-                targets, risk_on=bool(sig.risk_on), config=overlay_cfg,
+                defensive_book, risk_on=False, config=overlay_cfg,
                 eligible_symbols=eligible,
                 kicker_engaged=(kicker_decision.engaged
                                 and not residual_conflict),
                 prices=bear_prices,
+                defensive_budget=regime_core_budget(cfg),
             )
-            proposed_targets = dict(allocation.targets)
+            # A refused overlay degrades to the unlevered index, never to the
+            # levered book: losing the bear sleeves must not restore leverage.
+            defensive_targets = (dict(allocation.targets) if allocation.applied
+                                 else dict(defensive_book))
+            blended = blend_target_books(risk_book, defensive_targets,
+                                         regime.risk_fraction)
+            proposed_targets = dict(blended if blended is not None else targets)
             reason = allocation.reason
+            if blended is None:
+                reason = "blend refused; holding the baseline book"
             if blocking_evidenced_kickers and allocation.applied:
                 reason = (
                     "bear overlay applied; kicker blocked by prior evidence: "
@@ -988,13 +1096,18 @@ class StrategyX:
                 if refusal_reason == "research-only runtime"
                 else reason
             )
-            if active_backtest and allocation.applied and not dynamic_overlap:
+            if active_backtest and blended is not None and not dynamic_overlap:
                 selected_targets = dict(proposed_targets)
             cache["_sx_bear_system_state"] = kicker_decision.state
             cache["_sx_bear_kicker_bars"] = kicker_decision.bars
             cache["_sx_bear_kicker_cooldown"] = kicker_decision.cooldown
             cache["_sx_bear_state_version"] = 1
             cache["_sx_bear_kicker_state_symbol"] = kicker
+            cache[_BEAR_KICKER_OBS_KEY] = observation_id
+            cache[_BEAR_REGIME_KEY] = encode_regime_state(
+                RegimeState(regime.state, regime.confirm_kind,
+                            regime.confirm_count, regime.observation_id),
+                authority=regime_authority, fingerprint=regime_fingerprint)
             prior_entry = cache.get("_sx_bear_kicker_entry_day", "")
             if kicker_decision.state == "holding":
                 cache["_sx_bear_kicker_entry_day"] = (
@@ -1084,12 +1197,31 @@ class StrategyX:
                     "cooldown": kicker_decision.cooldown,
                     "reason": kicker_decision.reason,
                 },
+                "regime": {
+                    "state": regime.state,
+                    "risk_fraction": regime.risk_fraction,
+                    "confirm_kind": regime.confirm_kind,
+                    "confirm_count": regime.confirm_count,
+                    "observation_id": regime.observation_id,
+                    "reason": regime.reason,
+                    "signal": {
+                        "fast_bad": regime_signal.fast_bad,
+                        "fast_good": regime_signal.fast_good,
+                        "slow_on": regime_signal.slow_on,
+                        "emergency": regime_signal.emergency,
+                        "reason": regime_signal.reason,
+                    },
+                    "core_budget": regime_core_budget(cfg),
+                    "risk_book": dict(risk_book),
+                    "defensive_book": dict(defensive_targets),
+                },
                 "baseline_targets": dict(targets),
                 "proposed_targets": proposed_targets,
                 "target_delta": delta,
             }
             _log(
-                f"StrategyX bear mode={bear_mode} | {reason}"
+                f"StrategyX bear mode={bear_mode} | regime={regime.state}"
+                f"@{regime.risk_fraction:.2f} ({regime.reason}) | {reason}"
                 f"{f' | refused={refusal_reason}' if refusal_reason else ''}"
                 f" | eligible={list(eligible)} | kicker={kicker_decision.state}"
                 f" | provenance={sorted(cache['_sx_bear_owned'])}"
