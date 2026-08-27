@@ -4377,6 +4377,38 @@ def _strategy_xs_universe_symbols(cached_strategies):
     return out
 
 
+def _strategy_eb_universe_symbols(cached_strategies):
+    """Symbols strategy_eb needs bars and prices for, from its own config.
+
+    Same contract as `_strategy_x_universe_symbols` and the same reason: a
+    strategy that trades symbols the operator never listed must declare them,
+    or `price_history` is built without them and the strategy is silently
+    inert. Returns [] when strategy_eb is absent or disabled, so this is a
+    no-op for every other instance.
+    """
+    try:
+        from strategy_eb import DEFAULTS as _EB_DEFAULTS, strategy_eb_universe
+    except Exception:
+        return []
+    out = []
+    try:
+        for spec in (cached_strategies or []):
+            if not isinstance(spec, dict):
+                continue
+            name = str(spec.get("strategy") or "").strip().lower()
+            if name not in {"strategy_eb", "strategyeb"}:
+                continue
+            merged = {**_EB_DEFAULTS, **(spec.get("config") or {})}
+            if not merged.get("strategy_eb_enabled", False):
+                continue
+            for sym in strategy_eb_universe(merged):
+                if sym and sym not in out:
+                    out.append(sym)
+    except Exception:
+        return []
+    return out
+
+
 def _strategy_x_prepare(data, prices, current_time, cached_strategies,
                         key=None, secret=None):
     """Make strategy_x's own symbols priceable this bar.
@@ -4407,6 +4439,18 @@ def _strategy_x_prepare(data, prices, current_time, cached_strategies,
         for _xs in _xs_declared:
             if _xs not in _declared:
                 _declared.append(_xs)
+        # Guarded SEPARATELY for the same reason the XS lookup is: this whole
+        # function runs inside a try/except that logs and continues, so a
+        # failure resolving strategy_eb must not take strategy_x's pricing down
+        # with it. An unpriced leg is skipped in `targets_to_orders` with no
+        # error anywhere.
+        try:
+            _eb_declared = _strategy_eb_universe_symbols(cached_strategies)
+        except Exception:
+            _eb_declared = []
+        for _eb in _eb_declared:
+            if _eb not in _declared:
+                _declared.append(_eb)
         syms = [s for s in _declared if s and not (prices or {}).get(s)]
         for sym in syms:
             if mode == MODE_BACKTEST and isinstance(data, dict):
@@ -10183,6 +10227,16 @@ if mode == MODE_BACKTEST:
         if _xs_sym not in symbols_for_fetch:
             symbols_for_fetch.append(_xs_sym)
             _log(f"Adding {_xs_sym} to bar data for strategy_xs", "cyan")
+    # 2026-08-27: strategy_eb declares its own universe the same way — the
+    # reference index it measures volatility on, the levered leg, the off leg
+    # and the cash leg, none of which need to be in the instance watchlist.
+    # This is the FETCH site; the one inside `_strategy_x_prepare` only fixes
+    # PRICES. Missing either is silent, so both are asserted in
+    # test_strategy_eb_broker_wiring.py.
+    for _eb_sym in _strategy_eb_universe_symbols(_cached_strategies):
+        if _eb_sym not in symbols_for_fetch:
+            symbols_for_fetch.append(_eb_sym)
+            _log(f"Adding {_eb_sym} to bar data for strategy_eb", "cyan")
     symbols_for_data = symbols_for_fetch
     # Convert time_increment to Alpaca timeframe format
     alpaca_timeframe = _time_increment_to_alpaca_timeframe(time_increment)
