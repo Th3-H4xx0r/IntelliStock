@@ -1,0 +1,261 @@
+"""Wrapper tests for Strategy EB: the broker contract and cache behaviour."""
+import json
+import os
+import re
+import sys
+from datetime import datetime, timedelta, timezone
+
+# ONLY backend/ goes on the path. Adding backend/strategies/ too would make
+# `strategy_x` resolve to the WRAPPER rather than the pure module — they share
+# a name, and the wrapper imports the pure one, so it would self-import.
+_backend = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _backend not in sys.path:
+    sys.path.insert(0, _backend)
+
+from strategies.strategy_eb import StrategyEb  # noqa: E402
+from strategy_eb import DEFAULTS, LAST_REBALANCE_KEY  # noqa: E402
+
+#: THE DECISION WEEKDAY IS THE DATA DATE, NOT THE CALL DATE. `pit_daily_
+#: observations` returns only STRICTLY EARLIER sessions, so a call on Thursday
+#: sees through Wednesday and `rebalance_weekdays=[2]` fires then. Getting this
+#: backwards makes every cadence test pass against a strategy that never trades.
+#:   DECIDES: called Thu 2026-06-04, last visible session Wed 2026-06-03 (wd 2).
+#:   SKIPS:   called Fri 2026-06-05, last visible session Thu 2026-06-04 (wd 3).
+DECIDES = datetime(2026, 6, 4, 20, 0, tzinfo=timezone.utc)
+SKIPS = datetime(2026, 6, 5, 20, 0, tzinfo=timezone.utc)
+DECISION_SESSION = "2026-06-03"
+
+PRICES = {"TQQQ": 80.0, "SPY": 500.0, "BIL": 91.0, "QQQ": 480.0}
+
+
+def alternating(pct, n=120, end_day=None, start=100.0):
+    """Daily bars whose returns alternate exactly +pct, -pct, ..., the LAST one
+    stamped `end_day` (default the Wednesday that `DECIDES` sees)."""
+    end_day = end_day or datetime(2026, 6, 3, tzinfo=timezone.utc)
+    closes = [start]
+    for i in range(n - 1):
+        closes.append(closes[-1] * ((1 + pct) if i % 2 == 0 else (1 - pct)))
+    return [{"t": (end_day - timedelta(days=(n - 1 - i))).isoformat(),
+             "c": closes[i]} for i in range(n)]
+
+
+class FakeEmulator:
+    def __init__(self, cash=10000.0, positions=None, prices=None):
+        self._cash = cash
+        self._positions = dict(positions or {})
+        self._prices = dict(prices or PRICES)
+
+    def get_cash(self):
+        return self._cash
+
+    def get_positions(self):
+        return dict(self._positions)
+
+    def get_portfolio_value(self, prices=None):
+        px = prices or self._prices
+        return self._cash + sum(q * float(px.get(s, 0.0))
+                                for s, q in self._positions.items())
+
+
+def cfg(**overrides):
+    value = dict(DEFAULTS)
+    value["strategy_eb_enabled"] = True
+    value.update(overrides)
+    return value
+
+
+def data_for(ref_bars, legs=("TQQQ", "SPY", "BIL")):
+    out = {"QQQ": {"bars": ref_bars}}
+    for symbol in legs:
+        out[symbol] = {"bars": alternating(0.002)}
+    return out
+
+
+def test_disabled_by_default_emits_nothing():
+    out = StrategyEb().run_once(["TQQQ"], PRICES, DECIDES, dict(DEFAULTS), {},
+                                data=data_for(alternating(0.01)),
+                                portfolio_emulator=FakeEmulator())
+    assert out == {}
+
+
+def test_no_emulator_emits_nothing():
+    assert StrategyEb().run_once(["TQQQ"], PRICES, DECIDES, cfg(), {},
+                                 data=data_for(alternating(0.01)),
+                                 portfolio_emulator=None) == {}
+
+
+def test_a_wednesday_opens_the_core_and_the_spy_remainder():
+    cache = {}
+    out = StrategyEb().run_once(["TQQQ"], PRICES, DECIDES, cfg(), {},
+                                data=data_for(alternating(0.01)),
+                                portfolio_emulator=FakeEmulator(),
+                                strategy_cache=cache)
+    assert out.get("TQQQ") == 1 and out.get("SPY") == 1
+    assert cache["_strategy_eb_last"]["core_weight"] == 0.40
+    assert cache["_strategy_eb_last"]["targets"] == {"TQQQ": 0.40, "SPY": 0.60}
+
+
+def test_every_decision_carries_its_own_size():
+    """A bare 1 is sized by the broker's default cash_per_trade (~$1,000):
+    index_core_tilt asked for $6,000 of SPY and received $900."""
+    out = StrategyEb().run_once(["TQQQ"], PRICES, DECIDES, cfg(), {},
+                                data=data_for(alternating(0.01)),
+                                portfolio_emulator=FakeEmulator(),
+                                strategy_cache={})
+    sizes = out["_nexus_position_sizes"]
+    for symbol, decision in out.items():
+        if symbol.startswith("_"):
+            continue
+        assert symbol in sizes, symbol
+        assert sizes[symbol].get("buy_cash", 0) > 0 or "sell_fraction" in sizes[symbol]
+
+
+def test_it_does_not_trade_when_the_last_visible_session_is_not_a_decision_day():
+    """Called on Friday, the last visible session is Thursday (weekday 3)."""
+    assert StrategyEb().run_once(
+        ["TQQQ"], PRICES, SKIPS, cfg(), {},
+        data=data_for(alternating(0.01, end_day=datetime(
+            2026, 6, 4, tzinfo=timezone.utc))),
+        portfolio_emulator=FakeEmulator(), strategy_cache={}) == {}
+
+
+def test_it_does_not_trade_twice_in_one_session():
+    """The engine calls run_once on EVERY tick."""
+    strat, cache = StrategyEb(), {}
+    emu = FakeEmulator()
+    first = strat.run_once(["TQQQ"], PRICES, DECIDES, cfg(), {},
+                           data=data_for(alternating(0.01)),
+                           portfolio_emulator=emu, strategy_cache=cache)
+    assert first
+    assert cache[LAST_REBALANCE_KEY] == DECISION_SESSION
+    second = strat.run_once(["TQQQ"], PRICES, DECIDES, cfg(), {},
+                            data=data_for(alternating(0.01)),
+                            portfolio_emulator=emu, strategy_cache=cache)
+    assert second == {}
+
+
+def test_it_does_not_re_issue_an_in_flight_exit_in_the_same_session():
+    """An exit to zero deliberately bypasses the same-session guard in
+    `eb_should_trade` — waiting one more tick to leave a 3x fund is the failure
+    the transform exists to prevent. But equity fills are NEXT-BAR, so on every
+    one of the ~26 remaining 15m ticks the emulator still reports the position
+    and the identical exit would be re-sent. The wrapper dedupes it by session;
+    a LATER session re-arms, because there the exit really did not fill."""
+    strat, cache = StrategyEb(), {}
+    emu = FakeEmulator(cash=0.0, positions={"TQQQ": 100.0})
+    first = strat.run_once(["TQQQ"], PRICES, DECIDES, cfg(), {},
+                           data=data_for(alternating(0.10)),
+                           portfolio_emulator=emu, strategy_cache=cache)
+    assert first.get("TQQQ") == -1
+    assert cache["_eb_exit_issued_session"] == DECISION_SESSION
+
+    second = strat.run_once(["TQQQ"], PRICES, DECIDES, cfg(), {},
+                            data=data_for(alternating(0.10)),
+                            portfolio_emulator=emu, strategy_cache=cache)
+    assert second == {}
+
+    later = strat.run_once(
+        ["TQQQ"], PRICES, SKIPS, cfg(), {},
+        data=data_for(alternating(0.10, end_day=datetime(
+            2026, 6, 4, tzinfo=timezone.utc))),
+        portfolio_emulator=emu, strategy_cache=cache)
+    assert later.get("TQQQ") == -1
+    assert cache["_eb_exit_issued_session"] == "2026-06-04"
+
+
+def test_it_refuses_on_short_history_rather_than_levering_up():
+    assert StrategyEb().run_once(["TQQQ"], PRICES, DECIDES, cfg(), {},
+                                 data=data_for(alternating(0.01, n=40)),
+                                 portfolio_emulator=FakeEmulator(),
+                                 strategy_cache={}) == {}
+
+
+def test_it_refuses_on_empty_bars():
+    """Live passes data=None today; a blind strategy must do NOTHING."""
+    for blind in (None, {}, {"QQQ": {"bars": []}}):
+        assert StrategyEb().run_once(["TQQQ"], PRICES, DECIDES, cfg(), {},
+                                     data=blind,
+                                     portfolio_emulator=FakeEmulator(),
+                                     strategy_cache={}) == {}, blind
+
+
+def test_it_prices_declared_legs_the_broker_did_not_carry():
+    """The declared legs are absent from the operator's watchlist, so
+    targets_to_orders would skip them at px <= 0 and emit nothing."""
+    out = StrategyEb().run_once(["TQQQ"], {"TQQQ": 80.0}, DECIDES, cfg(), {},
+                                data=data_for(alternating(0.01)),
+                                portfolio_emulator=FakeEmulator(cash=10000.0),
+                                strategy_cache={})
+    assert out.get("SPY") == 1
+
+
+def test_every_sell_carries_an_action_intent():
+    """broker.py's Z2.1 check reads action_intent off the strategy summary and
+    whitelists only a fixed enum. Strategy X shipped without this and all 965
+    of its sells logged would_block_in_phase2=True."""
+    emu = FakeEmulator(cash=0.0, positions={"TQQQ": 100.0})
+    out = StrategyEb().run_once(["TQQQ"], PRICES, DECIDES, cfg(), {},
+                                data=data_for(alternating(0.10)),
+                                portfolio_emulator=emu, strategy_cache={})
+    sells = [s for s, d in out.items() if not s.startswith("_") and d == -1]
+    assert sells
+    for symbol in sells:
+        assert out["_nexus_action_intents"][symbol] == "etf_sell"
+
+
+def test_it_never_sells_a_symbol_outside_its_own_universe():
+    """`owned` scoping: walking the whole book liquidates a co-deployed
+    strategy's positions, and _nexus_sell_enforcement is a HARD override."""
+    emu = FakeEmulator(cash=0.0, positions={"TQQQ": 100.0, "AAPL": 50.0})
+    out = StrategyEb().run_once(["TQQQ"], dict(PRICES, AAPL=200.0), DECIDES,
+                                cfg(), {}, data=data_for(alternating(0.10)),
+                                portfolio_emulator=emu, strategy_cache={})
+    assert "AAPL" not in out
+
+
+def test_it_publishes_every_nexus_channel():
+    out = StrategyEb().run_once(["TQQQ"], PRICES, DECIDES, cfg(), {},
+                                data=data_for(alternating(0.01)),
+                                portfolio_emulator=FakeEmulator(),
+                                strategy_cache={})
+    for key in ("_nexus_position_sizes", "_nexus_discovered",
+                "_nexus_executable_buys", "_nexus_sell_enforcement",
+                "_nexus_action_intents"):
+        assert key in out, key
+    assert set(out["_nexus_discovered"]) == {"QQQ", "TQQQ", "SPY", "BIL"}
+
+
+def test_the_bil_dial_routes_the_remainder_to_bills():
+    cache = {}
+    StrategyEb().run_once(["TQQQ"], PRICES, DECIDES,
+                          cfg(remainder_bil_fraction=1.0), {},
+                          data=data_for(alternating(0.01)),
+                          portfolio_emulator=FakeEmulator(),
+                          strategy_cache=cache)
+    assert cache["_strategy_eb_last"]["targets"] == {"TQQQ": 0.40, "BIL": 0.60}
+
+
+def test_the_schema_header_contains_exactly_every_default():
+    path = os.path.join(_backend, "strategies", "strategy_eb.py")
+    header = re.search(r"# INTELLISTOCK_SCHEMA: (.*)", open(path).read())
+    schema = json.loads(header.group(1))
+    assert set(schema["config"]) == set(DEFAULTS)
+    assert schema["strategy"] == "strategy_eb"
+    assert schema["execution_scope"] == "run_once"
+    assert schema["decision_phase"] == "pre"
+    assert schema["execution_position"] == 10
+
+
+def test_the_class_name_matches_what_the_broker_derives_from_the_id():
+    """broker.py resolves a run-once strategy by CamelCasing its id, so the
+    class name is part of the contract. Strategy XS shipped once as
+    `StrategyXS` and BT634331 ran 1,259 sessions completely inert — the only
+    sign was one log line, and every unit test still passed because they import
+    by name."""
+    import strategies.strategy_eb as mod
+    from strategies_meta import _module_to_class_name
+
+    derived = _module_to_class_name("strategy_eb")
+    assert derived == "StrategyEb"
+    assert hasattr(mod, derived), f"broker looks for {derived}"
+    assert hasattr(getattr(mod, derived), "run_once")
