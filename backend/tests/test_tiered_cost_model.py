@@ -154,6 +154,38 @@ def test_create_backtest_emulator_accepts_a_tiered_model():
         "equity-tiered-v1[etf-liquid]")
 
 
+# ── the next-event path end to end ──────────────────────────────────────────
+
+def _next_event_fill(cost_model, symbol):
+    """One fill through the emulator's REAL next-event path, which builds the
+    quote itself — the spread it chooses has to follow the symbol too, or the
+    tier is applied to the fill but not to the book it fills against."""
+    emu = create_backtest_emulator(initial_cash=100_000.0, taker_fee=0.0,
+                                   is_crypto=False,
+                                   execution_delay=timedelta(days=1),
+                                   cost_model=cost_model)
+    emu.record_order(SimulationOrder(
+        order_id="o1", symbol=symbol, side="buy", quantity=10.0,
+        decision_at=T0, execute_not_before=T0 + timedelta(days=1),
+        source="main_signal"))
+    emu.process_price_event({symbol: 100.0}, timestamp=T0 + timedelta(days=2))
+    return emu.get_execution_summary()["fill_provenance"][0]
+
+
+def test_the_next_event_path_charges_the_tier_for_an_etf():
+    fill = _next_event_fill(_tiered(), "SPY")
+    # 8.0/2 + 0.1 bps on a 100.0 mid.
+    assert fill["price"] == pytest.approx(100.041, abs=1e-6)
+    assert fill["cost_model_version"] == "equity-tiered-v1[etf-liquid]"
+
+
+def test_the_next_event_path_leaves_an_untiered_symbol_byte_identical():
+    tiered = _next_event_fill(_tiered(), "SNDK")
+    flat = _next_event_fill(BASE, "SNDK")
+    for key in ("price", "fees", "spread_cost", "slippage_cost"):
+        assert tiered[key] == flat[key]
+
+
 # ── the evidence option ─────────────────────────────────────────────────────
 
 def test_the_option_is_absent_by_default():
@@ -188,3 +220,23 @@ def test_a_preset_wraps_the_stressed_model_not_the_nominal_one():
     wrapped = resolve_execution_cost_tiers("etf-liquid", stressed)
     assert isinstance(wrapped, TieredExecutionCostModel)
     assert wrapped.default is stressed
+
+
+# ── the queue row ───────────────────────────────────────────────────────────
+
+def test_a_tiers_only_run_keeps_its_evidence_block_on_the_queue_row():
+    """`action_create_backtest` only stamps the evidence block when the run
+    declares something. A tiers-only run declares exactly one thing, and
+    dropping it there loses the cost basis silently on the way to the broker —
+    which is the defect `pit_mode` already hit once
+    (test_backtest_research_default.py). Asserted against the source for the
+    same reason that test is: the gate is inline in a function that needs a
+    live queue connection.
+    """
+    import os
+
+    backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    src = open(os.path.join(backend_dir, "interactive_utils.py")).read()
+    start = src.index("def action_create_backtest(")
+    body = src[start:src.index("\ndef ", start + 10)]
+    assert '_evidence["equity_cost_tiers"] is not None' in body

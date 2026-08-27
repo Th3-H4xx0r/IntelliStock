@@ -5588,6 +5588,7 @@ def action_create_backtest(
     if (_evidence["evidence_mode"] != "off"
             or _evidence["pit_mode"] != "strict"
             or _evidence["equity_total_cost_bps"] is not None
+            or _evidence["equity_cost_tiers"] is not None
             or _evidence["nexus_candidate_overrides"]):
         if non_equity_compatibility:
             raise ValueError(
