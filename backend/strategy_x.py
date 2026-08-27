@@ -241,6 +241,44 @@ DEFAULTS = {
     # (see core_vol_target). Kept as a named dial because the numbers above are
     # the argument, not an opinion.
     "bear_regime_reentry_confirm_bars": 2,
+    # Portfolio trailing drawdown guard. 0 = OFF, and the measurement says
+    # LEAVE IT OFF. It reads the ACCOUNT rather than the tape, which sounds
+    # like the missing control and is not.
+    #
+    # Two forms were built and swept against volatility targeting, everything
+    # else held at the shipped research config (15/15/70, vt 0.15, vb 12):
+    #   mechanism                    CAGR   maxDD   worst window
+    #   none (vol target only)      20.85  -21.96      -16.7
+    #   binary halt  5% / 10%        17.58 / 20.27   -25.26 / -20.66
+    #   binary halt 15% / 20%        19.89 / 20.48   -25.63 / -21.96
+    #   continuous taper 10% / 15%    9.15 / 11.43   -18.59 / -20.10
+    #   continuous taper 20% / 30%   14.13 / 16.27   -20.87 / -21.02
+    # The binary halt is NON-MONOTONIC in its own threshold — 5% and 15% both
+    # give a WORSE drawdown than no guard at all — which is the signature of
+    # fitting noise rather than a mechanism. The continuous taper is monotonic
+    # and honest, and is still strictly dominated: at a matched -21% drawdown
+    # it returns 16.27 against volatility targeting's 20.85.
+    #
+    # The reason is structural, so it is unlikely to reverse on other data. A
+    # drawdown is a LAGGING measure: by the time the account is down the loss
+    # has happened, and de-levering on it mostly guarantees missing the
+    # rebound. Realised volatility is contemporaneous with risk and rises
+    # BEFORE the drawdown completes. That is why `core_vol_target` wins and
+    # every stop-loss variant tried here does not.
+    #
+    # Neither can promise a cap in any case: a stop is a level, not a fill, and
+    # a levered core gaps straight through any threshold set above a -12%
+    # session like 2020-03-16. Kept configurable because the numbers above are
+    # the argument, not an opinion.
+    "bear_regime_max_drawdown_pct": 0.0,
+    "bear_regime_drawdown_rearm_pct": 0.5,
+    # The CONTINUOUS form of the same idea, and the one to reach for first:
+    # exposure falls linearly with drawdown depth and reaches
+    # `bear_regime_drawdown_scale_min` at this depth, instead of switching off
+    # at a line. A drawdown that stops one tick past a binary threshold costs a
+    # trim here rather than a full round trip. 0 = OFF.
+    "bear_regime_drawdown_taper_pct": 0.0,
+    "bear_regime_drawdown_scale_min": 0.0,
     "bear_regime_transition_risk_fraction": 0.55,
     # ── satellite (OFF) ──
     "satellite_pct": 0.0,

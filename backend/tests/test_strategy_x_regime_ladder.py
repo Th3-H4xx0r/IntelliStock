@@ -27,6 +27,7 @@ if _backend not in sys.path:
 
 from strategy_x_bear import (  # noqa: E402
     REGIME_STATES,
+    drawdown_guard,
     FastCrashSignal,
     RegimeSignal,
     RegimeState,
@@ -556,3 +557,77 @@ def test_a_malformed_envelope_decodes_to_nothing_rather_than_to_full():
                 {"v": 1, "state": "full", "obs": "x"}, [1, 2], "full"):
         assert decode_regime_state(bad, authority="active",
                                    fingerprint="f") is None
+
+
+# ── the portfolio trailing drawdown guard ────────────────────────────────────
+
+def guard_cfg(**overrides):
+    value = {"bear_regime_max_drawdown_pct": 0.10,
+             "bear_regime_drawdown_rearm_pct": 0.50}
+    value.update(overrides)
+    return value
+
+
+def test_the_guard_is_off_by_default_and_never_halts():
+    for nav in (100.0, 1.0, 0.01):
+        state = drawdown_guard(nav, peak=100.0, halted=False, config={})
+        assert not state.halted and state.peak >= 100.0
+
+
+def test_a_new_high_raises_the_peak_and_does_not_halt():
+    state = drawdown_guard(120.0, peak=100.0, halted=False, config=guard_cfg())
+    assert state.peak == 120.0 and not state.halted
+
+
+def test_falling_past_the_threshold_halts():
+    state = drawdown_guard(89.0, peak=100.0, halted=False, config=guard_cfg())
+    assert state.halted and "drawdown" in state.reason
+
+
+def test_a_shallower_fall_does_not_halt():
+    state = drawdown_guard(91.0, peak=100.0, halted=False, config=guard_cfg())
+    assert not state.halted
+
+
+def test_the_halt_persists_while_the_recovery_is_incomplete():
+    state = drawdown_guard(92.0, peak=100.0, halted=True, config=guard_cfg())
+    assert state.halted
+
+
+def test_the_tape_rearms_the_halt_and_resets_the_peak_to_here():
+    """Re-arm comes from the tape, never from the account recovering.
+
+    While halted the strategy holds no levered core, so NAV cannot climb back
+    on its own. A recovery-based re-arm strands it flat through the whole
+    rebound: measured, the 2021 bull returned 5.5% against 39.3% unguarded and
+    full-period CAGR fell from 20.85% to 6.45%.
+    """
+    state = drawdown_guard(88.0, peak=100.0, halted=True, config=guard_cfg(),
+                           rearm_ok=True)
+    assert not state.halted and state.peak == 88.0
+
+
+def test_a_recovered_account_stays_halted_while_the_tape_says_no():
+    state = drawdown_guard(99.0, peak=100.0, halted=True, config=guard_cfg())
+    assert state.halted
+
+
+def test_a_nonfinite_nav_holds_the_previous_state_rather_than_rearming():
+    for bad in (float("nan"), float("inf"), -5.0, 0.0, "100", None):
+        state = drawdown_guard(bad, peak=100.0, halted=True, config=guard_cfg(),
+                               rearm_ok=True)
+        assert state.halted, bad
+        assert state.peak == 100.0, bad
+
+
+def test_a_nonfinite_peak_adopts_the_current_nav_without_halting():
+    state = drawdown_guard(100.0, peak=float("nan"), halted=False,
+                           config=guard_cfg())
+    assert state.peak == 100.0 and not state.halted
+
+
+def test_a_nonfinite_threshold_disables_the_guard():
+    for bad in (float("nan"), float("inf"), "0.1", None, -0.2):
+        state = drawdown_guard(50.0, peak=100.0, halted=False,
+                               config=guard_cfg(bear_regime_max_drawdown_pct=bad))
+        assert not state.halted, bad

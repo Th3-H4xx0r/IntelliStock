@@ -40,7 +40,7 @@ COST_BPS = 2.0
 #: bars = 272) with room to spare.
 BAR_WINDOW = 400
 
-CORE = ["QQQ", "TQQQ", "SPY", "SQQQ"]
+CORE = ["QQQ", "TQQQ", "SPY", "SQQQ", "SPXL", "SPXS", "IVV"]
 BEAR = ["BIL", "DBMF", "KMLM", "CTA"]
 COMMOD = ["GLD", "SLV", "USO", "UNG", "GDX", "XLE", "DBA", "CPER"]
 UNIVERSE = CORE + BEAR + COMMOD
@@ -294,6 +294,21 @@ def main():
     print("=" * 96)
     print(table[["bear", "baseline", "active", "SPY", "active_dd", "SPY_dd"]]
           .to_string(float_format=lambda x: f"{x:>9.2f}"))
+
+    # SPLIT-SAMPLE. A configuration chosen on the whole span and reported on
+    # the whole span cannot tell you whether it generalises. Each half is an
+    # independent read of the same rules.
+    print("\nsplit sample")
+    mid = curves["baseline"].index[len(curves["baseline"]) // 2]
+    for label, sl in (("first half", slice(None, mid)),
+                      ("second half", slice(mid, None))):
+        line = f"  {label:<12}"
+        for name in ("baseline", "active", "SPY"):
+            half = curves[name][sl]
+            stats = full_stats(half)
+            line += (f"  {name} CAGR {stats['cagr']:>6.2f} "
+                     f"maxDD {stats['maxdd']:>7.2f}")
+        print(line)
 
     print("\nfull period")
     for name in ("baseline", "active", "SPY"):

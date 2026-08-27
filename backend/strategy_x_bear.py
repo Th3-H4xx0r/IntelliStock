@@ -106,6 +106,17 @@ class RegimeDecision:
 
 
 @dataclass(frozen=True)
+class DrawdownState:
+    """Where the portfolio stands against its own high-water mark."""
+
+    peak: float
+    halted: bool
+    drawdown: float
+    reason: str
+    scale: float = 1.0
+
+
+@dataclass(frozen=True)
 class BearAllocation:
     targets: Mapping[str, float]
     applied: bool
@@ -375,6 +386,72 @@ def dual_timescale_signal(closes, *, slow_on, vol_unsafe,
               "above MA%d and MA%d" % (fast, mid) if good else
               "between MA%d and MA%d" % (fast, mid))
     return RegimeSignal(bad, good, on, unsafe, unsafe, reason)
+
+
+def drawdown_guard(nav, *, peak, halted, config, rearm_ok=False) -> DrawdownState:
+    """Trail the portfolio's own high-water mark and halt below a threshold.
+
+    Every other control here reads the TAPE. This one reads the ACCOUNT, which
+    is the only thing that notices when the tape's signals were all correct and
+    the position lost money anyway.
+
+    It cannot promise a cap. A stop is a level, not a fill: QQQ fell 12% in the
+    single session of 2020-03-16, and a levered core gaps straight through any
+    threshold set above that. What it does is stop a drawdown from COMPOUNDING
+    once it is underway, which is the part a moving average is always late for.
+
+    Re-arming is driven by the TAPE (`rearm_ok`, the slow filter turning back
+    on), not by the account recovering. That is not a preference, it is the
+    only rule that terminates: while halted the strategy holds no levered core,
+    so NAV cannot climb back on its own, and a recovery-based re-arm strands it
+    flat through the entire rebound. Measured with a NAV-based re-arm, the 2021
+    bull returned 5.5% against 39.3% unguarded, and full-period CAGR fell from
+    20.85% to 6.45%. On re-arm the peak resets to the current NAV rather than
+    the old high, so the guard measures the NEXT drawdown from where the
+    account actually is.
+    """
+    cfg = config or {}
+    limit = _finite_number(cfg.get("bear_regime_max_drawdown_pct", 0.0))
+    was_halted = bool(halted)
+    value = _finite_number(nav)
+    if value is None or value <= 0:
+        # Unreadable NAV must not look like a recovery.
+        prior = _finite_number(peak)
+        return DrawdownState(prior if prior and prior > 0 else 0.0, was_halted,
+                             0.0, "nav unreadable")
+    high = _finite_number(peak)
+    if high is None or high <= 0:
+        high = value
+    taper_off = _finite_number(cfg.get("bear_regime_drawdown_taper_pct", 0.0))
+    if (limit is None or limit <= 0) and not (taper_off and taper_off > 0):
+        return DrawdownState(max(high, value), False, 0.0, "guard disabled")
+
+    drawdown = 0.0 if value >= high else (high - value) / high
+
+    # CONTINUOUS taper, preferred over the binary halt below and measured
+    # against it. Exposure falls linearly with depth instead of switching off
+    # at a line, so a drawdown that stops one tick past the threshold costs a
+    # trim rather than a full round trip. This is the same reason
+    # `core_vol_target` beat twelve binary protective levers.
+    taper = _finite_number(cfg.get("bear_regime_drawdown_taper_pct", 0.0))
+    if taper is not None and taper > 0:
+        floor = _finite_number(cfg.get("bear_regime_drawdown_scale_min", 0.0))
+        floor = 0.0 if floor is None else min(max(floor, 0.0), 1.0)
+        scale = 1.0 - drawdown / taper
+        scale = min(1.0, max(floor, scale))
+        return DrawdownState(max(high, value), False, drawdown,
+                             f"drawdown {drawdown:.1%} -> scale {scale:.2f}",
+                             round(scale, Q))
+
+    if was_halted:
+        if rearm_ok:
+            return DrawdownState(value, False, 0.0, "drawdown halt re-armed")
+        return DrawdownState(max(high, value), True, drawdown,
+                             f"halted: {drawdown:.1%} below peak")
+    if drawdown >= limit:
+        return DrawdownState(high, True, drawdown,
+                             f"drawdown {drawdown:.1%} breached {limit:.0%}")
+    return DrawdownState(max(high, value), False, drawdown, "within drawdown")
 
 
 def _regime_refusal(config, observation_id, reason) -> RegimeDecision:
