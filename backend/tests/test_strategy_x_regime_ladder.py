@@ -46,6 +46,7 @@ def cfg(**overrides):
         "bear_regime_fast_ma_bars": 20,
         "bear_regime_mid_ma_bars": 50,
         "bear_regime_confirm_bars": 2,
+        "bear_regime_reentry_confirm_bars": 2,
         "bear_regime_transition_risk_fraction": 0.5,
     }
     value.update(overrides)
@@ -107,6 +108,42 @@ def test_full_falls_to_caution_only_after_the_mid_break_confirms():
     assert first.state == "full" and first.confirm_count == 1
     second, state = step(state, signal(fast_bad=True), observation_id=2)
     assert second.state == "caution" and second.confirm_count == 0
+
+
+def test_climbing_back_takes_longer_than_falling_did():
+    """Re-risking is slower than de-risking, at every rung.
+
+    BT200193 de-levered on 2021-12-21 and was back at full leverage on
+    2021-12-24 — three sessions, on the Santa rally, days from the all-time
+    high — then rode 70% TQQQ down until the slow filter finally gave way on
+    2022-01-21. A two-bar reclaim is not evidence that a top is not a top.
+    """
+    slow = cfg(bear_regime_reentry_confirm_bars=5)
+    state = RegimeState("caution", "", 0, 0)
+    decision, state = step(state, signal(fast_good=True), observation_id=1,
+                           config=slow, times=4)
+    assert decision.state == "caution"
+    final, _ = step(state, signal(fast_good=True), observation_id=5,
+                    config=slow)
+    assert final.state == "full"
+
+
+def test_falling_still_takes_only_the_ordinary_confirmation():
+    state = RegimeState("full", "", 0, 0)
+    decision, _ = step(state, signal(fast_bad=True), observation_id=1,
+                       config=cfg(bear_regime_reentry_confirm_bars=5), times=2)
+    assert decision.state == "caution"
+
+
+def test_the_early_rebound_bet_also_waits_for_the_longer_confirmation():
+    slow = cfg(bear_regime_reentry_confirm_bars=4)
+    state = RegimeState("defensive", "", 0, 0)
+    decision, state = step(state, signal(slow_on=False, fast_good=True),
+                           observation_id=1, config=slow, times=3)
+    assert decision.state == "defensive"
+    final, _ = step(state, signal(slow_on=False, fast_good=True),
+                    observation_id=4, config=slow)
+    assert final.state == "recovering"
 
 
 def test_caution_climbs_back_to_full_only_after_the_reclaim_confirms():

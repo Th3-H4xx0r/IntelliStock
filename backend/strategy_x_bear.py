@@ -24,6 +24,7 @@ _REGIME_ENVELOPE_VERSION = 1
 _REGIME_FAST_MA_DEFAULT = 20
 _REGIME_MID_MA_DEFAULT = 50
 _REGIME_CONFIRM_DEFAULT = 2
+_REGIME_REENTRY_CONFIRM_DEFAULT = 5
 _REGIME_TRANSITION_FRACTION_DEFAULT = 0.5
 
 _MAX_SAFE_COUNT = 100_000
@@ -442,11 +443,13 @@ def advance_regime_state(signal, previous, *, observation_id,
         return RegimeDecision(name, fraction_for(name), kind, count, current,
                               "observation unchanged")
 
-    needed = _config_count(config, "bear_regime_confirm_bars",
-                           _REGIME_CONFIRM_DEFAULT)
-    if needed is None:
+    down = _config_count(config, "bear_regime_confirm_bars",
+                         _REGIME_CONFIRM_DEFAULT)
+    up = _config_count(config, "bear_regime_reentry_confirm_bars",
+                       _REGIME_REENTRY_CONFIRM_DEFAULT)
+    if down is None or up is None:
         return _regime_refusal(config, current, "invalid confirmation setting")
-    needed = max(needed, 1)
+    down, up = max(down, 1), max(up, 1)
 
     if signal.emergency:
         return RegimeDecision("defensive", 0.0, "", 0, current,
@@ -483,6 +486,14 @@ def advance_regime_state(signal, previous, *, observation_id,
     if not evidence:
         return RegimeDecision(name, fraction_for(name), "", 0, current,
                               f"holding {name}: {signal.reason}")
+    # Climbing a rung is held to a LONGER standard than falling one. BT200193
+    # de-levered on 2021-12-21 and was back at full leverage on 2021-12-24 —
+    # three sessions, on the Santa rally, days from the all-time high — then
+    # rode 70% TQQQ down until the slow filter gave way on 2022-01-21. A
+    # two-bar reclaim is not evidence that a top is not a top, and the two
+    # errors are not symmetric: a late re-entry costs part of a rally, an early
+    # one costs the next leg of the decline at full size.
+    needed = up if fraction_for(destination) > fraction_for(name) else down
     count = count + 1 if kind == edge else 1
     if count < needed:
         return RegimeDecision(name, fraction_for(name), edge, count, current,

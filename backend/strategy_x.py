@@ -229,6 +229,18 @@ DEFAULTS = {
     "bear_regime_fast_ma_bars": 20,
     "bear_regime_mid_ma_bars": 50,
     "bear_regime_confirm_bars": 2,
+    # Re-entry confirmation, measured and left EQUAL to the fall. The obvious
+    # story — BT200193 de-levered on 2021-12-21 and was back at full leverage
+    # on 2021-12-24, three sessions from the all-time high — says make climbing
+    # slower. Measured over 15.0y it is wrong, and monotonically so:
+    #   bars   2      3      5      8     12
+    #   CAGR  27.02  25.75  24.34  23.36  22.68
+    #   2022  -2.5   -7.6  -11.0  -13.9   -8.3
+    # A slower climb misses the recovery by exactly as much as it avoids the
+    # relapse — the same result the twelve binary protective levers produced
+    # (see core_vol_target). Kept as a named dial because the numbers above are
+    # the argument, not an opinion.
+    "bear_regime_reentry_confirm_bars": 2,
     "bear_regime_transition_risk_fraction": 0.55,
     # ── satellite (OFF) ──
     "satellite_pct": 0.0,
@@ -264,6 +276,24 @@ DEFAULTS = {
     # twelve BINARY protective levers already measured and rejected — those all
     # failed because fully exiting misses the recovery, so the bull cost beat
     # the bear saving every time. 0 == OFF.
+    # MEASURED with the regime ladder, 15/15/70, 15.0y
+    # (scripts/strategy_x_bear_regime_matrix.py). This is the single largest
+    # effect in the whole bear study, and it beat every discrete lever tried
+    # against the same problem:
+    #   core_vol_target   CAGR   maxDD   2022full   2022H1   bearWins
+    #   0.00 (off)       27.02  -35.92     -2.5     -11.4      4/6
+    #   0.20             18.94  -29.60     +9.6      +2.8      5/6
+    #   0.30             21.59  -34.46     +8.1      +0.9      5/6
+    # With `commodity_trend_bars` at 200 and the ladder's transition fraction
+    # at 0.80, 0.20 gives CAGR 21.14 / maxDD -23.14 / Sharpe 1.02 and beats SPY
+    # in 11 of 15 windows — SPY itself is 15.12 / -33.72 / 0.93.
+    #
+    # WHY it works where the rungs do not: it is continuous. A discrete rung
+    # that fires on a false alarm pays the full round trip; scaling by
+    # target / (leverage * realised_vol) pays nothing, and rising realised
+    # volatility leads every one of these drawdowns. Still 0 by DEFAULT because
+    # it costs real CAGR in a calm bull and that is the operator's call — doc
+    # 198 sets it, this module does not assume it.
     "core_vol_target": 0.0,
     "core_vol_scale_min": 0.3,
     "core_vol_scale_max": 1.0,
@@ -305,6 +335,12 @@ DEFAULTS = {
     "commodity_symbols": ["GLD", "SLV", "USO", "UNG", "GDX", "XLE", "DBA", "CPER"],
     "commodity_max_names": 2,
     "commodity_mom_bars": 60,
+    # 100 SHIPPED, 200 measured better with the sleeve at 15%: the 100-day
+    # filter bought every false start in 2015, and the sleeve — not the ladder
+    # — was the largest single cause of the chop loss. 2015 chop -19.9 -> -14.0
+    # and full-period max drawdown -29.6 -> -23.6, at no cost to any bear
+    # window. Left at 100 here because the shipped sleeve is 0% and this is a
+    # sleeve-size-dependent result; doc 198 sets 200 alongside its 15%.
     "commodity_trend_bars": 100,
     # ── execution ──
     "min_order_usd": 50.0,
