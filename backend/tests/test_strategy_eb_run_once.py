@@ -415,3 +415,19 @@ def test_the_class_name_matches_what_the_broker_derives_from_the_id():
     assert derived == "StrategyEb"
     assert hasattr(mod, derived), f"broker looks for {derived}"
     assert hasattr(getattr(mod, derived), "run_once")
+
+
+def test_the_sweep_funds_the_pending_core_book_from_settled_cash():
+    """BT 222375: the Wednesday plan sells SPY to make room but the TQQQ buy
+    sizes off settled cash and is skipped; the next-session sweep must deploy
+    the settled proceeds toward the PENDING full book — core included — and
+    never sell anything."""
+    from strategies.strategy_eb import _PENDING_TARGETS_KEY
+    emu = FakeEmulator(cash=6000.0, positions={})
+    cache = {_PENDING_TARGETS_KEY: {"TQQQ": 0.45, "SPY": 0.55}}
+    out = StrategyEb().run_once(["TQQQ"], PRICES, SKIPS, cfg(), {},
+                                data=sweep_data(),
+                                portfolio_emulator=emu, strategy_cache=cache)
+    assert out.get("TQQQ") == 1 and out.get("SPY") == 1
+    assert all(v == 1 for k, v in out.items() if not k.startswith("_"))
+    assert "buy_cash" in out["_nexus_position_sizes"]["TQQQ"]

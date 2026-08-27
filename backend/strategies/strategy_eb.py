@@ -72,6 +72,12 @@ _EXIT_ISSUED_KEY = "_strategy_eb_exit_issued_session"
 #: the cash is still settled on the following tick, so an unguarded sweep would
 #: re-send the identical buy on every one of them.
 _SWEEP_ISSUED_KEY = "_strategy_eb_sweep_session"
+#: The FULL target book of the last core plan. Buys size off SETTLED cash, so
+#: the tick that sells SPY to make room cannot fund the TQQQ buy (BT 222375:
+#: 4 TQQQ buys in 4.8y, 795 SPY round trips). The next session's sweep deploys
+#: the settled proceeds toward THIS book — core included — never the remainder
+#: alone, which just bought SPY back.
+_PENDING_TARGETS_KEY = "_strategy_eb_pending_targets"
 
 #: {reason: scope} for refusals already logged, so a strategy that refuses all
 #: day writes one line rather than ~26.
@@ -222,6 +228,7 @@ class StrategyEb:
         # Written whether or not orders came out: the session HAS been decided,
         # and at 15m granularity there are ~26 more ticks in it.
         cache[LAST_REBALANCE_KEY] = session_id
+        cache[_PENDING_TARGETS_KEY] = dict(targets)
         if exiting:
             cache[_EXIT_ISSUED_KEY] = session_id
         cache[_LAST_DECISION_KEY] = {
@@ -271,16 +278,25 @@ class StrategyEb:
                                                        "cash_sweep_min_pct"):
             return {}
 
-        targets = eb_remainder_targets(held, cfg)
+        pending = cache.get(_PENDING_TARGETS_KEY)
+        if isinstance(pending, dict) and pending:
+            # Deploy toward the last decided book, core included. BUYS ONLY:
+            # the sweep spends idle cash; it never trims anything.
+            targets = {str(k).upper(): float(v) for k, v in pending.items()}
+            owned = set(universe)
+        else:
+            targets = eb_remainder_targets(held, cfg)
+            owned = {_s(cfg, "off_symbol"), _s(cfg, "cash_symbol")}
+            owned.discard(_s(cfg, "core_symbol"))
+        owned.discard("")
         if not targets:
             return {}
-        owned = {_s(cfg, "off_symbol"), _s(cfg, "cash_symbol")}
-        owned.discard(_s(cfg, "core_symbol"))
-        owned.discard("")
 
         decisions, sizes = targets_to_orders(
             targets, nav=nav, positions=positions, prices=prices, cash=cash,
             config=cfg, owned=owned)
+        decisions = {k: v for k, v in decisions.items() if v == 1}
+        sizes = {k: v for k, v in sizes.items() if k in decisions}
         if not decisions:
             return {}
 
