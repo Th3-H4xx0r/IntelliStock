@@ -63,6 +63,59 @@ actual) and overstated the return by two times. That asymmetry is the single
 most useful thing measured here: **the risk control transfers faithfully; the
 return does not.**
 
+## Calendar years — the decisive measurement
+
+Fifteen window slices flatter a strategy, because some are six weeks long. The
+natural unit for "makes money in every regime" is the calendar year:
+
+| year | A (BIL) | B (SPY) | C (QLD 2x) | SPY |
+|---|---:|---:|---:|---:|
+| 2011 | -4.3 | -8.6 | -13.4 | 3.0 |
+| 2012 | 0.5 | 5.1 | 12.0 | 14.2 |
+| 2013 | 31.9 | 43.3 | 52.5 | 29.0 |
+| 2014 | 10.8 | 17.2 | 24.0 | 14.6 |
+| 2015 | -7.3 | -11.0 | -7.3 | 1.3 |
+| 2016 | 1.5 | 1.8 | 2.9 | 13.6 |
+| 2017 | 37.6 | 45.2 | 46.3 | 20.8 |
+| 2018 | -9.3 | -12.1 | -14.9 | -5.2 |
+| 2019 | 15.3 | 24.0 | 32.6 | 31.1 |
+| 2020 | 16.5 | 28.5 | 38.6 | 17.2 |
+| 2021 | 22.9 | 37.9 | 38.8 | 30.5 |
+| 2022 | -0.8 | -4.1 | -7.3 | -18.6 |
+| 2023 | 18.9 | 26.6 | 44.5 | 26.7 |
+| 2024 | 18.8 | 23.4 | 28.0 | 25.6 |
+| 2025 | 12.2 | 19.4 | 18.8 | 18.0 |
+| 2026 | 7.1 | 8.9 | 15.5 | 12.7 |
+| **negative years** | **4** | **4** | **4** | **2** |
+| **years below SPY** | **13** | **9** | **5** | — |
+
+Every configuration is negative in MORE calendar years than SPY, and the losing
+years are all the same ones: 2011, 2015, 2016, 2018 — chop. The strategy wins
+enormously in trending years (2013 +52%, 2017 +46%, 2023 +44% against SPY's 29,
+21 and 27) and loses in sideways ones. That is the definition of a leveraged
+trend strategy, and it is what the trend literature predicts.
+
+**This is why the objective is unreachable as stated, and it is not a tuning
+problem.** The strategy has no alpha source. Its only signal is a trend filter
+on one index, and the evidence is consistent that trend filters buy crash
+protection, not excess return. Everything else here — leverage level, the
+defensive sleeves, the commodity sleeve, managed futures — is asset allocation,
+which moves you along a risk/return frontier but never off it.
+
+A permanent managed-futures sleeve, the literature's own crisis-alpha
+recommendation, was the last candidate and lands in the same place. Over the
+7.3 years the data allows (DBMF from 2019-05, KMLM 2020-12, CTA 2022-03):
+
+| asset | CAGR | maxDD | corr vs SPY |
+|---|---:|---:|---:|
+| SPY | 16.05% | -33.72% | +1.00 |
+| DBMF | 9.17% | -20.39% | +0.19 |
+| KMLM | 6.25% | -31.01% | -0.14 |
+| CTA | 7.47% | -20.80% | -0.14 |
+
+Blending it into SPY moves monotonically down the same frontier: 15% gives
+15.17% / -29.72%, 30% gives 14.25% / -25.70%.
+
 ## What was tried and rejected
 
 Every one of these was implemented, measured, and left off. The numbers are the
