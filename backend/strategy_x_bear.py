@@ -529,8 +529,14 @@ def advance_regime_state(signal, previous, *, observation_id,
     down, up = max(down, 1), max(up, 1)
 
     if signal.emergency:
+        # Name the trigger, not the moving averages. `RegimeSignal.reason` only
+        # ever describes MA position, so this used to log the self-contradictory
+        # "emergency: above MA20 and MA50" for what was actually a volatility
+        # blowout — the ladder's most drastic action never stated its cause.
+        trigger = ("volatility gate breached" if signal.vol_unsafe
+                   else signal.reason)
         return RegimeDecision("defensive", 0.0, "", 0, current,
-                              "emergency: " + signal.reason)
+                              "emergency: " + trigger)
 
     # ── de-risking is immediate; re-risking is staged ──
     # Not a symmetry for its own sake. The slow filter whipsaws hardest at a

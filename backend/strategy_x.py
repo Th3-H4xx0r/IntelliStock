@@ -336,6 +336,19 @@ DEFAULTS = {
     "core_vol_scale_min": 0.3,
     "core_vol_scale_max": 1.0,
     "core_leverage_factor": 3.0,
+    # Quantization grid for the vol scale. 0 == OFF, and measurement says
+    # leave it off for an ETF book. With the commodity buy/hold spread it does
+    # cut turnover hard, but not profitably at these spreads:
+    #   step / exit rank      turnover   CAGR    maxDD
+    #   off                   1206%/yr  24.85   -26.06
+    #   0.10 / 4               810%/yr  23.60   -26.55
+    #   0.20 / 5               757%/yr  23.39   -26.57
+    #   0.10 / 4 + band 0.10   704%/yr  22.44   -27.05
+    # Cutting turnover 42% costs 2.4pp of CAGR and saves roughly 0.3%/yr at the
+    # ~5bps these ETFs trade at (the engine measured 0.3bps on BT406990's
+    # fills). Arm it if this book ever holds names with real spread — the thin
+    # commodity ETFs are the candidates, not SPY or TQQQ.
+    "core_vol_scale_step": 0.0,
     "satellite_momentum_bars": 60,
     # Price floor for satellite candidates. DEFAULT OFF, and that is a measured
     # reversal of the reasoning that introduced it.
@@ -372,6 +385,10 @@ DEFAULTS = {
     "commodity_pct": 0.0,
     "commodity_symbols": ["GLD", "SLV", "USO", "UNG", "GDX", "XLE", "DBA", "CPER"],
     "commodity_max_names": 2,
+    # Buy/hold spread for the commodity sleeve, mirroring `satellite_exit_rank`.
+    # A name must rank inside `commodity_max_names` to be bought and only drops
+    # out past this rank. 2 == no spread, i.e. the shipped behaviour.
+    "commodity_exit_rank": 2,
     "commodity_mom_bars": 60,
     # 100 SHIPPED, 200 measured better with the sleeve at 15%: the 100-day
     # filter bought every false start in 2015, and the sleeve — not the ladder
@@ -609,7 +626,19 @@ def core_vol_scale(closes, config) -> float:
     rv = _stdev(rets[-vol_bars:]) * math.sqrt(252.0)
     if rv <= 0:
         return 1.0
-    return round(max(lo, min(hi, target / (lev * rv))), Q)
+    scale = max(lo, min(hi, target / (lev * rv)))
+    # QUANTIZE, and floor rather than round. An unquantized scale moves every
+    # single session, so the levered leg's target moves with it and the drift
+    # band is re-crossed on noise in a 12-day vol estimate. Measured on
+    # BT406990: 2,051%/yr one-way turnover, $714,207 of notional against a
+    # $7,221 average NAV, for a +0.76pp edge over 4.8 years. The engine models
+    # 0.003% of that notional in fees; the live measurement for this project is
+    # ~10.7%/yr of drag at 290%/month. Flooring means quantization can only
+    # ever hold LESS of the levered fund than the raw scale asked for.
+    step = _f(cfg, "core_vol_scale_step", 0.0)
+    if step > 0:
+        scale = max(lo, math.floor(scale / step) * step)
+    return round(scale, Q)
 
 
 def core_signal(closes, config) -> CoreSignal:
@@ -776,7 +805,7 @@ def bear_signal(closes, config, bars_engaged: int = 0) -> BearSignal:
                       len(hits), tuple(hits))
 
 
-def rank_commodities(closes_by_symbol: dict, config) -> list:
+def rank_commodities(closes_by_symbol: dict, config, held=None) -> list:
     """Commodity ETFs worth holding, best first. Pure.
 
     Two gates, both required: the ETF must be in its OWN uptrend (above its
@@ -784,6 +813,15 @@ def rank_commodities(closes_by_symbol: dict, config) -> list:
     return. The uptrend gate is what lets the sleeve hold NOTHING — commodities
     spend long stretches with none of them trending, and a sleeve that must
     always be full would be forced into whichever one is falling least.
+
+    BUY/HOLD SPREAD, the same sS rule `select_satellite` uses and for the same
+    reason: a name must rank inside `commodity_max_names` to be BOUGHT, but only
+    drops out once it falls past `commodity_exit_rank`. Without it this sleeve
+    re-draws its book on momentum ties — measured over BT406990, 15% of NAV
+    rotated through 55 distinct pairs in 1,258 sessions, GDX/SLV to USO/XLE to
+    GDX/GLD and back. A held name still has to stay in its own uptrend, so the
+    spread delays a swap between two trending names; it never keeps a falling
+    one.
 
     Deterministic: ties break on symbol, never on dict order.
     """
@@ -804,7 +842,16 @@ def rank_commodities(closes_by_symbol: dict, config) -> list:
         scored.append((round(px[-1] / prior - 1.0, Q), sym))
     # Highest momentum first; symbol ascending as the tie-break.
     scored.sort(key=lambda kv: (-kv[0], kv[1]))
-    return [s for _, s in scored[:max(0, _i(cfg, "commodity_max_names"))]]
+    ranked = [s for _, s in scored]
+    keep_n = max(0, _i(cfg, "commodity_max_names"))
+    exit_n = max(keep_n, _i(cfg, "commodity_exit_rank", keep_n))
+    holding = {str(s).strip().upper() for s in (held or set())}
+    if not holding:
+        return ranked[:keep_n]
+    survivors = [s for s in ranked[:exit_n] if s in holding][:keep_n]
+    room = max(0, keep_n - len(survivors))
+    adds = [s for s in ranked[:keep_n] if s not in holding][:room]
+    return survivors + adds
 
 
 def strategy_x_universe(config) -> list:

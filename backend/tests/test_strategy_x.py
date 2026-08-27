@@ -21,7 +21,8 @@ if _backend not in sys.path:
 
 from datetime import datetime, timezone  # noqa: E402
 
-from strategy_x import (  # noqa: E402
+from strategy_x import (
+    core_vol_scale,  # noqa: E402
     DEFAULTS,
     core_signal,
     pit_daily_closes,
@@ -578,3 +579,89 @@ def test_invalid_bear_system_mode_does_not_expand_the_core_universe():
     assert strategy_x_universe({**DEFAULTS, "bear_system_mode": "paper"}) == [
         "QQQ", "TQQQ", "SPY",
     ]
+
+# ── turnover control ─────────────────────────────────────────────────────────
+
+def test_the_vol_scale_is_unquantized_by_default():
+    closes = [100.0 * (1.01 ** i) for i in range(300)]
+    cfg = {"core_vol_target": 0.15, "core_vol_bars": 12, "core_vol_scale_min": 0.0}
+    plain = core_vol_scale(closes, cfg)
+    assert plain == core_vol_scale(closes, {**cfg, "core_vol_scale_step": 0.0})
+
+
+def test_quantizing_the_vol_scale_snaps_it_to_the_grid():
+    closes = [100.0 * (1.0 + 0.02 * ((-1) ** i)) for i in range(300)]
+    cfg = {"core_vol_target": 0.60, "core_vol_bars": 12,
+           "core_vol_scale_min": 0.0, "core_vol_scale_step": 0.1}
+    scale = core_vol_scale(closes, cfg)
+    assert abs(scale * 10 - round(scale * 10)) < 1e-9, scale
+
+
+def test_quantizing_never_rounds_exposure_up():
+    closes = [100.0 * (1.0 + 0.02 * ((-1) ** i)) for i in range(300)]
+    cfg = {"core_vol_target": 0.60, "core_vol_bars": 12, "core_vol_scale_min": 0.0}
+    raw = core_vol_scale(closes, cfg)
+    stepped = core_vol_scale(closes, {**cfg, "core_vol_scale_step": 0.1})
+    assert stepped <= raw + 1e-12
+
+
+def test_a_nonfinite_step_leaves_the_scale_alone():
+    closes = [100.0 * (1.0 + 0.02 * ((-1) ** i)) for i in range(300)]
+    cfg = {"core_vol_target": 0.60, "core_vol_bars": 12, "core_vol_scale_min": 0.0}
+    raw = core_vol_scale(closes, cfg)
+    for bad in (float("nan"), float("inf"), -0.1, None):
+        assert core_vol_scale(closes, {**cfg, "core_vol_scale_step": bad}) == raw
+
+
+def test_a_numeric_string_step_still_quantizes():
+    # Config arrives from JSON and the UI, so every other key here coerces a
+    # numeric string. This one must not be the exception.
+    closes = [100.0 * (1.0 + 0.02 * ((-1) ** i)) for i in range(300)]
+    cfg = {"core_vol_target": 0.60, "core_vol_bars": 12, "core_vol_scale_min": 0.0}
+    assert core_vol_scale(closes, {**cfg, "core_vol_scale_step": "0.1"}) == 0.3
+
+
+# ── the commodity sleeve's buy/hold spread ───────────────────────────────────
+
+def ccfg2(**overrides):
+    value = {"commodity_mom_bars": 5, "commodity_trend_bars": 5,
+             "commodity_max_names": 2, "commodity_exit_rank": 4,
+             "commodity_min_hold_bars": 0}
+    value.update(overrides)
+    return value
+
+
+def _ramp(n, step):
+    return [100.0 + step * i for i in range(n)]
+
+
+def test_a_held_commodity_survives_inside_the_exit_rank():
+    closes = {"AAA": _ramp(30, 3.0), "BBB": _ramp(30, 2.0),
+              "CCC": _ramp(30, 1.0), "DDD": _ramp(30, 0.5)}
+    cfg = ccfg2(commodity_max_names=2, commodity_exit_rank=4)
+    fresh = rank_commodities(closes, cfg)
+    assert fresh == ["AAA", "BBB"]
+    # CCC ranks 3rd — outside the buy list, inside the exit rank, so a HOLDER
+    # keeps it rather than paying a round trip to swap into BBB.
+    kept = rank_commodities(closes, cfg, held={"CCC"})
+    assert "CCC" in kept and len(kept) == 2
+
+
+def test_a_held_commodity_outside_the_exit_rank_is_dropped():
+    closes = {"AAA": _ramp(30, 3.0), "BBB": _ramp(30, 2.0),
+              "CCC": _ramp(30, 1.0), "DDD": _ramp(30, 0.5)}
+    cfg = ccfg2(commodity_max_names=2, commodity_exit_rank=3)
+    assert "DDD" not in rank_commodities(closes, cfg, held={"DDD"})
+
+
+def test_a_held_name_that_left_its_uptrend_is_dropped_whatever_its_rank():
+    closes = {"AAA": _ramp(30, 3.0), "BBB": _ramp(30, 2.0),
+              "CCC": [100.0 - i for i in range(30)]}
+    cfg = ccfg2(commodity_max_names=2, commodity_exit_rank=6)
+    assert "CCC" not in rank_commodities(closes, cfg, held={"CCC"})
+
+
+def test_omitting_held_reproduces_the_shipped_ranking():
+    closes = {"AAA": _ramp(30, 3.0), "BBB": _ramp(30, 2.0), "CCC": _ramp(30, 1.0)}
+    cfg = ccfg2()
+    assert rank_commodities(closes, cfg) == rank_commodities(closes, cfg, held=set())

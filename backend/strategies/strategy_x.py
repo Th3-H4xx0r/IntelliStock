@@ -1,4 +1,4 @@
-# INTELLISTOCK_SCHEMA: {"strategy": "strategy_x", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_x_enabled": false, "core_bull_symbol": "TQQQ", "core_chop_symbol": "SPY", "core_bear_symbol": "", "core_weight": 0.9, "core_band_pct": 0.05, "core_filter_symbol": "QQQ", "core_filter_ma_bars": 200, "core_vol_bars": 20, "core_vol_gate_mult": 2.25, "core_vol_median_bars": 252, "core_vol_median_min_samples": 60, "core_bear_weight": 0.35, "core_bear_short_ma_bars": 50, "core_bear_vol_expansion": 1.4, "core_bear_drawdown_pct": 0.15, "core_bear_lookback_bars": 252, "core_bear_min_confirm": 4, "core_bear_max_bars": 40, "core_bear_cooldown_bars": 20, "core_bear_exit_grace_bars": 2, "bear_system_mode": "off", "bear_cash_symbol": "BIL", "crisis_alpha_symbols": ["DBMF", "KMLM", "CTA"], "crisis_alpha_pct": 0.5, "crisis_alpha_min_history_bars": 60, "bear_kicker_symbol": "SQQQ", "bear_kicker_pct": 0.05, "bear_kicker_fast_ma_bars": 20, "bear_kicker_mid_ma_bars": 50, "bear_kicker_long_ma_bars": 200, "bear_kicker_max_bars": 5, "bear_kicker_cooldown_bars": 10, "bear_regime_enabled": false, "bear_regime_fast_ma_bars": 20, "bear_regime_mid_ma_bars": 50, "bear_regime_confirm_bars": 2, "bear_regime_reentry_confirm_bars": 2, "bear_regime_max_drawdown_pct": 0.0, "bear_regime_drawdown_rearm_pct": 0.5, "bear_regime_drawdown_taper_pct": 0.0, "bear_regime_drawdown_scale_min": 0.0, "bear_regime_transition_risk_fraction": 0.55, "satellite_pct": 0.0, "satellite_max_names": 6, "satellite_exit_rank": 12, "satellite_min_hold_bars": 21, "core_vol_target": 0.0, "core_vol_scale_min": 0.3, "core_vol_scale_max": 1.0, "core_leverage_factor": 3.0, "satellite_momentum_bars": 60, "satellite_min_price": 0.0, "commodity_pct": 0.0, "commodity_symbols": ["GLD", "SLV", "USO", "UNG", "GDX", "XLE", "DBA", "CPER"], "commodity_max_names": 2, "commodity_mom_bars": 60, "commodity_trend_bars": 100, "min_order_usd": 50.0, "cost_haircut_pct": 0.006, "broker_max_single_position_pct": 0.95, "core_once_per_session": true}}
+# INTELLISTOCK_SCHEMA: {"strategy": "strategy_x", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_x_enabled": false, "core_bull_symbol": "TQQQ", "core_chop_symbol": "SPY", "core_bear_symbol": "", "core_weight": 0.9, "core_band_pct": 0.05, "core_filter_symbol": "QQQ", "core_filter_ma_bars": 200, "core_vol_bars": 20, "core_vol_gate_mult": 2.25, "core_vol_median_bars": 252, "core_vol_median_min_samples": 60, "core_bear_weight": 0.35, "core_bear_short_ma_bars": 50, "core_bear_vol_expansion": 1.4, "core_bear_drawdown_pct": 0.15, "core_bear_lookback_bars": 252, "core_bear_min_confirm": 4, "core_bear_max_bars": 40, "core_bear_cooldown_bars": 20, "core_bear_exit_grace_bars": 2, "bear_system_mode": "off", "bear_cash_symbol": "BIL", "crisis_alpha_symbols": ["DBMF", "KMLM", "CTA"], "crisis_alpha_pct": 0.5, "crisis_alpha_min_history_bars": 60, "bear_kicker_symbol": "SQQQ", "bear_kicker_pct": 0.05, "bear_kicker_fast_ma_bars": 20, "bear_kicker_mid_ma_bars": 50, "bear_kicker_long_ma_bars": 200, "bear_kicker_max_bars": 5, "bear_kicker_cooldown_bars": 10, "bear_regime_enabled": false, "bear_regime_fast_ma_bars": 20, "bear_regime_mid_ma_bars": 50, "bear_regime_confirm_bars": 2, "bear_regime_reentry_confirm_bars": 2, "bear_regime_max_drawdown_pct": 0.0, "bear_regime_drawdown_rearm_pct": 0.5, "bear_regime_drawdown_taper_pct": 0.0, "bear_regime_drawdown_scale_min": 0.0, "bear_regime_transition_risk_fraction": 0.55, "satellite_pct": 0.0, "satellite_max_names": 6, "satellite_exit_rank": 12, "satellite_min_hold_bars": 21, "core_vol_target": 0.0, "core_vol_scale_min": 0.3, "core_vol_scale_max": 1.0, "core_leverage_factor": 3.0, "core_vol_scale_step": 0.0, "satellite_momentum_bars": 60, "satellite_min_price": 0.0, "commodity_pct": 0.0, "commodity_symbols": ["GLD", "SLV", "USO", "UNG", "GDX", "XLE", "DBA", "CPER"], "commodity_max_names": 2, "commodity_exit_rank": 2, "commodity_mom_bars": 60, "commodity_trend_bars": 100, "min_order_usd": 50.0, "cost_haircut_pct": 0.006, "broker_max_single_position_pct": 0.95, "core_once_per_session": true}}
 # INTELLISTOCK_DESCRIPTION: Leveraged Nasdaq core (TQQQ) with a de-lever filter to SPY. Direction is NOT predicted — a trend + volatility filter decides only WHETHER to be levered. Replaying this module over 15.7y of real closes (next-bar fills, point-in-time): CAGR 33.97%, maxDD -48.5%, Sharpe 0.88, 99.6x vs SPY's 8.5x, 4 years above +100%. The inverse (SQQQ) leg DEFAULTS OFF (-4.2% CAGR). The stock satellite is worth turning ON: with `satellite_pct=0.2` + `commodity_pct=0.2` it measures +7,140% compounded over 81 rolling 2-month windows vs SPY's +473%, beating SPY in 68% of them. (The old "satellite costs -4.0pp" figure was measured while a band bug kept the sleeve from ever opening a position - it held nothing.) Needs QQQ+TQQQ+SPY in the instance universe and granularity 86400. DIFFICULTY: 2
 # DIFFICULTY: 2
 """IntelliStock — Strategy X: leveraged core, filtered.
@@ -282,6 +282,21 @@ def _ny_session(current_time):
 #: bound, and a raw ordinal is ~739,000 — it would read as corruption on every
 #: bar. Days-since-1970 is ~20,700 today and stays inside the bound past 2200.
 _SESSION_EPOCH_ORDINAL = 719163  # date(1970, 1, 1).toordinal()
+
+
+#: Every Strategy X exit is a rebalance of an ETF book, which is exactly what
+#: the broker's sell whitelist calls `etf_sell`. Publishing it is not cosmetic:
+#: `broker.py`'s Z2.1 check reads `action_intent` off the strategy summary, and
+#: a sell with no recognised intent logs `would_block_in_phase2=True`. Measured
+#: on BT406990, that was 965 of 965 sells — the whole book. Phase 1 only logs;
+#: when phase 2 enforces, a strategy with no intent can never sell again.
+_SELL_INTENT = "etf_sell"
+
+
+def _sell_intents(decisions) -> dict:
+    return {symbol: _SELL_INTENT
+            for symbol, decision in (decisions or {}).items()
+            if decision == -1 and not str(symbol).startswith("_")}
 
 
 def _session_ordinal(session_id) -> int:
@@ -615,6 +630,7 @@ class StrategyX:
             out["_nexus_sell_enforcement"] = sorted(
                 symbol for symbol, decision in decisions.items() if decision == -1
             )
+            out["_nexus_action_intents"] = _sell_intents(decisions)
             return out
 
         sig = core_signal(closes, cfg)
@@ -713,7 +729,13 @@ class StrategyX:
         if float(cfg.get("commodity_pct", 0.0) or 0.0) > 0 and com_syms:
             com_closes = {s: pit_daily_closes(_bars_for(data, s), current_time)
                           for s in com_syms}
-            com_ranked = rank_commodities(com_closes, cfg)
+            # Held names get the buy/hold spread; without the current book the
+            # sleeve re-picks on momentum ties every session.
+            com_ranked = rank_commodities(
+                com_closes, cfg,
+                held={symbol for symbol, qty in (positions or {}).items()
+                      if float(qty or 0) > 0
+                      and str(symbol).strip().upper() in set(com_syms)})
             # Own the whole candidate set, not just today's picks — otherwise a
             # name that drops out of the ranking is outside `owned` and can
             # never be sold.
@@ -1388,6 +1410,7 @@ class StrategyX:
         out["_nexus_position_sizes"] = sizes
         out["_nexus_executable_buys"] = [s for s, d in decisions.items() if d == 1]
         out["_nexus_sell_enforcement"] = [s for s, d in decisions.items() if d == -1]
+        out["_nexus_action_intents"] = _sell_intents(decisions)
         return out
 
     @staticmethod

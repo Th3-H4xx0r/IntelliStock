@@ -112,6 +112,11 @@ class Emu:
     def __init__(self, cash):
         self._cash = float(cash)
         self._positions = {}
+        #: One-way traded notional. The forensic read of BT406990 measured
+        #: 2,051%/yr against a $7,221 average NAV while the engine modelled
+        #: 0.003% of it in fees — so turnover has to be a reported number here,
+        #: not an afterthought.
+        self.traded = 0.0
 
     def get_cash(self):
         return self._cash
@@ -129,6 +134,7 @@ class Emu:
         if cash_amount <= 0 or price <= 0:
             return
         fee = cash_amount * COST_BPS / 1e4
+        self.traded += cash_amount
         self._cash -= cash_amount
         self._positions[sym] = self._positions.get(sym, 0.0) + (cash_amount - fee) / price
 
@@ -137,6 +143,7 @@ class Emu:
         if qty <= 0 or price <= 0:
             return
         proceeds = qty * price
+        self.traded += proceeds
         self._cash += proceeds - proceeds * COST_BPS / 1e4
         left = self._positions.get(sym, 0.0) - qty
         if left <= 1e-9:
@@ -207,7 +214,9 @@ def replay(frame, cfg, label):
         dates.append(ts)
 
     curve = pd.Series(equity, index=pd.DatetimeIndex(dates), name=label)
-    return curve, orders
+    years = max((curve.index[-1] - curve.index[0]).days / 365.25, 1e-9)
+    turnover = emu.traded / max(curve.mean(), 1e-9) / years * 100
+    return curve, {"orders": orders, "turnover_pct_yr": turnover}
 
 
 def window_stats(curve, start, end):
@@ -267,11 +276,11 @@ def main():
     for name, cfg in arms.items():
         if name == "baseline" and baseline_cache.exists():
             curves[name] = pd.read_pickle(baseline_cache)
-            order_counts[name] = -1
+            order_counts[name] = {"orders": -1, "turnover_pct_yr": float("nan")}
             continue
-        curve, orders = replay(frame, cfg, name)
+        curve, stats = replay(frame, cfg, name)
         curves[name] = curve.iloc[warm:]
-        order_counts[name] = orders
+        order_counts[name] = stats
         if name == "baseline":
             curves[name].to_pickle(baseline_cache)
     spy = frame["SPY"].loc[curves["baseline"].index]
@@ -313,7 +322,10 @@ def main():
     print("\nfull period")
     for name in ("baseline", "active", "SPY"):
         stats = full_stats(curves[name])
-        extra = (f"  orders {order_counts[name]}" if name in order_counts else "")
+        st = order_counts.get(name) or {}
+        extra = (f"  orders {st.get('orders')}  turnover "
+                 f"{st.get('turnover_pct_yr', float('nan')):.0f}%/yr"
+                 if st else "")
         print(f"  {name:<9} CAGR {stats['cagr']:>7.2f}  maxDD {stats['maxdd']:>7.2f}"
               f"  Sharpe {stats['sharpe']:>5.2f}  x{stats['mult']:>7.2f}{extra}")
 
