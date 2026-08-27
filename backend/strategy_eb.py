@@ -36,9 +36,9 @@ import math
 from strategy_x import Q, _finite, _stdev
 
 __all__ = [
-    "DEFAULTS", "LAST_REBALANCE_KEY", "eb_core_weight", "eb_should_trade",
-    "eb_targets", "rebalance_weekdays", "session_ordinal", "session_weekday",
-    "strategy_eb_universe",
+    "DEFAULTS", "LAST_REBALANCE_KEY", "eb_core_weight", "eb_remainder_targets",
+    "eb_should_trade", "eb_targets", "rebalance_weekdays", "session_ordinal",
+    "session_weekday", "strategy_eb_universe",
 ]
 
 
@@ -112,6 +112,17 @@ DEFAULTS = {
     # a linear blend. With weight >= 0 and a SPY remainder, a 2022 above SPY's
     # own -18% is impossible by construction; this key is the honest answer.
     "remainder_bil_fraction": 0.0,
+    # ── the cash sweep ──
+    # `targets_to_orders` sizes buys off SETTLED cash and equity fills are
+    # next-bar, so the tick that sells the core CANNOT also fund the remainder
+    # leg — that buy is clipped to whatever cash had already settled. Left
+    # alone the freed cash is never deployed: the band sees no breach on any
+    # later session, and after a full exit the cadence rule returns
+    # (False, 0.0), so the book drifts to cash and stays there. Above this
+    # fraction of NAV, an idle balance is re-offered to the REMAINDER legs on
+    # any tick that is not already sending a core order. Below it, sweeping is
+    # pure churn.
+    "cash_sweep_min_pct": 0.02,
     # ── execution (read by strategy_x.targets_to_orders) ──
     "core_band_pct": 0.03,
     "min_order_usd": 25.0,
@@ -319,6 +330,28 @@ def eb_targets(w, cfg) -> dict:
                            (_s(cfg, "off_symbol"), spy)):
         if symbol and weight > 0:
             targets[symbol] = round(targets.get(symbol, 0.0) + weight, Q)
+    return targets
+
+
+def eb_remainder_targets(w_held, cfg) -> dict:
+    """Target weights for the REMAINDER legs only, around the core ALREADY held.
+
+        bil = (1 - w_held) * remainder_bil_fraction
+        spy = 1 - w_held - bil
+
+    The core is REMOVED rather than targeted at zero: a target of zero is an
+    exit instruction to `targets_to_orders`, so leaving it in would liquidate
+    the core every time the sweep ran. Its absence from both the targets and the
+    `owned` scope is what keeps the sweep incapable of touching it — it can
+    neither trim the core to fund the remainder nor top it up outside the weekly
+    cadence.
+
+    Sums to `1 - w_held`, never past it: asking for more would fund the buy by
+    selling the very position the weight was measured against.
+    """
+    cfg = cfg or {}
+    targets = eb_targets(w_held, cfg)
+    targets.pop(_s(cfg, "core_symbol"), None)
     return targets
 
 

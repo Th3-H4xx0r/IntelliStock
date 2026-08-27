@@ -19,6 +19,7 @@ from strategy_eb import (  # noqa: E402
     LAST_REBALANCE_KEY,
     _i,
     eb_core_weight,
+    eb_remainder_targets,
     eb_should_trade,
     eb_targets,
     rebalance_weekdays,
@@ -198,6 +199,46 @@ def test_colliding_symbols_accumulate_rather_than_overwrite():
     """off_symbol == cash_symbol must not silently drop half the book."""
     got = eb_targets(0.40, cfg(off_symbol="BIL", remainder_bil_fraction=0.5))
     assert got == {"TQQQ": 0.40, "BIL": 0.60}
+
+
+# ── eb_remainder_targets: the cash sweep's plan ─────────────────────────────
+#
+# The remainder legs around the core the book ALREADY holds. `targets_to_orders`
+# sizes buys off SETTLED cash, so the remainder leg of a rebalance that also
+# sold the core is dropped on the trade tick — and on every later session the
+# band sees no breach, so the freed cash is never deployed and the book drifts
+# to cash. These targets are what the wrapper re-offers that cash to.
+
+def test_the_remainder_plan_excludes_the_core_it_is_built_around():
+    got = eb_remainder_targets(0.40, cfg())
+    assert "TQQQ" not in got
+    assert got == {"SPY": 0.60}
+
+
+def test_the_remainder_plan_follows_the_dial():
+    assert eb_remainder_targets(0.40, cfg(remainder_bil_fraction=1.0)) == {
+        "BIL": 0.60}
+    assert eb_remainder_targets(0.40, cfg(remainder_bil_fraction=0.5)) == {
+        "SPY": 0.30, "BIL": 0.30}
+
+
+def test_the_remainder_plan_of_a_flat_book_is_the_whole_book():
+    """After a full exit `w_held` is 0, and the entire account is remainder."""
+    assert eb_remainder_targets(0.0, cfg()) == {"SPY": 1.0}
+
+
+def test_the_remainder_plan_of_a_fully_invested_core_asks_for_nothing():
+    assert eb_remainder_targets(1.0, cfg()) == {}
+
+
+def test_the_remainder_plan_never_sums_past_the_uninvested_share():
+    """Asking for more than 1 - w_held would fund the buy by selling the core,
+    which is exactly what the sweep must never do."""
+    for dial in (0.0, 0.25, 0.5, 1.0):
+        for held in (0.0, 0.05, 0.4, 0.65):
+            got = eb_remainder_targets(held, cfg(remainder_bil_fraction=dial))
+            assert round(sum(got.values()), 6) == round(1.0 - held, 6), (
+                held, dial)
 
 
 # ── strategy_eb_universe ────────────────────────────────────────────────────

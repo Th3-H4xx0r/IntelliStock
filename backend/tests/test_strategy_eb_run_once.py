@@ -111,12 +111,15 @@ def test_every_decision_carries_its_own_size():
 
 
 def test_it_does_not_trade_when_the_last_visible_session_is_not_a_decision_day():
-    """Called on Friday, the last visible session is Thursday (weekday 3)."""
+    """Called on Friday, the last visible session is Thursday (weekday 3). The
+    book is fully invested in SPY, so nothing is idle for the cash sweep either
+    and the weekday rule is the only thing under test."""
     assert StrategyEb().run_once(
         ["TQQQ"], PRICES, SKIPS, cfg(), {},
         data=data_for(alternating(0.01, end_day=datetime(
             2026, 6, 4, tzinfo=timezone.utc))),
-        portfolio_emulator=FakeEmulator(), strategy_cache={}) == {}
+        portfolio_emulator=FakeEmulator(cash=0.0, positions={"SPY": 20.0}),
+        strategy_cache={}) == {}
 
 
 def test_it_does_not_trade_twice_in_one_session():
@@ -147,7 +150,7 @@ def test_it_does_not_re_issue_an_in_flight_exit_in_the_same_session():
                            data=data_for(alternating(0.10)),
                            portfolio_emulator=emu, strategy_cache=cache)
     assert first.get("TQQQ") == -1
-    assert cache["_eb_exit_issued_session"] == DECISION_SESSION
+    assert cache["_strategy_eb_exit_issued_session"] == DECISION_SESSION
 
     second = strat.run_once(["TQQQ"], PRICES, DECIDES, cfg(), {},
                             data=data_for(alternating(0.10)),
@@ -160,7 +163,18 @@ def test_it_does_not_re_issue_an_in_flight_exit_in_the_same_session():
             2026, 6, 4, tzinfo=timezone.utc))),
         portfolio_emulator=emu, strategy_cache=cache)
     assert later.get("TQQQ") == -1
-    assert cache["_eb_exit_issued_session"] == "2026-06-04"
+    assert cache["_strategy_eb_exit_issued_session"] == "2026-06-04"
+
+
+def test_a_sell_publishes_the_fraction_of_the_position_to_close():
+    """A bare -1 with no size is the mirror of the bare 1: the broker picks the
+    quantity, not the strategy."""
+    emu = FakeEmulator(cash=0.0, positions={"TQQQ": 100.0})
+    out = StrategyEb().run_once(["TQQQ"], PRICES, DECIDES, cfg(), {},
+                                data=data_for(alternating(0.10)),
+                                portfolio_emulator=emu, strategy_cache={})
+    assert out["TQQQ"] == -1
+    assert out["_nexus_position_sizes"]["TQQQ"]["sell_fraction"] == 1.0
 
 
 def test_it_refuses_on_short_history_rather_than_levering_up():
@@ -233,6 +247,148 @@ def test_the_bil_dial_routes_the_remainder_to_bills():
                           portfolio_emulator=FakeEmulator(),
                           strategy_cache=cache)
     assert cache["_strategy_eb_last"]["targets"] == {"TQQQ": 0.40, "BIL": 0.60}
+
+
+# ── the cash sweep ──────────────────────────────────────────────────────────
+#
+# `targets_to_orders` sizes buys off SETTLED cash and equity fills are
+# next-bar, so the tick that sells the core cannot also fund the remainder leg
+# — the SPY buy is clipped to whatever cash had already settled. On every later
+# session the band sees no breach (and after a full exit `eb_should_trade`
+# returns (False, 0.0)), so the freed cash is NEVER deployed and the book
+# drifts to cash. That is not the strategy the spec describes.
+
+SWEEP_SESSION = "2026-06-04"
+
+
+def sweep_data(pct=0.01):
+    """Bars whose last visible session at `SKIPS` is a Thursday, so no core
+    decision is due — which is exactly when the sweep is allowed to run."""
+    return data_for(alternating(
+        pct, end_day=datetime(2026, 6, 4, tzinfo=timezone.utc)))
+
+
+def test_the_session_after_a_full_exit_puts_the_freed_cash_back_to_work():
+    cache = {}
+    out = StrategyEb().run_once(["TQQQ"], PRICES, SKIPS, cfg(), {},
+                                data=sweep_data(),
+                                portfolio_emulator=FakeEmulator(cash=10000.0),
+                                strategy_cache=cache)
+    assert out.get("SPY") == 1
+    assert "TQQQ" not in out
+    assert out["_nexus_position_sizes"]["SPY"]["buy_cash"] > 9000
+    for key in ("_nexus_position_sizes", "_nexus_discovered",
+                "_nexus_executable_buys", "_nexus_sell_enforcement",
+                "_nexus_action_intents"):
+        assert key in out, key
+    assert cache["_strategy_eb_sweep_session"] == SWEEP_SESSION
+
+
+def test_the_sweep_follows_the_bil_dial_like_every_other_remainder():
+    out = StrategyEb().run_once(["TQQQ"], PRICES, SKIPS,
+                                cfg(remainder_bil_fraction=1.0), {},
+                                data=sweep_data(),
+                                portfolio_emulator=FakeEmulator(cash=10000.0),
+                                strategy_cache={})
+    assert out.get("BIL") == 1
+    assert "SPY" not in out
+
+
+def test_a_book_that_is_barely_in_cash_is_left_alone():
+    """`cash_sweep_min_pct`: below it the sweep is pure churn."""
+    emu = FakeEmulator(cash=100.0, positions={"SPY": 19.8})
+    assert StrategyEb().run_once(["TQQQ"], PRICES, SKIPS, cfg(), {},
+                                 data=sweep_data(),
+                                 portfolio_emulator=emu,
+                                 strategy_cache={}) == {}
+
+
+def test_a_core_rebalance_session_never_sweeps_on_top_of_its_own_plan():
+    """The core plan already carries the remainder legs, and its buys have not
+    settled — cash still reads FULL on every remaining tick of that session, so
+    an unguarded sweep would spend the same dollars a second time."""
+    strat, cache = StrategyEb(), {}
+    emu = FakeEmulator()
+    out = strat.run_once(["TQQQ"], PRICES, DECIDES, cfg(), {},
+                         data=data_for(alternating(0.01)),
+                         portfolio_emulator=emu, strategy_cache=cache)
+    assert out.get("TQQQ") == 1
+    assert "_strategy_eb_sweep_session" not in cache
+
+    later_tick = strat.run_once(["TQQQ"], PRICES, DECIDES, cfg(), {},
+                                data=data_for(alternating(0.01)),
+                                portfolio_emulator=emu, strategy_cache=cache)
+    assert later_tick == {}
+    assert "_strategy_eb_sweep_session" not in cache
+
+
+def test_an_in_flight_exit_tick_does_not_sweep_either():
+    strat, cache = StrategyEb(), {}
+    emu = FakeEmulator(cash=0.0, positions={"TQQQ": 100.0})
+    strat.run_once(["TQQQ"], PRICES, DECIDES, cfg(), {},
+                   data=data_for(alternating(0.10)),
+                   portfolio_emulator=emu, strategy_cache=cache)
+    assert strat.run_once(["TQQQ"], PRICES, DECIDES, cfg(), {},
+                          data=data_for(alternating(0.10)),
+                          portfolio_emulator=emu, strategy_cache=cache) == {}
+    assert "_strategy_eb_sweep_session" not in cache
+
+
+def test_the_sweep_never_buys_or_sells_the_core():
+    """The core is outside both the sweep's targets and its `owned` scope, so
+    it can be neither trimmed to fund the remainder nor topped up outside the
+    weekly cadence."""
+    emu = FakeEmulator(cash=5000.0, positions={"TQQQ": 100.0})
+    out = StrategyEb().run_once(["TQQQ"], PRICES, SKIPS, cfg(), {},
+                                data=sweep_data(),
+                                portfolio_emulator=emu, strategy_cache={})
+    assert "TQQQ" not in out
+    assert out.get("SPY") == 1
+
+
+def test_the_sweep_fires_once_per_session_not_once_per_tick():
+    """Equity fills are next-bar here too: the cash is still settled on the
+    next tick, so an unguarded sweep re-sends the identical buy ~26 times."""
+    strat, cache = StrategyEb(), {}
+    emu = FakeEmulator(cash=10000.0)
+    assert strat.run_once(["TQQQ"], PRICES, SKIPS, cfg(), {},
+                          data=sweep_data(), portfolio_emulator=emu,
+                          strategy_cache=cache).get("SPY") == 1
+    assert strat.run_once(["TQQQ"], PRICES, SKIPS, cfg(), {},
+                          data=sweep_data(), portfolio_emulator=emu,
+                          strategy_cache=cache) == {}
+
+
+# ── log volume ──────────────────────────────────────────────────────────────
+
+def test_a_refusal_is_logged_once_per_session_not_once_per_tick(monkeypatch):
+    """A daily strategy that refuses all day writes one line, not ~26. The sink
+    is BacktestResults.logs, which an operator reads by eye."""
+    import strategies.strategy_eb as mod
+
+    lines = []
+    monkeypatch.setattr(mod, "_log",
+                        lambda msg, color="white": lines.append(msg))
+    strat, cache = mod.StrategyEb(), {}
+    for _ in range(4):
+        strat.run_once(["TQQQ"], PRICES, DECIDES, cfg(), {},
+                       data=data_for(alternating(0.01, n=40)),
+                       portfolio_emulator=FakeEmulator(), strategy_cache=cache)
+    assert len(lines) == 1
+
+
+def test_a_blind_refusal_is_logged_once_too(monkeypatch):
+    """`data=None` is EVERY live tick today, so this is the loudest one."""
+    import strategies.strategy_eb as mod
+
+    lines = []
+    monkeypatch.setattr(mod, "_log",
+                        lambda msg, color="white": lines.append(msg))
+    strat, cache = mod.StrategyEb(), {}
+    for _ in range(4):
+        strat.run_once(["TQQQ"], PRICES, DECIDES, cfg(), {}, data=None,
+                       portfolio_emulator=FakeEmulator(), strategy_cache=cache)
+    assert len(lines) == 1
 
 
 def test_the_schema_header_contains_exactly_every_default():
