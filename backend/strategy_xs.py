@@ -122,6 +122,16 @@ DEFAULTS = {
     "inverse_symbol": "",
     "inverse_pct": 0.0,
     # ── execution ──
+    # The broker caps ANY single position at BROKER_MAX_SINGLE_POSITION_PCT,
+    # which defaults to 15% of equity, and it TRIMS the buy to zero rather than
+    # clipping it. A 60%-of-NAV core can never be built underneath it: on
+    # BT102936 every QLD buy logged "trimmed to $0.00 ... cap=15%" and the
+    # strategy quietly held whatever it already had.
+    #
+    # 0.65 is the smallest value that lets the design express itself. Strategy
+    # X sets 0.95, which disarms the failsafe process-wide for every sibling
+    # strategy in the same document; this is deliberately tighter.
+    "broker_max_single_position_pct": 0.65,
     "min_order_usd": 50.0,
     "cost_haircut_pct": 0.006,
 }
