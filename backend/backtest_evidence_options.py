@@ -27,6 +27,8 @@ from simulated_execution import (
     LIQUIDITY_ADJUSTED_EQUITY_COST_MODEL,
     DEFAULT_EQUITY_EXECUTION_COST_MODEL,
     ExecutionCostModel,
+    TieredExecutionCostModel,
+    tiered_cost_model,
 )
 
 
@@ -49,11 +51,15 @@ CANDIDATE_OVERRIDE_KEYS = frozenset({
 #: Cost stress targets, in one-way basis points. `None` means nominal.
 COST_SCENARIO_TARGETS_BPS = (25.0, 50.0)
 
+#: Symbol-tier presets a queued run may select. Closed set: a run must not be
+#: able to invent its own cost basis from a backtest payload.
+EQUITY_COST_TIER_PRESETS = frozenset({"etf-liquid"})
+
 _OPTION_KEYS = frozenset({
     "evidence_mode", "fixture_build_id", "replay_fixture_id",
     "matrix_manifest_id", "matrix_arm_id", "cost_scenario_id",
     "equity_total_cost_bps", "nexus_candidate_overrides", "fixture_ordinal",
-    "pit_mode",
+    "pit_mode", "equity_cost_tiers",
 })
 
 #: Point-in-time enforcement for a historical run.
@@ -190,6 +196,21 @@ def _validate_cost_bps(value):
     return number
 
 
+def _validate_cost_tiers(value):
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, str):
+        raise EvidenceOptionError(
+            "equity_cost_tiers must be one of "
+            + ", ".join(sorted(EQUITY_COST_TIER_PRESETS)))
+    preset = value.strip()
+    if preset not in EQUITY_COST_TIER_PRESETS:
+        raise EvidenceOptionError(
+            f"unknown equity_cost_tiers preset {value!r}; known: "
+            + ", ".join(sorted(EQUITY_COST_TIER_PRESETS)))
+    return preset
+
+
 def validate_evidence_options(payload) -> dict:
     """Normalize a queued run's evidence/cost/override contract, or raise.
 
@@ -248,6 +269,7 @@ def validate_evidence_options(payload) -> dict:
             payload.get("fixture_ordinal"), mode),
         "pit_mode": _validate_pit_mode(payload.get("pit_mode")),
         "equity_total_cost_bps": _validate_cost_bps(payload.get("equity_total_cost_bps")),
+        "equity_cost_tiers": _validate_cost_tiers(payload.get("equity_cost_tiers")),
         "nexus_candidate_overrides": validate_candidate_overrides(
             payload.get("nexus_candidate_overrides")),
     }
@@ -305,6 +327,28 @@ def resolve_execution_cost_model(target_one_way_bps, base=None) -> ExecutionCost
         slippage_bps=model.slippage_bps * scale,
         fee_bps=model.fee_bps * scale,
     )
+
+
+def resolve_execution_cost_tiers(
+    preset_id, base
+) -> ExecutionCostModel | TieredExecutionCostModel:
+    """Wrap ONE resolved cost model in a symbol tier, or return it untouched.
+
+    Returns `base` ITSELF (not a copy) when no preset is selected, so an
+    ordinary run's object graph — and therefore its fills — are unchanged.
+
+    This wraps the model that `resolve_execution_cost_model` already resolved,
+    rather than being a second independent cost input, because broker.py hashes
+    exactly one model into the experiment preregistration while the emulator
+    does the filling. Two inputs would let a receipt claim a cost basis the
+    fills never used.
+    """
+    if preset_id is None:
+        return base
+    preset = _validate_cost_tiers(preset_id)
+    if not isinstance(base, ExecutionCostModel):
+        raise EvidenceOptionError("base must be an ExecutionCostModel")
+    return tiered_cost_model(preset, base)
 
 
 #: Source files whose contents define "what executed". Tests and caches are

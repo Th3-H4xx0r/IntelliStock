@@ -31,6 +31,7 @@ try:
         SimulationPriceEvent,
         SimulationQuote,
         SimulationSubmission,
+        TieredExecutionCostModel,
     )
 except ImportError:  # Package import path used by repository-root pytest.
     from backend.simulated_execution import (
@@ -44,6 +45,7 @@ except ImportError:  # Package import path used by repository-root pytest.
         SimulationPriceEvent,
         SimulationQuote,
         SimulationSubmission,
+        TieredExecutionCostModel,
     )
 
 # Crypto is NEVER commission-free: backtest fills must model the taker fee.
@@ -249,9 +251,12 @@ class PortfolioEmulator:
                 if isinstance(execution_simulator, NextEventExecutionSimulator)
                 else LIQUIDITY_ADJUSTED_EQUITY_COST_MODEL
             )
-        if not isinstance(equity_cost_model, ExecutionCostModel):
+        if not isinstance(equity_cost_model,
+                          (ExecutionCostModel, TieredExecutionCostModel)):
             raise ValueError("equity_cost_model must be an ExecutionCostModel")
         self._equity_cost_model = equity_cost_model
+        self._equity_tiered = isinstance(equity_cost_model,
+                                         TieredExecutionCostModel)
         self._equity_fees_paid = 0.0
         self._equity_spread_cost = 0.0
         self._equity_slippage_cost = 0.0
@@ -507,7 +512,12 @@ class PortfolioEmulator:
             (now + self._settlement_delay, withheld)
         )
 
-    def _equity_fill(self, side, shares, mid):
+    def _equity_model_for(self, symbol):
+        """The cost model for one symbol. Identity when untiered."""
+        return (self._equity_cost_model.model_for(symbol)
+                if self._equity_tiered else self._equity_cost_model)
+
+    def _equity_fill(self, side, shares, mid, symbol=None):
         """Price one equity fill through the cost model.
 
         Mirrors NextEventExecutionSimulator.on_quote exactly — touch price,
@@ -516,7 +526,7 @@ class PortfolioEmulator:
         identical fill cost. Returns (fill_price, fees, spread_cost,
         slippage_cost).
         """
-        model = self._equity_cost_model
+        model = self._equity_model_for(symbol)
         half_spread = mid * model.spread_bps / 20_000.0
         if side == "buy":
             touch = mid + half_spread
@@ -702,7 +712,7 @@ class PortfolioEmulator:
             # mid now discovers it cannot afford the whole clip — which is
             # precisely what happens live.
             fill_price, fees, spread_cost, slippage_cost = self._equity_fill(
-                "buy", shares, price
+                "buy", shares, price, symbol=ticker
             )
             notional = shares * fill_price
             total = notional + fees
@@ -762,7 +772,7 @@ class PortfolioEmulator:
             fill_price = price
         else:
             fill_price, fees, spread_cost, slippage_cost = self._equity_fill(
-                "sell", shares, price
+                "sell", shares, price, symbol=ticker
             )
             notional = shares * fill_price
             total = notional - fees
@@ -1321,7 +1331,8 @@ class PortfolioEmulator:
                 symbol=symbol,
                 timestamp=timestamp,
                 mid=mid,
-                spread_bps=self._execution_simulator.cost_model.spread_bps,
+                spread_bps=self._execution_simulator._model_for(
+                    symbol).spread_bps,
             )
             emitted.extend(self.process_quote(quote))
         return tuple(emitted)
@@ -1345,7 +1356,8 @@ class PortfolioEmulator:
                 symbol=event.symbol,
                 timestamp=event.available_at,
                 mid=event.price,
-                spread_bps=self._execution_simulator.cost_model.spread_bps,
+                spread_bps=self._execution_simulator._model_for(
+                    event.symbol).spread_bps,
             )
             emitted.extend(self.process_quote(quote))
         return tuple(emitted)
@@ -1516,7 +1528,7 @@ class PortfolioEmulator:
                 if amount_to_use <= 0:
                     return False
                 shares = self._execution_simulator.affordable_buy_quantity(
-                    amount_to_use, price
+                    amount_to_use, price, symbol=ticker
                 )
                 side = "buy"
             else:
@@ -1605,7 +1617,7 @@ class PortfolioEmulator:
                 # Size against the ALL-IN cost per share, not the mid, or the
                 # order asks for more shares than the cash can pay for and
                 # buy() bounces the whole trade at the last moment.
-                model = self._equity_cost_model
+                model = self._equity_model_for(ticker)
                 all_in = (
                     price
                     * (1.0 + model.spread_bps / 20_000.0)
@@ -1733,7 +1745,8 @@ def create_backtest_emulator(
     requested_version = None
     if cost_model is None:
         cost_model = LIQUIDITY_ADJUSTED_EQUITY_COST_MODEL
-    if not isinstance(cost_model, ExecutionCostModel):
+    if not isinstance(cost_model,
+                      (ExecutionCostModel, TieredExecutionCostModel)):
         raise ValueError("cost_model must be an ExecutionCostModel")
     if cost_model == DEFAULT_EQUITY_EXECUTION_COST_MODEL and not allow_nominal_cost_model:
         requested_version = cost_model.version

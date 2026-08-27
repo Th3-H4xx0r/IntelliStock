@@ -303,7 +303,14 @@ def _validate_evidence(value, path):
         validated = validate_evidence_options(value)
     except Exception:
         raise ExecutionSnapshotError("schema_evidence_invalid", paths=(path,)) from None
-    if validated != value:
+    # Compare only the keys THIS schema version declares. `_exact_keys` above
+    # already refused anything extra in the snapshot, so this is not a laxer
+    # check on the snapshot -- it is what keeps a signed v1 body byte-stable
+    # when a later evidence option is added to the validator. The alternative,
+    # comparing the whole dict, would invalidate every existing v1 snapshot the
+    # moment a new option lands, and a fixed-key signed contract must not gain
+    # a new cost basis without a schema version bump.
+    if {name: validated.get(name) for name in expected} != value:
         raise ExecutionSnapshotError("schema_evidence_invalid", paths=(path,))
     patterns = {
         "matrix_manifest_id": re.compile(r"^matrix-sha256-[0-9a-f]{64}$"),

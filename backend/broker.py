@@ -10052,10 +10052,16 @@ if mode == MODE_BACKTEST:
     from backtest_evidence_options import (
         apply_candidate_overrides as _apply_candidate_overrides,
         resolve_execution_cost_model as _resolve_execution_cost_model,
+        resolve_execution_cost_tiers as _resolve_execution_cost_tiers,
     )
     _evidence_options = _load_backtest_evidence_options(backtest_row_id)
     _evidence_cost_model = _resolve_execution_cost_model(
         _evidence_options.get("equity_total_cost_bps"))
+    # ONE immutable cost object per run: the tier wraps the model that is
+    # already hashed into preregistration and handed to the emulator, so a
+    # receipt can never claim a cost basis the fills did not use.
+    _evidence_cost_model = _resolve_execution_cost_tiers(
+        _evidence_options.get("equity_cost_tiers"), _evidence_cost_model)
     _evidence_lifecycle = None
     if _evidence_options.get("evidence_mode") != "off":
         _log(

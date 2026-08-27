@@ -122,6 +122,126 @@ LIQUIDITY_ADJUSTED_EQUITY_COST_MODEL = ExecutionCostModel(
 )
 
 
+#: THE 8 bps ETF SPREAD IS AN ASSUMPTION, NOT A MEASUREMENT.
+#: The 45.6 bps above was priced against SIP NBBO on 61 real fills. This was
+#: not. It is conservative for SPY/QQQ (~1 bp quoted) and roughly right for
+#: TQQQ; the first live EB fills must be priced the same way the original 61
+#: were, and this preset updated if it is off by more than 2x.
+#: One-way = 8.0/2 + 0.1 + 0.3 = 4.4 bps.
+ETF_LIQUID_EQUITY_COST_MODEL = ExecutionCostModel(
+    version="equity-etf-liquid-v1",
+    spread_bps=8.0,
+    slippage_bps=0.1,
+    fee_bps=0.3,
+    latency=timedelta(0),
+)
+
+#: Every leg Strategy EB and its siblings can trade, plus the two index proxies
+#: a comparison run needs. Deliberately a CLOSED list: an open rule ("any ETF")
+#: would quietly re-price a thin sector fund at mega-cap-index costs.
+ETF_LIQUID_SYMBOLS = frozenset(
+    {"SPY", "QQQ", "TQQQ", "QLD", "SQQQ", "BIL", "GLD", "IWM"}
+)
+
+
+class TieredExecutionCostModel:
+    """One cost model per symbol tier, one VERSION for the whole run.
+
+    `assert_execution_provenance_promotable` requires every fill's
+    `cost_model_version` to equal the summary's. So the composite version — not
+    the matched tier's version — is what gets stamped, and `as_dict()` carries
+    the default model's scalars so the promotion checker's finite-number rules
+    still have something to read.
+
+    Not an `ExecutionCostModel` subclass on purpose: the dataclass is frozen and
+    compared by value in `create_backtest_emulator`'s nominal-substitution
+    check, and a subclass would compare equal to a plain model with the same
+    fields.
+    """
+
+    __slots__ = ("_default", "_tiers", "_version", "_index")
+
+    def __init__(self, default, tiers, version):
+        if not isinstance(default, ExecutionCostModel):
+            raise ValueError("default must be an ExecutionCostModel")
+        if not isinstance(version, str) or not version.strip():
+            raise ValueError("version must be a non-empty string")
+        index = {}
+        for symbols, model in (tiers or {}).items():
+            if not isinstance(model, ExecutionCostModel):
+                raise ValueError("every tier must be an ExecutionCostModel")
+            for symbol in symbols:
+                key = str(symbol).strip().upper()
+                if not key:
+                    continue
+                if key in index:
+                    raise ValueError(f"symbol {key} appears in two tiers")
+                index[key] = model
+        self._default = default
+        self._tiers = {frozenset(s): m for s, m in (tiers or {}).items()}
+        self._version = version.strip()
+        self._index = index
+
+    @property
+    def default(self):
+        return self._default
+
+    @property
+    def version(self):
+        return self._version
+
+    # Delegated so callers that read a bare scalar off `cost_model` — the quote
+    # constructors in portfolio_emulator and the promotion checker — keep
+    # working without knowing about tiers.
+    @property
+    def spread_bps(self):
+        return self._default.spread_bps
+
+    @property
+    def slippage_bps(self):
+        return self._default.slippage_bps
+
+    @property
+    def fee_bps(self):
+        return self._default.fee_bps
+
+    @property
+    def latency(self):
+        return self._default.latency
+
+    def model_for(self, symbol) -> ExecutionCostModel:
+        return self._index.get(str(symbol or "").strip().upper(), self._default)
+
+    def as_dict(self) -> dict:
+        payload = dict(self._default.as_dict())
+        payload["version"] = self._version
+        payload["tiers"] = [
+            {"symbols": sorted(symbols), "model": model.as_dict()}
+            for symbols, model in sorted(
+                self._tiers.items(), key=lambda kv: sorted(kv[0]))
+        ]
+        return payload
+
+
+#: preset id -> (symbols, model). One preset today.
+COST_TIER_PRESETS = {
+    "etf-liquid": (ETF_LIQUID_SYMBOLS, ETF_LIQUID_EQUITY_COST_MODEL),
+}
+
+
+def tiered_cost_model(preset_id, default) -> TieredExecutionCostModel:
+    """Build the tiered model for a named preset over `default`."""
+    key = str(preset_id or "").strip()
+    if key not in COST_TIER_PRESETS:
+        raise ValueError(
+            f"unknown execution cost tier preset {preset_id!r}; "
+            f"known: {sorted(COST_TIER_PRESETS)}")
+    symbols, model = COST_TIER_PRESETS[key]
+    return TieredExecutionCostModel(
+        default=default, tiers={symbols: model},
+        version=f"equity-tiered-v1[{key}]")
+
+
 @dataclass(frozen=True)
 class SimulationOrder:
     order_id: str
@@ -393,15 +513,23 @@ class InsufficientBuyingPower(ValueError):
 
 class NextEventExecutionSimulator:
     def __init__(self, cost_model: ExecutionCostModel):
-        if not isinstance(cost_model, ExecutionCostModel):
+        if not isinstance(cost_model,
+                          (ExecutionCostModel, TieredExecutionCostModel)):
             raise ValueError("cost_model must be an ExecutionCostModel")
         self.cost_model = cost_model
+        self._tiered = isinstance(cost_model, TieredExecutionCostModel)
         self._pending: dict[str, _PendingOrder] = {}
         self._known_order_ids: set[str] = set()
         self._fills: list[SimulationFill] = []
         self._rejected_order_count = 0
         self._expired_order_count = 0
         self._refused_fill_count = 0
+
+    def _model_for(self, symbol) -> ExecutionCostModel:
+        """The cost model for one symbol. Identity when untiered, so an
+        untiered run's object graph is unchanged."""
+        return (self.cost_model.model_for(symbol) if self._tiered
+                else self.cost_model)
 
     @property
     def pending_orders(self) -> tuple[SimulationOrder, ...]:
@@ -445,17 +573,20 @@ class NextEventExecutionSimulator:
         self._known_order_ids.add(order.order_id)
         self._pending[order.order_id] = _PendingOrder(order=order)
 
-    def affordable_buy_quantity(self, cash: float, reference_price: float) -> float:
+    def affordable_buy_quantity(
+        self, cash: float, reference_price: float, symbol=None
+    ) -> float:
         cash_value = _finite_number(cash, field="cash", positive=True)
         mid = _finite_number(
             reference_price, field="reference_price", positive=True
         )
-        modeled_ask = mid * (1.0 + self.cost_model.spread_bps / 20_000.0)
+        model = self._model_for(symbol)
+        modeled_ask = mid * (1.0 + model.spread_bps / 20_000.0)
         fill_price = modeled_ask * (
-            1.0 + self.cost_model.slippage_bps / 10_000.0
+            1.0 + model.slippage_bps / 10_000.0
         )
         all_in_per_share = fill_price * (
-            1.0 + self.cost_model.fee_bps / 10_000.0
+            1.0 + model.fee_bps / 10_000.0
         )
         return cash_value / all_in_per_share
 
@@ -496,6 +627,7 @@ class NextEventExecutionSimulator:
             order = state.order
             if order.symbol != quote.symbol or liquidity <= 0:
                 continue
+            model = self._model_for(order.symbol)
             decision_seconds = _event_seconds(
                 order.decision_at, field="decision_at"
             )
@@ -504,7 +636,7 @@ class NextEventExecutionSimulator:
             )
             eligible_seconds = max(
                 execute_seconds,
-                decision_seconds + self.cost_model.latency.total_seconds(),
+                decision_seconds + model.latency.total_seconds(),
             )
             if (
                 quote_seconds <= decision_seconds
@@ -518,7 +650,7 @@ class NextEventExecutionSimulator:
 
             mid = (quote.bid + quote.ask) / 2.0
             modeled_half_spread = (
-                mid * self.cost_model.spread_bps / 20_000.0
+                mid * model.spread_bps / 20_000.0
             )
             if order.limit_price is not None:
                 # ── PASSIVE: the order RESTS; the market must come to it.
@@ -561,12 +693,12 @@ class NextEventExecutionSimulator:
             elif order.side == "buy":
                 touch_price = max(quote.ask, mid + modeled_half_spread)
                 fill_price = touch_price * (
-                    1.0 + self.cost_model.slippage_bps / 10_000.0
+                    1.0 + model.slippage_bps / 10_000.0
                 )
             else:
                 touch_price = min(quote.bid, mid - modeled_half_spread)
                 fill_price = touch_price * (
-                    1.0 - self.cost_model.slippage_bps / 10_000.0
+                    1.0 - model.slippage_bps / 10_000.0
                 )
             fill_price = _finite_number(
                 fill_price, field="fill price", positive=True
@@ -574,7 +706,7 @@ class NextEventExecutionSimulator:
             remaining = order.quantity - state.cumulative_quantity
             incremental = min(remaining, liquidity)
             all_in_per_share = fill_price * (
-                1.0 + self.cost_model.fee_bps / 10_000.0
+                1.0 + model.fee_bps / 10_000.0
             )
             if order.notional_limit is not None:
                 remaining_cash = max(
@@ -621,7 +753,7 @@ class NextEventExecutionSimulator:
 
             cumulative = state.cumulative_quantity + incremental
             notional = incremental * fill_price
-            fees = notional * self.cost_model.fee_bps / 10_000.0
+            fees = notional * model.fee_bps / 10_000.0
             fill_cost = notional + fees if order.side == "buy" else 0.0
             final_by_quantity = math.isclose(
                 cumulative,
@@ -655,6 +787,10 @@ class NextEventExecutionSimulator:
                                else abs(fill_price - touch_price) * incremental),
                 quote_timestamp=quote.timestamp,
                 executed_at=quote.timestamp,
+                # The COMPOSITE version, never the matched tier's:
+                # assert_execution_provenance_promotable requires every fill to
+                # carry the summary's version, and a per-tier stamp would make
+                # a mixed run permanently promotion-ineligible.
                 cost_model_version=self.cost_model.version,
                 source=order.source,
                 order_quantity=order.quantity,
