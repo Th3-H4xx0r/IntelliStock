@@ -11,6 +11,8 @@ from live_equity_bars import (  # noqa: E402
     LOOKBACK_DAYS_DEFAULT,
     build_live_equity_data,
     lookback_start,
+    is_degraded,
+    newest_stamp,
     other_enabled_run_once_lanes,
 )
 
@@ -78,27 +80,87 @@ def test_one_empty_symbol_is_backfilled_from_last_good():
     assert got["QQQ"][-1]["c"] == 101.0
 
 
-def test_a_truncated_series_is_served_from_the_longer_last_good():
-    """`fetch_alpaca_historical_bars` stitches the window from chunks and
-    swallows a failed chunk, so a partial outage returns a SHORT series, not an
-    error. A short window under-measures volatility, and under-measured risk
-    sizes the 3x core LARGER."""
-    long_series = [bar(d, 100.0 + d) for d in range(1, 21)]
-    partial = full()
-    partial["TQQQ"] = [bar(19, 118.0), bar(20, 119.0)]
-    got = build_live_equity_data(lambda s, a, b: partial, UNIVERSE, NOW,
-                                 last_good={"TQQQ": long_series})
-    assert got["TQQQ"] == long_series
-    assert got["TQQQ"] is not long_series
+# ── staleness: OLDER, or materially shorter — never "a few bars shorter" ─────
+# The 400-calendar-day window holds 272-276 sessions depending on which NYSE
+# holidays fall inside it, and the served output becomes the next `last_good`,
+# so a naive `len(bars) < len(held)` makes the snapshot's length a running
+# MAXIMUM and freezes it for weeks.
 
 
-def test_a_series_at_least_as_long_as_the_last_good_is_kept():
-    held = [bar(1, 100.0)]
+def series(n, last_day=20, close=100.0):
+    """`n` daily bars ending on 2026-06-`last_day`, oldest first."""
+    return [{"t": f"2026-06-{last_day - i:02d}T05:00:00+00:00", "c": close}
+            for i in range(n - 1, -1, -1)]
+
+
+def test_calendar_drift_is_not_staleness():
+    """276 sessions held, 273 fetched, same newest bar: real data, SERVED.
+    The predicate this replaces served a frozen snapshot on 141 of 250 trading
+    days over 2025-06 -> 2026-06, in runs of 52, 39, 25 and 13."""
+    held, fetched = series(276), series(273)
+    assert is_degraded(fetched, held) is False
     partial = full()
-    partial["TQQQ"] = [bar(1, 100.0), bar(2, 101.0)]
+    partial["TQQQ"] = fetched
     got = build_live_equity_data(lambda s, a, b: partial, UNIVERSE, NOW,
                                  last_good={"TQQQ": held})
-    assert got["TQQQ"] == partial["TQQQ"]
+    assert got["TQQQ"] == fetched
+
+
+def test_a_newer_but_shorter_fetch_is_served_and_becomes_the_snapshot():
+    held = series(276, last_day=19)
+    fetched = series(273, last_day=20)
+    assert newest_stamp(fetched) > newest_stamp(held)
+    assert is_degraded(fetched, held) is False
+
+
+def test_an_older_window_is_stale_however_long_it_is():
+    """A feed serving a stale window is what freezes session_id and the
+    missing-price fallback."""
+    held = [{"t": "2026-06-10T05:00:00+00:00", "c": 100.0}]
+    fetched = [{"t": f"2026-05-{d:02d}T05:00:00+00:00", "c": 100.0}
+               for d in range(1, 20)]
+    assert len(fetched) > len(held)
+    assert is_degraded(fetched, held) is True
+    partial = full()
+    partial["TQQQ"] = fetched
+    got = build_live_equity_data(lambda s, a, b: partial, UNIVERSE, NOW,
+                                 last_good={"TQQQ": held})
+    assert got["TQQQ"] == held
+    assert got["TQQQ"] is not held
+
+
+def test_a_swallowed_chunk_is_stale():
+    """24 closes where 275 are expected: `fetch_alpaca_historical_bars`
+    stitches its window from chunks and swallows a failed one, so a partial
+    outage is not an error anywhere. A short window under-measures volatility,
+    and under-measured risk sizes the 3x core LARGER."""
+    held, fetched = series(275), series(24)
+    assert is_degraded(fetched, held) is True
+    partial = full()
+    partial["TQQQ"] = fetched
+    got = build_live_equity_data(lambda s, a, b: partial, UNIVERSE, NOW,
+                                 last_good={"TQQQ": held})
+    assert got["TQQQ"] == held
+
+
+def test_unparseable_stamps_fall_back_to_the_length_rule_alone():
+    held = [{"c": 100.0} for _ in range(100)]
+    assert is_degraded([{"c": 100.0} for _ in range(95)], held) is False
+    assert is_degraded([{"c": 100.0} for _ in range(24)], held) is True
+    assert newest_stamp(held) is None
+
+
+def test_degradation_needs_something_to_degrade_from():
+    assert is_degraded([], []) is False
+    assert is_degraded(series(3), []) is False
+    assert is_degraded([], series(3)) is True
+
+
+def test_newest_stamp_reads_every_accepted_key():
+    assert newest_stamp([{"date": "2026-06-01"}]) is not None
+    assert newest_stamp([{"timestamp": "2026-06-01T05:00:00Z"}]) is not None
+    assert newest_stamp([{"t": "not a date"}]) is None
+    assert newest_stamp([]) is None
 
 
 def test_one_empty_symbol_with_no_last_good_is_simply_empty():
@@ -159,8 +221,15 @@ def test_backfilled_bar_lists_are_copies_not_aliases():
 # budget mode on a live tick.
 
 
-def spec(name, config=None):
-    return {"strategy": name, "config": config or {}}
+def spec(name, config=None, conditions=None, weight=1):
+    """A run_once spec. `weight` defaults to 1 because a zero-weight spec is
+    never CALLED by run_run_once_strategies (broker.py:6923)."""
+    out = {"strategy": name, "config": config or {}}
+    if conditions is not None:
+        out["conditions"] = conditions
+    if weight is not None:
+        out["weight"] = weight
+    return out
 
 
 def test_an_eb_only_document_has_no_other_lanes():
@@ -184,6 +253,48 @@ def test_a_lane_disabled_by_its_own_key_does_not_count():
         spec("residual_sleeve", {"enabled": 0}),
     ])
     assert lanes == []
+
+
+def test_a_zero_weight_lane_is_never_called_so_it_does_not_count():
+    """`run_run_once_strategies` skips weight<=0 outright (broker.py:6923); a
+    lane that is never called cannot read `data`."""
+    assert other_enabled_run_once_lanes([
+        spec("strategy_eb"), spec("graph_nexus_analysis", weight=0)]) == []
+    assert other_enabled_run_once_lanes([
+        spec("graph_nexus_analysis", weight="0")]) == []
+
+
+def test_a_weightless_lane_does_not_count():
+    """The broker's default is `spec.get("weight", 0)` — no weight is no run."""
+    assert other_enabled_run_once_lanes([
+        spec("strategy_eb"), spec("graph_nexus_analysis", weight=None)]) == []
+    assert other_enabled_run_once_lanes([
+        {"strategy": "graph_nexus_analysis"}]) == []
+    assert other_enabled_run_once_lanes([
+        spec("graph_nexus_analysis", weight="not a number")]) == []
+
+
+def test_a_weight_carrying_lane_counts():
+    assert other_enabled_run_once_lanes([
+        spec("strategy_eb"), spec("graph_nexus_analysis", weight=1)]) \
+        == ["graph_nexus_analysis"]
+    assert other_enabled_run_once_lanes([
+        spec("graph_nexus_analysis", weight=0.5)]) == ["graph_nexus_analysis"]
+
+
+def test_the_enable_key_is_read_from_conditions_under_config():
+    """`run_run_once_strategies` merges conditions then config
+    (broker.py:6931-6937); reading config alone would miss a lane switched off
+    in conditions."""
+    assert other_enabled_run_once_lanes([
+        spec("strategy_x", conditions={"strategy_x_enabled": False})]) == []
+    # config still wins the merge, in both directions.
+    assert other_enabled_run_once_lanes([
+        spec("strategy_x", config={"strategy_x_enabled": True},
+             conditions={"strategy_x_enabled": False})]) == ["strategy_x"]
+    assert other_enabled_run_once_lanes([
+        spec("strategy_x", config={"strategy_x_enabled": False},
+             conditions={"strategy_x_enabled": True})]) == []
 
 
 def test_a_lane_with_no_enable_key_counts_as_enabled():
