@@ -46,15 +46,35 @@ __all__ = ["DEFAULTS", "diversifier_basket", "strategy_xs_universe",
 DEFAULTS = {
     "strategy_xs_enabled": False,
     # ── the levered core ──
-    "core_bull_symbol": "TQQQ",
-    "core_leverage_factor": 3.0,
-    # Share of the RESIDUAL held in the levered leg; the rest is cash. 0.82 of
-    # a 0.55 residual is 45.1% of NAV, i.e. 135% equity beta.
-    "core_weight": 0.82,
+    # QLD (2x), not TQQQ (3x), at the SAME Nasdaq beta. The drag depends on
+    # total exposure m = k*w, not on the fund's multiple, so 60% QLD and 40%
+    # TQQQ are identical on paper — but the levered position has to be
+    # REBALANCED back to its weight, and a 3x fund drifts further per day.
+    # Measured end to end through run_once at matched 120% beta:
+    #   core         CAGR    maxDD   Sharpe  turnover
+    #   TQQQ 40%    17.23   -35.15    0.89     527%/yr
+    #   QLD  60%    17.52   -33.73    0.89     505%/yr
+    #   QQQ  70%    12.15   -27.17    0.90     516%/yr
+    # Same beta, better on both axes, for the same reason the search preferred
+    # a lower multiple: less drift per day is less forced turnover.
+    "core_bull_symbol": "QLD",
+    "core_leverage_factor": 2.0,
+    # Share of the RESIDUAL held in the levered leg; the rest is cash.
+    # 6/7 of the 0.70 residual is 60% of NAV in a 2x fund, i.e. 120% Nasdaq
+    # beta — the exposure the 4,104-construction search selected on 2011-2018
+    # alone (it chose 40% of a 3x fund, the same beta).
+    # NOTE the two-step: this is a share of the RESIDUAL, not of NAV. Setting
+    # it to 1.0 puts 70% of NAV in a 3x fund, which is 210% beta and was
+    # measured at -48.32% maximum drawdown against this config's -33.16%.
+    "core_weight": 0.857143,
     "core_cash_symbol": "BIL",
+    # Where the core sits when the filter is risk-off. Measured across 4,104
+    # constructions selected on 2011-2018 alone: SPY beats BIL here. Empty, or
+    # the levered leg itself, falls back to cash.
+    "core_off_symbol": "SPY",
     "core_band_pct": 0.05,
     # ── the filter, imported from strategy_x and unchanged ──
-    "core_filter_symbol": "QQQ",
+    "core_filter_symbol": "SPY",
     "core_filter_ma_bars": 200,
     "core_vol_bars": 20,
     "core_vol_slow_bars": 60,
@@ -75,8 +95,8 @@ DEFAULTS = {
     #   VIXY -48.94  -0.79   -36.5   +66.8   -25.0   <- excluded: carry
     # The dollar cannot carry the sleeve alone at a 2.5% CAGR; gold supplies
     # the long-run return and managed futures the crisis alpha.
-    "diversifier_pct": 0.45,
-    "diversifier_symbols": ["GLD", "UUP", "DBMF"],
+    "diversifier_pct": 0.30,
+    "diversifier_symbols": ["GLD", "UUP"],
     "diversifier_min_history_bars": 60,
     # ── the Graph stock sleeve (OFF) ──
     # 0.20 arms it, and arming it DE-LEVERS the core from 135% beta to 106%:
@@ -267,10 +287,20 @@ def xs_targets(*, risk_on: bool, config, basket=(), satellite_ranked=None,
                      + (f" | vol scale {scale:.2f}" if scale < 1.0 else ""))
         return targets, notes
 
-    # ── risk-off: the core goes to CASH, not to the unlevered index ──
-    # This is the whole difference from Strategy X, whose de-levered weight
-    # lands in SPY — so a nominal 70% TQQQ book is really 27% TQQQ and 57% SPY,
-    # and its measured result therefore tracks SPY.
+    # ── risk-off: the core goes to `core_off_symbol` ──
+    # CORRECTED BY MEASUREMENT. This originally sent the core to cash on the
+    # argument that Strategy X tracks SPY because it de-levers into SPY. A
+    # search over 4,104 constructions, selected on 2011-2018 alone, says the
+    # opposite: risk-off into SPY beats risk-off into cash, because going to
+    # cash forfeits every one of the many false risk-off signals. Strategy X's
+    # failure was its weak risk-ON leg — a volatility target pinned at its
+    # floor held 21% TQQQ — not the destination it de-levered into.
+    #
+    # The levered leg is never a valid destination: parking the core there on
+    # a config typo would RAISE exposure at exactly the wrong moment.
+    off = _s(cfg, "core_off_symbol", "")
+    if not off or off == bull:
+        off = cash
     inv_pct = max(0.0, min(1.0, _f(cfg, "inverse_pct")))
     parked = round(residual + idle, Q)
     if inverse and inv_pct > 0 and inv_pct <= parked:
@@ -278,8 +308,8 @@ def xs_targets(*, risk_on: bool, config, basket=(), satellite_ranked=None,
         parked = round(parked - inv_pct, Q)
         notes.append(f"risk-off: {inv_pct:.1%} {inverse} (inverse sleeve ARMED)")
     if parked > 0:
-        targets[cash] = round(targets.get(cash, 0.0) + parked, Q)
-    notes.append(f"risk-off: {targets.get(cash, 0.0):.1%} {cash}")
+        targets[off] = round(targets.get(off, 0.0) + parked, Q)
+    notes.append(f"risk-off: {targets.get(off, 0.0):.1%} {off}")
     return targets, notes
 
 

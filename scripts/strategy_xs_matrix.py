@@ -43,7 +43,8 @@ from strategy_xs import DEFAULTS  # noqa: E402
 COST_BPS = float(os.environ.get("SX_COST_BPS", "23"))
 BAR_WINDOW = 400
 
-UNIVERSE = ["QQQ", "TQQQ", "BIL", "GLD", "UUP", "DBMF", "SPY", "SQQQ", "PSQ"]
+UNIVERSE = ["QQQ", "TQQQ", "QLD", "BIL", "GLD", "UUP", "DBMF", "SPY",
+            "SQQQ", "PSQ"]
 
 
 class Emu:

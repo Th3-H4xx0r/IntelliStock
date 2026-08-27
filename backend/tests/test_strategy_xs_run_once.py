@@ -26,8 +26,8 @@ def falling(n):
     return bars(n, start=400.0, step=-0.8)
 
 
-PRICES = {"TQQQ": 50.0, "QQQ": 400.0, "BIL": 91.0,
-          "GLD": 200.0, "UUP": 28.0, "DBMF": 26.0}
+PRICES = {"QLD": 50.0, "SPY": 400.0, "BIL": 91.0,
+          "GLD": 200.0, "UUP": 28.0}
 
 
 class FakeEmulator:
@@ -55,38 +55,40 @@ def cfg(**overrides):
     return value
 
 
-def data_for(qqq_bars):
-    out = {"QQQ": {"bars": qqq_bars}}
-    for s in ("GLD", "UUP", "DBMF", "BIL", "TQQQ"):
+def data_for(filter_bars):
+    """The filter symbol is SPY, not QQQ — the 4,104-construction search chose
+    SPY/MA200 over the QQQ filter."""
+    out = {"SPY": {"bars": filter_bars}}
+    for s in ("GLD", "UUP", "BIL", "QLD"):
         out[s] = {"bars": bars(260)}
     return out
 
 
 def test_disabled_by_default_emits_nothing():
-    out = StrategyXS().run_once(["TQQQ"], PRICES, NOW, dict(DEFAULTS), {},
+    out = StrategyXS().run_once(["QLD"], PRICES, NOW, dict(DEFAULTS), {},
                                 data=data_for(bars(260)),
                                 portfolio_emulator=FakeEmulator())
     assert out == {}
 
 
 def test_an_uptrend_buys_the_levered_core_and_the_diversifier():
-    out = StrategyXS().run_once(["TQQQ"], PRICES, NOW, cfg(), {},
+    out = StrategyXS().run_once(["QLD"], PRICES, NOW, cfg(), {},
                                 data=data_for(bars(260)),
                                 portfolio_emulator=FakeEmulator(),
                                 strategy_cache={})
-    assert out.get("TQQQ") == 1
+    assert out.get("QLD") == 1
     assert out.get("GLD") == 1 and out.get("UUP") == 1
-    assert out["_nexus_position_sizes"]["TQQQ"]["buy_cash"] > 0
+    assert out["_nexus_position_sizes"]["QLD"]["buy_cash"] > 0
 
 
 def test_a_downtrend_holds_cash_and_still_holds_the_diversifier():
     cache = {}
-    out = StrategyXS().run_once(["TQQQ"], PRICES, NOW, cfg(), {},
+    out = StrategyXS().run_once(["QLD"], PRICES, NOW, cfg(), {},
                                 data=data_for(falling(260)),
                                 portfolio_emulator=FakeEmulator(),
                                 strategy_cache=cache)
-    assert out.get("TQQQ") is None or out.get("TQQQ") != 1
-    assert out.get("BIL") == 1
+    assert out.get("QLD") is None or out.get("QLD") != 1
+    assert out.get("SPY") == 1          # risk-off goes to SPY, not cash
     assert out.get("GLD") == 1
     assert cache["_strategy_xs_last"]["risk_on"] is False
 
@@ -94,7 +96,7 @@ def test_a_downtrend_holds_cash_and_still_holds_the_diversifier():
 def test_it_refuses_to_trade_without_enough_filter_history():
     """A cold start must never read as risk-on, and 'risk-off' here would be a
     real cash buy rather than a flat."""
-    out = StrategyXS().run_once(["TQQQ"], PRICES, NOW, cfg(), {},
+    out = StrategyXS().run_once(["QLD"], PRICES, NOW, cfg(), {},
                                 data=data_for(bars(30)),
                                 portfolio_emulator=FakeEmulator(),
                                 strategy_cache={})
@@ -102,20 +104,20 @@ def test_it_refuses_to_trade_without_enough_filter_history():
 
 
 def test_it_publishes_its_own_universe():
-    out = StrategyXS().run_once(["TQQQ"], PRICES, NOW, cfg(), {},
+    out = StrategyXS().run_once(["QLD"], PRICES, NOW, cfg(), {},
                                 data=data_for(bars(260)),
                                 portfolio_emulator=FakeEmulator(),
                                 strategy_cache={})
-    assert set(out["_nexus_discovered"]) >= {"QQQ", "TQQQ", "BIL",
-                                             "GLD", "UUP", "DBMF"}
+    assert set(out["_nexus_discovered"]) >= {"SPY", "QLD", "BIL",
+                                             "GLD", "UUP"}
 
 
 def test_every_sell_carries_an_action_intent():
     """broker.py's Z2.1 check reads action_intent off the strategy summary and
     whitelists only graph_nexus's enum. Strategy X shipped without this and all
     965 of its sells logged would_block_in_phase2=True."""
-    emu = FakeEmulator(cash=0.0, positions={"TQQQ": 100.0})
-    out = StrategyXS().run_once(["TQQQ"], PRICES, NOW, cfg(), {},
+    emu = FakeEmulator(cash=0.0, positions={"QLD": 100.0})
+    out = StrategyXS().run_once(["QLD"], PRICES, NOW, cfg(), {},
                                 data=data_for(falling(260)),
                                 portfolio_emulator=emu, strategy_cache={})
     sells = [s for s, d in out.items()
@@ -127,18 +129,18 @@ def test_every_sell_carries_an_action_intent():
 
 def test_a_missing_diversifier_price_does_not_raise_core_leverage():
     prices = dict(PRICES)
-    prices.pop("DBMF")
+    prices.pop("UUP")
     cache = {}
-    StrategyXS().run_once(["TQQQ"], prices, NOW, cfg(), {},
-                          data={"QQQ": {"bars": bars(260)},
+    StrategyXS().run_once(["QLD"], prices, NOW, cfg(), {},
+                          data={"SPY": {"bars": bars(260)},
                                 "GLD": {"bars": bars(260)},
-                                "UUP": {"bars": bars(260)},
                                 "BIL": {"bars": bars(260)},
-                                "TQQQ": {"bars": bars(260)}},
+                                "QLD": {"bars": bars(260)}},
                           portfolio_emulator=FakeEmulator(prices=prices),
                           strategy_cache=cache)
     targets = cache["_strategy_xs_last"]["targets"]
-    assert targets["TQQQ"] == 0.451
+    assert targets["QLD"] == 0.6
+    assert targets["GLD"] == 0.30
     assert round(sum(targets.values()), 6) == 1.0
 
 

@@ -41,8 +41,8 @@ def spec(**config):
 def test_the_declared_xs_universe_is_fetched():
     ns = _extract("_strategy_xs_universe_symbols")
     syms = ns["_strategy_xs_universe_symbols"](
-        spec(strategy_xs_enabled=True, diversifier_pct=0.45))
-    assert set(syms) >= {"QQQ", "TQQQ", "BIL", "GLD", "UUP", "DBMF"}
+        spec(strategy_xs_enabled=True, diversifier_pct=0.30))
+    assert set(syms) >= {"SPY", "QLD", "BIL", "GLD", "UUP"}
 
 
 def test_a_disabled_xs_contributes_no_symbols():

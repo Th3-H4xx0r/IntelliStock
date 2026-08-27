@@ -82,22 +82,21 @@ def total(targets):
 
 
 def test_risk_on_pays_the_sleeves_first_and_the_core_is_the_residual():
-    targets, _ = xs_targets(risk_on=True, config=acfg(),
-                            basket=("GLD", "UUP", "DBMF"))
+    targets, _ = xs_targets(risk_on=True, config=acfg(), basket=("GLD", "UUP"))
     assert total(targets) == 1.0
-    assert targets["TQQQ"] == 0.451          # 0.55 residual x 0.82 core_weight
-    assert targets["BIL"] == 0.099           # the unheld part of the residual
-    assert targets["GLD"] == targets["UUP"] == targets["DBMF"] == 0.15
+    assert targets["QLD"] == 0.6             # 0.70 residual x 6/7 core_weight
+    assert targets["BIL"] == 0.1             # the unheld part of the residual
+    assert targets["GLD"] == targets["UUP"] == 0.15
 
 
 def test_risk_off_sends_the_core_to_cash_not_to_the_index():
     """The whole difference from Strategy X. Strategy X routes the de-levered
     weight to SPY, so a nominal 70% TQQQ book is really 27% TQQQ and 57% SPY
     and tracks SPY."""
-    targets, _ = xs_targets(risk_on=False, config=acfg(),
-                            basket=("GLD", "UUP", "DBMF"))
-    assert "TQQQ" not in targets
-    assert targets["BIL"] == 0.55
+    targets, _ = xs_targets(risk_on=False, config=acfg(core_off_symbol=""),
+                            basket=("GLD", "UUP"))
+    assert "QLD" not in targets
+    assert targets["BIL"] == 0.70
     assert targets["GLD"] == 0.15
     assert total(targets) == 1.0
 
@@ -105,22 +104,22 @@ def test_risk_off_sends_the_core_to_cash_not_to_the_index():
 def test_the_diversifier_stays_on_in_both_regimes():
     on, _ = xs_targets(risk_on=True, config=acfg(), basket=("GLD", "UUP"))
     off, _ = xs_targets(risk_on=False, config=acfg(), basket=("GLD", "UUP"))
-    assert on["GLD"] == off["GLD"] == 0.225
+    assert on["GLD"] == off["GLD"] == 0.15
 
 
 def test_a_short_basket_redistributes_and_never_reaches_the_core():
     """bt 773215: an unfilled sleeve handed its weight to the 3x fund, bar 1
     went 80% TQQQ instead of 60%, and TQQQ alone was 133% of the loss."""
     targets, _ = xs_targets(risk_on=True, config=acfg(), basket=("GLD",))
-    assert targets["GLD"] == 0.45
-    assert targets["TQQQ"] == 0.451
+    assert targets["GLD"] == 0.30
+    assert targets["QLD"] == 0.6
     assert total(targets) == 1.0
 
 
 def test_an_empty_basket_goes_to_cash_not_to_the_core():
     targets, _ = xs_targets(risk_on=True, config=acfg(), basket=())
-    assert targets["TQQQ"] == 0.451
-    assert targets["BIL"] == round(0.099 + 0.45, 6)
+    assert targets["QLD"] == 0.6
+    assert targets["BIL"] == 0.4
     assert total(targets) == 1.0
 
 
@@ -128,27 +127,26 @@ def test_arming_the_graph_sleeve_delevers_the_core():
     """Intended: it swaps levered index beta for stock-picking beta rather
     than stacking both. 135% beta -> 106%."""
     targets, _ = xs_targets(risk_on=True, config=acfg(satellite_pct=0.20),
-                            basket=("GLD", "UUP", "DBMF"),
+                            basket=("GLD", "UUP"),
                             satellite_ranked=["AAPL", "MSFT"])
-    assert targets["TQQQ"] == 0.287          # 0.35 residual x 0.82
+    assert targets["QLD"] == 0.428571        # 0.50 residual x 4/7
     assert targets["AAPL"] == targets["MSFT"] == 0.1
     assert total(targets) == 1.0
-    beta = round(targets["TQQQ"] * 3 + 0.2, 3)
-    assert 1.05 <= beta <= 1.07
+    beta = round(targets["QLD"] * 2 + 0.2, 3)
+    assert 1.05 <= beta <= 1.06               # 120% -> 106%
 
 
 def test_an_unranked_graph_sleeve_does_not_raise_core_leverage():
     targets, _ = xs_targets(risk_on=True, config=acfg(satellite_pct=0.20),
-                            basket=("GLD", "UUP", "DBMF"),
-                            satellite_ranked=[])
-    assert targets["TQQQ"] == 0.287
+                            basket=("GLD", "UUP"), satellite_ranked=[])
+    assert targets["QLD"] == 0.428571
     assert total(targets) == 1.0
 
 
 def test_the_vol_scale_reduces_the_levered_leg_into_cash():
     targets, _ = xs_targets(risk_on=True, config=acfg(),
-                            basket=("GLD", "UUP", "DBMF"), vol_scale=0.5)
-    assert targets["TQQQ"] == round(0.451 * 0.5, 6)
+                            basket=("GLD", "UUP"), vol_scale=0.5)
+    assert targets["QLD"] == 0.3
     assert total(targets) == 1.0
 
 
@@ -156,7 +154,7 @@ def test_the_vol_scale_can_never_raise_exposure():
     for bad in (2.0, float("nan"), float("inf"), None, "1.5"):
         targets, _ = xs_targets(risk_on=True, config=acfg(),
                                 basket=("GLD", "UUP"), vol_scale=bad)
-        assert targets["TQQQ"] <= 0.451, bad
+        assert targets["QLD"] <= 0.6, bad
 
 
 def test_weights_never_sum_past_one_for_any_sleeve_split():
@@ -173,7 +171,7 @@ def test_the_universe_is_declared_from_config_not_the_watchlist():
     """The strategy owns its universe. Without this the filter symbol has no
     bars and the traded legs have no price, and BOTH failures are silent."""
     assert strategy_xs_universe(acfg()) == [
-        "QQQ", "TQQQ", "BIL", "GLD", "UUP", "DBMF"]
+        "SPY", "QLD", "BIL", "GLD", "UUP"]
 
 
 def test_the_universe_includes_the_inverse_leg_only_when_armed():
@@ -184,10 +182,49 @@ def test_the_universe_includes_the_inverse_leg_only_when_armed():
 
 def test_the_universe_omits_the_diversifier_when_the_sleeve_is_off():
     assert strategy_xs_universe(acfg(diversifier_pct=0.0)) == [
-        "QQQ", "TQQQ", "BIL"]
+        "SPY", "QLD", "BIL"]
 
 
 def test_the_universe_is_freshly_allocated_so_callers_cannot_mutate_defaults():
     first = strategy_xs_universe(acfg())
     first.append("JUNK")
     assert "JUNK" not in strategy_xs_universe(acfg())
+
+
+# ── the risk-off destination, corrected by the 4,104-construction search ─────
+
+def test_risk_off_goes_to_the_configured_destination_not_always_cash():
+    """Selected on 2011-2018 alone across 4,104 constructions, risk-off into
+    SPY beat risk-off into cash. Going to cash forfeits every false signal;
+    Strategy X's failure was its weak risk-ON leg, not the SPY destination."""
+    targets, _ = xs_targets(risk_on=False, config=acfg(core_off_symbol="SPY"),
+                            basket=("GLD", "UUP"))
+    assert targets["SPY"] == 0.70
+    assert "BIL" not in targets
+    assert total(targets) == 1.0
+
+
+def test_an_empty_off_symbol_still_means_cash():
+    targets, _ = xs_targets(risk_on=False, config=acfg(core_off_symbol="ZZZ"),
+                            basket=("GLD", "UUP"))
+    assert targets["ZZZ"] == 0.70
+
+
+def test_the_off_destination_never_receives_the_levered_leg():
+    """Risk-off must not park the core in the 3x fund by a config typo."""
+    targets, _ = xs_targets(risk_on=False,
+                            config=acfg(core_off_symbol="QLD"),
+                            basket=("GLD", "UUP"))
+    assert "QLD" not in targets
+    assert targets["BIL"] == 0.70
+
+
+def test_the_searched_configuration_allocates_as_measured():
+    """40% TQQQ + 30% GLD/UUP + 30% cash risk-on; 70% SPY + 30% basket off."""
+    cfg = acfg()
+    on, _ = xs_targets(risk_on=True, config=cfg, basket=("GLD", "UUP"))
+    assert on["QLD"] == 0.6 and on["GLD"] == on["UUP"] == 0.15
+    assert on["BIL"] == 0.1
+    off, _ = xs_targets(risk_on=False, config=cfg, basket=("GLD", "UUP"))
+    assert off["SPY"] == 0.70 and off["GLD"] == 0.15
+    assert total(on) == total(off) == 1.0
