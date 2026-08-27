@@ -217,10 +217,12 @@ def _instance_single_position_pct(conn, instance_doc):
     strategy document. An unparseable value returns None rather than raising —
     a malformed config key must not take a backtest down.
 
-    The declaring entry must ALSO be enabled. The env var is process-wide inside
-    the container, not lane-scoped, so honouring the key on a disabled entry
-    would lift the broker failsafe from 15% to 95% for every sibling strategy in
-    the same document while the strategy that asked for it does nothing.
+    The declaring entry must ALSO opt in, via `honour_single_position_cap` or
+    the older strategy_x-only `strategy_x_enabled`. The env var is process-wide
+    inside the container, not lane-scoped, so honouring the key on an entry that
+    did not ask for it would lift the broker failsafe from 15% to 95% for every
+    sibling strategy in the same document while the strategy that declared the
+    cap does nothing.
     """
     try:
         sid = (instance_doc or {}).get("strategy_id")
@@ -232,6 +234,12 @@ def _instance_single_position_pct(conn, instance_doc):
         doc = db_store.get("Strategies", sid)
         if not doc:
             return None
+
+        def _truthy(value):
+            if isinstance(value, bool):
+                return value
+            return str(value or "").strip().lower() in ("1", "true", "yes", "on")
+
         for entry in (doc.get("strategies") or []):
             if not isinstance(entry, dict):
                 continue
@@ -239,10 +247,13 @@ def _instance_single_position_pct(conn, instance_doc):
             raw = cfg.get("broker_max_single_position_pct")
             if raw is None or raw == "":
                 continue
-            enabled = cfg.get("strategy_x_enabled", False)
-            if isinstance(enabled, str):
-                enabled = enabled.strip().lower() in ("1", "true", "yes", "on")
-            if not enabled:
+            # `honour_single_position_cap` generalises what was a
+            # strategy_x-only opt-in. Strategy XS declared a 0.65 cap and it
+            # was silently inert for that reason; a strategy that needs a
+            # >15% position now says so explicitly instead of having to
+            # impersonate Strategy X.
+            if not (_truthy(cfg.get("honour_single_position_cap", False))
+                    or _truthy(cfg.get("strategy_x_enabled", False))):
                 continue
             # `float(True) == 1.0` would sail through the band below and
             # silently disable the trim, which is exactly what the bound exists

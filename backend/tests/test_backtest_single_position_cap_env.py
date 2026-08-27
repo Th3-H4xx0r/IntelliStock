@@ -352,3 +352,57 @@ def test_strategy_lookup_failure_does_not_drop_crypto_credentials(monkeypatch):
     assert command[7:9] == ["CRYPTO_KEY", "CRYPTO_SECRET"], (
         "a cap-lookup failure must not cost the crypto run its credentials")
     assert env["KEY"] == "CRYPTO_KEY"
+
+
+# --------------------------------------------------------------------------
+# _instance_single_position_pct: the generalised `honour_single_position_cap`
+# opt-in
+#
+# The env var it produces is process-wide inside the container, so the opt-in
+# must still require an ENABLED entry — otherwise a dormant lane would lift the
+# broker's 15% real-money failsafe for every sibling in the same document.
+# --------------------------------------------------------------------------
+
+def _eb_doc(**config):
+    return {"id": 200, "strategies": [{"strategy": "strategy_eb",
+                                       "config": dict(config)}]}
+
+
+def _pct(monkeypatch, doc):
+    engine = _engine()
+    monkeypatch.setattr(engine.db_store, "get", lambda _t, _k: doc)
+    return engine._instance_single_position_pct(None, {"strategy_id": 200})
+
+
+def test_the_new_opt_in_honours_the_cap_without_strategy_x(monkeypatch):
+    assert _pct(monkeypatch, _eb_doc(broker_max_single_position_pct=0.95,
+                                     honour_single_position_cap=True)) == 0.95
+
+
+@pytest.mark.parametrize("raw", ["true", "True", "yes", "on", "1"])
+def test_a_string_opt_in_is_truthy(monkeypatch, raw):
+    assert _pct(monkeypatch, _eb_doc(broker_max_single_position_pct=0.95,
+                                     honour_single_position_cap=raw)) == 0.95
+
+
+@pytest.mark.parametrize("raw", [False, "false", "no", "0", "", None])
+def test_a_falsy_opt_in_leaves_the_failsafe_alone(monkeypatch, raw):
+    assert _pct(monkeypatch, _eb_doc(broker_max_single_position_pct=0.95,
+                                     honour_single_position_cap=raw)) is None
+
+
+def test_the_strategy_x_opt_in_is_unchanged(monkeypatch):
+    assert _pct(monkeypatch, _eb_doc(broker_max_single_position_pct=0.95,
+                                     strategy_x_enabled=True)) == 0.95
+
+
+def test_neither_opt_in_means_the_key_is_still_inert(monkeypatch):
+    """Strategy XS's 0.65 has been inert since it shipped; that stays true
+    until it declares the new key."""
+    assert _pct(monkeypatch, _eb_doc(broker_max_single_position_pct=0.65)) is None
+
+
+def test_the_bounds_still_apply_under_the_new_opt_in(monkeypatch):
+    for raw in (0, -1, 2.0, True, "abc", "", None):
+        assert _pct(monkeypatch, _eb_doc(broker_max_single_position_pct=raw,
+                                         honour_single_position_cap=True)) is None, raw
