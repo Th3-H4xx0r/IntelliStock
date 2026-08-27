@@ -253,7 +253,9 @@ class PortfolioEmulator:
             )
         if not isinstance(equity_cost_model,
                           (ExecutionCostModel, TieredExecutionCostModel)):
-            raise ValueError("equity_cost_model must be an ExecutionCostModel")
+            raise ValueError(
+                "equity_cost_model must be an ExecutionCostModel or a "
+                "TieredExecutionCostModel")
         self._equity_cost_model = equity_cost_model
         self._equity_tiered = isinstance(equity_cost_model,
                                          TieredExecutionCostModel)
@@ -1392,6 +1394,20 @@ class PortfolioEmulator:
                 + self._equity_cost_model.slippage_bps
                 + self._equity_cost_model.fee_bps
             ),
+            # The headline above is the DEFAULT tier's cost -- honest for a
+            # mixed book, wrong for a book that sits entirely inside a tier.
+            # These two keys stop an all-ETF run being read off 23.2 bps when
+            # it paid 4.4.
+            "equity_cost_tiers_active": self._equity_tiered,
+            "equity_one_way_cost_bps_by_tier": (
+                self._equity_cost_model.one_way_cost_bps_by_tier()
+                if self._equity_tiered
+                else {"default": (
+                    self._equity_cost_model.spread_bps / 2.0
+                    + self._equity_cost_model.slippage_bps
+                    + self._equity_cost_model.fee_bps
+                )}
+            ),
             "legacy_equity_fees": round(self._equity_fees_paid, 6),
             "legacy_equity_spread_cost": round(self._equity_spread_cost, 6),
             "legacy_equity_slippage_cost": round(self._equity_slippage_cost, 6),
@@ -1747,7 +1763,9 @@ def create_backtest_emulator(
         cost_model = LIQUIDITY_ADJUSTED_EQUITY_COST_MODEL
     if not isinstance(cost_model,
                       (ExecutionCostModel, TieredExecutionCostModel)):
-        raise ValueError("cost_model must be an ExecutionCostModel")
+        raise ValueError(
+            "cost_model must be an ExecutionCostModel or a "
+            "TieredExecutionCostModel")
     if cost_model == DEFAULT_EQUITY_EXECUTION_COST_MODEL and not allow_nominal_cost_model:
         requested_version = cost_model.version
         cost_model = LIQUIDITY_ADJUSTED_EQUITY_COST_MODEL

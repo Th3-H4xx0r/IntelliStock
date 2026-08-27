@@ -310,7 +310,11 @@ def _validate_evidence(value, path):
     # comparing the whole dict, would invalidate every existing v1 snapshot the
     # moment a new option lands, and a fixed-key signed contract must not gain
     # a new cost basis without a schema version bump.
-    if {name: validated.get(name) for name in expected} != value:
+    # A key this schema declares but the validator no longer returns would
+    # otherwise compare as None on both sides and pass silently.
+    if not expected <= validated.keys():
+        raise ExecutionSnapshotError("schema_evidence_invalid", paths=(path,))
+    if {name: validated[name] for name in expected} != value:
         raise ExecutionSnapshotError("schema_evidence_invalid", paths=(path,))
     patterns = {
         "matrix_manifest_id": re.compile(r"^matrix-sha256-[0-9a-f]{64}$"),

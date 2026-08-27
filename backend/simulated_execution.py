@@ -212,6 +212,20 @@ class TieredExecutionCostModel:
     def model_for(self, symbol) -> ExecutionCostModel:
         return self._index.get(str(symbol or "").strip().upper(), self._default)
 
+    def one_way_cost_bps_by_tier(self) -> dict:
+        """One-way cost in bps for the default and for every tier.
+
+        The headline `equity_one_way_cost_bps` reports the DEFAULT tier. That
+        is the honest number for a mixed book and the WRONG one for a book that
+        sits entirely inside a tier: an all-ETF run would read 23.2 bps while
+        paying 4.4. This breakdown is what keeps that legible.
+        """
+        costs = {}
+        for symbols, model in self._tiers.items():
+            costs[_tier_label(model)] = _one_way_cost_bps(model)
+        return {"default": _one_way_cost_bps(self._default),
+                **{name: costs[name] for name in sorted(costs)}}
+
     def as_dict(self) -> dict:
         payload = dict(self._default.as_dict())
         payload["version"] = self._version
@@ -227,6 +241,24 @@ class TieredExecutionCostModel:
 COST_TIER_PRESETS = {
     "etf-liquid": (ETF_LIQUID_SYMBOLS, ETF_LIQUID_EQUITY_COST_MODEL),
 }
+
+
+def _one_way_cost_bps(model) -> float:
+    """Half the round-trip spread, plus slippage, plus fees."""
+    return model.spread_bps / 2.0 + model.slippage_bps + model.fee_bps
+
+
+def _tier_label(model) -> str:
+    """The preset id a tier model came from, else its own version.
+
+    Labelled by PRESET rather than by model version because the preset is what
+    a run selects and what a reader recognises; an ad-hoc tier built without a
+    preset still gets a stable, unambiguous name.
+    """
+    for preset, (_symbols, preset_model) in COST_TIER_PRESETS.items():
+        if preset_model is model or preset_model.version == model.version:
+            return preset
+    return model.version
 
 
 def tiered_cost_model(preset_id, default) -> TieredExecutionCostModel:
@@ -512,10 +544,12 @@ class InsufficientBuyingPower(ValueError):
 
 
 class NextEventExecutionSimulator:
-    def __init__(self, cost_model: ExecutionCostModel):
+    def __init__(self, cost_model: ExecutionCostModel | TieredExecutionCostModel):
         if not isinstance(cost_model,
                           (ExecutionCostModel, TieredExecutionCostModel)):
-            raise ValueError("cost_model must be an ExecutionCostModel")
+            raise ValueError(
+                "cost_model must be an ExecutionCostModel or a "
+                "TieredExecutionCostModel")
         self.cost_model = cost_model
         self._tiered = isinstance(cost_model, TieredExecutionCostModel)
         self._pending: dict[str, _PendingOrder] = {}

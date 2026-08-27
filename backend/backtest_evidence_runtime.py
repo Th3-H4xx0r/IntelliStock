@@ -394,6 +394,11 @@ class EvidenceRunLifecycle:
                 else "strict_verified"
             ),
             "equity_total_cost_bps": self._options.get("equity_total_cost_bps"),
+            # Inert while tiers require evidence_mode=off (this projection only
+            # runs for a NON-off run), but this and the serving whitelist are
+            # both grow-with-the-option lists whose failure mode is a SILENT
+            # drop -- the one that already bit pit_mode and the queue row.
+            "equity_cost_tiers": self._options.get("equity_cost_tiers"),
             "nexus_candidate_overrides": dict(
                 self._options.get("nexus_candidate_overrides") or {}),
             "terminal": dict(self._terminal) if self._terminal else None,

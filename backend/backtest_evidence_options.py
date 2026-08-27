@@ -196,7 +196,7 @@ def _validate_cost_bps(value):
     return number
 
 
-def _validate_cost_tiers(value):
+def _validate_cost_tiers(value, mode="off"):
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, str):
@@ -208,6 +208,14 @@ def _validate_cost_tiers(value):
         raise EvidenceOptionError(
             f"unknown equity_cost_tiers preset {value!r}; known: "
             + ", ".join(sorted(EQUITY_COST_TIER_PRESETS)))
+    # A matrix arm preregisters ONE cost model and its receipt compares the
+    # EXECUTED hash against it. A tier wraps that model, so a tiered arm would
+    # hash to no preregistered scenario and finish silently ineligible after
+    # burning the whole window. Refuse it up front instead.
+    if mode != "off":
+        raise EvidenceOptionError(
+            "equity_cost_tiers requires evidence_mode off; "
+            "tiered scenarios are not preregistered")
     return preset
 
 
@@ -269,7 +277,8 @@ def validate_evidence_options(payload) -> dict:
             payload.get("fixture_ordinal"), mode),
         "pit_mode": _validate_pit_mode(payload.get("pit_mode")),
         "equity_total_cost_bps": _validate_cost_bps(payload.get("equity_total_cost_bps")),
-        "equity_cost_tiers": _validate_cost_tiers(payload.get("equity_cost_tiers")),
+        "equity_cost_tiers": _validate_cost_tiers(
+            payload.get("equity_cost_tiers"), mode),
         "nexus_candidate_overrides": validate_candidate_overrides(
             payload.get("nexus_candidate_overrides")),
     }
@@ -336,6 +345,11 @@ def resolve_execution_cost_tiers(
 
     Returns `base` ITSELF (not a copy) when no preset is selected, so an
     ordinary run's object graph — and therefore its fills — are unchanged.
+
+    Only valid on an `evidence_mode="off"` run, which `validate_evidence_options`
+    enforces. A matrix arm preregisters one cost model and its receipt compares
+    the EXECUTED hash against it; a tier wraps that model, so a tiered arm would
+    hash to no preregistered scenario and finish silently ineligible.
 
     This wraps the model that `resolve_execution_cost_model` already resolved,
     rather than being a second independent cost input, because broker.py hashes

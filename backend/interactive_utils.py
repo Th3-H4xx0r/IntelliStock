@@ -6122,7 +6122,8 @@ def action_summarize_backtest(conn, backtest_id):
 
 _EVIDENCE_SUMMARY_FIELDS = (
     "evidence_mode", "matrix_id", "arm_name", "arm_id", "cost_scenario_id",
-    "equity_total_cost_bps", "nexus_candidate_overrides", "receipt_id",
+    "equity_total_cost_bps", "equity_cost_tiers",
+    "nexus_candidate_overrides", "receipt_id",
     "fixture_id", "trade_ledger_hash", "executed_source_identity",
     "execution_cost_model_hash", "benchmark_manifest", "promotion_eligible",
     "audits", "terminal", "cost_reconciliation", "decision_fill_audit",
