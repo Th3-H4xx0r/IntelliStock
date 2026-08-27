@@ -100,6 +100,12 @@ DEFAULTS = {
     "core_filter_symbol": "QQQ",     # the tape the filter reads, NOT the traded leg
     "core_filter_ma_bars": 200,      # mid-plateau (150-250 all work), not the peak
     "core_vol_bars": 20,
+    # The SLOW half of the volatility estimate; `core_vol_scale` takes the max
+    # of the two. 0 == OFF. 60-126 days is what the literature supports
+    # (Barroso & Santa-Clara 2015 use 126; the 20-day inverse-variance
+    # convention of Moreira & Muir 2017 is the one Cederburg et al. 2020 break,
+    # and it produces 99th-percentile leverage of 6.4x on their own numbers).
+    "core_vol_slow_bars": 0,
     # 0 disables. The gate should be LOOSE — it exists to refuse leverage in a
     # genuinely disordered tape, not to trade ordinary chop. Measured through
     # this module over 15.7y (scripts/strategy_x_replay.py), CAGR / maxDD /
@@ -624,6 +630,19 @@ def core_vol_scale(closes, config) -> float:
     if len(rets) < vol_bars:
         return 1.0
     rv = _stdev(rets[-vol_bars:]) * math.sqrt(252.0)
+    # MAX of a fast and a slow estimate, which is the S&P DJI Risk Control
+    # convention and the shape every serious source recommends: exposure comes
+    # off quickly and goes back on slowly. It also repairs a real defect in the
+    # tuning that produced this file. A short window alone was chosen here
+    # because it improved bear windows IN SAMPLE, which is precisely the
+    # failure Cederburg, O'Doherty, Wang & Yan (JFE 138(1), 2020) document —
+    # vol-managed alphas that are real in-sample and vanish out of it. The
+    # independent support is for 60-126 days (Barroso & Santa-Clara 2015;
+    # BlackRock/Stanford 2026 use a 126-day EWMA half-life), not for 12-20.
+    # 0 == OFF, i.e. the single-window behaviour that shipped.
+    slow_bars = max(0, _i(cfg, "core_vol_slow_bars", 0))
+    if slow_bars >= 2 and len(rets) >= slow_bars:
+        rv = max(rv, _stdev(rets[-slow_bars:]) * math.sqrt(252.0))
     if rv <= 0:
         return 1.0
     scale = max(lo, min(hi, target / (lev * rv)))

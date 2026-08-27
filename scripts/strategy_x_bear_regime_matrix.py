@@ -33,7 +33,19 @@ sys.path.insert(0, str(_REPO / "backend"))
 
 from strategies.strategy_x import StrategyX  # noqa: E402
 
-COST_BPS = 2.0
+#: CALIBRATED TO THE ENGINE, not assumed. `strategy_x_replay.py` uses 2 bps,
+#: and at this strategy's turnover that made the harness overstate return by
+#: 2x: local +147.6% against the engine's +67.55% on the identical window
+#: (BT406990), a steady ~8.5%/yr divergence that compounds rather than a signal
+#: difference. Measuring BT406990's own fills against its own benchmark quotes
+#: gives SPY +23.04 bps with mean == median to 2dp — a FLAT modelled spread,
+#: not sampling noise — and the thin commodity and managed-futures ETFs are
+#: charged more. At ~12.6x annual turnover, 23 bps is ~2.9%/yr on SPY alone.
+#:
+#: This matters more than any tuning parameter here: at 2 bps a turnover
+#: reduction looks like a pure cost, and at 23 bps it is the largest single
+#: lever available.
+COST_BPS = 23.0
 #: Only the trailing slice is handed to the strategy. `pit_daily_closes` walks
 #: every bar it is given, so an ever-growing list makes the replay quadratic.
 #: 400 covers the longest lookback in play (252 vol-median samples + 20 vol
