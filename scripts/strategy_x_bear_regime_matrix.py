@@ -52,7 +52,7 @@ COST_BPS = 23.0
 #: bars = 272) with room to spare.
 BAR_WINDOW = 400
 
-CORE = ["QQQ", "TQQQ", "SPY", "SQQQ", "SPXL", "SPXS", "IVV"]
+CORE = ["QQQ", "TQQQ", "QLD", "SPY", "SQQQ", "SPXL", "SPXS", "IVV"]
 BEAR = ["BIL", "DBMF", "KMLM", "CTA"]
 COMMOD = ["GLD", "SLV", "USO", "UNG", "GDX", "XLE", "DBA", "CPER"]
 UNIVERSE = CORE + BEAR + COMMOD

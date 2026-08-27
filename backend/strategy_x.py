@@ -341,6 +341,20 @@ DEFAULTS = {
     "core_vol_target": 0.0,
     "core_vol_scale_min": 0.3,
     "core_vol_scale_max": 1.0,
+    # Declared leverage of `core_bull_symbol`, used only by `core_vol_scale`.
+    # MEASURED: a 2x core (QLD, factor 2.0) sits on a slightly better frontier
+    # than the 3x one, which is what the leverage literature predicts —
+    # Peters (2010) gives 3x beating 1x only when mu_excess > 2*sigma^2, i.e.
+    # 12.5% at the Nasdaq-100's 25.79% volatility, while Brown (2023) gives a
+    # sufficient condition for 2x and none for 3x:
+    #   core            CAGR   maxDD   Sharpe   bearWins
+    #   TQQQ vt 0.18   15.11  -23.13    0.86      5/6
+    #   QLD  vt 0.35   17.33  -27.08    0.84      4/6
+    #   QLD  vt 0.50   19.04  -25.45    0.87      4/6
+    #   SPY B&H        15.12  -33.72    0.93       -
+    # Better return per unit of drawdown, worse bear-window coverage, and still
+    # a lower Sharpe than SPY. Kept at 3.0 because the shipped core is TQQQ;
+    # set both together or the scale is computed against the wrong leverage.
     "core_leverage_factor": 3.0,
     # Quantization grid for the vol scale. 0 == OFF, and measurement says
     # leave it off for an ETF book. With the commodity buy/hold spread it does
@@ -355,6 +369,22 @@ DEFAULTS = {
     # fills). Arm it if this book ever holds names with real spread — the thin
     # commodity ETFs are the candidates, not SPY or TQQQ.
     "core_vol_scale_step": 0.0,
+    # Where the volatility-scaled weight is parked. "" == the unlevered chop
+    # occupant, which is what shipped and which leaves the target applied to
+    # the LEG rather than the PORTFOLIO. See `plan_targets`.
+    #
+    # MEASURED at 15/15/70 over 15.0y. Parking in BIL is what makes the
+    # volatility target real, and it is a pure risk/return trade, not an edge:
+    #   remainder     CAGR   maxDD   bearWins  worst window
+    #   -> SPY       15.11  -23.13     5/6        -17.2
+    #   -> BIL       10.98  -19.14     6/6        -13.3
+    #   SPY B&H      15.12  -33.72       -           -
+    # BIL wins every bear window and gives the best drawdown and the best worst
+    # case in the whole study, and pays 4.1pp of CAGR for it — the same cash
+    # drag `plan_targets` already documents at 8pp without volatility scaling.
+    # Sharpe falls too (0.82 against 0.86), so this is not a free improvement;
+    # it is the dial for an operator who wants the drawdown and will pay for it.
+    "core_vol_remainder_symbol": "",
     "satellite_momentum_bars": 60,
     # Price floor for satellite candidates. DEFAULT OFF, and that is a measured
     # reversal of the reasoning that introduced it.
@@ -1050,6 +1080,21 @@ def plan_targets(*, risk_on: bool, config, satellite_ranked=None,
         vs = 1.0 if vol_scale is None else max(0.0, min(1.0, float(vol_scale)))
         targets[bull] = round(core_budget * weight * vs, Q)
         rest = round(core_budget - targets[bull] + unfilled, Q)
+        # WHERE THE DE-LEVERED WEIGHT GOES decides whether the volatility
+        # target is real. Sending it to the unlevered index keeps it at beta
+        # 1.0, so scaling TQQQ from 70% to 24% only takes portfolio beta from
+        # 2.1 to about 1.3 — the target is applied to the LEG, never to the
+        # PORTFOLIO, and the book ends up 57% plain SPY. That is why the
+        # measured result tracks SPY.
+        #
+        # `core_vol_remainder_symbol` sends the volatility-scaled portion (NOT
+        # the unfilled sleeve, which belongs to a sleeve that found nothing) to
+        # a chosen instrument instead. Empty == the shipped behaviour.
+        parked = _s(cfg, "core_vol_remainder_symbol", "")
+        scaled_off = round(core_budget * weight * (1.0 - vs), Q)
+        if parked and parked != chop and scaled_off > 0:
+            targets[parked] = round(targets.get(parked, 0.0) + scaled_off, Q)
+            rest = round(rest - scaled_off, Q)
         if rest > 0:
             targets[chop] = round(targets.get(chop, 0.0) + rest, Q)
         notes.append(f"risk-on: {targets[bull]:.1%} {bull}"
