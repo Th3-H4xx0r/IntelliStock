@@ -20,13 +20,15 @@ DEFAULT_HARD_DRAWDOWN = Decimal("0.09")
 DEFAULT_KILL_DRAWDOWN = Decimal("0.12")
 # Exposure caps are fractions of CURRENT equity, never absolute dollars. They
 # live here rather than inline in initialize_risk_state because
-# evaluate_drawdown has to reapply the identical fractions on every refresh.
+# evaluate_drawdown has to reapply the identical fractions on every refresh;
+# they are also the defaults of `RiskLimits`, which is what a strategy document
+# overrides when its design needs a different envelope.
 DEFAULT_MAX_ORDER_FRACTION = Decimal("0.10")
 DEFAULT_MAX_SYMBOL_FRACTION = Decimal("0.20")
 DEFAULT_MAX_LEVERAGED_FRACTION = Decimal("0.10")
 DEFAULT_SLEEVE_COOLDOWN = timedelta(hours=24)
 DEFAULT_LEVERAGED_SYMBOLS = frozenset(
-    {"SQQQ", "TQQQ", "SPXU", "UPRO", "SOXL", "SOXS"}
+    {"SQQQ", "TQQQ", "QLD", "SPXU", "UPRO", "SOXL", "SOXS"}
 )
 
 
@@ -62,6 +64,50 @@ def _decimal(value, name: str, *, positive: bool = False) -> Decimal:
 def _account_key(instance_id: str, account_id: str) -> str:
     identity = f"{str(instance_id).strip()}|{str(account_id).strip()}"
     return "live-risk:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class RiskLimits:
+    """One strategy document's live risk envelope.
+
+    Exists because a single set of module constants cannot serve two strategies
+    with different designs: a 5% soft buy-freeze is correct for a diversified
+    stock book and fatal for a vol-targeted levered core, which is BUILT to sit
+    through a -30% drawdown. The gate still BLOCKS rather than clips; only the
+    number it blocks against moves.
+
+    Validated at construction, so a config typo fails where an operator can see
+    it rather than silently disarming a real-money failsafe. Fields accept any
+    decimal-compatible value (a str or float straight out of a strategy config);
+    what is stored is always a Decimal.
+    """
+
+    max_order_fraction: Decimal = DEFAULT_MAX_ORDER_FRACTION
+    max_symbol_fraction: Decimal = DEFAULT_MAX_SYMBOL_FRACTION
+    max_leveraged_fraction: Decimal = DEFAULT_MAX_LEVERAGED_FRACTION
+    soft: Decimal = DEFAULT_SOFT_DRAWDOWN
+    hard: Decimal = DEFAULT_HARD_DRAWDOWN
+    kill: Decimal = DEFAULT_KILL_DRAWDOWN
+
+    def __post_init__(self) -> None:
+        for name in (
+            "max_order_fraction",
+            "max_symbol_fraction",
+            "max_leveraged_fraction",
+            "soft",
+            "hard",
+            "kill",
+        ):
+            value = _decimal(getattr(self, name), name, positive=True)
+            if not Decimal("0") < value <= Decimal("1"):
+                raise ValueError(f"{name} must be in (0, 1]")
+            object.__setattr__(self, name, value)
+        if not Decimal("0") < self.soft < self.hard < self.kill < Decimal("1"):
+            raise ValueError("drawdown thresholds must be increasing in (0, 1)")
+
+
+#: Exactly today's behaviour for every document that declares nothing.
+DEFAULT_RISK_LIMITS = RiskLimits()
 
 
 @dataclass(frozen=True, slots=True)
@@ -310,6 +356,8 @@ def initialize_risk_state(
     account_id: str,
     equity,
     observed_at: datetime,
+    *,
+    limits: RiskLimits = DEFAULT_RISK_LIMITS,
 ) -> AccountRiskState:
     equity_value = _decimal(equity, "equity", positive=True)
     return AccountRiskState(
@@ -319,9 +367,9 @@ def initialize_risk_state(
         high_water_equity=equity_value,
         last_equity=equity_value,
         observed_at=observed_at,
-        max_order_notional=equity_value * DEFAULT_MAX_ORDER_FRACTION,
-        max_symbol_notional=equity_value * DEFAULT_MAX_SYMBOL_FRACTION,
-        max_leveraged_notional=equity_value * DEFAULT_MAX_LEVERAGED_FRACTION,
+        max_order_notional=equity_value * limits.max_order_fraction,
+        max_symbol_notional=equity_value * limits.max_symbol_fraction,
+        max_leveraged_notional=equity_value * limits.max_leveraged_fraction,
     )
 
 
@@ -335,6 +383,7 @@ def initialize_live_risk_state(
     open_position_count: int,
     open_order_count: int,
     trading_blocked: bool = False,
+    limits: RiskLimits = DEFAULT_RISK_LIMITS,
 ) -> AccountRiskState:
     """Bootstrap risk state for a real-money account, but only from a flat book.
 
@@ -354,7 +403,9 @@ def initialize_live_risk_state(
     """
 
     if paper:
-        return initialize_risk_state(instance_id, account_id, equity, observed_at)
+        return initialize_risk_state(
+            instance_id, account_id, equity, observed_at, limits=limits
+        )
 
     refusals: list[str] = []
     if trading_blocked:
@@ -387,7 +438,9 @@ def initialize_live_risk_state(
         raise RiskStateBootstrapRefused(
             "live risk-state bootstrap refused: " + "; ".join(refusals)
         )
-    return initialize_risk_state(instance_id, account_id, equity, observed_at)
+    return initialize_risk_state(
+        instance_id, account_id, equity, observed_at, limits=limits
+    )
 
 
 def evaluate_drawdown(
@@ -395,9 +448,10 @@ def evaluate_drawdown(
     fresh_equity,
     observed_at: datetime,
     *,
-    soft_threshold=DEFAULT_SOFT_DRAWDOWN,
-    hard_threshold=DEFAULT_HARD_DRAWDOWN,
-    kill_threshold=DEFAULT_KILL_DRAWDOWN,
+    soft_threshold=None,
+    hard_threshold=None,
+    kill_threshold=None,
+    limits: RiskLimits = DEFAULT_RISK_LIMITS,
 ) -> AccountRiskState:
     observed = _utc(observed_at, "observed_at")
     if observed < state.observed_at:
@@ -405,9 +459,19 @@ def evaluate_drawdown(
     equity = _decimal(fresh_equity, "fresh_equity", positive=True)
     high = max(state.high_water_equity, equity)
     drawdown = (high - equity) / high
-    soft = _decimal(soft_threshold, "soft_threshold")
-    hard = _decimal(hard_threshold, "hard_threshold")
-    kill = _decimal(kill_threshold, "kill_threshold")
+    # An explicit threshold still wins; None means "use this document's limits".
+    soft = _decimal(
+        limits.soft if soft_threshold is None else soft_threshold,
+        "soft_threshold",
+    )
+    hard = _decimal(
+        limits.hard if hard_threshold is None else hard_threshold,
+        "hard_threshold",
+    )
+    kill = _decimal(
+        limits.kill if kill_threshold is None else kill_threshold,
+        "kill_threshold",
+    )
     if not Decimal("0") < soft < hard < kill < Decimal("1"):
         raise ValueError("drawdown thresholds must be increasing in (0, 1)")
     level = (
@@ -429,11 +493,16 @@ def evaluate_drawdown(
     #
     # A cap of None means "no limit configured"; rescaling it would invent one,
     # so those are preserved as-is.
+    #
+    # The fractions come from the strategy document's own `RiskLimits`, which is
+    # why they must be passed here as well as at bootstrap - this loop reapplies
+    # them on every observation, so an override in only one place is overwritten
+    # each tick.
     caps = {}
     for name, fraction in (
-        ("max_order_notional", DEFAULT_MAX_ORDER_FRACTION),
-        ("max_symbol_notional", DEFAULT_MAX_SYMBOL_FRACTION),
-        ("max_leveraged_notional", DEFAULT_MAX_LEVERAGED_FRACTION),
+        ("max_order_notional", limits.max_order_fraction),
+        ("max_symbol_notional", limits.max_symbol_fraction),
+        ("max_leveraged_notional", limits.max_leveraged_fraction),
     ):
         caps[name] = (
             equity * fraction if getattr(state, name) is not None else None

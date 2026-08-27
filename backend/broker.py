@@ -4377,6 +4377,47 @@ def _strategy_xs_universe_symbols(cached_strategies):
     return out
 
 
+def _strategy_eb_risk_limits(cached_strategies):
+    """The enabled strategy_eb lane's live risk envelope, or None.
+
+    None means "this document declares nothing", and every other document keeps
+    live_risk_state's module defaults untouched. A malformed value also returns
+    None -- degrading to the TIGHTER default is the only safe direction, and a
+    config typo must never take the live loop down.
+    """
+    try:
+        from live_risk_state import RiskLimits
+        from strategy_eb import DEFAULTS as _EB_DEFAULTS
+    except Exception:
+        return None
+    try:
+        for spec in (cached_strategies or []):
+            if not isinstance(spec, dict):
+                continue
+            if str(spec.get("strategy") or "").strip().lower() not in {
+                    "strategy_eb", "strategyeb"}:
+                continue
+            merged = {**_EB_DEFAULTS, **(spec.get("config") or {})}
+            if not merged.get("strategy_eb_enabled", False):
+                continue
+            return RiskLimits(
+                max_order_fraction=merged["live_max_order_fraction"],
+                max_symbol_fraction=merged["live_max_symbol_fraction"],
+                max_leveraged_fraction=merged["live_max_leveraged_fraction"],
+                soft=merged["live_soft_drawdown"],
+                hard=merged["live_hard_drawdown"],
+                kill=merged["live_kill_drawdown"],
+            )
+    except Exception as _eb_exc:
+        try:
+            _log(f"[strategy_eb] live risk limits ignored ({_eb_exc}); "
+                 "using the module defaults", "yellow")
+        except Exception:
+            pass
+        return None
+    return None
+
+
 def _strategy_eb_universe_symbols(cached_strategies):
     """Symbols strategy_eb needs bars and prices for, from its own config.
 
@@ -9042,6 +9083,7 @@ def _initialize_live_risk_authority(
 
     global _live_risk_store, _live_risk_state
     from live_risk_state import (
+        DEFAULT_RISK_LIMITS,
         RethinkRiskBackend,
         RiskStateStore,
         RiskStateUnavailable,
@@ -9049,6 +9091,10 @@ def _initialize_live_risk_authority(
         initialize_live_risk_state,
         initialize_risk_state,
     )
+
+    # The enabled strategy_eb lane's envelope, or the module defaults for every
+    # other document. Resolved once so bootstrap and refresh cannot disagree.
+    _risk_limits = _strategy_eb_risk_limits(_cached_strategies) or DEFAULT_RISK_LIMITS
 
     store = RiskStateStore(RethinkRiskBackend())
     try:
@@ -9128,6 +9174,7 @@ def _initialize_live_risk_authority(
                         open_position_count=_broker_positions_count(),
                         open_order_count=_broker_open_order_count(),
                         trading_blocked=_blocked,
+                        limits=_risk_limits,
                     )
                 )
                 _log("Live risk state bootstrapped from a flat book "
@@ -9150,6 +9197,7 @@ def _initialize_live_risk_authority(
                     str(account_id),
                     equity,
                     datetime.datetime.now(datetime.timezone.utc),
+                    limits=_risk_limits,
                 )
             )
     _live_risk_store = store
@@ -9161,7 +9209,7 @@ def _refresh_live_account_risk_state(adapter, observed_at):
     """Persist one fresh broker-equity drawdown observation."""
 
     global _live_risk_state
-    from live_risk_state import evaluate_drawdown
+    from live_risk_state import DEFAULT_RISK_LIMITS, evaluate_drawdown
 
     if _live_risk_store is None or _live_risk_state is None:
         raise RuntimeError("durable risk state is unavailable")
@@ -9169,7 +9217,10 @@ def _refresh_live_account_risk_state(adapter, observed_at):
     if equity is None:
         raise RuntimeError("fresh broker equity is unavailable")
     evaluated = evaluate_drawdown(
-        _live_risk_state, equity, observed_at
+        _live_risk_state,
+        equity,
+        observed_at,
+        limits=_strategy_eb_risk_limits(_cached_strategies) or DEFAULT_RISK_LIMITS,
     )
     _live_risk_state = _live_risk_store.save(evaluated)
     snapshot_id = (
@@ -9275,12 +9326,12 @@ def _live_order_dependency_snapshot(adapter, intent):
     max_order_notional = None
     max_position_quantity = None
     if _live_risk_state is not None:
+        from live_risk_state import DEFAULT_LEVERAGED_SYMBOLS
+
         max_order_notional = _live_risk_state.max_order_notional
         position_limit = (
             _live_risk_state.max_leveraged_notional
-            if symbol in {
-                "SQQQ", "TQQQ", "SPXU", "UPRO", "SOXL", "SOXS"
-            }
+            if symbol in DEFAULT_LEVERAGED_SYMBOLS
             else _live_risk_state.max_symbol_notional
         )
         if position_limit is not None and quote_price > 0:
