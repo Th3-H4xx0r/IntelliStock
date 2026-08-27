@@ -17,7 +17,8 @@ _backend = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _backend not in sys.path:
     sys.path.insert(0, _backend)
 
-_WANTED = {"_strategy_x_specs", "_strategy_x_universe_symbols", "_strategy_x_prepare"}
+_WANTED = {"_strategy_x_specs", "_strategy_x_universe_symbols",
+           "_strategy_xs_universe_symbols", "_strategy_x_prepare"}
 _src = open(os.path.join(_backend, "broker.py")).read()
 _tree = ast.parse(_src)
 _ns = {}

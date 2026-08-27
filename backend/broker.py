@@ -4345,6 +4345,38 @@ def _strategy_x_universe_symbols(cached_strategies):
     return out
 
 
+def _strategy_xs_universe_symbols(cached_strategies):
+    """Symbols strategy_xs needs bars for, from its own config.
+
+    Same contract as `_strategy_x_universe_symbols` and the same reason: a
+    strategy that trades symbols the operator never listed must declare them,
+    or `price_history` is built without them and the strategy is silently
+    inert. Returns [] when strategy_xs is absent or disabled, so this is a
+    no-op for every other instance.
+    """
+    try:
+        from strategy_xs import DEFAULTS as _XS_DEFAULTS, strategy_xs_universe
+    except Exception:
+        return []
+    out = []
+    try:
+        for spec in (cached_strategies or []):
+            if not isinstance(spec, dict):
+                continue
+            name = str(spec.get("strategy") or "").strip().lower()
+            if name not in {"strategy_xs", "strategyxs"}:
+                continue
+            merged = {**_XS_DEFAULTS, **(spec.get("config") or {})}
+            if not merged.get("strategy_xs_enabled", False):
+                continue
+            for sym in strategy_xs_universe(merged):
+                if sym and sym not in out:
+                    out.append(sym)
+    except Exception:
+        return []
+    return out
+
+
 def _strategy_x_prepare(data, prices, current_time, cached_strategies,
                         key=None, secret=None):
     """Make strategy_x's own symbols priceable this bar.
@@ -4358,8 +4390,24 @@ def _strategy_x_prepare(data, prices, current_time, cached_strategies,
     strategy, so this must run BEFORE the dispatch rather than after it.
     """
     try:
-        syms = [s for s in _strategy_x_universe_symbols(cached_strategies)
-                if s and not (prices or {}).get(s)]
+        # BOTH declaring strategies. Strategy XS uses the identical contract,
+        # and a second prepare pass in the hot path would double the fetches
+        # for the symbols they share (QQQ, TQQQ, BIL).
+        #
+        # The XS lookup is guarded SEPARATELY because this whole function runs
+        # inside a try/except that logs and continues: without its own guard, a
+        # failure resolving strategy_xs would silently take strategy_x's
+        # pricing down with it, and an unpriced leg is skipped in
+        # `targets_to_orders` with no error anywhere.
+        _declared = list(_strategy_x_universe_symbols(cached_strategies))
+        try:
+            _xs_declared = _strategy_xs_universe_symbols(cached_strategies)
+        except Exception:
+            _xs_declared = []
+        for _xs in _xs_declared:
+            if _xs not in _declared:
+                _declared.append(_xs)
+        syms = [s for s in _declared if s and not (prices or {}).get(s)]
         for sym in syms:
             if mode == MODE_BACKTEST and isinstance(data, dict):
                 if sym not in data:
@@ -10126,6 +10174,15 @@ if mode == MODE_BACKTEST:
         if _sx_sym not in symbols_for_fetch:
             symbols_for_fetch.append(_sx_sym)
             _log(f"Adding {_sx_sym} to bar data for strategy_x", "cyan")
+    # 2026-08-27: strategy_xs declares its own universe the same way — the
+    # filter symbol, the levered leg, cash, and the diversifier basket, none of
+    # which need to be in the instance watchlist. This is the FETCH site; the
+    # one inside `_strategy_x_prepare` only fixes PRICES. Missing either is
+    # silent, so both are asserted in test_strategy_xs_broker_wiring.py.
+    for _xs_sym in _strategy_xs_universe_symbols(_cached_strategies):
+        if _xs_sym not in symbols_for_fetch:
+            symbols_for_fetch.append(_xs_sym)
+            _log(f"Adding {_xs_sym} to bar data for strategy_xs", "cyan")
     symbols_for_data = symbols_for_fetch
     # Convert time_increment to Alpaca timeframe format
     alpaca_timeframe = _time_increment_to_alpaca_timeframe(time_increment)
