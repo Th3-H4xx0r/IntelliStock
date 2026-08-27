@@ -11,6 +11,7 @@ from live_equity_bars import (  # noqa: E402
     LOOKBACK_DAYS_DEFAULT,
     build_live_equity_data,
     lookback_start,
+    other_enabled_run_once_lanes,
 )
 
 NOW = datetime.datetime(2026, 6, 3, 20, 0, tzinfo=datetime.timezone.utc)
@@ -77,6 +78,29 @@ def test_one_empty_symbol_is_backfilled_from_last_good():
     assert got["QQQ"][-1]["c"] == 101.0
 
 
+def test_a_truncated_series_is_served_from_the_longer_last_good():
+    """`fetch_alpaca_historical_bars` stitches the window from chunks and
+    swallows a failed chunk, so a partial outage returns a SHORT series, not an
+    error. A short window under-measures volatility, and under-measured risk
+    sizes the 3x core LARGER."""
+    long_series = [bar(d, 100.0 + d) for d in range(1, 21)]
+    partial = full()
+    partial["TQQQ"] = [bar(19, 118.0), bar(20, 119.0)]
+    got = build_live_equity_data(lambda s, a, b: partial, UNIVERSE, NOW,
+                                 last_good={"TQQQ": long_series})
+    assert got["TQQQ"] == long_series
+    assert got["TQQQ"] is not long_series
+
+
+def test_a_series_at_least_as_long_as_the_last_good_is_kept():
+    held = [bar(1, 100.0)]
+    partial = full()
+    partial["TQQQ"] = [bar(1, 100.0), bar(2, 101.0)]
+    got = build_live_equity_data(lambda s, a, b: partial, UNIVERSE, NOW,
+                                 last_good={"TQQQ": held})
+    assert got["TQQQ"] == partial["TQQQ"]
+
+
 def test_one_empty_symbol_with_no_last_good_is_simply_empty():
     partial = full()
     partial["BIL"] = []
@@ -129,11 +153,56 @@ def test_backfilled_bar_lists_are_copies_not_aliases():
     assert got["TQQQ"] is not snapshot["TQQQ"]
 
 
+# ── spec §8: strategy_eb must be the only enabled run_once lane ──────────────
+# graph_nexus_analysis reads `data is not None` as its live/backtest
+# discriminator, so bars handed to a shared document flip GNA into backtest
+# budget mode on a live tick.
+
+
+def spec(name, config=None):
+    return {"strategy": name, "config": config or {}}
+
+
+def test_an_eb_only_document_has_no_other_lanes():
+    assert other_enabled_run_once_lanes([spec("strategy_eb"),
+                                         spec("StrategyEb")]) == []
+    assert other_enabled_run_once_lanes([]) == []
+    assert other_enabled_run_once_lanes(None) == []
+
+
+def test_graph_nexus_analysis_alongside_eb_is_reported():
+    lanes = other_enabled_run_once_lanes([spec("strategy_eb"),
+                                          spec("graph_nexus_analysis")])
+    assert lanes == ["graph_nexus_analysis"]
+
+
+def test_a_lane_disabled_by_its_own_key_does_not_count():
+    lanes = other_enabled_run_once_lanes([
+        spec("strategy_eb"),
+        spec("strategy_x", {"strategy_x_enabled": False}),
+        spec("strategy_xs", {"strategy_xs_enabled": "false"}),
+        spec("residual_sleeve", {"enabled": 0}),
+    ])
+    assert lanes == []
+
+
+def test_a_lane_with_no_enable_key_counts_as_enabled():
+    """Fails CLOSED: most run_once strategies — GNA included — have no enable
+    key at all, and the failure this guards is silent."""
+    assert other_enabled_run_once_lanes([spec("strategy_eb"),
+                                         spec("some_new_lane")]) \
+        == ["some_new_lane"]
+    assert other_enabled_run_once_lanes([
+        spec("strategy_x", {"strategy_x_enabled": True})]) == ["strategy_x"]
+
+
 def test_the_broker_wires_the_carrier_into_the_live_equity_branch():
     """A source assertion: the hook is inline in a 4,000-line function."""
     source = open(os.path.join(_backend, "broker.py")).read()
     assert "build_live_equity_data" in source
     assert "_live_equity_bars_last_good" in source
+    assert "other_enabled_run_once_lanes" in source
+    assert "[live-equity-bars] strategy_eb must be " in source
 
 
 def test_the_hook_is_a_live_sibling_of_the_crypto_branch():
@@ -175,3 +244,45 @@ def test_the_hook_lives_in_the_live_only_block():
             return
     raise AssertionError("the carrier is not inside an `if mode == MODE_LIVE` "
                          "block — a backtest must not take this path")
+
+
+def test_the_sole_lane_guard_wraps_the_fetch():
+    """The §8 guard is not advisory: the bar fetch must be UNREACHABLE when
+    another run_once lane is enabled."""
+    import ast
+
+    tree = ast.parse(open(os.path.join(_backend, "broker.py")).read())
+    crypto = [n for n in ast.walk(tree)
+              if isinstance(n, ast.If)
+              and "_is_crypto_instance_runtime" in ast.dump(n.test)
+              and "_tick_mode" in ast.dump(n.test)]
+    assert len(crypto) == 1, "the live crypto bars branch moved"
+    equity = crypto[0].orelse[0]
+    guards = [n for n in ast.walk(equity)
+              if isinstance(n, ast.If) and "_leb_others" in ast.dump(n.test)]
+    assert len(guards) == 1, "the sole-lane guard is missing"
+    guard = guards[0]
+
+    def dump(nodes):
+        return "".join(ast.dump(n) for n in nodes)
+
+    # Other lanes present -> no fetch, and data stays None.
+    assert "_leb_build" not in dump(guard.body)
+    assert "_leb_fetch" not in dump(guard.body)
+    assert "_rr_data" in dump(guard.body)
+    # EB alone -> the fetch, and only there.
+    assert "_leb_build" in dump(guard.orelse)
+    assert "_leb_fetch" in dump(guard.orelse)
+    # The lane list comes from the enabled run_once specs, not from a constant.
+    assigns = [n for n in ast.walk(equity)
+               if isinstance(n, ast.Assign) and "_leb_others" in ast.dump(n)]
+    assert assigns and "_run_once_specs" in ast.dump(assigns[0].value)
+    # The RED message the operator has to see, reassembled by the parser out of
+    # the implicit concatenation the source is line-wrapped into.
+    literals = "".join(
+        n.value for n in ast.walk(guard.body[-1])
+        if isinstance(n, ast.Constant) and isinstance(n.value, str))
+    assert ("[live-equity-bars] strategy_eb must be the only enabled run_once "
+            "lane on its document; leaving data=None so it refuses to trade."
+            ) in literals
+    assert "red" in literals

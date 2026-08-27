@@ -14272,47 +14272,71 @@ while not shutdown_requested:
                                         try:
                                             from live_equity_bars import (
                                                 build_live_equity_data as _leb_build,
+                                                other_enabled_run_once_lanes as _leb_other,
                                             )
 
-                                            def _leb_fetch(_syms, _start, _end,
-                                                           _k=_strat_data_key,
-                                                           _s=_strat_data_secret):
-                                                _db = None
-                                                try:
-                                                    _db = get_conn()
-                                                except Exception:
-                                                    _db = None
-                                                try:
-                                                    return fetch_alpaca_historical_bars(
-                                                        _syms, _start, _end, _k, _s,
-                                                        timeframe="1Day",
-                                                        db_conn=_db, feed=data_feed,
-                                                    )
-                                                finally:
-                                                    try:
-                                                        if _db is not None:
-                                                            _db.close()
-                                                    except Exception:
-                                                        pass
-
-                                            _rr_data = _leb_build(
-                                                _leb_fetch, _eb_syms,
-                                                datetime.datetime.now(
-                                                    datetime.timezone.utc),
-                                                last_good=globals().get(
-                                                    "_live_equity_bars_last_good"),
-                                                log=_log,
-                                            )
-                                            if _rr_data:
-                                                globals()["_live_equity_bars_last_good"] = _rr_data
-                                            elif _rr_data is None:
-                                                _rr_specs_eff = []
+                                            # Spec §8 enforced in code, because
+                                            # it is a LIVE CORRECTNESS rule and
+                                            # not a config preference:
+                                            # graph_nexus_analysis discriminates
+                                            # live from backtest on
+                                            # `data is not None`
+                                            # (`_bz_set_bt_main(data is not None)`),
+                                            # so handing bars to a document that
+                                            # also runs another run_once lane
+                                            # flips GNA into BACKTEST budget mode
+                                            # on a LIVE tick.
+                                            _leb_others = _leb_other(_run_once_specs)
+                                            if _leb_others:
+                                                _rr_data = None
                                                 _log(
-                                                    "Live equity bars unavailable (fetch "
-                                                    "failed, no last-good) — skipping "
-                                                    "strategies this tick; will retry.",
+                                                    "[live-equity-bars] strategy_eb must be "
+                                                    "the only enabled run_once lane on its "
+                                                    "document; leaving data=None so it "
+                                                    "refuses to trade. Also enabled: "
+                                                    + ", ".join(_leb_others),
                                                     "red",
                                                 )
+                                            else:
+                                                def _leb_fetch(_syms, _start, _end,
+                                                               _k=_strat_data_key,
+                                                               _s=_strat_data_secret):
+                                                    _db = None
+                                                    try:
+                                                        _db = get_conn()
+                                                    except Exception:
+                                                        _db = None
+                                                    try:
+                                                        return fetch_alpaca_historical_bars(
+                                                            _syms, _start, _end, _k, _s,
+                                                            timeframe="1Day",
+                                                            db_conn=_db, feed=data_feed,
+                                                        )
+                                                    finally:
+                                                        try:
+                                                            if _db is not None:
+                                                                _db.close()
+                                                        except Exception:
+                                                            pass
+
+                                                _rr_data = _leb_build(
+                                                    _leb_fetch, _eb_syms,
+                                                    datetime.datetime.now(
+                                                        datetime.timezone.utc),
+                                                    last_good=globals().get(
+                                                        "_live_equity_bars_last_good"),
+                                                    log=_log,
+                                                )
+                                                if _rr_data:
+                                                    globals()["_live_equity_bars_last_good"] = _rr_data
+                                                elif _rr_data is None:
+                                                    _rr_specs_eff = []
+                                                    _log(
+                                                        "Live equity bars unavailable (fetch "
+                                                        "failed, no last-good) — skipping "
+                                                        "strategies this tick; will retry.",
+                                                        "red",
+                                                    )
                                         except Exception as _leb_e:
                                             _rr_data = None
                                             _rr_specs_eff = []
