@@ -406,3 +406,16 @@ def test_the_bounds_still_apply_under_the_new_opt_in(monkeypatch):
     for raw in (0, -1, 2.0, True, "abc", "", None):
         assert _pct(monkeypatch, _eb_doc(broker_max_single_position_pct=raw,
                                          honour_single_position_cap=True)) is None, raw
+
+
+def test_both_opt_ins_read_the_same_canonical_tokens(monkeypatch):
+    """Sharing one parser narrowed `strategy_x_enabled`: a nonsense truthy
+    value like `2` or `{"a": 1}` used to pass Python's truth test and lift the
+    failsafe. It now fails CLOSED, back to the broker's 0.15 default, and both
+    keys agree on what "on" means."""
+    for key in ("strategy_x_enabled", "honour_single_position_cap"):
+        for raw, expected in ((1, 0.95), ("TRUE ", 0.95),
+                              (2, None), ({"a": 1}, None), ([1], None)):
+            assert _pct(monkeypatch, _eb_doc(
+                broker_max_single_position_pct=0.95,
+                **{key: raw})) == expected, (key, raw)
