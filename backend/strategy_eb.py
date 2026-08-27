@@ -252,7 +252,14 @@ def eb_core_weight(closes, cfg) -> float | None:
     resolve to MORE leverage, not less.
     """
     prices = _finite(closes)
-    minimum = max(2, _i(cfg, "min_history_bars"))
+    # The floor is whichever is LARGER: the configured minimum, or one more
+    # close than the longest vol window needs. Without the window terms a
+    # `vol_slow_bars` above `min_history_bars` silently truncates the slow
+    # window to whatever history happens to exist — a SHORTER window on the
+    # same tape measures LESS risk, and less measured risk sizes the 3x core
+    # LARGER. That is the one direction this module must never fail in.
+    minimum = max(2, _i(cfg, "min_history_bars"),
+                  _i(cfg, "vol_fast_bars") + 1, _i(cfg, "vol_slow_bars") + 1)
     if prices is None or len(prices) < minimum:
         return None
 
@@ -341,11 +348,13 @@ def eb_should_trade(session_id, w_target, w_held, cfg, cache) -> tuple:
 
     Order of the rules is the design:
       1. an unusable session label never trades (fail closed);
-      2. one decision per session, whatever the granularity;
-      3. an exit to zero is UNCONDITIONAL — it ignores both the band and the
-         weekday, because the band is meaningless around a target of zero and
-         waiting four days to leave a 3x fund is the failure the vol transform
-         exists to prevent;
+      2. an exit to zero is UNCONDITIONAL — it ignores the band, the weekday
+         AND the same-session guard, because the band is meaningless around a
+         target of zero and waiting four days, or even one more session, to
+         leave a 3x fund is the failure the vol transform exists to prevent.
+         It re-arms harmlessly: once the exit fills, `w_held` is 0 and the
+         rule returns (False, 0.0);
+      3. one decision per session otherwise, whatever the granularity;
       4. otherwise only the configured weekdays decide;
       5. otherwise only a drift of at least `core_rebalance_band` trades;
       6. a multi-weekday config moves 1/N of the way, not all the way.
@@ -360,11 +369,12 @@ def eb_should_trade(session_id, w_target, w_held, cfg, cache) -> tuple:
 
     if session_weekday(session_id) < 0:
         return (False, held)
-    if (cache or {}).get(LAST_REBALANCE_KEY) == session_id:
-        return (False, held)
 
     if target <= 0.0:
         return (True, 0.0) if held > 0.0 else (False, held)
+
+    if (cache or {}).get(LAST_REBALANCE_KEY) == session_id:
+        return (False, held)
 
     days = rebalance_weekdays(cfg)
     if session_weekday(session_id) not in days:

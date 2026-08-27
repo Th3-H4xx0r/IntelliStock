@@ -6,6 +6,7 @@ regression fixture: closes[i+1] = closes[i] * (1 +/- pct) alternating gives a
 sample stdev over any EVEN window of exactly pct-ish, and the numbers below were
 computed from that construction, not read off an implementation.
 """
+import decimal
 import os
 import sys
 
@@ -16,6 +17,7 @@ if _backend not in sys.path:
 from strategy_eb import (  # noqa: E402
     DEFAULTS,
     LAST_REBALANCE_KEY,
+    _i,
     eb_core_weight,
     eb_should_trade,
     eb_targets,
@@ -103,9 +105,60 @@ def test_a_flat_tape_has_no_measurable_risk_and_fails_closed():
 
 
 def test_an_infinite_target_vol_falls_back_to_the_default_rather_than_levering():
-    """strategy_x's own `_i` raises OverflowError on inf; EB's parsers fail
-    CLOSED, which is the only safe direction for a levered position."""
+    """`_f` returns the default for a non-finite value rather than letting inf
+    reach the divide, which is the only safe direction for a levered position.
+    An infinite target vol asks for infinite exposure."""
     assert eb_core_weight(alternating(0.01), cfg(target_vol=float("inf"))) == 0.40
+
+
+def test_a_vol_window_longer_than_the_history_floor_fails_closed():
+    """The floor must cover the WINDOW, not just `min_history_bars`. With
+    vol_slow_bars=250 and only 100 closes the slow window would silently
+    truncate to 99 returns; a shorter window measures LESS risk, and less
+    measured risk sizes a 3x position LARGER."""
+    assert eb_core_weight(alternating(0.01, n=100),
+                          cfg(vol_slow_bars=250)) is None
+
+
+def test_a_vol_window_exactly_covered_by_the_history_is_enough():
+    """The boundary of the same rule: 100 closes = 99 returns, so a 99-bar
+    slow window is the longest one this history can honestly measure."""
+    assert eb_core_weight(alternating(0.01, n=100),
+                          cfg(vol_slow_bars=99)) is not None
+    assert eb_core_weight(alternating(0.01, n=100),
+                          cfg(vol_slow_bars=100)) is None
+
+
+def test_an_absurd_vol_window_fails_closed_rather_than_measuring_nothing():
+    """A config value large enough to be nonsense must refuse, never re-lever."""
+    assert eb_core_weight(alternating(0.01), cfg(vol_slow_bars=10 ** 400)) is None
+
+
+# ── the integer parser fails CLOSED ─────────────────────────────────────────
+
+def test_the_int_parser_returns_the_default_for_a_non_finite_float():
+    """strategy_x's `_i` raises OverflowError here: `int(inf)` is not caught by
+    its (TypeError, ValueError, AttributeError). EB's owns the branch."""
+    for junk in (float("inf"), float("-inf"), float("nan")):
+        assert _i(cfg(vol_slow_bars=junk), "vol_slow_bars") == 60, junk
+
+
+def test_the_int_parser_returns_the_default_when_the_conversion_overflows():
+    """A Decimal infinity reaches `int()` and raises OverflowError there —
+    the branch a plain Python int can never trigger, since ints are unbounded."""
+    value = decimal.Decimal("Infinity")
+    assert _i(cfg(vol_slow_bars=value), "vol_slow_bars") == 60
+
+
+def test_the_int_parser_returns_the_default_for_unusable_values():
+    for junk in (None, "", "sixty", object()):
+        assert _i(cfg(vol_slow_bars=junk), "vol_slow_bars") == 60, junk
+
+
+def test_the_int_parser_resolves_a_missing_default_against_eb_defaults():
+    """strategy_x's `_i` resolves against ITS DEFAULTS, so an EB-only key with
+    no explicit default raises TypeError there."""
+    assert _i({}, "min_history_bars") == 70
 
 
 def test_a_zero_leverage_config_fails_closed_instead_of_dividing_by_zero():
@@ -226,6 +279,15 @@ def test_an_exit_to_zero_is_unconditional_and_ignores_the_weekday():
 
 def test_an_exit_to_zero_from_flat_is_not_an_order():
     assert eb_should_trade(THU, 0.0, 0.0, cfg(), {}) == (False, 0.0)
+
+
+def test_an_exit_to_zero_ignores_the_same_session_guard_too():
+    """"Unconditional" includes the once-per-session rule. A weight that has
+    already traded today and then reads zero must still leave the 3x fund;
+    it re-arms harmlessly, because once the exit fills `w_held` is 0."""
+    cache = {LAST_REBALANCE_KEY: WED}
+    assert eb_should_trade(WED, 0.0, 0.30, cfg(), cache) == (True, 0.0)
+    assert eb_should_trade(WED, 0.0, 0.0, cfg(), cache) == (False, 0.0)
 
 
 def test_it_refuses_a_second_trade_in_the_same_session():
