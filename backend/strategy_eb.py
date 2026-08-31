@@ -37,7 +37,7 @@ from strategy_x import Q, _finite, _stdev
 
 __all__ = [
     "DEFAULTS", "LAST_REBALANCE_KEY", "LAST_STATE_KEY", "eb_core_weight",
-    "eb_remainder_targets", "eb_should_trade", "eb_targets",
+    "eb_remainder_targets", "eb_should_trade", "eb_state_book", "eb_targets",
     "eb_trend_enabled", "eb_trend_state", "rebalance_weekdays",
     "session_ordinal", "session_weekday", "strategy_eb_universe",
 ]
@@ -152,6 +152,27 @@ DEFAULTS = {
     # fast for a weekly SMA) and cost 4.6pp/yr of CAGR, which is why the
     # default damps nothing.
     "core_off_damp": 1.0,
+    # ── the remainder BOOKS (default-off: an empty book is no book) ──
+    # {SYMBOL: weight} the de-levered remainder is split across INSTEAD of the
+    # single occupant, one book per state. Weights are shares of the remainder,
+    # not of NAV: at a 0.40 core, {"SMH": 0.3, "GLD": 0.7} is 18% SMH and 42%
+    # GLD. They may sum to less than 1 — the shortfall goes to the occupant the
+    # state would have used on its own (the SPY/BIL dial while ON, the risk-off
+    # or cash leg while OFF), so an EMPTY book is exactly the two-leg book that
+    # existed before this key. A book summing past 1 is RENORMALISED rather
+    # than clipped: clipping would silently drop whichever leg came last.
+    #
+    # `trend_on_book` is read in the ON state, which with `trend_filter_bars=0`
+    # is EVERY state — that is the static-blend configuration: a fixed
+    # multi-ETF remainder with no state machine at all. `trend_off_book` needs
+    # the filter ON to be reachable, and like `risk_off_symbol` it is not even
+    # declared to the broker otherwise.
+    #
+    # Set with `target_vol: 0` (or `core_max_weight: 0`) this is a PURE BOOK:
+    # core weight 0, the book carries the whole NAV. That is the one config in
+    # which the levered fund is absent by design rather than by refusal.
+    "trend_on_book": {},
+    "trend_off_book": {},
     # ── the cash sweep ──
     # `targets_to_orders` sizes buys off SETTLED cash and equity fills are
     # next-bar, so the tick that sells the core CANNOT also fund the remainder
@@ -289,6 +310,89 @@ def eb_trend_state(closes, prev_state, cfg) -> str:
         return "OFF" if close < sma * (1.0 - enter) else "ON"
     exit_pct = max(0.0, _f(cfg, "trend_on_exit_pct"))
     return "ON" if close > sma * (1.0 + exit_pct) else "OFF"
+
+
+def eb_state_book(cfg, trend_state="ON") -> dict:
+    """The remainder book for this state, cleaned: {SYMBOL: share}, share > 0.
+
+    An unusable book — absent, not a dict, empty, or every leg dropped — is
+    `{}`, and `{}` means "no book", which is the pre-feature single-occupant
+    path. There is deliberately no third answer: a book that half-parses would
+    put an arbitrary fraction of NAV somewhere nobody configured.
+
+    Symbols are upper-cased and duplicates accumulate. Non-positive and
+    unparseable weights are DROPPED rather than floored to zero — this book is
+    long-only, and the weights are shares of a remainder that is already >= 0.
+
+    Shares summing past 1 are renormalised so they sum to exactly 1. Shares
+    summing to less than 1 are left alone: the shortfall is the caller's, and
+    it belongs to the single occupant.
+    """
+    key = ("trend_off_book" if _state(trend_state) == "OFF"
+           else "trend_on_book")
+    raw = (cfg or {}).get(key)
+    if not isinstance(raw, dict) or not raw:
+        return {}
+
+    out: dict = {}
+    for symbol, weight in raw.items():
+        name = str(symbol or "").strip().upper()
+        if not name:
+            continue
+        try:
+            share = float(weight)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(share) or share <= 0:
+            continue
+        out[name] = round(out.get(name, 0.0) + share, Q)
+
+    total = sum(out.values())
+    if not math.isfinite(total) or total <= 0:
+        return {}
+    if total > 1.0:
+        out = {name: share / total for name, share in out.items()}
+    return out
+
+
+def _books_configured(cfg) -> bool:
+    """Whether ANY reachable book is configured — the "this is a book strategy"
+    predicate.
+
+    Reachable is the operative word, and it is the same rule the universe
+    applies: with the filter off the OFF book can never be read, so a config
+    that sets only that one is not a book strategy and must keep behaving
+    exactly as it did before these keys existed.
+
+    Deliberately EITHER state, not the current one: a pure book that names only
+    an ON book still has to be able to sell it and sit in the risk-off occupant
+    when the state flips, and that rotation is decided in the OFF state, where
+    the current book is empty.
+    """
+    if eb_state_book(cfg, "ON"):
+        return True
+    return bool(eb_trend_enabled(cfg) and eb_state_book(cfg, "OFF"))
+
+
+def _book_legs(remainder: float, book: dict) -> tuple:
+    """([(symbol, weight)], shortfall) for splitting `remainder` across `book`.
+
+    The shortfall is what the book's shares leave unspent, and it is what the
+    single occupant gets. Rounding each leg to Q can overshoot the remainder by
+    a few 1e-7 on a renormalised book; that overshoot is taken back off the
+    LARGEST leg, so the emitted weights still sum to exactly the remainder and
+    a target set can never ask for more than the account holds.
+    """
+    legs = [(symbol, round(remainder * share, Q))
+            for symbol, share in book.items()]
+    shortfall = remainder - sum(weight for _, weight in legs)
+    if shortfall < 0 and legs:
+        biggest = max(range(len(legs)), key=lambda i: (legs[i][1],
+                                                       legs[i][0]))
+        symbol, weight = legs[biggest]
+        legs[biggest] = (symbol, round(weight + shortfall, Q))
+        shortfall = 0.0
+    return legs, shortfall
 
 
 def session_ordinal(session_id) -> int:
@@ -430,6 +534,12 @@ def eb_targets(w, cfg, trend_state="ON") -> dict:
     misconfiguration. The BIL dial does not apply there because there is no
     SPY leg left to blend against.
 
+    With a BOOK configured for the state (`trend_on_book` / `trend_off_book`),
+    the remainder is split across the book's symbols by share and only the
+    SHORTFALL reaches the single occupant above. An empty book — the default —
+    is a shortfall of the whole remainder, which is why the two formulas above
+    are still the whole of the default behaviour, arithmetic included.
+
     The remainder is computed as the RESIDUAL rather than as `(1-w)*(1-dial)`
     so the legs sum to 1.0 at Q decimals by construction. A weight set summing
     past 1.0 asks for a clip the account cannot fund.
@@ -443,17 +553,22 @@ def eb_targets(w, cfg, trend_state="ON") -> dict:
         core = 0.0
     core = round(max(0.0, min(1.0, core)), Q)
 
+    # With no book this is `1.0 - core` unchanged, so every expression below is
+    # the arithmetic that shipped before the books existed, to the last bit.
+    book_legs, rest = _book_legs(1.0 - core, eb_state_book(cfg, trend_state))
+
     if _state(trend_state) == "OFF":
         occupant = _s(cfg, "risk_off_symbol") or _s(cfg, "cash_symbol")
         legs = ((_s(cfg, "core_symbol"), core),
-                (occupant, round(1.0 - core, Q)))
+                (occupant, round(rest, Q)))
     else:
         dial = max(0.0, min(1.0, _f(cfg, "remainder_bil_fraction")))
-        bil = round((1.0 - core) * dial, Q)
-        spy = round(1.0 - core - bil, Q)
+        bil = round(rest * dial, Q)
+        spy = round(rest - bil, Q)
         legs = ((_s(cfg, "core_symbol"), core),
                 (_s(cfg, "cash_symbol"), bil),
                 (_s(cfg, "off_symbol"), spy))
+    legs = tuple(legs) + tuple(book_legs)
 
     targets: dict = {}
     for symbol, weight in legs:
@@ -467,6 +582,10 @@ def eb_remainder_targets(w_held, cfg, trend_state="ON") -> dict:
 
         bil = (1 - w_held) * remainder_bil_fraction
         spy = 1 - w_held - bil
+
+    or, with a book configured for the state, that same `1 - w_held` split
+    across the book — the sweep funds the occupants the CURRENT state names,
+    never the ones the last plan happened to name.
 
     The core is REMOVED rather than targeted at zero: a target of zero is an
     exit instruction to `targets_to_orders`, so leaving it in would liquidate
@@ -506,6 +625,18 @@ def strategy_eb_universe(cfg) -> list:
         symbol = _s(cfg, key)
         if symbol and symbol not in out:
             out.append(symbol)
+    # The book legs LAST, in configured order, so adding a book cannot reorder
+    # the four legs every existing run already declares. The OFF book is
+    # declared only when the filter is on, for the same reason the risk-off leg
+    # is: with the filter off the state is always ON and an OFF-book leg can
+    # never be bought.
+    books = [eb_state_book(cfg, "ON")]
+    if eb_trend_enabled(cfg):
+        books.append(eb_state_book(cfg, "OFF"))
+    for book in books:
+        for symbol in book:
+            if symbol and symbol not in out:
+                out.append(symbol)
     return out
 
 
@@ -523,7 +654,9 @@ def eb_should_trade(session_id, w_target, w_held, cfg, cache,
          target of zero and waiting four days, or even one more session, to
          leave a 3x fund is the failure the vol transform exists to prevent.
          It re-arms harmlessly: once the exit fills, `w_held` is 0 and the
-         rule returns (False, 0.0);
+         rule returns (False, 0.0) — UNLESS a reachable book is configured,
+         in which case a zero core is a pure-book CONFIGURATION rather than
+         an exit, and the cadence below takes over;
       3. one decision per session otherwise, whatever the granularity;
       4. otherwise only the configured weekdays decide;
       5. otherwise a drift of at least `core_rebalance_band` trades, OR the
@@ -546,7 +679,16 @@ def eb_should_trade(session_id, w_target, w_held, cfg, cache,
         return (False, held)
 
     if target <= 0.0:
-        return (True, 0.0) if held > 0.0 else (False, held)
+        if held > 0.0:
+            return (True, 0.0)
+        if not _books_configured(cfg):
+            return (False, held)
+        # A PURE BOOK (`target_vol: 0` or `core_max_weight: 0`): the core is
+        # zero by configuration, not by an exit, and the book is the whole
+        # position. Falling through to the cadence is what lets it OPEN and
+        # ROTATE — the rules below all measure the core weight, and a book
+        # whose core is permanently 0 would otherwise read as "already at
+        # target, nothing to do" on every session forever.
 
     if (cache or {}).get(LAST_REBALANCE_KEY) == session_id:
         return (False, held)
@@ -554,6 +696,13 @@ def eb_should_trade(session_id, w_target, w_held, cfg, cache,
     days = rebalance_weekdays(cfg)
     if session_weekday(session_id) not in days:
         return (False, held)
+
+    if target <= 0.0:
+        # Only reachable with a book (see above). There is no core weight for
+        # the band to measure, so the decision weekday alone decides and
+        # `targets_to_orders`'s own `core_band_pct` is what suppresses churn,
+        # leg by leg, on a book that has not drifted.
+        return (True, 0.0)
 
     # An ABSENT key is not a rotation: on the first decision of a run there is
     # no executed book to rotate away from, and with the filter off the

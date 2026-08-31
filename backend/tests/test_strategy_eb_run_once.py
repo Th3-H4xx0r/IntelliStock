@@ -620,3 +620,176 @@ def test_a_zero_damp_exits_the_core_entirely_while_risk_off():
                                 data=trend_data(declining()),
                                 portfolio_emulator=emu, strategy_cache={})
     assert out.get("TQQQ") == -1
+
+
+# ── the remainder BOOKS through the broker contract ─────────────────────────
+#
+# A book is {SYMBOL: share of the remainder}. The default is {} on both states,
+# which is the single-occupant book this strategy shipped with.
+
+BOOK_PRICES = dict(GLD_PRICES, SMH=250.0, GDX=40.0, XLE=90.0)
+STATIC_BOOK = {"trend_on_book": {"SMH": 0.5, "GLD": 0.5}}
+BOOK_LEGS = ("TQQQ", "SPY", "BIL", "GLD", "SMH", "GDX", "XLE")
+
+
+def book_data(ref_bars):
+    return data_for(ref_bars, legs=BOOK_LEGS)
+
+
+def test_the_default_run_is_byte_identical_with_the_book_keys_removed():
+    """The differential: a default run with the two new keys deleted from the
+    config entirely must produce the SAME payload, cache and universe as one
+    carrying them. If it does not, the feature is not default-off."""
+    stripped = cfg()
+    stripped.pop("trend_on_book")
+    stripped.pop("trend_off_book")
+    runs = []
+    for config in (cfg(), stripped):
+        cache = {}
+        out = StrategyEb().run_once(["TQQQ"], PRICES, DECIDES, config, {},
+                                    data=data_for(alternating(0.01)),
+                                    portfolio_emulator=FakeEmulator(),
+                                    strategy_cache=cache)
+        runs.append((out, cache))
+    assert runs[0][0] == runs[1][0]
+    assert runs[0][1] == runs[1][1]
+    assert runs[0][0]["_nexus_discovered"] == ["QQQ", "TQQQ", "SPY", "BIL"]
+
+
+def test_a_static_blend_needs_no_state_machine_at_all():
+    """`trend_filter_bars = 0` with a non-empty ON book: the state is pinned
+    ON, so the book is simply the remainder, on every session, forever."""
+    cache = {}
+    out = StrategyEb().run_once(["TQQQ"], BOOK_PRICES, DECIDES,
+                                cfg(**STATIC_BOOK), {},
+                                data=book_data(alternating(0.01)),
+                                portfolio_emulator=FakeEmulator(),
+                                strategy_cache=cache)
+    assert cache["_strategy_eb_last"]["targets"] == {"TQQQ": 0.40,
+                                                     "SMH": 0.30, "GLD": 0.30}
+    assert out.get("SMH") == 1 and out.get("GLD") == 1 and out.get("TQQQ") == 1
+    assert "SPY" not in out
+    assert out["_nexus_discovered"] == ["QQQ", "TQQQ", "SPY", "BIL",
+                                        "SMH", "GLD"]
+    # Nothing about the state machine may appear: there is no machine here.
+    assert "_strategy_eb_trend_state" not in cache
+
+
+def test_a_static_blend_ignores_a_stale_persisted_off_state():
+    """With the filter off the state is PINNED ON. A leftover OFF in the cache
+    from an earlier config must not route the book through legs this run never
+    even declared."""
+    cache = {"_strategy_eb_trend_state": "OFF"}
+    StrategyEb().run_once(["TQQQ"], BOOK_PRICES, DECIDES,
+                          cfg(**STATIC_BOOK, trend_off_book={"GDX": 1.0},
+                              risk_off_symbol="GLD"), {},
+                          data=book_data(alternating(0.01)),
+                          portfolio_emulator=FakeEmulator(),
+                          strategy_cache=cache)
+    assert cache["_strategy_eb_last"]["targets"] == {"TQQQ": 0.40,
+                                                     "SMH": 0.30, "GLD": 0.30}
+
+
+PURE = {"target_vol": 0.0, "trend_filter_bars": 100, "risk_off_symbol": "GLD",
+        "trend_on_book": {"SMH": 0.3, "GLD": 0.7},
+        "trend_off_book": {"GDX": 0.5, "XLE": 0.5}}
+
+
+def test_a_pure_book_holds_no_core_and_buys_the_whole_book():
+    cache = {}
+    out = StrategyEb().run_once(["TQQQ"], BOOK_PRICES, DECIDES, cfg(**PURE),
+                                {}, data=book_data(alternating(0.01)),
+                                portfolio_emulator=FakeEmulator(),
+                                strategy_cache=cache)
+    assert cache["_strategy_eb_last"]["targets"] == {"SMH": 0.30, "GLD": 0.70}
+    assert out.get("SMH") == 1 and out.get("GLD") == 1
+    assert "TQQQ" not in out
+    # Largest intended weight first: GLD asks for its whole 70% of a $10,000
+    # NAV and SMH gets what is left after the 0.5% cost haircut.
+    sizes = out["_nexus_position_sizes"]
+    assert sizes["GLD"]["buy_cash"] == 7000.0
+    assert sizes["SMH"]["buy_cash"] == 2985.0
+
+
+def test_a_pure_book_rotates_the_whole_book_when_the_state_flips():
+    """The core band cannot see a book rotation — there is no core. The
+    executed-state clause is what forces it, and the plan must SELL the ON book
+    as well as buy the OFF one."""
+    emu = FakeEmulator(cash=0.0, positions={"SMH": 12.0, "GLD": 35.0})
+    cache = {"_strategy_eb_last_state": "ON"}
+    out = StrategyEb().run_once(["TQQQ"], BOOK_PRICES, DECIDES, cfg(**PURE),
+                                {}, data=book_data(declining()),
+                                portfolio_emulator=emu, strategy_cache=cache)
+    assert cache["_strategy_eb_trend_state"] == "OFF"
+    assert cache["_strategy_eb_last"]["targets"] == {"GDX": 0.50, "XLE": 0.50}
+    assert out.get("SMH") == -1 and out.get("GLD") == -1
+    assert cache["_strategy_eb_last_state"] == "OFF"
+
+
+def test_a_pure_book_that_has_not_drifted_sends_nothing():
+    """The weekday alone decides for a pure book, so the per-leg band in
+    `targets_to_orders` is the only churn control left. It must hold."""
+    emu = FakeEmulator(cash=0.0, positions={"SMH": 12.0, "GLD": 35.0})
+    out = StrategyEb().run_once(["TQQQ"], BOOK_PRICES, DECIDES, cfg(**PURE),
+                                {}, data=book_data(alternating(0.01)),
+                                portfolio_emulator=emu,
+                                strategy_cache={"_strategy_eb_last_state":
+                                                "ON"})
+    assert out == {}
+
+
+def test_a_pure_book_run_never_declares_the_levered_core_as_a_buy():
+    """`target_vol = 0` is a CONFIGURED zero, not a refusal: the run still
+    declares its universe and still trades."""
+    out = StrategyEb().run_once(["TQQQ"], BOOK_PRICES, DECIDES, cfg(**PURE),
+                                {}, data=book_data(alternating(0.01)),
+                                portfolio_emulator=FakeEmulator(),
+                                strategy_cache={})
+    assert set(out["_nexus_executable_buys"]) == {"SMH", "GLD"}
+    assert out["_nexus_sell_enforcement"] == []
+    assert set(out["_nexus_discovered"]) == {"QQQ", "TQQQ", "SPY", "BIL",
+                                             "GLD", "SMH", "GDX", "XLE"}
+
+
+def test_the_sweep_deploys_idle_cash_into_the_current_state_book():
+    emu = FakeEmulator(cash=6000.0, positions={}, prices=BOOK_PRICES)
+    out = StrategyEb().run_once(
+        ["TQQQ"], BOOK_PRICES, SKIPS, cfg(**PURE), {},
+        data=book_data(declining(end_day=THURSDAY)),
+        portfolio_emulator=emu,
+        strategy_cache={"_strategy_eb_trend_state": "OFF"})
+    assert out.get("GDX") == 1 and out.get("XLE") == 1
+    assert "SMH" not in out and "GLD" not in out
+
+
+def test_a_dict_valued_config_key_survives_the_api_round_trip():
+    """The header is what `/strategies/available` serves and what the UI seeds
+    an instance from, and `PUT /strategies/{id}` writes back what it was given.
+    A dict-valued key has to survive BOTH: the JSON header parse in
+    `strategies_meta`, and the payload normalisation in `interactive_utils`
+    that every write goes through."""
+    from strategies_meta import _parse_header_meta, get_available_strategies
+
+    path = os.path.join(_backend, "strategies", "strategy_eb.py")
+    schema, _ = _parse_header_meta(open(path).read())
+    assert schema["config"]["trend_on_book"] == {}
+    assert schema["config"]["trend_off_book"] == {}
+
+    entry = next(s for s in get_available_strategies()
+                 if s.get("id") == "strategy_eb")
+    assert entry["schema"]["config"]["trend_on_book"] == {}
+
+    from interactive_utils import _normalize_strategy_payload_item
+
+    books = {"trend_on_book": {"SMH": 0.3, "GLD": 0.7},
+             "trend_off_book": {"GDX": 0.5, "XLE": 0.5}}
+    payload = {"strategy": "strategy_eb", "weight": 1.0,
+               "config": dict(DEFAULTS, **books)}
+    # Through JSON, as the HTTP body actually arrives.
+    normalized = _normalize_strategy_payload_item(
+        json.loads(json.dumps(payload)), strict=True)
+    assert normalized["config"]["trend_on_book"] == books["trend_on_book"]
+    assert normalized["config"]["trend_off_book"] == books["trend_off_book"]
+    # And back out again, as the row is stored and re-read.
+    assert json.loads(json.dumps(normalized))["config"]["trend_on_book"] == {
+        "SMH": 0.3, "GLD": 0.7}

@@ -22,6 +22,7 @@ from strategy_eb import (  # noqa: E402
     eb_core_weight,
     eb_remainder_targets,
     eb_should_trade,
+    eb_state_book,
     eb_targets,
     eb_trend_state,
     rebalance_weekdays,
@@ -642,3 +643,298 @@ def test_the_default_state_argument_never_rotates():
     assert eb_should_trade(WED, 0.40, 0.35, cfg(), {}) == (False, 0.35)
     assert eb_should_trade(WED, 0.40, 0.35, cfg(),
                            {LAST_STATE_KEY: "ON"}) == (False, 0.35)
+
+
+# ── the remainder BOOKS: many occupants instead of one ──────────────────────
+#
+# A book is {SYMBOL: weight}. The remainder (1 - core) is split across it by
+# weight; whatever the weights leave unspent goes to the SINGLE occupant the
+# state would have used on its own, which is what makes an empty book — the
+# default — the code path that existed before this feature.
+
+ON_BOOK = {"trend_on_book": {"SMH": 0.5, "GLD": 0.5}}
+OFF_BOOK = {"trend_off_book": {"GDX": 0.5, "XLE": 0.5}}
+
+
+def test_both_books_are_empty_by_default():
+    assert eb_state_book(cfg(), "ON") == {}
+    assert eb_state_book(cfg(), "OFF") == {}
+    assert DEFAULTS["trend_on_book"] == {}
+    assert DEFAULTS["trend_off_book"] == {}
+
+
+def test_a_book_uppercases_its_symbols_and_accumulates_duplicates():
+    got = eb_state_book(cfg(trend_on_book={"smh": 0.2, "SMH": 0.1}), "ON")
+    assert got == {"SMH": 0.3}
+
+
+def test_a_book_drops_empty_symbols_and_non_positive_weights():
+    """A zero or negative weight is not a short leg — this book is long-only
+    and the weights are shares of a remainder that is already >= 0."""
+    got = eb_state_book(cfg(trend_on_book={"SMH": 0.5, "": 0.2, "GLD": 0.0,
+                                           "XLE": -0.3, "IWM": "junk"}), "ON")
+    assert got == {"SMH": 0.5}
+
+
+def test_a_book_summing_past_one_is_renormalised_not_clipped():
+    """Clipping would silently drop whichever leg came last. Renormalising
+    keeps every leg's SHARE of the remainder, which is what the operator
+    wrote."""
+    got = eb_state_book(cfg(trend_on_book={"A": 1.0, "B": 3.0}), "ON")
+    assert got == {"A": 0.25, "B": 0.75}
+
+
+def test_a_book_that_is_not_a_dict_is_no_book_at_all():
+    for junk in (None, "", [], "SMH", 3):
+        assert eb_state_book(cfg(trend_on_book=junk), "ON") == {}, junk
+
+
+def test_each_state_reads_its_own_book():
+    both = cfg(**ON_BOOK, **OFF_BOOK)
+    assert eb_state_book(both, "ON") == {"SMH": 0.5, "GLD": 0.5}
+    assert eb_state_book(both, "OFF") == {"GDX": 0.5, "XLE": 0.5}
+
+
+def test_the_on_book_splits_the_whole_remainder_by_weight():
+    got = eb_targets(0.40, cfg(**ON_BOOK))
+    assert got == {"TQQQ": 0.40, "SMH": 0.30, "GLD": 0.30}
+
+
+def test_a_book_that_does_not_spend_the_remainder_leaves_the_rest_in_spy():
+    """The shortfall is not cash by accident: it goes to the SAME occupant the
+    state would have used with no book at all."""
+    got = eb_targets(0.40, cfg(trend_on_book={"SMH": 0.5}))
+    assert got == {"TQQQ": 0.40, "SMH": 0.30, "SPY": 0.30}
+
+
+def test_the_shortfall_still_follows_the_bil_dial():
+    """The dial and the book are independent levers. A book that spends half
+    the remainder must not silently disable the dial on the other half."""
+    got = eb_targets(0.40, cfg(trend_on_book={"SMH": 0.5},
+                               remainder_bil_fraction=1.0))
+    assert got == {"TQQQ": 0.40, "SMH": 0.30, "BIL": 0.30}
+
+
+def test_a_renormalised_book_leaves_no_shortfall_at_all():
+    got = eb_targets(0.40, cfg(trend_on_book={"A": 1.0, "B": 3.0}))
+    assert got == {"TQQQ": 0.40, "A": 0.15, "B": 0.45}
+    assert "SPY" not in got
+
+
+def test_the_off_book_splits_the_remainder_while_risk_off():
+    got = eb_targets(0.40, cfg(**TREND, risk_off_symbol="GLD", **OFF_BOOK),
+                     "OFF")
+    assert got == {"TQQQ": 0.40, "GDX": 0.30, "XLE": 0.30}
+
+
+def test_an_off_book_shortfall_falls_back_to_the_risk_off_leg():
+    got = eb_targets(0.40, cfg(**TREND, risk_off_symbol="GLD",
+                               trend_off_book={"GDX": 0.5}), "OFF")
+    assert got == {"TQQQ": 0.40, "GDX": 0.30, "GLD": 0.30}
+
+
+def test_an_off_book_shortfall_with_no_risk_off_leg_falls_back_to_cash():
+    got = eb_targets(0.40, cfg(**TREND, trend_off_book={"GDX": 0.5}), "OFF")
+    assert got == {"TQQQ": 0.40, "GDX": 0.30, "BIL": 0.30}
+
+
+def test_each_state_uses_only_its_own_book():
+    both = cfg(**TREND, **ON_BOOK, **OFF_BOOK, risk_off_symbol="GLD")
+    assert eb_targets(0.40, both, "ON") == {"TQQQ": 0.40, "SMH": 0.30,
+                                            "GLD": 0.30}
+    assert eb_targets(0.40, both, "OFF") == {"TQQQ": 0.40, "GDX": 0.30,
+                                             "XLE": 0.30}
+
+
+def test_the_on_book_applies_with_the_trend_filter_switched_off():
+    """The static blend: no state machine at all, the book IS the remainder.
+    `trend_filter_bars = 0` pins the state ON, so the ON book is the only one
+    that can ever be read."""
+    got = eb_targets(0.40, cfg(trend_filter_bars=0, **ON_BOOK, **OFF_BOOK))
+    assert got == {"TQQQ": 0.40, "SMH": 0.30, "GLD": 0.30}
+
+
+def test_every_book_target_set_sums_to_exactly_one():
+    books = ({"SMH": 0.5, "GLD": 0.5}, {"SMH": 0.33, "GLD": 0.33, "A": 0.33},
+             {"A": 1.0}, {"A": 0.1}, {"A": 2.0, "B": 1.0}, {"A": 1 / 3})
+    for book in books:
+        for w in (0.0, 0.05, 0.35, 0.40, 0.65, 1.0):
+            got = eb_targets(w, cfg(trend_on_book=book))
+            assert round(sum(got.values()), 6) == 1.0, (book, w)
+
+
+def test_the_remainder_plan_carries_the_book_of_the_current_state():
+    """Otherwise the sweep deploys idle cash into the single occupant the book
+    was configured to replace."""
+    got = eb_remainder_targets(0.40, cfg(**TREND, **OFF_BOOK), "OFF")
+    assert got == {"GDX": 0.30, "XLE": 0.30}
+    assert eb_remainder_targets(0.40, cfg(**TREND, **ON_BOOK, **OFF_BOOK),
+                                "ON") == {"SMH": 0.30, "GLD": 0.30}
+
+
+def test_a_book_leg_colliding_with_a_fallback_leg_accumulates():
+    """SPY in the book AND as the shortfall occupant is one position, not a
+    duplicated key that overwrites half the weight."""
+    got = eb_targets(0.40, cfg(trend_on_book={"SPY": 0.5}))
+    assert got == {"TQQQ": 0.40, "SPY": 0.60}
+
+
+# ── the universe carries the book legs ──────────────────────────────────────
+
+def test_the_universe_appends_the_book_legs_after_the_named_ones():
+    got = strategy_eb_universe(cfg(**TREND, risk_off_symbol="GLD",
+                                   trend_on_book={"SMH": 0.6, "IWM": 0.4},
+                                   **OFF_BOOK))
+    assert got == ["QQQ", "TQQQ", "SPY", "BIL", "GLD", "SMH", "IWM",
+                   "GDX", "XLE"]
+
+
+def test_the_universe_omits_the_off_book_while_the_filter_is_off():
+    """Same reason the risk-off leg is omitted: with the filter off the state
+    is always ON, so an OFF-book leg can never be bought and the broker would
+    fetch bars and carry a price for nothing."""
+    assert strategy_eb_universe(cfg(**ON_BOOK, **OFF_BOOK)) == [
+        "QQQ", "TQQQ", "SPY", "BIL", "SMH", "GLD"]
+
+
+def test_the_universe_deduplicates_book_legs():
+    assert strategy_eb_universe(cfg(trend_on_book={"SPY": 0.5,
+                                                   "BIL": 0.5})) == [
+        "QQQ", "TQQQ", "SPY", "BIL"]
+
+
+def test_the_universe_is_unchanged_by_empty_books():
+    assert strategy_eb_universe(cfg()) == ["QQQ", "TQQQ", "SPY", "BIL"]
+
+
+# ── a PURE BOOK: core weight 0, the books carry the whole NAV ───────────────
+#
+# Two configs express it, and BOTH resolve to a legitimate zero rather than to
+# a refusal: `target_vol = 0` makes w_raw itself 0, and `core_max_weight = 0`
+# clamps whatever w_raw is to 0. Neither is the None that means "cannot
+# measure my own risk" — that is reserved for a short history, a NaN close and
+# a flat tape, which still refuse with a pure book.
+
+def test_a_zero_vol_target_sizes_the_core_at_zero_rather_than_refusing():
+    assert eb_core_weight(alternating(0.01), cfg(target_vol=0.0)) == 0.0
+
+
+def test_a_zero_core_cap_sizes_the_core_at_zero_rather_than_refusing():
+    assert eb_core_weight(alternating(0.001), cfg(core_max_weight=0.0)) == 0.0
+
+
+def test_a_pure_book_still_refuses_when_it_cannot_measure_the_tape():
+    """The zero core is a CONFIGURED zero. An unmeasurable tape must still
+    return None, or a pure-book run would trade straight through an outage."""
+    pure = cfg(target_vol=0.0, **ON_BOOK)
+    assert eb_core_weight([100.0] * 5, pure) is None
+    assert eb_core_weight([100.0] * 101, pure) is None
+
+
+def test_a_pure_book_target_is_the_book_itself():
+    got = eb_targets(0.0, cfg(target_vol=0.0,
+                              trend_on_book={"SMH": 0.3, "GLD": 0.7}))
+    assert got == {"SMH": 0.30, "GLD": 0.70}
+
+
+def test_a_pure_book_trades_on_its_decision_weekday_from_a_flat_account():
+    """With no core weight there is nothing for the band to measure, so the
+    weekday alone decides and `targets_to_orders`'s own per-leg band is what
+    suppresses churn. Without this clause the exit-to-zero rule answers
+    (False, 0.0) forever and a pure book never opens a position."""
+    pure = cfg(target_vol=0.0, **ON_BOOK)
+    assert eb_should_trade(WED, 0.0, 0.0, pure, {}) == (True, 0.0)
+
+
+def test_a_pure_book_still_obeys_the_weekday_cadence():
+    pure = cfg(target_vol=0.0, **ON_BOOK)
+    assert eb_should_trade(THU, 0.0, 0.0, pure, {}) == (False, 0.0)
+    assert eb_should_trade(MON, 0.0, 0.0, pure, {}) == (False, 0.0)
+
+
+def test_a_pure_book_still_decides_once_per_session():
+    pure = cfg(target_vol=0.0, **ON_BOOK)
+    assert eb_should_trade(WED, 0.0, 0.0, pure,
+                           {LAST_REBALANCE_KEY: WED}) == (False, 0.0)
+
+
+def test_a_pure_book_holding_a_core_exits_it_unconditionally():
+    """Rule 2 is untouched: a core to leave is left on any session, book or
+    no book."""
+    pure = cfg(target_vol=0.0, **ON_BOOK)
+    assert eb_should_trade(THU, 0.0, 0.40, pure, {}) == (True, 0.0)
+
+
+def test_a_flat_account_with_no_book_still_never_trades_at_a_zero_target():
+    """The byte-identity clause: without a book a zero target from flat is
+    exactly what it has always been — nothing to do, on every weekday."""
+    for session in (WED, THU, MON):
+        assert eb_should_trade(session, 0.0, 0.0, cfg(), {}) == (False, 0.0)
+
+
+def test_a_pure_book_rotates_when_the_state_flips():
+    pure = cfg(**TREND, target_vol=0.0, **ON_BOOK, **OFF_BOOK)
+    assert eb_should_trade(WED, 0.0, 0.0, pure,
+                           {LAST_STATE_KEY: "ON"}, "OFF") == (True, 0.0)
+
+
+# ── the differential: with no books configured, NOTHING moved ───────────────
+
+def test_the_book_free_book_is_the_pre_feature_formula_exactly():
+    """Recomputed from the docstring formula rather than from the
+    implementation: core = w, bil = (1-w)*dial, spy = 1-core-bil, and the whole
+    remainder to the occupant while OFF."""
+    for w in (0.0, 0.05, 0.2, 0.35, 0.4, 0.65, 1.0):
+        for dial in (0.0, 0.25, 0.5, 1.0):
+            base = cfg(remainder_bil_fraction=dial)
+            expected = {}
+            bil = round((1.0 - w) * dial, 6)
+            spy = round(1.0 - w - bil, 6)
+            for symbol, weight in (("TQQQ", w), ("BIL", bil), ("SPY", spy)):
+                if weight > 0:
+                    expected[symbol] = round(expected.get(symbol, 0.0)
+                                             + weight, 6)
+            assert eb_targets(w, base) == expected, (w, dial)
+            assert eb_targets(w, base, "ON") == expected, (w, dial)
+
+            off = cfg(**TREND, risk_off_symbol="GLD",
+                      remainder_bil_fraction=dial)
+            expected_off = {}
+            if w > 0:
+                expected_off["TQQQ"] = round(w, 6)
+            if round(1.0 - w, 6) > 0:
+                expected_off["GLD"] = round(1.0 - w, 6)
+            assert eb_targets(w, off, "OFF") == expected_off, (w, dial)
+
+
+def test_a_pure_book_named_on_one_state_only_still_rotates_off_it():
+    """A book on the ON state alone must still be SELLABLE when the state
+    flips: the rotation is decided in the OFF state, where that book is empty,
+    and the whole NAV then belongs to the risk-off occupant."""
+    pure = cfg(**TREND, target_vol=0.0, risk_off_symbol="GLD", **ON_BOOK)
+    assert eb_should_trade(WED, 0.0, 0.0, pure, {LAST_STATE_KEY: "ON"},
+                           "OFF") == (True, 0.0)
+    assert eb_targets(0.0, pure, "OFF") == {"GLD": 1.0}
+
+
+def test_an_off_book_the_filter_can_never_reach_is_not_a_book_at_all():
+    """With the filter off the OFF book is unreachable, so a config that sets
+    only that one must behave exactly as it did before these keys existed —
+    including at a zero core, where the pre-feature answer is "nothing to
+    do"."""
+    unreachable = cfg(target_vol=0.0, trend_off_book={"GDX": 1.0})
+    assert eb_should_trade(WED, 0.0, 0.0, unreachable, {}) == (False, 0.0)
+    assert strategy_eb_universe(unreachable) == ["QQQ", "TQQQ", "SPY", "BIL"]
+
+
+def test_a_parsed_book_is_freshly_allocated_so_defaults_cannot_be_mutated():
+    """`{**DEFAULTS, **config}` shares the default dict by reference, so a
+    caller that mutated a returned book would edit every future run's
+    default."""
+    book = eb_state_book(cfg(**ON_BOOK), "ON")
+    book["JUNK"] = 9.0
+    assert eb_state_book(cfg(**ON_BOOK), "ON") == {"SMH": 0.5, "GLD": 0.5}
+    empty = eb_state_book(cfg(), "ON")
+    empty["JUNK"] = 9.0
+    assert DEFAULTS["trend_on_book"] == {}
+    assert DEFAULTS["trend_off_book"] == {}

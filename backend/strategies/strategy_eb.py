@@ -1,4 +1,4 @@
-# INTELLISTOCK_SCHEMA: {"strategy": "strategy_eb", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_eb_enabled": false, "core_symbol": "TQQQ", "core_leverage": 3.0, "reference_symbol": "QQQ", "off_symbol": "SPY", "cash_symbol": "BIL", "target_vol": 0.2, "core_max_weight": 0.65, "weight_step": 0.05, "vol_fast_bars": 20, "vol_slow_bars": 60, "min_history_bars": 70, "core_rebalance_band": 0.1, "rebalance_weekdays": [2], "remainder_bil_fraction": 0.0, "trend_filter_bars": 0, "trend_off_enter_pct": 0.01, "trend_on_exit_pct": 0.02, "risk_off_symbol": "", "core_off_damp": 1.0, "cash_sweep_min_pct": 0.02, "core_band_pct": 0.03, "min_order_usd": 25.0, "cost_haircut_pct": 0.005, "broker_max_single_position_pct": 0.95, "honour_single_position_cap": true, "live_max_order_fraction": 0.7, "live_max_symbol_fraction": 0.7, "live_max_leveraged_fraction": 0.7, "live_soft_drawdown": 0.25, "live_hard_drawdown": 0.35, "live_kill_drawdown": 0.45}}
+# INTELLISTOCK_SCHEMA: {"strategy": "strategy_eb", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_eb_enabled": false, "core_symbol": "TQQQ", "core_leverage": 3.0, "reference_symbol": "QQQ", "off_symbol": "SPY", "cash_symbol": "BIL", "target_vol": 0.2, "core_max_weight": 0.65, "weight_step": 0.05, "vol_fast_bars": 20, "vol_slow_bars": 60, "min_history_bars": 70, "core_rebalance_band": 0.1, "rebalance_weekdays": [2], "remainder_bil_fraction": 0.0, "trend_filter_bars": 0, "trend_off_enter_pct": 0.01, "trend_on_exit_pct": 0.02, "risk_off_symbol": "", "core_off_damp": 1.0, "trend_on_book": {}, "trend_off_book": {}, "cash_sweep_min_pct": 0.02, "core_band_pct": 0.03, "min_order_usd": 25.0, "cost_haircut_pct": 0.005, "broker_max_single_position_pct": 0.95, "honour_single_position_cap": true, "live_max_order_fraction": 0.7, "live_max_symbol_fraction": 0.7, "live_max_leveraged_fraction": 0.7, "live_soft_drawdown": 0.25, "live_hard_drawdown": 0.35, "live_kill_drawdown": 0.45}}
 # INTELLISTOCK_DESCRIPTION: Efficient beta — a volatility-targeted leveraged Nasdaq core with the de-levered remainder in SPY, rebalanced once a week on a fixed weekday, every weight quantized and banded so it trades rarely. A risk transform, not an alpha: it makes no directional prediction and holds less of the same position when that position is more dangerous. One lever, remainder_bil_fraction, moves the remainder from SPY toward T-bills, trading CAGR for drawdown.
 """Strategy EB wrapper: cache state, order emission, broker contract.
 
@@ -24,6 +24,7 @@ from strategy_eb import (  # noqa: E402
     eb_core_weight,
     eb_remainder_targets,
     eb_should_trade,
+    eb_state_book,
     eb_targets,
     eb_trend_enabled,
     eb_trend_state,
@@ -215,7 +216,13 @@ class StrategyEb:
         # it on every session is a different, twitchier path with more flips,
         # and each flip rotates the entire remainder. Off-days read the
         # persisted state so the sweep still knows which asset it is funding.
-        trend_state = _state(cache.get(_TREND_STATE_KEY))
+        # With the filter off the state is not merely "ON by default" — it is
+        # pinned ON, exactly as `eb_trend_state` pins it. A persisted OFF left
+        # in the cache by an earlier config would otherwise still route the
+        # whole remainder to the risk-off leg, or to the OFF book, on a run
+        # whose universe never even declared them.
+        trend_state = (_state(cache.get(_TREND_STATE_KEY))
+                       if eb_trend_enabled(cfg) else "ON")
         if (eb_trend_enabled(cfg)
                 and session_weekday(session_id) in rebalance_weekdays(cfg)):
             trend_state = eb_trend_state(closes, cache.get(_TREND_STATE_KEY),
@@ -362,6 +369,7 @@ class StrategyEb:
             owned = {_s(cfg, "off_symbol"), _s(cfg, "cash_symbol")}
             if eb_trend_enabled(cfg):
                 owned.add(_s(cfg, "risk_off_symbol"))
+            owned |= set(eb_state_book(cfg, trend_state))
             owned.discard(_s(cfg, "core_symbol"))
         owned.discard("")
         if not targets:
