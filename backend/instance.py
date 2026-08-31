@@ -70,20 +70,48 @@ def _stop_alpha_watchdog():
     alpha_watchdog_process = None
 
 
-def _maybe_start_alpha_watchdog(instance_id_val):
+def _watchdog_subprocess_env(brokerage_doc):
+    """Env for the watchdog subprocess when the per-instance doc flag enables
+    it without deployment-scoped credentials. watchdog_main's own docstring
+    blesses this: "If Alpaca cannot issue a separately scoped credential for
+    the account, the operator may set these to the shared runtime credential,
+    accepting the residual risk recorded in the LIVE_40 sign-off." We forward
+    the instance's own brokerage credentials to the SUBPROCESS ONLY — never
+    into this process's environment, never onto the command line."""
+    env = os.environ.copy()
+    doc = brokerage_doc if isinstance(brokerage_doc, dict) else {}
+    if not env.get("ALPACA_WATCHDOG_KEY") and doc.get("alpaca_key"):
+        env["ALPACA_WATCHDOG_KEY"] = str(doc["alpaca_key"])
+    if not env.get("ALPACA_WATCHDOG_SECRET") and doc.get("alpaca_secret"):
+        env["ALPACA_WATCHDOG_SECRET"] = str(doc["alpaca_secret"])
+    env.setdefault(
+        "ALPACA_WATCHDOG_PAPER",
+        "1" if doc.get("alpaca_paper") else "0",
+    )
+    return env
+
+
+def _maybe_start_alpha_watchdog(instance_id_val, instance_doc=None,
+                                brokerage_doc=None):
     """Start the independent mark watchdog alongside the live broker when
-    ALPHA_MARK_WATCHDOG_ENABLED=1. Default DISABLED until the RethinkDB
-    table/index migration and scoped watchdog credentials are deployed
-    (Task 6 Step 9). Restart-safe: any prior watchdog is stopped first."""
+    ALPHA_MARK_WATCHDOG_ENABLED=1, or when the Instances row opts in via
+    `alpha_watchdog_enabled: true` (2026-08-31: the order gate requires
+    watchdog control-health for ALL new exposure, so a run_once paper
+    instance without the sidecar can never buy — strategy-eb tick #1).
+    Default DISABLED. Restart-safe: any prior watchdog is stopped first."""
     global alpha_watchdog_process
-    if os.environ.get("ALPHA_MARK_WATCHDOG_ENABLED", "0") != "1":
+    _env_enabled = os.environ.get("ALPHA_MARK_WATCHDOG_ENABLED", "0") == "1"
+    _doc_enabled = bool((instance_doc or {}).get("alpha_watchdog_enabled"))
+    if not (_env_enabled or _doc_enabled):
         return False
     _stop_alpha_watchdog()
     try:
         from benchmark_alpha.watchdog import build_watchdog_command
         cmd = build_watchdog_command(str(instance_id_val),
                                      python_executable="python")
-        alpha_watchdog_process = subprocess.Popen(cmd, cwd=BACKEND_DIR)
+        alpha_watchdog_process = subprocess.Popen(
+            cmd, cwd=BACKEND_DIR,
+            env=_watchdog_subprocess_env(brokerage_doc))
         import atexit
         atexit.register(_stop_alpha_watchdog)
         intellistock_logger.log(
@@ -568,7 +596,8 @@ def start_broker(symbols):
         and str(_brokerage_doc.get("brokerage_type") or "").lower()
         == "alpaca"
     ):
-        _watchdog_started = _maybe_start_alpha_watchdog(instance_id)
+        _watchdog_started = _maybe_start_alpha_watchdog(
+            instance_id, _instance_doc, _brokerage_doc)
     if _funded_alpaca and not _watchdog_started:
         try:
             broker_process.terminate()

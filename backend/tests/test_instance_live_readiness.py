@@ -17,7 +17,7 @@ def test_live_broker_gate_runs_immediately_before_spawn(monkeypatch):
     monkeypatch.setattr(inst, "_crash_entered", False)
     monkeypatch.setattr(inst, "_crash_loop_latched", False)
     monkeypatch.setattr(inst, "_broker_restart_times", [])
-    monkeypatch.setattr(inst, "_maybe_start_alpha_watchdog", lambda instance_id: None)
+    monkeypatch.setattr(inst, "_maybe_start_alpha_watchdog", lambda *a, **k: None)
     monkeypatch.setattr(
         inst, "_load_instance_and_brokerage",
         lambda _: (
@@ -42,7 +42,7 @@ def test_paper_broker_spawn_does_not_require_live_eligible_report(monkeypatch):
     monkeypatch.setattr(inst, "_crash_entered", False)
     monkeypatch.setattr(inst, "_crash_loop_latched", False)
     monkeypatch.setattr(inst, "_broker_restart_times", [])
-    monkeypatch.setattr(inst, "_maybe_start_alpha_watchdog", lambda instance_id: None)
+    monkeypatch.setattr(inst, "_maybe_start_alpha_watchdog", lambda *a, **k: None)
     monkeypatch.setattr(
         inst, "_load_instance_and_brokerage",
         lambda _: (
