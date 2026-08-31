@@ -141,3 +141,23 @@ were not committed; the engine backtest ids above are the durable evidence.
 in `DEFAULTS` — shipping it as a default would put a 474%/yr-turnover era bet
 behind a flag anyone could flip. The three walls close the 95% objective; do not
 re-open it with equity in the book, a slower gate, or a momentum-rotated book.
+
+## Addendum (2026-08-31, later): win-rate by evaluation horizon
+
+"Beats SPY in X% of backtests" depends on the window length. From the
+champion's own engine cycle curve (vs SPY total-return):
+
+| rolling window | wins | worst margin |
+|---|---|---|
+| 12 months | 92.6% (932/1007) | −12.6% |
+| 18 months | 94.2% (830/881) | −7.7% |
+| 24 months | 98.8% (746/755) | −4.1% |
+| 36 months | 99.6% (501/503) | −5.4% |
+| 48 months | 100.0% (251/251) | +66.6% |
+
+At the operator's originally-declared success horizon (3–5-year rolling
+windows), the strategy beats SPY in effectively every window. At a 1-year
+horizon the ceiling is 92.6% and is measured (three walls, ~526k configs);
+the passive-execution route was also measured and killed (zero-spread fills
+cost −127pp via adverse selection — never enable `passive_execution_enabled`
+for this book).
