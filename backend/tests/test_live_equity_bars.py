@@ -331,12 +331,15 @@ def test_the_hook_is_a_live_sibling_of_the_crypto_branch():
     ]
     assert len(crypto_ifs) == 1, "the live crypto bars branch moved"
     orelse = crypto_ifs[0].orelse
-    assert len(orelse) == 1 and isinstance(orelse[0], ast.If), \
-        "the equity carrier must be an elif on the crypto branch"
-    equity = ast.dump(orelse[0])
-    assert "'IDLE'" in ast.dump(orelse[0].test)
+    # 2026-08-31: the equity carrier is the crypto branch's ELSE — it runs on
+    # every live tick, IDLE included. The first paper boot proved the old
+    # tick-mode gate wrong: data must not wait for a mode; trading stays gated
+    # by the strategy's own session/cadence rules.
+    assert orelse, "the equity carrier must live on the crypto branch's orelse"
+    equity = "".join(ast.dump(n) for n in orelse)
     assert "_strategy_eb_universe_symbols" in equity
     assert "build_live_equity_data" in equity
+    assert "'IDLE'" not in equity.split("build_live_equity_data")[0].split("_strategy_eb_universe_symbols")[0]
     assert "_live_equity_bars_last_good" in equity
     # A failed fetch must empty the specs, not run the strategies blind.
     assert "_rr_specs_eff" in equity
@@ -368,7 +371,9 @@ def test_the_sole_lane_guard_wraps_the_fetch():
               and "_is_crypto_instance_runtime" in ast.dump(n.test)
               and "_tick_mode" in ast.dump(n.test)]
     assert len(crypto) == 1, "the live crypto bars branch moved"
-    equity = crypto[0].orelse[0]
+    # 2026-08-31: the fetch runs on EVERY live tick (IDLE included) — the
+    # equity hook is the crypto branch's whole orelse, no tick-mode wrapper.
+    equity = ast.Module(body=list(crypto[0].orelse), type_ignores=[])
     guards = [n for n in ast.walk(equity)
               if isinstance(n, ast.If) and "_leb_others" in ast.dump(n.test)]
     assert len(guards) == 1, "the sole-lane guard is missing"

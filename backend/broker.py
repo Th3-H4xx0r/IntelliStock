@@ -10222,7 +10222,7 @@ if mode == MODE_BACKTEST:
                 _PE.set_passive_execution(
                     _pe_cfg.get("passive_execution_enabled"),
                     _pe_cfg.get("passive_expire_quotes", 8))
-                _log(f"[passive] limit execution ENABLED from config "
+                _log(f"[passive] limit execution {'ENABLED' if _pe_cfg.get('passive_execution_enabled') else 'disabled'} from config "
                      f"(expire_after={_pe_cfg.get('passive_expire_quotes', 8)} quotes) "
                      f"— orders rest at the decision price instead of crossing",
                      "cyan")
@@ -11529,7 +11529,7 @@ if mode != MODE_BACKTEST:
                 _PE.set_passive_execution(
                     _pe_cfg.get("passive_execution_enabled"),
                     _pe_cfg.get("passive_expire_quotes", 8))
-                _log(f"[passive] limit execution ENABLED from config "
+                _log(f"[passive] limit execution {'ENABLED' if _pe_cfg.get('passive_execution_enabled') else 'disabled'} from config "
                      f"(expire_after={_pe_cfg.get('passive_expire_quotes', 8)} quotes) "
                      f"— orders rest at the decision price instead of crossing",
                      "cyan")
@@ -14392,7 +14392,13 @@ while not shutdown_requested:
                                 # Scoped to instances that actually declare an
                                 # EB universe, so every other equity instance
                                 # stays byte-identical (data=None).
-                                elif _tick_mode != "IDLE":
+                                # 2026-08-31: fetch on EVERY live tick, IDLE
+                                # included — the first paper boot ran IDLE,
+                                # skipped the fetch, and StrategyEb refused all
+                                # day with "no visible QQQ daily closes". Bars
+                                # are read-only data; TRADING stays gated by
+                                # the strategy's own session/cadence rules.
+                                else:
                                     try:
                                         _eb_syms = _strategy_eb_universe_symbols(
                                             _cached_strategies)
