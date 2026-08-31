@@ -28,16 +28,34 @@ def _extract(*names):
     return ns
 
 
-def test_subprocess_env_falls_back_to_brokerage_credentials(monkeypatch):
+def test_subprocess_env_decrypts_brokerage_credentials(monkeypatch):
+    """Stored creds are Fernet ciphertext ('fern…', len 127 in prod) — the
+    first sidecar run forwarded ciphertext and auth-failed silently."""
+    import secret_store
     ns = _extract("_watchdog_subprocess_env")
     monkeypatch.delenv("ALPACA_WATCHDOG_KEY", raising=False)
     monkeypatch.delenv("ALPACA_WATCHDOG_SECRET", raising=False)
     monkeypatch.delenv("ALPACA_WATCHDOG_PAPER", raising=False)
+    monkeypatch.setattr(secret_store, "decrypt",
+                        lambda v: {"fernK": "PKPLAIN", "fernS": "SECPLAIN"}[v])
     env = ns["_watchdog_subprocess_env"](
-        {"alpaca_key": "k1", "alpaca_secret": "s1", "alpaca_paper": True})
-    assert env["ALPACA_WATCHDOG_KEY"] == "k1"
-    assert env["ALPACA_WATCHDOG_SECRET"] == "s1"
+        {"alpaca_key": "fernK", "alpaca_secret": "fernS", "alpaca_paper": True})
+    assert env["ALPACA_WATCHDOG_KEY"] == "PKPLAIN"
+    assert env["ALPACA_WATCHDOG_SECRET"] == "SECPLAIN"
     assert env["ALPACA_WATCHDOG_PAPER"] == "1"
+
+
+def test_decrypt_failure_never_forwards_ciphertext(monkeypatch):
+    import secret_store
+    ns = _extract("_watchdog_subprocess_env")
+    monkeypatch.delenv("ALPACA_WATCHDOG_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_WATCHDOG_SECRET", raising=False)
+    def _boom(v): raise RuntimeError("no cred key")
+    monkeypatch.setattr(secret_store, "decrypt", _boom)
+    env = ns["_watchdog_subprocess_env"](
+        {"alpaca_key": "fernK", "alpaca_secret": "fernS", "alpaca_paper": True})
+    assert "ALPACA_WATCHDOG_KEY" not in env
+    assert "ALPACA_WATCHDOG_SECRET" not in env
 
 
 def test_scoped_env_credentials_win_over_the_brokerage_row(monkeypatch):

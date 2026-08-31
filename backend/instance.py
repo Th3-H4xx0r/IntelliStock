@@ -80,10 +80,27 @@ def _watchdog_subprocess_env(brokerage_doc):
     into this process's environment, never onto the command line."""
     env = os.environ.copy()
     doc = brokerage_doc if isinstance(brokerage_doc, dict) else {}
-    if not env.get("ALPACA_WATCHDOG_KEY") and doc.get("alpaca_key"):
-        env["ALPACA_WATCHDOG_KEY"] = str(doc["alpaca_key"])
-    if not env.get("ALPACA_WATCHDOG_SECRET") and doc.get("alpaca_secret"):
-        env["ALPACA_WATCHDOG_SECRET"] = str(doc["alpaca_secret"])
+    # BrokerageAccounts credentials are Fernet-encrypted at rest; the sidecar
+    # needs plaintext. Decrypt with the shared store (this container carries
+    # INTELLISTOCK_CRED_KEY). On any decrypt failure leave the env unset so
+    # watchdog_main refuses with its own clear message — never forward
+    # ciphertext as if it were a credential.
+    def _plain(value):
+        if not value:
+            return None
+        try:
+            from secret_store import decrypt
+            return decrypt(str(value)) or None
+        except Exception:
+            return None
+    if not env.get("ALPACA_WATCHDOG_KEY"):
+        _k = _plain(doc.get("alpaca_key"))
+        if _k:
+            env["ALPACA_WATCHDOG_KEY"] = _k
+    if not env.get("ALPACA_WATCHDOG_SECRET"):
+        _s = _plain(doc.get("alpaca_secret"))
+        if _s:
+            env["ALPACA_WATCHDOG_SECRET"] = _s
     env.setdefault(
         "ALPACA_WATCHDOG_PAPER",
         "1" if doc.get("alpaca_paper") else "0",
