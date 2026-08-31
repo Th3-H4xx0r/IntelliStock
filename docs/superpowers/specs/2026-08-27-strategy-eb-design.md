@@ -190,12 +190,24 @@ target_vol                 0.20        core_max_weight 0.65   weight_step 0.05
 vol_fast_bars              20          vol_slow_bars 60       min_history_bars 70
 core_rebalance_band        0.10        rebalance_weekdays [2]
 remainder_bil_fraction     0.0
+trend_filter_bars          0           trend_off_enter_pct 0.01  trend_on_exit_pct 0.02
+risk_off_symbol            ""          core_off_damp 1.0
+trend_on_book              {}          trend_off_book {}
+cash_sweep_min_pct         0.02
 core_band_pct              0.03        min_order_usd 25.0    cost_haircut_pct 0.005
 broker_max_single_position_pct 0.95    honour_single_position_cap true
 live_max_order_fraction 0.70  live_max_symbol_fraction 0.70  live_max_leveraged_fraction 0.70
 live_soft_drawdown 0.25  live_hard_drawdown 0.35  live_kill_drawdown 0.45
 ```
 Every key is read by something (checked against `_DEAD_STRATEGY_CONFIG_KEYS`).
+
+The trend block and both books are OFF at every default: `trend_filter_bars 0`
+is the feature switch, so the state is always ON, the occupant is `off_symbol`,
+and neither `risk_off_symbol` nor `trend_off_book` is even declared to the
+broker. An empty book is exactly the two-leg remainder that existed before the
+key. `cash_sweep_min_pct` re-offers an idle balance above 2% of NAV to the
+remainder legs, because equity fills are next-bar and the tick that sells the
+core cannot also fund the buy that replaces it.
 
 ## 10. Deployment objects
 
@@ -222,11 +234,6 @@ run's own `pv` price series. **Ship enabled only if ALL hold:**
 | G4 | rolling 12-month windows beat SPY in ≥ 60% | full-cycle consistency |
 | G5 | one-way turnover ≤ 400%/yr | the cost thesis |
 | G6 | zero `would_block_in_phase2` sells; zero orders blocked by the position cap | the two silent failures that burned XS |
-
-Local harness (`scripts/strategy_eb_matrix.py`, yfinance 2010-2026, cost
-4.4 bps on ETF legs, turnover printed) is used only to check the
-implementation reproduces the research sweep (CAGR ~24%, maxDD ~−40%,
-weekly turnover ~250-300%) before the engine run. It is never the verdict.
 
 If the gate fails, the strategy ships disabled with the numbers recorded
 in `DEFAULTS` comments, per the XS precedent. It is not re-tuned to pass.
@@ -263,7 +270,7 @@ in `DEFAULTS` comments, per the XS precedent. It is not re-tuned to pass.
   failure), `test_live_risk_limits.py` (per-doc override survives
   `evaluate_drawdown` refresh; other docs keep module defaults; `QLD` in
   the leveraged set; inline set removed from broker source).
-- Engine gate: `test_backtest_engine_single_position_cap.py` for
+- Engine gate: `backend/tests/test_backtest_single_position_cap_env.py` for
   `honour_single_position_cap`.
 - Command: `PYTHONPATH=.:backend python3 -m pytest -q backend/tests/test_strategy_eb*.py backend/tests/test_tiered_cost_model.py backend/tests/test_live_equity_bars.py backend/tests/test_live_risk_limits.py`, then the full suite.
 

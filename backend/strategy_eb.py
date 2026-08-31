@@ -28,6 +28,15 @@ WHAT IT DELIBERATELY DOES NOT CONTAIN, each with measured evidence
 
 Pure: no clock, no RNG, no I/O. `broker.py` is not import-safe (argparse at
 module scope SystemExits under pytest), so anything testable lives here.
+
+2026-08-31 — champion + ceiling (docs/superpowers/research/
+2026-08-31-strategy-eb-champion.md). Eight search iterations, ~547k configs.
+Best ENGINE config (tv .20 / 10,40 / wmax .65 / QQQ / trend_filter_bars 25 /
+books both GLD .5 GDX .25 XLE .25) returned +233.8% vs SPY-TR +77.1%, maxDD
+-27.5%, all three bears >= 0 — and FAILED the frozen section-11 gate on G5,
+474%/yr turnover against a 400% bound. 95% rolling-12m is unreachable here
+(three walls, measured). The margin is a gold/energy era bet: 2010-2021 the
+same construction LOSES to SPY. Defaults stay off.
 """
 from __future__ import annotations
 
