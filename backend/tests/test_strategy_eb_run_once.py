@@ -772,12 +772,17 @@ def test_a_dict_valued_config_key_survives_the_api_round_trip():
 
     path = os.path.join(_backend, "strategies", "strategy_eb.py")
     schema, _ = _parse_header_meta(open(path).read())
-    assert schema["config"]["trend_on_book"] == {}
-    assert schema["config"]["trend_off_book"] == {}
+    # The shipped schema is the bil25 config adopted 2026-08-31: champion
+    # books with 25% of the risk-off remainder falling through to BIL.
+    assert schema["config"]["trend_on_book"] == {
+        "GLD": 0.5, "GDX": 0.25, "XLE": 0.25}
+    assert schema["config"]["trend_off_book"] == {
+        "GLD": 0.375, "GDX": 0.1875, "XLE": 0.1875}
 
     entry = next(s for s in get_available_strategies()
                  if s.get("id") == "strategy_eb")
-    assert entry["schema"]["config"]["trend_on_book"] == {}
+    assert entry["schema"]["config"]["trend_on_book"] == {
+        "GLD": 0.5, "GDX": 0.25, "XLE": 0.25}
 
     from interactive_utils import _normalize_strategy_payload_item
 

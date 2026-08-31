@@ -36,7 +36,14 @@ books both GLD .5 GDX .25 XLE .25) returned +233.8% vs SPY-TR +77.1%, maxDD
 -27.5%, all three bears >= 0 — and FAILED the frozen section-11 gate on G5,
 474%/yr turnover against a 400% bound. 95% rolling-12m is unreachable here
 (three walls, measured). The margin is a gold/energy era bet: 2010-2021 the
-same construction LOSES to SPY. Defaults stay off.
+same construction LOSES to SPY. Module DEFAULTS stay off (empty book ==
+the legacy two-leg remainder, and the tests pin that contract); the SHIPPED
+config in the wrapper's INTELLISTOCK_SCHEMA is the bil25 variant adopted
+2026-08-31: champion books scaled so 25% of the risk-off remainder falls
+through to BIL (trend_off_book GLD .375 GDX .1875 XLE .1875,
+risk_off_symbol BIL). Engine card: +197.8% vs SPY-TR +77.1%, maxDD -21.1%
+vs SPY's -24.7% — the champion's own -27.5% tail was a concentrated gold
+break, and each ~1pp of drawdown bought back costs ~7pp of cycle return.
 """
 from __future__ import annotations
 
