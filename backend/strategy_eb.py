@@ -36,9 +36,10 @@ import math
 from strategy_x import Q, _finite, _stdev
 
 __all__ = [
-    "DEFAULTS", "LAST_REBALANCE_KEY", "eb_core_weight", "eb_remainder_targets",
-    "eb_should_trade", "eb_targets", "rebalance_weekdays", "session_ordinal",
-    "session_weekday", "strategy_eb_universe",
+    "DEFAULTS", "LAST_REBALANCE_KEY", "LAST_STATE_KEY", "eb_core_weight",
+    "eb_remainder_targets", "eb_should_trade", "eb_targets",
+    "eb_trend_enabled", "eb_trend_state", "rebalance_weekdays",
+    "session_ordinal", "session_weekday", "strategy_eb_universe",
 ]
 
 
@@ -54,6 +55,13 @@ _EPOCH_WEEKDAY = 3
 #: Where the wrapper records the session it last traded in, so intraday
 #: granularity cannot produce a second rebalance in the same session.
 LAST_REBALANCE_KEY = "_eb_last_rebalance_session"
+
+#: Where the wrapper records the trend state the last EXECUTED rebalance was
+#: built in. `eb_should_trade` reads it: the band is measured on the core
+#: weight, and a state flip changes only the REMAINDER, which the band cannot
+#: see. Absent — the default, and every run with the filter off — the clause is
+#: inert and the band alone decides.
+LAST_STATE_KEY = "_strategy_eb_last_state"
 
 _TRADING_DAYS = 252
 
@@ -112,6 +120,38 @@ DEFAULTS = {
     # a linear blend. With weight >= 0 and a SPY remainder, a 2022 above SPY's
     # own -18% is impossible by construction; this key is the honest answer.
     "remainder_bil_fraction": 0.0,
+    # ── the trend-conditioned remainder (ALL of it default-OFF) ──
+    # SMA length on the REFERENCE symbol's point-in-time closes. 0 is the
+    # feature switch, not a degenerate window: with it off every state read is
+    # ON, the occupant is `off_symbol`, the damp never applies and the risk-off
+    # leg is not even declared to the broker. The replay's grid found N=100 the
+    # only length that wins the 2025-11 chop window; 150 and 200 lose it
+    # outright.
+    "trend_filter_bars": 0,
+    # Hysteresis, and it is deliberately ASYMMETRIC. ON -> OFF when the
+    # close is below SMA*(1 - enter); OFF -> ON only when it is above
+    # SMA*(1 + exit).
+    # The dead zone between them is the whole defence against whipsaw: at 1%/2%
+    # the replay still flipped 10 times in 2011 and lost 30pp to a flat SPY.
+    # Narrowing them is the single most dangerous edit in this block.
+    "trend_off_enter_pct": 0.01,
+    "trend_on_exit_pct": 0.02,
+    # Occupant of the whole remainder while the state is OFF. "" means the
+    # cash leg, which is the T-bill variant of the replay grid. Setting it to
+    # GLD is the entire measured margin of the trend feature AND its entire
+    # risk: across 46 risk-off episodes gold beat SPY in 23 — a coin flip whose
+    # mean is carried by one 2008 episode. Enabling this is a bet on a hedge
+    # with no statistically significant conditional edge.
+    "risk_off_symbol": "",
+    # The core is multiplied by this while OFF, BEFORE the clamp and the 0.05
+    # quantisation — the replay computes w = clip(tv/(k*rv) * damp, 0, cap), so
+    # on a tape calm enough for the clamp to bind a 0.5 damp changes nothing.
+    # 1.0 keeps the full core and only rotates the remainder; 0.0 leaves the
+    # levered fund entirely. Over 2010-2021 cutting the core bought ZERO
+    # drawdown protection (all variants hit -38.5%, set by a COVID crash too
+    # fast for a weekly SMA) and cost 4.6pp/yr of CAGR, which is why the
+    # default damps nothing.
+    "core_off_damp": 1.0,
     # ── the cash sweep ──
     # `targets_to_orders` sizes buys off SETTLED cash and equity fills are
     # next-bar, so the tick that sells the core CANNOT also fund the remainder
@@ -189,6 +229,68 @@ def _s(cfg, key, default=None):
     return str(value if value is not None else default).strip().upper()
 
 
+def _state(value) -> str:
+    """Any cache value as a state. Anything unrecognised — None, "", a
+    corrupted row — reads as ON, the SAME answer a cold start gives, so a
+    damaged cache cannot produce a third behaviour."""
+    return "OFF" if str(value or "").strip().upper() == "OFF" else "ON"
+
+
+def eb_trend_enabled(cfg) -> bool:
+    """Whether the trend-conditioned remainder is switched on at all.
+
+    One predicate, read by the universe, the wrapper and the sweep, so "off"
+    means the same thing in all three. With it False the strategy is the
+    two-leg book it was before this feature existed, byte for byte.
+    """
+    return _i(cfg, "trend_filter_bars") > 0
+
+
+def eb_trend_state(closes, prev_state, cfg) -> str:
+    """"ON" or "OFF" — which asset the de-levered remainder belongs in.
+
+        sma  = mean(closes[-N:])
+        ON  -> OFF  when close < sma * (1 - trend_off_enter_pct)
+        OFF -> ON   when close > sma * (1 + trend_on_exit_pct)
+
+    Nothing else moves it. The asymmetric thresholds leave a dead zone that
+    NEITHER edge can cross, which is what stops a weekly cadence whipsawing on
+    a tape sitting on its own average.
+
+    Fail-closed here means fail UNCHANGED: a short history or a non-finite
+    close returns `prev_state`, never a guess. Inventing a state on a cold
+    start is what would make a restart rotate the entire remainder.
+
+    The CALLER decides when to ask. The replay evaluates this on decision
+    weekdays only; evaluating it every session is a twitchier state path with
+    more flips and more turnover, and turnover is already this design's
+    binding constraint.
+    """
+    cfg = cfg or {}
+    prev = _state(prev_state)
+    if not eb_trend_enabled(cfg):
+        # Not merely "start ON": with the feature off the machine must be
+        # INCAPABLE of being off, or a stale persisted OFF from an earlier
+        # config would rotate a default book out of SPY.
+        return "ON"
+
+    bars = _i(cfg, "trend_filter_bars")
+    prices = _finite(closes)
+    if prices is None or bars < 1 or bars > len(prices):
+        return prev
+    window = prices[-bars:]
+    sma = sum(window) / len(window)
+    if not math.isfinite(sma) or sma <= 0:
+        return prev
+
+    close = prices[-1]
+    if prev == "ON":
+        enter = max(0.0, min(1.0, _f(cfg, "trend_off_enter_pct")))
+        return "OFF" if close < sma * (1.0 - enter) else "ON"
+    exit_pct = max(0.0, _f(cfg, "trend_on_exit_pct"))
+    return "ON" if close > sma * (1.0 + exit_pct) else "OFF"
+
+
 def session_ordinal(session_id) -> int:
     """A monotonic integer per NY session, or 0 when the label is unusable.
 
@@ -250,12 +352,20 @@ def _quantize_floor(value: float, step: float) -> float:
     return round(math.floor(round(value / step, 9)) * step, Q)
 
 
-def eb_core_weight(closes, cfg) -> float | None:
+def eb_core_weight(closes, cfg, trend_state="ON") -> float | None:
     """Target core weight as a fraction of NAV, or None to REFUSE.
 
         rv    = max(stdev(ret, 20), stdev(ret, 60)) * sqrt(252)
-        w_raw = target_vol / (leverage * rv)
+        w_raw = target_vol / (leverage * rv) * (core_off_damp if OFF else 1)
         w     = floor(clamp(w_raw, 0, core_max_weight) / step) * step
+
+    The damp multiplies the RAW weight — before the clamp and before the grid,
+    exactly as the replay computes it. Order matters twice over: damping a
+    quantised 0.40 by 0.9 gives 0.36, which is off the 0.05 grid the turnover
+    control depends on; and on a tape calm enough for the clamp to bind, a
+    halved 4.09 still clamps to 0.65, so the damp correctly does nothing there.
+    Clamping first would have made that case a 0.30 position — a different
+    strategy from the one whose numbers were measured.
 
     None means "the strategy cannot evaluate its own risk". The caller must
     return {} — NOT fall back to a default weight. Every failure mode here
@@ -295,20 +405,33 @@ def eb_core_weight(closes, cfg) -> float | None:
         return None
 
     w_raw = target_vol / (leverage * rv)
+    if _state(trend_state) == "OFF":
+        # Clamped to [0, 1]. A damp above 1 is a config error that would size
+        # the 3x core LARGER in the one state this feature exists to de-risk —
+        # the only direction this key must never move.
+        w_raw *= max(0.0, min(1.0, _f(cfg, "core_off_damp")))
     if not math.isfinite(w_raw):
         return None
     return _quantize_floor(max(0.0, min(cap, w_raw)), step)
 
 
-def eb_targets(w, cfg) -> dict:
+def eb_targets(w, cfg, trend_state="ON") -> dict:
     """Target weight per symbol as a fraction of NAV. Sums to exactly 1.0.
+
+    Risk-ON (and every call that does not pass a state, which is every caller
+    with the filter off):
 
         core = w
         bil  = (1 - w) * remainder_bil_fraction
         spy  = 1 - core - bil
 
-    `spy` is computed as the RESIDUAL rather than as `(1-w)*(1-dial)` so the
-    three legs sum to 1.0 at Q decimals by construction. A weight set summing
+    Risk-OFF: the whole remainder goes to `risk_off_symbol`, or to the cash leg
+    when that is unset — the T-bill variant of the replay grid, not a
+    misconfiguration. The BIL dial does not apply there because there is no
+    SPY leg left to blend against.
+
+    The remainder is computed as the RESIDUAL rather than as `(1-w)*(1-dial)`
+    so the legs sum to 1.0 at Q decimals by construction. A weight set summing
     past 1.0 asks for a clip the account cannot fund.
     """
     cfg = cfg or {}
@@ -320,20 +443,26 @@ def eb_targets(w, cfg) -> dict:
         core = 0.0
     core = round(max(0.0, min(1.0, core)), Q)
 
-    dial = max(0.0, min(1.0, _f(cfg, "remainder_bil_fraction")))
-    bil = round((1.0 - core) * dial, Q)
-    spy = round(1.0 - core - bil, Q)
+    if _state(trend_state) == "OFF":
+        occupant = _s(cfg, "risk_off_symbol") or _s(cfg, "cash_symbol")
+        legs = ((_s(cfg, "core_symbol"), core),
+                (occupant, round(1.0 - core, Q)))
+    else:
+        dial = max(0.0, min(1.0, _f(cfg, "remainder_bil_fraction")))
+        bil = round((1.0 - core) * dial, Q)
+        spy = round(1.0 - core - bil, Q)
+        legs = ((_s(cfg, "core_symbol"), core),
+                (_s(cfg, "cash_symbol"), bil),
+                (_s(cfg, "off_symbol"), spy))
 
     targets: dict = {}
-    for symbol, weight in ((_s(cfg, "core_symbol"), core),
-                           (_s(cfg, "cash_symbol"), bil),
-                           (_s(cfg, "off_symbol"), spy)):
+    for symbol, weight in legs:
         if symbol and weight > 0:
             targets[symbol] = round(targets.get(symbol, 0.0) + weight, Q)
     return targets
 
 
-def eb_remainder_targets(w_held, cfg) -> dict:
+def eb_remainder_targets(w_held, cfg, trend_state="ON") -> dict:
     """Target weights for the REMAINDER legs only, around the core ALREADY held.
 
         bil = (1 - w_held) * remainder_bil_fraction
@@ -350,7 +479,7 @@ def eb_remainder_targets(w_held, cfg) -> dict:
     selling the very position the weight was measured against.
     """
     cfg = cfg or {}
-    targets = eb_targets(w_held, cfg)
+    targets = eb_targets(w_held, cfg, trend_state)
     targets.pop(_s(cfg, "core_symbol"), None)
     return targets
 
@@ -366,14 +495,22 @@ def strategy_eb_universe(cfg) -> list:
     """
     cfg = cfg or {}
     out: list = []
-    for key in ("reference_symbol", "core_symbol", "off_symbol", "cash_symbol"):
+    keys = ["reference_symbol", "core_symbol", "off_symbol", "cash_symbol"]
+    # Only when the filter is on. Declaring the risk-off leg otherwise makes
+    # the broker fetch bars and carry a price for an asset that can never be
+    # bought — and appended LAST, so enabling the filter cannot reorder the
+    # four legs every existing run already declares.
+    if eb_trend_enabled(cfg):
+        keys.append("risk_off_symbol")
+    for key in keys:
         symbol = _s(cfg, key)
         if symbol and symbol not in out:
             out.append(symbol)
     return out
 
 
-def eb_should_trade(session_id, w_target, w_held, cfg, cache) -> tuple:
+def eb_should_trade(session_id, w_target, w_held, cfg, cache,
+                    trend_state="ON") -> tuple:
     """(trade?, core weight to move to) for this session.
 
     Read-only on `cache`. The CALLER writes `LAST_REBALANCE_KEY` after it has
@@ -389,7 +526,12 @@ def eb_should_trade(session_id, w_target, w_held, cfg, cache) -> tuple:
          rule returns (False, 0.0);
       3. one decision per session otherwise, whatever the granularity;
       4. otherwise only the configured weekdays decide;
-      5. otherwise only a drift of at least `core_rebalance_band` trades;
+      5. otherwise a drift of at least `core_rebalance_band` trades, OR the
+         trend state differs from the one the last EXECUTED rebalance was
+         built in. The band is measured on the CORE weight and a flip moves
+         only the REMAINDER, so without the second clause the occupant
+         rotation is silently skipped on every decision day whose core drift
+         is inside 0.10 — which, by design, is most of them;
       6. a multi-weekday config moves 1/N of the way, not all the way.
     """
     try:
@@ -413,8 +555,15 @@ def eb_should_trade(session_id, w_target, w_held, cfg, cache) -> tuple:
     if session_weekday(session_id) not in days:
         return (False, held)
 
+    # An ABSENT key is not a rotation: on the first decision of a run there is
+    # no executed book to rotate away from, and with the filter off the
+    # wrapper never writes the key at all.
+    last_state = (cache or {}).get(LAST_STATE_KEY)
+    rotated = last_state is not None and _state(last_state) != _state(
+        trend_state)
+
     band = max(0.0, _f(cfg, "core_rebalance_band"))
-    if round(abs(target - held), Q) < band:
+    if not rotated and round(abs(target - held), Q) < band:
         return (False, held)
 
     tranches = max(1, len(days))

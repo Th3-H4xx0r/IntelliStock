@@ -457,3 +457,166 @@ def test_buys_size_off_buying_power_when_the_emulator_offers_it():
     spent = sum(v.get("buy_cash", 0.0) for v in sizes.values()
                 if isinstance(v, dict))
     assert spent > 1000.0
+
+
+# ── the trend-conditioned remainder ─────────────────────────────────────────
+#
+# `trend_filter_bars = 100` and `risk_off_symbol = "GLD"` is config A' of the
+# replay. The machine is evaluated on DECISION SESSIONS ONLY — a daily
+# evaluation is a twitchier state path than the one that was measured.
+
+TREND = {"trend_filter_bars": 100, "risk_off_symbol": "GLD"}
+GLD_PRICES = dict(PRICES, GLD=200.0)
+_TREND_LEGS = ("TQQQ", "SPY", "BIL", "GLD")
+THURSDAY = datetime(2026, 6, 4, tzinfo=timezone.utc)
+
+
+def declining(pct=0.01, drift=-0.01, n=120, end_day=None, start=300.0):
+    """Bars that alternate +/-`pct` around a `drift` downtrend, so the last
+    close sits far below its own 100-session average and the machine reads OFF.
+    A PURE decline would have zero realised volatility and `eb_core_weight`
+    would refuse; the alternation keeps rv at the same 0.163 the ON fixture
+    measures, so both fixtures target the SAME 0.40 core and the only thing
+    under test is the occupant."""
+    end_day = end_day or datetime(2026, 6, 3, tzinfo=timezone.utc)
+    closes = [start]
+    for i in range(n - 1):
+        closes.append(closes[-1] * (1 + drift)
+                      * ((1 + pct) if i % 2 == 0 else (1 - pct)))
+    return [{"t": (end_day - timedelta(days=(n - 1 - i))).isoformat(),
+             "c": closes[i]} for i in range(n)]
+
+
+def trend_data(ref_bars):
+    return data_for(ref_bars, legs=_TREND_LEGS)
+
+
+def test_the_default_config_writes_no_trend_state_at_all():
+    """Byte-identity. With `trend_filter_bars = 0` nothing about the machine
+    may reach the cache, the payload or the declared universe."""
+    cache = {}
+    out = StrategyEb().run_once(["TQQQ"], PRICES, DECIDES, cfg(), {},
+                                data=data_for(alternating(0.01)),
+                                portfolio_emulator=FakeEmulator(),
+                                strategy_cache=cache)
+    assert "_strategy_eb_trend_state" not in cache
+    assert "_strategy_eb_last_state" not in cache
+    assert set(out["_nexus_discovered"]) == {"QQQ", "TQQQ", "SPY", "BIL"}
+
+
+def test_a_risk_off_decision_puts_the_whole_remainder_in_gold():
+    cache = {}
+    out = StrategyEb().run_once(["TQQQ"], GLD_PRICES, DECIDES, cfg(**TREND),
+                                {}, data=trend_data(declining()),
+                                portfolio_emulator=FakeEmulator(),
+                                strategy_cache=cache)
+    assert cache["_strategy_eb_trend_state"] == "OFF"
+    assert cache["_strategy_eb_last"]["targets"] == {"TQQQ": 0.40, "GLD": 0.60}
+    assert out.get("GLD") == 1
+    assert "SPY" not in out
+    assert "GLD" in out["_nexus_discovered"]
+
+
+def test_a_risk_on_decision_keeps_the_remainder_in_spy():
+    """The SAME config on a tape above its average: the feature being enabled
+    must not itself change the book."""
+    cache = {}
+    out = StrategyEb().run_once(["TQQQ"], GLD_PRICES, DECIDES, cfg(**TREND),
+                                {}, data=trend_data(alternating(0.01)),
+                                portfolio_emulator=FakeEmulator(),
+                                strategy_cache=cache)
+    assert cache["_strategy_eb_trend_state"] == "ON"
+    assert cache["_strategy_eb_last"]["targets"] == {"TQQQ": 0.40, "SPY": 0.60}
+    assert out.get("SPY") == 1
+    assert "GLD" not in out
+
+
+def test_the_state_is_re_evaluated_only_on_a_decision_session():
+    """Called on Friday, the last visible session is Thursday. The replay
+    updates the machine on Wednesdays ONLY; evaluating it daily is a different
+    state path with different flip counts and different turnover."""
+    cache = {"_strategy_eb_trend_state": "ON"}
+    StrategyEb().run_once(
+        ["TQQQ"], GLD_PRICES, SKIPS, cfg(**TREND), {},
+        data=trend_data(declining(end_day=THURSDAY)),
+        portfolio_emulator=FakeEmulator(cash=0.0, positions={"SPY": 20.0}),
+        strategy_cache=cache)
+    assert cache["_strategy_eb_trend_state"] == "ON"
+
+
+def test_a_state_flip_rotates_the_occupant_inside_the_band():
+    """THE clause the feature depends on. The book is already AT its target
+    core weight, so |w - w_held| is 0 and the band suppresses everything — but
+    the remainder must still leave SPY. Without this the whole risk-off leg is
+    spent in the asset the flip was supposed to exit."""
+    # 50 TQQQ at 80 = $4,000 and 12 SPY at 500 = $6,000: NAV $10,000, held
+    # core exactly 0.40, which is what this tape targets.
+    emu = FakeEmulator(cash=0.0, positions={"TQQQ": 50.0, "SPY": 12.0})
+    cache = {"_strategy_eb_last_state": "ON"}
+    out = StrategyEb().run_once(["TQQQ"], GLD_PRICES, DECIDES, cfg(**TREND),
+                                {}, data=trend_data(declining()),
+                                portfolio_emulator=emu, strategy_cache=cache)
+    assert cache["_strategy_eb_last"]["held_weight"] == 0.4
+    assert out.get("SPY") == -1
+    assert cache["_strategy_eb_last"]["targets"] == {"TQQQ": 0.40, "GLD": 0.60}
+    assert cache["_strategy_eb_last_state"] == "OFF"
+
+
+def test_the_same_book_with_the_state_already_executed_does_nothing():
+    """The control for the test above: same tape, same book, same band — only
+    the recorded executed state differs, and the whole trade disappears."""
+    emu = FakeEmulator(cash=0.0, positions={"TQQQ": 50.0, "SPY": 12.0})
+    assert StrategyEb().run_once(
+        ["TQQQ"], GLD_PRICES, DECIDES, cfg(**TREND), {},
+        data=trend_data(declining()), portfolio_emulator=emu,
+        strategy_cache={"_strategy_eb_last_state": "OFF"}) == {}
+
+
+def test_the_sweep_carries_the_occupant_of_the_current_state():
+    """The pending book was written while the state was ON, so it names SPY.
+    Deploying it verbatim would buy back the very leg the flip just sold."""
+    from strategies.strategy_eb import _PENDING_TARGETS_KEY
+    emu = FakeEmulator(cash=6000.0, positions={})
+    cache = {_PENDING_TARGETS_KEY: {"TQQQ": 0.40, "SPY": 0.60},
+             "_strategy_eb_trend_state": "OFF"}
+    out = StrategyEb().run_once(
+        ["TQQQ"], GLD_PRICES, SKIPS, cfg(**TREND), {},
+        data=trend_data(declining(end_day=THURSDAY)),
+        portfolio_emulator=emu, strategy_cache=cache)
+    assert out.get("GLD") == 1
+    assert out.get("TQQQ") == 1
+    assert "SPY" not in out
+
+
+def test_the_remainder_sweep_of_a_risk_off_book_buys_the_risk_off_leg():
+    """No pending book at all — the fallback plan must be scoped to the
+    occupant too, or the sweep's `owned` set cannot even name it."""
+    emu = FakeEmulator(cash=10000.0, positions={})
+    out = StrategyEb().run_once(
+        ["TQQQ"], GLD_PRICES, SKIPS, cfg(**TREND), {},
+        data=trend_data(declining(end_day=THURSDAY)),
+        portfolio_emulator=emu,
+        strategy_cache={"_strategy_eb_trend_state": "OFF"})
+    assert out.get("GLD") == 1
+    assert "SPY" not in out
+
+
+def test_the_off_damp_reaches_the_emitted_book():
+    """`core_off_damp` is applied inside the weight, before quantisation, so
+    the whole payload — core AND remainder — moves with it."""
+    cache = {}
+    StrategyEb().run_once(["TQQQ"], GLD_PRICES, DECIDES,
+                          cfg(**TREND, core_off_damp=0.5), {},
+                          data=trend_data(declining()),
+                          portfolio_emulator=FakeEmulator(),
+                          strategy_cache=cache)
+    assert cache["_strategy_eb_last"]["targets"] == {"TQQQ": 0.20, "GLD": 0.80}
+
+
+def test_a_zero_damp_exits_the_core_entirely_while_risk_off():
+    emu = FakeEmulator(cash=0.0, positions={"TQQQ": 100.0})
+    out = StrategyEb().run_once(["TQQQ"], GLD_PRICES, DECIDES,
+                                cfg(**TREND, core_off_damp=0.0), {},
+                                data=trend_data(declining()),
+                                portfolio_emulator=emu, strategy_cache={})
+    assert out.get("TQQQ") == -1

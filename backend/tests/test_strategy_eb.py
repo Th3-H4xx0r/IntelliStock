@@ -17,11 +17,13 @@ if _backend not in sys.path:
 from strategy_eb import (  # noqa: E402
     DEFAULTS,
     LAST_REBALANCE_KEY,
+    LAST_STATE_KEY,
     _i,
     eb_core_weight,
     eb_remainder_targets,
     eb_should_trade,
     eb_targets,
+    eb_trend_state,
     rebalance_weekdays,
     session_ordinal,
     session_weekday,
@@ -357,3 +359,286 @@ def test_a_tranche_still_exits_the_whole_position_at_a_zero_target():
 
 def test_an_unusable_session_label_never_trades():
     assert eb_should_trade("junk", 0.40, 0.00, cfg(), {}) == (False, 0.00)
+
+
+# ── eb_trend_state: the two-state trend machine ─────────────────────────────
+#
+# N=4 everywhere below so the SMA is arithmetic you can check by eye:
+# [100, 100, 100, c] has mean (300 + c) / 4.
+
+TREND = {"trend_filter_bars": 4}
+
+
+def test_the_trend_filter_is_off_by_default_and_every_state_read_is_on():
+    """`trend_filter_bars = 0` IS the feature switch. With it off the machine
+    must not merely start ON — it must be incapable of leaving, or a stale
+    persisted OFF from an earlier config would rotate a default book to
+    cash."""
+    assert eb_trend_state([100.0, 100.0, 100.0, 1.0], "OFF", cfg()) == "ON"
+
+
+def test_an_on_state_survives_a_close_inside_the_enter_band():
+    """sma 99.75, threshold 99.75 * 0.99 = 98.7525. A close of 99 is BELOW the
+    average and still risk-on: the band is what stops a weekly whipsaw."""
+    assert eb_trend_state([100.0, 100.0, 100.0, 99.0], "ON",
+                          cfg(**TREND)) == "ON"
+
+
+def test_an_on_state_flips_off_below_the_enter_threshold():
+    """sma 99.5, threshold 98.505; 98 clears it downward."""
+    assert eb_trend_state([100.0, 100.0, 100.0, 98.0], "ON",
+                          cfg(**TREND)) == "OFF"
+
+
+def test_an_off_state_survives_a_close_back_above_the_average():
+    """The hysteresis is ASYMMETRIC on purpose: sma 100.5, threshold 102.51.
+    A close of 102 is above the average, above the OFF trigger, and still
+    OFF."""
+    assert eb_trend_state([100.0, 100.0, 100.0, 102.0], "OFF",
+                          cfg(**TREND)) == "OFF"
+
+
+def test_an_off_state_flips_on_above_the_exit_threshold():
+    """sma 100.75, threshold 102.765; 103 clears it."""
+    assert eb_trend_state([100.0, 100.0, 100.0, 103.0], "OFF",
+                          cfg(**TREND)) == "ON"
+
+
+def test_the_two_thresholds_leave_a_dead_zone_neither_edge_can_cross():
+    """Between sma*(1-enter) and sma*(1+exit) NOTHING moves, from either side.
+    That gap is the whole point: 2011 whipsawed 10 times through a 1%/2% band
+    and the replay warns a narrower one is worse."""
+    closes = [100.0, 100.0, 100.0, 100.0]
+    assert eb_trend_state(closes, "ON", cfg(**TREND)) == "ON"
+    assert eb_trend_state(closes, "OFF", cfg(**TREND)) == "OFF"
+
+
+def test_a_short_history_holds_the_previous_state_rather_than_guessing():
+    """Fail CLOSED means fail UNCHANGED here: inventing a state on a cold start
+    is what makes a restart trade, and this machine rotates the whole
+    remainder."""
+    for prev in ("ON", "OFF"):
+        assert eb_trend_state([100.0, 100.0, 100.0], prev,
+                              cfg(**TREND)) == prev, prev
+
+
+def test_a_non_finite_close_holds_the_previous_state():
+    assert eb_trend_state([100.0, float("nan"), 100.0, 98.0], "ON",
+                          cfg(**TREND)) == "ON"
+    assert eb_trend_state([100.0, 0.0, 100.0, 103.0], "OFF",
+                          cfg(**TREND)) == "OFF"
+
+
+def test_the_initial_state_is_on():
+    """No persisted state yet. The book starts risk-ON and the first decision
+    day is the first chance to leave."""
+    assert eb_trend_state([100.0, 100.0, 100.0, 100.0], None,
+                          cfg(**TREND)) == "ON"
+    assert eb_trend_state([100.0, 100.0, 100.0, 98.0], None,
+                          cfg(**TREND)) == "OFF"
+
+
+def test_an_unusable_persisted_state_reads_as_on():
+    """A corrupted cache value must resolve to the SAME state the initial one
+    does, not to a third behaviour."""
+    assert eb_trend_state([100.0, 100.0, 100.0, 98.0], "banana",
+                          cfg(**TREND)) == "OFF"
+    assert eb_trend_state([100.0, 100.0, 100.0, 102.0], "banana",
+                          cfg(**TREND)) == "ON"
+
+
+def test_the_average_uses_the_last_n_closes_and_no_more():
+    """A longer history must not drag the average: only the trailing window is
+    the trend."""
+    old = [1.0] * 50
+    assert eb_trend_state(old + [100.0, 100.0, 100.0, 98.0], "ON",
+                          cfg(**TREND)) == "OFF"
+
+
+def test_an_absurd_window_holds_the_previous_state():
+    assert eb_trend_state([100.0] * 200, "OFF",
+                          cfg(trend_filter_bars=10 ** 400)) == "OFF"
+
+
+def test_a_zero_enter_threshold_flips_on_the_average_itself():
+    """x = 0 is a grid point in the replay: the trigger is then a bare
+    close < sma."""
+    zero = cfg(**TREND, trend_off_enter_pct=0.0)
+    assert eb_trend_state([100.0, 100.0, 100.0, 99.9], "ON", zero) == "OFF"
+    assert eb_trend_state([100.0, 100.0, 100.0, 100.0], "ON", zero) == "ON"
+
+
+# ── eb_targets: the trend-conditioned occupant ──────────────────────────────
+
+def test_the_default_state_keeps_the_signature_change_invisible():
+    assert eb_targets(0.40, cfg()) == eb_targets(0.40, cfg(), "ON")
+
+
+def test_the_off_state_moves_the_whole_remainder_to_the_risk_off_symbol():
+    got = eb_targets(0.40, cfg(**TREND, risk_off_symbol="GLD"), "OFF")
+    assert got == {"TQQQ": 0.40, "GLD": 0.60}
+
+
+def test_the_on_state_keeps_the_spy_remainder():
+    got = eb_targets(0.40, cfg(**TREND, risk_off_symbol="GLD"), "ON")
+    assert got == {"TQQQ": 0.40, "SPY": 0.60}
+
+
+def test_an_unset_risk_off_symbol_falls_back_to_the_cash_leg():
+    """`risk_off_symbol = ""` with the filter on is the BIL variant of the
+    replay grid, not a misconfiguration."""
+    assert eb_targets(0.40, cfg(**TREND), "OFF") == {"TQQQ": 0.40, "BIL": 0.60}
+
+
+def test_the_risk_off_book_still_sums_to_exactly_one():
+    for w in (0.0, 0.05, 0.4, 0.65):
+        got = eb_targets(w, cfg(**TREND, risk_off_symbol="GLD"), "OFF")
+        assert round(sum(got.values()), 6) == 1.0, w
+
+
+def test_a_risk_off_book_with_a_zero_core_is_all_gold():
+    got = eb_targets(0.0, cfg(**TREND, risk_off_symbol="GLD"), "OFF")
+    assert got == {"GLD": 1.0}
+
+
+def test_the_bil_dial_is_untouched_while_the_state_is_on():
+    """The dial and the occupant switch are independent levers; the replay
+    turns the dial off, but enabling the filter must not silently disable
+    it."""
+    got = eb_targets(0.40, cfg(**TREND, risk_off_symbol="GLD",
+                               remainder_bil_fraction=0.5), "ON")
+    assert got == {"TQQQ": 0.40, "SPY": 0.30, "BIL": 0.30}
+
+
+def test_the_remainder_plan_follows_the_trend_state_too():
+    """Otherwise the cash sweep buys back the very leg the flip just sold."""
+    got = eb_remainder_targets(0.40, cfg(**TREND, risk_off_symbol="GLD"),
+                               "OFF")
+    assert got == {"GLD": 0.60}
+    assert eb_remainder_targets(0.40, cfg(**TREND, risk_off_symbol="GLD"),
+                                "ON") == {"SPY": 0.60}
+
+
+# ── core_off_damp: less core, not just a different remainder ────────────────
+
+def test_the_off_damp_is_applied_before_quantisation():
+    """0.40933 * 0.9 = 0.36840, floored onto the 0.05 grid = 0.35. Damping the
+    QUANTISED 0.40 instead gives 0.36 — off the grid entirely, which is the
+    turnover control this strategy is built on."""
+    assert eb_core_weight(alternating(0.01),
+                          cfg(**TREND, core_off_damp=0.9), "OFF") == 0.35
+
+
+def test_the_off_damp_is_applied_before_the_clamp_as_the_replay_does():
+    """eb2.py: w = clip(tv / (k*rv) * damp, 0, cap). On a tape calm enough for
+    the clamp to bind, w_raw is 4.09 and half of it still clamps to 0.65.
+    Damping a clamped 0.65 would hold 0.30 — a different strategy from the one
+    whose numbers were measured."""
+    assert eb_core_weight(alternating(0.001),
+                          cfg(**TREND, core_off_damp=0.5), "OFF") == 0.65
+
+
+def test_a_half_damp_halves_an_unclamped_core():
+    assert eb_core_weight(alternating(0.01),
+                          cfg(**TREND, core_off_damp=0.5), "OFF") == 0.20
+
+
+def test_a_zero_damp_leaves_the_core_entirely():
+    assert eb_core_weight(alternating(0.01),
+                          cfg(**TREND, core_off_damp=0.0), "OFF") == 0.0
+
+
+def test_the_damp_never_applies_while_the_state_is_on():
+    assert eb_core_weight(alternating(0.01),
+                          cfg(**TREND, core_off_damp=0.0), "ON") == 0.40
+    assert eb_core_weight(alternating(0.01), cfg(core_off_damp=0.0)) == 0.40
+
+
+def test_a_damp_above_one_cannot_lever_up_the_state_it_de_risks():
+    """The one direction this key must never move: a config error that sized
+    the core LARGER while risk-off would invert the whole feature."""
+    assert eb_core_weight(alternating(0.01),
+                          cfg(**TREND, core_off_damp=3.0), "OFF") == 0.40
+
+
+def test_an_unusable_damp_falls_back_to_no_damping():
+    for junk in (None, "", "half", float("nan")):
+        assert eb_core_weight(alternating(0.01),
+                              cfg(**TREND, core_off_damp=junk),
+                              "OFF") == 0.40, junk
+
+
+# ── the universe carries the risk-off leg ───────────────────────────────────
+
+def test_the_universe_includes_the_risk_off_leg_when_the_filter_is_on():
+    """`broker._strategy_eb_universe_symbols` reads this to decide what bars to
+    fetch and what to price. A leg missing from it has no price, and
+    `targets_to_orders` skips it silently."""
+    assert strategy_eb_universe(cfg(**TREND, risk_off_symbol="GLD")) == [
+        "QQQ", "TQQQ", "SPY", "BIL", "GLD"]
+
+
+def test_the_universe_omits_the_risk_off_leg_while_the_filter_is_off():
+    """Declaring GLD with the feature off makes the broker fetch bars for a leg
+    that can never be bought."""
+    assert strategy_eb_universe(cfg(risk_off_symbol="GLD")) == [
+        "QQQ", "TQQQ", "SPY", "BIL"]
+
+
+def test_an_unset_risk_off_symbol_adds_nothing_to_the_universe():
+    assert strategy_eb_universe(cfg(**TREND)) == ["QQQ", "TQQQ", "SPY", "BIL"]
+
+
+def test_the_universe_still_deduplicates_the_risk_off_leg():
+    assert strategy_eb_universe(cfg(**TREND, risk_off_symbol="BIL")) == [
+        "QQQ", "TQQQ", "SPY", "BIL"]
+
+
+# ── the flip forces a rebalance the band cannot see ─────────────────────────
+
+def test_a_state_flip_trades_even_when_the_band_is_not_breached():
+    """THE clause that makes the feature work. The band is on the CORE weight;
+    a flip changes the REMAINDER, which the band cannot see. Without this the
+    occupant rotation is skipped on every decision day whose core drift is
+    inside 0.10 — which is most of them, by design."""
+    cache = {LAST_STATE_KEY: "ON"}
+    assert eb_should_trade(WED, 0.40, 0.35, cfg(**TREND), cache,
+                           "OFF") == (True, 0.40)
+
+
+def test_no_flip_leaves_the_band_in_charge():
+    cache = {LAST_STATE_KEY: "ON"}
+    assert eb_should_trade(WED, 0.40, 0.35, cfg(**TREND), cache,
+                           "ON") == (False, 0.35)
+
+
+def test_a_flip_with_nothing_recorded_to_rotate_away_from_does_not_trade():
+    """First decision ever: `_strategy_eb_last_state` is absent, and there is
+    no executed book to rotate."""
+    assert eb_should_trade(WED, 0.40, 0.35, cfg(**TREND), {},
+                           "OFF") == (False, 0.35)
+
+
+def test_a_rotation_with_no_core_drift_at_all_still_trades():
+    assert eb_should_trade(WED, 0.40, 0.40, cfg(**TREND),
+                           {LAST_STATE_KEY: "ON"}, "OFF") == (True, 0.40)
+
+
+def test_a_rotation_still_obeys_the_weekday_cadence():
+    """The replay evaluates the machine on decision days ONLY."""
+    assert eb_should_trade(THU, 0.40, 0.35, cfg(**TREND),
+                           {LAST_STATE_KEY: "ON"}, "OFF") == (False, 0.35)
+
+
+def test_a_rotation_still_obeys_the_one_decision_per_session_rule():
+    cache = {LAST_REBALANCE_KEY: WED, LAST_STATE_KEY: "ON"}
+    assert eb_should_trade(WED, 0.40, 0.35, cfg(**TREND), cache,
+                           "OFF") == (False, 0.35)
+
+
+def test_the_default_state_argument_never_rotates():
+    """Every existing caller passes four arguments; with the feature off the
+    wrapper never writes the key, so the clause is inert."""
+    assert eb_should_trade(WED, 0.40, 0.35, cfg(), {}) == (False, 0.35)
+    assert eb_should_trade(WED, 0.40, 0.35, cfg(),
+                           {LAST_STATE_KEY: "ON"}) == (False, 0.35)

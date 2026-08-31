@@ -1,4 +1,4 @@
-# INTELLISTOCK_SCHEMA: {"strategy": "strategy_eb", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_eb_enabled": false, "core_symbol": "TQQQ", "core_leverage": 3.0, "reference_symbol": "QQQ", "off_symbol": "SPY", "cash_symbol": "BIL", "target_vol": 0.2, "core_max_weight": 0.65, "weight_step": 0.05, "vol_fast_bars": 20, "vol_slow_bars": 60, "min_history_bars": 70, "core_rebalance_band": 0.1, "rebalance_weekdays": [2], "remainder_bil_fraction": 0.0, "cash_sweep_min_pct": 0.02, "core_band_pct": 0.03, "min_order_usd": 25.0, "cost_haircut_pct": 0.005, "broker_max_single_position_pct": 0.95, "honour_single_position_cap": true, "live_max_order_fraction": 0.7, "live_max_symbol_fraction": 0.7, "live_max_leveraged_fraction": 0.7, "live_soft_drawdown": 0.25, "live_hard_drawdown": 0.35, "live_kill_drawdown": 0.45}}
+# INTELLISTOCK_SCHEMA: {"strategy": "strategy_eb", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_eb_enabled": false, "core_symbol": "TQQQ", "core_leverage": 3.0, "reference_symbol": "QQQ", "off_symbol": "SPY", "cash_symbol": "BIL", "target_vol": 0.2, "core_max_weight": 0.65, "weight_step": 0.05, "vol_fast_bars": 20, "vol_slow_bars": 60, "min_history_bars": 70, "core_rebalance_band": 0.1, "rebalance_weekdays": [2], "remainder_bil_fraction": 0.0, "trend_filter_bars": 0, "trend_off_enter_pct": 0.01, "trend_on_exit_pct": 0.02, "risk_off_symbol": "", "core_off_damp": 1.0, "cash_sweep_min_pct": 0.02, "core_band_pct": 0.03, "min_order_usd": 25.0, "cost_haircut_pct": 0.005, "broker_max_single_position_pct": 0.95, "honour_single_position_cap": true, "live_max_order_fraction": 0.7, "live_max_symbol_fraction": 0.7, "live_max_leveraged_fraction": 0.7, "live_soft_drawdown": 0.25, "live_hard_drawdown": 0.35, "live_kill_drawdown": 0.45}}
 # INTELLISTOCK_DESCRIPTION: Efficient beta — a volatility-targeted leveraged Nasdaq core with the de-levered remainder in SPY, rebalanced once a week on a fixed weekday, every weight quantized and banded so it trades rarely. A risk transform, not an alpha: it makes no directional prediction and holds less of the same position when that position is more dangerous. One lever, remainder_bil_fraction, moves the remainder from SPY toward T-bills, trading CAGR for drawdown.
 """Strategy EB wrapper: cache state, order emission, broker contract.
 
@@ -17,12 +17,18 @@ if _BACKEND not in sys.path:
 from strategy_eb import (  # noqa: E402
     DEFAULTS,
     LAST_REBALANCE_KEY,
+    LAST_STATE_KEY,
     _f,
     _s,
+    _state,
     eb_core_weight,
     eb_remainder_targets,
     eb_should_trade,
     eb_targets,
+    eb_trend_enabled,
+    eb_trend_state,
+    rebalance_weekdays,
+    session_weekday,
     strategy_eb_universe,
 )
 from strategy_x import (  # noqa: E402
@@ -78,6 +84,13 @@ _SWEEP_ISSUED_KEY = "_strategy_eb_sweep_session"
 #: the settled proceeds toward THIS book — core included — never the remainder
 #: alone, which just bought SPY back.
 _PENDING_TARGETS_KEY = "_strategy_eb_pending_targets"
+
+#: The trend machine's persisted state. It MUST survive across ticks and
+#: across restarts: re-deriving it from a cold start reads the initial "ON"
+#: rather than the state the book is actually holding, and the whole remainder
+#: would rotate on the next decision day. Written only on decision sessions,
+#: because that is where the replay evaluates the machine.
+_TREND_STATE_KEY = "_strategy_eb_trend_state"
 
 #: {reason: scope} for refusals already logged, so a strategy that refuses all
 #: day writes one line rather than ~26.
@@ -197,7 +210,19 @@ class StrategyEb:
         session_id = observations[-1][0]
         closes = [close for _, close in observations]
 
-        weight = eb_core_weight(closes, cfg)
+        # THE STATE MACHINE IS EVALUATED ON DECISION SESSIONS ONLY. The replay
+        # updates it on the rebalance weekday and holds it in between; running
+        # it on every session is a different, twitchier path with more flips,
+        # and each flip rotates the entire remainder. Off-days read the
+        # persisted state so the sweep still knows which asset it is funding.
+        trend_state = _state(cache.get(_TREND_STATE_KEY))
+        if (eb_trend_enabled(cfg)
+                and session_weekday(session_id) in rebalance_weekdays(cfg)):
+            trend_state = eb_trend_state(closes, cache.get(_TREND_STATE_KEY),
+                                         cfg)
+            cache[_TREND_STATE_KEY] = trend_state
+
+        weight = eb_core_weight(closes, cfg, trend_state)
         if weight is None:
             _log_once(cache, "unmeasurable", session_id,
                       f"StrategyEb: REFUSING to trade — {len(closes)} "
@@ -228,14 +253,15 @@ class StrategyEb:
                 * float(eff.get(core) or 0.0)) / nav
 
         trade, effective_weight = eb_should_trade(session_id, weight, held,
-                                                  cfg, cache)
+                                                  cfg, cache, trend_state)
         if not trade:
             # No core order is due, so idle cash gets a second chance. The
             # sweep is deliberately outside the weekday cadence and the band:
             # both are about the CORE, and neither ever re-examines a balance
             # the core plan failed to spend.
             return self._sweep(cfg, cache, session_id, universe, eff, nav,
-                               positions, portfolio_emulator, held)
+                               positions, portfolio_emulator, held,
+                               trend_state)
 
         # An exit already issued in THIS session is in flight, not ignored. No
         # sweep here either: the core sell has not settled, so the cash it will
@@ -244,7 +270,7 @@ class StrategyEb:
         if exiting and cache.get(_EXIT_ISSUED_KEY) == session_id:
             return {}
 
-        targets = eb_targets(effective_weight, cfg)
+        targets = eb_targets(effective_weight, cfg, trend_state)
         cash = _spendable(portfolio_emulator, eff)
         decisions, sizes = targets_to_orders(
             targets, nav=nav, positions=positions, prices=eff, cash=cash,
@@ -254,6 +280,13 @@ class StrategyEb:
         # and at 15m granularity there are ~26 more ticks in it.
         cache[LAST_REBALANCE_KEY] = session_id
         cache[_PENDING_TARGETS_KEY] = dict(targets)
+        if eb_trend_enabled(cfg):
+            # The state this book was BUILT in. `eb_should_trade` compares the
+            # live state against it, which is the only thing that can force a
+            # rotation the core band would otherwise suppress. Written with
+            # the filter off would be harmless but pointless: the state is
+            # then always ON.
+            cache[LAST_STATE_KEY] = trend_state
         if exiting:
             cache[_EXIT_ISSUED_KEY] = session_id
         cache[_LAST_DECISION_KEY] = {
@@ -264,8 +297,15 @@ class StrategyEb:
             "targets": dict(targets),
             "orders": len(decisions),
         }
+        # The state belongs in the log line only when the feature is on: a flip
+        # rotates the whole remainder, and an operator reading
+        # BacktestResults.logs by eye needs to see WHY the occupant changed.
+        state_note = f" | trend {trend_state}" if eb_trend_enabled(cfg) else ""
+        if eb_trend_enabled(cfg):
+            cache[_LAST_DECISION_KEY]["trend_state"] = trend_state
         _log(f"StrategyEb {session_id} | core {core} target {weight:.0%} "
-             f"(held {held:.0%} -> {effective_weight:.0%}) | targets="
+             f"(held {held:.0%} -> {effective_weight:.0%}){state_note}"
+             " | targets="
              + ", ".join(f"{s} {w:.1%}" for s, w in sorted(targets.items()))
              + f" | orders={len(decisions)} | nav=${nav:,.0f}", "cyan")
 
@@ -274,7 +314,7 @@ class StrategyEb:
         return _emit(decisions, sizes, universe)
 
     def _sweep(self, cfg, cache, session_id, universe, prices, nav, positions,
-               emulator, held) -> dict:
+               emulator, held, trend_state="ON") -> dict:
         """Re-offer an idle cash balance to the REMAINDER legs.
 
         `targets_to_orders` sizes buys off SETTLED cash, and equity fills are
@@ -308,10 +348,20 @@ class StrategyEb:
             # Deploy toward the last decided book, core included. BUYS ONLY:
             # the sweep spends idle cash; it never trims anything.
             targets = {str(k).upper(): float(v) for k, v in pending.items()}
+            if eb_trend_enabled(cfg):
+                # The pending book names the occupant of the state it was
+                # PLANNED in. Deploying it verbatim after a flip buys back the
+                # very leg the rotation just sold, with settled cash, on the
+                # session after the sell — the most expensive possible way to
+                # undo a trade. Re-derive the remainder around the same core.
+                targets = eb_targets(targets.get(_s(cfg, "core_symbol"), 0.0),
+                                     cfg, trend_state)
             owned = set(universe)
         else:
-            targets = eb_remainder_targets(held, cfg)
+            targets = eb_remainder_targets(held, cfg, trend_state)
             owned = {_s(cfg, "off_symbol"), _s(cfg, "cash_symbol")}
+            if eb_trend_enabled(cfg):
+                owned.add(_s(cfg, "risk_off_symbol"))
             owned.discard(_s(cfg, "core_symbol"))
         owned.discard("")
         if not targets:
