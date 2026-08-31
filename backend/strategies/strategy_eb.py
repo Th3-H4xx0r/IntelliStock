@@ -102,6 +102,23 @@ def _log_once(cache, reason, scope, msg, color="white"):
     _log(msg, color)
 
 
+def _spendable(emulator, prices) -> float:
+    """Buying power when the emulator offers it, else settled cash.
+
+    `get_buying_power` honours `credit_pending_sell_proceeds` (set per-document
+    by `backtest_credit_pending_sell_proceeds`), which lets the Wednesday plan's
+    buy size against its own funding sell instead of waiting a session
+    (BT 400783: the two-session funding lag cost 1.11pp CAGR).
+    """
+    try:
+        bp = emulator.get_buying_power(prices=prices)
+    except (AttributeError, TypeError):
+        bp = None
+    if bp is None:
+        return float(emulator.get_cash() or 0.0)
+    return float(bp or 0.0)
+
+
 def _emit(decisions, sizes, universe) -> dict:
     """The broker payload for a set of decisions.
 
@@ -110,6 +127,14 @@ def _emit(decisions, sizes, universe) -> dict:
     would_block_in_phase2=True.
     """
     out = dict(decisions)
+    sizes = dict(sizes)
+    # The broker's buy gate reserves `_cash_reserve_floor_pct` (default 0.10)
+    # of the account's STARTING value as an untouchable cash floor, sized for
+    # a many-name discovery book. On a 2-leg ETF book it blocked 775 of 805
+    # buys in BT 400783 and held the core 6.5pp under intent for 61% of
+    # sessions (-1.18pp CAGR). This book's risk control is the vol target,
+    # not a cash floor.
+    sizes["_cash_reserve_floor_pct"] = 0.0
     out["_nexus_position_sizes"] = sizes
     out["_nexus_discovered"] = list(universe)
     out["_nexus_executable_buys"] = [s for s, d in decisions.items() if d == 1]
@@ -220,7 +245,7 @@ class StrategyEb:
             return {}
 
         targets = eb_targets(effective_weight, cfg)
-        cash = float(portfolio_emulator.get_cash() or 0.0)
+        cash = _spendable(portfolio_emulator, eff)
         decisions, sizes = targets_to_orders(
             targets, nav=nav, positions=positions, prices=eff, cash=cash,
             config=cfg, owned=set(universe))
@@ -273,7 +298,7 @@ class StrategyEb:
             return {}
         if cache.get(_SWEEP_ISSUED_KEY) == session_id:
             return {}
-        cash = float(emulator.get_cash() or 0.0)
+        cash = _spendable(emulator, prices)
         if nav <= 0 or cash <= 0 or (cash / nav) <= _f(cfg,
                                                        "cash_sweep_min_pct"):
             return {}

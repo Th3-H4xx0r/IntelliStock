@@ -431,3 +431,29 @@ def test_the_sweep_funds_the_pending_core_book_from_settled_cash():
     assert out.get("TQQQ") == 1 and out.get("SPY") == 1
     assert all(v == 1 for k, v in out.items() if not k.startswith("_"))
     assert "buy_cash" in out["_nexus_position_sizes"]["TQQQ"]
+
+
+def test_every_payload_zeroes_the_brokers_cash_reserve_floor():
+    """BT 400783: the default 10%-of-initial-NAV cash floor blocked 775 of 805
+    buys on a 2-leg book. The wrapper publishes a zero floor; the vol target is
+    this book's risk control."""
+    emu = FakeEmulator(cash=6000.0, positions={})
+    out = StrategyEb().run_once(["TQQQ"], PRICES, DECIDES, cfg(), {},
+                                data=sweep_data(),
+                                portfolio_emulator=emu, strategy_cache={})
+    assert out["_nexus_position_sizes"]["_cash_reserve_floor_pct"] == 0.0
+
+
+def test_buys_size_off_buying_power_when_the_emulator_offers_it():
+    """With backtest_credit_pending_sell_proceeds the emulator's buying power
+    includes the same-tick funding sell; the wrapper must ask for it rather
+    than settled cash (the funding lag cost 1.11pp CAGR on BT 400783)."""
+    emu = FakeEmulator(cash=100.0, positions={"SPY": 12.0})
+    emu.get_buying_power = lambda prices=None: 5900.0
+    out = StrategyEb().run_once(["TQQQ"], PRICES, DECIDES, cfg(), {},
+                                data=data_for(alternating(0.01)),
+                                portfolio_emulator=emu, strategy_cache={})
+    sizes = out["_nexus_position_sizes"]
+    spent = sum(v.get("buy_cash", 0.0) for v in sizes.values()
+                if isinstance(v, dict))
+    assert spent > 1000.0
