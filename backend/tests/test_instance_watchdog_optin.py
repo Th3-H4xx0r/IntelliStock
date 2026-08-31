@@ -81,3 +81,22 @@ def test_the_doc_flag_or_env_flag_enables_and_default_stays_off(monkeypatch):
     assert "_maybe_start_alpha_watchdog(\n            instance_id, _instance_doc, _brokerage_doc)" in src
     # subprocess env comes from the dedicated builder, never bare os.environ
     assert "_watchdog_subprocess_env(brokerage_doc)" in src
+
+
+def test_pg_dsn_is_synthesized_for_the_sidecar_preflight(monkeypatch):
+    """watchdog_main refuses without PG_DSN/PGHOST, but containers carry
+    POSTGRES_* parts — the second sidecar run died on this preflight."""
+    import db.pool as pool
+    ns = _extract("_watchdog_subprocess_env")
+    monkeypatch.delenv("PG_DSN", raising=False)
+    monkeypatch.delenv("PGHOST", raising=False)
+    monkeypatch.setattr(pool, "dsn_from_env", lambda: "host=x port=5432 user=u dbname=d")
+    env = ns["_watchdog_subprocess_env"]({})
+    assert env["PG_DSN"] == "host=x port=5432 user=u dbname=d"
+
+
+def test_existing_pg_dsn_is_left_alone(monkeypatch):
+    ns = _extract("_watchdog_subprocess_env")
+    monkeypatch.setenv("PG_DSN", "host=real")
+    env = ns["_watchdog_subprocess_env"]({})
+    assert env["PG_DSN"] == "host=real"

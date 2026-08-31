@@ -105,6 +105,18 @@ def _watchdog_subprocess_env(brokerage_doc):
         "ALPACA_WATCHDOG_PAPER",
         "1" if doc.get("alpaca_paper") else "0",
     )
+    # watchdog_main's preflight requires PG_DSN or PGHOST literally, but this
+    # platform assembles Postgres config from POSTGRES_* parts. Synthesize the
+    # DSN with the shared helper so the sidecar passes preflight and its store
+    # gets an explicit DSN.
+    if not env.get("PG_DSN") and not env.get("PGHOST"):
+        try:
+            from db.pool import dsn_from_env
+            _dsn = dsn_from_env()
+            if _dsn:
+                env["PG_DSN"] = _dsn
+        except Exception:
+            pass
     return env
 
 
