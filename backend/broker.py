@@ -4392,6 +4392,36 @@ def _truthy(value) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _strategy_eb_single_position_pct(cached_strategies):
+    """Per-document single-position cap for LIVE ticks, mirroring
+    backtest_engine._instance_single_position_pct: honoured only when the
+    ENABLED strategy_eb lane opts in via `honour_single_position_cap` and
+    carries a valid (0, 1] `broker_max_single_position_pct` (bools rejected).
+    Returns None everywhere else so every other document keeps the 15%
+    failsafe. 2026-08-31: first paper tick trimmed GLD $5,384 -> $1,615 —
+    the 0.95 the backtest honoured was invisible to the live trim site."""
+    try:
+        for spec in (cached_strategies or []):
+            name = str((spec or {}).get("strategy", "")).strip().lower()
+            if name not in ("strategy_eb", "strategyeb"):
+                continue
+            cfg = dict((spec or {}).get("conditions") or {})
+            cfg.update((spec or {}).get("config") or {})
+            if not _truthy(cfg.get("strategy_eb_enabled", False)):
+                continue
+            if not _truthy(cfg.get("honour_single_position_cap", False)):
+                continue
+            raw = cfg.get("broker_max_single_position_pct")
+            if isinstance(raw, bool) or raw is None or raw == "":
+                continue
+            val = float(raw)
+            if 0.0 < val <= 1.0:
+                return val
+    except Exception:
+        return None
+    return None
+
+
 def _strategy_eb_risk_limits(cached_strategies):
     """The enabled strategy_eb lane's live risk envelope, or None.
 
@@ -17394,6 +17424,14 @@ while not shutdown_requested:
                                 _max_single_pct = float(os.environ.get("BROKER_MAX_SINGLE_POSITION_PCT", "0.15") or "0.15")
                             except (ValueError, TypeError):
                                 _max_single_pct = 0.15
+                            # 2026-08-31: honour the strategy_eb opt-in on LIVE
+                            # ticks too — the backtest engine honoured 0.95 via
+                            # honour_single_position_cap while live still ran
+                            # the 15% env default, so paper's first sweep buys
+                            # were trimmed to sizes the design never chose.
+                            _eb_cap = _strategy_eb_single_position_pct(_cached_strategies)
+                            if _eb_cap is not None:
+                                _max_single_pct = _eb_cap
                             if _anchor_policy:
                                 # Lane-local decision-time buy-admission cap only;
                                 # every other source remains under

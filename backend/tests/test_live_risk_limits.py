@@ -259,3 +259,22 @@ def test_the_live_risk_path_never_reads_the_module_strategy_cache(func):
     called = {n.func.id for n in ast.walk(node)
               if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
     assert "_live_risk_limits_for_this_document" in called
+
+
+def test_the_live_trim_site_honours_the_eb_position_cap_opt_in():
+    """2026-08-31 paper tick: GLD $5,384 trimmed to $1,615 — the 0.95 cap the
+    backtest engine honours was invisible live. The live trim site must read
+    the same opt-in."""
+    fns = _extract("_strategy_eb_single_position_pct")
+    fn = fns["_strategy_eb_single_position_pct"]
+    lane = lambda **cfg: [{"strategy": "strategy_eb", "config": {
+        "strategy_eb_enabled": True, "honour_single_position_cap": True,
+        "broker_max_single_position_pct": 0.95, **cfg}}]
+    assert fn(lane()) == 0.95
+    assert fn(lane(strategy_eb_enabled="false")) is None
+    assert fn(lane(honour_single_position_cap=False)) is None
+    assert fn(lane(broker_max_single_position_pct=True)) is None
+    assert fn(lane(broker_max_single_position_pct=1.5)) is None
+    assert fn(None) is None
+    src = open(os.path.join(_backend, "broker.py")).read()
+    assert src.count("_strategy_eb_single_position_pct(_cached_strategies)") >= 1
