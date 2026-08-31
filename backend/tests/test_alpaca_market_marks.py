@@ -393,3 +393,32 @@ def test_zero_bid_quote_is_normalized_not_fatal():
     assert mark is not None
     assert mark.bid is None  # zero side normalized away
     assert mark.price == pytest.approx(76.52)  # one-sided: the ask
+
+
+def test_the_default_factory_passes_a_datafeed_enum_not_a_string(monkeypatch):
+    """alpaca-py >= 0.43: StockDataStream(feed='iex') raises AttributeError
+    inside __init__; the reconnect loop swallowed it forever (2026-08-31,
+    strategy-eb: zero marks all session, every buy gate-blocked)."""
+    import sys, types
+    from alpaca.data.enums import DataFeed
+    captured = {}
+    fake_live = types.ModuleType("alpaca.data.live")
+    class _FakeStream:
+        def __init__(self, key, secret, feed=None):
+            captured["feed"] = feed
+    fake_live.StockDataStream = _FakeStream
+    monkeypatch.setitem(sys.modules, "alpaca.data.live", fake_live)
+    from alpaca_mark_stream import AlpacaMarkStream
+    s = AlpacaMarkStream({}, api_key="k", api_secret="s", feed="iex")
+    s._default_stream_factory()
+    assert captured["feed"] is DataFeed.IEX
+
+
+def test_disconnects_are_logged_first_and_every_tenth(capsys):
+    from alpaca_mark_stream import AlpacaMarkStream
+    s = AlpacaMarkStream({}, api_key="k", api_secret="s", feed="iex")
+    for _ in range(21):
+        s.record_disconnect(RuntimeError("boom"))
+    out = capsys.readouterr().out
+    assert out.count("[mark-stream] disconnect") == 3  # #1, #10, #20
+    assert "boom" in out

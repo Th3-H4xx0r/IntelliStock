@@ -48,6 +48,7 @@ class AlpacaMarkStream:
         self._healthy = False
         self._last_event_utc = None
         self._last_disconnect_reason = None
+        self._disconnect_counts = {}
 
     # -- health ---------------------------------------------------------------
 
@@ -59,7 +60,18 @@ class AlpacaMarkStream:
     def record_disconnect(self, reason):
         with self._lock:
             self._healthy = False
-            self._last_disconnect_reason = str(reason)
+            reason_s = str(reason)
+            self._last_disconnect_reason = reason_s
+            count = self._disconnect_counts.get(reason_s, 0) + 1
+            self._disconnect_counts[reason_s] = count
+        # 2026-08-31: a feed-type mismatch made the factory raise on EVERY
+        # reconnect for an entire session — zero marks, zero log lines, every
+        # order gate-blocked on quote.invalid_price. Silent stream death is
+        # forbidden: first occurrence of each distinct reason logs, then every
+        # 10th repeat, so a retry loop is visible without flooding.
+        if count == 1 or count % 10 == 0:
+            print(f"[mark-stream] disconnect #{count}: {reason_s}",
+                  flush=True)
 
     # -- callbacks (sync core; async wrappers delegate here) ------------------
 
@@ -166,7 +178,19 @@ class AlpacaMarkStream:
 
     def _default_stream_factory(self):
         from alpaca.data.live import StockDataStream
-        return StockDataStream(self._api_key, self._api_secret, feed=self._feed)
+        # alpaca-py >= 0.43 requires a DataFeed ENUM: passing the env string
+        # raises AttributeError("'str' object has no attribute 'value'") inside
+        # StockDataStream.__init__, which the reconnect loop swallowed forever
+        # (2026-08-31, strategy-eb: marks {} all session). Coerce known values;
+        # an unknown string is passed through so a future library that accepts
+        # strings again keeps working.
+        feed = self._feed
+        try:
+            from alpaca.data.enums import DataFeed
+            feed = DataFeed(str(feed).lower())
+        except (ImportError, ValueError):
+            pass
+        return StockDataStream(self._api_key, self._api_secret, feed=feed)
 
     def start(self):
         """Start the reconnect loop on a daemon thread; returns immediately."""
