@@ -8848,9 +8848,25 @@ def _compute_live_state_snapshot(instance_id_val: str, adapter) -> dict:
             # process's view here (soft durability: monitoring telemetry on
             # a 3s cadence, replaced each tick).
             try:
+                # 2026-08-31: publish HELD symbols only. The watchdog
+                # treats any snapshot mark without a matching broker
+                # position as critical divergence (mark_without_position) —
+                # publishing the full quote universe (BIL/QQQ signal
+                # symbols) tripped CRITICAL_ACTION and halted strategy-eb
+                # minutes after its first fills. Held-only marks preserve
+                # the real checks: a broker-believed ghost position still
+                # publishes its mark and still diverges from Alpaca truth,
+                # and a held-but-unmarked symbol still fires
+                # unmarked_position.
+                _snap_held = {
+                    str(_p.get("symbol")).upper()
+                    for _p in (positions_payload or [])
+                    if isinstance(_p, dict) and _p.get("symbol")
+                }
                 _snap_marks = {
                     str(_sym): float(_mk.price)
                     for _sym, _mk in (adapter.get_market_marks() or {}).items()
+                    if str(_sym).upper() in _snap_held
                 } if hasattr(adapter, "get_market_marks") else {}
                 r.insert('AlphaState', {
                     "id": f"live_snapshot:{instance_id_val}",
