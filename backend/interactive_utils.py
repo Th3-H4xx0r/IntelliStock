@@ -6422,7 +6422,9 @@ def action_get_live_state(conn, instance_id):
         }
 
     # Container-written LiveState row (may be None if container never booted).
-    ls_row = _ls_mod.get_live_state(r, conn, real_id)
+    # The RethinkDB handle is gone since the Postgres port; the live_state
+    # helpers ignore their first argument (they take pooled connections).
+    ls_row = _ls_mod.get_live_state(None, conn, real_id)
     container_seconds_since_update = None
     container_stale = False
     if isinstance(ls_row, dict):
@@ -6514,17 +6516,17 @@ def action_submit_live_command(conn, instance_id, command_type, payload, submitt
             # Return a synthetic completed command so the UI toast resolves.
             now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
             cmd_id = _ls_mod.submit_command(
-                r, conn,
+                None, conn,
                 instance_id=real_id, type="halt",
                 payload=dict(payload or {}),
                 submitted_by=submitted_by,
             )
-            _ls_mod.complete_command(r, conn, cmd_id, result={"already_halted": True, "noted_at": now_iso})
+            _ls_mod.complete_command(None, conn, cmd_id, result={"already_halted": True, "noted_at": now_iso})
             return {"command_id": cmd_id, "status": "completed", "result": {"already_halted": True}}
         raise ValueError("Instance %s is not running; cannot %s" % (real_id, command_type))
     try:
         cmd_id = _ls_mod.submit_command(
-            r, conn,
+            None, conn,
             instance_id=real_id,
             type=command_type,
             payload=payload or {},
@@ -6540,7 +6542,7 @@ def action_submit_live_command(conn, instance_id, command_type, payload, submitt
 def action_get_live_command(conn, command_id):
     """Return the LiveCommands row (status + result) for a submitted command."""
     import live_state as _ls_mod
-    doc = _ls_mod.get_command(r, conn, command_id)
+    doc = _ls_mod.get_command(None, conn, command_id)
     if doc is None:
         raise LiveInstanceNotFoundError("Live command not found: %s" % command_id)
     return doc
@@ -6562,7 +6564,7 @@ def action_live_trading_logs(conn, instance_id, since_line=0):
     if inst is None:
         raise ValueError("Instance not found: %s" % instance_id)
     real_id = str(inst.get("id", instance_id))
-    state = _ls_mod.get_live_state(r, conn, real_id)
+    state = _ls_mod.get_live_state(None, conn, real_id)
     running = bool(inst.get("runCommand", False)) and state is not None
     # Try the log file first. Gracefully fall back to a DB log_tail if the
     # state row is present and carries one (live_state doesn't write log_tail
