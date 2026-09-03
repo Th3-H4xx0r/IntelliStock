@@ -112,7 +112,8 @@ ALL_TABLES: tuple = (
     "LiveOrderLifecycle", "LiveOrderWAL", "LivePrices", "LivePricesStocks", "LiveState",
     "MlNewsLLMPromptCache", "Models", "NewsLLM", "NewsLLMCache", "NewsLLMPromptCache",
     "NewsRaw", "NewsScored", "NexusGraphBuilds", "NexusRuntimeState",
-    "NexusStrategyCache", "NotificationPreferences", "PointInTimeDatasetSnapshots",
+    "NexusStrategyCache", "NotificationPreferences", "OutlierGraphPeers",
+    "OutlierUniverseFeatures", "PointInTimeDatasetSnapshots",
     "PointInTimeManifests", "PriceHistory", "PushDevices", "Stocks", "Strategies",
     "TickerDayFeatures", "Users", "backtest_replay_calls",
     "backtest_replay_fixture_builds", "backtest_replay_fixtures",
@@ -273,6 +274,10 @@ _SPECS = [
     TableSpec("NexusStrategyCache",
               indexed_fields=("instance_id", "instance_id_config_hash", "origin"),
               prefix_fields=("id",)),
+    # Outlier sleeve (docs/superpowers/specs/2026-09-02-outlier-sleeve-design.md §4):
+    # id = "YYYY-MM-DD|SYMBOL", so one date's cross-section is a single prefix scan.
+    TableSpec("OutlierUniverseFeatures", prefix_fields=("id",)),
+    TableSpec("OutlierGraphPeers"),
     TableSpec("LiveBootAudit", indexed_fields=("instance_id",), prefix_fields=("id",)),
     # r.now() wrote a native time on these; the ported writer stores an
     # ISO-8601 string and time_fields decodes it back to a tz-aware datetime,
