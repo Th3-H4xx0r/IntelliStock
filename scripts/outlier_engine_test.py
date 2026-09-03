@@ -114,32 +114,39 @@ def set_confirm_frac(value):
 
 
 def run_windows(windows):
-    ids = []
+    """STRICTLY SEQUENTIAL: post one window, wait until it finishes, post the
+    next. Parallel posts (the first version) put seven containers on the
+    engine at once, which the operator vetoed on 2026-09-03."""
+    done = {}
     for tag, s, e in windows:
+        bid = None
         for _ in range(3):
             try:
                 _, r = call("POST", "/backtests", {"instance_id": INSTANCE, "stocks": STOCKS, "start_date": s,
                                                    "end_date": e, "granularity": "86400", "initial_cash": 6000,
                                                    "equity_cost_tiers": "etf-liquid"})
-                ids.append((r["id"], tag))
+                bid = r["id"]
                 break
             except BaseException:
                 time.sleep(10)
-    print("posted", ids, flush=True)
-    done = {}
-    for _ in range(400):
-        time.sleep(30)
-        try:
-            _, b = call("GET", "/backtests")
-        except BaseException:
+        if bid is None:
+            print("POST failed for", tag, flush=True)
             continue
-        bts = {x.get("id"): x for x in (b.get("backtests", b) if isinstance(b, dict) else b)}
-        for i, tag in ids:
-            if tag not in done and bts.get(i, {}).get("status") in ("finished", "error", "stopped"):
-                done[tag] = i
-                print("done", tag, i, bts[i].get("status"), bts[i].get("pnl_percent"), flush=True)
-        if len(done) == len(ids):
-            break
+        print("posted", tag, bid, flush=True)
+        for _ in range(360):
+            time.sleep(20)
+            try:
+                _, b = call("GET", "/backtests")
+            except BaseException:
+                continue
+            bts = {x.get("id"): x for x in (b.get("backtests", b) if isinstance(b, dict) else b)}
+            st = bts.get(bid, {}).get("status")
+            if st in ("finished", "error", "stopped"):
+                done[tag] = bid
+                print("done", tag, bid, st, bts[bid].get("pnl_percent"), flush=True)
+                break
+        else:
+            print("TIMEOUT waiting for", tag, bid, flush=True)
     return done
 
 
@@ -166,12 +173,15 @@ def main(argv=None):
             rows.append((tag, bid, days[0], days[-1], ret, s, dd, maxdd(spytr) * 100, BASE.get(tag, (float("nan"), float("nan")))))
             if tag == "cyc":
                 att = attribution(trades)
-                gain = nav[-1] - nav[0]
+                # Spec §9 c4: share of the SLEEVE's realised gain (sells minus
+                # buys over the sleeve's own names), not of the whole portfolio.
+                gain = sum(att.values())
                 big = [k for k, v in att.items() if gain > 0 and v / gain >= 0.05]
                 checks["c1_return"] = bool(ret >= BASE["cyc"][0] + 15)
                 checks["c2_drawdown"] = bool(dd >= BASE["cyc"][1] - 3)
                 checks["c4_population"] = bool(len(big) >= 3)
                 checks["attribution_top"] = {k: round(v, 0) for k, v in list(att.items())[:12]}
+                checks["sleeve_realised_gain"] = round(gain, 0)
         bears = [r for r in rows if r[0] in ("rb1", "rb3", "nb4", "rb2")]
         checks["c3_bears_nonnegative"] = bool(all(r[4] >= 0 for r in bears if r[8][0] >= 0))
         if args.windows == "spec":
