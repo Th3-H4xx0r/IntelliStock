@@ -276,7 +276,7 @@ is a modest, noisy improvement at best, as the offline spike said.
 Reading:
 - **Regime profile is unchanged**: bears 2/3 vs SPY (rb2 −0.20% is the one sub-zero, vs +0.29% for bil25), bulls still the weak spot (2/6), every 2-year-plus window wins by a wide margin.
 - **Against the champion it is a coin flip on short windows** (9 wins / 16 losses, most within ±3pp) and a clear win on the long ones: cycle +10.9pp, 2023–24 +10.4pp, both with the sleeve's names doing the work.
-- **Drawdown is shallower or equal in 20 of 25 windows** — the sleeve diversifies the gold-heavy OFF book rather than adding to its tail; the exceptions (2024, 2025, 2023–24) are ≤1.5pp deeper.
+- **Drawdown is shallower or equal in 19 of 25 windows** — the sleeve diversifies the gold-heavy OFF book rather than adding to its tail; the six exceptions (2022-H1 bear, 2024-H1 bull, 2024 spring chop, 2024, 2025, 2023–24) are all ≤1.5pp deeper.
 - **The cost is concentrated where nothing breaks out**: 2022-H1 bear −2.0pp, 2022 chop −2.7pp, 2023 chop −2.7pp, 2025 −2.7pp — the 15% reserve idling while EB's book runs at 85%.
 
 
