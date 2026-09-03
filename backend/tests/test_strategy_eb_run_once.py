@@ -809,9 +809,9 @@ def test_a_reserve_for_a_sibling_lane_shrinks_the_book_and_holds_its_cash():
                                 portfolio_emulator=FakeEmulator(cash=10000.0),
                                 strategy_cache={})
     sizes = out["_nexus_position_sizes"]
-    haircut = 1.0 - DEFAULTS["cost_haircut_pct"]        # targets_to_orders shaves every buy
+    haircut = 1.0 - DEFAULTS["cost_haircut_pct"]        # targets_to_orders shaves the leveraged core
     assert abs(sizes["TQQQ"]["buy_cash"] - 0.40 * 8500.0 * haircut) < 1.0
-    assert abs(sizes["SPY"]["buy_cash"] - 0.60 * 8500.0 * haircut) < 1.0
+    assert abs(sizes["SPY"]["buy_cash"] - 0.60 * 8500.0) < 1.0     # the remainder leg is exact
 
 
 def test_a_siblings_grown_position_replaces_the_reserve():
@@ -826,7 +826,7 @@ def test_a_siblings_grown_position_replaces_the_reserve():
     sizes = out["_nexus_position_sizes"]
     haircut = 1.0 - DEFAULTS["cost_haircut_pct"]
     assert abs(sizes["TQQQ"]["buy_cash"] - 0.40 * 8000.0 * haircut) < 1.0
-    assert abs(sizes["SPY"]["buy_cash"] - 0.60 * 8000.0 * haircut) < 1.0
+    assert abs(sizes["SPY"]["buy_cash"] - 0.60 * 8000.0) < 1.0
     assert "FOO" not in out            # never touches the sibling's name
 
 
