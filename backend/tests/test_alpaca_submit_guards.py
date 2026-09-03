@@ -422,3 +422,41 @@ def test_a_name_with_no_price_anywhere_still_contributes_zero():
 def test_a_junk_cached_price_does_not_poison_nav():
     a = _Adp({"AAA": 10.0, "GHOST": 5.0}, {"GHOST": "not-a-number"})
     assert a.get_positions_value({"AAA": 100.0}) == 1000.0
+
+
+class _MovingMarketClient(_Client):
+    """Positions whose MARKET VALUE moves between the two reads (any open
+    session), and optionally whose QUANTITY moves (a real ownership change)."""
+
+    def __init__(self, *, qty_moves=False, **kw):
+        super().__init__(**kw)
+        self._reads = 0
+        self._qty_moves = qty_moves
+
+    def get_all_positions(self):
+        self._reads += 1
+        # The adapter reads positions once at construction too, so alternate
+        # per read: the snapshot's two reads then differ when qty_moves is on.
+        qty = "13.4" if (not self._qty_moves or self._reads % 2 == 1) else "10.0"
+        def pos(symbol, q, mv, px):
+            return SimpleNamespace(symbol=symbol, qty=q, market_value=str(mv), avg_entry_price=px,
+                                   current_price=px, unrealized_pl="0", side="long")
+        return [pos("GLD", qty, 5400 + 7 * self._reads, "406.1"),
+                pos("GDX", "27.5", 2690 - 3 * self._reads, "97.85")]
+
+
+def test_reconciliation_snapshot_is_stable_when_only_market_values_move():
+    """strategy-eb's paper book could not trade from its first fill: the two
+    position reads bracket two order walks, market values differ between them
+    on any open session, and the full-snapshot equality marked every held
+    position unresolved on every in-session tick (2026-08-31 → 2026-09-03)."""
+    adapter = _adapter(_MovingMarketClient(orders=[_order_row(i) for i in range(3)]))
+    captured = adapter.capture_reconciliation_snapshot(account_id="acct-1")
+    assert captured.positions_stable is True
+    assert {p.symbol for p in captured.positions} == {"GLD", "GDX"}
+
+
+def test_reconciliation_snapshot_is_unstable_when_a_quantity_moves():
+    adapter = _adapter(_MovingMarketClient(qty_moves=True, orders=[_order_row(i) for i in range(3)]))
+    captured = adapter.capture_reconciliation_snapshot(account_id="acct-1")
+    assert captured.positions_stable is False

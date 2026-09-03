@@ -1494,6 +1494,18 @@ class AlpacaAdapter(BrokerAdapter):
                         updated_at=updated_at,
                     )
                 )
+            # Stability is OWNERSHIP stability: the same symbols in the same
+            # quantities on both reads. market_value is a price and moves
+            # between the two reads on any session where the market is open,
+            # so comparing the full snapshot made every position "unresolved"
+            # on every tick that held anything — strategy-eb's paper book
+            # could not trade from its first fill (2026-08-31) until this
+            # line changed (2026-09-03): boot reconciles passed pre-market,
+            # every in-session reconcile failed with
+            # positions_changed_during_snapshot.
+            def _ownership(positions):
+                return tuple((p.symbol, p.quantity) for p in positions)
+
             return AuthoritativeBrokerSnapshot(
                 account_id=str(account_id),
                 instance_id=self._instance_id,
@@ -1501,7 +1513,9 @@ class AlpacaAdapter(BrokerAdapter):
                 positions=second_positions,
                 orders=tuple(normalized_orders),
                 broker_available=True,
-                positions_stable=(first_positions == second_positions),
+                positions_stable=(
+                    _ownership(first_positions) == _ownership(second_positions)
+                ),
                 orders_complete=orders_complete,
             )
         except Exception:
