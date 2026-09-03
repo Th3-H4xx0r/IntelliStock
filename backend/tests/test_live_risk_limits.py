@@ -119,16 +119,24 @@ def test_the_broker_no_longer_inlines_its_own_leveraged_set():
 #: helpers close over.
 _BROKER_HELPERS = ("_truthy", "_strategy_eb_risk_limits",
                    "_strategy_eb_universe_symbols",
+                   "_strategy_eb_single_position_pct",
                    "_live_risk_limits_for_this_document")
+_BROKER_TABLES = ("_LANE_ENABLE_FLAGS",)
 
 
 def _extract(*names):
     broker = os.path.join(_backend, "broker.py")
     tree = ast.parse(open(broker).read())
     keep = set(names) | set(_BROKER_HELPERS)
-    wanted = [n for n in tree.body
-              if isinstance(n, ast.FunctionDef) and n.name in keep]
-    found = {n.name for n in wanted}
+    # Module-level tables the helpers close over (2026-09-02: the lane
+    # registry that lets the outlier sleeve widen the envelope beside EB).
+    tables = [n for n in tree.body
+              if isinstance(n, ast.Assign) and len(n.targets) == 1
+              and isinstance(n.targets[0], ast.Name)
+              and n.targets[0].id in _BROKER_TABLES]
+    wanted = tables + [n for n in tree.body
+                       if isinstance(n, ast.FunctionDef) and n.name in keep]
+    found = {n.name for n in wanted if isinstance(n, ast.FunctionDef)}
     assert set(names) <= found, f"missing from broker.py: {set(names) - found}"
     ns = {
         "_log": lambda *a, **k: None,
@@ -278,3 +286,25 @@ def test_the_live_trim_site_honours_the_eb_position_cap_opt_in():
     assert fn(None) is None
     src = open(os.path.join(_backend, "broker.py")).read()
     assert src.count("_strategy_eb_single_position_pct(_cached_strategies)") >= 1
+
+
+def test_the_outlier_lane_widens_the_symbol_fraction_and_the_cap():
+    ns = _extract("_strategy_eb_risk_limits", "_strategy_eb_single_position_pct")
+    specs = [{"strategy": "strategy_eb", "config": {
+                  "strategy_eb_enabled": True, "honour_single_position_cap": True,
+                  "broker_max_single_position_pct": 0.95}},
+             {"strategy": "outlier_sleeve", "config": {
+                  "outlier_sleeve_enabled": True, "honour_single_position_cap": True,
+                  "broker_max_single_position_pct": 0.95}}]
+    limits = ns["_strategy_eb_risk_limits"](specs)
+    assert limits.max_symbol_fraction == Decimal("0.7")   # EB's 0.7 is wider than the sleeve's 0.35
+    assert limits.max_order_fraction == Decimal("0.7") and limits.kill == Decimal("0.45")
+    assert ns["_strategy_eb_single_position_pct"](specs) == 0.95
+    only_sleeve = [specs[1]]
+    assert ns["_strategy_eb_risk_limits"](only_sleeve).max_symbol_fraction == Decimal("0.35")
+    assert ns["_strategy_eb_single_position_pct"](only_sleeve) == 0.95
+    disabled = [{"strategy": "outlier_sleeve", "config": {
+                     "outlier_sleeve_enabled": False, "honour_single_position_cap": True,
+                     "broker_max_single_position_pct": 0.95}}]
+    assert ns["_strategy_eb_risk_limits"](disabled) is None
+    assert ns["_strategy_eb_single_position_pct"](disabled) is None

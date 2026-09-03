@@ -402,3 +402,11 @@ def test_the_sole_lane_guard_wraps_the_fetch():
             "lane on its document; leaving data=None so it refuses to trade."
             ) in literals
     assert "red" in literals
+
+
+def test_the_outlier_sleeve_is_a_permitted_companion_lane():
+    specs = [{"strategy": "strategy_eb", "weight": 1.0, "config": {"strategy_eb_enabled": True}},
+             {"strategy": "outlier_sleeve", "weight": 1.0, "config": {"outlier_sleeve_enabled": True}}]
+    assert other_enabled_run_once_lanes(specs) == []
+    specs.append({"strategy": "graph_nexus_analysis", "weight": 1.0, "config": {}})
+    assert other_enabled_run_once_lanes(specs) == ["graph_nexus_analysis"]

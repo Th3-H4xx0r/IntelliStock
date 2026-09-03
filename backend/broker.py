@@ -4392,22 +4392,36 @@ def _truthy(value) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+#: run_once lanes whose config may widen this document's live envelope, and the
+#: config flag that says the lane is actually ON. Anything else is ignored: a
+#: document that carries none of these keeps live_risk_state's defaults.
+_LANE_ENABLE_FLAGS = {
+    "strategy_eb": "strategy_eb_enabled", "strategyeb": "strategy_eb_enabled",
+    "outlier_sleeve": "outlier_sleeve_enabled", "outliersleeve": "outlier_sleeve_enabled",
+}
+
+
 def _strategy_eb_single_position_pct(cached_strategies):
     """Per-document single-position cap for LIVE ticks, mirroring
-    backtest_engine._instance_single_position_pct: honoured only when the
-    ENABLED strategy_eb lane opts in via `honour_single_position_cap` and
-    carries a valid (0, 1] `broker_max_single_position_pct` (bools rejected).
-    Returns None everywhere else so every other document keeps the 15%
-    failsafe. 2026-08-31: first paper tick trimmed GLD $5,384 -> $1,615 —
-    the 0.95 the backtest honoured was invisible to the live trim site."""
+    backtest_engine._instance_single_position_pct: honoured only when an
+    ENABLED strategy_eb or outlier_sleeve lane opts in via
+    `honour_single_position_cap` and carries a valid (0, 1]
+    `broker_max_single_position_pct` (bools rejected). The WIDEST opted-in cap
+    wins: the cap is buy-admission only (see the trim site), and the outlier
+    sleeve's whole design is a slice that is allowed to grow. Returns None
+    everywhere else so every other document keeps the 15% failsafe.
+    2026-08-31: first paper tick trimmed GLD $5,384 -> $1,615 — the 0.95 the
+    backtest honoured was invisible to the live trim site."""
+    best = None
     try:
         for spec in (cached_strategies or []):
             name = str((spec or {}).get("strategy", "")).strip().lower()
-            if name not in ("strategy_eb", "strategyeb"):
+            flag = _LANE_ENABLE_FLAGS.get(name)
+            if flag is None:
                 continue
             cfg = dict((spec or {}).get("conditions") or {})
             cfg.update((spec or {}).get("config") or {})
-            if not _truthy(cfg.get("strategy_eb_enabled", False)):
+            if not _truthy(cfg.get(flag, False)):
                 continue
             if not _truthy(cfg.get("honour_single_position_cap", False)):
                 continue
@@ -4415,11 +4429,11 @@ def _strategy_eb_single_position_pct(cached_strategies):
             if isinstance(raw, bool) or raw is None or raw == "":
                 continue
             val = float(raw)
-            if 0.0 < val <= 1.0:
-                return val
+            if 0.0 < val <= 1.0 and (best is None or val > best):
+                best = val
     except Exception:
         return None
-    return None
+    return best
 
 
 def _strategy_eb_risk_limits(cached_strategies):
@@ -4441,16 +4455,26 @@ def _strategy_eb_risk_limits(cached_strategies):
             pass
         return None
     try:
+        from outlier_sleeve import DEFAULTS as _OS_DEFAULTS
+    except Exception:
+        _OS_DEFAULTS = {}
+    defaults_by_lane = {"strategy_eb": _EB_DEFAULTS, "strategyeb": _EB_DEFAULTS,
+                        "outlier_sleeve": _OS_DEFAULTS, "outliersleeve": _OS_DEFAULTS}
+    # The WIDEST envelope across the enabled lanes: a document that carries
+    # the outlier sleeve beside strategy_eb must let a sleeve winner grow.
+    widest = None
+    try:
         for spec in (cached_strategies or []):
             if not isinstance(spec, dict):
                 continue
-            if str(spec.get("strategy") or "").strip().lower() not in {
-                    "strategy_eb", "strategyeb"}:
+            name = str(spec.get("strategy") or "").strip().lower()
+            flag = _LANE_ENABLE_FLAGS.get(name)
+            if flag is None:
                 continue
-            merged = {**_EB_DEFAULTS, **(spec.get("config") or {})}
-            if not _truthy(merged.get("strategy_eb_enabled", False)):
+            merged = {**defaults_by_lane[name], **(spec.get("config") or {})}
+            if not _truthy(merged.get(flag, False)):
                 continue
-            return RiskLimits(
+            mine = RiskLimits(
                 max_order_fraction=merged["live_max_order_fraction"],
                 max_symbol_fraction=merged["live_max_symbol_fraction"],
                 max_leveraged_fraction=merged["live_max_leveraged_fraction"],
@@ -4458,6 +4482,18 @@ def _strategy_eb_risk_limits(cached_strategies):
                 hard=merged["live_hard_drawdown"],
                 kill=merged["live_kill_drawdown"],
             )
+            if widest is None:
+                widest = mine
+            else:
+                widest = RiskLimits(
+                    max_order_fraction=max(widest.max_order_fraction, mine.max_order_fraction),
+                    max_symbol_fraction=max(widest.max_symbol_fraction, mine.max_symbol_fraction),
+                    max_leveraged_fraction=max(widest.max_leveraged_fraction,
+                                               mine.max_leveraged_fraction),
+                    soft=max(widest.soft, mine.soft),
+                    hard=max(widest.hard, mine.hard),
+                    kill=max(widest.kill, mine.kill),
+                )
     except Exception as _eb_exc:
         try:
             _log(f"[strategy_eb] live risk limits ignored ({_eb_exc}); "
@@ -4465,7 +4501,7 @@ def _strategy_eb_risk_limits(cached_strategies):
         except Exception:
             pass
         return None
-    return None
+    return widest
 
 
 #: Set once, so a live loop does not repeat the same envelope line every tick.

@@ -38,6 +38,12 @@ LOOKBACK_DAYS_DEFAULT = 400
 #: `broker._strategy_eb_universe_symbols`.
 EB_STRATEGY_NAMES = frozenset({"strategy_eb", "strategyeb"})
 
+#: Lanes allowed beside strategy_eb on one document. The guard below exists
+#: because graph_nexus_analysis reads `data is not None` as "backtest"; the
+#: outlier sleeve reads no bars at all (it reads OutlierUniverseFeatures), so
+#: handing bars to a document that carries it changes nothing for it.
+COMPANION_LANES = frozenset({"outlier_sleeve", "outliersleeve"})
+
 
 def other_enabled_run_once_lanes(run_once_specs) -> list:
     """Names of run_once lanes on this document that are NOT strategy_eb.
@@ -60,7 +66,7 @@ def other_enabled_run_once_lanes(run_once_specs) -> list:
         if not isinstance(spec, dict):
             continue
         name = str(spec.get("strategy") or "").strip().lower()
-        if not name or name in EB_STRATEGY_NAMES:
+        if not name or name in EB_STRATEGY_NAMES or name in COMPANION_LANES:
             continue
         # `run_run_once_strategies` skips a zero-weight spec outright
         # (broker.py:6923), and `_strategy_x_specs` (broker.py:4311) mirrors
