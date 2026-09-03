@@ -1,4 +1,4 @@
-# INTELLISTOCK_SCHEMA: {"strategy": "strategy_eb", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_eb_enabled": false, "core_symbol": "TQQQ", "core_leverage": 3.0, "reference_symbol": "QQQ", "off_symbol": "SPY", "cash_symbol": "BIL", "target_vol": 0.2, "core_max_weight": 0.65, "weight_step": 0.05, "vol_fast_bars": 10, "vol_slow_bars": 40, "min_history_bars": 70, "core_rebalance_band": 0.1, "rebalance_weekdays": [2], "remainder_bil_fraction": 0.0, "trend_filter_bars": 25, "trend_off_enter_pct": 0.01, "trend_on_exit_pct": 0.02, "risk_off_symbol": "BIL", "core_off_damp": 0.0, "trend_on_book": {"GLD": 0.5, "GDX": 0.25, "XLE": 0.25}, "trend_off_book": {"GLD": 0.375, "GDX": 0.1875, "XLE": 0.1875}, "cash_sweep_min_pct": 0.02, "core_band_pct": 0.03, "min_order_usd": 25.0, "cost_haircut_pct": 0.005, "broker_max_single_position_pct": 0.95, "honour_single_position_cap": true, "live_max_order_fraction": 0.7, "live_max_symbol_fraction": 0.7, "live_max_leveraged_fraction": 0.7, "live_soft_drawdown": 0.25, "live_hard_drawdown": 0.35, "live_kill_drawdown": 0.45}}
+# INTELLISTOCK_SCHEMA: {"strategy": "strategy_eb", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_eb_enabled": false, "core_symbol": "TQQQ", "core_leverage": 3.0, "reference_symbol": "QQQ", "off_symbol": "SPY", "cash_symbol": "BIL", "target_vol": 0.2, "core_max_weight": 0.65, "weight_step": 0.05, "vol_fast_bars": 10, "vol_slow_bars": 40, "min_history_bars": 70, "core_rebalance_band": 0.1, "rebalance_weekdays": [2], "remainder_bil_fraction": 0.0, "trend_filter_bars": 25, "trend_off_enter_pct": 0.01, "trend_on_exit_pct": 0.02, "risk_off_symbol": "BIL", "core_off_damp": 0.0, "trend_on_book": {"GLD": 0.5, "GDX": 0.25, "XLE": 0.25}, "trend_off_book": {"GLD": 0.375, "GDX": 0.1875, "XLE": 0.1875}, "cash_sweep_min_pct": 0.02, "reserve_for_other_lanes_pct": 0.0, "core_band_pct": 0.03, "min_order_usd": 25.0, "cost_haircut_pct": 0.005, "broker_max_single_position_pct": 0.95, "honour_single_position_cap": true, "live_max_order_fraction": 0.7, "live_max_symbol_fraction": 0.7, "live_max_leveraged_fraction": 0.7, "live_soft_drawdown": 0.25, "live_hard_drawdown": 0.35, "live_kill_drawdown": 0.45}}
 # INTELLISTOCK_DESCRIPTION: Efficient beta — a volatility-targeted leveraged Nasdaq core with the remainder in a GLD/GDX/XLE book, a 25-session trend damp that steps the core out in downtrends, and a BIL floor that takes 25% of the risk-off remainder so de-risking never concentrates fully into the gold complex. Rebalanced weekly, every weight quantized and banded so it trades rarely. A risk transform, not an alpha.
 """Strategy EB wrapper: cache state, order emission, broker contract.
 
@@ -256,8 +256,24 @@ class StrategyEb:
             return {}
         positions = portfolio_emulator.get_positions() or {}
         core = _s(cfg, "core_symbol")
+
+        # Sharing the account with a sibling lane (reserve_for_other_lanes_pct
+        # > 0): this book is sized off NAV minus the larger of the sibling's
+        # reserve and what the sibling already holds, and the sibling's
+        # still-undeployed cash is held back from every buy. At 0.0 both are
+        # exactly `nav` and 0.0 — the pre-existing arithmetic, bit for bit.
+        reserve = max(0.0, min(0.9, _f(cfg, "reserve_for_other_lanes_pct")))
+        book_nav, cash_hold = nav, 0.0
+        if reserve > 0.0:
+            other = sum(float(q or 0.0) * float(eff.get(str(s).upper()) or 0.0)
+                        for s, q in positions.items()
+                        if str(s).upper() not in universe)
+            book_nav = max(0.0, nav - max(other, reserve * nav))
+            cash_hold = max(0.0, reserve * nav - other)
+            if book_nav <= 0:
+                return {}
         held = (float(positions.get(core) or 0.0)
-                * float(eff.get(core) or 0.0)) / nav
+                * float(eff.get(core) or 0.0)) / book_nav
 
         trade, effective_weight = eb_should_trade(session_id, weight, held,
                                                   cfg, cache, trend_state)
@@ -266,9 +282,9 @@ class StrategyEb:
             # sweep is deliberately outside the weekday cadence and the band:
             # both are about the CORE, and neither ever re-examines a balance
             # the core plan failed to spend.
-            return self._sweep(cfg, cache, session_id, universe, eff, nav,
+            return self._sweep(cfg, cache, session_id, universe, eff, book_nav,
                                positions, portfolio_emulator, held,
-                               trend_state)
+                               trend_state, cash_hold=cash_hold)
 
         # An exit already issued in THIS session is in flight, not ignored. No
         # sweep here either: the core sell has not settled, so the cash it will
@@ -278,9 +294,9 @@ class StrategyEb:
             return {}
 
         targets = eb_targets(effective_weight, cfg, trend_state)
-        cash = _spendable(portfolio_emulator, eff)
+        cash = max(0.0, _spendable(portfolio_emulator, eff) - cash_hold)
         decisions, sizes = targets_to_orders(
-            targets, nav=nav, positions=positions, prices=eff, cash=cash,
+            targets, nav=book_nav, positions=positions, prices=eff, cash=cash,
             config=cfg, owned=set(universe))
 
         # Written whether or not orders came out: the session HAS been decided,
@@ -321,7 +337,7 @@ class StrategyEb:
         return _emit(decisions, sizes, universe)
 
     def _sweep(self, cfg, cache, session_id, universe, prices, nav, positions,
-               emulator, held, trend_state="ON") -> dict:
+               emulator, held, trend_state="ON", cash_hold=0.0) -> dict:
         """Re-offer an idle cash balance to the REMAINDER legs.
 
         `targets_to_orders` sizes buys off SETTLED cash, and equity fills are
@@ -345,7 +361,9 @@ class StrategyEb:
             return {}
         if cache.get(_SWEEP_ISSUED_KEY) == session_id:
             return {}
-        cash = _spendable(emulator, prices)
+        # `nav` here is the BOOK's NAV and `cash_hold` the sibling lane's
+        # undeployed share (run_once computes both; 0 for a sole lane).
+        cash = max(0.0, _spendable(emulator, prices) - float(cash_hold or 0.0))
         if nav <= 0 or cash <= 0 or (cash / nav) <= _f(cfg,
                                                        "cash_sweep_min_pct"):
             return {}

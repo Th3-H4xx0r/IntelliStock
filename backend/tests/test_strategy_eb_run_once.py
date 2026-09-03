@@ -798,3 +798,44 @@ def test_a_dict_valued_config_key_survives_the_api_round_trip():
     # And back out again, as the row is stored and re-read.
     assert json.loads(json.dumps(normalized))["config"]["trend_on_book"] == {
         "SMH": 0.3, "GLD": 0.7}
+
+
+def test_a_reserve_for_a_sibling_lane_shrinks_the_book_and_holds_its_cash():
+    """reserve_for_other_lanes_pct=0.15 with nothing held by the sibling: the
+    book is 85% of NAV and 15% of cash stays idle for the sibling."""
+    out = StrategyEb().run_once(["TQQQ"], PRICES, DECIDES,
+                                cfg(reserve_for_other_lanes_pct=0.15), {},
+                                data=data_for(alternating(0.01)),
+                                portfolio_emulator=FakeEmulator(cash=10000.0),
+                                strategy_cache={})
+    sizes = out["_nexus_position_sizes"]
+    haircut = 1.0 - DEFAULTS["cost_haircut_pct"]        # targets_to_orders shaves every buy
+    assert abs(sizes["TQQQ"]["buy_cash"] - 0.40 * 8500.0 * haircut) < 1.0
+    assert abs(sizes["SPY"]["buy_cash"] - 0.60 * 8500.0 * haircut) < 1.0
+
+
+def test_a_siblings_grown_position_replaces_the_reserve():
+    """The sibling already holds 20% of NAV: the book is NAV minus that (80%),
+    and no extra cash is held back because the reserve is already deployed."""
+    emu = FakeEmulator(cash=8000.0, positions={"FOO": 20.0},
+                       prices={**PRICES, "FOO": 100.0})
+    out = StrategyEb().run_once(["TQQQ"], {**PRICES, "FOO": 100.0}, DECIDES,
+                                cfg(reserve_for_other_lanes_pct=0.15), {},
+                                data=data_for(alternating(0.01)),
+                                portfolio_emulator=emu, strategy_cache={})
+    sizes = out["_nexus_position_sizes"]
+    haircut = 1.0 - DEFAULTS["cost_haircut_pct"]
+    assert abs(sizes["TQQQ"]["buy_cash"] - 0.40 * 8000.0 * haircut) < 1.0
+    assert abs(sizes["SPY"]["buy_cash"] - 0.60 * 8000.0 * haircut) < 1.0
+    assert "FOO" not in out            # never touches the sibling's name
+
+
+def test_reserve_zero_is_the_pre_existing_arithmetic():
+    a = StrategyEb().run_once(["TQQQ"], PRICES, DECIDES, cfg(), {},
+                              data=data_for(alternating(0.01)),
+                              portfolio_emulator=FakeEmulator(), strategy_cache={})
+    b = StrategyEb().run_once(["TQQQ"], PRICES, DECIDES,
+                              cfg(reserve_for_other_lanes_pct=0.0), {},
+                              data=data_for(alternating(0.01)),
+                              portfolio_emulator=FakeEmulator(), strategy_cache={})
+    assert a == b

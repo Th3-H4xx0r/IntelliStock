@@ -200,6 +200,15 @@ DEFAULTS = {
     # any tick that is not already sending a core order. Below it, sweeping is
     # pure churn.
     "cash_sweep_min_pct": 0.02,
+    # ── sharing a document with another lane ──
+    # Fraction of NAV this book LEAVES to a sibling run_once lane (the outlier
+    # sleeve, 2026-09-02). 0.0 = the whole account is this book, byte-for-byte
+    # the behaviour before the key existed. Above 0 the book is sized off
+    # NAV minus max(reserve, value of positions outside this universe), and
+    # the sibling's still-undeployed share is held back from every buy and
+    # from the sweep. Measured without it: the sweep took every settled
+    # dollar and the sleeve made 0.25 entries per screen (bt 876989).
+    "reserve_for_other_lanes_pct": 0.0,
     # ── execution (read by strategy_x.targets_to_orders) ──
     "core_band_pct": 0.03,
     "min_order_usd": 25.0,
