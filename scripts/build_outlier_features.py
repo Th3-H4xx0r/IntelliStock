@@ -126,6 +126,8 @@ def main(argv=None):
     ap.add_argument("--price-min", type=float, default=3.0)
     args = ap.parse_args(argv)
     from db import store
+    from db import schema as dbschema
+    dbschema.ensure_schema(tables=[FEATURES_TABLE])
     headers = _headers(args.brokerage_id)
     syms = candidate_symbols(headers)
     print(f"candidates {len(syms)}", flush=True)

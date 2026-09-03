@@ -28,6 +28,8 @@ _Q_EDGES = ("MATCH (a:Company)-[:COMPETES_WITH|SUPPLIER_OF|STRATEGIC_PARTNER|PAR
 def main():
     from neo4j import GraphDatabase
     from db import store
+    from db import schema as dbschema
+    dbschema.ensure_schema(tables=[PEERS_TABLE])
     drv = GraphDatabase.driver(
         os.environ["NEO4J_URI"],
         auth=(os.environ.get("NEO4J_USER", "neo4j"), os.environ["NEO4J_PASSWORD"]),
