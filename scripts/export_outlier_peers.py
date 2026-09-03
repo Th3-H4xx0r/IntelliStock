@@ -45,7 +45,7 @@ def main():
     docs = [{"id": t.upper(), "sector": sector.get(t), "industry": industry.get(t),
              "peers": sorted(p.upper() for p in ps)} for t, ps in peers.items()]
     for i in range(0, len(docs), 2000):
-        store.insert(PEERS_TABLE, docs[i:i + 2000], conflict="replace")
+        store.insert_bulk(PEERS_TABLE, docs[i:i + 2000], conflict="replace")
     print(f"exported {len(docs)} tickers with peers", flush=True)
     return 0
 

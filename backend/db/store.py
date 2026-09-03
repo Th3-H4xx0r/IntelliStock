@@ -862,6 +862,62 @@ def insert(table: str, doc_or_docs, *, conflict: str = "error",
                         generated_keys=generated_keys)
 
 
+def insert_bulk(table: str, docs, *, conflict: str = "replace",
+                chunk: int = 2000) -> InsertResult:
+    """Multi-row upsert for large idempotent loads (feature tables).
+
+    One ``INSERT ... VALUES (...),(...)`` statement per ``chunk`` rows: one
+    round trip instead of the four per row that ``insert`` needs for ReQL's
+    partial-success semantics (measured 2026-09-02: 11 rows/s through
+    ``insert`` against server7, ~30 hours for the 1.18M-row outlier feature
+    build). The price is that a bad document fails its whole chunk -- no
+    per-row savepoint -- so this is for callers that own the data end to end
+    (scripts/build_outlier_features.py); everything else keeps ``insert``.
+    Plain id-keyed, non-partitioned tables only.
+    """
+    if conflict not in ("error", "replace", "update"):
+        raise StoreError("conflict must be error|replace|update, got %r" % conflict)
+    docs = [docs] if isinstance(docs, dict) else list(docs)
+    if not docs:
+        return InsertResult()
+    spec_ = dbschema.spec(table)
+    if spec_.partitioned is not None or tuple(spec_.pk) != ("id",):
+        raise StoreError("insert_bulk supports plain id-keyed tables only; "
+                         "use insert() for %s" % table)
+    q = dbschema.quoted(table)
+    extra_cols = sorted(spec_.column_sources)
+    if conflict == "replace":
+        tail = (' ON CONFLICT ("id") DO UPDATE SET doc = EXCLUDED.doc, '
+                "updated_at = now() WHERE %s.doc IS DISTINCT FROM EXCLUDED.doc" % q)
+    elif conflict == "update":
+        tail = (' ON CONFLICT ("id") DO UPDATE SET '
+                "doc = jsonb_deep_merge(%s.doc, EXCLUDED.doc), updated_at = now()" % q)
+    else:
+        tail = ' ON CONFLICT ("id") DO NOTHING'
+    columns = ", ".join(['"id"', '"doc"'] + ['"%s"' % c for c in extra_cols])
+    row_ph = "(" + ", ".join(["%s", "%s::jsonb"] + ["%s"] * len(extra_cols)) + ")"
+    # Encode the WHOLE batch first, like insert(): a NaN or NUL is a client-side
+    # rejection before any row is written.
+    encoded = []
+    for doc in docs:
+        row_id, doc, _generated = _row_id_or_generate(table, doc)
+        encoded.append([row_id, dbjson.dumps(doc)]
+                       + _extra_column_values(table, spec_, doc))
+    written = 0
+    for start in range(0, len(encoded), max(1, int(chunk))):
+        part = encoded[start:start + max(1, int(chunk))]
+        stmt = "INSERT INTO %s (%s) VALUES %s%s" % (
+            q, columns, ", ".join([row_ph] * len(part)), tail)
+        params = [v for row in part for v in row]
+        with dbpool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(stmt, params)
+                rc = cur.rowcount
+                written += rc if isinstance(rc, int) and rc >= 0 else len(part)
+            conn.commit()
+    return InsertResult(inserted=written)
+
+
 def _selector_to_selection(table: str, selector) -> Selection:
     if isinstance(selector, Selection):
         return selector

@@ -141,7 +141,7 @@ def main(argv=None):
     rows = rows_for_universe(bars, args.adv_min)
     print(f"rows {len(rows)}", flush=True)
     for i in range(0, len(rows), 5000):
-        store.insert(FEATURES_TABLE, rows[i:i + 5000], conflict="replace")
+        store.insert_bulk(FEATURES_TABLE, rows[i:i + 5000], conflict="replace")
         if (i // 5000) % 20 == 0:
             print(f"  wrote {min(i + 5000, len(rows))}/{len(rows)}", flush=True)
     print("done", flush=True)

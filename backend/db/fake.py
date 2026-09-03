@@ -175,6 +175,11 @@ class FakeStore:
     WRITE_CHUNK = _s.WRITE_CHUNK
 
     # -- writes -----------------------------------------------------------
+    def insert_bulk(self, table: str, docs, *, conflict: str = "replace",
+                    chunk: int = 2000) -> _s.InsertResult:
+        """API twin of db.store.insert_bulk; in memory the two paths are one."""
+        return self.insert(table, docs, conflict=conflict)
+
     def insert(self, table: str, doc_or_docs, *, conflict: str = "error",
                durability: str = "hard") -> _s.InsertResult:
         if conflict not in ("error", "replace", "update"):
