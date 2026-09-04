@@ -18,6 +18,7 @@ import time
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(_ROOT, "scripts"))
 from _api import call  # noqa: E402
+from outlier_engine_test import REGIME_WINDOWS, BASE as REGIME_BASE  # noqa: E402
 
 INSTANCE = "strategy-eb-lab"
 STOCKS = ["TQQQ", "SPY", "BIL", "QQQ", "GLD", "GDX", "XLE"]
@@ -111,6 +112,42 @@ def run_one(tag, s, e):
     return bid, "timeout"
 
 
+def regime_battery(wanted):
+    """25 regime windows, sequential, per candidate; table of return vs SPY-TR and vs bil25."""
+    doc_id, doc = lab_doc()
+    original = copy.deepcopy(doc)
+    lines = [f"\n### Regime battery {dt.datetime.now(dt.timezone.utc):%Y-%m-%d %H:%MZ} — {', '.join(wanted)}\n",
+             "| cand | regime | window | bt | return | SPY-TR | Δ vs SPY | bil25 | Δ vs bil25 | DD |", "|---|---|---|---|---|---|---|---|---|---|"]
+    try:
+        for cand in wanted:
+            d = copy.deepcopy(original)
+            for l in d["strategies"]:
+                if l["strategy"] == "strategy_eb":
+                    l["config"]["trend_on_book"] = dict(BIL25_ON_BOOK); l["config"]["target_vol"] = 0.20
+                    l["config"]["reserve_for_other_lanes_pct"] = 0.0; l["config"]["vts_enabled"] = False
+                    l["config"].update(copy.deepcopy(CANDIDATES[cand]))
+                if l["strategy"] == "outlier_sleeve":
+                    l["config"]["outlier_sleeve_enabled"] = False
+            put_doc(doc_id, d); print(cand, "configured for regime battery", flush=True)
+            wins = 0; wins_base = 0; n = 0
+            for reg, tag, s_, e_ in REGIME_WINDOWS:
+                bid, st = run_one(tag, s_, e_)
+                if bid is None or st != "finished":
+                    lines.append(f"| {cand} | {reg} | {tag} | {bid} | RUN FAILED | | | | | |"); continue
+                days, nav, spytr = path(bid)
+                ret = nav[-1] / nav[0] - 1; s = spytr[-1] / spytr[0] - 1; base = REGIME_BASE.get(tag, (float("nan"), float("nan")))
+                n += 1; wins += ret > s; wins_base += ret * 100 > base[0]
+                lines.append(f"| {cand} | {reg} | {tag} | {bid} | {ret:+.2%} | {s:+.2%} | {(ret - s) * 100:+.2f} | {base[0]:+.2f}% | {ret * 100 - base[0]:+.2f} | {maxdd(nav):.1%} |")
+                print(lines[-1], flush=True)
+            lines.append(f"\n**{cand}: {wins}/{n} beat SPY-TR · {wins_base}/{n} beat bil25** (bil25 alone: 16/25 vs SPY-TR)\n")
+    finally:
+        put_doc(doc_id, original); print("lab doc restored", flush=True)
+    with open(OUT, "a") as fh:
+        fh.write("\n".join(lines) + "\n")
+    print("\n".join(lines), flush=True)
+    return 0
+
+
 def main(argv=None):
     global CANDIDATES, OUT
     args = list(argv or sys.argv[1:])
@@ -119,7 +156,12 @@ def main(argv=None):
         if args[i + 1] == "vts":
             CANDIDATES, OUT = VTS_CANDIDATES, OUT_VTS
         del args[i:i + 2]
+    regime = "--windows" in args and args[args.index("--windows") + 1] == "regime"
+    if "--windows" in args:
+        i = args.index("--windows"); del args[i:i + 2]
     wanted = [a for a in args if a in CANDIDATES] or list(CANDIDATES)
+    if regime:
+        return regime_battery(wanted)
     doc_id, doc = lab_doc()
     original = copy.deepcopy(doc)
     eb = next(l for l in doc["strategies"] if l["strategy"] == "strategy_eb")
