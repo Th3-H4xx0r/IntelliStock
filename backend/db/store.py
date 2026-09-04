@@ -898,24 +898,52 @@ def insert_bulk(table: str, docs, *, conflict: str = "replace",
     row_ph = "(" + ", ".join(["%s", "%s::jsonb"] + ["%s"] * len(extra_cols)) + ")"
     # Encode the WHOLE batch first, like insert(): a NaN or NUL is a client-side
     # rejection before any row is written.
-    encoded = []
+    # Last write wins for an id that repeats inside one batch, exactly as
+    # insert() behaves row by row. Left in, PostgreSQL rejects the statement
+    # ("ON CONFLICT DO UPDATE command cannot affect row a second time") and a
+    # 5000-row slice of the feature build dies on one repeated key.
+    by_id, order, generated = {}, [], []
+    dup_errors, first_error = 0, None
     for doc in docs:
-        row_id, doc, _generated = _row_id_or_generate(table, doc)
-        encoded.append([row_id, dbjson.dumps(doc)]
-                       + _extra_column_values(table, spec_, doc))
-    written = 0
+        row_id, doc, was_generated = _row_id_or_generate(table, doc)
+        if row_id in by_id:
+            if conflict == "error":
+                dup_errors += 1
+                first_error = first_error or "Duplicate primary key `id`: %r" % (row_id,)
+                continue
+        else:
+            order.append(row_id)
+            if was_generated:
+                generated.append(row_id)
+        by_id[row_id] = [row_id, dbjson.dumps(doc)] + _extra_column_values(table, spec_, doc)
+    encoded = [by_id[i] for i in order]
+    inserted = replaced = unchanged = 0
     for start in range(0, len(encoded), max(1, int(chunk))):
         part = encoded[start:start + max(1, int(chunk))]
-        stmt = "INSERT INTO %s (%s) VALUES %s%s" % (
+        # xmax = 0 on a returned row means it was freshly inserted; anything
+        # else is a row the ON CONFLICT clause updated. Rows the IS DISTINCT
+        # guard (replace) or DO NOTHING (error) filtered out are not returned.
+        stmt = "INSERT INTO %s (%s) VALUES %s%s RETURNING (xmax = 0)" % (
             q, columns, ", ".join([row_ph] * len(part)), tail)
         params = [v for row in part for v in row]
         with dbpool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(stmt, params)
-                rc = cur.rowcount
-                written += rc if isinstance(rc, int) and rc >= 0 else len(part)
+                rows = cur.fetchall()
             conn.commit()
-    return InsertResult(inserted=written)
+        fresh = sum(1 for r in rows if r and r[0])
+        inserted += fresh
+        replaced += len(rows) - fresh
+        untouched = len(part) - len(rows)
+        if conflict == "error":
+            dup_errors += untouched
+            if untouched and first_error is None:
+                first_error = "Duplicate primary key `id`"
+        else:
+            unchanged += untouched
+    return InsertResult(inserted=inserted, replaced=replaced, unchanged=unchanged,
+                        errors=dup_errors, first_error=first_error,
+                        generated_keys=generated)
 
 
 def _selector_to_selection(table: str, selector) -> Selection:

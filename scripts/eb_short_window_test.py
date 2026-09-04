@@ -126,7 +126,7 @@ def run_one(tag, s, e):
         _, r = call("POST", "/backtests", {"instance_id": INSTANCE, "stocks": STOCKS, "start_date": s,
                                            "end_date": e, "granularity": "86400", "initial_cash": 6000,
                                            "equity_cost_tiers": "etf-liquid"})
-    except BaseException as exc:
+    except Exception as exc:
         print("post failed", tag, repr(exc)[:200], flush=True)
         return None, None
     bid = r["id"]
@@ -135,7 +135,8 @@ def run_one(tag, s, e):
         time.sleep(20)
         try:
             _, b = call("GET", "/backtests")
-        except BaseException:
+        except Exception as exc:
+            print("poll failed", tag, bid, repr(exc)[:120], flush=True)
             continue
         bts = {x.get("id"): x for x in (b.get("backtests", b) if isinstance(b, dict) else b)}
         st = bts.get(bid, {}).get("status")
@@ -186,15 +187,22 @@ def regime_battery(wanted):
 def main(argv=None):
     global CANDIDATES, OUT
     args = list(argv or sys.argv[1:])
-    if "--set" in args:
-        i = args.index("--set")
-        if args[i + 1] == "vts":
-            CANDIDATES, OUT = VTS_CANDIDATES, OUT_VTS
-        del args[i:i + 2]
-    regime = "--windows" in args and args[args.index("--windows") + 1] == "regime"
-    if "--windows" in args:
-        i = args.index("--windows"); del args[i:i + 2]
-    wanted = [a for a in args if a in CANDIDATES] or list(CANDIDATES)
+    def _flag(name, allowed):
+        if name not in args:
+            return None
+        i = args.index(name)
+        if i + 1 >= len(args) or args[i + 1] not in allowed:
+            raise SystemExit(f"{name} needs one of {sorted(allowed)}")
+        v = args[i + 1]; del args[i:i + 2]
+        return v
+    # Strict on purpose: a typo here used to run the WRONG experiment for hours.
+    if _flag("--set", {"short", "vts"}) == "vts":
+        CANDIDATES, OUT = VTS_CANDIDATES, OUT_VTS
+    regime = _flag("--windows", {"regime", "short"}) == "regime"
+    unknown = [a for a in args if a not in CANDIDATES]
+    if unknown:
+        raise SystemExit(f"unknown candidate(s) {unknown}; choose from {list(CANDIDATES)}")
+    wanted = args or list(CANDIDATES)
     if regime:
         return regime_battery(wanted)
     doc_id, doc = lab_doc()

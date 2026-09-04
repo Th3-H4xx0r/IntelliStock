@@ -177,8 +177,39 @@ class FakeStore:
     # -- writes -----------------------------------------------------------
     def insert_bulk(self, table: str, docs, *, conflict: str = "replace",
                     chunk: int = 2000) -> _s.InsertResult:
-        """API twin of db.store.insert_bulk; in memory the two paths are one."""
-        return self.insert(table, docs, conflict=conflict)
+        """API twin of db.store.insert_bulk.
+
+        Same contract as the real one: plain id-keyed, non-partitioned tables
+        only; an id repeated inside one batch is last-write-wins (or, under
+        conflict="error", a counted duplicate); the result carries the same
+        inserted/replaced/unchanged/errors breakdown insert() produces.
+        """
+        if conflict not in ("error", "replace", "update"):
+            raise StoreError("conflict must be error|replace|update, got %r" % conflict)
+        spec_ = _s.dbschema.spec(table)
+        if spec_.partitioned is not None or tuple(spec_.pk) != ("id",):
+            raise StoreError("insert_bulk supports plain id-keyed tables only; "
+                             "use insert() for %s" % table)
+        docs = [docs] if isinstance(docs, dict) else list(docs)
+        # Same in-batch dedup as the real one: last write wins, or a counted
+        # duplicate under conflict="error".
+        by_id, order, dups, first_error = {}, [], 0, None
+        for doc in docs:
+            rid, doc, _generated = _s._row_id_or_generate(table, doc)
+            if rid in by_id and conflict == "error":
+                dups += 1
+                first_error = first_error or "Duplicate primary key `id`: %r" % (rid,)
+                continue
+            if rid not in by_id:
+                order.append(rid)
+            by_id[rid] = doc
+        r = self.insert(table, [by_id[i] for i in order], conflict=conflict)
+        if not dups:
+            return r
+        return _s.InsertResult(inserted=r.inserted, replaced=r.replaced, unchanged=r.unchanged,
+                               skipped=r.skipped, errors=r.errors + dups,
+                               first_error=r.first_error or first_error,
+                               generated_keys=list(r.generated_keys))
 
     def insert(self, table: str, doc_or_docs, *, conflict: str = "error",
                durability: str = "hard") -> _s.InsertResult:

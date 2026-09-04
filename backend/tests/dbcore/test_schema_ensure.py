@@ -21,8 +21,10 @@ _LAZILY_CREATED = (
 )
 
 
-def test_all_tables_has_the_125_live_tables_plus_the_two_split_tables():
-    assert len(schema.ALL_TABLES) == 127 + len(_LAZILY_CREATED)
+def test_all_tables_has_the_127_live_tables_plus_the_two_split_tables():
+    # 2026-09-02: +2 for the outlier sleeve's feature and peer tables
+    # (OutlierUniverseFeatures, OutlierGraphPeers).
+    assert len(schema.ALL_TABLES) == 129 + len(_LAZILY_CREATED)
     assert len(set(schema.ALL_TABLES)) == len(schema.ALL_TABLES)
     for name in ("BacktestResults", "PriceHistory", "GraphNexusTradeContexts",
                  "kalshi_decisions", "sports_fixtures", "Users",

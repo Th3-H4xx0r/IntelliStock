@@ -41,3 +41,28 @@ def test_insert_bulk_refuses_partitioned_tables():
     from db.errors import StoreError
     with pytest.raises(StoreError):
         real.insert_bulk("PriceHistory", [{"id": "x", "ticker": "AAA", "ts": "2026-01-01T00:00:00Z"}])
+
+
+def test_insert_bulk_last_write_wins_for_an_id_repeated_inside_one_batch(store):
+    """scripts/build_outlier_features.py feeds 5000-row slices with no dedup;
+    a repeated key must not fail the chunk, and the later row must land."""
+    docs = _docs() + [{"id": "2026-06-02|AAA", "date": "2026-06-02", "symbol": "AAA", "close": 99.0}]
+    r = store.insert_bulk(FEATURES_TABLE, docs, conflict="replace")
+    assert r.errors == 0
+    assert store.get(FEATURES_TABLE, "2026-06-02|AAA")["close"] == 99.0
+    assert r.inserted + r.replaced + r.unchanged == 3
+
+
+def test_insert_bulk_reports_replaced_and_unchanged_like_insert(store):
+    first = store.insert_bulk(FEATURES_TABLE, _docs(), conflict="replace")
+    assert (first.inserted, first.replaced, first.errors) == (3, 0, 0)
+    again = store.insert_bulk(FEATURES_TABLE, _docs(), conflict="replace")
+    assert again.inserted == 0 and again.errors == 0
+    assert again.replaced + again.unchanged == 3
+
+
+def test_insert_bulk_counts_duplicates_as_errors_under_conflict_error(store):
+    store.insert_bulk(FEATURES_TABLE, _docs()[:1], conflict="error")
+    r = store.insert_bulk(FEATURES_TABLE, _docs(), conflict="error")
+    assert r.errors == 1 and r.first_error and "Duplicate" in r.first_error
+    assert r.inserted == 2
