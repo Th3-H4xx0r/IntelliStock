@@ -938,3 +938,54 @@ def test_a_parsed_book_is_freshly_allocated_so_defaults_cannot_be_mutated():
     empty["JUNK"] = 9.0
     assert DEFAULTS["trend_on_book"] == {}
     assert DEFAULTS["trend_off_book"] == {}
+
+
+# ── VIX term-structure re-entry (2026-09-04, pre-registered) ────────────────
+
+def test_vts_off_leaves_the_price_rule_bit_for_bit():
+    from strategy_eb import eb_trend_state, vts_enabled
+    c = cfg(trend_filter_bars=4)
+    falling = [100.0, 100.0, 100.0, 100.0, 90.0]
+    assert vts_enabled(c) is False
+    assert eb_trend_state(falling, "ON", c) == "OFF"
+    assert eb_trend_state(falling, "ON", c, vts_ratio=0.5) == "OFF"   # ignored when off
+
+
+def test_vts_keeps_the_book_on_unless_the_vol_curve_is_inverted_too():
+    from strategy_eb import eb_trend_state
+    c = cfg(trend_filter_bars=4, vts_enabled=True, vts_threshold=1.0)
+    falling = [100.0, 100.0, 100.0, 100.0, 90.0]
+    assert eb_trend_state(falling, "ON", c, vts_ratio=0.95) == "ON"     # price OFF, curve normal
+    assert eb_trend_state(falling, "ON", c, vts_ratio=1.20) == "OFF"    # price OFF, curve inverted
+    assert eb_trend_state(falling, "ON", c, vts_ratio=None) == "OFF"    # unmeasurable -> price rule
+    rising = [100.0, 100.0, 100.0, 100.0, 110.0]
+    assert eb_trend_state(rising, "OFF", c, vts_ratio=1.50) == "ON"     # price ON wins regardless
+
+
+def test_vts_ratio_norm_is_the_ratio_over_its_trailing_median():
+    from strategy_eb import vts_ratio_norm
+    c = cfg(vts_median_bars=5)
+    short = [10.0] * 9 + [15.0]          # last day the short leg spikes 50%
+    mid = [20.0] * 10
+    assert abs(vts_ratio_norm(short, mid, c) - 1.5) < 1e-9
+    assert vts_ratio_norm([10.0], [20.0], c) is None                    # fewer than 2 sessions
+    assert vts_ratio_norm([10.0, float("nan")], [20.0, 20.0], c) is None
+
+
+def test_vts_data_symbols_join_the_universe_only_when_on():
+    from strategy_eb import strategy_eb_universe
+    base = strategy_eb_universe(cfg(trend_filter_bars=25))
+    assert "VIXY" not in base and "VIXM" not in base
+    on = strategy_eb_universe(cfg(trend_filter_bars=25, vts_enabled=True))
+    assert on[:len(base)] == base and on[len(base):] == ["VIXY", "VIXM"]
+
+
+def test_a_vts_flip_may_trade_off_cadence_but_a_plain_off_day_may_not():
+    from strategy_eb import eb_should_trade, LAST_STATE_KEY
+    c = cfg(trend_filter_bars=25, vts_enabled=True, rebalance_weekdays=[2])
+    thursday = "2026-06-04"      # weekday 3, not a decision day
+    cache = {LAST_STATE_KEY: "OFF"}
+    assert eb_should_trade(thursday, 0.40, 0.0, c, cache, "ON")[0] is True   # flip OFF->ON
+    assert eb_should_trade(thursday, 0.40, 0.0, c, {LAST_STATE_KEY: "ON"}, "ON")[0] is False
+    plain = cfg(trend_filter_bars=25, rebalance_weekdays=[2])
+    assert eb_should_trade(thursday, 0.40, 0.0, plain, cache, "ON")[0] is False  # VTS off: cadence rules

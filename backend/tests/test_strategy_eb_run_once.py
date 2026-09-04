@@ -839,3 +839,23 @@ def test_reserve_zero_is_the_pre_existing_arithmetic():
                               data=data_for(alternating(0.01)),
                               portfolio_emulator=FakeEmulator(), strategy_cache={})
     assert a == b
+
+
+def test_vts_evaluates_the_state_every_session_from_the_vix_etf_pair():
+    """With the overlay on, a Thursday (not a decision day) still re-evaluates
+    the state: a falling reference with a NORMAL vol curve stays ON."""
+    ref = alternating(0.01)
+    for i, b in enumerate(ref):                       # make the reference fall hard at the end
+        if i >= len(ref) - 30:
+            b["c"] = ref[len(ref) - 31]["c"] * (0.995 ** (i - (len(ref) - 31)))
+    data = data_for(ref, legs=("TQQQ", "SPY", "BIL"))
+    data["VIXY"] = {"bars": alternating(0.001, start=20.0)}
+    data["VIXM"] = {"bars": alternating(0.001, start=25.0)}
+    cache = {"_strategy_eb_trend_state": "OFF"}
+    StrategyEb().run_once(["TQQQ"], PRICES, SKIPS, cfg(trend_filter_bars=25, vts_enabled=True), {},
+                          data=data, portfolio_emulator=FakeEmulator(), strategy_cache=cache)
+    assert cache["_strategy_eb_trend_state"] == "ON"      # price OFF, curve normal -> ON
+    cache2 = {"_strategy_eb_trend_state": "OFF"}
+    StrategyEb().run_once(["TQQQ"], PRICES, SKIPS, cfg(trend_filter_bars=25), {},
+                          data=data, portfolio_emulator=FakeEmulator(), strategy_cache=cache2)
+    assert cache2["_strategy_eb_trend_state"] == "OFF"    # VTS off: Thursday does not re-evaluate

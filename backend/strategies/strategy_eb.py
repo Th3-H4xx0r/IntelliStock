@@ -1,4 +1,4 @@
-# INTELLISTOCK_SCHEMA: {"strategy": "strategy_eb", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_eb_enabled": false, "core_symbol": "TQQQ", "core_leverage": 3.0, "reference_symbol": "QQQ", "off_symbol": "SPY", "cash_symbol": "BIL", "target_vol": 0.2, "core_max_weight": 0.65, "weight_step": 0.05, "vol_fast_bars": 10, "vol_slow_bars": 40, "min_history_bars": 70, "core_rebalance_band": 0.1, "rebalance_weekdays": [2], "remainder_bil_fraction": 0.0, "trend_filter_bars": 25, "trend_off_enter_pct": 0.01, "trend_on_exit_pct": 0.02, "risk_off_symbol": "BIL", "core_off_damp": 0.0, "trend_on_book": {"GLD": 0.5, "GDX": 0.25, "XLE": 0.25}, "trend_off_book": {"GLD": 0.375, "GDX": 0.1875, "XLE": 0.1875}, "cash_sweep_min_pct": 0.02, "reserve_for_other_lanes_pct": 0.0, "core_band_pct": 0.03, "min_order_usd": 25.0, "cost_haircut_pct": 0.005, "broker_max_single_position_pct": 0.95, "honour_single_position_cap": true, "live_max_order_fraction": 0.7, "live_max_symbol_fraction": 0.7, "live_max_leveraged_fraction": 0.7, "live_soft_drawdown": 0.25, "live_hard_drawdown": 0.35, "live_kill_drawdown": 0.45}}
+# INTELLISTOCK_SCHEMA: {"strategy": "strategy_eb", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_eb_enabled": false, "core_symbol": "TQQQ", "core_leverage": 3.0, "reference_symbol": "QQQ", "off_symbol": "SPY", "cash_symbol": "BIL", "target_vol": 0.2, "core_max_weight": 0.65, "weight_step": 0.05, "vol_fast_bars": 10, "vol_slow_bars": 40, "min_history_bars": 70, "core_rebalance_band": 0.1, "rebalance_weekdays": [2], "remainder_bil_fraction": 0.0, "trend_filter_bars": 25, "trend_off_enter_pct": 0.01, "trend_on_exit_pct": 0.02, "risk_off_symbol": "BIL", "core_off_damp": 0.0, "trend_on_book": {"GLD": 0.5, "GDX": 0.25, "XLE": 0.25}, "trend_off_book": {"GLD": 0.375, "GDX": 0.1875, "XLE": 0.1875}, "cash_sweep_min_pct": 0.02, "reserve_for_other_lanes_pct": 0.0, "vts_enabled": false, "vts_short_symbol": "VIXY", "vts_mid_symbol": "VIXM", "vts_median_bars": 250, "vts_threshold": 1.0, "core_band_pct": 0.03, "min_order_usd": 25.0, "cost_haircut_pct": 0.005, "broker_max_single_position_pct": 0.95, "honour_single_position_cap": true, "live_max_order_fraction": 0.7, "live_max_symbol_fraction": 0.7, "live_max_leveraged_fraction": 0.7, "live_soft_drawdown": 0.25, "live_hard_drawdown": 0.35, "live_kill_drawdown": 0.45}}
 # INTELLISTOCK_DESCRIPTION: Efficient beta — a volatility-targeted leveraged Nasdaq core with the remainder in a GLD/GDX/XLE book, a 25-session trend damp that steps the core out in downtrends, and a BIL floor that takes 25% of the risk-off remainder so de-risking never concentrates fully into the gold complex. Rebalanced weekly, every weight quantized and banded so it trades rarely. A risk transform, not an alpha.
 """Strategy EB wrapper: cache state, order emission, broker contract.
 
@@ -32,6 +32,7 @@ from strategy_eb import (  # noqa: E402
     session_weekday,
     strategy_eb_universe,
 )
+from strategy_eb import vts_enabled, vts_ratio_norm  # noqa: E402
 from strategy_x import (  # noqa: E402
     pit_daily_observations,
     targets_to_orders,
@@ -223,10 +224,26 @@ class StrategyEb:
         # whose universe never even declared them.
         trend_state = (_state(cache.get(_TREND_STATE_KEY))
                        if eb_trend_enabled(cfg) else "ON")
+        # VTS (2026-09-04): with the vol-curve overlay on, the state is
+        # evaluated EVERY session (the signal's value is timing) from the two
+        # VIX-ETF daily closes paired by session; otherwise on decision
+        # weekdays only, exactly as before.
+        _vts_on = vts_enabled(cfg)
+        _vts_ratio = None
+        if _vts_on:
+            _sv = pit_daily_observations(_bars_for(data, _s(cfg, "vts_short_symbol")),
+                                         current_time)
+            _mv = pit_daily_observations(_bars_for(data, _s(cfg, "vts_mid_symbol")),
+                                         current_time)
+            _mid_by = {sid: c for sid, c in _mv}
+            _pairs = [(c, _mid_by[sid]) for sid, c in _sv if sid in _mid_by]
+            _vts_ratio = vts_ratio_norm([a for a, _ in _pairs],
+                                        [b for _, b in _pairs], cfg)
         if (eb_trend_enabled(cfg)
-                and session_weekday(session_id) in rebalance_weekdays(cfg)):
+                and (_vts_on
+                     or session_weekday(session_id) in rebalance_weekdays(cfg))):
             trend_state = eb_trend_state(closes, cache.get(_TREND_STATE_KEY),
-                                         cfg)
+                                         cfg, vts_ratio=_vts_ratio)
             cache[_TREND_STATE_KEY] = trend_state
 
         weight = eb_core_weight(closes, cfg, trend_state)

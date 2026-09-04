@@ -209,6 +209,19 @@ DEFAULTS = {
     # from the sweep. Measured without it: the sweep took every settled
     # dollar and the sleeve made 0.25 entries per screen (bt 876989).
     "reserve_for_other_lanes_pct": 0.0,
+    # ── VIX term-structure re-entry (2026-09-04, pre-registered) ──
+    # With the filter ON, the state is OFF only when price is OFF (the SMA
+    # hysteresis above) AND the vol curve is inverted: VIXY/VIXM divided by
+    # its trailing `vts_median_bars`-session median exceeds `vts_threshold`.
+    # Implied vol mean-reverts faster than price recovers, so this exits only
+    # in genuine panics and re-enters weeks earlier than the SMA alone. The
+    # two ETFs are DATA symbols — fetched, never traded. Default off is the
+    # pre-existing machine bit for bit.
+    "vts_enabled": False,
+    "vts_short_symbol": "VIXY",
+    "vts_mid_symbol": "VIXM",
+    "vts_median_bars": 250,
+    "vts_threshold": 1.00,
     # ── execution (read by strategy_x.targets_to_orders) ──
     "core_band_pct": 0.03,
     "min_order_usd": 25.0,
@@ -292,7 +305,7 @@ def eb_trend_enabled(cfg) -> bool:
     return _i(cfg, "trend_filter_bars") > 0
 
 
-def eb_trend_state(closes, prev_state, cfg) -> str:
+def eb_trend_state(closes, prev_state, cfg, vts_ratio=None) -> str:
     """"ON" or "OFF" — which asset the de-levered remainder belongs in.
 
         sma  = mean(closes[-N:])
@@ -332,9 +345,65 @@ def eb_trend_state(closes, prev_state, cfg) -> str:
     close = prices[-1]
     if prev == "ON":
         enter = max(0.0, min(1.0, _f(cfg, "trend_off_enter_pct")))
-        return "OFF" if close < sma * (1.0 - enter) else "ON"
-    exit_pct = max(0.0, _f(cfg, "trend_on_exit_pct"))
-    return "ON" if close > sma * (1.0 + exit_pct) else "OFF"
+        price_state = "OFF" if close < sma * (1.0 - enter) else "ON"
+    else:
+        exit_pct = max(0.0, _f(cfg, "trend_on_exit_pct"))
+        price_state = "ON" if close > sma * (1.0 + exit_pct) else "OFF"
+    if price_state == "OFF" and vts_enabled(cfg):
+        # OFF needs BOTH a broken price trend and an inverted vol curve. An
+        # unmeasurable curve (None / non-finite) must not switch the book off
+        # on its own — fail toward the price rule, exactly as before.
+        try:
+            r = float(vts_ratio) if vts_ratio is not None else None
+        except (TypeError, ValueError):
+            r = None
+        if r is not None and math.isfinite(r) and r <= _f(cfg, "vts_threshold"):
+            return "ON"
+    return price_state
+
+
+def vts_enabled(cfg) -> bool:
+    """The VTS overlay needs the price filter on; a string "false" is off."""
+    if not eb_trend_enabled(cfg):
+        return False
+    v = (cfg or {}).get("vts_enabled", False)
+    if isinstance(v, bool):
+        return v
+    return str(v or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def vts_ratio_norm(short_closes, mid_closes, cfg):
+    """(short/mid) at the last session divided by the trailing median of that
+    ratio over `vts_median_bars` sessions, or None when unmeasurable.
+
+    Pure. Both inputs are visible daily closes, oldest first, the same length
+    and alignment (the wrapper pairs them by session). A median rather than a
+    mean because VIX-ETF roll decay drifts the raw ratio and a single spike
+    must not move the reference the spike is measured against.
+    """
+    try:
+        n = min(len(short_closes or []), len(mid_closes or []))
+    except TypeError:
+        return None
+    bars = max(2, _i(cfg, "vts_median_bars"))
+    if n < 2:
+        return None
+    ratios = []
+    for a, b in zip(short_closes[-n:], mid_closes[-n:]):
+        try:
+            a = float(a)
+            b = float(b)
+        except (TypeError, ValueError):
+            return None
+        if not (math.isfinite(a) and math.isfinite(b)) or b <= 0 or a <= 0:
+            return None
+        ratios.append(a / b)
+    window = sorted(ratios[-bars:])
+    m = len(window)
+    med = window[m // 2] if m % 2 else (window[m // 2 - 1] + window[m // 2]) / 2.0
+    if med <= 0:
+        return None
+    return ratios[-1] / med
 
 
 def eb_state_book(cfg, trend_state="ON") -> dict:
@@ -650,6 +719,13 @@ def strategy_eb_universe(cfg) -> list:
         symbol = _s(cfg, key)
         if symbol and symbol not in out:
             out.append(symbol)
+    # VTS data symbols, only when that feature is on: the broker fetches bars
+    # for them like the reference symbol; no target ever names them.
+    if vts_enabled(cfg):
+        for key in ("vts_short_symbol", "vts_mid_symbol"):
+            symbol = _s(cfg, key)
+            if symbol and symbol not in out:
+                out.append(symbol)
     # The book legs LAST, in configured order, so adding a book cannot reorder
     # the four legs every existing run already declares. The OFF book is
     # declared only when the filter is on, for the same reason the risk-off leg
@@ -719,7 +795,14 @@ def eb_should_trade(session_id, w_target, w_held, cfg, cache,
         return (False, held)
 
     days = rebalance_weekdays(cfg)
-    if session_weekday(session_id) not in days:
+    # VTS (2026-09-04): a state FLIP is allowed to trade off-cadence. The exit
+    # already is (rule 2); without this the re-entry waits for the weekday and
+    # the whole point of the vol-curve signal — coming back weeks earlier — is
+    # blunted to the weekly cadence. Off, this line changes nothing.
+    _vts_flip = (vts_enabled(cfg)
+                 and (cache or {}).get(LAST_STATE_KEY) is not None
+                 and _state((cache or {}).get(LAST_STATE_KEY)) != _state(trend_state))
+    if session_weekday(session_id) not in days and not _vts_flip:
         return (False, held)
 
     if target <= 0.0:

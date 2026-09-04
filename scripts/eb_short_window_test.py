@@ -30,8 +30,13 @@ CANDIDATES = {
     "K3": {"target_vol": 0.25},
     "K4": {"target_vol": 0.25, "trend_on_book": {"QQQ": 0.25, "GLD": 0.375, "GDX": 0.1875, "XLE": 0.1875}},
 }
+VTS_CANDIDATES = {
+    "V1": {"vts_enabled": True, "vts_threshold": 1.00, "vts_median_bars": 250},
+    "V2": {"vts_enabled": True, "vts_threshold": 1.05, "vts_median_bars": 250},
+}
 BIL25_3M = 0.616
 OUT = os.path.join(_ROOT, "docs", "superpowers", "research", "2026-09-03-short-window-preregistration.md")
+OUT_VTS = os.path.join(_ROOT, "docs", "superpowers", "research", "2026-09-04-vts-reentry-preregistration.md")
 
 
 def maxdd(x):
@@ -107,7 +112,14 @@ def run_one(tag, s, e):
 
 
 def main(argv=None):
-    wanted = [a for a in (argv or sys.argv[1:]) if a in CANDIDATES] or list(CANDIDATES)
+    global CANDIDATES, OUT
+    args = list(argv or sys.argv[1:])
+    if "--set" in args:
+        i = args.index("--set")
+        if args[i + 1] == "vts":
+            CANDIDATES, OUT = VTS_CANDIDATES, OUT_VTS
+        del args[i:i + 2]
+    wanted = [a for a in args if a in CANDIDATES] or list(CANDIDATES)
     doc_id, doc = lab_doc()
     original = copy.deepcopy(doc)
     eb = next(l for l in doc["strategies"] if l["strategy"] == "strategy_eb")
