@@ -26,6 +26,7 @@ WINDOWS = [("cyc", "2021-11-01", "2026-08-27"), ("rb1", "2022-01-01", "2022-06-3
            ("rb2", "2026-02-01", "2026-04-01"), ("rb3", "2025-02-15", "2025-04-15")]
 BIL25_ON_BOOK = {"GLD": 0.5, "GDX": 0.25, "XLE": 0.25}
 CANDIDATES = {
+    "B0": {},  # control: the unchanged bil25 default on the current deployed code (must reproduce bt 785201)
     "K1": {"trend_on_book": {"QQQ": 0.5, "GLD": 0.25, "GDX": 0.125, "XLE": 0.125}},
     "K2": {"trend_on_book": {"QQQ": 0.25, "GLD": 0.375, "GDX": 0.1875, "XLE": 0.1875}},
     "K3": {"target_vol": 0.25},
