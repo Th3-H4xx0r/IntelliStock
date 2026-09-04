@@ -984,6 +984,12 @@ _CODE_FINGERPRINT_FILES = (
     # Backtests share this cache policy. A stale image here can serve empty or
     # incomplete market data even when the strategy and broker hashes match.
     "price_utils.py",
+    # Strategy EB is the paper instance's live strategy and the lab's engine
+    # subject; 2026-09-03 a push that changed only these two files read as
+    # "deployed" before the image existed, and a pre-registered run started
+    # on the old code.
+    "strategy_eb.py",
+    "strategies/strategy_eb.py",
 )
 _CODE_FINGERPRINT_CACHE: "dict[str, str] | None" = None
 

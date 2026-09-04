@@ -34,6 +34,11 @@ FILES = (
     "backend/strategy_x.py",
     "backend/strategies/strategy_x.py",
     "backend/price_utils.py",
+    # 2026-09-03: the EB pair was missing, so a push that changed only
+    # strategy_eb.py reported "deployed" instantly and a pre-registered engine
+    # run started on the OLD image.
+    "backend/strategy_eb.py",
+    "backend/strategies/strategy_eb.py",
 )
 
 
