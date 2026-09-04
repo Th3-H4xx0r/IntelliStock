@@ -4474,14 +4474,28 @@ def _strategy_eb_risk_limits(cached_strategies):
             merged = {**defaults_by_lane[name], **(spec.get("config") or {})}
             if not _truthy(merged.get(flag, False)):
                 continue
-            mine = RiskLimits(
-                max_order_fraction=merged["live_max_order_fraction"],
-                max_symbol_fraction=merged["live_max_symbol_fraction"],
-                max_leveraged_fraction=merged["live_max_leveraged_fraction"],
-                soft=merged["live_soft_drawdown"],
-                hard=merged["live_hard_drawdown"],
-                kill=merged["live_kill_drawdown"],
-            )
+            try:
+                mine = RiskLimits(
+                    max_order_fraction=float(merged["live_max_order_fraction"]),
+                    max_symbol_fraction=float(merged["live_max_symbol_fraction"]),
+                    max_leveraged_fraction=float(merged["live_max_leveraged_fraction"]),
+                    soft=float(merged["live_soft_drawdown"]),
+                    hard=float(merged["live_hard_drawdown"]),
+                    kill=float(merged["live_kill_drawdown"]),
+                )
+            except Exception as _lane_exc:
+                # 2026-09-03: one malformed SIBLING lane (a missing live_* key,
+                # a non-numeric value) used to escape to the outer except and
+                # return None for the whole document — strategy_eb's already-
+                # computed envelope thrown away, the module defaults installed,
+                # and every strategy_eb buy blocked on max_order_notional,
+                # silently, on real money. Skip the lane, keep the rest.
+                try:
+                    _log(f"[{name}] live risk limits ignored for this lane "
+                         f"({_lane_exc}); the other lanes' envelope stands", "yellow")
+                except Exception:
+                    pass
+                continue
             if widest is None:
                 widest = mine
             else:

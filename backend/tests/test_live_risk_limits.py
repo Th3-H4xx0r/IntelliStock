@@ -308,3 +308,20 @@ def test_the_outlier_lane_widens_the_symbol_fraction_and_the_cap():
                      "broker_max_single_position_pct": 0.95}}]
     assert ns["_strategy_eb_risk_limits"](disabled) is None
     assert ns["_strategy_eb_single_position_pct"](disabled) is None
+
+
+def test_a_malformed_sibling_lane_does_not_drop_the_eb_envelope():
+    """2026-09-03: a sleeve lane whose limits are refused at construction used
+    to escape to the outer except and return None for the WHOLE document —
+    strategy_eb's envelope discarded, the module defaults installed, every EB
+    buy blocked on max_order_notional. The bad lane is skipped; EB stands.
+    Order must not matter."""
+    ns = _extract("_strategy_eb_risk_limits")
+    eb = {"strategy": "strategy_eb", "config": {"strategy_eb_enabled": True}}
+    bad = {"strategy": "outlier_sleeve",
+           "config": {"outlier_sleeve_enabled": True, "live_soft_drawdown": 0.9}}
+    junk = {"strategy": "outlier_sleeve",
+            "config": {"outlier_sleeve_enabled": True, "live_max_order_fraction": "junk"}}
+    assert ns["_strategy_eb_risk_limits"]([eb, bad]) == EB
+    assert ns["_strategy_eb_risk_limits"]([bad, eb]) == EB
+    assert ns["_strategy_eb_risk_limits"]([junk, eb, bad]) == EB
