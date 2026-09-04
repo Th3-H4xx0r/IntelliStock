@@ -852,10 +852,53 @@ def test_vts_evaluates_the_state_every_session_from_the_vix_etf_pair():
     data["VIXY"] = {"bars": alternating(0.001, start=20.0)}
     data["VIXM"] = {"bars": alternating(0.001, start=25.0)}
     cache = {"_strategy_eb_trend_state": "OFF"}
-    StrategyEb().run_once(["TQQQ"], PRICES, SKIPS, cfg(trend_filter_bars=25, vts_enabled=True), {},
+    StrategyEb().run_once(["TQQQ"], PRICES, SKIPS,
+                          cfg(trend_filter_bars=25, vts_enabled=True, vts_median_bars=20), {},
                           data=data, portfolio_emulator=FakeEmulator(), strategy_cache=cache)
-    assert cache["_strategy_eb_trend_state"] == "ON"      # price OFF, curve normal -> ON
+    dec = next(v for v in cache.values() if isinstance(v, dict) and "trend_state" in v)
+    assert dec["trend_state"] == "ON"                     # price OFF, curve normal -> ON
+    assert dec["vts"]["fired"] is True and dec["vts"]["pairs"] >= 20
+    assert abs(dec["vts"]["ratio"] - 1.0) < 0.05
+    # The PRICE rule keeps its own hysteresis: the forced ON is not persisted.
+    assert cache["_strategy_eb_trend_state"] == "OFF"
     cache2 = {"_strategy_eb_trend_state": "OFF"}
     StrategyEb().run_once(["TQQQ"], PRICES, SKIPS, cfg(trend_filter_bars=25), {},
                           data=data, portfolio_emulator=FakeEmulator(), strategy_cache=cache2)
     assert cache2["_strategy_eb_trend_state"] == "OFF"    # VTS off: Thursday does not re-evaluate
+
+
+def test_vts_with_its_data_missing_falls_back_to_the_weekly_cadence():
+    """The overlay is live only when its ratio measured. With VIXM absent the
+    Thursday does not re-evaluate, exactly as with the overlay off, and the
+    decision row says why."""
+    ref = alternating(0.01)
+    for i, b in enumerate(ref):
+        if i >= len(ref) - 30:
+            b["c"] = ref[len(ref) - 31]["c"] * (0.995 ** (i - (len(ref) - 31)))
+    data = data_for(ref, legs=("TQQQ", "SPY", "BIL"))
+    data["VIXY"] = {"bars": alternating(0.001, start=20.0)}       # no VIXM at all
+    cache = {"_strategy_eb_trend_state": "OFF"}
+    StrategyEb().run_once(["TQQQ"], PRICES, SKIPS,
+                          cfg(trend_filter_bars=25, vts_enabled=True, vts_median_bars=20), {},
+                          data=data, portfolio_emulator=FakeEmulator(), strategy_cache=cache)
+    assert cache["_strategy_eb_trend_state"] == "OFF"
+    dec = next(v for v in cache.values() if isinstance(v, dict) and "trend_state" in v)
+    assert dec["vts"] == {"ratio": None, "pairs": 0, "fired": False}
+
+
+def test_vts_with_too_little_history_is_inert():
+    """Fewer paired sessions than vts_median_bars: no measurement, no override."""
+    ref = alternating(0.01)
+    for i, b in enumerate(ref):
+        if i >= len(ref) - 30:
+            b["c"] = ref[len(ref) - 31]["c"] * (0.995 ** (i - (len(ref) - 31)))
+    data = data_for(ref, legs=("TQQQ", "SPY", "BIL"))
+    data["VIXY"] = {"bars": alternating(0.001, start=20.0)}
+    data["VIXM"] = {"bars": alternating(0.001, start=25.0)}
+    cache = {"_strategy_eb_trend_state": "OFF"}
+    StrategyEb().run_once(["TQQQ"], PRICES, SKIPS,
+                          cfg(trend_filter_bars=25, vts_enabled=True, vts_median_bars=100000), {},
+                          data=data, portfolio_emulator=FakeEmulator(), strategy_cache=cache)
+    assert cache["_strategy_eb_trend_state"] == "OFF"
+    dec = next(v for v in cache.values() if isinstance(v, dict) and "trend_state" in v)
+    assert dec["vts"]["ratio"] is None and dec["vts"]["fired"] is False and dec["vts"]["pairs"] > 0

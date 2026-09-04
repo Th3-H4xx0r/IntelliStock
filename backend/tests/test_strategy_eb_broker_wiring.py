@@ -77,3 +77,14 @@ def test_both_wiring_points_reference_the_eb_universe():
     uses = source.count("_strategy_eb_universe_symbols(")
     # one definition + the prepare (price) site + the fetch site
     assert uses >= 3, f"expected the EB universe at both wiring points, saw {uses}"
+
+
+def test_the_vts_data_symbols_reach_the_fetch_site_when_the_overlay_is_on():
+    """VTS adds two DATA symbols to the EB universe; the fetch site must see
+    them or the overlay runs blind (and, before 2026-09-03, would then have
+    kept its every-session cadence with no signal behind it)."""
+    ns = _extract("_strategy_eb_universe_symbols")
+    off = ns["_strategy_eb_universe_symbols"](spec(strategy_eb_enabled=True))
+    assert "VIXY" not in off and "VIXM" not in off
+    on = ns["_strategy_eb_universe_symbols"](spec(strategy_eb_enabled=True, trend_filter_bars=25, vts_enabled=True))
+    assert "VIXY" in on and "VIXM" in on

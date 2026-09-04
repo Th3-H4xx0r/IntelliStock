@@ -968,7 +968,8 @@ def test_vts_ratio_norm_is_the_ratio_over_its_trailing_median():
     short = [10.0] * 9 + [15.0]          # last day the short leg spikes 50%
     mid = [20.0] * 10
     assert abs(vts_ratio_norm(short, mid, c) - 1.5) < 1e-9
-    assert vts_ratio_norm([10.0], [20.0], c) is None                    # fewer than 2 sessions
+    assert vts_ratio_norm([10.0] * 4, [20.0] * 4, c) is None          # fewer than vts_median_bars: fail closed
+    assert abs(vts_ratio_norm([10.0] * 5, [20.0] * 5, c) - 1.0) < 1e-9  # exactly the window: measurable
     assert vts_ratio_norm([10.0, float("nan")], [20.0, 20.0], c) is None
 
 
@@ -985,7 +986,10 @@ def test_a_vts_flip_may_trade_off_cadence_but_a_plain_off_day_may_not():
     c = cfg(trend_filter_bars=25, vts_enabled=True, rebalance_weekdays=[2])
     thursday = "2026-06-04"      # weekday 3, not a decision day
     cache = {LAST_STATE_KEY: "OFF"}
-    assert eb_should_trade(thursday, 0.40, 0.0, c, cache, "ON")[0] is True   # flip OFF->ON
-    assert eb_should_trade(thursday, 0.40, 0.0, c, {LAST_STATE_KEY: "ON"}, "ON")[0] is False
+    assert eb_should_trade(thursday, 0.40, 0.0, c, cache, "ON", vts_active=True)[0] is True   # flip OFF->ON
+    assert eb_should_trade(thursday, 0.40, 0.0, c, {LAST_STATE_KEY: "ON"}, "ON", vts_active=True)[0] is False
+    # The ratio did not measure this session: the flag alone buys no off-cadence flip.
+    assert eb_should_trade(thursday, 0.40, 0.0, c, cache, "ON")[0] is False
+    assert eb_should_trade(thursday, 0.40, 0.0, c, cache, "ON", vts_active=False)[0] is False
     plain = cfg(trend_filter_bars=25, rebalance_weekdays=[2])
     assert eb_should_trade(thursday, 0.40, 0.0, plain, cache, "ON")[0] is False  # VTS off: cadence rules

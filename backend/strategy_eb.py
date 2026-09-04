@@ -386,7 +386,12 @@ def vts_ratio_norm(short_closes, mid_closes, cfg):
     except TypeError:
         return None
     bars = max(2, _i(cfg, "vts_median_bars"))
-    if n < 2:
+    if n < bars:
+        # Fail closed. The engine starts every window with ~63 sessions of
+        # history (90-calendar-day warmup); a "250-session median" computed
+        # over 63 is a different, unregistered rule — and one that re-centres
+        # on a panic within a quarter. Until the window is full there is no
+        # measurement, and the wrapper treats None as "overlay inactive".
         return None
     ratios = []
     for a, b in zip(short_closes[-n:], mid_closes[-n:]):
@@ -742,7 +747,7 @@ def strategy_eb_universe(cfg) -> list:
 
 
 def eb_should_trade(session_id, w_target, w_held, cfg, cache,
-                    trend_state="ON") -> tuple:
+                    trend_state="ON", vts_active=False) -> tuple:
     """(trade?, core weight to move to) for this session.
 
     Read-only on `cache`. The CALLER writes `LAST_REBALANCE_KEY` after it has
@@ -799,7 +804,11 @@ def eb_should_trade(session_id, w_target, w_held, cfg, cache,
     # already is (rule 2); without this the re-entry waits for the weekday and
     # the whole point of the vol-curve signal — coming back weeks earlier — is
     # blunted to the weekly cadence. Off, this line changes nothing.
-    _vts_flip = (vts_enabled(cfg)
+    # `vts_active` is the CALLER's statement that the ratio was measurable
+    # this session. Default False: with the overlay on but its data missing,
+    # the cadence must stay weekly — otherwise a data gap silently turns the
+    # strategy into a daily-flipping SMA on real money.
+    _vts_flip = (vts_enabled(cfg) and bool(vts_active)
                  and (cache or {}).get(LAST_STATE_KEY) is not None
                  and _state((cache or {}).get(LAST_STATE_KEY)) != _state(trend_state))
     if session_weekday(session_id) not in days and not _vts_flip:

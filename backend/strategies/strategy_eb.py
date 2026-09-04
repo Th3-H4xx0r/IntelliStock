@@ -230,6 +230,8 @@ class StrategyEb:
         # weekdays only, exactly as before.
         _vts_on = vts_enabled(cfg)
         _vts_ratio = None
+        _vts_pairs = 0
+        _vts_price_state = None
         if _vts_on:
             _sv = pit_daily_observations(_bars_for(data, _s(cfg, "vts_short_symbol")),
                                          current_time)
@@ -237,14 +239,33 @@ class StrategyEb:
                                          current_time)
             _mid_by = {sid: c for sid, c in _mv}
             _pairs = [(c, _mid_by[sid]) for sid, c in _sv if sid in _mid_by]
+            _vts_pairs = len(_pairs)
             _vts_ratio = vts_ratio_norm([a for a, _ in _pairs],
                                         [b for _, b in _pairs], cfg)
+            if _vts_ratio is None:
+                _log_once(cache, "vts-unmeasurable", session_id,
+                          f"StrategyEb {session_id} | vts: ratio unmeasurable "
+                          f"({_vts_pairs} paired {_s(cfg, 'vts_short_symbol')}/"
+                          f"{_s(cfg, 'vts_mid_symbol')} sessions, need max(2, int(cfg.get('vts_median_bars') or 0))) "
+                          "- weekly cadence, no off-cadence flip", "red")
+        # The overlay is LIVE only when its ratio measured this session. On the
+        # config flag alone a missing VIX-ETF series would keep the every-
+        # session cadence and the flip with no signal behind them.
+        _vts_live = _vts_on and _vts_ratio is not None
         if (eb_trend_enabled(cfg)
-                and (_vts_on
+                and (_vts_live
                      or session_weekday(session_id) in rebalance_weekdays(cfg))):
-            trend_state = eb_trend_state(closes, cache.get(_TREND_STATE_KEY),
-                                         cfg, vts_ratio=_vts_ratio)
-            cache[_TREND_STATE_KEY] = trend_state
+            _prev_state = cache.get(_TREND_STATE_KEY)
+            trend_state = eb_trend_state(closes, _prev_state, cfg,
+                                         vts_ratio=_vts_ratio)
+            if _vts_live:
+                # Hysteresis belongs to the PRICE rule. Persisting the forced
+                # ON would let the next session's price test run with the
+                # wider ON dead zone and collapse the 1%/2% asymmetry.
+                _vts_price_state = eb_trend_state(closes, _prev_state, cfg)
+                cache[_TREND_STATE_KEY] = _vts_price_state
+            else:
+                cache[_TREND_STATE_KEY] = trend_state
 
         weight = eb_core_weight(closes, cfg, trend_state)
         if weight is None:
@@ -293,7 +314,7 @@ class StrategyEb:
                 * float(eff.get(core) or 0.0)) / book_nav
 
         trade, effective_weight = eb_should_trade(session_id, weight, held,
-                                                  cfg, cache, trend_state)
+                                                  cfg, cache, trend_state, vts_active=_vts_live)
         if not trade:
             # No core order is due, so idle cash gets a second chance. The
             # sweep is deliberately outside the weekday cadence and the band:
@@ -343,6 +364,16 @@ class StrategyEb:
         state_note = f" | trend {trend_state}" if eb_trend_enabled(cfg) else ""
         if eb_trend_enabled(cfg):
             cache[_LAST_DECISION_KEY]["trend_state"] = trend_state
+        if _vts_on:
+            # Observable or it did not happen: a run with the overlay on must
+            # say, per session, what the ratio was and whether it overrode.
+            _vts_fired = bool(_vts_live and _vts_price_state == "OFF"
+                              and trend_state == "ON")
+            cache[_LAST_DECISION_KEY]["vts"] = {
+                "ratio": _vts_ratio, "pairs": _vts_pairs, "fired": _vts_fired}
+            state_note += (f" | vts r={_vts_ratio:.3f} n={_vts_pairs} fired={_vts_fired}"
+                           if _vts_ratio is not None
+                           else f" | vts unmeasurable n={_vts_pairs}")
         _log(f"StrategyEb {session_id} | core {core} target {weight:.0%} "
              f"(held {held:.0%} -> {effective_weight:.0%}){state_note}"
              " | targets="

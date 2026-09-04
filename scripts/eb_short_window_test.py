@@ -85,19 +85,51 @@ def put_doc(doc_id, doc):
     call("PUT", f"/strategies/{doc_id}", {"name": doc["name"], "strategies": doc["strategies"]})
 
 
+def restore_doc(doc_id, original):
+    """PUT the original back and PROVE it landed: a silent restore failure once
+    left vts_enabled=True on the lab doc and turned a bil25 control run into a
+    replay of the candidate it was meant to control for."""
+    for attempt in (1, 2):
+        put_doc(doc_id, original)
+        _, now = call("GET", f"/strategies/{doc_id}")
+        want = {l["strategy"]: l.get("config") for l in original["strategies"]}
+        got = {l["strategy"]: l.get("config") for l in now.get("strategies", [])}
+        if got == want:
+            print("lab doc restored (verified)", flush=True)
+            return True
+        print(f"RESTORE MISMATCH attempt {attempt}: " + ", ".join(
+            f"{k}: {sorted(set((want.get(k) or {}).items()) ^ set((got.get(k) or {}).items()))[:6]}"
+            for k in want if want.get(k) != got.get(k)), flush=True)
+    return False
+
+
+class EngineBusy(RuntimeError):
+    """A run did not reach a terminal status: the container may still hold the
+    engine slot, and posting the next window on top of it is exactly the
+    parallel-backtests failure the user vetoed. Abort the battery instead."""
+
+
+def running_on_instance():
+    _, b = call("GET", "/backtests")
+    rows = b.get("backtests", b) if isinstance(b, dict) else b
+    return [x.get("id") for x in rows
+            if x.get("instance_id") == INSTANCE and x.get("status") in ("running", "pending", "queued")]
+
+
 def run_one(tag, s, e):
-    bid = None
-    for _ in range(3):
-        try:
-            _, r = call("POST", "/backtests", {"instance_id": INSTANCE, "stocks": STOCKS, "start_date": s,
-                                               "end_date": e, "granularity": "86400", "initial_cash": 6000,
-                                               "equity_cost_tiers": "etf-liquid"})
-            bid = r["id"]
-            break
-        except BaseException:
-            time.sleep(10)
-    if bid is None:
+    busy = running_on_instance()
+    if busy:
+        raise EngineBusy(f"refusing to post {tag}: {busy} still running on {INSTANCE}")
+    try:
+        # ONE post. `_api.call` already retries 5xx internally; wrapping it in
+        # another retry re-sent accepted-then-failed posts up to 12 times.
+        _, r = call("POST", "/backtests", {"instance_id": INSTANCE, "stocks": STOCKS, "start_date": s,
+                                           "end_date": e, "granularity": "86400", "initial_cash": 6000,
+                                           "equity_cost_tiers": "etf-liquid"})
+    except BaseException as exc:
+        print("post failed", tag, repr(exc)[:200], flush=True)
         return None, None
+    bid = r["id"]
     print("posted", tag, bid, flush=True)
     for _ in range(400):
         time.sleep(20)
@@ -110,7 +142,7 @@ def run_one(tag, s, e):
         if st in ("finished", "error", "stopped"):
             print("done", tag, bid, st, bts[bid].get("pnl_percent"), flush=True)
             return bid, st
-    return bid, "timeout"
+    raise EngineBusy(f"{tag} {bid} did not finish within the poll budget")
 
 
 def regime_battery(wanted):
@@ -136,16 +168,18 @@ def regime_battery(wanted):
                 if bid is None or st != "finished":
                     lines.append(f"| {cand} | {reg} | {tag} | {bid} | RUN FAILED | | | | | |"); continue
                 days, nav, spytr = path(bid)
+                if len(nav) < 2:
+                    lines.append(f"| {cand} | {reg} | {tag} | {bid} | NO PATH | | | | | |"); continue
                 ret = nav[-1] / nav[0] - 1; s = spytr[-1] / spytr[0] - 1; base = REGIME_BASE.get(tag, (float("nan"), float("nan")))
                 n += 1; wins += ret > s; wins_base += ret * 100 > base[0]
                 lines.append(f"| {cand} | {reg} | {tag} | {bid} | {ret:+.2%} | {s:+.2%} | {(ret - s) * 100:+.2f} | {base[0]:+.2f}% | {ret * 100 - base[0]:+.2f} | {maxdd(nav):.1%} |")
                 print(lines[-1], flush=True)
             lines.append(f"\n**{cand}: {wins}/{n} beat SPY-TR · {wins_base}/{n} beat bil25** (bil25 alone: 16/25 vs SPY-TR)\n")
     finally:
-        put_doc(doc_id, original); print("lab doc restored", flush=True)
-    with open(OUT, "a") as fh:
-        fh.write("\n".join(lines) + "\n")
-    print("\n".join(lines), flush=True)
+        restore_doc(doc_id, original)
+        with open(OUT, "a") as fh:
+            fh.write("\n".join(lines) + "\n")
+        print("\n".join(lines), flush=True)
     return 0
 
 
@@ -178,6 +212,7 @@ def main(argv=None):
                     l["config"]["trend_on_book"] = dict(BIL25_ON_BOOK)
                     l["config"]["target_vol"] = 0.20
                     l["config"]["reserve_for_other_lanes_pct"] = 0.0
+                    l["config"]["vts_enabled"] = False      # every candidate starts from bil25, overlay OFF
                     l["config"].update(copy.deepcopy(CANDIDATES[cand]))
                 if l["strategy"] == "outlier_sleeve":
                     l["config"]["outlier_sleeve_enabled"] = False
@@ -190,6 +225,8 @@ def main(argv=None):
                     res[tag] = (bid, None)
                     continue
                 days, nav, spytr = path(bid)
+                if len(nav) < 2:
+                    res[tag] = (bid, None); continue
                 res[tag] = (bid, (nav[-1] / nav[0] - 1, maxdd(nav), beat(nav, spytr, 63), beat(nav, spytr, 126), beat(nav, spytr, 252)))
             cyc = res["cyc"][1]
             if cyc is None:
@@ -204,11 +241,10 @@ def main(argv=None):
                          + " | ".join("✓" if T[k] else "✗" for k in ("T1", "T2", "T3", "T4", "T5", "T6")) + f" | **{verdict}** |")
             print(lines[-1], flush=True)
     finally:
-        put_doc(doc_id, original)
-        print("lab doc restored", flush=True)
-    with open(OUT, "a") as fh:
-        fh.write("\n".join(lines) + "\n")
-    print("\n".join(lines), flush=True)
+        restore_doc(doc_id, original)
+        with open(OUT, "a") as fh:
+            fh.write("\n".join(lines) + "\n")
+        print("\n".join(lines), flush=True)
     return 0
 
 
