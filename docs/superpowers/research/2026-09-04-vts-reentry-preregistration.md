@@ -67,3 +67,37 @@ Metric definitions are those of `2026-09-03-short-window-preregistration.md`.
 ## Results
 
 _(appended by the runner verbatim)_
+
+### Run 2026-09-04 02:26Z — candidates V1, V2
+
+| cand | cyc bt | beat 3m | beat 6m | beat 12m | rb1 | rb2 | rb3 | cycle | maxDD | T1 | T2 | T3 | T4 | T5 | T6 | verdict |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| V1 | 560944 | 59.7% | 64.1% | 71.8% | -13.17% | -7.15% | -8.88% | +136.8% | -33.0% | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | **FAIL** |
+| V2 | 807899 | 59.9% | 61.1% | 70.2% | -13.17% | -7.13% | -14.46% | +129.6% | -33.0% | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | **FAIL** |
+
+## Verdict (2026-09-03 21:50 CDT, both runs complete)
+
+**V1 and V2 both FAIL all six of T1–T6.** V1 (threshold 1.00, bt 560944): 3m 59.7% / 6m 64.1% /
+12m 71.8%, bears −13.17 / −7.15 / −8.88, cycle +136.8%, maxDD −33.0%. V2 (1.05, bt 807899):
+3m 59.9% / 6m 61.1% / 12m 70.2%, bears −13.17 / −7.13 / −14.46, cycle +129.6%, maxDD −33.0%.
+bil25 on the same windows: 61.6 / 75.3 / 86.9, bears +2.06 / +0.29 / +2.59, +197.8%, −21.1%.
+Per the stop rule above, bil25 stays and this line stops. Thresholds were not moved.
+
+Path of V1: 2022 −18.1% (bil25 positive), 126 TQQQ trades against a weekly cadence. The rule
+re-entered TQQQ whenever the curve sat below its trailing median, which in 2022 was most
+sessions outside the June and October spikes.
+
+An independent MLE review of the wiring (scratchpad `vts_gap_review.md`, 2026-09-03) found the
+registered rule was never actually run: the engine's 90-calendar-day warmup gives ~63 sessions
+of VIXY/VIXM history at the start of every window, and `vts_ratio_norm` only required two, so
+the "trailing 250-session median" was a 63–130-session median for all of 2022 and for the whole
+of every 3m/6m window. A median that re-centres on the panic within a quarter is what let the
+re-entry fire mid-bear. Second, a threshold of 1.00 IS the median, so the rule fires on roughly
+half of all OFF sessions by construction, with no conditional information. Third, the off-cadence
+flip bypassed the core drift band and re-sized all five legs (flips/yr 8.1 → 18.6). The offline
+screen's own control arm returned +14% / +28% / +111% where the engine's bil25 returns +197.8%,
+so its deltas were never transportable. Decision: KILL; no threshold re-shopping, no third
+candidate. Correctness follow-up (no run): make `vts_ratio_norm` fail closed until it holds
+`vts_median_bars` paired sessions, derive the every-session cadence and the flip from ratio
+availability rather than the config flag, and log the ratio, pair count and whether the override
+fired. With `vts_enabled` false (the default and doc 200) none of this touches bil25.
