@@ -74,3 +74,14 @@ def test_manifest_completes_only_after_successful_rows(store):
     with pytest.raises(RuntimeError, match="source failed"):
         publish_rows(store, "v1", failing(), {"build_id": "abc"})
     assert store.get("PointInTimeDatasetSnapshots", "outlier:v1")["complete"] is False
+
+
+def test_long_observed_history_gap_restarts_features_without_changing_prior_rows():
+    first = bars([10] * 150)
+    second = [{**b, "t": (date(2025, 1, 1) + timedelta(days=i)).isoformat()}
+              for i, b in enumerate(bars([100] * 130))]
+    actual = symbol_rows("REUSED", first + second, first + second, "v1", adv_min=9000)
+    assert actual[:150] == symbol_rows("REUSED", first, first, "v1", adv_min=9000)
+    assert actual[150]["n_bars"] == 1
+    assert actual[150]["ret126"] is None
+    assert actual[150]["first_bar"] == "2025-01-01"

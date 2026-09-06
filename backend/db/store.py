@@ -923,7 +923,7 @@ def insert_bulk(table: str, docs, *, conflict: str = "replace",
         # xmax = 0 on a returned row means it was freshly inserted; anything
         # else is a row the ON CONFLICT clause updated. Rows the IS DISTINCT
         # guard (replace) or DO NOTHING (error) filtered out are not returned.
-        stmt = "INSERT INTO %s (%s) VALUES %s%s RETURNING (xmax = 0)" % (
+        stmt = "INSERT INTO %s (%s) VALUES %s%s RETURNING (xmax = 0) AS was_insert" % (
             q, columns, ", ".join([row_ph] * len(part)), tail)
         params = [v for row in part for v in row]
         with dbpool.connection() as conn:
@@ -931,7 +931,7 @@ def insert_bulk(table: str, docs, *, conflict: str = "replace",
                 cur.execute(stmt, params)
                 rows = cur.fetchall()
             conn.commit()
-        fresh = sum(1 for r in rows if r and r[0])
+        fresh = sum(1 for r in rows if r["was_insert"])
         inserted += fresh
         replaced += len(rows) - fresh
         untouched = len(part) - len(rows)

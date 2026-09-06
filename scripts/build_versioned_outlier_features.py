@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import gzip
 import hashlib
 import json
@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 from outlier_features import FEATURES_TABLE, compute_features, feature_id
 
 
-def symbol_rows(symbol, adjusted, raw, dataset, adv_min=1e7, price_min=3.0):
+def symbol_rows(symbol, adjusted, raw, dataset, adv_min=1e7, price_min=3.0, _retain=False):
     """Retain a name if it ever qualifies, without changing any past rank.
 
     This optimization cannot exclude a historically eligible observation:
@@ -44,6 +44,16 @@ def symbol_rows(symbol, adjusted, raw, dataset, adv_min=1e7, price_min=3.0):
     dates = sorted(a)
     if not dates:
         return []
+    boundaries = [i for i in range(1, len(dates))
+                  if (date.fromisoformat(dates[i]) - date.fromisoformat(dates[i - 1])).days > 30]
+    if boundaries:
+        rows, first = [], 0
+        for stop in boundaries + [len(dates)]:
+            block = dates[first:stop]
+            rows.extend(symbol_rows(symbol, [a[d] for d in block], [r[d] for d in block],
+                                    dataset, adv_min, price_min, _retain=True))
+            first = stop
+        return rows if _retain or any(row["rank_eligible"] for row in rows) else []
     advs, nominal, eligible = [], [], []
     window, total = deque(), 0.0
     for i, day in enumerate(dates):
@@ -62,7 +72,7 @@ def symbol_rows(symbol, adjusted, raw, dataset, adv_min=1e7, price_min=3.0):
         advs.append(adv)
         nominal.append(close)
         eligible.append(i >= 126 and adv >= adv_min and close >= price_min)
-    if not any(eligible):
+    if not _retain and not any(eligible):
         return []
     rows = compute_features([float(a[d]["c"]) for d in dates],
                             [float(a[d]["v"]) for d in dates], dates)
