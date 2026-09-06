@@ -18,8 +18,9 @@ SMA_BARS = 200
 SMA_MIN_BARS = 180
 
 
-def feature_id(date, symbol) -> str:
-    return f"{str(date)[:10]}|{str(symbol).strip().upper()}"
+def feature_id(date, symbol, dataset="") -> str:
+    prefix = f"{dataset}|" if dataset else ""
+    return f"{prefix}{str(date)[:10]}|{str(symbol).strip().upper()}"
 
 
 def compute_features(closes, volumes, dates) -> list:
@@ -65,18 +66,19 @@ def rank_cross_section(rows, adv_min) -> list:
     return rows
 
 
-def cross_section(store, date) -> list:
+def cross_section(store, date, dataset="") -> list:
     """Every row for `date`. `|` sorts below `~`, so `[date|, date|~)` is the
     prefix; bytewise (COLLATE "C") on both stores."""
-    d = str(date)[:10]
+    d = (f"{dataset}|" if dataset else "") + str(date)[:10]
     return list(store.run(store.between(FEATURES_TABLE, f"{d}|", f"{d}|~")))
 
 
-def visible_dates(store, before_date, lookback_days=10) -> list:
+def visible_dates(store, before_date, lookback_days=10, dataset="") -> list:
     """Distinct session dates in [before - lookback, before), ascending."""
     b = _date.fromisoformat(str(before_date)[:10])
     lo = (b - timedelta(days=lookback_days)).isoformat()
-    rows = store.run(store.between(FEATURES_TABLE, f"{lo}|", f"{b.isoformat()}|"))
+    prefix = f"{dataset}|" if dataset else ""
+    rows = store.run(store.between(FEATURES_TABLE, f"{prefix}{lo}|", f"{prefix}{b.isoformat()}|"))
     return sorted({str(r.get("date") or str(r.get("id", ""))[:10]) for r in rows})
 
 

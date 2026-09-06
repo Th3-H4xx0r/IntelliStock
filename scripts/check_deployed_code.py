@@ -39,6 +39,9 @@ FILES = (
     # run started on the OLD image.
     "backend/strategy_eb.py",
     "backend/strategies/strategy_eb.py",
+    "backend/outlier_sleeve.py",
+    "backend/strategies/outlier_sleeve.py",
+    "backend/outlier_features.py",
 )
 
 

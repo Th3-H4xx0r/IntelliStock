@@ -83,8 +83,8 @@ def test_a_screen_day_buys_ranked_candidates_at_one_and_a_half_percent(store, mo
     assert sizes["_cash_reserve_floor_pct"] == 0.0
     assert set(out["_nexus_discovered"]) == {"AAA", "BBB"}
     assert out["_nexus_executable_buys"] == ["AAA", "BBB"]
-    assert cache[SLOTS_KEY]["AAA"]["entry_px"] == 100.0
-    assert cache[SLOTS_KEY]["AAA"]["entry_cost"] == 150.0
+    assert not cache[SLOTS_KEY]
+    assert cache[mod.PENDING_KEY]["AAA"]["entry_cost"] == 150.0
     assert cache[LAST_SCREEN_KEY] > 0
 
 
@@ -116,7 +116,7 @@ def test_a_trend_break_sells_with_the_etf_sell_intent(store, monkeypatch):
     assert out["AAA"] == -1
     assert out["_nexus_sell_enforcement"] == ["AAA"]
     assert out["_nexus_action_intents"] == {"AAA": "etf_sell"}
-    assert "AAA" not in cache[SLOTS_KEY]
+    assert cache[SLOTS_KEY]["AAA"]["exit_reason"] == "sma"
 
 
 def test_winner_cap_emits_a_partial_sell_fraction(store, monkeypatch):

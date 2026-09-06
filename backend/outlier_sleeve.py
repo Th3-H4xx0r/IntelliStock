@@ -18,6 +18,14 @@ _NY = ZoneInfo("America/New_York")
 
 DEFAULTS: dict = {
     "outlier_sleeve_enabled": False,
+    "feature_dataset": "",
+    "winner_add_enabled": False,
+    "winner_add_fraction": 0.05,
+    "winner_add_position_cap": 0.20,
+    "winner_add_min_gain": 0.25,
+    "winner_add_min_age": 20,
+    "winner_add_min_gap": 20,
+    "winner_add_max_count": 2,
     "sleeve_fraction": 0.15,
     "slot_fraction": 0.015,
     "max_slots": 10,
@@ -96,7 +104,7 @@ def _eligible(r, cfg, excluded, held) -> bool:
     if not sym or sym in excluded or sym in held:
         return False
     try:
-        close = float(r.get("close") or 0.0)
+        close = float(r.get("nominal_close", r.get("close")) or 0.0)
         adv = float(r.get("adv20") or 0.0)
         n = int(r.get("n_bars") or 0)
     except (TypeError, ValueError):
@@ -221,6 +229,57 @@ def new_slot_orders(candidates, slots, nav, cash, cfg) -> dict:
         out[sym] = round(amt, 2)
         budget -= amt
         spendable -= amt
+    return out
+
+
+def winner_add_orders(slots, rows_by_sym, positions, nav, cash, session, cfg, blocked=(), prices=None) -> dict:
+    """Add only to seasoned winners, within the same new-money sleeve budget."""
+    cfg = {**DEFAULTS, **(cfg or {})}
+    if not _truthy(cfg["winner_add_enabled"]) or nav <= 0:
+        return {}
+    committed = sum(float(s.get("entry_cost") or 0) for s in slots.values())
+    budget = min(float(cash), _f(cfg, "sleeve_fraction") * nav - committed)
+    ordinal = session_ordinal(session)
+    ranked = []
+    for sym, slot in slots.items():
+        row = rows_by_sym.get(sym)
+        if sym in blocked or slot.get("exit_reason") or not row:
+            continue
+        if not _eligible({**row, "symbol": sym}, cfg, set(), set()):
+            continue
+        count = int(slot.get("buy_count") or 0)
+        if count < 1 or count - 1 >= _i(cfg, "winner_add_max_count"):
+            continue
+        first, last = slot.get("entry_ordinal"), slot.get("last_buy_ordinal")
+        if first is None or last is None:
+            continue
+        if (ordinal - int(first) < _i(cfg, "winner_add_min_age")
+                or ordinal - int(last) < _i(cfg, "winner_add_min_gap")):
+            continue
+        px, entry = float(row.get("close") or 0), float(slot.get("entry_px") or 0)
+        if entry <= 0 or px / entry - 1 < _f(cfg, "winner_add_min_gain"):
+            continue
+        high = float(row.get("hi252") or 0)
+        if (high <= 0 or px < high * (1 - _f(cfg, "breakout_tolerance"))
+                or float(row["rs_rank"]) < _f(cfg, "rs_decile_floor")):
+            continue
+        quantity = float(positions.get(sym) or 0)
+        if quantity <= 0:
+            continue
+        mark = float((prices if prices is not None else {}).get(sym, px))
+        if mark <= 0:
+            continue
+        room = _f(cfg, "winner_add_position_cap") * nav - quantity * mark
+        ranked.append((-float(row["ret126"]), sym, room))
+    out = {}
+    for _, sym, room in sorted(ranked):
+        amount = min(room, budget, _f(cfg, "winner_add_fraction") * nav)
+        if amount < _f(cfg, "min_order_usd"):
+            continue
+        # Floor cents so rounding cannot spend more than the available budget.
+        amount = int(amount * 100) / 100
+        out[sym] = amount
+        budget -= amount
     return out
 
 

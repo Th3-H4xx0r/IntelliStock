@@ -126,3 +126,12 @@ def test_result_is_cached():
     mod = _load_fingerprint_fn()
     first = mod._code_fingerprint()
     assert mod._code_fingerprint() is first, "recomputed instead of caching"
+
+
+def test_outlier_decisions_and_features_have_distinct_actual_hashes():
+    mod = _load_fingerprint_fn()
+    actual = mod._code_fingerprint()
+    for rel in ("outlier_sleeve.py", "strategies/outlier_sleeve.py", "outlier_features.py"):
+        with open(os.path.join(BACKEND, rel), "rb") as source:
+            expected = hashlib.sha256(source.read()).hexdigest()[:12]
+        assert actual.get(rel) == expected, rel

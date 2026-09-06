@@ -990,6 +990,9 @@ _CODE_FINGERPRINT_FILES = (
     # on the old code.
     "strategy_eb.py",
     "strategies/strategy_eb.py",
+    "outlier_sleeve.py",
+    "strategies/outlier_sleeve.py",
+    "outlier_features.py",
 )
 _CODE_FINGERPRINT_CACHE: "dict[str, str] | None" = None
 
