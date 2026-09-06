@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 from outlier_features import FEATURES_TABLE, compute_features, feature_id
 
 
-def symbol_rows(symbol, adjusted, raw, dataset, adv_min=1e7, price_min=3.0, _retain=False):
+def symbol_rows(symbol, adjusted, raw, dataset, adv_min=1e7, price_min=3.0, _retain=False, liquidity=None):
     """Retain a name if it ever qualifies, without changing any past rank.
 
     This optimization cannot exclude a historically eligible observation:
@@ -51,9 +51,26 @@ def symbol_rows(symbol, adjusted, raw, dataset, adv_min=1e7, price_min=3.0, _ret
         for stop in boundaries + [len(dates)]:
             block = dates[first:stop]
             rows.extend(symbol_rows(symbol, [a[d] for d in block], [r[d] for d in block],
-                                    dataset, adv_min, price_min, _retain=True))
+                                    dataset, adv_min, price_min, _retain=True,
+                                    liquidity=([b for b in liquidity if block[0] <= str(b["t"])[:10] <= block[-1]]
+                                               if liquidity is not None else None)))
             first = stop
         return rows if _retain or any(row["rank_eligible"] for row in rows) else []
+    liquidity_adv = None
+    if liquidity is not None:
+        liquidity_adv, dollar_window, running = {}, deque(), 0.0
+        liquidity_days = keyed(liquidity)
+        for day in sorted(liquidity_days):
+            b = liquidity_days[day]
+            close, volume = float(b["c"]), float(b["v"])
+            if not math.isfinite(close) or not math.isfinite(volume) or close <= 0 or volume < 0:
+                raise ValueError(f"{symbol}: invalid consolidated liquidity observation")
+            value = close * volume
+            dollar_window.append(value)
+            running += value
+            if len(dollar_window) > 20:
+                running -= dollar_window.popleft()
+            liquidity_adv[day] = running / 20 if len(dollar_window) == 20 else 0.0
     advs, nominal, eligible = [], [], []
     window, total = deque(), 0.0
     for i, day in enumerate(dates):
@@ -68,7 +85,8 @@ def symbol_rows(symbol, adjusted, raw, dataset, adv_min=1e7, price_min=3.0, _ret
         total += dollar_volume
         if len(window) > 20:
             total -= window.popleft()
-        adv = total / len(window)
+        adv = (liquidity_adv.get(day, 0.0) if liquidity_adv is not None
+               else total / len(window))
         advs.append(adv)
         nominal.append(close)
         eligible.append(i >= 126 and adv >= adv_min and close >= price_min)
@@ -138,12 +156,20 @@ def publish_rows(store, dataset, batches, metadata):
     return confirmed
 
 
-def prepare(archive, output, dataset, start):
+def prepare(archive, output, dataset, start, liquidity_archive=None):
     """Resumable observation preparation; SQLite is a feature spool only."""
     manifest = json.loads((archive / "manifest.json").read_text())
     settings = {"archive": manifest, "dataset": dataset, "start": start,
                 "adv_min": 1e7, "price_min": 3.0,
                 "builder_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
+    if liquidity_archive is not None:
+        liquidity_manifest = json.loads((liquidity_archive / "manifest.json").read_text())
+        if (liquidity_manifest.get("feed") != "sip" or liquidity_manifest.get("adjustment") != "raw"
+                or liquidity_manifest.get("complete") is not True
+                or liquidity_manifest.get("symbols") != manifest["symbols"]
+                or liquidity_manifest.get("source_manifest_sha256") != hashlib.sha256((archive / "manifest.json").read_bytes()).hexdigest()):
+            raise ValueError("consolidated archive incomplete or source mismatch")
+        settings["liquidity_archive"] = liquidity_manifest
     output.mkdir(parents=True, exist_ok=True)
     config_path = output / "settings.json"
     if config_path.exists() and json.loads(config_path.read_text()) != settings:
@@ -155,6 +181,8 @@ def prepare(archive, output, dataset, start):
     db.execute("CREATE TABLE IF NOT EXISTS batches (offset INTEGER PRIMARY KEY, digest TEXT)")
     for offset in range(0, manifest["symbols"], 100):
         paths = [archive / f"{offset:05d}-{adjustment}.json.gz" for adjustment in ("split", "raw")]
+        if liquidity_archive is not None:
+            paths.append(liquidity_archive / f"{offset:05d}-raw.json.gz")
         if not all(p.exists() for p in paths):
             db.close()
             print(f"Archive not complete; prepared through {offset} symbols", flush=True)
@@ -165,13 +193,17 @@ def prepare(archive, output, dataset, start):
             if done[0] != digest:
                 raise ValueError("archived input changed")
             continue
-        split, raw = [json.load(gzip.open(p, "rt")) for p in paths]
+        split, raw = [json.load(gzip.open(p, "rt")) for p in paths[:2]]
+        liquidity = json.load(gzip.open(paths[2], "rt")) if liquidity_archive is not None else None
+        if liquidity is not None and liquidity["requested_symbols"] != raw["requested_symbols"]:
+            raise ValueError("consolidated batch requests differ")
         if split["requested_symbols"] != raw["requested_symbols"]:
             raise ValueError("batch requests differ")
         with db:
             for symbol in split["requested_symbols"]:
                 rows = symbol_rows(symbol, split["bars"].get(symbol, []),
-                                   raw["bars"].get(symbol, []), dataset)
+                                   raw["bars"].get(symbol, []), dataset,
+                                   liquidity=(liquidity["bars"].get(symbol, []) if liquidity is not None else None))
                 db.executemany("INSERT INTO rows VALUES (?,?,?)",
                                [(r["id"], r["date"], json.dumps(r, separators=(",", ":")))
                                 for r in rows if r["date"] >= start])
@@ -193,7 +225,9 @@ def prepare(archive, output, dataset, start):
                 "limitations": manifest["limitations"] + [
                     "Includes ETFs and other provider-listed equity instruments; no undated security-type filter.",
                     "Graph relationship confirmation must remain off for this price-only dataset.",
-                    "Split-adjusted technical ratios use provider correction history; nominal price and dollar volume use raw bars."]}
+                    "Split-adjusted technical ratios use provider correction history; nominal price uses raw IEX bars.",
+                    "Dollar volume uses raw SIP sessions; missing SIP session blocks eligibility, price history retained."
+                    if liquidity_archive is not None else "Dollar volume uses raw IEX sessions."]}
     (output / "metadata.json").write_text(json.dumps(metadata, indent=2))
     db.close()
     print("FEATURE PREPARATION COMPLETE", row_count, flush=True)
@@ -205,13 +239,14 @@ def main():
     parser.add_argument("--archive", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--dataset", required=True)
+    parser.add_argument("--liquidity-archive", type=Path)
     parser.add_argument("--start", default="2021-10-01")
     parser.add_argument("--publish", action="store_true")
     args = parser.parse_args()
     if not re.fullmatch(r"[A-Za-z0-9_-]+", args.dataset):
         parser.error("dataset names allow only letters, digits, underscore and hyphen")
     if not args.publish:
-        return 0 if prepare(args.archive, args.output, args.dataset, args.start) else 2
+        return 0 if prepare(args.archive, args.output, args.dataset, args.start, args.liquidity_archive) else 2
     metadata = json.loads((args.output / "metadata.json").read_text())
     path = args.output / "rows.jsonl.gz"
     if hashlib.sha256(path.read_bytes()).hexdigest() != metadata["build_id"]:

@@ -85,3 +85,66 @@ def test_long_observed_history_gap_restarts_features_without_changing_prior_rows
     assert actual[150]["n_bars"] == 1
     assert actual[150]["ret126"] is None
     assert actual[150]["first_bar"] == "2025-01-01"
+
+
+def test_consolidated_liquidity_preserves_native_prices_and_does_not_use_future_volume():
+    native = bars([10] * 150, volume=100)
+    consolidated = bars([11] * 150, volume=2000000)
+    rows = symbol_rows('ABC', native, native, 'sip', liquidity=consolidated)
+    assert rows[-1]['adv20'] == 22000000
+    assert rows[-1]['nominal_close'] == rows[-1]['close'] == 10
+    assert rows[-1]['rank_eligible'] is True
+    changed = [*consolidated[:-1], {**consolidated[-1], 'v': 9000000}]
+    later = symbol_rows('ABC', native, native, 'sip', liquidity=changed)
+    assert rows[:-1] == later[:-1]
+
+
+def test_missing_consolidated_session_blocks_entry_but_retains_exit_history():
+    native = bars([10] * 150, volume=100)
+    consolidated = bars([11] * 149, volume=2000000)
+    rows = symbol_rows('ABC', native, native, 'sip', liquidity=consolidated)
+    assert len(rows) == 150
+    assert rows[-1]['adv20'] == 0
+    assert rows[-1]['rank_eligible'] is False
+    assert rows[-1]['close'] == 10
+
+
+def test_consolidated_adv_uses_consolidated_sessions_including_native_gaps():
+    consolidated = bars([10] * 151, volume=2000000)
+    consolidated[-21]['v'] = 100000000
+    native = [b for i,b in enumerate(consolidated) if i != 149]
+    rows = symbol_rows('ABC', native, native, 'sip', liquidity=consolidated)
+    assert rows[-1]['adv20'] == 20000000
+
+
+def test_consolidated_liquidity_requires_twenty_observed_sessions():
+    native = bars([10] * 150, volume=100)
+    consolidated = bars([11] * 150, volume=2000000)[-19:]
+    assert symbol_rows('ABC', native, native, 'sip', liquidity=consolidated) == []
+
+
+def test_preparation_binds_consolidated_source_and_reads_its_batches(tmp_path):
+    import gzip
+    import hashlib
+    import json
+    from build_versioned_outlier_features import prepare
+    archive, sip, output = [tmp_path / name for name in ('iex', 'sip', 'features')]
+    archive.mkdir(); sip.mkdir()
+    source = archive / 'manifest.json'
+    source.write_text(json.dumps({'symbols': 1, 'limitations': []}))
+    manifest = {'symbols': 1, 'feed': 'sip', 'adjustment': 'raw', 'complete': True,
+                'source_manifest_sha256': hashlib.sha256(source.read_bytes()).hexdigest()}
+    (sip / 'manifest.json').write_text(json.dumps(manifest))
+    for folder, adjustment, data in [(archive, 'raw', bars([10] * 150, volume=100)),
+                                     (archive, 'split', bars([10] * 150, volume=100)),
+                                     (sip, 'raw', bars([11] * 150, volume=2000000))]:
+        with gzip.open(folder / f'00000-{adjustment}.json.gz', 'wt') as stream:
+            json.dump({'requested_symbols': ['ABC'], 'bars': {'ABC': data}}, stream)
+    assert prepare(archive, output, 'sip', '2020-01-01', sip)
+    rows = [json.loads(line) for line in gzip.open(output / 'rows.jsonl.gz', 'rt')]
+    assert len(rows) == 150 and rows[-1]['adv20'] == 22000000 and rows[-1]['rs_rank'] == 1
+    assert json.loads((output / 'metadata.json').read_text())['source_settings']['liquidity_archive'] == manifest
+    manifest['source_manifest_sha256'] = 'wrong'
+    (sip / 'manifest.json').write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match='source mismatch'):
+        prepare(archive, tmp_path / 'wrong', 'wrong', '2020-01-01', sip)
