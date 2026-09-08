@@ -148,3 +148,53 @@ def test_preparation_binds_consolidated_source_and_reads_its_batches(tmp_path):
     (sip / 'manifest.json').write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match='source mismatch'):
         prepare(archive, tmp_path / 'wrong', 'wrong', '2020-01-01', sip)
+
+
+def identity_row(symbol, eligible=True, close=10, volume=100, ret=.5):
+    return {'symbol': symbol, 'date': '2021-10-01', 'rank_eligible': eligible,
+            'nominal_close': close, 'raw_volume': volume, 'ret126': ret}
+
+
+def identity_event(old='OLD', new='NEW'):
+    return {'old_symbol': old, 'new_symbol': new, 'old_cusip': 'same',
+            'new_cusip': 'same', 'process_date': '2022-01-01'}
+
+
+def test_alias_rank_dedup_counts_one_eligible_issuer_and_prefers_successor():
+    rows = [identity_row('OLD'), identity_row('NEW'), identity_row('OTHER', ret=.1)]
+    rank_session(rows, aliases=[identity_event()])
+    assert rows[0]['rs_rank'] is None and rows[0]['rank_duplicate_of'] == 'NEW'
+    assert rows[1]['rs_rank'] == 1 and rows[2]['rs_rank'] == 0
+
+
+def test_alias_rank_dedup_retains_only_eligible_copy_and_distinct_observations():
+    rows = [identity_row('OLD'), identity_row('NEW', eligible=False)]
+    rank_session(rows, aliases=[identity_event()])
+    assert rows[0]['rs_rank'] == 1
+    distinct = [identity_row('OLD'), identity_row('NEW', volume=200)]
+    rank_session(distinct, aliases=[identity_event()])
+    assert all(r['rank_eligible'] for r in distinct)
+
+
+def test_distinct_share_classes_and_post_event_ticker_reuse_are_not_deduplicated():
+    rows = [identity_row('OLD'), identity_row('NEW')]
+    event = {**identity_event(), 'new_cusip': 'different'}
+    rank_session(rows, aliases=[event])
+    assert all(r['rank_eligible'] for r in rows)
+    rank_session(rows, aliases=[{**identity_event(), 'process_date': '2021-09-01'}])
+    assert all(r['rank_eligible'] for r in rows)
+
+
+def test_alias_cycle_preserves_one_eligible_observation():
+    rows = [identity_row('OLD'), identity_row('NEW')]
+    rank_session(rows, aliases=[identity_event(), identity_event('NEW', 'OLD')])
+    assert sum(r['rank_eligible'] for r in rows) == 1
+
+
+def test_documented_ticker_reuse_resets_history_without_deleting_prior_issuer():
+    native = bars([10] * 150 + [30] * 150, volume=2000000)
+    boundary = native[150]['t']
+    rows = symbol_rows('REUSED', native, native, 'reset', reset_dates=[boundary])
+    assert rows[149]['n_bars'] == 150 and rows[150]['n_bars'] == 1
+    assert rows[150]['ret126'] is None and rows[150]['first_bar'] == boundary
+    assert rows[-1]['n_bars'] == 150 and rows[-1]['rank_eligible']

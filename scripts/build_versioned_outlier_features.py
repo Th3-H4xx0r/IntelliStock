@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 from outlier_features import FEATURES_TABLE, compute_features, feature_id
 
 
-def symbol_rows(symbol, adjusted, raw, dataset, adv_min=1e7, price_min=3.0, _retain=False, liquidity=None):
+def symbol_rows(symbol, adjusted, raw, dataset, adv_min=1e7, price_min=3.0, _retain=False, liquidity=None, reset_dates=()):
     """Retain a name if it ever qualifies, without changing any past rank.
 
     This optimization cannot exclude a historically eligible observation:
@@ -45,7 +45,8 @@ def symbol_rows(symbol, adjusted, raw, dataset, adv_min=1e7, price_min=3.0, _ret
     if not dates:
         return []
     boundaries = [i for i in range(1, len(dates))
-                  if (date.fromisoformat(dates[i]) - date.fromisoformat(dates[i - 1])).days > 30]
+                  if (date.fromisoformat(dates[i]) - date.fromisoformat(dates[i - 1])).days > 30
+                  or any(dates[i - 1] < reset <= dates[i] for reset in reset_dates)]
     if boundaries:
         rows, first = [], 0
         for stop in boundaries + [len(dates)]:
@@ -97,12 +98,50 @@ def symbol_rows(symbol, adjusted, raw, dataset, adv_min=1e7, price_min=3.0, _ret
     for i, row in enumerate(rows):
         row.update(id=feature_id(row["date"], symbol, dataset), symbol=symbol,
                    nominal_close=nominal[i], adv20=advs[i],
+                   raw_volume=float(r[dates[i]]["v"]),
                    rank_eligible=eligible[i], rs_rank=None)
     return rows
 
 
-def rank_session(rows):
+def rank_session(rows, aliases=()):
     """Equal-weight, tie-aware ranks inside this session's eligible universe."""
+    eligible = {r["symbol"]: r for r in rows if r.get("rank_eligible")}
+    parent = {s: s for s in eligible}
+    incoming = {}
+
+    def root(symbol):
+        while parent[symbol] != symbol:
+            parent[symbol] = parent[parent[symbol]]
+            symbol = parent[symbol]
+        return symbol
+
+    for event in aliases:
+        old, new = event["old_symbol"], event["new_symbol"]
+        if (old == new or old not in eligible or new not in eligible
+                or not event.get("old_cusip")
+                or event.get("old_cusip") != event.get("new_cusip")):
+            continue
+        a, b = eligible[old], eligible[new]
+        if a["date"] >= event["process_date"] or a["date"] != b["date"]:
+            continue
+        # Same security identity AND same observed price/volume. Distinct
+        # predecessors and share classes remain separate. If only one alias
+        # qualifies, it remains eligible regardless of successor coverage.
+        if not all(a.get(k) is not None and a[k] == b.get(k)
+                   for k in ("nominal_close", "raw_volume")):
+            continue
+        parent[root(old)] = root(new)
+        incoming[new] = max(incoming.get(new, ""), event["process_date"])
+    groups = {}
+    for symbol in eligible:
+        groups.setdefault(root(symbol), []).append(symbol)
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        survivor = max(members, key=lambda s: (incoming.get(s, ""), s))
+        for symbol in members:
+            if symbol != survivor:
+                eligible[symbol].update(rank_eligible=False, rank_duplicate_of=survivor)
     liquid = sorted((r for r in rows if r.get("rank_eligible")
                      and r.get("ret126") is not None), key=lambda r: float(r["ret126"]))
     for row in rows:
@@ -156,12 +195,18 @@ def publish_rows(store, dataset, batches, metadata):
     return confirmed
 
 
-def prepare(archive, output, dataset, start, liquidity_archive=None):
+def prepare(archive, output, dataset, start, liquidity_archive=None, identity_events=None, history_resets=None):
     """Resumable observation preparation; SQLite is a feature spool only."""
     manifest = json.loads((archive / "manifest.json").read_text())
     settings = {"archive": manifest, "dataset": dataset, "start": start,
                 "adv_min": 1e7, "price_min": 3.0,
                 "builder_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
+    aliases = json.loads(identity_events.read_text()) if identity_events is not None else []
+    resets = json.loads(history_resets.read_text()) if history_resets is not None else {}
+    if identity_events is not None:
+        settings["identity_events_sha256"] = hashlib.sha256(identity_events.read_bytes()).hexdigest()
+    if history_resets is not None:
+        settings["history_resets"] = resets
     if liquidity_archive is not None:
         liquidity_manifest = json.loads((liquidity_archive / "manifest.json").read_text())
         if (liquidity_manifest.get("feed") != "sip" or liquidity_manifest.get("adjustment") != "raw"
@@ -203,7 +248,8 @@ def prepare(archive, output, dataset, start, liquidity_archive=None):
             for symbol in split["requested_symbols"]:
                 rows = symbol_rows(symbol, split["bars"].get(symbol, []),
                                    raw["bars"].get(symbol, []), dataset,
-                                   liquidity=(liquidity["bars"].get(symbol, []) if liquidity is not None else None))
+                                   liquidity=(liquidity["bars"].get(symbol, []) if liquidity is not None else None),
+                                   reset_dates=resets.get("symbols", {}).get(symbol, []))
                 db.executemany("INSERT INTO rows VALUES (?,?,?)",
                                [(r["id"], r["date"], json.dumps(r, separators=(",", ":")))
                                 for r in rows if r["date"] >= start])
@@ -215,7 +261,7 @@ def prepare(archive, output, dataset, start, liquidity_archive=None):
     with gzip.open(target.with_suffix(".tmp"), "wt") as stream:
         for day in dates:
             rows = [json.loads(r[0]) for r in db.execute("SELECT doc FROM rows WHERE day=? ORDER BY id", (day,))]
-            rank_session(rows)
+            rank_session(rows, aliases=aliases)
             for row in rows:
                 stream.write(json.dumps(row, separators=(",", ":")) + "\n")
             row_count += len(rows)
@@ -225,6 +271,8 @@ def prepare(archive, output, dataset, start, liquidity_archive=None):
                 "limitations": manifest["limitations"] + [
                     "Includes ETFs and other provider-listed equity instruments; no undated security-type filter.",
                     "Graph relationship confirmation must remain off for this price-only dataset.",
+                    "Matching same-CUSIP alias observations count once among eligible rows; distinct predecessors remain."
+                    if aliases else "No observation-level alias rank deduplication.",
                     "Split-adjusted technical ratios use provider correction history; nominal price uses raw IEX bars.",
                     "Dollar volume uses raw SIP sessions; missing SIP session blocks eligibility, price history retained."
                     if liquidity_archive is not None else "Dollar volume uses raw IEX sessions."]}
@@ -240,13 +288,16 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--liquidity-archive", type=Path)
+    parser.add_argument("--identity-events", type=Path)
+    parser.add_argument("--history-resets", type=Path)
     parser.add_argument("--start", default="2021-10-01")
     parser.add_argument("--publish", action="store_true")
     args = parser.parse_args()
     if not re.fullmatch(r"[A-Za-z0-9_-]+", args.dataset):
         parser.error("dataset names allow only letters, digits, underscore and hyphen")
     if not args.publish:
-        return 0 if prepare(args.archive, args.output, args.dataset, args.start, args.liquidity_archive) else 2
+        return 0 if prepare(args.archive, args.output, args.dataset, args.start,
+                            args.liquidity_archive, args.identity_events, args.history_resets) else 2
     metadata = json.loads((args.output / "metadata.json").read_text())
     path = args.output / "rows.jsonl.gz"
     if hashlib.sha256(path.read_bytes()).hexdigest() != metadata["build_id"]:
