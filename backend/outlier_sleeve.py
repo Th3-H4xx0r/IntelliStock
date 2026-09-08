@@ -1,15 +1,14 @@
 """Outlier sleeve — pure decision rules. No clock, no I/O, no store.
 
-Buys 52-week-high breakouts with top-decile six-month relative strength,
-confirmed by Nexus peer breadth, in small slices that are never rebalanced
-down; exits only on a slow trend break or a time stop. Every rule here was
-chosen by measurement (spec docs/superpowers/specs/2026-09-02-outlier-sleeve-
-design.md §2): the SMA-200 exit is the load-bearing one — the fast exits sold
-SMCI at +126% and CLS at +92% before their 10x-60x runs.
+Buys 52-week-high breakouts with top-decile six-month relative strength.
+The baseline uses slow trend and time exits. Optional loss controls add an
+entry-loss exit and a trailing exit measured from post-entry closing highs.
+Position caps trim excess exposure. Performance belongs to native API tests.
 """
 from __future__ import annotations
 
 from datetime import timezone
+import math
 from zoneinfo import ZoneInfo
 
 from strategy_eb import session_ordinal, session_weekday
@@ -19,6 +18,10 @@ _NY = ZoneInfo("America/New_York")
 DEFAULTS: dict = {
     "outlier_sleeve_enabled": False,
     "feature_dataset": "",
+    "loss_controls_enabled": False,
+    "initial_stop_pct": 0.12,
+    "winner_trail_pct": 0.20,
+    "winner_trail_activation_gain": 0.25,
     "winner_add_enabled": False,
     "winner_add_fraction": 0.05,
     "winner_add_position_cap": 0.20,
@@ -168,12 +171,20 @@ def should_screen(session_id, cache, cfg) -> bool:
 
 
 def exit_decisions(slots, rows_by_sym, session_id, cfg) -> dict:
-    """symbol -> "sma" | "time" for slots that must be closed this session.
+    """Return reasons for full exits using one visible closing observation.
 
     Mutates the slot counters. Each session is counted once: a second call in
     the same session (15m granularity fires ~26 times) is a no-op.
     """
     cfg = {**DEFAULTS, **(cfg or {})}
+    loss_controls = _truthy(cfg.get("loss_controls_enabled"))
+    if loss_controls:
+        initial_stop = _f(cfg, "initial_stop_pct")
+        trail = _f(cfg, "winner_trail_pct")
+        activation = _f(cfg, "winner_trail_activation_gain")
+        if (not all(math.isfinite(v) for v in (initial_stop, trail, activation))
+                or not 0 < initial_stop < 1 or not 0 < trail < 1 or activation < 0):
+            raise ValueError("invalid outlier loss-control configuration")
     ordinal = session_ordinal(session_id)
     out = {}
     for sym, slot in (slots or {}).items():
@@ -188,7 +199,37 @@ def exit_decisions(slots, rows_by_sym, session_id, cfg) -> dict:
             continue
         if close <= 0 or entry <= 0:
             continue
+        if loss_controls and not all(math.isfinite(v) for v in (close, entry)):
+            continue
         slot["last_eval"] = session_id
+        if loss_controls:
+            try:
+                entry_ordinal = int(slot["entry_ordinal"])
+                anchor = float(slot.get("risk_entry_px", entry))
+                prior_peak = float(slot.get("risk_peak_close", anchor))
+                valid_risk = (all(math.isfinite(v) and v > 0 for v in (anchor, prior_peak))
+                              and type(slot.get("risk_trail_active", False)) is bool)
+            except (KeyError, TypeError, ValueError, OverflowError):
+                valid_risk = False
+            if not valid_risk:
+                # Corrupt restart state must not silently disable protection.
+                out[sym] = "risk_state"
+                continue
+        if loss_controls and ordinal >= entry_ordinal:
+            # The 252-day high includes observations from before the fill.
+            # Keep the entry anchor and observed closing peak in slot state;
+            # reconciliation updates cost basis without resetting either.
+            slot["risk_entry_px"] = anchor
+            peak = max(prior_peak, close)
+            slot["risk_peak_close"] = peak
+            slot["risk_trail_active"] = (bool(slot.get("risk_trail_active"))
+                                         or peak >= anchor * (1 + activation))
+            if close <= anchor * (1 - initial_stop):
+                out[sym] = "loss"
+                continue
+            if slot["risk_trail_active"] and close <= peak * (1 - trail):
+                out[sym] = "trail"
+                continue
         if close / entry - 1.0 >= _f(cfg, "time_stop_gain"):
             slot["proven"] = True
         if sma is not None and close < float(sma):
