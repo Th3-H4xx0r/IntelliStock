@@ -1,4 +1,4 @@
-# INTELLISTOCK_SCHEMA: {"strategy": "strategy_eb", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_eb_enabled": false, "core_symbol": "TQQQ", "core_leverage": 3.0, "reference_symbol": "QQQ", "off_symbol": "SPY", "cash_symbol": "BIL", "target_vol": 0.2, "core_max_weight": 0.65, "weight_step": 0.05, "vol_fast_bars": 10, "vol_slow_bars": 40, "min_history_bars": 70, "core_rebalance_band": 0.1, "rebalance_weekdays": [2], "remainder_bil_fraction": 0.0, "trend_filter_bars": 25, "trend_off_enter_pct": 0.01, "trend_on_exit_pct": 0.02, "risk_off_symbol": "BIL", "core_off_damp": 0.0, "trend_on_book": {"GLD": 0.5, "GDX": 0.25, "XLE": 0.25}, "trend_off_book": {"GLD": 0.375, "GDX": 0.1875, "XLE": 0.1875}, "cash_sweep_min_pct": 0.02, "reserve_for_other_lanes_pct": 0.0, "vts_enabled": false, "vts_short_symbol": "VIXY", "vts_mid_symbol": "VIXM", "vts_median_bars": 250, "vts_threshold": 1.0, "core_band_pct": 0.03, "min_order_usd": 25.0, "cost_haircut_pct": 0.005, "broker_max_single_position_pct": 0.95, "honour_single_position_cap": true, "live_max_order_fraction": 0.7, "live_max_symbol_fraction": 0.7, "live_max_leveraged_fraction": 0.7, "live_soft_drawdown": 0.25, "live_hard_drawdown": 0.35, "live_kill_drawdown": 0.45}}
+# INTELLISTOCK_SCHEMA: {"strategy": "strategy_eb", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_eb_enabled": false, "core_symbol": "TQQQ", "core_leverage": 3.0, "reference_symbol": "QQQ", "off_symbol": "SPY", "cash_symbol": "BIL", "target_vol": 0.2, "core_max_weight": 0.65, "weight_step": 0.05, "vol_fast_bars": 10, "vol_slow_bars": 40, "min_history_bars": 70, "core_rebalance_band": 0.1, "rebalance_weekdays": [2], "remainder_bil_fraction": 0.0, "trend_filter_bars": 25, "trend_off_enter_pct": 0.01, "trend_on_exit_pct": 0.02, "risk_off_symbol": "BIL", "core_off_damp": 0.0, "trend_on_book": {"GLD": 0.5, "GDX": 0.25, "XLE": 0.25}, "trend_off_book": {"GLD": 0.375, "GDX": 0.1875, "XLE": 0.1875}, "cash_sweep_min_pct": 0.02, "reserve_for_other_lanes_pct": 0.0, "vts_enabled": false, "vts_short_symbol": "VIXY", "vts_mid_symbol": "VIXM", "vts_median_bars": 250, "vts_threshold": 1.0, "core_band_pct": 0.03, "min_order_usd": 25.0, "cost_haircut_pct": 0.005, "broker_max_single_position_pct": 0.95, "honour_single_position_cap": true, "live_max_order_fraction": 0.7, "live_max_symbol_fraction": 0.7, "live_max_leveraged_fraction": 0.7, "live_soft_drawdown": 0.25, "live_hard_drawdown": 0.35, "live_kill_drawdown": 0.45, "pending_buy_guard_enabled": false}}
 # INTELLISTOCK_DESCRIPTION: Efficient beta — a volatility-targeted leveraged Nasdaq core with the remainder in a GLD/GDX/XLE book, a 25-session trend damp that steps the core out in downtrends, and a BIL floor that takes 25% of the risk-off remainder so de-risking never concentrates fully into the gold complex. Rebalanced weekly, every weight quantized and banded so it trades rarely. A risk transform, not an alpha.
 """Strategy EB wrapper: cache state, order emission, broker contract.
 
@@ -164,6 +164,37 @@ def _truthy(value) -> bool:
     if isinstance(value, bool):
         return value
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _guard_pending_buys(decisions, sizes, emulator, cfg, cache, session_id):
+    """Avoid adding exposure while an order for that symbol is unresolved.
+
+    Opt-in, default off. Requires an authoritative pending-order reader;
+    adapters without one cannot issue new buys with this guard enabled.
+    Sells remain executable, including when pending state is unavailable.
+    """
+    buys = {s for s, decision in decisions.items() if decision == 1}
+    if not buys or not _truthy(cfg.get("pending_buy_guard_enabled", False)):
+        return decisions, sizes
+    try:
+        raw = emulator.pending_execution_symbols()
+        if (not isinstance(raw, (tuple, list, set, frozenset))
+                or any(not isinstance(s, str) or not s.strip() for s in raw)):
+            raise ValueError("invalid pending-order symbols")
+        pending = {s.strip().upper() for s in raw}
+        blocked = {s for s in buys if s.strip().upper() in pending}
+    except Exception as error:
+        blocked = buys
+        _log_once(cache, "pending-unavailable", session_id,
+                  f"StrategyEb {session_id} | BUY BLOCK pending state unavailable "
+                  f"({type(error).__name__})", "red")
+    if not blocked:
+        return decisions, sizes
+    names = ",".join(sorted(blocked))
+    _log_once(cache, "pending-buy", f"{session_id}:{names}",
+              f"StrategyEb {session_id} | BUY BLOCK pending orders: {names}", "cyan")
+    kept = {s: d for s, d in decisions.items() if s not in blocked}
+    return kept, {s: size for s, size in sizes.items() if s in kept}
 
 
 def _bars_for(data, symbol):
@@ -336,6 +367,8 @@ class StrategyEb:
         decisions, sizes = targets_to_orders(
             targets, nav=book_nav, positions=positions, prices=eff, cash=cash,
             config=cfg, owned=set(universe))
+        decisions, sizes = _guard_pending_buys(
+            decisions, sizes, portfolio_emulator, cfg, cache, session_id)
 
         # Written whether or not orders came out: the session HAS been decided,
         # and at 15m granularity there are ~26 more ticks in it.
@@ -446,6 +479,8 @@ class StrategyEb:
             config=cfg, owned=owned)
         decisions = {k: v for k, v in decisions.items() if v == 1}
         sizes = {k: v for k, v in sizes.items() if k in decisions}
+        decisions, sizes = _guard_pending_buys(
+            decisions, sizes, emulator, cfg, cache, session_id)
         if not decisions:
             return {}
 

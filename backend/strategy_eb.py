@@ -98,6 +98,9 @@ DEFAULTS = {
     "reference_symbol": "QQQ",
     "off_symbol": "SPY",
     "cash_symbol": "BIL",
+    # New buys wait for the same symbol's existing orders to resolve.
+    # Opt-in: enabling requires an authoritative pending-order reader.
+    "pending_buy_guard_enabled": False,
     # ── the transform ──
     # 0.20 annualised on the whole book. Raising it is the single most
     # dangerous edit in this file: exposure is linear in it.
