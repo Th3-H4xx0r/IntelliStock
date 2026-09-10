@@ -140,7 +140,7 @@ def _bars(cfg, key):
     return fallback if fallback > 0 else 1
 
 
-def _pct(cfg, key, lo, hi):
+def _pct(cfg, key, lo, hi, inclusive_hi=False):
     """A fractional knob, read as its documented default when unusable.
 
     `_bars` for floats, and the saturating clamps it replaces failed the same
@@ -150,12 +150,21 @@ def _pct(cfg, key, lo, hi):
     `close <= peak * 0`, which no positive price satisfies, deleting the fast
     drawdown leg outright.
 
-    Both ends are exclusive because both DELETE a rule rather than merely
-    narrowing it: at `lo` the test can never be false, at `hi` it can never be
-    true. A value on either boundary is not a setting, it is a missing one.
+    Both ends are exclusive for a THRESHOLD, because both delete a rule rather
+    than merely narrowing it: at `lo` the test can never be false, at `hi` it
+    can never be true. A value on either boundary is not a setting, it is a
+    missing one.
+
+    `inclusive_hi` is for a MULTIPLIER, where that reasoning only holds at
+    `lo`. `chop_core_damp` of 1.0 does not delete the damp, it is an operator
+    asking for an undamped CHOP core — a legitimate ablation of exactly the
+    kind this battery runs — and reading it as 0.5 would silently run a
+    different variant than the one written down. Zero still reads as missing:
+    the file documents a damp, not a state that never holds the core.
     """
     value = _f(cfg, key)
-    if math.isfinite(value) and lo < value < hi:
+    top = value <= hi if inclusive_hi else value < hi
+    if math.isfinite(value) and lo < value and top:
         return value
     fallback = _f({}, key)
     return fallback if math.isfinite(fallback) else lo
@@ -268,6 +277,103 @@ def hx_state(closes, prev_state, confirm, cfg) -> tuple:
     if close < sma or flat:
         return "CHOP", 0
     return "BULL", 0
+
+
+def _eb_cfg(cfg):
+    """The seven keys `eb_core_weight` reads, and nothing else. Passing the
+    whole HX config works today because the names coincide, and would keep
+    working silently after an HX rename — while the core quietly resized
+    itself against strategy_eb's own DEFAULTS."""
+    return {key: (cfg or {}).get(key, DEFAULTS[key])
+            for key in _EB_WEIGHT_KEYS}
+
+
+def _bear_book(cfg) -> dict:
+    """The configured bear book, normalised to sum at most 1.
+
+    Renormalised rather than clipped when it sums past 1: clipping drops
+    whichever leg iterated last, which is a different portfolio from the one
+    the operator wrote. Any shortfall is the caller's to send to cash.
+    """
+    raw = (cfg or {}).get("bear_book")
+    if not isinstance(raw, dict):
+        return {}
+    book: dict = {}
+    for sym, weight in raw.items():
+        name = str(sym or "").strip().upper()
+        try:
+            value = float(weight)
+        except (TypeError, ValueError):
+            continue
+        if not name or not math.isfinite(value) or value <= 0:
+            continue
+        book[name] = round(book.get(name, 0.0) + value, Q)
+    total = round(sum(book.values()), Q)
+    if total > 1.0:
+        book = {s: round(w / total, Q) for s, w in book.items()}
+        # Each leg rounds independently, and enough of them can round UP:
+        # {0.900859, 0.22, 0.64, 0.059, 0.34} renormalises to 1.000002. A
+        # book above 1.0 is a LEVERED book — the engine funds the excess by
+        # borrowing — so the rounding error comes off the largest leg rather
+        # than being spent. It is at most a few 1e-6, well under the 0.05
+        # grid the ratio is written on.
+        excess = round(sum(book.values()) - 1.0, Q)
+        if excess > 0:
+            fat = max(sorted(book), key=lambda s: book[s])
+            book[fat] = round(book[fat] - excess, Q)
+            if book[fat] <= 0:
+                book.pop(fat)
+    return book
+
+
+def hx_targets(closes, state, cfg) -> dict:
+    """Target weight per symbol as a fraction of NAV, for one state.
+
+    Every path that cannot evaluate its own risk resolves to CASH. There is no
+    fallback weight anywhere here: a short history, a flat tape, a junk bear
+    book and an unrecognised state all mean the same thing, and T-bills is the
+    only answer that cannot be wrong in the expensive direction.
+    """
+    cash = _s(cfg, "cash_symbol")
+    core = _s(cfg, "core_symbol")
+    label = str(state or "").strip().upper()
+
+    if label == "BEAR":
+        book = _bear_book(cfg)
+        spent = round(sum(book.values()), Q)
+        if spent <= 0:
+            return {cash: 1.0}
+        rest = round(1.0 - spent, Q)
+        if rest > 0:
+            book[cash] = round(book.get(cash, 0.0) + rest, Q)
+        return book
+
+    if label not in {"BULL", "CHOP"}:
+        return {cash: 1.0}
+
+    weight = eb_core_weight(closes, _eb_cfg(cfg), "ON")
+    if weight is None:
+        return {cash: 1.0}
+    weight = max(0.0, min(1.0, float(weight)))
+
+    if label == "CHOP":
+        # The damp is applied AFTER the EB quantisation, which is what the
+        # spec says: "core weight x chop_core_damp". Damping before it would
+        # re-enter the 0.05 grid and change the measured construction.
+        weight = round(
+            weight * _pct(cfg, "chop_core_damp", 0.0, 1.0, inclusive_hi=True),
+            Q)
+        remainder = cash
+    else:
+        remainder = _s(cfg, "bull_remainder_symbol") or cash
+
+    targets: dict = {}
+    if weight > 0:
+        targets[core] = weight
+    rest = round(1.0 - weight, Q)
+    if rest > 0:
+        targets[remainder] = round(targets.get(remainder, 0.0) + rest, Q)
+    return targets
 
 
 def strategy_hx_universe(cfg) -> list:

@@ -66,8 +66,10 @@ from strategy_hx import hx_state  # noqa: E402
 
 
 def rising(n, start=100.0, rate=0.001):
-    """A clean 0.1%/day uptrend. Its realised volatility is exactly zero, so
-    it is a STATE fixture only — `eb_core_weight` refuses on it by design."""
+    """A clean 0.1%/day uptrend, and a STATE fixture. It is NOT a flat tape
+    for the core: `(1 + rate) ** i` rounds to three distinct return values, so
+    `eb_core_weight` measures ~1e-14 of realised vol and sizes the core at its
+    full cap rather than refusing. `[100.0] * n` is the flat tape."""
     return [start * ((1.0 + rate) ** i) for i in range(n)]
 
 
@@ -295,3 +297,133 @@ def test_a_corrupted_confirm_counter_cannot_buy_its_way_out_of_bear():
     for junk in (10 ** 30, 5, 99, 100_000):
         assert hx_state(closes + [top * 1.10], "BEAR", junk, cfg()) == (
             "BEAR", 1), junk
+
+
+from strategy_hx import hx_targets  # noqa: E402
+
+
+def wobbly(n, start=100.0, rate=0.001, amp=0.004):
+    """An uptrend with a deterministic alternating overlay, so the CORE has a
+    measurable realised vol to size against. `rising` does NOT: a compounding
+    series is vol-free in exact arithmetic, and in floating point its returns
+    differ only in the last bits — which measures as ~1e-14 of vol and sizes
+    the core at the FULL cap, not as a refusal."""
+    return [start * ((1.0 + rate) ** i) * (1.0 + (amp if i % 2 else -amp))
+            for i in range(n)]
+
+
+def total(targets):
+    return round(sum(targets.values()), 6)
+
+
+def test_bull_holds_the_vol_targeted_core_with_the_remainder_in_qqq():
+    targets = hx_targets(wobbly(120), "BULL", cfg())
+    assert targets == {"TQQQ": 0.45, "QQQ": 0.55}
+    assert total(targets) == 1.0
+
+
+def test_chop_halves_the_core_and_parks_the_rest_in_cash():
+    targets = hx_targets(wobbly(120), "CHOP", cfg())
+    assert targets == {"TQQQ": 0.225, "BIL": 0.775}
+    assert total(targets) == 1.0
+
+
+def test_an_unmeasurable_core_goes_to_cash_not_to_a_default_weight():
+    """`eb_core_weight` returns None on a flat tape, a short history or a
+    zero leverage. Every one of those would otherwise resolve to MORE
+    leverage, so None means cash.
+
+    The flat tape is a literal repeated close, NOT `rising`: a compounding
+    series' returns differ in the last bits of the float, so `rising(120)`
+    measures ~1e-14 of realised vol and sizes the core at the full 0.65 CAP.
+    A fixture believed to refuse that instead hands back the largest position
+    the strategy can hold is worth pinning in a test.
+    """
+    assert hx_targets([100.0] * 120, "BULL", cfg()) == {"BIL": 1.0}
+    assert hx_targets(wobbly(60), "BULL", cfg()) == {"BIL": 1.0}
+    assert hx_targets(wobbly(120), "BULL",
+                      cfg(core_leverage=0)) == {"BIL": 1.0}
+    assert hx_targets(rising(120), "BULL", cfg()) == {"TQQQ": 0.65,
+                                                      "QQQ": 0.35}
+
+
+def test_unknown_is_one_hundred_percent_cash():
+    assert hx_targets(rising(30), "UNKNOWN", cfg()) == {"BIL": 1.0}
+    assert hx_targets(wobbly(120), "nonsense", cfg()) == {"BIL": 1.0}
+
+
+def test_the_default_bear_book_is_held_as_written():
+    assert hx_targets(crash(), "BEAR", cfg()) == {"PSQ": 0.60, "BIL": 0.40}
+
+
+def test_a_short_bear_book_puts_the_shortfall_in_cash():
+    """V2 and V4 are deliberately small inverse sleeves. The unspent weight is
+    cash, never a bigger short."""
+    assert hx_targets(crash(), "BEAR",
+                      cfg(bear_book={"SQQQ": 0.25})) == {"SQQQ": 0.25,
+                                                         "BIL": 0.75}
+
+
+def test_a_bear_book_summing_past_one_is_renormalised_not_clipped():
+    """Clipping would silently drop whichever leg came last; renormalising
+    keeps the operator's intended RATIO and only scales it into budget."""
+    targets = hx_targets(crash(), "BEAR",
+                         cfg(bear_book={"PSQ": 0.8, "GLD": 0.6}))
+    assert total(targets) == 1.0
+    assert round(targets["PSQ"] / targets["GLD"], 4) == round(0.8 / 0.6, 4)
+
+
+def test_a_bear_book_of_junk_is_cash_not_an_empty_book():
+    for junk in (None, {}, {"": 0.5}, {"PSQ": "lots"}, {"PSQ": -0.4},
+                 {"PSQ": float("nan")}):
+        assert hx_targets(crash(), "BEAR", cfg(bear_book=junk)) == {
+            "BIL": 1.0}, junk
+
+
+def test_the_three_variant_books_the_battery_will_actually_run():
+    for book, expected in (
+            ({"SQQQ": 0.25, "BIL": 0.75}, {"SQQQ": 0.25, "BIL": 0.75}),
+            ({"SH": 0.60, "BIL": 0.40}, {"SH": 0.60, "BIL": 0.40}),
+            ({"PSQ": 0.40, "GLD": 0.20, "BIL": 0.40},
+             {"PSQ": 0.40, "GLD": 0.20, "BIL": 0.40})):
+        assert hx_targets(crash(), "BEAR", cfg(bear_book=book)) == expected
+
+
+def test_a_renormalised_bear_book_never_sums_above_one():
+    """Renormalising rounds each leg independently, and five legs can each
+    round UP: this book lands on 1.000002 before the trim. A book above 1.0
+    is a LEVERED book — the engine would fund the excess by borrowing — so
+    the rounding error comes off the largest leg rather than being spent."""
+    targets = hx_targets(crash(), "BEAR", cfg(bear_book={
+        "PSQ": 0.900859, "SH": 0.22, "SQQQ": 0.64, "GLD": 0.059,
+        "BIL": 0.34}))
+    assert total(targets) <= 1.0
+    assert total(targets) == 1.0
+
+
+def test_an_unmeasurable_core_in_chop_is_cash_not_a_damped_default():
+    """The CHOP branch gets no second chance either. Half of a weight that
+    could not be measured is still an unmeasured weight."""
+    assert hx_targets([100.0] * 120, "CHOP", cfg()) == {"BIL": 1.0}
+    assert hx_targets(wobbly(60), "CHOP", cfg()) == {"BIL": 1.0}
+
+
+def test_a_degenerate_chop_damp_reads_as_its_documented_default():
+    """A saturating clamp fails both ways here. `min(1.0, damp)` turns a
+    corrupted 5 into a damp of 1.0 — the FULL 3x core held in the state that
+    exists to shrink it — and `max(0.0, damp)` turns a corrupted -0.5 into a
+    damp of 0. A value outside (0, 1] is not a damp, it is a missing one."""
+    for bad in (5, 1.5, -0.5, 0, float("nan"), float("inf"), "", None,
+                "half"):
+        assert hx_targets(wobbly(120), "CHOP", cfg(chop_core_damp=bad)) == {
+            "TQQQ": 0.225, "BIL": 0.775}, bad
+
+
+def test_a_configured_chop_damp_survives_the_bound():
+    """The bound above is all any test would see if the damp were simply read
+    as 0.5. A configured damp has to reach the core, and 1.0 — no damp at all
+    — is inside the range: the CHOP remainder is still CASH, never QQQ."""
+    assert hx_targets(wobbly(120), "CHOP", cfg(chop_core_damp=0.2)) == {
+        "TQQQ": 0.09, "BIL": 0.91}
+    assert hx_targets(wobbly(120), "CHOP", cfg(chop_core_damp=1.0)) == {
+        "TQQQ": 0.45, "BIL": 0.55}
