@@ -120,6 +120,126 @@ def _s(cfg, key, default=None):
     return str(value if value is not None else default).strip().upper()
 
 
+_STATES = frozenset({"UNKNOWN", "BULL", "CHOP", "BEAR"})
+
+
+def _bars(cfg, key):
+    """A window/counter length, read as its documented default when unusable.
+
+    The parsers deliberately do not clamp ranges, so a 0 or a negative reaches
+    the state machine intact. Floored with `max(1, n)` a corrupted
+    `exit_confirm_sessions` of 0 becomes a ONE-session bear exit — four
+    sessions early on a 3x fund — and a corrupted `sma_bars` drags the history
+    floor it feeds down with it. A non-positive length is not a shorter
+    window, it is a MISSING one.
+    """
+    n = _i(cfg, key)
+    if n > 0:
+        return n
+    fallback = _i({}, key)
+    return fallback if fallback > 0 else 1
+
+
+def _sma(values, bars):
+    if bars <= 0 or len(values) < bars:
+        return None
+    return sum(values[-bars:]) / float(bars)
+
+
+def _entered_bear(prices, cfg) -> bool:
+    """The FAST leg. Either rule alone fires; both are one-session tests.
+
+    Rule A — a 20-session low that is ALSO below the 50-session average. A new
+    low alone happens in every healthy pullback.
+
+    Rule B — a `drawdown_pct` fall from the highest close of the prior
+    `fast_low_bars` sessions, where that high is at most `drawdown_bars`
+    sessions old. The AGE test is load-bearing: scanning the last ten sessions
+    for any historical 7% drop instead re-fires on stale crash lows the
+    session after a confirmed exit, which cancels the 5-session hysteresis and
+    turns the slow leg into a no-op.
+    """
+    low_bars = max(2, _bars(cfg, "fast_low_bars"))
+    dd_bars = max(1, _bars(cfg, "drawdown_bars"))
+    dd_pct = max(0.0, min(1.0, _f(cfg, "drawdown_pct")))
+    sma_bars = max(2, _bars(cfg, "sma_bars"))
+    close = prices[-1]
+
+    sma = _sma(prices, sma_bars)
+    if sma is not None and len(prices) > low_bars:
+        prior = prices[-(low_bars + 1):-1]
+        if close < min(prior) and close < sma:
+            return True
+
+    window = prices[-(low_bars + 1):]
+    peak = max(window)
+    if peak <= 0:
+        return False
+    age = len(window) - 1 - max(i for i, v in enumerate(window) if v == peak)
+    return age <= dd_bars and close <= peak * (1.0 - dd_pct)
+
+
+def hx_state(closes, prev_state, confirm, cfg) -> tuple:
+    """(state, confirm counter) for this session.
+
+    Read-only on everything. The caller persists both; passing them back in is
+    what makes the exit hysteresis survive a restart, and a cold start reads
+    UNKNOWN rather than inventing a regime.
+
+    The exit names its destination — BEAR leaves to BULL, as the spec writes
+    the rule — and the BULL/CHOP test applies from the NEXT session. Running
+    the CHOP test on the flip session would land a confirmed five-session
+    recovery in a damped book on a technicality.
+    """
+    prices = _finite(closes)
+    # Whichever consumer needs most history. Without the window terms a raised
+    # `sma_bars` would compare a truncated average against itself, and a
+    # shorter window on the same tape measures LESS risk — the one direction
+    # this module must never fail in.
+    minimum = max(2, _bars(cfg, "min_history_bars"),
+                  _bars(cfg, "sma_bars") + _bars(cfg, "chop_slope_bars"),
+                  _bars(cfg, "fast_low_bars") + _bars(cfg, "drawdown_bars"))
+    if prices is None or len(prices) < minimum:
+        return "UNKNOWN", 0
+
+    state = str(prev_state or "").strip().upper()
+    if state not in _STATES:
+        state = "UNKNOWN"
+    try:
+        count = int(confirm)
+    except (TypeError, ValueError, OverflowError):
+        count = 0
+    # Bounded like every other parsed counter in this repo, so a corrupted row
+    # cannot carry an unbounded integer into the comparison below.
+    count = max(0, min(100_000, count))
+
+    sma_bars = max(2, _bars(cfg, "sma_bars"))
+    sma = _sma(prices, sma_bars)
+    if sma is None or not math.isfinite(sma) or sma <= 0:
+        return "UNKNOWN", 0
+    close = prices[-1]
+
+    if state == "BEAR":
+        need = max(1, _bars(cfg, "exit_confirm_sessions"))
+        count = count + 1 if close > sma else 0
+        return ("BULL", 0) if count >= need else ("BEAR", count)
+
+    if _entered_bear(prices, cfg):
+        return "BEAR", 0
+
+    slope_bars = max(1, _bars(cfg, "chop_slope_bars"))
+    prior_sma = _sma(prices[:-slope_bars], sma_bars)
+    # A dead tape closes AT its own average, never below it, so the slope
+    # clause is the only thing standing between a flat market and a full 3x
+    # core. Unmeasurable slope reads as flat: CHOP is the cheaper error.
+    flat = True
+    if prior_sma is not None and prior_sma > 0:
+        flat = abs(sma / prior_sma - 1.0) < max(0.0, _f(cfg, "chop_slope_pct"))
+    if close < sma or flat:
+        return "CHOP", 0
+    return "BULL", 0
+
+
 def strategy_hx_universe(cfg) -> list:
     """Every symbol this strategy reads or trades, sorted and de-duplicated.
 
