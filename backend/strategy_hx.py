@@ -140,6 +140,27 @@ def _bars(cfg, key):
     return fallback if fallback > 0 else 1
 
 
+def _pct(cfg, key, lo, hi):
+    """A fractional knob, read as its documented default when unusable.
+
+    `_bars` for floats, and the saturating clamps it replaces failed the same
+    way in the other direction. `max(0.0, chop_slope_pct)` turns a corrupted
+    0 into a threshold that makes NOTHING flat, so a dead tape reads BULL and
+    holds the full 3x core; `min(1.0, drawdown_pct)` turns a corrupted 7 into
+    `close <= peak * 0`, which no positive price satisfies, deleting the fast
+    drawdown leg outright.
+
+    Both ends are exclusive because both DELETE a rule rather than merely
+    narrowing it: at `lo` the test can never be false, at `hi` it can never be
+    true. A value on either boundary is not a setting, it is a missing one.
+    """
+    value = _f(cfg, key)
+    if math.isfinite(value) and lo < value < hi:
+        return value
+    fallback = _f({}, key)
+    return fallback if math.isfinite(fallback) else lo
+
+
 def _sma(values, bars):
     if bars <= 0 or len(values) < bars:
         return None
@@ -161,7 +182,7 @@ def _entered_bear(prices, cfg) -> bool:
     """
     low_bars = max(2, _bars(cfg, "fast_low_bars"))
     dd_bars = max(1, _bars(cfg, "drawdown_bars"))
-    dd_pct = max(0.0, min(1.0, _f(cfg, "drawdown_pct")))
+    dd_pct = _pct(cfg, "drawdown_pct", 0.0, 1.0)
     sma_bars = max(2, _bars(cfg, "sma_bars"))
     close = prices[-1]
 
@@ -186,10 +207,12 @@ def hx_state(closes, prev_state, confirm, cfg) -> tuple:
     what makes the exit hysteresis survive a restart, and a cold start reads
     UNKNOWN rather than inventing a regime.
 
-    The exit names its destination — BEAR leaves to BULL, as the spec writes
-    the rule — and the BULL/CHOP test applies from the NEXT session. Running
-    the CHOP test on the flip session would land a confirmed five-session
-    recovery in a damped book on a technicality.
+    The exit does NOT name its destination. Once the confirm counter clears
+    `exit_confirm_sessions` the session is evaluated like any other — entry
+    test, then CHOP test, else BULL — so a rally that confirms its way out
+    while the fast leg is still firing stays in BEAR, and one that confirms
+    onto a dead tape lands in CHOP. Returning BULL from here instead handed
+    the full 3x core back for exactly one session before re-entering BEAR.
     """
     prices = _finite(closes)
     # Whichever consumer needs most history. Without the window terms a raised
@@ -209,9 +232,7 @@ def hx_state(closes, prev_state, confirm, cfg) -> tuple:
         count = int(confirm)
     except (TypeError, ValueError, OverflowError):
         count = 0
-    # Bounded like every other parsed counter in this repo, so a corrupted row
-    # cannot carry an unbounded integer into the comparison below.
-    count = max(0, min(100_000, count))
+    count = max(0, count)
 
     sma_bars = max(2, _bars(cfg, "sma_bars"))
     sma = _sma(prices, sma_bars)
@@ -221,8 +242,16 @@ def hx_state(closes, prev_state, confirm, cfg) -> tuple:
 
     if state == "BEAR":
         need = max(1, _bars(cfg, "exit_confirm_sessions"))
+        # A persisted counter can never satisfy the exit on its own. One at
+        # or above `need` is not a long wait, it is a corrupt row, and
+        # clamping it to `need - 1` would still turn the five-session wait
+        # into a one-session one — so out of range restarts at zero.
+        count = count if count < need else 0
         count = count + 1 if close > sma else 0
-        return ("BULL", 0) if count >= need else ("BEAR", count)
+        if count < need:
+            return "BEAR", count
+        # Confirmed. Fall through rather than returning BULL: the exit
+        # session takes the same entry and CHOP tests as any other.
 
     if _entered_bear(prices, cfg):
         return "BEAR", 0
@@ -234,7 +263,8 @@ def hx_state(closes, prev_state, confirm, cfg) -> tuple:
     # core. Unmeasurable slope reads as flat: CHOP is the cheaper error.
     flat = True
     if prior_sma is not None and prior_sma > 0:
-        flat = abs(sma / prior_sma - 1.0) < max(0.0, _f(cfg, "chop_slope_pct"))
+        flat = abs(sma / prior_sma - 1.0) < _pct(
+            cfg, "chop_slope_pct", 0.0, 1.0)
     if close < sma or flat:
         return "CHOP", 0
     return "BULL", 0
