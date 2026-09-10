@@ -51,3 +51,12 @@ def test_the_parsers_fail_toward_less_exposure():
         assert _i(cfg(sma_bars=bad), "sma_bars") == 50, bad
     assert _s({"core_symbol": " tqqq "}, "core_symbol") == "TQQQ"
     assert _s({"core_symbol": None}, "core_symbol") == "TQQQ"
+
+
+def test_the_parsers_pass_a_configured_value_through():
+    """The fallbacks above are all any test would see if `_f`/`_i` simply
+    returned `DEFAULTS[key]`. A configured value has to survive the parser, or
+    every knob on the strategy is decorative."""
+    from strategy_hx import _f, _i
+    assert _f(cfg(core_max_weight=0.30), "core_max_weight") == 0.30
+    assert _i(cfg(sma_bars=20), "sma_bars") == 20
