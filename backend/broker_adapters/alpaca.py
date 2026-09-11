@@ -1269,15 +1269,32 @@ class AlpacaAdapter(BrokerAdapter):
             # Everything else is transient — surface as typed error
             raise BrokerError(f"transient broker query failure for {client_order_id}: {e}") from e
 
+    def list_open_orders_strict(self, limit: int = 200) -> list[OrderRef]:
+        """The working-order book, or an exception. NEVER [] on failure.
+
+        `list_open_orders` answers a dead orders endpoint and a genuinely flat
+        account with the same `[]` — the fail-open defect
+        `tests/test_zz_adversarial_sweep.py::
+        test_j_the_open_order_count_is_fail_open_not_minus_one` documents. A
+        caller that refuses to add exposure while an order is unresolved
+        cannot use that answer: it would read an unreachable broker as a clear
+        book and send the duplicate it exists to prevent. This is the same
+        request with the swallow removed; `list_open_orders` keeps the lenient
+        contract its existing callers were written against.
+        """
+        from alpaca.trading.requests import GetOrdersRequest
+        from alpaca.trading.enums import QueryOrderStatus
+        req = GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=limit)
+        orders = self._client.get_orders(filter=req)
+        if orders is None:
+            raise BrokerError("orders endpoint returned no result")
+        return [self._to_orderref(o) for o in orders]
+
     def list_open_orders(self, limit: int = 200) -> list[OrderRef]:
         try:
-            from alpaca.trading.requests import GetOrdersRequest
-            from alpaca.trading.enums import QueryOrderStatus
-            req = GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=limit)
-            orders = self._client.get_orders(filter=req)
+            return self.list_open_orders_strict(limit)
         except Exception:
             return []
-        return [self._to_orderref(o) for o in orders]
 
     def _to_orderref(self, o: Any) -> OrderRef:
         side = str(getattr(o.side, "value", o.side) if getattr(o, "side", None) else "")
