@@ -140,6 +140,7 @@ class LiveOrderService:
             Callable[[BrokerOrderEvent, Optional[ConfirmedFill]], None]
         ] = None,
         max_terminal_retries: int = 2,
+        log: Optional[Callable[..., None]] = None,
     ) -> None:
         self.account_id = str(account_id)
         self.instance_id = str(instance_id)
@@ -156,7 +157,37 @@ class LiveOrderService:
         self.max_terminal_retries = int(max_terminal_retries)
         self._reservations: dict[str, Reservation] = {}
         self.capacity_breaches: set[str] = set()
+        self._log = log
+        #: Identities already reported through `_report_swallowed`. A retried
+        #: exit must not fill the log with the same line, and a set is the
+        #: whole of the throttle.
+        self._reported_failures: set[str] = set()
         self._restore_reservations()
+
+    def _report_swallowed(self, intent, reason: str, exc: BaseException) -> None:
+        """Say what an `except Exception` swallowed, once per identity.
+
+        `submit` turns five different exceptions into reason codes —
+        `dependency.snapshot.unavailable`, `persistence.intent.failed` and the
+        rest — and discarded the exception itself. The code names the STAGE
+        that failed; without this nothing anywhere named the cause, so a live
+        exit that never reached the broker left one opaque token behind.
+        """
+        if self._log is None:
+            return
+        key = f"{getattr(intent, 'idempotency_key', '')}:{reason}"
+        if key in self._reported_failures:
+            return
+        self._reported_failures.add(key)
+        try:
+            self._log(
+                f"live-order {reason}: {getattr(intent, 'side', '')} "
+                f"{getattr(intent, 'symbol', '')} "
+                f"({getattr(intent, 'idempotency_key', '')}) — "
+                f"{type(exc).__name__}: {exc}",
+                "red")
+        except Exception:
+            pass
 
     def _restore_reservations(self) -> None:
         for record in self.lifecycle_store.list_for_instance(self.instance_id):
@@ -271,7 +302,8 @@ class LiveOrderService:
             return _denial(intent, "idempotency.open_order_exists")
         try:
             reference = self._lookup_by_client_id(intent.idempotency_key)
-        except Exception:
+        except Exception as exc:
+            self._report_swallowed(intent, "broker.reconciliation.unavailable", exc)
             return OrderSubmission(
                 decision=GateDecision(
                     allowed=True,
@@ -356,16 +388,21 @@ class LiveOrderService:
             return self._reconcile_existing(intent, existing)
         try:
             snapshot = self._snapshot_provider(intent)
-        except Exception:
+        except Exception as exc:
+            self._report_swallowed(intent, "dependency.snapshot.unavailable", exc)
             return _denial(intent, "dependency.snapshot.unavailable")
         if not isinstance(snapshot, DependencySnapshot):
+            self._report_swallowed(
+                intent, "dependency.snapshot.invalid",
+                TypeError(f"snapshot provider returned {type(snapshot).__name__}"))
             return _denial(intent, "dependency.snapshot.invalid")
         decision = self._gate.evaluate(intent, snapshot)
         if not decision.allowed:
             return OrderSubmission(decision=decision)
         try:
             record = self.lifecycle_store.create_intent(intent)
-        except Exception:
+        except Exception as exc:
+            self._report_swallowed(intent, "persistence.intent.failed", exc)
             return _denial(intent, "persistence.intent.failed")
         self._reservations[intent.idempotency_key] = Reservation(
             client_order_id=intent.idempotency_key,
@@ -375,7 +412,8 @@ class LiveOrderService:
         )
         try:
             record = self._append_internal(record, LifecycleState.SUBMITTING)
-        except Exception:
+        except Exception as exc:
+            self._report_swallowed(intent, "persistence.submitting.failed", exc)
             self._reservations.pop(intent.idempotency_key, None)
             return _denial(intent, "persistence.submitting.failed")
         try:

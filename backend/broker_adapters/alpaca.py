@@ -2797,6 +2797,27 @@ class AlpacaAdapter(BrokerAdapter):
 
     # --- Restart reconciliation helper ---
 
+    #: An `intent` row this old that the broker has never heard of will never
+    #: become an order: the process died between the WAL write and the API
+    #: call. `get_order_by_client_id` RAISES on a transient failure and returns
+    #: None only for a genuine 404, so "not found" here is authoritative. Left
+    #: open, such a row is reported missing on every later reconcile and the
+    #: cycle reads unhealthy forever. A day is well past any Alpaca day order.
+    STALE_INTENT_RETIREMENT_HOURS = 24.0
+
+    def _intent_age_hours(self, rec) -> Optional[float]:
+        """Hours since the WAL row was written, or None when unreadable."""
+        raw = getattr(rec, "created_at_utc", None)
+        if not raw:
+            return None
+        try:
+            stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - stamp).total_seconds() / 3600.0
+
     def reconcile_wal_with_broker(self) -> dict[str, str]:
         """For each non-terminal WAL row, query broker for current state.
 
@@ -2809,38 +2830,76 @@ class AlpacaAdapter(BrokerAdapter):
         only same-day order was rejected. Mirrors the stream-handler
         cleanup at `_on_trade_update`. Takes `self._lock` to match that
         path's concurrency discipline.
+
+        2026-09-11 E6: the loop is PER ROW. `get_order_by_client_id` raises on
+        a transient broker failure — deliberately, so a 5xx is never mistaken
+        for "not at broker" — and one raising row used to abort the whole pass,
+        throwing away the resolutions already computed for the rows before it.
+        This runs at boot and decides whether the account can sell. A row that
+        cannot be resolved is now reported, left open, and the pass continues.
         """
         resolutions: dict[str, str] = {}
         for rec in self._wal.list_open():
             cid = rec.client_order_id
-            ref = self.get_order_by_client_id(cid)
-            if ref is None:
-                resolutions[cid] = "not_found_at_broker"
+            try:
+                ref = self.get_order_by_client_id(cid)
+            except Exception as exc:
+                resolutions[cid] = f"unresolved_{type(exc).__name__}"
+                _alog("BROKER",
+                      f"WAL reconcile: {cid} ({rec.symbol} {rec.side}) could "
+                      f"NOT be resolved — {type(exc).__name__}: {exc}. Left "
+                      "open for the next pass; the rest of the WAL is still "
+                      "reconciled.", "red")
                 continue
-            status = ref.status.lower()
-            _sym = str(getattr(ref, "symbol", "") or "").upper()
-            _side = str(getattr(ref, "side", "") or "").lower()
-            if status in {"filled"}:
-                self._wal.mark_filled(cid, ref.filled_qty, ref.filled_avg_price)
-                resolutions[cid] = "already_filled"
-            elif status in {"canceled", "cancelled"}:
-                self._wal.mark_canceled(cid)
-                resolutions[cid] = "already_canceled"
-                self._discard_orders_today(_sym, _side)
-            elif status in {"rejected"}:
-                self._wal.mark_rejected(cid, "rejected_per_broker")
-                resolutions[cid] = "already_rejected"
-                self._discard_orders_today(_sym, _side)
-            elif status in {"expired", "done_for_day"}:
-                self._wal.mark_expired(cid)
-                resolutions[cid] = f"already_{status}"
-                self._discard_orders_today(_sym, _side)
-            elif status in {"partially_filled"}:
-                self._wal.mark_partial(cid, ref.filled_qty, ref.filled_avg_price)
-                resolutions[cid] = "partially_filled_continuing"
-            else:
-                self._wal.mark_submitted(cid, ref.broker_order_id)
-                resolutions[cid] = f"still_open_{status}"
+            try:
+                if ref is None:
+                    age = self._intent_age_hours(rec)
+                    if (rec.state == "intent" and age is not None
+                            and age >= self.STALE_INTENT_RETIREMENT_HOURS):
+                        # E4: never submitted, and now unsubmittable.
+                        self._wal.mark_expired(cid)
+                        resolutions[cid] = "retired_stale_intent"
+                        _alog("BROKER",
+                              f"WAL reconcile: retiring {cid} ({rec.symbol} "
+                              f"{rec.side}) — an intent written {age:.0f}h ago "
+                              "that the broker has never seen. The order was "
+                              "never placed; it is not pending.", "red")
+                        self._discard_orders_today(
+                            str(rec.symbol or "").upper(),
+                            str(rec.side or "").lower())
+                    else:
+                        resolutions[cid] = "not_found_at_broker"
+                    continue
+                status = ref.status.lower()
+                _sym = str(getattr(ref, "symbol", "") or "").upper()
+                _side = str(getattr(ref, "side", "") or "").lower()
+                if status in {"filled"}:
+                    self._wal.mark_filled(cid, ref.filled_qty, ref.filled_avg_price)
+                    resolutions[cid] = "already_filled"
+                elif status in {"canceled", "cancelled"}:
+                    self._wal.mark_canceled(cid)
+                    resolutions[cid] = "already_canceled"
+                    self._discard_orders_today(_sym, _side)
+                elif status in {"rejected"}:
+                    self._wal.mark_rejected(cid, "rejected_per_broker")
+                    resolutions[cid] = "already_rejected"
+                    self._discard_orders_today(_sym, _side)
+                elif status in {"expired", "done_for_day"}:
+                    self._wal.mark_expired(cid)
+                    resolutions[cid] = f"already_{status}"
+                    self._discard_orders_today(_sym, _side)
+                elif status in {"partially_filled"}:
+                    self._wal.mark_partial(cid, ref.filled_qty, ref.filled_avg_price)
+                    resolutions[cid] = "partially_filled_continuing"
+                else:
+                    self._wal.mark_submitted(cid, ref.broker_order_id)
+                    resolutions[cid] = f"still_open_{status}"
+            except Exception as exc:
+                resolutions[cid] = f"unresolved_{type(exc).__name__}"
+                _alog("BROKER",
+                      f"WAL reconcile: {cid} resolved to a broker state this "
+                      f"adapter could not record — {type(exc).__name__}: "
+                      f"{exc}. Left open for the next pass.", "red")
         return resolutions
 
     def _discard_orders_today(self, symbol: str, side: str) -> None:

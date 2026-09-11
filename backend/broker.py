@@ -11105,6 +11105,11 @@ elif mode == MODE_LIVE:
                     lookup_by_client_id=live_adapter.get_order_by_client_id,
                     confirmed_fill_handler=_apply_live_confirmed_fill_risk,
                     event_handler=live_adapter.apply_lifecycle_event,
+                    # E4: the service turns five different exceptions into
+                    # reason codes and discarded the exception itself. Without
+                    # this the code names the STAGE that failed and nothing
+                    # anywhere names the cause.
+                    log=_log,
                 )
                 live_adapter.bind_order_event_sink(
                     _live_stock_order_service.apply_broker_event,
