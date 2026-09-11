@@ -36,10 +36,6 @@ ADMIN_ONLY_ROUTES = [
     ("POST", "/instances/{instance_id}/start"),
     ("POST", "/instances/{instance_id}/stop"),
     ("POST", "/instances/{instance_id}/clear-state"),
-    # Writes the readiness report a real-money launcher trusts. If anything on
-    # this list has to be admin-only, it is the route that can authorize a
-    # funded start.
-    ("POST", "/instances/{instance_id}/readiness-waiver"),
     ("POST", "/instances/{instance_id}/link-strategy"),
     ("POST", "/instances/{instance_id}/unlink-strategy"),
     ("POST", "/instances/{instance_id}/link-brokerage"),
@@ -281,7 +277,8 @@ def test_create_user_route_is_admin_only_and_still_mints_admins_for_an_admin(mon
 # test failure until someone decides which it is.
 #
 # Measured 2026-09-11: 104 mutating routes, 26 gated before this round, 29
-# after. The 75 below are NOT a clean bill of health -- several say
+# after, then 28 once the readiness waiver was opened to any signed-in user.
+# The 76 below are NOT a clean bill of health -- several say
 # "candidate" and mean it. They are written down so the next round has a list
 # instead of a search.
 # ---------------------------------------------------------------------------
@@ -332,6 +329,11 @@ NOT_ADMIN_GATED = {
         "authenticated by the MCP session token, not a user session",
     ("POST", "/chatbot/internal/mcp-tool-call"):
         "authenticated by the MCP session token, not a user session",
+
+    # -- deliberately open to any signed-in user, by operator decision -----
+    ("POST", "/instances/{instance_id}/readiness-waiver"):
+        "operator decision 2026-09-11: waiver is audited and phrase-confirmed; "
+        "any signed-in user may waive",
 
     # -- POST that reads: a probe or a preview, writing nothing -----------
     ("POST", "/llm/test"):
@@ -521,8 +523,9 @@ def test_the_gated_and_exempt_sets_partition_every_mutating_route():
     routes = _mutating_routes()
     gated = [r for r in routes if r[2] is require_admin]
     assert len(gated) + len(NOT_ADMIN_GATED) == len(routes)
-    # Sanity on the measurement in the comment above: this round added three.
-    assert len(gated) >= 29
+    # Sanity on the measurement in the comment above: this round added three
+    # and the readiness waiver later moved back out.
+    assert len(gated) >= 28
 
 
 # ---------------------------------------------------------------------------

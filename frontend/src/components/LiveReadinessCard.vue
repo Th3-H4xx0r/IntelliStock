@@ -8,8 +8,10 @@
 
      The card reads that state; the modal waives it. The waiver is a safety
      bypass, so it is styled as one and gated exactly the way the route is:
-     the exact phrase typed by hand, a reason long enough to be an audit
-     record, admin only. There is deliberately no "remember this phrase" and
+     the exact phrase typed by hand and a reason long enough to be an audit
+     record. Any signed-in user may waive (operator decision 2026-09-11) --
+     the typing is the gate, not the role. There is deliberately no
+     "remember this phrase" and
      no way to waive without typing it — a one-click bypass of a real-money
      gate is not a convenience, it is the failure mode. -->
 <template>
@@ -88,17 +90,13 @@
     <div class="mt-4 pt-4 border-t border-border-subtle">
       <button
         @click="openWaiver"
-        :disabled="!isAdmin"
-        :title="isAdmin ? 'Bypass the live-readiness gate (audited)' : 'Admin role required'"
+        title="Bypass the live-readiness gate (audited)"
         class="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold border transition-colors
-               border-red-500/30 text-red-300 hover:bg-red-500/10 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+               border-red-500/30 text-red-300 hover:bg-red-500/10"
       >
         <span class="material-symbols-outlined text-[14px]">gpp_maybe</span>
         Waive live-readiness gate…
       </button>
-      <p v-if="!isAdmin" class="text-[10px] text-slate-600 mt-2 text-center">
-        Admin role required to waive the gate.
-      </p>
     </div>
   </div>
 
@@ -209,7 +207,7 @@
 
 <script setup>
 import { computed, ref } from 'vue'
-import { getToken, getUser } from '../utils/auth.js'
+import { getToken } from '../utils/auth.js'
 import {
   WAIVER_MIN_REASON_CHARS,
   canSubmitWaiver,
@@ -235,7 +233,6 @@ const report = computed(() => props.instance?.live_readiness_report || {})
 const counts = computed(() => readinessCheckCounts(report.value))
 const waivedAt = computed(() => props.instance?.live_readiness_waived_at || '')
 const waivedBy = computed(() => props.instance?.live_readiness_waived_by || '')
-const isAdmin = computed(() => String(getUser()?.role ?? '').toLowerCase() === 'admin')
 
 // A waiver stamp with no report left on the row means the report was replaced
 // by something the waiver did not write — worth saying out loud rather than
@@ -290,7 +287,6 @@ const canSubmit  = computed(
   () => canSubmitWaiver(instanceId.value, confirmText.value, reasonText.value))
 
 function openWaiver() {
-  if (!isAdmin.value) return
   // Never carry a phrase across openings: the typing IS the confirmation.
   confirmText.value = ''
   reasonText.value  = ''

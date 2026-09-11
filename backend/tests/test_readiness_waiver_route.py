@@ -5,9 +5,12 @@ broker without ``Instances.<id>.live_readiness_report`` -- a fingerprinted,
 artifact-bound report with all six checks passed and state LIVE_ELIGIBLE.
 Nothing in the API could write one, by design: the report is supposed to be
 earned. When the repo owner decides to accept the risk anyway, the choice
-between "hand-edit the JSON blob a real-money launcher reads" and "an audited,
-admin-only route that records who waived what against which image" is not a
-close one.
+between "hand-edit the JSON blob a real-money launcher reads" and "an audited
+route that records who waived what against which image" is not a close one.
+
+The route is open to any *signed-in* user (operator decision 2026-09-11): the
+phrase and the reason are the gate, and the audit record names whoever typed
+them. Anonymous callers are still refused.
 
 So the waiver is a route, and these tests pin the properties that make it
 safer than the database write it replaces:
@@ -60,7 +63,7 @@ def waiver(store, monkeypatch):
         live_alerts, "alert_strategy_error",
         lambda **kw: alerts.append(kw))
 
-    main.app.dependency_overrides[main.require_admin] = lambda: ADMIN
+    main.app.dependency_overrides[main.get_current_user] = lambda: ADMIN
     main.app.dependency_overrides[main.conn_dependency] = lambda: None
     try:
         yield TestClient(main.app), store, alerts
@@ -109,20 +112,21 @@ def test_an_unknown_instance_is_a_404(waiver):
     assert res.status_code == 404, res.text
 
 
-def test_a_non_admin_cannot_waive(store, monkeypatch):
+def test_a_signed_in_non_admin_may_waive_and_is_named_on_the_row(store, monkeypatch):
+    """Operator decision 2026-09-11: the role is not the gate -- the typed
+    phrase and the reason are, and the audit record has to name whoever typed
+    them, not the role they happened to hold."""
     from fastapi.testclient import TestClient
-    from fastapi import HTTPException
 
     from api import main
+    import live_alerts
 
-    store.insert("Instances", {"id": INSTANCE})
+    store.insert("Instances", {"id": INSTANCE, "name": "EB live"})
     monkeypatch.setattr(main, "db_store", store)
     monkeypatch.setattr(main, "deployed_artifact_digest", lambda: DIGEST)
+    monkeypatch.setattr(live_alerts, "alert_strategy_error", lambda **kw: None)
 
-    def _reject():
-        raise HTTPException(status_code=403, detail="Admin role required")
-
-    main.app.dependency_overrides[main.require_admin] = _reject
+    main.app.dependency_overrides[main.get_current_user] = lambda: BOB
     main.app.dependency_overrides[main.conn_dependency] = lambda: None
     try:
         res = TestClient(main.app).post(
@@ -130,13 +134,42 @@ def test_a_non_admin_cannot_waive(store, monkeypatch):
             json={"confirm": CONFIRM, "reason": REASON})
     finally:
         main.app.dependency_overrides.clear()
-    assert res.status_code == 403, res.text
+
+    assert res.status_code == 200, res.text
+    assert res.json()["waived_by"] == "bob"
+    row = store.get("Instances", INSTANCE)
+    assert row["live_readiness_waived_by"] == "bob"
+    for check in row["live_readiness_report"]["checks"]:
+        assert " by bob: " in check["reason"]
+
+
+def test_an_unauthenticated_caller_still_cannot_waive(store, monkeypatch):
+    """Open to any signed-in user is not open to anyone: without a usable
+    token ``get_current_user`` refuses before the route body runs."""
+    from fastapi.testclient import TestClient
+
+    from api import main
+
+    store.insert("Instances", {"id": INSTANCE})
+    monkeypatch.setattr(main, "db_store", store)
+    monkeypatch.setattr(main, "deployed_artifact_digest", lambda: DIGEST)
+
+    main.app.dependency_overrides[main.conn_dependency] = lambda: None
+    try:
+        res = TestClient(main.app).post(
+            f"/instances/{INSTANCE}/readiness-waiver",
+            json={"confirm": CONFIRM, "reason": REASON},
+            headers={"Authorization": "Bearer not-a-real-token"})
+    finally:
+        main.app.dependency_overrides.clear()
+    assert res.status_code == 401, res.text
     assert store.get("Instances", INSTANCE).get("live_readiness_report") is None
 
 
-def test_the_route_is_wired_to_require_admin():
-    """test_api_authorization.py's inverse test only protects routes named in
-    its list; this pins the wiring even if the name is dropped from it."""
+def test_the_route_is_wired_to_the_authenticated_user_dependency():
+    """test_api_authorization.py classifies this route in its exemption table;
+    this pins the wiring even if the entry is dropped from it -- in either
+    direction, since re-gating it on admin would also fail here."""
     import inspect
 
     from api import main
@@ -147,7 +180,7 @@ def test_the_route_is_wired_to_require_admin():
         == "/instances/{instance_id}/readiness-waiver"
         and "POST" in getattr(route, "methods", ()))
     guard = inspect.signature(endpoint).parameters["current_user"].default
-    assert guard.dependency is main.require_admin
+    assert guard.dependency is main.get_current_user
 
 
 # --- the happy path -------------------------------------------------------
@@ -257,7 +290,7 @@ def test_a_docker_lookup_failure_does_not_write_a_half_waiver(store, monkeypatch
         raise LiveReadinessError("Docker client is unavailable")
 
     monkeypatch.setattr(main, "deployed_artifact_digest", _boom)
-    main.app.dependency_overrides[main.require_admin] = lambda: ADMIN
+    main.app.dependency_overrides[main.get_current_user] = lambda: ADMIN
     main.app.dependency_overrides[main.conn_dependency] = lambda: None
     try:
         res = TestClient(main.app).post(

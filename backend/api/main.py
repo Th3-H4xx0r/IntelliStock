@@ -2378,7 +2378,7 @@ def api_readiness_waiver(
     instance_id: str,
     body: ReadinessWaiverBody,
     conn=Depends(conn_dependency),
-    current_user: dict = Depends(require_admin),
+    current_user: dict = Depends(get_current_user),
 ):
     """Record an operator's decision to start live without the earned gate.
 
@@ -2395,6 +2395,10 @@ def api_readiness_waiver(
     expires the moment a new one is deployed, stamps who waived it and when,
     and pages. Every check's reason begins "OPERATOR WAIVED" so nothing that
     later reads this report can mistake it for evidence.
+
+    Any *signed-in* user may waive (operator decision 2026-09-11): the gate is
+    the typed phrase and the reason, not the caller's role, and the record
+    names whoever typed them. Anonymous callers are still refused.
 
     It does NOT go through ``assert_readiness_transition_allowed``: that
     ladder exists to stop promotion skipping states on evidence, and a waiver
