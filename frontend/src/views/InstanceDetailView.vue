@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppShell from '../layouts/AppShell.vue'
+import LiveReadinessCard from '../components/LiveReadinessCard.vue'
 import { getToken } from '../utils/auth.js'
 import {
   applyStrategyLlmDraft,
@@ -22,6 +23,12 @@ import {
 const route  = useRoute()
 const router = useRouter()
 const instanceId = computed(() => route.params.id)
+
+// Crypto and Kalshi instances are routed to their own detail views; `kind` is
+// absent on equity rows created before the field existed, so anything that is
+// not explicitly one of those is an equity instance.
+const isStockInstance = computed(
+  () => !['crypto', 'kalshi'].includes(String(inst.value?.kind ?? '').toLowerCase()))
 
 const API_BASE = import.meta.env.DEV
   ? '/api'
@@ -193,18 +200,30 @@ const editInfoForm   = ref({
   name: '',
   granularity: '60',
   max_usage: '',
+  initial_value: '',
+  clean_room_mode: false,
 })
+// Snapshot of what the row held when the modal opened. The clean-room fields
+// are sent only when they differ from it: PATCH treats an omitted field as
+// "leave it alone", so re-sending an unchanged baseline on every rename is a
+// write to a real-money field that nobody asked for.
+const editInfoOriginal = ref({ initial_value: '', clean_room_mode: false })
 
 function openEditInfo() {
   if (!inst.value) return
   editInfoMsg.value = ''
   editInfoOk.value = false
   editInfoSaving.value = false
+  const baseline = inst.value.initial_value != null ? String(inst.value.initial_value) : ''
+  const cleanRoom = !!inst.value.clean_room_mode
   editInfoForm.value = {
     name: inst.value.name || '',
     granularity: String(inst.value.granularity_time_increment || '60'),
     max_usage: inst.value.max_usage != null ? String(inst.value.max_usage) : '',
+    initial_value: baseline,
+    clean_room_mode: cleanRoom,
   }
+  editInfoOriginal.value = { initial_value: baseline, clean_room_mode: cleanRoom }
   showEditInfo.value = true
 }
 
@@ -344,6 +363,27 @@ async function submitEditInfo() {
       if (!Number.isFinite(parsedMaxUsage)) throw new Error('Max usage must be a valid number')
       payload.max_usage = parsedMaxUsage
     }
+
+    // The clean-room baseline every drawdown is measured against. Only sent
+    // when the operator actually changed it.
+    const baselineText = String(editInfoForm.value.initial_value ?? '').trim()
+    if (baselineText !== editInfoOriginal.value.initial_value) {
+      if (baselineText === '') {
+        // PATCH reads an absent field as "unchanged", so blanking the box
+        // would look like a clear and do nothing. Say so instead of
+        // silently discarding the edit.
+        throw new Error('Initial value cannot be cleared here — set a positive baseline or leave it unchanged')
+      }
+      const parsedBaseline = Number(baselineText)
+      if (!Number.isFinite(parsedBaseline) || parsedBaseline <= 0) {
+        throw new Error('Initial value must be a number greater than 0')
+      }
+      payload.initial_value = parsedBaseline
+    }
+    if (!!editInfoForm.value.clean_room_mode !== editInfoOriginal.value.clean_room_mode) {
+      payload.clean_room_mode = !!editInfoForm.value.clean_room_mode
+    }
+
     const res = await fetch(`${API_BASE}/instances/${encodeURIComponent(instanceId.value)}`, {
       method: 'PATCH',
       headers: authHeaders(),
@@ -1480,6 +1520,26 @@ async function submitCreateBacktest() {
                 <span class="text-slate-500">Max usage</span>
                 <span class="text-slate-200 font-mono">{{ inst.max_usage != null ? fmtMoney(inst.max_usage) : '—' }}</span>
               </div>
+              <!-- The clean-room pair the live-start preflight reads. Stored
+                   values: LIVE_CLEAN_ROOM_MODE / LIVE_INITIAL_VALUE still beat
+                   the row at launch. -->
+              <div class="flex justify-between gap-2">
+                <span class="text-slate-500">Initial value</span>
+                <span class="font-mono" :class="inst.initial_value != null ? 'text-slate-200' : 'text-slate-500'">
+                  {{ inst.initial_value != null ? fmtMoney(inst.initial_value) : '—' }}
+                </span>
+              </div>
+              <div class="flex justify-between gap-2">
+                <span class="text-slate-500">Clean-room mode</span>
+                <span class="text-xs font-semibold" :class="inst.clean_room_mode ? 'text-sky-400' : 'text-slate-500'">
+                  {{ inst.clean_room_mode ? 'On' : 'Off' }}
+                </span>
+              </div>
+              <p v-if="inst.clean_room_mode && inst.initial_value == null"
+                 class="text-[11px] text-amber-400 leading-relaxed pt-1">
+                Clean-room mode is on with no baseline — the broker refuses to
+                launch until an initial value is set.
+              </p>
             </div>
           </div>
 
@@ -1631,6 +1691,15 @@ async function submitCreateBacktest() {
               </button>
             </div>
           </div>
+
+          <!-- Live readiness — equity instances only. Crypto and Kalshi have
+               their own detail views and no live-readiness gate. -->
+          <LiveReadinessCard
+            v-if="isStockInstance"
+            :instance="inst"
+            :api-base="API_BASE"
+            @waived="fetchInstance"
+          />
         </div>
 
         <!-- ── Stocks ──────────────────────────────────────────────────────── -->
@@ -1930,6 +1999,43 @@ async function submitCreateBacktest() {
                 placeholder="Leave blank to keep current value"
               />
             </div>
+
+            <!-- Live-start controls. instance.py refuses to launch a broker
+                 when clean-room mode is on and no baseline is stored. -->
+            <div class="pt-1 border-t border-border-subtle">
+              <label class="block text-xs font-medium text-slate-400 mb-1.5 mt-4">
+                Initial value (clean-room P&amp;L baseline)
+              </label>
+              <input
+                v-model="editInfoForm.initial_value"
+                type="number"
+                min="0"
+                step="0.01"
+                class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono"
+                placeholder="e.g. 6000"
+              />
+              <p class="text-[11px] text-slate-600 mt-1.5 leading-relaxed">
+                Must be greater than 0. Sent only when changed, and it cannot be
+                cleared from here. <span class="font-mono">LIVE_INITIAL_VALUE</span> still
+                overrides it at launch.
+              </p>
+            </div>
+
+            <label class="flex items-start gap-3 cursor-pointer rounded-lg border border-border-subtle px-3 py-2.5 hover:border-slate-600 transition-colors">
+              <input
+                v-model="editInfoForm.clean_room_mode"
+                type="checkbox"
+                class="mt-0.5 accent-sky-400 shrink-0"
+              />
+              <span class="min-w-0">
+                <span class="block text-sm font-medium text-slate-200">Clean-room mode</span>
+                <span class="block text-[11px] text-slate-600 leading-relaxed mt-0.5">
+                  Measure P&amp;L and drawdown against the baseline above instead of
+                  the account's own history. With this on and no baseline stored,
+                  the broker refuses to start.
+                </span>
+              </span>
+            </label>
 
             <Transition name="slide-up">
               <div
