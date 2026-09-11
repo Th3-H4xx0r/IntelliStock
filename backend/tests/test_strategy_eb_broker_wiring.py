@@ -17,7 +17,8 @@ def _extract(*names):
     # `_truthy` and `_merged_strategy_settings` come along because the EB
     # config readers call them, and their blanket `except Exception` would turn
     # the resulting NameError into an empty result rather than a failure.
-    keep = set(names) | {"_truthy", "_merged_strategy_settings"}
+    keep = set(names) | {"_truthy", "_merged_strategy_settings",
+                         "_strategy_eb_merged_config"}
     wanted = [n for n in tree.body
               if isinstance(n, ast.FunctionDef) and n.name in keep]
     found = {n.name for n in wanted}
@@ -157,3 +158,39 @@ def test_the_run_once_call_site_passes_the_view():
     source = open(_BROKER).read()
     assert source.count("_eb_live_portfolio_view(") >= 2
     assert "portfolio_emulator=_eb_live_portfolio_view(" in source
+
+
+# --- what a live tick cannot run blind on (C2, 2026-09-11) ------------------
+
+def required(specs, positions=None):
+    ns = _extract("_strategy_eb_required_symbols")
+    return ns["_strategy_eb_required_symbols"](specs, positions)
+
+
+def test_the_reference_and_the_core_are_always_required():
+    """The reference index's daily closes ARE the volatility the transform
+    sizes off; an empty series for it is not a partial fetch, it is no data."""
+    assert required(spec(strategy_eb_enabled=True)) == ["QQQ", "TQQQ"]
+
+
+def test_held_symbols_are_required_too():
+    got = required(spec(strategy_eb_enabled=True),
+                   {"gld": 4.0, "SPY": 10.0, "BIL": 0.0})
+    assert got[:2] == ["QQQ", "TQQQ"]
+    assert "GLD" in got and "SPY" in got
+    assert "BIL" not in got, "a zero position is not held"
+
+
+def test_a_disabled_or_absent_eb_requires_nothing():
+    assert required(spec(strategy_eb_enabled=False), {"TQQQ": 1.0}) == []
+    assert required([{"strategy": "graph_nexus_analysis", "config": {}}]) == []
+    for junk in (None, [], [None], ["strategy_eb"]):
+        assert required(junk) == [], junk
+
+
+def test_unreadable_positions_do_not_break_the_requirement():
+    class Hostile(dict):
+        def items(self):
+            raise RuntimeError("adapter is down")
+
+    assert required(spec(strategy_eb_enabled=True), Hostile()) == ["QQQ", "TQQQ"]

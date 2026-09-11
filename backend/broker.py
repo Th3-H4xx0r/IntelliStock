@@ -13217,8 +13217,8 @@ _EB_EXIT_ISSUED_KEY = "_strategy_eb_exit_issued_session"
 _EB_LANE_NAMES = ("strategy_eb", "strategyeb", "StrategyEb")
 
 
-def _strategy_eb_core_symbol(cached_strategies):
-    """The enabled strategy_eb lane's core symbol, upper-cased, or "".
+def _strategy_eb_merged_config(cached_strategies):
+    """The ENABLED strategy_eb lane's settings over its module defaults, or {}.
 
     Settings are `conditions` UNION `config`, matching `_merged_strategy_
     settings` and therefore the dispatcher: reading `config` alone is blind to
@@ -13227,7 +13227,7 @@ def _strategy_eb_core_symbol(cached_strategies):
     try:
         from strategy_eb import DEFAULTS as _EB_DEFAULTS
     except Exception:
-        return ""
+        return {}
     try:
         for spec in (cached_strategies or []):
             if not isinstance(spec, dict):
@@ -13236,12 +13236,44 @@ def _strategy_eb_core_symbol(cached_strategies):
                     != "strategyeb":
                 continue
             merged = {**_EB_DEFAULTS, **_merged_strategy_settings(spec)}
-            if not _truthy(merged.get("strategy_eb_enabled", False)):
-                continue
-            return str(merged.get("core_symbol") or "").strip().upper()
+            if _truthy(merged.get("strategy_eb_enabled", False)):
+                return merged
     except Exception:
-        return ""
-    return ""
+        return {}
+    return {}
+
+
+def _strategy_eb_core_symbol(cached_strategies):
+    """The enabled strategy_eb lane's core symbol, upper-cased, or ""."""
+    return str(_strategy_eb_merged_config(cached_strategies).get("core_symbol")
+               or "").strip().upper()
+
+
+def _strategy_eb_required_symbols(cached_strategies, positions=None):
+    """Symbols a live EB tick CANNOT run blind on.
+
+    The reference index first — its daily closes ARE the volatility the whole
+    transform sizes off — then the core, then anything the book is currently
+    holding. `build_live_equity_data` refuses the tick when one of these comes
+    back empty with no last-good behind it, rather than handing over a partial
+    snapshot that reads as success.
+    """
+    merged = _strategy_eb_merged_config(cached_strategies)
+    if not merged:
+        return []
+    out = []
+    for key in ("reference_symbol", "core_symbol"):
+        symbol = str(merged.get(key) or "").strip().upper()
+        if symbol and symbol not in out:
+            out.append(symbol)
+    try:
+        for symbol, quantity in (positions or {}).items():
+            upper = str(symbol or "").strip().upper()
+            if upper and upper not in out and float(quantity or 0.0) > 0:
+                out.append(upper)
+    except Exception:
+        pass
+    return out
 
 
 def _report_live_submit_failure(symbol, decision, detail, *, instance_id,
@@ -14876,6 +14908,21 @@ while not shutdown_requested:
                                                         except Exception:
                                                             pass
 
+                                                # C2: the series this tick
+                                                # cannot run blind on — the
+                                                # reference index, the core,
+                                                # and whatever is held. An
+                                                # empty one with no last-good
+                                                # behind it refuses the tick
+                                                # instead of reading as a
+                                                # partial success.
+                                                try:
+                                                    _leb_positions = (
+                                                        portfolio_emulator.get_positions()
+                                                        if portfolio_emulator is not None
+                                                        else {})
+                                                except Exception:
+                                                    _leb_positions = {}
                                                 _rr_data = _leb_build(
                                                     _leb_fetch, _eb_syms,
                                                     datetime.datetime.now(
@@ -14883,6 +14930,9 @@ while not shutdown_requested:
                                                     last_good=globals().get(
                                                         "_live_equity_bars_last_good"),
                                                     log=_log,
+                                                    required=_strategy_eb_required_symbols(
+                                                        _cached_strategies,
+                                                        _leb_positions),
                                                 )
                                                 if _rr_data:
                                                     globals()["_live_equity_bars_last_good"] = _rr_data

@@ -29,7 +29,8 @@ def _extract(*names):
     """AST-extract broker functions. broker.py argparses at module scope and
     SystemExits under pytest, so it cannot be imported."""
     tree = ast.parse(open(_BROKER).read())
-    keep = set(names) | {"_truthy", "_merged_strategy_settings"}
+    keep = set(names) | {"_truthy", "_merged_strategy_settings",
+                         "_strategy_eb_merged_config"}
     consts = {"_EB_EXIT_ISSUED_KEY", "_EB_LANE_NAMES"}
     wanted = [n for n in tree.body
               if (isinstance(n, ast.FunctionDef) and n.name in keep)

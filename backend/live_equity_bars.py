@@ -195,6 +195,45 @@ def is_degraded(bars, held) -> bool:
     return len(bars) < MIN_LENGTH_RATIO * len(held)
 
 
+#: How many NYSE sessions a snapshot may lag before it stops counting as data.
+#: `is_degraded` only ever compares a fetch against the snapshot already held,
+#: which a FROZEN feed passes on every tick — same newest bar, same length — so
+#: without an ABSOLUTE bound a stale window is served forever and the strategy
+#: keeps sizing a levered position off a volatility it measured weeks ago.
+#: Three leaves two sessions of slack over the normal one-session lag (the
+#: daily bar for the session in progress does not exist until its close), which
+#: covers every NYSE holiday run in the calendar.
+MAX_STALE_SESSIONS_DEFAULT = 3
+
+#: Beyond this the session count is not worth walking day by day; anything that
+#: far back is stale under any bound anyone would configure.
+_STALE_WALK_LIMIT_DAYS = 45
+
+
+def sessions_since(stamp: datetime.datetime,
+                   now_utc: datetime.datetime) -> int:
+    """NYSE sessions strictly after ``stamp``'s date, through ``now_utc``'s.
+
+    Weekdays, not the exchange calendar: this module is deliberately import-pure
+    (no broker import, no `exchange_calendars` dependency) so its logic stays
+    reachable from tests. Counting a holiday as a session can only make the
+    bound TIGHTER, and the default carries two sessions of slack for exactly
+    that.
+    """
+    start = stamp.astimezone(datetime.timezone.utc).date()
+    end = now_utc.astimezone(datetime.timezone.utc).date()
+    if end <= start:
+        return 0
+    if (end - start).days > _STALE_WALK_LIMIT_DAYS:
+        return _STALE_WALK_LIMIT_DAYS
+    count, day = 0, start + datetime.timedelta(days=1)
+    while day <= end:
+        if day.weekday() < 5:
+            count += 1
+        day += datetime.timedelta(days=1)
+    return count
+
+
 def build_live_equity_data(
     fetch_bars: Callable[[list, datetime.datetime, datetime.datetime],
                          Optional[Mapping]],
@@ -203,8 +242,20 @@ def build_live_equity_data(
     lookback_days: int = LOOKBACK_DAYS_DEFAULT,
     last_good: Optional[Mapping] = None,
     log: Optional[Callable[[str, str], None]] = None,
+    required: Optional[Iterable[str]] = None,
+    max_stale_sessions: int = MAX_STALE_SESSIONS_DEFAULT,
 ) -> Optional[dict]:
-    """Assemble the live ``data`` dict for equity run_once strategies."""
+    """Assemble the live ``data`` dict for equity run_once strategies.
+
+    ``required`` names the symbols this tick cannot run blind on — the
+    reference index whose closes drive the whole transform, and anything the
+    book is currently holding. If one of them comes back empty and there is no
+    last-good to cover it, the whole snapshot is refused rather than handed
+    over as a partial success.
+
+    ``max_stale_sessions`` bounds how far the newest bar in the result may lag
+    ``now_utc``. 0 disables the bound.
+    """
 
     def _log(message, color="yellow"):
         if log is not None:
@@ -231,6 +282,44 @@ def build_live_equity_data(
              "red")
         fetched = None
 
+    need = []
+    for raw in (required or []):
+        upper = str(raw or "").strip().upper()
+        if upper and upper not in need:
+            need.append(upper)
+
+    def _fresh_enough(snapshot):
+        """None when the snapshot is too old to be data. C1: `is_degraded` only
+        compares a fetch against what is already held, so a feed that answers
+        every tick with the SAME stale window satisfies every other guard here
+        and is served forever."""
+        if int(max_stale_sessions or 0) <= 0:
+            return snapshot
+        newest = None
+        for bars in (snapshot or {}).values():
+            stamp = newest_stamp(bars)
+            if stamp is not None and (newest is None or stamp > newest):
+                newest = stamp
+        if newest is None:
+            # Unmeasurable, not proven stale. Blinding the strategy on a
+            # stamp-format change would be the worse failure of the two, so
+            # this serves — loudly.
+            _log("Live equity bars: staleness UNMEASURABLE — no parseable "
+                 "timestamp anywhere in the snapshot. Serving it, but the "
+                 "freshness guard is inert until the stamp format is fixed.",
+                 "red")
+            return snapshot
+        lag = sessions_since(newest, now_utc)
+        if lag > int(max_stale_sessions):
+            _log(f"Live equity bars: snapshot is STALE — newest bar "
+                 f"{newest.date()} is {lag} sessions behind "
+                 f"{now_utc.date()} (bound {max_stale_sessions}). Skipping "
+                 "strategies this tick: a levered position sized off a "
+                 "volatility measured weeks ago is worse than no position "
+                 "decision at all.", "red")
+            return None
+        return snapshot
+
     if isinstance(fetched, Mapping) and any(fetched.get(s) for s in syms):
         out, stale, truncated = {}, [], []
         for symbol in syms:
@@ -240,6 +329,18 @@ def build_live_equity_data(
                 (stale if not bars else truncated).append(symbol)
                 bars = held
             out[symbol] = bars
+        # C2: a partial fetch was treated as success as long as ANY symbol came
+        # back. With no last-good behind it, the reference index could be empty
+        # and the tick ran anyway — and a strategy that cannot see its own
+        # reference closes cannot evaluate its own risk.
+        blind = [symbol for symbol in need if not out.get(symbol)]
+        if blind:
+            _log("Live equity bars: PARTIAL fetch — no bars at all for "
+                 + ", ".join(blind)
+                 + ", and no last-good snapshot to cover them. Skipping "
+                   "strategies this tick rather than running one blind to the "
+                   "series it needs.", "red")
+            return None
         if stale:
             _log("Live equity bars: empty fetch for " + ", ".join(stale)
                  + " — reusing last-good bars (stale) rather than blinding a "
@@ -250,12 +351,12 @@ def build_live_equity_data(
                    "held; reusing the last-good one. A short window "
                    "under-measures volatility, and under-measured risk sizes a "
                    "levered position LARGER.", "yellow")
-        return out
+        return _fresh_enough(out)
 
     if last_good:
         _log("Live equity bars fetch FAILED — reusing the last-good snapshot "
              "(stale) for this tick.", "red")
-        return dict(last_good)
+        return _fresh_enough(dict(last_good))
     _log("Live equity bars fetch FAILED with no last-good snapshot — caller "
          "must skip strategies this tick.", "red")
     return None

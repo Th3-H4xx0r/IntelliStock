@@ -410,3 +410,153 @@ def test_the_outlier_sleeve_is_a_permitted_companion_lane():
     assert other_enabled_run_once_lanes(specs) == []
     specs.append({"strategy": "graph_nexus_analysis", "weight": 1.0, "config": {}})
     assert other_enabled_run_once_lanes(specs) == ["graph_nexus_analysis"]
+
+
+# --- C1 + C2 (2026-09-11 silent-failure audit) ------------------------------
+#
+# C1  `is_degraded` compares a fetch against the snapshot already held, which a
+#     FROZEN feed passes on every tick: same newest bar, same length, so the
+#     stale window is served forever and the strategy keeps sizing a levered
+#     position off a volatility it measured weeks ago.
+# C2  A partial fetch was treated as success as long as ANY symbol came back.
+#     With no last-good to fall back on, the reference index — whose closes are
+#     the whole transform — could be empty and the tick ran anyway.
+
+import pytest  # noqa: E402
+
+from live_equity_bars import sessions_since  # noqa: E402
+
+
+def dated(day, month=6, close=100.0):
+    return {"t": f"2026-{month:02d}-{day:02d}T05:00:00+00:00", "c": close}
+
+
+def snapshot(day, month=6, symbols=UNIVERSE):
+    return {s: [dated(day - 1, month), dated(day, month)] for s in symbols}
+
+
+def reds(lines):
+    return [m for m, c in lines if c == "red"]
+
+
+def sink():
+    lines = []
+    return lines, lambda message, color="yellow": lines.append((message, color))
+
+
+def test_sessions_since_counts_weekdays_not_calendar_days():
+    """2026-06-05 is a Friday, 2026-06-08 the Monday after."""
+    fri = datetime.datetime(2026, 6, 5, 21, tzinfo=datetime.timezone.utc)
+    assert sessions_since(fri, fri) == 0
+    assert sessions_since(fri, fri + datetime.timedelta(days=1)) == 0   # Sat
+    assert sessions_since(fri, fri + datetime.timedelta(days=2)) == 0   # Sun
+    assert sessions_since(fri, fri + datetime.timedelta(days=3)) == 1   # Mon
+    assert sessions_since(fri, fri + datetime.timedelta(days=5)) == 3   # Wed
+
+
+def test_a_frozen_window_is_refused_however_clean_it_looks():
+    """The exact C1 shape: the feed keeps answering, with the same bars, and
+    every other guard in this module is satisfied by that."""
+    lines, log = sink()
+    frozen = snapshot(2)          # newest bar 2026-06-02
+    later = datetime.datetime(2026, 6, 12, 20, tzinfo=datetime.timezone.utc)
+    got = build_live_equity_data(lambda s, a, b: frozen, UNIVERSE, later,
+                                 last_good=frozen, log=log)
+    assert got is None, "a fortnight-old window was served as live data"
+    assert reds(lines)
+    assert "stale" in reds(lines)[0].lower()
+
+
+def test_a_current_window_is_served():
+    lines, log = sink()
+    got = build_live_equity_data(lambda s, a, b: snapshot(2), UNIVERSE, NOW,
+                                 log=log)
+    assert got is not None and got["QQQ"]
+
+
+def test_the_bound_is_three_sessions_by_default():
+    """2026-06-02 is a Tuesday. Friday the 5th is 3 sessions on; Monday the
+    8th is 4 and must be refused."""
+    inside = datetime.datetime(2026, 6, 5, 20, tzinfo=datetime.timezone.utc)
+    outside = datetime.datetime(2026, 6, 8, 20, tzinfo=datetime.timezone.utc)
+    assert build_live_equity_data(lambda s, a, b: snapshot(2), UNIVERSE,
+                                  inside) is not None
+    assert build_live_equity_data(lambda s, a, b: snapshot(2), UNIVERSE,
+                                  outside) is None
+
+
+def test_the_bound_is_configurable_and_zero_disables_it():
+    outside = datetime.datetime(2026, 6, 30, 20, tzinfo=datetime.timezone.utc)
+    assert build_live_equity_data(lambda s, a, b: snapshot(2), UNIVERSE,
+                                  outside, max_stale_sessions=0) is not None
+    assert build_live_equity_data(lambda s, a, b: snapshot(2), UNIVERSE,
+                                  outside, max_stale_sessions=40) is not None
+
+
+def test_a_stale_last_good_fallback_is_refused_too():
+    """The fallback path is where a frozen snapshot lives longest: the fetch is
+    failing, so nothing ever refreshes it."""
+    lines, log = sink()
+    old = snapshot(2)
+    later = datetime.datetime(2026, 6, 22, 20, tzinfo=datetime.timezone.utc)
+    assert build_live_equity_data(lambda s, a, b: None, UNIVERSE, later,
+                                  last_good=old, log=log) is None
+    assert reds(lines)
+
+
+def test_an_unreadable_stamp_is_served_but_reported():
+    """Staleness is unmeasurable here. Blinding the strategy on a stamp-format
+    change would be a worse failure than serving it, so this serves — loudly."""
+    lines, log = sink()
+    odd = {s: [{"close": 100.0}] for s in UNIVERSE}
+    got = build_live_equity_data(lambda s, a, b: odd, UNIVERSE, NOW, log=log)
+    assert got is not None
+    assert reds(lines)
+
+
+# --- C2 ---------------------------------------------------------------------
+
+def test_an_empty_reference_symbol_with_no_last_good_is_refused():
+    lines, log = sink()
+    partial = snapshot(2)
+    partial["QQQ"] = []
+    got = build_live_equity_data(lambda s, a, b: partial, UNIVERSE, NOW,
+                                 required=["QQQ"], log=log)
+    assert got is None, "the tick ran with no reference closes at all"
+    assert reds(lines) and "QQQ" in reds(lines)[0]
+
+
+def test_an_empty_held_symbol_with_no_last_good_is_refused():
+    lines, log = sink()
+    partial = snapshot(2)
+    partial["TQQQ"] = []
+    assert build_live_equity_data(lambda s, a, b: partial, UNIVERSE, NOW,
+                                  required=["QQQ", "TQQQ"], log=log) is None
+    assert reds(lines)
+
+
+def test_a_required_symbol_covered_by_last_good_is_served():
+    """Stale beats blind; that is this module's whole contract. C2 is about
+    having NOTHING, not about having something old."""
+    partial = snapshot(2)
+    partial["TQQQ"] = []
+    got = build_live_equity_data(lambda s, a, b: partial, UNIVERSE, NOW,
+                                 required=["QQQ", "TQQQ"],
+                                 last_good={"TQQQ": [dated(1)]})
+    assert got is not None and got["TQQQ"]
+
+
+def test_an_unrequired_empty_symbol_is_still_just_empty():
+    """The pre-existing contract for a leg the book does not hold."""
+    partial = snapshot(2)
+    partial["BIL"] = []
+    got = build_live_equity_data(lambda s, a, b: partial, UNIVERSE, NOW,
+                                 required=["QQQ"])
+    assert got is not None and got["BIL"] == []
+
+
+def test_the_broker_declares_what_the_eb_tick_cannot_run_blind_on():
+    """A source assertion: the call site is inline in the main loop."""
+    source = open(os.path.join(_backend, "broker.py")).read()
+    assert "_strategy_eb_required_symbols(" in source
+    assert "required=" in source.split("_leb_build(", 1)[1][:600]
