@@ -347,6 +347,21 @@ class StrategyEb:
             cash_hold = max(0.0, reserve * nav - other)
             if book_nav <= 0:
                 return {}
+        # A1. `targets_to_orders` skips any leg it cannot price (strategy_x.py:
+        # 1178, 1203), silently. Holding the core with no usable price for it,
+        # that costs the EXIT its sell leg — and `held` below reads 0, so
+        # `eb_should_trade` sees a full 3x position as FLAT and can size a
+        # fresh buy on top of it. Live this is not hypothetical: `prices` is
+        # keyed off the operator's watchlist, which does not list these legs,
+        # and the daily-close fallback above is all that stands behind it.
+        # Refuse the whole tick, cache untouched, and say so.
+        if float(positions.get(core) or 0.0) > 0 and float(eff.get(core) or 0.0) <= 0:
+            _log_once(cache, "core-unpriced", session_id,
+                      f"StrategyEb {session_id} | REFUSING to trade — holding "
+                      f"{positions.get(core)} {core} with no usable price. An "
+                      "exit would lose its sell leg and a buy would be sized "
+                      "against a book that reads flat.", "red")
+            return {}
         held = (float(positions.get(core) or 0.0)
                 * float(eff.get(core) or 0.0)) / book_nav
 
@@ -376,19 +391,6 @@ class StrategyEb:
         decisions, sizes = _guard_pending_buys(
             decisions, sizes, portfolio_emulator, cfg, cache, session_id)
 
-        # Written whether or not orders came out: the session HAS been decided,
-        # and at 15m granularity there are ~26 more ticks in it.
-        cache[LAST_REBALANCE_KEY] = session_id
-        cache[_PENDING_TARGETS_KEY] = dict(targets)
-        if eb_trend_enabled(cfg):
-            # The state this book was BUILT in. `eb_should_trade` compares the
-            # live state against it, which is the only thing that can force a
-            # rotation the core band would otherwise suppress. Written with
-            # the filter off would be harmless but pointless: the state is
-            # then always ON.
-            cache[LAST_STATE_KEY] = trend_state
-        if exiting:
-            cache[_EXIT_ISSUED_KEY] = session_id
         cache[_LAST_DECISION_KEY] = {
             "session": session_id,
             "core_weight": weight,
@@ -419,8 +421,36 @@ class StrategyEb:
              + ", ".join(f"{s} {w:.1%}" for s, w in sorted(targets.items()))
              + f" | orders={len(decisions)} | nav=${nav:,.0f}", "cyan")
 
+        # A2. THE CACHE RECORDS EXECUTION, NOT INTENT. Written before this
+        # point, a decision that produced no orders still consumed the session:
+        # an exit whose sell leg was dropped stamped `_EXIT_ISSUED_KEY` and was
+        # then suppressed for the remaining ~26 ticks, and a buy set the
+        # pending-order guard blocked in full consumed `LAST_REBALANCE_KEY`,
+        # which is what `eb_should_trade` reads as "already decided today".
+        # Both leave the strategy holding a position it believes it has acted
+        # on. Nothing came out, so nothing is recorded, and the next tick of
+        # the same session tries again.
         if not decisions:
+            if exiting:
+                _log_once(cache, "exit-no-orders", session_id,
+                          f"StrategyEb {session_id} | EXIT PRODUCED NO ORDER "
+                          f"for {core} — not recording it as issued; the next "
+                          "tick re-arms it.", "red")
             return {}
+        cache[LAST_REBALANCE_KEY] = session_id
+        cache[_PENDING_TARGETS_KEY] = dict(targets)
+        if eb_trend_enabled(cfg):
+            # The state this book was BUILT in. `eb_should_trade` compares the
+            # live state against it, which is the only thing that can force a
+            # rotation the core band would otherwise suppress. Written with
+            # the filter off would be harmless but pointless: the state is
+            # then always ON.
+            cache[LAST_STATE_KEY] = trend_state
+        # Deduped on the ORDER, not on the session alone: the point of the key
+        # is "an exit is in flight", and an exit that never reached the payload
+        # is not in flight.
+        if exiting and decisions.get(core) == -1:
+            cache[_EXIT_ISSUED_KEY] = session_id
         return _emit(decisions, sizes, universe)
 
     def _sweep(self, cfg, cache, session_id, universe, prices, nav, positions,
