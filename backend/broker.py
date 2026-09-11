@@ -4398,6 +4398,14 @@ def _truthy(value) -> bool:
 _LANE_ENABLE_FLAGS = {
     "strategy_eb": "strategy_eb_enabled", "strategyeb": "strategy_eb_enabled",
     "outlier_sleeve": "outlier_sleeve_enabled", "outliersleeve": "outlier_sleeve_enabled",
+    # 2026-09-10: HX. The BACKTEST path honours the cap for any lane setting
+    # `honour_single_position_cap`; LIVE honours it only for lanes named here.
+    # Unregistered, a live HX tick keeps the 15% failsafe and trims every
+    # 65%-of-NAV core buy to $0.00 — BT102936, and how Strategy XS shipped
+    # inert. Every name added here also needs a `defaults_by_lane` row in
+    # `_strategy_eb_risk_limits`, or that lookup KeyErrors out of the WHOLE
+    # document's risk envelope.
+    "strategy_hx": "strategy_hx_enabled", "strategyhx": "strategy_hx_enabled",
 }
 
 
@@ -4458,8 +4466,18 @@ def _strategy_eb_risk_limits(cached_strategies):
         from outlier_sleeve import DEFAULTS as _OS_DEFAULTS
     except Exception:
         _OS_DEFAULTS = {}
+    try:
+        from strategy_hx import DEFAULTS as _HX_DEFAULTS
+    except Exception:
+        _HX_DEFAULTS = {}
+    # Every name in `_LANE_ENABLE_FLAGS` needs a row: this lookup sits OUTSIDE
+    # the per-lane except, so a missing one KeyErrors into the outer handler
+    # and returns None for the whole document. HX declares no `live_*` keys,
+    # so its lane is skipped by the per-lane handler and contributes nothing
+    # to the envelope — which is correct, not an omission.
     defaults_by_lane = {"strategy_eb": _EB_DEFAULTS, "strategyeb": _EB_DEFAULTS,
-                        "outlier_sleeve": _OS_DEFAULTS, "outliersleeve": _OS_DEFAULTS}
+                        "outlier_sleeve": _OS_DEFAULTS, "outliersleeve": _OS_DEFAULTS,
+                        "strategy_hx": _HX_DEFAULTS, "strategyhx": _HX_DEFAULTS}
     # The WIDEST envelope across the enabled lanes: a document that carries
     # the outlier sleeve beside strategy_eb must let a sleeve winner grow.
     widest = None
@@ -4585,6 +4603,40 @@ def _strategy_eb_universe_symbols(cached_strategies):
             if not _truthy(merged.get("strategy_eb_enabled", False)):
                 continue
             for sym in strategy_eb_universe(merged):
+                if sym and sym not in out:
+                    out.append(sym)
+    except Exception:
+        return []
+    return out
+
+
+def _strategy_hx_universe_symbols(cached_strategies):
+    """Symbols strategy_hx needs bars for, from its own config.
+
+    Same contract as `_strategy_eb_universe_symbols` and the same reason: a
+    strategy that trades symbols the operator never listed must declare them,
+    or `price_history` is built without them and the strategy is silently
+    inert. HX is worse than inert without this — with no reference bars the
+    state machine reads UNKNOWN and parks the whole book in T-bills for the
+    length of the run. Returns [] when strategy_hx is absent or disabled, so
+    this is a no-op for every other instance.
+    """
+    try:
+        from strategy_hx import DEFAULTS as _HX_DEFAULTS, strategy_hx_universe
+    except Exception:
+        return []
+    out = []
+    try:
+        for spec in (cached_strategies or []):
+            if not isinstance(spec, dict):
+                continue
+            name = str(spec.get("strategy") or "").strip().lower()
+            if name not in {"strategy_hx", "strategyhx"}:
+                continue
+            merged = {**_HX_DEFAULTS, **(spec.get("config") or {})}
+            if not _truthy(merged.get("strategy_hx_enabled", False)):
+                continue
+            for sym in strategy_hx_universe(merged):
                 if sym and sym not in out:
                     out.append(sym)
     except Exception:
@@ -10469,6 +10521,16 @@ if mode == MODE_BACKTEST:
         if _eb_sym not in symbols_for_fetch:
             symbols_for_fetch.append(_eb_sym)
             _log(f"Adding {_eb_sym} to bar data for strategy_eb", "cyan")
+    # 2026-09-10: strategy_hx declares its own universe the same way — the
+    # reference index its state machine reads, the levered core, the bull
+    # remainder, cash, and every leg of the configured bear book. HX does not
+    # use `_strategy_x_prepare`; its wrapper prices unlisted legs itself from
+    # the last visible close, so this fetch site is the ONLY wiring point and
+    # missing it is silent.
+    for _hx_sym in _strategy_hx_universe_symbols(_cached_strategies):
+        if _hx_sym not in symbols_for_fetch:
+            symbols_for_fetch.append(_hx_sym)
+            _log(f"Adding {_hx_sym} to bar data for strategy_hx", "cyan")
     symbols_for_data = symbols_for_fetch
     # Convert time_increment to Alpaca timeframe format
     alpaca_timeframe = _time_increment_to_alpaca_timeframe(time_increment)

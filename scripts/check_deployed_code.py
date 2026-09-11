@@ -42,6 +42,11 @@ FILES = (
     "backend/outlier_sleeve.py",
     "backend/strategies/outlier_sleeve.py",
     "backend/outlier_features.py",
+    # 2026-09-10: HX, for the same reason the EB pair is here. A push that
+    # changes only the strategy pair must not report "deployed" before the
+    # image carrying it exists.
+    "backend/strategy_hx.py",
+    "backend/strategies/strategy_hx.py",
 )
 
 
