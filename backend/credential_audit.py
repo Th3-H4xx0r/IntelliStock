@@ -14,9 +14,16 @@ from strategy_secret_boundary import iter_inline_strategy_secrets
 
 
 SECRET_FIELDS_BY_TABLE: Mapping[str, tuple[str, ...]] = {
+    # Every credential a brokerage row can hold. binanceus_* and
+    # kalshi_private_key were written to the row but never audited, so the
+    # inventory reported a clean account that was storing a live Kalshi
+    # signing key.
     "BrokerageAccounts": (
         "alpaca_key",
         "alpaca_secret",
+        "binanceus_key",
+        "binanceus_secret",
+        "kalshi_private_key",
     ),
     "Models": ("api_key",),
     "Instances": ("key", "secret"),

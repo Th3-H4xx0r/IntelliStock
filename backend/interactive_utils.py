@@ -1071,6 +1071,55 @@ def action_instances(conn):
     return {"instances": instances}
 
 
+# A ticker is spliced into the child process argv at instance.py:588-594
+# (['python', 'broker.py', id, 'live', 'NULL', 'NULL', incr, *symbols]), so an
+# unvalidated "symbol" is an argument to the process that trades real money.
+# Letters, digits, dot and dash, and it MUST start with a letter -- which is
+# what rules out "--initial-cash" and every other flag.
+#
+# The optional "/QUOTE" tail is the crypto pair form ("BTC/USD"): the same
+# stocks list carries a crypto instance's fixed universe. The quote leg is
+# letters and digits only, so the slash can never begin a path segment and
+# "A/../../ET" is still refused.
+TICKER_PATTERN = r"^[A-Z][A-Z0-9.\-]{0,9}(/[A-Z0-9]{1,10})?$"
+_TICKER_RE = re.compile(TICKER_PATTERN)
+
+
+def validate_ticker(symbol):
+    """Return the upper-cased ticker, or raise ValueError.
+
+    Upper-casing first is deliberate: the rest of the system stores tickers
+    upper-case, so validating the lower-cased input would let a symbol through
+    in one form and store it in another.
+    """
+    sym = str(symbol or "").strip().upper()
+    if not _TICKER_RE.match(sym):
+        raise ValueError(
+            "Invalid ticker symbol: %r (letters, digits, '.' and '-', starting "
+            "with a letter, max 10 characters, with an optional '/QUOTE' pair "
+            "leg)" % (symbol,)
+        )
+    return sym
+
+
+def validate_tickers(symbols):
+    """Validate a whole symbol list, preserving order and dropping blanks."""
+    out = []
+    for raw in symbols or []:
+        if not str(raw or "").strip():
+            continue
+        out.append(validate_ticker(raw))
+    return out
+
+
+class InstanceExistsError(ValueError):
+    """POST /instances named an id that is already taken.
+
+    A ValueError subclass so any existing caller that catches ValueError still
+    catches it; the API boundary maps it to 409 before the 400 branch.
+    """
+
+
 def action_create_instance(
     conn,
     instance_id,
@@ -1111,6 +1160,10 @@ def action_create_instance(
             key_val = (os.environ.get("APCA_API_KEY_ID") or os.environ.get("KEY") or "").strip()
         if not secret_val:
             secret_val = (os.environ.get("APCA_API_SECRET_KEY") or os.environ.get("SECRET") or "").strip()
+    # Create means create — checked after the cheap argument validation, so a
+    # malformed request never costs a database round trip.
+    if store.get("Instances", instance_id) is not None:
+        raise InstanceExistsError("Instance already exists: %s" % instance_id)
     doc = {
         "id": instance_id,
         "runCommand": bool(run_command),
@@ -1139,7 +1192,7 @@ def action_create_instance(
     # branches. Carry the crypto_config (band + risk knobs) and an optional fixed
     # symbol universe; empty/omitted stocks ⇒ the strategy auto-discovers coins.
     if stocks:
-        doc["stocks"] = [str(s).strip().upper() for s in stocks if str(s).strip()]
+        doc["stocks"] = validate_tickers(stocks)
     if kind:
         doc["kind"] = str(kind).strip()
     if crypto_config is not None:
@@ -1147,7 +1200,17 @@ def action_create_instance(
             doc["crypto_config"] = dict(crypto_config)
         except (TypeError, ValueError):
             doc["crypto_config"] = {}
-    store.insert("Instances", doc, conflict="replace")
+    # Create means create. This used to be conflict="replace", so re-posting an
+    # existing id silently replaced the whole row -- linked brokerage, strategy
+    # id, symbol list and run flag of a live instance, gone, with a 200. The
+    # existence check answers the common case with a clean 409; conflict="error"
+    # closes the race between the check and the write.
+    res = store.insert("Instances", doc, conflict="error")
+    if res.get("errors"):
+        first = str(res.get("first_error") or "")
+        if "duplicate" in first.lower() or "unique" in first.lower() or "conflict" in first.lower():
+            raise InstanceExistsError("Instance already exists: %s" % instance_id)
+        raise ValueError(first or "Could not create instance")
     return {"id": instance_id, "name": name, "strategy_id": doc.get("strategy_id")}
 
 
@@ -1204,7 +1267,7 @@ def action_edit_instance(
         except (TypeError, ValueError):
             raise ValueError("crypto_config must be an object")
     if stocks is not None:
-        updates["stocks"] = [str(s).strip().upper() for s in stocks if str(s).strip()]
+        updates["stocks"] = validate_tickers(stocks)
 
     if not updates:
         raise ValueError("No editable fields provided")
@@ -1242,7 +1305,9 @@ def action_add_stock(conn, instance_id, symbol):
     if not instance_id or not symbol:
         raise ValueError("Instance ID and symbol required")
     instance_id = instance_id.strip()
-    symbol = symbol.strip().upper()
+    # Re-validated here, not only at the API body: the CLI and the chatbot
+    # reach this action without passing through a Pydantic model.
+    symbol = validate_ticker(symbol)
     ensure_instances_table(conn)
     doc = _resolve_instance_doc(conn, instance_id)
     if doc is None:
@@ -7254,12 +7319,36 @@ def _ensure_brokerage_accounts_table(conn):
     schema.ensure_schema(tables=[BROKERAGE_ACCOUNTS_TABLE])
 
 
+# Field-name suffixes that always mask completely: a secret, a bearer token
+# and an RSA private key have no shape worth showing.
+_FULL_MASK_SUFFIXES = ("_secret", "_token", "_private_key")
+# Field-name suffixes that mask to first-four/last-four so an operator can tell
+# two accounts apart in a list.
+_PARTIAL_MASK_SUFFIXES = ("_key",)
+
+
+def _is_secret_field(name: str) -> bool:
+    n = str(name or "").lower()
+    return n.endswith(_FULL_MASK_SUFFIXES) or n.endswith(_PARTIAL_MASK_SUFFIXES)
+
+
 def _mask_brokerage_doc(doc):
     """Return a copy with sensitive credentials masked for display.
 
+    Masking is decided by the FIELD NAME, not an allowlist of four. The
+    allowlist was the bug: kalshi_private_key was added to the row and simply
+    never added to the list, so GET /brokerages returned the Fernet ciphertext
+    of the RSA key that signs live Kalshi orders to any authenticated caller.
+    A name-based rule masks the next such field the day it is written.
+
+    ``*_secret``, ``*_token`` and ``*_private_key`` mask completely.
+    ``*_key`` keeps the first and last four characters (an account
+    fingerprint, not a credential) and masks completely when it is too short
+    for that to leave anything hidden.
+
     When the stored value is Fernet-encrypted (starts with "fernet:"), we mask
     it without exposing the tag - decrypt briefly for display-only masking
-    of the original key's shape. Secrets always fully mask. Tokens fully mask.
+    of the original key's shape.
 
     This function is also used for edit-form pre-population; the _looks_masked()
     helper lets the update action recognise echoed masks and treat them as
@@ -7275,20 +7364,24 @@ def _mask_brokerage_doc(doc):
     def _mask_key(val):
         if not val:
             return val
-        raw = _decrypt(val) if _is_enc(val) else val
+        try:
+            raw = _decrypt(val) if _is_enc(val) else val
+        except Exception:
+            # An undecryptable value must still never be returned raw.
+            return "****"
         raw = raw or ""
         if len(raw) > 8:
             return raw[:4] + "****" + raw[-4:]
         return "****"
 
-    if d.get("alpaca_key"):
-        d["alpaca_key"] = _mask_key(d["alpaca_key"])
-    if d.get("alpaca_secret"):
-        d["alpaca_secret"] = "****"
-    if d.get("binanceus_key"):
-        d["binanceus_key"] = _mask_key(d["binanceus_key"])
-    if d.get("binanceus_secret"):
-        d["binanceus_secret"] = "****"
+    for name, value in list(d.items()):
+        if not value or not isinstance(value, str):
+            continue
+        lowered = name.lower()
+        if lowered.endswith(_FULL_MASK_SUFFIXES):
+            d[name] = "****"
+        elif lowered.endswith(_PARTIAL_MASK_SUFFIXES):
+            d[name] = _mask_key(value)
     return d
 
 

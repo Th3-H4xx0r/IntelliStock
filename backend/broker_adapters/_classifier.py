@@ -20,6 +20,10 @@ WAL row schema (per backend/broker_adapters/_wal.py + nexus_runtime_state.py):
     client_order_id, symbol, side, state, filled_qty, filled_avg_price,
     updated_at_utc (ISO string), broker_order_id, ...
 
+Ownership is decided on the (instance_id, account_id) stamped on each WAL
+row, NOT on the client_order_id prefix -- see ``classify_broker_positions``.
+The prefix below remains a secondary filter and a legacy fallback.
+
 CID prefix convention (per broker_adapters/_client_order_id.py):
     First 8 alphanumeric chars of instance_id + "-"
     e.g. instance "main"         -> prefix "main-"
@@ -83,6 +87,8 @@ def classify_broker_positions(
     cid_prefix: Optional[str] = None,
     retention_days: int = 180,
     now_utc: Optional[datetime] = None,
+    *,
+    account_id: Optional[str] = None,
 ) -> tuple[dict[str, float], dict[str, dict], list[dict]]:
     """Partition broker positions into (strategy_owned, external) + reconstruct _trades.
 
@@ -97,6 +103,15 @@ def classify_broker_positions(
         cid_prefix: explicit override; if None, derived from instance_id.
         retention_days: how far back to walk the rows.
         now_utc: optional injection for tests; defaults to UTC now.
+        account_id: the brokerage account these ``positions`` came from. When
+                    given, ownership is decided on the row's stamped
+                    (instance_id, account_id) and NOTHING else: a row missing
+                    either field, naming another instance, or naming another
+                    account is discarded. When omitted, the legacy prefix
+                    signal still applies -- but a row that names a DIFFERENT
+                    instance is discarded even then, which is the sibling
+                    collision itself (``strategy-eb`` and ``strategy-eb-lab``
+                    share the prefix ``strategy-``).
 
     Returns:
         owned:    {ticker: qty} for strategy-owned positions.
@@ -131,9 +146,32 @@ def classify_broker_positions(
     # auto-adopt an aged-out position: a holding older than retention is fail-safe
     # quarantined (the strategy's max_hold_days would have exited a real position long
     # ago), and auto-adopting could resurrect a manual long-term hold and force-sell it.
+    #
+    # Ownership: an 8-char cid prefix is not an identity. ``strategy-eb`` and
+    # ``strategy-eb-lab`` both write cids beginning ``strategy-``, so the
+    # prefix alone let one instance reconstruct the other's fills -- and with
+    # them adopt, and later sell, a position a human holds in the other
+    # account. When the caller names the account, the stamped owner is the
+    # only signal; rows written before stamping shipped carry no owner and are
+    # therefore NOT owned (fail closed toward "human-held": quarantined, never
+    # sold). Without an account_id we keep the legacy prefix path, but still
+    # reject any row that names a different instance.
+    owner_required = account_id is not None
+    want_instance = str(instance_id or "").strip()
+    want_account = str(account_id or "").strip()
+
     filtered: list[dict] = []
     aged_out_buy_tickers: set[str] = set()
     for row in wal_rows or []:
+        row_instance = str(row.get("instance_id") or "").strip()
+        row_account = str(row.get("account_id") or "").strip()
+        if owner_required:
+            if not row_instance or not row_account:
+                continue
+            if row_instance != want_instance or row_account != want_account:
+                continue
+        elif row_instance and want_instance and row_instance != want_instance:
+            continue
         cid = row.get("client_order_id") or ""
         if not cid.startswith(prefix):
             continue

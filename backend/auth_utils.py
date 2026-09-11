@@ -11,6 +11,8 @@ import calendar
 import hmac
 import os
 import sys
+import threading
+import time
 import uuid
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
@@ -148,6 +150,7 @@ def create_user(
         "username": username,
         "password_hash": hash_password(password),
         "role": role,
+        "token_version": 0,
         "has_completed_onboarding": False,
         "created_at": now,
         "updated_at": now,
@@ -193,6 +196,10 @@ def update_user(
         if len(password) < 6:
             raise ValueError("Password must be at least 6 characters")
         update["password_hash"] = hash_password(password)
+        # Revoke every token minted against the old password. A password is
+        # changed precisely when the operator suspects it leaked; leaving the
+        # sessions it authorised alive defeats the point.
+        update["token_version"] = token_version_of(doc) + 1
     if role is not None:
         if role not in ("admin", "user"):
             raise ValueError("Role must be admin or user")
@@ -224,7 +231,118 @@ def verify_secret_auth_key(provided: Optional[str]) -> bool:
     return hmac.compare_digest(provided.strip(), secret)
 
 
-def create_access_token(user_id: str, username: str, role: str) -> str:
+# ---------------------------------------------------------------------------
+# Login rate limiting
+#
+# In-process and per-worker by design: it needs no new dependency and no shared
+# store, and the thing it defends against -- an unlimited online guessing run
+# against POST /auth/login -- is slowed by any one worker refusing. A
+# multi-worker deployment therefore allows up to max_attempts PER WORKER per
+# window; put a real limiter at the proxy if you need a hard global number.
+# State is lost on restart, which is the safe direction: a restart never locks
+# a legitimate operator out.
+# ---------------------------------------------------------------------------
+
+LOGIN_RATE_LIMIT_MAX_ATTEMPTS_DEFAULT = 10
+LOGIN_RATE_LIMIT_WINDOW_SECONDS_DEFAULT = 900   # 15 minutes
+
+_LOGIN_ATTEMPTS: Dict[tuple, List[float]] = {}
+_LOGIN_ATTEMPTS_LOCK = threading.Lock()
+# Hard ceiling on distinct buckets so a spray across usernames or spoofed
+# hosts cannot grow the dict without bound.
+_LOGIN_ATTEMPTS_MAX_BUCKETS = 10_000
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        val = int(str(os.environ.get(name, "")).strip())
+    except (TypeError, ValueError):
+        return default
+    return val if val > 0 else default
+
+
+def login_rate_limit_config() -> tuple:
+    """(max_attempts, window_seconds), read from the environment each call."""
+    return (
+        _env_int("LOGIN_RATE_LIMIT_MAX_ATTEMPTS",
+                 LOGIN_RATE_LIMIT_MAX_ATTEMPTS_DEFAULT),
+        _env_int("LOGIN_RATE_LIMIT_WINDOW_SECONDS",
+                 LOGIN_RATE_LIMIT_WINDOW_SECONDS_DEFAULT),
+    )
+
+
+def _login_bucket_key(username: str, client_host: str) -> tuple:
+    return (str(username or "").strip().lower(), str(client_host or "unknown").strip())
+
+
+def login_is_rate_limited(username: str, client_host: str, now: Optional[float] = None) -> bool:
+    """True when this username+host has used up its attempts in the window."""
+    max_attempts, window = login_rate_limit_config()
+    ts = time.time() if now is None else float(now)
+    key = _login_bucket_key(username, client_host)
+    with _LOGIN_ATTEMPTS_LOCK:
+        recent = [t for t in _LOGIN_ATTEMPTS.get(key, ()) if t > ts - window]
+        if recent:
+            _LOGIN_ATTEMPTS[key] = recent
+        else:
+            _LOGIN_ATTEMPTS.pop(key, None)
+        return len(recent) >= max_attempts
+
+
+def record_failed_login(username: str, client_host: str, now: Optional[float] = None) -> int:
+    """Record one failed attempt. Returns the count now in the window."""
+    _max_attempts, window = login_rate_limit_config()
+    ts = time.time() if now is None else float(now)
+    key = _login_bucket_key(username, client_host)
+    with _LOGIN_ATTEMPTS_LOCK:
+        if len(_LOGIN_ATTEMPTS) >= _LOGIN_ATTEMPTS_MAX_BUCKETS and key not in _LOGIN_ATTEMPTS:
+            # Drop every bucket that has fully aged out before giving up room.
+            for k in [k for k, v in _LOGIN_ATTEMPTS.items()
+                      if not any(t > ts - window for t in v)]:
+                _LOGIN_ATTEMPTS.pop(k, None)
+        recent = [t for t in _LOGIN_ATTEMPTS.get(key, ()) if t > ts - window]
+        recent.append(ts)
+        _LOGIN_ATTEMPTS[key] = recent
+        return len(recent)
+
+
+def clear_login_attempts(username: str, client_host: str) -> None:
+    """Forget this bucket — called on a successful login."""
+    with _LOGIN_ATTEMPTS_LOCK:
+        _LOGIN_ATTEMPTS.pop(_login_bucket_key(username, client_host), None)
+
+
+def reset_login_rate_limit() -> None:
+    """Drop every bucket (tests, and a deliberate operator unlock)."""
+    with _LOGIN_ATTEMPTS_LOCK:
+        _LOGIN_ATTEMPTS.clear()
+
+
+def token_version_of(user: Optional[Dict]) -> int:
+    """The user row's token generation. Absent reads as 0, so rows and tokens
+    that predate revocation still match each other."""
+    if not user:
+        return 0
+    try:
+        return int(user.get("token_version") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def create_access_token(
+    user_id: str,
+    username: str,
+    role: str,
+    token_version: int = 0,
+) -> str:
+    """Mint an access token.
+
+    Lifetime defaults to 24 hours (it was 720 — a stolen token was good for a
+    month), still overridable with JWT_EXPIRE_HOURS, and sliding renewal keeps
+    an ACTIVE session alive past it. ``token_version`` pins the token to a
+    generation of the user row: bumping the row's version on a password change
+    kills every token minted before it.
+    """
     if not _check_jwt():
         raise RuntimeError("PyJWT is required for auth. Install with: pip install pyjwt")
     import jwt
@@ -232,11 +350,12 @@ def create_access_token(user_id: str, username: str, role: str) -> str:
     if not secret:
         raise RuntimeError("JWT_SECRET environment variable is required for auth")
     now = datetime.utcnow()
-    hours = int(os.environ.get("JWT_EXPIRE_HOURS", "720"))  # default ~30 days
+    hours = _env_int("JWT_EXPIRE_HOURS", 24)
     payload = {
         "sub": user_id,
         "username": username,
         "role": role,
+        "token_version": int(token_version or 0),
         "iat": now,
         "exp": now + timedelta(hours=hours),
     }
@@ -286,7 +405,11 @@ def renewed_token_if_stale(payload: Dict[str, Any], now: Optional[datetime] = No
     role = payload.get("role", "user")
     if not sub or not username:
         return None
-    return create_access_token(str(sub), str(username), str(role))
+    try:
+        version = int(payload.get("token_version") or 0)
+    except (TypeError, ValueError):
+        version = 0
+    return create_access_token(str(sub), str(username), str(role), version)
 
 
 def _strip_env_quotes(s: str) -> str:

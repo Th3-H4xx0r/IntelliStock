@@ -27,7 +27,7 @@ from fastapi import FastAPI, HTTPException, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from llm_utils import (
     call_llm_by_provider,
@@ -50,7 +50,11 @@ from auth_utils import (
     delete_user,
     verify_password,
     verify_secret_auth_key,
+    clear_login_attempts,
     create_access_token,
+    login_is_rate_limited,
+    record_failed_login,
+    token_version_of,
     decode_access_token,
     renewed_token_if_stale,
     user_doc_to_public,
@@ -62,6 +66,9 @@ from strategies_meta import get_available_strategies
 from stock_credential_boundary import StockCredentialError
 from interactive_utils import (
     get_conn,
+    InstanceExistsError,
+    TICKER_PATTERN,
+    validate_tickers,
     parse_granularity_to_seconds,
     action_clear_instance_state,
     action_status,
@@ -416,6 +423,16 @@ def get_current_user(
     user = get_user_by_id(conn, user_id)
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
+    # Revocation. The row's token_version is bumped on every password change,
+    # so a token minted against the old password stops authenticating the
+    # moment the operator rotates it. Missing on either side reads as 0, which
+    # is how tokens and rows that predate revocation keep matching.
+    try:
+        claimed_version = int(payload.get("token_version") or 0)
+    except (TypeError, ValueError):
+        claimed_version = 0
+    if claimed_version != token_version_of(user):
+        raise HTTPException(status_code=401, detail="Token has been revoked")
     # Sliding renewal: once the token passes half-life, hand back a fresh one via
     # a response header so active sessions never reach expiry. Best-effort — a
     # renewal hiccup must never break the request.
@@ -434,6 +451,24 @@ def get_current_user(
         "username": user.get("username"),
         "role": user.get("role", "user"),
     }
+
+
+def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
+    """Admin-only gate for every route that can move money or change who may.
+
+    Authentication was the whole authorization model: any account that could
+    log in could start a live instance, relink its brokerage, rewrite the
+    strategy it trades, submit an order, or promote itself to admin. Role is
+    now checked, and checked exactly -- an unrecognised or missing role is a
+    refusal, not a default.
+
+    Read-only GET routes deliberately do NOT use this: they stay open to any
+    authenticated user.
+    """
+    role = str(current_user.get("role") or "").strip().lower()
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="Admin role required")
+    return current_user
 
 
 def _build_llm_test_provider_config(body: "LlmConfigTestBody") -> dict[str, Any]:
@@ -495,6 +530,22 @@ class AddTickerBody(BaseModel):
     symbols: List[str] = Field(..., min_length=1)
 
 
+def _validated_stocks(value):
+    """Upper-case and validate a symbol list on the way in.
+
+    Symbols become argv for the broker child process (instance.py:588-594), so
+    "--INITIAL-CASH" in a request body would become a flag on the command line
+    of the process that trades real money. Validating in the model rejects it
+    at the boundary; the actions re-validate for the CLI and chatbot paths.
+    """
+    if value is None:
+        return None
+    try:
+        return validate_tickers(value)
+    except ValueError as e:
+        raise ValueError(str(e))
+
+
 class CreateInstanceBody(BaseModel):
     id: str = Field(..., min_length=1)
     name: Optional[str] = None
@@ -512,6 +563,8 @@ class CreateInstanceBody(BaseModel):
     crypto_config: Optional[dict] = None
     stocks: Optional[List[str]] = None
 
+    _check_stocks = field_validator("stocks", mode="before")(_validated_stocks)
+
 
 class EditInstanceBody(BaseModel):
     name: Optional[str] = None
@@ -521,13 +574,23 @@ class EditInstanceBody(BaseModel):
     crypto_config: Optional[dict] = None
     stocks: Optional[List[str]] = None
 
+    _check_stocks = field_validator("stocks", mode="before")(_validated_stocks)
+
 
 class DeleteInstanceBody(BaseModel):
     force: bool = False
 
 
 class AddStockBody(BaseModel):
-    symbol: str = Field(..., min_length=1)
+    # Upper-cased BEFORE the pattern runs: the rest of the system stores
+    # tickers upper-case, so validating the raw input would accept a symbol in
+    # one form and store it in another.
+    symbol: str = Field(..., min_length=1, pattern=TICKER_PATTERN)
+
+    @field_validator("symbol", mode="before")
+    @classmethod
+    def _upper(cls, v):
+        return str(v).strip().upper() if isinstance(v, str) else v
 
 
 class CreateStrategyBody(BaseModel):
@@ -931,6 +994,12 @@ def _run(f, *args, **kwargs) -> Any:
         return f(*args, **kwargs)
     except HTTPException:
         raise
+    except InstanceExistsError as e:
+        # Before the 400 branch: InstanceExistsError IS a ValueError. Creating
+        # an id that is already taken is a conflict, not a malformed request —
+        # and the create no longer replaces the existing row, so the caller
+        # needs to be told rather than congratulated.
+        raise HTTPException(status_code=409, detail=str(e))
     except StockCredentialError as e:
         # Nothing is broken server-side: one stored credential is still legacy
         # plaintext (or otherwise undecryptable) and strict decryption
@@ -1176,16 +1245,35 @@ def api_signup(body: SignupBody, conn=Depends(conn_dependency)):
         raise HTTPException(status_code=403, detail="Invalid signup key")
     try:
         user = create_user(conn, body.username, body.password, role="user")
-        token = create_access_token(user["id"], user["username"], user["role"])
+        token = create_access_token(user["id"], user["username"], user["role"],
+                                    token_version_of(user))
         return {"access_token": token, "token_type": "bearer", "user": user}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.post("/auth/login", response_class=JSONResponse)
-def api_login(body: LoginBody, conn=Depends(conn_dependency)):
-    """Login with username/password. Returns JWT access_token. Creates default admin on first login if missing."""
+def api_login(body: LoginBody, request: Request = None, conn=Depends(conn_dependency)):
+    """Login with username/password. Returns JWT access_token. Creates default admin on first login if missing.
+
+    Rate limited per username+client host (10 attempts / 15 minutes by
+    default): the route accepted unlimited guesses, so a password was only as
+    strong as the time an attacker cared to spend. A correct password clears
+    the bucket, so a legitimate operator who mistypes is never locked out for
+    longer than it takes to type it right.
+    """
     username = (body.username or "").strip().lower()
+    client_host = "unknown"
+    try:
+        if request is not None and request.client is not None:
+            client_host = str(request.client.host or "unknown")
+    except Exception:
+        client_host = "unknown"
+    if login_is_rate_limited(username, client_host):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many login attempts. Try again in a few minutes.",
+        )
     user = get_user_by_username(conn, username)
     if not user or not verify_password(body.password, user.get("password_hash", "")):
         # If admin doesn't exist yet (e.g. startup ran before DB was ready), ensure default admin and retry
@@ -1195,12 +1283,18 @@ def api_login(body: LoginBody, conn=Depends(conn_dependency)):
             ensure_default_admin(conn)
             user = get_user_by_username(conn, username)
             if user and verify_password(body.password, user.get("password_hash", "")):
+                clear_login_attempts(username, client_host)
                 user_public = user_doc_to_public(user)
-                token = create_access_token(user["id"], user["username"], user.get("role", "user"))
+                token = create_access_token(user["id"], user["username"],
+                                            user.get("role", "user"),
+                                            token_version_of(user))
                 return {"access_token": token, "token_type": "bearer", "user": user_public}
+        record_failed_login(username, client_host)
         raise HTTPException(status_code=401, detail="Invalid username or password")
+    clear_login_attempts(username, client_host)
     user_public = user_doc_to_public(user)
-    token = create_access_token(user["id"], user["username"], user.get("role", "user"))
+    token = create_access_token(user["id"], user["username"],
+                                user.get("role", "user"), token_version_of(user))
     return {"access_token": token, "token_type": "bearer", "user": user_public}
 
 
@@ -1227,9 +1321,9 @@ def api_list_auth_users(
 def api_create_auth_user(
     body: CreateUserBody,
     conn=Depends(conn_dependency),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_admin),
 ):
-    """Create a new user. Any authenticated user. No secret_auth_key required."""
+    """Create a new user. Admin only — this route mints admins."""
     try:
         user = create_user(conn, body.username, body.password, role=body.role, email=body.email)
         return user
@@ -1257,7 +1351,21 @@ def api_update_auth_user(
     conn=Depends(conn_dependency),
     current_user: dict = Depends(get_current_user),
 ):
-    """Update user. Any authenticated user can change password/email/role."""
+    """Update a user.
+
+    Self-service for password and email: a user may edit their OWN account.
+    Editing anyone else, and changing a role at all, is admin-only — the route
+    previously let any authenticated account rewrite the operator's password
+    or promote itself.
+    """
+    is_admin = str(current_user.get("role") or "").strip().lower() == "admin"
+    if not is_admin:
+        if str(current_user.get("id") or "") != str(user_id):
+            raise HTTPException(
+                status_code=403, detail="You may only edit your own account")
+        if body.role is not None:
+            raise HTTPException(
+                status_code=403, detail="Only an admin may change a role")
     try:
         user = update_user(conn, user_id, password=body.password, role=body.role, email=body.email)
         return user
@@ -1269,9 +1377,9 @@ def api_update_auth_user(
 def api_delete_auth_user(
     user_id: str,
     conn=Depends(conn_dependency),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_admin),
 ):
-    """Delete user. Any authenticated user."""
+    """Delete user. Admin only."""
     if current_user.get("id") == user_id:
         raise HTTPException(status_code=400, detail="Cannot delete yourself")
     try:
@@ -2090,7 +2198,7 @@ def api_instances(conn=Depends(conn_dependency), current_user: dict = Depends(ge
 
 
 @app.post("/instances", response_class=JSONResponse)
-def api_create_instance(body: CreateInstanceBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+def api_create_instance(body: CreateInstanceBody, conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
     return _run(
         action_create_instance,
         conn,
@@ -2116,7 +2224,7 @@ def api_get_instance(instance_id: str, conn=Depends(conn_dependency), current_us
 
 
 @app.patch("/instances/{instance_id}", response_class=JSONResponse)
-def api_edit_instance(instance_id: str, body: EditInstanceBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+def api_edit_instance(instance_id: str, body: EditInstanceBody, conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
     return _run(
         action_edit_instance,
         conn,
@@ -2131,22 +2239,22 @@ def api_edit_instance(instance_id: str, body: EditInstanceBody, conn=Depends(con
 
 
 @app.delete("/instances/{instance_id}", response_class=JSONResponse)
-def api_delete_instance(instance_id: str, force: bool = False, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+def api_delete_instance(instance_id: str, force: bool = False, conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
     return _run(action_delete_instance, conn, instance_id, force=force)
 
 
 @app.post("/instances/{instance_id}/stocks", response_class=JSONResponse)
-def api_add_stock(instance_id: str, body: AddStockBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+def api_add_stock(instance_id: str, body: AddStockBody, conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
     return _run(action_add_stock, conn, instance_id, body.symbol)
 
 
 @app.delete("/instances/{instance_id}/stocks/{symbol}", response_class=JSONResponse)
-def api_remove_stock(instance_id: str, symbol: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+def api_remove_stock(instance_id: str, symbol: str, conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
     return _run(action_remove_stock, conn, instance_id, symbol)
 
 
 @app.post("/instances/{instance_id}/start", response_class=JSONResponse)
-def api_start_instance(instance_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+def api_start_instance(instance_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
     # One running instance per Kalshi brokerage: a single account can't have two
     # bots trading it at once (they'd fight over balance/positions). Block the start
     # if a sibling Kalshi instance on the same brokerage is already running.
@@ -2175,7 +2283,7 @@ def api_start_instance(instance_id: str, conn=Depends(conn_dependency), current_
 
 
 @app.post("/instances/{instance_id}/stop", response_class=JSONResponse)
-def api_stop_instance(instance_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+def api_stop_instance(instance_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
     return _run(action_stop_instance, conn, instance_id)
 
 
@@ -2197,7 +2305,7 @@ def api_clear_instance_state(
     instance_id: str,
     body: ClearInstanceStateBody,
     conn=Depends(conn_dependency),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_admin),
 ):
     """Wipe per-instance lookback / decision / cache state.
 
@@ -2282,12 +2390,12 @@ def api_get_strategy(strategy_id: int, conn=Depends(conn_dependency), current_us
 
 
 @app.post("/strategies", response_class=JSONResponse)
-def api_create_strategy(body: CreateStrategyBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+def api_create_strategy(body: CreateStrategyBody, conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
     return _run(action_create_strategy, conn, body.name, body.strategies)
 
 
 @app.put("/strategies/{strategy_id}", response_class=JSONResponse)
-def api_edit_strategy(strategy_id: int, body: EditStrategyBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+def api_edit_strategy(strategy_id: int, body: EditStrategyBody, conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
     return _run(action_edit_strategy, conn, strategy_id, name=body.name, strategies=body.strategies, preserve_history=body.preserve_history)
 
 
@@ -2302,28 +2410,28 @@ def api_preview_strategy_config_change(strategy_id: int, body: ConfigChangePrevi
 
 
 @app.delete("/strategies/{strategy_id}", response_class=JSONResponse)
-def api_delete_strategy(strategy_id: int, force: bool = False, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+def api_delete_strategy(strategy_id: int, force: bool = False, conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
     return _run(action_delete_strategy, conn, strategy_id, force=force)
 
 
 @app.post("/instances/{instance_id}/link-strategy", response_class=JSONResponse)
-def api_link_strategy(instance_id: str, body: LinkStrategyBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+def api_link_strategy(instance_id: str, body: LinkStrategyBody, conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
     return _run(action_link_strategy, conn, instance_id, body.strategy_id)
 
 
 @app.post("/instances/{instance_id}/unlink-strategy", response_class=JSONResponse)
-def api_unlink_strategy(instance_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+def api_unlink_strategy(instance_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
     return _run(action_unlink_strategy, conn, instance_id)
 
 
 @app.post("/instances/{instance_id}/link-brokerage", response_class=JSONResponse)
-def api_link_brokerage_to_instance(instance_id: str, body: LinkBrokerageToInstanceBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+def api_link_brokerage_to_instance(instance_id: str, body: LinkBrokerageToInstanceBody, conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
     """Set or clear the brokerage linked to an instance."""
     return _run(action_link_brokerage_to_instance, conn, instance_id, body.brokerage_id or None)
 
 
 @app.post("/instances/{instance_id}/link-data-brokerage", response_class=JSONResponse)
-def api_link_data_brokerage_to_instance(instance_id: str, body: LinkBrokerageToInstanceBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+def api_link_data_brokerage_to_instance(instance_id: str, body: LinkBrokerageToInstanceBody, conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
     """Set or clear the market-data Alpaca brokerage for this instance.
 
     Separate from the trading brokerage so operators can pair a paper
@@ -3590,7 +3698,7 @@ def api_get_live_trading_logs(instance_id: str, since_line: int = 0, conn=Depend
 
 
 @app.post("/instances/{instance_id}/live-command", response_class=JSONResponse)
-def api_submit_live_command(instance_id: str, body: LiveCommandBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+def api_submit_live_command(instance_id: str, body: LiveCommandBody, conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
     """Submit a command to the broker. Any authenticated user can halt,
     close a position, or submit a manual order — the UI typed-confirm modals
     already provide the safety gate. Broker picks up within ~1s.
@@ -4066,7 +4174,7 @@ def api_list_brokerages(conn=Depends(conn_dependency), current_user: dict = Depe
 
 
 @app.post("/brokerages", response_class=JSONResponse)
-def api_link_brokerage(body: LinkBrokerageBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+def api_link_brokerage(body: LinkBrokerageBody, conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
     """Link a supported brokerage account after validating its credentials."""
     if body.brokerage_type == "alpaca":
         if not body.key or not body.secret:
@@ -4127,7 +4235,7 @@ def api_link_brokerage(body: LinkBrokerageBody, conn=Depends(conn_dependency), c
 
 
 @app.put("/brokerages/{brokerage_id}", response_class=JSONResponse)
-def api_update_brokerage(brokerage_id: str, body: UpdateBrokerageBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+def api_update_brokerage(brokerage_id: str, body: UpdateBrokerageBody, conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
     """Update a linked brokerage account's name and/or credentials."""
     return _run(action_update_brokerage, conn, brokerage_id,
                 account_name=body.account_name, key=body.key, secret=body.secret, paper=body.paper,
@@ -4135,7 +4243,7 @@ def api_update_brokerage(brokerage_id: str, body: UpdateBrokerageBody, conn=Depe
 
 
 @app.delete("/brokerages/{brokerage_id}", response_class=JSONResponse)
-def api_delete_brokerage(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+def api_delete_brokerage(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
     """Remove a linked brokerage account."""
     return _run(action_delete_brokerage, conn, brokerage_id)
 
@@ -4237,7 +4345,7 @@ def api_test_alpaca_brokerage(
 
 
 @app.post("/brokerages/ensure-ai-alpaca", response_class=JSONResponse)
-def api_ensure_ai_alpaca(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+def api_ensure_ai_alpaca(conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
     """Create (or find) an Alpaca brokerage for the AI engine using env vars. Returns brokerage_id."""
     brokerage_id = action_ensure_ai_alpaca_brokerage(conn)
     return {"brokerage_id": brokerage_id}
@@ -4881,7 +4989,7 @@ def api_kalshi_instance_model(brokerage_id: str, instance_id: str, conn=Depends(
 
 
 @app.post("/brokerages/{brokerage_id}/kalshi/kill", response_class=JSONResponse)
-def api_kalshi_kill(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+def api_kalshi_kill(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
     """KILL: stop the instance bound to this Kalshi account and cancel its
     resting orders. Scoped to the linked instance (fail-safe). If no instance is
     linked, cancel resting orders on THIS account only — never touch others."""
@@ -4977,7 +5085,7 @@ def api_kalshi_list_instances(brokerage_id: str, conn=Depends(conn_dependency), 
 
 
 @app.post("/brokerages/{brokerage_id}/kalshi/instances", response_class=JSONResponse)
-def api_kalshi_create_instance(brokerage_id: str, body: CreateKalshiInstanceBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+def api_kalshi_create_instance(brokerage_id: str, body: CreateKalshiInstanceBody, conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
     """Create a Kalshi trading instance bound to this brokerage. live execution
     is ON at creation when the brokerage is a LIVE account (user choice)."""
     row = _kalshi_brokerage_row(conn, brokerage_id)
@@ -5003,7 +5111,7 @@ def api_kalshi_create_instance(brokerage_id: str, body: CreateKalshiInstanceBody
 
 
 @app.patch("/instances/{instance_id}/kalshi/config", response_class=JSONResponse)
-def api_kalshi_update_instance(instance_id: str, body: UpdateKalshiInstanceBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+def api_kalshi_update_instance(instance_id: str, body: UpdateKalshiInstanceBody, conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
     """Edit a Kalshi instance's name + config (risk tier, leagues, caps, model).
     live_enabled is re-derived from the linked brokerage's environment."""
     from kalshi.instance_config import normalize_config
@@ -5046,7 +5154,7 @@ def api_kalshi_update_instance(instance_id: str, body: UpdateKalshiInstanceBody,
 # --- Kalshi backtests -----------------------------------------------------
 
 @app.post("/brokerages/{brokerage_id}/kalshi/backtests", response_class=JSONResponse)
-def api_kalshi_create_backtest(brokerage_id: str, body: KalshiBacktestBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+def api_kalshi_create_backtest(brokerage_id: str, body: KalshiBacktestBody, conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
     """Enqueue a Kalshi soccer backtest over the chosen leagues/date range with
     the given tuning config. A background worker picks up the pending row."""
     _kalshi_brokerage_row(conn, brokerage_id)

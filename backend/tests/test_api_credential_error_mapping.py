@@ -29,12 +29,14 @@ if str(_backend) not in sys.path:
 from fastapi import HTTPException  # noqa: E402
 
 from stock_credential_boundary import StockCredentialError  # noqa: E402
+from interactive_utils import InstanceExistsError  # noqa: E402
 
 # api/main.py builds a whole FastAPI app at import time; lift out just `_run`.
 _SRC = (_backend / "api" / "main.py").read_text()
 _TREE = ast.parse(_SRC)
 _NS = {"HTTPException": HTTPException, "Any": object,
-       "StockCredentialError": StockCredentialError}
+       "StockCredentialError": StockCredentialError,
+       "InstanceExistsError": InstanceExistsError}
 for _node in _TREE.body:
     if isinstance(_node, ast.FunctionDef) and _node.name == "_run":
         exec(compile(ast.Module(body=[_node], type_ignores=[]), "main.py", "exec"), _NS)
@@ -64,6 +66,13 @@ def test_credential_error_detail_is_actionable_and_secret_free():
     # The boundary's own message is safe; a raw key/secret never is.
     for leak in ("plaintext secret is forbidden", "PK", "SK", "Bearer"):
         assert leak not in detail, detail
+
+
+def test_an_existing_instance_id_is_a_409_not_a_400():
+    """InstanceExistsError IS a ValueError, so its branch must come first."""
+    with pytest.raises(HTTPException) as caught:
+        _run(_raise(InstanceExistsError("Instance already exists: strategy-eb")))
+    assert caught.value.status_code == 409
 
 
 def test_existing_mappings_are_unchanged():
