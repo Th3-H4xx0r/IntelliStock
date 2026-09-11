@@ -83,10 +83,21 @@ DEFAULTS = {
 
 #: The keys `eb_core_weight` reads, named explicitly rather than passing the
 #: whole HX config through. They coincide today; naming them means a later HX
-#: rename breaks a test instead of silently resizing a 3x position.
-_EB_WEIGHT_KEYS = ("core_leverage", "target_vol", "core_max_weight",
-                   "weight_step", "vol_fast_bars", "vol_slow_bars",
-                   "min_history_bars")
+#: rename breaks a test instead of silently resizing a 3x position. Split by
+#: parser, because the projection is PARSED rather than copied — see `_eb_cfg`.
+_EB_FLOAT_KEYS = ("core_leverage", "target_vol", "core_max_weight",
+                  "weight_step")
+_EB_BAR_KEYS = ("vol_fast_bars", "vol_slow_bars", "min_history_bars")
+_EB_WEIGHT_KEYS = _EB_FLOAT_KEYS + _EB_BAR_KEYS
+
+#: A bear book whose raw weights sum past this is a UNITS error, not a book:
+#: percent written as a fraction, or a fraction written as a multiple.
+#: Renormalising it produces a perfectly plausible 100% position in a 3x
+#: inverse fund out of a typo, so above the ceiling the book reads as MISSING.
+#: Two is deliberately loose — it still renormalises an operator who wrote a
+#: 1.4x book meaning ratios — and it is the difference between scaling an
+#: intent and inventing one.
+_BEAR_BOOK_MAX_RAW = 2.0
 
 
 # Own parsers rather than strategy_x's: its `_i` raises OverflowError on
@@ -321,12 +332,22 @@ def hx_state(closes, prev_state, confirm, cfg) -> tuple:
 
 
 def _eb_cfg(cfg):
-    """The seven keys `eb_core_weight` reads, and nothing else. Passing the
-    whole HX config works today because the names coincide, and would keep
-    working silently after an HX rename — while the core quietly resized
-    itself against strategy_eb's own DEFAULTS."""
-    return {key: _dict(cfg).get(key, DEFAULTS[key])
-            for key in _EB_WEIGHT_KEYS}
+    """The seven keys `eb_core_weight` reads, and nothing else.
+
+    PARSED, not copied. Forwarding raw values hands an unparseable window
+    straight to strategy_eb, whose own `_i` resolves the default against
+    STRATEGY_EB's DEFAULTS — 20/60, not HX's 10/40. A longer vol window on the
+    same tape can measure less realised vol, and less measured vol sizes the
+    3x core LARGER: a silent resize of a levered position out of a typo, in
+    the one direction this module must never fail in.
+
+    Passing the whole HX config works today because the names coincide, and
+    would keep working silently after an HX rename — while the core quietly
+    resized itself against another module's defaults.
+    """
+    out = {key: _f(cfg, key) for key in _EB_FLOAT_KEYS}
+    out.update({key: _bars(cfg, key) for key in _EB_BAR_KEYS})
+    return out
 
 
 def _bear_book(cfg) -> dict:
@@ -342,6 +363,10 @@ def _bear_book(cfg) -> dict:
     book: dict = {}
     for sym, weight in raw.items():
         name = str(sym or "").strip().upper()
+        # `float(True)` is 1.0. A leg that round-tripped through a JSON
+        # boolean would read as a 100% position in an inverse fund.
+        if isinstance(weight, bool):
+            continue
         try:
             value = float(weight)
         except (TypeError, ValueError):
@@ -350,6 +375,8 @@ def _bear_book(cfg) -> dict:
             continue
         book[name] = round(book.get(name, 0.0) + value, Q)
     total = round(sum(book.values()), Q)
+    if total > _BEAR_BOOK_MAX_RAW:
+        return {}
     if total > 1.0:
         book = {s: round(w / total, Q) for s, w in book.items()}
         # Each leg rounds independently, and enough of them can round UP:
@@ -362,9 +389,35 @@ def _bear_book(cfg) -> dict:
         if excess > 0:
             fat = max(sorted(book), key=lambda s: book[s])
             book[fat] = round(book[fat] - excess, Q)
-            if book[fat] <= 0:
-                book.pop(fat)
-    return book
+    # A leg small enough to round to zero against a large book is not a
+    # position; emitted it is a zero-weight target the broker has to price.
+    return {s: w for s, w in book.items() if s and w > 0}
+
+
+def _measurable(closes, cfg) -> bool:
+    """Enough finite, positive closes to evaluate the tape at all.
+
+    BULL and CHOP get this for free — `eb_core_weight` refuses below its own
+    floor — and UNKNOWN never deploys anything. BEAR was the exception: it read
+    only the config, so an empty bar list opened the inverse book. The state
+    machine would not have said BEAR without history, but the cache persists a
+    state across restarts and a blind session must not be allowed to act on a
+    remembered one.
+    """
+    need = _bars(cfg, "min_history_bars")
+    try:
+        values = list(closes or [])
+    except TypeError:
+        return False
+    count = 0
+    for value in values:
+        try:
+            price = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(price) and price > 0:
+            count += 1
+    return count >= need
 
 
 def hx_targets(closes, state, cfg) -> dict:
@@ -375,19 +428,24 @@ def hx_targets(closes, state, cfg) -> dict:
     book and an unrecognised state all mean the same thing, and T-bills is the
     only answer that cannot be wrong in the expensive direction.
     """
-    cash = _s(cfg, "cash_symbol")
     core = _s(cfg, "core_symbol")
+    cash = _s(cfg, "cash_symbol")
+    # A cash symbol that IS the core is not cash. Every refusal path below
+    # emits `{cash: 1.0}`, so `cash_symbol="TQQQ"` turns an UNKNOWN cold start
+    # — the one state that exists to hold nothing — into 100% of a 3x fund.
+    if cash == core:
+        cash = _s({}, "cash_symbol")
     label = str(state or "").strip().upper()
 
     if label == "BEAR":
-        book = _bear_book(cfg)
+        book = _bear_book(cfg) if _measurable(closes, cfg) else {}
         spent = round(sum(book.values()), Q)
         if spent <= 0:
             return {cash: 1.0}
         rest = round(1.0 - spent, Q)
-        if rest > 0:
+        if rest > 0 and cash:
             book[cash] = round(book.get(cash, 0.0) + rest, Q)
-        return book
+        return {s: w for s, w in book.items() if s and w > 0}
 
     if label not in {"BULL", "CHOP"}:
         return {cash: 1.0}
@@ -407,12 +465,17 @@ def hx_targets(closes, state, cfg) -> dict:
         remainder = cash
     else:
         remainder = _s(cfg, "bull_remainder_symbol") or cash
+        # A remainder that is the CORE is not a remainder. Accumulated onto
+        # the same key, 0.45 of core plus 0.55 of "remainder" is a 100% TQQQ
+        # book — 35 points past `core_max_weight`, built out of a typo.
+        if remainder == core:
+            remainder = cash
 
     targets: dict = {}
-    if weight > 0:
+    if core and weight > 0:
         targets[core] = weight
     rest = round(1.0 - weight, Q)
-    if rest > 0:
+    if remainder and remainder != core and rest > 0:
         targets[remainder] = round(targets.get(remainder, 0.0) + rest, Q)
     return targets
 

@@ -357,8 +357,9 @@ def test_the_default_bear_book_is_held_as_written():
 
 
 def test_a_short_bear_book_puts_the_shortfall_in_cash():
-    """V2 and V4 are deliberately small inverse sleeves. The unspent weight is
-    cash, never a bigger short."""
+    """Every preregistered variant names its own cash leg, so a book that does
+    not is a book with weight left over. The unspent weight is cash, never a
+    bigger short."""
     assert hx_targets(crash(), "BEAR",
                       cfg(bear_book={"SQQQ": 0.25})) == {"SQQQ": 0.25,
                                                          "BIL": 0.75}
@@ -391,11 +392,14 @@ def test_the_three_variant_books_the_battery_will_actually_run():
 
 def test_a_renormalised_bear_book_never_sums_above_one():
     """Renormalising rounds each leg independently, and five legs can each
-    round UP: this book lands on 1.000002 before the trim. A book above 1.0
+    round UP: this book lands on 1.000001 before the trim. A book above 1.0
     is a LEVERED book — the engine would fund the excess by borrowing — so
-    the rounding error comes off the largest leg rather than being spent."""
+    the rounding error comes off the largest leg rather than being spent.
+
+    Raw sum 1.759001, deliberately under the 2.0 ceiling: past that the book
+    reads as a units error and is refused rather than scaled."""
     targets = hx_targets(crash(), "BEAR", cfg(bear_book={
-        "PSQ": 0.900859, "SH": 0.22, "SQQQ": 0.64, "GLD": 0.059,
+        "PSQ": 0.500001, "SH": 0.22, "SQQQ": 0.64, "GLD": 0.059,
         "BIL": 0.34}))
     assert total(targets) <= 1.0
     assert total(targets) == 1.0
@@ -588,3 +592,113 @@ def test_a_non_dict_config_reads_exactly_like_an_absent_one():
             assert hx_targets(closes, state, junk) == hx_targets(
                 closes, state, {}), (junk, state)
             assert "" not in hx_targets(closes, state, junk)
+
+
+def test_a_remainder_symbol_equal_to_the_core_never_doubles_the_core():
+    """`bull_remainder_symbol` pointing at the core accumulated onto the same
+    key: 0.45 of core plus 0.55 of "remainder" is a 100% TQQQ book — 35 points
+    past `core_max_weight`, built out of a config typo. A remainder that is
+    the core is not a remainder; it reads as cash."""
+    targets = hx_targets(wobbly(120), "BULL", cfg(bull_remainder_symbol="TQQQ"))
+    assert targets["TQQQ"] <= DEFAULTS["core_max_weight"]
+    assert targets == {"TQQQ": 0.45, "BIL": 0.55}
+
+
+def test_a_cash_symbol_equal_to_the_core_is_not_a_cash_position():
+    """Worse on the refusal paths: every "park it in cash" branch emits
+    `{cash: 1.0}`, so a `cash_symbol` of TQQQ turns an UNKNOWN cold start —
+    the state that exists to hold nothing — into 100% of a 3x fund."""
+    for state in ("UNKNOWN", "nonsense"):
+        assert hx_targets(wobbly(120), state,
+                          cfg(cash_symbol="TQQQ")) == {"BIL": 1.0}, state
+    assert hx_targets([100.0] * 120, "BULL",
+                      cfg(cash_symbol="TQQQ")) == {"BIL": 1.0}
+    assert hx_targets(crash(), "BEAR",
+                      cfg(cash_symbol="TQQQ", bear_book={"PSQ": 0.25})) == {
+                          "PSQ": 0.25, "BIL": 0.75}
+
+
+def test_the_bear_book_is_gated_on_history_like_every_other_state():
+    """BEAR deployed its book off no history at all. The other three states
+    refuse below `min_history_bars`; BEAR is the state holding an inverse fund
+    and it was the one state that would open the position on an empty list."""
+    assert hx_targets([], "BEAR", cfg()) == {"BIL": 1.0}
+    assert hx_targets(wobbly(30), "BEAR", cfg()) == {"BIL": 1.0}
+    assert hx_targets(wobbly(69), "BEAR", cfg()) == {"BIL": 1.0}
+    assert hx_targets(wobbly(70), "BEAR", cfg()) == {"PSQ": 0.60, "BIL": 0.40}
+
+
+def test_a_bear_book_past_the_renormalisation_ceiling_reads_as_missing():
+    """Renormalisation has no ceiling of its own: `{"SQQQ": 5.0}` rescales to
+    a 100% position in a 3x inverse fund, which is a units error (percent
+    written as a fraction, or a fraction written as a multiple) rather than a
+    book. Above a raw sum of 2.0 the book is not scaled, it is MISSING."""
+    assert hx_targets(crash(), "BEAR", cfg(bear_book={"SQQQ": 5.0})) == {
+        "BIL": 1.0}
+    assert hx_targets(crash(), "BEAR", cfg(bear_book={
+        "PSQ": 60.0, "BIL": 40.0})) == {"BIL": 1.0}
+    # Still inside the ceiling, so still renormalised rather than refused.
+    targets = hx_targets(crash(), "BEAR",
+                         cfg(bear_book={"PSQ": 0.8, "GLD": 0.6}))
+    assert total(targets) == 1.0
+    assert round(targets["PSQ"] / targets["GLD"], 4) == round(0.8 / 0.6, 4)
+
+
+def test_a_bear_book_naming_cash_has_its_shortfall_added_to_that_leg():
+    """The top-up ACCUMULATES onto a cash leg the book already names; it does
+    not replace it. Written as a plain assignment the 0.20 BIL leg would be
+    overwritten by the 0.70 shortfall and the book would sum to 1.0 by
+    accident on this input and to less than 1.0 on any other."""
+    assert hx_targets(crash(), "BEAR",
+                      cfg(bear_book={"PSQ": 0.30, "BIL": 0.20})) == {
+                          "PSQ": 0.30, "BIL": 0.70}
+
+
+def test_a_boolean_bear_book_weight_is_not_a_full_position():
+    """`float(True)` is 1.0, so a book that round-tripped a leg through a
+    JSON boolean would read as a 100% position in it."""
+    assert hx_targets(crash(), "BEAR", cfg(bear_book={"PSQ": True})) == {
+        "BIL": 1.0}
+    assert hx_targets(crash(), "BEAR",
+                      cfg(bear_book={"PSQ": 0.30, "SQQQ": True})) == {
+                          "PSQ": 0.30, "BIL": 0.70}
+
+
+def test_a_malformed_vol_window_cannot_resize_the_core():
+    """`_eb_cfg` forwarded raw config values, so an unparseable
+    `vol_fast_bars` was resolved against STRATEGY_EB's DEFAULTS (20/60), not
+    HX's (10/40). A longer vol window on the same tape can measure less
+    realised vol, and less measured vol sizes the 3x core LARGER — a silent
+    resize out of a typo. The projection goes through HX's own parsers."""
+    baseline = hx_targets(wobbly(120), "BULL", cfg())
+    for key in ("vol_fast_bars", "vol_slow_bars", "min_history_bars"):
+        for bad in ("junk", None, "", float("nan"), 0, -3):
+            assert hx_targets(wobbly(120), "BULL",
+                              cfg(**{key: bad})) == baseline, (key, bad)
+    for key in ("core_leverage", "target_vol", "core_max_weight",
+                "weight_step"):
+        for bad in ("junk", None, "", float("nan"), float("inf")):
+            assert hx_targets(wobbly(120), "BULL",
+                              cfg(**{key: bad})) == baseline, (key, bad)
+
+
+def test_the_eb_projection_is_exactly_the_keys_eb_reads():
+    """Naming the keys is what makes a later HX rename break a test rather
+    than silently resize a 3x position against another module's defaults."""
+    from strategy_hx import _EB_WEIGHT_KEYS, _eb_cfg
+    assert set(_EB_WEIGHT_KEYS) <= set(DEFAULTS)
+    assert set(_eb_cfg(cfg())) == set(_EB_WEIGHT_KEYS)
+    assert _eb_cfg(cfg()) == {k: DEFAULTS[k] for k in _EB_WEIGHT_KEYS}
+
+
+def test_the_remainder_is_never_accumulated_onto_the_core_key():
+    """The second half of the same rule, for the one config where redirecting
+    the remainder to cash is not enough: name the CORE as the cash symbol too
+    and `remainder` resolves back to the core key. Accumulating there is a
+    100% position in whatever the config called the levered core, so the
+    unspent weight is simply left uninvested — literal cash the engine already
+    holds — rather than written onto that key."""
+    targets = hx_targets(wobbly(120), "BULL",
+                         cfg(core_symbol="BIL", bull_remainder_symbol="BIL"))
+    assert targets == {"BIL": 0.45}
+    assert targets["BIL"] <= DEFAULTS["core_max_weight"]
