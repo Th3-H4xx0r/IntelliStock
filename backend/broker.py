@@ -13293,11 +13293,46 @@ def _strategy_eb_required_symbols(cached_strategies, positions=None):
     return out
 
 
+def _core_sell_may_be_working(adapter, symbol, say) -> bool:
+    """Could a SELL for `symbol` be working at the broker right now?
+
+    True unless the working-order book AFFIRMATIVELY says otherwise. Absence of
+    an order is the only thing that makes a re-send safe, and absence cannot be
+    proven from an unreachable endpoint or a missing adapter — so both answer
+    True. `list_open_orders_strict` raises rather than reporting a dead orders
+    endpoint as a clear book, which is exactly why it is the one asked.
+    """
+    if adapter is None:
+        say("strategy_eb exit NOT re-armed: no broker adapter to read the "
+            "working-order book from, so a working SELL cannot be ruled out. "
+            "The exit stays suppressed until the next session.", "red")
+        return True
+    try:
+        working = adapter.list_open_orders_strict()
+    except Exception as exc:
+        say(f"strategy_eb exit NOT re-armed: the working-order book is "
+            f"unreachable ({type(exc).__name__}: {exc}), so a working SELL "
+            "cannot be ruled out. The exit stays suppressed until the next "
+            "session.", "red")
+        return True
+    wanted = str(symbol or "").strip().upper()
+    for ref in (working or []):
+        if str(getattr(ref, "side", "") or "").strip().lower() != "sell":
+            continue
+        if str(getattr(ref, "symbol", "") or "").strip().upper() == wanted:
+            say(f"strategy_eb exit NOT re-armed: a SELL for {wanted} is "
+                "working at the broker. Re-sending would mint a fresh "
+                "idempotency key (a sell's identity carries the decision "
+                "MINUTE and quantity) and sell the position twice.", "red")
+            return True
+    return False
+
+
 def _report_live_submit_failure(symbol, decision, detail, *, instance_id,
-                                strategy_cache=None, eb_core="",
-                                uncertain=False, log=None, alert=None):
+                                strategy_cache=None, eb_core="", adapter=None,
+                                outcome="failed", log=None, alert=None):
     """Make a live submit that did not reach the broker loud, and re-arm a
-    dropped exit.
+    dropped exit — but only when re-arming cannot duplicate an order.
 
     Three lanes used to lose an order in silence or in yellow: an UNCERTAIN
     submission (allowed, not accepted, reference None — the transport raised
@@ -13306,11 +13341,26 @@ def _report_live_submit_failure(symbol, decision, detail, *, instance_id,
 
     A buy that never reached the broker costs an opportunity, so it stays
     yellow and pages nobody. A SELL is a position the strategy believes it has
-    left: it is RED, it alerts, and it clears the EB lane's
-    `_strategy_eb_exit_issued_session` so the next tick re-arms the exit rather
-    than waiting for the next session. The clear is keyed on the core symbol,
-    because the key is per-LANE and clearing it for an unrelated sell would
-    re-send an exit that really is in flight.
+    left: RED, paged, and a candidate to re-arm by clearing the EB lane's
+    `_strategy_eb_exit_issued_session`.
+
+    WHICH failures may re-arm is a duplicate-order decision, not a logging one.
+    A SELL intent's identity carries `decision_minute` and `quantity`
+    (live_orders/types.py:268-272), so a re-send on a later tick mints a FRESH
+    idempotency key and the service will NOT dedupe it against an order that is
+    already working. Hence `outcome`:
+
+      "blocked"   the gate refused — a DEFINITE non-submission. Nothing reached
+                  the broker, the exit is not in flight, and the key MUST be
+                  cleared or the exit is suppressed for the rest of the session
+                  over an order that was never sent.
+      "uncertain" the transport raised and the lookup could not say whether the
+      "failed"    order exists; it may be working this second. Re-arm ONLY when
+                  the working-order book shows no SELL for the core.
+
+    The clear is keyed on the core symbol, because the key is per-LANE and
+    clearing it for an unrelated sell would re-send an exit that really is in
+    flight.
     """
     def _say(message, color):
         try:
@@ -13318,14 +13368,17 @@ def _report_live_submit_failure(symbol, decision, detail, *, instance_id,
         except Exception:
             pass
 
+    definite = str(outcome or "").strip().lower() == "blocked"
+    uncertain = str(outcome or "").strip().lower() == "uncertain"
     side = "SELL" if decision == -1 else ("BUY" if decision == 1 else "FLAT")
-    loud = bool(uncertain or decision == -1)
-    kind = "OUTCOME UNKNOWN" if uncertain else "NOT SUBMITTED"
+    loud = bool(not definite and uncertain) or decision == -1
+    kind = "NOT SUBMITTED" if definite else (
+        "OUTCOME UNKNOWN" if uncertain else "SUBMIT FAILED")
     message = (
         f"LIVE ORDER {kind}: {side} {symbol} — {detail}. "
-        + ("The broker may or may not hold this order; reconcile before the "
-           "next tick." if uncertain
-           else "Nothing reached the broker.")
+        + ("Nothing reached the broker." if definite
+           else "The broker may or may not hold this order; reconcile before "
+                "the next tick.")
     )
     _say(message, "red" if loud else "yellow")
     if not loud:
@@ -13339,6 +13392,8 @@ def _report_live_submit_failure(symbol, decision, detail, *, instance_id,
         return True
     if str(eb_core or "").strip().upper() != str(symbol or "").strip().upper():
         return True
+    if not definite and _core_sell_may_be_working(adapter, symbol, _say):
+        return True
     cleared = False
     for name in _EB_LANE_NAMES:
         lane = strategy_cache.get(name)
@@ -13346,8 +13401,12 @@ def _report_live_submit_failure(symbol, decision, detail, *, instance_id,
             lane.pop(_EB_EXIT_ISSUED_KEY, None)
             cleared = True
     if cleared:
-        _say(f"strategy_eb exit RE-ARMED for {symbol}: the submit did not "
-             "reach the broker, so the position is still held.", "red")
+        _say(f"strategy_eb exit RE-ARMED for {symbol}: "
+             + ("the gate refused the order, so nothing reached the broker."
+                if definite
+                else "no SELL for it is working at the broker.")
+             + " The position is still held; the next tick re-sends the exit.",
+             "red")
     return True
 
 
@@ -18535,6 +18594,23 @@ while not shutdown_requested:
                                                 f"{','.join(_submission.decision.reason_codes)}",
                                                 "red",
                                             )
+                                            # C2. A gate refusal is a DEFINITE
+                                            # non-submission — nothing reached
+                                            # the broker. Leaving the exit
+                                            # marked in flight suppressed it
+                                            # for the rest of the session over
+                                            # an order that was never sent.
+                                            _report_live_submit_failure(
+                                                symbol, decision,
+                                                "gate: " + (
+                                                    ",".join(_submission.decision.reason_codes)
+                                                    or "refused"),
+                                                instance_id=instance_id,
+                                                strategy_cache=_strategy_cache,
+                                                eb_core=_strategy_eb_core_symbol(
+                                                    _cached_strategies),
+                                                outcome="blocked",
+                                            )
                                         elif getattr(_submission, "uncertain", False):
                                             # E1. Allowed, NOT accepted,
                                             # reference None: the transport
@@ -18542,7 +18618,9 @@ while not shutdown_requested:
                                             # say whether the order exists.
                                             # The only branch that logged was
                                             # `not allowed`, so this produced
-                                            # no line at all.
+                                            # no line at all. C2: the order may
+                                            # be working RIGHT NOW, so the
+                                            # re-arm has to consult the book.
                                             _report_live_submit_failure(
                                                 symbol, decision,
                                                 ",".join(_submission.decision.reason_codes)
@@ -18551,7 +18629,8 @@ while not shutdown_requested:
                                                 strategy_cache=_strategy_cache,
                                                 eb_core=_strategy_eb_core_symbol(
                                                     _cached_strategies),
-                                                uncertain=True,
+                                                adapter=live_adapter,
+                                                outcome="uncertain",
                                             )
                                     else:
                                         # Non-equity compatibility paths are
@@ -18581,18 +18660,29 @@ while not shutdown_requested:
                                 except _live_cf.TimeoutError:
                                     # E2. Yellow-only, with no alert and no
                                     # retry. On a SELL that is a position the
-                                    # strategy believes it has left.
+                                    # strategy believes it has left. C2: the
+                                    # watchdog ABANDONS the future to the
+                                    # background, so the submit may complete a
+                                    # second later — this is an unknown
+                                    # outcome, never a failure to send.
                                     _report_live_submit_failure(
                                         symbol, decision,
                                         "execute_signal hard-timeout (>90s); future "
-                                        "abandoned to background, cid-idempotency "
-                                        "prevents a duplicate if it later succeeds",
+                                        "abandoned to background and may still "
+                                        "complete",
                                         instance_id=instance_id,
                                         strategy_cache=_strategy_cache,
                                         eb_core=_strategy_eb_core_symbol(
                                             _cached_strategies),
+                                        adapter=live_adapter,
+                                        outcome="uncertain",
                                     )
                                 except Exception as _es_e:
+                                    # Outcome unknown for the same reason: a
+                                    # definite broker refusal comes back as
+                                    # `allowed=False` and is handled above, so
+                                    # an exception escaping to here says
+                                    # nothing about whether an order exists.
                                     _report_live_submit_failure(
                                         symbol, decision,
                                         f"execute_signal raised "
@@ -18601,6 +18691,8 @@ while not shutdown_requested:
                                         strategy_cache=_strategy_cache,
                                         eb_core=_strategy_eb_core_symbol(
                                             _cached_strategies),
+                                        adapter=live_adapter,
+                                        outcome="failed",
                                     )
                             else:
                                 _anchor_order_source = (
