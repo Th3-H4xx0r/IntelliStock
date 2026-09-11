@@ -7276,12 +7276,36 @@ def _ensure_brokerage_accounts_table(conn):
     schema.ensure_schema(tables=[BROKERAGE_ACCOUNTS_TABLE])
 
 
+# Field-name suffixes that always mask completely: a secret, a bearer token
+# and an RSA private key have no shape worth showing.
+_FULL_MASK_SUFFIXES = ("_secret", "_token", "_private_key")
+# Field-name suffixes that mask to first-four/last-four so an operator can tell
+# two accounts apart in a list.
+_PARTIAL_MASK_SUFFIXES = ("_key",)
+
+
+def _is_secret_field(name: str) -> bool:
+    n = str(name or "").lower()
+    return n.endswith(_FULL_MASK_SUFFIXES) or n.endswith(_PARTIAL_MASK_SUFFIXES)
+
+
 def _mask_brokerage_doc(doc):
     """Return a copy with sensitive credentials masked for display.
 
+    Masking is decided by the FIELD NAME, not an allowlist of four. The
+    allowlist was the bug: kalshi_private_key was added to the row and simply
+    never added to the list, so GET /brokerages returned the Fernet ciphertext
+    of the RSA key that signs live Kalshi orders to any authenticated caller.
+    A name-based rule masks the next such field the day it is written.
+
+    ``*_secret``, ``*_token`` and ``*_private_key`` mask completely.
+    ``*_key`` keeps the first and last four characters (an account
+    fingerprint, not a credential) and masks completely when it is too short
+    for that to leave anything hidden.
+
     When the stored value is Fernet-encrypted (starts with "fernet:"), we mask
     it without exposing the tag - decrypt briefly for display-only masking
-    of the original key's shape. Secrets always fully mask. Tokens fully mask.
+    of the original key's shape.
 
     This function is also used for edit-form pre-population; the _looks_masked()
     helper lets the update action recognise echoed masks and treat them as
@@ -7297,20 +7321,24 @@ def _mask_brokerage_doc(doc):
     def _mask_key(val):
         if not val:
             return val
-        raw = _decrypt(val) if _is_enc(val) else val
+        try:
+            raw = _decrypt(val) if _is_enc(val) else val
+        except Exception:
+            # An undecryptable value must still never be returned raw.
+            return "****"
         raw = raw or ""
         if len(raw) > 8:
             return raw[:4] + "****" + raw[-4:]
         return "****"
 
-    if d.get("alpaca_key"):
-        d["alpaca_key"] = _mask_key(d["alpaca_key"])
-    if d.get("alpaca_secret"):
-        d["alpaca_secret"] = "****"
-    if d.get("binanceus_key"):
-        d["binanceus_key"] = _mask_key(d["binanceus_key"])
-    if d.get("binanceus_secret"):
-        d["binanceus_secret"] = "****"
+    for name, value in list(d.items()):
+        if not value or not isinstance(value, str):
+            continue
+        lowered = name.lower()
+        if lowered.endswith(_FULL_MASK_SUFFIXES):
+            d[name] = "****"
+        elif lowered.endswith(_PARTIAL_MASK_SUFFIXES):
+            d[name] = _mask_key(value)
     return d
 
 
