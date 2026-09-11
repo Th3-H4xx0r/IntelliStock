@@ -1071,6 +1071,47 @@ def action_instances(conn):
     return {"instances": instances}
 
 
+# A ticker is spliced into the child process argv at instance.py:588-594
+# (['python', 'broker.py', id, 'live', 'NULL', 'NULL', incr, *symbols]), so an
+# unvalidated "symbol" is an argument to the process that trades real money.
+# Letters, digits, dot and dash, and it MUST start with a letter -- which is
+# what rules out "--initial-cash" and every other flag.
+#
+# The optional "/QUOTE" tail is the crypto pair form ("BTC/USD"): the same
+# stocks list carries a crypto instance's fixed universe. The quote leg is
+# letters and digits only, so the slash can never begin a path segment and
+# "A/../../ET" is still refused.
+TICKER_PATTERN = r"^[A-Z][A-Z0-9.\-]{0,9}(/[A-Z0-9]{1,10})?$"
+_TICKER_RE = re.compile(TICKER_PATTERN)
+
+
+def validate_ticker(symbol):
+    """Return the upper-cased ticker, or raise ValueError.
+
+    Upper-casing first is deliberate: the rest of the system stores tickers
+    upper-case, so validating the lower-cased input would let a symbol through
+    in one form and store it in another.
+    """
+    sym = str(symbol or "").strip().upper()
+    if not _TICKER_RE.match(sym):
+        raise ValueError(
+            "Invalid ticker symbol: %r (letters, digits, '.' and '-', starting "
+            "with a letter, max 10 characters, with an optional '/QUOTE' pair "
+            "leg)" % (symbol,)
+        )
+    return sym
+
+
+def validate_tickers(symbols):
+    """Validate a whole symbol list, preserving order and dropping blanks."""
+    out = []
+    for raw in symbols or []:
+        if not str(raw or "").strip():
+            continue
+        out.append(validate_ticker(raw))
+    return out
+
+
 class InstanceExistsError(ValueError):
     """POST /instances named an id that is already taken.
 
@@ -1151,7 +1192,7 @@ def action_create_instance(
     # branches. Carry the crypto_config (band + risk knobs) and an optional fixed
     # symbol universe; empty/omitted stocks ⇒ the strategy auto-discovers coins.
     if stocks:
-        doc["stocks"] = [str(s).strip().upper() for s in stocks if str(s).strip()]
+        doc["stocks"] = validate_tickers(stocks)
     if kind:
         doc["kind"] = str(kind).strip()
     if crypto_config is not None:
@@ -1226,7 +1267,7 @@ def action_edit_instance(
         except (TypeError, ValueError):
             raise ValueError("crypto_config must be an object")
     if stocks is not None:
-        updates["stocks"] = [str(s).strip().upper() for s in stocks if str(s).strip()]
+        updates["stocks"] = validate_tickers(stocks)
 
     if not updates:
         raise ValueError("No editable fields provided")
@@ -1264,7 +1305,9 @@ def action_add_stock(conn, instance_id, symbol):
     if not instance_id or not symbol:
         raise ValueError("Instance ID and symbol required")
     instance_id = instance_id.strip()
-    symbol = symbol.strip().upper()
+    # Re-validated here, not only at the API body: the CLI and the chatbot
+    # reach this action without passing through a Pydantic model.
+    symbol = validate_ticker(symbol)
     ensure_instances_table(conn)
     doc = _resolve_instance_doc(conn, instance_id)
     if doc is None:

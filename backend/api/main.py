@@ -27,7 +27,7 @@ from fastapi import FastAPI, HTTPException, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from llm_utils import (
     call_llm_by_provider,
@@ -67,6 +67,8 @@ from stock_credential_boundary import StockCredentialError
 from interactive_utils import (
     get_conn,
     InstanceExistsError,
+    TICKER_PATTERN,
+    validate_tickers,
     parse_granularity_to_seconds,
     action_clear_instance_state,
     action_status,
@@ -528,6 +530,22 @@ class AddTickerBody(BaseModel):
     symbols: List[str] = Field(..., min_length=1)
 
 
+def _validated_stocks(value):
+    """Upper-case and validate a symbol list on the way in.
+
+    Symbols become argv for the broker child process (instance.py:588-594), so
+    "--INITIAL-CASH" in a request body would become a flag on the command line
+    of the process that trades real money. Validating in the model rejects it
+    at the boundary; the actions re-validate for the CLI and chatbot paths.
+    """
+    if value is None:
+        return None
+    try:
+        return validate_tickers(value)
+    except ValueError as e:
+        raise ValueError(str(e))
+
+
 class CreateInstanceBody(BaseModel):
     id: str = Field(..., min_length=1)
     name: Optional[str] = None
@@ -545,6 +563,8 @@ class CreateInstanceBody(BaseModel):
     crypto_config: Optional[dict] = None
     stocks: Optional[List[str]] = None
 
+    _check_stocks = field_validator("stocks", mode="before")(_validated_stocks)
+
 
 class EditInstanceBody(BaseModel):
     name: Optional[str] = None
@@ -554,13 +574,23 @@ class EditInstanceBody(BaseModel):
     crypto_config: Optional[dict] = None
     stocks: Optional[List[str]] = None
 
+    _check_stocks = field_validator("stocks", mode="before")(_validated_stocks)
+
 
 class DeleteInstanceBody(BaseModel):
     force: bool = False
 
 
 class AddStockBody(BaseModel):
-    symbol: str = Field(..., min_length=1)
+    # Upper-cased BEFORE the pattern runs: the rest of the system stores
+    # tickers upper-case, so validating the raw input would accept a symbol in
+    # one form and store it in another.
+    symbol: str = Field(..., min_length=1, pattern=TICKER_PATTERN)
+
+    @field_validator("symbol", mode="before")
+    @classmethod
+    def _upper(cls, v):
+        return str(v).strip().upper() if isinstance(v, str) else v
 
 
 class CreateStrategyBody(BaseModel):
