@@ -1551,6 +1551,20 @@ def action_get_instance(conn, instance_id):
         "max_usage": doc.get("max_usage"),
         "granularity_time_increment": doc.get("granularity_time_increment"),
         "created_by": doc.get("created_by", "user"),
+        # The live-start surface. PATCH /instances writes the clean-room
+        # baseline and POST /instances/{id}/readiness-waiver writes the
+        # report, but this projection is a whitelist -- so neither was
+        # readable, and an operator could only see what they had just set by
+        # querying the database directly. The keys are always present (null
+        # when unset) so a client can tell "no report on this instance" from
+        # "an API build too old to say". Environment overrides
+        # (LIVE_CLEAN_ROOM_MODE / LIVE_INITIAL_VALUE) still beat the row at
+        # launch; these are the stored values, not the effective ones.
+        "initial_value": doc.get("initial_value"),
+        "clean_room_mode": bool(doc.get("clean_room_mode", False)),
+        "live_readiness_report": doc.get("live_readiness_report") or None,
+        "live_readiness_waived_at": doc.get("live_readiness_waived_at"),
+        "live_readiness_waived_by": doc.get("live_readiness_waived_by"),
         "started_at": started_at,
         "uptime_seconds": uptime_seconds,
         "backtests": backtests,
