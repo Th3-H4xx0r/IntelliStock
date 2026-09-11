@@ -31,6 +31,18 @@ PROTECTED_DOC_IDS = frozenset({"200", "201"})
 STOCKS = sorted(set(strategy_hx_universe(DEFAULTS)) | {"SPY"})
 
 
+#: `_http` formats every HTTPError as "HTTP <code> on <method> <url>\n<body>",
+#: so the code and the API's own detail are both in the message.
+_DUPLICATE_CODES = ("400", "409", "422")
+
+
+def _is_duplicate(error) -> bool:
+    """True only for a 4xx whose body says the symbol is already listed."""
+    text = str(error).lower()
+    return "already" in text and any(f"http {code}" in text
+                                     for code in _DUPLICATE_CODES)
+
+
 def assert_writable(doc_id):
     """Refuse doc 200 and doc 201, in every string/int spelling."""
     if str(doc_id).strip() in PROTECTED_DOC_IDS:
@@ -82,24 +94,38 @@ def main(call=None) -> int:
     code, inst = _safe_get(call, f"/instances/{INSTANCE_ID}")
     if code == 404 or not inst:
         _, broker_row = call("GET", f"/instances/{CLONE_FROM}")
+        # `granularity`, NOT `granularity_time_increment`: that is the field
+        # `CreateInstanceBody` declares, and the API parses the string to
+        # seconds itself. Under any other name it is dropped and the instance
+        # is created at the 60s default — 1-minute stepping over a five-year
+        # window, which is the granularity trap this repo keeps re-learning.
         body = {"id": INSTANCE_ID, "name": "Strategy HX lab (backtest only)",
-                "strategy_id": doc_id, "granularity_time_increment": 86400,
+                "strategy_id": doc_id, "granularity": "86400",
                 "brokerage_id": broker_row.get("brokerage_id"),
                 "stocks": list(STOCKS)}
         call("POST", "/instances", body)
         print("created instance", INSTANCE_ID)
     else:
-        call("PATCH", f"/instances/{INSTANCE_ID}", {"strategy_id": doc_id})
-        print("instance exists; strategy_id set to", doc_id)
+        # PATCH /instances/{id} cannot do this: `EditInstanceBody` carries
+        # name, granularity, max_usage and brokerage_id and nothing else, so a
+        # strategy_id sent there is silently dropped and the instance keeps
+        # running whatever document it was already linked to.
+        call("POST", f"/instances/{INSTANCE_ID}/link-strategy",
+             {"strategy_id": int(doc_id)})
+        print("instance exists; strategy linked to", doc_id)
 
     for symbol in STOCKS:
         try:
             call("POST", f"/instances/{INSTANCE_ID}/stocks",
                  {"symbol": symbol})
-        except BaseException:
+        except SystemExit as error:
             # Already listed. The API 4xxs on a duplicate and _api.call turns
             # that into SystemExit, which is not a failure of this script.
-            pass
+            # ANYTHING else is: swallowing it leaves the instance short a leg,
+            # and a leg the instance does not list has no bars and no price —
+            # the strategy simply never trades it, silently.
+            if not _is_duplicate(error):
+                raise
 
     _, check = call("GET", f"/instances/{INSTANCE_ID}")
     print("instance:", json.dumps(

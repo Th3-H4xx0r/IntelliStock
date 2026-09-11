@@ -993,6 +993,14 @@ _CODE_FINGERPRINT_FILES = (
     "outlier_sleeve.py",
     "strategies/outlier_sleeve.py",
     "outlier_features.py",
+    # Strategy HX, for the same reason as the EB pair one line up — and for a
+    # second one: `scripts/check_deployed_code.py` keys this response by
+    # basename, so a file it hashes locally but this tuple omits reports
+    # "deployed <missing>". That reads as green output for a file nobody
+    # verified, which is the 2026-09-03 failure wearing the other list's
+    # clothes.
+    "strategy_hx.py",
+    "strategies/strategy_hx.py",
 )
 _CODE_FINGERPRINT_CACHE: "dict[str, str] | None" = None
 

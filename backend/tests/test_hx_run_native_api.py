@@ -170,3 +170,104 @@ def test_the_verdict_line_names_the_spy_benchmark_or_says_it_is_unknown():
     assert "rb1" in line and "-19.40" in line and "+3.10" in line
     assert "SPY n/a" in ctl.verdict("V1", "h3", {"pnl_percent": 1.0,
                                                  "risk_metrics": {}})
+
+
+def _controller_call(state, *, summary):
+    """A fake engine: an idle queue, the lab doc, a POST that accepts, then
+    `status` running twice and finished, with `summary` deciding what the
+    summary endpoint does on each poll."""
+    ctl = state["ctl"]
+
+    def fake_call(method, path, body=None, **kwargs):
+        state.setdefault("seen", []).append((method, path))
+        if path.startswith("/backtests?"):
+            return 200, {"backtests": [], "total": 0, "total_pages": 1}
+        if path == f"/instances/{ctl.INSTANCE_ID}":
+            return 200, {"strategy_id": 444}
+        if path == "/strategies/444" and method == "GET":
+            return 200, {"name": ctl.DOC_NAME, "strategies": [
+                {"strategy": "strategy_hx", "config": {}}]}
+        if method == "PUT":
+            return 200, {}
+        if (method, path) == ("POST", "/backtests"):
+            return 200, {"id": "bt7"}
+        if path.endswith("/status"):
+            state["status"] = state.get("status", 0) + 1
+            return 200, {"status": "running" if state["status"] < 3
+                         else "finished"}
+        if path.endswith("/summary"):
+            state["summary"] = state.get("summary", 0) + 1
+            return summary(state["summary"])
+        return 200, {}
+
+    return fake_call
+
+
+def test_the_poll_loop_survives_a_summary_that_does_not_exist_yet(tmp_path):
+    """The summary row is not created until the engine CLAIMS the job, and
+    until then /summary is a 400 that `_api.call` turns into SystemExit. Read
+    without a guard, the controller dies on its first poll — so the 25% risk
+    stop, the archive and the verdict never run at all, on every single
+    window."""
+    ctl = _module()
+    ctl.OUT_ROOT = str(tmp_path)
+    state = {"ctl": ctl}
+
+    def summary(n):
+        if n <= 2:
+            raise SystemExit("HTTP 400 on GET /backtests/bt7/summary\n"
+                             "{\"detail\":\"backtest has no summary yet\"}")
+        return 200, {"pnl_percent": 1.5, "equity_curve": [1, 2, 3],
+                     "risk_metrics": {"max_drawdown_pct": 0.05}}
+
+    result = ctl.run_window(_controller_call(state, summary=summary),
+                            "V1", "rb3", sleep=lambda *_: None)
+    assert result["status"] == "finished"
+    assert result["stopped"] is False
+    assert state["summary"] >= 3
+    assert ctl.should_stop(_controller_call({"ctl": ctl}, summary=summary),
+                           "bt7") is False
+
+
+def test_a_summary_error_that_is_not_a_missing_row_still_stops_the_run():
+    """Tolerating 400/404 must not become tolerating everything: a 500 or an
+    auth failure on /summary means the controller cannot see the drawdown it
+    is meant to be watching, and running blind past a 25% stop is worse than
+    stopping."""
+    ctl = _module()
+
+    def fake_call(method, path, body=None, **kwargs):
+        raise SystemExit("HTTP 500 on GET /backtests/bt7/summary\n"
+                         "{\"detail\":\"database is down\"}")
+
+    try:
+        ctl.should_stop(fake_call, "bt7")
+    except SystemExit as error:
+        assert "500" in str(error)
+    else:
+        raise AssertionError("a 500 on /summary was swallowed")
+
+
+def test_the_archive_directory_carries_a_run_timestamp(tmp_path):
+    """Re-running a window must never overwrite pre-registered evidence: the
+    request body, the logs and the summary of the earlier run are the record
+    of what was actually posted."""
+    import re
+
+    ctl = _module()
+    ctl.OUT_ROOT = str(tmp_path)
+    state = {"ctl": ctl}
+    result = ctl.run_window(
+        _controller_call(state, summary=lambda n: (
+            200, {"pnl_percent": 1.0, "risk_metrics": {}})),
+        "V1", "rb3", sleep=lambda *_: None)
+    name = os.path.basename(result["out_dir"])
+    assert re.fullmatch(r"V1-rb3-\d{6}", name), name
+    assert os.path.exists(os.path.join(result["out_dir"], "request.json"))
+
+
+def test_the_poll_ceiling_covers_a_full_cycle_window():
+    """`cyc` is ~1,200 sessions. At 20s a two-hour ceiling gives up on a job
+    that is still running and the window is simply never measured."""
+    ctl = _module()
+    assert ctl.POLL_SECONDS * ctl.POLL_LIMIT >= 6 * 3600

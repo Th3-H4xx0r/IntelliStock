@@ -55,10 +55,17 @@ def call(method: str, path: str, body=None, *, retries: int = 4):
                 payload = json.dumps(body)
                 headers["Content-Type"] = "application/json"
             return _http(method, API + path, headers=headers, body=payload)
-        except Exception as exc:  # noqa: BLE001
+        except BaseException as exc:  # noqa: BLE001
+            # BaseException, not Exception: `_http` raises SystemExit on every
+            # HTTPError, and SystemExit does not derive from Exception. Caught
+            # as Exception this clause never fired, the documented 5xx retry
+            # was dead code, and a deploy rebuild's transient 502 killed the
+            # run on the spot. A non-5xx — and a KeyboardInterrupt — still
+            # surfaces immediately, and so does the last attempt.
             last = exc
             msg = str(exc)
-            if not any(c in msg for c in ("500", "502", "503", "504")):
+            if (not any(c in msg for c in ("500", "502", "503", "504"))
+                    or attempt >= retries - 1):
                 raise
             _t.sleep(3 * (attempt + 1))
     raise last

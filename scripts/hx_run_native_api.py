@@ -72,7 +72,10 @@ FULL_ORDER = BEAR_ORDER + ("rc1", "rc2", "rc3", "ru1", "ru3", "cyc")
 INITIAL_CASH = 6000
 DRAWDOWN_REJECT = 0.25
 POLL_SECONDS = 20
-POLL_LIMIT = 360  # 2 hours at 20s
+# 6 hours at 20s. The `cyc` window is ~1,200 sessions; a two-hour ceiling gave
+# up on a job that was still running, and a window nobody waited for is a
+# window that was never measured.
+POLL_LIMIT = 1080
 OUT_ROOT = os.path.join(_ROOT, "output", "research", "hx-2026-09-10")
 _BUSY = ("running", "pending", "queued", "paused")
 
@@ -151,9 +154,30 @@ def drawdown_of(summary):
     return value
 
 
+def summary_or_none(call, bid):
+    """The job's summary, or None while there is not one yet.
+
+    The summary row does not exist until the engine CLAIMS the job, and until
+    then the endpoint raises ValueError -> HTTP 400, which `_api.call` turns
+    into SystemExit. Read without this guard the controller dies on its FIRST
+    poll, so the 25% risk stop, the archive and the verdict never run at all.
+
+    Only 400 and 404 read as "not measurable yet". A 500 or an auth failure
+    means the drawdown this loop exists to watch is unreadable, and running
+    blind past the stop is worse than stopping.
+    """
+    try:
+        _, summary = call("GET", f"/backtests/{bid}/summary")
+    except SystemExit as error:
+        text = str(error).lower()
+        if any(f"http {code}" in text for code in ("400", "404")):
+            return None
+        raise
+    return summary
+
+
 def should_stop(call, bid) -> bool:
-    _, summary = call("GET", f"/backtests/{bid}/summary")
-    drawdown = drawdown_of(summary)
+    drawdown = drawdown_of(summary_or_none(call, bid))
     return drawdown is not None and drawdown >= DRAWDOWN_REJECT
 
 
@@ -194,7 +218,11 @@ def run_window(call, variant, tag, *, sleep=time.sleep) -> dict:
     regime, start, end = WINDOWS[tag]
     apply_variant(call, variant)
     body = post_body(variant, start, end)
-    out_dir = os.path.join(OUT_ROOT, f"{variant}-{tag}")
+    # Timestamped: re-running a window must never overwrite pre-registered
+    # evidence. The request body, the logs and the summary of the earlier run
+    # are the record of what was actually posted, and a silent overwrite turns
+    # a falsifiable result into whichever run finished last.
+    out_dir = os.path.join(OUT_ROOT, f"{variant}-{tag}-{time.strftime('%H%M%S')}")
     with open(os.path.join(_ensure(out_dir), "request.json"), "w") as fh:
         json.dump(body, fh, indent=1)
     # An uncertain POST is never retried: a duplicated job would put two
@@ -212,7 +240,7 @@ def run_window(call, variant, tag, *, sleep=time.sleep) -> dict:
             print(f"ARCHIVED {variant} {tag} {bid} {status}", flush=True)
             print(verdict(variant, tag, summary), flush=True)
             return {"id": bid, "status": status, "summary": summary,
-                    "stopped": stopped}
+                    "stopped": stopped, "out_dir": out_dir}
         if not stopped and should_stop(call, bid):
             print(f"RISK STOP {variant} {tag} {bid}: drawdown >= "
                   f"{DRAWDOWN_REJECT:.0%}", flush=True)

@@ -132,3 +132,35 @@ def test_every_registered_lane_has_a_defaults_row():
                         for t in n.targets))
     mapped = {k.value for k in node.value.keys}
     assert set(_module_assign("_LANE_ENABLE_FLAGS")) <= mapped
+
+
+def test_the_health_fingerprint_and_the_deploy_check_list_the_same_files():
+    """`scripts/check_deployed_code.py` compares local hashes against the ones
+    GET /health publishes, and the API keys that response by BASENAME. A file
+    in FILES but not in `_CODE_FINGERPRINT_FILES` has no server-side hash at
+    all, so the check reports it "deployed <missing>" — green-looking output
+    for a file nobody verified. That is the 2026-09-03 failure one layer up:
+    there it was the local list, here it is the served one.
+
+    The two lists differ only by the `backend/` prefix: the image is built with
+    `context: ./backend`, so `backend/broker.py` in git is `/app/broker.py` in
+    the container.
+    """
+    def _literal(path, name):
+        for node in ast.parse(open(path).read()).body:
+            if isinstance(node, ast.Assign) and any(
+                    isinstance(t, ast.Name) and t.id == name
+                    for t in node.targets):
+                return list(ast.literal_eval(node.value))
+        raise AssertionError(f"{name} not found in {path}")
+
+    root = os.path.dirname(_BACKEND)
+    served = set(_literal(os.path.join(_BACKEND, "api", "main.py"),
+                          "_CODE_FINGERPRINT_FILES"))
+    checked = {p[len("backend/"):] for p in _literal(
+        os.path.join(root, "scripts", "check_deployed_code.py"), "FILES")}
+    assert served == checked, {"served_only": sorted(served - checked),
+                               "checked_only": sorted(checked - served)}
+    assert {"strategy_hx.py", "strategies/strategy_hx.py"} <= served
+    assert ({os.path.basename(p) for p in served}
+            == {os.path.basename(p) for p in checked})
