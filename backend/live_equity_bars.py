@@ -289,35 +289,58 @@ def build_live_equity_data(
             need.append(upper)
 
     def _fresh_enough(snapshot):
-        """None when the snapshot is too old to be data. C1: `is_degraded` only
-        compares a fetch against what is already held, so a feed that answers
-        every tick with the SAME stale window satisfies every other guard here
-        and is served forever."""
+        """None when the snapshot is too old to be data.
+
+        C1: `is_degraded` only compares a fetch against what is already held,
+        so a feed that answers every tick with the SAME stale window satisfies
+        every other guard here and is served forever.
+
+        I2: staleness is measured PER REQUIRED SYMBOL, not as the maximum stamp
+        across the snapshot. A frozen reference beside one live sleeve leg
+        passed that maximum — and the reference's closes ARE the volatility the
+        transform sizes off, so that is exactly the blindness the bound exists
+        to stop. With nothing declared required the old whole-snapshot rule
+        stands, which is what every other caller gets.
+        """
         if int(max_stale_sessions or 0) <= 0:
             return snapshot
-        newest = None
-        for bars in (snapshot or {}).values():
-            stamp = newest_stamp(bars)
-            if stamp is not None and (newest is None or stamp > newest):
-                newest = stamp
-        if newest is None:
+        bound = int(max_stale_sessions)
+        # {label: newest stamp}. One entry per required symbol, or a single
+        # whole-snapshot entry when nothing is required.
+        measured = {}
+        if need:
+            for symbol in need:
+                measured[symbol] = newest_stamp((snapshot or {}).get(symbol))
+        else:
+            newest = None
+            for bars in (snapshot or {}).values():
+                stamp = newest_stamp(bars)
+                if stamp is not None and (newest is None or stamp > newest):
+                    newest = stamp
+            measured["the snapshot"] = newest
+        unmeasurable = [name for name, stamp in measured.items()
+                        if stamp is None]
+        stale = [(name, stamp, sessions_since(stamp, now_utc))
+                 for name, stamp in measured.items()
+                 if stamp is not None and sessions_since(stamp, now_utc) > bound]
+        if stale:
+            _log("Live equity bars: snapshot is STALE — "
+                 + "; ".join(f"{name} newest bar {stamp.date()} is {lag} "
+                             f"sessions behind {now_utc.date()}"
+                             for name, stamp, lag in stale)
+                 + f" (bound {bound}). Skipping strategies this tick: a "
+                   "levered position sized off a volatility measured weeks "
+                   "ago is worse than no position decision at all.", "red")
+            return None
+        if unmeasurable:
             # Unmeasurable, not proven stale. Blinding the strategy on a
             # stamp-format change would be the worse failure of the two, so
             # this serves — loudly.
-            _log("Live equity bars: staleness UNMEASURABLE — no parseable "
-                 "timestamp anywhere in the snapshot. Serving it, but the "
-                 "freshness guard is inert until the stamp format is fixed.",
-                 "red")
-            return snapshot
-        lag = sessions_since(newest, now_utc)
-        if lag > int(max_stale_sessions):
-            _log(f"Live equity bars: snapshot is STALE — newest bar "
-                 f"{newest.date()} is {lag} sessions behind "
-                 f"{now_utc.date()} (bound {max_stale_sessions}). Skipping "
-                 "strategies this tick: a levered position sized off a "
-                 "volatility measured weeks ago is worse than no position "
-                 "decision at all.", "red")
-            return None
+            _log("Live equity bars: staleness UNMEASURABLE for "
+                 + ", ".join(unmeasurable)
+                 + " — no parseable timestamp. Serving the snapshot, but the "
+                   "freshness guard is inert for those until the stamp format "
+                   "is fixed.", "red")
         return snapshot
 
     if isinstance(fetched, Mapping) and any(fetched.get(s) for s in syms):

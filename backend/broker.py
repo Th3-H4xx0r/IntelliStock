@@ -13266,14 +13266,22 @@ def _strategy_eb_core_symbol(cached_strategies):
                or "").strip().upper()
 
 
-def _strategy_eb_required_symbols(cached_strategies, positions=None):
-    """Symbols a live EB tick CANNOT run blind on.
+def _strategy_eb_required_symbols(cached_strategies):
+    """The two series a live EB tick CANNOT run blind on: the reference index
+    and the core.
 
-    The reference index first — its daily closes ARE the volatility the whole
-    transform sizes off — then the core, then anything the book is currently
-    holding. `build_live_equity_data` refuses the tick when one of these comes
-    back empty with no last-good behind it, rather than handing over a partial
-    snapshot that reads as success.
+    The reference's daily closes ARE the volatility the whole transform sizes
+    off, and the core is what that volatility sizes. `build_live_equity_data`
+    refuses the tick when either comes back empty with no last-good behind it,
+    rather than handing over a partial snapshot that reads as success.
+
+    HOLDINGS ARE DELIBERATELY NOT HERE. They were, and one unpriceable holding
+    with no last-good made `build_live_equity_data` return None — which empties
+    `_rr_specs_eff` at the call site, so NO run_once strategy on the document
+    runs that tick. That trades a leg the strategy can already handle for the
+    whole document going inert: a held leg with no price is A1's job in
+    `strategies/strategy_eb.py`, which refuses the tick only when the leg it
+    cannot price is the CORE.
     """
     merged = _strategy_eb_merged_config(cached_strategies)
     if not merged:
@@ -13283,13 +13291,6 @@ def _strategy_eb_required_symbols(cached_strategies, positions=None):
         symbol = str(merged.get(key) or "").strip().upper()
         if symbol and symbol not in out:
             out.append(symbol)
-    try:
-        for symbol, quantity in (positions or {}).items():
-            upper = str(symbol or "").strip().upper()
-            if upper and upper not in out and float(quantity or 0.0) > 0:
-                out.append(upper)
-    except Exception:
-        pass
     return out
 
 
@@ -14984,21 +14985,18 @@ while not shutdown_requested:
                                                         except Exception:
                                                             pass
 
-                                                # C2: the series this tick
+                                                # C2: the two series this tick
                                                 # cannot run blind on — the
-                                                # reference index, the core,
-                                                # and whatever is held. An
-                                                # empty one with no last-good
-                                                # behind it refuses the tick
-                                                # instead of reading as a
-                                                # partial success.
-                                                try:
-                                                    _leb_positions = (
-                                                        portfolio_emulator.get_positions()
-                                                        if portfolio_emulator is not None
-                                                        else {})
-                                                except Exception:
-                                                    _leb_positions = {}
+                                                # reference index and the core.
+                                                # Either one empty with no
+                                                # last-good behind it refuses
+                                                # the tick instead of reading
+                                                # as a partial success. NOT the
+                                                # holdings: returning None here
+                                                # empties `_rr_specs_eff`, so
+                                                # one unpriceable sleeve leg
+                                                # would stop every run_once
+                                                # lane on the document.
                                                 _rr_data = _leb_build(
                                                     _leb_fetch, _eb_syms,
                                                     datetime.datetime.now(
@@ -15007,8 +15005,7 @@ while not shutdown_requested:
                                                         "_live_equity_bars_last_good"),
                                                     log=_log,
                                                     required=_strategy_eb_required_symbols(
-                                                        _cached_strategies,
-                                                        _leb_positions),
+                                                        _cached_strategies),
                                                 )
                                                 if _rr_data:
                                                     globals()["_live_equity_bars_last_good"] = _rr_data

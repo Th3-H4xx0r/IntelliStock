@@ -560,3 +560,89 @@ def test_the_broker_declares_what_the_eb_tick_cannot_run_blind_on():
     source = open(os.path.join(_backend, "broker.py")).read()
     assert "_strategy_eb_required_symbols(" in source
     assert "required=" in source.split("_leb_build(", 1)[1][:600]
+
+
+# --- I1 + I2 (branch review, 2026-09-11) ------------------------------------
+#
+# I1  `required` carried every non-zero holding. One unpriceable holding with
+#     no last-good returned None, which empties `_rr_specs_eff` at the call
+#     site — so NO run_once strategy runs that tick, over a leg the strategy
+#     does not need to see. The core and the reference are the two series that
+#     make the tick meaningless; a held-but-unpriceable leg is A1's job.
+# I2  `_fresh_enough` took the MAXIMUM stamp across every symbol, so a frozen
+#     reference beside one live leg passed the bound — which is precisely the
+#     blindness C1 exists to stop, since the reference's closes ARE the
+#     volatility the transform sizes off.
+
+def mixed(fresh_syms, stale_syms, fresh_day=2, stale_month=5):
+    out = {s: [dated(fresh_day - 1), dated(fresh_day)] for s in fresh_syms}
+    for s in stale_syms:
+        out[s] = [dated(1, stale_month), dated(2, stale_month)]
+    return out
+
+
+def test_a_frozen_reference_beside_a_live_leg_is_refused():
+    """The I2 shape: GLD ticks along, QQQ has not moved in a month, and the
+    max-over-all-symbols rule called the whole snapshot fresh."""
+    lines, log = sink()
+    got = build_live_equity_data(
+        lambda s, a, b: mixed(["GLD", "TQQQ"], ["QQQ"]), UNIVERSE + ["GLD"],
+        NOW, required=["QQQ", "TQQQ"], log=log)
+    assert got is None, "a month-old reference was served as live data"
+    reds_ = reds(lines)
+    assert reds_ and "QQQ" in reds_[0], reds_
+
+
+def test_a_frozen_core_is_refused_too():
+    lines, log = sink()
+    got = build_live_equity_data(
+        lambda s, a, b: mixed(["QQQ", "GLD"], ["TQQQ"]), UNIVERSE + ["GLD"],
+        NOW, required=["QQQ", "TQQQ"], log=log)
+    assert got is None
+    assert any("TQQQ" in m for m in reds(lines))
+
+
+def test_a_frozen_leg_that_is_not_required_does_not_refuse_the_tick():
+    """Symmetry with I1: one stale sleeve leg must not stop every strategy on
+    the document from running."""
+    got = build_live_equity_data(
+        lambda s, a, b: mixed(["QQQ", "TQQQ", "SPY", "BIL"], ["GLD"]),
+        UNIVERSE + ["GLD"], NOW, required=["QQQ", "TQQQ"])
+    assert got is not None
+    assert got["QQQ"] and got["GLD"]
+
+
+def test_with_nothing_required_the_bound_still_applies_to_the_whole_snapshot():
+    """The pre-existing contract for any other caller."""
+    frozen = snapshot(2)
+    later = datetime.datetime(2026, 6, 22, 20, tzinfo=datetime.timezone.utc)
+    assert build_live_equity_data(lambda s, a, b: frozen, UNIVERSE, later,
+                                  last_good=frozen) is None
+
+
+def test_a_required_symbol_with_no_stamp_at_all_is_reported_not_refused():
+    lines, log = sink()
+    odd = {s: [{"close": 100.0}] for s in UNIVERSE}
+    got = build_live_equity_data(lambda s, a, b: odd, UNIVERSE, NOW,
+                                 required=["QQQ"], log=log)
+    assert got is not None
+    assert reds(lines)
+
+
+# --- I1: what the broker actually declares ---------------------------------
+
+def test_the_broker_requires_only_the_reference_and_the_core():
+    """A held leg the fetch cannot price must not empty `_rr_specs_eff` and
+    stop every run_once lane on the document."""
+    import ast
+
+    broker = os.path.join(_backend, "broker.py")
+    tree = ast.parse(open(broker).read())
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+              and n.name == "_strategy_eb_required_symbols")
+    args = [a.arg for a in fn.args.args]
+    assert args == ["cached_strategies"], (
+        f"still takes {args}: holdings must not widen the requirement")
+    source = open(broker).read()
+    assert "_leb_positions" not in source, (
+        "the positions lookup at the bar-fetch call site is now dead")

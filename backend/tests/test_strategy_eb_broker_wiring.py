@@ -166,35 +166,42 @@ def test_the_run_once_call_site_passes_the_view():
 
 # --- what a live tick cannot run blind on (C2, 2026-09-11) ------------------
 
-def required(specs, positions=None):
+def required(specs):
     ns = _extract("_strategy_eb_required_symbols")
-    return ns["_strategy_eb_required_symbols"](specs, positions)
+    return ns["_strategy_eb_required_symbols"](specs)
 
 
 def test_the_reference_and_the_core_are_always_required():
     """The reference index's daily closes ARE the volatility the transform
-    sizes off; an empty series for it is not a partial fetch, it is no data."""
+    sizes off, and the core is what that volatility sizes. An empty series for
+    either is not a partial fetch, it is no data."""
     assert required(spec(strategy_eb_enabled=True)) == ["QQQ", "TQQQ"]
+    assert required(spec(strategy_eb_enabled=True, core_symbol="QLD",
+                         core_leverage=2.0)) == ["QQQ", "QLD"]
 
 
-def test_held_symbols_are_required_too():
-    got = required(spec(strategy_eb_enabled=True),
-                   {"gld": 4.0, "SPY": 10.0, "BIL": 0.0})
-    assert got[:2] == ["QQQ", "TQQQ"]
-    assert "GLD" in got and "SPY" in got
-    assert "BIL" not in got, "a zero position is not held"
+def test_holdings_are_deliberately_not_required():
+    """`build_live_equity_data` returning None empties `_rr_specs_eff`, so NO
+    run_once lane on the document runs that tick. Requiring every holding
+    traded one unpriceable sleeve leg — which A1 already handles, and only
+    refuses on when it is the CORE — for the whole document going inert."""
+    assert required(spec(strategy_eb_enabled=True)) == ["QQQ", "TQQQ"]
+    import inspect
+    ns = _extract("_strategy_eb_required_symbols")
+    params = list(inspect.signature(
+        ns["_strategy_eb_required_symbols"]).parameters)
+    assert params == ["cached_strategies"], params
+
+
+def test_a_reference_or_core_named_in_conditions_is_seen():
+    assert required([{"strategy": "strategy_eb",
+                      "conditions": {"strategy_eb_enabled": True,
+                                     "core_symbol": "QLD"},
+                      "config": {}}]) == ["QQQ", "QLD"]
 
 
 def test_a_disabled_or_absent_eb_requires_nothing():
-    assert required(spec(strategy_eb_enabled=False), {"TQQQ": 1.0}) == []
+    assert required(spec(strategy_eb_enabled=False)) == []
     assert required([{"strategy": "graph_nexus_analysis", "config": {}}]) == []
     for junk in (None, [], [None], ["strategy_eb"]):
         assert required(junk) == [], junk
-
-
-def test_unreadable_positions_do_not_break_the_requirement():
-    class Hostile(dict):
-        def items(self):
-            raise RuntimeError("adapter is down")
-
-    assert required(spec(strategy_eb_enabled=True), Hostile()) == ["QQQ", "TQQQ"]
