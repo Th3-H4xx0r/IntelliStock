@@ -36,6 +36,10 @@ ADMIN_ONLY_ROUTES = [
     ("POST", "/instances/{instance_id}/start"),
     ("POST", "/instances/{instance_id}/stop"),
     ("POST", "/instances/{instance_id}/clear-state"),
+    # Writes the readiness report a real-money launcher trusts. If anything on
+    # this list has to be admin-only, it is the route that can authorize a
+    # funded start.
+    ("POST", "/instances/{instance_id}/readiness-waiver"),
     ("POST", "/instances/{instance_id}/link-strategy"),
     ("POST", "/instances/{instance_id}/unlink-strategy"),
     ("POST", "/instances/{instance_id}/link-brokerage"),

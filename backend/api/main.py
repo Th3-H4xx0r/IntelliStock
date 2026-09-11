@@ -64,6 +64,9 @@ from auth_utils import (
 )
 from strategies_meta import get_available_strategies
 from stock_credential_boundary import StockCredentialError
+# Module level so it is monkeypatchable, and because it imports nothing heavier
+# than live_readiness -- the Docker import is inside the call.
+from deployed_artifact import deployed_artifact_digest
 from interactive_utils import (
     get_conn,
     InstanceExistsError,
@@ -2355,6 +2358,153 @@ def api_clear_instance_state(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+class ReadinessWaiverBody(BaseModel):
+    # Must equal f"WAIVE LIVE GATE {instance_id}" exactly. The instance id is
+    # inside the phrase so a body copy-pasted between terminals cannot waive
+    # the gate on the wrong instance.
+    confirm: str = Field(..., max_length=256)
+    # The audit record. Short enough to type, long enough that "ok" is not a
+    # justification for starting a real-money broker.
+    reason: str = Field(..., max_length=2000)
+
+
+READINESS_WAIVER_MIN_REASON = 20
+
+
+@app.post("/instances/{instance_id}/readiness-waiver", response_class=JSONResponse)
+def api_readiness_waiver(
+    instance_id: str,
+    body: ReadinessWaiverBody,
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(require_admin),
+):
+    """Record an operator's decision to start live without the earned gate.
+
+    ``instance.py:_assert_live_broker_start_allowed`` refuses to spawn a
+    funded broker without a fingerprinted, artifact-bound readiness report
+    with all six checks passed. There is deliberately no API writer for that
+    report -- it is meant to be earned, not asserted.
+
+    The operator can still decide to accept the risk, and when they do the
+    realistic alternative is a hand-written JSON blob poked into the row a
+    real-money launcher reads. This route is that same decision made
+    auditable: it names the instance in a typed phrase, computes the artifact
+    hash server-side so the waiver binds to the image on the host *now* and
+    expires the moment a new one is deployed, stamps who waived it and when,
+    and pages. Every check's reason begins "OPERATOR WAIVED" so nothing that
+    later reads this report can mistake it for evidence.
+
+    It does NOT go through ``assert_readiness_transition_allowed``: that
+    ladder exists to stop promotion skipping states on evidence, and a waiver
+    is by definition the operator overriding it. The state written is
+    LIVE_ELIGIBLE, the lowest state ``assert_live_start_allowed`` accepts --
+    LIVE_RUNNING still requires the separate explicit activation.
+    """
+    import hashlib
+    import live_alerts
+    from datetime import datetime, timezone
+    from intellistock_logger import intellistock_logger
+    from live_readiness import (LiveReadinessError, ReadinessCheck,
+                                ReadinessReport, ReadinessState,
+                                report_fingerprint, report_from_mapping,
+                                required_live_checks)
+
+    instance_id = str(instance_id)
+    if body.confirm != f"WAIVE LIVE GATE {instance_id}":
+        raise HTTPException(
+            status_code=400,
+            detail=(f"readiness waiver requires confirm == "
+                    f"'WAIVE LIVE GATE {instance_id}' exactly"),
+        )
+    reason = (body.reason or "").strip()
+    if len(reason) < READINESS_WAIVER_MIN_REASON:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"readiness waiver requires a reason of at least "
+                    f"{READINESS_WAIVER_MIN_REASON} characters"),
+        )
+
+    instance = db_store.get("Instances", instance_id)
+    if not isinstance(instance, dict) or instance.get("id") != instance_id:
+        raise HTTPException(status_code=404,
+                            detail=f"Instance not found: {instance_id}")
+
+    # Server-side, never from the caller: a client-supplied hash would let a
+    # waiver signed today authorize an image built tomorrow. No digest, no
+    # waiver -- a report with a guessed artifact_hash would be refused by the
+    # launcher anyway, and an unusable report on the row reads as an
+    # authorization it is not.
+    try:
+        artifact_hash = deployed_artifact_digest()
+    except LiveReadinessError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"deployed artifact identity is unavailable: {exc}")
+
+    waived_at = datetime.now(timezone.utc)
+    username = str(current_user.get("username") or current_user.get("id") or "?")
+    waiver_reason = (f"OPERATOR WAIVED {waived_at.date().isoformat()} "
+                     f"by {username}: {reason}")
+    evidence_hash = hashlib.sha256(waiver_reason.encode("utf-8")).hexdigest()
+    report = ReadinessReport(
+        instance_id=instance_id,
+        state=ReadinessState.LIVE_ELIGIBLE,
+        checks=tuple(
+            ReadinessCheck(name, True, waiver_reason, evidence_hash)
+            for name in required_live_checks()
+        ),
+        artifact_hash=artifact_hash,
+    )
+    fingerprint = report_fingerprint(report)
+    mapping = {
+        "instance_id": instance_id,
+        "state": report.state.value,
+        "checks": [
+            {"name": check.name, "passed": check.passed,
+             "reason": check.reason, "evidence_hash": check.evidence_hash}
+            for check in report.checks
+        ],
+        "artifact_hash": artifact_hash,
+        "fingerprint": fingerprint,
+    }
+    # Parse back what will be persisted before persisting it: this is the
+    # exact call instance.py makes, so a report that would not launch never
+    # reaches the row.
+    report_from_mapping(mapping, instance_id=instance_id, verify_fingerprint=True)
+
+    # store.update deep-merges, but every key report_from_mapping reads is
+    # written here and `checks` is an array (replaced, not merged), so no
+    # residue of a previous report can survive into the parsed result.
+    db_store.update("Instances", instance_id, {
+        "live_readiness_report": mapping,
+        "live_readiness_waived_at": waived_at.isoformat(),
+        "live_readiness_waived_by": username,
+    })
+
+    message = (f"LIVE READINESS GATE WAIVED for {instance_id} by {username} "
+               f"against artifact {artifact_hash[:12]}: {reason}")
+    intellistock_logger.log(message, "red", service="API")
+    try:
+        live_alerts.alert_strategy_error(
+            instance_id=instance_id, tag="readiness-waiver", message=message)
+    except Exception as exc:
+        # The waiver is already on the row; a dead Discord webhook must not
+        # turn it into a 500 the operator retries.
+        intellistock_logger.log(
+            f"readiness waiver alert failed: {type(exc).__name__}: {exc}",
+            "yellow", service="API")
+
+    return {
+        "instance_id": instance_id,
+        "waived": True,
+        "state": report.state.value,
+        "artifact_hash": artifact_hash,
+        "fingerprint": fingerprint,
+        "waived_at": waived_at.isoformat(),
+        "waived_by": username,
+    }
 
 
 # --- Config flags ---

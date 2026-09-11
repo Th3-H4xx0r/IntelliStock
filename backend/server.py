@@ -29,6 +29,7 @@ import socketio
 from waitress import serve
 from os import system
 from live_readiness import LiveReadinessError
+from deployed_artifact import deployed_artifact_digest, image_identity
 
 # Load .env from backend dir or project root so KEY/SECRET are available to spawned services
 BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -244,11 +245,10 @@ def is_funded_kalshi_live(instance_doc, brokerage_doc) -> bool:
     return environment.lower() in {"live", "prod"}
 
 
-def image_identity(image_obj):
-    value = getattr(image_obj, "id", "")
-    if type(value) is not str or not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
-        raise LiveReadinessError("Docker image identity is malformed")
-    return value.split(":", 1)[1]
+# image_identity/deployed_artifact_digest now live in deployed_artifact.py so
+# the API process can compute the deployed digest without importing this
+# supervisor (and without the launch-preflight side effects that come with it).
+# Re-exported: callers here, and the tests, still reach them through `server`.
 
 
 @dataclass(frozen=True)
@@ -265,9 +265,7 @@ def _preflight_instance_launch(instance_id, *, client=None):
     client = client or _get_docker_client()
     if client is None:
         raise LiveReadinessError("Docker client is unavailable")
-    image = os.environ.get('DOCKER_INSTANCE_IMAGE', 'intellistock-backend')
-    image_obj = client.images.get(image)
-    digest = image_identity(image_obj)
+    digest = deployed_artifact_digest(client=client)
     image_id = "sha256:" + digest
     instance, brokerage = _fresh_instance_docs(instance_id)
     if instance.get("id") != str(instance_id):
