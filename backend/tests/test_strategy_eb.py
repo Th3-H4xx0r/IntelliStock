@@ -32,8 +32,20 @@ from strategy_eb import (  # noqa: E402
 )
 
 
+#: The two-leg base configuration these tests are about: no trend machine, no
+#: remainder books, the 20/60 vol pair. It USED to be `DEFAULTS` verbatim —
+#: until 2026-09-11, when DEFAULTS was aligned to the shipped bil25 header so
+#: that a key a document omits resolves to the strategy that actually SHIPS
+#: rather than to a different one. The contract below is still fully supported
+#: (an empty book is no book), so these tests simply ask for it by name.
+TWO_LEG = {"trend_filter_bars": 0, "trend_on_book": {}, "trend_off_book": {},
+           "risk_off_symbol": "", "core_off_damp": 1.0,
+           "vol_fast_bars": 20, "vol_slow_bars": 60}
+
+
 def cfg(**overrides):
     value = dict(DEFAULTS)
+    value.update(TWO_LEG)
     value["strategy_eb_enabled"] = True
     value.update(overrides)
     return value
@@ -140,23 +152,31 @@ def test_an_absurd_vol_window_fails_closed_rather_than_measuring_nothing():
 
 # ── the integer parser fails CLOSED ─────────────────────────────────────────
 
+#: What `_f/_i/_s` resolve an unusable value to: `DEFAULTS`, never the caller's
+#: config. Since 2026-09-11 DEFAULTS is the shipped bil25 header, so the slow
+#: vol window is 40 rather than the 60 these tests used to read.
+SLOW_BARS_DEFAULT = 40
+
+
 def test_the_int_parser_returns_the_default_for_a_non_finite_float():
     """strategy_x's `_i` raises OverflowError here: `int(inf)` is not caught by
     its (TypeError, ValueError, AttributeError). EB's owns the branch."""
     for junk in (float("inf"), float("-inf"), float("nan")):
-        assert _i(cfg(vol_slow_bars=junk), "vol_slow_bars") == 60, junk
+        assert _i(cfg(vol_slow_bars=junk),
+                  "vol_slow_bars") == SLOW_BARS_DEFAULT, junk
 
 
 def test_the_int_parser_returns_the_default_when_the_conversion_overflows():
     """A Decimal infinity reaches `int()` and raises OverflowError there —
     the branch a plain Python int can never trigger, since ints are unbounded."""
     value = decimal.Decimal("Infinity")
-    assert _i(cfg(vol_slow_bars=value), "vol_slow_bars") == 60
+    assert _i(cfg(vol_slow_bars=value), "vol_slow_bars") == SLOW_BARS_DEFAULT
 
 
 def test_the_int_parser_returns_the_default_for_unusable_values():
     for junk in (None, "", "sixty", object()):
-        assert _i(cfg(vol_slow_bars=junk), "vol_slow_bars") == 60, junk
+        assert _i(cfg(vol_slow_bars=junk),
+                  "vol_slow_bars") == SLOW_BARS_DEFAULT, junk
 
 
 def test_the_int_parser_resolves_a_missing_default_against_eb_defaults():
@@ -562,11 +582,15 @@ def test_a_damp_above_one_cannot_lever_up_the_state_it_de_risks():
                           cfg(**TREND, core_off_damp=3.0), "OFF") == 0.40
 
 
-def test_an_unusable_damp_falls_back_to_no_damping():
+def test_an_unusable_damp_falls_back_to_the_module_default():
+    """Which is 0.0 since 2026-09-11 — the shipped champion leaves the levered
+    fund entirely while risk-off. An unusable value therefore de-risks MORE
+    than the caller asked for, never less, which is the safe direction for a
+    parser guarding a 3x position."""
     for junk in (None, "", "half", float("nan")):
         assert eb_core_weight(alternating(0.01),
                               cfg(**TREND, core_off_damp=junk),
-                              "OFF") == 0.40, junk
+                              "OFF") == 0.0, junk
 
 
 # ── the universe carries the risk-off leg ───────────────────────────────────
@@ -656,11 +680,11 @@ ON_BOOK = {"trend_on_book": {"SMH": 0.5, "GLD": 0.5}}
 OFF_BOOK = {"trend_off_book": {"GDX": 0.5, "XLE": 0.5}}
 
 
-def test_both_books_are_empty_by_default():
+def test_an_unconfigured_book_is_no_book():
     assert eb_state_book(cfg(), "ON") == {}
     assert eb_state_book(cfg(), "OFF") == {}
-    assert DEFAULTS["trend_on_book"] == {}
-    assert DEFAULTS["trend_off_book"] == {}
+    assert TWO_LEG["trend_on_book"] == {}
+    assert TWO_LEG["trend_off_book"] == {}
 
 
 def test_a_book_uppercases_its_symbols_and_accumulates_duplicates():
@@ -936,8 +960,10 @@ def test_a_parsed_book_is_freshly_allocated_so_defaults_cannot_be_mutated():
     assert eb_state_book(cfg(**ON_BOOK), "ON") == {"SMH": 0.5, "GLD": 0.5}
     empty = eb_state_book(cfg(), "ON")
     empty["JUNK"] = 9.0
-    assert DEFAULTS["trend_on_book"] == {}
-    assert DEFAULTS["trend_off_book"] == {}
+    assert eb_state_book(cfg(), "ON") == {}
+    shipped = eb_state_book({"trend_on_book": DEFAULTS["trend_on_book"]}, "ON")
+    shipped["JUNK"] = 9.0
+    assert DEFAULTS["trend_on_book"] == {"GLD": 0.5, "GDX": 0.25, "XLE": 0.25}
 
 
 # ── VIX term-structure re-entry (2026-09-04, pre-registered) ────────────────

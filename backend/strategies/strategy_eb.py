@@ -21,6 +21,7 @@ from strategy_eb import (  # noqa: E402
     _f,
     _s,
     _state,
+    drain_config_fallbacks,
     eb_core_weight,
     eb_remainder_targets,
     eb_should_trade,
@@ -254,6 +255,18 @@ class StrategyEb:
             return {}
         session_id = observations[-1][0]
         closes = [close for _, close in observations]
+
+        # B1. Keys the document did not carry resolved to `strategy_eb.DEFAULTS`
+        # in silence, and DEFAULTS used to be a DIFFERENT strategy from the
+        # shipped header — no trend machine, empty books, a 20/60 vol pair. The
+        # two are now pinned equal by a test, so a fallback is harmless; report
+        # it anyway, once a session, because "harmless" is a property of today's
+        # DEFAULTS and not of the mechanism.
+        fell_back = drain_config_fallbacks()
+        if fell_back:
+            _log_once(cache, "config-fallback", session_id,
+                      f"StrategyEb {session_id} | config fallback to module "
+                      f"DEFAULTS for: {', '.join(fell_back)}", "yellow")
 
         # THE STATE MACHINE IS EVALUATED ON DECISION SESSIONS ONLY. The replay
         # updates it on the rebalance weekday and holds it in between; running

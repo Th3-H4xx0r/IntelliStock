@@ -36,10 +36,8 @@ books both GLD .5 GDX .25 XLE .25) returned +233.8% vs SPY-TR +77.1%, maxDD
 -27.5%, all three bears >= 0 — and FAILED the frozen section-11 gate on G5,
 474%/yr turnover against a 400% bound. 95% rolling-12m is unreachable here
 (three walls, measured). The margin is a gold/energy era bet: 2010-2021 the
-same construction LOSES to SPY. Module DEFAULTS stay off (empty book ==
-the legacy two-leg remainder, and the tests pin that contract); the SHIPPED
-config in the wrapper's INTELLISTOCK_SCHEMA is the bil25 variant adopted
-2026-08-31: champion books scaled so 25% of the risk-off remainder falls
+same construction LOSES to SPY. The SHIPPED config in the wrapper's
+INTELLISTOCK_SCHEMA is the bil25 variant adopted 2026-08-31: champion books scaled so 25% of the risk-off remainder falls
 through to BIL (trend_off_book GLD .375 GDX .1875 XLE .1875,
 risk_off_symbol BIL). Engine card: +197.8% vs SPY-TR +77.1%, maxDD -21.1%
 vs SPY's -24.7% — the champion's own -27.5% tail was a concentrated gold
@@ -98,14 +96,6 @@ DEFAULTS = {
     "reference_symbol": "QQQ",
     "off_symbol": "SPY",
     "cash_symbol": "BIL",
-    # New buys wait for the same symbol's existing orders to resolve. Opt-in:
-    # enabling requires an authoritative pending-order reader, which a
-    # backtest gets from the emulator and live from the broker's own working-
-    # order book (backend/live_pending_orders.py, wired for the EB lane only
-    # by broker.py's _eb_live_portfolio_view). A lane with NO reader — a
-    # non-Alpaca adapter — refuses every buy while this is on, so leave it off
-    # there rather than run a strategy that can only sell.
-    "pending_buy_guard_enabled": False,
     # ── the transform ──
     # 0.20 annualised on the whole book. Raising it is the single most
     # dangerous edit in this file: exposure is linear in it.
@@ -119,8 +109,8 @@ DEFAULTS = {
     # grid plus the band below brings it to 207-299%/yr. FLOORING (never
     # rounding) means quantization can only ever hold LESS.
     "weight_step": 0.05,
-    "vol_fast_bars": 20,
-    "vol_slow_bars": 60,
+    "vol_fast_bars": 10,
+    "vol_slow_bars": 40,
     # 70 closes = 69 returns, enough for the 60-bar slow window. Below this the
     # strategy returns {} and logs red. A cold start must never lever up.
     "min_history_bars": 70,
@@ -144,14 +134,12 @@ DEFAULTS = {
     # a linear blend. With weight >= 0 and a SPY remainder, a 2022 above SPY's
     # own -18% is impossible by construction; this key is the honest answer.
     "remainder_bil_fraction": 0.0,
-    # ── the trend-conditioned remainder (ALL of it default-OFF) ──
+    # ── the trend-conditioned remainder ──
     # SMA length on the REFERENCE symbol's point-in-time closes. 0 is the
-    # feature switch, not a degenerate window: with it off every state read is
-    # ON, the occupant is `off_symbol`, the damp never applies and the risk-off
-    # leg is not even declared to the broker. The replay's grid found N=100 the
-    # only length that wins the 2025-11 chop window; 150 and 200 lose it
-    # outright.
-    "trend_filter_bars": 0,
+    # feature SWITCH, not a degenerate window: at 0 every state read is ON, the
+    # occupant is `off_symbol`, the damp never applies and the risk-off leg is
+    # not even declared to the broker. 25 is the shipped champion's length.
+    "trend_filter_bars": 25,
     # Hysteresis, and it is deliberately ASYMMETRIC. ON -> OFF when the
     # close is below SMA*(1 - enter); OFF -> ON only when it is above
     # SMA*(1 + exit).
@@ -160,23 +148,24 @@ DEFAULTS = {
     # Narrowing them is the single most dangerous edit in this block.
     "trend_off_enter_pct": 0.01,
     "trend_on_exit_pct": 0.02,
-    # Occupant of the whole remainder while the state is OFF. "" means the
-    # cash leg, which is the T-bill variant of the replay grid. Setting it to
-    # GLD is the entire measured margin of the trend feature AND its entire
-    # risk: across 46 risk-off episodes gold beat SPY in 23 — a coin flip whose
-    # mean is carried by one 2008 episode. Enabling this is a bet on a hedge
-    # with no statistically significant conditional edge.
-    "risk_off_symbol": "",
+    # Occupant of the whole remainder while the state is OFF, for whatever the
+    # OFF book's weights leave unspent. "" means the cash leg. BIL is the
+    # shipped bil25 choice: 25% of the risk-off remainder falls through to
+    # T-bills so de-risking never concentrates fully into the gold complex.
+    # Pointing it at GLD instead is a bet on a hedge with no statistically
+    # significant conditional edge — across 46 risk-off episodes gold beat SPY
+    # in 23, a coin flip whose mean is carried by one 2008 episode.
+    "risk_off_symbol": "BIL",
     # The core is multiplied by this while OFF, BEFORE the clamp and the 0.05
     # quantisation — the replay computes w = clip(tv/(k*rv) * damp, 0, cap), so
     # on a tape calm enough for the clamp to bind a 0.5 damp changes nothing.
     # 1.0 keeps the full core and only rotates the remainder; 0.0 leaves the
     # levered fund entirely. Over 2010-2021 cutting the core bought ZERO
     # drawdown protection (all variants hit -38.5%, set by a COVID crash too
-    # fast for a weekly SMA) and cost 4.6pp/yr of CAGR, which is why the
-    # default damps nothing.
-    "core_off_damp": 1.0,
-    # ── the remainder BOOKS (default-off: an empty book is no book) ──
+    # fast for a weekly SMA) and cost 4.6pp/yr of CAGR. 0.0 is the shipped
+    # champion's choice: while OFF the levered fund is left entirely.
+    "core_off_damp": 0.0,
+    # ── the remainder BOOKS (an EMPTY book is no book) ──
     # {SYMBOL: weight} the de-levered remainder is split across INSTEAD of the
     # single occupant, one book per state. Weights are shares of the remainder,
     # not of NAV: at a 0.40 core, {"SMH": 0.3, "GLD": 0.7} is 18% SMH and 42%
@@ -195,8 +184,8 @@ DEFAULTS = {
     # Set with `target_vol: 0` (or `core_max_weight: 0`) this is a PURE BOOK:
     # core weight 0, the book carries the whole NAV. That is the one config in
     # which the levered fund is absent by design rather than by refusal.
-    "trend_on_book": {},
-    "trend_off_book": {},
+    "trend_on_book": {"GLD": 0.5, "GDX": 0.25, "XLE": 0.25},
+    "trend_off_book": {"GLD": 0.375, "GDX": 0.1875, "XLE": 0.1875},
     # ── the cash sweep ──
     # `targets_to_orders` sizes buys off SETTLED cash and equity fills are
     # next-bar, so the tick that sells the core CANNOT also fund the remainder
@@ -253,6 +242,15 @@ DEFAULTS = {
     "live_soft_drawdown": 0.25,
     "live_hard_drawdown": 0.35,
     "live_kill_drawdown": 0.45,
+    # ── execution guard ──
+    # New buys wait for the same symbol's existing orders to resolve. Opt-in:
+    # enabling requires an authoritative pending-order reader, which a
+    # backtest gets from the emulator and live from the broker's own working-
+    # order book (backend/live_pending_orders.py, wired for the EB lane only
+    # by broker.py's _eb_live_portfolio_view). A lane with NO reader — a
+    # non-Alpaca adapter — refuses every buy while this is on, so leave it off
+    # there rather than run a strategy that can only sell.
+    "pending_buy_guard_enabled": False,
 }
 
 
@@ -262,7 +260,36 @@ DEFAULTS = {
 # against strategy_x's DEFAULTS, so any EB-only key without an explicit default
 # raises TypeError. Both fail OPEN, which is the wrong direction for a parser
 # guarding a levered position.
+#: Keys read off a config that did not carry them, since the last drain. A SET,
+#: so a caller reading the same missing key on all ~26 ticks of a session
+#: reports it once. Diagnostic only — nothing reads it to decide anything, and
+#: the module stays pure: the wrapper drains it and does the logging.
+_CONFIG_FALLBACKS = set()
+
+#: `None` is a legitimate config value, so absence needs its own sentinel.
+_MISSING = object()
+
+
+def drain_config_fallbacks() -> list:
+    """Key names that fell back to DEFAULTS since the last call, then clear.
+
+    Harmless now that DEFAULTS IS the shipped header — which is the point of
+    reporting it. It was not harmless before: a key the document did not carry
+    resolved to a different strategy entirely (no trend machine, a two-leg SPY
+    remainder, a 20/60 vol pair instead of 10/40), silently.
+    """
+    out = sorted(_CONFIG_FALLBACKS)
+    _CONFIG_FALLBACKS.clear()
+    return out
+
+
+def _note_fallback(cfg, key) -> None:
+    if (cfg or {}).get(key, _MISSING) is _MISSING:
+        _CONFIG_FALLBACKS.add(str(key))
+
+
 def _f(cfg, key, default=None):
+    _note_fallback(cfg, key)
     if default is None:
         default = DEFAULTS.get(key, 0.0)
     try:
@@ -276,6 +303,7 @@ def _f(cfg, key, default=None):
 
 
 def _i(cfg, key, default=None):
+    _note_fallback(cfg, key)
     if default is None:
         default = DEFAULTS.get(key, 0)
     try:
@@ -290,6 +318,7 @@ def _i(cfg, key, default=None):
 
 
 def _s(cfg, key, default=None):
+    _note_fallback(cfg, key)
     if default is None:
         default = DEFAULTS.get(key, "")
     value = (cfg or {}).get(key, default)

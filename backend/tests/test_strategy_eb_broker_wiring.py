@@ -35,9 +35,13 @@ def spec(**config):
 
 
 def test_the_declared_eb_universe_is_returned():
+    """The SHIPPED universe: since 2026-09-11 the module DEFAULTS are the
+    bil25 header, so the champion's GLD/GDX/XLE book legs are declared too —
+    which is the whole point of declaring a universe, since the operator's
+    watchlist never lists them."""
     ns = _extract("_strategy_eb_universe_symbols")
     syms = ns["_strategy_eb_universe_symbols"](spec(strategy_eb_enabled=True))
-    assert syms == ["QQQ", "TQQQ", "SPY", "BIL"]
+    assert syms == ["QQQ", "TQQQ", "SPY", "BIL", "GLD", "GDX", "XLE"]
 
 
 def test_the_qld_variant_is_returned_when_configured():

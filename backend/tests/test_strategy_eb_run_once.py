@@ -57,8 +57,20 @@ class FakeEmulator:
                                 for s, q in self._positions.items())
 
 
+#: The two-leg base configuration these tests are about: no trend machine, no
+#: remainder books, the 20/60 vol pair. It USED to be `DEFAULTS` verbatim —
+#: until 2026-09-11, when DEFAULTS was aligned to the shipped bil25 header so
+#: that a key a document omits resolves to the strategy that actually SHIPS
+#: rather than to a different one. The contract below is still fully supported
+#: (an empty book is no book), so these tests simply ask for it by name.
+TWO_LEG = {"trend_filter_bars": 0, "trend_on_book": {}, "trend_off_book": {},
+           "risk_off_symbol": "", "core_off_damp": 1.0,
+           "vol_fast_bars": 20, "vol_slow_bars": 60}
+
+
 def cfg(**overrides):
     value = dict(DEFAULTS)
+    value.update(TWO_LEG)
     value["strategy_eb_enabled"] = True
     value.update(overrides)
     return value
@@ -636,24 +648,40 @@ def book_data(ref_bars):
     return data_for(ref_bars, legs=BOOK_LEGS)
 
 
-def test_the_default_run_is_byte_identical_with_the_book_keys_removed():
-    """The differential: a default run with the two new keys deleted from the
-    config entirely must produce the SAME payload, cache and universe as one
-    carrying them. If it does not, the feature is not default-off."""
+def test_an_empty_book_is_still_exactly_the_two_leg_run():
+    """An EMPTY book is no book: the remainder goes to the single occupant the
+    state would have used on its own. This was the contract the module DEFAULTS
+    used to carry; since 2026-09-11 they carry the shipped champion instead, so
+    the contract is stated here rather than assumed."""
+    cache = {}
+    out = StrategyEb().run_once(["TQQQ"], PRICES, DECIDES, cfg(), {},
+                                data=data_for(alternating(0.01)),
+                                portfolio_emulator=FakeEmulator(),
+                                strategy_cache=cache)
+    assert cache["_strategy_eb_last"]["targets"] == {"TQQQ": 0.40, "SPY": 0.60}
+    assert out["_nexus_discovered"] == ["QQQ", "TQQQ", "SPY", "BIL"]
+
+
+def test_a_config_that_omits_the_book_keys_gets_the_module_defaults():
+    """The differential B1 is about: a key the document does not carry resolves
+    to `strategy_eb.DEFAULTS`, and DEFAULTS is the SHIPPED header. A stripped
+    config must therefore behave exactly like one spelling the shipped books
+    out — not like some third strategy nobody ever measured."""
     stripped = cfg()
-    stripped.pop("trend_on_book")
-    stripped.pop("trend_off_book")
+    for key in ("trend_on_book", "trend_off_book"):
+        stripped.pop(key)
+    spelt_out = cfg(trend_on_book=DEFAULTS["trend_on_book"],
+                    trend_off_book=DEFAULTS["trend_off_book"])
     runs = []
-    for config in (cfg(), stripped):
+    for config in (stripped, spelt_out):
         cache = {}
-        out = StrategyEb().run_once(["TQQQ"], PRICES, DECIDES, config, {},
-                                    data=data_for(alternating(0.01)),
+        out = StrategyEb().run_once(["TQQQ"], BOOK_PRICES, DECIDES, config, {},
+                                    data=book_data(alternating(0.01)),
                                     portfolio_emulator=FakeEmulator(),
                                     strategy_cache=cache)
         runs.append((out, cache))
     assert runs[0][0] == runs[1][0]
     assert runs[0][1] == runs[1][1]
-    assert runs[0][0]["_nexus_discovered"] == ["QQQ", "TQQQ", "SPY", "BIL"]
 
 
 def test_a_static_blend_needs_no_state_machine_at_all():

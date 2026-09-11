@@ -240,10 +240,11 @@ def test_the_universe_reader_sees_conditions_too():
     """Same merge, same reason: a lane enabled in `conditions` would trade
     symbols the broker never fetched bars for."""
     ns = _extract("_strategy_eb_universe_symbols")
-    assert ns["_strategy_eb_universe_symbols"](
+    got = ns["_strategy_eb_universe_symbols"](
         [{"strategy": "strategy_eb",
           "conditions": {"strategy_eb_enabled": True, "core_symbol": "QLD"},
-          "config": {}}]) == ["QQQ", "QLD", "SPY", "BIL"]
+          "config": {}}])
+    assert got[:4] == ["QQQ", "QLD", "SPY", "BIL"]
 
 
 def test_the_fallback_to_the_module_defaults_names_its_reason():

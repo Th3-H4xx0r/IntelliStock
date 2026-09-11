@@ -86,7 +86,12 @@ def test_the_instance_payload_is_daily_and_not_running():
     assert payload["granularity"] == "86400"
     assert payload["strategy_id"] == 201
     assert payload["run_command"] is False
-    assert set(payload["stocks"]) == {"TQQQ", "SPY", "BIL", "QQQ"}
+    # DERIVED from DEFAULTS, which since 2026-09-11 IS the shipped bil25
+    # header — so the bootstrapped watchlist now carries the champion's
+    # GLD/GDX/XLE book legs. Before the alignment it did not, and a document
+    # created by this script traded three legs it had no bars for.
+    assert set(payload["stocks"]) == {"TQQQ", "SPY", "BIL", "QQQ",
+                                      "GLD", "GDX", "XLE"}
 
 
 def test_the_watchlist_is_derived_from_the_config_not_written_out_by_hand():
