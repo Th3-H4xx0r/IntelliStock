@@ -64,13 +64,13 @@ def test_auth_users_round_trip_through_the_module(store, monkeypatch):
 
     monkeypatch.setattr(auth_utils, "store", store)
     monkeypatch.setattr(auth_utils, "ensure_users_table", lambda conn=None: None)
-    doc = auth_utils.create_user(None, "Alice", "hunter2", role="admin")
+    doc = auth_utils.create_user(None, "Alice", "hunter2-long-enough")
     assert doc["username"] == "alice" and "password_hash" not in doc
     assert auth_utils.get_user_by_username(None, "ALICE")["id"] == doc["id"]
-    assert auth_utils.get_user_by_id(None, doc["id"])["role"] == "admin"
+    assert auth_utils.get_user_by_id(None, doc["id"])["password_hash"]
     assert [u["id"] for u in auth_utils.list_users(None)] == [doc["id"]]
     with pytest.raises(ValueError):
-        auth_utils.create_user(None, "alice", "hunter2")
+        auth_utils.create_user(None, "alice", "hunter2-long-enough")
     auth_utils.delete_user(None, doc["id"])
     with pytest.raises(ValueError):
         auth_utils.delete_user(None, doc["id"])

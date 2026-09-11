@@ -333,13 +333,14 @@ def ensure_db_and_tables(c=None):
         ensure_engine_control_table(c)
     except Exception as e:
         intellistock_logger.log("EngineControl setup failed: %s" % e, "yellow", service="SERVER")
-    # Users table and default admin (for API auth) - create table and index, then ensure default admin
+    # Users table (for API auth). No account is provisioned: an empty table
+    # opens the first-run bootstrap on POST /auth/users, so the first password
+    # is chosen by the operator and never lives in the deployment environment.
     try:
-        from auth_utils import ensure_users_table, ensure_default_admin
+        from auth_utils import ensure_users_table
         ensure_users_table(c)
-        ensure_default_admin(c)
     except Exception as e:
-        intellistock_logger.log("Auth setup (Users table / default admin) failed: %s" % e, "yellow", service="SERVER")
+        intellistock_logger.log("Auth setup (Users table) failed: %s" % e, "yellow", service="SERVER")
 
 
 ###########################
@@ -744,7 +745,8 @@ def stop_instance_container(instance_id):
 
 def _agent_container_env():
     """Env vars for the AI agent container (pass through from server env so agent can reach API and use LLM)."""
-    # Re-load .env so we have DEFAULT_ADMIN_* etc. when building agent env (e.g. server in Docker may not have had them at startup)
+    # Re-load .env so we have the agent's API credentials etc. when building
+    # agent env (e.g. server in Docker may not have had them at startup)
     load_dotenv(os.path.join(BACKEND_DIR, '.env'))
     load_dotenv(os.path.join(os.path.dirname(BACKEND_DIR), '.env'))
     rethink_host = os.environ.get('INSTANCE_RETHINKDB_HOST', RETHINKDB_HOST)
@@ -768,7 +770,7 @@ def _agent_container_env():
         # API_URL is handled above (converted to Docker service name), so don't copy from env
         'RETHINKDB_HOST', 'RETHINKDB_PORT',
         'AGENT_API_USERNAME', 'AGENT_API_PASSWORD',
-        'DEFAULT_ADMIN_USERNAME', 'DEFAULT_ADMIN_PASSWORD',
+        'INTELLISTOCK_API_USERNAME', 'INTELLISTOCK_API_PASSWORD',
         'AI_BACKTESTING_AGENT_MODEL', 'AI_BACKTESTING_AGENT_API_KEY', 'AI_BACKTESTING_AGENT_PROVIDER',
         'GEMINI_API_KEY', 'DEEPSEEK_API_KEY',
         'KEY', 'SECRET',
@@ -790,9 +792,11 @@ def _agent_container_env():
         if v is not None:
             env[k] = v
     env.update(_pg_container_env())
-    if not env.get('DEFAULT_ADMIN_USERNAME') and not env.get('AGENT_API_USERNAME'):
+    if not env.get('AGENT_API_USERNAME') and not env.get('INTELLISTOCK_API_USERNAME'):
         intellistock_logger.log(
-            "Agent container will miss credentials: set DEFAULT_ADMIN_USERNAME and DEFAULT_ADMIN_PASSWORD (or AGENT_API_*) in server env or .env",
+            "Agent container will miss credentials: set AGENT_API_USERNAME and AGENT_API_PASSWORD "
+            "(or INTELLISTOCK_API_USERNAME / INTELLISTOCK_API_PASSWORD) in server env or .env. "
+            "Both name an account created through the Users tab.",
             "yellow", service="SERVER",
         )
     return env

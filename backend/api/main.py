@@ -59,8 +59,9 @@ from auth_utils import (
     renewed_token_if_stale,
     user_doc_to_public,
     ensure_users_table,
-    ensure_default_admin,
+    count_users,
     set_onboarding_completed,
+    MIN_PASSWORD_LENGTH,
 )
 from strategies_meta import get_available_strategies
 from stock_credential_boundary import StockCredentialError
@@ -239,8 +240,14 @@ security = HTTPBearer(auto_error=True)
 
 
 @app.on_event("startup")
-def api_startup_ensure_default_admin():
-    """Ensure Users table exists and default admin user is created if not already present. Retries for DB readiness."""
+def api_startup_ensure_auth_tables():
+    """Ensure the Users table exists. Retries for DB readiness.
+
+    No account is created here. A deployment with an empty Users table opens
+    the first-run bootstrap on ``POST /auth/users`` instead, so the first
+    password is chosen by the operator at the login page and never lives in
+    the deployment environment.
+    """
     import time
     import logging
     log = logging.getLogger("uvicorn.error")
@@ -249,7 +256,6 @@ def api_startup_ensure_default_admin():
             conn = get_conn()
             try:
                 ensure_users_table(conn)
-                ensure_default_admin(conn)
                 # Chatbot conversations table — first per-user resource in this codebase.
                 try:
                     from chatbot.conversations import ensure_chatbot_tables
@@ -257,21 +263,19 @@ def api_startup_ensure_default_admin():
                 except Exception as ce:
                     log.warning("Chatbot table init failed: %s", ce)
                 if attempt > 1:
-                    log.info("Default admin setup succeeded on attempt %d", attempt)
+                    log.info("Auth table setup succeeded on attempt %d", attempt)
+                try:
+                    if count_users(conn) == 0:
+                        log.warning(
+                            "No user accounts exist. The login page will offer "
+                            "'Create the first account' until one is created.")
+                except Exception:
+                    pass
                 break
             finally:
                 conn.close()
-        except RuntimeError as cfg_err:
-            # Unrecoverable misconfiguration (e.g. missing/weak DEFAULT_ADMIN_PASSWORD).
-            # No point retrying — surface a clear message and stop.
-            log.error(
-                "Default admin setup failed due to misconfiguration: %s. "
-                "API will start but login is unavailable until this is fixed.",
-                cfg_err,
-            )
-            break
         except Exception as e:
-            log.warning("Default admin setup (attempt %d/5): %s", attempt, e)
+            log.warning("Auth table setup (attempt %d/5): %s", attempt, e)
             if attempt == 5:
                 break
             time.sleep(2)
@@ -415,7 +419,7 @@ def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     conn=Depends(conn_dependency),
 ) -> dict:
-    """Validate JWT and return current user dict (id, username, role). Raises 401 if invalid."""
+    """Validate JWT and return current user dict (id, username). Raises 401 if invalid."""
     token = credentials.credentials
     payload = decode_access_token(token)
     if not payload:
@@ -452,8 +456,43 @@ def get_current_user(
     return {
         "id": user.get("id"),
         "username": user.get("username"),
-        "role": user.get("role", "user"),
     }
+
+
+# Same scheme, but a missing Authorization header resolves to None instead of
+# refusing. Exactly one route uses it — see get_current_user_optional.
+security_optional = HTTPBearer(auto_error=False)
+
+
+def get_current_user_optional(
+    response: Response,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_optional),
+    conn=Depends(conn_dependency),
+) -> Optional[dict]:
+    """The signed-in user, or None when no credentials were presented at all.
+
+    A token that IS presented is still validated and still 401s when it is
+    bad: "optional" means the header may be absent, never that a forged one
+    is waved through. The only caller is the first-run bootstrap on
+    ``POST /auth/users``, which pairs the absent header with an empty Users
+    table.
+    """
+    if credentials is None:
+        return None
+    return get_current_user(response=response, credentials=credentials, conn=conn)
+
+
+def _no_users_exist(conn) -> bool:
+    """True only when the Users table is provably empty.
+
+    Fails closed. A database hiccup here would otherwise advertise the
+    bootstrap window on a deployment that has accounts, which is the one
+    mistake in this file that hands out an account to a stranger.
+    """
+    try:
+        return count_users(conn) == 0
+    except Exception:
+        return False
 
 
 def _build_llm_test_provider_config(body: "LlmConfigTestBody") -> dict[str, Any]:
@@ -914,14 +953,12 @@ class LoginBody(BaseModel):
 
 class CreateUserBody(BaseModel):
     username: str = Field(..., min_length=1)
-    password: str = Field(..., min_length=6)
-    role: str = Field(default="user", pattern="^(admin|user)$")
+    password: str = Field(..., min_length=MIN_PASSWORD_LENGTH)
     email: Optional[str] = None
 
 
 class UpdateUserBody(BaseModel):
-    password: Optional[str] = Field(None, min_length=6)
-    role: Optional[str] = Field(None, pattern="^(admin|user)$")
+    password: Optional[str] = Field(None, min_length=MIN_PASSWORD_LENGTH)
     email: Optional[str] = None
 
 
@@ -1236,8 +1273,8 @@ def api_signup(body: SignupBody, conn=Depends(conn_dependency)):
     if not verify_secret_auth_key(body.secret_auth_key):
         raise HTTPException(status_code=403, detail="Invalid signup key")
     try:
-        user = create_user(conn, body.username, body.password, role="user")
-        token = create_access_token(user["id"], user["username"], user["role"],
+        user = create_user(conn, body.username, body.password)
+        token = create_access_token(user["id"], user["username"],
                                     token_version_of(user))
         return {"access_token": token, "token_type": "bearer", "user": user}
     except ValueError as e:
@@ -1246,7 +1283,12 @@ def api_signup(body: SignupBody, conn=Depends(conn_dependency)):
 
 @app.post("/auth/login", response_class=JSONResponse)
 def api_login(body: LoginBody, request: Request = None, conn=Depends(conn_dependency)):
-    """Login with username/password. Returns JWT access_token. Creates default admin on first login if missing.
+    """Login with username/password. Returns JWT access_token.
+
+    On a deployment with no accounts at all the refusal carries
+    ``detail.code == "no_users"``, which is how the login page learns to offer
+    "Create the first account" -- it cannot call GET /auth/users to find out,
+    because that needs the session it is trying to obtain.
 
     Rate limited per username+client host (10 attempts / 15 minutes by
     default): the route accepted unlimited guesses, so a password was only as
@@ -1268,25 +1310,25 @@ def api_login(body: LoginBody, request: Request = None, conn=Depends(conn_depend
         )
     user = get_user_by_username(conn, username)
     if not user or not verify_password(body.password, user.get("password_hash", "")):
-        # If admin doesn't exist yet (e.g. startup ran before DB was ready), ensure default admin and retry
-        default_user = (os.environ.get("DEFAULT_ADMIN_USERNAME") or "").strip().lower()
-        if username == default_user and default_user:
-            ensure_users_table(conn)
-            ensure_default_admin(conn)
-            user = get_user_by_username(conn, username)
-            if user and verify_password(body.password, user.get("password_hash", "")):
-                clear_login_attempts(username, client_host)
-                user_public = user_doc_to_public(user)
-                token = create_access_token(user["id"], user["username"],
-                                            user.get("role", "user"),
-                                            token_version_of(user))
-                return {"access_token": token, "token_type": "bearer", "user": user_public}
+        if _no_users_exist(conn):
+            # A deployment with no accounts has no password to guess, so this
+            # is not a failed attempt and is not counted as one -- it is the
+            # login page asking whether to offer the first-run bootstrap. The
+            # answer is a structured detail so the client can branch on the
+            # code rather than on a message string.
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "code": "no_users",
+                    "message": "No accounts exist yet. Create the first account.",
+                },
+            )
         record_failed_login(username, client_host)
         raise HTTPException(status_code=401, detail="Invalid username or password")
     clear_login_attempts(username, client_host)
     user_public = user_doc_to_public(user)
     token = create_access_token(user["id"], user["username"],
-                                user.get("role", "user"), token_version_of(user))
+                                token_version_of(user))
     return {"access_token": token, "token_type": "bearer", "user": user_public}
 
 
@@ -1313,14 +1355,39 @@ def api_list_auth_users(
 def api_create_auth_user(
     body: CreateUserBody,
     conn=Depends(conn_dependency),
-    current_user: dict = Depends(get_current_user),
+    current_user: Optional[dict] = Depends(get_current_user_optional),
 ):
-    """Create a new user. Any authenticated user."""
+    """Create a new user. Any authenticated user -- or, on an empty
+    deployment, nobody at all.
+
+    This is the only route with a conditional refusal, and the condition is
+    narrow: no Authorization header AND a Users table with zero rows. That
+    pair is the first-run bootstrap, the one moment when requiring a session
+    would mean no session could ever be created. The instant one row exists
+    the exception is closed, which is why every deployment that already has
+    users is unaffected by it.
+    """
+    import logging
+
+    bootstrap = current_user is None
+    # Checked twice on purpose: once to refuse early, and once immediately
+    # before the insert so a concurrent first signup narrows the window to
+    # the width of a single create_user call.
+    if bootstrap and not _no_users_exist(conn):
+        raise HTTPException(status_code=401, detail="Not authenticated")
     try:
-        user = create_user(conn, body.username, body.password, role=body.role, email=body.email)
-        return user
+        if bootstrap and not _no_users_exist(conn):
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        user = create_user(conn, body.username, body.password, email=body.email)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        message = str(e)
+        status = 409 if "already exists" in message.lower() else 400
+        raise HTTPException(status_code=status, detail=message)
+    if bootstrap:
+        logging.getLogger("uvicorn.error").info(
+            "First account created through the bootstrap route: %s",
+            user.get("username"))
+    return user
 
 
 @app.get("/auth/users/{user_id}", response_class=JSONResponse)
@@ -1343,7 +1410,7 @@ def api_update_auth_user(
     conn=Depends(conn_dependency),
     current_user: dict = Depends(get_current_user),
 ):
-    """Update a user's password, email or role. Any authenticated user.
+    """Update a user's password or email. Any authenticated user.
 
     This deployment has one class of user, so user administration is not a
     separate privilege (operator decision 2026-09-11). A password change still
@@ -1352,7 +1419,7 @@ def api_update_auth_user(
     own, when they change their own.
     """
     try:
-        user = update_user(conn, user_id, password=body.password, role=body.role, email=body.email)
+        user = update_user(conn, user_id, password=body.password, email=body.email)
         return user
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1366,12 +1433,17 @@ def api_delete_auth_user(
 ):
     """Delete a user. Any authenticated user.
 
-    Deleting yourself is still refused -- not as an authorization rule, but
-    because it is the one call that can leave a deployment with no account
-    able to log in.
+    Two refusals, neither of them an authorization rule: both exist because
+    this is the one call that can leave a deployment with no account able to
+    log in. You cannot delete yourself, and nobody can delete the last
+    remaining account -- the second guard is what catches the two-account
+    deployment that deletes one row and then reaches for the other.
     """
     if current_user.get("id") == user_id:
         raise HTTPException(status_code=400, detail="Cannot delete yourself")
+    if count_users(conn) <= 1:
+        raise HTTPException(status_code=400,
+                            detail="Cannot delete the last remaining user")
     try:
         delete_user(conn, user_id)
         return {"deleted": True, "id": user_id}

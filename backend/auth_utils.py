@@ -1,6 +1,11 @@
 """
 Auth utilities: user storage in Postgres, password hashing, JWT.
-Used by server.py (default admin) and api/main.py (auth endpoints + protection).
+Used by api/main.py (auth endpoints + protection) and server.py (table setup).
+
+There is one class of user (operator decision 2026-09-11). Nothing here reads
+a role to decide anything, nothing writes one, and no account is provisioned
+from the environment: the first account is created through the bootstrap path
+on ``POST /auth/users``, which is open exactly while ``count_users`` is zero.
 
 Every function keeps its leading ``conn`` parameter (R26): ~20 call sites and
 half a dozen test doubles pass one. It is accepted and ignored -- the store
@@ -68,6 +73,10 @@ def ensure_users_table(conn=None) -> None:
 # Bcrypt only uses the first 72 bytes. We always truncate so bcrypt never raises.
 BCRYPT_MAX_BYTES = 72
 
+# One rule, enforced twice: the API body rejects a short password with a 422
+# before the route runs, and this floor catches every other caller.
+MIN_PASSWORD_LENGTH = 8
+
 
 def _password_bytes(s: str) -> bytes:
     """Encode password to bytes, truncate to 72 bytes for bcrypt."""
@@ -128,17 +137,19 @@ def create_user(
     conn,
     username: str,
     password: str,
-    role: str = "user",
     email: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Insert a new user. Raises ValueError if username exists."""
+    """Insert a new user. Raises ValueError if username exists.
+
+    No role is written. Rows created before the tier was removed still carry
+    one; it is reported back like any other field and read by nothing.
+    """
     username = username.strip().lower()
     if not username:
         raise ValueError("Username required")
-    if not password or len(password) < 6:
-        raise ValueError("Password must be at least 6 characters")
-    if role not in ("admin", "user"):
-        raise ValueError("Role must be admin or user")
+    if not password or len(password) < MIN_PASSWORD_LENGTH:
+        raise ValueError(
+            f"Password must be at least {MIN_PASSWORD_LENGTH} characters")
     ensure_users_table(conn)
     existing = store.get_all(USERS_TABLE, username, index=USERNAME_INDEX)
     if existing:
@@ -149,7 +160,6 @@ def create_user(
         "id": user_id,
         "username": username,
         "password_hash": hash_password(password),
-        "role": role,
         "token_version": 0,
         "has_completed_onboarding": False,
         "created_at": now,
@@ -179,11 +189,21 @@ def list_users(conn) -> List[Dict]:
     return [user_doc_to_public(row) for row in rows if isinstance(row, dict)]
 
 
+def count_users(conn) -> int:
+    """How many accounts exist.
+
+    Two rules read this and both are about lockout, in opposite directions:
+    zero opens the first-run bootstrap on ``POST /auth/users``, and one
+    refuses the delete that would empty the table.
+    """
+    ensure_users_table(conn)
+    return int(store.count(USERS_TABLE))
+
+
 def update_user(
     conn,
     user_id: str,
     password: Optional[str] = None,
-    role: Optional[str] = None,
     email: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Update user. Returns public user dict. Raises ValueError if user not found."""
@@ -193,17 +213,14 @@ def update_user(
     now = datetime.utcnow().isoformat() + "Z"
     update = {"updated_at": now}
     if password is not None:
-        if len(password) < 6:
-            raise ValueError("Password must be at least 6 characters")
+        if len(password) < MIN_PASSWORD_LENGTH:
+            raise ValueError(
+                f"Password must be at least {MIN_PASSWORD_LENGTH} characters")
         update["password_hash"] = hash_password(password)
         # Revoke every token minted against the old password. A password is
         # changed precisely when the operator suspects it leaked; leaving the
         # sessions it authorised alive defeats the point.
         update["token_version"] = token_version_of(doc) + 1
-    if role is not None:
-        if role not in ("admin", "user"):
-            raise ValueError("Role must be admin or user")
-        update["role"] = role
     if email is not None:
         update["email"] = email.strip() if email else None
     store.update(USERS_TABLE, user_id, update)
@@ -332,7 +349,6 @@ def token_version_of(user: Optional[Dict]) -> int:
 def create_access_token(
     user_id: str,
     username: str,
-    role: str,
     token_version: int = 0,
 ) -> str:
     """Mint an access token.
@@ -354,7 +370,6 @@ def create_access_token(
     payload = {
         "sub": user_id,
         "username": username,
-        "role": role,
         "token_version": int(token_version or 0),
         "iat": now,
         "exp": now + timedelta(hours=hours),
@@ -402,59 +417,10 @@ def renewed_token_if_stale(payload: Dict[str, Any], now: Optional[datetime] = No
         return None
     sub = payload.get("sub")
     username = payload.get("username")
-    role = payload.get("role", "user")
     if not sub or not username:
         return None
     try:
         version = int(payload.get("token_version") or 0)
     except (TypeError, ValueError):
         version = 0
-    return create_access_token(str(sub), str(username), str(role), version)
-
-
-def _strip_env_quotes(s: str) -> str:
-    """Strip optional surrounding quotes from env value (load_dotenv can leave them)."""
-    if not s:
-        return s
-    s = s.strip()
-    if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
-        return s[1:-1].strip()
-    return s
-
-
-def ensure_default_admin(conn) -> None:
-    """
-    Create the default account from env (DEFAULT_ADMIN_USERNAME,
-    DEFAULT_ADMIN_PASSWORD) if that user does not exist. The name is
-    historical: there is no admin tier any more, this is simply the first
-    account, and without it nobody can log in at all.
-
-    SECURITY: We deliberately refuse to start with the legacy "changeme"
-    fallback when no account exists yet. The install scripts auto-generate
-    a strong DEFAULT_ADMIN_PASSWORD and write it to .env; running without
-    one is a deployment mistake we want to catch loudly, not paper over.
-    """
-    ensure_users_table(conn)
-    username = _strip_env_quotes(os.environ.get("DEFAULT_ADMIN_USERNAME", "") or "").strip().lower()
-    password = _strip_env_quotes(os.environ.get("DEFAULT_ADMIN_PASSWORD", "") or "")
-    if not username:
-        username = "admin"
-    existing = get_user_by_username(conn, username)
-    if existing is not None:
-        # First-boot provisioning only. The password env var is not consulted
-        # again: rotating it requires a real password-change flow, not a silent
-        # re-provision. The row's role is not touched either -- nothing reads
-        # it to decide anything since the admin tier was removed, so repairing
-        # it would be a write with no effect and a startup line that reads like
-        # a security event.
-        return
-    if not password or len(password) < 12:
-        # Bail loudly. install.sh / install.ps1 generate a 16-char random
-        # password and surface it to the operator at the end of the install
-        # run; if we got here without one, something is wrong.
-        raise RuntimeError(
-            "DEFAULT_ADMIN_PASSWORD must be set to a value >= 12 characters before first boot. "
-            "Re-run ./install.sh (or install.ps1) to auto-generate one, "
-            "or set it manually in .env and restart the backend."
-        )
-    create_user(conn, username, password, role="admin")
+    return create_access_token(str(sub), str(username), version)

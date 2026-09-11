@@ -2244,8 +2244,12 @@ def run_one_cycle(
 
 def main():
     api_url = _env("API_URL", "http://localhost:8011")
-    username = _env("AGENT_API_USERNAME") or _env("DEFAULT_ADMIN_USERNAME")
-    password = _env("AGENT_API_PASSWORD") or _env("DEFAULT_ADMIN_PASSWORD")
+    # Same resolution order as scripts/_api.py, minus the token: this client
+    # logs in, so it needs a username and a password. Both names point at an
+    # ordinary account created through the Users tab -- there is no
+    # environment-provisioned account any more.
+    username = _env("AGENT_API_USERNAME") or _env("INTELLISTOCK_API_USERNAME")
+    password = _env("AGENT_API_PASSWORD") or _env("INTELLISTOCK_API_PASSWORD")
     strategy_llm_config = _get_llm_config("strategy_generation")
     validation_llm_config = _get_llm_config("validation")
     best_selection_llm_config = _get_llm_config("best_selection")
@@ -2255,7 +2259,7 @@ def main():
     stock_pool = [s.strip().upper() for s in stock_pool_str.split(",") if s.strip()] if stock_pool_str else DEFAULT_STOCK_POOL
 
     if not username or not password:
-        _log("Set AGENT_API_USERNAME/AGENT_API_PASSWORD or DEFAULT_ADMIN_USERNAME/DEFAULT_ADMIN_PASSWORD", "red")
+        _log("Set AGENT_API_USERNAME/AGENT_API_PASSWORD or INTELLISTOCK_API_USERNAME/INTELLISTOCK_API_PASSWORD", "red")
         sys.exit(1)
     if not strategy_llm_config.get("api_key"):
         _log("Set API key for strategy generation: AI_BACKTESTING_STRATEGY_GENERATION_API_KEY, or GEMINI_API_KEY/DEEPSEEK_API_KEY/OPENAI_API_KEY/AZURE_OPENAI_API_KEY per provider", "yellow")
@@ -2269,9 +2273,8 @@ def main():
     if not client.login():
         _log("Cannot login to API (401 Unauthorized).", "red")
         _log("  - Ensure API_URL is correct and the API is running (e.g. http://localhost:8011).", "yellow")
-        _log("  - Start the API at least once so the default admin is created (startup creates it from DEFAULT_ADMIN_*).", "yellow")
-        _log("  - Or create a user via POST /auth/signup, then set AGENT_API_USERNAME and AGENT_API_PASSWORD to that user.", "yellow")
-        _log("  - Check .env: DEFAULT_ADMIN_USERNAME and DEFAULT_ADMIN_PASSWORD (no extra quotes).", "yellow")
+        _log("  - Create an account in the Users tab (or via POST /auth/users), then set AGENT_API_USERNAME and AGENT_API_PASSWORD to it.", "yellow")
+        _log("  - Check .env: AGENT_API_USERNAME / AGENT_API_PASSWORD, or INTELLISTOCK_API_USERNAME / INTELLISTOCK_API_PASSWORD (no extra quotes).", "yellow")
         sys.exit(1)
     # Clean up any AI-created instances left over from previous runs (e.g. crash/timeout)
     try:

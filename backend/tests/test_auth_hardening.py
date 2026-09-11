@@ -105,7 +105,8 @@ def test_login_returns_429_once_the_bucket_is_full(monkeypatch):
     from api import main
 
     monkeypatch.setattr(main, "get_user_by_username", lambda conn, u: None)
-    monkeypatch.setenv("DEFAULT_ADMIN_USERNAME", "someone-else")
+    # Users exist -- this is a wrong password, not an empty deployment.
+    monkeypatch.setattr(main, "count_users", lambda conn: 3)
     body = main.LoginBody(username="root", password="wrong-password")
 
     for _ in range(10):
@@ -122,7 +123,7 @@ def test_a_correct_password_still_works_from_a_different_host(monkeypatch):
     from api import main
     import auth_utils
 
-    user = {"id": "u1", "username": "root", "role": "admin", "password_hash": "h"}
+    user = {"id": "u1", "username": "root", "password_hash": "h"}
     monkeypatch.setattr(main, "get_user_by_username", lambda conn, u: user)
     monkeypatch.setattr(main, "verify_password", lambda p, h: p == "right")
     for i in range(10):
@@ -140,7 +141,7 @@ def test_default_token_lifetime_is_twenty_four_hours(monkeypatch):
     import auth_utils
     import jwt
 
-    token = auth_utils.create_access_token("u1", "root", "admin")
+    token = auth_utils.create_access_token("u1", "root")
     claims = jwt.decode(token, "test-signing-secret", algorithms=["HS256"])
     assert claims["exp"] - claims["iat"] == 24 * 3600
 
@@ -150,7 +151,7 @@ def test_env_still_overrides_the_lifetime(monkeypatch):
     import jwt
 
     monkeypatch.setenv("JWT_EXPIRE_HOURS", "72")
-    token = auth_utils.create_access_token("u1", "root", "admin")
+    token = auth_utils.create_access_token("u1", "root")
     claims = jwt.decode(token, "test-signing-secret", algorithms=["HS256"])
     assert claims["exp"] - claims["iat"] == 72 * 3600
 
@@ -162,7 +163,7 @@ def test_the_token_carries_the_users_token_version():
     import auth_utils
     import jwt
 
-    token = auth_utils.create_access_token("u1", "root", "admin", token_version=4)
+    token = auth_utils.create_access_token("u1", "root", token_version=4)
     claims = jwt.decode(token, "test-signing-secret", algorithms=["HS256"])
     assert claims["token_version"] == 4
 
@@ -172,7 +173,7 @@ def test_a_password_change_bumps_the_users_token_version(store, monkeypatch):
 
     monkeypatch.setattr(auth_utils, "store", store)
     monkeypatch.setattr(auth_utils, "ensure_users_table", lambda conn=None: None)
-    doc = auth_utils.create_user(None, "root", "hunter2", role="admin")
+    doc = auth_utils.create_user(None, "root", "hunter2-long-enough")
     assert auth_utils.get_user_by_id(None, doc["id"]).get("token_version", 0) == 0
 
     auth_utils.update_user(None, doc["id"], password="a-new-password")
@@ -187,7 +188,7 @@ def test_an_email_change_does_not_bump_the_token_version(store, monkeypatch):
 
     monkeypatch.setattr(auth_utils, "store", store)
     monkeypatch.setattr(auth_utils, "ensure_users_table", lambda conn=None: None)
-    doc = auth_utils.create_user(None, "root", "hunter2", role="admin")
+    doc = auth_utils.create_user(None, "root", "hunter2-long-enough")
     auth_utils.update_user(None, doc["id"], email="root@example.com")
     assert auth_utils.get_user_by_id(None, doc["id"]).get("token_version", 0) == 0
 
@@ -196,10 +197,10 @@ def test_a_stale_token_version_is_rejected_by_get_current_user(monkeypatch):
     from api import main
     import auth_utils
 
-    token = auth_utils.create_access_token("u1", "root", "admin", token_version=1)
+    token = auth_utils.create_access_token("u1", "root", token_version=1)
     monkeypatch.setattr(
         main, "get_user_by_id",
-        lambda conn, uid: {"id": "u1", "username": "root", "role": "admin",
+        lambda conn, uid: {"id": "u1", "username": "root",
                            "token_version": 2},
     )
 
@@ -220,10 +221,10 @@ def test_a_current_token_version_is_accepted(monkeypatch):
     from api import main
     import auth_utils
 
-    token = auth_utils.create_access_token("u1", "root", "admin", token_version=2)
+    token = auth_utils.create_access_token("u1", "root", token_version=2)
     monkeypatch.setattr(
         main, "get_user_by_id",
-        lambda conn, uid: {"id": "u1", "username": "root", "role": "admin",
+        lambda conn, uid: {"id": "u1", "username": "root",
                            "token_version": 2},
     )
 
@@ -231,7 +232,7 @@ def test_a_current_token_version_is_accepted(monkeypatch):
         credentials = token
 
     got = main.get_current_user(response=_Response(), credentials=_Creds(), conn=None)
-    assert got["role"] == "admin"
+    assert got["id"] == "u1" and got["username"] == "root"
 
 
 def test_tokens_and_rows_from_before_this_change_still_match(monkeypatch):
@@ -242,14 +243,14 @@ def test_tokens_and_rows_from_before_this_change_still_match(monkeypatch):
     import jwt
 
     legacy = jwt.encode(
-        {"sub": "u1", "username": "root", "role": "admin",
+        {"sub": "u1", "username": "root",
          "iat": datetime.utcnow(),
          "exp": datetime.utcnow() + timedelta(hours=1)},
         "test-signing-secret", algorithm="HS256",
     )
     monkeypatch.setattr(
         main, "get_user_by_id",
-        lambda conn, uid: {"id": "u1", "username": "root", "role": "admin"},
+        lambda conn, uid: {"id": "u1", "username": "root"},
     )
 
     class _Creds:
@@ -263,7 +264,7 @@ def test_the_renewed_token_keeps_the_token_version():
     import auth_utils
     import jwt
 
-    old = auth_utils.create_access_token("u1", "root", "admin", token_version=3)
+    old = auth_utils.create_access_token("u1", "root", token_version=3)
     payload = jwt.decode(old, "test-signing-secret", algorithms=["HS256"])
     # Past half-life: 20 of the token's 24 hours have burned.
     past_half_life = datetime.utcfromtimestamp(payload["iat"] + 20 * 3600)
@@ -277,7 +278,7 @@ def test_login_mints_a_token_carrying_the_rows_token_version(monkeypatch):
     from api import main
     import jwt
 
-    user = {"id": "u1", "username": "root", "role": "admin",
+    user = {"id": "u1", "username": "root",
             "password_hash": "h", "token_version": 7}
     monkeypatch.setattr(main, "get_user_by_username", lambda conn, u: user)
     monkeypatch.setattr(main, "verify_password", lambda p, h: True)

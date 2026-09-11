@@ -30,7 +30,7 @@ def _decode(token: str) -> dict:
 
 
 def test_default_lifetime_is_30_days_and_has_iat():
-    token = auth_utils.create_access_token("u1", "alice", "user")
+    token = auth_utils.create_access_token("u1", "alice")
     payload = _decode(token)
     assert "iat" in payload and "exp" in payload
     lifetime_hours = (payload["exp"] - payload["iat"]) / 3600
@@ -39,7 +39,7 @@ def test_default_lifetime_is_30_days_and_has_iat():
 
 def test_lifetime_honors_env_override(monkeypatch):
     monkeypatch.setenv("JWT_EXPIRE_HOURS", "48")
-    payload = _decode(auth_utils.create_access_token("u1", "alice", "user"))
+    payload = _decode(auth_utils.create_access_token("u1", "alice"))
     assert 47 <= (payload["exp"] - payload["iat"]) / 3600 <= 49
 
 

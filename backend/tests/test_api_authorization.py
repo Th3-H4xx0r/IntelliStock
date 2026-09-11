@@ -3,8 +3,8 @@
 There used to be a second tier: ``require_admin``, on every route that could
 move money or change who may. The operator's decision (2026-09-11) is that
 this deployment has exactly one class of user -- everyone who can log in is
-the operator -- so the role tier is gone. A role column still exists and is
-still reported, but nothing reads it to decide anything.
+the operator -- so the role tier is gone, and with it the bootstrap account
+the environment used to provision on first boot.
 
 That makes authentication the *whole* model, which is why the inverse test
 below is the important one in this file: every non-GET route in the app must
@@ -12,9 +12,14 @@ refuse an unauthenticated caller with 401, and the only exceptions are the
 handful named in PUBLIC_ROUTES with a reason. A new mutating route that
 forgets ``current_user`` is a test failure, not a quiet hole.
 
-What did NOT change: a token is still validated on every request, a password
-change still revokes every token minted against the old one, and the
-DEFAULT_ADMIN_USERNAME account is still provisioned on first boot.
+``POST /auth/users`` is the one route whose refusal is conditional: with an
+empty Users table it is the first-run bootstrap and answers without a session.
+It still 401s to the invalid token this file sends, so it stays in the inverse
+test; the conditional half lives in test_users_api.py, which owns the empty
+table and the populated one.
+
+What did NOT change: a token is still validated on every request, and a
+password change still revokes every token minted against the old one.
 """
 from __future__ import annotations
 
@@ -80,6 +85,17 @@ def test_there_is_no_role_tier_left_to_gate_on():
     assert not hasattr(main, "require_admin")
 
 
+def test_there_is_no_environment_provisioned_account_left():
+    """The first account comes from the bootstrap route now. A surviving
+    ``ensure_default_admin`` would mean a password still lives in the
+    deployment environment."""
+    import auth_utils
+    from api import main
+
+    assert not hasattr(auth_utils, "ensure_default_admin")
+    assert not hasattr(main, "ensure_default_admin")
+
+
 # --- route wiring ---------------------------------------------------------
 
 
@@ -94,6 +110,15 @@ def test_put_auth_user_is_wired_to_the_authenticated_user_dependency():
     from api.main import get_current_user
 
     assert _guard_of("PUT", "/auth/users/{user_id}") is get_current_user
+
+
+def test_post_auth_users_is_the_one_route_with_an_optional_session():
+    """It is the bootstrap route. The optional dependency is what lets an
+    empty deployment create its first account; test_users_api.py proves the
+    exception closes once a row exists."""
+    from api.main import get_current_user_optional
+
+    assert _guard_of("POST", "/auth/users") is get_current_user_optional
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +163,7 @@ def anon(monkeypatch):
 
     main.app.dependency_overrides[main.conn_dependency] = lambda: None
     try:
-        # No context manager: startup would provision the default user.
+        # No context manager: startup would reach for a database.
         yield TestClient(main.app)
     finally:
         main.app.dependency_overrides.pop(main.conn_dependency, None)
@@ -188,9 +213,9 @@ def _put(monkeypatch, *, target, actor, **body_kwargs):
 
     calls = {}
 
-    def _fake_update(conn, user_id, password=None, role=None, email=None):
-        calls.update(user_id=user_id, password=password, role=role, email=email)
-        return {"id": user_id, "username": "target", "role": role or "user"}
+    def _fake_update(conn, user_id, password=None, email=None):
+        calls.update(user_id=user_id, password=password, email=email)
+        return {"id": user_id, "username": "target"}
 
     monkeypatch.setattr(main, "update_user", _fake_update)
     body = main.UpdateUserBody(**body_kwargs)
@@ -199,8 +224,8 @@ def _put(monkeypatch, *, target, actor, **body_kwargs):
     return res, calls
 
 
-ADMIN = {"id": "admin-1", "username": "root", "role": "admin"}
-BOB = {"id": "bob-1", "username": "bob", "role": "user"}
+ROOT = {"id": "root-1", "username": "root"}
+BOB = {"id": "bob-1", "username": "bob"}
 
 
 def test_a_user_may_change_their_own_password(monkeypatch):
@@ -216,14 +241,8 @@ def test_a_user_may_change_their_own_email(monkeypatch):
 def test_any_signed_in_user_may_change_another_users_password(monkeypatch):
     """Operator decision 2026-09-11: one class of user, so user administration
     is not a separate privilege."""
-    _res, calls = _put(monkeypatch, target="admin-1", actor=BOB, password="reset-password")
-    assert calls["user_id"] == "admin-1" and calls["password"] == "reset-password"
-
-
-def test_any_signed_in_user_may_change_a_role(monkeypatch):
-    """The role field is still writable; nothing reads it to decide anything."""
-    _res, calls = _put(monkeypatch, target="bob-1", actor=BOB, role="admin")
-    assert calls["role"] == "admin"
+    _res, calls = _put(monkeypatch, target="root-1", actor=BOB, password="reset-password")
+    assert calls["user_id"] == "root-1" and calls["password"] == "reset-password"
 
 
 def test_deleting_yourself_is_still_refused(monkeypatch):
@@ -231,6 +250,7 @@ def test_deleting_yourself_is_still_refused(monkeypatch):
     with no accounts at all."""
     from api import main
 
+    monkeypatch.setattr(main, "count_users", lambda conn: 5)
     monkeypatch.setattr(main, "delete_user", lambda conn, user_id: None)
     with pytest.raises(HTTPException) as ei:
         main.api_delete_auth_user(user_id="bob-1", conn=None, current_user=BOB)
@@ -241,10 +261,11 @@ def test_any_signed_in_user_may_delete_another_account(monkeypatch):
     from api import main
 
     seen = {}
+    monkeypatch.setattr(main, "count_users", lambda conn: 5)
     monkeypatch.setattr(main, "delete_user",
                         lambda conn, user_id: seen.update(user_id=user_id))
-    got = main.api_delete_auth_user(user_id="admin-1", conn=None, current_user=BOB)
-    assert got["deleted"] is True and seen["user_id"] == "admin-1"
+    got = main.api_delete_auth_user(user_id="root-1", conn=None, current_user=BOB)
+    assert got["deleted"] is True and seen["user_id"] == "root-1"
 
 
 def test_the_create_user_route_still_mints_a_user_for_any_signed_in_caller(monkeypatch):
@@ -252,32 +273,12 @@ def test_the_create_user_route_still_mints_a_user_for_any_signed_in_caller(monke
 
     monkeypatch.setattr(
         main, "create_user",
-        lambda conn, username, password, role="user", email=None: {
-            "id": "new", "username": username, "role": role},
+        lambda conn, username, password, email=None: {
+            "id": "new", "username": username},
     )
-    body = main.CreateUserBody(username="second-operator", password="hunter22", role="admin")
+    body = main.CreateUserBody(username="second-operator", password="hunter222")
     got = main.api_create_auth_user(body=body, conn=None, current_user=BOB)
-    assert got["role"] == "admin"
-
-
-# --- first boot provisions an account ------------------------------------
-
-
-def test_the_default_account_is_created_on_first_boot(store, monkeypatch):
-    """DEFAULT_ADMIN_USERNAME is now just the name of the first account, but
-    it still has to exist or nobody can log in at all."""
-    import auth_utils
-
-    monkeypatch.setattr(auth_utils, "store", store)
-    monkeypatch.setattr(auth_utils, "ensure_users_table", lambda conn=None: None)
-    monkeypatch.setenv("DEFAULT_ADMIN_USERNAME", "operator")
-    monkeypatch.setenv("DEFAULT_ADMIN_PASSWORD", "a-sufficiently-long-password")
-
-    auth_utils.ensure_default_admin(None)
-    row = auth_utils.get_user_by_username(None, "operator")
-    assert row is not None
-    assert auth_utils.verify_password("a-sufficiently-long-password",
-                                      row["password_hash"])
+    assert got["username"] == "second-operator"
 
 
 # ---------------------------------------------------------------------------
@@ -308,8 +309,6 @@ def live_api(store, monkeypatch):
 
     monkeypatch.setenv("JWT_SECRET", "test-signing-secret-for-the-round-trip")
     monkeypatch.delenv("JWT_EXPIRE_HOURS", raising=False)
-    monkeypatch.setenv("DEFAULT_ADMIN_USERNAME", OPERATOR)
-    monkeypatch.setenv("DEFAULT_ADMIN_PASSWORD", OPERATOR_PASSWORD)
     monkeypatch.setattr(auth_utils, "store", store)
     monkeypatch.setattr(auth_utils, "ensure_users_table", lambda conn=None: None)
     monkeypatch.setattr(main, "ensure_users_table", lambda conn=None: None)
@@ -332,9 +331,9 @@ def _login(client, username, password):
 
 def test_a_plain_user_can_log_in_and_use_a_mutating_route_end_to_end(live_api):
     """login -> token (with token_version) -> get_current_user -> the route.
-    The account is deliberately role 'user': the role decides nothing."""
+    There is one class of user, so this account is every account."""
     client, auth_utils = live_api
-    auth_utils.create_user(None, "bob", "bobs-long-password", role="user")
+    auth_utils.create_user(None, "bob", "bobs-long-password")
 
     res = _login(client, "bob", "bobs-long-password")
     assert res.status_code == 200, res.text
@@ -347,7 +346,7 @@ def test_a_plain_user_can_log_in_and_use_a_mutating_route_end_to_end(live_api):
 def test_a_password_change_kills_the_old_token_and_a_fresh_login_works(live_api):
     """The revocation, proven through the HTTP surface."""
     client, auth_utils = live_api
-    auth_utils.ensure_default_admin(None)
+    auth_utils.create_user(None, OPERATOR, OPERATOR_PASSWORD)
 
     old_token = _login(client, OPERATOR, OPERATOR_PASSWORD).json()["access_token"]
     old_auth = {"Authorization": f"Bearer {old_token}"}
@@ -372,70 +371,8 @@ def test_a_password_change_kills_the_old_token_and_a_fresh_login_works(live_api)
 
 def test_the_old_password_no_longer_logs_in(live_api):
     client, auth_utils = live_api
-    auth_utils.ensure_default_admin(None)
+    auth_utils.create_user(None, OPERATOR, OPERATOR_PASSWORD)
     row = auth_utils.get_user_by_username(None, OPERATOR)
     auth_utils.update_user(None, row["id"], password="an-even-longer-new-password")
 
     assert _login(client, OPERATOR, OPERATOR_PASSWORD).status_code == 401
-
-
-# --- ensure_default_admin leaves an existing account alone ----------------
-
-
-def test_ensure_default_admin_does_not_reset_an_existing_account(store, monkeypatch):
-    """It is first-boot provisioning, not a recurring reset: an account that
-    already exists keeps its password and its sessions."""
-    import auth_utils
-
-    monkeypatch.setattr(auth_utils, "store", store)
-    monkeypatch.setattr(auth_utils, "ensure_users_table", lambda conn=None: None)
-    monkeypatch.setenv("DEFAULT_ADMIN_USERNAME", OPERATOR)
-    monkeypatch.setenv("DEFAULT_ADMIN_PASSWORD", "a-completely-different-password")
-
-    auth_utils.create_user(None, OPERATOR, OPERATOR_PASSWORD, role="user")
-    before = auth_utils.get_user_by_username(None, OPERATOR)
-
-    auth_utils.ensure_default_admin(None)
-
-    after = auth_utils.get_user_by_username(None, OPERATOR)
-    assert after["password_hash"] == before["password_hash"]
-    assert auth_utils.token_version_of(after) == auth_utils.token_version_of(before)
-    assert auth_utils.verify_password(OPERATOR_PASSWORD, after["password_hash"])
-
-
-def test_ensure_default_admin_is_quiet_about_an_account_it_leaves_alone(
-    store, monkeypatch, capsys
-):
-    """Nothing about the role decides anything any more, so provisioning must
-    not print something that reads like a security event."""
-    import auth_utils
-
-    monkeypatch.setattr(auth_utils, "store", store)
-    monkeypatch.setattr(auth_utils, "ensure_users_table", lambda conn=None: None)
-    monkeypatch.setenv("DEFAULT_ADMIN_USERNAME", OPERATOR)
-    monkeypatch.setenv("DEFAULT_ADMIN_PASSWORD", OPERATOR_PASSWORD)
-    auth_utils.create_user(None, OPERATOR, OPERATOR_PASSWORD, role="user")
-    capsys.readouterr()
-
-    auth_utils.ensure_default_admin(None)
-
-    captured = capsys.readouterr()
-    printed = (captured.err + captured.out).lower()
-    for alarming in ("promot", "must be able to administer", "security"):
-        assert alarming not in printed, printed
-
-
-def test_a_second_account_is_never_touched(store, monkeypatch):
-    import auth_utils
-
-    monkeypatch.setattr(auth_utils, "store", store)
-    monkeypatch.setattr(auth_utils, "ensure_users_table", lambda conn=None: None)
-    monkeypatch.setenv("DEFAULT_ADMIN_USERNAME", OPERATOR)
-    monkeypatch.setenv("DEFAULT_ADMIN_PASSWORD", OPERATOR_PASSWORD)
-    auth_utils.create_user(None, OPERATOR, OPERATOR_PASSWORD, role="admin")
-    auth_utils.create_user(None, "bob", "bobs-long-password", role="user")
-    before = auth_utils.get_user_by_username(None, "bob")
-
-    auth_utils.ensure_default_admin(None)
-
-    assert auth_utils.get_user_by_username(None, "bob") == before
