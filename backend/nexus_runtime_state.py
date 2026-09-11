@@ -103,6 +103,56 @@ class WALStore:
         rows = store.run(WAL_TABLE)
         return [r for r in rows if r.get("state") not in terminal]
 
+    def list_filled_for_owner(
+        self,
+        instance_id: str,
+        account_id: str,
+        since_utc: Optional[str] = None,
+    ) -> list[dict]:
+        """Return the filled WAL rows owned by exactly this
+        (instance_id, account_id) pair, optionally filtered by
+        ``updated_at_utc >= since_utc``.
+
+        This replaces ``list_filled_for_prefix`` as the ownership signal for
+        the clean-room classifier. The prefix is the first 8 alphanumeric
+        characters of the instance id, so ``strategy-eb`` and
+        ``strategy-eb-lab`` share one -- prefix ownership let either instance
+        adopt the other's fills, and with them a position a human holds in the
+        other account.
+
+        Fail closed in three places: a blank owner owns nothing, a row missing
+        either field owns nothing, and a store-side error is not swallowed.
+        ``instance_id`` is a declared secondary index (db/schema.py), but the
+        row filter stays in Python for the same reason the prefix scan did --
+        ``filled_qty`` truthiness and the ``dry-`` exclusion have no faithful
+        SQL twin, and splitting the predicate across the two would change
+        which rows a partially-populated row falls into.
+        """
+        _assert_table_allowed(WAL_TABLE)
+        inst = str(instance_id or "").strip()
+        acct = str(account_id or "").strip()
+        if not inst or not acct:
+            return []
+        rows = store.run(store.filter(WAL_TABLE, {"instance_id": inst}))
+        out: list[dict] = []
+        for row in rows:
+            if str(row.get("instance_id") or "") != inst:
+                continue
+            if str(row.get("account_id") or "") != acct:
+                continue
+            if not row.get("filled_qty"):
+                continue
+            # Synthetic dry-run fills were never sent to a broker.
+            if str(row.get("broker_order_id") or "").startswith("dry-"):
+                continue
+            if since_utc is not None:
+                ts = row.get("updated_at_utc") or row.get("created_at_utc")
+                if ts is not None and ts < since_utc:
+                    continue
+            row.pop("id", None)
+            out.append(row)
+        return out
+
     def list_filled_for_prefix(
         self,
         cid_prefix: str,
@@ -115,10 +165,12 @@ class WALStore:
         Used by the broker-state classifier (broker_adapters/_classifier.py)
         to determine which broker positions are strategy-owned at boot.
 
-        WAL is globally-scoped (no instance_id field); the cid prefix is the
-        ONLY signal that distinguishes one live instance's fills from
-        another's. For instance_id="main", the prefix is "main-" — see
-        broker_adapters/_client_order_id.py for the exact format.
+        LEGACY ownership signal. The cid prefix is only the first 8
+        alphanumeric characters of the instance id, so sibling instances
+        collide on it; ``list_filled_for_owner`` is the signal that actually
+        distinguishes one live instance's fills from another's. This query
+        survives for rows written before ownership stamping and for callers
+        that have no account identity to match on.
 
         The scan stays a full-table read in Python, exactly as it was under
         RethinkDB: pushing the prefix into SQL would change which rows a row
