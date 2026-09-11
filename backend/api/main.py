@@ -50,7 +50,11 @@ from auth_utils import (
     delete_user,
     verify_password,
     verify_secret_auth_key,
+    clear_login_attempts,
     create_access_token,
+    login_is_rate_limited,
+    record_failed_login,
+    token_version_of,
     decode_access_token,
     renewed_token_if_stale,
     user_doc_to_public,
@@ -416,6 +420,16 @@ def get_current_user(
     user = get_user_by_id(conn, user_id)
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
+    # Revocation. The row's token_version is bumped on every password change,
+    # so a token minted against the old password stops authenticating the
+    # moment the operator rotates it. Missing on either side reads as 0, which
+    # is how tokens and rows that predate revocation keep matching.
+    try:
+        claimed_version = int(payload.get("token_version") or 0)
+    except (TypeError, ValueError):
+        claimed_version = 0
+    if claimed_version != token_version_of(user):
+        raise HTTPException(status_code=401, detail="Token has been revoked")
     # Sliding renewal: once the token passes half-life, hand back a fresh one via
     # a response header so active sessions never reach expiry. Best-effort — a
     # renewal hiccup must never break the request.
@@ -1194,16 +1208,35 @@ def api_signup(body: SignupBody, conn=Depends(conn_dependency)):
         raise HTTPException(status_code=403, detail="Invalid signup key")
     try:
         user = create_user(conn, body.username, body.password, role="user")
-        token = create_access_token(user["id"], user["username"], user["role"])
+        token = create_access_token(user["id"], user["username"], user["role"],
+                                    token_version_of(user))
         return {"access_token": token, "token_type": "bearer", "user": user}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.post("/auth/login", response_class=JSONResponse)
-def api_login(body: LoginBody, conn=Depends(conn_dependency)):
-    """Login with username/password. Returns JWT access_token. Creates default admin on first login if missing."""
+def api_login(body: LoginBody, request: Request = None, conn=Depends(conn_dependency)):
+    """Login with username/password. Returns JWT access_token. Creates default admin on first login if missing.
+
+    Rate limited per username+client host (10 attempts / 15 minutes by
+    default): the route accepted unlimited guesses, so a password was only as
+    strong as the time an attacker cared to spend. A correct password clears
+    the bucket, so a legitimate operator who mistypes is never locked out for
+    longer than it takes to type it right.
+    """
     username = (body.username or "").strip().lower()
+    client_host = "unknown"
+    try:
+        if request is not None and request.client is not None:
+            client_host = str(request.client.host or "unknown")
+    except Exception:
+        client_host = "unknown"
+    if login_is_rate_limited(username, client_host):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many login attempts. Try again in a few minutes.",
+        )
     user = get_user_by_username(conn, username)
     if not user or not verify_password(body.password, user.get("password_hash", "")):
         # If admin doesn't exist yet (e.g. startup ran before DB was ready), ensure default admin and retry
@@ -1213,12 +1246,18 @@ def api_login(body: LoginBody, conn=Depends(conn_dependency)):
             ensure_default_admin(conn)
             user = get_user_by_username(conn, username)
             if user and verify_password(body.password, user.get("password_hash", "")):
+                clear_login_attempts(username, client_host)
                 user_public = user_doc_to_public(user)
-                token = create_access_token(user["id"], user["username"], user.get("role", "user"))
+                token = create_access_token(user["id"], user["username"],
+                                            user.get("role", "user"),
+                                            token_version_of(user))
                 return {"access_token": token, "token_type": "bearer", "user": user_public}
+        record_failed_login(username, client_host)
         raise HTTPException(status_code=401, detail="Invalid username or password")
+    clear_login_attempts(username, client_host)
     user_public = user_doc_to_public(user)
-    token = create_access_token(user["id"], user["username"], user.get("role", "user"))
+    token = create_access_token(user["id"], user["username"],
+                                user.get("role", "user"), token_version_of(user))
     return {"access_token": token, "token_type": "bearer", "user": user_public}
 
 
