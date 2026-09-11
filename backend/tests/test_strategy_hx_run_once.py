@@ -187,3 +187,27 @@ def test_the_class_name_matches_what_the_broker_derives_from_the_id():
     exec(compile(ast.Module(body=[fn], type_ignores=[]), broker, "exec"), ns)
     assert ns["_strategy_name_to_module_and_class"]("strategy_hx") == (
         "strategy_hx", "StrategyHx")
+
+
+def test_the_sync_script_reproduces_the_header_byte_for_byte():
+    """The header is what the UI and /strategies/available read. Letting it
+    drift from DEFAULTS means an operator configures a key the strategy does
+    not have, or misses one it does."""
+    import json
+    import re
+    import subprocess
+
+    root = os.path.dirname(_backend)
+    script = os.path.join(root, "scripts", "strategy_hx_sync_schema.py")
+    assert os.path.exists(script)
+    path = os.path.join(_backend, "strategies", "strategy_hx.py")
+    before = open(path).read()
+    result = subprocess.run([sys.executable, script], cwd=root,
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    after = open(path).read()
+    assert after == before, "the committed header is not what DEFAULTS says"
+    schema = json.loads(re.search(r"# INTELLISTOCK_SCHEMA: (.*)",
+                                  after).group(1))
+    assert schema["config"] == DEFAULTS
+    assert schema["execution_position"] == 10
