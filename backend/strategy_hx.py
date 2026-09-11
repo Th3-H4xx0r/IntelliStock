@@ -66,11 +66,18 @@ DEFAULTS = {
     # `_DEAD_STRATEGY_CONFIG_KEYS` and warns on boot; that warning documents
     # the trap in the log rather than only in a comment.
     "max_single_position_pct": 0.95,
-    # THE key that works. `_instance_single_position_pct` reads exactly this
-    # name off any lane setting `honour_single_position_cap` and forwards it
-    # as BROKER_MAX_SINGLE_POSITION_PCT. Without it the 15% failsafe trims a
+    # THE key that works — on the BACKTEST path. engines/backtest_engine.py's
+    # `_instance_single_position_pct` reads exactly this name off ANY lane
+    # setting `honour_single_position_cap` and forwards it as
+    # BROKER_MAX_SINGLE_POSITION_PCT. Without it the 15% failsafe trims a
     # 65%-of-NAV core buy to $0.00 and holds whatever it had — BT102936, and
     # Strategy XS shipped inert the same way.
+    # LIVE is a DIFFERENT path with a narrower rule:
+    # `broker._strategy_eb_single_position_pct` honours the cap only for
+    # lanes named in `broker._LANE_ENABLE_FLAGS` (broker.py:4398), which
+    # today lists strategy_eb and outlier_sleeve and nothing else. Task 5
+    # registers strategy_hx there; until it does, live ticks keep the 15%
+    # failsafe and this key is honoured by the battery alone.
     "broker_max_single_position_pct": 0.95,
 }
 
@@ -113,17 +120,34 @@ def _i(cfg, key, default=None):
         return int(default)
 
 
+def _dict(cfg):
+    """Config as a mapping, or an empty one.
+
+    A non-dict cfg reaching `.get` raises AttributeError, and the broker's
+    universe collector catches Exception and returns [] — a strategy that
+    fetches no bars, prices no legs and trades nothing, silently. `_f` and
+    `_i` already swallow it in their except clauses; this is the same rule
+    for the paths that index cfg directly.
+    """
+    return cfg if isinstance(cfg, dict) else {}
+
+
 def _s(cfg, key, default=None):
     if default is None:
         default = DEFAULTS.get(key, "")
-    value = (cfg or {}).get(key, default)
-    return str(value if value is not None else default).strip().upper()
+    fallback = str(default if default is not None else "").strip().upper()
+    value = _dict(cfg).get(key, default)
+    out = str(value if value is not None else default).strip().upper()
+    # A blank symbol is not a symbol: `{"": 1.0}` is a whole book routed to a
+    # target no broker can fill. `_f` and `_i` already read "" as their
+    # default; this is the same rule for the one parser that did not.
+    return out or fallback
 
 
 _STATES = frozenset({"UNKNOWN", "BULL", "CHOP", "BEAR"})
 
 
-def _bars(cfg, key):
+def _bars(cfg, key, lo=1):
     """A window/counter length, read as its documented default when unusable.
 
     The parsers deliberately do not clamp ranges, so a 0 or a negative reaches
@@ -132,9 +156,18 @@ def _bars(cfg, key):
     sessions early on a 3x fund — and a corrupted `sma_bars` drags the history
     floor it feeds down with it. A non-positive length is not a shorter
     window, it is a MISSING one.
+
+    `lo` is the documented minimum for the windows that GATE THE BEAR EXIT,
+    where a small but perfectly legal value is the same failure wearing a
+    plausible number. `sma_bars=5` turns "five sessions above the 50-day
+    average" into "five up days": measured, a bear tape plus nine 0.3% up
+    days exits to BULL on day 7 with the close still 4.1% under the real
+    50-day. The minimums are sma_bars 20, exit_confirm_sessions 2,
+    fast_low_bars 5, chop_slope_bars 5, drawdown_bars 2. Below them the
+    number is a typo, and a typo reads as the default, never as itself.
     """
     n = _i(cfg, key)
-    if n > 0:
+    if n > 0 and n >= lo:
         return n
     fallback = _i({}, key)
     return fallback if fallback > 0 else 1
@@ -189,10 +222,10 @@ def _entered_bear(prices, cfg) -> bool:
     session after a confirmed exit, which cancels the 5-session hysteresis and
     turns the slow leg into a no-op.
     """
-    low_bars = max(2, _bars(cfg, "fast_low_bars"))
-    dd_bars = max(1, _bars(cfg, "drawdown_bars"))
+    low_bars = _bars(cfg, "fast_low_bars", 5)
+    dd_bars = _bars(cfg, "drawdown_bars", 2)
     dd_pct = _pct(cfg, "drawdown_pct", 0.0, 1.0)
-    sma_bars = max(2, _bars(cfg, "sma_bars"))
+    sma_bars = _bars(cfg, "sma_bars", 20)
     close = prices[-1]
 
     sma = _sma(prices, sma_bars)
@@ -222,15 +255,20 @@ def hx_state(closes, prev_state, confirm, cfg) -> tuple:
     while the fast leg is still firing stays in BEAR, and one that confirms
     onto a dead tape lands in CHOP. Returning BULL from here instead handed
     the full 3x core back for exactly one session before re-entering BEAR.
+
+    BULL is the narrow state: it needs a close above a RISING average. Flat
+    and falling both read CHOP, because the slope test is signed — see the
+    comment at the bottom of this function.
     """
     prices = _finite(closes)
     # Whichever consumer needs most history. Without the window terms a raised
     # `sma_bars` would compare a truncated average against itself, and a
     # shorter window on the same tape measures LESS risk — the one direction
     # this module must never fail in.
-    minimum = max(2, _bars(cfg, "min_history_bars"),
-                  _bars(cfg, "sma_bars") + _bars(cfg, "chop_slope_bars"),
-                  _bars(cfg, "fast_low_bars") + _bars(cfg, "drawdown_bars"))
+    minimum = max(
+        2, _bars(cfg, "min_history_bars"),
+        _bars(cfg, "sma_bars", 20) + _bars(cfg, "chop_slope_bars", 5),
+        _bars(cfg, "fast_low_bars", 5) + _bars(cfg, "drawdown_bars", 2))
     if prices is None or len(prices) < minimum:
         return "UNKNOWN", 0
 
@@ -243,14 +281,14 @@ def hx_state(closes, prev_state, confirm, cfg) -> tuple:
         count = 0
     count = max(0, count)
 
-    sma_bars = max(2, _bars(cfg, "sma_bars"))
+    sma_bars = _bars(cfg, "sma_bars", 20)
     sma = _sma(prices, sma_bars)
     if sma is None or not math.isfinite(sma) or sma <= 0:
         return "UNKNOWN", 0
     close = prices[-1]
 
     if state == "BEAR":
-        need = max(1, _bars(cfg, "exit_confirm_sessions"))
+        need = _bars(cfg, "exit_confirm_sessions", 2)
         # A persisted counter can never satisfy the exit on its own. One at
         # or above `need` is not a long wait, it is a corrupt row, and
         # clamping it to `need - 1` would still turn the five-session wait
@@ -265,16 +303,19 @@ def hx_state(closes, prev_state, confirm, cfg) -> tuple:
     if _entered_bear(prices, cfg):
         return "BEAR", 0
 
-    slope_bars = max(1, _bars(cfg, "chop_slope_bars"))
+    slope_bars = _bars(cfg, "chop_slope_bars", 5)
     prior_sma = _sma(prices[:-slope_bars], sma_bars)
-    # A dead tape closes AT its own average, never below it, so the slope
-    # clause is the only thing standing between a flat market and a full 3x
-    # core. Unmeasurable slope reads as flat: CHOP is the cheaper error.
-    flat = True
+    # SIGNED, not abs(). A dead tape closes AT its own average and never
+    # below it, so the slope clause is the only thing between a flat market
+    # and a full 3x core — but read through abs() a CRASHING average is
+    # "trending" too. A V off a 35% low closes above an average still falling
+    # 11% per 20 sessions, and that read the full core on a cold start. Only
+    # a RISING average earns it; an unmeasurable slope earns nothing.
+    trending_up = False
     if prior_sma is not None and prior_sma > 0:
-        flat = abs(sma / prior_sma - 1.0) < _pct(
+        trending_up = (sma / prior_sma - 1.0) > _pct(
             cfg, "chop_slope_pct", 0.0, 1.0)
-    if close < sma or flat:
+    if close < sma or not trending_up:
         return "CHOP", 0
     return "BULL", 0
 
@@ -284,7 +325,7 @@ def _eb_cfg(cfg):
     whole HX config works today because the names coincide, and would keep
     working silently after an HX rename — while the core quietly resized
     itself against strategy_eb's own DEFAULTS."""
-    return {key: (cfg or {}).get(key, DEFAULTS[key])
+    return {key: _dict(cfg).get(key, DEFAULTS[key])
             for key in _EB_WEIGHT_KEYS}
 
 
@@ -295,7 +336,7 @@ def _bear_book(cfg) -> dict:
     whichever leg iterated last, which is a different portfolio from the one
     the operator wrote. Any shortfall is the caller's to send to cash.
     """
-    raw = (cfg or {}).get("bear_book")
+    raw = _dict(cfg).get("bear_book")
     if not isinstance(raw, dict):
         return {}
     book: dict = {}
@@ -387,7 +428,7 @@ def strategy_hx_universe(cfg) -> list:
     """
     out = {_s(cfg, "reference_symbol"), _s(cfg, "core_symbol"),
            _s(cfg, "bull_remainder_symbol"), _s(cfg, "cash_symbol")}
-    raw = (cfg or {}).get("bear_book")
+    raw = _dict(cfg).get("bear_book")
     if isinstance(raw, dict):
         for sym in raw:
             out.add(str(sym or "").strip().upper())

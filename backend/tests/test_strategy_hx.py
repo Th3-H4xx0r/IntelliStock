@@ -427,3 +427,164 @@ def test_a_configured_chop_damp_survives_the_bound():
         "TQQQ": 0.09, "BIL": 0.91}
     assert hx_targets(wobbly(120), "CHOP", cfg(chop_core_damp=1.0)) == {
         "TQQQ": 0.45, "BIL": 0.55}
+
+
+def v_bottom(n=70, fall=30, depth=0.35, rec=14, back=0.30):
+    """A 35% crash over 30 sessions, then a sharp V off the low. The close
+    ends ABOVE the 50-session average while that average is still falling
+    hard — the one shape an unsigned slope test reads as a bull market."""
+    closes = rising(n)
+    top = closes[-1]
+    for i in range(1, fall + 1):
+        closes.append(top * (1.0 - depth * i / fall))
+    low = closes[-1]
+    for i in range(1, rec + 1):
+        closes.append(low * (1.0 + back * i / rec))
+    return closes
+
+
+def grind_below_rising_sma(n=120, rate=0.004, fall=16, depth=0.10,
+                           bounce=5, back=0.03):
+    """A 6.7% slide that puts the close UNDER a still-rising average, with a
+    small bounce so it is not a new 20-session low and the fall is under the
+    7% the drawdown rule needs."""
+    closes = rising(n, rate=rate)
+    top = closes[-1]
+    for i in range(1, fall + 1):
+        closes.append(top * (1.0 - depth * i / fall))
+    low = closes[-1]
+    for i in range(1, bounce + 1):
+        closes.append(low * (1.0 + back * i / bounce))
+    return closes
+
+
+def test_a_below_minimum_window_reads_as_its_documented_default():
+    """A small but legal-looking window is a typo, not a setting, and each
+    one resolves toward MORE exposure. The gated keys reject below their
+    documented minimum the way `_pct` rejects."""
+    from strategy_hx import _bars
+    for key, lo, default in (("sma_bars", 20, 50),
+                             ("exit_confirm_sessions", 2, 5),
+                             ("fast_low_bars", 5, 20),
+                             ("chop_slope_bars", 5, 20),
+                             ("drawdown_bars", 2, 10)):
+        assert _bars(cfg(**{key: lo - 1}), key, lo) == default, key
+        assert _bars(cfg(**{key: 1}), key, lo) == default, key
+        assert _bars(cfg(**{key: lo}), key, lo) == lo, key
+        assert _bars(cfg(**{key: lo + 7}), key, lo) == lo + 7, key
+
+
+def test_a_five_session_average_cannot_stand_in_for_the_fifty():
+    """The call site, not just the helper. `sma_bars=5` turns "five sessions
+    above the 50-day average" into "five up days": measured, this tape exits
+    to BULL on day 7 with the close still 4.1% UNDER the real 50-day."""
+    closes = crash()
+    state, confirm = "BEAR", 0
+    for _ in range(9):
+        closes.append(closes[-1] * 1.003)
+        state, confirm = hx_state(closes, state, confirm, cfg(sma_bars=5))
+    assert closes[-1] < sum(closes[-50:]) / 50.0
+    assert state == "BEAR", state
+
+
+def test_a_below_minimum_confirm_length_cannot_shorten_the_exit():
+    """`exit_confirm_sessions=1` is the same trap one key over: legal,
+    positive, and a one-session bear exit."""
+    closes = crash()
+    top = max(closes)
+    state, confirm = "BEAR", 0
+    for _ in range(4):
+        closes.append(top * 1.10)
+        state, confirm = hx_state(closes, state, confirm,
+                                  cfg(exit_confirm_sessions=1))
+    assert (state, confirm) == ("BEAR", 4)
+
+
+def test_a_falling_average_is_chop_even_with_the_close_above_it():
+    """The slope test is SIGNED. A 35% crash and a sharp V leaves the close
+    above a 50-session average that is still falling 11% per 20 sessions.
+    Read through `abs()` that is "trending", and a cold start hands it the
+    full 3x core; the honest reading is a damped book."""
+    closes = v_bottom()
+    sma = sum(closes[-50:]) / 50.0
+    prior_sma = sum(closes[:-20][-50:]) / 50.0
+    assert closes[-1] > sma          # above its own average
+    assert sma < prior_sma           # which is falling
+    assert hx_state(closes, "UNKNOWN", 0, cfg()) == ("CHOP", 0)
+
+
+def test_a_close_below_a_rising_average_is_chop_not_bull():
+    """Pins `close < sma or not rising`: drop the close test and this slide
+    under a still-rising average reads BULL and holds the full 3x core."""
+    closes = grind_below_rising_sma()
+    sma = sum(closes[-50:]) / 50.0
+    prior_sma = sum(closes[:-20][-50:]) / 50.0
+    assert closes[-1] < sma          # below its own average
+    assert sma > prior_sma           # which is rising
+    assert hx_state(closes, "BULL", 0, cfg()) == ("CHOP", 0)
+
+
+def test_a_close_equal_to_the_average_does_not_count_toward_the_exit():
+    """Pins the strict `>`. Fifty identical closes put the close exactly ON
+    its own 50-session average; `>=` would count that as a confirming
+    session and walk a dead tape out of BEAR in five ticks of nothing."""
+    assert hx_state([100.0] * 120, "BEAR", 0, cfg()) == ("BEAR", 0)
+
+
+def test_a_persisted_state_is_normalised_before_it_is_trusted():
+    """Pins `.strip().upper()`. A cache row that round-tripped through a
+    lower-casing serialiser is still a BEAR: read literally it falls through
+    to UNKNOWN, takes the entry path, finds no trigger on this tape and
+    silently re-risks."""
+    for junk in ("bear", " BEAR ", "Bear", "\tbear\n"):
+        assert hx_state([100.0] * 120, junk, 0, cfg()) == ("BEAR", 0), junk
+
+
+def test_a_blank_symbol_reads_as_its_documented_default():
+    """`_s` returned "" for a blank string, and an empty symbol is a target
+    no broker can fill — `{"": 1.0}` is a whole book routed to nowhere."""
+    from strategy_hx import _s
+    assert _s({"cash_symbol": ""}, "cash_symbol") == "BIL"
+    assert _s({"cash_symbol": "   "}, "cash_symbol") == "BIL"
+    assert _s({"cash_symbol": None}, "cash_symbol") == "BIL"
+    assert _s(None, "cash_symbol") == "BIL"
+    assert _s([1, 2], "cash_symbol") == "BIL"
+
+
+def test_a_non_dict_config_is_not_an_exception():
+    """`broker._strategy_hx_universe_symbols` catches Exception and returns
+    [], so an AttributeError here is a strategy that fetches no bars and
+    trades nothing — silently."""
+    for junk in ([1, 2], "QQQ", 7, None, set()):
+        assert strategy_hx_universe(junk) == ["BIL", "QQQ", "TQQQ"], junk
+
+
+def test_a_blank_cash_symbol_never_becomes_an_unfillable_target():
+    for state in ("UNKNOWN", "BULL", "CHOP", "BEAR"):
+        targets = hx_targets(wobbly(120), state, cfg(cash_symbol=""))
+        assert "" not in targets, (state, targets)
+
+
+def test_the_module_level_default_bear_book_is_never_mutated():
+    """`DEFAULTS` is module state shared by every instance in the process. A
+    normalisation that wrote through to it would re-weight every other
+    lane's book for the life of the container."""
+    import copy
+    before = copy.deepcopy(DEFAULTS["bear_book"])
+    for state in ("BEAR", "BULL", "CHOP", "UNKNOWN"):
+        hx_targets(wobbly(120), state, dict(DEFAULTS))
+    hx_targets(wobbly(120), "BEAR", cfg(bear_book={"PSQ": 0.9, "BIL": 0.9}))
+    assert DEFAULTS["bear_book"] == before
+
+
+def test_a_non_dict_config_reads_exactly_like_an_absent_one():
+    """`_bear_book` and `_eb_cfg` index cfg directly too, so the same guard
+    has to cover them. A junk config is not a broken strategy, it is an
+    unconfigured one: it must resolve to the documented defaults rather than
+    raise, because the broker catches the raise and trades nothing."""
+    closes = wobbly(120)
+    for junk in ([1, 2], "QQQ", 7, None, set()):
+        for state in ("UNKNOWN", "BULL", "CHOP", "BEAR"):
+            assert hx_targets(closes, state, junk) == hx_targets(
+                closes, state, {}), (junk, state)
+            assert "" not in hx_targets(closes, state, junk)
