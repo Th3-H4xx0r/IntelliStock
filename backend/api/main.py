@@ -2362,7 +2362,7 @@ def api_terminate_discover(conn=Depends(conn_dependency), current_user: dict = D
 
 
 @app.post("/config/start-broker", response_class=JSONResponse)
-def api_start_broker(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+def api_start_broker(conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
     return _run(action_start_broker, conn)
 
 
@@ -3199,7 +3199,7 @@ class MigrateCredentialsBody(BaseModel):
 def api_migrate_credentials(
     body: MigrateCredentialsBody,
     conn=Depends(conn_dependency),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_admin),
 ):
     """Encrypt legacy plaintext credential fields in place.
 
@@ -4157,7 +4157,7 @@ def api_nexus_config_get(instance_id: str, conn=Depends(conn_dependency), curren
 
 
 @app.patch("/nexus/config/{instance_id}", response_class=JSONResponse)
-def api_nexus_config_set(instance_id: str, body: NexusConfigUpdateBody, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+def api_nexus_config_set(instance_id: str, body: NexusConfigUpdateBody, conn=Depends(conn_dependency), current_user: dict = Depends(require_admin)):
     """Update nexus trend tracking and stock discovery configuration for an instance."""
     updates = {k: v for k, v in body.model_dump().items() if v is not None}
     if not updates:

@@ -54,6 +54,10 @@ ADMIN_ONLY_ROUTES = [
     ("POST", "/brokerages/{brokerage_id}/kalshi/backtests"),
     ("POST", "/auth/users"),
     ("DELETE", "/auth/users/{user_id}"),
+    # Round 2 (whole-branch review I3).
+    ("PATCH", "/nexus/config/{instance_id}"),
+    ("POST", "/config/start-broker"),
+    ("POST", "/admin/credentials/migrate"),
 ]
 
 # Read-only routes stay open to any authenticated user.
@@ -262,3 +266,256 @@ def test_create_user_route_is_admin_only_and_still_mints_admins_for_an_admin(mon
     body = main.CreateUserBody(username="second-admin", password="hunter22", role="admin")
     got = main.api_create_auth_user(body=body, conn=None, current_user=ADMIN)
     assert got["role"] == "admin"
+
+
+# ---------------------------------------------------------------------------
+# The inverse test (whole-branch review I3).
+#
+# Listing the routes that ARE gated can only ever prove what it lists. This
+# goes the other way: every non-GET route in the app must be either
+# require_admin-gated or named here with a reason. A new mutating route is a
+# test failure until someone decides which it is.
+#
+# Measured 2026-09-11: 104 mutating routes, 26 gated before this round, 29
+# after. The 75 below are NOT a clean bill of health -- several say
+# "candidate" and mean it. They are written down so the next round has a list
+# instead of a search.
+# ---------------------------------------------------------------------------
+
+NOT_ADMIN_GATED = {
+    # -- public by design -------------------------------------------------
+    ("POST", "/auth/login"):
+        "public: this IS the authentication, and it is rate limited",
+    ("POST", "/auth/signup"):
+        "public: gated by SECRET_AUTH_KEY, not by a session",
+
+    # -- self-service: the caller's own account or device ------------------
+    ("PUT", "/auth/users/{user_id}"):
+        "self-service password/email; role change and other users are admin-only in the body",
+    ("POST", "/onboarding/complete"):
+        "self-service: sets a flag on the calling user's own row",
+    ("POST", "/onboarding/reset"):
+        "self-service: clears a flag on the calling user's own row",
+    ("PUT", "/notification-preferences"):
+        "self-service: the calling user's own notification routing",
+    ("POST", "/push/devices"):
+        "self-service: registers the caller's own push token",
+    ("DELETE", "/push/devices/{token}"):
+        "self-service: removes the caller's own push token",
+    ("POST", "/notifications/test"):
+        "self-service: sends a test notification to the caller",
+
+    # -- the caller's own chatbot conversations ----------------------------
+    ("POST", "/chatbot/conversations"):
+        "self-service: conversations are scoped to the calling user",
+    ("PATCH", "/chatbot/conversations/{conv_id}"):
+        "self-service: scoped to the calling user's conversation",
+    ("DELETE", "/chatbot/conversations/{conv_id}"):
+        "self-service: scoped to the calling user's conversation",
+    ("POST", "/chatbot/conversations/{conv_id}/clear"):
+        "self-service: scoped to the calling user's conversation",
+    ("POST", "/chatbot/conversations/{conv_id}/turn"):
+        "self-service: scoped to the calling user's conversation",
+    ("POST", "/chatbot/conversations/{conv_id}/confirm-tool"):
+        "self-service: confirms a tool the caller's own turn proposed",
+    ("POST", "/chatbot/conversations/{conv_id}/mcp-confirm"):
+        "self-service: confirms a tool the caller's own turn proposed",
+
+    # -- not session-authenticated at all ----------------------------------
+    ("POST", "/llm/outputs"):
+        "loopback-only (_require_loopback): llm_utils posts to it in-process",
+    ("POST", "/chatbot/internal/mcp-tools-list"):
+        "authenticated by the MCP session token, not a user session",
+    ("POST", "/chatbot/internal/mcp-tool-call"):
+        "authenticated by the MCP session token, not a user session",
+
+    # -- POST that reads: a probe or a preview, writing nothing -----------
+    ("POST", "/llm/test"):
+        "read-only probe: tests an LLM config, persists nothing",
+    ("POST", "/bedrock/list-models"):
+        "read-only probe: lists a provider's catalog",
+    ("POST", "/ollama/list-models"):
+        "read-only probe: lists a provider's catalog",
+    ("POST", "/openrouter/list-models"):
+        "read-only probe: lists a provider's catalog",
+    ("POST", "/benzinga/test"):
+        "read-only probe: tests a news source, persists nothing",
+    ("POST", "/brokerages/test-alpaca"):
+        "read-only probe: validates credentials, persists nothing",
+    ("POST", "/brokerages/test-kalshi"):
+        "read-only probe: validates credentials, persists nothing",
+    ("POST", "/models/{model_id}/test-cli"):
+        "read-only probe: tests a CLI provider, persists nothing",
+    ("POST", "/strategies/{strategy_id}/config-change-preview"):
+        "read-only: computes the diff a PUT would make, writes nothing",
+
+    # -- CANDIDATES for admin gating: model + provider credentials ---------
+    ("POST", "/models"):
+        "candidate: stores an LLM provider API key; not gated this round",
+    ("PUT", "/models/{model_id}"):
+        "candidate: stores an LLM provider API key; not gated this round",
+    ("DELETE", "/models/{model_id}"):
+        "candidate: deletes a model any instance may be using; not gated this round",
+    ("POST", "/claude/login/start"):
+        "candidate: starts an interactive provider login; not gated this round",
+    ("POST", "/claude/login/{job_id}/submit"):
+        "candidate: submits a provider login code; not gated this round",
+    ("POST", "/claude/login/{job_id}/cancel"):
+        "candidate: cancels a provider login job; not gated this round",
+    ("POST", "/claude/logout"):
+        "candidate: drops the shared Claude CLI session; not gated this round",
+    ("POST", "/codex/install"):
+        "candidate: installs the Codex CLI on the host; not gated this round",
+    ("POST", "/codex/login/start"):
+        "candidate: starts an interactive provider login; not gated this round",
+    ("POST", "/codex/login/{job_id}/cancel"):
+        "candidate: cancels a provider login job; not gated this round",
+    ("POST", "/codex/logout"):
+        "candidate: drops the shared Codex CLI session; not gated this round",
+
+    # -- CANDIDATES for admin gating: backtests and the research agent -----
+    ("POST", "/backtests"):
+        "candidate: spends LLM budget on a backtest container; not gated this round",
+    ("POST", "/backtests/stop-all"):
+        "candidate: stops every running backtest; not gated this round",
+    ("DELETE", "/backtests/{backtest_id}"):
+        "candidate: deletes a backtest and its results; not gated this round",
+    ("POST", "/backtests/{backtest_id}/stop"):
+        "candidate: stops a running backtest; not gated this round",
+    ("POST", "/backtests/{backtest_id}/pause"):
+        "candidate: pauses a running backtest; not gated this round",
+    ("POST", "/backtests/{backtest_id}/resume"):
+        "candidate: resumes a backtest; not gated this round",
+    ("POST", "/backtest-evidence/matrices"):
+        "candidate: publishes an evidence matrix; not gated this round",
+    ("DELETE", "/kalshi/backtests/{backtest_id}"):
+        "candidate: deletes a Kalshi backtest; not gated this round",
+    ("POST", "/kalshi/backtests/{backtest_id}/stop"):
+        "candidate: stops a Kalshi backtest; not gated this round",
+    ("POST", "/agent/control"):
+        "candidate: starts/stops the research agent loop; not gated this round",
+    ("POST", "/agent/restart"):
+        "candidate: restarts the research agent; not gated this round",
+    ("POST", "/agent/best"):
+        "candidate: rewrites the agent's best-result record; not gated this round",
+    ("POST", "/agent/results"):
+        "candidate: appends to the agent's result set; not gated this round",
+    ("POST", "/agent/top5"):
+        "candidate: rewrites the agent's top-5 record; not gated this round",
+    ("POST", "/agent/cycle-log"):
+        "candidate: appends to the agent cycle log; not gated this round",
+    ("POST", "/agent/cycle-log/{log_id}/update"):
+        "candidate: updates an agent cycle log row; not gated this round",
+    ("POST", "/agent/increment-count"):
+        "candidate: bumps the agent's run counter; not gated this round",
+    ("POST", "/agent/resume-timer"):
+        "candidate: resumes the agent timer; not gated this round",
+    ("POST", "/agent/runs/{log_id}/force-stop"):
+        "candidate: force-stops an agent run; not gated this round",
+
+    # -- CANDIDATES for admin gating: Nexus, discovery, digests, learning --
+    ("POST", "/nexus/control"):
+        "candidate: starts/stops the Graph Nexus service; not gated this round",
+    ("POST", "/nexus/rebuild"):
+        "candidate: queues a destructive Nexus rebuild; not gated this round",
+    ("POST", "/nexus/delete-edges"):
+        "candidate: deletes graph edges; not gated this round",
+    ("POST", "/discover/control"):
+        "candidate: starts/stops stock discovery; not gated this round",
+    ("DELETE", "/discovered/{instance_id}/{ticker}"):
+        "candidate: drops a discovered ticker from an instance; not gated this round",
+    ("POST", "/config/terminate-discover"):
+        "candidate: kills the discovery process; not gated this round",
+    ("POST", "/config/terminate-price"):
+        "candidate: kills the price process; not gated this round",
+    ("POST", "/digest/control"):
+        "candidate: configures the scheduled digest; not gated this round",
+    ("POST", "/digest/send-now"):
+        "candidate: sends a digest to every configured channel; not gated this round",
+    ("POST", "/learning/control"):
+        "candidate: starts/stops the self-learning subsystem; not gated this round",
+    ("POST", "/learning/purge"):
+        "candidate: purges self-learning state; not gated this round",
+    ("POST", "/learning/approvals/{approval_id}"):
+        "candidate: approves or rejects a learned change; not gated this round",
+    ("POST", "/learning/findings/{finding_id}/status"):
+        "candidate: acknowledges a finding; not gated this round",
+    ("POST", "/tickers"):
+        "candidate: adds a globally tracked ticker; not gated this round",
+    ("DELETE", "/tickers/{symbol}"):
+        "candidate: removes a globally tracked ticker; not gated this round",
+    ("DELETE", "/trends/{trend_id}"):
+        "candidate: deletes a trend row; not gated this round",
+    ("POST", "/trends/{trend_id}/end"):
+        "candidate: ends a trend early; not gated this round",
+}
+
+
+def _mutating_routes():
+    """(method, path, guard) for every non-GET route in the app."""
+    from api import main
+
+    out = []
+    for route in main.app.routes:
+        methods = set(getattr(route, "methods", ()) or ())
+        for method in sorted(methods - {"GET", "HEAD", "OPTIONS"}):
+            endpoint = getattr(route, "endpoint", None)
+            guard = None
+            if endpoint is not None:
+                param = inspect.signature(endpoint).parameters.get("current_user")
+                guard = getattr(getattr(param, "default", None), "dependency", None)
+            out.append((method, route.path, guard))
+    return out
+
+
+def test_every_mutating_route_is_admin_gated_or_named_with_a_reason():
+    """The inverse of the allowlist above: nothing may be unclassified."""
+    from api.main import require_admin
+
+    unclassified = [
+        f"{m} {p}" for m, p, guard in _mutating_routes()
+        if guard is not require_admin and (m, p) not in NOT_ADMIN_GATED
+    ]
+    assert not unclassified, (
+        "these mutating routes are neither require_admin-gated nor listed in "
+        "NOT_ADMIN_GATED with a reason:\n  " + "\n  ".join(sorted(unclassified))
+    )
+
+
+def test_the_exemption_list_has_no_dead_entries():
+    """An entry that no longer names a live, ungated route is stale — it hides
+    the next route that needs classifying."""
+    from api.main import require_admin
+
+    live = {(m, p) for m, p, guard in _mutating_routes() if guard is not require_admin}
+    stale = sorted(NOT_ADMIN_GATED.keys() - live)
+    assert not stale, f"exemptions that are gated or gone: {stale}"
+
+
+def test_every_exemption_carries_a_real_reason():
+    thin = {k: v for k, v in NOT_ADMIN_GATED.items()
+            if not isinstance(v, str) or len(v.strip()) < 20}
+    assert not thin, f"exemptions without a usable reason: {sorted(thin)}"
+
+
+def test_the_three_routes_from_the_branch_review_are_now_gated():
+    """I3: a live instance's runtime config, the broker start, and the
+    credential migration were open to any authenticated user."""
+    from api.main import require_admin
+
+    for method, path in [
+        ("PATCH", "/nexus/config/{instance_id}"),
+        ("POST", "/config/start-broker"),
+        ("POST", "/admin/credentials/migrate"),
+    ]:
+        assert _guard_of(method, path) is require_admin, f"{method} {path}"
+
+
+def test_the_gated_and_exempt_sets_partition_every_mutating_route():
+    from api.main import require_admin
+
+    routes = _mutating_routes()
+    gated = [r for r in routes if r[2] is require_admin]
+    assert len(gated) + len(NOT_ADMIN_GATED) == len(routes)
+    # Sanity on the measurement in the comment above: this round added three.
+    assert len(gated) >= 29
