@@ -45,7 +45,7 @@ def patched(monkeypatch):
         lambda table, key, patch: seen.update(key=key, patch=dict(patch)))
     monkeypatch.setattr(iu.store, "get", lambda table, key: {"id": key})
 
-    main.app.dependency_overrides[main.require_admin] = lambda: ADMIN
+    main.app.dependency_overrides[main.get_current_user] = lambda: ADMIN
     main.app.dependency_overrides[main.conn_dependency] = lambda: None
     try:
         yield TestClient(main.app), seen

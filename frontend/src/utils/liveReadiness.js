@@ -4,7 +4,8 @@
  * `instance.py:_assert_live_broker_start_allowed` will not spawn a funded
  * broker without an artifact-bound readiness report on the instance row. The
  * operator can override that with POST /instances/{id}/readiness-waiver — an
- * audited, admin-only bypass — and these are the rules that route enforces,
+ * audited bypass, open to any signed-in user — and these are the rules that
+ * route enforces,
  * restated on the client so the UI can refuse a body the server would refuse
  * anyway, and for exactly the same reasons.
  *
