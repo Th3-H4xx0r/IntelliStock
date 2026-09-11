@@ -58,6 +58,12 @@ BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 broker_process = None  # single broker subprocess
 alpha_watchdog_process = None  # Task 6: out-of-process mark/equity watchdog
 
+# How long to wait for the watchdog sidecar to prove it survived its own
+# preflight before reporting it as started. Seconds.
+WATCHDOG_START_GRACE_SEC = float(
+    os.environ.get("ALPHA_WATCHDOG_START_GRACE_SEC", "3") or 3)
+WATCHDOG_START_POLL_SEC = 0.1
+
 
 def _stop_alpha_watchdog():
     global alpha_watchdog_process
@@ -70,6 +76,28 @@ def _stop_alpha_watchdog():
     alpha_watchdog_process = None
 
 
+def _decrypt_watchdog_credential(value):
+    """One stored BrokerageAccounts credential as plaintext, or None.
+
+    BrokerageAccounts credentials are Fernet-encrypted at rest and the sidecar
+    needs plaintext. On any decrypt failure this returns None so the caller
+    leaves the env unset and `watchdog_main` refuses with its own clear
+    message — ciphertext is never forwarded as if it were a credential.
+
+    Shared by `_watchdog_subprocess_env` (which forwards the credential) and
+    `_assert_watchdog_preflight` (which decides whether one is reachable). Two
+    copies of this fallback is exactly how the preflight came to be stricter
+    than the code it guards.
+    """
+    if not value:
+        return None
+    try:
+        from secret_store import decrypt
+        return decrypt(str(value)) or None
+    except Exception:
+        return None
+
+
 def _watchdog_subprocess_env(brokerage_doc):
     """Env for the watchdog subprocess when the per-instance doc flag enables
     it without deployment-scoped credentials. watchdog_main's own docstring
@@ -80,25 +108,14 @@ def _watchdog_subprocess_env(brokerage_doc):
     into this process's environment, never onto the command line."""
     env = os.environ.copy()
     doc = brokerage_doc if isinstance(brokerage_doc, dict) else {}
-    # BrokerageAccounts credentials are Fernet-encrypted at rest; the sidecar
-    # needs plaintext. Decrypt with the shared store (this container carries
-    # INTELLISTOCK_CRED_KEY). On any decrypt failure leave the env unset so
-    # watchdog_main refuses with its own clear message — never forward
-    # ciphertext as if it were a credential.
-    def _plain(value):
-        if not value:
-            return None
-        try:
-            from secret_store import decrypt
-            return decrypt(str(value)) or None
-        except Exception:
-            return None
+    # Decrypt with the shared store (this container carries
+    # INTELLISTOCK_CRED_KEY); see `_decrypt_watchdog_credential`.
     if not env.get("ALPACA_WATCHDOG_KEY"):
-        _k = _plain(doc.get("alpaca_key"))
+        _k = _decrypt_watchdog_credential(doc.get("alpaca_key"))
         if _k:
             env["ALPACA_WATCHDOG_KEY"] = _k
     if not env.get("ALPACA_WATCHDOG_SECRET"):
-        _s = _plain(doc.get("alpaca_secret"))
+        _s = _decrypt_watchdog_credential(doc.get("alpaca_secret"))
         if _s:
             env["ALPACA_WATCHDOG_SECRET"] = _s
     env.setdefault(
@@ -127,7 +144,16 @@ def _maybe_start_alpha_watchdog(instance_id_val, instance_doc=None,
     `alpha_watchdog_enabled: true` (2026-08-31: the order gate requires
     watchdog control-health for ALL new exposure, so a run_once paper
     instance without the sidecar can never buy — strategy-eb tick #1).
-    Default DISABLED. Restart-safe: any prior watchdog is stopped first."""
+    Default DISABLED. Restart-safe: any prior watchdog is stopped first.
+
+    Returns True only when the sidecar is still RUNNING after a short grace.
+    2026-09-11: Popen succeeding proved only that a process was created.
+    `watchdog_main` refuses in its own preflight and exits 2, so a funded
+    broker could run beside a sidecar that was already dead — and because the
+    unified order gate needs watchdog control-health for all new exposure,
+    that account is silently sell-only under a green "Started" log line.
+    start_broker's funded refusal only fires on a False return, so the grace
+    check is what makes that refusal reachable."""
     global alpha_watchdog_process
     _env_enabled = os.environ.get("ALPHA_MARK_WATCHDOG_ENABLED", "0") == "1"
     _doc_enabled = bool((instance_doc or {}).get("alpha_watchdog_enabled"))
@@ -143,6 +169,25 @@ def _maybe_start_alpha_watchdog(instance_id_val, instance_doc=None,
             env=_watchdog_subprocess_env(brokerage_doc))
         import atexit
         atexit.register(_stop_alpha_watchdog)
+        # The preflight failure this catches happens at the top of
+        # watchdog_main.main(), before any network call, so it is over long
+        # before the grace expires. A healthy sidecar costs this much boot
+        # latency once.
+        _deadline = time.time() + WATCHDOG_START_GRACE_SEC
+        while time.time() < _deadline:
+            if alpha_watchdog_process.poll() is not None:
+                break
+            time.sleep(WATCHDOG_START_POLL_SEC)
+        _rc = alpha_watchdog_process.poll()
+        if _rc is not None:
+            alpha_watchdog_process = None
+            intellistock_logger.log(
+                f"Alpha watchdog exited immediately (rc={_rc}) — treating it as "
+                "NOT started. Its own preflight names the cause on stderr "
+                "(scoped credentials / PG_DSN); without it the order gate "
+                "blocks all new exposure.",
+                "red", service="INSTANCE")
+            return False
         intellistock_logger.log(
             "Started alpha mark watchdog subprocess", "green", service="INSTANCE")
         return True
@@ -219,20 +264,45 @@ def _assert_clean_room_initial_value(instance_id, instance_doc) -> None:
     raise CleanRoomConfigError(message)
 
 
-def _assert_watchdog_preflight() -> None:
-    """Reject funded Alpaca startup before Popen if watchdog wiring is absent."""
+def _assert_watchdog_preflight(brokerage_doc=None) -> None:
+    """Reject funded Alpaca startup before Popen if watchdog wiring is absent.
+
+    The credential pair is satisfied by EITHER a deployment-scoped env var OR a
+    decryptable credential on the instance's own brokerage row — the same two
+    sources, in the same precedence, that `_watchdog_subprocess_env` actually
+    hands the sidecar.
+
+    2026-09-11. This asked os.environ alone, so `alpaca-main` refused to start
+    on a host that carried neither var:
+
+        funded Alpaca watchdog prerequisites are incomplete:
+        ALPACA_WATCHDOG_KEY,ALPACA_WATCHDOG_SECRET
+
+    while the brokerage row's encrypted credentials — which the sidecar would
+    have used, and which `watchdog_main`'s own docstring blesses for exactly
+    this case — sat one decrypt away. A preflight must not be stricter than the
+    code it guards: refusing a start that would have worked is not a safety
+    property, it is an outage with a confident message.
+
+    Still MANDATORY, because neither has a fallback anywhere: the enable flag
+    (without it `_maybe_start_alpha_watchdog` returns False and start_broker
+    terminates the funded broker) and RETHINKDB_HOST.
+    """
 
     if os.environ.get("ALPHA_MARK_WATCHDOG_ENABLED", "0") != "1":
         raise RuntimeError("funded Alpaca requires ALPHA_MARK_WATCHDOG_ENABLED=1")
+    doc = brokerage_doc if isinstance(brokerage_doc, dict) else {}
     missing = [
         name
-        for name in (
-            "ALPACA_WATCHDOG_KEY",
-            "ALPACA_WATCHDOG_SECRET",
-            "RETHINKDB_HOST",
+        for name, field in (
+            ("ALPACA_WATCHDOG_KEY", "alpaca_key"),
+            ("ALPACA_WATCHDOG_SECRET", "alpaca_secret"),
         )
         if not os.environ.get(name)
+        and not _decrypt_watchdog_credential(doc.get(field))
     ]
+    if not os.environ.get("RETHINKDB_HOST"):
+        missing.append("RETHINKDB_HOST")
     if missing:
         raise RuntimeError(
             "funded Alpaca watchdog prerequisites are incomplete: "
@@ -609,7 +679,7 @@ def start_broker(symbols):
     if _requires_live_gate:
         _assert_live_broker_start_allowed(instance_id, _instance_doc)
     if _funded_alpaca:
-        _assert_watchdog_preflight()
+        _assert_watchdog_preflight(_brokerage_doc)
     _assert_clean_room_initial_value(instance_id, _instance_doc)
     broker_env = os.environ.copy()
     broker_env.pop("INSTANCE_SOCKET_SUPERVISOR_TOKEN", None)

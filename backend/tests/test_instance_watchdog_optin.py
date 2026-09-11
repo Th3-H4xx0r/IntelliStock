@@ -16,13 +16,20 @@ if _backend not in sys.path:
     sys.path.insert(0, _backend)
 
 
+#: Shared by `_watchdog_subprocess_env` and `_assert_watchdog_preflight`, so it
+#: is always compiled into the extraction namespace — otherwise every caller of
+#: `_extract` would have to name it.
+_ALWAYS = ("_decrypt_watchdog_credential",)
+
+
 def _extract(*names):
     src = open(os.path.join(_backend, "instance.py")).read()
     tree = ast.parse(src)
     ns = {"os": os, "subprocess": None, "BACKEND_DIR": "/tmp",
           "alpha_watchdog_process": None}
+    wanted = set(names) | set(_ALWAYS)
     for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name in names:
+        if isinstance(node, ast.FunctionDef) and node.name in wanted:
             mod = ast.Module(body=[node], type_ignores=[])
             exec(compile(mod, "instance.py", "exec"), ns)
     return ns
@@ -100,3 +107,185 @@ def test_existing_pg_dsn_is_left_alone(monkeypatch):
     monkeypatch.setenv("PG_DSN", "host=real")
     env = ns["_watchdog_subprocess_env"]({})
     assert env["PG_DSN"] == "host=real"
+
+
+# ---------------------------------------------------------------------------
+# Funded-Alpaca preflight (2026-09-11)
+#
+# `alpaca-main` crashed at boot on
+#   "funded Alpaca watchdog prerequisites are incomplete:
+#    ALPACA_WATCHDOG_KEY,ALPACA_WATCHDOG_SECRET"
+# with the host carrying neither -- while `_watchdog_subprocess_env`, the code
+# this preflight exists to protect, already falls back to the brokerage row's
+# decrypted credentials. A preflight stricter than the code it guards refuses a
+# start that would have worked.
+# ---------------------------------------------------------------------------
+
+_FUNDED_DOC = {"alpaca_key": "fernK", "alpaca_secret": "fernS",
+               "alpaca_paper": False}
+
+
+def _preflight_env(monkeypatch):
+    monkeypatch.setenv("ALPHA_MARK_WATCHDOG_ENABLED", "1")
+    monkeypatch.setenv("RETHINKDB_HOST", "rethink")
+    monkeypatch.delenv("ALPACA_WATCHDOG_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_WATCHDOG_SECRET", raising=False)
+
+
+def test_preflight_passes_on_the_scoped_env_pair(monkeypatch):
+    ns = _extract("_assert_watchdog_preflight")
+    _preflight_env(monkeypatch)
+    monkeypatch.setenv("ALPACA_WATCHDOG_KEY", "scoped")
+    monkeypatch.setenv("ALPACA_WATCHDOG_SECRET", "scopedsec")
+    assert ns["_assert_watchdog_preflight"]({}) is None
+
+
+def test_preflight_passes_when_the_brokerage_row_decrypts(monkeypatch):
+    """The exact alpaca-main refusal: no env pair, a decryptable row."""
+    import secret_store
+    ns = _extract("_assert_watchdog_preflight")
+    _preflight_env(monkeypatch)
+    monkeypatch.setattr(secret_store, "decrypt",
+                        lambda v: {"fernK": "PKPLAIN", "fernS": "SECPLAIN"}[v])
+    assert ns["_assert_watchdog_preflight"](_FUNDED_DOC) is None
+
+
+def test_preflight_refuses_when_the_row_cannot_be_decrypted(monkeypatch):
+    import secret_store
+    ns = _extract("_assert_watchdog_preflight")
+    _preflight_env(monkeypatch)
+
+    def _boom(_v):
+        raise RuntimeError("no cred key")
+
+    monkeypatch.setattr(secret_store, "decrypt", _boom)
+    try:
+        ns["_assert_watchdog_preflight"](_FUNDED_DOC)
+    except RuntimeError as exc:
+        assert "ALPACA_WATCHDOG_KEY" in str(exc)
+        assert "ALPACA_WATCHDOG_SECRET" in str(exc)
+    else:
+        raise AssertionError("an undecryptable row must refuse the start")
+
+
+def test_preflight_refuses_on_a_missing_row(monkeypatch):
+    ns = _extract("_assert_watchdog_preflight")
+    _preflight_env(monkeypatch)
+    try:
+        ns["_assert_watchdog_preflight"](None)
+    except RuntimeError as exc:
+        assert "ALPACA_WATCHDOG_KEY" in str(exc)
+    else:
+        raise AssertionError("no credentials anywhere must refuse the start")
+
+
+def test_preflight_still_requires_the_enable_flag(monkeypatch):
+    import secret_store
+    ns = _extract("_assert_watchdog_preflight")
+    _preflight_env(monkeypatch)
+    monkeypatch.setenv("ALPHA_MARK_WATCHDOG_ENABLED", "0")
+    monkeypatch.setattr(secret_store, "decrypt",
+                        lambda v: {"fernK": "PKPLAIN", "fernS": "SECPLAIN"}[v])
+    try:
+        ns["_assert_watchdog_preflight"](_FUNDED_DOC)
+    except RuntimeError as exc:
+        assert "ALPHA_MARK_WATCHDOG_ENABLED=1" in str(exc)
+    else:
+        raise AssertionError("the enable flag is still mandatory")
+
+
+def test_preflight_still_requires_rethinkdb_host(monkeypatch):
+    import secret_store
+    ns = _extract("_assert_watchdog_preflight")
+    _preflight_env(monkeypatch)
+    monkeypatch.delenv("RETHINKDB_HOST", raising=False)
+    monkeypatch.setattr(secret_store, "decrypt",
+                        lambda v: {"fernK": "PKPLAIN", "fernS": "SECPLAIN"}[v])
+    try:
+        ns["_assert_watchdog_preflight"](_FUNDED_DOC)
+    except RuntimeError as exc:
+        assert "RETHINKDB_HOST" in str(exc)
+    else:
+        raise AssertionError("RETHINKDB_HOST is still mandatory")
+
+
+def test_preflight_and_the_subprocess_env_share_one_decrypt(monkeypatch):
+    """Two copies of the fallback would drift back apart."""
+    src = open(os.path.join(_backend, "instance.py")).read()
+    tree = ast.parse(src)
+    names = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
+    assert "_decrypt_watchdog_credential" in names
+    for fn_name in ("_watchdog_subprocess_env", "_assert_watchdog_preflight"):
+        fn = next(n for n in tree.body
+                  if isinstance(n, ast.FunctionDef) and n.name == fn_name)
+        assert "_decrypt_watchdog_credential" in ast.dump(fn), fn_name
+
+
+def test_start_broker_hands_the_brokerage_row_to_the_preflight():
+    """A preflight that cannot see the row cannot honour the fallback."""
+    src = open(os.path.join(_backend, "instance.py")).read()
+    assert "_assert_watchdog_preflight(_brokerage_doc)" in src
+
+
+# ---------------------------------------------------------------------------
+# "Started" must mean RUNNING (2026-09-11)
+#
+# `watchdog_main` refuses in its own preflight and returns 2 — a process that
+# spawned and exited. Popen succeeding said nothing about that, so a funded
+# broker kept running beside a dead sidecar and the unified order gate blocked
+# every new position on dependency.watchdog.unknown: a real-money account that
+# is silently sell-only, with a green "Started alpha mark watchdog" line above
+# it. The funded refusal path in `start_broker` only fires on a False return.
+# ---------------------------------------------------------------------------
+
+def _instance_module():
+    from unittest.mock import MagicMock
+    sys.modules.setdefault("socketio", MagicMock())
+    import instance
+    instance.alpha_watchdog_process = None
+    return instance
+
+
+class _FakeProc:
+    def __init__(self, code):
+        self._code = code
+
+    def poll(self):
+        return self._code
+
+    def terminate(self):
+        self._code = -15
+
+    def wait(self, timeout=None):
+        return self._code
+
+
+def test_a_sidecar_that_immediately_refused_is_not_reported_as_started(monkeypatch):
+    inst = _instance_module()
+    monkeypatch.setenv("ALPHA_MARK_WATCHDOG_ENABLED", "1")
+    monkeypatch.setattr(inst, "WATCHDOG_START_GRACE_SEC", 0.05)
+    monkeypatch.setattr(inst.subprocess, "Popen",
+                        lambda *a, **k: _FakeProc(2))
+    assert inst._maybe_start_alpha_watchdog("alpaca-main", {}, {}) is False
+    assert inst.alpha_watchdog_process is None
+
+
+def test_a_running_sidecar_is_reported_as_started(monkeypatch):
+    inst = _instance_module()
+    monkeypatch.setenv("ALPHA_MARK_WATCHDOG_ENABLED", "1")
+    monkeypatch.setattr(inst, "WATCHDOG_START_GRACE_SEC", 0.05)
+    alive = _FakeProc(None)
+    monkeypatch.setattr(inst.subprocess, "Popen", lambda *a, **k: alive)
+    assert inst._maybe_start_alpha_watchdog("alpaca-main", {}, {}) is True
+    assert inst.alpha_watchdog_process is alive
+
+
+def test_the_disabled_default_still_short_circuits(monkeypatch):
+    inst = _instance_module()
+    monkeypatch.setenv("ALPHA_MARK_WATCHDOG_ENABLED", "0")
+
+    def _must_not_spawn(*_a, **_k):
+        raise AssertionError("the watchdog is DISABLED by default")
+
+    monkeypatch.setattr(inst.subprocess, "Popen", _must_not_spawn)
+    assert inst._maybe_start_alpha_watchdog("alpaca-main", {}, {}) is False
