@@ -274,6 +274,56 @@ def test_the_fallback_line_is_emitted_once_a_process():
     assert len([m for m, c in lines if c == "red"]) == 1, lines
 
 
+def test_one_malformed_sibling_lane_does_not_revert_the_position_cap():
+    """D4. The whole loop sat inside one `except Exception: return None`, so a
+    single unparseable sibling value reverted the DOCUMENT to the broker's 15%
+    failsafe — under which a 65%-of-NAV core buy is trimmed to $0.00 (BT102936),
+    which is how Strategy XS shipped inert."""
+    ns = _extract("_strategy_eb_single_position_pct")
+    cap = ns["_strategy_eb_single_position_pct"]([
+        {"strategy": "outlier_sleeve",
+         "config": {"outlier_sleeve_enabled": True,
+                    "honour_single_position_cap": True,
+                    "broker_max_single_position_pct": "not-a-number"}},
+        {"strategy": "strategy_eb",
+         "config": {"strategy_eb_enabled": True,
+                    "honour_single_position_cap": True,
+                    "broker_max_single_position_pct": 0.95}},
+    ])
+    assert cap == 0.95
+
+
+def test_a_malformed_spec_entry_does_not_revert_the_position_cap():
+    ns = _extract("_strategy_eb_single_position_pct")
+    cap = ns["_strategy_eb_single_position_pct"]([
+        "strategy_eb", None, 17,
+        {"strategy": "strategy_eb",
+         "config": {"strategy_eb_enabled": True,
+                    "honour_single_position_cap": True,
+                    "broker_max_single_position_pct": 0.95}},
+    ])
+    assert cap == 0.95
+
+
+def test_a_position_cap_set_in_conditions_is_seen():
+    ns = _extract("_strategy_eb_single_position_pct")
+    assert ns["_strategy_eb_single_position_pct"]([
+        {"strategy": "strategy_eb",
+         "conditions": {"strategy_eb_enabled": True,
+                        "honour_single_position_cap": True,
+                        "broker_max_single_position_pct": 0.8},
+         "config": {}}]) == 0.8
+
+
+def test_every_lane_malformed_still_means_no_document_cap():
+    ns = _extract("_strategy_eb_single_position_pct")
+    assert ns["_strategy_eb_single_position_pct"]([
+        {"strategy": "strategy_eb",
+         "config": {"strategy_eb_enabled": True,
+                    "honour_single_position_cap": True,
+                    "broker_max_single_position_pct": "nope"}}]) is None
+
+
 def test_the_universe_reader_agrees_with_the_limits_reader():
     ns = _extract("_strategy_eb_universe_symbols")
     disabled = [{"strategy": "strategy_eb",

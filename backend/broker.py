@@ -4421,14 +4421,19 @@ def _strategy_eb_single_position_pct(cached_strategies):
     2026-08-31: first paper tick trimmed GLD $5,384 -> $1,615 — the 0.95 the
     backtest honoured was invisible to the live trim site."""
     best = None
-    try:
-        for spec in (cached_strategies or []):
+    # D4 (2026-09-11): the try is INSIDE the loop. Around it, one unparseable
+    # value on a sibling lane — a `broker_max_single_position_pct` typo, a
+    # malformed spec entry — reverted the whole DOCUMENT to the broker's 15%
+    # failsafe, under which a 65%-of-NAV core buy is trimmed to $0.00
+    # (BT102936, and how Strategy XS shipped inert). A bad lane contributes
+    # nothing; the lanes that parsed still decide.
+    for spec in (cached_strategies or []):
+        try:
             name = str((spec or {}).get("strategy", "")).strip().lower()
             flag = _LANE_ENABLE_FLAGS.get(name)
             if flag is None:
                 continue
-            cfg = dict((spec or {}).get("conditions") or {})
-            cfg.update((spec or {}).get("config") or {})
+            cfg = _merged_strategy_settings(spec)
             if not _truthy(cfg.get(flag, False)):
                 continue
             if not _truthy(cfg.get("honour_single_position_cap", False)):
@@ -4439,8 +4444,14 @@ def _strategy_eb_single_position_pct(cached_strategies):
             val = float(raw)
             if 0.0 < val <= 1.0 and (best is None or val > best):
                 best = val
-    except Exception:
-        return None
+        except Exception as _cap_exc:
+            try:
+                _log(f"[live-risk] single-position cap ignored for one lane "
+                     f"({type(_cap_exc).__name__}: {_cap_exc}); the other "
+                     "lanes' cap stands", "yellow")
+            except Exception:
+                pass
+            continue
     return best
 
 

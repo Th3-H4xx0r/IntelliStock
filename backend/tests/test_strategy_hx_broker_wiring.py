@@ -30,10 +30,10 @@ def _extract(*names):
     """AST-extract broker functions into a stub namespace. broker.py argparses
     at module scope and SystemExits under pytest, so it cannot be imported."""
     tree = ast.parse(open(_BROKER).read())
-    # `_truthy` comes along because the HX config reader calls it, and the
-    # blanket `except Exception` would turn the resulting NameError into an
-    # empty result rather than a failure.
-    keep = set(names) | {"_truthy"}
+    # `_truthy` and `_merged_strategy_settings` come along because the HX
+    # config readers call them, and the blanket `except Exception` would turn
+    # the resulting NameError into an empty result rather than a failure.
+    keep = set(names) | {"_truthy", "_merged_strategy_settings"}
     wanted = [n for n in tree.body
               if isinstance(n, ast.FunctionDef) and n.name in keep]
     found = {n.name for n in wanted}
