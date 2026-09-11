@@ -80,11 +80,11 @@ def _load_config() -> dict[str, str]:
             or env.get("VITE_API_URL")
             or "http://localhost:8011"
         ).rstrip("/"),
-        "username": (env.get("DEFAULT_ADMIN_USERNAME") or env.get("MONITOR_USERNAME") or "").strip().lower(),
-        "password": env.get("DEFAULT_ADMIN_PASSWORD") or env.get("MONITOR_PASSWORD") or "",
+        "username": (env.get("INTELLISTOCK_API_USERNAME") or env.get("MONITOR_USERNAME") or "").strip().lower(),
+        "password": env.get("INTELLISTOCK_API_PASSWORD") or env.get("MONITOR_PASSWORD") or "",
     }
     if not cfg["username"] or not cfg["password"]:
-        print("ERROR: need DEFAULT_ADMIN_USERNAME + DEFAULT_ADMIN_PASSWORD "
+        print("ERROR: need INTELLISTOCK_API_USERNAME + INTELLISTOCK_API_PASSWORD "
               "(or MONITOR_USERNAME/MONITOR_PASSWORD) in .env or env.",
               file=sys.stderr)
         sys.exit(2)

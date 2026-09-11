@@ -29,8 +29,8 @@ def main(argv=None):
            or f"http://localhost:{os.environ.get('API_PORT', '8000')}").rstrip("/")
     token = os.environ.get("INTELLISTOCK_API_TOKEN") or _login(
         api,
-        os.environ.get("INTELLISTOCK_USERNAME") or os.environ.get("DEFAULT_ADMIN_USERNAME", "admin"),
-        os.environ.get("INTELLISTOCK_PASSWORD") or os.environ.get("DEFAULT_ADMIN_PASSWORD", ""),
+        os.environ.get("INTELLISTOCK_USERNAME") or os.environ.get("INTELLISTOCK_API_USERNAME", "admin"),
+        os.environ.get("INTELLISTOCK_PASSWORD") or os.environ.get("INTELLISTOCK_API_PASSWORD", ""),
     )
     status, body = _http(
         "POST", f"{api}/backtests",

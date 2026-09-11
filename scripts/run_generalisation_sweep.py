@@ -44,8 +44,8 @@ def _api():
     _load_dotenv(_REPO)
     api = (os.environ.get("INTELLISTOCK_API_URL") or "").rstrip("/")
     token = os.environ.get("INTELLISTOCK_API_TOKEN") or _login(
-        api, os.environ.get("DEFAULT_ADMIN_USERNAME", "admin"),
-        os.environ.get("DEFAULT_ADMIN_PASSWORD", ""))
+        api, os.environ.get("INTELLISTOCK_API_USERNAME", "admin"),
+        os.environ.get("INTELLISTOCK_API_PASSWORD", ""))
     return api, token
 
 

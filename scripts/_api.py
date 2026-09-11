@@ -4,8 +4,11 @@
     python3 scripts/_api.py GET /strategies
     python3 scripts/_api.py POST /backtests '{"instance_id": "...", ...}'
 
-Auth follows scripts/run_paired_experiment.py: INTELLISTOCK_API_TOKEN if set,
-otherwise a login with DEFAULT_ADMIN_USERNAME/PASSWORD from the primary .env.
+Auth, in order: INTELLISTOCK_API_TOKEN if set, otherwise a login with
+INTELLISTOCK_API_USERNAME / INTELLISTOCK_API_PASSWORD from the primary .env.
+Those name an ordinary account created in the Users tab -- there is no
+environment-provisioned account any more.
+
 The API is the serving-truth read path post-Postgres-cutover; direct RethinkDB
 reads are a stale mirror.
 """
@@ -28,14 +31,43 @@ API = (os.environ.get("INTELLISTOCK_API_URL") or "").rstrip("/")
 _TOKEN = None
 
 
+def _credentials():
+    """(username, password), newest key names first.
+
+    ``DEFAULT_ADMIN_*`` is the deprecated pair. It survives here, and only
+    here, so that a checkout running against an .env written before the
+    Users tab shipped keeps working through the deploy; see
+    docs/runbooks/users-and-login.md. Nothing about it is special any more --
+    it names an ordinary account.
+    """
+    username = os.environ.get("INTELLISTOCK_API_USERNAME")
+    password = os.environ.get("INTELLISTOCK_API_PASSWORD")
+    if username or password:
+        return (username or "").strip(), password or ""
+    legacy_user = os.environ.get("DEFAULT_ADMIN_USERNAME")
+    legacy_pass = os.environ.get("DEFAULT_ADMIN_PASSWORD")
+    if legacy_user or legacy_pass:
+        print("[_api] DEFAULT_ADMIN_USERNAME/PASSWORD are deprecated — rename them "
+              "to INTELLISTOCK_API_USERNAME/INTELLISTOCK_API_PASSWORD in .env.",
+              file=sys.stderr)
+        return (legacy_user or "").strip(), legacy_pass or ""
+    return "", ""
+
+
 def auth():
     global _TOKEN
     if _TOKEN is None:
-        _TOKEN = os.environ.get("INTELLISTOCK_API_TOKEN") or _login(
-            API,
-            os.environ.get("DEFAULT_ADMIN_USERNAME", "admin"),
-            os.environ.get("DEFAULT_ADMIN_PASSWORD", ""),
-        )
+        token = os.environ.get("INTELLISTOCK_API_TOKEN")
+        if token:
+            _TOKEN = token
+        else:
+            username, password = _credentials()
+            if not username or not password:
+                raise SystemExit(
+                    "No API credentials. Set INTELLISTOCK_API_TOKEN, or "
+                    "INTELLISTOCK_API_USERNAME and INTELLISTOCK_API_PASSWORD, "
+                    "in .env — they name an account created in the Users tab.")
+            _TOKEN = _login(API, username, password)
     return _TOKEN
 
 

@@ -40,8 +40,8 @@ def main(argv=None):
     _load_dotenv(_REPO)
     api = (os.environ.get("INTELLISTOCK_API_URL") or "").rstrip("/")
     token = os.environ.get("INTELLISTOCK_API_TOKEN") or _login(
-        api, os.environ.get("INTELLISTOCK_USERNAME") or os.environ.get("DEFAULT_ADMIN_USERNAME", "admin"),
-        os.environ.get("INTELLISTOCK_PASSWORD") or os.environ.get("DEFAULT_ADMIN_PASSWORD", ""))
+        api, os.environ.get("INTELLISTOCK_USERNAME") or os.environ.get("INTELLISTOCK_API_USERNAME", "admin"),
+        os.environ.get("INTELLISTOCK_PASSWORD") or os.environ.get("INTELLISTOCK_API_PASSWORD", ""))
     auth = {"Authorization": f"Bearer {token}"}
 
     runs = []

@@ -115,8 +115,8 @@ class EvidenceApi:
                 or os.environ.get("INTELLISTOCK_API_URL") or "").rstrip("/")
         if not base:
             raise SystemExit("INTELLISTOCK_API_URL is not set")
-        payload = {"username": env.get("DEFAULT_ADMIN_USERNAME"),
-                   "password": env.get("DEFAULT_ADMIN_PASSWORD")}
+        payload = {"username": env.get("INTELLISTOCK_API_USERNAME"),
+                   "password": env.get("INTELLISTOCK_API_PASSWORD")}
         body = cls._raw(base, "/auth/login", payload, None)
         token = body.get("access_token") or body.get("token")
         if not token:

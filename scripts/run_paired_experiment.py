@@ -57,8 +57,8 @@ def _auth():
     global _TOKEN
     if _TOKEN is None:
         _TOKEN = os.environ.get("INTELLISTOCK_API_TOKEN") or _login(
-            API, os.environ.get("DEFAULT_ADMIN_USERNAME", "admin"),
-            os.environ.get("DEFAULT_ADMIN_PASSWORD", ""))
+            API, os.environ.get("INTELLISTOCK_API_USERNAME", "admin"),
+            os.environ.get("INTELLISTOCK_API_PASSWORD", ""))
     return {"Authorization": f"Bearer {_TOKEN}", "Content-Type": "application/json"}
 
 

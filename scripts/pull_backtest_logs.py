@@ -21,8 +21,9 @@ Env vars (read from .env at repo root or process env):
     INTELLISTOCK_API_URL     base API URL (default API_URL env or
                              http://localhost:<API_PORT>)
     INTELLISTOCK_API_TOKEN   long-lived bearer token (skips login)
-    INTELLISTOCK_USERNAME    admin user (default DEFAULT_ADMIN_USERNAME or 'admin')
-    INTELLISTOCK_PASSWORD    admin pass (default DEFAULT_ADMIN_PASSWORD)
+    INTELLISTOCK_API_USERNAME  account to log in as (an ordinary account,
+                               created in the Users tab)
+    INTELLISTOCK_API_PASSWORD  its password
 """
 from __future__ import annotations
 
@@ -178,19 +179,20 @@ def main() -> int:
     token = (os.environ.get("INTELLISTOCK_API_TOKEN") or "").strip()
     if not token:
         username = (
-            os.environ.get("INTELLISTOCK_USERNAME")
-            or os.environ.get("DEFAULT_ADMIN_USERNAME")
-            or "admin"
-        ).strip()
-        password = (
-            os.environ.get("INTELLISTOCK_PASSWORD")
-            or os.environ.get("DEFAULT_ADMIN_PASSWORD")
+            os.environ.get("INTELLISTOCK_API_USERNAME")
+            or os.environ.get("INTELLISTOCK_USERNAME")
             or ""
         ).strip()
-        if not password:
+        password = (
+            os.environ.get("INTELLISTOCK_API_PASSWORD")
+            or os.environ.get("INTELLISTOCK_PASSWORD")
+            or ""
+        ).strip()
+        if not username or not password:
             raise SystemExit(
-                "No INTELLISTOCK_API_TOKEN, and no INTELLISTOCK_PASSWORD / "
-                "DEFAULT_ADMIN_PASSWORD to login with. Set one in .env."
+                "No INTELLISTOCK_API_TOKEN, and no INTELLISTOCK_API_USERNAME / "
+                "INTELLISTOCK_API_PASSWORD to login with. Set them in .env — "
+                "they name an account created in the Users tab."
             )
         token = _login(api_url, username, password)
 

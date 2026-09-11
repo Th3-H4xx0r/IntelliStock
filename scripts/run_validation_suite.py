@@ -108,9 +108,9 @@ def _status(bt_id: int) -> dict:
         token = pbl._login(
             api,
             os.environ.get("INTELLISTOCK_USERNAME")
-            or os.environ.get("DEFAULT_ADMIN_USERNAME", "admin"),
+            or os.environ.get("INTELLISTOCK_API_USERNAME", "admin"),
             os.environ.get("INTELLISTOCK_PASSWORD")
-            or os.environ.get("DEFAULT_ADMIN_PASSWORD", ""),
+            or os.environ.get("INTELLISTOCK_API_PASSWORD", ""),
         )
     code, body = pbl._fetch(api, token, f"/backtests/{bt_id}/status", allow_404=True)
     return body if code == 200 and isinstance(body, dict) else {}

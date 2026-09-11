@@ -207,8 +207,8 @@ def _fetch_summary(bt_id: int, env: dict) -> dict | None:
         return None
     try:
         tok = (env.get("INTELLISTOCK_API_TOKEN") or "").strip() or _login(
-            api, env.get("INTELLISTOCK_USERNAME") or env.get("DEFAULT_ADMIN_USERNAME") or "admin",
-            env.get("INTELLISTOCK_PASSWORD") or env.get("DEFAULT_ADMIN_PASSWORD") or "")
+            api, env.get("INTELLISTOCK_USERNAME") or env.get("INTELLISTOCK_API_USERNAME") or "admin",
+            env.get("INTELLISTOCK_PASSWORD") or env.get("INTELLISTOCK_API_PASSWORD") or "")
         st, body = _fetch(api, tok, f"/backtests/{bt_id}/summary", allow_404=True)
         return body if isinstance(body, dict) else None
     except SystemExit:
