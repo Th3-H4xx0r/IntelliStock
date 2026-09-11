@@ -1565,6 +1565,11 @@ def action_get_instance(conn, instance_id):
         "live_readiness_report": doc.get("live_readiness_report") or None,
         "live_readiness_waived_at": doc.get("live_readiness_waived_at"),
         "live_readiness_waived_by": doc.get("live_readiness_waived_by"),
+        # When the launcher last carried the standing waiver forward onto a
+        # newly deployed image, and which image it came from. Null on an
+        # instance whose waiver has never outlived a deploy.
+        "live_readiness_rebound_at": doc.get("live_readiness_rebound_at"),
+        "live_readiness_rebound_from": doc.get("live_readiness_rebound_from"),
         "started_at": started_at,
         "uptime_seconds": uptime_seconds,
         "backtests": backtests,

@@ -2464,7 +2464,7 @@ def api_readiness_waiver(
     from intellistock_logger import intellistock_logger
     from live_readiness import (LiveReadinessError, ReadinessCheck,
                                 ReadinessReport, ReadinessState,
-                                report_fingerprint, report_from_mapping,
+                                report_from_mapping, report_to_mapping,
                                 required_live_checks)
 
     instance_id = str(instance_id)
@@ -2513,18 +2513,11 @@ def api_readiness_waiver(
         ),
         artifact_hash=artifact_hash,
     )
-    fingerprint = report_fingerprint(report)
-    mapping = {
-        "instance_id": instance_id,
-        "state": report.state.value,
-        "checks": [
-            {"name": check.name, "passed": check.passed,
-             "reason": check.reason, "evidence_hash": check.evidence_hash}
-            for check in report.checks
-        ],
-        "artifact_hash": artifact_hash,
-        "fingerprint": fingerprint,
-    }
+    # One writer for the persisted shape, shared with the launcher's
+    # carry-forward (live_readiness.rebind_operator_waiver) so the two can
+    # never disagree about how a report is spelled or fingerprinted.
+    mapping = report_to_mapping(report)
+    fingerprint = mapping["fingerprint"]
     # Parse back what will be persisted before persisting it: this is the
     # exact call instance.py makes, so a report that would not launch never
     # reaches the row.
@@ -2537,6 +2530,11 @@ def api_readiness_waiver(
         "live_readiness_report": mapping,
         "live_readiness_waived_at": waived_at.isoformat(),
         "live_readiness_waived_by": username,
+        # A fresh waiver starts its own carry-forward trail; the previous
+        # one's re-bind stamps describe an image and a decision that are both
+        # now superseded.
+        "live_readiness_rebound_at": None,
+        "live_readiness_rebound_from": None,
     })
 
     message = (f"LIVE READINESS GATE WAIVED for {instance_id} by {username} "
@@ -2560,6 +2558,76 @@ def api_readiness_waiver(
         "fingerprint": fingerprint,
         "waived_at": waived_at.isoformat(),
         "waived_by": username,
+    }
+
+
+@app.delete("/instances/{instance_id}/readiness-waiver",
+            response_class=JSONResponse)
+def api_revoke_readiness_waiver(
+    instance_id: str,
+    conn=Depends(conn_dependency),
+    current_user: dict = Depends(get_current_user),
+):
+    """End a standing waiver: the funded broker is gated again.
+
+    The waiver used to expire by itself, because the report binds to a Docker
+    image and every deploy built a new one. It no longer does -- the launcher
+    carries it forward (``live_readiness.rebind_operator_waiver``), which is
+    what the operator asked for and which means the decision now has to be
+    ended deliberately rather than by a build.
+
+    This removes the report and every stamp that goes with it, so the next
+    funded start refuses exactly as it would have before anyone waived
+    anything. It does NOT remove an *earned* report: that is evidence, and
+    deleting evidence is not what a route called "revoke waiver" should do.
+    """
+    import live_alerts
+    from datetime import datetime, timezone
+    from intellistock_logger import intellistock_logger
+    from live_readiness import is_operator_waiver
+
+    instance_id = str(instance_id)
+    instance = db_store.get("Instances", instance_id)
+    if not isinstance(instance, dict) or instance.get("id") != instance_id:
+        raise HTTPException(status_code=404,
+                            detail=f"Instance not found: {instance_id}")
+
+    report = instance.get("live_readiness_report")
+    if isinstance(report, dict) and not is_operator_waiver(report):
+        raise HTTPException(
+            status_code=409,
+            detail=("this instance's readiness report is not an operator "
+                    "waiver; earned evidence is not revoked through this "
+                    "route"))
+
+    was_waived = isinstance(report, dict)
+    db_store.update("Instances", instance_id, {
+        "live_readiness_report": None,
+        "live_readiness_waived_at": None,
+        "live_readiness_waived_by": None,
+        "live_readiness_rebound_at": None,
+        "live_readiness_rebound_from": None,
+    })
+
+    username = str(current_user.get("username") or current_user.get("id") or "?")
+    revoked_at = datetime.now(timezone.utc).isoformat()
+    message = (f"LIVE READINESS WAIVER REVOKED for {instance_id} by "
+               f"{username}: a funded broker start is gated again")
+    intellistock_logger.log(message, "red", service="API")
+    try:
+        live_alerts.alert_strategy_error(
+            instance_id=instance_id, tag="readiness-waiver", message=message)
+    except Exception as exc:
+        intellistock_logger.log(
+            f"readiness waiver revocation alert failed: "
+            f"{type(exc).__name__}: {exc}", "yellow", service="API")
+
+    return {
+        "instance_id": instance_id,
+        "waived": False,
+        "was_waived": was_waived,
+        "revoked_at": revoked_at,
+        "revoked_by": username,
     }
 
 

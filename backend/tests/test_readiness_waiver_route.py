@@ -339,3 +339,122 @@ def test_the_digest_helper_refuses_a_malformed_image_identity():
 
     with pytest.raises(LiveReadinessError):
         deployed_artifact_digest(client=_Client())
+
+
+# --- revoking a standing waiver -------------------------------------------
+#
+# The waiver is carried forward across deploys now (server.py), so it is a
+# standing decision rather than a per-image one. A standing decision needs a
+# way to end it, and it has to be the same route's inverse: DELETE.
+
+
+def test_a_waiver_can_be_revoked_and_leaves_nothing_behind(waiver):
+    client, store, _alerts = waiver
+    assert _post(client).status_code == 200
+    assert store.get("Instances", INSTANCE)["live_readiness_report"]
+
+    res = client.delete(f"/instances/{INSTANCE}/readiness-waiver")
+    assert res.status_code == 200, res.text
+    assert res.json()["waived"] is False
+
+    row = store.get("Instances", INSTANCE)
+    for key in ("live_readiness_report", "live_readiness_waived_at",
+                "live_readiness_waived_by", "live_readiness_rebound_at",
+                "live_readiness_rebound_from"):
+        assert row.get(key) is None, f"{key} survived the revocation"
+
+
+def test_revoking_restores_the_launcher_refusal(waiver):
+    """The point of revoking: the funded broker stops being allowed to
+    start."""
+    from live_readiness import LiveReadinessError, report_from_mapping
+
+    client, store, _alerts = waiver
+    assert _post(client).status_code == 200
+    assert client.delete(f"/instances/{INSTANCE}/readiness-waiver").status_code == 200
+
+    with pytest.raises(LiveReadinessError):
+        report_from_mapping(
+            store.get("Instances", INSTANCE).get("live_readiness_report"),
+            instance_id=INSTANCE)
+
+
+def test_revoking_pages_the_operator_channel(waiver):
+    client, _store, alerts = waiver
+    assert _post(client).status_code == 200
+    assert client.delete(f"/instances/{INSTANCE}/readiness-waiver").status_code == 200
+    assert len(alerts) == 2
+    assert "REVOKED" in alerts[1]["message"].upper()
+
+
+def test_revoking_an_instance_with_no_waiver_is_still_a_clean_no_op(waiver):
+    client, store, _alerts = waiver
+    res = client.delete(f"/instances/{INSTANCE}/readiness-waiver")
+    assert res.status_code == 200, res.text
+    assert store.get("Instances", INSTANCE).get("live_readiness_report") is None
+
+
+def test_revoking_refuses_to_throw_away_an_earned_report(waiver):
+    """DELETE revokes a *waiver*. An earned report is evidence somebody
+    gathered, and this route is not the way to delete evidence."""
+    import hashlib as _hashlib
+
+    from live_readiness import (ReadinessCheck, ReadinessReport,
+                                ReadinessState, report_to_mapping,
+                                required_live_checks)
+
+    client, store, _alerts = waiver
+    reason = "paper observation completed over 21 sessions"
+    evidence = _hashlib.sha256(reason.encode("utf-8")).hexdigest()
+    earned = report_to_mapping(ReadinessReport(
+        instance_id=INSTANCE,
+        state=ReadinessState.LIVE_ELIGIBLE,
+        checks=tuple(ReadinessCheck(n, True, reason, evidence)
+                     for n in required_live_checks()),
+        artifact_hash=DIGEST))
+    store.update("Instances", INSTANCE, {"live_readiness_report": earned})
+
+    res = client.delete(f"/instances/{INSTANCE}/readiness-waiver")
+    assert res.status_code == 409, res.text
+    assert store.get("Instances", INSTANCE)["live_readiness_report"] == earned
+
+
+def test_revoking_an_unknown_instance_is_a_404(waiver):
+    client, _store, _alerts = waiver
+    res = client.delete("/instances/not-a-real-instance/readiness-waiver")
+    assert res.status_code == 404, res.text
+
+
+def test_an_unauthenticated_caller_cannot_revoke(store, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from api import main
+
+    report = {"instance_id": INSTANCE, "checks": [], "state": "LIVE_ELIGIBLE"}
+    store.insert("Instances", {"id": INSTANCE,
+                               "live_readiness_report": report})
+    monkeypatch.setattr(main, "db_store", store)
+
+    main.app.dependency_overrides[main.conn_dependency] = lambda: None
+    try:
+        res = TestClient(main.app).delete(
+            f"/instances/{INSTANCE}/readiness-waiver",
+            headers={"Authorization": "Bearer not-a-real-token"})
+    finally:
+        main.app.dependency_overrides.clear()
+    assert res.status_code == 401, res.text
+    assert store.get("Instances", INSTANCE)["live_readiness_report"] == report
+
+
+def test_the_revoke_route_is_wired_to_the_authenticated_user_dependency():
+    import inspect
+
+    from api import main
+
+    endpoint = next(
+        route.endpoint for route in main.app.routes
+        if getattr(route, "path", None)
+        == "/instances/{instance_id}/readiness-waiver"
+        and "DELETE" in getattr(route, "methods", ()))
+    guard = inspect.signature(endpoint).parameters["current_user"].default
+    assert guard.dependency is main.get_current_user

@@ -261,6 +261,74 @@ class InstanceLaunchPreflight:
     brokerage: dict
 
 
+def _carry_forward_operator_waiver(instance_id, instance, digest):
+    """Re-bind a standing operator waiver to the image being launched.
+
+    A readiness report binds to one Docker image, so every deploy invalidated
+    the operator's waiver and the funded broker refused to start until the
+    button on the instance page was pressed again -- *before* the instance
+    restarted, which is a race nobody reliably wins. The operator's decision
+    (2026-09-11) is that a waiver is a standing one, so the launcher carries
+    it forward instead of asking again.
+
+    Only a waiver. An earned report is evidence gathered about one artifact
+    and says nothing about the next, so it is left alone and refuses on the
+    mismatch exactly as it does today -- that refusal is the feature.
+
+    Fail-soft on purpose: this is the launch path for every instance on the
+    host, and the guard that actually decides whether a funded broker may
+    start runs a few lines later either way. A carry-forward that cannot be
+    done is logged, not raised.
+    """
+    from datetime import timezone
+
+    from live_readiness import rebind_operator_waiver
+
+    persisted = instance.get("live_readiness_report")
+    try:
+        rebound = rebind_operator_waiver(
+            persisted, instance_id=str(instance_id), artifact_hash=digest)
+    except Exception as exc:
+        intellistock_logger.log(
+            f"live-readiness waiver carry-forward refused for {instance_id}: "
+            f"{type(exc).__name__}: {exc}", "red", service="SERVER")
+        return
+    if rebound is None:
+        return
+
+    previous = str(persisted.get("artifact_hash") or "")[:12]
+    rebound_at = datetime.now(timezone.utc).isoformat()
+    store.update("Instances", str(instance_id), {
+        "live_readiness_report": rebound,
+        "live_readiness_rebound_at": rebound_at,
+        "live_readiness_rebound_from": previous,
+    })
+    # The in-memory row is what the funded-Kalshi gate below reads, and what
+    # the caller carries into the launch. A stale copy here would refuse the
+    # very report just written.
+    instance["live_readiness_report"] = rebound
+    instance["live_readiness_rebound_at"] = rebound_at
+    instance["live_readiness_rebound_from"] = previous
+
+    who = instance.get("live_readiness_waived_by") or "unknown"
+    when = instance.get("live_readiness_waived_at") or "unknown"
+    message = (f"live-readiness waiver carried forward to image "
+               f"{digest[:12]} for {instance_id} (waived by {who} at {when})")
+    intellistock_logger.log(message, "red", service="SERVER")
+    try:
+        import live_alerts
+
+        live_alerts.alert_strategy_error(
+            instance_id=str(instance_id), tag="readiness-waiver",
+            message=message)
+    except Exception as exc:
+        # The re-bind is already on the row; a dead webhook must not be the
+        # reason a real-money instance fails to start.
+        intellistock_logger.log(
+            f"readiness waiver carry-forward alert failed: "
+            f"{type(exc).__name__}: {exc}", "yellow", service="SERVER")
+
+
 def _preflight_instance_launch(instance_id, *, client=None):
     client = client or _get_docker_client()
     if client is None:
@@ -270,6 +338,16 @@ def _preflight_instance_launch(instance_id, *, client=None):
     instance, brokerage = _fresh_instance_docs(instance_id)
     if instance.get("id") != str(instance_id):
         raise LiveReadinessError("instance identity does not match launch")
+    # Here and not in start_instance_container: this is the one place where
+    # the *authoritative* digest (read from Docker, not handed in) and the
+    # instance row are both in hand, and it is upstream of both enforcement
+    # points -- the funded-Kalshi assert three lines below, and the equities
+    # assert inside the container, which validates against the digest
+    # start_instance_container puts in INTELLISTOCK_DEPLOYED_ARTIFACT_SHA256
+    # from this same preflight. Doing it in instance.py instead would have the
+    # container re-sign its own authorization against an environment variable
+    # it cannot verify, which is circular.
+    _carry_forward_operator_waiver(instance_id, instance, digest)
     if is_funded_kalshi_live(instance, brokerage):
         from live_readiness import assert_live_start_allowed, report_from_mapping
         assert_live_start_allowed(report_from_mapping(instance.get("live_readiness_report"), instance_id=str(instance_id)), deployed_artifact_hash=digest)

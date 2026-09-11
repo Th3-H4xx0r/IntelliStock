@@ -28,6 +28,12 @@ _REQUIRED_LIVE_CHECKS = (
     "operations", "paper_observation",
 )
 
+# Every check an operator waiver writes begins with this, so that nothing
+# reading the report later can mistake an assertion for evidence -- and so
+# that the launcher can tell a *standing* waiver (carried forward across
+# deploys) from an earned report (bound to one artifact, forever).
+OPERATOR_WAIVER_PREFIX = "OPERATOR WAIVED"
+
 
 def required_live_checks() -> tuple[str, ...]:
     return _REQUIRED_LIVE_CHECKS
@@ -102,6 +108,92 @@ def _canonical_payload(report: ReadinessReport) -> str:
 def report_fingerprint(report: ReadinessReport) -> str:
     """Return a stable fingerprint without exposing readiness evidence itself."""
     return hashlib.sha256(_canonical_payload(report).encode("utf-8")).hexdigest()
+
+
+def report_to_mapping(report: ReadinessReport) -> dict:
+    """The persisted shape of a report, fingerprint included.
+
+    One writer for the row `report_from_mapping` reads back. The waiver route
+    and the launcher's carry-forward both go through here so a key can never
+    be spelled two ways, and the fingerprint can never be computed over
+    something other than what is about to be stored.
+    """
+    _assert_report_well_formed(report)
+    return {
+        "instance_id": report.instance_id,
+        "state": report.state.value,
+        "checks": [
+            {"name": check.name, "passed": check.passed,
+             "reason": check.reason, "evidence_hash": check.evidence_hash}
+            for check in report.checks
+        ],
+        "artifact_hash": report.artifact_hash,
+        "fingerprint": report_fingerprint(report),
+    }
+
+
+def is_operator_waiver(payload: Mapping | None) -> bool:
+    """True when EVERY check in a persisted report is an operator waiver.
+
+    Deliberately unanimous. A report with one earned check among five waived
+    ones is not a standing waiver: re-binding it to a new image would re-sign
+    somebody's evidence against an artifact it was never gathered on.
+    """
+    if type(payload) is not dict:
+        return False
+    checks = payload.get("checks")
+    if type(checks) is not list or not checks:
+        return False
+    return all(
+        type(check) is dict
+        and type(check.get("reason")) is str
+        and check["reason"].startswith(OPERATOR_WAIVER_PREFIX)
+        for check in checks
+    )
+
+
+def rebind_operator_waiver(
+        payload: Mapping | None,
+        *,
+        instance_id: str,
+        artifact_hash: str,
+) -> dict | None:
+    """The same standing waiver, bound to the image about to be launched.
+
+    A readiness report binds to one Docker image, so every deploy invalidated
+    the operator's waiver and the funded broker refused to start until the
+    button was pressed again -- before the restart, which is a race. The
+    operator's decision (2026-09-11) is that a waiver is standing: "this
+    instance may start live on my say-so", not "against image ab12cd34".
+
+    Returns ``None`` when there is nothing to carry forward -- no report, a
+    report that is not a unanimous operator waiver, or one already bound to
+    this image. An *earned* report is never re-bound: it is evidence about one
+    artifact and says nothing about the next, which is the entire reason the
+    binding exists.
+
+    Raises ``LiveReadinessError`` rather than re-signing anything it cannot
+    first verify: the persisted fingerprint has to check out before a new one
+    is computed, or a hand-edited blob would get a valid signature for free.
+    """
+    if type(artifact_hash) is not str or not _SHA256_RE.fullmatch(artifact_hash):
+        raise LiveReadinessError("deployed artifact identity is malformed")
+    if not is_operator_waiver(payload):
+        return None
+    if payload.get("artifact_hash") == artifact_hash:
+        return None
+    current = report_from_mapping(
+        payload, instance_id=instance_id, verify_fingerprint=True)
+    rebound = report_to_mapping(ReadinessReport(
+        instance_id=current.instance_id,
+        state=current.state,
+        checks=current.checks,
+        artifact_hash=artifact_hash,
+    ))
+    # Parse back what will be persisted, exactly as the launcher will.
+    report_from_mapping(rebound, instance_id=instance_id,
+                        verify_fingerprint=True)
+    return rebound
 
 
 def report_from_mapping(payload: Mapping, *, instance_id: str,
