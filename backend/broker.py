@@ -4452,10 +4452,15 @@ def _strategy_eb_risk_limits(cached_strategies):
     None -- degrading to the TIGHTER default is the only safe direction, and a
     config typo must never take the live loop down.
     """
+    global _live_risk_limits_last_reason
+    _live_risk_limits_last_reason = "no strategy document loaded"
     try:
         from live_risk_state import RiskLimits
         from strategy_eb import DEFAULTS as _EB_DEFAULTS
     except Exception as _eb_import_exc:
+        _live_risk_limits_last_reason = (
+            f"strategy_eb module unavailable ({type(_eb_import_exc).__name__}: "
+            f"{_eb_import_exc})")
         try:
             _log("[live-risk] strategy_eb limits unavailable "
                  f"({_eb_import_exc}); using the module defaults", "yellow")
@@ -4470,27 +4475,42 @@ def _strategy_eb_risk_limits(cached_strategies):
         from strategy_hx import DEFAULTS as _HX_DEFAULTS
     except Exception:
         _HX_DEFAULTS = {}
-    # Every name in `_LANE_ENABLE_FLAGS` needs a row: this lookup sits OUTSIDE
-    # the per-lane except, so a missing one KeyErrors into the outer handler
-    # and returns None for the whole document. HX declares no `live_*` keys,
-    # so its lane is skipped by the per-lane handler and contributes nothing
-    # to the envelope — which is correct, not an omission.
+    # D5 (2026-09-11): `.get(name, {})`, not a bare subscript. This lookup sits
+    # OUTSIDE the per-lane except, so a lane registered in `_LANE_ENABLE_FLAGS`
+    # without a row here used to KeyError into the outer handler and return
+    # None for the WHOLE document — strategy_eb's already-computed envelope
+    # thrown away, the module defaults installed, and every 65%-of-NAV buy
+    # blocked on max_order_notional, silently, on real money. An empty default
+    # set just means the lane must declare every `live_*` key itself; if it
+    # does not, the per-lane handler skips it and the rest still stands. HX
+    # declares no `live_*` keys and is skipped exactly that way, which is
+    # correct rather than an omission.
     defaults_by_lane = {"strategy_eb": _EB_DEFAULTS, "strategyeb": _EB_DEFAULTS,
                         "outlier_sleeve": _OS_DEFAULTS, "outliersleeve": _OS_DEFAULTS,
                         "strategy_hx": _HX_DEFAULTS, "strategyhx": _HX_DEFAULTS}
     # The WIDEST envelope across the enabled lanes: a document that carries
     # the outlier sleeve beside strategy_eb must let a sleeve winner grow.
     widest = None
+    reasons = []
     try:
         for spec in (cached_strategies or []):
             if not isinstance(spec, dict):
+                reasons.append("a malformed spec entry")
                 continue
             name = str(spec.get("strategy") or "").strip().lower()
             flag = _LANE_ENABLE_FLAGS.get(name)
             if flag is None:
+                reasons.append(f"{name or '(unnamed)'} declares no live envelope")
                 continue
-            merged = {**defaults_by_lane[name], **(spec.get("config") or {})}
+            # D3 (2026-09-11): `conditions` UNION `config`, the merge the
+            # dispatcher performs before it hands settings to the strategy.
+            # Reading `config` alone meant a document that enabled the lane in
+            # `conditions` RAN the strategy while the envelope reader called it
+            # disabled and left the account on the module defaults.
+            merged = {**defaults_by_lane.get(name, {}),
+                      **_merged_strategy_settings(spec)}
             if not _truthy(merged.get(flag, False)):
+                reasons.append(f"{name}: {flag} is not set")
                 continue
             try:
                 mine = RiskLimits(
@@ -4508,6 +4528,8 @@ def _strategy_eb_risk_limits(cached_strategies):
                 # computed envelope thrown away, the module defaults installed,
                 # and every strategy_eb buy blocked on max_order_notional,
                 # silently, on real money. Skip the lane, keep the rest.
+                reasons.append(f"{name}: lane skipped "
+                               f"({type(_lane_exc).__name__}: {_lane_exc})")
                 try:
                     _log(f"[{name}] live risk limits ignored for this lane "
                          f"({_lane_exc}); the other lanes' envelope stands", "yellow")
@@ -4527,18 +4549,29 @@ def _strategy_eb_risk_limits(cached_strategies):
                     kill=max(widest.kill, mine.kill),
                 )
     except Exception as _eb_exc:
+        _live_risk_limits_last_reason = (
+            f"unexpected error reading the document "
+            f"({type(_eb_exc).__name__}: {_eb_exc})")
         try:
             _log(f"[strategy_eb] live risk limits ignored ({_eb_exc}); "
                  "using the module defaults", "yellow")
         except Exception:
             pass
         return None
+    if widest is None:
+        _live_risk_limits_last_reason = (
+            "; ".join(reasons) if reasons else "no strategy lanes on the document")
     return widest
 
 
 #: Set once, so a live loop does not repeat the same envelope line every tick.
 _live_risk_envelope_logged = False
 _live_risk_caps_rescaled_logged = False
+_live_risk_defaults_logged = False
+
+#: Why the last `_strategy_eb_risk_limits` call produced no envelope, so the
+#: fallback below can NAME its cause instead of happening in silence.
+_live_risk_limits_last_reason = ""
 
 
 def _live_risk_limits_for_this_document():
@@ -4563,6 +4596,24 @@ def _live_risk_limits_for_this_document():
             specs = None
     limits = _strategy_eb_risk_limits(specs)
     if limits is None:
+        # D2 (2026-09-11): this fallback was SILENT. The module defaults are
+        # 10/20/10% of equity, which blocks a 65%-of-NAV core buy outright, so
+        # the difference between "this document declares no envelope" (correct,
+        # and true of every non-EB instance) and "the lane was skipped by a
+        # config typo" (an inert real-money account) has to be readable.
+        global _live_risk_defaults_logged
+        if not _live_risk_defaults_logged:
+            _live_risk_defaults_logged = True
+            try:
+                _log("[live-risk] NO document envelope — falling back to the "
+                     f"module defaults (order {DEFAULT_RISK_LIMITS.max_order_fraction} "
+                     f"/ symbol {DEFAULT_RISK_LIMITS.max_symbol_fraction} / "
+                     f"leveraged {DEFAULT_RISK_LIMITS.max_leveraged_fraction}, "
+                     f"ladder {DEFAULT_RISK_LIMITS.soft}/{DEFAULT_RISK_LIMITS.hard}/"
+                     f"{DEFAULT_RISK_LIMITS.kill}). Reason: "
+                     f"{_live_risk_limits_last_reason or 'unknown'}.", "red")
+            except Exception:
+                pass
         return DEFAULT_RISK_LIMITS
     global _live_risk_envelope_logged
     if not _live_risk_envelope_logged:
@@ -4599,7 +4650,11 @@ def _strategy_eb_universe_symbols(cached_strategies):
             name = str(spec.get("strategy") or "").strip().lower()
             if name not in {"strategy_eb", "strategyeb"}:
                 continue
-            merged = {**_EB_DEFAULTS, **(spec.get("config") or {})}
+            # D3 (2026-09-11): `conditions` UNION `config`, matching the merge
+            # the dispatcher performs. Reading `config` alone meant a lane
+            # enabled in `conditions` ran and traded symbols the broker had
+            # fetched no bars for.
+            merged = {**_EB_DEFAULTS, **_merged_strategy_settings(spec)}
             if not _truthy(merged.get("strategy_eb_enabled", False)):
                 continue
             for sym in strategy_eb_universe(merged):

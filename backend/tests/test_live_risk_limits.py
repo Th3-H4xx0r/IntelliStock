@@ -117,11 +117,16 @@ def test_the_broker_no_longer_inlines_its_own_leveraged_set():
 #: broker.py is unimportable under pytest, so its top-level helpers are lifted
 #: out of the AST and executed in a bare namespace. These are the names those
 #: helpers close over.
-_BROKER_HELPERS = ("_truthy", "_strategy_eb_risk_limits",
+_BROKER_HELPERS = ("_truthy", "_merged_strategy_settings",
+                   "_strategy_eb_risk_limits",
                    "_strategy_eb_universe_symbols",
                    "_strategy_eb_single_position_pct",
                    "_live_risk_limits_for_this_document")
-_BROKER_TABLES = ("_LANE_ENABLE_FLAGS",)
+#: Module-level state the helpers read or set. Extracted rather than seeded so
+#: each `_extract()` starts from broker.py's own initial values — the
+#: once-a-process log flags among them.
+_BROKER_TABLES = ("_LANE_ENABLE_FLAGS", "_live_risk_envelope_logged",
+                  "_live_risk_defaults_logged", "_live_risk_limits_last_reason")
 
 
 def _extract(*names):
@@ -192,6 +197,81 @@ def test_a_string_false_does_not_widen_the_envelope(flag):
     assert ns["_strategy_eb_risk_limits"](
         [{"strategy": "strategy_eb",
           "config": {"strategy_eb_enabled": flag}}]) is None
+
+
+# --- 2026-09-11 silent-failure audit: D2, D3, D5 ----------------------------
+
+def test_a_lane_missing_from_the_defaults_table_does_not_void_the_document():
+    """D5. `defaults_by_lane[name]` was a bare subscript OUTSIDE the per-lane
+    `except`, so registering a lane in `_LANE_ENABLE_FLAGS` without a defaults
+    row KeyErrored into the outer handler and returned None for the WHOLE
+    document — strategy_eb's already-computed envelope thrown away and every
+    65%-of-NAV buy blocked on max_order_notional, on real money, silently."""
+    ns = _extract("_strategy_eb_risk_limits")
+    ns["_LANE_ENABLE_FLAGS"]["ghost_lane"] = "ghost_lane_enabled"
+    limits = ns["_strategy_eb_risk_limits"]([
+        {"strategy": "ghost_lane", "config": {"ghost_lane_enabled": True}},
+        {"strategy": "strategy_eb", "config": {"strategy_eb_enabled": True}},
+    ])
+    assert limits == EB
+
+
+def test_limits_set_in_conditions_are_seen():
+    """D3. The dispatcher merges `conditions` UNDER `config` before handing
+    settings to the strategy, so a document that enables EB in `conditions`
+    RUNS the strategy — while the envelope reader saw only `config` and left
+    the real-money account on the 10/20/10% module defaults."""
+    ns = _extract("_strategy_eb_risk_limits")
+    assert ns["_strategy_eb_risk_limits"](
+        [{"strategy": "strategy_eb",
+          "conditions": {"strategy_eb_enabled": True},
+          "config": {}}]) == EB
+
+
+def test_config_still_wins_over_conditions():
+    ns = _extract("_strategy_eb_risk_limits")
+    assert ns["_strategy_eb_risk_limits"](
+        [{"strategy": "strategy_eb",
+          "conditions": {"strategy_eb_enabled": True},
+          "config": {"strategy_eb_enabled": False}}]) is None
+
+
+def test_the_universe_reader_sees_conditions_too():
+    """Same merge, same reason: a lane enabled in `conditions` would trade
+    symbols the broker never fetched bars for."""
+    ns = _extract("_strategy_eb_universe_symbols")
+    assert ns["_strategy_eb_universe_symbols"](
+        [{"strategy": "strategy_eb",
+          "conditions": {"strategy_eb_enabled": True, "core_symbol": "QLD"},
+          "config": {}}]) == ["QQQ", "QLD", "SPY", "BIL"]
+
+
+def test_the_fallback_to_the_module_defaults_names_its_reason():
+    """D2. The resolver returned DEFAULT_RISK_LIMITS in silence. That envelope
+    blocks every strategy_eb buy on max_order_notional, so the difference
+    between "this document declares nothing" and "the lane was skipped by a
+    config typo" is the difference between a working account and an inert one."""
+    ns = _extract("_live_risk_limits_for_this_document")
+    lines = []
+    ns["_log"] = lambda msg, color="white": lines.append((str(msg), color))
+    ns["_cached_strategies"] = [{"strategy": "strategy_eb",
+                                 "config": {"strategy_eb_enabled": True,
+                                            "live_soft_drawdown": 0.9}}]
+    assert ns["_live_risk_limits_for_this_document"]() is DEFAULT_RISK_LIMITS
+    red = [m for m, c in lines if c == "red"]
+    assert red, f"the silent fallback: {lines}"
+    assert "strategy_eb" in red[0]
+
+
+def test_the_fallback_line_is_emitted_once_a_process():
+    ns = _extract("_live_risk_limits_for_this_document")
+    lines = []
+    ns["_log"] = lambda msg, color="white": lines.append((str(msg), color))
+    ns["_cached_strategies"] = [{"strategy": "graph_nexus_analysis",
+                                 "config": {}}]
+    for _ in range(5):
+        assert ns["_live_risk_limits_for_this_document"]() is DEFAULT_RISK_LIMITS
+    assert len([m for m, c in lines if c == "red"]) == 1, lines
 
 
 def test_the_universe_reader_agrees_with_the_limits_reader():
