@@ -65,11 +65,32 @@ const API_BASE = import.meta.env.DEV
   : (import.meta.env.VITE_API_URL || '/api')
 
 /**
+ * Turn a FastAPI error body into one user-facing line. `detail` arrives as a
+ * string from our routes, an array from Pydantic's 422, and an object from the
+ * login route's structured refusal.
+ */
+function detailMessage(detail, fallback) {
+  if (typeof detail === 'string') return detail
+  if (Array.isArray(detail)) {
+    return detail.map(x => (x && (x.msg || x.message)) || JSON.stringify(x)).join('; ')
+  }
+  if (detail && typeof detail === 'object') return detail.message || detail.msg || fallback
+  return fallback
+}
+
+async function errorBody(res) {
+  try { return await res.json() } catch { return null }
+}
+
+/**
  * POST /auth/login
  * @param {string} username
  * @param {string} password
  * @returns {{ token: string, user: object }}
- * @throws {Error} with a user-facing message
+ * @throws {Error} with a user-facing message. On a deployment with no accounts
+ *   at all the thrown error carries `noUsers: true` — the login page turns
+ *   that into "Create the first account", because it has no other way to ask:
+ *   GET /auth/users needs the session it is trying to obtain.
  */
 export async function login(username, password) {
   const res = await fetch(`${API_BASE}/auth/login`, {
@@ -79,15 +100,46 @@ export async function login(username, password) {
   })
 
   if (!res.ok) {
-    if (res.status === 401) throw new Error('Invalid username or password.')
-    let msg = `Server error (${res.status})`
-    try { msg = (await res.json()).detail ?? msg } catch { /* ignore */ }
-    throw new Error(msg)
+    const detail = (await errorBody(res))?.detail
+    if (res.status === 401) {
+      if (detail && typeof detail === 'object' && detail.code === 'no_users') {
+        const err = new Error(detailMessage(detail, 'No accounts exist yet.'))
+        err.noUsers = true
+        throw err
+      }
+      throw new Error('Invalid username or password.')
+    }
+    throw new Error(detailMessage(detail, `Server error (${res.status})`))
   }
 
   const data = await res.json()
   saveSession(data.access_token, data.user)
   return { token: data.access_token, user: data.user }
+}
+
+/**
+ * POST /auth/users with no session — the first-run bootstrap.
+ *
+ * The backend allows this only while the Users table is empty, so it is not a
+ * public signup route: on any deployment that already has an account it comes
+ * back 401. Logs the new account straight in on success.
+ */
+export async function createFirstAccount(username, password) {
+  const res = await fetch(`${API_BASE}/auth/users`, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ username, password }),
+  })
+
+  if (!res.ok) {
+    const detail = (await errorBody(res))?.detail
+    if (res.status === 401) {
+      throw new Error('An account already exists. Sign in instead.')
+    }
+    throw new Error(detailMessage(detail, `Server error (${res.status})`))
+  }
+
+  return login(username, password)
 }
 
 /**

@@ -71,6 +71,7 @@ const navItems = [
   { label: 'Models',      icon: 'psychology',       to: '/models'      },
   { label: 'Token Usage', icon: 'payments',         to: '/token-usage' },
   { label: 'Notifications', icon: 'notifications',   to: '/notification-settings' },
+  { label: 'Users',         icon: 'group',            to: '/users'       },
 ]
 
 watch(

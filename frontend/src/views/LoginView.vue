@@ -1,7 +1,7 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { login, isAuthenticated } from '../utils/auth.js'
+import { login, createFirstAccount, isAuthenticated } from '../utils/auth.js'
 
 const router   = useRouter()
 const route    = useRoute()
@@ -11,10 +11,31 @@ const showPw   = ref(false)
 const loading  = ref(false)
 const error    = ref('')
 
+// First-run bootstrap. Only ever turned on by the server's own "no_users"
+// signal on a login refusal — never guessed at, so a normal deployment never
+// shows a way to create an account without signing in.
+const firstRun = ref(false)
+const confirmPassword = ref('')
+
 // Redirect already-authenticated users
 onMounted(() => {
   if (isAuthenticated()) router.replace('/dashboard')
 })
+
+function goAfterAuth() {
+  // Open-redirect guard: only honour same-origin path-style redirects.
+  // Reject protocol-relative (//attacker.com), userinfo paths (/@evil.com),
+  // backslash-prefixed paths (/\evil.com), and any absolute URLs.
+  const requested = route.query.redirect
+  const safe = (typeof requested === 'string'
+                && requested.startsWith('/')
+                && !requested.startsWith('//')
+                && !requested.startsWith('/\\')
+                && !requested.includes('@'))
+               ? requested
+               : '/dashboard'
+  router.push(safe)
+}
 
 async function submit() {
   error.value = ''
@@ -25,18 +46,38 @@ async function submit() {
   loading.value = true
   try {
     await login(username.value.trim(), password.value)
-    // Open-redirect guard: only honour same-origin path-style redirects.
-    // Reject protocol-relative (//attacker.com), userinfo paths (/@evil.com),
-    // backslash-prefixed paths (/\evil.com), and any absolute URLs.
-    const requested = route.query.redirect
-    const safe = (typeof requested === 'string'
-                  && requested.startsWith('/')
-                  && !requested.startsWith('//')
-                  && !requested.startsWith('/\\')
-                  && !requested.includes('@'))
-                 ? requested
-                 : '/dashboard'
-    router.push(safe)
+    goAfterAuth()
+  } catch (e) {
+    if (e.noUsers) {
+      firstRun.value = true
+      error.value = ''
+    } else {
+      error.value = e.message
+    }
+  } finally {
+    loading.value = false
+  }
+}
+
+async function createAccount() {
+  error.value = ''
+  const name = username.value.trim()
+  if (!name) {
+    error.value = 'Choose a username.'
+    return
+  }
+  if (password.value.length < 8) {
+    error.value = 'Password must be at least 8 characters.'
+    return
+  }
+  if (password.value !== confirmPassword.value) {
+    error.value = 'The two passwords do not match.'
+    return
+  }
+  loading.value = true
+  try {
+    await createFirstAccount(name, password.value)
+    goAfterAuth()
   } catch (e) {
     error.value = e.message
   } finally {
@@ -146,7 +187,14 @@ onMounted(() => {
             <span class="material-symbols-outlined text-primary text-base">lock</span>
             <span class="text-[11px] font-bold uppercase tracking-widest text-slate-400">Private Access Only</span>
           </div>
-          <div>
+          <div v-if="firstRun">
+            <h1 class="text-3xl font-bold tracking-tight">Set up your account.</h1>
+            <p class="text-slate-400 text-sm mt-2">
+              This deployment has no accounts yet. Create the first one — it
+              gets full access, and it can create the rest from the Users tab.
+            </p>
+          </div>
+          <div v-else>
             <h1 class="text-3xl font-bold tracking-tight">Welcome back.</h1>
             <p class="text-slate-400 text-sm mt-2">
               IntelliStock is invite-only. Sign in with your credentials.
@@ -166,7 +214,7 @@ onMounted(() => {
             </div>
           </Transition>
 
-          <form @submit.prevent="submit" class="space-y-4" novalidate>
+          <form @submit.prevent="firstRun ? createAccount() : submit()" class="space-y-4" novalidate>
 
             <!-- Username field -->
             <div class="space-y-1.5">
@@ -196,8 +244,8 @@ onMounted(() => {
                   id="password"
                   v-model="password"
                   :type="showPw ? 'text' : 'password'"
-                  autocomplete="current-password"
-                  placeholder="••••••••"
+                  :autocomplete="firstRun ? 'new-password' : 'current-password'"
+                  :placeholder="firstRun ? 'at least 8 characters' : '••••••••'"
                   :disabled="loading"
                   class="w-full bg-background-dark border border-border-subtle rounded-xl pl-10 pr-11 py-3 text-sm text-slate-100 placeholder-slate-600
                          focus:outline-none focus:border-primary/60 focus:ring-1 focus:ring-primary/30
@@ -214,6 +262,25 @@ onMounted(() => {
               </div>
             </div>
 
+            <!-- Confirm password — first run only -->
+            <div v-if="firstRun" class="space-y-1.5">
+              <label for="confirm-password" class="text-xs font-semibold uppercase tracking-widest text-slate-400">Confirm password</label>
+              <div class="relative">
+                <span class="material-symbols-outlined absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-600 text-lg pointer-events-none">lock</span>
+                <input
+                  id="confirm-password"
+                  v-model="confirmPassword"
+                  :type="showPw ? 'text' : 'password'"
+                  autocomplete="new-password"
+                  placeholder="••••••••"
+                  :disabled="loading"
+                  class="w-full bg-background-dark border border-border-subtle rounded-xl pl-10 pr-4 py-3 text-sm text-slate-100 placeholder-slate-600
+                         focus:outline-none focus:border-primary/60 focus:ring-1 focus:ring-primary/30
+                         disabled:opacity-50 transition-colors"
+                />
+              </div>
+            </div>
+
             <!-- Submit -->
             <button
               type="submit"
@@ -225,7 +292,9 @@ onMounted(() => {
               <svg v-if="loading" class="size-4 animate-spin" viewBox="0 0 24 24" fill="none">
                 <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" stroke-dasharray="31.4" stroke-dashoffset="10" stroke-linecap="round"/>
               </svg>
-              <span>{{ loading ? 'Signing in…' : 'Sign In' }}</span>
+              <span>{{ loading
+                ? (firstRun ? 'Creating…' : 'Signing in…')
+                : (firstRun ? 'Create the first account' : 'Sign In') }}</span>
               <span v-if="!loading" class="material-symbols-outlined text-lg">arrow_forward</span>
             </button>
           </form>
@@ -233,8 +302,11 @@ onMounted(() => {
         </div>
 
         <!-- Footer note -->
-        <p class="text-center text-xs text-slate-600">
-          Access is by invitation only. Contact your administrator if you need an account.
+        <p v-if="firstRun" class="text-center text-xs text-slate-600">
+          This offer appears only while the deployment has no accounts at all.
+        </p>
+        <p v-else class="text-center text-xs text-slate-600">
+          Access is by invitation only. Ask someone with an account to create one for you.
         </p>
 
       </div>
