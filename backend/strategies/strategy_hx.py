@@ -48,6 +48,9 @@ _SELL_INTENT = "etf_sell"
 
 _STATE_KEY = "_strategy_hx_state"
 _CONFIRM_KEY = "_strategy_hx_confirm"
+#: The last session the state machine was ADVANCED on. `run_once` is called per
+#: tick, not per session, and the exit hysteresis counts sessions.
+_SESSION_KEY = "_strategy_hx_session"
 _LAST_DECISION_KEY = "_strategy_hx_last"
 _LOGGED_KEY = "_strategy_hx_logged"
 
@@ -137,8 +140,20 @@ class StrategyHx:
         closes = [close for _, close in observations]
 
         prev_state = str(cache.get(_STATE_KEY) or "").strip().upper()
-        state, confirm = hx_state(closes, prev_state,
-                                  cache.get(_CONFIRM_KEY), cfg)
+        # ONCE PER SESSION. `run_once` is called on every tick and the exit
+        # hysteresis counts SESSIONS — but the backtest clock carries no
+        # holiday calendar, so a holiday produces a second tick over an
+        # identical visible close series. Advanced on each of those, the
+        # five-session bear exit completes in four: a 3x fund back on a session
+        # early, the one direction this strategy may never fail in. Every tick
+        # after the first of a session replays the cached answer, which is also
+        # what the machine would have returned anyway on unchanged closes.
+        if cache.get(_SESSION_KEY) == session_id and prev_state:
+            state, confirm = prev_state, cache.get(_CONFIRM_KEY)
+        else:
+            state, confirm = hx_state(closes, prev_state,
+                                      cache.get(_CONFIRM_KEY), cfg)
+        cache[_SESSION_KEY] = session_id
         cache[_STATE_KEY] = state
         cache[_CONFIRM_KEY] = confirm
         if state == "UNKNOWN":

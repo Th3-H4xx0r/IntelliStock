@@ -211,3 +211,54 @@ def test_the_sync_script_reproduces_the_header_byte_for_byte():
                                   after).group(1))
     assert schema["config"] == DEFAULTS
     assert schema["execution_position"] == 10
+
+
+def bars_forward(closes, start_day=datetime(2026, 1, 1, tzinfo=timezone.utc)):
+    """Daily bars anchored at the START, so appending a close adds a SESSION.
+
+    `bars()` anchors on the end, so appending there shifts the whole series a
+    day earlier and the last visible session_id never changes — which is the
+    opposite of what a new trading day looks like."""
+    return [{"t": (start_day + timedelta(days=i)).isoformat(), "c": c}
+            for i, c in enumerate(closes)]
+
+
+def data_forward(closes):
+    out = {"QQQ": {"bars": bars_forward(closes)}}
+    for symbol in ("TQQQ", "BIL", "PSQ"):
+        out[symbol] = {"bars": bars_forward([50.0] * len(closes))}
+    return out
+
+
+def test_the_bear_exit_counter_counts_sessions_not_ticks():
+    """`run_once` is called on every TICK, and the backtest clock has no
+    holiday calendar: a holiday produces a second tick over an identical
+    visible close series. Advancing the counter on each of those completes a
+    five-session bear exit in four — a 3x fund back on a session early, which
+    is the one direction this strategy may never fail in. The machine advances
+    once per session; every other tick of that session replays the answer."""
+    closes = crash()
+    top = max(closes)
+    closes.append(top * 1.10)
+    cache = {"_strategy_hx_state": "BEAR", "_strategy_hx_confirm": 0}
+    call = dict(data=data_forward(closes), portfolio_emulator=FakeEmulator(),
+                strategy_cache=cache)
+    StrategyHx().run_once(["QQQ"], PRICES, NOW, cfg(), {}, **call)
+    assert cache["_strategy_hx_state"] == "BEAR"
+    assert cache["_strategy_hx_confirm"] == 1
+    first_session = cache["_strategy_hx_session"]
+
+    # A second tick of the SAME session — a holiday, a restart, a re-run.
+    StrategyHx().run_once(["QQQ"], PRICES, NOW, cfg(), {}, **call)
+    assert cache["_strategy_hx_confirm"] == 1
+    assert cache["_strategy_hx_state"] == "BEAR"
+    assert cache["_strategy_hx_session"] == first_session
+
+    # A genuinely new session does advance it.
+    closes.append(top * 1.10)
+    StrategyHx().run_once(["QQQ"], PRICES, NOW, cfg(), {},
+                          data=data_forward(closes),
+                          portfolio_emulator=FakeEmulator(),
+                          strategy_cache=cache)
+    assert cache["_strategy_hx_session"] != first_session
+    assert cache["_strategy_hx_confirm"] == 2
