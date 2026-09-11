@@ -1699,6 +1699,7 @@ async function submitCreateBacktest() {
             :instance="inst"
             :api-base="API_BASE"
             @waived="fetchInstance"
+            @revoked="fetchInstance"
           />
         </div>
 

@@ -54,6 +54,49 @@
   ```
   Expected: `VERDICT: GREEN`. If YELLOW, read the warning and decide. If RED, do not proceed.
 
+## The live-readiness gate, and the standing waiver
+
+A funded broker will not spawn without a fingerprinted readiness report on
+`Instances.<id>.live_readiness_report`
+(`instance.py:_assert_live_broker_start_allowed`). The report binds to the
+sha256 of the Docker image it was written against.
+
+Two kinds of report live on that key, and they behave differently across a
+deploy:
+
+| | Earned report | Operator waiver |
+|---|---|---|
+| Written by | evidence, gathered | **Waive live-readiness gate…** on the instance page (`POST /instances/{id}/readiness-waiver`) |
+| Every check's reason | describes what passed | begins `OPERATOR WAIVED` |
+| After a deploy | **invalidated** — it is evidence about one artifact and says nothing about the next | **carried forward** — the launcher re-binds it to the new image |
+
+The carry-forward (`live_readiness.rebind_operator_waiver`, called from
+`server._preflight_instance_launch`) is why there is no longer a step here
+reading "re-waive after every deploy". Pressing the button before the
+instance restarts was a race nobody reliably won, and losing it meant a
+funded instance quietly failing to start. The waiver is a standing decision
+now: *this instance may start live on my say-so*, not *against image
+ab12cd34*.
+
+Each carry-forward is loud and on the record — a RED log line
+(`live-readiness waiver carried forward to image <short> for <instance>
+(waived by <who> at <when>)`), the same page the waiver itself sends, and
+`live_readiness_rebound_at` / `live_readiness_rebound_from` on the row,
+shown on the card as **Last carried forward**. `live_readiness_waived_by`
+and `live_readiness_waived_at` are never overwritten: the decision was made
+once, by a person, on a date.
+
+Nothing is laundered. A report whose persisted fingerprint does not verify is
+refused rather than re-signed, a report with one earned check among the
+waived ones is not a waiver, and an earned report is never touched.
+
+- [ ] **Ending it is deliberate.** A deploy no longer revokes a waiver, so
+  **Revoke waiver** on the card (`DELETE /instances/{id}/readiness-waiver`)
+  is the only thing that does. It clears the report and every stamp, and the
+  next funded start refuses exactly as it would have before anyone waived
+  anything. It refuses (409) on an earned report — that is evidence, and this
+  is not the route for deleting it.
+
 ## T-15min
 
 - [ ] **Start the live instance.** Use the UI button or API call.

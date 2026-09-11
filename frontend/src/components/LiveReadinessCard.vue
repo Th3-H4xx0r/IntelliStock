@@ -3,8 +3,14 @@
 
      `instance.py:_assert_live_broker_start_allowed` refuses to spawn a funded
      broker without a fingerprinted, artifact-bound readiness report on the
-     row, and the report binds to the Docker image it was written against — so
-     every deploy invalidates it and the operator has to look at this again.
+     row, and the report binds to the Docker image it was written against.
+
+     A waiver is a STANDING decision now (operator, 2026-09-11): the launcher
+     re-binds it to each newly deployed image
+     (`live_readiness.rebind_operator_waiver`), so a deploy no longer silently
+     revokes it and nobody has to race a restart to press this button again.
+     An earned report is still invalidated by a deploy — it is evidence about
+     one artifact — and that is why this card distinguishes the two.
 
      The card reads that state; the modal waives it. The waiver is a safety
      bypass, so it is styled as one and gated exactly the way the route is:
@@ -13,7 +19,11 @@
      the typing is the gate, not the role. There is deliberately no
      "remember this phrase" and
      no way to waive without typing it — a one-click bypass of a real-money
-     gate is not a convenience, it is the failure mode. -->
+     gate is not a convenience, it is the failure mode.
+
+     Because it is standing, it has to be endable: "Revoke waiver" (DELETE on
+     the same route, behind its own confirmation) is the only thing that puts
+     the gate back. -->
 <template>
   <div class="glass-card rounded-2xl p-5" :class="cardBorder">
     <div class="flex items-center justify-between mb-4 gap-2">
@@ -24,11 +34,22 @@
       >{{ badgeLabel }}</span>
     </div>
 
-    <!-- The binding is the whole point of the feature; say it every time. -->
-    <div class="rounded-lg border border-amber-500/25 bg-amber-500/5 px-3 py-2 mb-4 flex items-start gap-2">
+    <!-- Which of the two kinds of report this is, is the thing an operator
+         needs to know here: one survives a deploy, the other must not. -->
+    <div
+      v-if="isWaived"
+      class="rounded-lg border border-red-500/25 bg-red-500/5 px-3 py-2 mb-4 flex items-start gap-2"
+    >
+      <span class="material-symbols-outlined text-red-300 text-[14px] mt-0.5">gpp_maybe</span>
+      <p class="text-[11px] text-red-200/80 leading-relaxed">
+        Standing operator waiver — carried forward automatically on every deploy.
+      </p>
+    </div>
+    <div v-else class="rounded-lg border border-amber-500/25 bg-amber-500/5 px-3 py-2 mb-4 flex items-start gap-2">
       <span class="material-symbols-outlined text-amber-400 text-[14px] mt-0.5">deployed_code_alert</span>
       <p class="text-[11px] text-amber-200/80 leading-relaxed">
-        Report is bound to the deployed image; re-waive after every deploy.
+        An earned report is bound to the image it was gathered on, and a deploy
+        invalidates it.
       </p>
     </div>
 
@@ -80,6 +101,15 @@
           <span class="text-red-300/80 text-xs font-semibold">Waived at</span>
           <span class="text-red-200 font-mono text-xs" :title="waivedAt || ''">{{ fmtWhen(waivedAt) }}</span>
         </div>
+        <!-- The carry-forward is invisible otherwise: the operator never -->
+        <!-- pressed anything, so the row has to say when it last happened. -->
+        <div v-if="reboundAt" class="flex justify-between gap-2">
+          <span class="text-red-300/80 text-xs font-semibold">Last carried forward</span>
+          <span
+            class="text-red-200 font-mono text-xs"
+            :title="reboundFrom ? `re-bound from image ${reboundFrom}` : ''"
+          >{{ fmtWhen(reboundAt) }}</span>
+        </div>
         <p v-if="waivedIsStale" class="text-[11px] text-red-300 leading-relaxed">
           The waiver names an image other than the one this report is bound to.
           Re-waive before starting live.
@@ -87,7 +117,7 @@
       </div>
     </div>
 
-    <div class="mt-4 pt-4 border-t border-border-subtle">
+    <div class="mt-4 pt-4 border-t border-border-subtle space-y-2">
       <button
         @click="openWaiver"
         title="Bypass the live-readiness gate (audited)"
@@ -95,10 +125,61 @@
                border-red-500/30 text-red-300 hover:bg-red-500/10"
       >
         <span class="material-symbols-outlined text-[14px]">gpp_maybe</span>
-        Waive live-readiness gate…
+        {{ isWaived ? 'Re-waive with a new reason…' : 'Waive live-readiness gate…' }}
+      </button>
+      <button
+        v-if="isWaived"
+        @click="showRevoke = true"
+        title="End the standing waiver — a funded start is gated again"
+        class="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold border transition-colors
+               border-border-subtle text-slate-400 hover:text-slate-200 hover:bg-white/5"
+      >
+        <span class="material-symbols-outlined text-[14px]">lock_reset</span>
+        Revoke waiver
       </button>
     </div>
   </div>
+
+  <!-- ── Revoke confirmation ─────────────────────────────────────────────── -->
+  <Teleport to="body">
+    <Transition name="fade">
+      <div
+        v-if="showRevoke"
+        class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+        @click.self="closeRevoke"
+      >
+        <div class="relative w-full max-w-md bg-[#0f1318] border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
+          <div class="px-6 py-5 border-b border-border-subtle">
+            <h2 class="text-base font-bold">Revoke the standing waiver</h2>
+            <p class="text-[11px] text-slate-500 truncate mt-0.5">
+              Instance <span class="font-mono text-slate-300">{{ instanceId }}</span>
+            </p>
+          </div>
+          <div class="px-6 py-5 space-y-3">
+            <p class="text-xs text-slate-300 leading-relaxed">
+              This removes the readiness report and the waiver stamps. A funded
+              broker on this instance will refuse to start again until the gate
+              is earned — or waived afresh.
+            </p>
+            <p v-if="revokeMsg" class="text-xs leading-relaxed"
+               :class="revokeOk ? 'text-emerald-300' : 'text-red-300'">
+              {{ revokeMsg }}
+            </p>
+          </div>
+          <div class="px-6 py-4 border-t border-border-subtle flex gap-3">
+            <button @click="closeRevoke" :disabled="revoking"
+                    class="flex-1 py-2.5 rounded-lg border border-border-subtle text-sm font-medium text-slate-400 hover:text-slate-200 transition-colors disabled:opacity-50">
+              {{ revokeOk ? 'Close' : 'Cancel' }}
+            </button>
+            <button v-if="!revokeOk" @click="submitRevoke" :disabled="revoking"
+                    class="flex-1 py-2.5 rounded-lg bg-red-500 text-white text-sm font-bold hover:brightness-110 transition-all disabled:opacity-40 disabled:cursor-not-allowed">
+              {{ revoking ? 'Revoking…' : 'Revoke waiver' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </Transition>
+  </Teleport>
 
   <!-- ── Waiver modal (safety bypass — typed confirmation, no shortcuts) ──── -->
   <Teleport to="body">
@@ -136,7 +217,9 @@
                 operator channel, and is bound to the image deployed right now.
               </p>
               <p class="text-[11px] text-red-300/80 leading-relaxed">
-                Report is bound to the deployed image; re-waive after every deploy.
+                It stands until you revoke it: the launcher re-binds it to each
+                newly deployed image, so a deploy will not quietly put the gate
+                back.
               </p>
             </div>
 
@@ -225,7 +308,7 @@ const props = defineProps({
   instance: { type: Object, default: () => ({}) },
   apiBase: { type: String, required: true },
 })
-const emit = defineEmits(['waived'])
+const emit = defineEmits(['waived', 'revoked'])
 
 const instanceId = computed(() => String(props.instance?.id ?? ''))
 const status = computed(() => readinessStatus(props.instance))
@@ -233,6 +316,10 @@ const report = computed(() => props.instance?.live_readiness_report || {})
 const counts = computed(() => readinessCheckCounts(report.value))
 const waivedAt = computed(() => props.instance?.live_readiness_waived_at || '')
 const waivedBy = computed(() => props.instance?.live_readiness_waived_by || '')
+const reboundAt = computed(() => props.instance?.live_readiness_rebound_at || '')
+const reboundFrom = computed(() => props.instance?.live_readiness_rebound_from || '')
+const isWaived = computed(
+  () => status.value === 'present' && isWaivedReport(report.value))
 
 // A waiver stamp with no report left on the row means the report was replaced
 // by something the waiver did not write — worth saying out loud rather than
@@ -243,10 +330,10 @@ const waivedIsStale = computed(
 const badgeLabel = computed(() => {
   if (status.value === 'unsupported') return 'Unknown'
   if (status.value === 'missing') return 'No report'
-  return isWaivedReport(report.value) ? 'Waived' : 'Reported'
+  return isWaived.value ? 'Waived' : 'Reported'
 })
 const badgeClass = computed(() => {
-  if (status.value === 'present' && !isWaivedReport(report.value)) {
+  if (status.value === 'present' && !isWaived.value) {
     return 'bg-emerald-500/10 text-emerald-400 border-emerald-500/25'
   }
   if (status.value === 'present') return 'bg-red-500/10 text-red-300 border-red-500/30'
@@ -255,10 +342,7 @@ const badgeClass = computed(() => {
 })
 // A waived instance wears the warning border; everything else keeps
 // .glass-card's own, so the card sits flush with its neighbours.
-const cardBorder = computed(
-  () => (status.value === 'present' && isWaivedReport(report.value))
-    ? 'border border-red-500/25'
-    : '')
+const cardBorder = computed(() => (isWaived.value ? 'border border-red-500/25' : ''))
 
 function shortHash(v) { return shortArtifactHash(v) }
 
@@ -337,6 +421,43 @@ async function submitWaiver() {
     msg.value = e.message || 'Waiver failed'
   } finally {
     saving.value = false
+  }
+}
+
+// ── Revoke ──────────────────────────────────────────────────────────────────
+// The waiver is standing, so ending it is a deliberate act of its own rather
+// than something a deploy does by accident. One confirmation, no typed phrase:
+// revoking re-arms a safety gate, it does not bypass one.
+const showRevoke = ref(false)
+const revoking   = ref(false)
+const revokeMsg  = ref('')
+const revokeOk   = ref(false)
+
+function closeRevoke() {
+  if (revoking.value) return
+  showRevoke.value = false
+  revokeMsg.value = ''
+  revokeOk.value = false
+}
+
+async function submitRevoke() {
+  if (revoking.value) return
+  revoking.value = true
+  revokeMsg.value = ''
+  try {
+    const res = await fetch(
+      `${props.apiBase}/instances/${encodeURIComponent(instanceId.value)}/readiness-waiver`,
+      { method: 'DELETE', headers: authHeaders() })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(data?.detail || data?.error || `HTTP ${res.status}`)
+    revokeOk.value = true
+    revokeMsg.value = `Waiver revoked. A funded start on ${instanceId.value} is gated again.`
+    emit('revoked', data)
+  } catch (e) {
+    revokeOk.value = false
+    revokeMsg.value = e.message || 'Revocation failed'
+  } finally {
+    revoking.value = false
   }
 }
 </script>
