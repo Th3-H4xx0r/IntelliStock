@@ -134,6 +134,12 @@ def test_start_ignores_caller_preflight_and_runs_immutable_image_id(monkeypatch)
     monkeypatch.setenv("SOCKET_CONTROL_MASTER_KEY", "0123456789abcdef" * 4)
     monkeypatch.setenv("EQUITIES_INSTANCE_AUTOSTART_ALLOWED", "true")
     monkeypatch.setenv("PIT_CAPTURE_ENABLED", "1")
+    # 2026-09-11: the funded-Alpaca preflight inside the instance container
+    # requires these; alpaca-main crash-looped because the launcher never
+    # forwarded them from the supervisor's environment.
+    monkeypatch.setenv("ALPHA_MARK_WATCHDOG_ENABLED", "1")
+    monkeypatch.setenv("LIVE_WAL_ACCOUNT_ID", "165399789")
+    monkeypatch.setenv("LIVE_CLEAN_ROOM_MODE", "1")
     monkeypatch.setattr(server, "_get_instance_network", lambda c: "net")
     monkeypatch.setattr(server, "_augment_volumes_with_claude", lambda v: v)
     captured = []
@@ -162,6 +168,9 @@ def test_start_ignores_caller_preflight_and_runs_immutable_image_id(monkeypatch)
     env = kwargs["environment"]
     assert env["INTELLISTOCK_DEPLOYED_ARTIFACT_SHA256"] == "a" * 64
     assert env["PIT_CAPTURE_ENABLED"] == "1"
+    assert env["ALPHA_MARK_WATCHDOG_ENABLED"] == "1"
+    assert env["LIVE_WAL_ACCOUNT_ID"] == "165399789"
+    assert env["LIVE_CLEAN_ROOM_MODE"] == "1"
     assert "INSTANCE_SOCKET_SUPERVISOR_TOKEN" not in env
     assert env["INSTANCE_SOCKET_BROKER_TOKEN"]
 

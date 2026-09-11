@@ -675,7 +675,19 @@ def start_instance_container(instance_id, *, preflight=None):
                'LIVE_AUTO_RESET_ON_MIGRATION',
                # Strict PIT evidence capture is disabled by default and reaches
                # equities workers only when the operator explicitly enables it.
-               'PIT_CAPTURE_ENABLED'):
+               'PIT_CAPTURE_ENABLED',
+               # 2026-09-11: a funded Alpaca instance refuses to start unless
+               # instance.py sees the watchdog flag (and optionally its own
+               # key pair), and the adapter reads the WAL account id and the
+               # clean-room switches from ITS environment, not the
+               # supervisor's. alpaca-main crash-looped on
+               # "funded Alpaca requires ALPHA_MARK_WATCHDOG_ENABLED=1" with
+               # the flag set on the host, because none of these were
+               # forwarded. Forwarded only when set, like everything above.
+               'ALPHA_MARK_WATCHDOG_ENABLED',
+               'ALPACA_WATCHDOG_KEY', 'ALPACA_WATCHDOG_SECRET',
+               'LIVE_WAL_ACCOUNT_ID',
+               'LIVE_CLEAN_ROOM_MODE', 'LIVE_INITIAL_VALUE'):
         _v = os.environ.get(_k)
         if _v:
             env[_k] = _v
