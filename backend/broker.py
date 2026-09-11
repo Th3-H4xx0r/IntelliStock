@@ -13140,6 +13140,75 @@ def _log_live_trade_decision(symbol, decision, price, ts, strategy_summary,
         pass
 
 
+def _restore_strategy_cache_from_db(run_once_specs, instance_id, strategy_cache,
+                                    *, connect, load, merge, log=None,
+                                    skip_lanes=(), db_handle=None):
+    """Restore each run_once lane's persisted `strategy_cache`. One shot.
+
+    Returns True ONLY when the DB was reachable and every lane was queried
+    without raising. False means nothing was restored and the caller must leave
+    its done-flag clear so the next tick tries again.
+
+    The branch this exists for: `get_conn_retry` returning None used to skip the
+    whole restore with NO log while the caller set the done-flag anyway, so a
+    container that booted during a DB blip ran its entire life on an empty
+    cache. For Strategy EB that is a cold start on a levered position —
+    `_strategy_eb_exit_issued_session` gone (the in-flight exit is re-sent),
+    `_strategy_eb_trend_state` gone (the machine reads its cold "ON" and rotates
+    the whole remainder), `_strategy_eb_pending_targets` gone (the settled
+    proceeds are never deployed).
+
+    `skip_lanes` names lanes the boot sequence already hydrated; re-reading a
+    row underneath them is not this function's job.
+    """
+    def _say(message, color="white"):
+        try:
+            (log if log is not None else _log)(message, color)
+        except Exception:
+            pass
+
+    conn = None
+    try:
+        conn = connect()
+    except Exception as exc:
+        conn = None
+        _say(f"strategy cache NOT restored: no DB connection "
+             f"({type(exc).__name__}: {exc}); retrying next tick.", "red")
+        return False
+    if conn is None:
+        _say("strategy cache NOT restored: no DB connection after retries. "
+             "Running on an EMPTY cache would cold-start every run_once lane's "
+             "persisted state; retrying next tick instead.", "red")
+        return False
+    skip = {str(name).strip() for name in (skip_lanes or ())}
+    try:
+        for spec in (run_once_specs or []):
+            name = str((spec or {}).get("strategy") or "").strip()
+            if not name or name in skip:
+                continue
+            loaded = load(conn, db_handle, str(instance_id), name)
+            if not loaded:
+                continue
+            target = strategy_cache.setdefault(name, {})
+            merge(target, loaded)
+            _say(
+                f"strategy_cache restored for {name}: {len(loaded)} key(s) "
+                f"(bar_index={target.get('_deployment_bar_index')}, "
+                f"halt_active={(target.get('_portfolio_drawdown_state') or {}).get('halt_active')})",
+                "cyan",
+            )
+    except Exception as exc:
+        _say(f"strategy cache NOT restored: load failed "
+             f"({type(exc).__name__}: {exc}); retrying next tick.", "red")
+        return False
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return True
+
+
 def _credit_guard_or_raise(*, call_site: str) -> str:
     """R2 Task 4: preflight OpenRouter credit guard.
 
@@ -14182,45 +14251,30 @@ while not shutdown_requested:
                 # holds the API subscription regardless of mode.
                 _strat_data_key = (data_key or key or os.environ.get("KEY", "")) or ""
                 _strat_data_secret = (data_secret or secret or os.environ.get("SECRET", "")) or ""
-                # F1: persist per-strategy strategy_cache across container restarts.
-                if mode == MODE_LIVE and not globals().get("_strategy_cache_loaded_from_db"):
-                    try:
-                        from strategy_cache_persistence import (
-                            load_strategy_cache_from_db as _scp_load,
-                            merge_loaded_cache_into as _scp_merge,
-                        )
-                        _scp_conn = get_conn_retry(max_attempts=3, delay=2)
-                        if _scp_conn is not None:
-                            try:
-                                for _spec_sc in (_run_once_specs or []):
-                                    _nm = str((_spec_sc or {}).get("strategy") or "").strip()
-                                    if not _nm:
-                                        continue
-                                    _loaded = _scp_load(_scp_conn, r, str(instance_id), _nm)
-                                    if _loaded:
-                                        _tgt = _strategy_cache.setdefault(_nm, {})
-                                        _scp_merge(_tgt, _loaded)
-                                        _log(
-                                            f"strategy_cache restored for {_nm}: {len(_loaded)} key(s) "
-                                            f"(bar_index={_tgt.get('_deployment_bar_index')}, "
-                                            f"halt_active={(_tgt.get('_portfolio_drawdown_state') or {}).get('halt_active')})",
-                                            "cyan",
-                                        )
-                            finally:
-                                try:
-                                    _scp_conn.close()
-                                except Exception:
-                                    pass
-                        globals()["_strategy_cache_loaded_from_db"] = True
-                    except Exception as _scp_le:
-                        try:
-                            _log(
-                                f"strategy_cache load failed (continuing with empty cache): {type(_scp_le).__name__}: {_scp_le}",
-                                "yellow",
-                            )
-                        except Exception:
-                            pass
-                        globals()["_strategy_cache_loaded_from_db"] = True
+                # F1: persist per-strategy strategy_cache across container
+                # restarts. Its OWN gate, not the GNA boot sequence's: that one
+                # sets `_strategy_cache_loaded_from_db` unconditionally (twice),
+                # so this per-lane restore never ran on a live boot and every
+                # non-GNA lane — strategy_eb among them — started cold.
+                # `_strategy_cache_boot_hydrated` is the set of lanes the boot
+                # sequence already filled, captured ONCE so a retry after a DB
+                # blip does not mistake tick-1's own writes for boot state.
+                if mode == MODE_LIVE and not globals().get("_run_once_cache_restored"):
+                    from strategy_cache_persistence import (
+                        load_strategy_cache_from_db as _scp_load,
+                        merge_loaded_cache_into as _scp_merge,
+                    )
+                    _scp_skip = globals().get("_strategy_cache_boot_hydrated")
+                    if _scp_skip is None:
+                        _scp_skip = {_n for _n, _c in (_strategy_cache or {}).items() if _c}
+                        globals()["_strategy_cache_boot_hydrated"] = _scp_skip
+                    if _restore_strategy_cache_from_db(
+                        _run_once_specs, instance_id, _strategy_cache,
+                        connect=lambda: get_conn_retry(max_attempts=3, delay=2),
+                        load=_scp_load, merge=_scp_merge, log=_log,
+                        skip_lanes=_scp_skip, db_handle=r,
+                    ):
+                        globals()["_run_once_cache_restored"] = True
                 # 2026-05-05 — pre-cycle RH refresh (LIVE only). The adapter
                 # caches refresh_account / refresh_positions for 1 hour. The
                 # hourly cycle DEPENDS on fresh data — risk evaluation against
