@@ -13140,6 +13140,110 @@ def _log_live_trade_decision(symbol, decision, price, ts, strategy_summary,
         pass
 
 
+#: Where the EB wrapper stamps the session an exit-to-zero was ISSUED in, so it
+#: is not re-sent on each of the session's remaining ticks while the fill is
+#: pending. Kept in sync with `strategies/strategy_eb._EXIT_ISSUED_KEY`: a
+#: submit that never reached the broker has to clear it, or the exit waits for
+#: the NEXT session to re-arm.
+_EB_EXIT_ISSUED_KEY = "_strategy_eb_exit_issued_session"
+
+#: Both spellings broker.py resolves the EB lane under.
+_EB_LANE_NAMES = ("strategy_eb", "strategyeb", "StrategyEb")
+
+
+def _strategy_eb_core_symbol(cached_strategies):
+    """The enabled strategy_eb lane's core symbol, upper-cased, or "".
+
+    Settings are `conditions` UNION `config`, matching `_merged_strategy_
+    settings` and therefore the dispatcher: reading `config` alone is blind to
+    a value set in `conditions`.
+    """
+    try:
+        from strategy_eb import DEFAULTS as _EB_DEFAULTS
+    except Exception:
+        return ""
+    try:
+        for spec in (cached_strategies or []):
+            if not isinstance(spec, dict):
+                continue
+            if str(spec.get("strategy") or "").strip().lower().replace("_", "") \
+                    != "strategyeb":
+                continue
+            merged = {**_EB_DEFAULTS, **_merged_strategy_settings(spec)}
+            if not _truthy(merged.get("strategy_eb_enabled", False)):
+                continue
+            return str(merged.get("core_symbol") or "").strip().upper()
+    except Exception:
+        return ""
+    return ""
+
+
+def _report_live_submit_failure(symbol, decision, detail, *, instance_id,
+                                strategy_cache=None, eb_core="",
+                                uncertain=False, log=None, alert=None):
+    """Make a live submit that did not reach the broker loud, and re-arm a
+    dropped exit.
+
+    Three lanes used to lose an order in silence or in yellow: an UNCERTAIN
+    submission (allowed, not accepted, reference None — the transport raised
+    and the lookup could not say whether the order exists), the 90s watchdog
+    timeout, and the blanket `except Exception`.
+
+    A buy that never reached the broker costs an opportunity, so it stays
+    yellow and pages nobody. A SELL is a position the strategy believes it has
+    left: it is RED, it alerts, and it clears the EB lane's
+    `_strategy_eb_exit_issued_session` so the next tick re-arms the exit rather
+    than waiting for the next session. The clear is keyed on the core symbol,
+    because the key is per-LANE and clearing it for an unrelated sell would
+    re-send an exit that really is in flight.
+    """
+    def _say(message, color):
+        try:
+            (log if log is not None else _log)(message, color)
+        except Exception:
+            pass
+
+    side = "SELL" if decision == -1 else ("BUY" if decision == 1 else "FLAT")
+    loud = bool(uncertain or decision == -1)
+    kind = "OUTCOME UNKNOWN" if uncertain else "NOT SUBMITTED"
+    message = (
+        f"LIVE ORDER {kind}: {side} {symbol} — {detail}. "
+        + ("The broker may or may not hold this order; reconcile before the "
+           "next tick." if uncertain
+           else "Nothing reached the broker.")
+    )
+    _say(message, "red" if loud else "yellow")
+    if not loud:
+        return False
+    try:
+        (alert if alert is not None else _live_alert_strategy_error)(
+            instance_id=str(instance_id), tag="live-submit", message=message)
+    except Exception as exc:
+        _say(f"live-submit alert failed: {type(exc).__name__}: {exc}", "yellow")
+    if decision != -1 or not isinstance(strategy_cache, dict):
+        return True
+    if str(eb_core or "").strip().upper() != str(symbol or "").strip().upper():
+        return True
+    cleared = False
+    for name in _EB_LANE_NAMES:
+        lane = strategy_cache.get(name)
+        if isinstance(lane, dict) and _EB_EXIT_ISSUED_KEY in lane:
+            lane.pop(_EB_EXIT_ISSUED_KEY, None)
+            cleared = True
+    if cleared:
+        _say(f"strategy_eb exit RE-ARMED for {symbol}: the submit did not "
+             "reach the broker, so the position is still held.", "red")
+    return True
+
+
+def _live_alert_strategy_error(**kwargs):
+    """`live_alerts.alert_strategy_error`, imported at the call so a missing
+    Discord path cannot take the trade loop down at import time."""
+    import live_alerts
+
+    live_alerts.alert_strategy_error(**kwargs)
+
+
 def _restore_strategy_cache_from_db(run_once_specs, instance_id, strategy_cache,
                                     *, connect, load, merge, log=None,
                                     skip_lanes=(), db_handle=None):
@@ -18298,6 +18402,24 @@ while not shutdown_requested:
                                                 f"{','.join(_submission.decision.reason_codes)}",
                                                 "red",
                                             )
+                                        elif getattr(_submission, "uncertain", False):
+                                            # E1. Allowed, NOT accepted,
+                                            # reference None: the transport
+                                            # raised and the lookup could not
+                                            # say whether the order exists.
+                                            # The only branch that logged was
+                                            # `not allowed`, so this produced
+                                            # no line at all.
+                                            _report_live_submit_failure(
+                                                symbol, decision,
+                                                ",".join(_submission.decision.reason_codes)
+                                                or "outcome unknown",
+                                                instance_id=instance_id,
+                                                strategy_cache=_strategy_cache,
+                                                eb_core=_strategy_eb_core_symbol(
+                                                    _cached_strategies),
+                                                uncertain=True,
+                                            )
                                     else:
                                         # Non-equity compatibility paths are
                                         # intentionally unchanged.
@@ -18324,18 +18446,28 @@ while not shutdown_requested:
                                             pre_override_decision, normalized,
                                         )
                                 except _live_cf.TimeoutError:
-                                    _log(
-                                        f"execute_signal hard-timeout (>90s) for "
-                                        f"{_side_word.upper()} {symbol}; abandoning "
-                                        f"future to background. RH cid-idempotency "
-                                        f"prevents duplicate if it eventually succeeds.",
-                                        "yellow",
+                                    # E2. Yellow-only, with no alert and no
+                                    # retry. On a SELL that is a position the
+                                    # strategy believes it has left.
+                                    _report_live_submit_failure(
+                                        symbol, decision,
+                                        "execute_signal hard-timeout (>90s); future "
+                                        "abandoned to background, cid-idempotency "
+                                        "prevents a duplicate if it later succeeds",
+                                        instance_id=instance_id,
+                                        strategy_cache=_strategy_cache,
+                                        eb_core=_strategy_eb_core_symbol(
+                                            _cached_strategies),
                                     )
                                 except Exception as _es_e:
-                                    _log(
-                                        f"execute_signal failed for {_side_word.upper()} "
-                                        f"{symbol}: {type(_es_e).__name__}: {_es_e}",
-                                        "yellow",
+                                    _report_live_submit_failure(
+                                        symbol, decision,
+                                        f"execute_signal raised "
+                                        f"{type(_es_e).__name__}: {_es_e}",
+                                        instance_id=instance_id,
+                                        strategy_cache=_strategy_cache,
+                                        eb_core=_strategy_eb_core_symbol(
+                                            _cached_strategies),
                                     )
                             else:
                                 _anchor_order_source = (
