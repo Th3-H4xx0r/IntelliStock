@@ -123,3 +123,84 @@ def test_disabled_flag_preserves_payload_and_cache_without_pending_api():
                                     portfolio_emulator=FakeEmulator(), strategy_cache=cache)
         outputs.append((out, cache))
     assert outputs[0] == outputs[1]
+
+
+# --- LIVE: the guard reading a broker adapter through the live view ---------
+#
+# Live, `portfolio_emulator` is the broker adapter, not a PortfolioEmulator.
+# These run the WHOLE strategy against the live reader, because the guard's
+# value is entirely in what run_once emits, not in what the reader returns.
+
+from broker_adapters.base import OrderRef  # noqa: E402
+from live_pending_orders import LivePendingOrderView  # noqa: E402
+
+
+def live_emulator(orders, **emulator_kwargs):
+    """A FakeEmulator wearing the adapter's open-order surface, viewed live."""
+    emu = FakeEmulator(**emulator_kwargs)
+
+    def list_open_orders_strict(limit=200):
+        if isinstance(orders, BaseException):
+            raise orders
+        return orders
+
+    emu.list_open_orders_strict = list_open_orders_strict
+    return LivePendingOrderView(emu)
+
+
+def live_order(symbol, status):
+    return OrderRef(broker_order_id='b', client_order_id='c', symbol=symbol,
+                    side='buy', qty=1.0, status=status)
+
+
+def run_live(emulator, **overrides):
+    return StrategyEb().run_once([], PRICES, DECIDES,
+                                 cfg(pending_buy_guard_enabled=True,
+                                     **overrides), {},
+                                 data=data_for(alternating(.01)),
+                                 portfolio_emulator=emulator)
+
+
+def test_a_live_working_order_blocks_that_symbols_buy():
+    out = run_live(live_emulator([live_order('tqqq', 'new')]))
+    assert 'TQQQ' not in out and out.get('SPY') == 1
+    assert 'TQQQ' not in out['_nexus_executable_buys']
+
+
+def test_a_live_partial_fill_still_blocks_the_buy():
+    assert 'TQQQ' not in run_live(
+        live_emulator([live_order('TQQQ', 'partially_filled')]))
+
+
+def test_a_live_terminal_order_does_not_block_the_buy():
+    out = run_live(live_emulator([live_order('TQQQ', 'filled'),
+                                  live_order('SPY', 'canceled')]))
+    assert out.get('TQQQ') == 1 and out.get('SPY') == 1
+
+
+def test_an_empty_live_order_book_trades_exactly_as_the_guard_off_run_does():
+    """The flag must be a no-op on a flat book, or it is untradeable live."""
+    guarded = run_live(live_emulator([]))
+    ungated = StrategyEb().run_once([], PRICES, DECIDES, cfg(), {},
+                                    data=data_for(alternating(.01)),
+                                    portfolio_emulator=FakeEmulator())
+    assert guarded == ungated
+
+
+def test_an_unreadable_live_order_book_blocks_buys_but_keeps_sells():
+    out = run_live(live_emulator(RuntimeError('503 unavailable'),
+                                 cash=10000, positions={'TQQQ': 200}))
+    assert out.get('TQQQ') == -1
+    assert not out['_nexus_executable_buys']
+    assert out['_nexus_sell_enforcement'] == ['TQQQ']
+
+
+def test_a_live_adapter_with_no_order_reader_blocks_buys():
+    """A non-Alpaca adapter has no strict reader; unknown is not empty."""
+    assert run_live(LivePendingOrderView(FakeEmulator())) == {}
+
+
+def test_a_malformed_live_order_blocks_buys():
+    bad = OrderRef(broker_order_id='b', client_order_id='c', symbol='',
+                   side='buy', qty=1.0, status='new')
+    assert run_live(live_emulator([bad])) == {}

@@ -7042,6 +7042,44 @@ def _run_graph_nexus_with_point_in_time(
     )
 
 
+def _eb_live_portfolio_view(strategy_name, emulator):
+    """Strategy EB's live emulator, with the pending-order reader attached.
+
+    In a backtest `portfolio_emulator` is a PortfolioEmulator and it can say
+    which symbols still have an unresolved order. LIVE it is the broker
+    ADAPTER (`portfolio_emulator = live_adapter`), which cannot — so EB's
+    pending-buy guard read nothing, blocked every buy of every session, and
+    `pending_buy_guard_enabled` had to stay off. This hands EB a read-through
+    view that answers the same question from the broker's working-order book.
+
+    Scoped to the EB spec ON PURPOSE. `pending_execution_symbols` is not EB's
+    alone: strategy_x.py reads it off the emulator through getattr and today
+    finds nothing, so attaching the reader to the adapter itself would change
+    Strategy X's live kicker as a side effect of fixing EB's guard.
+
+    Every failure path returns the emulator unchanged, which leaves the guard
+    with no reader — and a guard with no reader blocks buys and keeps sells.
+    """
+    if emulator is None or globals().get("mode") != MODE_LIVE:
+        return emulator
+    if str(strategy_name or "").strip().lower() not in {"strategy_eb",
+                                                        "strategyeb"}:
+        return emulator
+    if getattr(emulator, "pending_execution_symbols", None) is not None:
+        return emulator
+    try:
+        from live_pending_orders import LivePendingOrderView
+        return LivePendingOrderView(emulator)
+    except Exception as _view_err:
+        _log(
+            f"Strategy EB live pending-order view unavailable "
+            f"({type(_view_err).__name__}: {_view_err}); the pending-buy "
+            f"guard, if enabled, will refuse every buy.",
+            "yellow",
+        )
+        return emulator
+
+
 def run_run_once_strategies(specs, symbols, prices, current_time, data=None, portfolio_emulator=None, time_increment=None, alpaca_key=None, alpaca_secret=None, strategy_caches=None, alpaca_data_feed=None, mode=None):
     """
     Run strategies that have execution_scope "run_once". Each returns a dict mapping symbol -> score (and optional reason).
@@ -7312,7 +7350,8 @@ def run_run_once_strategies(specs, symbols, prices, current_time, data=None, por
                         config,
                         conditions,
                         data=data,
-                        portfolio_emulator=portfolio_emulator,
+                        portfolio_emulator=_eb_live_portfolio_view(
+                            name, portfolio_emulator),
                         strategy_cache=strategy_cache,
                         time_increment=time_increment,
                         mode=(

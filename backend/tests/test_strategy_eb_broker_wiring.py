@@ -88,3 +88,72 @@ def test_the_vts_data_symbols_reach_the_fetch_site_when_the_overlay_is_on():
     assert "VIXY" not in off and "VIXM" not in off
     on = ns["_strategy_eb_universe_symbols"](spec(strategy_eb_enabled=True, trend_filter_bars=25, vts_enabled=True))
     assert "VIXY" in on and "VIXM" in on
+
+
+# --- the live pending-order reader reaches EB and nothing else --------------
+
+from types import SimpleNamespace  # noqa: E402
+
+from broker_adapters.base import OrderRef  # noqa: E402
+
+
+def adapter(*orders):
+    """A live adapter surface: open orders, and no pending_execution_symbols."""
+    return SimpleNamespace(
+        list_open_orders_strict=lambda limit=200: [
+            OrderRef(broker_order_id="b", client_order_id="c", symbol=s,
+                     side="buy", qty=1.0, status=st) for s, st in orders])
+
+
+def live(ns):
+    ns["mode"] = "live"
+    return ns
+
+
+def test_live_mode_hands_eb_a_working_pending_order_reader():
+    ns = live(_extract("_eb_live_portfolio_view"))
+    live_adapter = adapter(("tqqq", "new"), ("SPY", "filled"))
+    view = ns["_eb_live_portfolio_view"]("strategy_eb", live_adapter)
+    assert view is not live_adapter
+    assert view.pending_execution_symbols() == ("TQQQ",)
+
+
+def test_the_legacy_unseparated_id_is_wired_too():
+    ns = live(_extract("_eb_live_portfolio_view"))
+    assert ns["_eb_live_portfolio_view"]("StrategyEb", adapter()) is not None
+    assert hasattr(ns["_eb_live_portfolio_view"]("StrategyEb", adapter()),
+                   "pending_execution_symbols")
+
+
+def test_no_other_strategy_is_given_the_reader():
+    """Strategy X reads the same method through getattr. Attaching it to the
+    adapter itself would silently change its live kicker."""
+    ns = live(_extract("_eb_live_portfolio_view"))
+    for name in ("strategy_x", "graph_nexus_analysis", "", None):
+        live_adapter = adapter(("TQQQ", "new"))
+        assert ns["_eb_live_portfolio_view"](name, live_adapter) is live_adapter
+
+
+def test_a_backtest_emulator_is_passed_through_untouched():
+    ns = _extract("_eb_live_portfolio_view")  # ns["mode"] is "backtest"
+    emulator = adapter(("TQQQ", "new"))
+    assert ns["_eb_live_portfolio_view"]("strategy_eb", emulator) is emulator
+
+
+def test_an_emulator_that_already_reads_pending_orders_is_not_wrapped():
+    ns = live(_extract("_eb_live_portfolio_view"))
+    emulator = SimpleNamespace(pending_execution_symbols=lambda: ("SPY",))
+    assert ns["_eb_live_portfolio_view"]("strategy_eb", emulator) is emulator
+
+
+def test_a_missing_emulator_stays_missing():
+    ns = live(_extract("_eb_live_portfolio_view"))
+    assert ns["_eb_live_portfolio_view"]("strategy_eb", None) is None
+
+
+def test_the_run_once_call_site_passes_the_view():
+    """A source assertion: the call site is inline in a 1,000-line function.
+    Defining the helper and never calling it is a silent no-op live."""
+    source = open(_BROKER).read()
+    assert source.count("_eb_live_portfolio_view(") >= 2
+    assert "portfolio_emulator=_eb_live_portfolio_view(" in source

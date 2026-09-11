@@ -172,6 +172,12 @@ def _guard_pending_buys(decisions, sizes, emulator, cfg, cache, session_id):
     Opt-in, default off. Requires an authoritative pending-order reader;
     adapters without one cannot issue new buys with this guard enabled.
     Sells remain executable, including when pending state is unavailable.
+
+    The reader is whatever the caller passed as the emulator: a backtest's
+    PortfolioEmulator, or live the view broker.py wraps the broker adapter in
+    (backend/live_pending_orders.py), which answers from the account's working
+    orders. Both raise rather than report an empty book they could not read,
+    which is what makes the `except` below a refusal and not a rubber stamp.
     """
     buys = {s for s, decision in decisions.items() if decision == 1}
     if not buys or not _truthy(cfg.get("pending_buy_guard_enabled", False)):

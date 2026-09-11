@@ -98,8 +98,13 @@ DEFAULTS = {
     "reference_symbol": "QQQ",
     "off_symbol": "SPY",
     "cash_symbol": "BIL",
-    # New buys wait for the same symbol's existing orders to resolve.
-    # Opt-in: enabling requires an authoritative pending-order reader.
+    # New buys wait for the same symbol's existing orders to resolve. Opt-in:
+    # enabling requires an authoritative pending-order reader, which a
+    # backtest gets from the emulator and live from the broker's own working-
+    # order book (backend/live_pending_orders.py, wired for the EB lane only
+    # by broker.py's _eb_live_portfolio_view). A lane with NO reader — a
+    # non-Alpaca adapter — refuses every buy while this is on, so leave it off
+    # there rather than run a strategy that can only sell.
     "pending_buy_guard_enabled": False,
     # ── the transform ──
     # 0.20 annualised on the whole book. Raising it is the single most
