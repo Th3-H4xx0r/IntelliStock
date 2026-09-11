@@ -149,3 +149,64 @@ def test_the_loop_gates_the_per_lane_restore_on_its_own_flag():
     body = source.split("F1: persist per-strategy strategy_cache", 1)[1][:2000]
     assert 'if _restore_strategy_cache_from_db(' in body, (
         "the done-flag must be conditional on a completed restore")
+
+
+# --- M1 (branch review): the restore block must not be able to kill the loop -
+
+def _module_statements():
+    """Every top-level statement of broker.py, including the main `while` body,
+    which is module-level code rather than a function."""
+    return ast.parse(open(_BROKER).read()).body
+
+
+def _find_restore_block():
+    """The statement in the main loop that gates the per-lane cache restore."""
+    for node in ast.walk(ast.Module(body=_module_statements(), type_ignores=[])):
+        if not isinstance(node, ast.If):
+            continue
+        dump = ast.dump(node)
+        if ("_run_once_cache_restored" in dump
+                and "_restore_strategy_cache_from_db" in dump):
+            return node
+    raise AssertionError("the per-lane cache restore block is gone")
+
+
+def test_the_restore_block_cannot_take_the_live_loop_down():
+    """`from strategy_cache_persistence import ...` sits in the LIVE trading
+    loop. Outside a try, an import failure — a bad deploy, a partially written
+    module — propagates out of the tick and kills the loop, where the whole
+    point of this block is to log RED and retry on the next one."""
+    block = _find_restore_block()
+    imports = [n for n in ast.walk(block)
+               if isinstance(n, ast.ImportFrom)
+               and n.module == "strategy_cache_persistence"]
+    assert imports, "the persistence import moved out of the restore block"
+    guarded = [n for n in ast.walk(block) if isinstance(n, ast.Try)]
+    assert guarded, "the restore block has no try at all"
+    protected = {id(n) for t in guarded for n in ast.walk(t)}
+    for node in imports:
+        assert id(node) in protected, (
+            "the strategy_cache_persistence import is outside the try: an "
+            "import failure kills the live loop instead of logging RED and "
+            "retrying next tick")
+    calls = [n for n in ast.walk(block) if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Name)
+             and n.func.id == "_restore_strategy_cache_from_db"]
+    assert calls and all(id(n) in protected for n in calls)
+
+
+def test_the_guard_does_not_swallow_the_retry():
+    """A handler that marked the restore done would reintroduce the original
+    defect one level up."""
+    block = _find_restore_block()
+    handlers = [n for t in ast.walk(block)
+                if isinstance(t, ast.Try) for n in t.handlers]
+    assert handlers
+    dumps = [ast.dump(ast.Module(body=h.body, type_ignores=[]))
+             for h in handlers]
+    for dump in dumps:
+        assert "_run_once_cache_restored" not in dump, (
+            "an except path marks the restore done — a failed restore must "
+            "retry, which is the whole of F1")
+    assert any("red" in dump for dump in dumps), (
+        "no failure path in the restore block says anything")

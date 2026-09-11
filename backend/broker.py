@@ -14539,21 +14539,39 @@ while not shutdown_requested:
                 # sequence already filled, captured ONCE so a retry after a DB
                 # blip does not mistake tick-1's own writes for boot state.
                 if mode == MODE_LIVE and not globals().get("_run_once_cache_restored"):
-                    from strategy_cache_persistence import (
-                        load_strategy_cache_from_db as _scp_load,
-                        merge_loaded_cache_into as _scp_merge,
-                    )
-                    _scp_skip = globals().get("_strategy_cache_boot_hydrated")
-                    if _scp_skip is None:
-                        _scp_skip = {_n for _n, _c in (_strategy_cache or {}).items() if _c}
-                        globals()["_strategy_cache_boot_hydrated"] = _scp_skip
-                    if _restore_strategy_cache_from_db(
-                        _run_once_specs, instance_id, _strategy_cache,
-                        connect=lambda: get_conn_retry(max_attempts=3, delay=2),
-                        load=_scp_load, merge=_scp_merge, log=_log,
-                        skip_lanes=_scp_skip, db_handle=r,
-                    ):
-                        globals()["_run_once_cache_restored"] = True
+                    # M1: the whole block is inside the try, the import
+                    # included. This runs in the LIVE trading loop, so an
+                    # import that fails — a bad deploy, a half-written module —
+                    # would propagate out of the tick and kill the loop, when
+                    # the entire point of this block is to log RED and try
+                    # again next tick. The gate is left clear on every failure
+                    # path, which is the whole of F1.
+                    try:
+                        from strategy_cache_persistence import (
+                            load_strategy_cache_from_db as _scp_load,
+                            merge_loaded_cache_into as _scp_merge,
+                        )
+                        _scp_skip = globals().get("_strategy_cache_boot_hydrated")
+                        if _scp_skip is None:
+                            _scp_skip = {_n for _n, _c in (_strategy_cache or {}).items() if _c}
+                            globals()["_strategy_cache_boot_hydrated"] = _scp_skip
+                        if _restore_strategy_cache_from_db(
+                            _run_once_specs, instance_id, _strategy_cache,
+                            connect=lambda: get_conn_retry(max_attempts=3, delay=2),
+                            load=_scp_load, merge=_scp_merge, log=_log,
+                            skip_lanes=_scp_skip, db_handle=r,
+                        ):
+                            globals()["_run_once_cache_restored"] = True
+                    except Exception as _scp_block_exc:
+                        try:
+                            _log(
+                                "strategy cache NOT restored: the restore block "
+                                f"itself failed ({type(_scp_block_exc).__name__}: "
+                                f"{_scp_block_exc}); retrying next tick. Every "
+                                "run_once lane is running on an EMPTY cache "
+                                "until it succeeds.", "red")
+                        except Exception:
+                            pass
                 # 2026-05-05 — pre-cycle RH refresh (LIVE only). The adapter
                 # caches refresh_account / refresh_positions for 1 hour. The
                 # hourly cycle DEPENDS on fresh data — risk evaluation against
