@@ -439,9 +439,27 @@ def ensure_default_admin(conn) -> None:
         username = "admin"
     existing = get_user_by_username(conn, username)
     if existing is not None:
-        # Admin already exists — leave them alone. The password env var is
-        # only consulted on first-boot provisioning; rotating it requires
-        # a real password-change flow, not a silent re-provision.
+        # The password env var is only consulted on first-boot provisioning;
+        # rotating it requires a real password-change flow, not a silent
+        # re-provision. The ROLE is different: role is now load-bearing (every
+        # mutating route is admin-gated), so a DEFAULT_ADMIN_USERNAME row that
+        # is not an admin — demoted under the old flat-authorization
+        # free-for-all, or created as a plain user before it was named the
+        # default admin — leaves the operator with no in-band way back in.
+        # Repair the role, and only the role: the password and token_version
+        # are untouched, so this is not a reset and it logs nobody out.
+        role = str(existing.get("role") or "").strip().lower()
+        if role != "admin":
+            store.update(USERS_TABLE, existing["id"], {
+                "role": "admin",
+                "updated_at": datetime.utcnow().isoformat() + "Z",
+            })
+            print(
+                "[auth] default admin %r had role %r; promoted to 'admin' "
+                "(DEFAULT_ADMIN_USERNAME must be able to administer this "
+                "deployment). Password unchanged." % (username, role or "unset"),
+                file=sys.stderr, flush=True,
+            )
         return
     if not password or len(password) < 12:
         # Bail loudly. install.sh / install.ps1 generate a 16-char random
