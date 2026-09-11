@@ -1071,6 +1071,14 @@ def action_instances(conn):
     return {"instances": instances}
 
 
+class InstanceExistsError(ValueError):
+    """POST /instances named an id that is already taken.
+
+    A ValueError subclass so any existing caller that catches ValueError still
+    catches it; the API boundary maps it to 409 before the 400 branch.
+    """
+
+
 def action_create_instance(
     conn,
     instance_id,
@@ -1111,6 +1119,10 @@ def action_create_instance(
             key_val = (os.environ.get("APCA_API_KEY_ID") or os.environ.get("KEY") or "").strip()
         if not secret_val:
             secret_val = (os.environ.get("APCA_API_SECRET_KEY") or os.environ.get("SECRET") or "").strip()
+    # Create means create — checked after the cheap argument validation, so a
+    # malformed request never costs a database round trip.
+    if store.get("Instances", instance_id) is not None:
+        raise InstanceExistsError("Instance already exists: %s" % instance_id)
     doc = {
         "id": instance_id,
         "runCommand": bool(run_command),
@@ -1147,7 +1159,17 @@ def action_create_instance(
             doc["crypto_config"] = dict(crypto_config)
         except (TypeError, ValueError):
             doc["crypto_config"] = {}
-    store.insert("Instances", doc, conflict="replace")
+    # Create means create. This used to be conflict="replace", so re-posting an
+    # existing id silently replaced the whole row -- linked brokerage, strategy
+    # id, symbol list and run flag of a live instance, gone, with a 200. The
+    # existence check answers the common case with a clean 409; conflict="error"
+    # closes the race between the check and the write.
+    res = store.insert("Instances", doc, conflict="error")
+    if res.get("errors"):
+        first = str(res.get("first_error") or "")
+        if "duplicate" in first.lower() or "unique" in first.lower() or "conflict" in first.lower():
+            raise InstanceExistsError("Instance already exists: %s" % instance_id)
+        raise ValueError(first or "Could not create instance")
     return {"id": instance_id, "name": name, "strategy_id": doc.get("strategy_id")}
 
 

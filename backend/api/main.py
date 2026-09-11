@@ -66,6 +66,7 @@ from strategies_meta import get_available_strategies
 from stock_credential_boundary import StockCredentialError
 from interactive_utils import (
     get_conn,
+    InstanceExistsError,
     parse_granularity_to_seconds,
     action_clear_instance_state,
     action_status,
@@ -963,6 +964,12 @@ def _run(f, *args, **kwargs) -> Any:
         return f(*args, **kwargs)
     except HTTPException:
         raise
+    except InstanceExistsError as e:
+        # Before the 400 branch: InstanceExistsError IS a ValueError. Creating
+        # an id that is already taken is a conflict, not a malformed request —
+        # and the create no longer replaces the existing row, so the caller
+        # needs to be told rather than congratulated.
+        raise HTTPException(status_code=409, detail=str(e))
     except StockCredentialError as e:
         # Nothing is broken server-side: one stored credential is still legacy
         # plaintext (or otherwise undecryptable) and strict decryption

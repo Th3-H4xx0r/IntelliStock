@@ -135,11 +135,14 @@ def test_stock_instance_creation_does_not_copy_environment_credentials(monkeypat
 
     def _capture_insert(table, doc, conflict=None, **_k):
         assert table == "Instances"
-        assert conflict == "replace"
+        # Create refuses to replace an existing row (a re-POST of a live
+        # instance's id used to wipe its brokerage link and strategy).
+        assert conflict == "error"
         captured.update(doc)
         return {"inserted": 1}
 
     monkeypatch.setattr(iu.store, "insert", _capture_insert)
+    monkeypatch.setattr(iu.store, "get", lambda _table, _key: None)
 
     iu.action_create_instance(object(), "stock-instance")
 
