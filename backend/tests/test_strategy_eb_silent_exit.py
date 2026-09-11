@@ -182,6 +182,63 @@ def test_a_tick_that_did_trade_still_records_the_session(monkeypatch):
     assert cache[PENDING_KEY]
 
 
+# --- A3: the three remaining unlogged refusals ------------------------------
+
+def test_a_missing_emulator_is_reported(monkeypatch):
+    """Live, no emulator means the broker handed the lane nothing to read the
+    book from. Returning {} for that is right; returning it in silence means a
+    lane can be inert for a whole deployment with no line to find."""
+    lines = capture(monkeypatch)
+    assert StrategyEb().run_once(["TQQQ"], PRICES, DECIDES, cfg(), {},
+                                 data=data_for(alternating(0.01)),
+                                 portfolio_emulator=None) == {}
+    assert [m for m, c in lines if c == "red"], f"silent, only {lines}"
+
+
+def test_a_non_positive_nav_is_reported(monkeypatch):
+    """NAV <= 0 is an unreadable account, not an empty one — most often every
+    held leg priced at 0, which is the same blindness A1 guards."""
+    lines = capture(monkeypatch)
+    assert StrategyEb().run_once(["TQQQ"], PRICES, DECIDES, cfg(), {},
+                                 data=data_for(alternating(0.01)),
+                                 portfolio_emulator=FakeEmulator(cash=0.0),
+                                 strategy_cache={}) == {}
+    red = [m for m, c in lines if c == "red"]
+    assert red, f"silent, only {lines}"
+    assert "nav" in red[0].lower()
+
+
+def test_a_non_positive_book_nav_is_reported(monkeypatch):
+    """Sharing the document with a sibling lane, the sibling can hold the whole
+    account. This book then has nothing to size against — which is a
+    CONFIGURATION outcome an operator needs to see, not a silent no-op."""
+    lines = capture(monkeypatch)
+    prices = dict(PRICES, AAPL=100.0)
+    out = StrategyEb().run_once(
+        ["TQQQ"], prices, DECIDES, cfg(reserve_for_other_lanes_pct=0.9), {},
+        data=data_for(alternating(0.01)),
+        portfolio_emulator=FakeEmulator(cash=0.0, positions={"AAPL": 100.0},
+                                        prices=prices),
+        strategy_cache={})
+    assert out == {}
+    red = [m for m, c in lines if c == "red"]
+    assert red, f"silent, only {lines}"
+    assert "book" in red[0].lower()
+
+
+def test_the_refusals_are_throttled_to_one_line_a_session(monkeypatch):
+    """~26 ticks a session at 15m. A refusal that repeats on all of them is how
+    a real refusal goes unread."""
+    lines = capture(monkeypatch)
+    cache = {}
+    for _ in range(4):
+        StrategyEb().run_once(["TQQQ"], PRICES, DECIDES, cfg(), {},
+                              data=data_for(alternating(0.01)),
+                              portfolio_emulator=FakeEmulator(cash=0.0),
+                              strategy_cache=cache)
+    assert len([m for m, c in lines if c == "red"]) == 1, lines
+
+
 def test_the_exit_re_arms_next_tick_when_its_order_never_came_out(monkeypatch):
     """End to end: a dropped exit is retried on the very next tick of the same
     session, because nothing recorded it as issued."""

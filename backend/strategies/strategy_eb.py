@@ -225,10 +225,16 @@ class StrategyEb:
         cfg = {**DEFAULTS, **(config or {})}
         if not _truthy(cfg.get("strategy_eb_enabled", False)):
             return {}
+        cache = strategy_cache if isinstance(strategy_cache, dict) else {}
         if portfolio_emulator is None:
+            # A3. Silent, this is a lane that can be inert for a whole
+            # deployment with no line anywhere to find. Live it means the
+            # broker handed the strategy nothing to read the book from.
+            _log_once(cache, "no-emulator", str(current_time)[:10],
+                      "StrategyEb: REFUSING to trade — no portfolio emulator, "
+                      "so the book cannot be read at all.", "red")
             return {}
 
-        cache = strategy_cache if isinstance(strategy_cache, dict) else {}
         universe = strategy_eb_universe(cfg)
         reference = _s(cfg, "reference_symbol")
 
@@ -328,6 +334,13 @@ class StrategyEb:
 
         nav = float(portfolio_emulator.get_portfolio_value(eff) or 0.0)
         if nav <= 0:
+            # A3. Not an empty account — an UNREADABLE one. The commonest
+            # cause is every held leg priced at 0, the same blindness A1
+            # guards, and it must not read as "nothing to do".
+            _log_once(cache, "nav-unreadable", session_id,
+                      f"StrategyEb {session_id} | REFUSING to trade — nav "
+                      f"reads ${nav:,.2f}. An unreadable account is not an "
+                      "empty one; no position can be sized against it.", "red")
             return {}
         positions = portfolio_emulator.get_positions() or {}
         core = _s(cfg, "core_symbol")
@@ -346,6 +359,15 @@ class StrategyEb:
             book_nav = max(0.0, nav - max(other, reserve * nav))
             cash_hold = max(0.0, reserve * nav - other)
             if book_nav <= 0:
+                # A3. The sibling lane holds the whole account, so this book
+                # has nothing to size against. That is a CONFIGURATION
+                # outcome — a reserve set too high, or a sibling that grew
+                # past it — and an operator has to be able to see it.
+                _log_once(cache, "book-nav-empty", session_id,
+                          f"StrategyEb {session_id} | REFUSING to trade — book "
+                          f"nav is ${book_nav:,.2f} of ${nav:,.2f}: the "
+                          f"{reserve:.0%} reserve and ${other:,.2f} held by "
+                          "other lanes leave this book nothing.", "red")
                 return {}
         # A1. `targets_to_orders` skips any leg it cannot price (strategy_x.py:
         # 1178, 1203), silently. Holding the core with no usable price for it,
