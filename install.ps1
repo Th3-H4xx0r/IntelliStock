@@ -200,9 +200,6 @@ if (Test-Path $EnvFile) {
   $credKey = New-UrlSafeKey 32
   # Signup gate token: required by /auth/signup. Keep private.
   $secretAuthKey = New-UrlSafeKey 32
-  # Default admin password: 16 random URL-safe characters. 16 input bytes
-  # -> ~22 b64 chars before the substring, so length is always sufficient.
-  $adminPassword = (New-UrlSafeKey 16).Substring(0, 16)
   # JWT signing key: 32 random bytes.
   $jwtSecret = New-UrlSafeKey 32
   # Neo4j password — only honoured at first-boot. 20 input bytes -> ~27
@@ -220,11 +217,12 @@ INTELLISTOCK_CRED_KEY=$credKey
 # this exact value. Keep it private -- anyone with it can register users.
 SECRET_AUTH_KEY=$secretAuthKey
 
-# Default admin account auto-provisioned on first backend boot. Change
-# DEFAULT_ADMIN_PASSWORD here if you want a memorable one -- the value
-# below is the auto-generated random password printed at install time.
-DEFAULT_ADMIN_USERNAME=admin
-DEFAULT_ADMIN_PASSWORD=$adminPassword
+# No account is provisioned from this file. The login page offers
+# "Create the first account" while the Users table is empty; after that,
+# accounts live in the Users tab. These two name an account you created
+# there, for scripts/ and the AI backtest engine to log in with.
+INTELLISTOCK_API_USERNAME=
+INTELLISTOCK_API_PASSWORD=
 
 # JWT signing key. Backend refuses to mint tokens if this is unset
 # or weak; rotating it logs out every active session.
@@ -344,9 +342,6 @@ if (-not $healthy) {
 # ── Done ──────────────────────────────────────────────────────────
 $frontendPort = Get-EnvValue 'FRONTEND_PORT'    '3000'
 $rdbWebPort   = Get-EnvValue 'RETHINKDB_WEB_PORT' '8080'
-$adminUser    = Get-EnvValue 'DEFAULT_ADMIN_USERNAME' 'admin'
-$adminPass    = Get-EnvValue 'DEFAULT_ADMIN_PASSWORD' ''
-
 Write-Host ''
 Write-Host 'IntelliStock is up.' -ForegroundColor Green
 Write-Host ''
@@ -355,10 +350,11 @@ Write-Host "  API                 http://localhost:$apiPort"
 Write-Host "  RethinkDB admin     http://localhost:$rdbWebPort"
 Write-Host '  Neo4j browser       http://localhost:7474   (user: neo4j / pass: see NEO4J_PASSWORD in .env)'
 Write-Host ''
-Write-Host '  Default admin login' -ForegroundColor Magenta
-Write-Host "    Username          $adminUser"
-Write-Host "    Password          $adminPass"
-Write-Host '    (also stored in .env as DEFAULT_ADMIN_PASSWORD - change there + restart to rotate)' -ForegroundColor Yellow
+Write-Host '  First account' -ForegroundColor Magenta
+Write-Host '    Open the frontend and choose "Create the first account" on the'
+Write-Host '    login page. It is offered only while no account exists, so do it'
+Write-Host '    now -- and everyone you create afterwards, in the Users tab, has'
+Write-Host '    the same full access.' -ForegroundColor Yellow
 Write-Host ''
 Write-Host '  Logs                docker compose logs -f'
 Write-Host '  Stop                docker compose down'

@@ -62,17 +62,23 @@ container boot. Either:
 
 ## Login / auth
 
-### "Invalid credentials" with the install-printed admin password
+### The login page offers "Create the first account"
 
-Three things to check:
+That is the server saying the `Users` table is empty — a fresh install,
+or an API pointed at the wrong database. On a fresh install, take it:
+it is the only way to create the first account, and it closes as soon
+as one exists. Otherwise check `PG_DSN` before creating anything.
 
-1. The install script prints the password once. If you missed it,
-   it's also in `.env` as `DEFAULT_ADMIN_PASSWORD`.
-2. The default admin user is created on first backend boot. If the
-   backend container hadn't started yet when you tried to log in,
-   wait 30 seconds and retry.
-3. If you've rotated the password by editing `.env`, you need to
-   `docker compose restart backend` for the new value to take effect.
+See docs/runbooks/users-and-login.md.
+
+### "Invalid username or password"
+
+1. Accounts are created in the **Users** tab, not from `.env` — there
+   is no environment-provisioned account to fall back on.
+2. Ten failed attempts per username+host in 15 minutes returns `429`
+   instead. Wait it out; a correct password clears the bucket.
+3. If someone changed that account's password, every token minted
+   against the old one was revoked. Sign in again.
 
 ### Signup fails with "Invalid signup key"
 

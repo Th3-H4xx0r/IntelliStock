@@ -47,7 +47,7 @@ Out of scope (explicitly):
 
 If you set up IntelliStock before this security pass and your `.env`
 predates `JWT_SECRET` / `NEO4J_PASSWORD` being required, the backend
-and `docker compose` will refuse to start. Three values are now
+and `docker compose` will refuse to start. Two values are now
 mandatory in `.env`:
 
 - `JWT_SECRET` — 32 random bytes, urlsafe-b64. Generate with
@@ -57,9 +57,6 @@ mandatory in `.env`:
   if you already have a Neo4j volume, set this to whatever password the
   existing graph uses. New installs: pick any value (the install
   scripts auto-generate one).
-- `DEFAULT_ADMIN_PASSWORD` — at least 12 characters. The backend
-  refuses to provision the default admin if missing or shorter.
-
 Easiest path: stop the stack, delete `.env`, re-run `./install.sh` (or
 `install.ps1`), and copy any provider keys (Benzinga, Polygon, Discord)
 back over from your old file. The Fernet `INTELLISTOCK_CRED_KEY` MUST
@@ -72,11 +69,12 @@ If you're running this against real money on a real broker, do all of
 these *before* the first live trade:
 
 - [ ] Run `./install.sh` (or `install.ps1`) — it auto-generates
-      `INTELLISTOCK_CRED_KEY`, `SECRET_AUTH_KEY`, `JWT_SECRET`,
-      `DEFAULT_ADMIN_PASSWORD`, and `NEO4J_PASSWORD`. Never commit
-      `.env`.
-- [ ] Confirm `DEFAULT_ADMIN_PASSWORD` is **not** the literal string
-      `changeme` (the backend now refuses to start if it is).
+      `INTELLISTOCK_CRED_KEY`, `SECRET_AUTH_KEY`, `JWT_SECRET`, and
+      `NEO4J_PASSWORD`. Never commit `.env`.
+- [ ] Create the first account through the login page's "Create the
+      first account" and pick a real password. That door is open only
+      while the `Users` table is empty — visit the deployment yourself
+      before anyone else can, and confirm it has closed.
 - [ ] Confirm `NEO4J_PASSWORD` is the auto-generated value, not the
       legacy `intellistock` default (compose now refuses to render
       without an explicit value).
@@ -190,9 +188,12 @@ These are baseline protections you can rely on:
   secret is missing.
 - **Constant-time comparison** for `SECRET_AUTH_KEY` (signup gate)
   via `hmac.compare_digest`.
-- **Default admin password fail-fast.** The backend refuses to start
-  if `DEFAULT_ADMIN_PASSWORD` is unset or shorter than 12 characters
-  on first-time provisioning.
+- **No credentials in the deployment environment.** No account is
+  provisioned from env. `POST /auth/users` drops its session
+  requirement only while the `Users` table has zero rows, and the
+  count is re-checked immediately before the insert. A failure to read
+  that count is treated as "users exist", so a database hiccup cannot
+  open the door.
 - **CORS closed by default.** `allow_origins` is empty unless you
   explicitly opt in via `CORS_ALLOW_ORIGINS`.
 - **OpenAPI / Swagger UI off by default.** Set `API_DOCS_PUBLIC=true`

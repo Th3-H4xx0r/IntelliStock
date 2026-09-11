@@ -270,10 +270,6 @@ else
   # Signup gate: any /auth/signup call must present this token. Holding it
   # private is what keeps the open invite from being a public registration.
   SECRET_AUTH_KEY="$(openssl rand 32 | base64 | tr -d '\n' | tr '+/' '-_')"
-  # Admin password: 16 random URL-safe characters. Auto-provisioned on first
-  # boot. Surface it at the end of install so the user can log in.
-  # 16 input bytes -> 22 base64 chars (no padding stripped here), cut to 16.
-  ADMIN_PASSWORD="$(openssl rand 16 | base64 | tr -d '\n=' | tr '+/' '-_' | cut -c1-16)"
   # JWT signing key: must be at least 32 bytes of high-entropy randomness.
   JWT_SECRET="$(openssl rand 32 | base64 | tr -d '\n' | tr '+/' '-_')"
   # Neo4j password — Neo4j only honours NEO4J_AUTH on first boot, so we
@@ -292,11 +288,12 @@ INTELLISTOCK_CRED_KEY=${CRED_KEY}
 # this exact value. Keep it private — anyone with it can register users.
 SECRET_AUTH_KEY=${SECRET_AUTH_KEY}
 
-# Default admin account auto-provisioned on first backend boot. Change
-# DEFAULT_ADMIN_PASSWORD here if you want a memorable one — the value
-# below is the auto-generated random password printed at install time.
-DEFAULT_ADMIN_USERNAME=admin
-DEFAULT_ADMIN_PASSWORD=${ADMIN_PASSWORD}
+# No account is provisioned from this file. The login page offers
+# "Create the first account" while the Users table is empty; after that,
+# accounts live in the Users tab. These two name an account you created
+# there, for scripts/ and the AI backtest engine to log in with.
+INTELLISTOCK_API_USERNAME=
+INTELLISTOCK_API_PASSWORD=
 
 # JWT signing key. The backend refuses to mint tokens if this is unset
 # or weak; rotating it logs out every active session.
@@ -400,10 +397,6 @@ FRONTEND_PORT="${FRONTEND_PORT:-3000}"
 RDB_WEB_PORT="$(grep -E '^RETHINKDB_WEB_PORT=' "$ENV_FILE" | cut -d= -f2 | tr -d '"')"
 RDB_WEB_PORT="${RDB_WEB_PORT:-8080}"
 
-ADMIN_USER="$(grep -E '^DEFAULT_ADMIN_USERNAME=' "$ENV_FILE" | cut -d= -f2 | tr -d '"')"
-ADMIN_USER="${ADMIN_USER:-admin}"
-ADMIN_PASS="$(grep -E '^DEFAULT_ADMIN_PASSWORD=' "$ENV_FILE" | cut -d= -f2 | tr -d '"')"
-
 cat <<EOF
 
 ${GREEN}IntelliStock is up.${NC}
@@ -413,10 +406,11 @@ ${GREEN}IntelliStock is up.${NC}
   RethinkDB admin     http://localhost:${RDB_WEB_PORT}
   Neo4j browser       http://localhost:7474   (user: neo4j / pass: see NEO4J_PASSWORD in .env)
 
-  ${PURPLE}Default admin login${NC}
-    Username          ${ADMIN_USER}
-    Password          ${ADMIN_PASS}
-    ${YELLOW}(also stored in .env as DEFAULT_ADMIN_PASSWORD — change there + restart to rotate)${NC}
+  ${PURPLE}First account${NC}
+    Open the frontend and choose ${GREEN}Create the first account${NC} on the
+    login page. It is offered only while no account exists, so do it
+    now — and everyone you create afterwards, in the Users tab, has
+    the same full access.
 
   Logs                docker compose logs -f
   Stop                docker compose down
