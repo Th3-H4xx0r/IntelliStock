@@ -573,6 +573,13 @@ class EditInstanceBody(BaseModel):
     brokerage_id: Optional[str] = None
     crypto_config: Optional[dict] = None
     stocks: Optional[List[str]] = None
+    # The clean-room baseline. instance.py refuses to launch a broker when
+    # clean_room_mode is on and initial_value is absent, and the adapter
+    # measures every drawdown against it -- so `gt=0` is the contract, not a
+    # nicety: zero is exactly what the preflight already reads as "unset", and
+    # a negative baseline inverts the circuit it protects.
+    initial_value: Optional[float] = Field(None, gt=0)
+    clean_room_mode: Optional[bool] = None
 
     _check_stocks = field_validator("stocks", mode="before")(_validated_stocks)
 
@@ -2235,6 +2242,8 @@ def api_edit_instance(instance_id: str, body: EditInstanceBody, conn=Depends(con
         brokerage_id=body.brokerage_id,
         crypto_config=body.crypto_config,
         stocks=body.stocks,
+        initial_value=body.initial_value,
+        clean_room_mode=body.clean_room_mode,
     )
 
 

@@ -1223,6 +1223,8 @@ def action_edit_instance(
     brokerage_id=None,
     crypto_config=None,
     stocks=None,
+    initial_value=None,
+    clean_room_mode=None,
 ):
     if not instance_id or not str(instance_id).strip():
         raise ValueError("Instance ID required")
@@ -1268,6 +1270,24 @@ def action_edit_instance(
             raise ValueError("crypto_config must be an object")
     if stocks is not None:
         updates["stocks"] = validate_tickers(stocks)
+
+    # The clean-room baseline (instance.py:_assert_clean_room_initial_value,
+    # broker.py's adapter build). `None` means "not supplied" and must leave
+    # the stored value alone -- renaming an instance cannot be allowed to
+    # erase the reference its drawdown circuit is measured against.
+    if initial_value is not None:
+        try:
+            baseline = float(initial_value)
+        except (TypeError, ValueError):
+            raise ValueError("initial_value must be a number")
+        # `not > 0` and not `<= 0`: it also rejects NaN, which compares false
+        # against everything and would otherwise be stored as a baseline.
+        if not baseline > 0:
+            raise ValueError("initial_value must be greater than 0")
+        updates["initial_value"] = baseline
+
+    if clean_room_mode is not None:
+        updates["clean_room_mode"] = bool(clean_room_mode)
 
     if not updates:
         raise ValueError("No editable fields provided")
