@@ -9466,7 +9466,16 @@ def _initialize_live_risk_authority(
                         return len(rows)
                     snap = getattr(adapter, "capture_reconciliation_snapshot", None)
                     if callable(snap):
-                        s = snap()
+                        # 2026-09-11: `snap()` — no arguments. account_id is a
+                        # REQUIRED keyword-only parameter on AlpacaAdapter, so
+                        # this raised TypeError straight into the handler
+                        # below and the count was ALWAYS -1 on a flat account:
+                        # the bootstrap ALWAYS refused and a funded instance
+                        # booted silently sell-only. Exactly the defect the
+                        # 2026-08-03 sweep found in the positions arm, in the
+                        # other arm, surviving the same way — by being a call
+                        # that cannot succeed inside a bare `except`.
+                        s = snap(account_id=str(account_id))
                         if not bool(getattr(s, "orders_complete", False)):
                             return -1
                         return len(getattr(s, "open_orders", ()) or ())

@@ -456,3 +456,38 @@ def test_a_malformed_sibling_lane_does_not_drop_the_eb_envelope():
     assert ns["_strategy_eb_risk_limits"]([eb, bad]) == EB
     assert ns["_strategy_eb_risk_limits"]([bad, eb]) == EB
     assert ns["_strategy_eb_risk_limits"]([junk, eb, bad]) == EB
+
+
+def test_the_open_order_corroboration_matches_the_adapters_signature():
+    """2026-09-11 funded-start sweep.
+
+    `list_open_orders` returns [] on a dead endpoint, so an empty result is
+    ambiguous and `_broker_open_order_count` corroborates it with the
+    reconciliation snapshot. That call was written `snap()` — but
+    `AlpacaAdapter.capture_reconciliation_snapshot` takes `account_id` as a
+    REQUIRED keyword-only argument, so it raised TypeError into the bare
+    `except Exception: return -1`.
+
+    The count was therefore ALWAYS -1 on a flat account, the bootstrap ALWAYS
+    refused, and a funded instance booted silently sell-only — precisely the
+    failure this function's docstring says it was written to end, and the same
+    signature mismatch the 2026-08-03 sweep found in the positions arm.
+    """
+    import inspect
+
+    from broker_adapters.alpaca import AlpacaAdapter
+
+    param = inspect.signature(
+        AlpacaAdapter.capture_reconciliation_snapshot).parameters["account_id"]
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
+    assert param.default is inspect.Parameter.empty
+
+    node = _function_source("_initialize_live_risk_authority")
+    calls = [n for n in ast.walk(node)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+             and n.func.id == "snap"]
+    assert calls, "the open-order corroboration is gone"
+    for call in calls:
+        assert "account_id" in {kw.arg for kw in call.keywords}, (
+            "snap() without account_id raises TypeError, the bootstrap reads "
+            "-1 open orders, and a flat funded account boots sell-only")
