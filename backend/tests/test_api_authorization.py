@@ -519,3 +519,215 @@ def test_the_gated_and_exempt_sets_partition_every_mutating_route():
     assert len(gated) + len(NOT_ADMIN_GATED) == len(routes)
     # Sanity on the measurement in the comment above: this round added three.
     assert len(gated) >= 29
+
+
+# ---------------------------------------------------------------------------
+# The operator-lockout proof, end to end (whole-branch review I4).
+#
+# The tests above call the guard with a hand-built dict. That proves the guard
+# accepts an admin; it does NOT prove the operator can get a token that
+# survives login -> token_version claim -> get_current_user -> require_admin.
+# Those are the four places round 1 changed, so the proof has to run through
+# all four.
+# ---------------------------------------------------------------------------
+
+OPERATOR = "operator"
+OPERATOR_PASSWORD = "a-sufficiently-long-password"
+ADMIN_ROUTE = "/instances/eb/stop"
+
+
+@pytest.fixture
+def live_api(store, monkeypatch):
+    """The real app over the test store, with the DB-touching bits caged.
+
+    Only auth is exercised: the admin-gated action is stubbed so the assertion
+    is about the status code the AUTHORIZATION produced, not about whether an
+    instance exists.
+    """
+    from fastapi.testclient import TestClient
+    import auth_utils
+    from api import main
+
+    monkeypatch.setenv("JWT_SECRET", "test-signing-secret-for-the-round-trip")
+    monkeypatch.delenv("JWT_EXPIRE_HOURS", raising=False)
+    monkeypatch.setenv("DEFAULT_ADMIN_USERNAME", OPERATOR)
+    monkeypatch.setenv("DEFAULT_ADMIN_PASSWORD", OPERATOR_PASSWORD)
+    monkeypatch.setattr(auth_utils, "store", store)
+    monkeypatch.setattr(auth_utils, "ensure_users_table", lambda conn=None: None)
+    monkeypatch.setattr(main, "ensure_users_table", lambda conn=None: None)
+    monkeypatch.setattr(main, "action_stop_instance",
+                        lambda conn, instance_id: {"stopped": True, "id": instance_id})
+    auth_utils.reset_login_rate_limit()
+
+    main.app.dependency_overrides[main.conn_dependency] = lambda: None
+    try:
+        with TestClient(main.app) as client:
+            yield client, auth_utils
+    finally:
+        main.app.dependency_overrides.pop(main.conn_dependency, None)
+        auth_utils.reset_login_rate_limit()
+
+
+def _login(client, username, password):
+    return client.post("/auth/login", json={"username": username, "password": password})
+
+
+def test_the_operator_can_log_in_and_use_an_admin_route_end_to_end(live_api):
+    """login -> token (with token_version) -> get_current_user -> require_admin."""
+    client, auth_utils = live_api
+    auth_utils.ensure_default_admin(None)
+
+    res = _login(client, OPERATOR, OPERATOR_PASSWORD)
+    assert res.status_code == 200, res.text
+    token = res.json()["access_token"]
+    assert res.json()["user"]["role"] == "admin"
+
+    got = client.post(ADMIN_ROUTE, headers={"Authorization": f"Bearer {token}"})
+    assert got.status_code not in (401, 403), got.text
+    assert got.status_code == 200
+
+
+def test_a_non_admin_token_is_refused_by_the_same_route(live_api):
+    client, auth_utils = live_api
+    auth_utils.ensure_default_admin(None)
+    auth_utils.create_user(None, "bob", "bobs-long-password", role="user")
+
+    res = _login(client, "bob", "bobs-long-password")
+    assert res.status_code == 200, res.text
+    got = client.post(ADMIN_ROUTE,
+                      headers={"Authorization": f"Bearer {res.json()['access_token']}"})
+    assert got.status_code == 403
+
+
+def test_a_password_change_kills_the_old_token_and_a_fresh_login_works(live_api):
+    """The revocation from round 3, proven through the HTTP surface."""
+    client, auth_utils = live_api
+    auth_utils.ensure_default_admin(None)
+
+    old_token = _login(client, OPERATOR, OPERATOR_PASSWORD).json()["access_token"]
+    old_auth = {"Authorization": f"Bearer {old_token}"}
+    assert client.post(ADMIN_ROUTE, headers=old_auth).status_code == 200
+
+    row = auth_utils.get_user_by_username(None, OPERATOR)
+    changed = client.put(
+        f"/auth/users/{row['id']}",
+        headers=old_auth,
+        json={"password": "an-even-longer-new-password"},
+    )
+    assert changed.status_code == 200, changed.text
+
+    # The token minted against the old password is dead...
+    assert client.post(ADMIN_ROUTE, headers=old_auth).status_code == 401
+    # ...and the operator is not locked out: the new password works.
+    again = _login(client, OPERATOR, "an-even-longer-new-password")
+    assert again.status_code == 200, again.text
+    fresh = {"Authorization": f"Bearer {again.json()['access_token']}"}
+    assert client.post(ADMIN_ROUTE, headers=fresh).status_code == 200
+
+
+def test_the_old_password_no_longer_logs_in(live_api):
+    client, auth_utils = live_api
+    auth_utils.ensure_default_admin(None)
+    row = auth_utils.get_user_by_username(None, OPERATOR)
+    auth_utils.update_user(None, row["id"], password="an-even-longer-new-password")
+
+    assert _login(client, OPERATOR, OPERATOR_PASSWORD).status_code == 401
+
+
+# --- in-band recovery: the operator row that lost its role ----------------
+
+
+def test_ensure_default_admin_promotes_the_operator_back_to_admin(store, monkeypatch, capsys):
+    """Round 1 made role load-bearing. If the DEFAULT_ADMIN_USERNAME row is
+    role 'user' — demoted by the old flat-authorization free-for-all, or
+    created as a plain user before it was named the default admin —
+    ensure_default_admin used to return early and leave it that way, and with
+    every admin route now gated there was no in-band way back in."""
+    import auth_utils
+
+    monkeypatch.setattr(auth_utils, "store", store)
+    monkeypatch.setattr(auth_utils, "ensure_users_table", lambda conn=None: None)
+    monkeypatch.setenv("DEFAULT_ADMIN_USERNAME", OPERATOR)
+    monkeypatch.setenv("DEFAULT_ADMIN_PASSWORD", OPERATOR_PASSWORD)
+
+    auth_utils.create_user(None, OPERATOR, OPERATOR_PASSWORD, role="user")
+    assert auth_utils.get_user_by_username(None, OPERATOR)["role"] == "user"
+
+    auth_utils.ensure_default_admin(None)
+
+    assert auth_utils.get_user_by_username(None, OPERATOR)["role"] == "admin"
+    logged = capsys.readouterr()
+    assert OPERATOR in (logged.err + logged.out)
+    assert "admin" in (logged.err + logged.out)
+
+
+def test_the_promotion_does_not_touch_the_password_or_the_token_version(store, monkeypatch):
+    """Repair the role, nothing else: a promotion is not a password reset, and
+    it must not log the operator's other sessions out."""
+    import auth_utils
+
+    monkeypatch.setattr(auth_utils, "store", store)
+    monkeypatch.setattr(auth_utils, "ensure_users_table", lambda conn=None: None)
+    monkeypatch.setenv("DEFAULT_ADMIN_USERNAME", OPERATOR)
+    monkeypatch.setenv("DEFAULT_ADMIN_PASSWORD", "a-completely-different-password")
+
+    auth_utils.create_user(None, OPERATOR, OPERATOR_PASSWORD, role="user")
+    before = auth_utils.get_user_by_username(None, OPERATOR)
+
+    auth_utils.ensure_default_admin(None)
+
+    after = auth_utils.get_user_by_username(None, OPERATOR)
+    assert after["password_hash"] == before["password_hash"]
+    assert auth_utils.token_version_of(after) == auth_utils.token_version_of(before)
+    assert auth_utils.verify_password(OPERATOR_PASSWORD, after["password_hash"])
+
+
+def test_an_admin_operator_row_is_left_completely_alone(store, monkeypatch, capsys):
+    import auth_utils
+
+    monkeypatch.setattr(auth_utils, "store", store)
+    monkeypatch.setattr(auth_utils, "ensure_users_table", lambda conn=None: None)
+    monkeypatch.setenv("DEFAULT_ADMIN_USERNAME", OPERATOR)
+    monkeypatch.setenv("DEFAULT_ADMIN_PASSWORD", OPERATOR_PASSWORD)
+    auth_utils.create_user(None, OPERATOR, OPERATOR_PASSWORD, role="admin")
+    before = auth_utils.get_user_by_username(None, OPERATOR)
+    capsys.readouterr()
+
+    auth_utils.ensure_default_admin(None)
+
+    assert auth_utils.get_user_by_username(None, OPERATOR) == before
+    assert "promot" not in (capsys.readouterr().err.lower())
+
+
+def test_a_non_operator_user_is_never_promoted(store, monkeypatch):
+    """Only the DEFAULT_ADMIN_USERNAME row is repairable this way."""
+    import auth_utils
+
+    monkeypatch.setattr(auth_utils, "store", store)
+    monkeypatch.setattr(auth_utils, "ensure_users_table", lambda conn=None: None)
+    monkeypatch.setenv("DEFAULT_ADMIN_USERNAME", OPERATOR)
+    monkeypatch.setenv("DEFAULT_ADMIN_PASSWORD", OPERATOR_PASSWORD)
+    auth_utils.create_user(None, OPERATOR, OPERATOR_PASSWORD, role="admin")
+    auth_utils.create_user(None, "bob", "bobs-long-password", role="user")
+
+    auth_utils.ensure_default_admin(None)
+
+    assert auth_utils.get_user_by_username(None, "bob")["role"] == "user"
+
+
+def test_the_promotion_takes_effect_on_a_token_the_user_already_holds(live_api):
+    """The role is read from the ROW on every request, not from the token, so
+    recovery does not require the operator to log in again."""
+    client, auth_utils = live_api
+    # The app's startup provisioned the operator; demote it the way the old
+    # flat-authorization API allowed any account to.
+    row = auth_utils.get_user_by_username(None, OPERATOR)
+    auth_utils.update_user(None, row["id"], role="user")
+
+    token = _login(client, OPERATOR, OPERATOR_PASSWORD).json()["access_token"]
+    auth = {"Authorization": f"Bearer {token}"}
+    assert client.post(ADMIN_ROUTE, headers=auth).status_code == 403
+
+    auth_utils.ensure_default_admin(None)
+
+    assert client.post(ADMIN_ROUTE, headers=auth).status_code == 200
