@@ -14,9 +14,30 @@ from strategy_x_bear import BearSystemStateError
 BROKER_PATH = Path(__file__).resolve().parents[1] / "broker.py"
 
 
+#: Everything `run_run_once_strategies` reads at module scope, extracted with
+#: it. NOT optional: the dispatcher wraps each strategy in a blanket
+#: `except Exception` that logs RED and continues, so a name missing here is a
+#: NameError nobody sees — every test in this file then fails with an empty
+#: result and none of them says why. `_eb_live_portfolio_view` (cb9d2ba) cost
+#: this file 15 failures exactly that way. `test_every_name_the_dispatcher_
+#: reads_is_in_the_harness` is the sentinel that now catches the next one.
+_DISPATCHER_NAMES = {
+    "run_run_once_strategies",
+    "_residual_sleeve_config",
+    # the EB live pending-order view, threaded into the run_once call site
+    "_eb_live_portfolio_view",
+    # `conditions` UNION `config`, the merge the EB config readers share
+    "_merged_strategy_settings",
+    # paths these tests never take, but a NameError does not care
+    "_llm_resolution_is_fatal",
+    "_resolve_nexus_runtime_identity",
+    "_run_graph_nexus_with_point_in_time",
+}
+
+
 def _dispatcher_namespace(run_mode="backtest"):
     tree = ast.parse(BROKER_PATH.read_text())
-    wanted = {"run_run_once_strategies", "_residual_sleeve_config"}
+    wanted = _DISPATCHER_NAMES
     nodes = [
         node for node in tree.body
         if isinstance(node, ast.FunctionDef) and node.name in wanted
@@ -207,3 +228,59 @@ def test_live_sibling_strategy_preserves_scheduler_mode(scheduler_mode):
         mode=scheduler_mode,
     )
     assert namespace["received_modes"] == [scheduler_mode]
+
+
+# --- the harness itself must fail loudly, not quietly ----------------------
+#
+# `run_run_once_strategies` is AST-extracted into a stub namespace, and its
+# per-strategy body is wrapped in a blanket `except Exception` that logs RED
+# and moves on (broker.py, "Run-once strategy '{name}' error"). So a broker
+# helper added to that function and NOT added to `_DISPATCHER_NAMES` below
+# raises NameError, the handler eats it, and EVERY test here sees
+# `received_modes == []` — 15 failures with one cause and no clue in any of
+# them. That is how `_eb_live_portfolio_view` (cb9d2ba) broke this file.
+
+def _free_names(function_name):
+    """Module-scope names the extracted function reads but never binds."""
+    import builtins
+
+    tree = ast.parse(BROKER_PATH.read_text())
+    fn = next(n for n in tree.body
+              if isinstance(n, ast.FunctionDef) and n.name == function_name)
+    bound = {a.arg for a in list(fn.args.args) + list(fn.args.kwonlyargs)}
+    for slot in (fn.args.vararg, fn.args.kwarg):
+        if slot is not None:
+            bound.add(slot.arg)
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            bound.add(node.id)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                bound.add((alias.asname or alias.name).split(".")[0])
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(node.name)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bound.add(node.name)
+    loads = {n.id for n in ast.walk(fn)
+             if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+    return loads - bound - set(dir(builtins))
+
+
+def test_every_name_the_dispatcher_reads_is_in_the_harness():
+    """The sentinel. Fails on the commit that adds an unstubbed helper, naming
+    it — instead of 15 assertion failures that all say `[] != [None]`."""
+    namespace = _dispatcher_namespace()
+    missing = sorted(_free_names("run_run_once_strategies") - set(namespace))
+    assert not missing, (
+        "run_run_once_strategies reads module-scope names this harness does "
+        "not provide: " + ", ".join(missing) + ". Add them to the extracted "
+        "set or stub them; a NameError here is swallowed by the dispatcher's "
+        "blanket handler and every test in this file fails with an empty "
+        "result instead.")
+
+
+def test_the_swallowing_handler_is_still_the_reason_this_matters():
+    """A source assertion: if the blanket handler ever goes away, the sentinel
+    above stops being load-bearing and this test should be revisited."""
+    source = BROKER_PATH.read_text()
+    assert "Run-once strategy '{name}' error" in source.replace('f"', '"')
