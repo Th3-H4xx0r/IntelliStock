@@ -9524,7 +9524,7 @@ def _refresh_live_account_risk_state(adapter, observed_at):
     """Persist one fresh broker-equity drawdown observation."""
 
     global _live_risk_state, _live_risk_caps_rescaled_logged
-    from live_risk_state import evaluate_drawdown
+    from live_risk_state import apply_risk_level_transition, evaluate_drawdown
 
     if _live_risk_store is None or _live_risk_state is None:
         raise RuntimeError("durable risk state is unavailable")
@@ -9534,6 +9534,7 @@ def _refresh_live_account_risk_state(adapter, observed_at):
     limits = _live_risk_limits_for_this_document()
     previous_order_cap = _live_risk_state.max_order_notional
     previous_equity = _live_risk_state.last_equity
+    previous_level = _live_risk_state.level
     evaluated = evaluate_drawdown(
         _live_risk_state,
         equity,
@@ -9555,6 +9556,17 @@ def _refresh_live_account_risk_state(adapter, observed_at):
         except Exception:
             pass
     _live_risk_state = _live_risk_store.save(evaluated)
+    # D1: act on the level, not just record it. Until now hard and kill did
+    # exactly what soft did — `new_exposure_allowed=False` and nothing else —
+    # with no line and no page on the transition, and working BUY orders placed
+    # before the drawdown was measured still able to fill into it.
+    try:
+        apply_risk_level_transition(
+            previous_level, _live_risk_state,
+            instance_id=str(instance_id), adapter=adapter, log=_log)
+    except Exception as _ladder_exc:
+        _log(f"[live-risk] ladder transition handler failed: "
+             f"{type(_ladder_exc).__name__}: {_ladder_exc}", "red")
     snapshot_id = (
         f"risk-state:{_live_risk_state.version}:"
         f"{_live_risk_state.observed_at.isoformat()}"

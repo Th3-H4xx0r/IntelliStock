@@ -519,6 +519,137 @@ def evaluate_drawdown(
     )
 
 
+#: The drawdown ladder, in increasing severity.
+RISK_LEVELS = ("normal", "soft", "hard", "kill")
+
+
+def risk_level_rank(level) -> int:
+    """Severity of a ladder level; anything unrecognised reads as normal."""
+    try:
+        return RISK_LEVELS.index(str(level or "").strip().lower())
+    except ValueError:
+        return 0
+
+
+def _default_risk_log(message: str, color: str = "white") -> None:
+    from intellistock_logger import intellistock_logger
+
+    intellistock_logger.log(str(message), color, service="LIVE-RISK")
+
+
+def _default_risk_alert(**kwargs) -> None:
+    import live_alerts
+
+    live_alerts.alert_drawdown_halt(**kwargs)
+
+
+def cancel_open_buy_orders(adapter, *, log=None) -> int:
+    """Cancel the account's working BUY orders. Returns how many were cancelled.
+
+    Reads `list_open_orders_strict`, which RAISES rather than answering `[]`
+    for an unreachable endpoint, so a failure here is reported instead of being
+    mistaken for a clear book.
+
+    SELLs are deliberately left alone: at the kill level an open sell is a
+    reduce-only exit, the one order you want to survive.
+    """
+    def _say(message, color="red"):
+        try:
+            (log if log is not None else _default_risk_log)(message, color)
+        except Exception:
+            pass
+
+    if adapter is None:
+        _say("risk ladder: kill level reached with no broker adapter — open "
+             "BUY orders could NOT be cancelled and may still fill.")
+        return 0
+    try:
+        working = adapter.list_open_orders_strict()
+    except Exception as exc:
+        _say(f"risk ladder: the open-order book is unreachable "
+             f"({type(exc).__name__}: {exc}) — open BUY orders could NOT be "
+             "cancelled and may still fill.")
+        return 0
+    cancelled = 0
+    for ref in (working or []):
+        if str(getattr(ref, "side", "") or "").strip().lower() != "buy":
+            continue
+        broker_order_id = getattr(ref, "broker_order_id", "")
+        try:
+            if adapter.cancel_order(broker_order_id):
+                cancelled += 1
+            else:
+                _say(f"risk ladder: the broker refused to cancel working BUY "
+                     f"{getattr(ref, 'symbol', '?')} ({broker_order_id}).")
+        except Exception as exc:
+            _say(f"risk ladder: cancelling working BUY "
+                 f"{getattr(ref, 'symbol', '?')} ({broker_order_id}) raised "
+                 f"{type(exc).__name__}: {exc}.")
+    return cancelled
+
+
+def apply_risk_level_transition(previous_level, state, *, instance_id="",
+                                adapter=None, log=None, alert=None) -> bool:
+    """React to one move on the drawdown ladder. True when a level changed.
+
+    `evaluate_drawdown` computed normal / soft / hard / kill and set
+    `new_exposure_allowed`, and that was the WHOLE of it: hard and kill did
+    exactly what soft did, nothing logged the transition, nothing paged, and
+    open BUY orders placed a minute before a 45% drawdown was measured stayed
+    working at the broker — so the level meant to stop the account could still
+    ADD to it on a fill.
+
+    What this rung does NOT do, on purpose: it does not auto-liquidate, and it
+    does not flip `runCommand`. Exiting a book at the bottom of a drawdown, and
+    stopping the container, are operator decisions and stay operator decisions.
+    The kill rung makes the ladder observable and stops new exposure arriving
+    through an order that was already in flight.
+    """
+    def _say(message, color):
+        try:
+            (log if log is not None else _default_risk_log)(message, color)
+        except Exception:
+            pass
+
+    was = str(previous_level or "").strip().lower()
+    now = str(getattr(state, "level", "") or "").strip().lower()
+    if was == now:
+        return False
+    escalation = risk_level_rank(now) > risk_level_rank(was)
+    identity = str(instance_id or getattr(state, "instance_id", "") or "")
+    drawdown = getattr(state, "drawdown", Decimal("0"))
+    equity = getattr(state, "last_equity", Decimal("0"))
+    peak = getattr(state, "high_water_equity", Decimal("0"))
+    headline = (
+        f"risk ladder {was or 'unknown'} -> {now.upper()}: drawdown "
+        f"{float(drawdown):.2%} (equity {equity} against a high-water {peak}); "
+        f"new exposure {'BLOCKED' if now != 'normal' else 'allowed'}."
+    )
+    if not escalation:
+        _say(headline + " Recovered; no action taken.", "green")
+        return True
+    if now == "kill":
+        headline += (
+            " Cancelling working BUY orders. NOT auto-liquidating and NOT "
+            "stopping the instance — both are operator decisions."
+        )
+    _say(headline, "red")
+    try:
+        (alert if alert is not None else _default_risk_alert)(
+            instance_id=identity,
+            drawdown_pct=float(drawdown) * 100.0,
+            peak_value=float(peak),
+            current_value=float(equity),
+        )
+    except Exception as exc:
+        _say(f"risk ladder alert failed: {type(exc).__name__}: {exc}", "yellow")
+    if now == "kill":
+        cancelled = cancel_open_buy_orders(adapter, log=log)
+        _say(f"risk ladder: cancelled {cancelled} working BUY order(s) at the "
+             "kill level.", "red")
+    return True
+
+
 def apply_confirmed_fill(
     state: AccountRiskState,
     fill,
