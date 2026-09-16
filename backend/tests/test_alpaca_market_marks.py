@@ -422,3 +422,93 @@ def test_disconnects_are_logged_first_and_every_tenth(capsys):
     out = capsys.readouterr().out
     assert out.count("[mark-stream] disconnect") == 3  # #1, #10, #20
     assert "boom" in out
+
+
+class _LibraryLikeStream:
+    """Mimics alpaca-py's StockDataStream retry semantics: `_run_forever`
+    catches ValueError from `_auth` and loops, only exiting when
+    `_should_run` is False. A fatal auth reply therefore loops forever unless
+    something flips `_should_run` (2026-09-16, alpaca-main: "connection limit
+    exceeded" printed thousands of times, no backoff, buys gate-blocked)."""
+
+    def __init__(self, key, secret, feed=None):
+        self._should_run = True
+        self._ws = None
+        self.auth_attempts = 0
+        self.closed = 0
+        self._loop = None
+
+    async def _auth(self):
+        self.auth_attempts += 1
+        raise ValueError("connection limit exceeded")
+
+    def subscribe_quotes(self, handler, *symbols):
+        pass
+
+    def subscribe_trades(self, handler, *symbols):
+        pass
+
+    def unsubscribe_quotes(self, *symbols):
+        pass
+
+    def unsubscribe_trades(self, *symbols):
+        pass
+
+    async def close(self):
+        self.closed += 1
+        self._ws = None
+
+    async def _run_forever(self):
+        self._loop = asyncio.get_running_loop()
+        for _ in range(50):                      # bounded stand-in for `while True`
+            if not self._should_run:
+                return
+            try:
+                await self._auth()
+            except ValueError:
+                pass
+        raise AssertionError("the library loop never returned: _should_run stayed True")
+
+    def run(self):
+        asyncio.run(self._run_forever())
+
+    def stop(self):
+        self._should_run = False
+
+
+def test_a_fatal_auth_reply_stops_the_library_loop_after_one_attempt():
+    from alpaca_mark_stream import bounded_auth_stream_class
+    seen = []
+    cls = bounded_auth_stream_class(_LibraryLikeStream, on_fatal=seen.append)
+    s = cls("k", "s", feed="iex")
+    s.run()
+    assert s.auth_attempts == 1
+    assert s.closed == 1
+    assert seen and "connection limit exceeded" in str(seen[0])
+
+
+def test_connection_limit_backs_off_to_the_max_and_says_who_holds_the_slot(capsys):
+    from alpaca_mark_stream import AlpacaMarkStream, bounded_auth_stream_class
+    book = MarketMarkBook()
+    waits = []
+
+    def factory():
+        return bounded_auth_stream_class(_LibraryLikeStream, on_fatal=stream.note_fatal_auth)("k", "s")
+
+    stream = AlpacaMarkStream(book, api_key="k", api_secret="s", feed="iex",
+                              stream_factory=factory, reconnect_min_seconds=1.0,
+                              reconnect_max_seconds=60.0)
+    real_wait = stream._stop_event.wait
+
+    def spy_wait(timeout=None):
+        waits.append(timeout)
+        stream._stop_event.set()            # one iteration is enough
+        return True
+
+    stream._stop_event.wait = spy_wait
+    stream.set_symbols(["GLD"])
+    stream._run_loop()
+    assert waits == [60.0]                  # straight to the max, not 1s
+    assert stream.healthy is False
+    out = capsys.readouterr().out
+    assert "connection limit exceeded" in out and "another" in out

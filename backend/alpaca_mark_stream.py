@@ -22,6 +22,42 @@ from market_marks import (
 MAX_STREAM_SYMBOLS = 30
 
 
+def bounded_auth_stream_class(base_cls, on_fatal=None):
+    """Subclass ``base_cls`` (alpaca-py's StockDataStream) so an auth rejection
+    ends that run instead of looping inside the library.
+
+    alpaca-py's ``_run_forever`` catches the ValueError ``_auth`` raises for
+    any server-side rejection, logs the traceback and retries at once, and
+    only ever exits when ``_should_run`` is False. "connection limit exceeded"
+    (Alpaca allows ONE market-data websocket per login, paper and live keys
+    included) therefore printed thousands of tracebacks with no backoff and
+    never returned to the reconnect loop below (2026-09-16, alpaca-main: two
+    days of buys gate-blocked on quote.stale). Flipping ``_should_run`` makes
+    the library loop return on its next pass, so ``run()`` comes back to our
+    loop, which logs once and backs off.
+    """
+
+    class _BoundedAuthStream(base_cls):
+        async def _auth(self):
+            try:
+                await super()._auth()
+            except ValueError as exc:
+                self._should_run = False
+                try:
+                    await self.close()
+                except Exception:
+                    pass
+                if on_fatal is not None:
+                    try:
+                        on_fatal(exc)
+                    except Exception:
+                        pass
+                raise
+
+    _BoundedAuthStream.__name__ = f"BoundedAuth{base_cls.__name__}"
+    return _BoundedAuthStream
+
+
 class AlpacaMarkStream:
     """Owns one StockDataStream and writes every event into the mark book."""
 
@@ -49,6 +85,7 @@ class AlpacaMarkStream:
         self._last_event_utc = None
         self._last_disconnect_reason = None
         self._disconnect_counts = {}
+        self._fatal_auth = None
 
     # -- health ---------------------------------------------------------------
 
@@ -56,6 +93,16 @@ class AlpacaMarkStream:
     def healthy(self):
         with self._lock:
             return self._healthy
+
+    def note_fatal_auth(self, exc):
+        """Called from the stream's own loop when Alpaca rejected the auth."""
+        with self._lock:
+            self._fatal_auth = str(exc)
+
+    def _take_fatal_auth(self):
+        with self._lock:
+            reason, self._fatal_auth = self._fatal_auth, None
+        return reason
 
     def record_disconnect(self, reason):
         with self._lock:
@@ -190,7 +237,9 @@ class AlpacaMarkStream:
             feed = DataFeed(str(feed).lower())
         except (ImportError, ValueError):
             pass
-        return StockDataStream(self._api_key, self._api_secret, feed=feed)
+        cls = bounded_auth_stream_class(StockDataStream,
+                                        on_fatal=self.note_fatal_auth)
+        return cls(self._api_key, self._api_secret, feed=feed)
 
     def start(self):
         """Start the reconnect loop on a daemon thread; returns immediately."""
@@ -249,7 +298,19 @@ class AlpacaMarkStream:
                         pass
                 backoff = self._reconnect_min
                 stream.run()  # blocking until disconnect/stop
-                self.record_disconnect("stream run() returned")
+                fatal = self._take_fatal_auth()
+                if fatal:
+                    hint = ""
+                    if "connection limit" in fatal.lower():
+                        hint = (" — another client holds this login's one "
+                                "market-data websocket (a second running "
+                                "instance on the same Alpaca account, paper "
+                                "or live?); retrying every "
+                                f"{self._reconnect_max:.0f}s until it frees")
+                    self.record_disconnect(f"auth rejected: {fatal}{hint}")
+                    backoff = self._reconnect_max
+                else:
+                    self.record_disconnect("stream run() returned")
             except Exception as exc:
                 self.record_disconnect(exc)
             if self._stop_event.wait(backoff):
