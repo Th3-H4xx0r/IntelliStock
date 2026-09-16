@@ -26,6 +26,9 @@ API = "https://intellistock-api.pkrishna.dev"
 # response by basename.
 FILES = (
     "backend/broker.py",
+    # 2026-09-16: the order-submitting adapter was missing, so the check passed
+    # instantly on a push that changed only this file.
+    "backend/broker_adapters/alpaca.py",
     "backend/strategies/graph_nexus_analysis.py",
     "backend/core_sleeve.py",
     "backend/llm_utils.py",

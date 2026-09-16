@@ -1060,6 +1060,11 @@ def _run(f, *args, **kwargs) -> Any:
 # "unreadable" in production, which is the one place this has to work.
 _CODE_FINGERPRINT_FILES = (
     "broker.py",
+    # 2026-09-16: the adapter that SUBMITS every live order was not here, so a
+    # push that changed only it reported "all 16 files match" seconds after the
+    # push — a green check that proved nothing about the code actually running.
+    # Same class as the EB omission on 2026-09-03.
+    "broker_adapters/alpaca.py",
     "strategies/graph_nexus_analysis.py",
     "core_sleeve.py",
     # The LLM layer decides trades as surely as the broker does — the overlay's
