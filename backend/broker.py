@@ -13262,6 +13262,11 @@ def _log_live_trade_decision(symbol, decision, price, ts, strategy_summary,
 #: submit that never reached the broker has to clear it, or the exit waits for
 #: the NEXT session to re-arm.
 _EB_EXIT_ISSUED_KEY = "_strategy_eb_exit_issued_session"
+#: EB stamps these when a plan is EMITTED, not when it reaches the broker,
+#: so a gate refusal burns the session's only attempt (see
+#: `_report_live_submit_failure`).
+_EB_SWEEP_ISSUED_KEY = "_strategy_eb_sweep_session"
+_EB_REBALANCE_KEY = "_eb_last_rebalance_session"
 
 #: Both spellings broker.py resolves the EB lane under.
 _EB_LANE_NAMES = ("strategy_eb", "strategyeb", "StrategyEb")
@@ -13362,6 +13367,36 @@ def _core_sell_may_be_working(adapter, symbol, say) -> bool:
     return False
 
 
+def _eb_buy_may_be_working(adapter, say) -> bool:
+    """Could any EB BUY still be working at the broker right now?
+
+    The sell path can answer this from the refusal alone — one exit, one
+    order. EB's BUY latches are per-LANE and cover every leg of one plan, so a
+    sibling leg may have been accepted while this one was refused. Absence of
+    a working BUY is the only thing that makes re-arming safe, and absence
+    cannot be proven from a missing adapter or an unreachable endpoint, so
+    both answer True and the latch stays stamped.
+    """
+    if adapter is None:
+        say("strategy_eb buy latches NOT re-armed: no broker adapter to read "
+            "the working-order book from, so a working BUY cannot be ruled "
+            "out.", "yellow")
+        return True
+    try:
+        working = adapter.list_open_orders_strict()
+    except Exception as exc:
+        say("strategy_eb buy latches NOT re-armed: the working-order book is "
+            f"unreachable ({type(exc).__name__}: {exc}), so a working BUY "
+            "cannot be ruled out.", "yellow")
+        return True
+    for ref in (working or []):
+        if str(getattr(ref, "side", "") or "").strip().lower() == "buy":
+            say("strategy_eb buy latches NOT re-armed: a BUY is already "
+                "working at the broker.", "yellow")
+            return True
+    return False
+
+
 def _report_live_submit_failure(symbol, decision, detail, *, instance_id,
                                 strategy_cache=None, eb_core="", adapter=None,
                                 outcome="failed", log=None, alert=None):
@@ -13415,6 +13450,33 @@ def _report_live_submit_failure(symbol, decision, detail, *, instance_id,
                 "the next tick.")
     )
     _say(message, "red" if loud else "yellow")
+    if decision == 1 and definite and isinstance(strategy_cache, dict):
+        # The same defect the exit re-arm below exists for, one lane over.
+        # EB stamps its sweep/rebalance latches when the plan is EMITTED, so a
+        # gate refusal burns the session's only attempt. 2026-09-16,
+        # alpaca-main (real money): the sweep fired at 01:00 PT — 04:00 ET,
+        # where a regular-hours order has no fresh quote to price against —
+        # the gate refused all three legs on quote.stale, and the account then
+        # sat 100% in cash until the session rolled, which repeated the same
+        # pre-market refusal the next day. Five days, $6,041 idle. Nothing
+        # reached the broker, so clearing the latch cannot duplicate an order;
+        # the working-order book is still consulted because one plan has
+        # several legs and a sibling may have been accepted.
+        if not _eb_buy_may_be_working(adapter, _say):
+            cleared = False
+            for name in _EB_LANE_NAMES:
+                lane = strategy_cache.get(name)
+                if not isinstance(lane, dict):
+                    continue
+                for key in (_EB_SWEEP_ISSUED_KEY, _EB_REBALANCE_KEY):
+                    if key in lane:
+                        lane.pop(key, None)
+                        cleared = True
+            if cleared:
+                _say(f"strategy_eb buy RE-ARMED after {symbol}: the gate "
+                     "refused the order, nothing reached the broker and no "
+                     "BUY is working, so the next tick re-plans instead of "
+                     "waiting for the next session.", "yellow")
     if not loud:
         return False
     try:

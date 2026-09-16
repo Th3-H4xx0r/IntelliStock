@@ -33,8 +33,10 @@ def _extract(*names):
     tree = ast.parse(open(_BROKER).read())
     keep = set(names) | {"_truthy", "_merged_strategy_settings",
                          "_strategy_eb_merged_config",
-                         "_core_sell_may_be_working"}
-    consts = {"_EB_EXIT_ISSUED_KEY", "_EB_LANE_NAMES"}
+                         "_core_sell_may_be_working",
+                         "_eb_buy_may_be_working"}
+    consts = {"_EB_EXIT_ISSUED_KEY", "_EB_LANE_NAMES",
+              "_EB_SWEEP_ISSUED_KEY", "_EB_REBALANCE_KEY"}
     wanted = [n for n in tree.body
               if (isinstance(n, ast.FunctionDef) and n.name in keep)
               or (isinstance(n, ast.Assign)
@@ -336,3 +338,86 @@ def test_every_silent_lane_on_the_live_submit_path_reports():
     assert "_report_live_submit_failure(" in block
     uncertain = source.split("_submission.accepted", 1)[1][:4000]
     assert "uncertain" in uncertain
+
+
+# --- E3: a refused BUY must not burn the session's only attempt -------------
+
+SWEEP_KEY = "_strategy_eb_sweep_session"
+REBAL_KEY = "_eb_last_rebalance_session"
+
+
+def eb_buy_cache(session="2026-09-15"):
+    return {"strategy_eb": {SWEEP_KEY: session, REBAL_KEY: session,
+                            EXIT_KEY: session}}
+
+
+def test_a_definite_buy_block_re_arms_the_sweep_and_rebalance_latches():
+    """2026-09-16, alpaca-main (REAL MONEY): EB swept $6,041 of idle cash at
+    01:00 PT — 04:00 ET, where a regular-hours order has no fresh quote — and
+    the gate refused all three legs on quote.stale. The latches are stamped on
+    EMISSION, so the session's only attempt was spent on orders that never
+    reached the broker, and the account sat in 100% cash. The next day repeated
+    it. Nothing was sent, so re-arming cannot duplicate anything."""
+    lines, alerts, log, alert = _sink()
+    cache = eb_buy_cache()
+    report(symbol="GLD", decision=1, detail="gate:quote.stale",
+           instance_id="alpaca-main", strategy_cache=cache, eb_core="TQQQ",
+           outcome="blocked", adapter=orders(), log=log, alert=alert)
+    assert SWEEP_KEY not in cache["strategy_eb"]
+    assert REBAL_KEY not in cache["strategy_eb"]
+    assert alerts == [], "a refused buy is an opportunity cost, not a page"
+    assert any("RE-ARMED" in m for m, _c in lines), lines
+
+
+def test_a_refused_buy_leaves_the_exit_latch_alone():
+    """The exit latch means a position the strategy believes it has left; a
+    refused BUY says nothing about it."""
+    _l, _a, log, alert = _sink()
+    cache = eb_buy_cache()
+    report(symbol="GLD", decision=1, detail="gate:quote.stale",
+           instance_id="alpaca-main", strategy_cache=cache, eb_core="TQQQ",
+           outcome="blocked", adapter=orders(), log=log, alert=alert)
+    assert cache["strategy_eb"][EXIT_KEY] == "2026-09-15"
+
+
+def test_a_working_buy_blocks_the_re_arm():
+    """THE duplicate-buy case: one plan has several legs, so a sibling may have
+    been accepted while this leg was refused. Re-planning then buys twice."""
+    lines, _a, log, alert = _sink()
+    cache = eb_buy_cache()
+    report(symbol="GLD", decision=1, detail="gate:quote.stale",
+           instance_id="alpaca-main", strategy_cache=cache, eb_core="TQQQ",
+           outcome="blocked", adapter=orders(("XLE", "buy")), log=log, alert=alert)
+    assert cache["strategy_eb"][SWEEP_KEY] == "2026-09-15"
+    assert any("NOT re-armed" in m for m, _c in lines), lines
+
+
+def test_an_unreadable_order_book_blocks_the_buy_re_arm():
+    """Absence of a working BUY cannot be proven from a dead endpoint, so the
+    latch stays stamped — stuck cash beats a double buy."""
+    _l, _a, log, alert = _sink()
+    cache = eb_buy_cache()
+    report(symbol="GLD", decision=1, detail="gate:quote.stale",
+           instance_id="alpaca-main", strategy_cache=cache, eb_core="TQQQ",
+           outcome="blocked", adapter=unreachable(), log=log, alert=alert)
+    assert cache["strategy_eb"][SWEEP_KEY] == "2026-09-15"
+
+
+def test_an_uncertain_buy_does_not_re_arm_the_latches():
+    """Uncertain means the order may be working this second."""
+    _l, _a, log, alert = _sink()
+    cache = eb_buy_cache()
+    report(symbol="GLD", decision=1, detail="ReadTimeout",
+           instance_id="alpaca-main", strategy_cache=cache, eb_core="TQQQ",
+           outcome="uncertain", adapter=orders(), log=log, alert=alert)
+    assert cache["strategy_eb"][SWEEP_KEY] == "2026-09-15"
+
+
+def test_a_refused_sell_does_not_touch_the_buy_latches():
+    _l, _a, log, alert = _sink()
+    cache = eb_buy_cache()
+    report(symbol="TQQQ", decision=-1, detail="gate:market_closed",
+           instance_id="alpaca-main", strategy_cache=cache, eb_core="TQQQ",
+           outcome="blocked", adapter=orders(), log=log, alert=alert)
+    assert cache["strategy_eb"][SWEEP_KEY] == "2026-09-15"
+    assert EXIT_KEY not in cache["strategy_eb"]
