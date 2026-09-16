@@ -578,3 +578,30 @@ def test_rest_quote_request_carries_the_symbols_and_a_datafeed_enum(alpaca_adapt
     request = client.requests[0]
     assert list(request.symbol_or_symbols) == ["GLD"]
     assert request.feed is DataFeed.IEX
+
+
+def test_the_real_alpaca_quote_model_still_carries_the_fields_the_fallback_reads():
+    """`fetch_rest_quote_marks` reads the REST quote through getattr, so a
+    renamed field would not raise — it would silently mark nothing and put
+    the buy back on the gate's dependency.quote.unknown path, which is the
+    failure that idled a real account for five days. Pin the names against
+    the installed library so an alpaca-py upgrade fails here instead."""
+    from alpaca.data.models.quotes import Quote
+    fields = set(getattr(Quote, "model_fields", None) or Quote.__fields__)
+    assert {"bid_price", "ask_price", "bid_size", "ask_size",
+            "timestamp", "conditions"} <= fields
+
+
+def test_the_real_rest_quote_request_and_client_signatures_still_match():
+    """Same reasoning one layer out: the request/response shape is only
+    exercised against the live API on a decision day, so pin it here."""
+    import inspect
+    from alpaca.data.historical import StockHistoricalDataClient
+    from alpaca.data.requests import StockLatestQuoteRequest
+    from alpaca.data.enums import DataFeed
+    request = StockLatestQuoteRequest(
+        symbol_or_symbols=["GLD"], feed=DataFeed("iex"))
+    assert list(request.symbol_or_symbols) == ["GLD"]
+    params = inspect.signature(
+        StockHistoricalDataClient.get_stock_latest_quote).parameters
+    assert "request_params" in params
