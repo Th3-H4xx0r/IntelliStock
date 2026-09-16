@@ -2133,7 +2133,15 @@ class AlpacaAdapter(BrokerAdapter):
         cid = str(getattr(order, "client_order_id", "") or "").strip()
         broker_order_id = str(getattr(order, "id", "") or "").strip() or None
         symbol = str(getattr(order, "symbol", "") or "").strip().upper()
-        side = OrderSide(str(getattr(order, "side", "") or "").lower())
+        # alpaca-py hands back an OrderSide ENUM. `str(OrderSide.BUY)` is
+        # "OrderSide.BUY", so lowering it yields "orderside.buy" and this
+        # raised on every real fill (2026-09-16, alpaca-main: all three
+        # legs logged "lifecycle dispatch failed closed" and the durable
+        # record missed them). Read `.value` first, as the neighbouring
+        # call sites already do.
+        _raw_side = getattr(order, "side", "") or ""
+        side = OrderSide(
+            str(getattr(_raw_side, "value", _raw_side)).lower())
         cumulative = Decimal(str(getattr(order, "filled_qty", 0) or 0))
         raw_average = getattr(order, "filled_avg_price", None)
         average = (
@@ -2384,7 +2392,8 @@ class AlpacaAdapter(BrokerAdapter):
         sym = str(getattr(order, "symbol", ""))
         filled_qty = float(getattr(order, "filled_qty", 0) or 0)
         filled_avg = float(getattr(order, "filled_avg_price", 0) or 0) or None
-        side = str(getattr(order, "side", "")).lower()
+        _side_raw = getattr(order, "side", "")
+        side = str(getattr(_side_raw, "value", _side_raw)).lower()
 
         # 2026-04-22 Fix 4.4: log EVERY trade_update terminal-state event so
         # operators see the full lifecycle: SUBMIT → ACCEPTED → FILLED (or

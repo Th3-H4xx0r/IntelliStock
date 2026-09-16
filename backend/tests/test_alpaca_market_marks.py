@@ -605,3 +605,43 @@ def test_the_real_rest_quote_request_and_client_signatures_still_match():
     params = inspect.signature(
         StockHistoricalDataClient.get_stock_latest_quote).parameters
     assert "request_params" in params
+
+
+def _enum_fill_event(symbol="GLD", qty=7.5772786, price=398.25):
+    """A fill shaped like the REAL alpaca-py payload: `order.side` is an
+    OrderSide ENUM, not a string. Every fixture above passes the string, which
+    is why 2026-09-16's first live fills logged
+    `lifecycle dispatch failed closed: 'orderside.buy' is not a valid
+    OrderSide` on all three legs and the durable record missed them."""
+    from alpaca.trading.enums import OrderSide as _AlpacaOrderSide
+    event = _fill_event(symbol=symbol, qty=qty, price=price)
+    event.order.side = _AlpacaOrderSide.BUY
+    # The lifecycle normalizer reads more of the payload than the mark path:
+    # a bare MagicMock attribute reaches Decimal() and raises there instead.
+    event.order.filled_fees = 0
+    event.order.commission = 0
+    event.order.updated_at = datetime.now(timezone.utc)
+    event.timestamp = datetime.now(timezone.utc)
+    return event
+
+
+def test_an_enum_order_side_normalizes_for_the_lifecycle_sink(alpaca_adapter):
+    """`str(OrderSide.BUY).lower()` is 'orderside.buy'; the sink needs 'buy'.
+    Reading `.value` first is the pattern the neighbouring call sites use."""
+    # The normalizer stamps account identity, which the live path binds at
+    # boot alongside the durable sink.
+    alpaca_adapter.bind_order_event_sink(lambda event: None,
+                                         account_id="acct-9789")
+    normalized = alpaca_adapter._normalized_trade_update(_enum_fill_event())
+    assert normalized is not None, (
+        "an enum side made the lifecycle normalizer raise, so the fill was "
+        "never recorded")
+    assert str(getattr(normalized.side, "value", normalized.side)).lower() == "buy"
+
+
+def test_an_enum_order_side_logs_a_clean_side(alpaca_adapter, capsys):
+    """The operator log and the Discord trade alert both read this string;
+    they showed 'ORDERSIDE.BUY' on the first real fills."""
+    asyncio.run(alpaca_adapter._on_trade_update(_enum_fill_event()))
+    out = capsys.readouterr().out
+    assert "orderside.buy" not in out.lower(), out[-600:]
