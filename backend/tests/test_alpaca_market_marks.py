@@ -512,3 +512,69 @@ def test_connection_limit_backs_off_to_the_max_and_says_who_holds_the_slot(capsy
     assert stream.healthy is False
     out = capsys.readouterr().out
     assert "connection limit exceeded" in out and "another" in out
+
+
+class _RestQuote:
+    def __init__(self, bid, ask, ts=None, conditions=()):
+        self.bid_price, self.ask_price = bid, ask
+        self.bid_size, self.ask_size = 2, 3
+        self.timestamp = ts or datetime.now(timezone.utc)
+        self.conditions = list(conditions)
+
+
+class _RestQuoteClient:
+    def __init__(self, payload):
+        self.payload = payload
+        self.requests = []
+
+    def get_stock_latest_quote(self, request):
+        self.requests.append(request)
+        return self.payload
+
+
+def test_rest_quote_marks_rescue_symbols_the_websocket_cannot_reach(alpaca_adapter):
+    """2026-09-16, alpaca-main (REAL MONEY): Alpaca allows one market-data
+    websocket per login and paper + live keys share it, so another client
+    starved this one and every buy died on dependency.quote.unknown while the
+    account sat in cash. REST is rate-limited, not connection-limited."""
+    alpaca_adapter._rest_quote_client = _RestQuoteClient({
+        "GLD": _RestQuote(300.00, 300.10),
+        "XLE": _RestQuote(90.00, 90.02),
+    })
+    marked = alpaca_adapter.fetch_rest_quote_marks(("gld", " XLE "))
+    assert set(marked) == {"GLD", "XLE"}
+    mark = alpaca_adapter.get_market_marks()["GLD"]
+    assert mark.source is MarkSource.REST_QUOTE
+    assert abs(mark.price - 300.05) < 1e-9
+    assert alpaca_adapter._last_prices["XLE"] == pytest.approx(90.01)
+
+
+def test_a_one_sided_rest_book_still_marks_and_an_empty_one_does_not(alpaca_adapter):
+    """Zero sides are routine on IEX; one live side is a usable mark, no side
+    is not, and an unusable symbol must stay unmarked (so it stays blocked)."""
+    alpaca_adapter._rest_quote_client = _RestQuoteClient({
+        "GLD": _RestQuote(0.0, 300.10),      # ask only
+        "XLE": _RestQuote(0.0, 0.0),         # empty book
+        "GDX": _RestQuote(None, None),       # no data at all
+    })
+    marked = alpaca_adapter.fetch_rest_quote_marks(("GLD", "XLE", "GDX"))
+    assert marked == ("GLD",)
+    assert alpaca_adapter.get_market_marks()["GLD"].price == 300.10
+
+
+def test_rest_quote_fetch_makes_no_call_for_an_empty_symbol_list(alpaca_adapter):
+    client = _RestQuoteClient({})
+    alpaca_adapter._rest_quote_client = client
+    assert alpaca_adapter.fetch_rest_quote_marks(()) == ()
+    assert alpaca_adapter.fetch_rest_quote_marks(("", "  ")) == ()
+    assert client.requests == []
+
+
+def test_rest_quote_request_carries_the_symbols_and_a_datafeed_enum(alpaca_adapter):
+    from alpaca.data.enums import DataFeed
+    client = _RestQuoteClient({"GLD": _RestQuote(300.0, 300.1)})
+    alpaca_adapter._rest_quote_client = client
+    alpaca_adapter.fetch_rest_quote_marks(("GLD",))
+    request = client.requests[0]
+    assert list(request.symbol_or_symbols) == ["GLD"]
+    assert request.feed is DataFeed.IEX

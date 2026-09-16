@@ -1954,6 +1954,95 @@ class AlpacaAdapter(BrokerAdapter):
             )
             self._stream_thread.start()
 
+    def _rest_quote_data_client(self):
+        """Lazily built REST market-data client (cached on the adapter)."""
+        client = getattr(self, "_rest_quote_client", None)
+        if client is not None:
+            return client
+        try:
+            from alpaca.data.historical import StockHistoricalDataClient
+        except Exception as _imp_exc:
+            _alog("BROKER", f"REST quote client unavailable: "
+                            f"{type(_imp_exc).__name__}: {_imp_exc}", "yellow")
+            return None
+        client = StockHistoricalDataClient(self._api_key, self._api_secret)
+        self._rest_quote_client = client
+        return client
+
+    def fetch_rest_quote_marks(self, symbols) -> tuple:
+        """Mark ``symbols`` from Alpaca's REST latest-quote endpoint.
+
+        The market-data WEBSOCKET is one connection per Alpaca login, and the
+        paper and live keys of one account share it, so another client can
+        hold the slot indefinitely and no amount of waiting produces a stream
+        mark. On 2026-09-16 that left alpaca-main — real money — holding its
+        whole $6,041 in cash for five days: every buy died at the order gate
+        on dependency.quote.unknown. REST is rate-limited rather than
+        connection-limited, so it still answers when the socket is taken, and
+        ``MarkSource.REST_QUOTE`` is ALREADY a DECISION/SUBMISSION primary
+        source (``market_marks.PURPOSE_POLICIES``): this hands the gate a
+        source it already trusts rather than widening one.
+
+        Returns the symbols that received a usable mark. A missing symbol, an
+        empty book or a transport error never raises out of here — the
+        contract is "rescue what you can", and whatever stays unmarked stays
+        gate-blocked, which is the safe direction.
+        """
+        wanted = sorted({str(s).strip().upper()
+                         for s in (symbols or ()) if str(s).strip()})
+        if not wanted:
+            return ()
+        client = self._rest_quote_data_client()
+        if client is None:
+            return ()
+        feed = str(os.environ.get("ALPACA_DATA_FEED", "iex") or "iex").lower()
+        try:
+            from alpaca.data.enums import DataFeed
+            feed_arg = DataFeed(feed)
+        except (ImportError, ValueError):
+            # Same coercion the stream needs: alpaca-py >= 0.43 wants the enum.
+            feed_arg = feed
+        from alpaca.data.requests import StockLatestQuoteRequest
+        quotes = client.get_stock_latest_quote(
+            StockLatestQuoteRequest(symbol_or_symbols=wanted, feed=feed_arg))
+        quality = (MarkQuality.CONSOLIDATED if feed == "sip"
+                   else MarkQuality.SINGLE_EXCHANGE)
+        now = datetime.now(timezone.utc)
+        marked = []
+        for symbol in wanted:
+            quote = (quotes or {}).get(symbol)
+            if quote is None:
+                continue
+            bid = _as_positive_float(getattr(quote, "bid_price", None))
+            ask = _as_positive_float(getattr(quote, "ask_price", None))
+            if bid is not None and ask is not None:
+                price = (bid + ask) / 2.0
+            else:
+                price = bid if bid is not None else ask
+            if not price or price <= 0:
+                continue
+            observed = getattr(quote, "timestamp", None)
+            if not isinstance(observed, datetime) or observed.tzinfo is None:
+                observed = now
+            try:
+                accepted = self._market_marks.update(MarketMark(
+                    symbol=symbol, price=price, bid=bid, ask=ask,
+                    bid_size=_as_positive_float(getattr(quote, "bid_size", None)),
+                    ask_size=_as_positive_float(getattr(quote, "ask_size", None)),
+                    observed_at=observed, received_at=now,
+                    source=MarkSource.REST_QUOTE, feed=feed,
+                    quality=quality, session=classify_session(observed),
+                    conditions=tuple(getattr(quote, "conditions", None) or ()),
+                ))
+            except ValueError:
+                continue
+            if accepted:
+                marked.append(symbol)
+                newest = self._market_marks.get(symbol)
+                if newest is not None:
+                    self._last_prices[symbol] = newest.price
+        return tuple(marked)
+
     def start_market_marks(self, symbols) -> dict:
         """Start the read-only quote/trade stream feeding typed marks."""
 
@@ -2916,3 +3005,16 @@ class AlpacaAdapter(BrokerAdapter):
                         self._orders_today.pop(symbol, None)
         except Exception:
             pass
+
+
+def _as_positive_float(value):
+    """Float, or None for anything unusable or non-positive.
+
+    Zero and negative sides are routine on IEX (an empty book), so they are
+    normalised to None rather than allowed to poison a mid-price.
+    """
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if result > 0 else None

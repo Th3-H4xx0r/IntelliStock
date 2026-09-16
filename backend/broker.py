@@ -4932,10 +4932,34 @@ def _ensure_live_candidate_marks(live_adapter, run_once_results,
     while still and _cm_time.time() < _deadline:
         _cm_time.sleep(0.5)
         still = [s for s in still if marks.get(s) is None]
+    _rescued = 0
+    if still:
+        # Waiting longer cannot help when the socket is not ours to open.
+        # Alpaca allows ONE market-data websocket per login and the paper and
+        # live keys of one account share it, so another client holds the slot
+        # indefinitely: 2026-09-16, alpaca-main sat in cash for five days
+        # because every buy died on dependency.quote.unknown. REST quotes are
+        # rate-limited rather than connection-limited, so they stay available,
+        # and MarkSource.REST_QUOTE is ALREADY a DECISION/SUBMISSION primary
+        # source (market_marks.PURPOSE_POLICIES) — this hands the gate a
+        # source it already trusts, it does not widen one.
+        _rest = getattr(live_adapter, "fetch_rest_quote_marks", None)
+        if callable(_rest):
+            try:
+                _rest(tuple(still))
+            except Exception as _rq_exc:
+                _log(f"[marks] REST quote fallback failed for "
+                     f"{', '.join(still)}: {type(_rq_exc).__name__}: "
+                     f"{_rq_exc} — entries will be gate-blocked", "red")
+            else:
+                _before = len(still)
+                still = [s for s in still if marks.get(s) is None]
+                _rescued = _before - len(still)
     _log(f"[marks] candidate subscribe: +{len(missing)} symbol(s) "
          f"({', '.join(missing[:8])}{'…' if len(missing) > 8 else ''}); "
          f"marked {len(missing) - len(still)}/{len(missing)} within "
          f"{float(wait_seconds):.0f}s"
+         + (f" ({_rescued} via REST fallback)" if _rescued else "")
          + (f"; still unmarked (will gate-block): {', '.join(still)}"
             if still else ""),
          "yellow" if still else "cyan")

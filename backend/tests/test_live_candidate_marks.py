@@ -255,3 +255,66 @@ def test_bear_refill_appreciation_guard_defaults_off_and_is_whitelisted():
         "read-site guard missing")
     assert "bear refill SKIPPED — leg appreciating" in _SRC, (
         "the guard must announce itself (unlogged lever = unprovable lever)")
+
+
+class _RestAdapter(_Adapter):
+    """Adapter whose stream never marks anything, but whose REST fallback does.
+
+    Mirrors the real producer: `fetch_rest_quote_marks` writes into the same
+    `_market_marks` book the helper reads, and returns the symbols it marked.
+    """
+
+    def __init__(self, *a, rest_marks=None, boom=False, **kw):
+        super().__init__(*a, **kw)
+        self.rest_calls = []
+        self._rest_marks = rest_marks
+        self._boom = boom
+
+    def fetch_rest_quote_marks(self, symbols):
+        self.rest_calls.append(tuple(symbols))
+        if self._boom:
+            raise RuntimeError("alpaca REST 429")
+        got = tuple(symbols) if self._rest_marks is None else tuple(self._rest_marks)
+        self._market_marks._marked.update(got)
+        return got
+
+
+def test_rest_quotes_rescue_candidates_the_stream_never_marks():
+    """2026-09-16, alpaca-main (REAL MONEY): Alpaca allows ONE market-data
+    websocket per login and paper + live keys share it, so a second client
+    starved this one for five days — every buy died on
+    dependency.quote.unknown while the whole $6,041 account sat in cash.
+    Waiting longer cannot fix that. REST quotes are rate-limited rather than
+    connection-limited, and REST_QUOTE is already a DECISION/SUBMISSION
+    primary source in market_marks.PURPOSE_POLICIES, so the helper must fall
+    back to them instead of handing the gate nothing."""
+    a = _RestAdapter(marked=(), subscribed=("SPY",))
+    subscribed, still = b._ensure_live_candidate_marks(
+        a, _results({"GLD": 1, "XLE": 1}), _spec(), wait_seconds=0.0)
+    assert subscribed == ["GLD", "XLE"]
+    assert a.rest_calls == [("GLD", "XLE")]
+    assert still == []
+
+
+def test_rest_fallback_is_not_called_when_the_stream_already_marked_them():
+    """No wasted REST calls (Basic plan is rate-limited) on the happy path."""
+    a = _RestAdapter(marked=("GLD", "XLE"), subscribed=("SPY",))
+    _, still = b._ensure_live_candidate_marks(
+        a, _results({"GLD": 1, "XLE": 1}), _spec(), wait_seconds=0.0)
+    assert a.rest_calls == [] and still == []
+
+
+def test_a_failing_rest_fallback_still_reports_the_symbols_unmarked():
+    """The fallback is a rescue, never a new way to crash the tick; symbols it
+    cannot mark must stay in `still` so the caller logs a gate-block."""
+    a = _RestAdapter(marked=(), subscribed=(), boom=True)
+    _, still = b._ensure_live_candidate_marks(
+        a, _results({"GLD": 1}), _spec(), wait_seconds=0.0)
+    assert a.rest_calls == [("GLD",)] and still == ["GLD"]
+
+
+def test_partial_rest_coverage_leaves_only_the_uncovered_symbol_unmarked():
+    a = _RestAdapter(marked=(), subscribed=(), rest_marks=("GLD",))
+    _, still = b._ensure_live_candidate_marks(
+        a, _results({"GLD": 1, "XLE": 1}), _spec(), wait_seconds=0.0)
+    assert still == ["XLE"]
