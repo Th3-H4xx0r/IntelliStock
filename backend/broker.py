@@ -4910,8 +4910,34 @@ def _ensure_live_candidate_marks(live_adapter, run_once_results,
     if not buys:
         return ([], [])
     marks = getattr(live_adapter, "_market_marks", None)
-    missing = sorted(
-        s for s in buys if marks is None or marks.get(s) is None)
+
+    def _unusable(sym):
+        """A mark the gate would refuse counts as missing.
+
+        Checking only for None left a STALE mark looking like coverage: once
+        the REST fallback had written yesterday's close (pre-market, where
+        these ETFs have no IEX quote), every later tick saw "a mark" and
+        skipped the refresh, so the book could never recover within the
+        session even after the opening bell made a fresh quote available
+        (2026-09-16, alpaca-main).
+        """
+        if marks is None:
+            return True
+        mark = marks.get(sym)
+        if mark is None:
+            return True
+        try:
+            from market_marks import MarkPurpose, evaluate_mark
+            return not evaluate_mark(
+                mark, MarkPurpose.DECISION,
+                datetime.datetime.now(datetime.timezone.utc)).allowed
+        except Exception:
+            # Fail toward refreshing it. A REST quote costs one rate-limited
+            # call; assuming an unreadable mark is fine is how a stale book
+            # reaches the gate.
+            return True
+
+    missing = sorted(s for s in buys if _unusable(s))
     if not missing:
         return ([], [])
     try:
@@ -4928,10 +4954,10 @@ def _ensure_live_candidate_marks(live_adapter, run_once_results,
         _log("[marks] mark-stream overflow after candidate subscribe; "
              f"unmarked symbols fail closed: {_status['overflow']}", "red")
     _deadline = _cm_time.time() + max(0.0, float(wait_seconds))
-    still = [s for s in missing if marks is None or marks.get(s) is None]
+    still = [s for s in missing if _unusable(s)]
     while still and _cm_time.time() < _deadline:
         _cm_time.sleep(0.5)
-        still = [s for s in still if marks.get(s) is None]
+        still = [s for s in still if _unusable(s)]
     _rescued = 0
     if still:
         # Waiting longer cannot help when the socket is not ours to open.
@@ -4953,7 +4979,7 @@ def _ensure_live_candidate_marks(live_adapter, run_once_results,
                      f"{_rq_exc} — entries will be gate-blocked", "red")
             else:
                 _before = len(still)
-                still = [s for s in still if marks.get(s) is None]
+                still = [s for s in still if _unusable(s)]
                 _rescued = _before - len(still)
     _log(f"[marks] candidate subscribe: +{len(missing)} symbol(s) "
          f"({', '.join(missing[:8])}{'…' if len(missing) > 8 else ''}); "

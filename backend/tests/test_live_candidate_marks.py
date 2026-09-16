@@ -21,7 +21,9 @@ if _BACKEND not in sys.path:
 _SRC = open(os.path.join(_BACKEND, "broker.py"), encoding="utf-8").read()
 _TREE = ast.parse(_SRC)
 
-_NS = {"_log": lambda *a, **k: None}
+import datetime as _dt  # broker.py does `import datetime`; without it the
+# helper's mark-freshness check raises and every fake mark reads unusable.
+_NS = {"_log": lambda *a, **k: None, "datetime": _dt}
 _EXTRACT_FUNCS = {
     "_live_candidate_marks_enabled",
     "_ensure_live_candidate_marks",
@@ -39,6 +41,20 @@ def _spec(**cfg):
     return [{"strategy": "graph_nexus_analysis", "config": cfg}]
 
 
+def _mark(symbol, age_seconds):
+    from datetime import datetime, timedelta, timezone
+    from market_marks import (MarkQuality, MarkSource, MarketMark,
+                              classify_session)
+    when = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+    return MarketMark(
+        symbol=symbol, price=100.0, bid=99.99, ask=100.01,
+        bid_size=1, ask_size=1, observed_at=when, received_at=when,
+        source=MarkSource.REST_QUOTE, feed="iex",
+        quality=MarkQuality.SINGLE_EXCHANGE, session=classify_session(when),
+        conditions=(),
+    )
+
+
 class _MarkBook:
     """Same read surface the helper uses on AlpacaAdapter._market_marks."""
 
@@ -46,7 +62,9 @@ class _MarkBook:
         self._marked = set(marked)
 
     def get(self, symbol):
-        return object() if symbol in self._marked else None
+        # A real, FRESH mark: the helper now asks whether the gate would
+        # accept it, so a bare sentinel would read as unusable.
+        return _mark(symbol, 1) if symbol in self._marked else None
 
 
 class _Stream:
@@ -318,3 +336,52 @@ def test_partial_rest_coverage_leaves_only_the_uncovered_symbol_unmarked():
     _, still = b._ensure_live_candidate_marks(
         a, _results({"GLD": 1, "XLE": 1}), _spec(), wait_seconds=0.0)
     assert still == ["XLE"]
+
+
+class _RealMarkBook:
+    """Holds real MarketMark objects so mark freshness is evaluated for real."""
+
+    def __init__(self, marks=()):
+        self._by_symbol = {m.symbol: m for m in marks}
+
+    def get(self, symbol):
+        return self._by_symbol.get(symbol)
+
+    def put(self, mark):
+        self._by_symbol[mark.symbol] = mark
+
+
+class _StaleMarkAdapter(_Adapter):
+    def __init__(self, stale_symbols):
+        super().__init__()
+        self._market_marks = _RealMarkBook(
+            [_mark(s, 14 * 3600) for s in stale_symbols])   # yesterday's close
+        self.rest_calls = []
+
+    def fetch_rest_quote_marks(self, symbols):
+        self.rest_calls.append(tuple(symbols))
+        for s in symbols:
+            self._market_marks.put(_mark(s, 1))             # a live quote
+        return tuple(symbols)
+
+
+def test_a_stale_mark_counts_as_missing_and_is_refreshed():
+    """2026-09-16, alpaca-main: pre-market these ETFs have no IEX quote, so the
+    REST fallback wrote yesterday's close. Checking only for None then made
+    every later tick see "a mark" and skip the refresh, so the book could not
+    recover inside the session even once the opening bell made a live quote
+    available. The gate would refuse it, so it is not coverage."""
+    a = _StaleMarkAdapter(["GLD", "XLE"])
+    subscribed, still = b._ensure_live_candidate_marks(
+        a, _results({"GLD": 1, "XLE": 1}), _spec(), wait_seconds=0.0)
+    assert subscribed == ["GLD", "XLE"], "a stale mark was mistaken for coverage"
+    assert a.rest_calls == [("GLD", "XLE")]
+    assert still == []
+
+
+def test_a_fresh_mark_is_left_alone_and_costs_no_rest_call():
+    a = _StaleMarkAdapter([])
+    a._market_marks.put(_mark("GLD", 2))
+    _, still = b._ensure_live_candidate_marks(
+        a, _results({"GLD": 1}), _spec(), wait_seconds=0.0)
+    assert a.rest_calls == [] and still == []
