@@ -18719,6 +18719,12 @@ while not shutdown_requested:
                                                 strategy_cache=_strategy_cache,
                                                 eb_core=_strategy_eb_core_symbol(
                                                     _cached_strategies),
+                                                # The SELL re-arm does not need
+                                                # the order book on a definite
+                                                # refusal, but the BUY one does:
+                                                # a plan has several legs and a
+                                                # sibling may have been accepted.
+                                                adapter=live_adapter,
                                                 outcome="blocked",
                                             )
                                         elif getattr(_submission, "uncertain", False):

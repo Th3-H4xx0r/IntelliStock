@@ -421,3 +421,18 @@ def test_a_refused_sell_does_not_touch_the_buy_latches():
            outcome="blocked", adapter=orders(), log=log, alert=alert)
     assert cache["strategy_eb"][SWEEP_KEY] == "2026-09-15"
     assert EXIT_KEY not in cache["strategy_eb"]
+
+
+def test_the_gate_blocked_call_site_hands_over_the_order_book():
+    """The BUY re-arm must be able to rule out a working sibling leg, and it
+    fails closed without an adapter. Until 2026-09-16 the gate-blocked lane
+    was the one call site that passed no `adapter=`, because the SELL re-arm
+    deliberately does not need it — which made the BUY re-arm inert on the
+    exact path it exists for."""
+    source = open(_BROKER).read()
+    block = source.split('outcome="blocked"', 1)[0]
+    call = block.rsplit("_report_live_submit_failure(", 1)[1]
+    assert "adapter=" in call, (
+        "the gate-blocked call site passes no adapter, so "
+        "_eb_buy_may_be_working cannot rule out a working BUY and the sweep "
+        "latch is never re-armed")
