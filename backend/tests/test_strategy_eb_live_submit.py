@@ -34,7 +34,8 @@ def _extract(*names):
     keep = set(names) | {"_truthy", "_merged_strategy_settings",
                          "_strategy_eb_merged_config",
                          "_core_sell_may_be_working",
-                         "_eb_buy_may_be_working"}
+                         "_eb_buy_may_be_working",
+                         "_eb_order_may_be_working"}
     consts = {"_EB_EXIT_ISSUED_KEY", "_EB_LANE_NAMES",
               "_EB_SWEEP_ISSUED_KEY", "_EB_REBALANCE_KEY"}
     wanted = [n for n in tree.body
@@ -321,8 +322,10 @@ def test_the_re_arm_policy_reaches_all_three_call_sites():
     assert 'outcome="uncertain"' in timeout and "adapter=" in timeout, (
         "the 90s watchdog abandons the future to the background, so its "
         "outcome is UNKNOWN and its re-arm must consult the order book")
-    raised = source.split("execute_signal raised", 1)[1][:1200]
-    assert 'outcome="failed"' in raised and "adapter=" in raised
+    raised = source.split("execute_signal raised", 1)[1][:1500]
+    # Every exception is an unknown failure EXCEPT an RTH deferral, which
+    # raises before the order exists and is routed as "deferred".
+    assert '"failed"' in raised and '"deferred"' in raised and "adapter=" in raised
 
 
 def test_every_silent_lane_on_the_live_submit_path_reports():
@@ -436,3 +439,72 @@ def test_the_gate_blocked_call_site_hands_over_the_order_book():
         "the gate-blocked call site passes no adapter, so "
         "_eb_buy_may_be_working cannot rule out a working BUY and the sweep "
         "latch is never re-armed")
+
+
+# --- E4: an RTH deferral must be retried, as the guard promises -------------
+
+def test_a_deferred_rotation_sell_re_arms_the_rebalance_latch():
+    """2026-09-17, alpaca-main (REAL MONEY): the weekly rebalance fired at
+    04:40 ET and rotated toward the risk-off book, but all three sells were
+    fractional, and fractional shares only trade in regular hours. The guard
+    deferred them — "it will be retried when regular hours resume" — yet EB had
+    already stamped its once-per-session rebalance latch, so no later tick
+    re-planned, not even at the open. The book sat in the wrong regime for a
+    week. A deferral means the order was never created, so re-arming cannot
+    duplicate it."""
+    lines, alerts, log, alert = _sink()
+    cache = eb_buy_cache()
+    report(symbol="GDX", decision=-1,
+           detail="execute_signal raised ValueError: order deferred: GDX sell of "
+                  "4.000214 floors to 4.0 outside RTH, which would leave 0.000214 at risk",
+           instance_id="alpaca-main", strategy_cache=cache, eb_core="TQQQ",
+           outcome="deferred", adapter=orders(), log=log, alert=alert)
+    assert REBAL_KEY not in cache["strategy_eb"], "the rebalance stays suppressed"
+    assert SWEEP_KEY not in cache["strategy_eb"]
+
+
+def test_a_deferral_is_expected_outside_rth_and_pages_nobody():
+    """The guard doing its job is not a failure. Paging every pre-market hour
+    on it is how a pager stops being read."""
+    lines, alerts, log, alert = _sink()
+    report(symbol="GDX", decision=-1, detail="order deferred: ... outside RTH",
+           instance_id="alpaca-main", strategy_cache=eb_buy_cache(),
+           eb_core="TQQQ", outcome="deferred", adapter=orders(),
+           log=log, alert=alert)
+    assert alerts == []
+    assert any("DEFERRED" in m for m, _c in lines), lines
+    assert not any(c == "red" for _m, c in lines), lines
+
+
+def test_a_deferred_leg_does_not_re_arm_while_an_order_is_working():
+    """One plan has several legs; if any order is working, re-planning from
+    unsettled positions could trade it twice."""
+    _l, _a, log, alert = _sink()
+    cache = eb_buy_cache()
+    report(symbol="GDX", decision=-1, detail="order deferred: ... outside RTH",
+           instance_id="alpaca-main", strategy_cache=cache, eb_core="TQQQ",
+           outcome="deferred", adapter=orders(("GLD", "sell")),
+           log=log, alert=alert)
+    assert cache["strategy_eb"][REBAL_KEY] == "2026-09-15"
+
+
+def test_a_deferred_core_exit_re_arms_the_exit():
+    """A deferred exit leaves the levered position held at risk; the guard
+    promised the retry, so the exit latch must not suppress it."""
+    _l, _a, log, alert = _sink()
+    cache = eb_buy_cache()
+    report(symbol="TQQQ", decision=-1, detail="order deferred: ... outside RTH",
+           instance_id="alpaca-main", strategy_cache=cache, eb_core="TQQQ",
+           outcome="deferred", adapter=orders(), log=log, alert=alert)
+    assert EXIT_KEY not in cache["strategy_eb"]
+
+
+def test_the_exception_lane_routes_rth_deferrals_as_deferred():
+    """A source assertion: the exception lane is inline in the main loop. A
+    deferral raises before the order is created, so it is a definite
+    non-submission, not an unknown failure."""
+    source = open(_BROKER).read()
+    raised = source.split('f"execute_signal raised "', 1)[1][:1500]
+    assert "order deferred" in raised and '"deferred"' in raised, (
+        "RTH deferrals are still reported as unknown failures, so they page "
+        "and never re-arm EB's latches")

@@ -13423,6 +13423,31 @@ def _eb_buy_may_be_working(adapter, say) -> bool:
     return False
 
 
+def _eb_order_may_be_working(adapter, say) -> bool:
+    """Could ANY order (either side) still be working at the broker?
+
+    Re-planning a multi-leg rotation from positions that have not settled can
+    trade a leg twice, so a deferral re-arms the plan only when the book is
+    affirmatively empty. A missing adapter or unreachable endpoint cannot
+    prove that, so both answer True and the latch stays stamped.
+    """
+    if adapter is None:
+        say("strategy_eb deferral NOT re-armed: no broker adapter to read the "
+            "working-order book from.", "yellow")
+        return True
+    try:
+        working = adapter.list_open_orders_strict()
+    except Exception as exc:
+        say("strategy_eb deferral NOT re-armed: the working-order book is "
+            f"unreachable ({type(exc).__name__}: {exc}).", "yellow")
+        return True
+    if working:
+        say("strategy_eb deferral NOT re-armed: an order is already working at "
+            "the broker.", "yellow")
+        return True
+    return False
+
+
 def _report_live_submit_failure(symbol, decision, detail, *, instance_id,
                                 strategy_cache=None, eb_core="", adapter=None,
                                 outcome="failed", log=None, alert=None):
@@ -13463,20 +13488,28 @@ def _report_live_submit_failure(symbol, decision, detail, *, instance_id,
         except Exception:
             pass
 
-    definite = str(outcome or "").strip().lower() == "blocked"
-    uncertain = str(outcome or "").strip().lower() == "uncertain"
+    _outcome = str(outcome or "").strip().lower()
+    # "deferred": the regular-hours guard refused to CREATE the order (a
+    # fractional quantity outside RTH). Like a gate refusal it is a definite
+    # non-submission; unlike one it is the guard doing its job, so it pages
+    # nobody — it happens every pre-market hour by design.
+    deferred = _outcome == "deferred"
+    definite = _outcome == "blocked" or deferred
+    uncertain = _outcome == "uncertain"
     side = "SELL" if decision == -1 else ("BUY" if decision == 1 else "FLAT")
-    loud = bool(not definite and uncertain) or decision == -1
-    kind = "NOT SUBMITTED" if definite else (
-        "OUTCOME UNKNOWN" if uncertain else "SUBMIT FAILED")
+    loud = (bool(not definite and uncertain) or decision == -1) and not deferred
+    kind = "DEFERRED" if deferred else ("NOT SUBMITTED" if definite else (
+        "OUTCOME UNKNOWN" if uncertain else "SUBMIT FAILED"))
     message = (
         f"LIVE ORDER {kind}: {side} {symbol} — {detail}. "
-        + ("Nothing reached the broker." if definite
+        + ("Deferred until regular hours; nothing reached the broker."
+           if deferred else
+           "Nothing reached the broker." if definite
            else "The broker may or may not hold this order; reconcile before "
                 "the next tick.")
     )
     _say(message, "red" if loud else "yellow")
-    if decision == 1 and definite and isinstance(strategy_cache, dict):
+    if decision == 1 and definite and not deferred and isinstance(strategy_cache, dict):
         # The same defect the exit re-arm below exists for, one lane over.
         # EB stamps its sweep/rebalance latches when the plan is EMITTED, so a
         # gate refusal burns the session's only attempt. 2026-09-16,
@@ -13503,6 +13536,37 @@ def _report_live_submit_failure(symbol, decision, detail, *, instance_id,
                      "refused the order, nothing reached the broker and no "
                      "BUY is working, so the next tick re-plans instead of "
                      "waiting for the next session.", "yellow")
+    if deferred and isinstance(strategy_cache, dict):
+        # The guard's contract is "retried when regular hours resume", but EB
+        # stamps its once-per-session latches when a plan is EMITTED, so the
+        # retry never came. 2026-09-17, alpaca-main (real money): the weekly
+        # rebalance fired at 04:40 ET and rotated toward the risk-off book;
+        # all three sells were fractional and deferred, and the latch then
+        # suppressed every later tick — the open included — leaving the book
+        # in the wrong regime until the next cadence day, a week away.
+        cleared = []
+        core = str(eb_core or "").strip().upper()
+        is_core_exit = decision == -1 and core and core == str(symbol or "").strip().upper()
+        for name in _EB_LANE_NAMES:
+            lane = strategy_cache.get(name)
+            if isinstance(lane, dict) and is_core_exit and _EB_EXIT_ISSUED_KEY in lane:
+                # One exit, one order, never created: same argument as a gate
+                # refusal of the exit — the order book cannot change it.
+                lane.pop(_EB_EXIT_ISSUED_KEY, None)
+                cleared.append(_EB_EXIT_ISSUED_KEY)
+        if not _eb_order_may_be_working(adapter, _say):
+            for name in _EB_LANE_NAMES:
+                lane = strategy_cache.get(name)
+                if not isinstance(lane, dict):
+                    continue
+                for key in (_EB_REBALANCE_KEY, _EB_SWEEP_ISSUED_KEY):
+                    if key in lane:
+                        lane.pop(key, None)
+                        cleared.append(key)
+        if cleared:
+            _say(f"strategy_eb RE-ARMED after deferred {side} {symbol}: the "
+                 "order was never created, so the next tick re-plans and "
+                 "executes once regular hours allow it.", "yellow")
     if not loud:
         return False
     try:
@@ -18834,7 +18898,14 @@ while not shutdown_requested:
                                         eb_core=_strategy_eb_core_symbol(
                                             _cached_strategies),
                                         adapter=live_adapter,
-                                        outcome="failed",
+                                        # A deferral raises before the order
+                                        # is created, so unlike every other
+                                        # exception here it is certain that
+                                        # nothing reached the broker.
+                                        outcome=(
+                                            "deferred"
+                                            if str(_es_e).startswith("order deferred")
+                                            else "failed"),
                                     )
                             else:
                                 _anchor_order_source = (
