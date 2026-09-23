@@ -7196,6 +7196,53 @@ def _eb_live_portfolio_view(strategy_name, emulator):
         return emulator
 
 
+def _eb_decision_outside_rth(strategy_name, current_time):
+    """Should Strategy EB's decision be HELD on this tick? Live only.
+
+    EB plans once per session and stamps its latches when the plan is
+    EMITTED, and the cache is persisted right after run_once. The broker's
+    session window opens 01:00 PT (04:00 ET), so live EB planned pre-market,
+    where a fractional order cannot trade and IEX has no fresh quote, and the
+    plan's only attempt was spent on orders that could not execute: 2026-09-16
+    the sweep sat $6,041 in cash for five days, 2026-09-17 the weekly rotation
+    was missed for a week (alpaca-main, real money). The deferral re-arm that
+    followed still hung the plan on ~9 pre-market ticks of an in-memory clear
+    that a restart undoes and an order-book read that fails closed on any
+    Alpaca outage.
+
+    EB's decision reads only COMPLETED sessions' daily closes, so it is the
+    same decision at the open as pre-market; only the sizing prices are
+    fresher, and the orders can execute on the tick that plans them.
+
+    True only when the broker runs live, the lane is EB, and the NYSE regular
+    session is closed at `current_time`. Anything it cannot establish answers
+    False, the pre-existing path (pre-market plan plus deferral re-arm), never
+    an EB that silently stops deciding.
+    """
+    if globals().get("mode") != MODE_LIVE:
+        return False
+    if str(strategy_name or "").strip().lower() not in {"strategy_eb",
+                                                        "strategyeb"}:
+        return False
+    import datetime as _dt
+
+    if not isinstance(current_time, _dt.datetime):
+        return False
+    now = current_time
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=_dt.timezone.utc)
+    try:
+        from live_calendar import is_nyse_open
+        return not is_nyse_open(now)
+    except Exception as exc:
+        _log(
+            f"Strategy EB regular-hours hold unavailable (calendar "
+            f"{type(exc).__name__}: {exc}); deciding on this tick as before.",
+            "yellow",
+        )
+        return False
+
+
 def run_run_once_strategies(specs, symbols, prices, current_time, data=None, portfolio_emulator=None, time_increment=None, alpaca_key=None, alpaca_secret=None, strategy_caches=None, alpaca_data_feed=None, mode=None):
     """
     Run strategies that have execution_scope "run_once". Each returns a dict mapping symbol -> score (and optional reason).
@@ -7458,6 +7505,14 @@ def run_run_once_strategies(specs, symbols, prices, current_time, data=None, por
                         time_increment=time_increment,
                         scheduler_mode=mode,
                     )
+                elif _eb_decision_outside_rth(name, current_time):
+                    # Live EB plans at the open, not pre-market: {} is what EB
+                    # itself returns on a tick with nothing to do, and not
+                    # calling it leaves its cache, and so every latch, as it
+                    # was. See `_eb_decision_outside_rth`.
+                    _log(f"Run-once strategy '{name}': decision held until "
+                         "the NYSE regular session opens (live).", "cyan")
+                    raw = {}
                 else:
                     raw = instance.run_once(
                         list(symbols),

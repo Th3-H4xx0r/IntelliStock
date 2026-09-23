@@ -26,6 +26,8 @@ _DISPATCHER_NAMES = {
     "_residual_sleeve_config",
     # the EB live pending-order view, threaded into the run_once call site
     "_eb_live_portfolio_view",
+    # the live-only hold on EB's decision outside regular hours
+    "_eb_decision_outside_rth",
     # `conditions` UNION `config`, the merge the EB config readers share
     "_merged_strategy_settings",
     # paths these tests never take, but a NameError does not care
