@@ -13352,6 +13352,13 @@ _EB_REBALANCE_KEY = "_eb_last_rebalance_session"
 #: Both spellings broker.py resolves the EB lane under.
 _EB_LANE_NAMES = ("strategy_eb", "strategyeb", "StrategyEb")
 
+#: {"session": <EB session>, "counts": {SYMBOL: n}} — how many times a refused
+#: rotation trim has re-armed the plan this session. Capped so a PERMANENT
+#: refusal (not armed, source denied, a degraded DB) stops re-planning and
+#: paging every tick; the cap still covers a ~1h Alpaca outage at 20-min ticks.
+_EB_SELL_REARMS_KEY = "_strategy_eb_sell_rearms"
+_EB_SELL_REARM_CAP = 6
+
 
 def _strategy_eb_merged_config(cached_strategies):
     """The ENABLED strategy_eb lane's settings over its module defaults, or {}.
@@ -13503,9 +13510,53 @@ def _eb_order_may_be_working(adapter, say) -> bool:
     return False
 
 
+def _eb_sell_leg_may_be_working(adapter, symbol, say) -> bool:
+    """Could re-planning after this refused rotation trim trade twice?
+
+    True when a SELL for THIS symbol, or ANY BUY, may be working. SELLs are
+    symbol-scoped, unlike `_eb_order_may_be_working`: a gate refusal at the
+    open comes a moment after the plan's sibling sells were submitted, so an
+    empty book is exactly what cannot be expected there. Those siblings are
+    protected on the re-plan by the band (filled, they are at target) and by
+    the broker's already-ordered-today guard; a SELL for THIS symbol would not
+    be, because a sell's idempotency key carries the decision minute. A
+    working BUY would not be either: buys size off cash, which an unfilled buy
+    has not spent yet, so the re-plan would size it again.
+    A missing adapter or unreachable endpoint cannot prove absence: True.
+    """
+    wanted = str(symbol or "").strip().upper()
+    if adapter is None:
+        say(f"strategy_eb {wanted} trim NOT re-armed: no broker adapter to "
+            "read the working-order book from. The leg waits for the next "
+            "cadence day.", "red")
+        return True
+    try:
+        working = adapter.list_open_orders_strict()
+    except Exception as exc:
+        say(f"strategy_eb {wanted} trim NOT re-armed: the working-order book "
+            f"is unreachable ({type(exc).__name__}: {exc}). The leg waits for "
+            "the next cadence day.", "red")
+        return True
+    for ref in (working or []):
+        side = str(getattr(ref, "side", "") or "").strip().lower()
+        ref_symbol = str(getattr(ref, "symbol", "") or "").strip().upper()
+        if side == "sell" and ref_symbol == wanted:
+            say(f"strategy_eb {wanted} trim NOT re-armed: a SELL for it is "
+                "working at the broker; re-planning would sell it twice.",
+                "red")
+            return True
+        if side == "buy":
+            say(f"strategy_eb {wanted} trim NOT re-armed: a BUY ({ref_symbol}) "
+                "is working at the broker; re-planning would size it again.",
+                "red")
+            return True
+    return False
+
+
 def _report_live_submit_failure(symbol, decision, detail, *, instance_id,
                                 strategy_cache=None, eb_core="", adapter=None,
-                                outcome="failed", log=None, alert=None):
+                                outcome="failed", log=None, alert=None,
+                                eb_universe=None):
     """Make a live submit that did not reach the broker loud, and re-arm a
     dropped exit — but only when re-arming cannot duplicate an order.
 
@@ -13632,6 +13683,48 @@ def _report_live_submit_failure(symbol, decision, detail, *, instance_id,
     if decision != -1 or not isinstance(strategy_cache, dict):
         return True
     if str(eb_core or "").strip().upper() != str(symbol or "").strip().upper():
+        # A refused ROTATION leg (a book trim, not the core exit). Returning
+        # here left `_eb_last_rebalance_session` stamped, so every later tick
+        # returned {} and the next session's sweep only buys: the leg sat
+        # untrimmed until the next cadence day, a week away. Reproduced
+        # against the real gate ahead of the first live EB sell (2026-09-24):
+        # the 3-second position refresh rewrote the held mark between the
+        # intent and the gate read -> quote.timestamp_mismatch. Only a
+        # DEFINITE refusal of a symbol EB itself trades re-arms; an uncertain
+        # one may be working now.
+        wanted = str(symbol or "").strip().upper()
+        universe = {str(s or "").strip().upper() for s in (eb_universe or ())}
+        lanes = [strategy_cache.get(name) for name in _EB_LANE_NAMES]
+        stamped = [lane for lane in lanes if isinstance(lane, dict)
+                   and (_EB_REBALANCE_KEY in lane or _EB_SWEEP_ISSUED_KEY in lane)]
+        if _outcome == "blocked" and stamped and wanted in universe:
+            session = str(stamped[0].get(_EB_REBALANCE_KEY)
+                          or stamped[0].get(_EB_SWEEP_ISSUED_KEY) or "")
+            tally = stamped[0].get(_EB_SELL_REARMS_KEY)
+            if not isinstance(tally, dict) or tally.get("session") != session:
+                tally = {"session": session, "counts": {}}
+            counts = tally.get("counts")
+            if not isinstance(counts, dict):
+                counts = {}
+            try:
+                used = int(counts.get(wanted, 0) or 0)
+            except (TypeError, ValueError):
+                used = _EB_SELL_REARM_CAP
+            if used >= _EB_SELL_REARM_CAP:
+                _say(f"strategy_eb {wanted} trim NOT re-armed: refused "
+                     f"{used} times this session already. The leg waits for "
+                     "the next cadence day.", "red")
+            elif not _eb_sell_leg_may_be_working(adapter, symbol, _say):
+                for lane in stamped:
+                    lane.pop(_EB_REBALANCE_KEY, None)
+                    lane.pop(_EB_SWEEP_ISSUED_KEY, None)
+                counts[wanted] = used + 1
+                tally["counts"] = counts
+                stamped[0][_EB_SELL_REARMS_KEY] = tally
+                _say(f"strategy_eb plan RE-ARMED after the refused {wanted} "
+                     f"trim (retry {used + 1} of {_EB_SELL_REARM_CAP}): "
+                     "nothing reached the broker, so the next tick re-plans "
+                     "the leg from the positions as they stand.", "yellow")
         return True
     if not definite and _core_sell_may_be_working(adapter, symbol, _say):
         return True
@@ -18871,6 +18964,8 @@ while not shutdown_requested:
                                                 # sibling may have been accepted.
                                                 adapter=live_adapter,
                                                 outcome="blocked",
+                                                eb_universe=_strategy_eb_universe_symbols(
+                                                    _cached_strategies),
                                             )
                                         elif getattr(_submission, "uncertain", False):
                                             # E1. Allowed, NOT accepted,
@@ -18956,11 +19051,19 @@ while not shutdown_requested:
                                         # A deferral raises before the order
                                         # is created, so unlike every other
                                         # exception here it is certain that
-                                        # nothing reached the broker.
+                                        # nothing reached the broker. So does
+                                        # an intent that could not be built
+                                        # (e.g. the pre-submit reconcile
+                                        # published an empty book): definite,
+                                        # which lets EB re-plan the leg.
                                         outcome=(
                                             "deferred"
                                             if str(_es_e).startswith("order deferred")
+                                            else "blocked"
+                                            if str(_es_e) == "computed order quantity <= 0"
                                             else "failed"),
+                                        eb_universe=_strategy_eb_universe_symbols(
+                                            _cached_strategies),
                                     )
                             else:
                                 _anchor_order_source = (

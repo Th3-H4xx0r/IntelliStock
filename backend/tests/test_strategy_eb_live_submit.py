@@ -35,9 +35,11 @@ def _extract(*names):
                          "_strategy_eb_merged_config",
                          "_core_sell_may_be_working",
                          "_eb_buy_may_be_working",
-                         "_eb_order_may_be_working"}
+                         "_eb_order_may_be_working",
+                         "_eb_sell_leg_may_be_working"}
     consts = {"_EB_EXIT_ISSUED_KEY", "_EB_LANE_NAMES",
-              "_EB_SWEEP_ISSUED_KEY", "_EB_REBALANCE_KEY"}
+              "_EB_SWEEP_ISSUED_KEY", "_EB_REBALANCE_KEY",
+              "_EB_SELL_REARMS_KEY", "_EB_SELL_REARM_CAP"}
     wanted = [n for n in tree.body
               if (isinstance(n, ast.FunctionDef) and n.name in keep)
               or (isinstance(n, ast.Assign)
@@ -508,3 +510,148 @@ def test_the_exception_lane_routes_rth_deferrals_as_deferred():
     assert "order deferred" in raised and '"deferred"' in raised, (
         "RTH deferrals are still reported as unknown failures, so they page "
         "and never re-arm EB's latches")
+
+
+# --- E5: a gate-refused rotation SELL must be retried, not dropped ----------
+#
+# 2026-09-22 sweep, ahead of the first live EB SELL ever (the 09-24 rebalance):
+# a GLD/GDX/XLE trim refused by the gate at the open reported
+# outcome="blocked", and for a non-core sell `_report_live_submit_failure`
+# returned without clearing anything. `_eb_last_rebalance_session` stayed
+# stamped, every later tick returned {} (and the next session's sweep only
+# buys), so the leg sat untrimmed until the next cadence day, a week away.
+# A real trigger was reproduced against the real gate: the 3-second position
+# refresh rewrote the held mark between the intent and the gate read, and the
+# gate refused on quote.timestamp_mismatch.
+
+EB_UNIVERSE = ("QQQ", "TQQQ", "SPY", "BIL", "GLD", "GDX", "XLE")
+TALLY_KEY = "_strategy_eb_sell_rearms"
+
+
+def trim_refused(cache, adapter, symbol="GDX", outcome="blocked",
+                 universe=EB_UNIVERSE, detail="gate: quote.timestamp_mismatch"):
+    lines, alerts, log, alert = _sink()
+    report(symbol=symbol, decision=-1, detail=detail,
+           instance_id="alpaca-main", strategy_cache=cache, eb_core="TQQQ",
+           outcome=outcome, adapter=adapter, log=log, alert=alert,
+           eb_universe=universe)
+    return lines, alerts
+
+
+def test_a_gate_refused_rotation_sell_re_arms_the_rebalance_latch():
+    cache = eb_buy_cache()
+    lines, alerts = trim_refused(cache, orders())
+    assert REBAL_KEY not in cache["strategy_eb"], "the leg waits a week"
+    assert SWEEP_KEY not in cache["strategy_eb"]
+    assert cache["strategy_eb"][EXIT_KEY] == "2026-09-15", (
+        "a book-leg refusal says nothing about the core exit")
+    assert any("RE-ARMED" in m for m, _c in lines), lines
+    assert alerts, "a refused SELL still pages"
+
+
+def test_a_refused_rotation_sell_does_not_re_arm_while_that_symbol_has_a_working_sell():
+    """A SELL intent's key carries the decision minute, so a re-plan would NOT
+    be deduped against an order for that symbol already working."""
+    cache = eb_buy_cache()
+    lines, _a = trim_refused(cache, orders(("GDX", "sell")))
+    assert cache["strategy_eb"][REBAL_KEY] == "2026-09-15"
+    assert any("NOT re-armed" in m for m, _c in lines), lines
+
+
+def test_a_sibling_legs_working_sell_does_not_block_the_re_arm():
+    """The sibling legs of the same plan were submitted a second earlier, so
+    they are exactly what is working when this leg is refused. They are
+    protected on the re-plan by the band (once filled they are at target) and
+    by the broker's already-ordered-today guard; demanding an empty book here
+    would make the re-arm inert on the path it exists for."""
+    cache = eb_buy_cache()
+    trim_refused(cache, orders(("GLD", "sell"), ("XLE", "sell")),
+                 detail="gate: positions.stale")
+    assert REBAL_KEY not in cache["strategy_eb"]
+
+
+def test_a_working_buy_blocks_the_sell_re_arm():
+    """Buys size off cash, and an unfilled buy has not spent it yet: the
+    re-plan would size the same buy again."""
+    cache = eb_buy_cache()
+    lines, _a = trim_refused(cache, orders(("TQQQ", "buy")))
+    assert cache["strategy_eb"][REBAL_KEY] == "2026-09-15"
+    assert any("NOT re-armed" in m for m, _c in lines), lines
+
+
+def test_an_unreadable_order_book_blocks_the_sell_re_arm():
+    cache = eb_buy_cache()
+    trim_refused(cache, unreachable(), detail="gate: positions.stale")
+    assert cache["strategy_eb"][REBAL_KEY] == "2026-09-15"
+
+
+def test_no_adapter_blocks_the_sell_re_arm():
+    cache = eb_buy_cache()
+    trim_refused(cache, None, detail="gate: positions.stale")
+    assert cache["strategy_eb"][REBAL_KEY] == "2026-09-15"
+
+
+def test_an_uncertain_rotation_sell_does_not_re_arm_the_plan():
+    """Uncertain means the order may exist at the broker this second."""
+    cache = eb_buy_cache()
+    trim_refused(cache, orders(), outcome="uncertain", detail="ReadTimeout")
+    assert cache["strategy_eb"][REBAL_KEY] == "2026-09-15"
+
+
+def test_a_refused_sell_of_a_symbol_eb_does_not_trade_leaves_the_plan_alone():
+    """A broker risk exit on some other holding is not EB's leg to re-plan."""
+    cache = eb_buy_cache()
+    trim_refused(cache, orders(), symbol="AAPL")
+    assert cache["strategy_eb"][REBAL_KEY] == "2026-09-15"
+
+
+def test_without_the_eb_universe_nothing_is_re_armed():
+    """Fail closed: a call site that cannot say what EB trades gets the old
+    behaviour, never a re-plan for an unknown symbol."""
+    cache = eb_buy_cache()
+    trim_refused(cache, orders(), universe=None)
+    assert cache["strategy_eb"][REBAL_KEY] == "2026-09-15"
+
+
+def test_the_re_arm_is_capped_per_leg_per_session():
+    """A PERMANENT refusal (not armed, source denied, a degraded DB) would
+    otherwise re-plan and page on every tick of the session."""
+    cache = eb_buy_cache()
+    for attempt in range(1, 7):
+        cache["strategy_eb"][REBAL_KEY] = "2026-09-23"   # the re-plan stamps
+        trim_refused(cache, orders())
+        assert REBAL_KEY not in cache["strategy_eb"], attempt
+    cache["strategy_eb"][REBAL_KEY] = "2026-09-23"
+    lines, _a = trim_refused(cache, orders())
+    assert cache["strategy_eb"][REBAL_KEY] == "2026-09-23", "7th re-arm"
+    assert any("refused 6 times" in m for m, _c in lines), lines
+    # other legs keep their own budget, and next week's session starts fresh
+    trim_refused(cache, orders(), symbol="XLE")
+    assert REBAL_KEY not in cache["strategy_eb"]
+    cache["strategy_eb"][REBAL_KEY] = "2026-09-30"
+    trim_refused(cache, orders())
+    assert REBAL_KEY not in cache["strategy_eb"]
+    assert cache["strategy_eb"][TALLY_KEY]["session"] == "2026-09-30"
+
+
+def test_both_call_sites_that_can_report_blocked_pass_the_eb_universe():
+    source = open(_BROKER).read()
+    gate = source.split('outcome="blocked",', 1)[1][:400]
+    assert "eb_universe=_strategy_eb_universe_symbols(" in gate
+    raised = source.split('f"execute_signal raised "', 1)[1][:2500]
+    assert "eb_universe=_strategy_eb_universe_symbols(" in raised
+
+
+def test_an_intent_that_could_not_be_built_is_a_definite_non_submission():
+    """Reproduced in the 2026-09-24 replay: a failed orders read during the
+    pre-submit reconcile published an empty book, every opening trim raised
+    `computed order quantity <= 0` inside `_build_strategy_stock_intent` —
+    BEFORE the order existed — and the exception lane reported it as an
+    unknown "failed", which re-arms nothing. The rotation waited a week."""
+    source = open(_BROKER).read()
+    raised = source.split('f"execute_signal raised "', 1)[1][:2500]
+    assert '"computed order quantity <= 0"' in raised and '"blocked"' in raised, (
+        "an intent that failed to build is still reported as an unknown "
+        "failure, so a refused rotation leg is never re-planned")
+    builder = source.split("def _build_strategy_stock_intent(", 1)[1][:3000]
+    assert 'raise ValueError("computed order quantity <= 0")' in builder
