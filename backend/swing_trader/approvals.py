@@ -32,7 +32,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 
 from swing_trader import clock, wheel_rules
-from swing_trader.account import option_book, swing_live_budget
+from swing_trader.account import latest_trade_price, option_book, swing_live_budget
 from swing_trader.constants import POSITION_SIZE_PCT, PROFIT_TARGET, STOP_LOSS
 
 DECISION_STATUS = {"approve": "approved", "approve_half": "approved_half",
@@ -122,7 +122,32 @@ def _swing_budget(adapter) -> float:
         raise OptionBookUnreadable(
             f"the cash securing short puts cannot be read ({reason}); refusing the "
             "swing approval rather than spending it")
-    return float(budget)
+    # Final-round I-R1: a stock buy still working (a pre-market entry queued
+    # for the open) has not left cash yet, so it comes off the budget too --
+    # otherwise each approval re-spends the same cash, and the puts' collateral.
+    return max(0.0, float(budget) - _working_stock_buys(adapter, book))
+
+
+def _working_stock_buys(adapter, book) -> float:
+    """The unfilled notional of every working stock BUY in `book`: its limit
+    price when it has one, else the latest trade. A buy that cannot be
+    priced is BookUnreadable (transient: the approval returns to pending)."""
+    total = 0.0
+    for order in book:
+        if str(getattr(order, "side", "") or "").lower() != "buy":
+            continue
+        if str(getattr(order, "asset_class", None) or "us_equity").lower() != "us_equity":
+            continue
+        remaining = float(getattr(order, "qty", 0) or 0) - float(getattr(order, "filled_qty", 0) or 0)
+        if remaining <= 0:
+            continue
+        price = getattr(order, "limit_price", None) or latest_trade_price(adapter, order.symbol)
+        if not price or float(price) <= 0:
+            raise BookUnreadable(
+                f"the working buy for {order.symbol} cannot be priced; refusing the swing "
+                "approval rather than spending cash that order already holds")
+        total += remaining * float(price)
+    return total
 
 
 def build_approved_order(signal: dict, *, live_price, equity, cfg, adapter=None,

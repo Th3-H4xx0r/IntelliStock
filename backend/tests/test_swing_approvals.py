@@ -216,6 +216,39 @@ def test_i1_under_the_budget_st_s_sizing_stands():
     assert half["qty"] == 31                      # int(62 / 2), under the 50 the budget buys
 
 
+def test_ir1_a_working_stock_buy_comes_off_the_approval_budget():
+    """Final-round I-R1: the 09:15 scan's queued entry (20 BBB @ $100 limit,
+    $2,000) has not left cash yet; an approval before the open must not
+    re-spend it. Budget $5,000 - $2,000 = $3,000 -> 30 shares, not 50."""
+    from swing_alpaca_fakes import enum, order_row
+    queued = order_row(id="b-1", client_order_id="swing-bbb", symbol="BBB", qty="20",
+                       type=enum("limit"), limit_price="100", order_class=enum("bracket"))
+    adapter = alpaca(cash="45000", bp="90000", equity="50000", puts=[PUT_400],
+                     orders=[queued])
+    out = approvals.build_approved_order(dict(sig("AAA", adj=1.0), status="approved"),
+                                         live_price=100.0, equity=50_000.0, cfg=CFG,
+                                         adapter=adapter)
+    assert out["qty"] == 30
+    assert 45_000.0 - 2_000.0 - out["qty"] * 100.0 >= 40_000.0     # the put stays covered
+
+
+def test_ir1_a_market_buy_is_priced_at_the_latest_trade_and_unpriceable_is_transient():
+    from swing_alpaca_fakes import order_row
+    queued = order_row(id="b-2", client_order_id="swing-ccc", symbol="CCC", qty="10")
+    adapter = alpaca(cash="45000", bp="90000", equity="50000", puts=[PUT_400],
+                     orders=[queued])
+    adapter.get_latest_trades = lambda syms: {"CCC": (150.0, None)}
+    out = approvals.build_approved_order(dict(sig("AAA", adj=1.0), status="approved"),
+                                         live_price=100.0, equity=50_000.0, cfg=CFG,
+                                         adapter=adapter)
+    assert out["qty"] == 35                                      # (5,000 - 1,500) / 100
+    adapter.get_latest_trades = lambda syms: {}
+    with pytest.raises(approvals.BookUnreadable, match="cannot be priced"):
+        approvals.build_approved_order(dict(sig("AAA", adj=1.0), status="approved"),
+                                       live_price=100.0, equity=50_000.0, cfg=CFG,
+                                       adapter=adapter)
+
+
 def test_i1_an_unknown_option_book_is_option_book_unreadable():
     # A contract whose fields cannot be looked up leaves the map incomplete.
     adapter = alpaca(cash="45000", bp="90000", equity="50000", puts=[PUT_400], meta=False)
