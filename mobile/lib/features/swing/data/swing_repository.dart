@@ -214,6 +214,7 @@ class WheelSnapshot {
     this.collateralTotal,
     this.cash,
     this.recentScans = const [],
+    this.fetchedAt,
   });
 
   static const empty = WheelSnapshot();
@@ -223,7 +224,13 @@ class WheelSnapshot {
   final double? cash;
   final List<WheelScan> recentScans;
 
-  factory WheelSnapshot.fromJson(Map<String, dynamic> j) => WheelSnapshot(
+  /// When this book was fetched (local time). The card loads only on open
+  /// and pull-to-refresh, so it says how old the book is (FW item 4, M-3).
+  final DateTime? fetchedAt;
+
+  factory WheelSnapshot.fromJson(Map<String, dynamic> j,
+          {DateTime? fetchedAt}) =>
+      WheelSnapshot(
         openPuts: ((j['open_puts'] as List?) ?? const [])
             .whereType<Map>()
             .map((m) => WheelPut.fromJson(m.cast<String, dynamic>()))
@@ -234,6 +241,7 @@ class WheelSnapshot {
             .whereType<Map>()
             .map((m) => WheelScan.fromJson(m.cast<String, dynamic>()))
             .toList(),
+        fetchedAt: fetchedAt,
       );
 }
 
@@ -329,7 +337,8 @@ class SwingRepository {
   Future<WheelSnapshot> wheel(String instanceId) async {
     final data = await _client.get<dynamic>('/instances/$instanceId/wheel');
     return data is Map
-        ? WheelSnapshot.fromJson(data.cast<String, dynamic>())
+        ? WheelSnapshot.fromJson(data.cast<String, dynamic>(),
+            fetchedAt: DateTime.now())
         : WheelSnapshot.empty;
   }
 }

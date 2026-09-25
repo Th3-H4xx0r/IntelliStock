@@ -167,8 +167,9 @@ export function confirmPrompt(signal, decision) {
 
 export function decisionSuccessMessage(signal, decision) {
   const sym = signal?.symbol || 'the signal'
-  if (decision === 'approve') return `Approved ${sym}. The broker rebuilds and checks the order at the live price; if it refuses, you'll get a notification.`
-  if (decision === 'approve_half') return `Approved ${sym} at half size. The broker rebuilds and checks the order at the live price; if it refuses, you'll get a notification.`
+  // No notification is promised: some refusals send none (FW item 4, M-1).
+  if (decision === 'approve') return `Approved ${sym}. The broker rebuilds and checks the order at the live price before sending it.`
+  if (decision === 'approve_half') return `Approved ${sym} at half size. The broker rebuilds and checks the order at the live price before sending it.`
   return `Rejected ${sym}.`
 }
 
@@ -377,6 +378,32 @@ export function parseWheelPayload(payload) {
     cash: finiteOrNull(src.cash),
     recentScans,
   }
+}
+
+/** "as of 14:02" for the last successful wheel load, local 24-hour time. */
+export function fmtAsOf(date) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return ''
+  const hh = String(date.getHours()).padStart(2, '0')
+  const mm = String(date.getMinutes()).padStart(2, '0')
+  return `as of ${hh}:${mm}`
+}
+
+/**
+ * A failed GET /instances/{id}/wheel. FastAPI's own 404 for a route it does
+ * not have reads exactly "Not Found": that API build has no wheel endpoint,
+ * which is not an error. Any other 404 (an unknown instance, say) is shown
+ * with its detail. Only a 401 stops polling: every other answer can change.
+ */
+export function wheelLoadFailure(status, detail) {
+  const text = detailText(detail)
+  if (status === 401) {
+    return { kind: 'unauthorized', stopPolling: true, message: 'Session expired — please sign in again.' }
+  }
+  if (status === 404 && text === 'Not Found') {
+    return { kind: 'no-endpoint', stopPolling: false, message: 'This API build has no wheel endpoint yet.' }
+  }
+  if (!status) return { kind: 'error', stopPolling: false, message: text || 'Could not load the wheel' }
+  return { kind: 'error', stopPolling: false, message: text || `Could not load the wheel (${status})` }
 }
 
 /** 'alert' is exactly the set the 15:45 monitor buys back (spec section 5.2). */

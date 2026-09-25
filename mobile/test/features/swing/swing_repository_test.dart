@@ -224,8 +224,12 @@ void main() {
              'expiry': '2026-10-02', 'score': 55, 'status': 'pending', 'skip_reason': null},
           ],
         };
+      final before = DateTime.now();
       final w = await SwingRepository(api).wheel('i1');
       expect(api.calls.single['path'], '/instances/i1/wheel');
+      // FW item 4 (M-3): the snapshot carries when it was fetched.
+      expect(w.fetchedAt, isNotNull);
+      expect(w.fetchedAt!.isBefore(before), isFalse);
       expect(w.openPuts.single.currentPrice, isNull);
       expect(w.openPuts.single.monitorWillBuyBack, isFalse);
       expect(w.collateralTotal, 13000.0);

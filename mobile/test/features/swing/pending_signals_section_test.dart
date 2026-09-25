@@ -240,6 +240,30 @@ void main() {
           findsOneWidget);
     });
 
+    testWidgets('FW item 4: any other 404 shows its detail, and Retry still works',
+        (tester) async {
+      final repo = FakeSwingRepo([])
+        ..wheelError = ApiError('Instance not found: i1', statusCode: 404);
+      await tester.pumpWidget(_app(repo, const WheelCard(instanceId: 'i1')));
+      await tester.pumpAndSettle();
+      expect(find.text('Instance not found: i1'), findsOneWidget);
+      expect(find.text('This API build has no wheel endpoint yet.'), findsNothing);
+      repo.wheelError = null;
+      await tester.tap(find.text('Retry'));
+      await tester.pumpAndSettle();
+      expect(find.text('No open puts.'), findsOneWidget);
+    });
+
+    testWidgets('FW item 4: the card stamps when the book was fetched',
+        (tester) async {
+      final repo = FakeSwingRepo([],
+          wheelSnapshot: WheelSnapshot.fromJson(const {'open_puts': []},
+              fetchedAt: DateTime(2026, 9, 25, 14, 2, 41)));
+      await tester.pumpWidget(_app(repo, const WheelCard(instanceId: 'i1')));
+      await tester.pumpAndSettle();
+      expect(find.text('as of 14:02'), findsOneWidget);
+    });
+
     testWidgets('an outage (503) is an error, never an empty book; Retry works',
         (tester) async {
       final repo = FakeSwingRepo([])

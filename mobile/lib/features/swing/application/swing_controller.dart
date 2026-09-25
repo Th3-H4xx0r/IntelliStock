@@ -57,10 +57,11 @@ String decisionConfirmBody(SwingSignal s, String decision) => switch (decision) 
 
 String decisionSuccessMessage(SwingSignal s, String decision) =>
     switch (decision) {
+      // No notification is promised: some refusals send none (FW item 4).
       'approve' =>
-        "Approved ${s.symbol}. The broker rebuilds and checks the order at the live price; if it refuses, you'll get a notification.",
+        'Approved ${s.symbol}. The broker rebuilds and checks the order at the live price before sending it.',
       'approve_half' =>
-        "Approved ${s.symbol} at half size. The broker rebuilds and checks the order at the live price; if it refuses, you'll get a notification.",
+        'Approved ${s.symbol} at half size. The broker rebuilds and checks the order at the live price before sending it.',
       _ => 'Rejected ${s.symbol}.',
     };
 

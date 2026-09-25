@@ -12,6 +12,7 @@ import {
   decisionSuccessMessage,
   decisionsFor,
   detailText,
+  fmtAsOf,
   fmtItm,
   itmTone,
   joinKeyRisks,
@@ -27,6 +28,7 @@ import {
   stuckLabel,
   scoreTone,
   swingLanesOf,
+  wheelLoadFailure,
 } from '../src/utils/swing.js'
 
 const SWING = {
@@ -130,12 +132,13 @@ test('approval copy says the broker rebuilds and checks the order, never that it
       confirm,
       `Approve AAPL${decision === 'approve_half' ? ' at half size' : ''}? The broker rebuilds the order at the live price and checks it before sending. Decisions are final.`,
     )
+    // FW item 4 (M-1): some refusals send no notification, so none is promised.
     assert.equal(
       success,
-      `Approved AAPL${decision === 'approve_half' ? ' at half size' : ''}. The broker rebuilds and checks the order at the live price; if it refuses, you'll get a notification.`,
+      `Approved AAPL${decision === 'approve_half' ? ' at half size' : ''}. The broker rebuilds and checks the order at the live price before sending it.`,
     )
     for (const text of [confirm, success]) {
-      assert.doesNotMatch(text, /placed|goes out|within seconds|command poll/)
+      assert.doesNotMatch(text, /placed|goes out|within seconds|command poll|notif/)
     }
   }
   assert.equal(confirmPrompt(WHEEL, 'reject'), 'Reject APH? Decisions are final.')
@@ -364,4 +367,28 @@ test('classifyResendFailure: 409/404 drop the stuck card and snooze it; 503 keep
   assert.equal(down.message, 'Not queued — try again.')
   assert.equal(classifyResendFailure(401, '').stopPolling, true)
   assert.equal(classifyResendFailure(0, '').message, 'Could not reach the server.')
+})
+
+// -- FW item 4: the wheel card's "as of" stamp and its 404s ------------------------------
+
+test('fmtAsOf stamps the last successful load in local 24-hour time', () => {
+  assert.equal(fmtAsOf(new Date(2026, 8, 25, 14, 2, 59)), 'as of 14:02')
+  assert.equal(fmtAsOf(new Date(2026, 8, 25, 9, 5)), 'as of 09:05')
+  assert.equal(fmtAsOf(null), '')
+  assert.equal(fmtAsOf(new Date('nope')), '')
+})
+
+test('wheelLoadFailure: a route-less API build is not an error, and only 401 stops polling', () => {
+  const absent = wheelLoadFailure(404, 'Not Found')
+  assert.deepEqual([absent.kind, absent.stopPolling, absent.message],
+    ['no-endpoint', false, 'This API build has no wheel endpoint yet.'])
+  const unknown = wheelLoadFailure(404, 'Instance not found: swing-paper')
+  assert.deepEqual([unknown.kind, unknown.stopPolling, unknown.message],
+    ['error', false, 'Instance not found: swing-paper'])
+  assert.equal(wheelLoadFailure(404, '').message, 'Could not load the wheel (404)')
+  const expired = wheelLoadFailure(401, '')
+  assert.deepEqual([expired.stopPolling, expired.message], [true, 'Session expired — please sign in again.'])
+  const down = wheelLoadFailure(503, 'broker unavailable: timeout')
+  assert.deepEqual([down.kind, down.stopPolling, down.message], ['error', false, 'broker unavailable: timeout'])
+  assert.equal(wheelLoadFailure(0, '').message, 'Could not load the wheel')
 })

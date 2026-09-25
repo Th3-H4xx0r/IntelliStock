@@ -433,19 +433,20 @@ void main() {
       'Approve AAPL at half size? The broker rebuilds the order at the live '
       'price and checks it before sending. Decisions are final.',
     );
+    // FW item 4 (M-1): some refusals send no notification, so none is promised.
     expect(
       decisionSuccessMessage(s, 'approve'),
       'Approved AAPL. The broker rebuilds and checks the order at the live '
-      "price; if it refuses, you'll get a notification.",
+      'price before sending it.',
     );
     expect(
       decisionSuccessMessage(s, 'approve_half'),
       'Approved AAPL at half size. The broker rebuilds and checks the order at '
-      "the live price; if it refuses, you'll get a notification.",
+      'the live price before sending it.',
     );
     expect(decisionConfirmBody(s, 'reject'), 'Reject AAPL? Decisions are final.');
     expect(decisionSuccessMessage(s, 'reject'), 'Rejected AAPL.');
-    final promise = RegExp('placed|goes out|within seconds|command poll');
+    final promise = RegExp('placed|goes out|within seconds|command poll|notif');
     for (final d in ['approve', 'approve_half']) {
       expect(decisionConfirmBody(s, d), isNot(matches(promise)));
       expect(decisionSuccessMessage(s, d), isNot(matches(promise)));
