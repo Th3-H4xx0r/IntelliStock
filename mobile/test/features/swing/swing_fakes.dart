@@ -87,12 +87,14 @@ SwingSignal swingSignal(
 
 /// A swing signal that reads approved (or approved_half) since [decidedAt].
 SwingSignal approvedSignal(String id, String decidedAt,
-        {String status = 'approved', String symbol = 'AAPL'}) =>
+        {String status = 'approved',
+        String symbol = 'AAPL',
+        String session = '2026-09-25'}) =>
     SwingSignal.fromJson({
       'id': id,
       'lane': 'swing',
       'symbol': symbol,
-      'session': '2026-09-25',
+      'session': session,
       'created_at': '2026-09-25T13:15:00Z',
       'score': 62,
       'recommendation': 'REVIEW',

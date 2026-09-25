@@ -252,11 +252,11 @@ The `LiveCommands` type `submit_order` payload is `{"source": "swing_approval", 
    - **200** `{"signal", "command_id"}` when queued;
    - **202** with the §9 item 2 `uncertain` body when the queue write raised but may have landed;
    - **404** for an unknown signal id, or one that belongs to another instance (or an unknown instance);
-   - **409** when the signal is not approved, or a command for it is still pending or running;
+   - **409** when the signal is not approved, when its `session` is not today's New York date ("this approval is from <session>; approve a fresh signal instead"), or when a command for it is still pending or running;
    - **503** when the instance is not running or has crashed, the queue cannot be read, or the command provably was not queued ("not queued — try again");
    - 401 from auth.
 
-   The web and iOS cards offer "Re-send" on a signal that has read approved for more than 2 minutes (from `decided_at`, or from this device's last re-send). They read those signals with `?status=approved` and `?status=approved_half`, alongside the `?status=pending` list.
+   The web and iOS cards offer "Re-send" on a signal from today's session that has read approved for more than 2 minutes (from `decided_at`, or from this device's last re-send); an older one shows its session and the reason instead. They read those signals with `?status=approved` and `?status=approved_half`, alongside the `?status=pending` list.
 3. `GET /instances/{id}/wheel` returns:
    ```json
    {"open_puts": [{"contract": "APH261002P00130000", "underlying": "APH", "strike": 130.0,

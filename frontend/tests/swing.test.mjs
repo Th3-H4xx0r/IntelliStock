@@ -17,10 +17,12 @@ import {
   itmTone,
   joinKeyRisks,
   normalizeApprovedList,
+  nyDate,
   normalizeSignalList,
   parseWheelPayload,
   proposalRows,
   reasoningPreview,
+  resendBlockedReason,
   resendPrompt,
   resendSuccess,
   STUCK_AFTER_MS,
@@ -392,4 +394,22 @@ test('wheelLoadFailure: a route-less API build is not an error, and only 401 sto
   const down = wheelLoadFailure(503, 'broker unavailable: timeout')
   assert.deepEqual([down.kind, down.stopPolling, down.message], ['error', false, 'broker unavailable: timeout'])
   assert.equal(wheelLoadFailure(0, '').message, 'Could not load the wheel')
+})
+
+// -- Follow-up 3: re-send is for today's session only ------------------------------------
+
+test('nyDate is the New York calendar date, across the DST switches', () => {
+  assert.equal(nyDate(Date.parse('2026-09-25T01:30:00Z')), '2026-09-24')   // 21:30 EDT
+  assert.equal(nyDate(Date.parse('2026-09-25T04:00:00Z')), '2026-09-25')   // 00:00 EDT
+  assert.equal(nyDate(Date.parse('2026-03-08T04:59:00Z')), '2026-03-07')   // 23:59 EST
+  assert.equal(nyDate(Date.parse('2026-11-01T04:30:00Z')), '2026-11-01')   // 00:30 EDT
+  assert.equal(nyDate(Date.parse('2026-11-02T04:30:00Z')), '2026-11-01')   // 23:30 EST
+})
+
+test('resendBlockedReason: only an approval from today\'s session can be re-sent', () => {
+  assert.equal(resendBlockedReason({ ...SWING, session: '2026-09-25' }, '2026-09-25'), null)
+  assert.equal(resendBlockedReason({ ...SWING, session: '2026-09-24' }, '2026-09-25'),
+    'This approval is from 2026-09-24; approve a fresh signal instead.')
+  assert.equal(resendBlockedReason({ ...SWING, session: '' }, '2026-09-25'),
+    'This approval is from an unknown session; approve a fresh signal instead.')
 })

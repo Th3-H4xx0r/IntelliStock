@@ -6730,10 +6730,11 @@ def _swing_read(read, empty):
         raise
 
 
-def _ny_today():
+def _ny_today(now=None):
+    """Today's New York date (the swing lanes' `session`), at `now` or now."""
     from swing_trader import clock
     return datetime.date.fromisoformat(
-        clock.ny_date(datetime.datetime.now(datetime.timezone.utc)))
+        clock.ny_date(now or datetime.datetime.now(datetime.timezone.utc)))
 
 
 def action_swing_list_signals(conn, instance_id, status=None, limit=100):
@@ -6908,8 +6909,9 @@ def action_swing_resend_signal(conn, instance_id, signal_id, requested_by=None):
     copy that arrives second (a late original, a second re-send) places
     nothing.
 
-    Unknown, or another instance's: LookupError (404). Not approved, or a
-    command for it still pending or running: SwingResendConflictError (409).
+    Unknown, or another instance's: LookupError (404). Not approved, from
+    a session other than today's (New York), or a command for it still
+    pending or running: SwingResendConflictError (409).
     The instance not running or crashed, the queue unreadable, or the command
     provably not queued: SwingBrokerUnavailableError (503). A queue write
     that raised but may have landed: the 202 "uncertain" body."""
@@ -6923,6 +6925,13 @@ def action_swing_resend_signal(conn, instance_id, signal_id, requested_by=None):
         raise SwingResendConflictError(
             "signal %s is %s, not approved; there is no approval to re-send"
             % (signal_id, status or "unset"))
+    session = str(signal.get("session") or "")[:10]
+    if session != _ny_today().isoformat():
+        # Follow-up 3: an approval from an earlier session is stale; the lane
+        # scores the name again, and the operator approves that signal.
+        raise SwingResendConflictError(
+            "this approval is from %s; approve a fresh signal instead"
+            % (session or "an unknown session"))
     try:
         open_commands = _swing_approval_commands(real_id, signal_id, open_only=True)
     except Exception as exc:

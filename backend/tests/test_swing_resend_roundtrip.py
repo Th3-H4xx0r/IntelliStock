@@ -7,6 +7,7 @@ double re-send from two devices), one approval places one order.
 The route runs over real HTTP (TestClient) with the REAL live_state queue
 on the FakeStore; every queued payload is then fed to the REAL handler from
 broker.py (test_swing_approval_roundtrip's harness)."""
+import datetime
 import os
 import sys
 
@@ -35,6 +36,10 @@ def api(store, monkeypatch, notices):
     monkeypatch.setattr(live_state, "store", store)
     monkeypatch.setattr(live_state, "ensure_tables", lambda r=None, conn=None: None)
     store.insert("Instances", [{"id": IID, "name": IID, "runCommand": True}])
+    # Follow-up 3: a re-send needs the signal's session (the harness's
+    # 2026-09-28) to be today in New York.
+    monkeypatch.setattr(interactive_utils, "_ny_today",
+                        lambda now=None: datetime.date(2026, 9, 28))
     main.app.dependency_overrides[main.conn_dependency] = lambda: None
     main.app.dependency_overrides[main.get_current_user] = lambda: {"id": "u1",
                                                                     "username": "pranav"}

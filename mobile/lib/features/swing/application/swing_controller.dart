@@ -136,6 +136,36 @@ String stuckLabel(SwingSignal s, DateTime now) {
   return 'Approved ${mins < 1 ? 1 : mins} min ago; the broker has not picked it up yet.';
 }
 
+/// The New York calendar date ("YYYY-MM-DD") at [instant]: the lanes'
+/// `session`. US Eastern time, exactly: EDT (UTC-4) from 02:00 local on the
+/// second Sunday of March to 02:00 local on the first Sunday of November,
+/// EST (UTC-5) otherwise.
+String nyDate(DateTime instant) {
+  final u = instant.toUtc();
+  DateTime nthSunday(int month, int n) {
+    final first = DateTime.utc(u.year, month, 1);
+    final offset = (DateTime.sunday - first.weekday) % 7;
+    return first.add(Duration(days: offset + 7 * (n - 1)));
+  }
+
+  final dstStart = nthSunday(3, 2).add(const Duration(hours: 7)); // 02:00 EST
+  final dstEnd = nthSunday(11, 1).add(const Duration(hours: 6)); // 02:00 EDT
+  final edt = !u.isBefore(dstStart) && u.isBefore(dstEnd);
+  final local = u.subtract(Duration(hours: edt ? 4 : 5));
+  String two(int v) => v.toString().padLeft(2, '0');
+  return '${local.year}-${two(local.month)}-${two(local.day)}';
+}
+
+/// Follow-up 3: the server re-sends only an approval from today's New York
+/// session; an older one is stale (approve the fresh signal). null when the
+/// card may offer Re-send, else the reason shown in its place.
+String? resendBlockedReason(SwingSignal s, String today) {
+  final session = s.session.length >= 10 ? s.session.substring(0, 10) : s.session;
+  if (session.isNotEmpty && session == today) return null;
+  return 'This approval is from ${session.isEmpty ? 'an unknown session' : session}; '
+      'approve a fresh signal instead.';
+}
+
 String resendConfirmBody(SwingSignal s) =>
     'Re-send the approval for ${s.symbol}? The broker rebuilds the order at the '
     'live price and checks it before sending; a copy it already picked up is '

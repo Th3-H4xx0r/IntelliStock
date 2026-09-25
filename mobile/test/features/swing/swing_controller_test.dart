@@ -273,6 +273,28 @@ void main() {
     });
   });
 
+  group('follow-up 3: re-send is for today\'s New York session only', () {
+    test('nyDate is the New York calendar date, across the DST switches', () {
+      expect(nyDate(DateTime.utc(2026, 9, 25, 1, 30)), '2026-09-24'); // 21:30 EDT
+      expect(nyDate(DateTime.utc(2026, 9, 25, 4, 0)), '2026-09-25'); // 00:00 EDT
+      expect(nyDate(DateTime.utc(2026, 3, 8, 4, 59)), '2026-03-07'); // 23:59 EST
+      expect(nyDate(DateTime.utc(2026, 3, 8, 7, 0)), '2026-03-08'); // 03:00 EDT
+      expect(nyDate(DateTime.utc(2026, 11, 1, 4, 30)), '2026-11-01'); // 00:30 EDT
+      expect(nyDate(DateTime.utc(2026, 11, 2, 4, 30)), '2026-11-01'); // 23:30 EST
+      expect(nyDate(DateTime.utc(2026, 1, 1, 4, 59)), '2025-12-31'); // 23:59 EST
+    });
+
+    test('resendBlockedReason names the stale session', () {
+      expect(resendBlockedReason(approvedSignal('a', '2026-09-25T13:00:00Z'), '2026-09-25'),
+          isNull);
+      expect(
+          resendBlockedReason(
+              approvedSignal('a', '2026-09-24T13:00:00Z', session: '2026-09-24'),
+              '2026-09-25'),
+          'This approval is from 2026-09-24; approve a fresh signal instead.');
+    });
+  });
+
   group('FW item 3: stuck approvals', () {
     setUp(() => clock = DateTime.utc(2026, 9, 25, 13, 30));
 

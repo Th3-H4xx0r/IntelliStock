@@ -156,6 +156,7 @@ void main() {
       expect(find.text('Approved, not yet sent (1)'), findsOneWidget);
       expect(find.text('Approved 5 min ago; the broker has not picked it up yet.'),
           findsOneWidget);
+      expect(find.text('session 2026-09-25'), findsOneWidget); // follow-up 3
       expect(find.text('NVDA'), findsNothing); // approved 30 s ago: in flight
       expect(tester.takeException(), isNull);
 
@@ -168,6 +169,20 @@ void main() {
       expect(repo.resendCalls, ['a1']);
       expect(find.text('Re-sent AAPL to the broker.'), findsOneWidget);
       expect(find.text('Approved, not yet sent (1)'), findsNothing);
+    });
+
+    testWidgets('follow-up 3: an approval from an older session shows its session, no Re-send',
+        (tester) async {
+      final repo = FakeSwingRepo([], approved: [
+        approvedSignal('old', '2026-09-24T13:25:00Z', session: '2026-09-24'),
+      ]);
+      await tester.pumpWidget(_app(repo, _section));
+      await tester.pumpAndSettle();
+      expect(find.text('Approved, not yet sent (1)'), findsOneWidget);
+      expect(find.text('session 2026-09-24'), findsOneWidget);
+      expect(find.text('This approval is from 2026-09-24; approve a fresh signal instead.'),
+          findsOneWidget);
+      expect(_cardButton('Re-send'), findsNothing);
     });
 
     testWidgets('an account with no stuck approvals renders no re-send section',

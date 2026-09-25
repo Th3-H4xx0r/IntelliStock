@@ -124,6 +124,8 @@ class PendingSignalsSection extends ConsumerWidget {
                         key: ValueKey('stuck-${s.id}'),
                         signal: s,
                         label: stuckLabel(s, state.asOf ?? DateTime.now()),
+                        blockedReason: resendBlockedReason(
+                            s, nyDate(state.asOf ?? DateTime.now())),
                         busy: state.isResending(s.id),
                         onResend: () => _resend(context, ref, s),
                       ),
@@ -336,12 +338,16 @@ class _StuckCard extends StatelessWidget {
     super.key,
     required this.signal,
     required this.label,
+    required this.blockedReason,
     required this.busy,
     required this.onResend,
   });
 
   final SwingSignal signal;
   final String label;
+
+  /// Why Re-send is not offered (an approval from an older session), or null.
+  final String? blockedReason;
   final bool busy;
   final VoidCallback onResend;
 
@@ -377,16 +383,23 @@ class _StuckCard extends StatelessWidget {
               ),
             ],
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 4),
+          Text('session ${s.session.isEmpty ? '—' : s.session}',
+              style: AppTextStyles.nano.copyWith(color: AppColors.textFaint)),
+          const SizedBox(height: 6),
           Text(label,
               style: AppTextStyles.micro.copyWith(color: AppColors.textMd)),
           const SizedBox(height: 10),
-          AppButton.semantic(
-            label: 'Re-send',
-            color: AppColors.warning,
-            dense: true,
-            onPressed: busy ? null : onResend,
-          ),
+          if (blockedReason != null)
+            Text(blockedReason!,
+                style: AppTextStyles.nano.copyWith(color: AppColors.textDim))
+          else
+            AppButton.semantic(
+              label: 'Re-send',
+              color: AppColors.warning,
+              dense: true,
+              onPressed: busy ? null : onResend,
+            ),
           if (busy) ...[
             const SizedBox(height: 6),
             Text('Working…',

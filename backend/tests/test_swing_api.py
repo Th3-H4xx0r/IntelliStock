@@ -37,6 +37,10 @@ def api(store, monkeypatch):
         return {"command_id": f"cmd-{len(commands)}", "status": "pending"}
 
     monkeypatch.setattr(interactive_utils, "action_submit_live_command", submit)
+    # Follow-up 3: a re-send needs the signal's session to be today (ET). The
+    # helper's signals are from 2026-09-24, so that is "today" here; the wheel
+    # tests set their own day.
+    monkeypatch.setattr(interactive_utils, "_ny_today", lambda now=None: date(2026, 9, 24))
     main.app.dependency_overrides[main.conn_dependency] = lambda: None
     main.app.dependency_overrides[main.get_current_user] = lambda: {"id": "u1",
                                                                     "username": "pranav"}
@@ -668,6 +672,41 @@ def test_a_second_resend_is_409_while_the_first_is_queued(api, store, monkeypatc
     assert first.status_code == 200
     again = api.post(resend_url(sid))
     assert again.status_code == 409 and first.json()["command_id"] in again.json()["detail"]
+
+
+def _signal_on(session, *, status="approved", symbol="OLD"):
+    doc = signals_store.new_signal(
+        instance_id=IID, lane="swing", symbol=symbol, session=session, score=62,
+        recommendation="review", reasoning="r", key_risks=[], size_adjustment=1.0,
+        proposal={"entry": 98.0, "stop": 92.12, "target": 106.82, "shares": 76},
+        status=status, created_at=f"{session}T13:20:00+00:00")
+    signals_store.insert_signal(doc)
+    return doc["id"]
+
+
+@pytest.mark.parametrize("session", ["2026-09-23", "2026-09-17", "2026-09-25"])
+def test_followup_3_a_resend_from_another_session_is_409(api, session):
+    sid = _signal_on(session)
+    res = api.post(resend_url(sid))
+    assert res.status_code == 409
+    assert res.json()["detail"] == (f"this approval is from {session}; approve a fresh "
+                                    "signal instead")
+    assert api.commands == [] and signals_store.get_signal(sid)["status"] == "approved"
+
+
+def test_followup_3_today_is_the_new_york_date_not_utc():
+    # 2026-09-25 01:30 UTC is still 2026-09-24 in New York (21:30 EDT), and
+    # 2026-03-08 06:30 UTC is 01:30 EST, before that morning's DST switch.
+    assert interactive_utils._ny_today(
+        datetime(2026, 9, 25, 1, 30, tzinfo=timezone.utc)) == date(2026, 9, 24)
+    assert interactive_utils._ny_today(
+        datetime(2026, 3, 8, 6, 30, tzinfo=timezone.utc)) == date(2026, 3, 8)
+
+
+def test_followup_3_a_resend_from_this_session_still_queues(api):
+    sid = _signal_on("2026-09-24", symbol="NOW")
+    assert api.post(resend_url(sid)).status_code == 200
+    assert len(api.commands) == 1
 
 
 def test_resend_of_an_unknown_or_foreign_signal_is_404(api):

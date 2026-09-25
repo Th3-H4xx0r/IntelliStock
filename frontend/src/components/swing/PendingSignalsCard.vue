@@ -167,7 +167,10 @@
           </div>
           <p class="text-xs text-slate-300 mt-2">{{ stuckLabel(s, nowMs) }}</p>
 
-          <div v-if="resendConfirming[s.id]" class="mt-3 rounded-lg border border-amber-500/25 bg-amber-500/5 px-3 py-2">
+          <p v-if="resendBlockedReason(s, today)" class="text-[11px] text-slate-500 mt-2">
+            {{ resendBlockedReason(s, today) }}
+          </p>
+          <div v-else-if="resendConfirming[s.id]" class="mt-3 rounded-lg border border-amber-500/25 bg-amber-500/5 px-3 py-2">
             <p class="text-xs text-slate-200">{{ resendPrompt(s) }}</p>
             <div class="flex gap-2 mt-2 flex-wrap">
               <button
@@ -215,8 +218,10 @@ import {
   joinKeyRisks,
   normalizeApprovedList,
   normalizeSignalList,
+  nyDate,
   proposalRows,
   reasoningPreview,
+  resendBlockedReason,
   resendPrompt,
   resendSuccess,
   scoreTone,
@@ -244,6 +249,7 @@ const guard = createInFlightGuard()
 const latch = createDecisionLatch() // hides a decided card from a poll that raced its 2xx
 const stuck = ref([])            // approved, and no broker command has claimed it for 2+ minutes
 const nowMs = ref(Date.now())    // the clock stuck labels were computed at
+const today = computed(() => nyDate(nowMs.value)) // the New York session a re-send needs
 const resendConfirming = ref({}) // signal id -> true while its Re-send awaits the confirm click
 const resending = ref({})        // signal id -> true while the POST .../resend is in flight
 const resendGuard = createInFlightGuard()
