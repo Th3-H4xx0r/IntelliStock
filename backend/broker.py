@@ -8910,6 +8910,40 @@ def _install_legacy_containment_gate(adapter, instance_id_val):
     return adapter
 
 
+def _option_position_payload(p) -> dict:
+    """One option row for the LiveState snapshot (interfaces doc section 9
+    item 4): Alpaca's own P&L fields, null when Alpaca has no current price,
+    never an invented 0. Equity rows never come through here."""
+    def number(name):
+        value = getattr(p, name, None)
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    qty = float(getattr(p, "qty", 0.0) or 0.0)
+    price = number("current_price")
+    plpc = number("unrealized_plpc")
+    avg = number("avg_entry_price")
+    return {
+        "symbol": getattr(p, "symbol", "") or "",
+        "qty": qty,
+        "avg_entry_price": avg if avg else None,
+        "last_price": price,
+        "market_value": number("market_value") if price is not None else None,
+        "unrealized_pnl": number("unrealized_pl"),
+        "unrealized_pnl_pct": plpc * 100.0 if plpc is not None else None,
+        "asset_class": "us_option",
+        "side": getattr(p, "side", None) or ("short" if qty < 0 else "long"),
+        "multiplier": int(getattr(p, "multiplier", 100) or 100),
+        "underlying": getattr(p, "underlying", None),
+        # Ruling F4 (A-live pre-flight): put/call from the contract fields.
+        "option_type": getattr(p, "option_type", None),
+        "strike": getattr(p, "strike", None),
+        "expiry": getattr(p, "expiry", None),
+    }
+
+
 def _compute_live_state_snapshot(instance_id_val: str, adapter) -> dict:
     """Build the dict to upsert into LiveState. Read-only over the adapter.
 
@@ -9023,6 +9057,13 @@ def _compute_live_state_snapshot(instance_id_val: str, adapter) -> dict:
     try:
         if live_position_dtos is not None:
             for p in live_position_dtos:
+                # swing-port: an option row carries its contract fields and
+                # Alpaca's own P&L; every equity row is built exactly as before.
+                if getattr(p, "asset_class", None) == "us_option":
+                    if alpaca_equity <= 0:
+                        equity += float(getattr(p, "market_value", 0.0) or 0.0)
+                    positions_payload.append(_option_position_payload(p))
+                    continue
                 sym = getattr(p, "symbol", "") or ""
                 qty_f = float(getattr(p, "qty", 0.0) or 0.0)
                 avg_entry = float(getattr(p, "avg_entry_price", 0.0) or 0.0)
@@ -9080,6 +9121,23 @@ def _compute_live_state_snapshot(instance_id_val: str, adapter) -> dict:
             })
     except Exception:
         positions_payload = []
+
+    # swing-port: a positions outage serves only the equity mirror (the
+    # adapter's preserve path, or the cached fallback above), and the API falls
+    # back to this row exactly then. Carry each last-known contract, unpriced,
+    # so a short put never vanishes. Empty on EB's account.
+    try:
+        _shown = {row.get("symbol") for row in positions_payload}
+        for _occ, _opt in list(
+                (getattr(adapter, "_option_positions", None) or {}).items()):
+            if _occ in _shown:
+                continue
+            _carried = _option_position_payload(_opt)
+            _carried.update(last_price=None, market_value=None,
+                            unrealized_pnl=None, unrealized_pnl_pct=None)
+            positions_payload.append(_carried)
+    except Exception:
+        pass
 
     # Recent trades (cap to MAX_RECENT_TRADES, newest first).
     recent_trades = []
@@ -11008,6 +11066,15 @@ def _execute_live_command(adapter, cmd: dict, order_service=None) -> tuple[bool,
             symbol = str(payload.get("symbol") or "").strip().upper()
             if not symbol:
                 return (False, "close_position requires payload.symbol", {})
+            # swing-port: an option contract is closed by the wheel lane's
+            # buy-to-close, never sold like a stock -- also one the option
+            # book lost (an OCC-shaped symbol).
+            import re as _re
+            if (symbol in (getattr(adapter, "_option_positions", {}) or {})
+                    or _re.fullmatch(r"[A-Z]{1,6}\d{6}[CP]\d{8}", symbol)):
+                return (False, f"{symbol} is an option contract; option "
+                               "contracts are closed by buy-to-close, not "
+                               "close_position", {})
             positions = dict(getattr(adapter, "_positions", {}) or {})
             qty = payload.get("qty")
             try:

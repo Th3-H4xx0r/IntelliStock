@@ -267,10 +267,101 @@ def _alpaca_recent_trades(client, limit: int = 50) -> list[dict]:
                 "qty": float(getattr(o, "filled_qty", 0.0) or 0.0),
                 "price": float(getattr(o, "filled_avg_price", 0.0) or 0.0),
                 "order_id": str(getattr(o, "id", "") or "") or None,
+                "asset_class": _enum_text(getattr(o, "asset_class", None), "us_equity"),
             })
         except Exception:
             continue
     return out[:_MAX_RECENT_TRADES]
+
+
+#: swing-port: contract fields per OCC symbol, cached for the process.
+_OPTION_META_CACHE: dict[str, dict] = {}
+
+
+class _PositionsUnavailable(Exception):
+    """Alpaca's positions could not be read. Never served as an empty book:
+    the wheel page would read an outage as "no open puts" (plan B G8a
+    re-review)."""
+
+
+def _num_or_none(value) -> Optional[float]:
+    try:
+        return float(value) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _enum_text(value, default: str = "") -> str:
+    text = str(getattr(value, "value", value) or "").strip().lower()
+    return text or default
+
+
+def _option_meta(client, symbol: str) -> dict:
+    """Contract fields for one OCC symbol from Alpaca (spec section 9 fix 10),
+    cached for the process; {} when the lookup fails."""
+    if symbol in _OPTION_META_CACHE:
+        return _OPTION_META_CACHE[symbol]
+    try:
+        contract = client.get_option_contract(symbol)
+    except Exception:
+        return {}
+    expiration = getattr(contract, "expiration_date", None)
+    meta = {
+        "underlying": str(getattr(contract, "underlying_symbol", "") or "").upper() or None,
+        # Ruling F4 (A-live pre-flight): put/call from the contract fields.
+        "option_type": _enum_text(getattr(contract, "type", None)) or None,
+        "strike": _num_or_none(getattr(contract, "strike_price", None)),
+        "expiry": (expiration.isoformat() if hasattr(expiration, "isoformat")
+                   else (str(expiration) if expiration else None)),
+    }
+    if meta["underlying"]:
+        _OPTION_META_CACHE[symbol] = meta
+    return meta
+
+
+def _alpaca_position_payload(client, p) -> dict:
+    """One live-state position row (interfaces doc section 9 item 4).
+
+    P&L is Alpaca's own unrealized_pl / unrealized_plpc / current_price. When
+    Alpaca omits one, an equity row falls back to the pre-port derivation
+    and an option row reports null, never an invented 0.
+    """
+    symbol = str(getattr(p, "symbol", "") or "").upper()
+    qty = float(getattr(p, "qty", 0.0) or 0.0)
+    asset_class = _enum_text(getattr(p, "asset_class", None), "us_equity")
+    is_option = asset_class == "us_option"
+    avg_entry = _num_or_none(getattr(p, "avg_entry_price", None))
+    market_value = _num_or_none(getattr(p, "market_value", None))
+    price = _num_or_none(getattr(p, "current_price", None))
+    unrealized = _num_or_none(getattr(p, "unrealized_pl", None))
+    plpc = _num_or_none(getattr(p, "unrealized_plpc", None))
+    unrealized_pct = plpc * 100.0 if plpc is not None else None
+    if not is_option:
+        if price is None and market_value is not None and qty:
+            price = market_value / qty
+        if unrealized is None and price and avg_entry:
+            unrealized = (price - avg_entry) * qty
+        if unrealized_pct is None and price and avg_entry:
+            unrealized_pct = ((price / avg_entry) - 1.0) * 100.0
+    row = {
+        "symbol": symbol,
+        "qty": qty,
+        "avg_entry_price": avg_entry if avg_entry else None,
+        "last_price": price,
+        "market_value": market_value,
+        "unrealized_pnl": unrealized,
+        "unrealized_pnl_pct": unrealized_pct,
+        "asset_class": asset_class,
+        "side": _enum_text(getattr(p, "side", None), "short" if qty < 0 else "long"),
+        "multiplier": 100 if is_option else 1,
+        "underlying": None,
+        "option_type": None,
+        "strike": None,
+        "expiry": None,
+    }
+    if is_option:
+        row.update(_option_meta(client, symbol))
+    return row
 
 
 def _fetch_alpaca(instance_id: str, creds: dict) -> dict:
@@ -284,28 +375,25 @@ def _fetch_alpaca(instance_id: str, creds: dict) -> dict:
     account_id = str(getattr(acct, "account_number", "") or getattr(acct, "id", "") or "") or None
 
     positions_payload: list[dict] = []
+    # swing-port (plan B G8a re-review): an unreadable book fails the fetch
+    # (broker_fetch_error) instead of serving an empty one.
     try:
-        positions = client.get_all_positions() or []
-    except Exception:
-        positions = []
+        positions = client.get_all_positions()
+    except Exception as exc:
+        raise _PositionsUnavailable(f"{type(exc).__name__}: {exc}") from exc
+    if not isinstance(positions, (list, tuple)):
+        raise _PositionsUnavailable(
+            f"answered {type(positions).__name__}, not a list")
     for p in positions:
         try:
-            qty_f = float(getattr(p, "qty", 0.0) or 0.0)
-            avg_entry = float(getattr(p, "avg_entry_price", 0.0) or 0.0)
-            market_value = float(getattr(p, "market_value", 0.0) or 0.0)
-            price = market_value / qty_f if qty_f else 0.0
-            unrealized = (price - avg_entry) * qty_f if avg_entry and price else 0.0
-            unrealized_pct = ((price / avg_entry) - 1.0) * 100.0 if avg_entry else 0.0
-            positions_payload.append({
-                "symbol": str(getattr(p, "symbol", "") or "").upper(),
-                "qty": qty_f,
-                "avg_entry_price": avg_entry if avg_entry else None,
-                "last_price": price,
-                "market_value": market_value,
-                "unrealized_pnl": unrealized,
-                "unrealized_pnl_pct": unrealized_pct,
-            })
-        except Exception:
+            positions_payload.append(_alpaca_position_payload(client, p))
+        except Exception as exc:
+            # An unreadable option row must not vanish from the book either;
+            # an equity row is skipped as it always was.
+            if _enum_text(getattr(p, "asset_class", None)) == "us_option":
+                raise _PositionsUnavailable(
+                    f"option row {getattr(p, 'symbol', '?')} unreadable "
+                    f"({type(exc).__name__})") from exc
             continue
 
     recent_trades = _alpaca_recent_trades(client)
@@ -381,6 +469,9 @@ def fetch_broker_live_state(conn, instance_id: str) -> dict:
                 base_meta["broker_fetch_error"] = f"unsupported_broker_type: {broker_type}"
                 return base_meta
             state = _fetch_alpaca(instance_id, creds)
+        except _PositionsUnavailable as e:
+            base_meta["broker_fetch_error"] = f"positions_unavailable: {e}"
+            return base_meta
         except Exception as e:
             base_meta["broker_fetch_error"] = f"broker_api_error: {type(e).__name__}: {e}"
             return base_meta
