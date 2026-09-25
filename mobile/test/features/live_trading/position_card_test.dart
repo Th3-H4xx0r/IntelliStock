@@ -55,8 +55,11 @@ void main() {
     // MARKET VALUE, LAST and P&L $ have no value to show.
     expect(find.text('—'), findsNWidgets(3));
     expect(find.text('Close'), findsNothing);
-    expect(find.text('Managed by the wheel lane. Use Halt to stop it.'),
+    expect(
+        find.text('Managed by the wheel lane, which buys puts back '
+            'automatically. Close it at the broker if needed.'),
         findsOneWidget);
+    expect(find.textContaining('Halt'), findsNothing);
   });
 
   testWidgets('stock position keeps Shares and Close', (tester) async {

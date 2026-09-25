@@ -117,6 +117,26 @@ test('confirmPrompt and decisionSuccessMessage name the symbol and the decision'
   assert.match(decisionSuccessMessage(WHEEL, 'reject'), /^Rejected APH/)
 })
 
+test('approval copy says the broker rebuilds and checks the order, never that it was placed', () => {
+  for (const decision of ['approve', 'approve_half']) {
+    const confirm = confirmPrompt(SWING, decision)
+    const success = decisionSuccessMessage(SWING, decision)
+    assert.equal(
+      confirm,
+      `Approve AAPL${decision === 'approve_half' ? ' at half size' : ''}? The broker rebuilds the order at the live price and checks it before sending. Decisions are final.`,
+    )
+    assert.equal(
+      success,
+      `Approved AAPL${decision === 'approve_half' ? ' at half size' : ''}. The broker rebuilds and checks the order at the live price; if it refuses, you'll get a notification.`,
+    )
+    for (const text of [confirm, success]) {
+      assert.doesNotMatch(text, /placed|goes out|within seconds|command poll/)
+    }
+  }
+  assert.equal(confirmPrompt(WHEEL, 'reject'), 'Reject APH? Decisions are final.')
+  assert.equal(decisionSuccessMessage(WHEEL, 'reject'), 'Rejected APH.')
+})
+
 test('detailText flattens FastAPI detail shapes', () => {
   assert.equal(detailText('signal is not pending'), 'signal is not pending')
   assert.equal(detailText([{ msg: 'bad decision' }, { message: 'x' }]), 'bad decision; x')

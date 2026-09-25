@@ -221,7 +221,7 @@ class PositionCard extends StatelessWidget {
                     onPressed: onClose,
                   )
                 : Text(
-                    'Managed by the wheel lane. Use Halt to stop it.',
+                    'Managed by the wheel lane, which buys puts back automatically. Close it at the broker if needed.',
                     style: AppTextStyles.nano.copyWith(color: AppColors.textFaint),
                   ),
           ),

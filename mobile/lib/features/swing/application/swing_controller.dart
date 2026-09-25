@@ -49,18 +49,18 @@ String decisionLabel(String decision) => switch (decision) {
 
 String decisionConfirmBody(SwingSignal s, String decision) => switch (decision) {
       'approve' =>
-        'Approve ${s.symbol}? The order is rebuilt at the live price and placed within seconds.',
+        'Approve ${s.symbol}? The broker rebuilds the order at the live price and checks it before sending. Decisions are final.',
       'approve_half' =>
-        'Approve ${s.symbol} at half size? The order is rebuilt at the live price and placed within seconds.',
+        'Approve ${s.symbol} at half size? The broker rebuilds the order at the live price and checks it before sending. Decisions are final.',
       _ => 'Reject ${s.symbol}? Decisions are final.',
     };
 
 String decisionSuccessMessage(SwingSignal s, String decision) =>
     switch (decision) {
       'approve' =>
-        "Approved ${s.symbol}. The order goes out on the broker's next command poll.",
+        "Approved ${s.symbol}. The broker rebuilds and checks the order at the live price; if it refuses, you'll get a notification.",
       'approve_half' =>
-        "Approved ${s.symbol} at half size. The order goes out on the broker's next command poll.",
+        "Approved ${s.symbol} at half size. The broker rebuilds and checks the order at the live price; if it refuses, you'll get a notification.",
       _ => 'Rejected ${s.symbol}.',
     };
 

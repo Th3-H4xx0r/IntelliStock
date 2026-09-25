@@ -128,15 +128,15 @@ export function proposalRows(signal) {
 
 export function confirmPrompt(signal, decision) {
   const sym = signal?.symbol || 'this signal'
-  if (decision === 'approve') return `Approve ${sym}? The order is rebuilt at the live price and placed within seconds.`
-  if (decision === 'approve_half') return `Approve ${sym} at half size? The order is rebuilt at the live price and placed within seconds.`
+  if (decision === 'approve') return `Approve ${sym}? The broker rebuilds the order at the live price and checks it before sending. Decisions are final.`
+  if (decision === 'approve_half') return `Approve ${sym} at half size? The broker rebuilds the order at the live price and checks it before sending. Decisions are final.`
   return `Reject ${sym}? Decisions are final.`
 }
 
 export function decisionSuccessMessage(signal, decision) {
   const sym = signal?.symbol || 'the signal'
-  if (decision === 'approve') return `Approved ${sym}. The order goes out on the broker's next command poll.`
-  if (decision === 'approve_half') return `Approved ${sym} at half size. The order goes out on the broker's next command poll.`
+  if (decision === 'approve') return `Approved ${sym}. The broker rebuilds and checks the order at the live price; if it refuses, you'll get a notification.`
+  if (decision === 'approve_half') return `Approved ${sym} at half size. The broker rebuilds and checks the order at the live price; if it refuses, you'll get a notification.`
   return `Rejected ${sym}.`
 }
 

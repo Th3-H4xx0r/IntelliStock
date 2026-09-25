@@ -184,4 +184,36 @@ void main() {
     expect(decisionConfirmBody(s, 'reject'), contains('final'));
     expect(decisionSuccessMessage(s, 'approve'), startsWith('Approved AAPL'));
   });
+
+  test('approval copy says the broker rebuilds and checks, never that it placed',
+      () {
+    final s = signal('a1');
+    expect(
+      decisionConfirmBody(s, 'approve'),
+      'Approve AAPL? The broker rebuilds the order at the live price and '
+      'checks it before sending. Decisions are final.',
+    );
+    expect(
+      decisionConfirmBody(s, 'approve_half'),
+      'Approve AAPL at half size? The broker rebuilds the order at the live '
+      'price and checks it before sending. Decisions are final.',
+    );
+    expect(
+      decisionSuccessMessage(s, 'approve'),
+      'Approved AAPL. The broker rebuilds and checks the order at the live '
+      "price; if it refuses, you'll get a notification.",
+    );
+    expect(
+      decisionSuccessMessage(s, 'approve_half'),
+      'Approved AAPL at half size. The broker rebuilds and checks the order at '
+      "the live price; if it refuses, you'll get a notification.",
+    );
+    expect(decisionConfirmBody(s, 'reject'), 'Reject AAPL? Decisions are final.');
+    expect(decisionSuccessMessage(s, 'reject'), 'Rejected AAPL.');
+    final promise = RegExp('placed|goes out|within seconds|command poll');
+    for (final d in ['approve', 'approve_half']) {
+      expect(decisionConfirmBody(s, d), isNot(matches(promise)));
+      expect(decisionSuccessMessage(s, d), isNot(matches(promise)));
+    }
+  });
 }

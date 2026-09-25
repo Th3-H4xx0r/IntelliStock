@@ -1320,7 +1320,7 @@ watch(
                   </button>
                 </div>
                 <p v-else class="text-[10px] text-slate-600 text-right">
-                  Managed by the wheel lane. Use Halt to stop it.
+                  Managed by the wheel lane, which buys puts back automatically. Close it at the broker if needed.
                 </p>
               </div>
             </div>
