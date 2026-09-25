@@ -18,6 +18,15 @@ lane: the simulator's bar hook runs after its pending-fill block, so another
 lane's close-filled sell of a bracketed symbol would execute before a
 same-session stop (and the wheel is inert in backtests anyway).
 
+Brokerage (FW-str minor c): the lab NEVER links a live brokerage. A new lab
+instance takes strategy-eb's brokerage only when that is provably a paper
+Alpaca account that is not alpaca-main's, the same proof --paper demands;
+otherwise it is created with NO brokerage and the reason is printed. A
+backtest reads its market data through the instance's linked Alpaca
+brokerage, so link a PAPER one in the Instances editor before backtesting. An
+existing lab instance keeps its brokerage; one that is not provably paper is
+flagged, never changed.
+
 Backtesting the lab: run it at granularity 86400 (daily bars; the instance
 is created at 86400, and the swing lane refuses sub-daily bars since its
 SMA200 and RSI are regular-hours daily indicators). Start every backtest
@@ -179,6 +188,36 @@ def assert_paper_brokerage(call, brokerage_id):
     return live
 
 
+def paper_brokerage_refusal(call, brokerage_id):
+    """None when `brokerage_id` is provably a paper account that is not
+    alpaca-main's (assert_paper_brokerage's proof), else why not."""
+    if not brokerage_id:
+        return "no brokerage to check"
+    try:
+        assert_paper_brokerage(call, brokerage_id)
+    except SystemExit as refused:   # _api.call SystemExits on 4xx, too
+        return str(refused).removeprefix("REFUSING: ")
+    return None
+
+
+def lab_brokerage(call):
+    """The brokerage a NEW lab instance may take: strategy-eb's when it is
+    provably paper, else None (FW-str minor c: the lab never links real
+    money). Prints what it decided."""
+    _code, clone = _safe_get(call, f"/instances/{CLONE_FROM}")
+    candidate = str((clone or {}).get("brokerage_id") or "") or None
+    why = (f"{CLONE_FROM} could not be read or has no brokerage" if candidate is None
+           else paper_brokerage_refusal(call, candidate))
+    if why is None:
+        print(f"lab brokerage: {candidate} ({CLONE_FROM}'s, a proven paper account)")
+        return candidate
+    print(f"lab brokerage: NO brokerage linked. {CLONE_FROM}'s brokerage "
+          f"{candidate or '(none)'} is not a proven paper account: {why}. A backtest reads "
+          "its market data through the instance's linked Alpaca brokerage, so link a "
+          "PAPER one in the Instances editor before backtesting the lab.", flush=True)
+    return None
+
+
 def assert_same_brokerage(inst, instance_id, brokerage_id):
     """Fix round 1 (Important 1): an existing instance keeps its brokerage.
     A rerun naming another one is refused, never silently re-linked: the
@@ -284,8 +323,14 @@ def main(argv=None, *, call=None, store=None) -> int:
     code, inst = _safe_get(call, f"/instances/{LAB_INSTANCE_ID}")
     brokerage_id = None
     if code == 404 or not inst:
-        _, clone = call("GET", f"/instances/{CLONE_FROM}")
-        brokerage_id = (clone or {}).get("brokerage_id")
+        brokerage_id = lab_brokerage(call)
+    elif inst.get("brokerage_id"):
+        why = paper_brokerage_refusal(call, inst["brokerage_id"])
+        if why is not None:
+            print(f"WARNING: the existing {LAB_INSTANCE_ID} instance is on brokerage "
+                  f"{inst['brokerage_id']}, which is not a proven paper account ({why}). "
+                  "It is left as it is and never started here; move it to a PAPER "
+                  "brokerage in the Instances editor.", flush=True)
     _upsert_instance(call, LAB_INSTANCE_ID, name="Swing trader lab (backtest only)",
                      doc_id=doc_id, granularity="86400", brokerage_id=brokerage_id,
                      stocks=stocks)
