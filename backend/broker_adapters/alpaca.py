@@ -1621,6 +1621,27 @@ class AlpacaAdapter(BrokerAdapter):
             until = oldest - timedelta(microseconds=1)
         return list(seen.values()), False
 
+    def _say_unreadable_order_once(self, raw, why) -> None:
+        """Fix wave FW-eb-m2: one red line per order the reconcile snapshot
+        cannot read (it runs every 60 s while the order is in the 30-day
+        history window)."""
+        order_id = str(getattr(raw, "id", "") or getattr(raw, "client_order_id", "") or "?")
+        seen = getattr(self, "_unreadable_orders_logged", None)
+        if seen is None:
+            seen = set()
+            self._unreadable_orders_logged = seen
+        if order_id in seen:
+            return
+        seen.add(order_id)
+        _alog(
+            "BROKER",
+            f"reconcile snapshot: order {order_id} "
+            f"({getattr(raw, 'client_order_id', '?')}) {why}; the snapshot is "
+            "broker-unavailable (fail closed) while it is in the order "
+            "history",
+            "red",
+        )
+
     def capture_reconciliation_snapshot(
         self,
         *,
@@ -1714,14 +1735,8 @@ class AlpacaAdapter(BrokerAdapter):
                 # in the Alpaca UI is named here in red. A single-leg option
                 # order with no side stays readable through its intent.
                 if _enum_value(getattr(raw, "order_class", None)) == "mleg":
-                    _alog(
-                        "BROKER",
-                        f"reconcile snapshot: order {getattr(raw, 'id', '?')} "
-                        f"({getattr(raw, 'client_order_id', '?')}) is multi-leg "
-                        "(mleg) and cannot be reconciled; the snapshot is "
-                        "unhealthy until it is closed",
-                        "red",
-                    )
+                    self._say_unreadable_order_once(
+                        raw, "is multi-leg (mleg) and cannot be reconciled")
                     raise BrokerError(
                         f"unreadable multi-leg order {getattr(raw, 'id', '?')}")
                 side_value = getattr(getattr(raw, "side", None), "value", None)
@@ -1731,14 +1746,8 @@ class AlpacaAdapter(BrokerAdapter):
                     side_value = _side_from_position_intent(
                         getattr(raw, "position_intent", None))
                     if side_value is None:
-                        _alog(
-                            "BROKER",
-                            f"reconcile snapshot: order {getattr(raw, 'id', '?')} "
-                            f"({getattr(raw, 'client_order_id', '?')}) has no "
-                            "side and no position_intent; the snapshot is "
-                            "unhealthy",
-                            "red",
-                        )
+                        self._say_unreadable_order_once(
+                            raw, "has no side and no position_intent")
                         raise BrokerError(
                             f"order {getattr(raw, 'id', '?')} has no side")
                 status_value = getattr(

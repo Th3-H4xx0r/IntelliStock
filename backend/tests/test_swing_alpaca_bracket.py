@@ -530,8 +530,12 @@ def test_the_unreadable_order_is_named_in_red(monkeypatch):
                         lines.append((service, msg, color)))
     mleg = order_row(id="mleg-1", client_order_id="ui-mleg", symbol=None,
                      side=None, order_class=enum("mleg"), status=enum("filled"))
-    _snapshot_of(mleg)
-    assert any(color == "red" and "mleg-1" in msg for _s, msg, color in lines)
+    adapter = make_adapter(FakeTradingClient(orders=[mleg]))
+    for _ in range(3):                      # the 60 s reconcile, three times
+        assert adapter.capture_reconciliation_snapshot(
+            account_id="acct-1").broker_available is False
+    named = [msg for _s, msg, color in lines if color == "red" and "mleg-1" in msg]
+    assert len(named) == 1, "one red line per unreadable order, not per reconcile"
 
 
 def test_stream_events_held_and_pending_cancel_are_acknowledged():
