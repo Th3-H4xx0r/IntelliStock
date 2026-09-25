@@ -21,7 +21,15 @@
      instance stopped, or the broker's handler returned early) is listed
      under "Approved, not yet sent" with a Re-send button (fix wave item 3).
      The server refuses a re-send while a command for it is still queued, and
-     the broker's approved -> submitted claim ignores a second copy. -->
+     the broker's approved -> submitted claim ignores a second copy.
+
+     A 202 (the approval or re-send is recorded, but its delivery could not be
+     confirmed) puts the signal on a "Waiting for the broker" card with an
+     "uncertain — waiting for the broker" badge and the server's advice
+     (follow-up 2). While one waits, each poll also reads the submitted and
+     failed lists; a poll begun after the 202 that finds the signal pending
+     brings its pending card back, and one that finds it submitted or failed
+     says so on the card until the operator dismisses it. -->
 <template>
   <section class="glass-card rounded-2xl p-5">
     <div class="flex items-center justify-between mb-4 gap-2">
@@ -145,6 +153,44 @@
       </div>
     </div>
 
+    <div v-if="Object.keys(uncertain).length" class="mt-4">
+      <p class="text-[11px] font-bold uppercase tracking-widest text-amber-400/80 mb-2">
+        Waiting for the broker ({{ Object.keys(uncertain).length }})
+      </p>
+      <div class="space-y-2">
+        <div
+          v-for="(entry, id) in uncertain"
+          :key="`uncertain-${id}`"
+          class="rounded-lg border px-4 py-3"
+          :class="uncertainCardClass(entry)"
+        >
+          <div class="flex items-center gap-2 flex-wrap">
+            <span class="text-base font-black text-slate-100 tracking-wide font-mono">{{ entry.signal.symbol }}</span>
+            <span class="px-2 py-0.5 rounded-full text-[10px] font-bold border uppercase" :class="laneClass(entry.signal.lane)">
+              {{ entry.signal.lane }}
+            </span>
+            <span class="px-2 py-0.5 rounded-full text-[10px] font-bold border" :class="uncertainBadgeClass(entry)">
+              {{ uncertainBadge(entry) }}
+            </span>
+            <span class="text-[11px] text-slate-600">session {{ entry.signal.session || '—' }}</span>
+          </div>
+          <p v-if="!entry.resolved" class="text-xs text-amber-200/90 mt-2 leading-relaxed">{{ entry.message }}</p>
+          <p v-else-if="entry.resolved === 'submitted'" class="text-xs text-slate-300 mt-2">
+            The broker submitted it. Check open orders for the fill.
+          </p>
+          <p v-else class="text-xs text-slate-300 mt-2">
+            It failed at the broker; the live log says why.
+          </p>
+          <div v-if="entry.resolved" class="flex gap-2 mt-3">
+            <button
+              @click="dismissUncertain(id)"
+              class="px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-800"
+            >Dismiss</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div v-if="loaded && stuck.length" class="mt-4">
       <p class="text-[11px] font-bold uppercase tracking-widest text-amber-400/80 mb-2">
         Approved, not yet sent ({{ stuck.length }})
@@ -216,6 +262,7 @@ import {
   decisionsFor,
   detailText,
   joinKeyRisks,
+  addUncertain,
   foldSignalLoad,
   nyDate,
   proposalRows,
@@ -225,6 +272,8 @@ import {
   resendSuccess,
   scoreTone,
   stuckLabel,
+  uncertainBadge,
+  uncertainListsNeeded,
 } from '../../utils/swing.js'
 
 const POLL_MS = 30000
@@ -252,6 +301,7 @@ const resendConfirming = ref({}) // signal id -> true while its Re-send awaits t
 const resending = ref({})        // signal id -> true while the POST .../resend is in flight
 const resendGuard = createInFlightGuard()
 const resentAt = new Map()       // signal id -> epoch ms of this page's last re-send (or refusal)
+const uncertain = ref({})        // signal id -> { signal, message, since, resolved } after a 202 (follow-up 2)
 let pollTimer = null
 let noticeTimer = null
 
@@ -343,11 +393,12 @@ async function load() {
     // end the hide on a card this page decided (FW-api-I2). Each read settles
     // on its own (follow-up 4): one failing never stops the others.
     const statuses = ['pending', 'approved', 'approved_half']
+    if (uncertainListsNeeded(uncertain.value)) statuses.push('submitted', 'failed')
     const settled = await Promise.allSettled(statuses.map(fetchSignals))
     const results = Object.fromEntries(statuses.map((status, i) => [status, settled[i]]))
     nowMs.value = Date.now()
     const out = foldSignalLoad({
-      generation, latch, results, nowMs: nowMs.value, resentAt,
+      generation, latch, results, nowMs: nowMs.value, resentAt, uncertain: uncertain.value,
       previous: { signals: signals.value, stuck: stuck.value },
     })
     const live = new Set(out.signals.map(s => s.id))
@@ -361,12 +412,29 @@ async function load() {
     }
     signals.value = out.signals
     stuck.value = out.stuck
+    uncertain.value = out.uncertain
     if (out.unauthorized) stopPolling()
     loadError.value = out.error
     if (out.pendingLoaded) loaded.value = true
   } finally {
     loading.value = false
   }
+}
+
+function dismissUncertain(id) {
+  uncertain.value = omit(uncertain.value, id)
+}
+
+function uncertainCardClass(entry) {
+  if (entry.resolved === 'submitted') return 'border-emerald-500/20 bg-emerald-500/5'
+  if (entry.resolved === 'failed') return 'border-rose-500/20 bg-rose-500/5'
+  return 'border-amber-500/25 bg-amber-500/5'
+}
+
+function uncertainBadgeClass(entry) {
+  if (entry.resolved === 'submitted') return 'text-emerald-300 bg-emerald-500/10 border-emerald-500/20'
+  if (entry.resolved === 'failed') return 'text-rose-300 bg-rose-500/10 border-rose-500/20'
+  return 'text-amber-300 bg-amber-500/10 border-amber-500/20'
 }
 
 function startResend(id) {
@@ -398,7 +466,11 @@ async function resend(signal) {
       const outcome = resendSuccess(res.status, body, signal)
       resentAt.set(signal.id, Date.now())
       removeStuck(signal.id)
-      showNotice(outcome.tone, outcome.message)
+      if (outcome.uncertain) {
+        uncertain.value = addUncertain(uncertain.value, signal, outcome.message, latch.current())
+      } else {
+        showNotice(outcome.tone, outcome.message)
+      }
       return
     }
     let detail = ''
@@ -450,7 +522,13 @@ async function submit(signal) {
       const outcome = classifyDecisionSuccess(res.status, body, signal, decision)
       latch.record(signal.id)
       removeCard(signal.id)
-      showNotice(outcome.tone, outcome.message)
+      if (outcome.uncertain) {
+        // Follow-up 2: the advice stays on a card until a poll settles it.
+        uncertain.value = addUncertain(uncertain.value, { ...signal, ...(body?.signal || {}), id: signal.id },
+          outcome.message, latch.current())
+      } else {
+        showNotice(outcome.tone, outcome.message)
+      }
       return
     }
     let detail = ''
@@ -503,6 +581,7 @@ watch(() => props.instanceId, (next, prev) => {
   stuck.value = []
   resendConfirming.value = {}
   resentAt.clear()
+  uncertain.value = {}
   load()
   startPolling()
 })

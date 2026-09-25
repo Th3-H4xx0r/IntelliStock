@@ -293,6 +293,11 @@ class SwingRepository {
       (await _signals(instanceId, 'pending'))
         ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
 
+  /// Signals that read [status] (follow-up 2 reads "submitted" and "failed"
+  /// while a card waits for the broker).
+  Future<List<SwingSignal>> signalsWithStatus(String instanceId, String status) =>
+      _signals(instanceId, status);
+
   /// Signals that still read approved or approved_half, newest decision
   /// first: the ones a broker command has not claimed yet (fix wave item 3).
   Future<List<SwingSignal>> approvedSignals(String instanceId) async {

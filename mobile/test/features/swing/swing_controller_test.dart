@@ -288,6 +288,99 @@ void main() {
     });
   });
 
+  group('follow-up 2: an uncertain approval stays on its card', () {
+    setUp(() => clock = DateTime.utc(2026, 9, 25, 13, 30));
+
+    Future<(ProviderContainer, PendingSignalsNotifier)> uncertainOn(
+        FakeSwingRepo repo) async {
+      repo.decideReceipt = DecisionReceipt(uncertain: true, detail: kUncertainApproval);
+      final c = await start(repo);
+      final notifier = c.read(pendingSignalsProvider('i1').notifier);
+      final result = await notifier.decide(signal('a1'), 'approve');
+      expect(result.outcome, DecisionOutcome.uncertain);
+      return (c, notifier);
+    }
+
+    test('a 202 puts the signal on a waiting card, not a toast', () async {
+      final repo = FakeSwingRepo([signal('a1')]);
+      final (c, notifier) = await uncertainOn(repo);
+      final card = read(c).uncertain.single;
+      expect(card.signal.id, 'a1');
+      expect(card.badge, 'uncertain — waiting for the broker');
+      expect(card.message, kUncertainApproval);
+      expect(read(c).signals, isEmpty);
+
+      // Still approved half an hour on: it waits, and it is not a stuck card.
+      repo
+        ..pending = []
+        ..approved = [approvedSignal('a1', '2026-09-25T13:00:00Z')];
+      await notifier.refresh();
+      expect(read(c).uncertain.single.resolved, isNull);
+      expect(read(c).stuck, isEmpty);
+      expect(repo.statusReads, containsAll(['submitted', 'failed']));
+    });
+
+    test('a later poll that reports submitted settles the badge; Dismiss removes it',
+        () async {
+      final repo = FakeSwingRepo([signal('a1')]);
+      final (c, notifier) = await uncertainOn(repo);
+      repo
+        ..pending = []
+        ..submitted = [withStatus(signal('a1'), 'submitted')];
+      await notifier.refresh();
+      expect(read(c).uncertain.single.badge, 'submitted');
+      notifier.dismissUncertain('a1');
+      expect(read(c).uncertain, isEmpty);
+    });
+
+    test('a later poll that reports failed says failed', () async {
+      final repo = FakeSwingRepo([signal('a1')]);
+      final (c, notifier) = await uncertainOn(repo);
+      repo
+        ..pending = []
+        ..failed = [withStatus(signal('a1'), 'failed')];
+      await notifier.refresh();
+      expect(read(c).uncertain.single.badge, 'failed');
+    });
+
+    test('a later poll that reports pending ends the waiting card: the pending card is back',
+        () async {
+      final repo = FakeSwingRepo([signal('a1')]);
+      final (c, notifier) = await uncertainOn(repo);
+      await notifier.refresh(); // the broker put it back to pending
+      expect(read(c).uncertain, isEmpty);
+      expect(read(c).signals.map((s) => s.id), ['a1']);
+    });
+
+    test('a poll that began before the 202 cannot settle it', () async {
+      final repo = _GatedListRepo([signal('a1')])..listGate.complete();
+      repo.decideReceipt = DecisionReceipt(uncertain: true, detail: kUncertainApproval);
+      final c = await start(repo);
+      final notifier = c.read(pendingSignalsProvider('i1').notifier);
+      final hold = Completer<void>();
+      repo.nextListGate = hold;
+      final racing = notifier.refresh(); // answers a1 pending, from before the 202
+      await notifier.decide(signal('a1'), 'approve');
+      hold.complete();
+      await racing;
+      expect(read(c).uncertain.single.resolved, isNull);
+      expect(read(c).signals, isEmpty);
+    });
+
+    test('a 202 re-send waits on a card too', () async {
+      final repo = FakeSwingRepo([],
+          approved: [approvedSignal('a1', '2026-09-25T13:20:00Z')])
+        ..resendReceipt = const DecisionReceipt(uncertain: true);
+      final c = await start(repo);
+      final result = await c
+          .read(pendingSignalsProvider('i1').notifier)
+          .resend(read(c).stuck.single);
+      expect(result.outcome, DecisionOutcome.uncertain);
+      expect(read(c).stuck, isEmpty);
+      expect(read(c).uncertain.single.message, uncertainMessage('Re-send'));
+    });
+  });
+
   group('follow-up 4: the list reads settle independently', () {
     setUp(() => clock = DateTime.utc(2026, 9, 25, 13, 30));
 

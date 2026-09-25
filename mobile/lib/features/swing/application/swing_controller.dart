@@ -171,10 +171,42 @@ String resendConfirmBody(SwingSignal s) =>
     'live price and checks it before sending; a copy it already picked up is '
     'ignored.';
 
+/// Follow-up 2: the badge on a card whose approval or re-send answered 202.
+const uncertainBadge = 'uncertain — waiting for the broker';
+
+/// A 202'd approval or re-send, kept on its own card until a poll begun
+/// after the 202 settles it (follow-up 2).
+class UncertainCard {
+  const UncertainCard({
+    required this.signal,
+    required this.message,
+    required this.since,
+    this.resolved,
+  });
+
+  final SwingSignal signal;
+
+  /// The server's advice, shown on the card while it waits.
+  final String message;
+
+  /// The newest fetch generation started when the 202 arrived: only a fetch
+  /// begun after it may settle the card.
+  final int since;
+
+  /// null while waiting, then "submitted" or "failed".
+  final String? resolved;
+
+  String get badge => resolved ?? uncertainBadge;
+
+  UncertainCard settled(String status) => UncertainCard(
+      signal: signal, message: message, since: since, resolved: status);
+}
+
 class PendingSignalsState {
   const PendingSignalsState({
     this.signals = const [],
     this.stuck = const [],
+    this.uncertain = const [],
     this.deciding = const {},
     this.resending = const {},
     this.refreshError,
@@ -182,6 +214,9 @@ class PendingSignalsState {
   });
 
   final List<SwingSignal> signals;
+
+  /// 202'd approvals and re-sends, waiting for the broker (follow-up 2).
+  final List<UncertainCard> uncertain;
 
   /// Approved signals no broker command has claimed for [stuckAfter]: each
   /// gets a Re-send button.
@@ -205,6 +240,7 @@ class PendingSignalsState {
   PendingSignalsState copyWith({
     List<SwingSignal>? signals,
     List<SwingSignal>? stuck,
+    List<UncertainCard>? uncertain,
     Set<String>? deciding,
     Set<String>? resending,
     String? refreshError,
@@ -214,6 +250,7 @@ class PendingSignalsState {
       PendingSignalsState(
         signals: signals ?? this.signals,
         stuck: stuck ?? this.stuck,
+        uncertain: uncertain ?? this.uncertain,
         deciding: deciding ?? this.deciding,
         resending: resending ?? this.resending,
         refreshError:
@@ -244,6 +281,10 @@ class PendingSignalsNotifier
   /// id -> when this device last re-sent it, or was refused because a
   /// command was already queued (fix wave item 3).
   final Map<String, DateTime> _resentAt = <String, DateTime>{};
+
+  /// id -> the waiting card after a 202 (follow-up 2). It outlives
+  /// pull-to-refresh: only a poll that settles it, or Dismiss, removes it.
+  final Map<String, UncertainCard> _uncertain = <String, UncertainCard>{};
 
   @override
   Future<PendingSignalsState> build(String arg) async {
@@ -303,9 +344,40 @@ class PendingSignalsNotifier
 
     final pendingRead = settle(repo.pendingSignals(arg));
     final approvedRead = settle(repo.approvedSignals(arg));
+    // While a card waits (follow-up 2), the submitted and failed lists too.
+    final waiting = _uncertain.values.any((c) => c.resolved == null);
+    final submittedRead =
+        waiting ? settle(repo.signalsWithStatus(arg, 'submitted')) : null;
+    final failedRead = waiting ? settle(repo.signalsWithStatus(arg, 'failed')) : null;
     final (pending, pendingError) = await pendingRead;
     final (approved, approvedError) = await approvedRead;
-    return _Load(pending, approved, pendingError ?? approvedError);
+    final (submitted, submittedError) = await (submittedRead ?? Future.value((null, null)));
+    final (failed, failedError) = await (failedRead ?? Future.value((null, null)));
+    return _Load(pending, approved,
+        pendingError ?? approvedError ?? submittedError ?? failedError,
+        submitted: submitted, failed: failed);
+  }
+
+  /// Follow-up 2: settle the waiting cards a fetch begun after their 202 can
+  /// speak for. Pending: the card goes and the pending card is back.
+  /// Submitted or failed: the badge says so until Dismiss. Anything else, or
+  /// a failed read, leaves the card waiting.
+  void _foldUncertain(int generation, _Load load) {
+    Set<String>? ids(List<SwingSignal>? rows) => rows?.map((s) => s.id).toSet();
+    final pending = ids(load.pending);
+    final submitted = ids(load.submitted);
+    final failed = ids(load.failed);
+    for (final id in _uncertain.keys.toList()) {
+      final card = _uncertain[id]!;
+      if (card.resolved != null || generation <= card.since) continue;
+      if (pending?.contains(id) ?? false) {
+        _uncertain.remove(id);
+      } else if (submitted?.contains(id) ?? false) {
+        _uncertain[id] = card.settled('submitted');
+      } else if (failed?.contains(id) ?? false) {
+        _uncertain[id] = card.settled('failed');
+      }
+    }
   }
 
   /// A failed read keeps its part of [current]; the first error is shown.
@@ -314,14 +386,19 @@ class PendingSignalsNotifier
     final now = ref.read(swingClockProvider)();
     final pending = load.pending;
     final approved = load.approved;
+    _foldUncertain(generation, load);
     final next = current.copyWith(
       signals: pending == null
           ? current.signals
           : _visible(generation, pending,
               nonPending: (approved ?? const []).map((s) => s.id)),
-      stuck: approved == null
-          ? current.stuck
-          : stuckApprovals(approved, now, _resentAt),
+      // An uncertain card is never also a stuck one.
+      stuck: (approved == null
+              ? current.stuck
+              : stuckApprovals(approved, now, _resentAt))
+          .where((s) => !_uncertain.containsKey(s.id))
+          .toList(),
+      uncertain: _uncertain.values.toList(),
       asOf: now,
       clearRefreshError: true,
     );
@@ -377,10 +454,10 @@ class PendingSignalsNotifier
       _hidden[signal.id] = _generation;
       _drop(signal.id);
       if (receipt.uncertain) {
-        return DecisionResult(
-          DecisionOutcome.uncertain,
-          receipt.detail.isEmpty ? uncertainMessage() : receipt.detail,
-        );
+        final message =
+            receipt.detail.isEmpty ? uncertainMessage() : receipt.detail;
+        _wait(signal, message);
+        return DecisionResult(DecisionOutcome.uncertain, message);
       }
       return DecisionResult(
           DecisionOutcome.recorded, decisionSuccessMessage(signal, decision));
@@ -441,10 +518,11 @@ class PendingSignalsNotifier
           await ref.read(swingRepositoryProvider).resend(arg, signal.id);
       _snooze(signal.id);
       if (receipt.uncertain) {
-        return DecisionResult(
-          DecisionOutcome.uncertain,
-          receipt.detail.isEmpty ? uncertainMessage('Re-send') : receipt.detail,
-        );
+        final message = receipt.detail.isEmpty
+            ? uncertainMessage('Re-send')
+            : receipt.detail;
+        _wait(signal, message);
+        return DecisionResult(DecisionOutcome.uncertain, message);
       }
       return DecisionResult(
           DecisionOutcome.recorded, 'Re-sent ${signal.symbol} to the broker.');
@@ -472,6 +550,24 @@ class PendingSignalsNotifier
       return DecisionResult(
           DecisionOutcome.failed, 'Could not re-send that approval: $err');
     }
+  }
+
+  /// Follow-up 2: a 202 puts the signal on a waiting card.
+  void _wait(SwingSignal signal, String message) {
+    _uncertain[signal.id] =
+        UncertainCard(signal: signal, message: message, since: _generation);
+    final current = state.valueOrNull ?? const PendingSignalsState();
+    state = AsyncData(current.copyWith(
+      uncertain: _uncertain.values.toList(),
+      stuck: current.stuck.where((s) => s.id != signal.id).toList(),
+    ));
+  }
+
+  /// Removes a settled waiting card (its Dismiss button).
+  void dismissUncertain(String id) {
+    _uncertain.remove(id);
+    final current = state.valueOrNull ?? const PendingSignalsState();
+    state = AsyncData(current.copyWith(uncertain: _uncertain.values.toList()));
   }
 
   /// Takes the stuck card off and holds it back for another [stuckAfter].
@@ -508,10 +604,15 @@ class PendingSignalsNotifier
 /// One poll's reads, each settled on its own (follow-up 4): null when that
 /// read failed; [error] is the first failure.
 class _Load {
-  const _Load(this.pending, this.approved, this.error);
+  const _Load(this.pending, this.approved, this.error,
+      {this.submitted, this.failed});
   final List<SwingSignal>? pending;
   final List<SwingSignal>? approved;
   final Object? error;
+
+  /// Read only while a card is uncertain (follow-up 2).
+  final List<SwingSignal>? submitted;
+  final List<SwingSignal>? failed;
 }
 
 final pendingSignalsProvider = AsyncNotifierProvider.autoDispose

@@ -62,6 +62,8 @@ export function createDecisionLatch() {
       generation += 1
       return generation
     },
+    /** The generation of the newest load started so far. */
+    current() { return generation },
     record(id) { hidden.set(id, generation) },
     has(id) { return hidden.has(id) },
     clear() { hidden.clear() },
@@ -276,14 +278,71 @@ export function stuckApprovals(approved, nowMs, resentAt = new Map()) {
   })
 }
 
+// -- Follow-up 2: an uncertain (202) approval stays on its card ----------------
+
+export const UNCERTAIN_BADGE = 'uncertain — waiting for the broker'
+
+/**
+ * Put a 202'd approval or re-send on an "uncertain" card. `since` is the
+ * generation of the newest load started when the 202 arrived: only a load
+ * begun after it may settle the card. Returns a new map (id -> entry).
+ */
+export function addUncertain(uncertain, signal, message, since) {
+  return { ...uncertain, [signal.id]: { signal, message, since, resolved: null } }
+}
+
+export function uncertainBadge(entry) {
+  return entry?.resolved || UNCERTAIN_BADGE
+}
+
+/** While any card waits, each poll also reads ?status=submitted and ?status=failed. */
+export function uncertainListsNeeded(uncertain) {
+  return Object.values(uncertain || {}).some(e => !e.resolved)
+}
+
+function idsOf(result) {
+  if (result?.status !== 'fulfilled') return null
+  const v = result.value
+  const rows = Array.isArray(v) ? v : (Array.isArray(v?.signals) ? v.signals : [])
+  return new Set(rows.filter(r => r && typeof r === 'object' && r.id).map(r => r.id))
+}
+
+/**
+ * A waiting card settles only on a load begun after its 202: pending (the
+ * card goes, and the pending card is back), submitted or failed (the badge
+ * says so until the operator dismisses it). Anything else, or a failed
+ * read, leaves it waiting.
+ */
+function foldUncertain(uncertain, generation, results) {
+  const pending = idsOf(results?.pending)
+  const submitted = idsOf(results?.submitted)
+  const failed = idsOf(results?.failed)
+  const next = {}
+  for (const [id, entry] of Object.entries(uncertain || {})) {
+    if (entry.resolved || generation <= entry.since) {
+      next[id] = entry
+    } else if (pending?.has(id)) {
+      continue
+    } else if (submitted?.has(id)) {
+      next[id] = { ...entry, resolved: 'submitted' }
+    } else if (failed?.has(id)) {
+      next[id] = { ...entry, resolved: 'failed' }
+    } else {
+      next[id] = entry
+    }
+  }
+  return next
+}
+
 /**
  * Follow-up 4: fold one poll's list reads into the next card state. Each read
  * settles on its own (`results` holds Promise.allSettled outcomes keyed by
- * status: pending, approved, approved_half). A failed read keeps its part of
- * `previous` and reports its error; it never stops another list refreshing.
- * A reason carrying `unauthorized: true` is a 401.
+ * status: pending, approved, approved_half, and submitted and failed while a
+ * card is uncertain). A failed read keeps its part of `previous` and reports
+ * its error; it never stops another list refreshing. A reason carrying
+ * `unauthorized: true` is a 401. An uncertain card is never also a stuck one.
  */
-export function foldSignalLoad({ generation, latch, results, previous, nowMs, resentAt }) {
+export function foldSignalLoad({ generation, latch, results, previous, nowMs, resentAt, uncertain = {} }) {
   const done = key => results?.[key]?.status === 'fulfilled'
   const failures = Object.values(results || {})
     .filter(r => r?.status === 'rejected').map(r => r.reason)
@@ -293,13 +352,15 @@ export function foldSignalLoad({ generation, latch, results, previous, nowMs, re
   const signals = done('pending')
     ? latch.apply(generation, normalizeSignalList(results.pending.value), approvedRows.map(s => s.id))
     : previous.signals
-  const stuck = done('approved') && done('approved_half')
+  const nextUncertain = foldUncertain(uncertain, generation, results)
+  const stuck = (done('approved') && done('approved_half')
     ? stuckApprovals(approvedRows, nowMs, resentAt)
-    : previous.stuck
+    : previous.stuck).filter(s => !nextUncertain[s.id])
   const first = failures[0]
   return {
     signals,
     stuck,
+    uncertain: nextUncertain,
     pendingLoaded: done('pending'),
     error: first ? (first.message || String(first)) : '',
     unauthorized: failures.some(r => r?.unauthorized === true),

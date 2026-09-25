@@ -48,6 +48,24 @@ class FakeSwingRepo implements SwingRepository {
     return decideReceipt;
   }
 
+  /// What `?status=submitted` and `?status=failed` answer (follow-up 2).
+  List<SwingSignal> submitted = <SwingSignal>[];
+  List<SwingSignal> failed = <SwingSignal>[];
+  final statusReads = <String>[];
+
+  @override
+  Future<List<SwingSignal>> signalsWithStatus(
+      String instanceId, String status) async {
+    statusReads.add(status);
+    if (listError != null) throw listError!;
+    return List.of(switch (status) {
+      'submitted' => submitted,
+      'failed' => failed,
+      'pending' => pending,
+      _ => approved.where((s) => s.status == status).toList(),
+    });
+  }
+
   /// Fails only the approved lists (follow-up 4); [listError] fails both.
   Object? approvedError;
 
@@ -113,6 +131,23 @@ SwingSignal approvedSignal(String id, String decidedAt,
       'decided_by': 'pranav',
       'decided_at': decidedAt,
     });
+
+/// [s] as the server would list it with [status].
+SwingSignal withStatus(SwingSignal s, String status) => SwingSignal(
+      id: s.id,
+      lane: s.lane,
+      symbol: s.symbol,
+      session: s.session,
+      createdAt: s.createdAt,
+      score: s.score,
+      recommendation: s.recommendation,
+      reasoning: s.reasoning,
+      keyRisks: s.keyRisks,
+      sizeAdjustment: s.sizeAdjustment,
+      proposal: s.proposal,
+      status: status,
+      decidedAt: s.decidedAt,
+    );
 
 SwingSignal wheelSignal(String id) => SwingSignal.fromJson({
       'id': id,

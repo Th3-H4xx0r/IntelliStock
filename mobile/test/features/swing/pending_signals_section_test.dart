@@ -81,6 +81,7 @@ void main() {
 
     testWidgets('FW-api-I1: a 202 shows the server advice, never the success copy',
         (tester) async {
+      _phone(tester); // 320pt wide: the long badge and the advice must fit
       final detail = kUncertainApproval;
       final repo = FakeSwingRepo([swingSignal('a1')])
         ..decideReceipt = DecisionReceipt(uncertain: true, detail: detail);
@@ -91,9 +92,29 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(_dialogButton('Approve'));
       await tester.pumpAndSettle();
-      expect(find.text('AAPL'), findsNothing);
+      // Follow-up 2: the advice stays on a waiting card, not a snackbar.
+      expect(find.text('Waiting for the broker (1)'), findsOneWidget);
+      // AppBadge upper-cases its label.
+      expect(find.text('UNCERTAIN — WAITING FOR THE BROKER'), findsOneWidget);
       expect(find.text(detail), findsOneWidget);
+      expect(find.byType(SnackBar), findsNothing);
+      expect(tester.takeException(), isNull);
+      expect(_cardButton('Approve'), findsNothing); // no longer a pending card
       expect(find.textContaining('Approved AAPL'), findsNothing);
+
+      // It persists across polls until one settles it.
+      repo
+        ..pending = []
+        ..submitted = [withStatus(swingSignal('a1'), 'submitted')];
+      final container = ProviderScope.containerOf(tester.element(find.byType(PendingSignalsSection)));
+      await container.read(pendingSignalsProvider('i1').notifier).refresh();
+      await tester.pumpAndSettle();
+      expect(find.text('SUBMITTED'), findsOneWidget);
+      expect(find.text('UNCERTAIN — WAITING FOR THE BROKER'), findsNothing);
+      expect(find.text(detail), findsNothing);
+      await tester.tap(_cardButton('Dismiss'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Waiting for the broker'), findsNothing);
     });
 
     testWidgets('cancel in the dialog sends nothing', (tester) async {

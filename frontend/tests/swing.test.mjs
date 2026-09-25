@@ -12,8 +12,12 @@ import {
   decisionSuccessMessage,
   decisionsFor,
   detailText,
+  addUncertain,
   fmtAsOf,
   foldSignalLoad,
+  UNCERTAIN_BADGE,
+  uncertainBadge,
+  uncertainListsNeeded,
   fmtItm,
   itmTone,
   joinKeyRisks,
@@ -457,4 +461,77 @@ test('foldSignalLoad: all settled clears the error; a 401 anywhere says so', () 
     results: { pending: ok([SWING]), approved: { status: 'rejected', reason: expired }, approved_half: ok([]) },
   })
   assert.deepEqual([out.unauthorized, out.error], [true, 'Session expired — please sign in again.'])
+})
+
+// -- Follow-up 2: an uncertain approval stays on its card until a poll settles it --------
+
+test('the latch reports the newest load generation (the one a 202 must outlive)', () => {
+  const latch = createDecisionLatch()
+  assert.equal(latch.current(), 0)
+  latch.beginLoad(); latch.beginLoad()
+  assert.equal(latch.current(), 2)
+})
+
+test('addUncertain records the card with the poll generation it must outlive', () => {
+  const u = addUncertain({}, SWING, UNCERTAIN_APPROVAL, 3)
+  assert.deepEqual(u.a1, { signal: SWING, message: UNCERTAIN_APPROVAL, since: 3, resolved: null })
+  assert.equal(uncertainBadge(u.a1), 'uncertain — waiting for the broker')
+  assert.equal(UNCERTAIN_BADGE, 'uncertain — waiting for the broker')
+  assert.equal(uncertainListsNeeded(u), true)
+  assert.equal(uncertainListsNeeded({}), false)
+})
+
+function fold(latch, generation, uncertain, lists) {
+  const results = {}
+  for (const [k, v] of Object.entries(lists)) results[k] = v instanceof Error ? { status: 'rejected', reason: v } : ok(v)
+  return foldSignalLoad({ generation, latch, results, previous: { signals: [], stuck: [] }, nowMs: T0,
+    resentAt: new Map(), uncertain })
+}
+
+test('an uncertain card waits while the signal still reads approved or is nowhere', () => {
+  const latch = createDecisionLatch()
+  latch.beginLoad(); latch.record('a1')
+  const u = addUncertain({}, SWING, UNCERTAIN_APPROVAL, 1)
+  const gen = latch.beginLoad()
+  const out = fold(latch, gen, u, { pending: [], approved: [approvedAt('a1', '2026-09-25T13:00:00Z')],
+    approved_half: [], submitted: [], failed: [] })
+  assert.equal(out.uncertain.a1.resolved, null)
+  // Approved 30 minutes ago, but it is uncertain, not stuck: no Re-send card.
+  assert.deepEqual(out.stuck, [])
+  assert.equal(fold(latch, latch.beginLoad(), u, { pending: [], approved: [], approved_half: [], submitted: [], failed: [] })
+    .uncertain.a1.resolved, null)
+})
+
+test('a later poll that reports submitted or failed settles the badge', () => {
+  const latch = createDecisionLatch()
+  const u = addUncertain({}, SWING, UNCERTAIN_APPROVAL, 0)
+  const sub = fold(latch, latch.beginLoad(), u, { pending: [], approved: [], approved_half: [],
+    submitted: [{ ...SWING, status: 'submitted' }], failed: [] })
+  assert.equal(sub.uncertain.a1.resolved, 'submitted')
+  assert.equal(uncertainBadge(sub.uncertain.a1), 'submitted')
+  const bad = fold(latch, latch.beginLoad(), u, { pending: [], approved: [], approved_half: [],
+    submitted: [], failed: [{ ...SWING, status: 'failed' }] })
+  assert.deepEqual([bad.uncertain.a1.resolved, uncertainBadge(bad.uncertain.a1)], ['failed', 'failed'])
+})
+
+test('a later poll that reports pending ends the uncertain card: the pending card is back', () => {
+  const latch = createDecisionLatch()
+  latch.beginLoad(); latch.record('a1')
+  const u = addUncertain({}, SWING, UNCERTAIN_APPROVAL, 1)
+  const out = fold(latch, latch.beginLoad(), u, { pending: [SWING], approved: [], approved_half: [],
+    submitted: [], failed: [] })
+  assert.deepEqual(out.uncertain, {})
+  assert.deepEqual(out.signals.map(s => s.id), ['a1'])
+})
+
+test('a poll that began before the 202 cannot settle it; a failed read settles nothing', () => {
+  const latch = createDecisionLatch()
+  const racing = latch.beginLoad()
+  latch.record('a1')
+  const u = addUncertain({}, SWING, UNCERTAIN_APPROVAL, racing)
+  const out = fold(latch, racing, u, { pending: [SWING], approved: [], approved_half: [], submitted: [], failed: [] })
+  assert.equal(out.uncertain.a1.resolved, null)
+  const down = fold(latch, latch.beginLoad(), u, { pending: new Error('x'), approved: [], approved_half: [],
+    submitted: new Error('y'), failed: [] })
+  assert.equal(down.uncertain.a1.resolved, null)
 })
