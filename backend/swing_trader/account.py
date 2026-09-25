@@ -127,12 +127,17 @@ def swing_live_budget(emu, book):
     8: the cash that secures short puts is not the swing lane's to spend, so
     with any committed the budget is the smaller of buying power and cash,
     less that collateral -- margin buying power cannot lift it, since the puts
-    are cash-secured. (None, None, reason) when the option book cannot be
-    read: the lane then plans no entries (its exits still run)."""
+    are cash-secured. Seams m2: negative cash (an assignment's debit) is a
+    budget of 0, puts or no puts -- the equity gate refuses every swing BUY
+    then, so margin buying power must not plan entries it cannot place.
+    (None, None, reason) when the option book cannot be read: the lane's
+    scan is then not ready and retries next tick (seams m1)."""
     cash, bp = _live_cash_and_buying_power(emu)
     collateral, reason = put_collateral(emu, book)
     if collateral is None:
         return None, None, reason
+    if cash < 0:
+        return 0.0, collateral, None
     if collateral <= 0:
         return bp, 0.0, None
     return max(0.0, min(bp, cash) - collateral), collateral, None

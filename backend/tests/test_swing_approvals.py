@@ -472,3 +472,11 @@ def test_g8b_the_real_alpaca_accessor_drives_option_book():
     client.get_all_positions = down
     adapter.refresh_positions()
     assert "stale" in account.option_book(adapter)[1]
+
+
+def test_m2_an_approval_on_negative_cash_is_a_definite_refusal():
+    # Seams m2: the budget is 0 while cash is negative, puts or no puts.
+    with pytest.raises(ValueError, match="buys no whole share"):
+        approvals.build_approved_order(dict(sig("AAA"), status="approved"), live_price=100.0,
+                                       equity=50_000.0, cfg=CFG,
+                                       adapter=alpaca(cash="-500", bp="90000", equity="50000"))

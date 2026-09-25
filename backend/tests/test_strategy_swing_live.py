@@ -964,6 +964,17 @@ def test_without_puts_the_budget_is_st_s_buying_power(live, monkeypatch):
     assert _entries(out) == {"AAA": 12_500.0, "CCC": 12_500.0, "DDD": 12_500.0}
 
 
+def test_negative_cash_plans_no_entries_even_with_no_puts_open(live, monkeypatch):
+    """Seams m2: after an assignment debit, cash is negative and margin buying
+    power is not. FW1's equity snapshot refuses every swing BUY then, so the
+    lane must not plan (and count as auto_approved) entries it cannot place."""
+    monkeypatch.setattr(live.ai_analyst, "analyse",
+                        scripted({"AAA": APPROVE, "CCC": APPROVE, "DDD": APPROVE}))
+    out = tick(live, MON_0920, PutBook(cash=-500.0, bp=200_000.0), {})
+    assert _entries(out) == {}
+    assert not any(r["status"] == "auto_approved" for r in rows().values())
+
+
 def test_an_unknown_put_collateral_is_not_ready_and_the_next_tick_scans(live, monkeypatch):
     """Seams m1: FW1's incompleteness triggers (an unknown-origin short fill,
     an ambiguous mid-refresh settle) last until the next ~3 s refresh. The

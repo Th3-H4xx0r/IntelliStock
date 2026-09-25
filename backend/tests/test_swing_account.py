@@ -48,3 +48,44 @@ def test_a_complete_current_answer_still_reads_healthy():
 def test_an_adapter_without_the_accessor_keeps_the_private_flag_fallback():
     legacy = NS(_option_positions_complete=True, _positions_stale_since=None)
     assert account.positions_health(legacy) == (True, None, None)
+
+
+# -- seams m2 / m3: swing_live_budget and put_collateral on the REAL adapter ----------
+
+PUT_400 = ("XYZ261016P00400000", "XYZ", 400.0)
+
+
+def alpaca(*, cash, bp="20000", puts=(), contracts=None):
+    """A REAL AlpacaAdapter over the network-free alpaca-py doubles: its
+    refresh_cash and option map are what the swing budget reads. `puts` are
+    (contract, underlying, strike) shorts of one contract; `contracts`
+    overrides the contract rows its lookups answer."""
+    from swing_alpaca_fakes import FakeOptionsTradingClient
+    from swing_alpaca_fakes import account as account_row
+    from swing_alpaca_fakes import contract_row, make_adapter, option_position
+
+    if contracts is None:
+        contracts = {occ: contract_row(occ, underlying=u, strike=k, expiration="2026-10-16")
+                     for occ, u, k in puts}
+    client = FakeOptionsTradingClient(
+        account_row=account_row(cash=cash, buying_power=bp),
+        positions=[option_position(occ, qty="-1") for occ, _u, _k in puts],
+        contracts_by_symbol=contracts)
+    return make_adapter(client)
+
+
+def test_m2_negative_cash_is_no_budget_with_no_puts_open():
+    """After an assignment debit the account's cash is negative while margin
+    buying power stays positive. FW1's equity snapshot refuses every swing
+    BUY on negative cash, so a budget of buying power let the lane plan and
+    count entries the gate was certain to refuse."""
+    assert account.swing_live_budget(alpaca(cash="-500"), []) == (0.0, 0.0, None)
+
+
+def test_m2_negative_cash_is_no_budget_with_puts_open():
+    assert account.swing_live_budget(alpaca(cash="-500", puts=[PUT_400]), []) == (
+        0.0, 40_000.0, None)
+
+
+def test_m2_positive_cash_with_no_puts_is_still_st_s_buying_power():
+    assert account.swing_live_budget(alpaca(cash="500"), []) == (20_000.0, 0.0, None)
