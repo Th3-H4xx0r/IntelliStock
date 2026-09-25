@@ -26,17 +26,24 @@ PendingSignalsState read(ProviderContainer c) =>
     c.read(pendingSignalsProvider('i1')).requireValue;
 
 /// Holds every pendingSignals() call on [listGate] and counts the calls.
+/// [nextListGate], when set, holds only the next call, and it answers with
+/// the rows as they were when the call began.
 class _GatedListRepo extends FakeSwingRepo {
   _GatedListRepo(super.pending);
 
   final listGate = Completer<void>();
+  Completer<void>? nextListGate;
   int listCalls = 0;
 
   @override
   Future<List<SwingSignal>> pendingSignals(String instanceId) async {
     listCalls++;
+    final snapshot = await super.pendingSignals(instanceId);
+    final hold = nextListGate;
+    nextListGate = null;
     await listGate.future;
-    return super.pendingSignals(instanceId);
+    if (hold != null) await hold.future;
+    return snapshot;
   }
 }
 
@@ -173,11 +180,66 @@ void main() {
     });
 
     test('a poll that raced a recorded decision does not resurrect the card', () async {
+      final repo = _GatedListRepo([signal('a1')])..listGate.complete();
+      final c = await start(repo);
+      final notifier = c.read(pendingSignalsProvider('i1').notifier);
+      // The poll starts, and its answer predates the decision...
+      final hold = Completer<void>();
+      repo.nextListGate = hold;
+      final racing = notifier.refresh();
+      await notifier.decide(signal('a1'), 'approve'); // ...the 2xx arrives...
+      hold.complete(); // ...and the poll lands still listing a1 as pending.
+      await racing;
+      expect(read(c).signals, isEmpty);
+    });
+
+    test('FW-api-I2: a poll begun after the 2xx governs, so a broker reset shows again',
+        () async {
       final repo = FakeSwingRepo([signal('a1')]);
       final c = await start(repo);
       final notifier = c.read(pendingSignalsProvider('i1').notifier);
       await notifier.decide(signal('a1'), 'approve');
-      await notifier.refresh(); // the server still lists a1 (stale read)
+      expect(read(c).signals, isEmpty);
+      // No quote before the open: the broker put a1 back to pending and
+      // pushed "approve again after the open".
+      await notifier.refresh();
+      expect(read(c).signals.map((s) => s.id), ['a1']);
+      // And it can be approved again from this screen.
+      final again = await notifier.decide(signal('a1'), 'approve');
+      expect(again.outcome, DecisionOutcome.recorded);
+      expect(repo.decideCalls, ['a1:approve', 'a1:approve']);
+    });
+
+    test('FW-api-I2: pull-to-refresh (invalidate) clears the local hide', () async {
+      final repo = _GatedListRepo([signal('a1')])..listGate.complete();
+      final c = await start(repo);
+      final notifier = c.read(pendingSignalsProvider('i1').notifier);
+      final hold = Completer<void>();
+      repo.nextListGate = hold;
+      final racing = notifier.refresh();
+      await notifier.decide(signal('a1'), 'approve');
+      hold.complete();
+      await racing;
+      expect(read(c).signals, isEmpty); // hidden from the racing poll
+
+      c.invalidate(pendingSignalsProvider('i1'));
+      await c.read(pendingSignalsProvider('i1').future);
+      expect(read(c).signals.map((s) => s.id), ['a1']);
+    });
+
+    test('FW-api-I2: an older poll that lands after a newer one is ignored', () async {
+      final repo = _GatedListRepo([signal('a1')])..listGate.complete();
+      final c = await start(repo);
+      final notifier = c.read(pendingSignalsProvider('i1').notifier);
+      final hold = Completer<void>();
+      repo.nextListGate = hold;
+      final older = notifier.refresh(); // answers a1 pending, but late
+      repo.pending = [];
+      await notifier.refresh(); // newer: a1 was decided elsewhere
+      expect(read(c).signals, isEmpty);
+      repo.pending = [signal('a1')];
+      hold.complete();
+      await older;
       expect(read(c).signals, isEmpty);
     });
 

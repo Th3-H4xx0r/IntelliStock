@@ -11,7 +11,10 @@
      synchronous guard drops a second click that lands before Vue re-renders.
      A 400/404/409 means the signal is no longer pending, usually because
      another device decided first. The card goes, the server's reason is shown,
-     and the next poll brings the card back only if it really is still pending. -->
+     and the next poll brings the card back only if it really is still pending.
+     A decided card is hidden only from a poll that was already in flight when
+     the decision landed (FW-api-I2): after that the server's status governs,
+     so a signal the broker puts back to pending shows again. -->
 <template>
   <section class="glass-card rounded-2xl p-5">
     <div class="flex items-center justify-between mb-4 gap-2">
@@ -149,6 +152,7 @@ import {
   classifyDecisionFailure,
   classifyDecisionSuccess,
   confirmPrompt,
+  createDecisionLatch,
   createInFlightGuard,
   decisionsFor,
   detailText,
@@ -157,7 +161,6 @@ import {
   proposalRows,
   reasoningPreview,
   scoreTone,
-  withoutDecided,
 } from '../../utils/swing.js'
 
 const POLL_MS = 30000
@@ -177,7 +180,7 @@ const deciding = ref({})      // signal id -> true while the POST is in flight
 const reasons = ref({})
 const expanded = ref({})
 const guard = createInFlightGuard()
-const decided = new Set()     // ids this page decided; a racing poll never re-adds them
+const latch = createDecisionLatch() // hides a decided card from a poll that raced its 2xx
 let pollTimer = null
 let noticeTimer = null
 
@@ -250,6 +253,7 @@ function removeCard(id) {
 async function load() {
   if (loading.value) return
   loading.value = true
+  const generation = latch.beginLoad()
   try {
     const res = await fetch(`${signalsUrl()}?status=pending`, { headers: authHeaders() })
     if (res.status === 401) {
@@ -262,7 +266,7 @@ async function load() {
       try { detail = detailText((await res.json())?.detail) } catch { /* keep */ }
       throw new Error(detail || `Could not load signals (${res.status})`)
     }
-    const next = withoutDecided(normalizeSignalList(await res.json()), decided)
+    const next = latch.apply(generation, normalizeSignalList(await res.json()))
     const live = new Set(next.map(s => s.id))
     // A card that vanished server-side takes its half-finished confirm with it.
     for (const id of Object.keys(confirming.value)) {
@@ -307,7 +311,7 @@ async function submit(signal) {
       let body = null
       try { body = await res.json() } catch { /* the body is optional */ }
       const outcome = classifyDecisionSuccess(res.status, body, signal, decision)
-      decided.add(signal.id)
+      latch.record(signal.id)
       removeCard(signal.id)
       showNotice(outcome.tone, outcome.message)
       return
@@ -358,7 +362,7 @@ watch(() => props.instanceId, (next, prev) => {
   loadError.value = ''
   confirming.value = {}
   reasons.value = {}
-  decided.clear()
+  latch.clear()
   load()
   startPolling()
 })

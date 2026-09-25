@@ -40,9 +40,37 @@ export function normalizeSignalList(payload) {
     .sort((a, b) => String(b.created_at ?? '').localeCompare(String(a.created_at ?? '')))
 }
 
-/** A decision this page recorded is final; a poll that raced it must not re-add the card. */
-export function withoutDecided(signals, decidedIds) {
-  return signals.filter(s => !decidedIds.has(s.id))
+/**
+ * FW-api-I2: the hide a decision's 2xx puts on its card. It covers only the
+ * race with a poll that was already in flight when the 2xx arrived, whose
+ * answer can predate the decision. The hide ends as soon as either
+ *  - a poll that began after the 2xx answers (its answer is authoritative), or
+ *  - a poll returns the id with a non-pending status (`nonPendingIds`).
+ * After that the server's status governs, so a signal the broker puts back
+ * to pending (no quote before the open, an unreadable book) shows again.
+ *
+ * beginLoad() is called as each load starts and returns its generation;
+ * apply(generation, pendingRows, nonPendingIds) filters that load's answer.
+ */
+export function createDecisionLatch() {
+  let generation = 0
+  const hidden = new Map()          // id -> the generation last started when its 2xx arrived
+  return {
+    beginLoad() {
+      generation += 1
+      return generation
+    },
+    record(id) { hidden.set(id, generation) },
+    has(id) { return hidden.has(id) },
+    clear() { hidden.clear() },
+    apply(loadGeneration, pendingRows, nonPendingIds = []) {
+      const seen = new Set(nonPendingIds)
+      for (const [id, at] of [...hidden]) {
+        if (loadGeneration > at || seen.has(id)) hidden.delete(id)
+      }
+      return pendingRows.filter(s => !hidden.has(s.id))
+    },
+  }
 }
 
 export function scoreTone(score) {

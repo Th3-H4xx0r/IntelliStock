@@ -6,6 +6,7 @@ import {
   classifyDecisionFailure,
   classifyDecisionSuccess,
   confirmPrompt,
+  createDecisionLatch,
   createInFlightGuard,
   decisionSuccessMessage,
   decisionsFor,
@@ -19,7 +20,6 @@ import {
   reasoningPreview,
   scoreTone,
   swingLanesOf,
-  withoutDecided,
 } from '../src/utils/swing.js'
 
 const SWING = {
@@ -56,9 +56,6 @@ test('normalizeSignalList accepts a bare list or {signals}, keeps pending only, 
   assert.deepEqual(normalizeSignalList({ detail: 'nope' }), [])
 })
 
-test('withoutDecided drops ids this page already decided, so a poll cannot resurrect a card', () => {
-  assert.deepEqual(withoutDecided([SWING, WHEEL], new Set(['a1'])).map(s => s.id), ['w1'])
-})
 
 test('scoreTone bands', () => {
   assert.equal(scoreTone(80), 'high')
@@ -239,4 +236,52 @@ test('classifyDecisionFailure: a 503 keeps the card and says it was not queued',
   const server = classifyDecisionFailure(503, 'the approval was not queued for the broker (x); the signal is pending again — not queued, try again')
   assert.match(server.message, /not queued, try again$/)
   assert.doesNotMatch(v.message, /manually/)
+})
+
+// -- FW-api-I2: the local hide covers only the race with an in-flight poll -------------
+
+test('a poll already in flight when the decision landed cannot resurrect the card', () => {
+  const latch = createDecisionLatch()
+  const racing = latch.beginLoad()          // the poll starts...
+  latch.record('a1')                        // ...the approval's 2xx arrives...
+  // ...and the poll answers with the server's pre-decision view.
+  assert.deepEqual(latch.apply(racing, [SWING, WHEEL]).map(s => s.id), ['w1'])
+  assert.equal(latch.has('a1'), true)
+})
+
+test('a poll that began after the decision governs: a broker reset to pending shows again', () => {
+  const latch = createDecisionLatch()
+  latch.beginLoad()
+  latch.record('a1')
+  // The broker had no quote pre-open and put a1 back to pending; the next poll
+  // started after the 2xx, so the server's answer stands.
+  const next = latch.beginLoad()
+  assert.deepEqual(latch.apply(next, [SWING, WHEEL]).map(s => s.id), ['a1', 'w1'])
+  assert.equal(latch.has('a1'), false)
+})
+
+test('a poll that returns the id with a non-pending status ends the hide at once', () => {
+  const latch = createDecisionLatch()
+  const racing = latch.beginLoad()
+  latch.record('a1')
+  // The racing poll saw a1 approved (the approved lists), so the hide is done ...
+  assert.deepEqual(latch.apply(racing, [WHEEL], ['a1']).map(s => s.id), ['w1'])
+  assert.equal(latch.has('a1'), false)
+  // ... and from then on the server's pending rows show, whichever poll brings them.
+  assert.deepEqual(latch.apply(racing, [SWING]).map(s => s.id), ['a1'])
+})
+
+test('a decision recorded before any load began is hidden only from no load at all', () => {
+  const latch = createDecisionLatch()
+  latch.record('a1')                        // generation 0: nothing is in flight
+  const first = latch.beginLoad()
+  assert.deepEqual(latch.apply(first, [SWING]).map(s => s.id), ['a1'])
+})
+
+test('clear() drops every hide (instance switch)', () => {
+  const latch = createDecisionLatch()
+  const gen = latch.beginLoad()
+  latch.record('a1')
+  latch.clear()
+  assert.deepEqual(latch.apply(gen, [SWING]).map(s => s.id), ['a1'])
 })

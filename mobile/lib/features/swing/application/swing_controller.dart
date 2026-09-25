@@ -72,7 +72,8 @@ String decisionUncertainMessage(SwingSignal s) =>
 // ── Pending signals (polled) ─────────────────────────────────────────────────
 
 enum DecisionOutcome {
-  /// The server recorded it; the card is gone for good.
+  /// The server recorded it; the card goes. It comes back only if the
+  /// broker puts the signal back to pending (FW-api-I2).
   recorded,
 
   /// 202 (FW-api-I1): the approval is recorded but the broker command may or
@@ -134,9 +135,18 @@ class PendingSignalsNotifier
 
   IntervalPoller? _poller;
 
-  /// Ids this device decided. A poll that raced the decision must not bring
-  /// the card back.
-  final Set<String> _decided = <String>{};
+  /// FW-api-I2. Each fetch takes a generation as it starts. A decision's 2xx
+  /// hides its card from fetches that were already in flight when it arrived
+  /// (their answer can predate it): id -> the newest generation started then.
+  /// The hide ends when a fetch begun after the 2xx answers, or when a fetch
+  /// returns the id with a non-pending status; the server governs after
+  /// that, so a signal the broker puts back to pending shows again.
+  final Map<String, int> _hidden = <String, int>{};
+  int _generation = 0;
+
+  /// The newest generation whose answer is on screen: an older fetch that
+  /// lands after it is dropped, not applied over it.
+  int _applied = 0;
 
   @override
   Future<PendingSignalsState> build(String arg) async {
@@ -149,9 +159,14 @@ class PendingSignalsNotifier
       _poller?.dispose();
     });
 
+    // The notifier survives ref.invalidate (riverpod 2.6.1), so pull-to-
+    // refresh lands here with the old hides: it clears them (FW-api-I2).
+    _hidden.clear();
     final lifecycle = ref.read(appLifecycleProvider);
+    final generation = ++_generation;
     final rows = await ref.read(swingRepositoryProvider).pendingSignals(arg);
-    if (disposed) return PendingSignalsState(signals: _visible(rows));
+    if (generation > _applied) _applied = generation;
+    if (disposed) return PendingSignalsState(signals: _visible(generation, rows));
 
     _poller?.dispose();
     _poller = IntervalPoller(fetch: refresh, interval: () => pollEvery);
@@ -167,19 +182,28 @@ class PendingSignalsNotifier
         _poller?.pause();
       }
     });
-    return PendingSignalsState(signals: _visible(rows));
+    return PendingSignalsState(signals: _visible(generation, rows));
   }
 
-  List<SwingSignal> _visible(List<SwingSignal> rows) =>
-      rows.where((s) => !_decided.contains(s.id)).toList();
+  /// [rows] are the pending rows of the fetch that took [generation];
+  /// [nonPending] the ids it saw with another status.
+  List<SwingSignal> _visible(int generation, List<SwingSignal> rows,
+      {Iterable<String> nonPending = const []}) {
+    final seen = nonPending.toSet();
+    _hidden.removeWhere((id, at) => generation > at || seen.contains(id));
+    return rows.where((s) => !_hidden.containsKey(s.id)).toList();
+  }
 
   /// One poll cycle. A failure keeps the last good list and says so.
   Future<void> refresh() async {
+    final generation = ++_generation;
     try {
       final rows = await ref.read(swingRepositoryProvider).pendingSignals(arg);
+      if (generation < _applied) return;
+      _applied = generation;
       final current = state.valueOrNull ?? const PendingSignalsState();
-      state = AsyncData(
-          current.copyWith(signals: _visible(rows), clearRefreshError: true));
+      state = AsyncData(current.copyWith(
+          signals: _visible(generation, rows), clearRefreshError: true));
     } catch (err) {
       final current = state.valueOrNull;
       if (current == null) return;
@@ -195,7 +219,7 @@ class PendingSignalsNotifier
     final current = state.valueOrNull;
     if (current == null ||
         current.deciding.contains(signal.id) ||
-        _decided.contains(signal.id)) {
+        _hidden.containsKey(signal.id)) {
       return const DecisionResult(DecisionOutcome.ignored, '');
     }
     state = AsyncData(
@@ -204,7 +228,7 @@ class PendingSignalsNotifier
       final receipt = await ref
           .read(swingRepositoryProvider)
           .decide(arg, signal.id, decision, reason: reason);
-      _decided.add(signal.id);
+      _hidden[signal.id] = _generation;
       _drop(signal.id);
       if (receipt.uncertain) {
         return DecisionResult(
