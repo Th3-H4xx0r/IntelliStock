@@ -221,7 +221,7 @@ def update_signal(signal_id: str, patch: dict) -> None
 
 ## 7. Engine hooks for approvals (live)
 
-The `LiveCommands` type `submit_order` payload is `{"source": "swing_approval", "signal_id": str}`. The broker handler loads the signal, calls `swing_trader.approvals.build_approved_order(...)`, builds an `OrderIntent` (equity bracket or option), submits it through the `LiveOrderService`, then writes `status` `"submitted"` or `"failed"` and `order_client_id` back onto the signal.
+The `LiveCommands` type `submit_order` payload is `{"source": "swing_approval", "signal_id": str}`. The broker handler loads the signal, calls `swing_trader.approvals.build_approved_order(...)`, builds an `OrderIntent` (equity bracket or option), submits it through the `LiveOrderService`, then writes `status` `"submitted"` or `"failed"` and `order_client_id` back onto the signal. Section 10 item 17 gives the full write-back as built, including `submitted_order` and the reset to `pending` on a transient failure.
 
 ## 8. Strategy ids and configuration
 
@@ -270,7 +270,7 @@ The `LiveCommands` type `submit_order` payload is `{"source": "swing_approval", 
 
 ## 10. Additions from plan A-live
 
-Copied from plan A-live's "Contract additions" (Task 1 Step 0). Three items carry the controller's pre-flight rulings of 2026-09-24, marked **Ruling F1**, **Ruling F4** and **Ruling F17**; everything else is verbatim.
+Copied from plan A-live's "Contract additions" (Task 1 Step 0). Three items carry the controller's pre-flight rulings of 2026-09-24, marked **Ruling F1**, **Ruling F4** and **Ruling F17**. Text marked **Drift (T16)** was added on 2026-09-25 to record what A-live built beyond the plan (Task 15 review, M-4). Everything else is verbatim.
 
 1. `OrderIntent.parent_client_order_id: Optional[str] = None` and `OrderIntent.broker_client_order_id: Optional[str] = None`. When `broker_client_order_id` is set, it IS the `idempotency_key`; the hash is not used. Only sources `bracket_leg` and `option_activity` may set it.
 2. Identity rules the contract left open:
@@ -306,7 +306,8 @@ Copied from plan A-live's "Contract additions" (Task 1 Step 0). Three items carr
     - `_engine_wheel_assignments`, a list of `{"activity_id", "contract", "underlying", "shares", "side", "strike", "date"}`. The wheel lane (plan B) reads this list to know which shares it owns. An entry is added, once per `activity_id`, whenever the assignment's lifecycle row is FILLED, so a replay after a lost cache lists it again; `side` is `"buy"` for a put and `"sell"` for a call.
     - The assignment is recorded through `record_external_fill` with source `option_activity`, Alpaca's activity id as `broker_order_id`, and the key `opasn-<sha256(activity id)[:32]>`.
     - The assignment notification goes through plan B's `swing_trader.notify.notify_wheel_assignment(instance_id, *, symbol=<underlying>, qty=<shares>, price=<strike>, date="YYYY-MM-DD")` when that module is importable, and through `notifications.notify(category="wheel_assignment", ...)` when it is not.
-14. For every option order that carries a `signal_id`, the engine writes `{"status": "submitted"|"failed", "order_client_id"}` back through `swing_trader.signals_store.update_signal`. This covers strategy-emitted orders, not only approvals.
+    - **Drift (T16).** `_engine_option_activity_owed`: a list of Alpaca activity ids whose one `wheel_assignment` notice is still owed, capped at the newest 500. An id joins it when the poll that recorded the assignment (`record_external_fill`) cannot read the lifecycle row back. The store read failed, so FILLED is unknown, never "not filled". That activity is held: the cursor does not move past it, it is not added to `seen`, and no notice is sent. The later poll that finds the row FILLED lists the assignment in `_engine_wheel_assignments`, sends the notice once, and drops the id. A poll that only re-reads a row it did not record never adds an id. The key is absent until an id is first owed. After that it is rewritten on every poll that reads activities, as `[]` when nothing is owed.
+14. For every option order that carries a `signal_id`, the engine writes `{"status": "submitted"|"failed", "order_client_id"}` back through `swing_trader.signals_store.update_signal`. This covers strategy-emitted orders, not only approvals. **Drift (T16):** a duplicate, and an outcome that is neither submitted nor a definite refusal, write nothing. The approval handler writes more than this; see item 17.
 15. Engine refusal note for plan B: the engine never retries an exit it deferred. That happens when a bracket-leg cancel did not confirm, or a sell floored to zero. **The swing lane must re-emit its RSI exit on later ticks while the position is still held.**
 16. Live-state position rows (interfaces section 9, item 4; the coordinator pinned this on 2026-09-24):
     - **Option rows** written by `broker.py`'s LiveState snapshot, and **every row** served by `live_broker_fetch`, carry `asset_class`, `side` (`"long"` or `"short"`), `multiplier` (100 for options, 1 for equities), `underlying`, `strike` and `expiry`. `qty` is signed. **Ruling F4:** option rows also carry `option_type` (`"put"` or `"call"`), so the UI reads the contract fields instead of parsing the OCC symbol.
@@ -316,6 +317,28 @@ Copied from plan A-live's "Contract additions" (Task 1 Step 0). Three items carr
     - `close_position` refuses option contracts with a clear message ("<symbol> is an option contract; option contracts are closed by buy-to-close, not close_position"): a contract in the adapter's option book, or any OCC-shaped symbol.
     - L5 additions. `live_broker_fetch` equity rows carry `option_type`, `underlying`, `strike` and `expiry` as `null`, so every served row has one key set. When Alpaca's positions cannot be read (the call raises, the answer is not a list, or an option row is unreadable) the fetch fails with `broker_fetch_error` = `"positions_unavailable: <cause>"` and serves no `positions`; the API then serves the container's row and marks the state `stale`. It is never an empty book (plan B G8a re-review: the wheel page must not read an outage as "no open puts"). An unreadable equity row is skipped as before.
     - L5 addition. During a positions outage the `broker.py` snapshot also carries each contract from the adapter's last-known option book, with `last_price`, `market_value`, `unrealized_pnl` and `unrealized_pnl_pct` set to `null`.
+17. **Drift (T16).** The approval handler `broker._execute_swing_approval` (section 7; A-live Task 15 and its fix rounds 1 and 1b) writes these patches through `signals_store.update_signal`. It first claims the signal `approved`/`approved_half` → `submitted` with a compare-and-swap (`signals_store.cas_signal`), before anything is sent. So every row below starts from `submitted`, a lost claim writes nothing, and a redelivered command cannot place a second order.
+    - **Accepted:** `{"status": "submitted", "order_client_id": <key>, "submitted_order": <order>}`.
+      - `<key>` is the key the service used, which can be an escalated retry key.
+      - `<order>` is the dict `approvals.build_approved_order` rebuilt at the live price (section 6): `equity_bracket` or `option`. Calibration scores the contract actually sold, because `swing_trader.calibration` reads `submitted_order.contract` before `proposal.contract`.
+    - **Outcome unknown:**
+      - The service answered without a broker reference: it writes `{"order_client_id": <key>, "submitted_order": <order>}`.
+      - `enqueue` raised: it writes `{"submitted_order": <order>}` only. The command result carries the pre-submit key, because an escalated key cannot be known (M-5).
+      - In both cases the status stays `submitted`, a red line is logged, and the next reconcile resolves the order.
+    - **Transient failure:** it writes `{"status": "pending", "decided_by": None, "decided_at": None, "decision_reason": None}`. Nothing reached the broker, and the decision is undone so the operator can approve again.
+      - Transient means one of these:
+        - no live price for the symbol;
+        - the account equity read raised (`refresh_account`, when the adapter holds no equity);
+        - no usable options snapshot for the wheel contract;
+        - `approvals.BookUnreadable`;
+        - a gate refusal whose codes are ALL transient: any `dependency.*` code, `quote.stale`, `positions.stale`, `market.closed` and `market.regular_hours_required`.
+      - A transient code beside a lasting one is a definite failure; for example `market.closed` with `exposure.max_order_notional`. A gate refusal returns before the service creates a lifecycle record, so the re-approval places exactly one order.
+      - The command error and the `swing_approval_failed` notice (`notify_swing_approval_failed`) carry the reason `"<why> — approve again"`.
+        - `" after the open"` is appended for no live price, no options snapshot, and a gate code of `quote.stale`, `market.closed`, `market.regular_hours_required` or `dependency.quote.*`.
+        - For a gate refusal `<why>` is `"order gate blocked: <codes, comma-joined>"`. For the book it is `"broker order book unreadable"`.
+      - The notice is sent only when the reset was written (M-1). If the write fails, the handler logs red and the notice reads `"<why> — nothing was sent, and the signal could not be put back to pending"`.
+    - **Definite failure:** it writes `{"status": "failed", "order_client_id": <key, or None before the gate>}` and sends a `swing_approval_failed` notice. This covers an unknown or disabled lane, a rebuild error and a refused bracket. It also covers every other refusal the service reports: risk caps, `idempotency.*` duplicates, and a broker refusal, which the service returns as the gate code `broker.rejected.<exception>`.
+    - **Unreadable signal:** it is read three times about 1 s apart. If every read fails, the handler writes nothing, logs red and sends a notice naming the signal id. The signal still reads `approved`.
 
 ## 11. Additions from plan B
 
@@ -325,7 +348,7 @@ Copied from plan A-live's "Contract additions" (Task 1 Step 0). Three items carr
 - Swing strategy-cache key `_swing_pending_exits` (`{symbol: {"reason", "intent", "since"}}`): an emitted exit is re-emitted on every later tick while the stock is held with no working non-bracket sell (answers A-live addition 15).
 - Option order dict key `"session": "YYYY-MM-DD"`, informational (A-live keys option sells on the session itself).
 - The wheel lane reads `_engine_wheel_assignments` (A-live addition 13) from its strategy cache: only assigned shares are covered-call candidates.
-- `SwingSignals` may carry `score: None` (AI gate off), `context: dict`, and `error` on a `failed` row the lane wrote (A-live's approval handler writes only `status` and `order_client_id`).
+- `SwingSignals` may carry `score: None` (AI gate off), `context: dict`, and `error` on a `failed` row the lane wrote. **Drift (T16):** A-live's approval handler never writes `error`. It writes `status`, `order_client_id` and `submitted_order` (the rebuilt order dict), or it resets `status` to `pending` and clears `decided_by`, `decided_at` and `decision_reason` on a transient failure (section 10 item 17).
 - `swing_trader.signals_store`: `signal_id_for(instance_id, lane, session, symbol) -> str`, `new_signal(**fields) -> dict`, `cas_signal(signal_id, *, expect_status, doc) -> bool`, `swing_owned_symbols(instance_id, held) -> set[str]`, `insert_wheel_scan(row) -> str`, `list_wheel_scans(instance_id, limit=50) -> list[dict]`, `all_signals(instance_id) -> list[dict]`, `ensure_tables() -> None`, `OPEN_STATUSES`.
 - `swing_trader.approvals.SignalConflict(ValueError)`: a decision on a signal that is not pending; `_run` maps it to 400 per §9 item 2. A click that lost the compare-and-swap: `interactive_utils.SwingDecisionRaceError` → 409. An approval that cannot reach the broker, or an unreadable wheel book: `interactive_utils.SwingBrokerUnavailableError` → 503, and the signal stays pending. Unknown or foreign signal id: `LookupError` → 404.
 - `swing_trader.account`: read-only book views shared by both lanes (`equity_positions`, `option_symbols`, `live_equity`, `live_buying_power`, `option_positions`, `open_orders`, `account_options`, `spendable`, `pending_symbols`, `entry_price_from_trades`).
