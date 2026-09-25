@@ -10629,6 +10629,267 @@ def _wheel_options_refusal(adapter, cached_strategies, *, log=None, alert=None):
     return refusal
 
 
+def _lane_config(cached_strategies, lane) -> dict:
+    """The settings of the first ENABLED spec for ``lane`` (a key of
+    ``_LANE_ENABLE_FLAGS``), or {} when the document has none: the lane's
+    header defaults (swing_trader.constants SWING_DEFAULTS / WHEEL_DEFAULTS),
+    then `conditions`, then `config`. An approval rebuilds its order from
+    this, so a key the document leaves out reads the lane's own default."""
+    import copy
+
+    flag = _LANE_ENABLE_FLAGS.get(str(lane or "").strip().lower())
+    if flag is None:
+        return {}
+    for spec in (cached_strategies or []):
+        try:
+            name = str((spec or {}).get("strategy", "")).strip().lower()
+            if _LANE_ENABLE_FLAGS.get(name) != flag:
+                continue
+            merged = _merged_strategy_settings(spec)
+            if not _truthy(merged.get(flag, False)):
+                continue
+        except Exception:
+            continue
+        cfg = {}
+        try:
+            from swing_trader import constants as _swing_constants
+            defaults = {
+                "strategy_swing_enabled": _swing_constants.SWING_DEFAULTS,
+                "strategy_wheel_enabled": _swing_constants.WHEEL_DEFAULTS,
+            }.get(flag) or {}
+            cfg.update(copy.deepcopy(dict(defaults)))
+        except Exception:
+            pass
+        cfg.update(merged)
+        return cfg
+    return {}
+
+
+def _approval_live_price(adapter, symbol):
+    """(price, quote_at) for an approval, fresh: a REST quote mark first (the
+    gate trusts that source), then the IEX latest trade. None when neither."""
+    wanted = str(symbol or "").strip().upper()
+    if not wanted:
+        return None
+    try:
+        adapter.fetch_rest_quote_marks([wanted])
+    except Exception:
+        pass
+    book = getattr(adapter, "_market_marks", None)
+    mark = book.get(wanted) if book is not None else None
+    if mark is not None and float(getattr(mark, "price", 0) or 0) > 0:
+        return float(mark.price), mark.observed_at
+    try:
+        trades = adapter.get_latest_trades([wanted]) or {}
+    except Exception:
+        return None
+    hit = trades.get(wanted)
+    if not hit:
+        return None
+    price, stamp = hit
+    try:
+        stamp_dt = datetime.datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if stamp_dt.tzinfo is None:
+        stamp_dt = stamp_dt.replace(tzinfo=datetime.timezone.utc)
+    return float(price), stamp_dt
+
+
+def _execute_swing_approval(adapter, payload, order_service, *,
+                            cached_strategies=None, now_utc=None, log=None):
+    """A LiveCommands submit_order carrying {"source": "swing_approval",
+    "signal_id"} (spec 6.1 broker item 9; interfaces doc section 7).
+
+    Only an approved (or approved_half) signal of this instance is placed.
+    It is claimed approved -> submitted with a compare-and-swap BEFORE
+    anything is sent (plan B G8a), so a redelivered command, or a
+    re-approval after the route reverted an enqueue, can never place a
+    second order; a lost claim places and writes nothing. The order is then
+    rebuilt at the live price by swing_trader.approvals (stop, target and
+    shares for swing; expiry and strike for the wheel, spec section 9 fix 2)
+    from the lane's config with its defaults, built as a MANUAL-source
+    bracket or option intent by the live loop's own builders, and sent
+    through the unified order service.
+
+    Write-back (A-live ledger rulings):
+    - accepted: status submitted, order_client_id = the key the service used
+      (it can escalate a spent identity), submitted_order = the rebuilt order
+      (plan B G5), so calibration scores the contract actually sold;
+    - approvals.BookUnreadable (a transient broker read): back to pending,
+      decision cleared, so the operator can approve again (plan B G5 review);
+    - any other definite failure (lane, price, rebuild, intent, gate or
+      broker refusal): failed; and every failure the operator did not cause
+      is sent as swing_approval_failed (plan C final review P1);
+    - an unknown submit outcome (the service raised, or answered without a
+      broker reference) stays submitted with a red log line, never failed:
+      the service can raise after the broker accepted, and the next
+      reconcile resolves it (L4).
+    """
+    from zoneinfo import ZoneInfo
+    from live_orders import OrderSource
+
+    def say(message, color="white"):
+        if log is not None:
+            try:
+                log(message, color)
+            except Exception:
+                pass
+
+    signal_id = str((payload or {}).get("signal_id") or "").strip()
+    if not signal_id:
+        return (False, "swing_approval requires signal_id", {})
+    if order_service is None:
+        return (False, "unified live order service unavailable", {})
+    try:
+        from swing_trader import approvals, signals_store
+    except Exception as exc:
+        return (False, f"swing_trader unavailable: {type(exc).__name__}: {exc}", {})
+    signal = signals_store.get_signal(signal_id)
+    if not signal:
+        return (False, f"unknown signal {signal_id}", {})
+    owner = str(order_service.instance_id)
+    if str(signal.get("instance_id") or "") != owner:
+        return (False, f"signal {signal_id} belongs to another instance", {})
+    status = str(signal.get("status") or "")
+    if status not in ("approved", "approved_half"):
+        say(f"[swing] approval {signal_id} ignored: it is {status or 'unset'}, "
+            "not approved", "yellow")
+        return (False, f"signal {signal_id} is {status or 'unset'}, not approved", {})
+    lane = str(signal.get("lane") or "").strip().lower()
+    symbol = str(signal.get("symbol") or "").strip().upper()
+    label = f"[swing] approval {signal_id} ({lane or '?'} {symbol or '?'})"
+
+    def tell(reason):
+        try:
+            from swing_trader.notify import notify_swing_approval_failed
+            notify_swing_approval_failed(owner, symbol=symbol, lane=lane,
+                                         reason=reason)
+        except Exception as exc:
+            say(f"{label}: the failure notice was not sent "
+                f"({type(exc).__name__}: {exc})", "yellow")
+
+    def write(patch):
+        try:
+            signals_store.update_signal(signal_id, patch)
+        except Exception as exc:
+            say(f"{label}: signal write-back {patch} failed "
+                f"({type(exc).__name__}: {exc})", "red")
+
+    claimed = dict(signal)
+    claimed["status"] = "submitted"
+    try:
+        won = signals_store.cas_signal(signal_id, expect_status=status, doc=claimed)
+    except Exception as exc:
+        say(f"{label}: the claim could not be written ({type(exc).__name__}: "
+            f"{exc}); nothing placed", "red")
+        tell(f"the approval could not be claimed ({type(exc).__name__}); "
+             "nothing was sent")
+        return (False, f"signal {signal_id} could not be claimed: "
+                       f"{type(exc).__name__}: {exc}", {})
+    if not won:
+        say(f"{label}: another command claimed it first; nothing placed", "yellow")
+        return (False, f"signal {signal_id} was claimed by another command; "
+                       "nothing placed", {})
+
+    def failed(error, reason, key=None, result=None):
+        write({"status": "failed", "order_client_id": key})
+        say(f"{label} FAILED: {error}", "red")
+        tell(reason)
+        return (False, error, result or {})
+
+    now_utc = now_utc or datetime.datetime.now(datetime.timezone.utc)
+    try:
+        lane_name = {"swing": "strategy_swing", "wheel": "strategy_wheel"}.get(lane)
+        if lane_name is None:
+            raise ValueError(f"unknown lane {signal.get('lane')!r}")
+        specs = cached_strategies
+        if specs is None:
+            # The command thread starts before the live loop caches the
+            # strategy document; an approval queued across a restart reads it.
+            loader = globals().get("load_strategies_from_db")
+            specs = loader()[0] if loader is not None else None
+        cfg = _lane_config(specs, lane_name)
+        if not cfg:
+            raise ValueError(f"the {lane_name} lane is not enabled on this document")
+        live = _approval_live_price(adapter, symbol)
+        if live is None:
+            raise ValueError(f"no live price for {symbol}")
+        live_price, quote_at = live
+        equity = getattr(adapter, "_account_equity", None)
+        if equity is None:
+            equity = adapter.refresh_account().equity
+        with _live_order_dependency_lock:
+            risk_id = str(_live_order_dependency_state.get("risk_snapshot_id")
+                          or "risk:unavailable")
+        order = approvals.build_approved_order(
+            signal, live_price=float(live_price), equity=float(equity), cfg=cfg,
+            adapter=adapter,
+            today=now_utc.astimezone(ZoneInfo("America/New_York")).date())
+        kind = str((order or {}).get("kind") or "")
+        if kind == "equity_bracket":
+            intent = _build_bracket_intent(
+                order_service, symbol=str(order["symbol"]).strip().upper(),
+                price=live_price, decision_at=now_utc, quantity=order["qty"],
+                bracket={"take_profit_price": order["take_profit_price"],
+                         "stop_loss_price": order["stop_loss_price"]},
+                risk_snapshot_id=risk_id, quote_at=quote_at,
+                source=OrderSource.MANUAL, reason=f"swing_approval:{signal_id}")
+        elif kind == "option":
+            quote = _refresh_option_quote(adapter, order.get("contract"), now_utc)
+            if quote is None:
+                raise ValueError(
+                    f"no usable options snapshot for {order.get('contract')}")
+            intent = _build_option_intent(
+                order_service, order, quote_at=quote["quote_at"],
+                decision_at=now_utc, risk_snapshot_id=risk_id,
+                source=OrderSource.MANUAL)
+        else:
+            raise ValueError(f"unknown approved order kind {kind!r}")
+    except Exception as exc:
+        unreadable = getattr(approvals, "BookUnreadable", None)
+        if isinstance(unreadable, type) and isinstance(exc, unreadable):
+            reason = "broker order book unreadable — approve again"
+            write({"status": "pending", "decided_by": None, "decided_at": None,
+                   "decision_reason": None})
+            say(f"{label} put back to pending: {exc}", "yellow")
+            tell(reason)
+            return (False, f"{reason} ({exc})", {})
+        return failed(f"swing approval failed: {type(exc).__name__}: {exc}",
+                      str(exc) or type(exc).__name__)
+
+    try:
+        submission = order_service.enqueue(intent)
+    except Exception as exc:
+        write({"submitted_order": order})
+        say(f"{label}: submit raised {type(exc).__name__}: {exc}; the outcome "
+            f"is unknown, the signal stays submitted and the next reconcile "
+            f"resolves {intent.idempotency_key}", "red")
+        return (False, f"order outcome unknown ({type(exc).__name__}: {exc}); "
+                       "the next reconcile resolves it",
+                {"signal_id": signal_id, "client_order_id": intent.idempotency_key})
+    key = str(getattr(submission.decision, "idempotency_key", "")
+              or intent.idempotency_key)
+    codes = [str(code) for code in submission.decision.reason_codes]
+    result = {
+        "signal_id": signal_id,
+        "client_order_id": key,
+        "order_id": getattr(submission.reference, "broker_order_id", None),
+        "reason_codes": codes,
+    }
+    if not submission.decision.allowed:
+        error = "order gate blocked: " + ",".join(codes)
+        return failed(error, error, key=key, result=result)
+    if not submission.accepted:
+        write({"order_client_id": key, "submitted_order": order})
+        say(f"{label}: outcome unknown ({','.join(codes) or 'transport'}); the "
+            f"signal stays submitted and the next reconcile resolves {key}", "red")
+        return (False, "order outcome unknown; the next reconcile resolves it", result)
+    write({"status": "submitted", "order_client_id": key, "submitted_order": order})
+    say(f"{label} submitted ({key})", "green")
+    return (True, "", result)
+
+
 def _live_order_dependency_snapshot(adapter, intent):
     """Build a cache-only dependency view for the pure stock order gate."""
     # swing-port: an option intent gets the options view (collateral, regular
@@ -11134,6 +11395,15 @@ def _execute_live_command(adapter, cmd: dict, order_service=None) -> tuple[bool,
                 "client_order_id": intent.idempotency_key,
                 "last_price": price,
             })
+
+        if ctype == "submit_order" and str(payload.get("source") or "") == "swing_approval":
+            # swing-port (spec 6.1 broker item 9; interfaces doc section 7):
+            # an operator approval from web or iOS. Nothing else sends this
+            # source, so every other submit_order takes the manual path below.
+            return _execute_swing_approval(
+                adapter, payload, order_service,
+                cached_strategies=globals().get("_cached_strategies"),
+                log=globals().get("_log"))
 
         if ctype == "submit_order":
             symbol = str(payload.get("symbol") or "").strip().upper()
