@@ -215,6 +215,35 @@ def test_live_prices_prefers_the_adapter_and_falls_back(monkeypatch):
     assert market_data.live_prices(["AAA"], adapter=Broken(), now=now) == {"AAA": 50.0}
 
 
+# -- fix (G2-I1): a naive clock or an unparseable trade time is never fresh ---
+
+def test_a_naive_now_is_read_as_utc_and_still_judges_staleness():
+    now_naive = datetime(2026, 7, 7, 15, 0)                     # 11:00 ET as naive UTC
+    old = datetime(2026, 7, 7, 14, 40, tzinfo=timezone.utc)     # 20 min before
+    fresh = datetime(2026, 7, 7, 14, 58, tzinfo=timezone.utc)   # 2 min before
+    assert market_data._is_stale(old, now_naive) is True
+    assert market_data._is_stale(fresh, now_naive) is False
+    assert market_data.fresh_trade_price(210.0, old.isoformat(), now=now_naive) is None
+    assert market_data.fresh_trade_price(210.0, fresh.isoformat(), now=now_naive) == 210.0
+
+
+def test_an_unparseable_or_missing_trade_time_counts_as_stale():
+    in_hours = datetime(2026, 7, 7, 15, 0, tzinfo=timezone.utc)   # 11:00 ET
+    at_night = datetime(2026, 7, 7, 23, 0, tzinfo=timezone.utc)   # 19:00 ET
+    for now in (in_hours, at_night):
+        assert market_data._is_stale("garbage", now) is True
+        assert market_data._is_stale(None, now) is True
+        assert market_data.fresh_trade_price(210.0, "garbage", now=now) is None
+        assert market_data.fresh_trade_price(210.0, None, now=now) is None
+
+
+def test_an_iex_print_without_a_time_falls_back_to_yfinance(monkeypatch):
+    monkeypatch.setattr(market_data, "yf", _yf_price(99.0))
+    now = datetime(2026, 7, 7, 15, 0, tzinfo=timezone.utc)
+    blank = FakeClient(responses=[{"AAPL": FakeTrade(210.0, None)}])
+    assert market_data.fetch_live_price("AAPL", client=blank, now=now) == 99.0
+
+
 # -- engine bars -> ST frames (backtest) --------------------------------------
 
 def _daily(day, c, o=None, h=None, lo=None, v=1000.0):

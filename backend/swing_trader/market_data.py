@@ -172,19 +172,26 @@ def get_latest_price(symbol: str, *, client):
 
 
 def _is_stale(ts, now) -> bool:
-    """app.py:688-697: stale only during market hours and older than 10 min."""
+    """app.py:688-697: stale only during market hours and older than 10 min.
+
+    fix (G2-I1): a naive `now` is read as UTC (clock.as_utc) instead of making
+    the age subtraction raise into a swallowed "fresh", and a missing or
+    unparseable trade time is stale at any hour — its age cannot be judged."""
     try:
-        now_utc = now or datetime.now(timezone.utc)
+        now_utc = clock.as_utc(now) or datetime.now(timezone.utc)  # fix (G2-I1)
+        ts_utc = clock.as_utc(ts)  # fix (G2-I1)
+        if ts_utc is None:  # fix (G2-I1): no readable trade time is never fresh
+            return True
         now_et = now_utc.astimezone(clock.NY)
         market_open = (
             now_et.weekday() < 5
             and (now_et.hour, now_et.minute) >= (9, 30)
             and now_et.hour < 16
         )
-        age = (now_utc - clock.as_utc(ts)).total_seconds()
+        age = (now_utc - ts_utc).total_seconds()
         return market_open and age > STALE_TRADE_SECONDS
     except Exception:
-        return False
+        return True  # fix (G2-I1): an error judging the age is not "fresh"
 
 
 def yf_last_price(symbol: str):
@@ -205,7 +212,7 @@ def fetch_live_price(symbol: str, *, client, now=None):
     """
     price, ts = get_latest_trade(symbol, client=client)
     if price is not None:
-        if ts is None or not _is_stale(ts, now):
+        if not _is_stale(ts, now):  # fix (G2-I1): a print with no time is stale
             return price
         _log(f"  [live-price] {symbol}: IEX trade is stale — falling back to yfinance")
     return yf_last_price(symbol)
@@ -213,14 +220,15 @@ def fetch_live_price(symbol: str, *, client, now=None):
 
 def fresh_trade_price(price, ts, *, now=None):
     """A (price, timestamp) pair from the broker adapter, or None when it is
-    missing, non-positive or stale by the rule above."""
+    missing, non-positive or stale by the rule above (a missing or
+    unparseable timestamp is stale — fix (G2-I1))."""
     try:
         p = float(price)
     except (TypeError, ValueError):
         return None
     if not math.isfinite(p) or p <= 0:
         return None
-    if ts is not None and _is_stale(ts, now):
+    if _is_stale(ts, now):  # fix (G2-I1): was skipped when ts was None
         return None
     return p
 
