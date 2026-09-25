@@ -1014,3 +1014,73 @@ def test_a_control_re_read_that_raises_is_transient_and_places_nothing(swing):
     assert error == ("the order gate's controls could not be re-read — approve "
                      "again (ConnectionError: pg down)")
     assert swing.updates == [("sig-1", _PENDING)]
+
+
+# --- FW-lo-I2 + T15 re-review: more transient codes ----------------------------
+
+@pytest.mark.parametrize("codes,after_the_open", [
+    # The mark stream or the 3 s position refresh rewrote the mark between
+    # the approval's price read and the gate's (a pure race).
+    (("quote.timestamp_mismatch",), False),
+    (("quote.reference_price_mismatch",), False),
+    # The tick rotated the risk snapshot between the build and the gate.
+    (("risk.snapshot_mismatch",), False),
+    (("quote.timestamp_mismatch", "quote.reference_price_mismatch",
+      "risk.snapshot_mismatch"), False),
+    (("quote.timestamp_mismatch", "dependency.cash.stale"), False),
+    (("quote.reference_price_mismatch", "quote.stale"), True),
+    (("risk.snapshot_mismatch", "market.regular_hours_required"), True),
+])
+def test_a_race_refusal_returns_the_signal_to_pending(swing, codes, after_the_open):
+    swing.rows["sig-1"] = _signal()
+    service, (ok, error, result) = _run(swing, _Service("deny", swing, codes))
+    reason = ("order gate blocked: " + ",".join(codes) + " — approve again"
+              + (" after the open" if after_the_open else ""))
+    assert ok is False and error == reason
+    assert swing.updates == [("sig-1", _PENDING)]
+    assert swing.notices[0]["reason"] == reason
+
+
+@pytest.mark.parametrize("codes", [
+    ("quote.timestamp_mismatch", "exposure.max_order_notional"),
+    ("risk.snapshot_mismatch", "cash.insufficient"),
+    ("quote.reference_price_mismatch", "idempotency.open_order_exists"),
+    ("quote.symbol_mismatch",),
+    ("quote.invalid_price",),
+])
+def test_a_race_code_beside_a_lasting_code_stays_failed(swing, codes):
+    swing.rows["sig-1"] = _signal()
+    service, (ok, error, _result) = _run(swing, _Service("deny", swing, codes))
+    (intent,) = service.intents
+    assert ok is False and error == "order gate blocked: " + ",".join(codes)
+    assert swing.updates == [("sig-1", {"status": "failed",
+                                        "order_client_id": intent.idempotency_key})]
+
+
+class _NoEquityAdapter(_Adapter):
+    def refresh_account(self):
+        return SimpleNamespace(equity=None)
+
+
+def test_a_refreshed_account_with_no_equity_is_transient(swing):
+    swing.rows["sig-1"] = _signal()
+    service, (ok, error, _result) = _run(swing, adapter=_NoEquityAdapter(equity=None))
+    reason = "account equity unreadable (the broker returned none) — approve again"
+    assert ok is False and error == reason and service.intents == []
+    assert swing.updates == [("sig-1", _PENDING)]
+    assert swing.built == []
+
+
+def test_a_reset_that_did_not_land_never_tells_the_command_approve_again(swing):
+    """The command's error (the LiveCommands row the UI shows) says what the
+    notice says: nothing was sent, and the signal may still read submitted."""
+    swing.rows["sig-1"] = _signal()
+    swing.update_raises_for = "pending"
+    _service, (ok, error, _result) = _run(swing, _Service("deny", swing,
+                                                           ("quote.stale",)))
+    assert ok is False
+    assert "approve again" not in error
+    assert error.startswith("order gate blocked: quote.stale — nothing was sent")
+    assert "could not be put back to pending" in error
+    ((notice),) = swing.notices
+    assert "approve again" not in notice["reason"]

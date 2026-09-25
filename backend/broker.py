@@ -11043,20 +11043,30 @@ def _execute_swing_approval(adapter, payload, order_service, *,
                 + (f" ({detail})" if detail else ""), "yellow")
             tell(reason)
         else:
-            # M-1: never "approve again" when the reset did not land.
+            # M-1: never "approve again" when the reset did not land -- in
+            # the notice nor in the command's error (fix wave FW1 item 3).
+            reason = (f"{why} — nothing was sent, and the signal could not be "
+                      "put back to pending (it may still read submitted)")
             say(f"{label}: {why}; nothing placed, and the signal could not be "
                 "put back to pending (it may still read submitted)", "red")
-            tell(f"{why} — nothing was sent, and the signal could not be put "
-                 "back to pending")
+            tell(reason)
         return (False, reason + (f" ({detail})" if detail else ""), result or {})
 
     # "Not now" gate codes (I-1; fix round 1b adds the market-hours two).
     after_open = ("quote.stale", "market.closed", "market.regular_hours_required")
+    # Fix wave FW1 item 3 (FW-lo-I2): pure races, also "not now". The mark
+    # stream or the 3 s position refresh rewrote the mark between the
+    # approval's price read and the gate's, or the tick rotated the risk
+    # snapshot between the build and the gate. Every gate refusal is decided
+    # before the service creates a lifecycle row, so re-arming is safe.
+    races = ("quote.timestamp_mismatch", "quote.reference_price_mismatch",
+             "risk.snapshot_mismatch")
 
     def all_transient(codes):
         return bool(codes) and all(
             code.startswith("dependency.")
-            or code in after_open or code == "positions.stale" for code in codes)
+            or code in after_open or code in races
+            or code == "positions.stale" for code in codes)
 
     now_utc = now_utc or datetime.datetime.now(datetime.timezone.utc)
     try:
@@ -11083,6 +11093,11 @@ def _execute_swing_approval(adapter, payload, order_service, *,
             except Exception as exc:
                 raise _Retryable(f"account equity unreadable "
                                  f"({type(exc).__name__}: {exc})") from exc
+            if equity is None:
+                # Fix wave FW1 item 3: a refresh that answered with no equity
+                # is as transient as one that raised.
+                raise _Retryable("account equity unreadable (the broker "
+                                 "returned none)")
         with _live_order_dependency_lock:
             risk_id = str(_live_order_dependency_state.get("risk_snapshot_id")
                           or "risk:unavailable")
