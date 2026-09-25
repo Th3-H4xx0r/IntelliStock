@@ -11178,8 +11178,13 @@ def _live_order_dependency_snapshot(adapter, intent):
 def _build_strategy_stock_intent(
         order_service, portfolio, *, symbol, decision, price, current_time,
         cash_to_use, sell_fraction, action_intents, is_risk_exit,
-        risk_snapshot_id, quote_at, bracket=None):
-    """Create the immutable intent for one normal/risk strategy emission."""
+        risk_snapshot_id, quote_at, bracket=None, next_open_sell=False):
+    """Create the immutable intent for one normal/risk strategy emission.
+
+    ``next_open_sell`` (swing-port fix wave, FW-str-I1): a swing exit is a
+    plain MARKET DAY sell, which Alpaca queues for the open (ST's exit), never
+    the extended-hours limit the session style makes before 09:30 ET. EB never
+    passes it."""
     from decimal import Decimal
     from live_orders import OrderIntent, OrderSide, OrderSource
     if bracket is not None and decision == 1:
@@ -11233,7 +11238,9 @@ def _build_strategy_stock_intent(
     # session. Honour defer here so the order is never created, rather than
     # created and then silently truncated.
     style = (
-        portfolio._order_style_for_now(
+        {"order_type": "market", "limit_price": None, "extended_hours": False}
+        if next_open_sell and side == "sell"
+        else portfolio._order_style_for_now(
             price, side, decision_at, quantity=float(quantity)
         )
         if hasattr(portfolio, "_order_style_for_now")
@@ -11366,7 +11373,7 @@ def _build_bracket_intent(
 
 
 def _cancel_bracket_legs_confirmed(adapter, order_service, symbol, *,
-                                   timeout_s=10.0, log=None):
+                                   timeout_s=10.0, log=None, cancelled=None):
     """Cancel every working bracket leg on ``symbol`` and wait for Alpaca to
     confirm (spec 6.1 broker item 4). True when nothing is left working and the
     sell may go; False defers the sell a tick.
@@ -11374,6 +11381,9 @@ def _cancel_bracket_legs_confirmed(adapter, order_service, symbol, *,
     Leg ids come from two places, because each can miss one: the lifecycle
     store (a held stop leg is not always listed as open) and the broker's
     open orders (a leg whose registration has not happened yet).
+
+    ``cancelled`` (a list) receives the leg ids whose cancel Alpaca confirmed,
+    so the caller knows the position has lost its stop.
     """
     from broker_adapters.base import is_bracket_child_order
     from live_orders import OrderSource
@@ -11421,7 +11431,97 @@ def _cancel_bracket_legs_confirmed(adapter, order_service, symbol, *,
     say(f"[swing] {wanted} bracket legs {leg_ids} cancel "
         f"{'confirmed' if confirmed else 'NOT confirmed; the sell waits a tick'}",
         "cyan" if confirmed else "yellow")
+    if confirmed and cancelled is not None:
+        cancelled.extend(leg_ids)
     return confirmed
+
+
+#: swing-port fix wave (FW-str-I1): the swing lane's exit intents
+#: (strategies/strategy_swing.py INTENT_EXIT). A re-sent pending exit carries
+#: its intent but not the fill_at_next_open hint.
+_SWING_EXIT_INTENTS = frozenset(
+    {"swing_rsi_exit", "swing_stop_exit", "swing_target_exit"})
+
+
+def _swing_next_open_exit(hint, intents) -> bool:
+    """True for a swing exit: its hint says fill_at_next_open (exactly True),
+    or its action intents name one of the lane's exits. EB's hints and
+    intents carry neither."""
+    if isinstance(hint, dict) and hint.get("fill_at_next_open") is True:
+        return True
+    try:
+        return bool(_SWING_EXIT_INTENTS & {str(i) for i in (intents or ())})
+    except TypeError:
+        return False
+
+
+def _swing_unprotected_alert(instance_id, symbol, detail):
+    """A swing exit that did not go out after its bracket legs were cancelled:
+    the position has no stop until the lane re-sends it. Priority 2 (URGENT),
+    through the lane's own sender. Never raises."""
+    try:
+        from swing_trader import notify as _swing_notify
+        _swing_notify.send(
+            "swing_exit", instance_id,
+            f"EXIT NOT PLACED — {symbol} has no stop",
+            f"{symbol}: the bracket legs were cancelled for an exit, and the "
+            f"exit sell did not go out ({detail}). The position is "
+            "UNPROTECTED; the lane re-sends the exit on the next tick. Check "
+            "open orders.", priority=2)
+    except Exception:
+        pass
+
+
+def _submit_swing_sell(adapter, order_service, intent, *, log=None,
+                       timeout_s=10.0):
+    """A SELL on a document with an enabled swing lane (FW-str-I1).
+
+    Its bracket legs are cancelled only once the gate has accepted the sell,
+    inside the service's before-submit hook, and only then is it sent: a sell
+    the gate refuses (a stale pre-market mark) leaves its stop working. Legs
+    that do not confirm cancelled raise "order deferred: ..." before anything
+    exists, exactly as the loop's pre-gate cancel used to. A sell that does not
+    go out after its legs were cancelled is a red line and a priority-2 alert;
+    the lane re-sends the exit on the next tick (strategy_swing._reemit_exits).
+    """
+    legs = []
+
+    def say(message, color="white"):
+        if log is not None:
+            try:
+                log(message, color)
+            except Exception:
+                pass
+
+    def cancel_legs(_intent, _decision):
+        if not _cancel_bracket_legs_confirmed(
+                adapter, order_service, intent.symbol, timeout_s=timeout_s,
+                log=log, cancelled=legs):
+            raise ValueError(
+                f"order deferred: {intent.symbol} bracket legs did not confirm "
+                f"cancelled within {float(timeout_s):.0f}s; the sell waits a tick")
+
+    def unprotected(detail):
+        say(f"[swing] {intent.symbol} exit NOT placed after its bracket legs "
+            f"{legs} were cancelled ({detail}): the position is UNPROTECTED "
+            "until the lane re-sends the exit next tick", "red")
+        _swing_unprotected_alert(
+            str(getattr(order_service, "instance_id", "") or ""),
+            intent.symbol, detail)
+
+    try:
+        submission = order_service.enqueue(intent, before_submit=cancel_legs)
+    except Exception as exc:
+        if legs:
+            unprotected(f"submit raised {type(exc).__name__}: {exc}")
+        raise
+    if legs and not submission.accepted:
+        codes = ",".join(submission.decision.reason_codes)
+        unprotected(
+            f"outcome unknown ({codes or 'transport'}); it may not have been "
+            "placed" if getattr(submission, "uncertain", False)
+            else f"refused: {codes or 'no reason given'}")
+    return submission
 
 
 def _execute_live_command(adapter, cmd: dict, order_service=None) -> tuple[bool, str, dict]:
@@ -20454,28 +20554,21 @@ while not shutdown_requested:
                                         and not _is_crypto_instance_runtime()
                                     )
                                     if _is_alpaca_stock_gate:
-                                        # swing-port (spec 6.1 broker item 4):
-                                        # a SELL of a bracketed position first
-                                        # cancels its legs and waits for Alpaca
-                                        # to confirm; unconfirmed, the sell
-                                        # waits a tick. Only a document with an
-                                        # enabled swing lane holds legs.
-                                        if (
+                                        # swing-port (spec 6.1 broker item 4;
+                                        # fix wave FW-str-I1): a SELL on a
+                                        # document with an enabled swing lane
+                                        # is a swing sell. Its bracket legs are
+                                        # cancelled only AFTER the gate accepts
+                                        # it (_submit_swing_sell; unconfirmed,
+                                        # the sell waits a tick), and a lane
+                                        # exit is a plain market DAY sell that
+                                        # Alpaca queues for the open. Only a
+                                        # document with an enabled swing lane
+                                        # holds legs; EB's never does.
+                                        _swing_sell = (
                                             decision == -1
                                             and _lane_enabled(_cached_strategies, "strategy_swing")
-                                            and not _cancel_bracket_legs_confirmed(
-                                                live_adapter,
-                                                _live_stock_order_service,
-                                                symbol,
-                                                timeout_s=10.0,
-                                                log=_log,
-                                            )
-                                        ):
-                                            raise ValueError(
-                                                f"order deferred: {symbol} bracket "
-                                                "legs did not confirm cancelled "
-                                                "within 10s; the sell waits a tick"
-                                            )
+                                        )
                                         # Single source of truth, shared with the
                                         # holding-floor gate above — see
                                         # _RISK_EXIT_INTENTS. Two copies would
@@ -20543,12 +20636,26 @@ while not shutdown_requested:
                                                     and isinstance(nexus_hint, dict)
                                                     else None
                                                 ),
+                                                next_open_sell=(
+                                                    _swing_sell
+                                                    and _swing_next_open_exit(
+                                                        nexus_hint, _z21_intents)
+                                                ),
                                             )
                                         )
-                                        _es_fut = _PRICE_FETCH_EXECUTOR.submit(
-                                            _live_stock_order_service.enqueue,
-                                            _stock_intent,
-                                        )
+                                        if _swing_sell:
+                                            _es_fut = _PRICE_FETCH_EXECUTOR.submit(
+                                                _submit_swing_sell,
+                                                live_adapter,
+                                                _live_stock_order_service,
+                                                _stock_intent,
+                                                log=_log,
+                                            )
+                                        else:
+                                            _es_fut = _PRICE_FETCH_EXECUTOR.submit(
+                                                _live_stock_order_service.enqueue,
+                                                _stock_intent,
+                                            )
                                         _submission = _es_fut.result(
                                             timeout=90.0
                                         )

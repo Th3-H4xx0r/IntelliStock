@@ -286,6 +286,13 @@ def test_eb_builds_with_the_call_sites_bracket_none_are_byte_identical():
     assert _digest(_eb_grid(_eb_builder(), bracket=None)) == EB_GRID_DIGEST
 
 
+def test_eb_builds_with_next_open_sell_false_are_byte_identical():
+    """Fix wave FW-str-I1: the call site passes next_open_sell=False for every
+    EB buy and sell (its document has no swing lane)."""
+    assert _digest(_eb_grid(_eb_builder(), bracket=None,
+                            next_open_sell=False)) == EB_GRID_DIGEST
+
+
 # --- F8: a bracket refused before any order exists is a definite refusal ------
 
 def _exception_lane_outcome():
@@ -561,24 +568,29 @@ def test_a_failed_leg_registration_never_stops_the_reconcile(monkeypatch):
 
 # --- wiring (source assertions: the loop and boot are module-level code) --------
 
-def test_the_submit_block_cancels_legs_before_building_a_sell():
+def test_the_submit_block_cancels_legs_only_after_the_gate_accepts():
+    """Fix wave FW-str-I1 reverses the Task 9 order: the loop no longer
+    cancels a position's legs before it builds (and gates) the sell. A sell
+    on a swing document goes through _submit_swing_sell, whose after-the-gate
+    hook cancels the legs; the deferral message is unchanged."""
     text = source()
     gate = text.index("if _is_alpaca_stock_gate:")
-    guard = text.index("_cancel_bracket_legs_confirmed(", gate)
     build = text.index("_build_strategy_stock_intent(", gate)
-    assert guard < build
     window = text[gate:build]
+    assert "_cancel_bracket_legs_confirmed(" not in window
     assert "decision == -1" in window
     assert '_lane_enabled(_cached_strategies, "strategy_swing")' in window
-    assert 'f"order deferred: {symbol} bracket ' in window
+    hook = function_source("_submit_swing_sell")
+    assert "_cancel_bracket_legs_confirmed(" in hook
+    assert 'f"order deferred: {intent.symbol} bracket legs did not confirm "' in hook
 
 
-def test_the_leg_cancel_guard_is_evaluated_sells_first():
+def test_the_swing_sell_guard_is_evaluated_sells_first():
     """EB pin: an EB buy never reads the lane registry, and an EB sell never
     reaches the cancel (the registry answers False for doc 200)."""
     text = source()
     gate = text.index("if _is_alpaca_stock_gate:")
-    window = text[gate:text.index("_cancel_bracket_legs_confirmed(", gate)]
+    window = text[gate:text.index("_build_strategy_stock_intent(", gate)]
     assert window.index("decision == -1") < window.index("_lane_enabled(")
 
 

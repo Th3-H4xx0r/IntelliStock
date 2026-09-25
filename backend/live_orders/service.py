@@ -482,7 +482,21 @@ class LiveOrderService:
             except TerminalRetryExhausted:
                 return candidate, existing, "idempotency.terminal_retry_exhausted"
 
-    def submit(self, intent: OrderIntent) -> OrderSubmission:
+    def submit(
+        self,
+        intent: OrderIntent,
+        *,
+        before_submit: Optional[Callable[[OrderIntent, GateDecision], None]] = None,
+    ) -> OrderSubmission:
+        """Gate, record and send one intent.
+
+        ``before_submit`` (swing-port fix wave, FW-str-I1) runs once the gate
+        has allowed the intent and before anything exists: no lifecycle row,
+        no reservation, no broker call. A swing exit cancels its bracket legs
+        there, so a refused sell leaves its stop working. To refuse, it
+        raises; the exception reaches the caller and nothing was created.
+        Every EB call passes no hook and takes exactly the old path.
+        """
         if not isinstance(intent, OrderIntent):
             raise TypeError("LiveOrderService.submit requires an OrderIntent")
         if intent.source in _RECORD_ONLY_SOURCES:
@@ -508,6 +522,8 @@ class LiveOrderService:
         decision = self._gate.evaluate(intent, snapshot)
         if not decision.allowed:
             return OrderSubmission(decision=decision)
+        if before_submit is not None:
+            before_submit(intent, decision)
         try:
             record = self.lifecycle_store.create_intent(intent)
         except Exception as exc:
