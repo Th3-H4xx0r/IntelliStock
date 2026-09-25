@@ -10231,6 +10231,233 @@ def _execute_option_intents(option_orders, *, order_service, adapter, now_utc,
     return results
 
 
+#: swing-port: the option activity types a wheel position ends in.
+_OPTION_ACTIVITY_TYPES = ("OPASN", "OPEXP", "OPEXC")
+#: Monotonic time of the last activities poll (a throttle, not the cursor).
+_option_activity_last_poll: dict = {"at": None}
+
+
+def _poll_option_activities(adapter, order_service, wheel_cache, *, now_utc,
+                            log=None, notify=None, min_interval_s=300.0,
+                            monotonic=None):
+    """Turn option assignment, expiry and exercise activities into lifecycle
+    facts (spec 6.1 broker item 8). Returns the activities processed.
+
+    The cursor lives in the wheel lane's strategy cache, which the live loop
+    persists per lane (_engine_option_activity_cursor: `after` one day before
+    the newest date handled, plus the ids handled), so a restart re-reads at
+    most a day and dedupes by id. The cursor never moves past an assignment
+    that has to be retried.
+
+    An assignment is recorded through record_external_fill as source
+    option_activity, with Alpaca's activity id as the broker id, under a key
+    derived from that id, so it is filled exactly once even if the cursor is
+    lost: a put assignment adds the shares (a call assignment removes them)
+    under this instance's lineage. Whenever that row is FILLED, the
+    assignment is listed once in _engine_wheel_assignments, so the wheel lane
+    knows the shares are its own. The one wheel_assignment notification goes
+    out only from the poll that made the row FILLED (through plan B's
+    swing_trader.notify.notify_wheel_assignment when it is deployed, the
+    bare notification otherwise). The durable row decides, never the
+    record call's answer: the live fill handler can raise after the row is
+    FILLED, and a retry would then find it terminal and never list it.
+
+    An expiry or exercise is logged; broker truth drops the option on the
+    positions refresh that follows. An assignment whose contract cannot be
+    resolved, or whose record fails, stays unseen and is retried. An
+    unreadable activities answer (the adapter raises on a non-list body)
+    changes nothing and is retried on the next poll.
+    """
+    import hashlib
+    import time as _time
+    from decimal import Decimal
+    from live_orders import LifecycleState, OrderIntent, OrderSide, OrderSource
+
+    def say(message, color="white"):
+        if log is not None:
+            try:
+                log(message, color)
+            except Exception:
+                pass
+
+    def default_notify(instance_id_value, **fields):
+        # Plan B's sender when it is deployed (it knows the category's push
+        # routing and priority); the bare notification otherwise.
+        try:
+            from swing_trader.notify import notify_wheel_assignment
+        except Exception:
+            notify_wheel_assignment = None
+        if notify_wheel_assignment is not None:
+            notify_wheel_assignment(instance_id_value, **fields)
+            return
+        import os as _os
+        from notifications import notify as _notify
+        _notify(category="wheel_assignment", instance_id=instance_id_value,
+                title=f"Wheel assignment: {fields['symbol']}",
+                body=(f"{fields['symbol']}: assigned {fields['qty']} shares @ "
+                      f"${fields['price']:.2f} on {fields['date']}"),
+                discord_channel=_os.environ.get("LIVE_ALERTS_CHANNEL", "trades"))
+
+    def when(text):
+        raw = str(text or "")
+        try:
+            if len(raw) == 10:
+                day = datetime.date.fromisoformat(raw)
+                return datetime.datetime(day.year, day.month, day.day, 20, 0,
+                                         tzinfo=datetime.timezone.utc)
+            parsed = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            return (parsed if parsed.tzinfo is not None
+                    else parsed.replace(tzinfo=datetime.timezone.utc))
+        except ValueError:
+            return now_utc
+
+    def filled(key):
+        try:
+            record = order_service.lifecycle_store.get(key)
+        except Exception:
+            return False
+        return record is not None and record.state is LifecycleState.FILLED
+
+    clock = monotonic or _time.monotonic
+    last = _option_activity_last_poll.get("at")
+    if last is not None and clock() - last < float(min_interval_s):
+        return []
+    _option_activity_last_poll["at"] = clock()
+    cursor = dict(wheel_cache.get("_engine_option_activity_cursor") or {})
+    seen = list(cursor.get("seen") or [])
+    after = cursor.get("after") or (
+        now_utc.date() - datetime.timedelta(days=7)).isoformat()
+    try:
+        activities = adapter.get_option_activities(
+            types=_OPTION_ACTIVITY_TYPES, after=after)
+    except Exception as exc:
+        say(f"[wheel] option activities unreadable ({type(exc).__name__}: "
+            f"{exc}); retried next poll", "yellow")
+        return []
+    processed = []
+    newest = None
+    retry_from = None
+
+    def hold(activity, why):
+        nonlocal retry_from
+        say(f"[wheel] assignment {activity.id} on {activity.symbol} NOT "
+            f"recorded: {why}; retried next poll", "red")
+        day = str(activity.date or "")[:10]
+        if day and (retry_from is None or day < retry_from):
+            retry_from = day
+
+    for activity in activities or ():
+        if not activity.id or activity.id in seen:
+            continue
+        symbol = activity.symbol
+        if activity.activity_type == "OPASN":
+            meta = (getattr(adapter, "_option_positions", {}) or {}).get(symbol)
+            if (meta is None or not getattr(meta, "underlying", "")
+                    or not getattr(meta, "strike", 0)):
+                meta = adapter.option_contract_meta(symbol)
+            option_type = str(getattr(meta, "option_type", "") or "").lower()
+            try:
+                strike = Decimal(str(getattr(meta, "strike", 0) or 0))
+            except Exception:
+                strike = Decimal("0")
+            if (meta is None or not getattr(meta, "underlying", "")
+                    or option_type not in ("put", "call") or strike <= 0):
+                hold(activity, "its contract fields are unknown")
+                continue
+            contracts = max(1, abs(int(round(float(activity.qty or 0)))))
+            shares = contracts * 100
+            side = OrderSide.BUY if option_type == "put" else OrderSide.SELL
+            occurred = when(activity.date)
+            key = "opasn-" + hashlib.sha256(
+                activity.id.encode("utf-8")).hexdigest()[:32]
+            first = not filled(key)
+            failure = None
+            if first:
+                try:
+                    intent = OrderIntent(
+                        account_id=order_service.account_id,
+                        instance_id=order_service.instance_id,
+                        source=OrderSource.OPTION_ACTIVITY,
+                        reason=f"wheel_assignment:{symbol}",
+                        symbol=meta.underlying,
+                        side=side,
+                        quantity=Decimal(shares),
+                        reduce_only=side is OrderSide.SELL,
+                        decision_at=occurred,
+                        quote_at=occurred,
+                        risk_snapshot_id="option-activity",
+                        reference_price=strike,
+                        broker_client_order_id=key,
+                    )
+                    order_service.record_external_fill(
+                        intent, broker_order_id=activity.id,
+                        quantity=Decimal(shares), price=strike,
+                        occurred_at=occurred,
+                        reason=f"option assignment {symbol}")
+                except Exception as exc:
+                    failure = f"{type(exc).__name__}: {exc}"
+            if not filled(key):
+                hold(activity, f"the record failed ({failure or 'not filled'})")
+                continue
+            if failure is not None:
+                say(f"[wheel] assignment {activity.id} on {symbol} is recorded, "
+                    f"but applying it raised ({failure}); the positions refresh "
+                    "and reconcile that follow settle the books", "red")
+            listed = wheel_cache.get("_engine_wheel_assignments")
+            if not isinstance(listed, list):
+                listed = wheel_cache["_engine_wheel_assignments"] = []
+            if not any(isinstance(row, dict)
+                       and row.get("activity_id") == activity.id
+                       for row in listed):
+                listed.append({
+                    "activity_id": activity.id, "contract": symbol,
+                    "underlying": meta.underlying, "shares": shares,
+                    "side": side.value, "strike": float(strike),
+                    "date": str(activity.date)[:10],
+                })
+            if first:
+                say(f"[wheel] ASSIGNED {symbol}: {side.value} {shares} "
+                    f"{meta.underlying} at {strike}", "yellow")
+                try:
+                    (notify or default_notify)(
+                        str(order_service.instance_id),
+                        symbol=meta.underlying, qty=shares,
+                        price=float(strike), date=str(activity.date)[:10])
+                except Exception as exc:
+                    say(f"[wheel] assignment notification failed "
+                        f"({type(exc).__name__}: {exc})", "yellow")
+        else:
+            say(f"[wheel] {activity.activity_type} {symbol} qty {activity.qty} "
+                f"on {activity.date}", "cyan")
+        processed.append(activity)
+        seen.append(activity.id)
+        day = str(activity.date or "")[:10]
+        if day and (newest is None or day > newest):
+            newest = day
+    if processed:
+        def day_before(text):
+            try:
+                return (datetime.date.fromisoformat(text)
+                        - datetime.timedelta(days=1)).isoformat()
+            except (TypeError, ValueError):
+                return None
+
+        moved = day_before(newest) if newest else None
+        if moved is not None:
+            after = moved
+        held = day_before(retry_from) if retry_from else None
+        if held is not None and held < after:
+            after = held
+        wheel_cache["_engine_option_activity_cursor"] = {
+            "after": after, "seen": seen[-500:]}
+        try:
+            adapter.refresh_positions()
+        except Exception as exc:
+            say(f"[wheel] position refresh after activities failed "
+                f"({type(exc).__name__}: {exc})", "yellow")
+    return processed
+
+
 def _live_order_dependency_snapshot(adapter, intent):
     """Build a cache-only dependency view for the pure stock order gate."""
     # swing-port: an option intent gets the options view (collateral, regular
@@ -20007,6 +20234,30 @@ while not shutdown_requested:
                         "strategies": list(strategy_summary) if strategy_summary else [],
                         "post_decision": list(post_decision_trace) if post_decision_trace else [],
                     })
+
+            # swing-port (spec 6.1 broker item 8): option assignments, expiries
+            # and exercises, polled only for a document with an enabled wheel
+            # lane. An assignment moves shares, so ownership is re-derived.
+            if (
+                mode == MODE_LIVE
+                and str(live_broker_type or "").strip().lower() == "alpaca"
+                and _live_stock_order_service is not None
+                and live_adapter is not None
+                and _lane_enabled(_cached_strategies, "strategy_wheel")
+            ):
+                try:
+                    if _poll_option_activities(
+                        live_adapter,
+                        _live_stock_order_service,
+                        _strategy_cache.setdefault("strategy_wheel", {}),
+                        now_utc=datetime.datetime.now(datetime.timezone.utc),
+                        log=_log,
+                    ):
+                        _reconcile_alpaca_ownership(
+                            live_adapter, _live_stock_order_service)
+                except Exception as _act_exc:
+                    _log(f"[wheel] option activities poll crashed "
+                         f"({type(_act_exc).__name__}: {_act_exc})", "red")
 
             # swing-port (spec 6.1 broker item 2): the wheel lane's option
             # orders, after the stock loop, through the same LiveOrderService.
