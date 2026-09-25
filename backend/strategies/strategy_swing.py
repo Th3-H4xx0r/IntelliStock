@@ -669,7 +669,15 @@ class StrategySwing:
 
         option_syms = account.option_symbols(emu)
         equity = account.live_equity(emu, prices)
-        bp = account.live_buying_power(emu)
+        # FW-lo-I5: the cash securing short puts (open, and working
+        # sell-to-open) is not the swing lane's to spend.
+        bp, collateral, collateral_unread = account.swing_live_budget(emu, book)
+        if bp is None:
+            bp = 0.0
+        elif collateral:
+            _log(f"StrategySwing {session} | ${collateral:,.0f} is committed to short puts; "
+                 f"the swing budget is ${bp:,.2f} (cash and buying power less that "
+                 "collateral)", "cyan")
         # G8a M4: a GTC entry still working at the broker is not "unfilled".
         calibration.record_outcomes(iid, emu, "swing", held=set(equity_pos),
                                     working=_symbols_of(book, _working_entry))
@@ -702,6 +710,12 @@ class StrategySwing:
             reg["regime_ok"], bear["blocked_days"],
             bear_regime_days=int(cfg["bear_regime_days"]),
             live_universe=live_universe, defensive_universe=defensive)
+        if univ and collateral_unread:
+            _log_once(cache, "put-collateral", session,
+                      f"StrategySwing {session} | REFUSING ENTRIES this session — the cash "
+                      f"securing short puts cannot be read ({collateral_unread}), so a swing "
+                      "entry could spend it. Exits still run.", "red")
+            univ = None
         first = cache.get(_SCAN_FIRST_KEY)
         if univ and isinstance(first, dict) and first.get("session") == session \
                 and first.get("late"):

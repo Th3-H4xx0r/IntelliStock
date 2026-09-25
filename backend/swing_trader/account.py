@@ -92,12 +92,50 @@ def live_equity(emu, prices=None) -> float:
         return float(emu.get_portfolio_value(prices or {}) or 0.0)
 
 
-def live_buying_power(emu) -> float:
-    """ST sized swing entries against account.buying_power (paper_trader.py:450)."""
+def _live_cash_and_buying_power(emu):
+    """(cash, buying_power) from one refresh_cash read; settled cash for
+    both when the read fails, as before."""
     try:
-        return float(emu.refresh_cash().buying_power)
+        dto = emu.refresh_cash()
+        return float(dto.cash or 0.0), float(dto.buying_power or 0.0)
     except Exception:
-        return float(emu.get_cash() or 0.0)
+        cash = float(emu.get_cash() or 0.0)
+        return cash, cash
+
+
+def put_collateral(emu, book):
+    """(collateral, reason): cash committed to short puts -- every open short
+    put plus the unfilled remainder of every working sell-to-open put, at
+    strike x 100 -- or (None, reason) when the option book cannot be read as
+    a complete, current map (option_book). `book` is the strict working-order
+    read (working_orders)."""
+    rows, reason = option_book(emu)
+    if reason is not None:
+        return None, reason
+    from swing_trader import wheel_rules
+    held, _by = wheel_rules.short_put_collateral(rows)
+    pending, _by = wheel_rules.pending_sto_collateral(book)
+    return held + pending, None
+
+
+def swing_live_budget(emu, book):
+    """(budget, collateral, reason): what the swing lane's live entries may
+    spend this scan.
+
+    ST sized swing entries against account.buying_power (paper_trader.py:450),
+    and with no short put open that is still the budget. FW-lo-I5 / spec fix
+    8: the cash that secures short puts is not the swing lane's to spend, so
+    with any committed the budget is the smaller of buying power and cash,
+    less that collateral -- margin buying power cannot lift it, since the puts
+    are cash-secured. (None, None, reason) when the option book cannot be
+    read: the lane then plans no entries (its exits still run)."""
+    cash, bp = _live_cash_and_buying_power(emu)
+    collateral, reason = put_collateral(emu, book)
+    if collateral is None:
+        return None, None, reason
+    if collateral <= 0:
+        return bp, 0.0, None
+    return max(0.0, min(bp, cash) - collateral), collateral, None
 
 
 def working_orders(emu):

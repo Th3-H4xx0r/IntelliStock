@@ -899,3 +899,82 @@ def test_a_restart_after_the_open_keeps_the_first_tick_it_saw(live, monkeypatch)
     monkeypatch.setattr(live.regime, "fetch_vix_close", lambda: 15.0)
     restarted = dict(cache)
     assert tick(live, MON_0940, LiveAdapter(), restarted)["AAA"] == 1
+
+
+# -- FW-lo-I5 (sizing): cash that secures short puts is not the swing lane's ---------
+
+class PutBook(LiveAdapter):
+    """An account with a cash balance apart from its buying power, open short
+    puts and working sell-to-open orders, as the real adapter reports them."""
+
+    def __init__(self, *, cash, bp, puts=(), sto=(), health=None, **kw):
+        super().__init__(bp=bp, options=[
+            NS(symbol=f"XYZ261016P{int(strike * 1000):08d}", qty=-qty, option_type="put",
+               strike=strike, underlying="XYZ", expiry="2026-10-16")
+            for strike, qty in puts], open_orders=[
+            NS(symbol=f"QRS261016P{int(strike * 1000):08d}", side="sell", qty=qty,
+               filled_qty=0, position_intent="sell_to_open", asset_class="us_option",
+               order_class="simple")
+            for strike, qty in sto], **kw)
+        self.cash, self.health = cash, health
+
+    def refresh_cash(self):
+        return NS(cash=self.cash, buying_power=self.bp)
+
+    def get_cash(self):
+        return self.cash
+
+    def option_positions_health(self):
+        return dict(self.health or {"complete": True, "stale_since": None})
+
+
+def _entries(out):
+    return {s: out["_nexus_position_sizes"][s]["buy_cash"]
+            for s in out.get("_nexus_executable_buys", [])}
+
+
+def test_open_and_pending_put_collateral_comes_off_the_swing_budget(live, monkeypatch):
+    """live-orders-review I-5: the lane sized against buying power with no
+    deduction for short puts, so swing entries could spend the cash securing
+    them. $100k cash less a $40k open put and a $40k working sell-to-open
+    leaves $20k: AAA takes its $12,500, CCC the $7,500 left, DDD nothing."""
+    monkeypatch.setattr(live.ai_analyst, "analyse",
+                        scripted({"AAA": APPROVE, "CCC": APPROVE, "DDD": APPROVE}))
+    book = PutBook(cash=100_000.0, bp=100_000.0, puts=[(200.0, 2)], sto=[(100.0, 4)])
+    out = tick(live, MON_0920, book, {})
+    assert _entries(out) == {"AAA": 12_500.0, "CCC": 7_500.0}
+
+
+def test_with_puts_open_margin_buying_power_does_not_lift_the_budget(live, monkeypatch):
+    """Cash-secured means CASH: with puts open the budget is the smaller of
+    buying power and cash, less the collateral ($50k - $30k = $20k), never
+    the $200k margin figure less it."""
+    monkeypatch.setattr(live.ai_analyst, "analyse",
+                        scripted({"AAA": APPROVE, "CCC": APPROVE, "DDD": APPROVE}))
+    book = PutBook(cash=50_000.0, bp=200_000.0, puts=[(150.0, 2)])
+    out = tick(live, MON_0920, book, {})
+    assert _entries(out) == {"AAA": 12_500.0, "CCC": 7_500.0}
+
+
+def test_without_puts_the_budget_is_st_s_buying_power(live, monkeypatch):
+    monkeypatch.setattr(live.ai_analyst, "analyse",
+                        scripted({"AAA": APPROVE, "CCC": APPROVE, "DDD": APPROVE}))
+    book = PutBook(cash=5_000.0, bp=200_000.0)
+    out = tick(live, MON_0920, book, {})
+    assert _entries(out) == {"AAA": 12_500.0, "CCC": 12_500.0, "DDD": 12_500.0}
+
+
+def test_an_unreadable_option_book_refuses_entries_but_runs_exits(live, monkeypatch):
+    ai = scripted({"AAA": APPROVE, "CCC": APPROVE, "DDD": APPROVE})
+    monkeypatch.setattr(live.ai_analyst, "analyse", ai)
+    monkeypatch.setattr(live, "swing_indicators",
+                        lambda f, c: dict(IND, EEE=ind(104.0, rsi=72.0, rsi_prev=68.0)))
+    lines = []
+    monkeypatch.setattr(live, "_log", lambda msg, color="white": lines.append(msg))
+    book = PutBook(cash=100_000.0, bp=100_000.0, positions={"EEE": (10, 100.0, 1_040.0)},
+                   health={"complete": False, "stale_since": None})
+    cache = {}
+    out = tick(live, MON_0920, book, cache)
+    assert {s: d for s, d in out.items() if not s.startswith("_")} == {"EEE": -1}
+    assert ai.calls == [] and cache[live._SCAN_DONE_KEY] == "2026-06-01"
+    assert any("REFUSING ENTRIES" in m and "short puts" in m for m in lines)
