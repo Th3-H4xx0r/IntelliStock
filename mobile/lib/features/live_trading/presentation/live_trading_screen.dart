@@ -1311,6 +1311,16 @@ class _PositionCardSkeleton extends StatelessWidget {
 
 // ── Trade row ─────────────────────────────────────────────────────────────────
 
+/// Test-only public wrapper around the private trade row so widget tests can
+/// check its layout in isolation. Not used by the app.
+@visibleForTesting
+class TradeRowForTest extends StatelessWidget {
+  const TradeRowForTest({super.key, required this.trade});
+  final Trade trade;
+  @override
+  Widget build(BuildContext context) => _TradeRow(trade: trade);
+}
+
 class _TradeRow extends StatelessWidget {
   const _TradeRow({required this.trade});
   final Trade trade;
@@ -1343,21 +1353,30 @@ class _TradeRow extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 8),
-              Flexible(
-                child: Text(
-                  trade.symbol,
-                  overflow: TextOverflow.ellipsis,
-                  style: AppTextStyles.cardTitle.copyWith(
-                    color: AppColors.textHi,
-                    fontWeight: FontWeight.w800,
-                  ),
+              // Expanded owns all the free space, so the price column stays
+              // flush right; the symbol shrinks (with an ellipsis) only when
+              // it and the badge do not fit.
+              Expanded(
+                child: Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        trade.symbol,
+                        overflow: TextOverflow.ellipsis,
+                        style: AppTextStyles.cardTitle.copyWith(
+                          color: AppColors.textHi,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                    if (trade.isOption) ...[
+                      const SizedBox(width: 6),
+                      const AppBadge(label: 'Option', color: AppColors.primary),
+                    ],
+                  ],
                 ),
               ),
-              if (trade.isOption) ...[
-                const SizedBox(width: 6),
-                const AppBadge(label: 'Option', color: AppColors.primary),
-              ],
-              const Spacer(),
+              const SizedBox(width: 8),
               Column(
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
