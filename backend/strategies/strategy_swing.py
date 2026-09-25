@@ -12,7 +12,7 @@ import math
 import os
 import re
 import sys
-from datetime import date, datetime, timezone
+from datetime import date
 
 _BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _BACKEND not in sys.path:
@@ -59,6 +59,12 @@ _IND_MEMO_KEY = "_swing_ind_memo"              # backtest: indicators of that se
 _BEAR_KEY = "_swing_bear"                      # {"session", "blocked_days", ...} (fix 11)
 _SECTOR_MAP_KEY = "_swing_sector_map"          # backtest: SwingSectorMap, read once
 _LOGGED_KEY = "_swing_logged"                  # {reason: scope} for _log_once
+_SCAN_KEY = "_swing_scan"                      # live: the resumable scan state
+_SCAN_DONE_KEY = "_swing_scan_done_session"    # live: the session latch, on COMPLETION
+_EMITTED_KEY = "_swing_emitted"                # live: entries sent this session
+_NO_MODEL_KEY = "_swing_no_model_session"      # live: the no-model alert, once a session
+_SECTOR_CACHE_KEY = "_swing_sector_cache"      # live: yfinance fallback sectors
+_PENDING_EXIT_KEY = "_swing_pending_exits"     # live: exits re-sent until the stock is gone
 
 #: Hint flags the engine tests with `is True` (plan A-backtest Task 6).
 _HINT_FLAGS = ("whole_shares", "fill_at_next_open")
@@ -177,6 +183,50 @@ def _exits(ind, positions, entry_of, cfg, decisions, sizes, intents) -> dict:
             intents[symbol] = INTENT_EXIT[reason]
             out[symbol] = reason
     return out
+
+
+def _yf_symbol(symbol) -> str:
+    """yfinance spells class shares with a dash (BRK-B), Alpaca with a dot."""
+    return str(symbol).replace(".", "-")
+
+
+def _enum_text(value) -> str:
+    return str(getattr(value, "value", value) or "").strip().lower().rsplit(".", 1)[-1]
+
+
+def _working_exit(order) -> bool:
+    """A working SELL that is not a bracket leg. Alpaca reports a bracket's
+    take-profit and stop legs as sells of order_class "bracket" (the stop
+    waits in "held"); those legs are what the engine cancels before it sells,
+    so they never count as the exit being in flight."""
+    return (_enum_text(getattr(order, "side", None)) == "sell"
+            and _enum_text(getattr(order, "order_class", None)) not in {"bracket", "oco", "oto"})
+
+
+_OCC_RE = re.compile(r"^[A-Z.]{1,6}\d{6}[CP]\d{8}$")
+
+
+def _working_entry(order) -> bool:
+    """A working stock BUY: an entry queued for the open (a bracket parent or
+    an approved order). It holds a slot and a sector, as the backtest's
+    pending_symbols do. A wheel buy-to-close is an option order, not one."""
+    symbol = str(getattr(order, "symbol", "") or "").upper()
+    return (_enum_text(getattr(order, "side", None)) == "buy"
+            and _enum_text(getattr(order, "asset_class", None)) != "us_option"
+            and not _OCC_RE.match(symbol))
+
+
+def _symbols_of(orders, predicate) -> set:
+    return {str(getattr(o, "symbol", "") or "").upper() for o in (orders or []) if predicate(o)}
+
+
+def _valid_hhmm(value):
+    """"HH:MM" for a real wall-clock time, else None (G2 minor): clock.parse_hhmm
+    falls back to 00:00, which would scan at midnight."""
+    m = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*", str(value if value is not None else ""))
+    if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59:
+        return None
+    return f"{int(m.group(1)):02d}:{m.group(2)}"
 
 
 def _increment_seconds(value):
@@ -405,9 +455,458 @@ class StrategySwing:
             entries_placed += 1
             active.add(symbol)               # fix 4: the sector set follows each buy
 
-    # -- live (Task 17) --------------------------------------------------------
+    # -- live ----------------------------------------------------------------
 
     def _live(self, prices, current_time, cfg, emu, cache, mode):
-        _log_once(cache, "live-not-built", clock.ny_date(current_time),
-                  "StrategySwing: the live path is not built yet (plan B Task 17).", "red")
-        return {}
+        """Spec §5.1 live/paper. The scan starts at the first tick at or after
+        scan_time_et, resumes on later ticks until every candidate is scored,
+        and stamps the session latch when it COMPLETES: a crash mid-scan
+        resumes from the persisted cursor instead of losing the day."""
+        session = clock.ny_date(current_time)
+        if not clock.is_trading_day(date.fromisoformat(session)):
+            return {}
+        iid = str(cfg.get("instance_id") or "swing")
+        scan_time = _valid_hhmm(cfg.get("scan_time_et"))
+        if scan_time is None:
+            _log_once(cache, "bad-scan-time", session,
+                      f"StrategySwing {session} | REFUSING the scan — scan_time_et "
+                      f"{cfg.get('scan_time_et')!r} is not an HH:MM time (ET); fix it in the "
+                      "strategy editor. Pending exits are still re-sent.", "red")
+        scan_due = (scan_time is not None and cache.get(_SCAN_DONE_KEY) != session
+                    and clock.at_or_after(current_time, scan_time))
+        rearm = self._rearm_todo(cache, session)
+        rearm_due = bool(rearm) and clock.is_rth(current_time)
+        pending = cache.get(_PENDING_EXIT_KEY)
+        if not (scan_due or rearm_due or (isinstance(pending, dict) and pending)):
+            return {}
+        # fix F3: each step below places orders on what the working-order book
+        # says, read through the adapter's strict reader. Unreadable, the lane
+        # places nothing this tick; the scan resumes and exits re-send next tick.
+        book = account.working_orders(emu)
+        if book is None:
+            _log(f"StrategySwing {session} | REFUSING new orders this tick — the broker's "
+                 "working-order book is unreadable; the lane retries next tick.", "red")
+            return {}
+
+        decisions, sizes, intents = {}, {}, {}
+        self._reemit_exits(session, emu, cache, book, decisions, sizes, intents)
+        if rearm_due:
+            self._rearm_stale(rearm, session, emu, cache, book, decisions, sizes, intents)
+
+        if scan_due:
+            signals_store.ensure_tables()
+            deadline = clock.tick_deadline(current_time, mode)
+            scan = cache.get(_SCAN_KEY)
+            if not isinstance(scan, dict) or scan.get("session") != session:
+                scan = None
+                if clock.time_left(deadline) >= clock.PREPARE_RESERVE_S:
+                    try:
+                        scan = self._prepare(prices, session, iid, cfg, emu, cache, book,
+                                             decisions, sizes, intents)
+                    except Exception as exc:
+                        _log(f"StrategySwing {session} | scan preparation failed "
+                             f"({type(exc).__name__}: {exc}); retried next tick", "red")
+                        scan = None
+                    if scan is not None:
+                        cache[_SCAN_KEY] = scan
+            if scan is not None:
+                self._score_queue(scan, session, iid, cfg, cache, deadline,
+                                  decisions, sizes, intents)
+                if scan["cursor"] >= len(scan["queue"]):
+                    cache[_SCAN_DONE_KEY] = session
+                    cache.pop(_SCAN_KEY, None)
+                    self._run_summary(scan, session, iid, emu)
+
+        self._remember_emitted(current_time, session, cache, decisions, sizes, intents)
+        return _emit(decisions, sizes, intents)
+
+    def _prepare(self, prices, session, iid, cfg, emu, cache, book, decisions, sizes,
+                 intents):
+        """paper_trader.py:446-626 up to the entry loop: data, regime, exits,
+        the bear counter, and the queue of names whose signal fired. Exits are
+        merged into the payload only once everything above them succeeded."""
+        try:
+            client = market_data.data_client(cfg.get("alpaca_key"), cfg.get("alpaca_secret"))
+        except RuntimeError as exc:
+            _log_once(cache, "no-creds", session,
+                      f"StrategySwing {session} | REFUSING to scan — {exc}", "red")
+            return None
+        live_universe = [universe.norm_symbol(s) for s in universe.get_sp500_symbols()]
+        defensive = _list(cfg["defensive_universe"])
+        fetch_universe = list(dict.fromkeys(live_universe + defensive))
+        bars = market_data.get_daily_bars(fetch_universe, days=market_data.LIVE_WINDOW_DAYS,
+                                          client=client)
+        ind = swing_indicators(bars, cfg)
+        spy = ind.get("SPY")
+        if not spy:
+            _log_once(cache, "no-spy-live", session,
+                      f"StrategySwing {session} | no SPY daily bars — the scan retries "
+                      "next tick", "red")
+            return None
+        vix = regime.fetch_vix_close()
+        reg = regime.regime_decision(spy.get("close"), spy.get("sma200"), vix,
+                                     spy_buffer=float(cfg["spy_buffer"]),
+                                     vix_max=float(cfg["vix_max"]))
+
+        equity_pos = account.equity_positions(emu)
+        option_syms = account.option_symbols(emu)
+        equity = account.live_equity(emu, prices)
+        bp = account.live_buying_power(emu)
+        calibration.record_outcomes(iid, emu, "swing", held=set(equity_pos))
+        # fix F3: a name with a working sell is already exiting (never stack a
+        # second sell on it); a working buy is an entry queued for the open and
+        # holds its slot and sector like a position.
+        selling = _symbols_of(book, _working_exit)
+        queued = _symbols_of(book, _working_entry)
+
+        ex_dec, ex_sizes, ex_int = {}, {}, {}
+        reasons = _exits(ind, {s: p["qty"] for s, p in equity_pos.items() if s not in selling},
+                         lambda s: equity_pos[s]["avg_entry_price"], cfg,
+                         ex_dec, ex_sizes, ex_int)
+        for symbol, reason in reasons.items():
+            close, pos = float(ind[symbol]["close"]), equity_pos[symbol]
+            entry = pos["avg_entry_price"]
+            notify.send("swing_exit", iid, f"SELL {symbol}",
+                        f"{symbol} — {reason}\n{(close - entry) / entry * 100:+.1f}% | "
+                        f"${(close - entry) * pos['qty']:+.0f}", priority=1)
+            bp += pos["qty"] * close
+        pending = cache.setdefault(_PENDING_EXIT_KEY, {})
+        for symbol, reason in reasons.items():
+            pending.setdefault(symbol, {"reason": reason, "intent": INTENT_EXIT[reason],
+                                        "since": session})
+        active = (set(equity_pos) | option_syms | queued) - set(reasons)
+
+        bear = signals.update_regime_tracker(cache.get(_BEAR_KEY), reg["regime_ok"], session)
+        cache[_BEAR_KEY] = bear
+        univ, phase = signals.select_entry_universe(
+            reg["regime_ok"], bear["blocked_days"],
+            bear_regime_days=int(cfg["bear_regime_days"]),
+            live_universe=live_universe, defensive_universe=defensive)
+        vix_str = f"{vix:.1f}" if vix is not None else "n/a"
+        if phase == "bear_mode":
+            notify.send("swing_run_summary", iid, f"🐻 Bear Mode Day {bear['blocked_days']}",
+                        f"Regime blocked {bear['blocked_days']} consecutive days.\n"
+                        f"Scanning defensive: {', '.join(defensive)}\n"
+                        f"Reason: {reg['blocked_reason']}")
+
+        queue = []
+        if univ:
+            ekw = signals.entry_kwargs(cfg)
+            for symbol in univ:
+                if symbol in active or symbol not in ind:
+                    continue
+                try:
+                    fired = signals.entry_signal(ind[symbol], **ekw)
+                except Exception as exc:
+                    _log(f"StrategySwing {session} | {symbol}: entry check skipped "
+                         f"({type(exc).__name__}: {exc}) — the scan continues", "yellow")
+                    continue
+                if fired:
+                    queue.append({"symbol": symbol, "ind": ind[symbol]})
+        _log(f"StrategySwing {session} | regime "
+             f"{'ACTIVE' if reg['regime_ok'] else 'BLOCKED'} ({phase}) | SPY "
+             f"{reg['spy_close']} vs SMA200 {reg['spy_sma200']} | VIX {vix_str} | "
+             f"exits={sorted(reasons)} | signals={[c['symbol'] for c in queue]}", "cyan")
+
+        decisions.update(ex_dec)
+        sizes.update(ex_sizes)
+        intents.update(ex_int)
+        return {"session": session, "phase": phase, "regime_ok": reg["regime_ok"],
+                "vix": vix, "queue": queue, "cursor": 0, "active": sorted(active),
+                "option_symbols": sorted(option_syms), "equity": equity,
+                "buying_power": bp, "entries_placed": 0,
+                "available_slots": int(cfg["max_positions"]) - len(active),
+                "counts": {"entered": 0, "pending": 0, "rejected": 0, "skipped": 0,
+                           "ai_errors": 0}}
+
+    def _score_queue(self, scan, session, iid, cfg, cache, deadline,
+                     decisions, sizes, intents):
+        """paper_trader.py:626-756, one candidate at a time inside the tick
+        budget. One failure skips its candidate (fix 5)."""
+        gate = _truthy(cfg.get("ai_gate_enabled", True))
+        role = ai_analyst.llm_role_from_config(cfg) if gate else None
+        if gate and role is None:
+            if cache.get(_NO_MODEL_KEY) != session:
+                cache[_NO_MODEL_KEY] = session
+                left = len(scan["queue"]) - scan["cursor"]
+                msg = ("ai_gate_enabled is on but no conviction model is linked "
+                       f"(conviction_llm_model_id); {left} swing entr(ies) refused this "
+                       "session. Link a model in the strategy editor.")
+                _log(f"StrategySwing {session} | REFUSING ENTRIES — {msg}", "red")
+                notify.send("strategy_error", iid, "Swing AI gate: no model linked", msg,
+                            priority=1)
+            scan["counts"]["skipped"] += len(scan["queue"]) - scan["cursor"]
+            scan["cursor"] = len(scan["queue"])
+            return
+
+        option_syms = set(scan.get("option_symbols") or [])
+        try:
+            smap = refdata.sector_map(store, [c["symbol"] for c in scan["queue"]]
+                                      + list(scan["active"]))
+        except Exception as exc:
+            _log(f"StrategySwing {session} | SwingSectorMap unreadable "
+                 f"({type(exc).__name__}: {exc}) — sectors fall back to yfinance", "yellow")
+            smap = {}
+        read_sector = _sector_reader(smap, allow_network=True,
+                                     cache=cache.setdefault(_SECTOR_CACHE_KEY, {}))
+
+        def sector_of(symbol):
+            if symbol in option_syms:
+                return "unknown"
+            return read_sector(symbol)
+
+        try:
+            client = market_data.data_client(cfg.get("alpaca_key"), cfg.get("alpaca_secret"))
+        except RuntimeError:
+            client = None           # the sector-ETF RSI reads "unavailable"
+        while scan["cursor"] < len(scan["queue"]):
+            if clock.time_left(deadline) < clock.CANDIDATE_RESERVE_S:
+                _log(f"StrategySwing {session} | tick budget spent — "
+                     f"{len(scan['queue']) - scan['cursor']} candidate(s) resume next tick",
+                     "cyan")
+                return
+            item = scan["queue"][scan["cursor"]]
+            scan["cursor"] += 1
+            try:
+                self._consider(item, scan, session, iid, cfg, role, gate, sector_of,
+                               client, cache, decisions, sizes, intents)
+            except Exception as exc:
+                scan["counts"]["ai_errors"] += 1
+                _log(f"StrategySwing {session} | {item['symbol']}: skipped after "
+                     f"{type(exc).__name__}: {exc} — the scan continues (fix 5)", "yellow")
+
+    def _consider(self, item, scan, session, iid, cfg, role, gate, sector_of, client,
+                  cache, decisions, sizes, intents):
+        symbol, ind = item["symbol"], item["ind"]
+        active = set(scan["active"])
+        if symbol in active:
+            return
+        conflict = signals.sector_conflict(symbol, active, sector_of=sector_of,
+                                           max_per_sector=int(cfg["max_per_sector"]))
+        if conflict:
+            _log(f"  {symbol}: SIGNAL blocked — sector conflict ({sector_of(symbol)} "
+                 f"already held via {conflict})")
+            scan["counts"]["skipped"] += 1
+            return
+        if scan["entries_placed"] >= scan["available_slots"]:
+            _log(f"  {symbol}: Skipped (no open slots)")
+            scan["counts"]["skipped"] += 1
+            return
+        alloc = scan["equity"] * float(cfg["position_size_pct"])
+        if scan["buying_power"] < alloc * 0.5:
+            _log(f"  {symbol}: Skipped (insufficient buying power: "
+                 f"${scan['buying_power']:,.2f})")
+            scan["counts"]["skipped"] += 1
+            return
+        use = min(alloc, scan["buying_power"])
+        base_shares = int(use / ind["close"])
+        if base_shares < 1:
+            _log(f"  {symbol}: Skipped (share count rounds to 0)")
+            scan["counts"]["skipped"] += 1
+            return
+
+        stop_price   = round(ind["close"] * (1 - float(cfg["stop_loss"])), 2)
+        target_price = round(ind["close"] * (1 + float(cfg["profit_target"])), 2)
+
+        # Hard earnings block — no exceptions regardless of AI score
+        earnings_days = ai_analyst.days_until_earnings(_yf_symbol(symbol))
+        block = int(cfg["earnings_hard_block_days"])
+        if earnings_days is not None and earnings_days < block:
+            _log(f"  [{symbol}] SKIP — earnings in {earnings_days} day(s) "
+                 f"(hard block: < {block} days)")
+            scan["counts"]["skipped"] += 1
+            return
+
+        sid = signals_store.signal_id_for(iid, "swing", session, symbol)
+        existing = signals_store.get_signal(sid)
+        proposal = {"entry": ind["close"], "stop": stop_price, "target": target_price,
+                    "shares": base_shares}
+        if existing is not None:
+            # A resumed scan: the decision is already recorded; never re-score.
+            result = {"conviction_score": existing.get("score"),
+                      "recommendation": str(existing.get("recommendation") or "").lower(),
+                      "reasoning": existing.get("reasoning") or "",
+                      "position_size_adjustment": float(existing.get("size_adjustment") or 1.0),
+                      "key_risks": existing.get("key_risks") or []}
+        elif gate:
+            result = ai_analyst.analyse(
+                {"symbol": symbol, "rsi": ind["rsi"], "rsi_prev": ind["rsi_prev"],
+                 "macd_hist": ind["macd_hist"], "macd_hist_prev": ind["macd_hist_prev"],
+                 "entry_price": ind["close"], "shares": base_shares,
+                 "stop_price": stop_price, "target_price": target_price},
+                role=role, sector_of=sector_of, bars_client=client,
+                earnings_fn=lambda s: earnings_days,
+                approve_threshold=int(cfg["ai_approve_threshold"]),
+                review_threshold=int(cfg["ai_review_threshold"]))
+        else:
+            result = {"conviction_score": None, "recommendation": "approve",
+                      "reasoning": "AI gate disabled", "position_size_adjustment": 1.0,
+                      "key_risks": []}
+        rec = result["recommendation"]
+        score = result.get("conviction_score")
+        adj = float(result.get("position_size_adjustment") or 1.0)
+        context = {k: result.get(k) for k in ("earnings_days", "sector_etf", "sector_rsi",
+                                              "news_summary") if k in result}
+
+        def record(status):
+            if existing is None:
+                signals_store.insert_signal(signals_store.new_signal(
+                    instance_id=iid, lane="swing", symbol=symbol, session=session,
+                    score=score, recommendation=rec, reasoning=result.get("reasoning"),
+                    key_risks=result.get("key_risks"), size_adjustment=adj,
+                    proposal=proposal, status=status, context=context))
+
+        if rec == "reject":
+            record("ai_rejected")
+            scan["counts"]["rejected"] += 1
+            if existing is None:
+                notify.send("swing_run_summary", iid, f"REJECTED {symbol}",
+                            f"{symbol} — Score {score}/100\n"
+                            f"{str(result.get('reasoning') or '')[:100]}")
+            return
+
+        if rec == "review":
+            record("pending")
+            scan["counts"]["pending"] += 1
+            if existing is None:
+                notify.send("swing_pending_review", iid,
+                            f"⚠️ REVIEW: {symbol} (score {score}/100)",
+                            f"{symbol} @ ${ind['close']:.2f}\n"
+                            f"Score: {score}/100 — needs your approval\n"
+                            f"{str(result.get('reasoning') or '')[:120]}\n"
+                            f"Risks: {', '.join(result.get('key_risks') or [])}\n"
+                            f"Stop: ${stop_price:.2f} | Target: ${target_price:.2f}\n"
+                            f"Approve or reject in IntelliStock (web or iOS).", priority=1)
+            return
+
+        # approve — apply position size adjustment before placing
+        if existing is not None and existing.get("status") != "auto_approved":
+            return          # the operator decided it, or it already failed
+        shares = max(1, int(base_shares * adj))
+        record("auto_approved")
+        scan["buying_power"] -= shares * ind["close"]
+        scan["entries_placed"] += 1
+        scan["active"].append(symbol)            # fix 4: the sector set follows each buy
+        scan["counts"]["entered"] += 1
+        emitted = (cache.get(_EMITTED_KEY) or {})
+        if emitted.get("session") == session and symbol in (emitted.get("entries") or {}):
+            return          # already sent before a restart; the broker holds it
+        decisions[symbol] = 1
+        # The engine sizes a live whole-share bracket as floor(buy_cash / live
+        # price) and reads no share count from the hint (plan A-live). buy_cash
+        # is ST's allocation times the AI size adjustment, never below one
+        # share at the prior close (ST's max(1, ...)).
+        sizes[symbol] = {"buy_cash": round(max(use * adj, ind["close"]), 2),
+                         "bracket": {"take_profit_price": target_price,
+                                     "stop_loss_price": stop_price},
+                         "whole_shares": True, "fill_at_next_open": True}
+        intents[symbol] = INTENT_DEFENSIVE if scan["phase"] == "bear_mode" else INTENT_ENTRY
+        if existing is None:
+            notify.send("swing_entry", iid, f"BUY {symbol}",
+                        f"{symbol} — {shares} shares @ ${ind['close']:.2f}\n"
+                        f"Stop ${stop_price:.2f} | Target ${target_price:.2f}", priority=1)
+
+    def _reemit_exits(self, session, emu, cache, book, decisions, sizes, intents):
+        """A-live contract addition 15: the engine never retries an exit it
+        deferred. Re-send every pending exit whose stock is still held and has
+        no working non-bracket sell; forget it once the stock is gone. `book`
+        is the strict working-order read (fix F3)."""
+        pending = cache.get(_PENDING_EXIT_KEY)
+        if not isinstance(pending, dict) or not pending:
+            return
+        try:
+            held = {str(s).upper() for s, q in (emu.get_positions() or {}).items()
+                    if float(q or 0.0) > 0}
+        except Exception as exc:
+            _log_once(cache, "exit-book", session,
+                      f"StrategySwing {session} | pending exits not re-sent — positions are "
+                      f"unreadable ({type(exc).__name__}: {exc})", "yellow")
+            return
+        selling = _symbols_of(book, _working_exit)
+        for symbol in sorted(pending):
+            if symbol not in held:
+                pending.pop(symbol)
+                _log(f"StrategySwing {session} | {symbol}: position gone — exit complete")
+                continue
+            if symbol in selling:
+                continue
+            decisions[symbol] = -1
+            sizes[symbol] = {"sell_fraction": 1.0}
+            intents[symbol] = pending[symbol]["intent"]
+            _log_once(cache, f"reemit-{symbol}", session,
+                      f"StrategySwing {session} | {symbol}: re-sending the "
+                      f"{pending[symbol]['reason']} exit decided {pending[symbol]['since']} "
+                      "— still held with no working sell (the engine does not retry a "
+                      "deferred exit)", "yellow")
+
+    def _rearm_todo(self, cache, session) -> list:
+        """Pre-market entries of this session not yet re-armed."""
+        em = cache.get(_EMITTED_KEY)
+        if not isinstance(em, dict) or em.get("session") != session:
+            return []
+        return [s for s, e in (em.get("entries") or {}).items()
+                if not e.get("at_rth") and not e.get("rearmed")]
+
+    def _rearm_stale(self, todo, session, emu, cache, book, decisions, sizes, intents):
+        """Spec §5.1: an entry the gate refused on a stale pre-market quote is
+        re-emitted ONCE, at the first regular-hours tick. The lane cannot see
+        the gate's reason, so it re-emits exactly the pre-market entries that
+        left no trace at the broker: no working order, no order of any status
+        since the session began, no position. An unreadable book re-emits
+        nothing — a missed entry costs an opportunity, a duplicate costs money."""
+        em = cache[_EMITTED_KEY]
+        for s in todo:
+            em["entries"][s]["rearmed"] = True
+        try:
+            seen = {str(o.symbol).upper() for o in (emu.list_closed_orders(todo, session) or [])}
+            held = {str(s).upper() for s, q in (emu.get_positions() or {}).items()
+                    if float(q or 0.0) > 0}
+        except Exception as exc:
+            _log(f"StrategySwing {session} | stale-quote re-arm skipped — the order book "
+                 f"is unreadable ({type(exc).__name__}: {exc})", "yellow")
+            return
+        working = _symbols_of(book, lambda o: True)
+        for s in todo:
+            if s in working or s in seen or s in held:
+                continue
+            entry = em["entries"][s]
+            decisions[s] = 1
+            sizes[s] = dict(entry["hint"])
+            intents[s] = entry["intent"]
+            _log(f"StrategySwing {session} | {s}: re-emitting the entry once at the open — "
+                 "nothing reached the broker pre-market (quote.stale)", "cyan")
+
+    def _remember_emitted(self, current_time, session, cache, decisions, sizes, intents):
+        buys = [s for s, d in decisions.items() if d == 1]
+        if not buys:
+            return
+        em = cache.get(_EMITTED_KEY)
+        if not isinstance(em, dict) or em.get("session") != session:
+            em = {"session": session, "entries": {}}
+            cache[_EMITTED_KEY] = em
+        at_rth = clock.is_rth(current_time)
+        for s in buys:
+            if s in em["entries"]:
+                continue            # a re-arm keeps its record, rearmed=True
+            em["entries"][s] = {"hint": dict(sizes.get(s) or {}),
+                                "intent": intents.get(s, INTENT_ENTRY),
+                                "at_rth": at_rth, "rearmed": False}
+
+    def _run_summary(self, scan, session, iid, emu):
+        """paper_trader.py:790-809, the run-complete notification."""
+        positions = account.equity_positions(emu)
+        parts = []
+        for s, p in sorted(positions.items()):
+            if p["avg_entry_price"] > 0 and p["market_value"] > 0:
+                pct = (p["market_value"] / (p["qty"] * p["avg_entry_price"]) - 1) * 100
+                parts.append(f"{s} {pct:+.1f}%")
+        c = scan["counts"]
+        vix = scan.get("vix")
+        lines = [f"{session} ET", f"Signals: {c['entered']} | Positions: {len(positions)}"]
+        if parts:
+            lines.append(" | ".join(parts))
+        lines.append(f"Regime: {'ACTIVE' if scan.get('regime_ok') else 'BLOCKED'} | "
+                     f"VIX {f'{vix:.1f}' if vix is not None else 'n/a'}")
+        lines.append(f"Review: {c['pending']} | Rejected: {c['rejected']} | "
+                     f"Skipped: {c['skipped']} | AI errors: {c['ai_errors']}")
+        notify.send("swing_run_summary", iid, "Swing Trader ✅ Run Complete", "\n".join(lines))

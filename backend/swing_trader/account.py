@@ -42,3 +42,74 @@ def entry_price_from_trades(emulator, symbol):
             except (TypeError, ValueError):
                 return None
     return None
+
+
+def equity_positions(emu) -> dict:
+    """{symbol: {"qty", "avg_entry_price", "market_value"}} for long stock.
+    ST read avg_entry_price off Alpaca positions (paper_trader.py:545); the
+    adapter's refresh_positions returns the same PositionDTO."""
+    dtos = []
+    refresh = getattr(emu, "refresh_positions", None)
+    if callable(refresh):
+        try:
+            dtos = list(refresh() or [])
+        except Exception:
+            dtos = []
+    try:
+        held = {str(s).upper(): float(q or 0.0) for s, q in (emu.get_positions() or {}).items()}
+    except Exception:
+        held = {}
+    out = {}
+    for d in dtos:
+        sym = str(getattr(d, "symbol", "") or "").upper()
+        qty = float(getattr(d, "qty", 0) or 0.0)
+        if qty > 0 and sym in held:
+            out[sym] = {"qty": qty,
+                        "avg_entry_price": float(getattr(d, "avg_entry_price", 0) or 0.0),
+                        "market_value": float(getattr(d, "market_value", 0) or 0.0)}
+    for sym, qty in held.items():
+        if qty > 0 and sym not in out:
+            out[sym] = {"qty": qty, "avg_entry_price": entry_price_from_trades(emu, sym) or 0.0,
+                        "market_value": 0.0}
+    return out
+
+
+def option_symbols(emu) -> set:
+    """Open option contracts. ST's open_positions was the whole account, so
+    option positions take swing slots (paper_trader.py:454, 596)."""
+    try:
+        return {str(p.symbol).upper() for p in (emu.list_option_positions() or [])}
+    except Exception:
+        return set()
+
+
+def live_equity(emu, prices=None) -> float:
+    try:
+        return float(emu.refresh_account().equity)
+    except Exception:
+        return float(emu.get_portfolio_value(prices or {}) or 0.0)
+
+
+def live_buying_power(emu) -> float:
+    """ST sized swing entries against account.buying_power (paper_trader.py:450)."""
+    try:
+        return float(emu.refresh_cash().buying_power)
+    except Exception:
+        return float(emu.get_cash() or 0.0)
+
+
+def working_orders(emu):
+    """The working-order book, or None when it cannot be read.
+
+    fix F3: through the adapter's STRICT reader when it has one —
+    AlpacaAdapter.list_open_orders answers an outage with [], which reads as
+    "nothing working" and would let a duplicate order through. None means
+    unreadable: the caller places nothing that depends on the book."""
+    try:
+        reader = getattr(emu, "list_open_orders_strict", None) or emu.list_open_orders
+        orders = reader()
+    except Exception:
+        return None
+    if not isinstance(orders, (list, tuple)):
+        return None
+    return list(orders)

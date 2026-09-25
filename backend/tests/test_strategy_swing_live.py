@@ -1,0 +1,528 @@
+"""StrategySwing live path: the resumable 09:15 scan (spec §5.1, §8, §9)."""
+import importlib.util
+import os
+import sys
+from datetime import datetime, timezone
+from types import SimpleNamespace as NS
+
+import pytest
+
+_backend = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _backend not in sys.path:
+    sys.path.insert(0, _backend)
+
+from swing_trader import clock, signals_store  # noqa: E402
+from swing_trader.constants import SWING_DEFAULTS  # noqa: E402
+
+PATH = os.path.join(_backend, "strategies", "strategy_swing.py")
+MON_0920 = datetime(2026, 6, 1, 13, 20, tzinfo=timezone.utc)
+MON_0940 = datetime(2026, 6, 1, 13, 40, tzinfo=timezone.utc)
+MON_1000 = datetime(2026, 6, 1, 14, 0, tzinfo=timezone.utc)
+TUE_0920 = datetime(2026, 6, 2, 13, 20, tzinfo=timezone.utc)
+
+
+def _load():
+    spec = importlib.util.spec_from_file_location("strategies.strategy_swing", PATH)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def ind(close, rsi=45.0, rsi_prev=40.0, **kw):
+    out = {"close": close, "volume": 2e6, "rsi": rsi, "rsi_prev": rsi_prev,
+           "macd_hist": 0.2, "macd_hist_prev": 0.1, "macd_hist_prev2": 0.05,
+           "sma200": close * 0.9, "vol_avg20": 1e6, "adx": 20.0}
+    out.update(kw)
+    return out
+
+
+IND = {"SPY": ind(450.0, rsi=60.0, sma200=400.0), "AAA": ind(100.0), "BBB": ind(50.0),
+       "CCC": ind(80.0), "DDD": ind(20.0)}
+APPROVE = {"conviction_score": 80, "recommendation": "approve", "reasoning": "ok",
+           "position_size_adjustment": 1.0, "key_risks": []}
+REVIEW = {"conviction_score": 60, "recommendation": "review", "reasoning": "meh",
+          "position_size_adjustment": 0.5, "key_risks": ["x"]}
+REJECT = {"conviction_score": 30, "recommendation": "reject", "reasoning": "no",
+          "position_size_adjustment": 1.0, "key_risks": []}
+
+
+class LiveAdapter:
+    def __init__(self, positions=None, equity=100_000.0, bp=200_000.0,
+                 open_orders=(), closed=(), options=()):
+        self.pos = dict(positions or {})       # symbol -> (qty, avg_entry, market_value)
+        self.equity, self.bp = equity, bp
+        self.open_orders, self.closed, self.options = list(open_orders), list(closed), list(options)
+        self.closed_calls = []
+
+    def get_positions(self):
+        return {s: v[0] for s, v in self.pos.items()}
+
+    def refresh_positions(self):
+        return [NS(symbol=s, qty=v[0], avg_entry_price=v[1], market_value=v[2])
+                for s, v in self.pos.items()]
+
+    def refresh_account(self):
+        return NS(equity=self.equity)
+
+    def refresh_cash(self):
+        return NS(cash=self.bp, buying_power=self.bp)
+
+    def get_cash(self):
+        return self.bp
+
+    def get_portfolio_value(self, prices=None):
+        return self.equity
+
+    def list_option_positions(self):
+        return list(self.options)
+
+    def list_open_orders(self, limit=200):
+        return list(self.open_orders)
+
+    def list_closed_orders(self, symbols, after):
+        self.closed_calls.append((list(symbols), after))
+        return list(self.closed)
+
+    def get_trade_history(self):
+        return []
+
+
+class NoNetworkYf:
+    def __init__(self, sector=None):
+        self.sector = sector
+
+    def Ticker(self, symbol):
+        if self.sector is None:
+            raise RuntimeError("network disabled in tests")
+        return NS(info={"sector": self.sector})
+
+
+def scripted(results):
+    calls = []
+
+    def analyse(signal, **kw):
+        calls.append(signal["symbol"])
+        r = results[signal["symbol"]]
+        if isinstance(r, Exception):
+            raise r
+        return dict(r, symbol=signal["symbol"])
+
+    analyse.calls = calls
+    return analyse
+
+
+@pytest.fixture
+def live(store, monkeypatch):
+    m = _load()
+    monkeypatch.setattr(m, "store", store)
+    monkeypatch.setattr(signals_store, "store", store)
+    store.insert("SwingSectorMap", [
+        {"id": s, "symbol": s, "sector": sec, "as_of": "2026-09-24", "source": "yfinance"}
+        for s, sec in (("AAA", "technology"), ("BBB", "technology"),
+                       ("CCC", "energy"), ("DDD", "utilities"))], conflict="replace")
+    monkeypatch.setattr(m.market_data, "data_client", lambda k, s: object())
+    monkeypatch.setattr(m.market_data, "get_daily_bars", lambda syms, days, client: {})
+    monkeypatch.setattr(m.universe, "get_sp500_symbols",
+                        lambda: ["AAA", "BBB", "CCC", "DDD", "SPY", "QQQ"])
+    monkeypatch.setattr(m.regime, "fetch_vix_close", lambda: 15.0)
+    monkeypatch.setattr(m.ai_analyst, "days_until_earnings", lambda s: None)
+    monkeypatch.setattr(m.calibration, "record_outcomes", lambda *a, **k: 0)
+    monkeypatch.setattr(m.clock, "is_trading_day", lambda d: True)
+    monkeypatch.setattr(m, "swing_indicators", lambda frames, c: dict(IND))
+    # Symbols SwingSectorMap lacks (XLP) fall back to yfinance live; tests
+    # make no network calls.
+    monkeypatch.setattr(m.sectors, "yf", NoNetworkYf())
+    sent = []
+    monkeypatch.setattr(m.notify, "send",
+                        lambda cat, iid, title, msg, priority=0: sent.append((cat, title)))
+    m.sent = sent
+    clock._DEADLINES.clear()
+    return m
+
+
+def cfg(**over):
+    c = dict(SWING_DEFAULTS, strategy_swing_enabled=True, instance_id="swing-paper",
+             alpaca_key="k", alpaca_secret="s", conviction_llm_provider="claude-cli",
+             conviction_llm_model="claude-sonnet-4-6", conviction_llm_api_key="")
+    c.update(over)
+    return c
+
+
+def tick(m, at, adapter, cache, config=None, mode="MONITOR"):
+    return m.StrategySwing().run_once(["SPY"], {}, at, config or cfg(), {}, data=None,
+                                      portfolio_emulator=adapter, strategy_cache=cache,
+                                      mode=mode)
+
+
+def rows():
+    return {r["symbol"]: r for r in signals_store.all_signals("swing-paper")}
+
+
+def test_the_0920_scan_emits_brackets_and_records_every_score(live, monkeypatch):
+    ai = scripted({"AAA": APPROVE, "CCC": REVIEW, "DDD": REJECT})
+    monkeypatch.setattr(live.ai_analyst, "analyse", ai)
+    cache = {}
+    out = tick(live, MON_0920, LiveAdapter(), cache)
+    assert {s: d for s, d in out.items() if not s.startswith("_")} == {"AAA": 1}
+    # The engine buys floor(buy_cash / live price) shares; a live price above
+    # the prior close may buy one share fewer than ST's 125 (accepted).
+    assert out["_nexus_position_sizes"]["AAA"] == {
+        "buy_cash": 12_500.0,
+        "bracket": {"take_profit_price": 109.0, "stop_loss_price": 94.0},
+        "whole_shares": True, "fill_at_next_open": True}
+    assert out["_nexus_action_intents"] == {"AAA": "swing_entry"}
+    assert ai.calls == ["AAA", "CCC", "DDD"]           # BBB: same sector as AAA (fix 4)
+    r = rows()
+    assert (r["AAA"]["status"], r["CCC"]["status"], r["DDD"]["status"]) == (
+        "auto_approved", "pending", "ai_rejected")
+    assert "BBB" not in r
+    assert r["CCC"]["proposal"] == {"entry": 80.0, "stop": 75.2, "target": 87.2, "shares": 156}
+    cats = [c for c, _ in live.sent]
+    assert cats == ["swing_entry", "swing_pending_review", "swing_run_summary",
+                    "swing_run_summary"]
+    assert live.sent[-1][1] == "Swing Trader ✅ Run Complete"
+    assert cache[live._SCAN_DONE_KEY] == "2026-06-01" and live._SCAN_KEY not in cache
+
+
+def test_a_later_tick_does_not_rescan(live, monkeypatch):
+    ai = scripted({"AAA": APPROVE, "CCC": REVIEW, "DDD": REJECT})
+    monkeypatch.setattr(live.ai_analyst, "analyse", ai)
+    cache = {}
+    tick(live, MON_0920, LiveAdapter(), cache)
+    working = LiveAdapter(open_orders=[NS(symbol="AAA", side="buy")])
+    assert tick(live, MON_1000, working, cache) == {}
+    assert ai.calls == ["AAA", "CCC", "DDD"]
+
+
+def test_a_stale_quote_entry_is_reemitted_once_at_the_open(live, monkeypatch):
+    monkeypatch.setattr(live.ai_analyst, "analyse",
+                        scripted({"AAA": APPROVE, "CCC": REJECT, "DDD": REJECT}))
+    cache = {}
+    first = tick(live, MON_0920, LiveAdapter(), cache)
+    empty = LiveAdapter()
+    again = tick(live, MON_0940, empty, cache)
+    assert again["AAA"] == 1
+    assert again["_nexus_position_sizes"]["AAA"] == first["_nexus_position_sizes"]["AAA"]
+    assert empty.closed_calls == [(["AAA"], "2026-06-01")]
+    assert tick(live, MON_1000, LiveAdapter(), cache) == {}
+
+
+def test_no_rearm_when_the_broker_saw_the_order(live, monkeypatch):
+    monkeypatch.setattr(live.ai_analyst, "analyse",
+                        scripted({"AAA": APPROVE, "CCC": REJECT, "DDD": REJECT}))
+    cache = {}
+    tick(live, MON_0920, LiveAdapter(), cache)
+    rejected = LiveAdapter(closed=[NS(symbol="AAA", side="buy", status="rejected")])
+    assert tick(live, MON_0940, rejected, cache) == {}
+    assert tick(live, MON_0940, LiveAdapter(positions={"AAA": (125, 100.0, 12_500.0)}),
+                {**cache}) == {}
+
+
+def test_an_ai_error_skips_only_that_candidate(live, monkeypatch):
+    monkeypatch.setattr(live.ai_analyst, "analyse", scripted({
+        "AAA": ValueError("the model returned no valid JSON object"),
+        "CCC": APPROVE, "DDD": ValueError("conviction_score 150 is outside 0-100")}))
+    cache = {}
+    out = tick(live, MON_0920, LiveAdapter(), cache)
+    assert out["_nexus_executable_buys"] == ["CCC"]
+    assert set(rows()) == {"CCC"}
+    assert cache[live._SCAN_DONE_KEY] == "2026-06-01"
+
+
+def test_no_model_linked_refuses_entries_with_one_alert_per_session(live, monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("no scoring without a model")
+
+    monkeypatch.setattr(live.ai_analyst, "analyse", boom)
+    held = LiveAdapter(positions={"EEE": (10, 100.0, 1_040.0)})
+    monkeypatch.setattr(live, "swing_indicators",
+                        lambda f, c: dict(IND, EEE=ind(104.0, rsi=72.0, rsi_prev=68.0)))
+    no_model = cfg(conviction_llm_provider="", conviction_llm_model="")
+    cache = {}
+    out = tick(live, MON_0920, held, cache, config=no_model)
+    assert {s: d for s, d in out.items() if not s.startswith("_")} == {"EEE": -1}
+    tick(live, MON_1000, held, cache, config=no_model)
+    assert [c for c, _ in live.sent].count("strategy_error") == 1
+    tick(live, TUE_0920, held, cache, config=no_model)
+    assert [c for c, _ in live.sent].count("strategy_error") == 2
+
+
+def test_the_tick_budget_resumes_the_scan_on_the_next_tick(live, monkeypatch):
+    ai = scripted({"AAA": APPROVE, "CCC": REVIEW, "DDD": REJECT})
+    monkeypatch.setattr(live.ai_analyst, "analyse", ai)
+    budget = iter([100.0, 60.0, 10.0])
+    monkeypatch.setattr(live.clock, "time_left", lambda deadline: next(budget, 1_000.0))
+    cache = {}
+    first = tick(live, MON_0920, LiveAdapter(), cache)
+    assert first["_nexus_executable_buys"] == ["AAA"]
+    assert cache[live._SCAN_KEY]["cursor"] == 1 and live._SCAN_DONE_KEY not in cache
+    working = LiveAdapter(open_orders=[NS(symbol="AAA", side="buy")])
+    second = tick(live, MON_0940, working, cache, mode="FULL")
+    assert second == {}                                # CCC pending, DDD rejected
+    assert ai.calls == ["AAA", "CCC", "DDD"]
+    assert cache[live._SCAN_DONE_KEY] == "2026-06-01"
+
+
+def test_rsi_cross_and_close_stop_exits_run_in_the_scan(live, monkeypatch):
+    monkeypatch.setattr(live.ai_analyst, "analyse",
+                        scripted({"AAA": REJECT, "CCC": REJECT, "DDD": REJECT}))
+    monkeypatch.setattr(live, "swing_indicators", lambda f, c: dict(
+        IND, EEE=ind(104.0, rsi=72.0, rsi_prev=68.0), FFF=ind(93.0, rsi=40.0, rsi_prev=45.0)))
+    adapter = LiveAdapter(positions={"EEE": (10, 100.0, 1_040.0), "FFF": (5, 100.0, 465.0)})
+    out = tick(live, MON_0920, adapter, {})
+    assert out["EEE"] == -1 and out["FFF"] == -1
+    assert out["_nexus_position_sizes"]["EEE"] == {"sell_fraction": 1.0, "fill_at_next_open": True}
+    assert out["_nexus_action_intents"] == {"EEE": "swing_rsi_exit", "FFF": "swing_stop_exit"}
+    assert [t for c, t in live.sent if c == "swing_exit"] == ["SELL EEE", "SELL FFF"]
+
+
+def test_a_deferred_exit_is_reemitted_until_the_position_is_gone(live, monkeypatch):
+    monkeypatch.setattr(live.ai_analyst, "analyse",
+                        scripted({"AAA": REJECT, "CCC": REJECT, "DDD": REJECT}))
+    monkeypatch.setattr(live, "swing_indicators",
+                        lambda f, c: dict(IND, EEE=ind(104.0, rsi=72.0, rsi_prev=68.0)))
+    held = LiveAdapter(positions={"EEE": (10, 100.0, 1_040.0)})
+    cache = {}
+    assert tick(live, MON_0920, held, cache)["EEE"] == -1
+    assert cache[live._PENDING_EXIT_KEY]["EEE"]["intent"] == "swing_rsi_exit"
+    # The engine deferred it (the legs' cancel did not confirm): nothing at the broker.
+    again = tick(live, MON_0940, held, cache)
+    assert {s: d for s, d in again.items() if not s.startswith("_")} == {"EEE": -1}
+    assert again["_nexus_action_intents"] == {"EEE": "swing_rsi_exit"}
+    assert again["_nexus_position_sizes"]["EEE"] == {"sell_fraction": 1.0}
+    # A working market sell is the exit in flight: do not stack a second one.
+    selling = LiveAdapter(positions={"EEE": (10, 100.0, 1_040.0)},
+                          open_orders=[NS(symbol="EEE", side="sell", order_class="simple")])
+    assert tick(live, MON_1000, selling, cache) == {}
+    # Still held the next morning, before that session's scan: still re-emitted.
+    tue_0900 = datetime(2026, 6, 2, 13, 0, tzinfo=timezone.utc)
+    assert tick(live, tue_0900, held, cache)["EEE"] == -1
+    # Gone: the entry is dropped and nothing more is sent.
+    assert tick(live, datetime(2026, 6, 2, 13, 5, tzinfo=timezone.utc),
+                LiveAdapter(), cache) == {}
+    assert "EEE" not in cache[live._PENDING_EXIT_KEY]
+
+
+def test_a_bracket_leg_is_not_a_working_exit(live, monkeypatch):
+    cache = {live._PENDING_EXIT_KEY: {"EEE": {"reason": "stop_loss",
+                                              "intent": "swing_stop_exit",
+                                              "since": "2026-06-01"}},
+             live._SCAN_DONE_KEY: "2026-06-01"}
+    legs = [NS(symbol="EEE", side="sell", order_class="bracket", status="held"),
+            NS(symbol="EEE", side="sell", order_class="bracket", status="new")]
+    out = tick(live, MON_1000, LiveAdapter(positions={"EEE": (10, 100.0, 930.0)},
+                                           open_orders=legs), cache)
+    assert out["EEE"] == -1 and out["_nexus_action_intents"] == {"EEE": "swing_stop_exit"}
+
+    class Unreadable(LiveAdapter):
+        def list_open_orders(self, limit=200):
+            raise RuntimeError("orders endpoint down")
+
+    assert tick(live, MON_1000, Unreadable(positions={"EEE": (10, 100.0, 930.0)}),
+                cache) == {}
+    assert "EEE" in cache[live._PENDING_EXIT_KEY]
+
+
+def test_the_bear_counter_advances_once_per_session(live, monkeypatch):
+    monkeypatch.setattr(live.regime, "fetch_vix_close", lambda: 30.0)
+    monkeypatch.setattr(live, "swing_indicators", lambda f, c: dict(IND, XLP=ind(80.0)))
+    monkeypatch.setattr(live.ai_analyst, "analyse", scripted({"XLP": APPROVE}))
+    cache = {}
+    config = cfg(bear_regime_days=2)
+    assert tick(live, MON_0920, LiveAdapter(), cache, config=config) == {}
+    tick(live, MON_1000, LiveAdapter(), cache, config=config)
+    bear = cache[live._BEAR_KEY]
+    assert (bear["session"], bear["blocked_days"]) == ("2026-06-01", 1)
+    out = tick(live, TUE_0920, LiveAdapter(), cache, config=config)
+    assert cache[live._BEAR_KEY]["blocked_days"] == 2
+    assert out["_nexus_action_intents"] == {"XLP": "swing_defensive_entry"}
+    assert any(t.startswith("🐻 Bear Mode Day 2") for _, t in live.sent)
+
+
+def test_a_restarted_scan_reuses_the_recorded_decision(live, monkeypatch):
+    ai = scripted({"CCC": REJECT, "DDD": REJECT})
+    monkeypatch.setattr(live.ai_analyst, "analyse", ai)
+    signals_store.insert_signal(signals_store.new_signal(
+        instance_id="swing-paper", lane="swing", symbol="AAA", session="2026-06-01",
+        score=80, recommendation="approve", reasoning="ok", key_risks=[],
+        size_adjustment=1.0, proposal={}, status="auto_approved"))
+    out = tick(live, MON_0920, LiveAdapter(), {})
+    assert out["AAA"] == 1 and "AAA" not in ai.calls
+
+
+def test_a_holiday_or_an_early_tick_does_nothing(live, monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("must not scan")
+
+    monkeypatch.setattr(live.ai_analyst, "analyse", boom)
+    early = datetime(2026, 6, 1, 13, 0, tzinfo=timezone.utc)       # 09:00 ET
+    assert tick(live, early, LiveAdapter(), {}) == {}
+    monkeypatch.setattr(live.clock, "is_trading_day", lambda d: False)
+    assert tick(live, MON_0920, LiveAdapter(), {}) == {}
+
+
+def test_with_the_ai_gate_off_every_signal_enters_unscored(live, monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("gate off: no scoring")
+
+    monkeypatch.setattr(live.ai_analyst, "analyse", boom)
+    out = tick(live, MON_0920, LiveAdapter(), {},
+               config=cfg(ai_gate_enabled=False, conviction_llm_provider=""))
+    assert out["_nexus_executable_buys"] == ["AAA", "CCC", "DDD"]
+    assert all(r["score"] is None and r["status"] == "auto_approved" for r in rows().values())
+
+
+def test_the_scan_never_places_more_than_the_open_slots(live, monkeypatch):
+    monkeypatch.setattr(live.ai_analyst, "analyse",
+                        scripted({"AAA": APPROVE, "CCC": APPROVE, "DDD": APPROVE}))
+    out = tick(live, MON_0920, LiveAdapter(), {}, config=cfg(max_positions=1))
+    assert out["_nexus_executable_buys"] == ["AAA"]
+
+
+def test_missing_credentials_refuse_the_scan(live, monkeypatch):
+    def refuse(k, s):
+        raise RuntimeError("Alpaca data credentials missing")
+
+    monkeypatch.setattr(live.market_data, "data_client", refuse)
+    cache = {}
+    assert tick(live, MON_0920, LiveAdapter(), cache) == {}
+    assert live._SCAN_DONE_KEY not in cache
+
+
+# -- controller rulings (G6) ---------------------------------------------------
+
+class StrictBook(LiveAdapter):
+    """Alpaca's shape: list_open_orders answers an outage with [], the strict
+    reader raises (or shows what the lenient one hides)."""
+
+    def __init__(self, strict=None, **kw):
+        super().__init__(**kw)
+        self.strict = strict
+
+    def list_open_orders(self, limit=200):
+        return []
+
+    def list_open_orders_strict(self, limit=200):
+        if isinstance(self.strict, Exception):
+            raise self.strict
+        return list(self.strict or [])
+
+
+def test_f3_an_unreadable_strict_book_places_nothing_this_tick(live, monkeypatch):
+    lines = []
+    monkeypatch.setattr(live, "_log", lambda msg, color="white": lines.append(msg))
+    ai = scripted({"AAA": APPROVE, "CCC": REJECT, "DDD": REJECT})
+    monkeypatch.setattr(live.ai_analyst, "analyse", ai)
+    monkeypatch.setattr(live, "swing_indicators",
+                        lambda f, c: dict(IND, EEE=ind(104.0, rsi=72.0, rsi_prev=68.0)))
+    cache = {live._PENDING_EXIT_KEY: {"FFF": {"reason": "stop_loss",
+                                              "intent": "swing_stop_exit",
+                                              "since": "2026-05-29"}}}
+    down = StrictBook(strict=RuntimeError("orders endpoint down"),
+                      positions={"EEE": (10, 100.0, 1_040.0), "FFF": (5, 100.0, 465.0)})
+    assert tick(live, MON_0920, down, cache) == {}
+    assert ai.calls == [] and live._SCAN_DONE_KEY not in cache
+    assert "FFF" in cache[live._PENDING_EXIT_KEY]
+    assert any("unreadable" in line for line in lines)
+    # The book reads again: the scan runs and the pending exit is re-sent.
+    up = StrictBook(strict=[], positions={"EEE": (10, 100.0, 1_040.0),
+                                          "FFF": (5, 100.0, 465.0)})
+    out = tick(live, MON_0940, up, cache)
+    assert {s: d for s, d in out.items() if not s.startswith("_")} == {
+        "AAA": 1, "EEE": -1, "FFF": -1}
+    assert cache[live._SCAN_DONE_KEY] == "2026-06-01"
+
+
+def test_f3_the_strict_book_is_the_one_read(live, monkeypatch):
+    cache = {live._PENDING_EXIT_KEY: {"EEE": {"reason": "stop_loss",
+                                              "intent": "swing_stop_exit",
+                                              "since": "2026-06-01"}},
+             live._SCAN_DONE_KEY: "2026-06-01"}
+    selling = StrictBook(strict=[NS(symbol="EEE", side="sell", order_class="simple")],
+                         positions={"EEE": (10, 100.0, 930.0)})
+    assert tick(live, MON_1000, selling, cache) == {}
+
+
+def test_a_working_buy_counts_as_held_in_the_scan(live, monkeypatch):
+    # An approved bracket for AAA is queued for the open: AAA is not scored
+    # again, and it holds the technology slot (BBB is not scored either).
+    ai = scripted({"CCC": REJECT, "DDD": REJECT})
+    monkeypatch.setattr(live.ai_analyst, "analyse", ai)
+    queued = StrictBook(strict=[NS(symbol="AAA", side="buy", order_class="bracket")])
+    assert tick(live, MON_0920, queued, {}) == {}
+    assert ai.calls == ["CCC", "DDD"]
+
+
+def test_the_scan_does_not_stack_an_exit_on_a_working_sell(live, monkeypatch):
+    monkeypatch.setattr(live.ai_analyst, "analyse",
+                        scripted({"AAA": REJECT, "CCC": REJECT, "DDD": REJECT}))
+    monkeypatch.setattr(live, "swing_indicators", lambda f, c: dict(
+        IND, EEE=ind(104.0, rsi=72.0, rsi_prev=68.0), FFF=ind(93.0, rsi=40.0, rsi_prev=45.0)))
+    book = StrictBook(strict=[NS(symbol="EEE", side="sell", order_class="simple"),
+                              NS(symbol="FFF", side="sell", order_class="bracket")],
+                      positions={"EEE": (10, 100.0, 1_040.0), "FFF": (5, 100.0, 465.0)})
+    out = tick(live, MON_0920, book, {})
+    assert {s: d for s, d in out.items() if not s.startswith("_")} == {"FFF": -1}
+    assert [t for c, t in live.sent if c == "swing_exit"] == ["SELL FFF"]
+
+
+def test_live_buy_cash_carries_the_size_adjustment_and_no_share_count(live, monkeypatch):
+    half = dict(APPROVE, position_size_adjustment=0.5)
+    monkeypatch.setattr(live.ai_analyst, "analyse",
+                        scripted({"AAA": half, "CCC": REJECT, "DDD": REJECT}))
+    out = tick(live, MON_0920, LiveAdapter(), {})
+    hint = out["_nexus_position_sizes"]["AAA"]
+    assert hint["buy_cash"] == 6_250.0                 # 100,000 x 0.125 x 0.5
+    assert not {"qty", "shares", "notional"} & set(hint)
+    assert all(type(hint[k]) is bool for k in ("whole_shares", "fill_at_next_open"))
+    assert rows()["AAA"]["proposal"]["shares"] == 125  # ST's base count, for the record
+
+
+def test_an_unparseable_scan_time_refuses_the_scan(live, monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("must not scan")
+
+    lines = []
+    monkeypatch.setattr(live, "_log", lambda msg, color="white": lines.append(msg))
+    monkeypatch.setattr(live.ai_analyst, "analyse", boom)
+    cache = {}
+    after_midnight = datetime(2026, 6, 1, 4, 5, tzinfo=timezone.utc)   # 00:05 ET
+    for at in (after_midnight, MON_0920, MON_1000):
+        assert tick(live, at, LiveAdapter(), cache, config=cfg(scan_time_et="9h15")) == {}
+    assert live._SCAN_DONE_KEY not in cache
+    assert sum("scan_time_et" in line for line in lines) == 1
+    # A pending exit is still re-sent: only the scan is refused.
+    cache[live._PENDING_EXIT_KEY] = {"EEE": {"reason": "stop_loss",
+                                             "intent": "swing_stop_exit",
+                                             "since": "2026-06-01"}}
+    held = LiveAdapter(positions={"EEE": (10, 100.0, 930.0)})
+    assert tick(live, MON_1000, held, cache, config=cfg(scan_time_et="25:00"))["EEE"] == -1
+
+
+def test_an_empty_sector_reads_unknown(live, monkeypatch, store):
+    # AAA and BBB are unmapped and yfinance gives them no sector: "" must not
+    # read as a shared sector (sector_conflict exempts only "unknown").
+    for s in ("AAA", "BBB"):
+        store.delete("SwingSectorMap", s)
+    monkeypatch.setattr(live.sectors, "yf", NoNetworkYf(sector=""))
+    out = tick(live, MON_0920, LiveAdapter(), {},
+               config=cfg(ai_gate_enabled=False, conviction_llm_provider=""))
+    assert out["_nexus_executable_buys"] == ["AAA", "BBB", "CCC", "DDD"]
+
+
+def test_g1_minor_5_a_bad_row_skips_only_that_symbol_in_the_scan(live, monkeypatch):
+    lines = []
+    monkeypatch.setattr(live, "_log", lambda msg, color="white": lines.append(msg))
+    ai = scripted({"BBB": REJECT, "CCC": REJECT, "DDD": REJECT})
+    monkeypatch.setattr(live.ai_analyst, "analyse", ai)
+    monkeypatch.setattr(live, "swing_indicators", lambda f, c: dict(
+        IND, AAA=ind(100.0, rsi="n/a"), EEE=dict(ind(100.0), close="n/a"),
+        FFF=ind(93.0, rsi=40.0, rsi_prev=45.0)))
+    adapter = LiveAdapter(positions={"EEE": (10, 100.0, 1_000.0), "FFF": (5, 100.0, 465.0)})
+    cache = {}
+    out = tick(live, MON_0920, adapter, cache)
+    assert {s: d for s, d in out.items() if not s.startswith("_")} == {"FFF": -1}
+    assert ai.calls == ["BBB", "CCC", "DDD"]          # AAA skipped; BBB no longer blocked
+    assert cache[live._SCAN_DONE_KEY] == "2026-06-01"
+    assert any("AAA" in line for line in lines) and any("EEE" in line for line in lines)
