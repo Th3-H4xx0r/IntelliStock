@@ -624,7 +624,9 @@ class StrategySwing:
         """paper_trader.py:446-626 up to the entry loop: data, regime, exits,
         the bear counter, and the queue of names whose signal fired. Exits are
         merged into the payload only once everything above them succeeded.
-        None means not ready: nothing is decided, and the next tick retries."""
+        None means not ready and the next tick retries: nothing is decided,
+        except that an unknown put collateral (seams m1) still merges this
+        tick's exits -- only the entries wait."""
         try:
             client = market_data.data_client(cfg.get("alpaca_key"), cfg.get("alpaca_secret"))
         except RuntimeError as exc:
@@ -652,18 +654,12 @@ class StrategySwing:
                       "tick.", "red")
             return None
         # FW-lo-I5: the cash securing short puts (open, and working
-        # sell-to-open) is not the swing lane's to spend. Seams m1: collateral
-        # that cannot be read is "not ready", like the positions above --
-        # FW1's incompleteness triggers last only until the next ~3 s refresh,
-        # so nothing is decided or latched and the scan retries next tick.
+        # sell-to-open) is not the swing lane's to spend. Seams m1 (as ruled):
+        # when it cannot be read, this tick still decides and sends the exits
+        # -- they are risk-reducing and never depend on collateral -- but plans
+        # no entries and does not latch; the entries retry next tick. FW1's
+        # incompleteness triggers last only until the next ~3 s refresh.
         bp, collateral, collateral_unread = account.swing_live_budget(emu, book)
-        if bp is None:
-            _log_once(cache, "put-collateral", session,
-                      f"StrategySwing {session} | scan not ready: the cash securing short "
-                      f"puts cannot be read ({collateral_unread}), so a swing entry could "
-                      "spend it. Nothing is decided or latched; the scan retries next tick.",
-                      "red")
-            return None
         live_universe = [universe.norm_symbol(s) for s in universe.get_sp500_symbols()]
         defensive = _list(cfg["defensive_universe"])
         fetch_universe = list(dict.fromkeys(live_universe + defensive))
@@ -699,17 +695,32 @@ class StrategySwing:
         reasons = _exits(ind, {s: p["qty"] for s, p in equity_pos.items() if s not in selling},
                          lambda s: equity_pos[s]["avg_entry_price"], cfg,
                          ex_dec, ex_sizes, ex_int)
+        pending = cache.setdefault(_PENDING_EXIT_KEY, {})
         for symbol, reason in reasons.items():
             close, pos = float(ind[symbol]["close"]), equity_pos[symbol]
             entry = pos["avg_entry_price"]
-            notify.send("swing_exit", iid, f"SELL {symbol}",
-                        f"{symbol} — {reason}\n{(close - entry) / entry * 100:+.1f}% | "
-                        f"${(close - entry) * pos['qty']:+.0f}", priority=1)
-            bp += pos["qty"] * close
-        pending = cache.setdefault(_PENDING_EXIT_KEY, {})
+            if (pending.get(symbol) or {}).get("since") != session:
+                # A scan retried this session (seams m1) re-decides its exits;
+                # the SELL notice went out when the exit was first decided.
+                notify.send("swing_exit", iid, f"SELL {symbol}",
+                            f"{symbol} — {reason}\n{(close - entry) / entry * 100:+.1f}% | "
+                            f"${(close - entry) * pos['qty']:+.0f}", priority=1)
+            if bp is not None:
+                bp += pos["qty"] * close
         for symbol, reason in reasons.items():
             pending.setdefault(symbol, {"reason": reason, "intent": INTENT_EXIT[reason],
                                         "since": session})
+        if bp is None:
+            _log_once(cache, "put-collateral", session,
+                      f"StrategySwing {session} | REFUSING ENTRIES this tick — the cash "
+                      f"securing short puts cannot be read ({collateral_unread}), so a swing "
+                      f"entry could spend it. Exits are decided and sent "
+                      f"({sorted(reasons) or 'none'}); the scan is not latched and its "
+                      "entries retry next tick.", "red")
+            decisions.update(ex_dec)
+            sizes.update(ex_sizes)
+            intents.update(ex_int)
+            return None
         active = (set(equity_pos) | option_syms | queued) - set(reasons)
 
         bear = signals.update_regime_tracker(cache.get(_BEAR_KEY), reg["regime_ok"], session)

@@ -975,32 +975,46 @@ def test_negative_cash_plans_no_entries_even_with_no_puts_open(live, monkeypatch
     assert not any(r["status"] == "auto_approved" for r in rows().values())
 
 
-def test_an_unknown_put_collateral_is_not_ready_and_the_next_tick_scans(live, monkeypatch):
-    """Seams m1: FW1's incompleteness triggers (an unknown-origin short fill,
-    an ambiguous mid-refresh settle) last until the next ~3 s refresh. The
-    lane used to plan no entries and still latch the session, so a 3 s gap
-    cost the whole day's entries. An unknown collateral is now "not ready",
-    as unreadable positions are: nothing is decided or latched, and the next
-    tick scans."""
+UNTYPED_SHORT = NS(symbol="XYZ261016P00400000", qty=-1, option_type="", strike=400.0,
+                   underlying="XYZ", expiry="")
+
+
+@pytest.mark.parametrize("cause", ["untyped short row", "incomplete map"])
+def test_an_unknown_put_collateral_still_exits_skips_entries_and_does_not_latch(
+        live, monkeypatch, cause):
+    """Seams m1, as ruled after the final round: exits are risk-reducing and
+    never depend on collateral. With the put collateral unknown -- a short
+    row whose type Alpaca did not give (m3), or one of FW1's ~3 s
+    incompleteness triggers -- the scan still DECIDES and sends this tick's
+    exits (RSI > 70 here), plans no entries, and does not latch, so the
+    entries retry next tick. The SELL notice goes out once."""
     ai = scripted({"AAA": APPROVE, "CCC": APPROVE, "DDD": APPROVE})
     monkeypatch.setattr(live.ai_analyst, "analyse", ai)
     monkeypatch.setattr(live, "swing_indicators",
                         lambda f, c: dict(IND, EEE=ind(104.0, rsi=72.0, rsi_prev=68.0)))
     lines = []
     monkeypatch.setattr(live, "_log", lambda msg, color="white": lines.append(msg))
-    book = PutBook(cash=100_000.0, bp=100_000.0, positions={"EEE": (10, 100.0, 1_040.0)},
-                   health={"complete": False, "stale_since": None})
+    book = PutBook(cash=100_000.0, bp=100_000.0, positions={"EEE": (10, 100.0, 1_040.0)})
+    if cause == "untyped short row":
+        book.options = [UNTYPED_SHORT]
+    else:
+        book.health = {"complete": False, "stale_since": None}
     cache = {}
-    assert tick(live, MON_0920, book, cache) == {}
-    assert ai.calls == [] and live._SCAN_DONE_KEY not in cache
-    assert any("not ready" in m and "short puts" in m for m in lines)
-    assert rows() == {}
+    out = tick(live, MON_0920, book, cache)
+    assert {s: d for s, d in out.items() if not s.startswith("_")} == {"EEE": -1}
+    assert out["_nexus_action_intents"] == {"EEE": "swing_rsi_exit"}
+    assert _entries(out) == {} and ai.calls == [] and rows() == {}
+    assert live._SCAN_DONE_KEY not in cache and live._SCAN_KEY not in cache
+    assert any("REFUSING ENTRIES" in m and "short puts" in m for m in lines)
 
-    book.health = {"complete": True, "stale_since": None}      # the next refresh landed
+    # The next refresh reads the book whole: the retried scan plans the entries
+    # and latches; the exit is still decided, and its SELL notice is not repeated.
+    book.options, book.health = [], {"complete": True, "stale_since": None}
     out = tick(live, MON_0920, book, cache)
     assert out["EEE"] == -1
     assert set(_entries(out)) == {"AAA", "CCC", "DDD"}
     assert cache[live._SCAN_DONE_KEY] == "2026-06-01"
+    assert [t for c, t in live.sent if c == "swing_exit"] == ["SELL EEE"]
 
 
 # -- FW-str minor (a): an entry that rounds to 0 whole shares holds nothing ----------
