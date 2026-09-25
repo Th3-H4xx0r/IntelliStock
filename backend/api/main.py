@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional, Union
 
 from fastapi import FastAPI, HTTPException, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, field_validator
@@ -206,6 +207,14 @@ from interactive_utils import (
     action_register_push_device,
     action_delete_push_device,
     action_list_push_devices,
+    SwingBrokerUnavailableError,
+    SwingDecisionRaceError,
+    SwingResendConflictError,
+    action_swing_list_signals,
+    action_swing_decide_signal,
+    action_swing_resend_signal,
+    action_wheel_overview,
+    action_swing_calibration,
 )
 
 # OpenAPI / Swagger UI off in production unless API_DOCS_PUBLIC says otherwise.
@@ -1087,6 +1096,11 @@ _CODE_FINGERPRINT_FILES = (
     # Backtests share this cache policy. A stale image here can serve empty or
     # incomplete market data even when the strategy and broker hashes match.
     "price_utils.py",
+    # The backtest engine itself (swing port, spec 12): a push that changes
+    # only the simulator must not read as deployed before its image exists.
+    "simulated_execution.py",
+    "portfolio_emulator.py",
+    "backtest_bar_events.py",
     # Strategy EB is the paper instance's live strategy and the lab's engine
     # subject; 2026-09-03 a push that changed only these two files read as
     # "deployed" before the image existed, and a pre-registered run started
@@ -1104,6 +1118,42 @@ _CODE_FINGERPRINT_FILES = (
     # clothes.
     "strategy_hx.py",
     "strategies/strategy_hx.py",
+    # 2026-09-24 swing port: see scripts/check_deployed_code.py. Both lists
+    # must stay identical up to the backend/ prefix.
+    "live_orders/__init__.py",
+    "live_orders/types.py",
+    "live_orders/store.py",
+    "live_orders/gate.py",
+    "live_orders/service.py",
+    "live_orders/reconcile.py",
+    "broker_adapters/base.py",
+    "broker_adapters/errors.py",
+    "live_pending_orders.py",
+    "live_risk_state.py",
+    "live_broker_fetch.py",
+    "strategies/strategy_swing.py",
+    "strategies/strategy_wheel.py",
+    "swing_trader/__init__.py",
+    "swing_trader/account.py",
+    "swing_trader/clock.py",
+    "swing_trader/constants.py",
+    "swing_trader/indicators.py",
+    "swing_trader/signals.py",
+    "swing_trader/regime.py",
+    "swing_trader/universe.py",
+    "swing_trader/sectors.py",
+    "swing_trader/wheel_rules.py",
+    "swing_trader/ai_analyst.py",
+    "swing_trader/market_data.py",
+    "swing_trader/iv.py",
+    "swing_trader/calibration.py",
+    "swing_trader/approvals.py",
+    "swing_trader/notify.py",
+    "swing_trader/refdata.py",
+    "swing_trader/signals_store.py",
+    "db/schema.py",
+    "notification_types.py",
+    "interactive_utils.py",
 )
 _CODE_FINGERPRINT_CACHE: "dict[str, str] | None" = None
 
@@ -4007,6 +4057,107 @@ def api_get_live_command(command_id: str, conn=Depends(conn_dependency), current
     """Return the status and result of a previously-submitted live command.
     UI polls this until `status` ∈ {completed, failed}."""
     return _run(action_get_live_command, conn, command_id)
+
+
+# --- swing-trader port (plan B Task 21; interfaces §8, §9) ---
+#
+# GET  /instances/{id}/swing/signals?status=     — review queue (web + iOS)
+# POST /instances/{id}/swing/signals/{sid}/decision — approve / approve_half / reject
+# POST /instances/{id}/swing/signals/{sid}/resend   — re-queue a stuck approval
+# GET  /instances/{id}/wheel                     — open puts, collateral, recent scans
+# GET  /instances/{id}/swing/calibration         — score buckets vs outcomes
+
+
+class SwingDecisionBody(BaseModel):
+    decision: str = Field(pattern="^(approve|approve_half|reject)$")
+    reason: Optional[str] = None      # both UIs omit it when blank
+
+
+@app.get("/instances/{instance_id}/swing/signals", response_class=JSONResponse)
+def api_swing_list_signals(instance_id: str, status: Optional[str] = None, limit: int = 100,
+                           conn=Depends(conn_dependency),
+                           current_user: dict = Depends(get_current_user)):
+    return _run(action_swing_list_signals, conn, instance_id, status, limit)
+
+
+@app.post("/instances/{instance_id}/swing/signals/{signal_id}/decision",
+          response_class=JSONResponse)
+def api_swing_decide_signal(instance_id: str, signal_id: str, body: SwingDecisionBody,
+                            conn=Depends(conn_dependency),
+                            current_user: dict = Depends(get_current_user)):
+    """Decide a pending signal. An approval queues a submit_order LiveCommand
+    that the broker rebuilds at the live price.
+
+    - 200: recorded (and, for an approval, queued).
+    - 202: the approval is recorded, but the queue write raised and the
+      re-read shows the command queued, the signal already moved on, or
+      nothing readable. The order may be in flight: the body carries
+      {"uncertain": true, "detail"}; check the signal status and open orders.
+    - 400: the signal is no longer pending. 404: unknown, or another
+      instance's. 409: a concurrent click won. 422: a malformed body.
+    - 503: the approval provably did not reach the broker (the instance is
+      not running or has crashed, or the command was not queued and the
+      signal was put back to pending): try again.
+    """
+    try:
+        out = _run(action_swing_decide_signal, conn, instance_id, signal_id,
+                   body.decision, body.reason,
+                   str(current_user.get("username") or current_user.get("id")
+                       or "operator"))
+    except SwingDecisionRaceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except SwingBrokerUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    if isinstance(out, dict) and out.get("uncertain"):
+        return JSONResponse(status_code=202, content=jsonable_encoder(out))
+    return out
+
+
+@app.post("/instances/{instance_id}/swing/signals/{signal_id}/resend",
+          response_class=JSONResponse)
+def api_swing_resend_signal(instance_id: str, signal_id: str,
+                            conn=Depends(conn_dependency),
+                            current_user: dict = Depends(get_current_user)):
+    """Re-send a stuck approval: queue the approval's submit_order payload
+    again for a signal that reads approved or approved_half with no pending
+    or running command. The broker claims approved -> submitted before it
+    sends anything, so a duplicate copy places nothing.
+
+    - 200: queued, {"signal", "command_id"}.
+    - 202: the queue write raised but may have landed; the same
+      {"uncertain": true, "detail"} body as the decision route.
+    - 404: unknown, or another instance's. 409: not approved, approved on a
+      day other than today's New York date (decided_at), or a command for it
+      is still pending or running.
+    - 503: the instance is not running or has crashed, the queue could not be
+      read, or the command provably was not queued: try again.
+    """
+    try:
+        out = _run(action_swing_resend_signal, conn, instance_id, signal_id,
+                   str(current_user.get("username") or current_user.get("id")
+                       or "operator"))
+    except SwingResendConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except SwingBrokerUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    if isinstance(out, dict) and out.get("uncertain"):
+        return JSONResponse(status_code=202, content=jsonable_encoder(out))
+    return out
+
+
+@app.get("/instances/{instance_id}/wheel", response_class=JSONResponse)
+def api_wheel_overview(instance_id: str, conn=Depends(conn_dependency),
+                       current_user: dict = Depends(get_current_user)):
+    try:
+        return _run(action_wheel_overview, conn, instance_id)
+    except SwingBrokerUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.get("/instances/{instance_id}/swing/calibration", response_class=JSONResponse)
+def api_swing_calibration(instance_id: str, conn=Depends(conn_dependency),
+                          current_user: dict = Depends(get_current_user)):
+    return _run(action_swing_calibration, conn, instance_id)
 
 
 @app.get("/backtests/{backtest_id}/graph-data", response_class=JSONResponse)

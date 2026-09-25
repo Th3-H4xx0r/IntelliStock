@@ -4,6 +4,7 @@ import '../../../core/formatters/formatters.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_text_styles.dart';
 import '../../../core/widgets/app_button.dart';
+import '../../../core/widgets/common_widgets.dart';
 import '../../../core/widgets/glass_card.dart';
 import '../../../core/widgets/material_symbols.dart';
 import '../data/live_repository.dart';
@@ -27,7 +28,7 @@ class PositionCard extends StatelessWidget {
   final VoidCallback onClose;
 
   bool get _isUp {
-    if (historicals.length < 2) return position.unrealizedPnl >= 0;
+    if (historicals.length < 2) return (position.unrealizedPnl ?? 0) >= 0;
     final startV = _toDouble(historicals.first.ts, historicals.first.value);
     final endV = historicals.last.value;
     return endV >= startV;
@@ -80,7 +81,12 @@ class PositionCard extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Row(
+                    // A Wrap, not a Row: an 18-character OCC symbol plus two
+                    // badges does not fit one line on a 320pt phone.
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 4,
+                      crossAxisAlignment: WrapCrossAlignment.center,
                       children: [
                         Text(
                           position.symbol,
@@ -90,8 +96,12 @@ class PositionCard extends StatelessWidget {
                             letterSpacing: 0.5,
                           ),
                         ),
-                        const SizedBox(width: 8),
-                        if (position.avgEntryPrice != null)
+                        if (position.isOption)
+                          const AppBadge(label: 'Option', color: AppColors.primary),
+                        if (position.isOption && position.isShort)
+                          const AppBadge(label: 'Short', color: AppColors.warning),
+                        if (position.avgEntryPrice != null &&
+                            position.unrealizedPnlPct != null)
                           Text(
                             fmtPct(position.unrealizedPnlPct),
                             style: AppTextStyles.micro.copyWith(
@@ -101,6 +111,13 @@ class PositionCard extends StatelessWidget {
                           ),
                       ],
                     ),
+                    if (position.isOption) ...[
+                      const SizedBox(height: 2),
+                      Text(
+                        position.optionDescription,
+                        style: AppTextStyles.nano.copyWith(color: AppColors.textDim),
+                      ),
+                    ],
                     if (historicals.length >= 2) ...[
                       const SizedBox(height: 2),
                       Row(
@@ -154,7 +171,9 @@ class PositionCard extends StatelessWidget {
             child: historicals.isEmpty
                 ? Center(
                     child: Text(
-                      'No price history',
+                      position.isOption
+                          ? 'No price chart for options'
+                          : 'No price history',
                       style: AppTextStyles.nano.copyWith(color: AppColors.textFaint),
                     ),
                   )
@@ -166,7 +185,7 @@ class PositionCard extends StatelessWidget {
           // 4-stat grid: Shares / Last / Entry / P&L$
           Row(
             children: [
-              _Stat(label: 'SHARES', value: position.qty.toStringAsFixed(4)),
+              _Stat(label: position.quantityLabel, value: position.quantityText),
               _Stat(label: 'LAST', value: fmtMoney(position.lastPrice)),
               _Stat(
                 label: 'ENTRY',
@@ -179,7 +198,8 @@ class PositionCard extends StatelessWidget {
                 value: position.avgEntryPrice != null
                     ? fmtPnl(position.unrealizedPnl)
                     : '—',
-                valueColor: position.avgEntryPrice != null
+                valueColor: position.avgEntryPrice != null &&
+                        position.unrealizedPnl != null
                     ? unrealizedPnlColor
                     : AppColors.textDim,
               ),
@@ -188,16 +208,22 @@ class PositionCard extends StatelessWidget {
 
           const SizedBox(height: 10),
 
-          // Close button
+          // Close button. close_position cannot close an option; the wheel
+          // lane buys its puts back itself.
           Align(
             alignment: Alignment.centerRight,
-            child: AppButton.semantic(
-              label: 'Close',
-              icon: symbol('logout'),
-              color: AppColors.danger,
-              dense: true,
-              onPressed: onClose,
-            ),
+            child: position.canClose
+                ? AppButton.semantic(
+                    label: 'Close',
+                    icon: symbol('logout'),
+                    color: AppColors.danger,
+                    dense: true,
+                    onPressed: onClose,
+                  )
+                : Text(
+                    'Managed by the wheel lane, which buys puts back automatically. Close it at the broker if needed.',
+                    style: AppTextStyles.nano.copyWith(color: AppColors.textFaint),
+                  ),
           ),
         ],
       ),

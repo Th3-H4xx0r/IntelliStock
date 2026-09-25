@@ -6652,6 +6652,439 @@ def action_get_live_command(conn, command_id):
     return doc
 
 
+# --- swing-trader port: signals, decisions, the wheel book (plan B Task 21) ---
+# The swing and wheel lanes write SwingSignals / SwingWheelScans (swing_trader.
+# signals_store). An approval is final after one compare-and-swap and reaches
+# the broker as a submit_order LiveCommand {"source": "swing_approval",
+# "signal_id"} that plan A-live's handler rebuilds at the live price. The
+# handler claims the signal approved -> submitted before it sends anything, so
+# a duplicate command (a redelivery, or a re-send) places nothing.
+
+class SwingBrokerUnavailableError(RuntimeError):
+    """The routes answer 503. The wheel book is unknown because the broker
+    cannot be read (an empty book would read as "no open puts"); or an
+    approval provably did not reach the broker: the instance is not running
+    or has crashed (the signal stays pending), or the command was not queued
+    and the signal was put back to pending (FW-api-I1). Either way a retry
+    later is safe. A queue write whose outcome is unknown is NOT this error:
+    it is the decision route's 202 "uncertain" answer."""
+
+
+class SwingDecisionRaceError(RuntimeError):
+    """This click lost the compare-and-swap to a concurrent decision (409)."""
+
+
+class SwingResendConflictError(RuntimeError):
+    """A re-send refused (409): the signal is not approved, or a broker
+    command for it is still pending or running."""
+
+
+def _swing_log(msg, color="white"):
+    try:
+        from intellistock_logger import intellistock_logger as _ilog
+        _ilog.log(str(msg), color, service="SwingApi")
+    except Exception:
+        print("[SwingApi] %s" % msg)
+
+
+def _finite_or_none(value):
+    """A finite float, else None: a nan/inf from the broker is no value (and
+    would make the JSON response itself fail)."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    return v if v == v and v not in (float("inf"), float("-inf")) else None
+
+
+def _swing_instance(conn, instance_id):
+    inst = _resolve_instance_doc(conn, instance_id) if instance_id else None
+    if inst is None:
+        raise LookupError("Instance not found: %s" % instance_id)
+    return inst, str(inst.get("id", instance_id))
+
+
+def _swing_table_missing(exc) -> bool:
+    """A swing table no lane has created yet: Postgres SQLSTATE 42P01
+    (undefined_table), which db.pool re-raises unwrapped, found anywhere in
+    the exception's cause chain. The lanes create their tables only when a
+    scan is due (signals_store.ensure_tables), so an instance started after
+    the day's scan has none until the next session (FW item 4, M-4)."""
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if getattr(exc, "sqlstate", None) == "42P01":
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
+
+
+def _swing_read(read, empty):
+    """read(), or `empty` when a swing table does not exist yet. Every other
+    failure propagates."""
+    try:
+        return read()
+    except Exception as exc:
+        if _swing_table_missing(exc):
+            return empty
+        raise
+
+
+def _ny_date_of(instant):
+    """The New York calendar date of an aware datetime (swing_trader.clock's
+    ET conversion)."""
+    from swing_trader import clock
+    return datetime.date.fromisoformat(clock.ny_date(instant))
+
+
+def _ny_today(now=None):
+    """Today's New York date, at `now` or now."""
+    return _ny_date_of(now or datetime.datetime.now(datetime.timezone.utc))
+
+
+def action_swing_list_signals(conn, instance_id, status=None, limit=100):
+    """{"signals": [...]} newest first (interfaces §9 item 1); empty before a
+    lane has created its tables."""
+    from swing_trader import signals_store
+    _inst, real_id = _swing_instance(conn, instance_id)
+    return {"signals": _swing_read(
+        lambda: signals_store.list_signals(real_id, status=(status or None), limit=limit),
+        [])}
+
+
+def action_swing_decide_signal(conn, instance_id, signal_id, decision, reason=None,
+                               decided_by=None):
+    """Decide a pending signal (interfaces §9 item 2). Not pending:
+    SignalConflict, a ValueError (400). Unknown or another instance's:
+    LookupError (404). Lost the compare-and-swap: SwingDecisionRaceError
+    (409). An approval that provably cannot reach the broker (instance not
+    running or crashed, or the command provably not queued): the signal is
+    pending (again) and SwingBrokerUnavailableError (503). A queue write that
+    raised but may have landed: {"uncertain": True, "detail", ...}, which the
+    route answers as 202 (FW-api-I1, _swing_after_failed_enqueue). A
+    rejection needs no broker."""
+    from swing_trader import approvals, signals_store
+    inst, real_id = _swing_instance(conn, instance_id)
+    signal = _swing_read(lambda: signals_store.get_signal(signal_id), None)
+    if not signal or str(signal.get("instance_id") or "") != real_id:
+        raise LookupError("Signal not found: %s" % signal_id)
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    decided = approvals.decide(signal, decision, decided_by, reason, now_iso)
+    approving = decided["status"] in approvals.APPROVED_STATUSES
+    if approving and not inst.get("runCommand", False):
+        raise SwingBrokerUnavailableError(
+            "Instance %s is not running, so the approval could not reach the broker; "
+            "the signal stays pending" % real_id)
+    if approving and inst.get("crashed"):
+        # M6: a crashed instance is held open for its logs; no broker loop
+        # would pick the command up.
+        raise SwingBrokerUnavailableError(
+            "Instance %s has crashed, so the approval could not reach the broker; "
+            "the signal stays pending" % real_id)
+    if not signals_store.cas_signal(signal_id, expect_status="pending", doc=decided):
+        raise SwingDecisionRaceError("signal %s was decided first by another click; "
+                                     "decisions are final" % signal_id)
+    out = {"signal": decided, "command_id": None}
+    if approving:
+        started = datetime.datetime.now(datetime.timezone.utc)
+        try:
+            cmd = action_submit_live_command(
+                conn, real_id, "submit_order",
+                {"source": "swing_approval", "signal_id": str(signal_id)}, decided_by)
+        except Exception as exc:
+            return _swing_after_failed_enqueue(real_id, signal_id, signal, decided, exc,
+                                               started)
+        out["command_id"] = (cmd or {}).get("command_id")
+    return out
+
+
+def _as_utc(value):
+    """A LiveCommands time field as an aware UTC datetime, or None. The store
+    decodes time_fields to datetimes; the in-process FakeStore keeps the ISO
+    string."""
+    if isinstance(value, str):
+        try:
+            value = datetime.datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    if not isinstance(value, datetime.datetime):
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=datetime.timezone.utc)
+    return value.astimezone(datetime.timezone.utc)
+
+
+def _swing_approval_commands(real_id, signal_id, *, since=None, open_only=False,
+                             limit=200):
+    """The submit_order LiveCommands carrying {"source": "swing_approval",
+    "signal_id": signal_id} for this instance, newest first: those created at
+    or after `since`, or with open_only those still pending or running.
+    Raises when the queue cannot be read; callers treat that as "unknown",
+    never as "none"."""
+    import live_state as _ls_mod
+    pred = (store.P.field("instance_id").eq(str(real_id))
+            & store.P.field("type").eq("submit_order"))
+    if open_only:
+        pred = pred & (store.P.field("status").eq("pending")
+                       | store.P.field("status").eq("running"))
+    sel = store.limit(store.order_by(store.filter(_ls_mod.LIVE_COMMANDS_TABLE, pred),
+                                     fields=(store.desc("created_at"),)), limit)
+    out = []
+    for cmd in store.run(sel):
+        payload = cmd.get("payload") if isinstance(cmd.get("payload"), dict) else {}
+        if (str(payload.get("source") or "") != "swing_approval"
+                or str(payload.get("signal_id") or "") != str(signal_id)):
+            continue
+        if since is not None:
+            at = _as_utc(cmd.get("created_at"))
+            if at is None or at < since:
+                continue
+        out.append(cmd)
+    return out
+
+
+def _swing_uncertain(signal_doc, command_id, *, what="Approval"):
+    """FW-api-I1: the approval is recorded, and the broker command may have
+    been queued. The route answers 202 with this body. The wording is the
+    controller's (follow-up 1): it never invites a hand order, and it carries
+    no exception text; every caller logs that server-side first."""
+    return {"signal": signal_doc, "command_id": command_id, "uncertain": True,
+            "detail": ("%s received, but its delivery to the broker could not be "
+                       "confirmed. Do NOT place this order by hand — it may still be "
+                       "queued. The card will show submitted or failed shortly." % what)}
+
+
+def _swing_after_failed_enqueue(real_id, signal_id, prior, decided, exc, started):
+    """The command-queue write raised after the approval landed (FW-api-I1).
+
+    A raise does not prove the row is absent: the COMMIT can reach Postgres
+    and the acknowledgement be lost, and the broker's command worker can then
+    claim the signal. So the queue and the signal are re-read first:
+    - a command for this signal created since the attempt, or a signal that
+      no longer reads the decided status (only the broker's claim moves it),
+      means it was queued: answer "uncertain" (202) and leave the row alone;
+    - either read failing means nothing is known: "uncertain" too;
+    - otherwise it is provably not queued: put the signal back to pending and
+      raise SwingBrokerUnavailableError (503, "not queued — try again"). A row
+      that lands after the re-read finds the signal pending, and the broker's
+      handler ignores a command whose signal is not approved.
+    """
+    from swing_trader import signals_store
+    status = decided["status"]
+    since = started - datetime.timedelta(seconds=1)
+    try:
+        found = _swing_approval_commands(real_id, signal_id, since=since)
+        current = signals_store.get_signal(signal_id)
+    except Exception as rexc:
+        _swing_log("swing approval %s on %s: the command write raised (%s) and the queue "
+                   "could not be re-read (%s: %s); the order may be in flight"
+                   % (signal_id, real_id, exc, type(rexc).__name__, rexc), "red")
+        return _swing_uncertain(decided, None)
+    now_status = str((current or {}).get("status") or "")
+    if found or now_status != status:
+        command_id = found[0].get("id") if found else None
+        _swing_log("swing approval %s on %s: the command write raised (%s), but %s; the "
+                   "order may be in flight"
+                   % (signal_id, real_id, exc,
+                      "command %s is queued" % command_id if found
+                      else "the signal now reads %s" % (now_status or "missing")), "red")
+        return _swing_uncertain(current or decided, command_id)
+    try:
+        reverted, revert_error = signals_store.cas_signal(
+            signal_id, expect_status=status, doc=prior), None
+    except Exception as rexc:
+        reverted, revert_error = False, rexc
+    if not reverted:
+        why = ("the revert raised %s: %s" % (type(revert_error).__name__, revert_error)
+               if revert_error is not None else "the row no longer read %s" % status)
+        _swing_log("swing approval %s on %s: the command write raised (%s) and the signal "
+                   "could not be put back to pending (%s); the order may be in flight"
+                   % (signal_id, real_id, exc, why), "red")
+        return _swing_uncertain(decided, None)
+    raise SwingBrokerUnavailableError(
+        "the approval was not queued for the broker (%s); the signal is pending again "
+        "— not queued, try again" % exc)
+
+
+def action_swing_resend_signal(conn, instance_id, signal_id, requested_by=None):
+    """Re-send a stuck approval (FW item 3). An approved or approved_half
+    signal with no pending or running command for it gets the approval's
+    submit_order payload queued again. The row is not touched: the broker's
+    handler claims it approved -> submitted before it sends anything, so a
+    copy that arrives second (a late original, a second re-send) places
+    nothing.
+
+    Unknown, or another instance's: LookupError (404). Not approved, approved
+    on a day other than today (New York, from decided_at), or a command for
+    it still pending or running: SwingResendConflictError (409).
+    The instance not running or crashed, the queue unreadable, or the command
+    provably not queued: SwingBrokerUnavailableError (503). A queue write
+    that raised but may have landed: the 202 "uncertain" body."""
+    from swing_trader import approvals, signals_store
+    inst, real_id = _swing_instance(conn, instance_id)
+    signal = _swing_read(lambda: signals_store.get_signal(signal_id), None)
+    if not signal or str(signal.get("instance_id") or "") != real_id:
+        raise LookupError("Signal not found: %s" % signal_id)
+    status = str(signal.get("status") or "")
+    if status not in approvals.APPROVED_STATUSES:
+        raise SwingResendConflictError(
+            "signal %s is %s, not approved; there is no approval to re-send"
+            % (signal_id, status or "unset"))
+    # Round 3 minor 1: only an approval made today (New York) is re-sent; an
+    # older one is stale, and the operator approves the lane's fresh signal.
+    # It reads decided_at, not `session`: a wheel signal's session is its
+    # weekly scan day. The server alone decides this 409.
+    decided_at = _as_utc(signal.get("decided_at"))
+    made_on = _ny_date_of(decided_at).isoformat() if decided_at else None
+    if made_on != _ny_today().isoformat():
+        raise SwingResendConflictError(
+            "this approval was made on %s; approve a fresh signal instead"
+            % (made_on or "an unknown date"))
+    try:
+        open_commands = _swing_approval_commands(real_id, signal_id, open_only=True)
+    except Exception as exc:
+        raise SwingBrokerUnavailableError(
+            "the command queue could not be read (%s: %s), so a re-send cannot rule out "
+            "one already queued; nothing was re-sent — try again"
+            % (type(exc).__name__, exc))
+    if open_commands:
+        cmd = open_commands[0]
+        raise SwingResendConflictError(
+            "command %s for signal %s is still %s; the broker runs it when it picks it "
+            "up, so nothing was re-sent" % (cmd.get("id"), signal_id, cmd.get("status")))
+    if not inst.get("runCommand", False):
+        raise SwingBrokerUnavailableError(
+            "Instance %s is not running, so the re-send could not reach the broker; the "
+            "signal still reads %s" % (real_id, status))
+    if inst.get("crashed"):
+        raise SwingBrokerUnavailableError(
+            "Instance %s has crashed, so the re-send could not reach the broker; the "
+            "signal still reads %s" % (real_id, status))
+    started = datetime.datetime.now(datetime.timezone.utc)
+    try:
+        cmd = action_submit_live_command(
+            conn, real_id, "submit_order",
+            {"source": "swing_approval", "signal_id": str(signal_id)}, requested_by)
+    except Exception as exc:
+        # The same re-read as a failed approval (FW-api-I1). Nothing to revert:
+        # the row was never changed.
+        try:
+            found = _swing_approval_commands(
+                real_id, signal_id, since=started - datetime.timedelta(seconds=1))
+        except Exception as rexc:
+            _swing_log("swing re-send %s on %s: the command write raised (%s) and the "
+                       "queue could not be re-read (%s: %s); the order may be in flight"
+                       % (signal_id, real_id, exc, type(rexc).__name__, rexc), "red")
+            return _swing_uncertain(signal, None, what="Re-send")
+        if found:
+            _swing_log("swing re-send %s on %s: the command write raised (%s), but command "
+                       "%s is queued" % (signal_id, real_id, exc, found[0].get("id")), "red")
+            return _swing_uncertain(signal, found[0].get("id"), what="Re-send")
+        raise SwingBrokerUnavailableError(
+            "the re-send was not queued for the broker (%s); the signal still reads %s "
+            "— not queued, try again" % (exc, status))
+    _swing_log("swing approval %s on %s re-sent by %s (command %s)"
+               % (signal_id, real_id, requested_by or "operator",
+                  (cmd or {}).get("command_id")), "yellow")
+    return {"signal": signal, "command_id": (cmd or {}).get("command_id")}
+
+
+def _wheel_underlying_prices(instance_id, symbols):
+    """{underlying: price} from the instance's own Alpaca data credentials:
+    the IEX latest trade, then yfinance (ST app.py _fetch_live_price). A symbol
+    with no quote is absent, and the row reports null."""
+    import live_broker_fetch as _lbf
+    from swing_trader import market_data
+    wanted = sorted({str(s).upper() for s in (symbols or []) if s})
+    if not wanted:
+        return {}
+    creds = _lbf._load_credentials(str(instance_id))
+    if creds.get("error"):
+        return {}
+    try:
+        client = market_data.data_client(creds.get("key"), creds.get("secret"))
+    except RuntimeError:
+        return {}
+    try:
+        prices = market_data.live_prices(wanted, client=client) or {}
+    except Exception:
+        return {}
+    return {s: v for s, v in ((s, _finite_or_none(p)) for s, p in prices.items())
+            if v is not None and v > 0}
+
+
+def _wheel_put_fields(p, parsed):
+    """(underlying, strike, expiry) from A-live's contract fields, each one
+    falling back to the OCC symbol when the broker could not fill it in: one
+    malformed row never turns the whole book into a 400."""
+    underlying = str(p.get("underlying") or parsed[0]).upper()
+    strike = _finite_or_none(p.get("strike"))
+    if not strike or strike <= 0:              # M3: nan/inf/0/"n/a" read the OCC strike
+        strike = float(parsed[3])
+    expiry = str(p.get("expiry") or "")[:10]
+    try:
+        datetime.date.fromisoformat(expiry)
+    except ValueError:
+        expiry = parsed[1]
+    return underlying, strike, expiry
+
+
+def action_wheel_overview(conn, instance_id, *, today=None):
+    """The wheel book (interfaces §9 item 3): short puts from broker truth,
+    ITM % signed (negative out of the money, null without an underlying
+    quote), collateral, cash, and the 20 newest scan rows."""
+    import live_broker_fetch as _lbf
+    from swing_trader import signals_store, wheel_rules
+    _inst, real_id = _swing_instance(conn, instance_id)
+    state = _lbf.fetch_broker_live_state(conn, real_id) or {}
+    if state.get("broker_fetch_error"):
+        raise SwingBrokerUnavailableError("broker unavailable: %s" % state["broker_fetch_error"])
+    today = today or _ny_today()
+    puts = []
+    for p in state.get("positions") or []:
+        parsed = wheel_rules.occ_parts(p.get("symbol"))
+        kind = str(p.get("option_type") or (parsed[2] if parsed else "")).lower()
+        qty = _finite_or_none(p.get("qty"))
+        if qty is None or parsed is None or qty >= 0 or kind != "put":
+            continue                           # M3: a nan/inf qty skips only that row
+        underlying, strike, expiry = _wheel_put_fields(p, parsed)
+        puts.append((p, underlying, strike, expiry, int(round(abs(qty)))))
+    prices = _wheel_underlying_prices(real_id, [u for _p, u, _s, _e, _q in puts])
+    rows = []
+    for p, underlying, strike, expiry, n in puts:
+        spot = _finite_or_none(prices.get(underlying))
+        multiplier = _finite_or_none(p.get("multiplier"))
+        if not multiplier or multiplier <= 0:
+            multiplier = 100.0                 # M3: the row's multiplier, default 100
+        rows.append({
+            "contract": str(p.get("symbol")).upper(),
+            "underlying": underlying,
+            "strike": strike,
+            "expiry": expiry,
+            "qty": n,
+            "avg_entry_price": _finite_or_none(p.get("avg_entry_price")),
+            "current_price": _finite_or_none(p.get("last_price")),
+            "underlying_price": spot,
+            "itm_pct": (round((strike - spot) / strike * 100.0, 2)
+                        if spot is not None and strike > 0 else None),
+            "dte": (datetime.date.fromisoformat(expiry) - today).days,
+            "collateral": round(strike * multiplier * n, 2),
+            "unrealized_pl": _finite_or_none(p.get("unrealized_pnl")),
+        })
+    return {"open_puts": rows,
+            "collateral_total": round(sum(r["collateral"] for r in rows), 2),
+            "cash": _finite_or_none(state.get("cash")),
+            "recent_scans": _swing_read(
+                lambda: signals_store.list_wheel_scans(real_id, limit=20), [])}
+
+
+def action_swing_calibration(conn, instance_id):
+    from swing_trader import calibration
+    _inst, real_id = _swing_instance(conn, instance_id)
+    report = _swing_read(lambda: calibration.calibration_report(real_id), None)
+    return report if report is not None else calibration.calibration_report(rows=[])
+
+
 def action_live_trading_logs(conn, instance_id, since_line=0):
     """Live-tail of this instance's broker log file.
 

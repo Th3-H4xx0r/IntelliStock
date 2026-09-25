@@ -37,6 +37,11 @@ FILES = (
     "backend/strategy_x.py",
     "backend/strategies/strategy_x.py",
     "backend/price_utils.py",
+    # The backtest engine itself (swing port, spec 12): a push that changes
+    # only the simulator must not read as deployed before its image exists.
+    "backend/simulated_execution.py",
+    "backend/portfolio_emulator.py",
+    "backend/backtest_bar_events.py",
     # 2026-09-03: the EB pair was missing, so a push that changed only
     # strategy_eb.py reported "deployed" instantly and a pre-registered engine
     # run started on the OLD image.
@@ -50,6 +55,47 @@ FILES = (
     # image carrying it exists.
     "backend/strategy_hx.py",
     "backend/strategies/strategy_hx.py",
+    # 2026-09-24 swing port: the live and paper order path (types, gate,
+    # service, reconcile, adapter contract, guards), both strategies with
+    # their ported package, the new tables and notification types, and the
+    # approval API. (The backtest simulator files are plan A-backtest's, and
+    # broker.py, alpaca.py, llm_utils.py and api/main.py are listed above.) A
+    # push that changed only one of these must not read as deployed. The two
+    # `__init__.py` entries share a basename, so both sides key them by path.
+    "backend/live_orders/__init__.py",
+    "backend/live_orders/types.py",
+    "backend/live_orders/store.py",
+    "backend/live_orders/gate.py",
+    "backend/live_orders/service.py",
+    "backend/live_orders/reconcile.py",
+    "backend/broker_adapters/base.py",
+    "backend/broker_adapters/errors.py",
+    "backend/live_pending_orders.py",
+    "backend/live_risk_state.py",
+    "backend/live_broker_fetch.py",
+    "backend/strategies/strategy_swing.py",
+    "backend/strategies/strategy_wheel.py",
+    "backend/swing_trader/__init__.py",
+    "backend/swing_trader/account.py",
+    "backend/swing_trader/clock.py",
+    "backend/swing_trader/constants.py",
+    "backend/swing_trader/indicators.py",
+    "backend/swing_trader/signals.py",
+    "backend/swing_trader/regime.py",
+    "backend/swing_trader/universe.py",
+    "backend/swing_trader/sectors.py",
+    "backend/swing_trader/wheel_rules.py",
+    "backend/swing_trader/ai_analyst.py",
+    "backend/swing_trader/market_data.py",
+    "backend/swing_trader/iv.py",
+    "backend/swing_trader/calibration.py",
+    "backend/swing_trader/approvals.py",
+    "backend/swing_trader/notify.py",
+    "backend/swing_trader/refdata.py",
+    "backend/swing_trader/signals_store.py",
+    "backend/db/schema.py",
+    "backend/notification_types.py",
+    "backend/interactive_utils.py",
 )
 
 

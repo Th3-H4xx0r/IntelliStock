@@ -1,0 +1,444 @@
+{
+ "steps": [
+  {
+   "day": 0,
+   "cash": 10000.0,
+   "buying_power": 10000.0,
+   "positions": {},
+   "pending": [
+    "SPY",
+    "ABC"
+   ],
+   "pending_sell_proceeds": 0.0
+  },
+  {
+   "day": 1,
+   "cash": 10000.0,
+   "buying_power": 10000.0,
+   "positions": {},
+   "pending": [
+    "SPY",
+    "ABC"
+   ],
+   "pending_sell_proceeds": 0.0
+  },
+  {
+   "day": 2,
+   "cash": 150.1369260516743,
+   "buying_power": 150.1369260516743,
+   "positions": {
+    "SPY": 7.91730833448767,
+    "ABC": 299.3055836592449
+   },
+   "pending": [],
+   "pending_sell_proceeds": 0.0
+  },
+  {
+   "day": 3,
+   "cash": 150.2719541184748,
+   "buying_power": 150.2719541184748,
+   "positions": {
+    "SPY": 7.91730833448767,
+    "ABC": 299.3055836592449
+   },
+   "pending": [
+    "ABC"
+   ],
+   "pending_sell_proceeds": 3142.708628422072
+  },
+  {
+   "day": 4,
+   "cash": 150.41023587363196,
+   "buying_power": 150.41023587363196,
+   "positions": {
+    "SPY": 7.91730833448767,
+    "ABC": 299.3055836592449
+   },
+   "pending": [
+    "ABC",
+    "SPY"
+   ],
+   "pending_sell_proceeds": 7405.015066755217
+  },
+  {
+   "day": 5,
+   "cash": 2838.048703029405,
+   "buying_power": 2703.6736530882695,
+   "positions": {
+    "SPY": 7.91730833448767,
+    "ABC": 149.65279182962246
+   },
+   "pending": [
+    "SPY"
+   ],
+   "pending_sell_proceeds": 4014.0753255852487
+  },
+  {
+   "day": 6,
+   "cash": 6889.927025139701,
+   "buying_power": 6687.333109034186,
+   "positions": {
+    "ABC": 149.65279182962246
+   },
+   "pending": [
+    "ABC"
+   ],
+   "pending_sell_proceeds": 2768.5766488480153
+  },
+  {
+   "day": 7,
+   "cash": 6889.927025139701,
+   "buying_power": 6889.927025139701,
+   "positions": {
+    "ABC": 149.65279182962246
+   },
+   "pending": [
+    "ABC"
+   ],
+   "pending_sell_proceeds": 2880.8162427202324
+  }
+ ],
+ "trades": [
+  {
+   "timestamp": "2026-03-03 21:00:00+00:00",
+   "action": "buy",
+   "ticker": "SPY",
+   "shares": 7.91730833448767,
+   "price": 505.20705202000005,
+   "total": 4000.0,
+   "fees": 0.11999640010799675,
+   "spread_cost": 1.599296283566495,
+   "slippage_cost": 0.03999840005239871,
+   "order_id": "sim-000000000001-SPY",
+   "cumulative_quantity": 7.91730833448767,
+   "quote_timestamp": "2026-03-03 21:00:00+00:00",
+   "cost_model_version": "equity-tiered-v1[etf-liquid]",
+   "source": "main_signal",
+   "cash_after": 6000.0
+  },
+  {
+   "timestamp": "2026-03-03 21:00:00+00:00",
+   "action": "buy",
+   "ticker": "ABC",
+   "shares": 299.3055836592449,
+   "price": 19.544655444600004,
+   "total": 5850.000000000001,
+   "fees": 0.17549473515794528,
+   "spread_cost": 13.307126249490278,
+   "slippage_cost": 0.05849766007687337,
+   "order_id": "sim-000000000002-ABC",
+   "cumulative_quantity": 299.3055836592449,
+   "quote_timestamp": "2026-03-03 21:00:00+00:00",
+   "cost_model_version": "equity-tiered-v1[etf-liquid]",
+   "source": "main_signal",
+   "cash_after": 149.9999999999991
+  },
+  {
+   "timestamp": "2026-03-06 21:00:00+00:00",
+   "action": "sell",
+   "ticker": "ABC",
+   "shares": 149.65279182962246,
+   "price": 17.958780410400003,
+   "total": 2687.5009988227052,
+   "fees": 0.08062744878814479,
+   "spread_cost": 6.141750576687534,
+   "slippage_cost": 0.026876085023312075,
+   "order_id": "sim-000000000003-ABC",
+   "cumulative_quantity": 149.65279182962246,
+   "quote_timestamp": "2026-03-06 21:00:00+00:00",
+   "cost_model_version": "equity-tiered-v1[etf-liquid]",
+   "source": "main_signal",
+   "cash_after": 2837.911234696337
+  },
+  {
+   "timestamp": "2026-03-07 21:00:00+00:00",
+   "action": "sell",
+   "ticker": "SPY",
+   "shares": 7.91730833448767,
+   "price": 511.79008204800004,
+   "total": 4051.8783221102963,
+   "fees": 0.12155999646320277,
+   "spread_cost": 1.6214647469028962,
+   "slippage_cost": 0.04052040402493189,
+   "order_id": "sim-000000000004-SPY",
+   "cumulative_quantity": 7.91730833448767,
+   "quote_timestamp": "2026-03-07 21:00:00+00:00",
+   "cost_model_version": "equity-tiered-v1[etf-liquid]",
+   "source": "main_signal",
+   "cash_after": 6889.927025139701
+  }
+ ],
+ "summary": {
+  "execution_provenance_complete": true,
+  "execution_cost_model_version": "equity-tiered-v1[etf-liquid]",
+  "execution_cost_model": {
+   "version": "equity-tiered-v1[etf-liquid]",
+   "spread_bps": 45.6,
+   "slippage_bps": 0.1,
+   "fee_bps": 0.3,
+   "latency_seconds": 0.0,
+   "tiers": [
+    {
+     "symbols": [
+      "BIL",
+      "GLD",
+      "IWM",
+      "QLD",
+      "QQQ",
+      "SPY",
+      "SQQQ",
+      "TQQQ"
+     ],
+     "model": {
+      "version": "equity-etf-liquid-v1",
+      "spread_bps": 8.0,
+      "slippage_bps": 0.1,
+      "fee_bps": 0.3,
+      "latency_seconds": 0.0
+     }
+    }
+   ]
+  },
+  "total_fees": 0.4976785805172896,
+  "spread_cost": 22.669637856647203,
+  "slippage_cost": 0.16589254917751606,
+  "unfilled_order_count": 2,
+  "rejected_order_count": 0,
+  "refused_fill_count": 0,
+  "fill_provenance": [
+   {
+    "order_id": "sim-000000000001-SPY",
+    "symbol": "SPY",
+    "side": "buy",
+    "incremental_quantity": 7.91730833448767,
+    "cumulative_quantity": 7.91730833448767,
+    "price": 505.20705202000005,
+    "fees": 0.11999640010799675,
+    "spread_cost": 1.599296283566495,
+    "slippage_cost": 0.03999840005239871,
+    "quote_timestamp": "2026-03-03T21:00:00+00:00",
+    "executed_at": "2026-03-03T21:00:00+00:00",
+    "cost_model_version": "equity-tiered-v1[etf-liquid]",
+    "source": "main_signal",
+    "order_quantity": 7.9964814178325465,
+    "is_final": true
+   },
+   {
+    "order_id": "sim-000000000002-ABC",
+    "symbol": "ABC",
+    "side": "buy",
+    "incremental_quantity": 299.3055836592449,
+    "cumulative_quantity": 299.3055836592449,
+    "price": 19.544655444600004,
+    "fees": 0.17549473515794528,
+    "spread_cost": 13.307126249490278,
+    "slippage_cost": 0.05849766007687337,
+    "quote_timestamp": "2026-03-03T21:00:00+00:00",
+    "executed_at": "2026-03-03T21:00:00+00:00",
+    "cost_model_version": "equity-tiered-v1[etf-liquid]",
+    "source": "main_signal",
+    "order_quantity": 299.3055836592449,
+    "is_final": true
+   },
+   {
+    "order_id": "sim-000000000003-ABC",
+    "symbol": "ABC",
+    "side": "sell",
+    "incremental_quantity": 149.65279182962246,
+    "cumulative_quantity": 149.65279182962246,
+    "price": 17.958780410400003,
+    "fees": 0.08062744878814479,
+    "spread_cost": 6.141750576687534,
+    "slippage_cost": 0.026876085023312075,
+    "quote_timestamp": "2026-03-06T21:00:00+00:00",
+    "executed_at": "2026-03-06T21:00:00+00:00",
+    "cost_model_version": "equity-tiered-v1[etf-liquid]",
+    "source": "main_signal",
+    "order_quantity": 149.65279182962246,
+    "is_final": true
+   },
+   {
+    "order_id": "sim-000000000004-SPY",
+    "symbol": "SPY",
+    "side": "sell",
+    "incremental_quantity": 7.91730833448767,
+    "cumulative_quantity": 7.91730833448767,
+    "price": 511.79008204800004,
+    "fees": 0.12155999646320277,
+    "spread_cost": 1.6214647469028962,
+    "slippage_cost": 0.04052040402493189,
+    "quote_timestamp": "2026-03-07T21:00:00+00:00",
+    "executed_at": "2026-03-07T21:00:00+00:00",
+    "cost_model_version": "equity-tiered-v1[etf-liquid]",
+    "source": "main_signal",
+    "order_quantity": 7.91730833448767,
+    "is_final": true
+   }
+  ],
+  "equity_cost_model_version": "equity-tiered-v1[etf-liquid]",
+  "equity_cost_model": {
+   "version": "equity-tiered-v1[etf-liquid]",
+   "spread_bps": 45.6,
+   "slippage_bps": 0.1,
+   "fee_bps": 0.3,
+   "latency_seconds": 0.0,
+   "tiers": [
+    {
+     "symbols": [
+      "BIL",
+      "GLD",
+      "IWM",
+      "QLD",
+      "QQQ",
+      "SPY",
+      "SQQQ",
+      "TQQQ"
+     ],
+     "model": {
+      "version": "equity-etf-liquid-v1",
+      "spread_bps": 8.0,
+      "slippage_bps": 0.1,
+      "fee_bps": 0.3,
+      "latency_seconds": 0.0
+     }
+    }
+   ]
+  },
+  "equity_cost_model_requested_version": null,
+  "equity_one_way_cost_bps": 23.200000000000003,
+  "equity_cost_tiers_active": true,
+  "equity_one_way_cost_bps_by_tier": {
+   "default": 23.200000000000003,
+   "etf-liquid": 4.3999999999999995
+  },
+  "legacy_equity_fees": 0.0,
+  "legacy_equity_spread_cost": 0.0,
+  "legacy_equity_slippage_cost": 0.0,
+  "legacy_equity_volume": 0.0,
+  "min_order_notional": 1.0,
+  "sub_minimum_rejected_order_count": 1,
+  "sub_minimum_rejected_notional": 0.49978,
+  "settled_sell_proceeds_fraction": 0.95,
+  "settlement_delay_seconds": 86400.0,
+  "unsettled_cash": 0.0,
+  "day_trade_count": 0,
+  "day_trades_worst_rolling_5_sessions": 0,
+  "pdt_limit_reference": 3,
+  "max_stale_mark_seconds": 0.0,
+  "stale_marked_symbols": {},
+  "dividends_credited": 0.547704,
+  "dividends_by_symbol": {
+   "SPY": 0.547704
+  },
+  "dividend_yields": {
+   "SPY": 0.0125,
+   "VOO": 0.0125,
+   "IVV": 0.0125,
+   "SPLG": 0.0125,
+   "VTI": 0.0125,
+   "QQQ": 0.005,
+   "QQQM": 0.0055,
+   "DIA": 0.0155,
+   "IWM": 0.011,
+   "VGT": 0.006
+  },
+  "default_dividend_yield": 0.0,
+  "return_basis": "total_return_accrued",
+  "benchmark_return_basis": "total_return"
+ },
+ "portfolio": [
+  {
+   "timestamp": "2026-03-02 13:00:00",
+   "value": 10000.0,
+   "cash": 10000.0,
+   "positions_snapshot": {},
+   "prices": {}
+  },
+  {
+   "timestamp": "2026-03-03 13:00:00",
+   "value": 10000.0,
+   "cash": 10000.0,
+   "positions_snapshot": {},
+   "prices": {
+    "SPY": 500.0,
+    "ABC": 20.0
+   }
+  },
+  {
+   "timestamp": "2026-03-04 13:00:00",
+   "value": 9984.836516323223,
+   "cash": 150.1369260516743,
+   "positions_snapshot": {
+    "SPY": 7.91730833448767,
+    "ABC": 299.3055836592449
+   },
+   "prices": {
+    "SPY": 505.0,
+    "ABC": 19.5
+   }
+  },
+  {
+   "timestamp": "2026-03-05 13:00:00",
+   "value": 10378.508761537478,
+   "cash": 150.2719541184748,
+   "positions_snapshot": {
+    "SPY": 7.91730833448767,
+    "ABC": 299.3055836592449
+   },
+   "prices": {
+    "SPY": 498.0,
+    "ABC": 21.0
+   }
+  },
+  {
+   "timestamp": "2026-03-06 13:00:00",
+   "value": 10922.613118795354,
+   "cash": 150.41023587363196,
+   "positions_snapshot": {
+    "SPY": 7.91730833448767,
+    "ABC": 299.3055836592449
+   },
+   "prices": {
+    "SPY": 510.0,
+    "ABC": 22.5
+   }
+  },
+  {
+   "timestamp": "2026-03-07 13:00:00",
+   "value": 9545.874281547858,
+   "cash": 2838.048703029405,
+   "positions_snapshot": {
+    "SPY": 7.91730833448767,
+    "ABC": 149.65279182962246
+   },
+   "prices": {
+    "SPY": 507.0,
+    "ABC": 18.0
+   }
+  },
+  {
+   "timestamp": "2026-03-08 13:00:00",
+   "value": 9658.503673987716,
+   "cash": 6889.927025139701,
+   "positions_snapshot": {
+    "ABC": 149.65279182962246
+   },
+   "prices": {
+    "SPY": 512.0,
+    "ABC": 18.5
+   }
+  },
+  {
+   "timestamp": "2026-03-09 13:00:00",
+   "value": 9770.743267859933,
+   "cash": 6889.927025139701,
+   "positions_snapshot": {
+    "ABC": 149.65279182962246
+   },
+   "prices": {
+    "SPY": 509.0,
+    "ABC": 19.25
+   }
+  }
+ ]
+}

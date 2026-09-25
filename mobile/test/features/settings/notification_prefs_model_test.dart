@@ -43,8 +43,8 @@ void main() {
     });
   });
 
-  test('there are 10 fallback categories with stable keys', () {
-    expect(kNotificationCategories.length, 10);
+  test('there are 19 fallback categories with stable keys', () {
+    expect(kNotificationCategories.length, 19);
     expect(
       kNotificationCategories.map((c) => c.key),
       containsAll(<String>[
@@ -60,5 +60,37 @@ void main() {
         'instance_crash',
       ]),
     );
+  });
+
+  test('the fallback lists the swing and wheel types in backend order', () {
+    // backend/notification_types.py, group "Swing & Wheel" (plan B Task 12).
+    final keys = kNotificationCategories.map((c) => c.key).toList();
+    expect(keys.sublist(keys.length - 9), <String>[
+      'swing_entry',
+      'swing_pending_review',
+      'swing_exit',
+      'swing_run_summary',
+      'wheel_put_placed',
+      'wheel_pending_review',
+      'wheel_position_alert',
+      'wheel_assignment',
+      'swing_approval_failed',
+    ]);
+    final failed = kNotificationCategories.firstWhere(
+      (c) => c.key == 'swing_approval_failed',
+    );
+    expect(failed.label, 'Approved order refused or unconfirmed');
+    expect(
+      failed.description,
+      'A swing or wheel order you approved was not sent, may not have been '
+      'placed, or WAS placed though its signal reads failed',
+    );
+    final exit = kNotificationCategories.firstWhere((c) => c.key == 'swing_exit');
+    expect(
+      exit.description,
+      'The swing lane sold a position; or an exit was not placed or its '
+      'outcome is unknown, so the position may be unprotected',
+    );
+    expect(keys.toSet().length, keys.length);
   });
 }

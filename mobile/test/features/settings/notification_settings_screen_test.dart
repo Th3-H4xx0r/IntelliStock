@@ -60,14 +60,15 @@ Widget _app(_FakeRepo repo, {List<PushDevice> devices = const []}) =>
 
 void main() {
   testWidgets(
-    'renders 10 fallback categories, two toggles each, and test buttons',
+    'renders 19 fallback categories, two toggles each, and test buttons',
     (tester) async {
       await tester.pumpWidget(_app(_FakeRepo(_seed())));
       await tester.pumpAndSettle();
 
       expect(find.text('Order filled'), findsOneWidget);
       expect(find.text('Crash loop'), findsOneWidget);
-      expect(find.byType(AppToggle), findsNWidgets(20)); // 10 categories x 2
+      expect(find.text('Approved order refused or unconfirmed'), findsOneWidget);
+      expect(find.byType(AppToggle), findsNWidgets(38)); // 19 categories x 2
       expect(find.text('Test Discord'), findsOneWidget);
       expect(find.text('Test iOS push'), findsOneWidget);
     },

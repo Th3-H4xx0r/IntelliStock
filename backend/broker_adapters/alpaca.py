@@ -22,9 +22,11 @@ Crash safety:
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 import concurrent.futures
 import hashlib
 import os
+import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -38,6 +40,11 @@ from broker_adapters.base import (
     CashDTO,
     AccountDTO,
     HealthStatus,
+    OptionActivityDTO,
+    OptionContractDTO,
+    OptionPositionDTO,
+    OptionSnapshotDTO,
+    is_bracket_child_order,
 )
 from market_marks import (
     MarkQuality,
@@ -56,6 +63,7 @@ from broker_adapters.errors import (
     WashSale,
     FractionalNotAllowed,
     BrokerRateLimited,
+    OptionsNotPermitted,
 )
 from broker_adapters._client_order_id import make_client_order_id
 from broker_adapters._wal import LiveOrderWAL
@@ -301,6 +309,24 @@ class AlpacaAdapter(BrokerAdapter):
         self._fractionable_cache: dict[str, tuple[Optional[bool], float]] = {}
         self._fractionable_negative_ttl_sec: float = 60.0
 
+        # swing-port: option positions (signed; a short put is negative) live
+        # apart from the equity mirror, which stays long-only. refresh_positions
+        # fills them; EB's account holds none, so both stay empty there.
+        # Incomplete until one positions read succeeds: a failed first read
+        # must not report "no options" on an account holding a short put.
+        self._option_positions: dict[str, OptionPositionDTO] = {}
+        self._option_positions_complete = False
+        #: Fix wave round 2: every confirmed option fill applied to the map,
+        #: numbered, so refresh_positions can reconcile the fills that landed
+        #: while its GET was in flight. EB's account never has one: 0 forever.
+        self._option_fill_seq = 0
+        self._option_fill_journal: list[tuple[int, str, int, int]] = []
+        self._option_contract_cache: dict[str, OptionContractDTO] = {}
+        self._option_contract_misses: dict[str, float] = {}
+        self._last_option_misses: frozenset = frozenset()
+        #: Contract symbols seen in the last reconciliation snapshot.
+        self._reconciliation_option_symbols: frozenset = frozenset()
+
         # Seed from Alpaca
         self.refresh_cash()
         _seeded_broker_positions = self.refresh_positions()
@@ -317,6 +343,11 @@ class AlpacaAdapter(BrokerAdapter):
             _broker_view = []
             if self._defer_ownership_reconciliation:
                 for _position in _seeded_broker_positions or ():
+                    if getattr(_position, "asset_class", None) == "us_option":
+                        # swing-port: a contract lives in _option_positions;
+                        # it is never an equity position awaiting ownership,
+                        # nor "-1sh external" in the boot audit.
+                        continue
                     _broker_view.append(
                         {
                             "symbol": _position.symbol,
@@ -642,6 +673,12 @@ class AlpacaAdapter(BrokerAdapter):
                 # order doesn't block a legitimate new attempt today.
                 if status in ("rejected", "canceled", "expired", "denied"):
                     continue
+                # swing-port: a bracket's take-profit and stop-loss legs are
+                # exits the parent created; counting them as "sell ordered
+                # today" would skip the swing lane's own exit. The parent BUY
+                # still counts, so a duplicate entry is still refused.
+                if is_bracket_child_order(o):
+                    continue
                 sym = str(getattr(o, "symbol", "") or "").upper()
                 side = str(getattr(o.side, "value", o.side) if getattr(o, "side", None) else "").lower()
                 if sym and side in ("buy", "sell"):
@@ -857,6 +894,12 @@ class AlpacaAdapter(BrokerAdapter):
         tif: str,
         extended_hours: bool,
         client_order_id: str,
+        *,
+        order_class: Optional[str] = None,
+        take_profit: Optional[float] = None,
+        stop_loss: Optional[float] = None,
+        position_intent: Optional[str] = None,
+        asset_class: Optional[str] = None,
     ) -> OrderRef:
         from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest
         from alpaca.trading.enums import OrderSide, TimeInForce
@@ -871,6 +914,25 @@ class AlpacaAdapter(BrokerAdapter):
             raise BrokerError(
                 f"pre-submit reconciliation unavailable for {client_order_id}"
             ) from lookup_error
+
+        # swing-port: a bracket is admitted only in its one legal shape, and
+        # the check runs before the WAL row exists, so a refusal is a definite
+        # non-submission. No EB call passes order_class; this is skipped.
+        _is_bracket = str(order_class or "").strip().lower() == "bracket"
+        if _is_bracket:
+            qty = _checked_bracket_order(
+                symbol=symbol, side=side, qty=qty, notional=notional,
+                order_type=order_type, tif=tif,
+                extended_hours=extended_hours, take_profit=take_profit,
+                stop_loss=stop_loss)
+        # swing-port: an option order is admitted only as whole contracts,
+        # regular hours, a legal position_intent and a market or limit type.
+        _is_option = str(asset_class or "").strip().lower() == "us_option"
+        if _is_option:
+            qty = _checked_option_order(
+                symbol=symbol, side=side, qty=qty, notional=notional,
+                order_type=order_type, limit_price=limit_price, tif=tif,
+                extended_hours=extended_hours, position_intent=position_intent)
 
         # 2026-08-02 extended-hours order class. Alpaca supports fractional
         # quantities during regular hours only, so a fractional order that also
@@ -904,7 +966,12 @@ class AlpacaAdapter(BrokerAdapter):
                 )
                 qty = _whole
 
-        if side.lower() == "buy":
+        # swing-port: a buy-to-close REDUCES risk; the PDT rule must never keep
+        # the account short a put it is trying to close.
+        if side.lower() == "buy" and not (
+            _is_option
+            and str(position_intent or "").strip().lower() == "buy_to_close"
+        ):
             self._preflight_buy(
                 symbol=symbol,
                 qty=qty,
@@ -973,6 +1040,28 @@ class AlpacaAdapter(BrokerAdapter):
             kw["qty"] = qty
         if notional is not None and qty is None:
             kw["notional"] = notional
+        if _is_bracket:
+            from alpaca.trading.enums import OrderClass
+            from alpaca.trading.requests import StopLossRequest, TakeProfitRequest
+
+            kw["order_class"] = OrderClass.BRACKET
+            kw["take_profit"] = TakeProfitRequest(
+                limit_price=round(float(take_profit), 2))
+            kw["stop_loss"] = StopLossRequest(
+                stop_price=round(float(stop_loss), 2))
+            _alog(
+                "BROKER",
+                f"Alpaca SUBMIT bracket legs: {symbol} "
+                f"take_profit=${float(take_profit):.2f} "
+                f"stop_loss=${float(stop_loss):.2f} cid={client_order_id[:24]}",
+                "cyan",
+            )
+        if _is_option:
+            from alpaca.trading.enums import PositionIntent
+
+            kw["position_intent"] = PositionIntent(
+                str(position_intent).strip().lower()
+            )
 
         if order_type.lower() == "market":
             req = MarketOrderRequest(**kw)
@@ -1069,6 +1158,14 @@ class AlpacaAdapter(BrokerAdapter):
                 or getattr(e, "response", None) is not None
                 or getattr(parsed, "http_status", None) is not None
             )
+            if _is_option:
+                # swing-port: Alpaca answers an option order the account may
+                # not place with 40310000, the code the equity path reads as
+                # "not fractionable". Mapped here, before the definitive flag
+                # is set, so it never reaches the whole-share retry -- and
+                # only when Alpaca answered: a transport failure stays
+                # ambiguous whatever its text says.
+                parsed = _option_order_error(e, parsed, answered=_answered)
             parsed.broker_definitive_rejection = bool(_answered)
             if not _answered:
                 _alog(
@@ -1320,7 +1417,148 @@ class AlpacaAdapter(BrokerAdapter):
             filled_qty=float(o.filled_qty or 0.0),
             filled_avg_price=float(o.filled_avg_price) if o.filled_avg_price else None,
             submitted_at_utc=getattr(o, "submitted_at", None),
+            # swing-port: multi-leg and option fields, read with getattr so
+            # older doubles and every EB order simply read as simple orders.
+            order_class=_enum_value(getattr(o, "order_class", None)),
+            legs=tuple(
+                self._to_orderref(leg) for leg in (getattr(o, "legs", None) or ())
+            ),
+            position_intent=_enum_value(getattr(o, "position_intent", None)),
+            asset_class=_enum_value(getattr(o, "asset_class", None)),
+            order_type=_enum_value(
+                getattr(o, "type", None) or getattr(o, "order_type", None)
+            ),
+            limit_price=_as_positive_float(getattr(o, "limit_price", None)),
+            stop_price=_as_positive_float(getattr(o, "stop_price", None)),
         )
+
+    def get_order_with_legs(self, order_id) -> OrderRef:
+        """The order with its child legs, read with ``nested=True`` so a
+        bracket's take-profit and stop-loss come back under ``legs``."""
+        from alpaca.trading.requests import GetOrderByIdRequest
+
+        raw = self._client.get_order_by_id(
+            str(order_id), filter=GetOrderByIdRequest(nested=True)
+        )
+        return self._to_orderref(raw)
+
+    def _order_status(self, order_id: str) -> tuple[str, float]:
+        raw = self._client.get_order_by_id(str(order_id))
+        return (
+            _enum_value(getattr(raw, "status", None)) or "",
+            float(getattr(raw, "filled_qty", 0) or 0),
+        )
+
+    def cancel_orders_confirmed(
+        self,
+        order_ids,
+        timeout_s: float = 10.0,
+        *,
+        poll_interval_s: float = 0.5,
+        sleep=time.sleep,
+        clock=time.monotonic,
+        booked_fills=None,
+    ) -> bool:
+        """Cancel ``order_ids`` and wait until Alpaca confirms every one.
+
+        True only when each order ended cancelled (or was already dead) with
+        nothing filled. False when any is still working at the timeout, and
+        False when any FILLED, even partly, while we waited: the position
+        changed under the caller, and a sell sized off the old position would
+        oversell -- on a margin paper account, into a short. The caller defers
+        its sell a tick and re-reads broker truth.
+
+        ``booked_fills`` (fix wave FW1 item 8, review M-1) maps an order id to
+        the quantity the caller has ALREADY booked for it. An order that is
+        dead (cancelled, expired...) with no more filled than that is
+        confirmed: its partial fill is in the position the sell was sized
+        from, so nothing changed while we waited.
+        """
+        booked = {}
+        for key, value in dict(booked_fills or {}).items():
+            try:
+                booked[str(key).strip()] = Decimal(str(value))
+            except Exception:
+                continue
+        ids = [
+            str(value).strip()
+            for value in (order_ids or ())
+            if str(value or "").strip()
+        ]
+        if not ids:
+            return True
+        for order_id in ids:
+            try:
+                self._client.cancel_order_by_id(order_id)
+            except Exception as exc:
+                # "not cancelable" is routine for an order that already
+                # finished; its status below says which way it finished.
+                _alog(
+                    "BROKER",
+                    f"cancel {order_id} raised {type(exc).__name__}: {exc}; "
+                    "confirming by status",
+                    "yellow",
+                )
+        deadline = clock() + max(0.0, float(timeout_s))
+        pending = list(ids)
+        while True:
+            still_working = []
+            for order_id in pending:
+                try:
+                    status, filled = self._order_status(order_id)
+                except Exception:
+                    still_working.append(order_id)
+                    continue
+                if (
+                    filled > 0
+                    and status in _CANCEL_CONFIRMED_STATES
+                    and order_id in booked
+                    and Decimal(str(filled)) <= booked[order_id]
+                ):
+                    continue    # dead, and its partial fill already booked
+                if filled > 0 or status in ("filled", "partially_filled"):
+                    _alog(
+                        "BROKER",
+                        f"order {order_id} filled ({filled}) while being "
+                        "cancelled; the caller must re-read positions",
+                        "yellow",
+                    )
+                    return False
+                if status not in _CANCEL_CONFIRMED_STATES:
+                    still_working.append(order_id)
+            if not still_working:
+                return True
+            if clock() >= deadline:
+                _alog(
+                    "BROKER",
+                    f"cancel of {still_working} not confirmed within "
+                    f"{float(timeout_s):.0f}s",
+                    "yellow",
+                )
+                return False
+            pending = still_working
+            sleep(poll_interval_s)
+
+    def list_closed_orders(self, symbols, after) -> list[OrderRef]:
+        """Every CLOSED order for ``symbols`` submitted after ``after`` (an ISO
+        date or a datetime). Raises rather than return a truncated history."""
+        from alpaca.trading.enums import QueryOrderStatus
+
+        if isinstance(after, datetime):
+            after_dt = after
+        else:
+            after_dt = datetime.fromisoformat(str(after).replace("Z", "+00:00"))
+        if after_dt.tzinfo is None:
+            after_dt = after_dt.replace(tzinfo=timezone.utc)
+        wanted = sorted(
+            {str(s).strip().upper() for s in (symbols or ()) if str(s).strip()}
+        )
+        rows, complete = self._walk_orders(
+            status=QueryOrderStatus.CLOSED, since=after_dt, symbols=wanted or None
+        )
+        if not complete:
+            raise BrokerError(f"closed-order history for {wanted} is truncated")
+        return [self._to_orderref(row) for row in rows]
 
     def _walk_orders(
         self,
@@ -1329,6 +1567,7 @@ class AlpacaAdapter(BrokerAdapter):
         since: Optional[datetime] = None,
         page_size: int = 500,
         max_pages: int = 40,
+        symbols: Optional[list] = None,
     ) -> tuple[list, bool]:
         """Page through get_orders until exhausted. Returns (orders, complete).
 
@@ -1354,6 +1593,8 @@ class AlpacaAdapter(BrokerAdapter):
                 kwargs["after"] = since
             if until is not None:
                 kwargs["until"] = until
+            if symbols:
+                kwargs["symbols"] = list(symbols)
             page = list(
                 self._client.get_orders(filter=GetOrdersRequest(**kwargs)) or []
             )
@@ -1384,6 +1625,27 @@ class AlpacaAdapter(BrokerAdapter):
             # one submitted_at cannot stall the walk.
             until = oldest - timedelta(microseconds=1)
         return list(seen.values()), False
+
+    def _say_unreadable_order_once(self, raw, why) -> None:
+        """Fix wave FW-eb-m2: one red line per order the reconcile snapshot
+        cannot read (it runs every 60 s while the order is in the 30-day
+        history window)."""
+        order_id = str(getattr(raw, "id", "") or getattr(raw, "client_order_id", "") or "?")
+        seen = getattr(self, "_unreadable_orders_logged", None)
+        if seen is None:
+            seen = set()
+            self._unreadable_orders_logged = seen
+        if order_id in seen:
+            return
+        seen.add(order_id)
+        _alog(
+            "BROKER",
+            f"reconcile snapshot: order {order_id} "
+            f"({getattr(raw, 'client_order_id', '?')}) {why}; the snapshot is "
+            "broker-unavailable (fail closed) while it is in the order "
+            "history",
+            "red",
+        )
 
     def capture_reconciliation_snapshot(
         self,
@@ -1418,10 +1680,15 @@ class AlpacaAdapter(BrokerAdapter):
         )
 
         observed_at = datetime.now(timezone.utc)
+        option_symbols: set[str] = set()
 
         def _positions(raw_positions):
             out = []
             for raw in raw_positions or ():
+                if _is_us_option_position(raw):
+                    option_symbols.add(
+                        str(getattr(raw, "symbol", "") or "").strip().upper()
+                    )
                 try:
                     out.append(
                         BrokerPositionSnapshot(
@@ -1462,11 +1729,32 @@ class AlpacaAdapter(BrokerAdapter):
             except ImportError:
                 raw_orders = list(self._client.get_orders() or [])
             second_positions = _positions(self._client.get_all_positions())
+            self._reconciliation_option_symbols = frozenset(option_symbols)
             normalized_orders = []
             for raw in raw_orders:
+                # Fix wave FW-eb-m2: an order this snapshot cannot read FAILS
+                # CLOSED, as on main: a multi-leg (mleg) order, or one with no
+                # side that no position_intent explains, makes the whole
+                # snapshot broker-unavailable (reconcile cannot rule it out).
+                # IntelliStock never submits an mleg order; one placed by hand
+                # in the Alpaca UI is named here in red. A single-leg option
+                # order with no side stays readable through its intent.
+                if _enum_value(getattr(raw, "order_class", None)) == "mleg":
+                    self._say_unreadable_order_once(
+                        raw, "is multi-leg (mleg) and cannot be reconciled")
+                    raise BrokerError(
+                        f"unreadable multi-leg order {getattr(raw, 'id', '?')}")
                 side_value = getattr(getattr(raw, "side", None), "value", None)
                 if side_value is None:
                     side_value = getattr(raw, "side", "")
+                if not side_value:
+                    side_value = _side_from_position_intent(
+                        getattr(raw, "position_intent", None))
+                    if side_value is None:
+                        self._say_unreadable_order_once(
+                            raw, "has no side and no position_intent")
+                        raise BrokerError(
+                            f"order {getattr(raw, 'id', '?')} has no side")
                 status_value = getattr(
                     getattr(raw, "status", None), "value", None
                 )
@@ -1566,11 +1854,21 @@ class AlpacaAdapter(BrokerAdapter):
         if any(event.instance_id != self._instance_id for event in result.events):
             raise BrokerError("reconciliation instance identity mismatch")
         now = datetime.now(timezone.utc)
+        # swing-port: option contracts live in _option_positions only. They
+        # stay out of every long-only equity mirror a reconcile publishes:
+        # owned, external (broker.py's boot audit would print "-1.0000sh"),
+        # unresolved and the equity trade history. Empty on EB's account.
+        contracts = (
+            set(getattr(result, "option_symbols", ()) or ())
+            | set(self._reconciliation_option_symbols)
+            | set(self._option_positions)
+            | set(self._last_option_misses)
+        )
         with self._lock:
             self._positions = {
                 symbol: float(quantity)
                 for symbol, quantity in result.owned.items()
-                if quantity > 0
+                if quantity > 0 and symbol not in contracts
             }
             self._external_positions = {
                 symbol: {
@@ -1581,6 +1879,7 @@ class AlpacaAdapter(BrokerAdapter):
                     "first_seen_utc": now.isoformat(),
                 }
                 for symbol, quantity in result.external.items()
+                if symbol not in contracts
             }
             self._unresolved_positions = {
                 symbol: {
@@ -1589,6 +1888,7 @@ class AlpacaAdapter(BrokerAdapter):
                     "first_seen_utc": now.isoformat(),
                 }
                 for symbol, quantity in result.unresolved.items()
+                if symbol not in contracts
             }
             self._trades = [
                 {
@@ -1604,6 +1904,7 @@ class AlpacaAdapter(BrokerAdapter):
                 }
                 for event in result.events
                 if event.incremental_quantity > 0
+                and event.symbol not in contracts
             ]
             self._pending_broker_positions = ()
             self._reconciliation_healthy = result.healthy
@@ -1635,6 +1936,10 @@ class AlpacaAdapter(BrokerAdapter):
         the stale flag and clobbers ``_positions`` as before (that's the
         normal "user liquidated" path, distinct from an outage).
         """
+        # Fix wave round 2: the option fills applied from here on landed while
+        # the GET was in flight; the rebind reconciles them (an int read is
+        # atomic; no lock is taken, so EB's path is unchanged).
+        _option_fill_mark = self._option_fill_seq
         try:
             positions = self._client.get_all_positions()
             rest_ok = True
@@ -1698,9 +2003,32 @@ class AlpacaAdapter(BrokerAdapter):
         # doesn't have a fill-priced entry yet.
         new_last_prices: dict[str, float] = {}
         out: list[PositionDTO] = []
+        new_option_positions: dict[str, OptionPositionDTO] = {}
+        option_misses: list[str] = []
         for p in positions:
             try:
                 sym = str(p.symbol)
+                if _is_us_option_position(p):
+                    # swing-port: an option row keeps its broker quantity in
+                    # new_positions (the clean-room filter below still decides
+                    # what the equity mirror adopts, and it never adopts a
+                    # short) and is described from Alpaca's contract fields,
+                    # not an OCC-symbol parse (spec section 9 fix 10). It is
+                    # recognised BEFORE the equity float parsing below, which
+                    # would otherwise drop it silently on an unreadable field.
+                    try:
+                        new_positions[sym] = float(p.qty)
+                        out.append(
+                            self._collect_option_position(
+                                p, new_option_positions, option_misses
+                            )
+                        )
+                    except (TypeError, ValueError):
+                        # An unreadable option row must not vanish from a map
+                        # that still reads complete: that would hide an open
+                        # short put from the collateral check.
+                        option_misses.append(sym.strip().upper())
+                    continue
                 qty = float(p.qty)
                 mv = float(p.market_value or 0.0)
                 new_positions[sym] = qty
@@ -1760,6 +2088,30 @@ class AlpacaAdapter(BrokerAdapter):
                 self._positions = owned_new
             else:
                 self._positions = new_positions
+            _option_symbols = set(new_option_positions) | set(option_misses)
+            if _option_symbols:
+                # swing-port: the equity mirror never holds a contract, long or
+                # short, in either mode. The clean-room filter already drops a
+                # short; a long option would otherwise be adopted. EB's account
+                # holds no options, so this never runs there.
+                self._positions = {
+                    _sym: _qty
+                    for _sym, _qty in self._positions.items()
+                    if str(_sym).strip().upper() not in _option_symbols
+                }
+            _mid_refresh_unsettled = False
+            if self._option_fill_seq != _option_fill_mark:
+                # Fix wave round 2 (FW1 re-review, out-of-scope, ruled in): a
+                # stream fill between the GET and this rebind must not vanish
+                # from a map that reads complete.
+                new_option_positions, _mid_refresh_unsettled = (
+                    self._settle_mid_refresh_option_fills_locked(
+                        _option_fill_mark, new_option_positions, option_misses))
+            self._option_positions = new_option_positions
+            # An outage that outlived the staleness cap reaches here with an
+            # empty broker view: that is not proof of no open shorts.
+            self._option_positions_complete = (
+                rest_ok and not option_misses and not _mid_refresh_unsettled)
             # Successful REST refresh — clear the staleness flag set by
             # any prior outage so SELL branches stop suppressing.
             if self._positions_stale_since is not None:
@@ -1793,6 +2145,16 @@ class AlpacaAdapter(BrokerAdapter):
                     _newest = self._market_marks.get(_sym)
                     if _newest is not None:
                         self._last_prices[_sym] = _newest.price
+        if frozenset(option_misses) != self._last_option_misses:
+            self._last_option_misses = frozenset(option_misses)
+            if option_misses:
+                _alog(
+                    "BROKER",
+                    f"option contract fields unavailable for "
+                    f"{sorted(option_misses)}; sell-to-open collateral is "
+                    "unknown (new puts refused) until they resolve",
+                    "red",
+                )
         return out
 
     def refresh_cash(self) -> CashDTO:
@@ -2043,6 +2405,473 @@ class AlpacaAdapter(BrokerAdapter):
                     self._last_prices[symbol] = newest.price
         return tuple(marked)
 
+    # --- swing-port: options and reference data -------------------------------
+
+    def _option_data_client(self):
+        """Lazily built options market-data client (cached on the adapter)."""
+        client = getattr(self, "_option_rest_client", None)
+        if client is not None:
+            return client
+        from alpaca.data.historical import OptionHistoricalDataClient
+
+        client = OptionHistoricalDataClient(self._api_key, self._api_secret)
+        self._option_rest_client = client
+        return client
+
+    def get_option_contracts(
+        self,
+        underlying,
+        *,
+        option_type=None,
+        expiration_gte=None,
+        expiration_lte=None,
+        strike_gte=None,
+        strike_lte=None,
+        page_limit: int = 1000,
+        max_pages: int = 50,
+    ) -> list[OptionContractDTO]:
+        """Every contract matching the filters, all pages (spec section 9
+        fix 9). alpaca-py does NOT follow ``next_page_token`` itself; this
+        loops until it is empty and refuses a partial chain rather than
+        returning one."""
+        from alpaca.trading.enums import ContractType
+        from alpaca.trading.requests import GetOptionContractsRequest
+
+        base = {
+            "underlying_symbols": [str(underlying).strip().upper()],
+            "limit": int(page_limit),
+        }
+        if option_type:
+            base["type"] = ContractType(str(option_type).strip().lower())
+        if expiration_gte:
+            base["expiration_date_gte"] = str(expiration_gte)
+        if expiration_lte:
+            base["expiration_date_lte"] = str(expiration_lte)
+        # alpaca-py types the strike bounds as strings.
+        if strike_gte is not None:
+            base["strike_price_gte"] = f"{float(strike_gte):.2f}"
+        if strike_lte is not None:
+            base["strike_price_lte"] = f"{float(strike_lte):.2f}"
+        out: list[OptionContractDTO] = []
+        seen_tokens: set[str] = set()
+        token = None
+        for _page in range(max(1, int(max_pages))):
+            request = GetOptionContractsRequest(
+                **base, **({"page_token": token} if token else {})
+            )
+            response = self._client.get_option_contracts(request)
+            for raw in getattr(response, "option_contracts", None) or ():
+                out.append(_option_contract_dto(raw))
+            token = getattr(response, "next_page_token", None)
+            if not token:
+                return out
+            if token in seen_tokens:
+                raise BrokerError(
+                    f"option contract pagination repeated page token {token!r} "
+                    f"for {underlying}"
+                )
+            seen_tokens.add(token)
+        raise BrokerError(
+            f"option chain for {underlying} exceeded {max_pages} pages; "
+            "refusing a partial chain"
+        )
+
+    def get_option_snapshots(self, contracts) -> dict[str, OptionSnapshotDTO]:
+        """Latest quote, trade, IV and greeks per contract (indicative feed;
+        the OPRA agreement is unsigned), requested 100 symbols at a time."""
+        from alpaca.data.enums import OptionsFeed
+        from alpaca.data.requests import OptionSnapshotRequest
+
+        wanted = sorted(
+            {str(c).strip().upper() for c in (contracts or ()) if str(c).strip()}
+        )
+        out: dict[str, OptionSnapshotDTO] = {}
+        if not wanted:
+            return out
+        client = self._option_data_client()
+        for start in range(0, len(wanted), 100):
+            batch = wanted[start:start + 100]
+            raw = client.get_option_snapshot(
+                OptionSnapshotRequest(
+                    symbol_or_symbols=batch, feed=OptionsFeed.INDICATIVE
+                )
+            ) or {}
+            for symbol in batch:
+                snap = raw.get(symbol)
+                if snap is not None:
+                    out[symbol] = _option_snapshot_dto(symbol, snap)
+        return out
+
+    def get_option_chain(
+        self,
+        underlying,
+        *,
+        option_type=None,
+        expiration_gte=None,
+        expiration_lte=None,
+        strike_gte=None,
+        strike_lte=None,
+    ) -> dict[str, OptionSnapshotDTO]:
+        """Every matching contract (all pages) joined to its snapshot."""
+        contracts = self.get_option_contracts(
+            underlying,
+            option_type=option_type,
+            expiration_gte=expiration_gte,
+            expiration_lte=expiration_lte,
+            strike_gte=strike_gte,
+            strike_lte=strike_lte,
+        )
+        return self.get_option_snapshots([c.symbol for c in contracts])
+
+    def get_account_options(self) -> dict:
+        """Options approval and buying power from the trade account."""
+        acct = self._client.get_account()
+
+        def number(name, cast):
+            value = getattr(acct, name, None)
+            if value in (None, ""):
+                return None
+            try:
+                return cast(value)
+            except (TypeError, ValueError):
+                return None
+
+        return {
+            "options_trading_level": number("options_trading_level", int),
+            "options_approved_level": number("options_approved_level", int),
+            "options_buying_power": number("options_buying_power", float),
+            "non_marginable_buying_power": number(
+                "non_marginable_buying_power", float
+            ),
+            "cash": number("cash", float),
+            "equity": number("equity", float),
+        }
+
+    def option_positions_health(self) -> dict:
+        """The option book's health for the wheel lane, so it never reads
+        this adapter's private attributes (plan B G7 review I-1).
+
+        ``complete`` is False until one positions refresh has read every
+        option row: a positions outage at startup, an unreadable row or a
+        contract lookup miss keeps it False. ``stale_since`` is the epoch
+        second the last positions refresh started failing (None while
+        refreshes succeed); the option map a stale refresh leaves behind is
+        the last good read, not broker truth. A fresh dict on every call."""
+        return {
+            "complete": bool(getattr(self, "_option_positions_complete", False)),
+            "stale_since": getattr(self, "_positions_stale_since", None),
+        }
+
+    def option_contract_meta(self, symbol) -> Optional[OptionContractDTO]:
+        """Alpaca's contract fields for one OCC symbol, cached for the process;
+        a failed lookup is not retried for 60 s."""
+        sym = str(symbol or "").strip().upper()
+        with self._lock:
+            cached = self._option_contract_cache.get(sym)
+            retry_at = self._option_contract_misses.get(sym, 0.0)
+        if cached is not None:
+            return cached
+        if time.time() < retry_at:
+            return None
+        try:
+            dto = _option_contract_dto(self._client.get_option_contract(sym))
+        except Exception as exc:
+            with self._lock:
+                self._option_contract_misses[sym] = time.time() + 60.0
+            _alog(
+                "BROKER",
+                f"option contract lookup failed for {sym}: "
+                f"{type(exc).__name__}: {exc}",
+                "yellow",
+            )
+            return None
+        with self._lock:
+            self._option_contract_cache[sym] = dto
+            self._option_contract_misses.pop(sym, None)
+        return dto
+
+    def list_option_positions(self) -> list[OptionPositionDTO]:
+        with self._lock:
+            return list(self._option_positions.values())
+
+    def _collect_option_position(self, raw, sink, misses) -> PositionDTO:
+        """Record one broker option row in ``sink`` and return its display row.
+        Unknown contract fields keep the signed quantity (a buy-to-close needs
+        only that) but mark the map incomplete, which refuses new puts."""
+        symbol = str(raw.symbol).strip().upper()
+        qty = int(float(raw.qty))
+        meta = self.option_contract_meta(symbol)
+        if meta is None:
+            misses.append(symbol)
+        current = _as_float(getattr(raw, "current_price", None))
+        market_value = _as_float(getattr(raw, "market_value", None))
+        unrealized = _as_float(getattr(raw, "unrealized_pl", None))
+        avg_entry = float(getattr(raw, "avg_entry_price", 0) or 0)
+        sink[symbol] = OptionPositionDTO(
+            symbol=symbol,
+            underlying=meta.underlying if meta else "",
+            option_type=meta.option_type if meta else "",
+            strike=meta.strike if meta else 0.0,
+            expiry=meta.expiration if meta else "",
+            qty=qty,
+            avg_entry_price=avg_entry,
+            current_price=current,
+            market_value=market_value,
+            unrealized_pl=unrealized,
+            multiplier=100,
+        )
+        return PositionDTO(
+            symbol=symbol,
+            qty=float(qty),
+            avg_entry_price=avg_entry,
+            market_value=market_value or 0.0,
+            asset_class="us_option",
+            side=_enum_value(getattr(raw, "side", None))
+            or ("short" if qty < 0 else "long"),
+            unrealized_pl=unrealized,
+            unrealized_plpc=_as_float(getattr(raw, "unrealized_plpc", None)),
+            current_price=current,
+            multiplier=100,
+            underlying=meta.underlying if meta else None,
+            # Ruling F4 (A-live pre-flight): put/call from the contract fields.
+            option_type=meta.option_type if meta else None,
+            strike=meta.strike if meta else None,
+            expiry=meta.expiration if meta else None,
+        )
+
+    def _settle_mid_refresh_option_fills_locked(self, mark, fresh, misses):
+        """Fix wave round 2: reconcile the option fills journalled after
+        ``mark`` (the fill count when a refresh's GET started) with that GET's
+        answer ``fresh``. Caller holds self._lock.
+
+        Per contract: the GET already shows the fills' result -> keep the GET;
+        the GET shows the quantity from before them -> it predates them, so
+        keep what the fills made (the current row, or nothing if they closed
+        it); anything else, an unreadable GET row, a kept row with no known
+        contract, or a journal that no longer reaches back to ``mark`` ->
+        unsettled, and the caller marks the map incomplete (fail closed).
+        Returns (the map to bind, unsettled)."""
+        fresh = dict(fresh)
+        journal = [e for e in self._option_fill_journal if e[0] > mark]
+        unsettled = not journal or journal[0][0] != mark + 1
+        span: dict[str, list[int]] = {}
+        for _seq, symbol, before, after in journal:
+            if symbol in span:
+                span[symbol][1] = after
+            else:
+                span[symbol] = [before, after]
+        missed = {str(m).strip().upper() for m in (misses or ())}
+        for symbol, (before, after) in span.items():
+            if str(symbol).strip().upper() in missed:
+                unsettled = True
+                continue
+            row = fresh.get(symbol)
+            got = int(row.qty) if row is not None else 0
+            if got == after:
+                continue
+            if got != before:
+                unsettled = True
+                continue
+            current = self._option_positions.get(symbol)
+            if after == 0:
+                fresh.pop(symbol, None)
+            elif current is not None and int(current.qty) == after:
+                fresh[symbol] = current
+                typed = (
+                    str(current.option_type or "").lower() in ("put", "call")
+                    and str(current.underlying or "").strip()
+                    and float(current.strike or 0) > 0
+                )
+                if not typed:
+                    unsettled = True
+            else:
+                unsettled = True
+        return fresh, unsettled
+
+    def _apply_option_fill_locked(self, event, fill) -> None:
+        """One confirmed option fill: the signed contract count moves by
+        position_delta, cash by the service's x100 cash_delta. Caller holds
+        self._lock. The next refresh_positions rebinds from broker truth.
+
+        The map is rebuilt and rebound, never mutated in place: the same
+        rebind contract refresh_positions documents, so a reader iterating the
+        previous dict without the lock never sees it change size."""
+        symbol = event.symbol
+        updated = dict(self._option_positions)
+        current = updated.get(symbol)
+        new_qty = (current.qty if current is not None else 0) + int(
+            fill.position_delta
+        )
+        # Fix wave round 2: journal the fill for a refresh in flight.
+        self._option_fill_seq += 1
+        self._option_fill_journal.append((
+            self._option_fill_seq, symbol,
+            int(current.qty) if current is not None else 0, int(new_qty)))
+        if len(self._option_fill_journal) > _OPTION_FILL_JOURNAL_MAX:
+            del self._option_fill_journal[:-_OPTION_FILL_JOURNAL_MAX]
+        self._cash += float(fill.cash_delta)
+        if new_qty == 0:
+            updated.pop(symbol, None)
+            self._option_positions = updated
+            return
+        if current is not None:
+            updated[symbol] = replace(current, qty=new_qty)
+            self._option_positions = updated
+            return
+        meta = self._option_contract_cache.get(symbol)
+        if meta is None:
+            # Fix wave FW1 follow-up: a fill on an option order WE placed
+            # carries its intent's contract, so the row is born typed and the
+            # map stays complete; the next refresh re-reads Alpaca's own meta.
+            meta = _fill_contract_meta(symbol, fill)
+        updated[symbol] = OptionPositionDTO(
+            symbol=symbol,
+            underlying=meta.underlying if meta else "",
+            option_type=meta.option_type if meta else "",
+            strike=meta.strike if meta else 0.0,
+            expiry=meta.expiration if meta else "",
+            qty=new_qty,
+            avg_entry_price=float(fill.incremental_price),
+            current_price=None,
+            market_value=None,
+            unrealized_pl=None,
+            multiplier=100,
+        )
+        self._option_positions = updated
+        if meta is None and new_qty < 0:
+            # Fix wave FW-lo-I3: a short of unknown origin (no cached meta
+            # and no intent meta on its fill) carries collateral nobody can
+            # count. The map is incomplete until a refresh reads the meta,
+            # which fails closed for new sell-to-opens, the duplicate-put
+            # check and the 25% cap; a buy-to-close needs only the signed
+            # quantity.
+            self._option_positions_complete = False
+
+    def get_option_activities(
+        self,
+        types=("OPASN", "OPEXP", "OPEXC"),
+        after=None,
+        *,
+        page_size: int = 100,
+        max_pages: int = 20,
+    ) -> list[OptionActivityDTO]:
+        """Assignment, expiry and exercise activities since ``after``.
+
+        TradingClient has no activities method in alpaca-py 0.43.5; its
+        RESTClient.get builds ``base + /v2 + path`` with the account's own
+        credentials, which is exactly GET /v2/account/activities/{type}.
+        Pages by ``page_token`` (the last row's id) and refuses to return a
+        truncated history.
+        """
+        out: list[OptionActivityDTO] = []
+        for kind in types:
+            kind = str(kind).strip().upper()
+            if kind not in ("OPASN", "OPEXP", "OPEXC"):
+                raise ValueError(f"unsupported option activity type {kind!r}")
+            token = None
+            for _page in range(max(1, int(max_pages))):
+                params = {"direction": "asc", "page_size": int(page_size)}
+                if after:
+                    params["after"] = str(after)
+                if token:
+                    params["page_token"] = token
+                raw = self._client.get(f"/account/activities/{kind}", params)
+                if not isinstance(raw, list):
+                    # A 200 whose body is not a list is not "no activities";
+                    # reading it as empty would lose an assignment.
+                    raise BrokerError(
+                        f"{kind} activities answered {type(raw).__name__}, "
+                        "not a list"
+                    )
+                rows = raw
+                for row in rows:
+                    out.append(_option_activity_dto(kind, row))
+                if len(rows) < int(page_size):
+                    break
+                token = str((rows[-1] or {}).get("id") or "")
+                if not token:
+                    break
+            else:
+                raise BrokerError(f"{kind} activities exceeded {max_pages} pages")
+        out.sort(key=_activity_sort_key)
+        return out
+
+    def get_daily_bars(self, symbols, days) -> dict[str, list[dict]]:
+        """Split- and dividend-adjusted SIP daily bars, oldest first, for a
+        ``days`` CALENDAR-day lookback, 100 symbols per request. The window
+        ends 16 minutes ago: SIP data newer than 15 minutes needs a paid
+        subscription and the free tier answers everything older."""
+        from alpaca.data.enums import Adjustment, DataFeed
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame
+
+        wanted = sorted(
+            {str(s).strip().upper() for s in (symbols or ()) if str(s).strip()}
+        )
+        out: dict[str, list[dict]] = {symbol: [] for symbol in wanted}
+        if not wanted:
+            return out
+        client = self._rest_quote_data_client()
+        if client is None:
+            raise BrokerError("stock market-data client unavailable")
+        now = datetime.now(timezone.utc)
+        start = now - timedelta(days=max(1, int(days)))
+        end = now - timedelta(minutes=16)
+        for index in range(0, len(wanted), 100):
+            batch = wanted[index:index + 100]
+            barset = client.get_stock_bars(
+                StockBarsRequest(
+                    symbol_or_symbols=batch,
+                    timeframe=TimeFrame.Day,
+                    start=start,
+                    end=end,
+                    adjustment=Adjustment.ALL,
+                    feed=DataFeed.SIP,
+                )
+            )
+            data = getattr(barset, "data", None) or {}
+            for symbol in batch:
+                rows = sorted(data.get(symbol) or (), key=_bar_time)
+                out[symbol] = [
+                    {
+                        "t": bar.timestamp.isoformat(),
+                        "o": float(bar.open),
+                        "h": float(bar.high),
+                        "l": float(bar.low),
+                        "c": float(bar.close),
+                        "v": float(bar.volume),
+                    }
+                    for bar in rows
+                ]
+        return out
+
+    def get_latest_trades(self, symbols) -> dict[str, tuple[float, str]]:
+        """IEX latest trade per symbol as (price, ISO timestamp)."""
+        from alpaca.data.enums import DataFeed
+        from alpaca.data.requests import StockLatestTradeRequest
+
+        wanted = sorted(
+            {str(s).strip().upper() for s in (symbols or ()) if str(s).strip()}
+        )
+        out: dict[str, tuple[float, str]] = {}
+        if not wanted:
+            return out
+        client = self._rest_quote_data_client()
+        if client is None:
+            raise BrokerError("stock market-data client unavailable")
+        for index in range(0, len(wanted), 100):
+            batch = wanted[index:index + 100]
+            raw = client.get_stock_latest_trade(
+                StockLatestTradeRequest(symbol_or_symbols=batch, feed=DataFeed.IEX)
+            ) or {}
+            for symbol in batch:
+                trade = raw.get(symbol)
+                price = _as_positive_float(getattr(trade, "price", None))
+                stamp = getattr(trade, "timestamp", None)
+                if price is not None and hasattr(stamp, "isoformat"):
+                    out[symbol] = (price, stamp.isoformat())
+        return out
+
     def start_market_marks(self, symbols) -> dict:
         """Start the read-only quote/trade stream feeding typed marks."""
 
@@ -2127,6 +2956,11 @@ class AlpacaAdapter(BrokerAdapter):
             "cancelled": LifecycleState.CANCELED,
             "expired": LifecycleState.EXPIRED,
             "done_for_day": LifecycleState.EXPIRED,
+            # swing-port: a bracket's stop leg waits in "held"; a leg being
+            # cancelled before a strategy sell passes through "pending_cancel".
+            # Both are still working orders.
+            "held": LifecycleState.ACKNOWLEDGED,
+            "pending_cancel": LifecycleState.ACKNOWLEDGED,
         }.get(raw_event)
         if state is None:
             return None
@@ -2140,6 +2974,22 @@ class AlpacaAdapter(BrokerAdapter):
         # record missed them). Read `.value` first, as the neighbouring
         # call sites already do.
         _raw_side = getattr(order, "side", "") or ""
+        if not _raw_side:
+            # swing-port: an mleg top level carries no side. It is not an
+            # order this instance placed; dropping it beats raising inside
+            # the stream callback.
+            _raw_side = _side_from_position_intent(
+                getattr(order, "position_intent", None)) or ""
+            if not _raw_side:
+                _alog(
+                    "ALPACA",
+                    f"stream {raw_event or '?'} event for order "
+                    f"{getattr(order, 'client_order_id', '') or '?'} "
+                    f"({getattr(order, 'id', '') or '?'}) carries no side "
+                    "and no position intent; dropped",
+                    "yellow",
+                )
+                return None
         side = OrderSide(
             str(getattr(_raw_side, "value", _raw_side)).lower())
         cumulative = Decimal(str(getattr(order, "filled_qty", 0) or 0))
@@ -2229,7 +3079,15 @@ class AlpacaAdapter(BrokerAdapter):
             elif event.state is LifecycleState.EXPIRED:
                 self._wal.mark_expired(event.client_order_id)
 
-            if fill is not None:
+            # swing-port: an option fill moves the option map and cash only;
+            # the long-only equity mirror and _trades never see a contract.
+            _option_fill = (
+                fill is not None
+                and getattr(fill, "asset_class", "us_equity") == "us_option"
+            )
+            if _option_fill:
+                self._apply_option_fill_locked(event, fill)
+            if fill is not None and not _option_fill:
                 symbol = event.symbol
                 new_position = (
                     Decimal(str(self._positions.get(symbol, 0) or 0))
@@ -3014,6 +3872,242 @@ class AlpacaAdapter(BrokerAdapter):
                         self._orders_today.pop(symbol, None)
         except Exception:
             pass
+
+
+#: Fix wave round 2: how many option fills the adapter remembers for a
+#: refresh in flight (far more than can land during one GET).
+_OPTION_FILL_JOURNAL_MAX = 256
+
+#: Order states in which a cancel is confirmed and nothing more can fill.
+_CANCEL_CONFIRMED_STATES = frozenset(
+    {"canceled", "cancelled", "expired", "rejected", "done_for_day"}
+)
+
+
+def _enum_value(value) -> Optional[str]:
+    """An alpaca-py enum or a plain string as lower-case text; None if empty."""
+    text = str(getattr(value, "value", value) or "").strip().lower()
+    return text or None
+
+
+def _side_from_position_intent(value) -> Optional[str]:
+    """buy_*/sell_* position intents imply the side of an order that has none."""
+    text = _enum_value(value) or ""
+    if text.startswith("buy_"):
+        return "buy"
+    if text.startswith("sell_"):
+        return "sell"
+    return None
+
+
+def _checked_bracket_order(
+    *, symbol, side, qty, notional, order_type, tif, extended_hours,
+    take_profit, stop_loss,
+) -> int:
+    """The one bracket shape IntelliStock sends (spec section 6.1): a BUY
+    market parent, whole shares, day or GTC, regular hours, both leg prices
+    with the stop below the target. Anything else is refused before the WAL
+    row exists."""
+    def refuse(why: str):
+        raise BrokerPreflightBlocked(
+            f"{symbol} bracket refused before submission: {why}"
+        )
+
+    if str(side).strip().lower() != "buy":
+        refuse("only BUY-entry brackets are supported")
+    if notional is not None or qty is None:
+        refuse("a bracket needs a whole-share qty, not a notional")
+    if float(qty) != int(float(qty)) or int(float(qty)) < 1:
+        refuse(f"qty={qty} is not a whole number of shares >= 1")
+    if str(order_type).strip().lower() != "market":
+        refuse("the parent must be a market order")
+    if str(tif).strip().lower() not in ("day", "gtc"):
+        refuse(f"tif={tif} (bracket legs need day or gtc)")
+    if extended_hours:
+        refuse("brackets are regular-hours orders")
+    if take_profit is None or stop_loss is None:
+        refuse("take_profit and stop_loss are both required")
+    if not 0 < float(stop_loss) < float(take_profit):
+        refuse(f"stop_loss={stop_loss} must be below take_profit={take_profit}")
+    return int(float(qty))
+
+
+def _as_float(value) -> Optional[float]:
+    """Float, or None for anything unusable. Negatives stay (short values)."""
+    try:
+        return float(value) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_us_option_position(raw) -> bool:
+    return _enum_value(getattr(raw, "asset_class", None)) == "us_option"
+
+
+def _checked_option_order(
+    *, symbol, side, qty, notional, order_type, limit_price, tif,
+    extended_hours, position_intent,
+) -> int:
+    """Whole contracts, regular hours, a position_intent that agrees with the
+    side, a market or priced limit order (spec section 6.1)."""
+    def refuse(why: str):
+        raise BrokerPreflightBlocked(
+            f"{symbol} option order refused before submission: {why}"
+        )
+
+    intent = str(position_intent or "").strip().lower()
+    expected = {
+        "buy_to_open": "buy",
+        "buy_to_close": "buy",
+        "sell_to_open": "sell",
+        "sell_to_close": "sell",
+    }.get(intent)
+    if expected is None:
+        refuse(f"position_intent={position_intent!r}")
+    if str(side).strip().lower() != expected:
+        refuse(f"side={side} contradicts position_intent={intent}")
+    if notional is not None or qty is None:
+        refuse("options trade whole contracts, not a notional")
+    if float(qty) != int(float(qty)) or int(float(qty)) < 1:
+        refuse(f"qty={qty} is not a whole number of contracts >= 1")
+    if extended_hours:
+        refuse("options trade in regular hours only")
+    if str(tif).strip().lower() not in ("day", "gtc"):
+        refuse(f"tif={tif}")
+    kind = str(order_type).strip().lower()
+    if kind not in ("market", "limit"):
+        refuse(f"order_type={order_type}")
+    if kind == "limit" and (limit_price is None or float(limit_price) <= 0):
+        refuse("a limit order needs limit_price > 0")
+    return int(float(qty))
+
+
+#: Fix wave FW1 item 8 (live-orders review M-2): Alpaca's own refusal of an
+#: option order the account may not place -- its 403 code 40310000 (which the
+#: equity path reads as "not fractionable"), or a message that says the
+#: account is not eligible / approved / enabled / permitted, or names its
+#: options (trading) level. The word "option" alone is not one: a 5xx or a
+#: validation error that names the contract kept its own type.
+_OPTIONS_REFUSAL = re.compile(
+    r"40310000"
+    r"|\bnot (?:eligible|approved|enabled|permitted|authorized|allowed)\b"
+    r"|\boptions? trading (?:is )?not\b"
+    r"|\boptions? (?:trading )?level\b"
+)
+
+
+def _option_order_error(exc, parsed, *, answered: bool):
+    """Alpaca's answer to an option order the account may not place.
+
+    Only an HTTP answer is a refusal. A transport failure (no response) is
+    returned unchanged so it stays ambiguous, even when its text mentions
+    an option. A server error (5xx) is never read as a permissions answer,
+    and neither is an answer that merely names the contract."""
+    if not answered:
+        return parsed
+    if isinstance(parsed, (InsufficientBuyingPower, BrokerRateLimited)):
+        return parsed
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(parsed, "http_status", None)
+    try:
+        status = int(status) if status is not None else None
+    except (TypeError, ValueError):
+        status = None
+    if status is not None and status >= 500:
+        return parsed
+    message = str(exc).lower()
+    if isinstance(parsed, FractionalNotAllowed) or _OPTIONS_REFUSAL.search(message):
+        return OptionsNotPermitted(str(exc))
+    return parsed
+
+
+def _fill_contract_meta(symbol, fill) -> Optional[OptionContractDTO]:
+    """The contract a ConfirmedFill carries from our own option intent (FW1
+    follow-up), as the contract DTO the option map reads; None unless it
+    names an underlying, a put or call, a strike above zero and an expiry."""
+    underlying = str(getattr(fill, "underlying", None) or "").strip().upper()
+    option_type = str(getattr(fill, "option_type", None) or "").strip().lower()
+    expiry = str(getattr(fill, "expiry", None) or "").strip()
+    try:
+        strike = float(getattr(fill, "strike", None) or 0)
+    except (TypeError, ValueError):
+        strike = 0.0
+    if not underlying or option_type not in ("put", "call") or not strike > 0 or not expiry:
+        return None
+    return OptionContractDTO(
+        symbol=str(symbol).strip().upper(), underlying=underlying,
+        option_type=option_type, strike=strike, expiration=expiry,
+        open_interest=None, close_price=None)
+
+
+def _option_contract_dto(raw) -> OptionContractDTO:
+    """One alpaca-py OptionContract as the adapter DTO (spec section 9 fix
+    10: contract fields come from Alpaca, never from parsing the OCC symbol)."""
+    expiration = getattr(raw, "expiration_date", None)
+    open_interest = getattr(raw, "open_interest", None)
+    close_price = getattr(raw, "close_price", None)
+    return OptionContractDTO(
+        symbol=str(raw.symbol).strip().upper(),
+        underlying=str(getattr(raw, "underlying_symbol", "") or "").strip().upper(),
+        option_type=_enum_value(getattr(raw, "type", None)) or "",
+        strike=float(raw.strike_price),
+        expiration=(
+            expiration.isoformat()
+            if hasattr(expiration, "isoformat")
+            else str(expiration or "")
+        ),
+        open_interest=(
+            int(float(open_interest)) if open_interest not in (None, "") else None
+        ),
+        close_price=float(close_price) if close_price not in (None, "") else None,
+    )
+
+
+def _option_snapshot_dto(symbol: str, raw) -> OptionSnapshotDTO:
+    quote = getattr(raw, "latest_quote", None)
+    trade = getattr(raw, "latest_trade", None)
+    greeks = getattr(raw, "greeks", None)
+    stamp = getattr(quote, "timestamp", None) or getattr(trade, "timestamp", None)
+
+    def greek(name):
+        value = getattr(greeks, name, None) if greeks is not None else None
+        return float(value) if value is not None else None
+
+    iv = getattr(raw, "implied_volatility", None)
+    return OptionSnapshotDTO(
+        symbol=symbol,
+        bid=_as_positive_float(getattr(quote, "bid_price", None)),
+        ask=_as_positive_float(getattr(quote, "ask_price", None)),
+        last=_as_positive_float(getattr(trade, "price", None)),
+        iv=float(iv) if iv is not None else None,
+        delta=greek("delta"),
+        gamma=greek("gamma"),
+        theta=greek("theta"),
+        vega=greek("vega"),
+        quote_ts=stamp.isoformat() if hasattr(stamp, "isoformat") else None,
+    )
+
+
+def _option_activity_dto(kind: str, row) -> OptionActivityDTO:
+    row = dict(row or {})
+    price = row.get("price", row.get("per_share_amount"))
+    return OptionActivityDTO(
+        id=str(row.get("id") or ""),
+        activity_type=str(row.get("activity_type") or kind).strip().upper(),
+        symbol=str(row.get("symbol") or "").strip().upper(),
+        qty=float(row.get("qty") or 0),
+        date=str(row.get("date") or row.get("transaction_time") or ""),
+        price=float(price) if price not in (None, "") else None,
+    )
+
+
+def _activity_sort_key(activity: OptionActivityDTO):
+    return (activity.date, activity.id)
+
+
+def _bar_time(bar):
+    return bar.timestamp
 
 
 def _as_positive_float(value):

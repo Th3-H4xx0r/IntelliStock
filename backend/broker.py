@@ -3644,6 +3644,35 @@ def _core_sleeve_cfg_raw(cached_strategies):
     return {}
 
 
+def _backtest_credit_pending_sell_proceeds(cached_strategies) -> bool:
+    """May a submitted-but-unfilled funding sell count toward buying power?
+
+    The graph_nexus lane's config is read exactly as before: doc 200 carries
+    the flag on a weight-0 graph_nexus lane that never runs, and EB's credit
+    depends on it. Any enabled run_once lane (one the dispatcher would run:
+    run_once scope, weight > 0) may also set it -- the swing lab's only lane
+    is strategy_swing (swing port, plan B pre-flight R1). Default False.
+    """
+    flag = "backtest_credit_pending_sell_proceeds"
+    if bool((_core_sleeve_cfg_raw(cached_strategies) or {}).get(flag, False)):
+        return True
+    for spec in (cached_strategies or []):
+        if not isinstance(spec, dict):
+            continue
+        scope = str(spec.get("execution_scope") or "per_symbol").strip().lower()
+        if scope != "run_once":
+            continue
+        try:
+            if float(spec.get("weight", 0) or 0) <= 0:
+                continue
+        except (TypeError, ValueError):
+            continue
+        config = spec.get("config")
+        if isinstance(config, dict) and bool(config.get(flag, False)):
+            return True
+    return False
+
+
 def _anchor_reinforcement_execution_policy(
         cached_strategies, nexus_hint, mode_value):
     """Default-OFF, backtest-only risk envelope for an anchor order.
@@ -4406,6 +4435,12 @@ _LANE_ENABLE_FLAGS = {
     # `_strategy_eb_risk_limits`, or that lookup KeyErrors out of the WHOLE
     # document's risk envelope.
     "strategy_hx": "strategy_hx_enabled", "strategyhx": "strategy_hx_enabled",
+    # swing-port: the swing lane widens the envelope to its 20% order/symbol
+    # caps and honours its 20% single-position cap live; the wheel lane
+    # declares no live_* keys and is skipped exactly as HX is. Both have rows
+    # in `_strategy_eb_risk_limits`' defaults_by_lane (D5).
+    "strategy_swing": "strategy_swing_enabled", "strategyswing": "strategy_swing_enabled",
+    "strategy_wheel": "strategy_wheel_enabled", "strategywheel": "strategy_wheel_enabled",
 }
 
 
@@ -4455,6 +4490,27 @@ def _strategy_eb_single_position_pct(cached_strategies):
     return best
 
 
+def _lane_enabled(cached_strategies, lane) -> bool:
+    """True when the document carries an ENABLED spec for ``lane`` (a key of
+    ``_LANE_ENABLE_FLAGS``), with the strategies' own enabled-flag semantics
+    and `conditions` UNION `config`. Every swing-port branch in the live loop
+    is gated on this, so a document without the lane (doc 200) never enters
+    one."""
+    flag = _LANE_ENABLE_FLAGS.get(str(lane or "").strip().lower())
+    if flag is None:
+        return False
+    for spec in (cached_strategies or []):
+        try:
+            name = str((spec or {}).get("strategy", "")).strip().lower()
+            if _LANE_ENABLE_FLAGS.get(name) != flag:
+                continue
+            if _truthy(_merged_strategy_settings(spec).get(flag, False)):
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _strategy_eb_risk_limits(cached_strategies):
     """The enabled strategy_eb lane's live risk envelope, or None.
 
@@ -4496,9 +4552,20 @@ def _strategy_eb_risk_limits(cached_strategies):
     # does not, the per-lane handler skips it and the rest still stands. HX
     # declares no `live_*` keys and is skipped exactly that way, which is
     # correct rather than an omission.
+    # swing-port: the swing lane's live envelope (spec section 5.1): 20% per
+    # order and per symbol, EB's drawdown rungs. Inline, not a module
+    # constant, because the envelope tests extract this function with only
+    # the tables it already reads. The wheel declares none (like HX).
+    _SW_DEFAULTS = {
+        "live_max_order_fraction": 0.2, "live_max_symbol_fraction": 0.2,
+        "live_max_leveraged_fraction": 0.2, "live_soft_drawdown": 0.25,
+        "live_hard_drawdown": 0.35, "live_kill_drawdown": 0.45,
+    }
     defaults_by_lane = {"strategy_eb": _EB_DEFAULTS, "strategyeb": _EB_DEFAULTS,
                         "outlier_sleeve": _OS_DEFAULTS, "outliersleeve": _OS_DEFAULTS,
-                        "strategy_hx": _HX_DEFAULTS, "strategyhx": _HX_DEFAULTS}
+                        "strategy_hx": _HX_DEFAULTS, "strategyhx": _HX_DEFAULTS,
+                        "strategy_swing": _SW_DEFAULTS, "strategyswing": _SW_DEFAULTS,
+                        "strategy_wheel": {}, "strategywheel": {}}
     # The WIDEST envelope across the enabled lanes: a document that carries
     # the outlier sleeve beside strategy_eb must let a sleeve winner grow.
     widest = None
@@ -7546,6 +7613,13 @@ def run_run_once_strategies(specs, symbols, prices, current_time, data=None, por
                 # Fix 15: Extract propagation-expansion BUY tickers
                 nexus_expansion_buys = raw.pop("_nexus_expansion_buys", [])
                 nexus_executable_buys = raw.pop("_nexus_executable_buys", [])
+                # swing-port: the wheel lane's option orders ride their own
+                # side channel (interfaces doc section 1). Popped so it is
+                # never mistaken for a ticker; carried only when non-empty,
+                # so EB's metadata is exactly what it was.
+                nexus_option_orders = raw.pop("_nexus_option_orders", [])
+                if nexus_option_orders:
+                    metadata["_nexus_option_orders"] = list(nexus_option_orders)
                 # Z4.1's regime-adjusted position cap. Must be POPPED here (so it
                 # is not mistaken for a ticker in the score loop below) AND
                 # packed into metadata, which is the only channel the tick body
@@ -8836,6 +8910,40 @@ def _install_legacy_containment_gate(adapter, instance_id_val):
     return adapter
 
 
+def _option_position_payload(p) -> dict:
+    """One option row for the LiveState snapshot (interfaces doc section 9
+    item 4): Alpaca's own P&L fields, null when Alpaca has no current price,
+    never an invented 0. Equity rows never come through here."""
+    def number(name):
+        value = getattr(p, name, None)
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    qty = float(getattr(p, "qty", 0.0) or 0.0)
+    price = number("current_price")
+    plpc = number("unrealized_plpc")
+    avg = number("avg_entry_price")
+    return {
+        "symbol": getattr(p, "symbol", "") or "",
+        "qty": qty,
+        "avg_entry_price": avg if avg else None,
+        "last_price": price,
+        "market_value": number("market_value") if price is not None else None,
+        "unrealized_pnl": number("unrealized_pl"),
+        "unrealized_pnl_pct": plpc * 100.0 if plpc is not None else None,
+        "asset_class": "us_option",
+        "side": getattr(p, "side", None) or ("short" if qty < 0 else "long"),
+        "multiplier": int(getattr(p, "multiplier", 100) or 100),
+        "underlying": getattr(p, "underlying", None),
+        # Ruling F4 (A-live pre-flight): put/call from the contract fields.
+        "option_type": getattr(p, "option_type", None),
+        "strike": getattr(p, "strike", None),
+        "expiry": getattr(p, "expiry", None),
+    }
+
+
 def _compute_live_state_snapshot(instance_id_val: str, adapter) -> dict:
     """Build the dict to upsert into LiveState. Read-only over the adapter.
 
@@ -8949,6 +9057,13 @@ def _compute_live_state_snapshot(instance_id_val: str, adapter) -> dict:
     try:
         if live_position_dtos is not None:
             for p in live_position_dtos:
+                # swing-port: an option row carries its contract fields and
+                # Alpaca's own P&L; every equity row is built exactly as before.
+                if getattr(p, "asset_class", None) == "us_option":
+                    if alpaca_equity <= 0:
+                        equity += float(getattr(p, "market_value", 0.0) or 0.0)
+                    positions_payload.append(_option_position_payload(p))
+                    continue
                 sym = getattr(p, "symbol", "") or ""
                 qty_f = float(getattr(p, "qty", 0.0) or 0.0)
                 avg_entry = float(getattr(p, "avg_entry_price", 0.0) or 0.0)
@@ -9006,6 +9121,23 @@ def _compute_live_state_snapshot(instance_id_val: str, adapter) -> dict:
             })
     except Exception:
         positions_payload = []
+
+    # swing-port: a positions outage serves only the equity mirror (the
+    # adapter's preserve path, or the cached fallback above), and the API falls
+    # back to this row exactly then. Carry each last-known contract, unpriced,
+    # so a short put never vanishes. Empty on EB's account.
+    try:
+        _shown = {row.get("symbol") for row in positions_payload}
+        for _occ, _opt in list(
+                (getattr(adapter, "_option_positions", None) or {}).items()):
+            if _occ in _shown:
+                continue
+            _carried = _option_position_payload(_opt)
+            _carried.update(last_price=None, market_value=None,
+                            unrealized_pnl=None, unrealized_pnl_pct=None)
+            positions_payload.append(_carried)
+    except Exception:
+        pass
 
     # Recent trades (cap to MAX_RECENT_TRADES, newest first).
     recent_trades = []
@@ -9447,6 +9579,16 @@ def _reconcile_alpaca_ownership(adapter, order_service):
             _cid_prefix = f"{_cid_safe(str(instance_id), 8) or 'x'}-"
         except Exception:
             _cid_prefix = ""
+        # swing-port: re-read any bracket whose legs are not recorded yet (a
+        # nested read that failed after submit, or a restart), so a leg fill
+        # resolves before ownership is judged. Swing documents only.
+        if _lane_enabled(globals().get("_cached_strategies"), "strategy_swing"):
+            try:
+                order_service.ensure_bracket_legs()
+            except Exception as _legs_exc:
+                _log(f"[swing] bracket leg registration failed "
+                     f"({type(_legs_exc).__name__}: {_legs_exc}); retried next "
+                     "reconcile", "yellow")
         result = StartupReconciler(
             lifecycle_store=order_service.lifecycle_store,
             event_applier=order_service.apply_broker_event,
@@ -9735,8 +9877,1572 @@ def _open_order_idempotency_keys(instance_identity) -> frozenset:
         return frozenset()
 
 
+#: swing-port: the latest REST options snapshot per contract. Shared by the
+#: intent builder and the gate's snapshot provider so both read ONE quote:
+#: the gate refuses a quote_at that differs from the intent's.
+_live_option_quotes: dict = {}
+
+
+def _refresh_option_quote(adapter, contract, now_utc, *, max_age_s=60.0):
+    """A decision price for one option contract (spec 6.1: option quotes come
+    from the options snapshot, and one older than 60 s is refreshed over REST
+    before the check). Returns {"price", "quote_at", "fetched_at"} or None."""
+    from decimal import Decimal
+
+    symbol = str(contract or "").strip().upper()
+    cached = _live_option_quotes.get(symbol)
+    if (cached is not None
+            and (now_utc - cached["fetched_at"]).total_seconds() <= max_age_s):
+        return cached
+    snap = (adapter.get_option_snapshots([symbol]) or {}).get(symbol)
+    if snap is None:
+        return None
+    if snap.bid and snap.ask and snap.bid > 0 and snap.ask > 0:
+        price = (snap.bid + snap.ask) / 2.0
+    elif snap.last and snap.last > 0:
+        price = snap.last
+    else:
+        return None
+    quote_at = now_utc
+    if snap.quote_ts:
+        try:
+            parsed = datetime.datetime.fromisoformat(
+                str(snap.quote_ts).replace("Z", "+00:00"))
+            quote_at = (parsed if parsed.tzinfo is not None
+                        else parsed.replace(tzinfo=datetime.timezone.utc))
+        except ValueError:
+            quote_at = now_utc
+    entry = {"price": Decimal(str(round(price, 4))), "quote_at": quote_at,
+             "fetched_at": now_utc}
+    if cached is not None:
+        # Fix wave FW1 item 8 (review M-4): the loop and the approval thread
+        # share this cache. The entry this refresh replaces is kept one level
+        # deep, so an intent built on it moments ago is still gated on ITS
+        # quote (the gate refuses a quote_at that differs from the intent's).
+        entry["previous"] = {name: cached[name]
+                             for name in ("price", "quote_at", "fetched_at")}
+    _live_option_quotes[symbol] = entry
+    return entry
+
+
+def _build_option_intent(order_service, order, *, quote_at, decision_at,
+                         risk_snapshot_id, source=None):
+    """One `_nexus_option_orders` entry (interfaces doc section 1) as an
+    OrderIntent. Raises ValueError on a malformed entry; nothing is sent."""
+    from decimal import Decimal
+    from live_orders import OrderIntent, OrderSide, OrderSource
+
+    if not isinstance(order, dict):
+        raise ValueError("an option order must be a dict")
+    position_intent = str(order.get("position_intent") or "").strip().lower()
+    if position_intent not in ("buy_to_open", "buy_to_close",
+                               "sell_to_open", "sell_to_close"):
+        raise ValueError(
+            f"unsupported position_intent {order.get('position_intent')!r}")
+    raw_qty = order.get("qty")
+    if (isinstance(raw_qty, bool) or not isinstance(raw_qty, (int, float))
+            or int(raw_qty) != raw_qty or int(raw_qty) < 1):
+        raise ValueError(
+            f"option qty must be a whole number of contracts >= 1, got {raw_qty!r}")
+    order_type = str(order.get("order_type") or "limit").strip().lower()
+    limit_price = order.get("limit_price")
+    closing = position_intent.endswith("_to_close")
+    if source is None:
+        source = OrderSource.RISK_EXIT if closing else OrderSource.STRATEGY
+    return OrderIntent(
+        account_id=order_service.account_id,
+        instance_id=order_service.instance_id,
+        source=source,
+        reason=str(order.get("reason") or position_intent),
+        symbol=str(order.get("contract") or "").strip().upper(),
+        side=OrderSide.SELL if position_intent.startswith("sell") else OrderSide.BUY,
+        quantity=Decimal(int(raw_qty)),
+        reduce_only=closing,
+        decision_at=decision_at,
+        quote_at=quote_at,
+        risk_snapshot_id=risk_snapshot_id,
+        order_type=order_type,
+        limit_price=(Decimal(str(limit_price))
+                     if order_type == "limit" and limit_price is not None
+                     else None),
+        tif=str(order.get("tif") or "day").strip().lower(),
+        extended_hours=False,
+        asset_class="us_option",
+        position_intent=position_intent,
+        contract_multiplier=100,
+        underlying=order.get("underlying"),
+        option_type=order.get("option_type"),
+        strike=order.get("strike"),
+        expiry=order.get("expiry"),
+    )
+
+
+def _pending_sell_to_open_collateral(order_service, *, exclude_key, underlying):
+    """(all, on-underlying) collateral of sell-to-open puts still working at
+    the broker, the intent being judged excluded. Raises when the lifecycle
+    store is unreadable: the caller must not read unknown as zero."""
+    from decimal import Decimal
+
+    total = Decimal("0")
+    mine = Decimal("0")
+    wanted = str(underlying or "").strip().upper()
+    for record in order_service.lifecycle_store.list_for_instance(
+            order_service.instance_id):
+        intent = record.intent
+        if (record.terminal or record.client_order_id == exclude_key
+                or intent.asset_class != "us_option"
+                or intent.position_intent != "sell_to_open"
+                or intent.option_type != "put"):
+            continue
+        remaining = max(Decimal("0"), intent.quantity - record.cumulative_quantity)
+        collateral = intent.strike * intent.contract_multiplier * remaining
+        total += collateral
+        if intent.underlying == wanted:
+            mine += collateral
+    return total, mine
+
+
+def _live_option_dependency_snapshot(adapter, intent, *, now_utc=None):
+    """The gate's dependency view for one us_option intent (spec 6.1 options
+    branch). The quote is the one _execute_option_intents fetched for this
+    intent; the calendar is read here, so regular hours are known even on a
+    tick whose stock loop had nothing to price.
+
+    Unknown is never zero: an incomplete option book leaves the open and
+    per-underlying collateral None, and an unreadable lifecycle store leaves
+    the pending collateral None (L3 review M3); the gate refuses both."""
+    from decimal import Decimal
+    from live_orders import DependencySnapshot, Health, OrderSource
+
+    now_utc = now_utc or datetime.datetime.now(datetime.timezone.utc)
+    with _live_order_dependency_lock:
+        state = dict(_live_order_dependency_state)
+    symbol = str(intent.symbol).strip().upper()
+    underlying = str(intent.underlying or "").strip().upper()
+    positions = dict(getattr(adapter, "_option_positions", {}) or {})
+    held = positions.get(symbol)
+    position_quantity = Decimal(int(held.qty)) if held is not None else Decimal("0")
+    quote = _live_option_quotes.get(symbol)
+    if (quote is not None and quote.get("quote_at") != intent.quote_at
+            and isinstance(quote.get("previous"), dict)
+            and quote["previous"].get("quote_at") == intent.quote_at):
+        # Fix wave FW1 item 8 (review M-4): another thread refreshed this
+        # contract between the intent's build and this gate read; gate the
+        # intent on the quote it was built on (freshness is still judged).
+        quote = quote["previous"]
+    if quote is None:
+        quote_price = Decimal("0")
+        quote_at = datetime.datetime.fromtimestamp(0, datetime.timezone.utc)
+        quote_health = Health.UNKNOWN
+    else:
+        quote_price = quote["price"]
+        quote_at = quote["quote_at"]
+        quote_health = (Health.HEALTHY
+                        if (now_utc - quote_at).total_seconds() <= 60
+                        else Health.UNHEALTHY)
+    try:
+        from live_calendar import is_nyse_open, is_nyse_open_extended
+        regular_session_open = bool(is_nyse_open(now_utc))
+        market_open = bool(is_nyse_open_extended(now_utc))
+        calendar, calendar_at = Health.HEALTHY, now_utc
+    except Exception:
+        regular_session_open, market_open = False, False
+        calendar, calendar_at = Health.UNKNOWN, None
+    open_short = Decimal("0")
+    open_short_on_underlying = Decimal("0")
+    meta_known = True
+    for row in positions.values():
+        if int(row.qty) >= 0:
+            continue
+        kind = str(row.option_type or "").strip().lower()
+        try:
+            strike = Decimal(str(row.strike))
+        except Exception:
+            strike = Decimal("0")
+        if (kind not in ("put", "call") or not strike > 0
+                or not str(row.underlying or "").strip()):
+            # Fix wave FW-lo-I3: a short whose type, underlying or strike is
+            # unknown carries collateral this view cannot count.
+            meta_known = False
+            continue
+        if kind == "put":
+            collateral = strike * int(row.multiplier) * abs(int(row.qty))
+            open_short += collateral
+            if str(row.underlying).upper() == underlying:
+                open_short_on_underlying += collateral
+    try:
+        pending_total, pending_underlying = _pending_sell_to_open_collateral(
+            _live_stock_order_service, exclude_key=intent.idempotency_key,
+            underlying=underlying)
+        pending_known = True
+    except Exception:
+        pending_total, pending_underlying = Decimal("0"), Decimal("0")
+        pending_known = False
+    known = (bool(getattr(adapter, "_option_positions_complete", False))
+             and pending_known and meta_known)
+    available_cash = Decimal(str(getattr(adapter, "_cash", 0) or 0))
+    if available_cash < 0 and intent.reduce_only:
+        # Fix wave FW-lo-I5: a buy/sell-to-close is risk-reducing (ruling F1);
+        # a margin debit after an assignment must not stop it being gated.
+        # An opening order still fails closed on negative cash.
+        available_cash = Decimal("0")
+    equity = getattr(adapter, "_account_equity", None)
+    positions_health = state.get("positions", "unknown")
+    if getattr(adapter, "_positions_stale_since", None) is not None:
+        positions_health = "unhealthy"
+    positions_at = state.get("positions_at")
+    if not isinstance(positions_at, datetime.datetime):
+        positions_at = datetime.datetime.fromtimestamp(0, datetime.timezone.utc)
+
+    def stamp(name):
+        value = state.get(name)
+        return value if isinstance(value, datetime.datetime) else None
+
+    instance_identity = str(getattr(adapter, "_instance_id", "") or instance_id)
+    return DependencySnapshot(
+        account_id=str(globals().get("live_brokerage_id")
+                       or getattr(adapter, "_account_id", None)
+                       or getattr(adapter, "_instance_id", "")),
+        instance_id=instance_identity,
+        observed_at=now_utc,
+        armed=bool(globals().get("mode") == MODE_LIVE
+                   and str(globals().get("live_broker_type") or "").lower() == "alpaca"
+                   and _live_stock_order_service is not None),
+        kill_switch=Health(state.get("kill_switch", "unknown")),
+        quote=quote_health,
+        cash=Health(state.get("cash", "unknown")),
+        positions=Health(positions_health),
+        calendar=calendar,
+        persistence=Health(state.get("persistence", "unknown")),
+        risk_state=Health(state.get("risk_state", "unknown")),
+        watchdog=Health(state.get("watchdog", "unknown")),
+        quote_symbol=symbol,
+        quote_price=quote_price,
+        quote_at=quote_at,
+        position_symbol=symbol,
+        position_quantity=position_quantity,
+        positions_at=positions_at,
+        available_cash=available_cash,
+        market_open=market_open,
+        risk_snapshot_id=str(state.get("risk_snapshot_id") or intent.risk_snapshot_id),
+        kill_switch_at=stamp("kill_switch_at"),
+        cash_at=stamp("cash_at"),
+        calendar_at=calendar_at,
+        persistence_at=stamp("persistence_at"),
+        risk_state_at=stamp("risk_state_at"),
+        watchdog_at=stamp("watchdog_at"),
+        max_order_notional=(_live_risk_state.max_order_notional
+                            if _live_risk_state is not None else None),
+        max_position_quantity=None,
+        max_quote_age=datetime.timedelta(seconds=60),
+        open_order_idempotency_keys=_open_order_idempotency_keys(instance_identity),
+        authorized_sources=frozenset(OrderSource),
+        asset_class="us_option",
+        regular_session_open=regular_session_open,
+        account_equity=Decimal(str(equity)) if equity is not None else None,
+        open_short_put_collateral=open_short if known else None,
+        pending_sell_to_open_collateral=pending_total if pending_known else None,
+        underlying_put_collateral=(
+            open_short_on_underlying + pending_underlying if known else None),
+    )
+
+
+def _wheel_alert(title, message, *, priority=0):
+    """One wheel_position_alert through notifications.notify, formatted as
+    plan B's swing_trader.notify.send formats it: priority 2 is marked
+    URGENT. Never raises; a notification failure is a red log line, never a
+    lost order. Plan B's sender replaces this when the branches meet (A-live
+    ledger, plan B G7 review I-3)."""
+    category = "wheel_position_alert"
+    try:
+        from notifications import notify
+
+        try:
+            from notification_types import type_for_key
+            channel = (type_for_key(category) or {}).get("channel") or "notifications"
+        except Exception:
+            channel = "notifications"
+        urgent = " (URGENT)" if int(priority or 0) >= 2 else ""
+        iid = str(globals().get("instance_id") or "")
+        notify(category=category, instance_id=iid, title=str(title),
+               body=f"WHEEL ALERT [{iid}] {title}{urgent}\n{message}",
+               discord_channel=channel,
+               push_title=f"{title}{urgent}"[:120],
+               push_body=str(message)[:220])
+        return True
+    except Exception as exc:
+        try:
+            _log(f"[wheel] notification failed ({type(exc).__name__}: {exc}): "
+                 f"{title} — {message}", "red")
+        except Exception:
+            pass
+        return False
+
+
+#: swing-port (L4 review M-3): the close-failure alerts already sent this New
+#: York session, keyed (contract, kind). The wheel re-emits its buy-to-close on
+#: every tick; the operator hears once per contract per session and kind.
+_auto_close_alerts: dict = {"session": None, "sent": set()}
+
+
+def _execute_option_intents(option_orders, *, order_service, adapter, now_utc,
+                            risk_snapshot_id, refused_reason="", log=None):
+    """Submit the wheel lane's option orders through the unified order path
+    (spec 6.1 broker item 2). Every refusal is logged with its reason (spec
+    section 9 item 16); an order carrying a signal_id has its outcome written
+    back to the signal. Returns one result dict per order.
+
+    Rulings (A-live ledger):
+    - F3: a duplicate refusal (idempotency.open_order_exists, or
+      idempotency.terminal_requires_retry once the order filled) means the
+      order is already at the broker. It is written back to nothing and
+      alerts nobody: "failed" over "submitted" drops a working put from plan
+      B's open statuses.
+    - An "error" (the submit raised) is an unknown outcome, like "uncertain":
+      the service can raise after the broker accepted. Neither is written
+      back as failed; the next reconcile resolves the order.
+    - G7 review I-3: a buy-to-close that did not go out sends a priority-2
+      "AUTO-CLOSE FAILED" alert; a sell-to-open carrying a signal_id that was
+      definitely not placed marks its signal failed and sends a correction
+      "Put order NOT placed: <reason>".
+    - L4 review: the service can escalate a spent identity to the next retry
+      ordinal, so an order is reported under the key the gate decided on
+      (I-1). One malformed entry, or anything else an order raises, costs
+      only that order (I-2). Only a definite refusal says "CLOSE MANUALLY
+      IMMEDIATELY"; an unknown outcome says the close may be working (M-1).
+      One close-failure alert per contract per New York session and kind
+      (M-3).
+    - L5 review: `refused_reason` (the options-level verdict) refuses only
+      opening orders; a buy_to_close or sell_to_close still goes out.
+    """
+    duplicate_codes = frozenset({"idempotency.open_order_exists",
+                                 "idempotency.terminal_requires_retry"})
+    definite_refusals = ("refused", "blocked", "invalid", "no_quote")
+
+    def say(message, color="white"):
+        if log is not None:
+            try:
+                log(message, color)
+            except Exception:
+                pass
+
+    def place(entry, result):
+        """Places one order; returns why it did not go out ("" if it did)."""
+        contract = result["contract"]
+        # L5 review: the options-level verdict refuses OPENING orders only. A
+        # close is risk-reducing (F1): refusing a buy_to_close would keep the
+        # short put open and spend the session's AUTO-CLOSE alert on it.
+        closing = str(entry.get("position_intent") or "").strip().lower() in (
+            "buy_to_close", "sell_to_close")
+        if refused_reason and not closing:
+            result["status"] = "refused"
+            say(f"[wheel] {contract} {entry.get('position_intent')} NOT placed: "
+                f"the wheel lane is refused ({refused_reason})", "red")
+            return f"the wheel lane is refused ({refused_reason})"
+        try:
+            quote = _refresh_option_quote(adapter, contract, now_utc) if contract else None
+        except Exception as exc:
+            quote = None
+            say(f"[wheel] {contract} options snapshot failed "
+                f"({type(exc).__name__}: {exc})", "yellow")
+        if quote is None:
+            result["status"] = "no_quote"
+            say(f"[wheel] {contract or entry!r} NOT placed: no usable options "
+                "snapshot", "red")
+            return "no usable options snapshot"
+        try:
+            intent = _build_option_intent(
+                order_service, entry, quote_at=quote["quote_at"],
+                decision_at=now_utc, risk_snapshot_id=risk_snapshot_id)
+        except Exception as exc:
+            # No intent, so nothing was sent: a definite refusal, whatever
+            # the entry raised (decimal.InvalidOperation, OverflowError...).
+            result["status"] = "invalid"
+            say(f"[wheel] malformed option order dropped ({exc}): {entry!r}", "red")
+            return f"malformed order ({exc})"
+        result["client_order_id"] = intent.idempotency_key
+        try:
+            submission = order_service.submit(intent)
+        except Exception as exc:
+            result["status"] = "error"
+            say(f"[wheel] {contract} submit raised {type(exc).__name__}: {exc}", "red")
+            return f"submit raised {type(exc).__name__}: {exc}"
+        # I-1: a retried identity goes out under the escalated key.
+        result["client_order_id"] = (
+            getattr(submission.decision, "idempotency_key", None)
+            or intent.idempotency_key)
+        codes = tuple(submission.decision.reason_codes)
+        result["reason_codes"] = codes
+        if submission.accepted:
+            result["status"] = "submitted"
+            say(f"[wheel] {intent.position_intent} {intent.quantity} {contract} "
+                f"submitted ({result['client_order_id']})", "green")
+            return ""
+        if not submission.decision.allowed:
+            result["status"] = "blocked"
+            if codes and all(code in duplicate_codes for code in codes):
+                say(f"[wheel] {intent.position_intent} {contract} is already at "
+                    f"the broker ({','.join(codes)}); nothing re-sent", "yellow")
+            else:
+                say(f"[wheel] ORDER GATE BLOCKED {intent.position_intent} {contract}: "
+                    f"{','.join(codes)}", "red")
+            return ",".join(codes) or "refused"
+        result["status"] = "uncertain"
+        say(f"[wheel] {contract} outcome unknown "
+            f"({','.join(codes) or 'transport'}); "
+            "the next reconcile resolves it", "red")
+        return f"outcome unknown ({','.join(codes) or 'transport'})"
+
+    try:
+        from zoneinfo import ZoneInfo
+        session = now_utc.astimezone(ZoneInfo("America/New_York")).date().isoformat()
+    except Exception:
+        session = str(now_utc)[:10]
+    if _auto_close_alerts.get("session") != session:
+        _auto_close_alerts["session"] = session
+        _auto_close_alerts["sent"] = set()
+
+    results = []
+    for order in list(option_orders or ()):
+        entry = order if isinstance(order, dict) else {}
+        result = {
+            "contract": str(entry.get("contract") or "").strip().upper(),
+            "position_intent": entry.get("position_intent"),
+            "signal_id": entry.get("signal_id"),
+            "status": "",
+            "reason_codes": (),
+            "client_order_id": None,
+        }
+        results.append(result)
+        if not isinstance(order, dict):
+            result["status"] = "invalid"
+            say(f"[wheel] malformed option order dropped: {order!r}", "red")
+            continue
+        try:
+            detail = place(entry, result)
+        except Exception as exc:
+            # I-2: whatever this order raised, the rest of the batch (a
+            # buy-to-close among it) is still attempted.
+            result["status"] = "error"
+            detail = f"{type(exc).__name__}: {exc}"
+            say(f"[wheel] {result['contract'] or entry!r} order failed "
+                f"({detail}); the rest of the batch goes on", "red")
+        status = result["status"]
+        codes = tuple(result["reason_codes"])
+        contract = result["contract"] or "(no contract)"
+        duplicate = (status == "blocked" and bool(codes)
+                     and all(code in duplicate_codes for code in codes))
+        position_intent = str(entry.get("position_intent") or "").strip().lower()
+        if (position_intent == "buy_to_close" and status != "submitted"
+                and not duplicate):
+            definite = status in definite_refusals
+            alert_key = (contract, "definite" if definite else "unconfirmed")
+            if alert_key in _auto_close_alerts["sent"]:
+                say(f"[wheel] buy-to-close of {contract} still not placed "
+                    f"({status}: {detail}); alerted earlier this session", "red")
+            elif definite:
+                if _wheel_alert(
+                        f"AUTO-CLOSE FAILED — {contract} — CLOSE MANUALLY "
+                        "IMMEDIATELY",
+                        f"The buy-to-close of {contract} was NOT placed "
+                        f"({status}: {detail}). The short put is still open.",
+                        priority=2):
+                    _auto_close_alerts["sent"].add(alert_key)
+            elif _wheel_alert(
+                    f"AUTO-CLOSE UNCONFIRMED — {contract} — CHECK OPEN ORDERS",
+                    f"The buy-to-close of {contract} may not have been placed "
+                    f"— check open orders ({status}: {detail}). Closing it by "
+                    "hand while it is working would close twice.",
+                    priority=2):
+                _auto_close_alerts["sent"].add(alert_key)
+        signal_id = entry.get("signal_id")
+        if not signal_id or duplicate:
+            continue
+        if status != "submitted" and status not in definite_refusals:
+            say(f"[wheel] signal {signal_id} left as it was: the {contract} "
+                f"outcome is unknown ({status}); the next reconcile resolves it",
+                "red")
+            continue
+        try:
+            from swing_trader.signals_store import update_signal
+            update_signal(str(signal_id), {
+                "status": "submitted" if status == "submitted" else "failed",
+                "order_client_id": result["client_order_id"],
+            })
+        except Exception as exc:
+            say(f"[wheel] signal {signal_id} write-back failed "
+                f"({type(exc).__name__}: {exc})", "yellow")
+        if status in definite_refusals and position_intent == "sell_to_open":
+            _wheel_alert(
+                f"Put order NOT placed: {contract}",
+                f"Put order NOT placed: {detail} ({contract}, signal "
+                f"{signal_id})",
+                priority=1)
+    return results
+
+
+#: swing-port: the option activity types a wheel position ends in.
+_OPTION_ACTIVITY_TYPES = ("OPASN", "OPEXP", "OPEXC")
+#: Monotonic time of the last activities poll (a throttle, not the cursor).
+_option_activity_last_poll: dict = {"at": None}
+
+
+def _poll_option_activities(adapter, order_service, wheel_cache, *, now_utc,
+                            log=None, notify=None, min_interval_s=300.0,
+                            monotonic=None):
+    """Turn option assignment, expiry and exercise activities into lifecycle
+    facts (spec 6.1 broker item 8). Returns the activities processed.
+
+    The cursor lives in the wheel lane's strategy cache, which the live loop
+    persists per lane (_engine_option_activity_cursor: `after` one day before
+    the newest date handled, plus the ids handled), so a restart re-reads at
+    most a day and dedupes by id. The cursor never moves past an assignment
+    that has to be retried.
+
+    An assignment is recorded through record_external_fill as source
+    option_activity, with Alpaca's activity id as the broker id, under a key
+    derived from that id, so it is filled exactly once even if the cursor is
+    lost: a put assignment adds the shares (a call assignment removes them)
+    under this instance's lineage. Whenever that row is FILLED, the
+    assignment is listed once in _engine_wheel_assignments, so the wheel lane
+    knows the shares are its own. The one wheel_assignment notification goes
+    out only from the poll that made the row FILLED (through plan B's
+    swing_trader.notify.notify_wheel_assignment when it is deployed, the
+    bare notification otherwise). The durable row decides, never the
+    record call's answer: the live fill handler can raise after the row is
+    FILLED, and a retry would then find it terminal and never list it.
+
+    An expiry or exercise is logged; broker truth drops the option on the
+    positions refresh that follows. An assignment whose contract cannot be
+    resolved, or whose record fails, stays unseen and is retried. An
+    unreadable activities answer (the adapter raises on a non-list body)
+    changes nothing and is retried on the next poll.
+
+    L5 review, fail safe: a lifecycle read that fails is UNKNOWN and holds
+    the activity (no cursor advance, no notice); if the unconfirmed read came
+    right after this poll's record, the notice is owed
+    (_engine_option_activity_owed) and the retry that finds the row FILLED
+    sends it, once. An assignment with a zero, missing or non-integral
+    quantity is held in red, never booked as one contract or rounded. A
+    contract neither held nor listed by Alpaca any more (a restart after
+    expiry) is booked from its OCC symbol's fields, an adjusted root refused.
+    """
+    import hashlib
+    import time as _time
+    from decimal import Decimal
+    from live_orders import LifecycleState, OrderIntent, OrderSide, OrderSource
+
+    def say(message, color="white"):
+        if log is not None:
+            try:
+                log(message, color)
+            except Exception:
+                pass
+
+    def default_notify(instance_id_value, **fields):
+        # Plan B's sender when it is deployed (it knows the category's push
+        # routing and priority); the bare notification otherwise.
+        try:
+            from swing_trader.notify import notify_wheel_assignment
+        except Exception:
+            notify_wheel_assignment = None
+        if notify_wheel_assignment is not None:
+            notify_wheel_assignment(instance_id_value, **fields)
+            return
+        import os as _os
+        from notifications import notify as _notify
+        _notify(category="wheel_assignment", instance_id=instance_id_value,
+                title=f"Wheel assignment: {fields['symbol']}",
+                body=(f"{fields['symbol']}: assigned {fields['qty']} shares @ "
+                      f"${fields['price']:.2f} on {fields['date']}"),
+                discord_channel=_os.environ.get("LIVE_ALERTS_CHANNEL", "trades"))
+
+    def when(text):
+        raw = str(text or "")
+        try:
+            if len(raw) == 10:
+                day = datetime.date.fromisoformat(raw)
+                return datetime.datetime(day.year, day.month, day.day, 20, 0,
+                                         tzinfo=datetime.timezone.utc)
+            parsed = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            return (parsed if parsed.tzinfo is not None
+                    else parsed.replace(tzinfo=datetime.timezone.utc))
+        except ValueError:
+            return now_utc
+
+    def filled(key):
+        """True or False from the durable row; None when the store could not
+        be read (L5 review). Unknown is never "not filled": read that way, a
+        replay would take itself for the poll that filled the row and
+        announce the assignment twice."""
+        try:
+            record = order_service.lifecycle_store.get(key)
+        except Exception:
+            return None
+        return record is not None and record.state is LifecycleState.FILLED
+
+    def occ_fields(symbol):
+        """(underlying, option_type, strike) read from an OCC symbol, or None.
+        L5 review: only for BOOKING an assignment of a contract Alpaca no
+        longer lists (a restart after expiry), never for identifying a
+        position. An adjusted root (a digit in it) names no tradable
+        underlying and is refused."""
+        try:
+            from swing_trader.wheel_rules import occ_parts
+            parts = occ_parts(symbol)
+        except Exception:
+            return None
+        if parts is None or not str(parts[0]).isalpha():
+            return None
+        return str(parts[0]), parts[2], Decimal(str(parts[3]))
+
+    def whole_contracts(raw):
+        """The activity's contract count, or None when it is missing, zero,
+        not a whole number of contracts or unreadable (L5 review: never
+        booked as one; T15 fix round 1 M-3: never rounded)."""
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return None
+        if value != value or value in (float("inf"), float("-inf")):
+            return None
+        if value != int(value):
+            return None
+        count = abs(int(value))
+        return count if count >= 1 else None
+
+    clock = monotonic or _time.monotonic
+    last = _option_activity_last_poll.get("at")
+    if last is not None and clock() - last < float(min_interval_s):
+        return []
+    _option_activity_last_poll["at"] = clock()
+    cursor = dict(wheel_cache.get("_engine_option_activity_cursor") or {})
+    seen = list(cursor.get("seen") or [])
+    after = cursor.get("after") or (
+        now_utc.date() - datetime.timedelta(days=7)).isoformat()
+    try:
+        activities = adapter.get_option_activities(
+            types=_OPTION_ACTIVITY_TYPES, after=after)
+    except Exception as exc:
+        say(f"[wheel] option activities unreadable ({type(exc).__name__}: "
+            f"{exc}); retried next poll", "yellow")
+        return []
+    processed = []
+    newest = None
+    retry_from = None
+    # L5 review: assignments this instance recorded but could not confirm;
+    # the poll that later finds the row FILLED sends their one notice.
+    owed = [str(x) for x in (wheel_cache.get("_engine_option_activity_owed")
+                             or []) if x]
+
+    def hold(activity, why):
+        nonlocal retry_from
+        say(f"[wheel] assignment {activity.id} on {activity.symbol} NOT "
+            f"recorded: {why}; retried next poll", "red")
+        day = str(activity.date or "")[:10]
+        if day and (retry_from is None or day < retry_from):
+            retry_from = day
+
+    for activity in activities or ():
+        if not activity.id or activity.id in seen:
+            continue
+        symbol = activity.symbol
+        if activity.activity_type == "OPASN":
+            contracts = whole_contracts(activity.qty)
+            if contracts is None:
+                hold(activity, f"its quantity {activity.qty!r} is zero, missing "
+                               "or not a whole number of contracts")
+                continue
+            meta = (getattr(adapter, "_option_positions", {}) or {}).get(symbol)
+            if (meta is None or not getattr(meta, "underlying", "")
+                    or not getattr(meta, "strike", 0)):
+                meta = adapter.option_contract_meta(symbol)
+            if meta is None:
+                fields = occ_fields(symbol)
+                if fields is None:
+                    hold(activity, "its contract fields are unknown")
+                    continue
+                underlying, option_type, strike = fields
+                say(f"[wheel] assignment {activity.id} on {symbol}: the contract "
+                    f"is no longer listed; booked from its OCC symbol "
+                    f"({underlying} {option_type} {strike})", "yellow")
+            else:
+                underlying = str(getattr(meta, "underlying", "") or "")
+                option_type = str(getattr(meta, "option_type", "") or "").lower()
+                try:
+                    strike = Decimal(str(getattr(meta, "strike", 0) or 0))
+                except Exception:
+                    strike = Decimal("0")
+                if (not underlying or option_type not in ("put", "call")
+                        or strike <= 0):
+                    hold(activity, "its contract fields are unknown")
+                    continue
+            shares = contracts * 100
+            side = OrderSide.BUY if option_type == "put" else OrderSide.SELL
+            occurred = when(activity.date)
+            key = "opasn-" + hashlib.sha256(
+                activity.id.encode("utf-8")).hexdigest()[:32]
+            state = filled(key)
+            if state is None:
+                hold(activity, "the lifecycle store is unreadable")
+                continue
+            first = not state
+            failure = None
+            if first:
+                try:
+                    intent = OrderIntent(
+                        account_id=order_service.account_id,
+                        instance_id=order_service.instance_id,
+                        source=OrderSource.OPTION_ACTIVITY,
+                        reason=f"wheel_assignment:{symbol}",
+                        symbol=underlying,
+                        side=side,
+                        quantity=Decimal(shares),
+                        reduce_only=side is OrderSide.SELL,
+                        decision_at=occurred,
+                        quote_at=occurred,
+                        risk_snapshot_id="option-activity",
+                        reference_price=strike,
+                        broker_client_order_id=key,
+                    )
+                    order_service.record_external_fill(
+                        intent, broker_order_id=activity.id,
+                        quantity=Decimal(shares), price=strike,
+                        occurred_at=occurred,
+                        reason=f"option assignment {symbol}")
+                except Exception as exc:
+                    failure = f"{type(exc).__name__}: {exc}"
+            state = filled(key)
+            if state is None:
+                # Recorded by this poll, perhaps, but the row cannot be read
+                # back: the retry that finds it FILLED owes the one notice.
+                if first and activity.id not in owed:
+                    owed.append(activity.id)
+                hold(activity, "the lifecycle store is unreadable, so the "
+                               "record cannot be confirmed")
+                continue
+            if not state:
+                hold(activity, f"the record failed ({failure or 'not filled'})")
+                continue
+            if failure is not None:
+                say(f"[wheel] assignment {activity.id} on {symbol} is recorded, "
+                    f"but applying it raised ({failure}); the positions refresh "
+                    "and reconcile that follow settle the books", "red")
+            listed = wheel_cache.get("_engine_wheel_assignments")
+            if not isinstance(listed, list):
+                listed = wheel_cache["_engine_wheel_assignments"] = []
+            if not any(isinstance(row, dict)
+                       and row.get("activity_id") == activity.id
+                       for row in listed):
+                listed.append({
+                    "activity_id": activity.id, "contract": symbol,
+                    "underlying": underlying, "shares": shares,
+                    "side": side.value, "strike": float(strike),
+                    "date": str(activity.date)[:10],
+                })
+            if first or activity.id in owed:
+                if activity.id in owed:
+                    owed.remove(activity.id)
+                say(f"[wheel] ASSIGNED {symbol}: {side.value} {shares} "
+                    f"{underlying} at {strike}", "yellow")
+                try:
+                    (notify or default_notify)(
+                        str(order_service.instance_id),
+                        symbol=underlying, qty=shares,
+                        price=float(strike), date=str(activity.date)[:10])
+                except Exception as exc:
+                    say(f"[wheel] assignment notification failed "
+                        f"({type(exc).__name__}: {exc})", "yellow")
+        else:
+            say(f"[wheel] {activity.activity_type} {symbol} qty {activity.qty} "
+                f"on {activity.date}", "cyan")
+        processed.append(activity)
+        seen.append(activity.id)
+        day = str(activity.date or "")[:10]
+        if day and (newest is None or day > newest):
+            newest = day
+    if owed or "_engine_option_activity_owed" in wheel_cache:
+        wheel_cache["_engine_option_activity_owed"] = owed[-500:]
+    if processed:
+        def day_before(text):
+            try:
+                return (datetime.date.fromisoformat(text)
+                        - datetime.timedelta(days=1)).isoformat()
+            except (TypeError, ValueError):
+                return None
+
+        moved = day_before(newest) if newest else None
+        if moved is not None:
+            after = moved
+        held = day_before(retry_from) if retry_from else None
+        if held is not None and held < after:
+            after = held
+        wheel_cache["_engine_option_activity_cursor"] = {
+            "after": after, "seen": seen[-500:]}
+        try:
+            adapter.refresh_positions()
+        except Exception as exc:
+            say(f"[wheel] position refresh after activities failed "
+                f"({type(exc).__name__}: {exc})", "yellow")
+    return processed
+
+
+#: swing-port: this process's one options-level verdict for the wheel lane.
+_wheel_options_check: dict = {"refusal": None}
+
+
+def _wheel_options_refusal(adapter, cached_strategies, *, log=None, alert=None):
+    """"" when the wheel lane may trade options, else why not.
+
+    Spec 6.1: the adapter checks options_trading_level >= 1 when the
+    document has an enabled wheel lane; below that the lane is refused, in
+    red, with an alert. The check runs on the first live tick that carries
+    wheel orders (at boot the strategy document is not loaded yet) and the
+    verdict is kept for the process, so the alert is sent once; an
+    unreadable account refuses THIS tick only and is asked again.
+    """
+    if not _lane_enabled(cached_strategies, "strategy_wheel"):
+        return ""
+    cached = _wheel_options_check.get("refusal")
+    if cached is not None:
+        return cached
+
+    def say(message, color):
+        if log is not None:
+            try:
+                log(message, color)
+            except Exception:
+                pass
+
+    def default_alert(**kwargs):
+        from live_alerts import alert_strategy_error
+        alert_strategy_error(**kwargs)
+
+    try:
+        options = adapter.get_account_options() or {}
+    except Exception as exc:
+        say(f"[wheel] options level unreadable ({type(exc).__name__}: {exc}); "
+            "wheel orders refused this tick", "yellow")
+        return f"options level unreadable ({type(exc).__name__})"
+    level = options.get("options_trading_level")
+    try:
+        level_value = int(level) if level is not None else None
+    except (TypeError, ValueError):
+        level_value = None
+    if level_value is not None and level_value >= 1:
+        _wheel_options_check["refusal"] = ""
+        say(f"[wheel] options_trading_level={level_value}: cash-secured puts "
+            "permitted", "green")
+        return ""
+    refusal = f"options_trading_level={level} is below 1"
+    _wheel_options_check["refusal"] = refusal
+    say(f"[wheel] wheel lane REFUSED: {refusal}. No option order will be "
+        "placed; approve options level 1 on the paper account and restart "
+        "the instance.", "red")
+    try:
+        (alert or default_alert)(
+            instance_id=str(getattr(adapter, "_instance_id", "") or ""),
+            tag="wheel-options-level",
+            message=f"Wheel lane refused: {refusal}")
+    except Exception:
+        pass
+    return refusal
+
+
+def _lane_config(cached_strategies, lane) -> dict:
+    """The settings of the first ENABLED spec for ``lane`` (a key of
+    ``_LANE_ENABLE_FLAGS``), or {} when the document has none: the lane's
+    header defaults (swing_trader.constants SWING_DEFAULTS / WHEEL_DEFAULTS),
+    then `conditions`, then `config`. An approval rebuilds its order from
+    this, so a key the document leaves out reads the lane's own default."""
+    import copy
+
+    flag = _LANE_ENABLE_FLAGS.get(str(lane or "").strip().lower())
+    if flag is None:
+        return {}
+    for spec in (cached_strategies or []):
+        try:
+            name = str((spec or {}).get("strategy", "")).strip().lower()
+            if _LANE_ENABLE_FLAGS.get(name) != flag:
+                continue
+            merged = _merged_strategy_settings(spec)
+            if not _truthy(merged.get(flag, False)):
+                continue
+        except Exception:
+            continue
+        cfg = {}
+        try:
+            from swing_trader import constants as _swing_constants
+            defaults = {
+                "strategy_swing_enabled": _swing_constants.SWING_DEFAULTS,
+                "strategy_wheel_enabled": _swing_constants.WHEEL_DEFAULTS,
+            }.get(flag) or {}
+            cfg.update(copy.deepcopy(dict(defaults)))
+        except Exception:
+            pass
+        cfg.update(merged)
+        return cfg
+    return {}
+
+
+def _approval_live_price(adapter, symbol):
+    """(price, quote_at) for an approval, fresh: a REST quote mark first (the
+    gate trusts that source), then the IEX latest trade. None when neither."""
+    wanted = str(symbol or "").strip().upper()
+    if not wanted:
+        return None
+    try:
+        adapter.fetch_rest_quote_marks([wanted])
+    except Exception:
+        pass
+    book = getattr(adapter, "_market_marks", None)
+    mark = book.get(wanted) if book is not None else None
+    if mark is not None and float(getattr(mark, "price", 0) or 0) > 0:
+        return float(mark.price), mark.observed_at
+    try:
+        trades = adapter.get_latest_trades([wanted]) or {}
+    except Exception:
+        return None
+    hit = trades.get(wanted)
+    if not hit:
+        return None
+    price, stamp = hit
+    try:
+        stamp_dt = datetime.datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if stamp_dt.tzinfo is None:
+        stamp_dt = stamp_dt.replace(tzinfo=datetime.timezone.utc)
+    return float(price), stamp_dt
+
+
+def _sweep_stale_submitted_signals(order_service, *, now_utc=None, log=None,
+                                   max_age_s=600.0):
+    """Fix wave FW1 item 9 (plan B final review M-2): a swing/wheel signal
+    left "submitted" with no order key and no lifecycle intent.
+
+    The approval handler claims a signal approved -> submitted BEFORE it
+    sends anything and writes the order's key back after. A process that died
+    between the two leaves a row that reads submitted forever. Once such a
+    row is ``max_age_s`` past its claim (claimed_at, else decided_at, else
+    created_at), it is compare-and-swapped to failed and the operator is told
+    the order may not have been placed. A row whose intent exists (reason
+    swing_approval:<id>, or, for a wheel approval made before its intent
+    carried the id, a MANUAL option intent on its underlying since the claim)
+    is left to reconcile. Runs from the swing/wheel lane tick only. An
+    unreadable lifecycle store raises: nothing is marked on a guess.
+    Returns the ids marked failed."""
+    from live_orders import OrderSource
+    from swing_trader import notify as swing_notify
+    from swing_trader import signals_store
+
+    def say(message, color="white"):
+        if log is not None:
+            try:
+                log(message, color)
+            except Exception:
+                pass
+
+    def parse(stamp):
+        try:
+            value = datetime.datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+        return value if value.tzinfo is not None else value.replace(
+            tzinfo=datetime.timezone.utc)
+
+    now_utc = now_utc or datetime.datetime.now(datetime.timezone.utc)
+    instance_key = str(order_service.instance_id)
+    signals_store.ensure_tables()
+    in_flight = globals().setdefault("_swing_approvals_in_flight", set())
+    stale = []
+    for row in signals_store.list_signals(instance_key, status="submitted", limit=500):
+        if row.get("order_client_id") or row.get("lane") not in ("swing", "wheel"):
+            continue
+        if str(row.get("id") or "") in in_flight:
+            continue    # round 2, minor 3: its handler is still placing it
+        claimed = None
+        for name in ("claimed_at", "decided_at", "created_at"):
+            claimed = parse(row.get(name)) if row.get(name) else None
+            if claimed is not None:
+                break
+        if claimed is None or (now_utc - claimed).total_seconds() < float(max_age_s):
+            continue
+        stale.append((row, claimed))
+    if not stale:
+        return []
+    records = list(order_service.lifecycle_store.list_for_instance(instance_key))
+    reasons = {str(record.intent.reason) for record in records}
+    swept = []
+    for row, claimed in stale:
+        signal_id = str(row.get("id") or "")
+        symbol = str(row.get("symbol") or "").strip().upper()
+        lane = str(row.get("lane") or "")
+        if f"swing_approval:{signal_id}" in reasons:
+            continue
+        if lane == "wheel" and any(
+                record.intent.source is OrderSource.MANUAL
+                and record.intent.asset_class == "us_option"
+                and str(record.intent.underlying or "").upper() == symbol
+                and record.intent.decision_at >= claimed
+                for record in records):
+            continue
+        minutes = int((now_utc - claimed).total_seconds() // 60)
+        doc = dict(row)
+        doc.update({"status": "failed", "order_client_id": None})
+        if not signals_store.cas_signal(signal_id, expect_status="submitted", doc=doc):
+            continue
+        say(f"[swing] approval {signal_id} ({lane} {symbol}) marked failed: "
+            f"claimed {minutes} min ago with no order key and no order intent; "
+            "the order may not have been placed — check open orders", "red")
+        swing_notify.notify_swing_approval_unconfirmed(
+            instance_key, symbol=symbol, lane=lane,
+            detail=(f"The approval was claimed {minutes} min ago and no order "
+                    "was ever recorded; the signal is marked failed."))
+        swept.append(signal_id)
+    return swept
+
+
+def _approval_control_overlay(adapter, *, instance_key, now_utc=None):
+    """The order gate's control inputs, RE-READ for an operator approval
+    (swing-port fix wave, FW-lo-I1).
+
+    An approval runs in the 1-second command thread, off-tick. The live loop
+    stamps kill_switch_at, cash_at, calendar_at, risk_state_at and
+    watchdog_at only inside a tick (every 20 minutes on the equity grid), and
+    the gate wants each within 60 s for an opening order, so an approval five
+    minutes after a tick was refused dependency.*.stale however healthy the
+    account was. Each input is read here the way the tick reads it:
+
+    - kill switch: the Instances row (runCommand False is unhealthy; no row
+      is unknown);
+    - watchdog: the AlphaState control_health row, stamped with the
+      evidence's own observed_at, never with now (a heartbeat older than 60 s
+      stays stale);
+    - cash: refresh_account(), Alpaca's cash (and the equity below);
+    - calendar: adapter.is_market_open(now);
+    - risk state: the durable risk row re-loaded and evaluated against the
+      fresh equity, NOT saved, so the risk row's version and risk_snapshot_id
+      stay the tick's and an intent the loop is gating cannot see its snapshot
+      id move.
+
+    Returns DependencySnapshot field overrides for this approval's own
+    snapshot. The loop's dependency state is never written (it is left to the
+    loop; the snapshot provider only reads it, under its lock). The one
+    shared write is refresh_account(), which updates the adapter's cached
+    account fields from Alpaca under the adapter's own lock, as the tick's
+    and the snapshot thread's refreshes already do: _cash, _account_equity,
+    and the pre-submit PDT guard's facts _daytrade_count,
+    _pattern_day_trader and _account_facts_at. Any read that fails raises;
+    the caller treats it as transient. Each read is bounded like the tick's.
+    """
+    from live_orders import Health
+    from live_risk_state import evaluate_drawdown
+
+    def now():
+        return datetime.datetime.now(datetime.timezone.utc)
+
+    pool = globals().get("_PRICE_FETCH_EXECUTOR")
+
+    def bounded(fn, *args, timeout=15.0):
+        if pool is None:
+            return fn(*args)
+        return pool.submit(fn, *args).result(timeout=timeout)
+
+    reader = globals().get("_KS_RDB")
+    if reader is None:
+        raise RuntimeError("the kill-switch store is unavailable")
+    key = str(instance_key)
+    row, health_row = bounded(
+        lambda: (reader.get("Instances", key),
+                 reader.get("AlphaState", f"control_health:{key}")),
+        timeout=10.0)
+    kill_switch_at = now()
+    if row is None:
+        kill_switch = Health.UNKNOWN
+    elif row.get("runCommand") is False:
+        kill_switch = Health.UNHEALTHY
+    else:
+        kill_switch = Health.HEALTHY
+    try:
+        from benchmark_alpha.watchdog import ControlHealth
+
+        payload = dict((health_row or {}).get("payload") or {})
+        evidence = ControlHealth(
+            instance_id=payload.get("instance_id"),
+            status=payload.get("status"),
+            observed_at=datetime.datetime.fromisoformat(
+                str(payload.get("observed_at"))),
+            result_status=payload.get("result_status"),
+            degraded_audit=payload.get("degraded_audit"),
+            evidence_hash=payload.get("evidence_hash"),
+        )
+        watchdog = (Health.HEALTHY
+                    if evidence.status == "healthy" and not evidence.degraded_audit
+                    else Health.UNHEALTHY)
+        watchdog_at = evidence.observed_at
+    except Exception:
+        watchdog, watchdog_at = Health.UNKNOWN, None
+    account = bounded(adapter.refresh_account)
+    cash_at = now()
+    equity = getattr(account, "equity", None)
+    if equity is None:
+        raise RuntimeError("the broker returned no account equity")
+    market_open = bool(bounded(adapter.is_market_open, now_utc or now(),
+                               timeout=10.0))
+    calendar_at = now()
+    risk_store, risk_state = _live_risk_store, _live_risk_state
+    if risk_store is None or risk_state is None:
+        raise RuntimeError("durable risk state is unavailable")
+    durable = risk_store.load_required(risk_state.instance_id,
+                                       risk_state.account_id)
+    evaluated = evaluate_drawdown(
+        durable, equity, now(), limits=_live_risk_limits_for_this_document())
+    return {
+        "kill_switch": kill_switch, "kill_switch_at": kill_switch_at,
+        "watchdog": watchdog, "watchdog_at": watchdog_at,
+        "cash": Health.HEALTHY, "cash_at": cash_at,
+        "calendar": Health.HEALTHY, "calendar_at": calendar_at,
+        "market_open": market_open,
+        "risk_state": (Health.HEALTHY if evaluated.new_exposure_allowed
+                       else Health.UNHEALTHY),
+        "risk_state_at": evaluated.observed_at,
+    }
+
+
+def _execute_swing_approval(adapter, payload, order_service, *,
+                            cached_strategies=None, now_utc=None, log=None,
+                            sleep=None):
+    """A LiveCommands submit_order carrying {"source": "swing_approval",
+    "signal_id"} (spec 6.1 broker item 9; interfaces doc section 7).
+
+    Only an approved (or approved_half) signal of this instance is placed.
+    It is claimed approved -> submitted with a compare-and-swap BEFORE
+    anything is sent (plan B G8a), so a redelivered command, or a
+    re-approval after the route reverted an enqueue, can never place a
+    second order; a lost claim places and writes nothing. The order is then
+    rebuilt at the live price by swing_trader.approvals (stop, target and
+    shares for swing; expiry and strike for the wheel, spec section 9 fix 2)
+    from the lane's config with its defaults, built as a MANUAL-source
+    bracket or option intent by the live loop's own builders, and sent
+    through the unified order service.
+
+    Write-back (A-live ledger rulings):
+    - accepted: status submitted, order_client_id = the key the service used
+      (it can escalate a spent identity), submitted_order = the rebuilt order
+      (plan B G5), so calibration scores the contract actually sold;
+    - a TRANSIENT failure puts the signal back to pending with its decision
+      cleared, so the operator can approve again (plan B G5 review; T15 fix
+      round 1, I-1): approvals.BookUnreadable, no live price, an equity read
+      that raised, no options snapshot, and a gate refusal whose codes are
+      ALL transient (dependency.*, quote.stale, positions.stale, and, fix
+      round 1b, market.closed and market.regular_hours_required). A gate
+      refusal returns before the service creates a lifecycle record, so the
+      re-approval takes the normal path and places exactly one order. Its
+      notice ("... — approve again") goes out only when the reset was
+      written (M-1);
+    - any other definite failure (unknown or disabled lane, rebuild error,
+      bracket refused, risk-cap, duplicate or broker refusal): failed; and
+      every failure the operator did not cause is sent as
+      swing_approval_failed (plan C final review P1);
+    - the signal read is tried three times about 1 s apart before the
+      command fails, with a red line and a notice naming the signal (I-2);
+      the claim is never retried;
+    - an unknown submit outcome (the service raised, or answered without a
+      broker reference) stays submitted with a red log line, never failed:
+      the service can raise after the broker accepted, and the next
+      reconcile resolves it (L4).
+    """
+    import time as _time
+    from zoneinfo import ZoneInfo
+    from live_orders import OrderSource
+
+    class _Retryable(Exception):
+        """A transient failure: the signal goes back to pending (I-1)."""
+
+        def __init__(self, why, *, quote=False, detail="", again=""):
+            super().__init__(why)
+            self.quote = quote
+            self.detail = detail
+            self.again = again
+
+    def say(message, color="white"):
+        if log is not None:
+            try:
+                log(message, color)
+            except Exception:
+                pass
+
+    signal_id = str((payload or {}).get("signal_id") or "").strip()
+    if not signal_id:
+        return (False, "swing_approval requires signal_id", {})
+    if order_service is None:
+        return (False, "unified live order service unavailable", {})
+    try:
+        from swing_trader import approvals, signals_store
+    except Exception as exc:
+        return (False, f"swing_trader unavailable: {type(exc).__name__}: {exc}", {})
+    owner = str(order_service.instance_id)
+    pause = sleep or _time.sleep
+    read_error = None
+    for attempt in range(3):
+        if attempt:
+            pause(1.0)
+        try:
+            signal = signals_store.get_signal(signal_id)
+            read_error = None
+            break
+        except Exception as exc:
+            read_error = exc
+    if read_error is not None:
+        why = f"{type(read_error).__name__}: {read_error}"
+        say(f"[swing] approval {signal_id}: the signal could not be read after "
+            f"3 tries ({why}); nothing placed, and it may still read approved",
+            "red")
+        try:
+            from swing_trader.notify import notify_swing_approval_failed
+            notify_swing_approval_failed(
+                owner, symbol=f"signal {signal_id}", lane="swing or wheel",
+                reason=(f"the approved signal could not be read "
+                        f"({type(read_error).__name__}); nothing was sent"))
+        except Exception:
+            pass
+        return (False, f"signal {signal_id} could not be read: {why}", {})
+    if not signal:
+        return (False, f"unknown signal {signal_id}", {})
+    if str(signal.get("instance_id") or "") != owner:
+        return (False, f"signal {signal_id} belongs to another instance", {})
+    status = str(signal.get("status") or "")
+    if status not in ("approved", "approved_half"):
+        say(f"[swing] approval {signal_id} ignored: it is {status or 'unset'}, "
+            "not approved", "yellow")
+        return (False, f"signal {signal_id} is {status or 'unset'}, not approved", {})
+    lane = str(signal.get("lane") or "").strip().lower()
+    symbol = str(signal.get("symbol") or "").strip().upper()
+    label = f"[swing] approval {signal_id} ({lane or '?'} {symbol or '?'})"
+
+    def tell(reason):
+        try:
+            from swing_trader.notify import notify_swing_approval_failed
+            notify_swing_approval_failed(owner, symbol=symbol, lane=lane,
+                                         reason=reason)
+        except Exception as exc:
+            say(f"{label}: the failure notice was not sent "
+                f"({type(exc).__name__}: {exc})", "yellow")
+
+    def write(patch) -> bool:
+        try:
+            signals_store.update_signal(signal_id, patch)
+            return True
+        except Exception as exc:
+            say(f"{label}: signal write-back {patch} failed "
+                f"({type(exc).__name__}: {exc})", "red")
+            return False
+
+    # Seams m6: only an approval made today (New York, from decided_at) is
+    # placed, the re-send route's day rule. An original command still queued
+    # across a day (the instance stopped or wedged after the approval) would
+    # otherwise be claimed and placed at a later day's price. Decided BEFORE
+    # the claim, by a compare-and-swap from the approved status it read.
+    now_utc = now_utc or datetime.datetime.now(datetime.timezone.utc)
+    new_york = ZoneInfo("America/New_York")
+    decided_at = signal.get("decided_at")
+    if not isinstance(decided_at, datetime.datetime):
+        try:
+            decided_at = datetime.datetime.fromisoformat(
+                str(decided_at).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            decided_at = None
+    if decided_at is not None and decided_at.tzinfo is None:
+        decided_at = decided_at.replace(tzinfo=datetime.timezone.utc)
+    made_on = decided_at.astimezone(new_york).date() if decided_at else None
+    if made_on != now_utc.astimezone(new_york).date():
+        stale_why = (f"approval from {made_on.isoformat() if made_on else 'an unknown date'}"
+                     " — approve a fresh signal")
+        stale = dict(signal)
+        stale.update({"status": "failed", "order_client_id": None})
+        try:
+            won = signals_store.cas_signal(signal_id, expect_status=status, doc=stale)
+        except Exception as exc:
+            say(f"{label}: {stale_why}, but it could not be marked failed "
+                f"({type(exc).__name__}: {exc}); nothing placed", "red")
+            tell(f"{stale_why}; the signal could not be marked failed "
+                 f"({type(exc).__name__}) and still reads approved; nothing was sent")
+            return (False, f"{stale_why}; nothing placed, and the signal could not "
+                           f"be marked failed ({type(exc).__name__}: {exc})", {})
+        if not won:
+            say(f"{label}: {stale_why}; another command changed it first; "
+                "nothing placed", "yellow")
+            return (False, f"signal {signal_id} changed before it could be marked "
+                           "failed; nothing placed", {})
+        say(f"{label} FAILED: {stale_why}", "red")
+        tell(stale_why)
+        return (False, stale_why, {})
+
+    # Fix wave round 2, minor 3: from the claim until this handler has
+    # written its outcome, the stale-row sweep (the loop thread of this same
+    # process) must not judge this signal.
+    in_flight = globals().setdefault("_swing_approvals_in_flight", set())
+    in_flight.add(signal_id)
+    try:
+        claimed = dict(signal)
+        claimed["status"] = "submitted"
+        # Fix wave FW1 item 9: the stale-row sweep ages a claim from here.
+        claimed["claimed_at"] = (now_utc or datetime.datetime.now(
+            datetime.timezone.utc)).isoformat()
+        try:
+            won = signals_store.cas_signal(signal_id, expect_status=status, doc=claimed)
+        except Exception as exc:
+            say(f"{label}: the claim could not be written ({type(exc).__name__}: "
+                f"{exc}); nothing placed", "red")
+            tell(f"the approval could not be claimed ({type(exc).__name__}); "
+                 "nothing was sent")
+            return (False, f"signal {signal_id} could not be claimed: "
+                           f"{type(exc).__name__}: {exc}", {})
+        if not won:
+            say(f"{label}: another command claimed it first; nothing placed", "yellow")
+            return (False, f"signal {signal_id} was claimed by another command; "
+                           "nothing placed", {})
+
+        def claim_write(patch):
+            """(landed, current row): the patch written only while the row is
+            still this claim's (status submitted, this claim's claimed_at)."""
+            try:
+                current = signals_store.get_signal(signal_id)
+            except Exception as exc:
+                say(f"{label}: signal re-read before write-back failed "
+                    f"({type(exc).__name__}: {exc})", "red")
+                return False, None
+            if (not current or str(current.get("status") or "") != "submitted"
+                    or current.get("claimed_at") != claimed.get("claimed_at")):
+                return False, current
+            doc = dict(current)
+            doc.update(patch)
+            try:
+                won = signals_store.cas_signal(signal_id, expect_status="submitted",
+                                               doc=doc)
+            except Exception as exc:
+                say(f"{label}: signal write-back {patch} failed "
+                    f"({type(exc).__name__}: {exc})", "red")
+                return False, current
+            if not won:
+                try:
+                    current = signals_store.get_signal(signal_id)
+                except Exception:
+                    pass
+            return bool(won), current
+
+        def failed(error, reason, key=None, result=None):
+            write({"status": "failed", "order_client_id": key})
+            say(f"{label} FAILED: {error}", "red")
+            tell(reason)
+            return (False, error, result or {})
+
+        def back_to_pending(why, *, quote=False, detail="", result=None, again=""):
+            """I-1: a transient failure. Nothing reached the broker, so the
+            decision is undone and the operator may approve again (`again`
+            says when, if not after the open)."""
+            reason = f"{why} — approve again" + (" after the open" if quote else again)
+            if write({"status": "pending", "decided_by": None, "decided_at": None,
+                      "decision_reason": None}):
+                say(f"{label} put back to pending: {why}"
+                    + (f" ({detail})" if detail else ""), "yellow")
+                tell(reason)
+            else:
+                # M-1: never "approve again" when the reset did not land -- in
+                # the notice nor in the command's error (fix wave FW1 item 3).
+                reason = (f"{why} — nothing was sent, and the signal could not be "
+                          "put back to pending (it may still read submitted)")
+                say(f"{label}: {why}; nothing placed, and the signal could not be "
+                    "put back to pending (it may still read submitted)", "red")
+                tell(reason)
+            return (False, reason + (f" ({detail})" if detail else ""), result or {})
+
+        # "Not now" gate codes (I-1; fix round 1b adds the market-hours two).
+        after_open = ("quote.stale", "market.closed", "market.regular_hours_required")
+        # Fix wave FW1 item 3 (FW-lo-I2): pure races, also "not now". The mark
+        # stream or the 3 s position refresh rewrote the mark between the
+        # approval's price read and the gate's, or the tick rotated the risk
+        # snapshot between the build and the gate. Every gate refusal is decided
+        # before the service creates a lifecycle row, so re-arming is safe.
+        races = ("quote.timestamp_mismatch", "quote.reference_price_mismatch",
+                 "risk.snapshot_mismatch")
+
+        def all_transient(codes):
+            return bool(codes) and all(
+                code.startswith("dependency.")
+                or code in after_open or code in races
+                or code == "positions.stale" for code in codes)
+
+        now_utc = now_utc or datetime.datetime.now(datetime.timezone.utc)
+        try:
+            lane_name = {"swing": "strategy_swing", "wheel": "strategy_wheel"}.get(lane)
+            if lane_name is None:
+                raise ValueError(f"unknown lane {signal.get('lane')!r}")
+            specs = cached_strategies
+            if specs is None:
+                # The command thread starts before the live loop caches the
+                # strategy document; an approval queued across a restart reads it.
+                loader = globals().get("load_strategies_from_db")
+                specs = loader()[0] if loader is not None else None
+            cfg = _lane_config(specs, lane_name)
+            if not cfg:
+                raise ValueError(f"the {lane_name} lane is not enabled on this document")
+            if lane == "swing" and _swing_exit_held_after_close(now_utc):
+                # Seams m4: Alpaca rejects a non-extended-hours market order
+                # between the close (13:00 on a half day) and 20:00 ET, the
+                # window FW1 holds a swing exit in. The bracket is a market
+                # GTC entry: hold it rather than send it to be refused.
+                raise _Retryable("after the close",
+                                 again=" after 20:00 ET or pre-market")
+            # FW-lo-I1: the gate's control inputs are re-read NOW and laid over
+            # this approval's snapshot only; the loop's stamps are fresh only
+            # within 60 s of a tick. Round 2: re-read BEFORE the price, so its
+            # round trips never sit between the quote read (which pins the
+            # intent's quote_at) and the gate's read of the same mark -- the
+            # controls have a 60 s budget, the quote does not. A failed re-read is
+            # transient, like the stale stamps it replaces.
+            try:
+                controls = _approval_control_overlay(adapter, instance_key=owner,
+                                                     now_utc=now_utc)
+            except Exception as exc:
+                raise _Retryable("the order gate's controls could not be re-read",
+                                 detail=f"{type(exc).__name__}: {exc}") from exc
+            live = _approval_live_price(adapter, symbol)
+            if live is None:
+                raise _Retryable(f"no live price for {symbol}", quote=True)
+            live_price, quote_at = live
+            equity = getattr(adapter, "_account_equity", None)
+            if equity is None:
+                try:
+                    equity = adapter.refresh_account().equity
+                except Exception as exc:
+                    raise _Retryable(f"account equity unreadable "
+                                     f"({type(exc).__name__}: {exc})") from exc
+                if equity is None:
+                    # Fix wave FW1 item 3: a refresh that answered with no equity
+                    # is as transient as one that raised.
+                    raise _Retryable("account equity unreadable (the broker "
+                                     "returned none)")
+            with _live_order_dependency_lock:
+                risk_id = str(_live_order_dependency_state.get("risk_snapshot_id")
+                              or "risk:unavailable")
+            order = approvals.build_approved_order(
+                signal, live_price=float(live_price), equity=float(equity), cfg=cfg,
+                adapter=adapter,
+                today=now_utc.astimezone(ZoneInfo("America/New_York")).date())
+            kind = str((order or {}).get("kind") or "")
+            if kind == "equity_bracket":
+                intent = _build_bracket_intent(
+                    order_service, symbol=str(order["symbol"]).strip().upper(),
+                    price=live_price, decision_at=now_utc, quantity=order["qty"],
+                    bracket={"take_profit_price": order["take_profit_price"],
+                             "stop_loss_price": order["stop_loss_price"]},
+                    risk_snapshot_id=risk_id, quote_at=quote_at,
+                    source=OrderSource.MANUAL, reason=f"swing_approval:{signal_id}")
+            elif kind == "option":
+                try:
+                    quote = _refresh_option_quote(adapter, order.get("contract"),
+                                                  now_utc)
+                except Exception as exc:
+                    raise _Retryable(
+                        f"no usable options snapshot for {order.get('contract')} "
+                        f"({type(exc).__name__})", quote=True) from exc
+                if quote is None:
+                    raise _Retryable(
+                        f"no usable options snapshot for {order.get('contract')}",
+                        quote=True)
+                # Fix wave FW1 item 9: the intent names its signal, as a swing
+                # approval's does, so the stale-row sweep can find it.
+                intent = _build_option_intent(
+                    order_service, dict(order, reason=f"swing_approval:{signal_id}"),
+                    quote_at=quote["quote_at"], decision_at=now_utc,
+                    risk_snapshot_id=risk_id, source=OrderSource.MANUAL)
+            else:
+                raise ValueError(f"unknown approved order kind {kind!r}")
+        except _Retryable as exc:
+            return back_to_pending(str(exc), quote=exc.quote, detail=exc.detail,
+                                   again=exc.again)
+        except Exception as exc:
+            unreadable = getattr(approvals, "BookUnreadable", None)
+            if isinstance(unreadable, type) and isinstance(exc, unreadable):
+                # Seams I-1: a swing entry whose put collateral is unknown.
+                option_book = getattr(approvals, "OptionBookUnreadable", None)
+                if isinstance(option_book, type) and isinstance(exc, option_book):
+                    return back_to_pending("option book unreadable", detail=str(exc))
+                return back_to_pending("broker order book unreadable", detail=str(exc))
+            return failed(f"swing approval failed: {type(exc).__name__}: {exc}",
+                          str(exc) or type(exc).__name__)
+
+        # An option snapshot reads the calendar itself.
+        if getattr(intent, "asset_class", "us_equity") == "us_option":
+            controls = {name: value for name, value in dict(controls).items()
+                        if name not in ("calendar", "calendar_at", "market_open")}
+        try:
+            submission = order_service.enqueue(intent, snapshot_overlay=controls)
+        except Exception as exc:
+            write({"submitted_order": order})
+            say(f"{label}: submit raised {type(exc).__name__}: {exc}; the outcome "
+                f"is unknown, the signal stays submitted and the next reconcile "
+                f"resolves {intent.idempotency_key}", "red")
+            return (False, f"order outcome unknown ({type(exc).__name__}: {exc}); "
+                           "the next reconcile resolves it",
+                    {"signal_id": signal_id, "client_order_id": intent.idempotency_key})
+        key = str(getattr(submission.decision, "idempotency_key", "")
+                  or intent.idempotency_key)
+        codes = [str(code) for code in submission.decision.reason_codes]
+        result = {
+            "signal_id": signal_id,
+            "client_order_id": key,
+            "order_id": getattr(submission.reference, "broker_order_id", None),
+            "reason_codes": codes,
+        }
+        if not submission.decision.allowed:
+            error = "order gate blocked: " + ",".join(codes)
+            if all_transient(codes):
+                # The gate refused before the service created a lifecycle row, so
+                # a re-approval builds the same identity afresh: one order.
+                return back_to_pending(error, quote=any(
+                    code in after_open or code.startswith("dependency.quote.")
+                    for code in codes), result=result)
+            return failed(error, error, key=key, result=result)
+        if not submission.accepted:
+            write({"order_client_id": key, "submitted_order": order})
+            say(f"{label}: outcome unknown ({','.join(codes) or 'transport'}); the "
+                f"signal stays submitted and the next reconcile resolves {key}", "red")
+            return (False, "order outcome unknown; the next reconcile resolves it", result)
+        # Round 2, minor 3: the success write-back is a compare-and-swap from
+        # the row THIS claim wrote (status submitted, this claim's claimed_at),
+        # so it can never flip a row the sweep marked failed back to submitted.
+        landed, current = claim_write({"status": "submitted",
+                                       "order_client_id": key,
+                                       "submitted_order": order})
+        if landed:
+            say(f"{label} submitted ({key})", "green")
+        elif str((current or {}).get("status") or "") == "failed":
+            say(f"{label}: the order WAS placed ({key}) but the signal had been "
+                "marked failed meanwhile — do not place it by hand", "red")
+            try:
+                from swing_trader.notify import notify_swing_order_placed_for_failed
+                notify_swing_order_placed_for_failed(
+                    owner, symbol=symbol, lane=lane, client_order_id=key)
+            except Exception as exc:
+                say(f"{label}: the placed-for-failed notice was not sent "
+                    f"({type(exc).__name__}: {exc})", "red")
+        else:
+            say(f"{label}: submitted ({key}), but the signal write-back did not "
+                f"land (the row reads {(current or {}).get('status')!r})", "red")
+        return (True, "", result)
+    finally:
+        in_flight.discard(signal_id)
+
+
 def _live_order_dependency_snapshot(adapter, intent):
     """Build a cache-only dependency view for the pure stock order gate."""
+    # swing-port: an option intent gets the options view (collateral, regular
+    # hours, REST option quote). Every EB intent is us_equity and reads on.
+    if getattr(intent, "asset_class", "us_equity") == "us_option":
+        return _live_option_dependency_snapshot(adapter, intent)
     from decimal import Decimal
     from live_orders import DependencySnapshot, Health, OrderSource
     from market_marks import MarkPurpose, evaluate_mark
@@ -9781,6 +11487,16 @@ def _live_order_dependency_snapshot(adapter, intent):
         value = state.get(name)
         return value if isinstance(value, datetime.datetime) else None
 
+    available_cash = Decimal(str(getattr(adapter, "_cash", 0) or 0))
+    if available_cash < 0 and intent.reduce_only and any(
+            _lane_enabled(globals().get("_cached_strategies"), lane)
+            for lane in ("strategy_swing", "strategy_wheel")):
+        # Fix wave FW-lo-I5: a margin debit after an assignment must not stop
+        # a swing/wheel document's EXIT from being gated (the snapshot refuses
+        # negative cash). A reduce-only sell never spends cash. Checked only
+        # when cash is negative, and EB's document enables neither lane, so
+        # EB's snapshot still raises exactly as before.
+        available_cash = Decimal("0")
     max_order_notional = None
     max_position_quantity = None
     if _live_risk_state is not None:
@@ -9818,7 +11534,7 @@ def _live_order_dependency_snapshot(adapter, intent):
         position_symbol=symbol,
         position_quantity=position_quantity,
         positions_at=positions_at,
-        available_cash=Decimal(str(getattr(adapter, "_cash", 0) or 0)),
+        available_cash=available_cash,
         market_open=bool(state.get("market_open", False)),
         risk_snapshot_id=risk_snapshot_id,
         kill_switch_at=_state_time("kill_switch_at"),
@@ -9847,10 +11563,22 @@ def _live_order_dependency_snapshot(adapter, intent):
 def _build_strategy_stock_intent(
         order_service, portfolio, *, symbol, decision, price, current_time,
         cash_to_use, sell_fraction, action_intents, is_risk_exit,
-        risk_snapshot_id, quote_at):
-    """Create the immutable intent for one normal/risk strategy emission."""
+        risk_snapshot_id, quote_at, bracket=None, next_open_sell=False):
+    """Create the immutable intent for one normal/risk strategy emission.
+
+    ``next_open_sell`` (swing-port fix wave, FW-str-I1): a swing exit is a
+    plain MARKET DAY sell, which Alpaca queues for the open (ST's exit), never
+    the extended-hours limit the session style makes before 09:30 ET. EB never
+    passes it."""
     from decimal import Decimal
     from live_orders import OrderIntent, OrderSide, OrderSource
+    if bracket is not None and decision == 1:
+        # swing-port (spec 6.1 broker item 3): a bracket entry.
+        return _build_bracket_intent(
+            order_service, symbol=symbol, price=price,
+            decision_at=current_time, cash_to_use=cash_to_use,
+            bracket=bracket, action_intents=action_intents,
+            risk_snapshot_id=risk_snapshot_id, quote_at=quote_at)
 
     decision_at = current_time
     if not isinstance(decision_at, datetime.datetime):
@@ -9875,6 +11603,14 @@ def _build_strategy_stock_intent(
     if quantity <= 0:
         raise ValueError("computed order quantity <= 0")
     side = "buy" if decision == 1 else "sell"
+    if next_open_sell and side == "sell" and _swing_exit_held_after_close(decision_at):
+        # Fix wave round 2, minor 2: Alpaca rejects a non-extended-hours
+        # market order between the close and 20:00 ET. Nothing is created;
+        # the lane re-sends the exit on the next pre-market or RTH tick.
+        raise ValueError(
+            f"order deferred: {symbol} swing exit held until the next "
+            "pre-market or regular-hours tick (a market DAY order is not "
+            "accepted between the close and 20:00 ET)")
     # quantity= is REQUIRED, not optional. _order_style_for_now grew
     # quantity/defer on 2026-08-02 because the extended-hours flip was only half
     # the rule: Alpaca supports fractional quantities during regular hours ONLY,
@@ -9895,7 +11631,9 @@ def _build_strategy_stock_intent(
     # session. Honour defer here so the order is never created, rather than
     # created and then silently truncated.
     style = (
-        portfolio._order_style_for_now(
+        {"order_type": "market", "limit_price": None, "extended_hours": False}
+        if next_open_sell and side == "sell"
+        else portfolio._order_style_for_now(
             price, side, decision_at, quantity=float(quantity)
         )
         if hasattr(portfolio, "_order_style_for_now")
@@ -9958,6 +11696,313 @@ def _build_strategy_stock_intent(
     )
 
 
+def _swing_exit_held_after_close(at) -> bool:
+    """Fix wave round 2, minor 2: True between the regular close (16:00 ET,
+    13:00 on a half day) and 20:00 ET, when Alpaca rejects the plain market
+    DAY order a swing exit is. Pre-market is not held (the order queues for
+    the open); after 20:00 the gate's own market.closed refuses. Without a
+    calendar, 16:00-20:00 ET."""
+    from zoneinfo import ZoneInfo
+
+    et = at.astimezone(ZoneInfo("America/New_York"))
+    if not 12 <= et.hour < 20:
+        return False
+    try:
+        from live_calendar import is_nyse_open
+        return not bool(is_nyse_open(at))
+    except Exception:
+        return et.hour >= 16
+
+
+def _build_bracket_intent(
+        order_service, *, symbol, price, decision_at, bracket,
+        risk_snapshot_id, quote_at, cash_to_use=None, quantity=None,
+        action_intents=(), source=None, reason=None):
+    """One swing entry as an Alpaca GTC market bracket (spec section 6.1,
+    broker item 3): whole shares, tif=gtc, order_class=bracket, and the
+    absolute leg prices the lane anchored on the prior close.
+
+    It never calls _order_style_for_now. That conversion would turn a 09:15 ET
+    entry into an extended-hours limit DAY order; a plain market bracket is
+    what Alpaca queues for the open, which is ST's behaviour.
+
+    Every refusal here is raised before any broker order exists. The live
+    submit block routes a "bracket refused" ValueError, like "computed order
+    quantity <= 0", as a definite refusal (outcome blocked), never as an
+    unknown outcome (ruling F8).
+    """
+    from decimal import ROUND_FLOOR, Decimal
+    from live_orders import OrderIntent, OrderSide, OrderSource
+
+    if not isinstance(decision_at, datetime.datetime):
+        decision_at = datetime.datetime.now(datetime.timezone.utc)
+    elif decision_at.tzinfo is None:
+        decision_at = decision_at.replace(tzinfo=datetime.timezone.utc)
+    price_d = Decimal(str(price))
+    if quantity is not None:
+        shares = Decimal(int(quantity))
+    elif price_d > 0:
+        shares = (Decimal(str(cash_to_use or 0)) / price_d).to_integral_value(
+            rounding=ROUND_FLOOR)
+    else:
+        shares = Decimal("0")
+    if shares <= 0:
+        raise ValueError("computed order quantity <= 0")
+    legs = bracket if isinstance(bracket, dict) else {}
+    if legs.get("take_profit_price") is None or legs.get("stop_loss_price") is None:
+        raise ValueError(f"bracket refused: {symbol} hint lacks a leg price")
+    cent = Decimal("0.01")
+    take_profit = Decimal(str(legs["take_profit_price"])).quantize(cent)
+    stop_loss = Decimal(str(legs["stop_loss_price"])).quantize(cent)
+    if not Decimal("0") < stop_loss < price_d < take_profit:
+        raise ValueError(
+            f"bracket refused: stop {stop_loss} and target {take_profit} do "
+            f"not straddle {price_d} for {symbol}")
+    return OrderIntent(
+        account_id=order_service.account_id,
+        instance_id=order_service.instance_id,
+        source=source or OrderSource.STRATEGY,
+        reason=reason or (
+            ",".join(sorted(action_intents)) if action_intents
+            else "strategy signal"),
+        symbol=symbol,
+        side=OrderSide.BUY,
+        quantity=shares,
+        reduce_only=False,
+        decision_at=decision_at,
+        quote_at=quote_at,
+        risk_snapshot_id=risk_snapshot_id,
+        order_type="market",
+        limit_price=None,
+        tif="gtc",
+        extended_hours=False,
+        reference_price=price_d,
+        order_class="bracket",
+        take_profit_price=take_profit,
+        stop_loss_price=stop_loss,
+    )
+
+
+def _cancel_bracket_legs_confirmed(adapter, order_service, symbol, *,
+                                   timeout_s=10.0, log=None, cancelled=None,
+                                   attempted=None):
+    """Cancel every working bracket leg on ``symbol`` and wait for Alpaca to
+    confirm (spec 6.1 broker item 4). True when nothing is left working and the
+    sell may go; False defers the sell a tick.
+
+    Leg ids come from two places, because each can miss one: the lifecycle
+    store (a held stop leg is not always listed as open) and the broker's
+    open orders (a leg whose registration has not happened yet).
+
+    ``cancelled`` (a list) receives the leg ids whose cancel Alpaca confirmed,
+    so the caller knows the position has lost its stop. ``attempted`` (a
+    list) receives every leg id a cancel was SENT for, confirmed or not: a
+    cancel that times out, or a leg that fills while being cancelled, may
+    already have taken the stop away (fix wave round 2, must-check 2(d)).
+    """
+    from broker_adapters.base import is_bracket_child_order
+    from live_orders import OrderSource
+
+    def say(message, color="yellow"):
+        if log is not None:
+            try:
+                log(message, color)
+            except Exception:
+                pass
+
+    wanted = str(symbol or "").strip().upper()
+    leg_ids = []
+    booked = {}
+    try:
+        for record in order_service.lifecycle_store.list_for_instance(
+                order_service.instance_id):
+            if record.terminal or record.intent.source is not OrderSource.BRACKET_LEG:
+                continue
+            if record.intent.symbol == wanted and record.broker_order_id:
+                leg_ids.append(record.broker_order_id)
+                # Fix wave FW1 item 8: what this leg has already booked, so a
+                # leg cancelled after a partial fill does not defer the sell.
+                booked[record.broker_order_id] = record.cumulative_quantity
+    except Exception as exc:
+        say(f"[swing] {wanted} sell deferred: the lifecycle store is "
+            f"unreadable ({type(exc).__name__}: {exc}), so its bracket legs "
+            "cannot be ruled out", "red")
+        return False
+    try:
+        working = adapter.list_open_orders_strict()
+    except Exception as exc:
+        say(f"[swing] {wanted} sell deferred: the open-order book is "
+            f"unreachable ({type(exc).__name__}: {exc})", "red")
+        return False
+    for ref in (working or ()):
+        ref_id = str(getattr(ref, "broker_order_id", "") or "")
+        if (ref_id and ref_id not in leg_ids and is_bracket_child_order(ref)
+                and str(getattr(ref, "symbol", "") or "").strip().upper() == wanted):
+            leg_ids.append(ref_id)
+    if not leg_ids:
+        return True
+    if attempted is not None:
+        attempted.extend(leg_ids)
+    try:
+        confirmed = bool(adapter.cancel_orders_confirmed(
+            leg_ids, timeout_s=timeout_s, booked_fills=booked))
+    except Exception as exc:
+        say(f"[swing] {wanted} bracket leg cancel raised "
+            f"{type(exc).__name__}: {exc}", "red")
+        return False
+    say(f"[swing] {wanted} bracket legs {leg_ids} cancel "
+        f"{'confirmed' if confirmed else 'NOT confirmed; the sell waits a tick'}",
+        "cyan" if confirmed else "yellow")
+    if confirmed and cancelled is not None:
+        cancelled.extend(leg_ids)
+    return confirmed
+
+
+#: swing-port fix wave (FW-str-I1): the swing lane's exit intents
+#: (strategies/strategy_swing.py INTENT_EXIT). A re-sent pending exit carries
+#: its intent but not the fill_at_next_open hint.
+_SWING_EXIT_INTENTS = frozenset(
+    {"swing_rsi_exit", "swing_stop_exit", "swing_target_exit"})
+
+
+def _swing_next_open_exit(hint, intents) -> bool:
+    """True for a swing exit: its hint says fill_at_next_open (exactly True),
+    or its action intents name one of the lane's exits. EB's hints and
+    intents carry neither."""
+    if isinstance(hint, dict) and hint.get("fill_at_next_open") is True:
+        return True
+    try:
+        return bool(_SWING_EXIT_INTENTS & {str(i) for i in (intents or ())})
+    except TypeError:
+        return False
+
+
+#: Fix wave round 2, minor 3: approval signal ids a handler in this process
+#: is placing right now (claimed, outcome not yet written). The stale-row
+#: sweep skips them.
+_swing_approvals_in_flight: set = set()
+
+
+#: Fix wave round 2: the unprotected-exit alerts already sent this New York
+#: session, keyed (symbol, kind): one per symbol per session and kind.
+_swing_unprotected_alerts: dict = {"session": None, "sent": set()}
+
+
+def _swing_unprotected_alert(instance_id, symbol, detail, *, kind="unprotected",
+                             now_utc=None):
+    """A swing exit that did not go out after a cancel was SENT for its
+    bracket legs: the stop may be gone until the lane re-sends the exit on the
+    next tick. RED, priority 2 (URGENT), through the lane's own sender, once
+    per symbol per New York session (and kind). Returns True when sent; never
+    raises. Self-contained (local imports, state through globals()) so an
+    alert can never fail on a missing name."""
+    try:
+        import datetime as _dt
+        from zoneinfo import ZoneInfo
+
+        now = now_utc or _dt.datetime.now(_dt.timezone.utc)
+        session = now.astimezone(ZoneInfo("America/New_York")).date().isoformat()
+        state = globals().setdefault("_swing_unprotected_alerts",
+                                     {"session": None, "sent": set()})
+        if state.get("session") != session:
+            state["session"] = session
+            state["sent"] = set()
+        key = (str(symbol or "").strip().upper(), str(kind))
+        if key in state["sent"]:
+            return False
+        from swing_trader import notify as _swing_notify
+        if kind == "unknown":
+            # Round 2, minor 1: the sell may have reached the broker (the
+            # service can raise after the transport); never "not placed".
+            _swing_notify.send(
+                "swing_exit", instance_id,
+                f"EXIT OUTCOME UNKNOWN — check open orders — {symbol}",
+                f"{symbol}: the exit sell may or may not have been placed "
+                f"({detail}) — check open orders. Its bracket stop was "
+                "cancelled; if no sell is working the position is "
+                "unprotected, and the exit will retry next tick.", priority=2)
+        else:
+            _swing_notify.send(
+                "swing_exit", instance_id,
+                f"EXIT NOT PLACED — {symbol} may be unprotected",
+                f"{symbol}: position may be unprotected — the bracket stop may "
+                "have been cancelled; the exit will retry next tick. Check open "
+                f"orders. ({detail})", priority=2)
+        state["sent"].add(key)
+        return True
+    except Exception:
+        return False
+
+
+def _submit_swing_sell(adapter, order_service, intent, *, log=None,
+                       timeout_s=10.0):
+    """A SELL on a document with an enabled swing lane (FW-str-I1).
+
+    Its bracket legs are cancelled only once the gate has accepted the sell,
+    inside the service's before-submit hook, and only then is it sent: a sell
+    the gate refuses (a stale pre-market mark) leaves its stop working. Legs
+    that do not confirm cancelled raise "order deferred: ..." before anything
+    exists, exactly as the loop's pre-gate cancel used to. A sell that does not
+    go out after its legs were cancelled is a red line and a priority-2 alert;
+    the lane re-sends the exit on the next tick (strategy_swing._reemit_exits).
+    """
+    legs = []
+    attempted = []
+
+    def say(message, color="white"):
+        if log is not None:
+            try:
+                log(message, color)
+            except Exception:
+                pass
+
+    def cancel_legs(_intent, _decision):
+        if not _cancel_bracket_legs_confirmed(
+                adapter, order_service, intent.symbol, timeout_s=timeout_s,
+                log=log, cancelled=legs, attempted=attempted):
+            if attempted:
+                # Round 2, must-check 2(d): the cancel went out but was not
+                # confirmed (a timeout, or a leg filled while being cancelled).
+                # The stop may already be gone and no sell goes this tick.
+                unprotected(
+                    f"a cancel was sent for bracket legs {attempted} and not "
+                    f"confirmed within {float(timeout_s):.0f}s (or a leg filled "
+                    "while being cancelled); the exit sell was NOT sent this "
+                    "tick", legs_text=attempted)
+            raise ValueError(
+                f"order deferred: {intent.symbol} bracket legs did not confirm "
+                f"cancelled within {float(timeout_s):.0f}s; the sell waits a tick")
+
+    def unprotected(detail, *, legs_text=None, kind="unprotected"):
+        what = ("exit OUTCOME UNKNOWN (check open orders)" if kind == "unknown"
+                else "exit NOT placed")
+        say(f"[swing] {intent.symbol} {what} after a cancel of its "
+            f"bracket legs {legs_text if legs_text is not None else legs} "
+            f"({detail}): the position may be UNPROTECTED until the lane "
+            "re-sends the exit next tick", "red")
+        _swing_unprotected_alert(
+            str(getattr(order_service, "instance_id", "") or ""),
+            intent.symbol, detail, kind=kind)
+
+    try:
+        submission = order_service.enqueue(intent, before_submit=cancel_legs)
+    except Exception as exc:
+        if legs:
+            # Round 2, minor 1: the service can raise AFTER the transport
+            # (applying the broker's answer), so the outcome is unknown.
+            unprotected(f"submit raised {type(exc).__name__}: {exc}",
+                        kind="unknown")
+        raise
+    if legs and not submission.accepted:
+        codes = ",".join(submission.decision.reason_codes)
+        if getattr(submission, "uncertain", False):
+            unprotected(f"outcome unknown ({codes or 'transport'}); it may not "
+                        "have been placed", kind="unknown")
+        else:
+            unprotected(f"refused: {codes or 'no reason given'}")
+    return submission
+
+
 def _execute_live_command(adapter, cmd: dict, order_service=None) -> tuple[bool, str, dict]:
     """Run one command against the live adapter. Returns (success, error, result)."""
     ctype = str(cmd.get("type") or "").lower()
@@ -9997,11 +12042,18 @@ def _execute_live_command(adapter, cmd: dict, order_service=None) -> tuple[bool,
                     _a_halt(instance_id=str(instance_id), reason=_halt_reason_text)
                 except Exception:
                     pass
+                # swing-port (spec 6.1 broker item 6): halt leaves risk-reducing
+                # orders working (bracket legs, option buy-to-close). Ruling
+                # F1: an EB stock order is cancelled whatever position_intent
+                # Alpaca tags it with; only us_option closes and legs stay.
+                from broker_adapters.base import is_risk_reducing_order
                 orders_canceled = 0
                 for _pass in range(2):
                     try:
                         for od in adapter.list_open_orders(limit=500) or []:
                             try:
+                                if is_risk_reducing_order(od):
+                                    continue
                                 if adapter.cancel_order(od.broker_order_id):
                                     orders_canceled += 1
                             except Exception:
@@ -10026,6 +12078,15 @@ def _execute_live_command(adapter, cmd: dict, order_service=None) -> tuple[bool,
             symbol = str(payload.get("symbol") or "").strip().upper()
             if not symbol:
                 return (False, "close_position requires payload.symbol", {})
+            # swing-port: an option contract is closed by the wheel lane's
+            # buy-to-close, never sold like a stock -- also one the option
+            # book lost (an OCC-shaped symbol).
+            import re as _re
+            if (symbol in (getattr(adapter, "_option_positions", {}) or {})
+                    or _re.fullmatch(r"[A-Z]{1,6}\d{6}[CP]\d{8}", symbol)):
+                return (False, f"{symbol} is an option contract; option "
+                               "contracts are closed by buy-to-close, not "
+                               "close_position", {})
             positions = dict(getattr(adapter, "_positions", {}) or {})
             qty = payload.get("qty")
             try:
@@ -10085,6 +12146,15 @@ def _execute_live_command(adapter, cmd: dict, order_service=None) -> tuple[bool,
                 "client_order_id": intent.idempotency_key,
                 "last_price": price,
             })
+
+        if ctype == "submit_order" and str(payload.get("source") or "") == "swing_approval":
+            # swing-port (spec 6.1 broker item 9; interfaces doc section 7):
+            # an operator approval from web or iOS. Nothing else sends this
+            # source, so every other submit_order takes the manual path below.
+            return _execute_swing_approval(
+                adapter, payload, order_service,
+                cached_strategies=globals().get("_cached_strategies"),
+                log=globals().get("_log"))
 
         if ctype == "submit_order":
             symbol = str(payload.get("symbol") or "").strip().upper()
@@ -11217,6 +13287,10 @@ elif mode == MODE_LIVE:
                         _RethinkLifecycleBackend()
                     ),
                     lookup_by_client_id=live_adapter.get_order_by_client_id,
+                    # swing-port: a bracket parent's legs are read back with
+                    # nested=True and become lifecycle rows. Only an intent
+                    # with order_class="bracket" ever calls it.
+                    legs_lookup=live_adapter.get_order_with_legs,
                     confirmed_fill_handler=_apply_live_confirmed_fill_risk,
                     event_handler=live_adapter.apply_lifecycle_event,
                     # E4: the service turns five different exceptions into
@@ -12186,6 +14260,7 @@ def _non_equity_compatibility_bar_availability_resolver(
 
 def _equity_daily_bar_session_close(bar_start):
     """Resolve an equity daily bar to its authoritative exchange close."""
+    # Twin: backtest_bar_events.equity_daily_session_open; keep the two in step.
     try:
         import pandas as pd
         import live_calendar
@@ -12361,8 +14436,14 @@ def _submit_portfolio_signal(
     cash_per_trade=1000.0,
     sell_fraction=1.0,
     order_source,
+    execution_hints=None,
 ):
-    """Submit with source provenance only when using next-event execution."""
+    """Submit with source provenance only when using next-event execution.
+
+    ``execution_hints`` is `backtest_bar_events.execution_hint_kwargs(...)`:
+    empty unless a strategy's sizing hint set bracket / whole_shares /
+    fill_at_next_open, so every other call passes exactly what it did.
+    """
     kwargs = {
         "timestamp": timestamp,
         "cash_per_trade": cash_per_trade,
@@ -12370,6 +14451,8 @@ def _submit_portfolio_signal(
     }
     if bool(getattr(portfolio, "has_next_event_execution", False)):
         kwargs["order_source"] = order_source
+        if execution_hints:
+            kwargs.update(execution_hints)
     return portfolio.execute_signal(ticker, signal, price, **kwargs)
 
 
@@ -12702,6 +14785,7 @@ def _backtest_symbol_price_lookup_block_reason(data, symbol, current_time):
 # broker.py (not import-safe — runs argparse + main path at load).
 import backtest_price_history as _bph
 import backtest_prices_cursor as _bprices_cursor
+import backtest_bar_events as _bbe
 
 
 def _invalidate_price_history_cursor() -> None:
@@ -12723,6 +14807,67 @@ def get_price_history_up_to_current(data, symbols, current_time):
             for_history=True,
         ),
     )
+
+
+def _backtest_bar_open_resolver():
+    """When each fetched bar's first trade could print: the NYSE session open
+    for a daily bar, the bar's own label for an intraday one (spec 6.2)."""
+    interval = _backtest_bar_interval()
+    return _bbe.make_bar_open_resolver(
+        interval=interval,
+        session_open_resolver=(
+            _bbe.equity_daily_session_open
+            if interval >= datetime.timedelta(days=1) else None),
+    )
+
+
+def _process_backtest_bar_events(portfolio, data, prices, current_time):
+    """Next-open fills and bracket legs over every bar not yet processed.
+
+    Called after the pending-fill block and before the strategy call, and only
+    when the emulator has a bracket leg or a next-open order, so a run that
+    never asked for either never reaches it (spec 6.2).
+    """
+    clock = _aware_backtest_clock(current_time)
+    if clock is None:
+        return ()
+    bars = _bbe.collect_bar_events(
+        data,
+        portfolio.bar_event_requirements(),
+        clock,
+        bar_time_to_datetime=_bar_time_to_datetime,
+        bar_available_at=_backtest_bar_availability_resolver(),
+        bar_open_at=_backtest_bar_open_resolver(),
+    )
+    if not bars:
+        return ()
+    marks = _backtest_fill_snapshot_marks(portfolio, prices, data, current_time)
+    fills = portfolio.process_bar_events(bars, clock)
+    for fill in fills:
+        # Twin: the "[execution] FILL" log in the main loop's pending-fill block.
+        try:
+            _log(
+                "[execution] FILL %s %s qty=%.8f cumulative=%.8f "
+                "price=%.6f fees=%.6f quote=%s model=%s source=%s "
+                "exit_reason=%s"
+                % (
+                    fill.side.upper(),
+                    fill.symbol,
+                    fill.incremental_quantity,
+                    fill.cumulative_quantity,
+                    fill.price,
+                    fill.fees,
+                    fill.quote_timestamp,
+                    fill.cost_model_version,
+                    fill.source,
+                    fill.exit_reason or "-",
+                ),
+                "green",
+            )
+        finally:
+            _apply_backtest_confirmed_fill_state(fill, marks)
+    return tuple(fills)
+
 
 print("Time Increment:", time_increment)
 
@@ -13429,6 +15574,7 @@ def _core_sell_may_be_working(adapter, symbol, say) -> bool:
     True. `list_open_orders_strict` raises rather than reporting a dead orders
     endpoint as a clear book, which is exactly why it is the one asked.
     """
+    from broker_adapters.base import is_bracket_child_order
     if adapter is None:
         say("strategy_eb exit NOT re-armed: no broker adapter to read the "
             "working-order book from, so a working SELL cannot be ruled out. "
@@ -13444,6 +15590,8 @@ def _core_sell_may_be_working(adapter, symbol, say) -> bool:
         return True
     wanted = str(symbol or "").strip().upper()
     for ref in (working or []):
+        if is_bracket_child_order(ref):
+            continue
         if str(getattr(ref, "side", "") or "").strip().lower() != "sell":
             continue
         if str(getattr(ref, "symbol", "") or "").strip().upper() == wanted:
@@ -13465,6 +15613,7 @@ def _eb_buy_may_be_working(adapter, say) -> bool:
     cannot be proven from a missing adapter or an unreachable endpoint, so
     both answer True and the latch stays stamped.
     """
+    from broker_adapters.base import is_bracket_child_order
     if adapter is None:
         say("strategy_eb buy latches NOT re-armed: no broker adapter to read "
             "the working-order book from, so a working BUY cannot be ruled "
@@ -13478,6 +15627,8 @@ def _eb_buy_may_be_working(adapter, say) -> bool:
             "cannot be ruled out.", "yellow")
         return True
     for ref in (working or []):
+        if is_bracket_child_order(ref):
+            continue
         if str(getattr(ref, "side", "") or "").strip().lower() == "buy":
             say("strategy_eb buy latches NOT re-armed: a BUY is already "
                 "working at the broker.", "yellow")
@@ -13493,6 +15644,7 @@ def _eb_order_may_be_working(adapter, say) -> bool:
     affirmatively empty. A missing adapter or unreachable endpoint cannot
     prove that, so both answer True and the latch stays stamped.
     """
+    from broker_adapters.base import is_bracket_child_order
     if adapter is None:
         say("strategy_eb deferral NOT re-armed: no broker adapter to read the "
             "working-order book from.", "yellow")
@@ -13503,6 +15655,9 @@ def _eb_order_may_be_working(adapter, say) -> bool:
         say("strategy_eb deferral NOT re-armed: the working-order book is "
             f"unreachable ({type(exc).__name__}: {exc}).", "yellow")
         return True
+    # swing-port: bracket legs are exits a parent created, not working
+    # orders a re-plan could duplicate. alpaca-main has none.
+    working = [ref for ref in (working or []) if not is_bracket_child_order(ref)]
     if working:
         say("strategy_eb deferral NOT re-armed: an order is already working at "
             "the broker.", "yellow")
@@ -13524,6 +15679,7 @@ def _eb_sell_leg_may_be_working(adapter, symbol, say) -> bool:
     has not spent yet, so the re-plan would size it again.
     A missing adapter or unreachable endpoint cannot prove absence: True.
     """
+    from broker_adapters.base import is_bracket_child_order
     wanted = str(symbol or "").strip().upper()
     if adapter is None:
         say(f"strategy_eb {wanted} trim NOT re-armed: no broker adapter to "
@@ -13538,6 +15694,8 @@ def _eb_sell_leg_may_be_working(adapter, symbol, say) -> bool:
             "the next cadence day.", "red")
         return True
     for ref in (working or []):
+        if is_bracket_child_order(ref):
+            continue
         side = str(getattr(ref, "side", "") or "").strip().lower()
         ref_symbol = str(getattr(ref, "symbol", "") or "").strip().upper()
         if side == "sell" and ref_symbol == wanted:
@@ -14541,6 +16699,7 @@ while not shutdown_requested:
                     # so a grep sees execution -> reconciliation in causal order.
                     # The finally preserves reconciliation if both logger
                     # sinks fail.
+                    # Twin: _process_backtest_bar_events logs bar-driven fills.
                     try:
                         _log(
                             "[execution] FILL %s %s qty=%.8f cumulative=%.8f "
@@ -14563,6 +16722,13 @@ while not shutdown_requested:
                         _apply_backtest_confirmed_fill_state(
                             _bt_fill, _bt_fill_prices)
             _reconcile_anchor_pending_orders(portfolio_emulator)
+            # Swing port (spec 6.2): next-open fills and bracket legs, off
+            # every bar since the last one processed. Only a run that has
+            # submitted a bracket or a next-open order ever gets past this.
+            if (portfolio_emulator.has_bracket_legs()
+                    or portfolio_emulator.has_next_open_orders()):
+                _process_backtest_bar_events(
+                    portfolio_emulator, data, prices, current_time)
 
         # Backtest: every bar, execute any pending future trades for TODAY before running strategies.
         # NOTE: loops over _strategy_cache (all strategies that ever scheduled trades), NOT _run_once_specs,
@@ -15759,6 +17925,9 @@ while not shutdown_requested:
             # Z4.1's regime-adjusted position cap, published by the strategy.
             # None = not published (old build) -> the static config wins, as before.
             nexus_max_positions = None
+            # swing-port (spec 6.1, broker item 1): every spec's option orders,
+            # executed after the stock loop. Empty on every EB tick.
+            nexus_option_orders: list = []
             for _spec_r, _scores_r, _reasons_r, *_meta_r in run_once_results:
                 meta = _meta_r[0] if _meta_r else {}
                 _nmp = meta.get("_nexus_max_positions")
@@ -15793,6 +17962,7 @@ while not shutdown_requested:
                     nexus_executable_buys.add(sym)
                 for sym, intent in (meta.get("_nexus_action_intents") or {}).items():
                     nexus_action_intents_merged[sym] = intent
+                nexus_option_orders.extend(meta.get("_nexus_option_orders") or [])
             # 2026-07-19 BULL_F7d forensics: trend-reversal sell enforcement
             # was flattening the sleeve's SQQQ leg every bar it was parked
             # ("overriding SQQQ from 0 to -1") — the sleeve then re-parked at
@@ -16822,9 +18992,9 @@ while not shutdown_requested:
             # False keeps existing runs byte-identical.
             if portfolio_emulator is not None:
                 try:
-                    portfolio_emulator.credit_pending_sell_proceeds = bool(
-                        (_core_sleeve_cfg_raw(_cached_strategies) or {}).get(
-                            "backtest_credit_pending_sell_proceeds", False))
+                    portfolio_emulator.credit_pending_sell_proceeds = (
+                        _backtest_credit_pending_sell_proceeds(
+                            _cached_strategies))
                 except Exception:
                     pass
             _mpg_full_exits: set = set()   # names FULLY exited this cycle (sells run first)
@@ -18863,6 +21033,21 @@ while not shutdown_requested:
                                         and not _is_crypto_instance_runtime()
                                     )
                                     if _is_alpaca_stock_gate:
+                                        # swing-port (spec 6.1 broker item 4;
+                                        # fix wave FW-str-I1): a SELL on a
+                                        # document with an enabled swing lane
+                                        # is a swing sell. Its bracket legs are
+                                        # cancelled only AFTER the gate accepts
+                                        # it (_submit_swing_sell; unconfirmed,
+                                        # the sell waits a tick), and a lane
+                                        # exit is a plain market DAY sell that
+                                        # Alpaca queues for the open. Only a
+                                        # document with an enabled swing lane
+                                        # holds legs; EB's never does.
+                                        _swing_sell = (
+                                            decision == -1
+                                            and _lane_enabled(_cached_strategies, "strategy_swing")
+                                        )
                                         # Single source of truth, shared with the
                                         # holding-floor gate above — see
                                         # _RISK_EXIT_INTENTS. Two copies would
@@ -18924,12 +21109,32 @@ while not shutdown_requested:
                                                 quote_at=(
                                                     _authoritative_quote_at
                                                 ),
+                                                bracket=(
+                                                    nexus_hint.get("bracket")
+                                                    if decision == 1
+                                                    and isinstance(nexus_hint, dict)
+                                                    else None
+                                                ),
+                                                next_open_sell=(
+                                                    _swing_sell
+                                                    and _swing_next_open_exit(
+                                                        nexus_hint, _z21_intents)
+                                                ),
                                             )
                                         )
-                                        _es_fut = _PRICE_FETCH_EXECUTOR.submit(
-                                            _live_stock_order_service.enqueue,
-                                            _stock_intent,
-                                        )
+                                        if _swing_sell:
+                                            _es_fut = _PRICE_FETCH_EXECUTOR.submit(
+                                                _submit_swing_sell,
+                                                live_adapter,
+                                                _live_stock_order_service,
+                                                _stock_intent,
+                                                log=_log,
+                                            )
+                                        else:
+                                            _es_fut = _PRICE_FETCH_EXECUTOR.submit(
+                                                _live_stock_order_service.enqueue,
+                                                _stock_intent,
+                                            )
                                         _submission = _es_fut.result(
                                             timeout=90.0
                                         )
@@ -19060,7 +21265,7 @@ while not shutdown_requested:
                                             "deferred"
                                             if str(_es_e).startswith("order deferred")
                                             else "blocked"
-                                            if str(_es_e) == "computed order quantity <= 0"
+                                            if str(_es_e) == "computed order quantity <= 0" or str(_es_e).startswith("bracket refused")
                                             else "failed"),
                                         eb_universe=_strategy_eb_universe_symbols(
                                             _cached_strategies),
@@ -19081,6 +21286,8 @@ while not shutdown_requested:
                                     cash_per_trade=cash_to_use,
                                     sell_fraction=sell_fraction,
                                     order_source=_anchor_order_source,
+                                    execution_hints=_bbe.execution_hint_kwargs(
+                                        nexus_hint, decision),
                                 )
                                 _mpg_submit_ok = bool(_mpg_result)
                                 if _anchor_policy:
@@ -19235,6 +21442,80 @@ while not shutdown_requested:
                         "strategies": list(strategy_summary) if strategy_summary else [],
                         "post_decision": list(post_decision_trace) if post_decision_trace else [],
                     })
+
+            # swing-port fix wave (plan B final review M-2): a swing/wheel
+            # approval claimed long ago that recorded no order is marked failed
+            # and told. Swing/wheel documents only; doc 200 never enters.
+            if (
+                mode == MODE_LIVE
+                and str(live_broker_type or "").strip().lower() == "alpaca"
+                and _live_stock_order_service is not None
+                and (_lane_enabled(_cached_strategies, "strategy_swing")
+                     or _lane_enabled(_cached_strategies, "strategy_wheel"))
+            ):
+                try:
+                    _sweep_stale_submitted_signals(
+                        _live_stock_order_service, log=_log)
+                except Exception as _sweep_exc:
+                    _log(f"[swing] stale approval sweep failed "
+                         f"({type(_sweep_exc).__name__}: {_sweep_exc}); retried "
+                         "next tick", "yellow")
+
+            # swing-port (spec 6.1 broker item 8): option assignments, expiries
+            # and exercises, polled only for a document with an enabled wheel
+            # lane. An assignment moves shares, so ownership is re-derived.
+            if (
+                mode == MODE_LIVE
+                and str(live_broker_type or "").strip().lower() == "alpaca"
+                and _live_stock_order_service is not None
+                and live_adapter is not None
+                and _lane_enabled(_cached_strategies, "strategy_wheel")
+            ):
+                try:
+                    if _poll_option_activities(
+                        live_adapter,
+                        _live_stock_order_service,
+                        _strategy_cache.setdefault("strategy_wheel", {}),
+                        now_utc=datetime.datetime.now(datetime.timezone.utc),
+                        log=_log,
+                    ):
+                        _reconcile_alpaca_ownership(
+                            live_adapter, _live_stock_order_service)
+                except Exception as _act_exc:
+                    _log(f"[wheel] option activities poll crashed "
+                         f"({type(_act_exc).__name__}: {_act_exc})", "red")
+
+            # swing-port (spec 6.1 broker item 2): the wheel lane's option
+            # orders, after the stock loop, through the same LiveOrderService.
+            # Only a tick whose lanes emitted option orders gets here; EB emits
+            # none, so doc 200 never enters.
+            if (
+                nexus_option_orders
+                and mode == MODE_LIVE
+                and str(live_broker_type or "").strip().lower() == "alpaca"
+                and _live_stock_order_service is not None
+                and live_adapter is not None
+            ):
+                with _live_order_dependency_lock:
+                    _opt_risk_id = str(
+                        _live_order_dependency_state.get("risk_snapshot_id")
+                        or "risk:unavailable"
+                    )
+                try:
+                    _execute_option_intents(
+                        nexus_option_orders,
+                        order_service=_live_stock_order_service,
+                        adapter=live_adapter,
+                        now_utc=datetime.datetime.now(datetime.timezone.utc),
+                        risk_snapshot_id=_opt_risk_id,
+                        refused_reason=_wheel_options_refusal(
+                            live_adapter, _cached_strategies, log=_log),
+                        log=_log,
+                    )
+                except Exception as _opt_exc:
+                    _log(f"[wheel] option order execution crashed "
+                         f"({type(_opt_exc).__name__}: {_opt_exc}); nothing "
+                         "further this tick", "red")
 
             ###################################
             ## Save portfolio snapshot every loop (value at current time with current prices).

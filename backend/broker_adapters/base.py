@@ -25,6 +25,16 @@ class OrderRef:
     filled_qty: float = 0.0
     filled_avg_price: Optional[float] = None
     submitted_at_utc: Optional[datetime] = None
+    # swing-port (interfaces doc section 3). Defaults keep every old caller.
+    order_class: Optional[str] = None
+    legs: tuple = ()
+    position_intent: Optional[str] = None
+    asset_class: Optional[str] = None
+    # swing-port (plan A-live contract additions): tell a take-profit leg
+    # (limit) from a stop-loss leg (stop), and carry their prices.
+    order_type: Optional[str] = None
+    limit_price: Optional[float] = None
+    stop_price: Optional[float] = None
 
 
 @dataclass
@@ -34,6 +44,19 @@ class PositionDTO:
     avg_entry_price: float
     market_value: float
     created_at_utc: Optional[datetime] = None
+    # swing-port: filled only for option rows (refresh_positions), so every
+    # equity row is exactly what it was.
+    asset_class: Optional[str] = None
+    side: Optional[str] = None
+    unrealized_pl: Optional[float] = None
+    unrealized_plpc: Optional[float] = None
+    current_price: Optional[float] = None
+    multiplier: int = 1
+    underlying: Optional[str] = None
+    # Ruling F4 (A-live pre-flight): "put" | "call", from the contract fields.
+    option_type: Optional[str] = None
+    strike: Optional[float] = None
+    expiry: Optional[str] = None
 
 
 @dataclass
@@ -56,6 +79,61 @@ class AccountDTO:
     buying_power: float = 0.0
     last_equity: float = 0.0
     cash: float = 0.0
+    # swing-port: options approval and buying power (interfaces doc section 3).
+    options_trading_level: Optional[int] = None
+    options_approved_level: Optional[int] = None
+    options_buying_power: Optional[float] = None
+    non_marginable_buying_power: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class OptionContractDTO:
+    symbol: str
+    underlying: str
+    option_type: str
+    strike: float
+    expiration: str
+    open_interest: Optional[int]
+    close_price: Optional[float]
+
+
+@dataclass(frozen=True)
+class OptionSnapshotDTO:
+    symbol: str
+    bid: Optional[float]
+    ask: Optional[float]
+    last: Optional[float]
+    iv: Optional[float]
+    delta: Optional[float]
+    gamma: Optional[float]
+    theta: Optional[float]
+    vega: Optional[float]
+    quote_ts: Optional[str]
+
+
+@dataclass(frozen=True)
+class OptionPositionDTO:
+    symbol: str
+    underlying: str
+    option_type: str
+    strike: float
+    expiry: str
+    qty: int                      # signed; negative = short
+    avg_entry_price: float        # per-share premium
+    current_price: Optional[float]
+    market_value: Optional[float]
+    unrealized_pl: Optional[float]
+    multiplier: int = 100
+
+
+@dataclass(frozen=True)
+class OptionActivityDTO:
+    id: str
+    activity_type: str            # "OPASN" | "OPEXP" | "OPEXC"
+    symbol: str
+    qty: float
+    date: str
+    price: Optional[float]
 
 
 @dataclass
@@ -212,3 +290,117 @@ class BrokerAdapter(ABC):
 
     @abstractmethod
     def print_portfolio(self, prices: dict[str, float], logger: Any = None) -> None: ...
+
+    # --- swing-port: options, brackets, reference data ------------------------
+    # Non-abstract on purpose: an adapter that does not trade options
+    # (Binance.US, every test double) inherits these and refuses loudly only
+    # if something actually asks it to.
+    def get_option_chain(self, underlying, *, option_type=None,
+                         expiration_gte=None, expiration_lte=None,
+                         strike_gte=None, strike_lte=None) -> dict:
+        raise NotImplementedError(f"{type(self).__name__} does not support get_option_chain")
+
+    def get_option_contracts(self, underlying, *, option_type=None,
+                             expiration_gte=None, expiration_lte=None,
+                             strike_gte=None, strike_lte=None) -> list:
+        raise NotImplementedError(f"{type(self).__name__} does not support get_option_contracts")
+
+    def get_option_snapshots(self, contracts) -> dict:
+        raise NotImplementedError(f"{type(self).__name__} does not support get_option_snapshots")
+
+    def list_option_positions(self) -> list:
+        raise NotImplementedError(f"{type(self).__name__} does not support list_option_positions")
+
+    def get_account_options(self) -> dict:
+        raise NotImplementedError(f"{type(self).__name__} does not support get_account_options")
+
+    def get_option_activities(self, types=("OPASN", "OPEXP", "OPEXC"),
+                              after=None) -> list:
+        raise NotImplementedError(f"{type(self).__name__} does not support get_option_activities")
+
+    def get_order_with_legs(self, order_id) -> "OrderRef":
+        raise NotImplementedError(f"{type(self).__name__} does not support get_order_with_legs")
+
+    def cancel_orders_confirmed(self, order_ids, timeout_s: float = 10.0, *,
+                                booked_fills=None) -> bool:
+        raise NotImplementedError(f"{type(self).__name__} does not support cancel_orders_confirmed")
+
+    def list_closed_orders(self, symbols, after) -> list:
+        raise NotImplementedError(f"{type(self).__name__} does not support list_closed_orders")
+
+    def get_daily_bars(self, symbols, days) -> dict:
+        raise NotImplementedError(f"{type(self).__name__} does not support get_daily_bars")
+
+    def get_latest_trades(self, symbols) -> dict:
+        raise NotImplementedError(f"{type(self).__name__} does not support get_latest_trades")
+
+    def option_positions_health(self) -> dict:
+        """``{"complete": bool, "stale_since": <stamp or None>}`` for the
+        option book (plan B G7 review I-1). Refuses here, like every option
+        method above: an adapter that cannot trade options must never be read
+        as holding a complete, empty option book. A caller treats the refusal
+        as "unknown"."""
+        raise NotImplementedError(f"{type(self).__name__} does not support option_positions_health")
+
+
+#: Order classes whose exit legs are conditional children of another order.
+_MULTI_LEG_CLASSES = frozenset({"bracket", "oco", "oto"})
+_CLOSING_POSITION_INTENTS = frozenset({"buy_to_close", "sell_to_close"})
+
+
+def _enum_text(value) -> str:
+    return str(getattr(value, "value", value) or "").strip().lower()
+
+
+def is_bracket_child_order(order) -> bool:
+    """True for a conditional exit leg of a multi-leg equity order.
+
+    Alpaca reports the take-profit and stop-loss legs of a bracket as separate
+    orders sharing ``order_class == "bracket"``; the stop waits in ``held``.
+    IntelliStock submits only BUY-entry brackets (the gate refuses equity sells
+    that are not reduce-only), so inside a multi-leg class every SELL, and
+    every ``held`` order, is a child exit. A ``held`` order OUTSIDE a multi-leg
+    class, which Alpaca does not produce, is NOT ignored: guards stay closed
+    on what they cannot explain.
+    """
+    if _enum_text(getattr(order, "order_class", None)) not in _MULTI_LEG_CLASSES:
+        return False
+    return (
+        _enum_text(getattr(order, "status", None)) == "held"
+        or _enum_text(getattr(order, "side", None)) == "sell"
+    )
+
+
+def is_risk_reducing_order(order) -> bool:
+    """True for an order that only ever REDUCES exposure: a bracket child leg,
+    or an OPTION buy/sell-to-close. Kill-level and halt cancellation leave these.
+
+    Ruling F1 (A-live pre-flight, 2026-09-24): ``position_intent`` counts only
+    on an order whose ``asset_class`` is ``us_option``. Alpaca may tag a stock
+    order with a position_intent (``sell_to_close`` on an EB trim), and a halt
+    or kill rung on alpaca-main must keep cancelling EB's working stock sells
+    exactly as it did before this helper existed. An order with no asset_class
+    is therefore never risk-reducing by its position_intent.
+    """
+    if is_bracket_child_order(order):
+        return True
+    return (
+        _enum_text(getattr(order, "asset_class", None)) == "us_option"
+        and _enum_text(getattr(order, "position_intent", None))
+        in _CLOSING_POSITION_INTENTS
+    )
+
+
+def is_opening_option_sell(order) -> bool:
+    """True for an OPTION sell-to-open: a SELL that opens a strike x 100
+    obligation (swing-port fix wave, FW-lo-I4). The kill rung cancels it with
+    the working buys.
+
+    Ruling F1 applies as in ``is_risk_reducing_order``: ``position_intent``
+    counts only on an order whose ``asset_class`` is ``us_option``, so an EB
+    stock sell is never one, whatever Alpaca tags it with.
+    """
+    return (
+        _enum_text(getattr(order, "asset_class", None)) == "us_option"
+        and _enum_text(getattr(order, "position_intent", None)) == "sell_to_open"
+    )

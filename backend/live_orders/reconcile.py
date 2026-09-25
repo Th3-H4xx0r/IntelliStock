@@ -15,6 +15,7 @@ from .types import (
     BrokerOrderEvent,
     LifecycleState,
     OrderSide,
+    OrderSource,
     TERMINAL_LIFECYCLE_STATES,
 )
 
@@ -138,6 +139,10 @@ class ReconciliationResult:
     healthy: bool
     evidence_hash: str
     issues: tuple[str, ...] = field(default_factory=tuple)
+    #: swing-port: symbols this instance's lifecycle traded as us_option
+    #: contracts. Informational only (never in the evidence hash): it lets the
+    #: adapter keep contracts out of its long-only equity mirrors.
+    option_symbols: frozenset = field(default_factory=frozenset)
 
     def __post_init__(self) -> None:
         for name in ("owned", "external", "unresolved"):
@@ -151,6 +156,11 @@ class ReconciliationResult:
         object.__setattr__(self, "issues", tuple(str(issue) for issue in self.issues))
         object.__setattr__(self, "healthy", bool(self.healthy))
         object.__setattr__(self, "evidence_hash", str(self.evidence_hash))
+        object.__setattr__(
+            self,
+            "option_symbols",
+            frozenset(str(symbol).upper() for symbol in self.option_symbols),
+        )
 
 
 _STATUS_STATES = {
@@ -165,6 +175,10 @@ _STATUS_STATES = {
     "rejected": LifecycleState.REJECTED,
     "expired": LifecycleState.EXPIRED,
     "done_for_day": LifecycleState.EXPIRED,
+    # swing-port: a bracket's stop leg waits in "held"; an order being
+    # cancelled is still working until Alpaca confirms "canceled".
+    "held": LifecycleState.ACKNOWLEDGED,
+    "pending_cancel": LifecycleState.ACKNOWLEDGED,
 }
 
 
@@ -326,6 +340,31 @@ class StartupReconciler:
         cid = str(getattr(order, "client_order_id", "") or "")
         return not cid.startswith(self.cid_prefix)
 
+    def _own_records(self, snapshot: AuthoritativeBrokerSnapshot) -> dict:
+        """This instance's lifecycle rows for the snapshot's account.
+
+        swing-port (L1 review): a bracket leg's client order id is minted by
+        the broker, so it carries no instance prefix. A leg row counts as ours
+        only through explicit parent linkage: its parent must be a row of this
+        same instance and account. An orphan leg is left out, so its broker
+        order is judged like any other unknown order and it can neither move
+        lineage nor pin the reconcile unhealthy. Every EB row is unaffected:
+        EB never writes a leg row.
+        """
+        records = {
+            record.client_order_id: record
+            for record in self.lifecycle_store.list_for_instance(
+                snapshot.instance_id
+            )
+            if record.intent.account_id == snapshot.account_id
+        }
+        return {
+            cid: record
+            for cid, record in records.items()
+            if record.intent.source is not OrderSource.BRACKET_LEG
+            or record.intent.parent_client_order_id in records
+        }
+
     def _resolve_abandoned(
         self, snapshot: AuthoritativeBrokerSnapshot, record
     ) -> bool:
@@ -405,13 +444,7 @@ class StartupReconciler:
                 issues=tuple(issues),
             )
 
-        records = {
-            record.client_order_id: record
-            for record in self.lifecycle_store.list_for_instance(
-                snapshot.instance_id
-            )
-            if record.intent.account_id == snapshot.account_id
-        }
+        records = self._own_records(snapshot)
         issues: list[str] = []
         unresolved: dict[str, Decimal] = {}
         seen_known: set[str] = set()
@@ -456,13 +489,7 @@ class StartupReconciler:
                 continue
             self.event_applier(normalized)
 
-        records = {
-            record.client_order_id: record
-            for record in self.lifecycle_store.list_for_instance(
-                snapshot.instance_id
-            )
-            if record.intent.account_id == snapshot.account_id
-        }
+        records = self._own_records(snapshot)
         retired = False
         for cid, record in records.items():
             if record.terminal or cid in seen_known:
@@ -477,13 +504,7 @@ class StartupReconciler:
             issues.append(f"local_order_missing_broker:{cid}")
 
         if retired:
-            records = {
-                record.client_order_id: record
-                for record in self.lifecycle_store.list_for_instance(
-                    snapshot.instance_id
-                )
-                if record.intent.account_id == snapshot.account_id
-            }
+            records = self._own_records(snapshot)
 
         lineage: dict[str, Decimal] = {}
         all_events: list[BrokerOrderEvent] = []
@@ -498,10 +519,25 @@ class StartupReconciler:
                 lineage.get(record.intent.symbol, Decimal("0")) + signed
             )
 
+        # swing-port: a short option that this instance's lifecycle sold is
+        # owned (negative), not external. A negative broker quantity with no
+        # option lineage (an equity short, a manual option) stays external.
+        option_symbols = {
+            record.intent.symbol
+            for record in records.values()
+            if record.intent.asset_class == "us_option"
+        }
         owned: dict[str, Decimal] = {}
         external: dict[str, Decimal] = {}
         for symbol, broker_quantity in positions.items():
             if broker_quantity < 0:
+                proven_short = min(Decimal("0"), lineage.get(symbol, Decimal("0")))
+                if symbol in option_symbols and proven_short < 0:
+                    owned_short = max(broker_quantity, proven_short)
+                    owned[symbol] = owned_short
+                    if broker_quantity < owned_short:
+                        external[symbol] = broker_quantity - owned_short
+                    continue
                 external[symbol] = broker_quantity
                 continue
             proven = max(Decimal("0"), lineage.get(symbol, Decimal("0")))
@@ -548,4 +584,5 @@ class StartupReconciler:
             healthy=healthy,
             evidence_hash=digest,
             issues=tuple(issues),
+            option_symbols=frozenset(option_symbols),
         )

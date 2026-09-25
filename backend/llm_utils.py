@@ -1899,10 +1899,17 @@ def _call_claude_cli_plain(
     provider_config: dict[str, Any] | None = None,
     timeout_sec: int | None = None,
     retries: int = 0,
+    tools: str = "",
+    max_turns: int | None = None,
 ) -> str:
     """Plain-text claude-cli call. Returns the assistant's reply text, or
     empty string on failure. Mirrors the existing call_llm_by_provider
-    contract (best-effort, never raises into the strategy)."""
+    contract (best-effort, never raises into the strategy).
+
+    `tools` is the CLI's --tools value: "" (every tool off) for every model
+    call in the system except call_llm_with_web_search, which passes
+    "WebSearch" and caps the agent loop with `max_turns`. With the default
+    arguments the argv is byte-identical to what it always was."""
     if not model:
         return ""
     cfg = provider_config or {}
@@ -1963,7 +1970,9 @@ def _call_claude_cli_plain(
             resolved_cli, "-p",
             "--output-format", "json",
             "--model", model,
-            "--tools", "",
+            "--tools", tools,
+            *(["--allowedTools", tools] if tools else []),
+            *(["--max-turns", str(int(max_turns))] if tools and max_turns else []),
             "--strict-mcp-config",
             "--no-session-persistence",
             "--disable-slash-commands",
@@ -2020,11 +2029,12 @@ def _call_claude_cli_plain(
             break
         result_text = envelope.get("result") or ""
         # Persist to prompt cache if enabled.
-        try:
-            _effort_key = _cache_effort_key("claude-cli", provider_config)
-            _store_prompt_cache(prompt, canonical_model_cache_key(model, provider_config), "", str(result_text))
-        except Exception:
-            pass
+        if not tools:
+            try:
+                _effort_key = _cache_effort_key("claude-cli", provider_config)
+                _store_prompt_cache(prompt, canonical_model_cache_key(model, provider_config), "", str(result_text))
+            except Exception:
+                pass
         # T10 critical-guard capture — CLI providers map signals to synthetic status
         try:
             _stash_last_http(status=200, body=None, exc=None)
@@ -7064,6 +7074,58 @@ def call_gemini_with_grounding(
         return " ".join(text_parts).strip()
     except Exception:
         return ""
+
+
+# ── Web-searching call (swing-trader news line, spec §8) ───────────────────
+#
+# Providers whose model can search the web server-side. Every other provider
+# returns "" and logs ONE line per process: a missing news line never fails a
+# scan, and a log line per candidate per day would bury the one that matters.
+# Direct Anthropic API (not a provider in the models framework today) would use
+# {"type": "web_search_20260209", "name": "web_search", "max_uses": 2} on
+# Opus 4.6+/Sonnet 4.6+ (web_search_20250305 on older models and Vertex); the
+# tool does not exist on Amazon Bedrock.
+_WEB_SEARCH_SKIP_LOGGED: set = set()
+
+
+def call_llm_with_web_search(
+    provider: str,
+    api_key: str,
+    model: str,
+    prompt: str,
+    *,
+    max_output_tokens: int = 300,
+    max_uses: int = 2,
+    timeout_sec: int | None = None,
+    provider_config: dict[str, Any] | None = None,
+) -> str:
+    """One model call that may search the web first. Returns the reply text,
+    or "" when the provider cannot search or the call failed. Never raises.
+
+    - gemini: Google Search grounding (call_gemini_with_grounding).
+    - claude-cli: Anthropic's server-side web search through Claude Code's
+      WebSearch tool, the only tool enabled, with the agent loop capped at
+      `max_uses` searches plus the answer (ST's max_uses=2).
+    """
+    p = (provider or "").strip().lower()
+    try:
+        if p == "gemini":
+            return call_gemini_with_grounding(
+                api_key, model, prompt, max_output_tokens=max_output_tokens,
+                timeout_sec=timeout_sec) or ""
+        if p == "claude-cli":
+            return _call_claude_cli_plain(
+                model=model, prompt=prompt, provider_config=provider_config,
+                timeout_sec=timeout_sec, retries=0, tools="WebSearch",
+                max_turns=max(1, int(max_uses)) + 1) or ""
+    except Exception:
+        return ""
+    if p not in _WEB_SEARCH_SKIP_LOGGED:
+        _WEB_SEARCH_SKIP_LOGGED.add(p)
+        import sys
+        print(f"[llm_utils] web search is not available for provider {p!r}; "
+              "news skipped", file=sys.stderr, flush=True)
+    return ""
 
 
 # ── Prompt-hash cache (reusable) ───────────────────────────────────────────

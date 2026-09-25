@@ -50,8 +50,14 @@ def test_default_routing_discord_on_push_off_except_critical():
     for key, v in r.items():
         assert v["discord"] is True
         assert v["push"] is (key in _PUSH_ON_BY_DEFAULT)
-    # the only push-on-by-default key today
-    assert _PUSH_ON_BY_DEFAULT == {"instance_crash"}
+    # instance_crash, plus the swing-trader port's reviews, entries, exits and
+    # position alerts (spec §10), an approved swing/wheel order the broker
+    # refused (plan C final review), and a wheel assignment (fix wave item 4:
+    # the shares now held are money at risk, and ST pushed it at priority 1)
+    assert _PUSH_ON_BY_DEFAULT == {
+        "instance_crash", "swing_entry", "swing_pending_review", "swing_exit",
+        "wheel_put_placed", "wheel_pending_review", "wheel_position_alert",
+        "wheel_assignment", "swing_approval_failed"}
     assert r["instance_crash"]["push"] is True
 
 
@@ -77,3 +83,13 @@ def test_nine_live_alert_keys_present():
     for k in ["order_submit", "order_fill", "order_reject", "order_retry",
               "strategy_start", "strategy_error", "halt", "drawdown_halt", "crash_loop"]:
         assert k in NOTIFICATION_TYPE_KEYS
+
+
+def test_swing_approval_failed_type_present_and_classifies():
+    from notification_types import NOTIFICATION_TYPE_KEYS, classify, type_for_key
+    assert "swing_approval_failed" in NOTIFICATION_TYPE_KEYS
+    meta = type_for_key("swing_approval_failed")
+    assert meta["group"] == "Swing & Wheel"
+    assert meta["channel"] == "trades"
+    assert classify(content="SWING APPROVAL FAILED [swing-paper] AAPL refused") \
+        == "swing_approval_failed"
