@@ -413,3 +413,11 @@ def test_fix_a_an_exit_without_an_entry_price_is_logged(mod, monkeypatch):
               emu=BtEmulator(positions={"XOM": 5.0}))
     assert "XOM" not in out
     assert any("XOM" in line and "entry price" in line for line in lines)
+
+
+def test_fw_str_d_the_backtest_path_enters_at_any_tick_time(mod, monkeypatch):
+    """The no-entries-after-the-open rule is live only: a backtest tick after
+    09:30 ET still decides the session's entries on prior closes."""
+    after_open = datetime(2026, 6, 2, 15, 0, tzinfo=timezone.utc)     # 11:00 ET
+    out = run(mod, monkeypatch, {"SPY": SPY, "AAA": ind(100.0)}, at=after_open)
+    assert out["_nexus_executable_buys"] == ["AAA"]

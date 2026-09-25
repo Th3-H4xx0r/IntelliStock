@@ -92,12 +92,50 @@ def live_equity(emu, prices=None) -> float:
         return float(emu.get_portfolio_value(prices or {}) or 0.0)
 
 
-def live_buying_power(emu) -> float:
-    """ST sized swing entries against account.buying_power (paper_trader.py:450)."""
+def _live_cash_and_buying_power(emu):
+    """(cash, buying_power) from one refresh_cash read; settled cash for
+    both when the read fails, as before."""
     try:
-        return float(emu.refresh_cash().buying_power)
+        dto = emu.refresh_cash()
+        return float(dto.cash or 0.0), float(dto.buying_power or 0.0)
     except Exception:
-        return float(emu.get_cash() or 0.0)
+        cash = float(emu.get_cash() or 0.0)
+        return cash, cash
+
+
+def put_collateral(emu, book):
+    """(collateral, reason): cash committed to short puts -- every open short
+    put plus the unfilled remainder of every working sell-to-open put, at
+    strike x 100 -- or (None, reason) when the option book cannot be read as
+    a complete, current map (option_book). `book` is the strict working-order
+    read (working_orders)."""
+    rows, reason = option_book(emu)
+    if reason is not None:
+        return None, reason
+    from swing_trader import wheel_rules
+    held, _by = wheel_rules.short_put_collateral(rows)
+    pending, _by = wheel_rules.pending_sto_collateral(book)
+    return held + pending, None
+
+
+def swing_live_budget(emu, book):
+    """(budget, collateral, reason): what the swing lane's live entries may
+    spend this scan.
+
+    ST sized swing entries against account.buying_power (paper_trader.py:450),
+    and with no short put open that is still the budget. FW-lo-I5 / spec fix
+    8: the cash that secures short puts is not the swing lane's to spend, so
+    with any committed the budget is the smaller of buying power and cash,
+    less that collateral -- margin buying power cannot lift it, since the puts
+    are cash-secured. (None, None, reason) when the option book cannot be
+    read: the lane then plans no entries (its exits still run)."""
+    cash, bp = _live_cash_and_buying_power(emu)
+    collateral, reason = put_collateral(emu, book)
+    if collateral is None:
+        return None, None, reason
+    if collateral <= 0:
+        return bp, 0.0, None
+    return max(0.0, min(bp, cash) - collateral), collateral, None
 
 
 def working_orders(emu):
@@ -126,8 +164,9 @@ def positions_health(emu):
     flags, where a missing flag reads healthy as before. An accessor that
     refuses (the base adapter raises NotImplementedError), raises or answers
     anything but a dict gives an error and no verdict: the caller reads that
-    as unknown and fails closed. A dict without ``complete: True`` is
-    incomplete."""
+    as unknown and fails closed. So does a dict with no ``stale_since`` key
+    (G8b minor 1): a missing stamp is not a fresh one. A dict without
+    ``complete: True`` is incomplete."""
     accessor = getattr(emu, "option_positions_health", None)
     if callable(accessor):
         try:
@@ -136,6 +175,8 @@ def positions_health(emu):
             return False, None, f"{type(exc).__name__}: {exc}"
         if not isinstance(health, dict):
             return False, None, f"unexpected answer {health!r}"
+        if "stale_since" not in health:
+            return False, None, f"unexpected answer {health!r} (no stale_since)"
         return health.get("complete") is True, health.get("stale_since"), None
     return (getattr(emu, "_option_positions_complete", True) is not False,
             getattr(emu, "_positions_stale_since", None), None)
@@ -185,6 +226,24 @@ def open_orders(emu):
     has one. An outage is None — the wheel then sells nothing that tick —
     never an empty book, which would let a duplicate put through (fix 1)."""
     return working_orders(emu)
+
+
+def latest_trade_price(emu, symbol):
+    """The adapter's latest trade price for `symbol` (plan A-live
+    get_latest_trades, which the broker's approval path also prices a live
+    entry at), or None when the adapter has none or the read fails."""
+    reader = getattr(emu, "get_latest_trades", None)
+    if not callable(reader):
+        return None
+    sym = str(symbol).strip().upper()
+    try:
+        trades = reader([sym]) or {}
+    except Exception:
+        return None
+    entry = trades.get(sym) if isinstance(trades, dict) else None
+    price = entry[0] if isinstance(entry, (tuple, list)) and entry else entry
+    price = _finite(price)
+    return price if price is not None and price > 0 else None
 
 
 def _finite(value):

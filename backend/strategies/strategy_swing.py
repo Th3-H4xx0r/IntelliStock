@@ -65,6 +65,7 @@ _EMITTED_KEY = "_swing_emitted"                # live: entries sent this session
 _NO_MODEL_KEY = "_swing_no_model_session"      # live: the no-model alert, once a session
 _SECTOR_CACHE_KEY = "_swing_sector_cache"      # live: yfinance fallback sectors
 _PENDING_EXIT_KEY = "_swing_pending_exits"     # live: exits re-sent until the stock is gone
+_SCAN_FIRST_KEY = "_swing_scan_first_tick"     # live: {"session", "at", "late"} (FW-str d)
 
 #: Hint flags the engine tests with `is True` (plan A-backtest Task 6).
 _HINT_FLAGS = ("whole_shares", "fill_at_next_open")
@@ -74,6 +75,9 @@ _UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 #: Review fix c: while yfinance returns no VIX, the live scan waits for it
 #: until this ET time, then proceeds with the regime blocked, as ST did.
 _VIX_RETRY_UNTIL_ET = "10:00"
+#: FW-str minor (d): the regular-hours open. A session whose FIRST scan tick
+#: is at or after it plans no entries (ST's cron only ever ran at 09:15).
+_MARKET_OPEN_ET = "09:30"
 
 
 def _log_once(cache, reason, scope, msg, color="white"):
@@ -550,6 +554,15 @@ class StrategySwing:
                       "strategy editor. Pending exits are still re-sent.", "red")
         scan_due = (scan_time is not None and cache.get(_SCAN_DONE_KEY) != session
                     and clock.at_or_after(current_time, scan_time))
+        if scan_due:
+            first = cache.get(_SCAN_FIRST_KEY)
+            if not isinstance(first, dict) or first.get("session") != session:
+                # Stamped on the first tick the scan is due, whatever happens
+                # next: a pre-market tick that is not ready keeps its entries.
+                cache[_SCAN_FIRST_KEY] = {
+                    "session": session,
+                    "at": clock.ny_now(current_time).strftime("%H:%M"),
+                    "late": clock.at_or_after(current_time, _MARKET_OPEN_ET)}
         rearm = self._rearm_todo(cache, session)
         rearm_due = bool(rearm) and clock.is_rth(current_time)
         pending = cache.get(_PENDING_EXIT_KEY)
@@ -596,7 +609,7 @@ class StrategySwing:
                     if scan is not None:
                         cache[_SCAN_KEY] = scan
             if scan is not None:
-                self._score_queue(scan, session, iid, cfg, cache, deadline,
+                self._score_queue(scan, session, iid, cfg, emu, cache, deadline,
                                   decisions, sizes, intents)
                 if scan["cursor"] >= len(scan["queue"]):
                     cache[_SCAN_DONE_KEY] = session
@@ -656,7 +669,15 @@ class StrategySwing:
 
         option_syms = account.option_symbols(emu)
         equity = account.live_equity(emu, prices)
-        bp = account.live_buying_power(emu)
+        # FW-lo-I5: the cash securing short puts (open, and working
+        # sell-to-open) is not the swing lane's to spend.
+        bp, collateral, collateral_unread = account.swing_live_budget(emu, book)
+        if bp is None:
+            bp = 0.0
+        elif collateral:
+            _log(f"StrategySwing {session} | ${collateral:,.0f} is committed to short puts; "
+                 f"the swing budget is ${bp:,.2f} (cash and buying power less that "
+                 "collateral)", "cyan")
         # G8a M4: a GTC entry still working at the broker is not "unfilled".
         calibration.record_outcomes(iid, emu, "swing", held=set(equity_pos),
                                     working=_symbols_of(book, _working_entry))
@@ -689,6 +710,24 @@ class StrategySwing:
             reg["regime_ok"], bear["blocked_days"],
             bear_regime_days=int(cfg["bear_regime_days"]),
             live_universe=live_universe, defensive_universe=defensive)
+        if univ and collateral_unread:
+            _log_once(cache, "put-collateral", session,
+                      f"StrategySwing {session} | REFUSING ENTRIES this session — the cash "
+                      f"securing short puts cannot be read ({collateral_unread}), so a swing "
+                      "entry could spend it. Exits still run.", "red")
+            univ = None
+        first = cache.get(_SCAN_FIRST_KEY)
+        if univ and isinstance(first, dict) and first.get("session") == session \
+                and first.get("late"):
+            # FW-str minor (d): a missed pre-market scan is no entries today.
+            # Entries now would fill at intraday prices with legs anchored on
+            # the prior close; ST's cron only ever ran at 09:15. Exits run.
+            _log_once(cache, "late-scan", session,
+                      f"StrategySwing {session} | NO ENTRIES today — the day's first scan "
+                      f"tick came at {first.get('at')} ET, at or after the "
+                      f"{_MARKET_OPEN_ET} open (a missed pre-market scan; ST's cron ran "
+                      "only at 09:15). Exits still run.", "yellow")
+            univ = None
         vix_str = f"{vix:.1f}" if vix is not None else "n/a"
         if phase == "bear_mode":
             notify.send("swing_run_summary", iid, f"🐻 Bear Mode Day {bear['blocked_days']}",
@@ -726,7 +765,7 @@ class StrategySwing:
                 "counts": {"entered": 0, "pending": 0, "rejected": 0, "skipped": 0,
                            "ai_errors": 0}}
 
-    def _score_queue(self, scan, session, iid, cfg, cache, deadline,
+    def _score_queue(self, scan, session, iid, cfg, emu, cache, deadline,
                      decisions, sizes, intents):
         """paper_trader.py:626-756, one candidate at a time inside the tick
         budget. One failure skips its candidate (fix 5)."""
@@ -776,14 +815,14 @@ class StrategySwing:
             scan["cursor"] += 1
             try:
                 self._consider(item, scan, session, iid, cfg, role, gate, sector_of,
-                               client, cache, decisions, sizes, intents)
+                               client, emu, cache, decisions, sizes, intents)
             except Exception as exc:
                 scan["counts"]["ai_errors"] += 1
                 _log(f"StrategySwing {session} | {item['symbol']}: skipped after "
                      f"{type(exc).__name__}: {exc} — the scan continues (fix 5)", "yellow")
 
     def _consider(self, item, scan, session, iid, cfg, role, gate, sector_of, client,
-                  cache, decisions, sizes, intents):
+                  emu, cache, decisions, sizes, intents):
         symbol, ind = item["symbol"], item["ind"]
         active = set(scan["active"])
         if symbol in active:
@@ -855,13 +894,19 @@ class StrategySwing:
         context = {k: result.get(k) for k in ("earnings_days", "sector_etf", "sector_rsi",
                                               "news_summary") if k in result}
 
-        def record(status):
+        def record(status, reason=None):
             if existing is None:
-                signals_store.insert_signal(signals_store.new_signal(
+                doc = signals_store.new_signal(
                     instance_id=iid, lane="swing", symbol=symbol, session=session,
                     score=score, recommendation=rec, reasoning=result.get("reasoning"),
                     key_risks=result.get("key_risks"), size_adjustment=adj,
-                    proposal=proposal, status=status, context=context))
+                    proposal=proposal, status=status, context=context)
+                if reason:
+                    doc["decision_reason"] = reason
+                signals_store.insert_signal(doc)
+            elif reason:
+                signals_store.update_signal(sid, {"status": status,
+                                                  "decision_reason": reason})
 
         if rec == "reject":
             record("ai_rejected")
@@ -890,20 +935,33 @@ class StrategySwing:
         if existing is not None and existing.get("status") != "auto_approved":
             return          # the operator decided it, or it already failed
         shares = max(1, int(base_shares * adj))
+        # The engine sizes a live whole-share bracket as floor(buy_cash / live
+        # price) and reads no share count from the hint (plan A-live). buy_cash
+        # is ST's allocation times the AI size adjustment, never below one
+        # share at the prior close (ST's max(1, ...)).
+        buy_cash = round(max(use * adj, ind["close"]), 2)
+        emitted = (cache.get(_EMITTED_KEY) or {})
+        sent = emitted.get("session") == session and symbol in (emitted.get("entries") or {})
+        live_px = None if sent else account.latest_trade_price(emu, symbol)
+        if live_px is not None and math.floor(buy_cash / live_px + 1e-9) < 1:
+            # FW-str minor (a): the broker would floor this to 0 shares and
+            # refuse it. It holds no slot, sector or buying power, so a later
+            # candidate may take them.
+            why = (f"the share count rounds to 0: ${buy_cash:,.2f} buys no whole share at "
+                   f"the live ${live_px:,.2f} (prior close ${ind['close']:,.2f})")
+            _log(f"  {symbol}: Skipped ({why}) — its slot and sector stay free")
+            record("failed", why)
+            scan["counts"]["skipped"] += 1
+            return
         record("auto_approved")
         scan["buying_power"] -= shares * ind["close"]
         scan["entries_placed"] += 1
         scan["active"].append(symbol)            # fix 4: the sector set follows each buy
         scan["counts"]["entered"] += 1
-        emitted = (cache.get(_EMITTED_KEY) or {})
-        if emitted.get("session") == session and symbol in (emitted.get("entries") or {}):
+        if sent:
             return          # already sent before a restart; the broker holds it
         decisions[symbol] = 1
-        # The engine sizes a live whole-share bracket as floor(buy_cash / live
-        # price) and reads no share count from the hint (plan A-live). buy_cash
-        # is ST's allocation times the AI size adjustment, never below one
-        # share at the prior close (ST's max(1, ...)).
-        sizes[symbol] = {"buy_cash": round(max(use * adj, ind["close"]), 2),
+        sizes[symbol] = {"buy_cash": buy_cash,
                          "bracket": {"take_profit_price": target_price,
                                      "stop_loss_price": stop_price},
                          "whole_shares": True, "fill_at_next_open": True}

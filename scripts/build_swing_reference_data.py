@@ -50,13 +50,16 @@ BENCHMARKS = ("SPY", "QQQ")
 #: under today. Only ticker changes; an acquired or delisted name is left as
 #: it is (it has no bars after it leaves, and the engine skips it). Verify
 #: against Alpaca before trusting a window that spans one of these dates.
+#: A ticker in today's S&P list (universe.SP500_SYMBOLS, ST's May 2026 list)
+#: is current and is never a key here: Fiserv is FISV again and Paramount
+#: Skydance is PSKY, so their older tickers map forward to those (FW-str (b)).
 RENAME_MAP = {
     "ABC": "COR",      # AmerisourceBergen -> Cencora, 2023-08-30
     "ANTM": "ELV",     # Anthem -> Elevance Health, 2022-06-28
     "ARNC": "HWM",     # Arconic Inc. -> Howmet Aerospace, 2020-04-01
     "BBT": "TFC",      # BB&T -> Truist, 2019-12-09
     "BLL": "BALL",     # Ball Corp, 2022-05-17
-    "CBS": "PARA",     # CBS -> ViacomCBS (VIAC) 2019-12-05 -> Paramount 2022-02-16
+    "CBS": "PSKY",     # CBS -> VIAC 2019-12-05 -> PARA 2022-02-16 -> PSKY Aug 2025
     "CDAY": "DAY",     # Ceridian -> Dayforce, 2024-02-01
     "COG": "CTRA",     # Cabot Oil & Gas -> Coterra, 2021-10-01
     "CTL": "LUMN",     # CenturyLink -> Lumen, 2020-09-18
@@ -64,7 +67,7 @@ RENAME_MAP = {
     "DWDP": "DD",      # DowDuPont -> DuPont de Nemours, 2019-06-03
     "FB": "META",      # Facebook -> Meta Platforms, 2022-06-09
     "FBHS": "FBIN",    # Fortune Brands Home & Security -> Innovations, 2022-12-15
-    "FISV": "FI",      # Fiserv, 2023-06-07
+    "FI": "FISV",      # Fiserv: FI from 2023-06-07, FISV again from late 2025
     "FLT": "CPAY",     # FleetCor -> Corpay, 2024-03-25
     "HCP": "DOC",      # HCP -> Healthpeak (PEAK) 2019-11-05 -> DOC 2024-03-04
     "HRS": "LHX",      # Harris -> L3Harris, 2019-07-01
@@ -72,12 +75,13 @@ RENAME_MAP = {
     "LB": "BBWI",      # L Brands -> Bath & Body Works, 2021-08-03
     "MYL": "VTRS",     # Mylan -> Viatris, 2020-11-16
     "NLOK": "GEN",     # NortonLifeLock -> Gen Digital, 2022-11-08
+    "PARA": "PSKY",    # Paramount Global -> Paramount Skydance, Aug 2025
     "PEAK": "DOC",     # Healthpeak, 2024-03-04
     "PKI": "RVTY",     # PerkinElmer -> Revvity, 2023-05-16
     "RE": "EG",        # Everest Re -> Everest Group, 2023-07-10
     "SYMC": "GEN",     # Symantec -> NortonLifeLock (NLOK) 2019-11-04 -> GEN
     "UTX": "RTX",      # United Technologies -> Raytheon Technologies, 2020-04-03
-    "VIAC": "PARA",    # ViacomCBS -> Paramount Global, 2022-02-16
+    "VIAC": "PSKY",    # ViacomCBS -> PARA 2022-02-16 -> Paramount Skydance Aug 2025
     "WLTW": "WTW",     # Willis Towers Watson, 2022-01-04
 }
 
@@ -107,10 +111,11 @@ Check them once against Alpaca's asset list, with the lab's own keys:
     PY
 
 A RENAME_MAP target must print status "active": anything else (not found,
-"inactive", delisted) is a wrong target, so fix the map and rerun. Known
-suspects to check first: PARA (CBS and VIAC map to it; Paramount Skydance has
-traded as PSKY since August 2025) and FISV/FI (Fiserv traded as FI from 2023;
-check which symbol Alpaca lists as active today).
+"inactive", delisted) is a wrong target, so fix the map and rerun. The map
+follows the port's current S&P list: CBS, VIAC and PARA map to PSKY
+(Paramount Skydance since August 2025) and FI to FISV (Fiserv's ticker
+again). Check first that Alpaca's PSKY and FISV bars reach back through the
+PARA and FI years.
 A former member that is not found, but whose company still trades under a new
 symbol, needs a RENAME_MAP entry (old -> new). Rerunning is idempotent.
 """

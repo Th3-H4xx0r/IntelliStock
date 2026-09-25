@@ -24,6 +24,15 @@ def _setup():
     return module
 
 
+LIVE = {"alpaca-main": {"id": "alpaca-main", "brokerage_id": "brk-live",
+                        "granularity_time_increment": 60}}
+BROKERAGES = [{"id": "brk-live", "alpaca_paper": False},
+              {"id": "brk-paper", "alpaca_paper": True},
+              {"id": "brk-lab", "alpaca_paper": True},
+              {"id": "brk-eb-live", "alpaca_paper": False},
+              {"id": "brk-unknown"}]
+
+
 def members(store, rows):
     store.insert("SwingIndexMembership", [
         {"id": f"SPX|{d}", "index": "SPX", "date": d, "members": m} for d, m in rows],
@@ -70,13 +79,15 @@ def test_the_lab_lane_is_enabled_defaults_plus_the_funding_flag():
             lane["execution_position"], lane["weight"], lane["conditions"]) == (
         "strategy_swing", "run_once", "pre", 10, 1.0, {})
     assert lane["config"] == {**SWING_DEFAULTS, "strategy_swing_enabled": True,
-                              "backtest_credit_pending_sell_proceeds": True}
+                              "backtest_credit_pending_sell_proceeds": True,
+                              "backtest_credit_sell_proceeds_enabled": True}
     # Only the swing lane: another lane's close-filled sell of a bracketed
     # symbol would run before a same-session stop in the simulator.
     assert s.lab_payload() == {"name": s.LAB_DOC_NAME, "strategies": [lane]}
     paper = s.paper_payload()["strategies"]
     assert [l["strategy"] for l in paper] == ["strategy_swing", "strategy_wheel"]
     assert "backtest_credit_pending_sell_proceeds" not in paper[0]["config"]
+    assert "backtest_credit_sell_proceeds_enabled" not in paper[0]["config"]
     assert paper[1]["config"] == {**WHEEL_DEFAULTS, "strategy_wheel_enabled": True}
     assert paper[1]["execution_position"] == 20
 
@@ -104,7 +115,9 @@ def test_the_lab_watchlist_is_every_member_visible_in_the_window(store):
 def test_a_fresh_lab_is_created_with_daily_bars_and_the_watchlist(store):
     s = _setup()
     members(store, [("2021-01-04", ["AAPL", "MSFT"])])
-    api = Api(instances={"strategy-eb": {"id": "strategy-eb", "brokerage_id": "brk-lab"}})
+    api = Api(instances={**LIVE,
+                         "strategy-eb": {"id": "strategy-eb", "brokerage_id": "brk-lab"}},
+              brokerages=BROKERAGES)
     assert s.main(["--start", "2021-07-01", "--end", "2021-12-31"], call=api,
                   store=store) == 0
     ((_, doc),) = api.calls("POST", "/strategies")
@@ -168,12 +181,6 @@ def test_a_duplicate_stock_is_tolerated_and_a_real_failure_is_not(store):
 
 
 # -- --paper -------------------------------------------------------------------------
-
-LIVE = {"alpaca-main": {"id": "alpaca-main", "brokerage_id": "brk-live",
-                        "granularity_time_increment": 60}}
-BROKERAGES = [{"id": "brk-live", "alpaca_paper": False},
-              {"id": "brk-paper", "alpaca_paper": True},
-              {"id": "brk-unknown"}]
 
 
 def test_paper_creates_both_lanes_on_a_proven_paper_brokerage(store):
@@ -294,3 +301,56 @@ def test_m7_dates_are_validated(store, argv):
     with pytest.raises(SystemExit) as bad:
         s.main(argv, call=Api(), store=store)
     assert bad.value.code == 2
+
+
+# -- FW-str minor (c): the lab never links a live brokerage -------------------------
+
+@pytest.mark.parametrize("eb_brokerage, needle", [
+    ("brk-eb-live", "not marked as an Alpaca paper account"),   # a live account
+    ("brk-live", "alpaca-main"),                                 # the real-money one
+    ("brk-unknown", "not marked as an Alpaca paper account"),   # paper not declared
+    ("brk-missing", "not found"),
+])
+def test_a_fresh_lab_never_copies_a_brokerage_it_cannot_prove_is_paper(
+        store, capsys, eb_brokerage, needle):
+    """strategies-review M-8: the lab cloned strategy-eb's brokerage. If that
+    is a live account, the lab instance of a swing document is linked to real
+    money. Created with none instead, and the operator is told why."""
+    s = _setup()
+    members(store, [("2021-01-04", ["AAPL"])])
+    api = Api(instances={**LIVE, "strategy-eb": {"id": "strategy-eb",
+                                                 "brokerage_id": eb_brokerage}},
+              brokerages=BROKERAGES)
+    assert s.main(["--start", "2021-07-12", "--end", "2021-12-31"], call=api,
+                  store=store) == 0
+    body = api.instances[s.LAB_INSTANCE_ID]
+    assert body["brokerage_id"] is None
+    for _m, _p, written in _writes(api):
+        assert eb_brokerage not in repr(written) and "brk-live" not in repr(written)
+    out = capsys.readouterr().out
+    assert "NO brokerage" in out and needle in out and "paper" in out
+
+
+def test_a_fresh_lab_without_a_readable_alpaca_main_links_no_brokerage(store, capsys):
+    s = _setup()
+    members(store, [("2021-01-04", ["AAPL"])])
+    api = Api(instances={"strategy-eb": {"id": "strategy-eb", "brokerage_id": "brk-lab"}},
+              brokerages=BROKERAGES)
+    assert s.main(["--start", "2021-07-12", "--end", "2021-12-31"], call=api,
+                  store=store) == 0
+    assert api.instances[s.LAB_INSTANCE_ID]["brokerage_id"] is None
+    assert "NO brokerage" in capsys.readouterr().out
+
+
+def test_an_existing_lab_on_a_live_brokerage_is_left_alone_and_flagged(store, capsys):
+    s = _setup()
+    members(store, [("2021-01-04", ["AAPL"])])
+    lab = {"id": s.LAB_INSTANCE_ID, "strategy_id": 1, "brokerage_id": "brk-eb-live"}
+    api = Api(docs=[{"id": 444, "name": s.LAB_DOC_NAME}],
+              instances={**LIVE, s.LAB_INSTANCE_ID: lab}, brokerages=BROKERAGES)
+    assert s.main(["--start", "2021-07-12", "--end", "2021-12-31"], call=api,
+                  store=store) == 0
+    assert api.instances[s.LAB_INSTANCE_ID]["brokerage_id"] == "brk-eb-live"
+    assert not any("brokerage" in repr(b) for _m, _p, b in _writes(api))
+    out = capsys.readouterr().out
+    assert "WARNING" in out and "brk-eb-live" in out and "paper" in out

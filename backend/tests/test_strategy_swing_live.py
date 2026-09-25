@@ -692,6 +692,20 @@ def test_g8b_the_scan_reads_staleness_through_the_public_accessor(live, monkeypa
     assert out["AAA"] == 1 and cache[live._SCAN_DONE_KEY] == "2026-06-01"
 
 
+@pytest.mark.parametrize("answer", ["not a dict", None, ["complete", True],
+                                    {"complete": True}])
+def test_g8b_an_unreadable_health_answer_holds_the_scan(live, monkeypatch, answer):
+    """G8b minor 4: a non-dict accessor answer (and minor 1: a dict with no
+    stale_since) is unknown health, so the scan decides nothing and retries."""
+    ai = scripted({"AAA": APPROVE, "CCC": REJECT, "DDD": REJECT})
+    monkeypatch.setattr(live.ai_analyst, "analyse", ai)
+    cache = {}
+    assert tick(live, MON_0920, HealthAccessor(answer), cache) == {}
+    assert ai.calls == [] and live._SCAN_DONE_KEY not in cache
+    out = tick(live, MON_0940, HealthAccessor({"complete": True, "stale_since": None}), cache)
+    assert out["AAA"] == 1 and cache[live._SCAN_DONE_KEY] == "2026-06-01"
+
+
 def test_fix_c_a_missing_vix_retries_until_the_scan_reads_it(live, monkeypatch):
     ai = scripted({"AAA": APPROVE, "CCC": REJECT, "DDD": REJECT})
     monkeypatch.setattr(live.ai_analyst, "analyse", ai)
@@ -825,3 +839,205 @@ def test_g8a_the_scan_passes_its_working_buys_to_the_outcome_pass(live, monkeypa
             NS(symbol="APH261002P00130000", side="buy")]         # a wheel buy-to-close
     tick(live, MON_0920, LiveAdapter(open_orders=book), {})
     assert seen and seen[0]["working"] == {"EEE"}
+
+
+# -- FW-str minor (d): no entries from a scan that first ran after the open ----------
+
+MON_1400 = datetime(2026, 6, 1, 18, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("first_tick", [MON_0940, MON_1400])
+def test_a_first_scan_tick_after_the_open_plans_exits_but_no_entries(
+        live, monkeypatch, first_tick):
+    """strategies-review M-6: an instance started (or restarted) after 09:30
+    scanned then and entered at intraday prices, with legs anchored on the
+    prior close. ST's cron only ever ran at 09:15."""
+    ai = scripted({"AAA": APPROVE, "CCC": APPROVE, "DDD": APPROVE})
+    monkeypatch.setattr(live.ai_analyst, "analyse", ai)
+    monkeypatch.setattr(live, "swing_indicators",
+                        lambda f, c: dict(IND, EEE=ind(104.0, rsi=72.0, rsi_prev=68.0)))
+    lines = []
+    monkeypatch.setattr(live, "_log", lambda msg, color="white": lines.append(msg))
+    held = LiveAdapter(positions={"EEE": (10, 100.0, 1_040.0)})
+    cache = {}
+    out = tick(live, first_tick, held, cache)
+    assert {s: d for s, d in out.items() if not s.startswith("_")} == {"EEE": -1}
+    assert out["_nexus_action_intents"] == {"EEE": "swing_rsi_exit"}
+    assert out["_nexus_executable_buys"] == []
+    assert cache[live._SCAN_DONE_KEY] == "2026-06-01"
+    assert ai.calls == [] and rows() == {}
+    late = [m for m in lines if "NO ENTRIES" in m]
+    assert len(late) == 1 and "09:30" in late[0]
+    assert [c for c, _ in live.sent].count("swing_run_summary") == 1
+    # The next session's pre-market scan enters as usual.
+    monkeypatch.setattr(live.ai_analyst, "analyse",
+                        scripted({"AAA": APPROVE, "CCC": REJECT, "DDD": REJECT}))
+    monkeypatch.setattr(live, "swing_indicators", lambda f, c: dict(IND))
+    assert tick(live, TUE_0920, LiveAdapter(), cache)["AAA"] == 1
+
+
+def test_a_pre_market_first_tick_that_was_not_ready_still_enters_later(live, monkeypatch):
+    """The rule reads the day's FIRST scan tick: a 09:20 scan held back
+    (positions, VIX) and prepared at 09:40 keeps its entries (fix a, fix c)."""
+    ai = scripted({"AAA": APPROVE, "CCC": REJECT, "DDD": REJECT})
+    monkeypatch.setattr(live.ai_analyst, "analyse", ai)
+    unready = LiveAdapter()
+    unready._positions_stale_since = 1_000.0
+    cache = {}
+    assert tick(live, MON_0920, unready, cache) == {}
+    assert tick(live, MON_0940, LiveAdapter(), cache)["AAA"] == 1
+
+
+def test_a_restart_after_the_open_keeps_the_first_tick_it_saw(live, monkeypatch):
+    """The first-tick stamp lives in the strategy cache, which survives a
+    restart; a cache that never saw the pre-market tick is late."""
+    ai = scripted({"AAA": APPROVE, "CCC": REJECT, "DDD": REJECT})
+    monkeypatch.setattr(live.ai_analyst, "analyse", ai)
+    monkeypatch.setattr(live.regime, "fetch_vix_close", lambda: None)
+    cache = {}
+    assert tick(live, MON_0920, LiveAdapter(), cache) == {}      # VIX retry
+    monkeypatch.setattr(live.regime, "fetch_vix_close", lambda: 15.0)
+    restarted = dict(cache)
+    assert tick(live, MON_0940, LiveAdapter(), restarted)["AAA"] == 1
+
+
+# -- FW-lo-I5 (sizing): cash that secures short puts is not the swing lane's ---------
+
+class PutBook(LiveAdapter):
+    """An account with a cash balance apart from its buying power, open short
+    puts and working sell-to-open orders, as the real adapter reports them."""
+
+    def __init__(self, *, cash, bp, puts=(), sto=(), health=None, **kw):
+        super().__init__(bp=bp, options=[
+            NS(symbol=f"XYZ261016P{int(strike * 1000):08d}", qty=-qty, option_type="put",
+               strike=strike, underlying="XYZ", expiry="2026-10-16")
+            for strike, qty in puts], open_orders=[
+            NS(symbol=f"QRS261016P{int(strike * 1000):08d}", side="sell", qty=qty,
+               filled_qty=0, position_intent="sell_to_open", asset_class="us_option",
+               order_class="simple")
+            for strike, qty in sto], **kw)
+        self.cash, self.health = cash, health
+
+    def refresh_cash(self):
+        return NS(cash=self.cash, buying_power=self.bp)
+
+    def get_cash(self):
+        return self.cash
+
+    def option_positions_health(self):
+        return dict(self.health or {"complete": True, "stale_since": None})
+
+
+def _entries(out):
+    return {s: out["_nexus_position_sizes"][s]["buy_cash"]
+            for s in out.get("_nexus_executable_buys", [])}
+
+
+def test_open_and_pending_put_collateral_comes_off_the_swing_budget(live, monkeypatch):
+    """live-orders-review I-5: the lane sized against buying power with no
+    deduction for short puts, so swing entries could spend the cash securing
+    them. $100k cash less a $40k open put and a $40k working sell-to-open
+    leaves $20k: AAA takes its $12,500, CCC the $7,500 left, DDD nothing."""
+    monkeypatch.setattr(live.ai_analyst, "analyse",
+                        scripted({"AAA": APPROVE, "CCC": APPROVE, "DDD": APPROVE}))
+    book = PutBook(cash=100_000.0, bp=100_000.0, puts=[(200.0, 2)], sto=[(100.0, 4)])
+    out = tick(live, MON_0920, book, {})
+    assert _entries(out) == {"AAA": 12_500.0, "CCC": 7_500.0}
+
+
+def test_with_puts_open_margin_buying_power_does_not_lift_the_budget(live, monkeypatch):
+    """Cash-secured means CASH: with puts open the budget is the smaller of
+    buying power and cash, less the collateral ($50k - $30k = $20k), never
+    the $200k margin figure less it."""
+    monkeypatch.setattr(live.ai_analyst, "analyse",
+                        scripted({"AAA": APPROVE, "CCC": APPROVE, "DDD": APPROVE}))
+    book = PutBook(cash=50_000.0, bp=200_000.0, puts=[(150.0, 2)])
+    out = tick(live, MON_0920, book, {})
+    assert _entries(out) == {"AAA": 12_500.0, "CCC": 7_500.0}
+
+
+def test_without_puts_the_budget_is_st_s_buying_power(live, monkeypatch):
+    monkeypatch.setattr(live.ai_analyst, "analyse",
+                        scripted({"AAA": APPROVE, "CCC": APPROVE, "DDD": APPROVE}))
+    book = PutBook(cash=5_000.0, bp=200_000.0)
+    out = tick(live, MON_0920, book, {})
+    assert _entries(out) == {"AAA": 12_500.0, "CCC": 12_500.0, "DDD": 12_500.0}
+
+
+def test_an_unreadable_option_book_refuses_entries_but_runs_exits(live, monkeypatch):
+    ai = scripted({"AAA": APPROVE, "CCC": APPROVE, "DDD": APPROVE})
+    monkeypatch.setattr(live.ai_analyst, "analyse", ai)
+    monkeypatch.setattr(live, "swing_indicators",
+                        lambda f, c: dict(IND, EEE=ind(104.0, rsi=72.0, rsi_prev=68.0)))
+    lines = []
+    monkeypatch.setattr(live, "_log", lambda msg, color="white": lines.append(msg))
+    book = PutBook(cash=100_000.0, bp=100_000.0, positions={"EEE": (10, 100.0, 1_040.0)},
+                   health={"complete": False, "stale_since": None})
+    cache = {}
+    out = tick(live, MON_0920, book, cache)
+    assert {s: d for s, d in out.items() if not s.startswith("_")} == {"EEE": -1}
+    assert ai.calls == [] and cache[live._SCAN_DONE_KEY] == "2026-06-01"
+    assert any("REFUSING ENTRIES" in m and "short puts" in m for m in lines)
+
+
+# -- FW-str minor (a): an entry that rounds to 0 whole shares holds nothing ----------
+
+class Quoted(LiveAdapter):
+    """An adapter whose latest trades (plan A-live get_latest_trades, the
+    price the broker sizes a whole-share entry at) are given."""
+
+    def __init__(self, trades, **kw):
+        super().__init__(**kw)
+        self.trades = dict(trades)
+
+    def get_latest_trades(self, symbols):
+        return {s: (self.trades[s], "2026-06-01T13:19:00+00:00")
+                for s in symbols if s in self.trades}
+
+
+QUARTER = dict(APPROVE, position_size_adjustment=0.25)
+
+
+def _small_book(monkeypatch, live):
+    # $10k equity: 12.5% is $1,250, 3 shares of a $400 name; the AI's 0.25
+    # size makes int(3 x 0.25) = 0, so ST's max(1, ...) asks for one share
+    # and the lane sends buy_cash = the $400 prior close.
+    monkeypatch.setattr(live, "swing_indicators", lambda f, c: dict(
+        IND, AAA=ind(400.0), BBB=ind(50.0)))
+    monkeypatch.setattr(live.ai_analyst, "analyse",
+                        scripted({"AAA": QUARTER, "BBB": APPROVE, "CCC": REJECT,
+                                  "DDD": REJECT}))
+
+
+def test_an_entry_that_floors_to_zero_shares_at_the_live_price_frees_its_slot_and_sector(
+        live, monkeypatch):
+    """strategies-review M-1: the broker buys floor(buy_cash / live price).
+    A pre-market price above the prior close floors the one-share entry to 0
+    and the broker refuses it -- while the lane had counted AAA's slot, its
+    technology sector and its buying power, and blocked BBB behind it."""
+    _small_book(monkeypatch, live)
+    lines = []
+    monkeypatch.setattr(live, "_log", lambda msg, color="white": lines.append(msg))
+    adapter = Quoted({"AAA": 404.0, "BBB": 50.5}, equity=10_000.0)
+    out = tick(live, MON_0920, adapter, {})
+    assert out["_nexus_executable_buys"] == ["BBB"]              # AAA's sector is free
+    assert out["_nexus_position_sizes"]["BBB"]["buy_cash"] == 1_250.0
+    r = rows()
+    assert r["AAA"]["status"] == "failed"
+    assert "rounds to 0" in r["AAA"]["decision_reason"]
+    assert r["BBB"]["status"] == "auto_approved"
+    assert any("AAA" in m and "rounds to 0" in m for m in lines)
+    assert "BUY AAA" not in [t for c, t in live.sent if c == "swing_entry"]
+
+
+@pytest.mark.parametrize("adapter", [
+    lambda: LiveAdapter(equity=10_000.0),                        # no live price: the close
+    lambda: Quoted({"AAA": 399.0, "BBB": 50.5}, equity=10_000.0),   # it still buys one
+])
+def test_an_entry_that_still_buys_a_share_keeps_st_s_one_share_floor(
+        live, monkeypatch, adapter):
+    _small_book(monkeypatch, live)
+    out = tick(live, MON_0920, adapter(), {})
+    assert out["_nexus_executable_buys"] == ["AAA"]              # BBB: AAA's sector
+    assert out["_nexus_position_sizes"]["AAA"]["buy_cash"] == 400.0
+    assert rows()["AAA"]["status"] == "auto_approved"
