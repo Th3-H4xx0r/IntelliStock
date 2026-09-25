@@ -228,6 +228,24 @@ def open_orders(emu):
     return working_orders(emu)
 
 
+def latest_trade_price(emu, symbol):
+    """The adapter's latest trade price for `symbol` (plan A-live
+    get_latest_trades, which the broker's approval path also prices a live
+    entry at), or None when the adapter has none or the read fails."""
+    reader = getattr(emu, "get_latest_trades", None)
+    if not callable(reader):
+        return None
+    sym = str(symbol).strip().upper()
+    try:
+        trades = reader([sym]) or {}
+    except Exception:
+        return None
+    entry = trades.get(sym) if isinstance(trades, dict) else None
+    price = entry[0] if isinstance(entry, (tuple, list)) and entry else entry
+    price = _finite(price)
+    return price if price is not None and price > 0 else None
+
+
 def _finite(value):
     try:
         v = float(value)

@@ -978,3 +978,66 @@ def test_an_unreadable_option_book_refuses_entries_but_runs_exits(live, monkeypa
     assert {s: d for s, d in out.items() if not s.startswith("_")} == {"EEE": -1}
     assert ai.calls == [] and cache[live._SCAN_DONE_KEY] == "2026-06-01"
     assert any("REFUSING ENTRIES" in m and "short puts" in m for m in lines)
+
+
+# -- FW-str minor (a): an entry that rounds to 0 whole shares holds nothing ----------
+
+class Quoted(LiveAdapter):
+    """An adapter whose latest trades (plan A-live get_latest_trades, the
+    price the broker sizes a whole-share entry at) are given."""
+
+    def __init__(self, trades, **kw):
+        super().__init__(**kw)
+        self.trades = dict(trades)
+
+    def get_latest_trades(self, symbols):
+        return {s: (self.trades[s], "2026-06-01T13:19:00+00:00")
+                for s in symbols if s in self.trades}
+
+
+QUARTER = dict(APPROVE, position_size_adjustment=0.25)
+
+
+def _small_book(monkeypatch, live):
+    # $10k equity: 12.5% is $1,250, 3 shares of a $400 name; the AI's 0.25
+    # size makes int(3 x 0.25) = 0, so ST's max(1, ...) asks for one share
+    # and the lane sends buy_cash = the $400 prior close.
+    monkeypatch.setattr(live, "swing_indicators", lambda f, c: dict(
+        IND, AAA=ind(400.0), BBB=ind(50.0)))
+    monkeypatch.setattr(live.ai_analyst, "analyse",
+                        scripted({"AAA": QUARTER, "BBB": APPROVE, "CCC": REJECT,
+                                  "DDD": REJECT}))
+
+
+def test_an_entry_that_floors_to_zero_shares_at_the_live_price_frees_its_slot_and_sector(
+        live, monkeypatch):
+    """strategies-review M-1: the broker buys floor(buy_cash / live price).
+    A pre-market price above the prior close floors the one-share entry to 0
+    and the broker refuses it -- while the lane had counted AAA's slot, its
+    technology sector and its buying power, and blocked BBB behind it."""
+    _small_book(monkeypatch, live)
+    lines = []
+    monkeypatch.setattr(live, "_log", lambda msg, color="white": lines.append(msg))
+    adapter = Quoted({"AAA": 404.0, "BBB": 50.5}, equity=10_000.0)
+    out = tick(live, MON_0920, adapter, {})
+    assert out["_nexus_executable_buys"] == ["BBB"]              # AAA's sector is free
+    assert out["_nexus_position_sizes"]["BBB"]["buy_cash"] == 1_250.0
+    r = rows()
+    assert r["AAA"]["status"] == "failed"
+    assert "rounds to 0" in r["AAA"]["decision_reason"]
+    assert r["BBB"]["status"] == "auto_approved"
+    assert any("AAA" in m and "rounds to 0" in m for m in lines)
+    assert "BUY AAA" not in [t for c, t in live.sent if c == "swing_entry"]
+
+
+@pytest.mark.parametrize("adapter", [
+    lambda: LiveAdapter(equity=10_000.0),                        # no live price: the close
+    lambda: Quoted({"AAA": 399.0, "BBB": 50.5}, equity=10_000.0),   # it still buys one
+])
+def test_an_entry_that_still_buys_a_share_keeps_st_s_one_share_floor(
+        live, monkeypatch, adapter):
+    _small_book(monkeypatch, live)
+    out = tick(live, MON_0920, adapter(), {})
+    assert out["_nexus_executable_buys"] == ["AAA"]              # BBB: AAA's sector
+    assert out["_nexus_position_sizes"]["AAA"]["buy_cash"] == 400.0
+    assert rows()["AAA"]["status"] == "auto_approved"

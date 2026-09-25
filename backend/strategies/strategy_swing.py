@@ -609,7 +609,7 @@ class StrategySwing:
                     if scan is not None:
                         cache[_SCAN_KEY] = scan
             if scan is not None:
-                self._score_queue(scan, session, iid, cfg, cache, deadline,
+                self._score_queue(scan, session, iid, cfg, emu, cache, deadline,
                                   decisions, sizes, intents)
                 if scan["cursor"] >= len(scan["queue"]):
                     cache[_SCAN_DONE_KEY] = session
@@ -765,7 +765,7 @@ class StrategySwing:
                 "counts": {"entered": 0, "pending": 0, "rejected": 0, "skipped": 0,
                            "ai_errors": 0}}
 
-    def _score_queue(self, scan, session, iid, cfg, cache, deadline,
+    def _score_queue(self, scan, session, iid, cfg, emu, cache, deadline,
                      decisions, sizes, intents):
         """paper_trader.py:626-756, one candidate at a time inside the tick
         budget. One failure skips its candidate (fix 5)."""
@@ -815,14 +815,14 @@ class StrategySwing:
             scan["cursor"] += 1
             try:
                 self._consider(item, scan, session, iid, cfg, role, gate, sector_of,
-                               client, cache, decisions, sizes, intents)
+                               client, emu, cache, decisions, sizes, intents)
             except Exception as exc:
                 scan["counts"]["ai_errors"] += 1
                 _log(f"StrategySwing {session} | {item['symbol']}: skipped after "
                      f"{type(exc).__name__}: {exc} — the scan continues (fix 5)", "yellow")
 
     def _consider(self, item, scan, session, iid, cfg, role, gate, sector_of, client,
-                  cache, decisions, sizes, intents):
+                  emu, cache, decisions, sizes, intents):
         symbol, ind = item["symbol"], item["ind"]
         active = set(scan["active"])
         if symbol in active:
@@ -894,13 +894,19 @@ class StrategySwing:
         context = {k: result.get(k) for k in ("earnings_days", "sector_etf", "sector_rsi",
                                               "news_summary") if k in result}
 
-        def record(status):
+        def record(status, reason=None):
             if existing is None:
-                signals_store.insert_signal(signals_store.new_signal(
+                doc = signals_store.new_signal(
                     instance_id=iid, lane="swing", symbol=symbol, session=session,
                     score=score, recommendation=rec, reasoning=result.get("reasoning"),
                     key_risks=result.get("key_risks"), size_adjustment=adj,
-                    proposal=proposal, status=status, context=context))
+                    proposal=proposal, status=status, context=context)
+                if reason:
+                    doc["decision_reason"] = reason
+                signals_store.insert_signal(doc)
+            elif reason:
+                signals_store.update_signal(sid, {"status": status,
+                                                  "decision_reason": reason})
 
         if rec == "reject":
             record("ai_rejected")
@@ -929,20 +935,33 @@ class StrategySwing:
         if existing is not None and existing.get("status") != "auto_approved":
             return          # the operator decided it, or it already failed
         shares = max(1, int(base_shares * adj))
+        # The engine sizes a live whole-share bracket as floor(buy_cash / live
+        # price) and reads no share count from the hint (plan A-live). buy_cash
+        # is ST's allocation times the AI size adjustment, never below one
+        # share at the prior close (ST's max(1, ...)).
+        buy_cash = round(max(use * adj, ind["close"]), 2)
+        emitted = (cache.get(_EMITTED_KEY) or {})
+        sent = emitted.get("session") == session and symbol in (emitted.get("entries") or {})
+        live_px = None if sent else account.latest_trade_price(emu, symbol)
+        if live_px is not None and math.floor(buy_cash / live_px + 1e-9) < 1:
+            # FW-str minor (a): the broker would floor this to 0 shares and
+            # refuse it. It holds no slot, sector or buying power, so a later
+            # candidate may take them.
+            why = (f"the share count rounds to 0: ${buy_cash:,.2f} buys no whole share at "
+                   f"the live ${live_px:,.2f} (prior close ${ind['close']:,.2f})")
+            _log(f"  {symbol}: Skipped ({why}) — its slot and sector stay free")
+            record("failed", why)
+            scan["counts"]["skipped"] += 1
+            return
         record("auto_approved")
         scan["buying_power"] -= shares * ind["close"]
         scan["entries_placed"] += 1
         scan["active"].append(symbol)            # fix 4: the sector set follows each buy
         scan["counts"]["entered"] += 1
-        emitted = (cache.get(_EMITTED_KEY) or {})
-        if emitted.get("session") == session and symbol in (emitted.get("entries") or {}):
+        if sent:
             return          # already sent before a restart; the broker holds it
         decisions[symbol] = 1
-        # The engine sizes a live whole-share bracket as floor(buy_cash / live
-        # price) and reads no share count from the hint (plan A-live). buy_cash
-        # is ST's allocation times the AI size adjustment, never below one
-        # share at the prior close (ST's max(1, ...)).
-        sizes[symbol] = {"buy_cash": round(max(use * adj, ind["close"]), 2),
+        sizes[symbol] = {"buy_cash": buy_cash,
                          "bracket": {"take_profit_price": target_price,
                                      "stop_loss_price": stop_price},
                          "whole_shares": True, "fill_at_next_open": True}
