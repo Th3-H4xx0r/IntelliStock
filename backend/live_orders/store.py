@@ -15,6 +15,7 @@ from .types import (
     OrderIntent,
     OrderSide,
     OrderSource,
+    SWING_ROW_DEFAULTS,
     TERMINAL_LIFECYCLE_STATES,
 )
 
@@ -122,7 +123,7 @@ class AppendResult:
 
 
 def _intent_to_row(intent: OrderIntent) -> dict:
-    return {
+    row = {
         "account_id": intent.account_id,
         "instance_id": intent.instance_id,
         "source": intent.source.value,
@@ -147,6 +148,19 @@ def _intent_to_row(intent: OrderIntent) -> dict:
             else None
         ),
     }
+    # swing-port: a new field is written only when it differs from its
+    # default, so an EB row keeps exactly the keys above (pinned in
+    # tests/test_swing_live_types.py).
+    for name, default in SWING_ROW_DEFAULTS:
+        value = getattr(intent, name)
+        if value != default:
+            row[name] = str(value) if isinstance(value, Decimal) else value
+    return row
+
+
+def _row_decimal(row: Mapping, name: str) -> Optional[Decimal]:
+    value = row.get(name)
+    return Decimal(str(value)) if value is not None else None
 
 
 def _intent_from_row(row: Mapping) -> OrderIntent:
@@ -174,6 +188,19 @@ def _intent_from_row(row: Mapping) -> OrderIntent:
             if row.get("reference_price") is not None
             else None
         ),
+        # swing-port: absent keys are the defaults an EB row was written with.
+        asset_class=row.get("asset_class", "us_equity"),
+        order_class=row.get("order_class"),
+        take_profit_price=_row_decimal(row, "take_profit_price"),
+        stop_loss_price=_row_decimal(row, "stop_loss_price"),
+        position_intent=row.get("position_intent"),
+        contract_multiplier=int(row.get("contract_multiplier", 1)),
+        underlying=row.get("underlying"),
+        option_type=row.get("option_type"),
+        strike=_row_decimal(row, "strike"),
+        expiry=row.get("expiry"),
+        parent_client_order_id=row.get("parent_client_order_id"),
+        broker_client_order_id=row.get("broker_client_order_id"),
     )
 
 

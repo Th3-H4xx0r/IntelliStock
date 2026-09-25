@@ -26,6 +26,7 @@ from .store import (
     OrderLifecycleStore,
 )
 from .types import (
+    BRACKET_LEG,
     BrokerOrderEvent,
     ConfirmedFill,
     DependencySnapshot,
@@ -41,6 +42,7 @@ from .types import (
 __all__ = [
     "AppendResult",
     "AuthoritativeBrokerSnapshot",
+    "BRACKET_LEG",
     "BrokerOrderEvent",
     "BrokerOrderSnapshot",
     "BrokerPositionSnapshot",

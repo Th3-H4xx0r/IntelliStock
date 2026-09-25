@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Optional
@@ -30,6 +30,49 @@ class OrderSource(str, Enum):
     MANUAL = "manual"
     RISK_EXIT = "risk_exit"
     RESIDUAL_SLEEVE = "residual_sleeve"
+    # swing-port: a reduce-only child leg of a bracket parent, registered from
+    # the parent's nested legs so a leg fill resolves to a known record.
+    BRACKET_LEG = "bracket_leg"
+    # swing-port: a broker-originated fill with no order behind it (an option
+    # assignment adds or removes the underlying's shares).
+    OPTION_ACTIVITY = "option_activity"
+
+
+#: The interfaces contract's name for the bracket-leg lifecycle source.
+BRACKET_LEG = OrderSource.BRACKET_LEG.value
+
+#: swing-port value sets.
+ASSET_CLASSES = ("us_equity", "us_option")
+POSITION_INTENTS = ("buy_to_open", "buy_to_close", "sell_to_open", "sell_to_close")
+_POSITION_INTENT_SIDE = {
+    "buy_to_open": "buy",
+    "buy_to_close": "buy",
+    "sell_to_open": "sell",
+    "sell_to_close": "sell",
+}
+#: Sources whose rows are keyed by an id the BROKER minted, not by our hash.
+_BROKER_KEYED_SOURCES = frozenset({"bracket_leg", "option_activity"})
+#: (field, default). A field joins the identity dict only when it differs from
+#: this default -- which is what keeps every stored EB row on its existing key.
+_SWING_IDENTITY_DEFAULTS = (
+    ("asset_class", "us_equity"),
+    ("order_class", None),
+    ("position_intent", None),
+    ("contract_multiplier", 1),
+    ("underlying", None),
+    ("option_type", None),
+    ("strike", None),
+    ("expiry", None),
+    ("parent_client_order_id", None),
+    ("broker_client_order_id", None),
+)
+#: The stored row carries the identity fields plus the two leg prices. The leg
+#: prices are row-only: they are sizing, like limit_price, and must never
+#: re-key a re-emitted entry.
+SWING_ROW_DEFAULTS = _SWING_IDENTITY_DEFAULTS + (
+    ("take_profit_price", None),
+    ("stop_loss_price", None),
+)
 
 
 class LifecycleState(str, Enum):
@@ -103,6 +146,121 @@ def _session_date(value: datetime) -> str:
         return value.astimezone(timezone.utc).strftime("%Y-%m-%d")
 
 
+def _optional_text(value, *, case: str = "") -> Optional[str]:
+    """A stripped string, or None for None or blank; ``case`` folds it."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if case == "upper":
+        text = text.upper()
+    elif case == "lower":
+        text = text.lower()
+    return text or None
+
+
+def _swing_fields(
+    intent, *, source, side, quantity, order_type, tif, extended_hours
+) -> dict:
+    """Normalize and validate the swing-port fields of one ``OrderIntent``.
+
+    Defaults pass through untouched, so an EB intent comes back exactly as the
+    defaults and nothing about its identity or its stored row changes.
+    """
+    asset_class = _optional_text(intent.asset_class, case="lower") or "us_equity"
+    if asset_class not in ASSET_CLASSES:
+        raise ValueError(f"unsupported asset_class: {intent.asset_class!r}")
+    order_class = _optional_text(intent.order_class, case="lower")
+    if order_class not in (None, "bracket"):
+        raise ValueError(f"unsupported order_class: {intent.order_class!r}")
+    take_profit = _optional_decimal(intent.take_profit_price, "take_profit_price")
+    stop_loss = _optional_decimal(intent.stop_loss_price, "stop_loss_price")
+    for name, value in (
+        ("take_profit_price", take_profit),
+        ("stop_loss_price", stop_loss),
+    ):
+        if value is not None and value <= 0:
+            raise ValueError(f"{name} must be > 0")
+    position_intent = _optional_text(intent.position_intent, case="lower")
+    if position_intent is not None and position_intent not in POSITION_INTENTS:
+        raise ValueError(f"unsupported position_intent: {intent.position_intent!r}")
+    raw_multiplier = intent.contract_multiplier
+    if isinstance(raw_multiplier, bool):
+        raise TypeError("contract_multiplier must be an integer")
+    try:
+        multiplier = int(raw_multiplier)
+    except (TypeError, ValueError) as exc:
+        raise TypeError("contract_multiplier must be an integer") from exc
+    if multiplier != raw_multiplier:
+        raise ValueError("contract_multiplier must be an integer")
+    underlying = _optional_text(intent.underlying, case="upper")
+    option_type = _optional_text(intent.option_type, case="lower")
+    strike = _optional_decimal(intent.strike, "strike")
+    expiry = _optional_text(intent.expiry)
+    parent = _optional_text(intent.parent_client_order_id)
+    broker_key = _optional_text(intent.broker_client_order_id)
+    whole = quantity == quantity.to_integral_value()
+
+    if order_class == "bracket":
+        if side is not OrderSide.BUY:
+            raise ValueError("a bracket parent must be a BUY")
+        if order_type != "market" or tif != "gtc" or extended_hours:
+            raise ValueError("a bracket parent is a regular-hours market GTC order")
+        if not whole:
+            raise ValueError("a bracket parent needs whole shares")
+        if take_profit is None or stop_loss is None:
+            raise ValueError("a bracket needs take_profit_price and stop_loss_price")
+        if stop_loss >= take_profit:
+            raise ValueError("stop_loss_price must be below take_profit_price")
+    if asset_class == "us_option":
+        if position_intent is None:
+            raise ValueError("an option order needs position_intent")
+        if _POSITION_INTENT_SIDE[position_intent] != side.value:
+            raise ValueError("position_intent contradicts side")
+        if multiplier != 100:
+            raise ValueError("an option contract_multiplier must be 100")
+        if not whole:
+            raise ValueError("options trade whole contracts")
+        if extended_hours:
+            raise ValueError("options do not trade extended hours")
+        if order_class is not None:
+            raise ValueError("an option order cannot be a bracket")
+        if underlying is None:
+            raise ValueError("an option order needs underlying")
+        if option_type not in ("put", "call"):
+            raise ValueError("option_type must be put or call")
+        if strike is None or strike <= 0:
+            raise ValueError("an option order needs strike > 0")
+        try:
+            date.fromisoformat(expiry or "")
+        except ValueError as exc:
+            raise ValueError("expiry must be YYYY-MM-DD") from exc
+    else:
+        if position_intent is not None:
+            raise ValueError("position_intent is for options only")
+        if multiplier != 1:
+            raise ValueError("an equity contract_multiplier must be 1")
+        if any(value is not None for value in (underlying, option_type, strike, expiry)):
+            raise ValueError("underlying/option_type/strike/expiry are for options only")
+    if broker_key is not None and source.value not in _BROKER_KEYED_SOURCES:
+        raise ValueError(
+            "broker_client_order_id is reserved for bracket legs and option activity"
+        )
+    return {
+        "asset_class": asset_class,
+        "order_class": order_class,
+        "take_profit_price": take_profit,
+        "stop_loss_price": stop_loss,
+        "position_intent": position_intent,
+        "contract_multiplier": multiplier,
+        "underlying": underlying,
+        "option_type": option_type,
+        "strike": strike,
+        "expiry": expiry,
+        "parent_client_order_id": parent,
+        "broker_client_order_id": broker_key,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class OrderIntent:
     """One immutable request to change live stock exposure."""
@@ -124,6 +282,21 @@ class OrderIntent:
     tif: str = "day"
     extended_hours: bool = False
     reference_price: Optional[Decimal] = None
+    # swing-port (interfaces doc sections 2 and 9). Each field joins the
+    # identity only when it differs from its default, so stored EB rows keep
+    # their keys; take_profit_price and stop_loss_price never join it.
+    asset_class: str = "us_equity"
+    order_class: Optional[str] = None
+    take_profit_price: Optional[Decimal] = None
+    stop_loss_price: Optional[Decimal] = None
+    position_intent: Optional[str] = None
+    contract_multiplier: int = 1
+    underlying: Optional[str] = None
+    option_type: Optional[str] = None
+    strike: Optional[Decimal] = None
+    expiry: Optional[str] = None
+    parent_client_order_id: Optional[str] = None
+    broker_client_order_id: Optional[str] = None
     identity_payload: str = field(init=False)
     idempotency_key: str = field(init=False)
 
@@ -180,6 +353,15 @@ class OrderIntent:
         reference_price = _optional_decimal(self.reference_price, "reference_price")
         if reference_price is not None and reference_price <= 0:
             raise ValueError("reference_price must be > 0")
+        swing = _swing_fields(
+            self,
+            source=source,
+            side=side,
+            quantity=quantity,
+            order_type=order_type,
+            tif=tif,
+            extended_hours=extended_hours,
+        )
 
         for name, value in (
             ("account_id", account_id),
@@ -199,6 +381,7 @@ class OrderIntent:
             ("tif", tif),
             ("extended_hours", extended_hours),
             ("reference_price", reference_price),
+            *swing.items(),
         ):
             object.__setattr__(self, name, value)
 
@@ -264,20 +447,37 @@ class OrderIntent:
             "session_date": _session_date(decision_at),
             "retry_ordinal": retry_ordinal,
         }
-        if side is not OrderSide.BUY:
+        # swing-port: an option SELL (sell_to_open) is keyed on the SESSION like
+        # a buy, never on the minute: spec section 9 fix 1, a rerun must not
+        # mint a second put of the same contract. Equity sells are unchanged.
+        if side is not OrderSide.BUY and swing["asset_class"] == "us_equity":
             identity["decision_minute"] = decision_at.replace(
                 second=0, microsecond=0
             ).isoformat(timespec="minutes")
             identity["quantity"] = _normalized_decimal(quantity)
             identity["reduce_only"] = bool(self.reduce_only)
+        for name, default in _SWING_IDENTITY_DEFAULTS:
+            value = swing[name]
+            if value != default:
+                identity[name] = (
+                    _normalized_decimal(value)
+                    if isinstance(value, Decimal)
+                    else value
+                )
         payload = json.dumps(identity, sort_keys=True, separators=(",", ":"))
         digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-        # Preserve the existing clean-room classifier contract: every
-        # strategy-owned WAL row begins with this instance's 8-char prefix.
-        instance_prefix = re.sub(r"[^A-Za-z0-9]", "", instance_id)[:8] or "x"
-        retry_suffix = f"-{retry_ordinal}"
-        digest_room = 48 - len(instance_prefix) - 1 - len(retry_suffix)
-        key = f"{instance_prefix}-{digest[:digest_room]}{retry_suffix}"
+        if swing["broker_client_order_id"] is not None:
+            # A bracket leg's client order id is minted by Alpaca, and an
+            # assignment has no order at all: the row must carry the id the
+            # broker reports, or no event could ever resolve to it.
+            key = swing["broker_client_order_id"]
+        else:
+            # Preserve the existing clean-room classifier contract: every
+            # strategy-owned WAL row begins with this instance's 8-char prefix.
+            instance_prefix = re.sub(r"[^A-Za-z0-9]", "", instance_id)[:8] or "x"
+            retry_suffix = f"-{retry_ordinal}"
+            digest_room = 48 - len(instance_prefix) - 1 - len(retry_suffix)
+            key = f"{instance_prefix}-{digest[:digest_room]}{retry_suffix}"
         object.__setattr__(self, "identity_payload", payload)
         object.__setattr__(self, "idempotency_key", key)
 
@@ -339,6 +539,15 @@ class DependencySnapshot:
     max_control_age: timedelta = timedelta(seconds=60)
     max_clock_skew: timedelta = timedelta(seconds=5)
     max_reference_price_deviation: Decimal = Decimal("0.001")
+    # swing-port (options branch of the gate). Every default is the equity
+    # snapshot EB builds today; only an option snapshot sets these.
+    asset_class: str = "us_equity"
+    regular_session_open: Optional[bool] = None
+    account_equity: Optional[Decimal] = None
+    open_short_put_collateral: Optional[Decimal] = None
+    pending_sell_to_open_collateral: Decimal = Decimal("0")
+    underlying_put_collateral: Optional[Decimal] = None
+    max_underlying_collateral_fraction: Decimal = Decimal("0.25")
 
     def __post_init__(self) -> None:
         health_fields = (
@@ -388,8 +597,42 @@ class DependencySnapshot:
             self.max_reference_price_deviation,
             "max_reference_price_deviation",
         )
-        if position_quantity < 0:
+        asset_class = _optional_text(self.asset_class, case="lower") or "us_equity"
+        if asset_class not in ASSET_CLASSES:
+            raise ValueError(f"unsupported asset_class: {self.asset_class!r}")
+        # swing-port: a short option is a negative position. Nothing else may
+        # be one; the equity book is long-only.
+        if position_quantity < 0 and asset_class != "us_option":
             raise ValueError("position_quantity must be >= 0")
+        account_equity = _optional_decimal(self.account_equity, "account_equity")
+        open_short_put_collateral = _optional_decimal(
+            self.open_short_put_collateral, "open_short_put_collateral"
+        )
+        pending_sell_to_open_collateral = _decimal(
+            self.pending_sell_to_open_collateral,
+            "pending_sell_to_open_collateral",
+        )
+        underlying_put_collateral = _optional_decimal(
+            self.underlying_put_collateral, "underlying_put_collateral"
+        )
+        max_underlying_collateral_fraction = _decimal(
+            self.max_underlying_collateral_fraction,
+            "max_underlying_collateral_fraction",
+        )
+        for name, value in (
+            ("open_short_put_collateral", open_short_put_collateral),
+            ("pending_sell_to_open_collateral", pending_sell_to_open_collateral),
+            ("underlying_put_collateral", underlying_put_collateral),
+        ):
+            if value is not None and value < 0:
+                raise ValueError(f"{name} must be >= 0")
+        if not Decimal("0") < max_underlying_collateral_fraction <= Decimal("1"):
+            raise ValueError("max_underlying_collateral_fraction must be in (0, 1]")
+        regular_session_open = (
+            None
+            if self.regular_session_open is None
+            else bool(self.regular_session_open)
+        )
         if available_cash < 0:
             raise ValueError("available_cash must be >= 0")
         if max_order_notional is not None and max_order_notional <= 0:
@@ -446,6 +689,16 @@ class DependencySnapshot:
                 frozenset(str(value) for value in self.open_order_idempotency_keys),
             ),
             ("authorized_sources", sources),
+            ("asset_class", asset_class),
+            ("regular_session_open", regular_session_open),
+            ("account_equity", account_equity),
+            ("open_short_put_collateral", open_short_put_collateral),
+            ("pending_sell_to_open_collateral", pending_sell_to_open_collateral),
+            ("underlying_put_collateral", underlying_put_collateral),
+            (
+                "max_underlying_collateral_fraction",
+                max_underlying_collateral_fraction,
+            ),
         ):
             object.__setattr__(self, name, value)
 
@@ -589,6 +842,9 @@ class ConfirmedFill:
     incremental_fees: Decimal
     position_delta: Decimal
     cash_delta: Decimal
+    # swing-port: a contract fill moves `quantity x price x multiplier` cash.
+    asset_class: str = "us_equity"
+    contract_multiplier: int = 1
 
     def __post_init__(self) -> None:
         quantity = _decimal(
@@ -605,3 +861,13 @@ class ConfirmedFill:
         object.__setattr__(self, "incremental_fees", fees)
         object.__setattr__(self, "position_delta", position_delta)
         object.__setattr__(self, "cash_delta", cash_delta)
+        asset_class = _optional_text(self.asset_class, case="lower") or "us_equity"
+        if asset_class not in ASSET_CLASSES:
+            raise ValueError(f"unsupported asset_class: {self.asset_class!r}")
+        if isinstance(self.contract_multiplier, bool):
+            raise TypeError("contract_multiplier must be an integer")
+        multiplier = int(self.contract_multiplier)
+        if multiplier != self.contract_multiplier or multiplier < 1:
+            raise ValueError("contract_multiplier must be an integer >= 1")
+        object.__setattr__(self, "asset_class", asset_class)
+        object.__setattr__(self, "contract_multiplier", multiplier)

@@ -266,3 +266,49 @@ The `LiveCommands` type `submit_order` payload is `{"source": "swing_approval", 
    - `multiplier` is 100 for options.
    - `last_price`, `market_value`, `unrealized_pnl` and `unrealized_pnl_pct` may be `null` when Alpaca has no `current_price`.
    - `recent_trades` rows carry **no** `asset_class`, so the UI falls back to the OCC symbol shape for them.
+
+
+## 10. Additions from plan A-live
+
+Copied from plan A-live's "Contract additions" (Task 1 Step 0). Three items carry the controller's pre-flight rulings of 2026-09-24, marked **Ruling F1**, **Ruling F4** and **Ruling F17**; everything else is verbatim.
+
+1. `OrderIntent.parent_client_order_id: Optional[str] = None` and `OrderIntent.broker_client_order_id: Optional[str] = None`. When `broker_client_order_id` is set, it IS the `idempotency_key`; the hash is not used. Only sources `bracket_leg` and `option_activity` may set it.
+2. Identity rules the contract left open:
+   - `take_profit_price` and `stop_loss_price` never join the identity dict. They are sizing, like `limit_price`, and a re-emitted entry must not re-key.
+   - Every other new field joins the identity only when it differs from its default.
+   - A `us_option` SELL is keyed on the session: no `decision_minute`, `quantity` or `reduce_only`. This is spec section 9 fix 1: a rerun cannot mint a second sell-to-open of the same contract in one session.
+   - `take_profit_price`, `stop_loss_price` and `strike` are normalized to `Decimal` on construction (callers may pass floats), like `limit_price`.
+3. `OrderSource.BRACKET_LEG = "bracket_leg"` (the contract's `BRACKET_LEG`, also exported as the module constant `live_orders.BRACKET_LEG`) and `OrderSource.OPTION_ACTIVITY = "option_activity"` (option assignment fills).
+4. `DependencySnapshot` gains `asset_class: str = "us_equity"`, `regular_session_open: Optional[bool] = None`, `account_equity: Optional[Decimal] = None`, `open_short_put_collateral: Optional[Decimal] = None` (None = unknown), `pending_sell_to_open_collateral: Decimal = 0`, `underlying_put_collateral: Optional[Decimal] = None` (existing short puts plus pending sell-to-open puts on the intent's underlying, this intent excluded) and `max_underlying_collateral_fraction: Decimal = 0.25`.
+5. `ConfirmedFill` gains `asset_class: str = "us_equity"` and `contract_multiplier: int = 1`.
+6. `OrderRef` also gains `order_type: Optional[str] = None`, `limit_price: Optional[float] = None` and `stop_price: Optional[float] = None`. That is how a take-profit leg (limit) is told from a stop-loss leg (stop).
+7. `PositionDTO` gains `asset_class`, `side`, `unrealized_pl`, `unrealized_plpc`, `current_price`, `underlying`, `option_type`, `strike` and `expiry` (all `Optional`, default None) and `multiplier: int = 1`. They are filled only for option rows. **Ruling F4:** `option_type` (`"put"` or `"call"`, from Alpaca's contract fields, never an OCC-symbol parse) is on every option position: `OptionPositionDTO.option_type` (section 3) and `PositionDTO.option_type`.
+8. `broker_adapters.base`:
+   - `BrokerAdapter.get_option_chain(underlying, *, option_type=None, expiration_gte=None, expiration_lte=None, strike_gte=None, strike_lte=None) -> dict[str, OptionSnapshotDTO]`. Spec 6.1 lists it; the contract omitted it.
+   - The pure helpers `is_bracket_child_order(order) -> bool` and `is_risk_reducing_order(order) -> bool`.
+     **Ruling F1:** `is_risk_reducing_order` is True for a bracket child leg (`is_bracket_child_order`: a multi-leg `order_class`) or for an order whose `asset_class` is `us_option` AND whose `position_intent` is `buy_to_close` or `sell_to_close`. A stock order's `position_intent` is ignored: Alpaca may tag stock orders with one, and a halt or kill rung on alpaca-main must keep cancelling EB's working sells exactly as today.
+   - `get_daily_bars(symbols, days)` takes `days` as a **calendar-day lookback**.
+9. `broker_adapters.errors.OptionsNotPermitted(BrokerError)`, which is definitive and non-retryable.
+10. `AlpacaAdapter` gains `option_contract_meta(symbol) -> Optional[OptionContractDTO]` (cached contract lookup) and `_option_positions_complete: bool`. It also gains `cancel_orders_confirmed(order_ids, timeout_s=10.0, *, poll_interval_s=0.5, sleep=time.sleep, clock=time.monotonic)`; the extra keywords are test hooks. It returns **False if any order ends filled or partially filled**, because the position changed under the caller.
+11. `LiveOrderService(..., legs_lookup=None)` plus:
+    - `register_bracket_legs(parent_intent, parent_reference) -> tuple[LifecycleRecord, ...]`
+    - `ensure_bracket_legs() -> int`
+    - `record_external_fill(intent, *, broker_order_id, quantity, price, occurred_at, reason="") -> EventApplication`
+    - the module function `live_orders.service.bracket_leg_intent(parent, leg) -> OrderIntent`
+12. `broker.py` module functions:
+    - `_lane_enabled`, `_build_bracket_intent`, `_cancel_bracket_legs_confirmed`
+    - `_build_option_intent`, `_refresh_option_quote`, `_live_option_quotes` (dict)
+    - `_live_option_dependency_snapshot`, `_pending_sell_to_open_collateral`, `_execute_option_intents`
+    - `_poll_option_activities`, `_wheel_options_refusal`, `_execute_swing_approval`, `_approval_live_price`, `_lane_config`, `_option_position_payload`
+13. Strategy-cache keys that the engine writes under `_strategy_cache["strategy_wheel"]`:
+    - `_engine_option_activity_cursor`, shaped `{"after": "YYYY-MM-DD", "seen": [ids]}`
+    - `_engine_wheel_assignments`, a list of `{"activity_id", "contract", "underlying", "shares", "side", "strike", "date"}`. The wheel lane (plan B) reads this list to know which shares it owns.
+    - The assignment notification goes through plan B's `swing_trader.notify.notify_wheel_assignment(instance_id, *, symbol=<underlying>, qty=<shares>, price=<strike>, date="YYYY-MM-DD")` when that module is importable, and through `notifications.notify(category="wheel_assignment", ...)` when it is not.
+14. For every option order that carries a `signal_id`, the engine writes `{"status": "submitted"|"failed", "order_client_id"}` back through `swing_trader.signals_store.update_signal`. This covers strategy-emitted orders, not only approvals.
+15. Engine refusal note for plan B: the engine never retries an exit it deferred. That happens when a bracket-leg cancel did not confirm, or a sell floored to zero. **The swing lane must re-emit its RSI exit on later ticks while the position is still held.**
+16. Live-state position rows (interfaces section 9, item 4; the coordinator pinned this on 2026-09-24):
+    - **Option rows** written by `broker.py`'s LiveState snapshot, and **every row** served by `live_broker_fetch`, carry `asset_class`, `side` (`"long"` or `"short"`), `multiplier` (100 for options, 1 for equities), `underlying`, `strike` and `expiry`. `qty` is signed. **Ruling F4:** option rows also carry `option_type` (`"put"` or `"call"`), so the UI reads the contract fields instead of parsing the OCC symbol.
+    - `last_price`, `market_value`, `unrealized_pnl` and `unrealized_pnl_pct` are `null` when Alpaca gives no value. They are never invented as 0.
+    - **Equity rows written by `broker.py` keep their exact pre-change shape**, with none of these keys, because that code runs inside EB's real-money process every few seconds. The UI must read a missing `asset_class` as `"us_equity"`, a missing `multiplier` as 1, and a missing `side` from the sign of `qty`.
+    - `live_broker_fetch` `recent_trades` rows gain `asset_class`. Rows written by `broker.py` still carry none, so the UI keeps its OCC-shape fallback for them. **Ruling F17:** this refines section 9 item 4, whose "`recent_trades` rows carry no `asset_class`" now holds only for the rows `broker.py` writes.
+    - `close_position` refuses option contracts with a clear message ("option contracts are closed by buy-to-close, not close_position").
