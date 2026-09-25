@@ -19,6 +19,8 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 _backend = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _backend not in sys.path:
     sys.path.insert(0, _backend)
@@ -112,6 +114,15 @@ def _submit_plain(emulator, day, now):
 
 def _canonical(result) -> str:
     return json.dumps(result, indent=1, default=str) + "\n"
+
+
+@pytest.fixture(autouse=True)
+def _passive_execution_off(monkeypatch):
+    """The golden was written with passive execution off. Pin that here, so a
+    host's PASSIVE_EXECUTION_ENABLED or an override broker.py set earlier in
+    the process cannot fail this guard falsely."""
+    monkeypatch.delenv("PASSIVE_EXECUTION_ENABLED", raising=False)
+    monkeypatch.setattr(PortfolioEmulator, "_PASSIVE_OVERRIDE", None)
 
 
 def test_non_bracket_run_is_byte_identical_to_the_pre_change_golden():
