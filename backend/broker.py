@@ -4435,6 +4435,12 @@ _LANE_ENABLE_FLAGS = {
     # `_strategy_eb_risk_limits`, or that lookup KeyErrors out of the WHOLE
     # document's risk envelope.
     "strategy_hx": "strategy_hx_enabled", "strategyhx": "strategy_hx_enabled",
+    # swing-port: the swing lane widens the envelope to its 20% order/symbol
+    # caps and honours its 20% single-position cap live; the wheel lane
+    # declares no live_* keys and is skipped exactly as HX is. Both have rows
+    # in `_strategy_eb_risk_limits`' defaults_by_lane (D5).
+    "strategy_swing": "strategy_swing_enabled", "strategyswing": "strategy_swing_enabled",
+    "strategy_wheel": "strategy_wheel_enabled", "strategywheel": "strategy_wheel_enabled",
 }
 
 
@@ -4484,6 +4490,27 @@ def _strategy_eb_single_position_pct(cached_strategies):
     return best
 
 
+def _lane_enabled(cached_strategies, lane) -> bool:
+    """True when the document carries an ENABLED spec for ``lane`` (a key of
+    ``_LANE_ENABLE_FLAGS``), with the strategies' own enabled-flag semantics
+    and `conditions` UNION `config`. Every swing-port branch in the live loop
+    is gated on this, so a document without the lane (doc 200) never enters
+    one."""
+    flag = _LANE_ENABLE_FLAGS.get(str(lane or "").strip().lower())
+    if flag is None:
+        return False
+    for spec in (cached_strategies or []):
+        try:
+            name = str((spec or {}).get("strategy", "")).strip().lower()
+            if _LANE_ENABLE_FLAGS.get(name) != flag:
+                continue
+            if _truthy(_merged_strategy_settings(spec).get(flag, False)):
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _strategy_eb_risk_limits(cached_strategies):
     """The enabled strategy_eb lane's live risk envelope, or None.
 
@@ -4525,9 +4552,20 @@ def _strategy_eb_risk_limits(cached_strategies):
     # does not, the per-lane handler skips it and the rest still stands. HX
     # declares no `live_*` keys and is skipped exactly that way, which is
     # correct rather than an omission.
+    # swing-port: the swing lane's live envelope (spec section 5.1): 20% per
+    # order and per symbol, EB's drawdown rungs. Inline, not a module
+    # constant, because the envelope tests extract this function with only
+    # the tables it already reads. The wheel declares none (like HX).
+    _SW_DEFAULTS = {
+        "live_max_order_fraction": 0.2, "live_max_symbol_fraction": 0.2,
+        "live_max_leveraged_fraction": 0.2, "live_soft_drawdown": 0.25,
+        "live_hard_drawdown": 0.35, "live_kill_drawdown": 0.45,
+    }
     defaults_by_lane = {"strategy_eb": _EB_DEFAULTS, "strategyeb": _EB_DEFAULTS,
                         "outlier_sleeve": _OS_DEFAULTS, "outliersleeve": _OS_DEFAULTS,
-                        "strategy_hx": _HX_DEFAULTS, "strategyhx": _HX_DEFAULTS}
+                        "strategy_hx": _HX_DEFAULTS, "strategyhx": _HX_DEFAULTS,
+                        "strategy_swing": _SW_DEFAULTS, "strategyswing": _SW_DEFAULTS,
+                        "strategy_wheel": {}, "strategywheel": {}}
     # The WIDEST envelope across the enabled lanes: a document that carries
     # the outlier sleeve beside strategy_eb must let a sleeve winner grow.
     widest = None
@@ -7575,6 +7613,13 @@ def run_run_once_strategies(specs, symbols, prices, current_time, data=None, por
                 # Fix 15: Extract propagation-expansion BUY tickers
                 nexus_expansion_buys = raw.pop("_nexus_expansion_buys", [])
                 nexus_executable_buys = raw.pop("_nexus_executable_buys", [])
+                # swing-port: the wheel lane's option orders ride their own
+                # side channel (interfaces doc section 1). Popped so it is
+                # never mistaken for a ticker; carried only when non-empty,
+                # so EB's metadata is exactly what it was.
+                nexus_option_orders = raw.pop("_nexus_option_orders", [])
+                if nexus_option_orders:
+                    metadata["_nexus_option_orders"] = list(nexus_option_orders)
                 # Z4.1's regime-adjusted position cap. Must be POPPED here (so it
                 # is not mistaken for a ticker in the score loop below) AND
                 # packed into metadata, which is the only channel the tick body
@@ -15867,6 +15912,9 @@ while not shutdown_requested:
             # Z4.1's regime-adjusted position cap, published by the strategy.
             # None = not published (old build) -> the static config wins, as before.
             nexus_max_positions = None
+            # swing-port (spec 6.1, broker item 1): every spec's option orders,
+            # executed after the stock loop. Empty on every EB tick.
+            nexus_option_orders: list = []
             for _spec_r, _scores_r, _reasons_r, *_meta_r in run_once_results:
                 meta = _meta_r[0] if _meta_r else {}
                 _nmp = meta.get("_nexus_max_positions")
@@ -15901,6 +15949,7 @@ while not shutdown_requested:
                     nexus_executable_buys.add(sym)
                 for sym, intent in (meta.get("_nexus_action_intents") or {}).items():
                     nexus_action_intents_merged[sym] = intent
+                nexus_option_orders.extend(meta.get("_nexus_option_orders") or [])
             # 2026-07-19 BULL_F7d forensics: trend-reversal sell enforcement
             # was flattening the sleeve's SQQQ leg every bar it was parked
             # ("overriding SQQQ from 0 to -1") — the sleeve then re-parked at
