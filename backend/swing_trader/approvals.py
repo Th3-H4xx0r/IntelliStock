@@ -15,12 +15,19 @@ fix F3 (pre-flight ruling): the wheel approval's duplicate check reads the
 working-order book through the adapter's STRICT reader and refuses when the
 book cannot be read. AlpacaAdapter.list_open_orders answers an outage with
 [], which would read as "no working put" and let a duplicate through.
+
+G8a ruling 2: the option positions are read the same way, through
+account.option_book. AlpacaAdapter.list_option_positions never raises; after
+an outage or while a contract's fields are unreadable it returns a partial
+map, so an incomplete or stale map refuses the approval like an unreadable
+order book.
 """
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
 from swing_trader import clock, wheel_rules
+from swing_trader.account import option_book
 from swing_trader.constants import POSITION_SIZE_PCT, PROFIT_TARGET, STOP_LOSS
 
 DECISION_STATUS = {"approve": "approved", "approve_half": "approved_half",
@@ -35,9 +42,11 @@ class SignalConflict(ValueError):
 
 
 class BookUnreadable(ValueError):
-    """fix F3: the broker's working-order book could not be read, so a wheel
-    approval cannot rule out a duplicate put. A-live's approval handler turns
-    it, like every refusal here, into status "failed"."""
+    """fix F3: the broker's working-order book could not be read, or (G8a
+    ruling 2) its option map is incomplete or stale, so a wheel approval
+    cannot rule out a duplicate put. A-live's approval handler resets the
+    signal to pending (G5 ruling), so the operator can approve again once
+    the book is whole."""
 
 
 def decide(signal: dict, decision: str, user, reason, now_iso: str) -> dict:
@@ -71,6 +80,18 @@ def _working_orders(adapter) -> list:
         raise BookUnreadable(f"the broker's working-order book is unreadable (got "
                              f"{type(orders).__name__}, not a list)")
     return list(orders)
+
+
+def _option_positions(adapter) -> list:
+    """G8a ruling 2: the option positions, or BookUnreadable when the map is
+    unreadable, incomplete or stale (account.option_book). A partial map
+    would hide an open put and let a duplicate through."""
+    rows, not_ready = option_book(adapter)
+    if rows is None or not_ready is not None:
+        raise BookUnreadable(
+            f"the broker's option positions are not a complete, current map ({not_ready}); "
+            "refusing the wheel approval rather than reading a partial book")
+    return rows
 
 
 def build_approved_order(signal: dict, *, live_price, equity, cfg, adapter=None,
@@ -123,7 +144,7 @@ def build_approved_order(signal: dict, *, live_price, equity, cfg, adapter=None,
                      "strike_price": float(proposal["strike"]), "expiry": expiry,
                      "est_premium": float(proposal.get("premium_est") or 0.0),
                      "position_size_contracts": qty}
-        option_positions = list(adapter.list_option_positions() or [])
+        option_positions = _option_positions(adapter)  # G8a ruling 2: fail closed
         open_orders = _working_orders(adapter)  # fix F3: fail closed
         duplicate = wheel_rules.duplicate_put_reason(signal["symbol"], option_positions,
                                                      open_orders)

@@ -268,3 +268,43 @@ def test_f3_a_working_put_on_the_strict_book_is_a_duplicate():
         approvals.build_approved_order(wheel_sig(), live_price=131.2, equity=200_000.0,
                                        cfg=CFG, adapter=StrictBook(),
                                        today=date(2026, 6, 1))
+
+
+# -- G8a ruling 2 (G7 carry b): the wheel approval reads the option map through
+# -- account.option_book and fails closed ---------------------------------------
+
+class OptionMapAdapter(WheelAdapter):
+    """AlpacaAdapter.list_option_positions never raises: after an outage, or
+    while a contract's fields are unreadable, it returns a PARTIAL map and says
+    so only through its private health flags."""
+
+    def __init__(self, positions=(), *, complete=True, stale_since=None, down=False):
+        super().__init__(positions)
+        self._option_positions_complete = complete
+        self._positions_stale_since = stale_since
+        self.down = down
+
+    def list_option_positions(self):
+        if self.down:
+            raise RuntimeError("positions endpoint unreachable")
+        return list(self.positions)
+
+
+@pytest.mark.parametrize("adapter,needle", [
+    # The held APH put is missing from the partial map: read as complete, a
+    # second put would be sold on APH.
+    (OptionMapAdapter([], complete=False), "incomplete"),
+    (OptionMapAdapter([], stale_since=1.0), "stale"),
+    (OptionMapAdapter([], down=True), "unreachable"),
+])
+def test_g8a_an_unready_option_map_refuses_the_wheel_approval(adapter, needle):
+    with pytest.raises(approvals.BookUnreadable, match=needle):
+        approvals.build_approved_order(wheel_sig(), live_price=131.2, equity=200_000.0,
+                                       cfg=CFG, adapter=adapter, today=date(2026, 6, 1))
+
+
+def test_g8a_a_complete_current_option_map_still_builds_the_order():
+    out = approvals.build_approved_order(wheel_sig(), live_price=131.2, equity=200_000.0,
+                                         cfg=CFG, adapter=OptionMapAdapter([]),
+                                         today=date(2026, 6, 1))
+    assert out["contract"] == "APH260612P00128000"
