@@ -187,6 +187,14 @@ void main() {
       expect(SwingSignal.fromJson(const {'id': 'x'}).decidedAt, isNull);
     });
 
+    test('order_client_id is read; absent or empty is null (seams I-2)', () {
+      expect(SwingSignal.fromJson(const {'id': 'x', 'order_client_id': 'k-0'}).orderClientId,
+          'k-0');
+      expect(SwingSignal.fromJson(const {'id': 'x', 'order_client_id': ''}).orderClientId,
+          isNull);
+      expect(SwingSignal.fromJson(const {'id': 'x'}).orderClientId, isNull);
+    });
+
     test('resend POSTs to .../resend with no body and reads the receipt', () async {
       final api = _FakeApiClient()
         ..postResponse = {'signal': {}, 'command_id': 'c1'};

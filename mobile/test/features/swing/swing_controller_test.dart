@@ -330,11 +330,50 @@ void main() {
       final (c, notifier) = await uncertainOn(repo);
       repo
         ..pending = []
-        ..submitted = [withStatus(signal('a1'), 'submitted')];
+        ..submitted = [
+          withStatus(signal('a1'), 'submitted', orderClientId: 'instance-1-abc-0')
+        ];
       await notifier.refresh();
       expect(read(c).uncertain.single.badge, 'submitted');
       notifier.dismissUncertain('a1');
       expect(read(c).uncertain, isEmpty);
+    });
+
+    // Seams I-2: the broker writes submitted when it CLAIMS the approval,
+    // before it sends anything, and order_client_id once the order went out.
+    // A claim can still go back to pending or be swept to failed.
+    test('a submitted row without an order key keeps waiting; it can return to pending',
+        () async {
+      final repo = FakeSwingRepo([signal('a1')]);
+      final (c, notifier) = await uncertainOn(repo);
+      repo
+        ..pending = []
+        ..submitted = [withStatus(signal('a1'), 'submitted')];
+      await notifier.refresh();
+      expect(read(c).uncertain.single.resolved, isNull);
+      expect(read(c).uncertain.single.badge, 'uncertain — waiting for the broker');
+      repo
+        ..submitted = []
+        ..pending = [signal('a1')]; // the control re-read failed: back to pending
+      await notifier.refresh();
+      expect(read(c).uncertain, isEmpty);
+      expect(read(c).signals.map((s) => s.id), ['a1']);
+    });
+
+    test('a submitted row without an order key that is then swept failed says failed',
+        () async {
+      final repo = FakeSwingRepo([signal('a1')]);
+      final (c, notifier) = await uncertainOn(repo);
+      repo
+        ..pending = []
+        ..submitted = [withStatus(signal('a1'), 'submitted', orderClientId: '')];
+      await notifier.refresh();
+      expect(read(c).uncertain.single.resolved, isNull);
+      repo
+        ..submitted = []
+        ..failed = [withStatus(signal('a1'), 'failed')];
+      await notifier.refresh();
+      expect(read(c).uncertain.single.badge, 'failed');
     });
 
     test('a later poll that reports failed says failed', () async {

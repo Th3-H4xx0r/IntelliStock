@@ -104,10 +104,13 @@ void main() {
       expect(_cardButton('Approve'), findsNothing); // no longer a pending card
       expect(find.textContaining('Approved AAPL'), findsNothing);
 
-      // It persists across polls until one settles it.
+      // It persists across polls until one settles it (seams I-2: a
+      // submitted row that carries the order key the broker sent).
       repo
         ..pending = []
-        ..submitted = [withStatus(swingSignal('a1'), 'submitted')];
+        ..submitted = [
+          withStatus(swingSignal('a1'), 'submitted', orderClientId: 'instance-1-abc-0')
+        ];
       final container = ProviderScope.containerOf(tester.element(find.byType(PendingSignalsSection)));
       await container.read(pendingSignalsProvider('i1').notifier).refresh();
       await tester.pumpAndSettle();

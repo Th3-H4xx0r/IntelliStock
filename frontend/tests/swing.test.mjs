@@ -515,12 +515,44 @@ test('a later poll that reports submitted or failed settles the badge', () => {
   const latch = createDecisionLatch()
   const u = addUncertain({}, SWING, 0, T0)
   const sub = fold(latch, latch.beginLoad(), u, { pending: [], approved: [], approved_half: [],
-    submitted: [{ ...SWING, status: 'submitted' }], failed: [] })
+    submitted: [{ ...SWING, status: 'submitted', order_client_id: 'instance-1-abc-0' }], failed: [] })
   assert.equal(sub.uncertain.a1.resolved, 'submitted')
   assert.equal(uncertainBadge(sub.uncertain.a1), 'submitted')
   const bad = fold(latch, latch.beginLoad(), u, { pending: [], approved: [], approved_half: [],
     submitted: [], failed: [{ ...SWING, status: 'failed' }] })
   assert.deepEqual([bad.uncertain.a1.resolved, uncertainBadge(bad.uncertain.a1)], ['failed', 'failed'])
+})
+
+// Seams I-2: the broker writes submitted when it CLAIMS the approval, before it sends
+// anything, and order_client_id only once the order went out. The claim can still be
+// undone (back to pending) or swept (failed), so only a keyed row settles the card.
+test('a submitted row without order_client_id keeps waiting, and can still return to pending', () => {
+  const latch = createDecisionLatch()
+  latch.beginLoad(); latch.record('a1')
+  const u = addUncertain({}, SWING, 1, T0)
+  const claimed = fold(latch, latch.beginLoad(), u, { pending: [], approved: [], approved_half: [],
+    submitted: [{ ...SWING, status: 'submitted', order_client_id: null }], failed: [] })
+  assert.equal(claimed.uncertain.a1.resolved, null)
+  assert.equal(uncertainBadge(claimed.uncertain.a1), UNCERTAIN_BADGE)
+  const unkeyed = fold(latch, latch.beginLoad(), claimed.uncertain, { pending: [], approved: [],
+    approved_half: [], submitted: [{ ...SWING, status: 'submitted' }], failed: [] })
+  assert.equal(unkeyed.uncertain.a1.resolved, null)
+  // The control re-read failed and the broker put it back: the pending card is back.
+  const reset = fold(latch, latch.beginLoad(), unkeyed.uncertain, { pending: [SWING], approved: [],
+    approved_half: [], submitted: [], failed: [] })
+  assert.deepEqual(reset.uncertain, {})
+  assert.deepEqual(reset.signals.map(s => s.id), ['a1'])
+})
+
+test('a submitted row without order_client_id that is then swept failed says failed', () => {
+  const latch = createDecisionLatch()
+  const u = addUncertain({}, SWING, 0, T0)
+  const claimed = fold(latch, latch.beginLoad(), u, { pending: [], approved: [], approved_half: [],
+    submitted: [{ ...SWING, status: 'submitted', order_client_id: '' }], failed: [] })
+  assert.equal(claimed.uncertain.a1.resolved, null)
+  const swept = fold(latch, latch.beginLoad(), claimed.uncertain, { pending: [], approved: [],
+    approved_half: [], submitted: [], failed: [{ ...SWING, status: 'failed', order_client_id: null }] })
+  assert.equal(swept.uncertain.a1.resolved, 'failed')
 })
 
 test('a later poll that reports pending ends the uncertain card: the pending card is back', () => {

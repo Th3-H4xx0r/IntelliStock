@@ -383,15 +383,21 @@ class PendingSignalsNotifier
 
   /// Follow-up 2: settle the waiting cards a fetch begun after their 202 can
   /// speak for. Pending: the card goes and the pending card is back.
-  /// Submitted or failed: the badge says so until Dismiss. Round 3 FU-1:
-  /// still approved more than [stuckAfter] after the 202, the card leaves
-  /// the waiting state and joins the stuck list (the returned ids), where
-  /// Re-send and Dismiss are. Anything else, or a failed read, leaves it
-  /// waiting.
+  /// Submitted or failed: the badge says so until Dismiss. Seams I-2: the
+  /// broker writes submitted when it CLAIMS the approval, before it sends
+  /// anything, and order_client_id once the order went out; a claim can
+  /// still go back to pending or be swept to failed. So only a submitted row
+  /// carrying an order key settles the card; one without it keeps waiting.
+  /// Round 3 FU-1: still approved more than [stuckAfter] after the 202, the
+  /// card leaves the waiting state and joins the stuck list (the returned
+  /// ids), where Re-send and Dismiss are. Anything else, or a failed read,
+  /// leaves it waiting.
   Set<String> _foldUncertain(int generation, _Load load, DateTime now) {
     Set<String>? ids(List<SwingSignal>? rows) => rows?.map((s) => s.id).toSet();
     final pending = ids(load.pending);
-    final submitted = ids(load.submitted);
+    final submitted = ids(load.submitted
+        ?.where((s) => (s.orderClientId ?? '').isNotEmpty)
+        .toList());
     final failed = ids(load.failed);
     final approved = ids(load.approved) ?? const <String>{};
     final joinedStuck = <String>{};

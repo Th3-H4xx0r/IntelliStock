@@ -132,8 +132,10 @@ SwingSignal approvedSignal(String id, String decidedAt,
       'decided_at': decidedAt,
     });
 
-/// [s] as the server would list it with [status].
-SwingSignal withStatus(SwingSignal s, String status) => SwingSignal(
+/// [s] as the server would list it with [status] (and, seams I-2, the
+/// order key the broker writes once it sent the order).
+SwingSignal withStatus(SwingSignal s, String status, {String? orderClientId}) =>
+    SwingSignal(
       id: s.id,
       lane: s.lane,
       symbol: s.symbol,
@@ -147,6 +149,7 @@ SwingSignal withStatus(SwingSignal s, String status) => SwingSignal(
       proposal: s.proposal,
       status: status,
       decidedAt: s.decidedAt,
+      orderClientId: orderClientId,
     );
 
 SwingSignal wheelSignal(String id) => SwingSignal.fromJson({

@@ -28,8 +28,9 @@
      "uncertain — waiting for the broker" badge (follow-up 2). While one
      waits, each poll also reads the submitted and failed lists; a poll begun
      after the 202 that finds the signal pending brings its pending card
-     back, and one that finds it submitted or failed says so on the card
-     until the operator dismisses it. One that still finds it approved more
+     back, and one that finds it submitted with an order key (the broker sent
+     it; a bare submitted is only its claim, seams I-2) or failed says so on
+     the card until the operator dismisses it. One that still finds it approved more
      than 2 minutes after the 202 moves it to "Approved, not yet sent", with
      Re-send and Dismiss; a waiting card offers Dismiss after 2 minutes in
      any case (round 3 FU-1). -->

@@ -33,6 +33,7 @@ class SwingSignal {
     required this.proposal,
     required this.status,
     this.decidedAt,
+    this.orderClientId,
   });
 
   final String id;
@@ -54,6 +55,11 @@ class SwingSignal {
 
   /// When the operator decided it (UTC); null while pending or unparseable.
   final DateTime? decidedAt;
+
+  /// The client order id the broker wrote once it SENT the order (seams
+  /// I-2). A submitted row without it is only the broker's claim, which can
+  /// still go back to pending or be failed. Null when absent or empty.
+  final String? orderClientId;
 
   bool get isWheel => lane == 'wheel';
 
@@ -110,6 +116,8 @@ class SwingSignal {
         proposal: (j['proposal'] as Map?)?.cast<String, dynamic>() ?? const {},
         status: _str(j['status']).isEmpty ? 'pending' : _str(j['status']),
         decidedAt: DateTime.tryParse(_str(j['decided_at']))?.toUtc(),
+        orderClientId:
+            _str(j['order_client_id']).isEmpty ? null : _str(j['order_client_id']),
       );
 }
 

@@ -309,24 +309,28 @@ export function uncertainListsNeeded(uncertain) {
   return Object.values(uncertain || {}).some(e => !e.resolved)
 }
 
-function idsOf(result) {
+function idsOf(result, keep = () => true) {
   if (result?.status !== 'fulfilled') return null
   const v = result.value
   const rows = Array.isArray(v) ? v : (Array.isArray(v?.signals) ? v.signals : [])
-  return new Set(rows.filter(r => r && typeof r === 'object' && r.id).map(r => r.id))
+  return new Set(rows.filter(r => r && typeof r === 'object' && r.id && keep(r)).map(r => r.id))
 }
 
 /**
  * A waiting card settles only on a load begun after its 202: pending (the
  * card goes, and the pending card is back), submitted or failed (the badge
- * says so until the operator dismisses it). Round 3 FU-1: still approved
- * more than STUCK_AFTER_MS after the 202, it leaves the waiting state and
- * joins the stuck list (`joinedStuck`), where Re-send and Dismiss are.
- * Anything else, or a failed read, leaves it waiting.
+ * says so until the operator dismisses it). Seams I-2: the broker writes
+ * submitted when it CLAIMS the approval, before it sends anything, and
+ * order_client_id once the order went out; a claim can still go back to
+ * pending or be swept to failed. So only a submitted row carrying
+ * order_client_id settles the card; one without it keeps waiting. Round 3
+ * FU-1: still approved more than STUCK_AFTER_MS after the 202, it leaves the
+ * waiting state and joins the stuck list (`joinedStuck`), where Re-send and
+ * Dismiss are. Anything else, or a failed read, leaves it waiting.
  */
 function foldUncertain(uncertain, generation, results, nowMs) {
   const pending = idsOf(results?.pending)
-  const submitted = idsOf(results?.submitted)
+  const submitted = idsOf(results?.submitted, r => Boolean(r.order_client_id))
   const failed = idsOf(results?.failed)
   const approved = new Set([...(idsOf(results?.approved) || []), ...(idsOf(results?.approved_half) || [])])
   const next = {}

@@ -461,7 +461,8 @@ class _StuckCard extends StatelessWidget {
 
 /// A 202'd approval or re-send (follow-up 2): "uncertain — waiting for the
 /// broker" with the server's advice until a poll finds the signal pending
-/// (the card goes), submitted or failed (the badge says so until Dismiss).
+/// (the card goes), submitted with an order key (seams I-2) or failed (the
+/// badge says so until Dismiss).
 class _UncertainCardView extends StatelessWidget {
   const _UncertainCardView({
     super.key,
