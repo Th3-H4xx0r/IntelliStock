@@ -208,6 +208,21 @@ The adapter's option positions live in `self._option_positions: dict[str, Option
       - It counts sessions with `backtest_bar_events.completed_sessions_after(after, now)`: NYSE sessions that opened after `after` and had closed by `now`. The fallback without the calendar library is weekdays 09:30-16:00 ET.
       - It drops the orders through `NextEventExecutionSimulator.expire_next_open_orders(is_stale)`. A shorter halt still fills at the reopen.
     - `collect_bar_events` skips, with one yellow warning per (symbol, bar), a bar `SimulationBarEvent` would refuse: an open, high, low or close that is NaN, infinite, zero or negative; a high below its low; or an `available_at` before its `bar_ts`. Raising would abort the run on every retry, since the bar never changes. The symbol's later bars still arrive. `reset_label_cache()` also forgets the warnings.
+13. **The swing strategy provisions its own backtest data (2026-09-25, swing-bt-autodata).** The engine is unchanged: there is no engine hook, and `broker.py` has no swing code for it. Any instance whose document carries an enabled `strategy_swing` lane backtests directly, with no reference-data script, no lab instance and an empty watchlist allowed.
+    - **First run, any mode: the reference sync.** `swing_trader.refdata_sync.sync_reference_data(start, end, *, defensive_universe=None, store=None, ...) -> list[str]` stores only the rows SwingMacroDaily, SwingIndexMembership and SwingSectorMap lack for the window, and returns the lane's universe: the members visible in `[start, end]` (the list in effect at `start` plus every change dated before `end`, `lab_watchlist`'s rule), plus SPY, QQQ and the lane's `defensive_universe`.
+      - Every step is best-effort and logged yellow on failure. The lane's own refusals stay the visible failure.
+      - VIX comes from Cboe, falling back to FRED. Membership comes from the newest fja05680/sp500 CSV, found through GitHub's contents API with "(Updated)" preferred.
+      - Sectors: ST's overrides win, then Wikipedia's GICS sector (mapped onto ST's Yahoo labels, `refdata_build.GICS_TO_YAHOO`), then yfinance inside a 300 s budget. `source` is `"override" | "wikipedia" | "yfinance"`.
+      - A failed lookup leaves a retry marker, `{"sector": "unknown", "source": "yfinance", "retried_at"}`. It is asked again at most once per 7 days. `refdata.sector_map` skips any empty or "unknown" row, so a marker reads as absent.
+      - `scripts/build_swing_reference_data.py` is a thin full-rebuild CLI over the same `swing_trader.refdata_build` code.
+    - **Backtest.** `StrategySwing._prepare_backtest` runs on the run's first trading session:
+      - The sync runs synchronously for `[first session, run end]`. The run end is the engine's `BacktestInstances` "end-date" for the injected `_telemetry_backtest_id`, else yesterday.
+      - The lane then fetches its own 1Day bars for every universe symbol the engine's `data` lacks, over `[first session - 450 days, run end]`. `swing_trader.backtest_bars.fetch_daily_bars` rebuilds the engine loader's request: `/v2/stocks/{sym}/bars` with adjustment `"split"`, the injected `alpaca_data_feed`, 365-day chunks and the `AlpacaBarsCache`.
+      - The lane keeps a flag in its cache (`_swing_bt_prep`) and the bars in a module-level `_OWN_BARS`, because the engine serialises the strategy cache on every bar.
+      - Each session's indicators see only bars dated before that session (`OwnBars.before`), and the engine's bars win for any symbol `data` carries.
+      - A traded symbol reaches the engine's existing on-demand loader through `_nexus_discovered` and `_nexus_executable_buys`, for pricing, next-open fills and bracket legs.
+    - **Live.** The first call per process per NY day starts the sync in a daemon thread (`refdata_sync.start_background_sync`). The 09:15 ET scan never waits on it.
+    - **Kill switch.** `SWING_AUTODATA=0` turns off the sync and the own-bars fetch. The unit tests default to `0`.
 
 ## 5. Tables (`backend/db/schema.py`)
 

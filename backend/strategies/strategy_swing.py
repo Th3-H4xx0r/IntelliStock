@@ -12,7 +12,7 @@ import math
 import os
 import re
 import sys
-from datetime import date
+from datetime import date, timedelta
 
 _BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _BACKEND not in sys.path:
@@ -22,12 +22,14 @@ from db import store  # noqa: E402  (tests monkeypatch this name)
 from swing_trader import (  # noqa: E402
     account,
     ai_analyst,
+    backtest_bars,
     calibration,
     clock,
     indicators,
     market_data,
     notify,
     refdata,
+    refdata_sync,
     regime,
     sectors,
     signals,
@@ -66,6 +68,12 @@ _NO_MODEL_KEY = "_swing_no_model_session"      # live: the no-model alert, once 
 _SECTOR_CACHE_KEY = "_swing_sector_cache"      # live: yfinance fallback sectors
 _PENDING_EXIT_KEY = "_swing_pending_exits"     # live: exits re-sent until the stock is gone
 _SCAN_FIRST_KEY = "_swing_scan_first_tick"     # live: {"session", "at", "late"} (FW-str d)
+_BT_PREP_KEY = "_swing_bt_prep"                # backtest: {"run", "first_session", "end"}
+
+#: backtest: the lane's own daily bars (backtest_bars.OwnBars) for the run
+#: named in the cache's _BT_PREP_KEY. Module-level, not in the strategy
+#: cache: the engine serialises every strategy cache on every bar.
+_OWN_BARS: dict = {}
 
 #: Hint flags the engine tests with `is True` (plan A-backtest Task 6).
 _HINT_FLAGS = ("whole_shares", "fill_at_next_open")
@@ -349,6 +357,33 @@ def _sub_daily_reason(data, time_increment):
     return None
 
 
+def _autodata_enabled() -> bool:
+    """The lane's own data (reference sync and own bars) is on unless
+    SWING_AUTODATA is "0" (the unit tests' default: they never reach the
+    network)."""
+    return str(os.environ.get("SWING_AUTODATA", "1")).strip().lower() not in {
+        "0", "false", "no", "off"}
+
+
+def _backtest_end(cfg, first):
+    """(last day of this backtest, None), from the engine's queue row for the
+    run (BacktestInstances "end-date", the id the engine injects as
+    _telemetry_backtest_id); else (yesterday, why)."""
+    bid = str(cfg.get("_telemetry_backtest_id") or "").strip()
+    if bid:
+        try:
+            row = store.get("BacktestInstances", int(bid) if bid.isdigit() else bid)
+            raw = str((row or {}).get("end-date") or "")[:10]
+            if raw:
+                return max(first, date.fromisoformat(raw)), None
+            why = f"backtest {bid} carries no end-date"
+        except Exception as exc:
+            why = f"backtest {bid} unreadable ({type(exc).__name__}: {exc})"
+    else:
+        why = "no backtest id in the lane's config"
+    return max(first, date.today() - timedelta(days=1)), why
+
+
 class StrategySwing:
     # The class name is NOT free: broker.py resolves a run-once strategy by
     # CamelCasing its id — strategy_swing -> StrategySwing — and runs the whole
@@ -385,6 +420,51 @@ class StrategySwing:
             cache[_SECTOR_MAP_KEY] = smap
         return smap
 
+    def _prepare_backtest(self, cfg, session, data, cache):
+        """The run's first session: store the reference rows the window
+        lacks (refdata_sync), then fetch the lane's own daily bars for the
+        window's point-in-time universe (backtest_bars), once. Later sessions
+        reuse them. Returns the OwnBars, or None when there are none."""
+        prep = cache.get(_BT_PREP_KEY)
+        if isinstance(prep, dict):
+            return _OWN_BARS.get(prep.get("run"))
+        if not _autodata_enabled():
+            return None
+        try:
+            return self._prepare_backtest_once(cfg, session, data, cache)
+        except Exception as exc:
+            # Best-effort, and once: the run goes on with the engine's bars and
+            # whatever reference rows are stored.
+            cache[_BT_PREP_KEY] = {"run": None, "first_session": session, "end": None}
+            _log(f"StrategySwing {session} | own data unavailable ({type(exc).__name__}: "
+                 f"{exc}); the lane runs on the engine's bars", "yellow")
+            return None
+
+    def _prepare_backtest_once(self, cfg, session, data, cache):
+        first = date.fromisoformat(session)
+        end, why = _backtest_end(cfg, first)
+        if why:
+            _log(f"StrategySwing {session} | backtest window end unknown ({why}); the "
+                 f"lane's own data runs through {end}", "yellow")
+        universe_now = refdata_sync.sync_reference_data(
+            first, end, defensive_universe=_list(cfg["defensive_universe"]), store=store)
+        feed = str(cfg.get("alpaca_data_feed") or "iex").strip().lower()
+        run = f"{cfg.get('_telemetry_backtest_id') or ''}|{first}|{end}|{feed}"
+        own = _OWN_BARS.get(run)
+        if own is None:
+            carried = {str(s).upper() for s, v in (data or {}).items()
+                       if backtest_bars.has_bars(v)} if isinstance(data, dict) else set()
+            wanted = [s for s in universe_now if s not in carried]
+            own = backtest_bars.OwnBars(backtest_bars.fetch_daily_bars(
+                wanted, first - timedelta(days=market_data.LIVE_WINDOW_DAYS), end,
+                key=cfg.get("alpaca_key"), secret=cfg.get("alpaca_secret"), feed=feed))
+            _OWN_BARS.clear()
+            _OWN_BARS[run] = own
+        cache[_BT_PREP_KEY] = {"run": run, "first_session": session, "end": end.isoformat()}
+        _log(f"StrategySwing {session} | universe {first}..{end}: {len(universe_now)} "
+             f"symbols, own daily bars for {len(own.symbols)}", "cyan")
+        return own
+
     def _backtest(self, prices, current_time, cfg, data, emu, cache, time_increment=None):
         session = clock.ny_date(current_time)
         if cache.get(_BT_SESSION_KEY) == session:
@@ -401,6 +481,9 @@ class StrategySwing:
                       "RTH daily bars; run the swing lab at granularity 86400 (daily bars).",
                       "red")
             return {}
+        own = self._prepare_backtest(cfg, session, data, cache)
+        if own is not None:
+            data = backtest_bars.merged_view(data, own, session, market_data.LIVE_WINDOW_DAYS)
         names = sorted(str(s).upper() for s in data) if isinstance(data, dict) else []
 
         memo = cache.get(_IND_MEMO_KEY)
@@ -537,12 +620,26 @@ class StrategySwing:
 
     # -- live ----------------------------------------------------------------
 
+    def _start_live_sync(self, cfg, session):
+        """First run in live: refresh the reference rows in a daemon thread,
+        at most once per process per NY day. Never blocks the tick; the scan
+        proceeds on what is stored (the sector read falls back to yfinance)."""
+        if not _autodata_enabled():
+            return
+        try:
+            refdata_sync.start_background_sync(
+                session, defensive_universe=_list(cfg.get("defensive_universe")))
+        except Exception as exc:
+            _log(f"StrategySwing {session} | reference sync not started "
+                 f"({type(exc).__name__}: {exc})", "yellow")
+
     def _live(self, prices, current_time, cfg, emu, cache, mode):
         """Spec §5.1 live/paper. The scan starts at the first tick at or after
         scan_time_et, resumes on later ticks until every candidate is scored,
         and stamps the session latch when it COMPLETES: a crash mid-scan
         resumes from the persisted cursor instead of losing the day."""
         session = clock.ny_date(current_time)
+        self._start_live_sync(cfg, session)
         if not clock.is_trading_day(date.fromisoformat(session)):
             return {}
         iid = str(cfg.get("instance_id") or "swing")

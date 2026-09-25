@@ -39,6 +39,11 @@ os.environ.setdefault("PG_RECONNECT_TIMEOUT", "2")
 # The test database is local and answers instantly or not at all, so the
 # connect-retry ladder only adds latency to a conclusion the test tolerates.
 os.environ.setdefault("PG_CONNECT_RETRIES", "0")
+# The swing lane fetches its own reference data (Cboe, GitHub, Wikipedia,
+# Yahoo) and daily bars (Alpaca) on its first run. A unit test that drives
+# the lane must never reach the network, so that path is off unless a test
+# turns it on (test_strategy_swing_autodata.py does, with every fetch stubbed).
+os.environ.setdefault("SWING_AUTODATA", "0")
 
 
 # ---------------------------------------------------------------------------

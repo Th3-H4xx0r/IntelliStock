@@ -55,6 +55,10 @@ EXPECTED = (
     # plan B's API routes (plan C changes no backend file)
     "backend/interactive_utils.py",
     "backend/api/main.py",
+    # swing-bt-autodata: the lane fetches and stores its own data
+    "backend/swing_trader/refdata_build.py",
+    "backend/swing_trader/refdata_sync.py",
+    "backend/swing_trader/backtest_bars.py",
 )
 
 

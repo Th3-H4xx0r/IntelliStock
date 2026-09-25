@@ -4,6 +4,13 @@
     python3 scripts/swing_lab_setup.py --start 2021-07-01 --end 2026-09-18
     python3 scripts/swing_lab_setup.py --paper --brokerage-id <paper brokerage id>
 
+The lab is OPTIONAL. Any instance whose document carries an enabled
+strategy_swing lane backtests directly, with an empty watchlist allowed: the
+lane fetches and stores the reference rows it is missing, and its own daily
+bars for the window's point-in-time universe, on its first session
+(swing_trader.refdata_sync and swing_trader.backtest_bars). The lab remains a
+convenient backtest-only document and instance.
+
 Lab (default): doc "Swing trader lab" with one strategy_swing lane at enabled
 SWING_DEFAULTS plus the two same-tick funding flags (plan A-backtest: an
 entry decided with an exit is otherwise sized before the exit's cash exists):
@@ -12,11 +19,13 @@ exit, and backtest_credit_sell_proceeds_enabled lets the broker's buy gate
 count it (FW-bt-I1: without it the gate clamps the entry to raw cash). It
 also creates the backtest-only instance "swing-lab" at daily granularity. Its
 watchlist is every S&P member visible in [--start, --end] from
-SwingIndexMembership (run scripts/build_swing_reference_data.py first), plus
-SPY, QQQ and the defensive ETFs (spec §7). The lab carries ONLY the swing
-lane: the simulator's bar hook runs after its pending-fill block, so another
-lane's close-filled sell of a bracketed symbol would execute before a
-same-session stop (and the wheel is inert in backtests anyway).
+SwingIndexMembership, plus SPY, QQQ and the defensive ETFs (spec §7). The
+table must already hold a row before --start: a swing backtest's first run
+stores one, and so does scripts/build_swing_reference_data.py. The lab
+carries ONLY the swing lane: the simulator's bar hook runs after its
+pending-fill block, so another lane's close-filled sell of a bracketed symbol
+would execute before a same-session stop (and the wheel is inert in
+backtests anyway).
 
 Brokerage (FW-str minor c): the lab NEVER links a live brokerage. A new lab
 instance takes strategy-eb's brokerage only when that is provably a paper

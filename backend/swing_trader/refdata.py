@@ -1,6 +1,8 @@
 """Point-in-time reference data for backtests (spec §7).
 
-Rows are written only by scripts/build_swing_reference_data.py. Every reader
+Rows are written by swing_trader.refdata_sync (the lane's own first-run sync,
+missing rows only) and scripts/build_swing_reference_data.py (a full rebuild),
+both through swing_trader.refdata_build. Every reader
 takes the store as an argument (db.store in production, the FakeStore fixture
 in tests) and reads STRICTLY BEFORE the NY trading date: a daily row dated the
 session carries a close from the future. `between` is [lo, hi), so the open
@@ -73,9 +75,15 @@ def members_before(store, ny_date, index: str = "SPX"):
 
 
 def sector_map(store, symbols) -> dict:
+    """{symbol: sector} for the symbols with a known sector. A row whose
+    sector is empty or "unknown" only records a failed lookup (the retry
+    marker swing_trader.refdata_sync writes) and is left out, so a reader
+    treats the symbol as absent: "unknown" in a backtest, and the yfinance
+    fallback in the live scan."""
     keys = sorted({norm_symbol(s) for s in (symbols or []) if str(s).strip()})
     if not keys:
         return {}
     rows = store.get_all(SECTOR_TABLE, *keys)
-    return {str(r.get("symbol") or r.get("id")).upper(): str(r.get("sector") or "unknown")
-            for r in rows}
+    return {str(r.get("symbol") or r.get("id")).upper(): str(r.get("sector"))
+            for r in rows
+            if str(r.get("sector") or "").strip().lower() not in ("", "unknown")}
