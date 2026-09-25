@@ -651,6 +651,19 @@ class StrategySwing:
                       f"{not_ready}. Nothing is decided or latched; the scan retries next "
                       "tick.", "red")
             return None
+        # FW-lo-I5: the cash securing short puts (open, and working
+        # sell-to-open) is not the swing lane's to spend. Seams m1: collateral
+        # that cannot be read is "not ready", like the positions above --
+        # FW1's incompleteness triggers last only until the next ~3 s refresh,
+        # so nothing is decided or latched and the scan retries next tick.
+        bp, collateral, collateral_unread = account.swing_live_budget(emu, book)
+        if bp is None:
+            _log_once(cache, "put-collateral", session,
+                      f"StrategySwing {session} | scan not ready: the cash securing short "
+                      f"puts cannot be read ({collateral_unread}), so a swing entry could "
+                      "spend it. Nothing is decided or latched; the scan retries next tick.",
+                      "red")
+            return None
         live_universe = [universe.norm_symbol(s) for s in universe.get_sp500_symbols()]
         defensive = _list(cfg["defensive_universe"])
         fetch_universe = list(dict.fromkeys(live_universe + defensive))
@@ -669,12 +682,7 @@ class StrategySwing:
 
         option_syms = account.option_symbols(emu)
         equity = account.live_equity(emu, prices)
-        # FW-lo-I5: the cash securing short puts (open, and working
-        # sell-to-open) is not the swing lane's to spend.
-        bp, collateral, collateral_unread = account.swing_live_budget(emu, book)
-        if bp is None:
-            bp = 0.0
-        elif collateral:
+        if collateral:
             _log(f"StrategySwing {session} | ${collateral:,.0f} is committed to short puts; "
                  f"the swing budget is ${bp:,.2f} (cash and buying power less that "
                  "collateral)", "cyan")
@@ -710,12 +718,6 @@ class StrategySwing:
             reg["regime_ok"], bear["blocked_days"],
             bear_regime_days=int(cfg["bear_regime_days"]),
             live_universe=live_universe, defensive_universe=defensive)
-        if univ and collateral_unread:
-            _log_once(cache, "put-collateral", session,
-                      f"StrategySwing {session} | REFUSING ENTRIES this session — the cash "
-                      f"securing short puts cannot be read ({collateral_unread}), so a swing "
-                      "entry could spend it. Exits still run.", "red")
-            univ = None
         first = cache.get(_SCAN_FIRST_KEY)
         if univ and isinstance(first, dict) and first.get("session") == session \
                 and first.get("late"):

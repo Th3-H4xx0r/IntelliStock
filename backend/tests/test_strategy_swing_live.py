@@ -964,7 +964,13 @@ def test_without_puts_the_budget_is_st_s_buying_power(live, monkeypatch):
     assert _entries(out) == {"AAA": 12_500.0, "CCC": 12_500.0, "DDD": 12_500.0}
 
 
-def test_an_unreadable_option_book_refuses_entries_but_runs_exits(live, monkeypatch):
+def test_an_unknown_put_collateral_is_not_ready_and_the_next_tick_scans(live, monkeypatch):
+    """Seams m1: FW1's incompleteness triggers (an unknown-origin short fill,
+    an ambiguous mid-refresh settle) last until the next ~3 s refresh. The
+    lane used to plan no entries and still latch the session, so a 3 s gap
+    cost the whole day's entries. An unknown collateral is now "not ready",
+    as unreadable positions are: nothing is decided or latched, and the next
+    tick scans."""
     ai = scripted({"AAA": APPROVE, "CCC": APPROVE, "DDD": APPROVE})
     monkeypatch.setattr(live.ai_analyst, "analyse", ai)
     monkeypatch.setattr(live, "swing_indicators",
@@ -974,10 +980,16 @@ def test_an_unreadable_option_book_refuses_entries_but_runs_exits(live, monkeypa
     book = PutBook(cash=100_000.0, bp=100_000.0, positions={"EEE": (10, 100.0, 1_040.0)},
                    health={"complete": False, "stale_since": None})
     cache = {}
+    assert tick(live, MON_0920, book, cache) == {}
+    assert ai.calls == [] and live._SCAN_DONE_KEY not in cache
+    assert any("not ready" in m and "short puts" in m for m in lines)
+    assert rows() == {}
+
+    book.health = {"complete": True, "stale_since": None}      # the next refresh landed
     out = tick(live, MON_0920, book, cache)
-    assert {s: d for s, d in out.items() if not s.startswith("_")} == {"EEE": -1}
-    assert ai.calls == [] and cache[live._SCAN_DONE_KEY] == "2026-06-01"
-    assert any("REFUSING ENTRIES" in m and "short puts" in m for m in lines)
+    assert out["EEE"] == -1
+    assert set(_entries(out)) == {"AAA", "CCC", "DDD"}
+    assert cache[live._SCAN_DONE_KEY] == "2026-06-01"
 
 
 # -- FW-str minor (a): an entry that rounds to 0 whole shares holds nothing ----------
