@@ -26,7 +26,8 @@ def test_all_tables_has_the_127_live_tables_plus_the_two_split_tables():
     # (OutlierUniverseFeatures, OutlierGraphPeers).
     # 2026-09-24: +6 for the swing-trader port (SwingSignals, SwingWheelScans,
     # SwingIvSnapshots, SwingMacroDaily, SwingIndexMembership, SwingSectorMap).
-    assert len(schema.ALL_TABLES) == 135 + len(_LAZILY_CREATED)
+    # 2026-09-25: +1 for the swing lane's daily-bar cache (SwingDailyBars).
+    assert len(schema.ALL_TABLES) == 136 + len(_LAZILY_CREATED)
     assert len(set(schema.ALL_TABLES)) == len(schema.ALL_TABLES)
     for name in ("BacktestResults", "PriceHistory", "GraphNexusTradeContexts",
                  "kalshi_decisions", "sports_fixtures", "Users",

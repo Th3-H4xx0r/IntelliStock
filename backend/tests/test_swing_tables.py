@@ -1,4 +1,4 @@
-"""The six swing-trader tables: registered, keyed the way the contract says,
+"""The seven swing-trader tables: registered, keyed the way the contract says,
 and readable the way the lanes read them (spec §7)."""
 import os
 import sys
@@ -11,10 +11,11 @@ from db import schema  # noqa: E402
 from db.store import P  # noqa: E402
 
 SWING_TABLES = ("SwingSignals", "SwingWheelScans", "SwingIvSnapshots",
-                "SwingMacroDaily", "SwingIndexMembership", "SwingSectorMap")
+                "SwingMacroDaily", "SwingIndexMembership", "SwingSectorMap",
+                "SwingDailyBars")
 
 
-def test_the_six_tables_are_registered_with_text_ids():
+def test_the_seven_tables_are_registered_with_text_ids():
     for name in SWING_TABLES:
         assert name in schema.ALL_TABLES, name
         assert schema.spec(name).id_type == "text", name
@@ -26,7 +27,8 @@ def test_the_record_tables_index_instance_id():
 
 
 def test_the_dated_series_are_prefix_scanned_on_id():
-    for name in ("SwingIvSnapshots", "SwingMacroDaily", "SwingIndexMembership"):
+    for name in ("SwingIvSnapshots", "SwingMacroDaily", "SwingIndexMembership",
+                 "SwingDailyBars"):
         assert schema.TABLES[name].prefix_fields == ("id",)
 
 

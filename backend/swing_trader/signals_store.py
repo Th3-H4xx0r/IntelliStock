@@ -22,7 +22,7 @@ _ENSURED = False
 
 
 def ensure_tables() -> None:
-    """Create the six tables once per process. DDL stays in db/schema.py; a
+    """Create the swing tables once per process. DDL stays in db/schema.py; a
     test's FakeStore needs none."""
     global _ENSURED
     if _ENSURED:

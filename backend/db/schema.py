@@ -115,7 +115,7 @@ ALL_TABLES: tuple = (
     "NexusStrategyCache", "NotificationPreferences", "OutlierGraphPeers",
     "OutlierUniverseFeatures", "PointInTimeDatasetSnapshots",
     "PointInTimeManifests", "PriceHistory", "PushDevices", "Stocks", "Strategies",
-    "SwingIndexMembership", "SwingIvSnapshots", "SwingMacroDaily",
+    "SwingDailyBars", "SwingIndexMembership", "SwingIvSnapshots", "SwingMacroDaily",
     "SwingSectorMap", "SwingSignals", "SwingWheelScans",
     "TickerDayFeatures", "Users", "backtest_replay_calls",
     "backtest_replay_fixture_builds", "backtest_replay_fixtures",
@@ -290,6 +290,9 @@ _SPECS = [
     TableSpec("SwingMacroDaily", prefix_fields=("id",)),
     TableSpec("SwingIndexMembership", prefix_fields=("id",)),
     TableSpec("SwingSectorMap"),
+    # id = "SYMBOL|YYYY": one row per symbol per calendar year of daily bars
+    # (swing_trader.backtest_bars), read in batches by id.
+    TableSpec("SwingDailyBars", prefix_fields=("id",)),
     TableSpec("LiveBootAudit", indexed_fields=("instance_id",), prefix_fields=("id",)),
     # r.now() wrote a native time on these; the ported writer stores an
     # ISO-8601 string and time_fields decodes it back to a tz-aware datetime,

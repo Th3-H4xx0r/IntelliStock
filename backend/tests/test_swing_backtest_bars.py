@@ -150,9 +150,15 @@ def test_chunks_go_through_the_engines_bars_cache(monkeypatch):
 
     monkeypatch.setattr(price_utils, "get_bars_chunk_cached", cached)
     http = Http()
+
+    class Unreadable:
+        def get_all(self, *_a, **_k):
+            raise RuntimeError("server7 unreachable")
+
+    # The per-symbol path is the fallback when SwingDailyBars cannot be read.
     got = backtest_bars.fetch_daily_bars(["AAPL"], date(2025, 1, 2), date(2025, 1, 3),
                                          key="k", secret="s", feed="sip", http_get=http,
-                                         log=Logs())
+                                         log=Logs(), store=Unreadable())
     assert http.calls == [] and len(got["AAPL"]) == 1
     assert seen == [(True, "AAPL", datetime(2025, 1, 2), datetime(2025, 1, 3, 23, 59, 59),
                      "1Day", "sip", "split")]
