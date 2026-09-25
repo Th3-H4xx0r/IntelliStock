@@ -3,6 +3,9 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppShell from '../layouts/AppShell.vue'
 import LiveReadinessCard from '../components/LiveReadinessCard.vue'
+import PendingSignalsCard from '../components/swing/PendingSignalsCard.vue'
+import WheelPanel from '../components/swing/WheelPanel.vue'
+import { swingLanesOf } from '../utils/swing.js'
 import { getToken } from '../utils/auth.js'
 import {
   applyStrategyLlmDraft,
@@ -29,6 +32,10 @@ const instanceId = computed(() => route.params.id)
 // not explicitly one of those is an equity instance.
 const isStockInstance = computed(
   () => !['crypto', 'kalshi'].includes(String(inst.value?.kind ?? '').toLowerCase()))
+
+// The swing / wheel approval cards appear only on an equity instance whose
+// strategy document carries one of those lanes (spec 2026-09-24 section 10).
+const swingLanes = computed(() => swingLanesOf(inst.value?.strategy))
 
 const API_BASE = import.meta.env.DEV
   ? '/api'
@@ -1701,6 +1708,15 @@ async function submitCreateBacktest() {
             @waived="fetchInstance"
             @revoked="fetchInstance"
           />
+        </div>
+
+        <!-- ── Swing / wheel lanes ───────────────────────────────────────── -->
+        <div
+          v-if="isStockInstance && swingLanes.any"
+          class="grid grid-cols-1 xl:grid-cols-2 gap-5 mb-6"
+        >
+          <PendingSignalsCard :instance-id="instanceId" :api-base="API_BASE" />
+          <WheelPanel v-if="swingLanes.wheel" :instance-id="instanceId" :api-base="API_BASE" />
         </div>
 
         <!-- ── Stocks ──────────────────────────────────────────────────────── -->
