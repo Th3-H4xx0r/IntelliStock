@@ -37,6 +37,11 @@ FILES = (
     "backend/strategy_x.py",
     "backend/strategies/strategy_x.py",
     "backend/price_utils.py",
+    # The backtest engine itself (swing port, spec 12): a push that changes
+    # only the simulator must not read as deployed before its image exists.
+    "backend/simulated_execution.py",
+    "backend/portfolio_emulator.py",
+    "backend/backtest_bar_events.py",
     # 2026-09-03: the EB pair was missing, so a push that changed only
     # strategy_eb.py reported "deployed" instantly and a pre-registered engine
     # run started on the OLD image.

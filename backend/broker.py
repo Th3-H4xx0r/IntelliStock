@@ -3644,6 +3644,35 @@ def _core_sleeve_cfg_raw(cached_strategies):
     return {}
 
 
+def _backtest_credit_pending_sell_proceeds(cached_strategies) -> bool:
+    """May a submitted-but-unfilled funding sell count toward buying power?
+
+    The graph_nexus lane's config is read exactly as before: doc 200 carries
+    the flag on a weight-0 graph_nexus lane that never runs, and EB's credit
+    depends on it. Any enabled run_once lane (one the dispatcher would run:
+    run_once scope, weight > 0) may also set it -- the swing lab's only lane
+    is strategy_swing (swing port, plan B pre-flight R1). Default False.
+    """
+    flag = "backtest_credit_pending_sell_proceeds"
+    if bool((_core_sleeve_cfg_raw(cached_strategies) or {}).get(flag, False)):
+        return True
+    for spec in (cached_strategies or []):
+        if not isinstance(spec, dict):
+            continue
+        scope = str(spec.get("execution_scope") or "per_symbol").strip().lower()
+        if scope != "run_once":
+            continue
+        try:
+            if float(spec.get("weight", 0) or 0) <= 0:
+                continue
+        except (TypeError, ValueError):
+            continue
+        config = spec.get("config")
+        if isinstance(config, dict) and bool(config.get(flag, False)):
+            return True
+    return False
+
+
 def _anchor_reinforcement_execution_policy(
         cached_strategies, nexus_hint, mode_value):
     """Default-OFF, backtest-only risk envelope for an anchor order.
@@ -12186,6 +12215,7 @@ def _non_equity_compatibility_bar_availability_resolver(
 
 def _equity_daily_bar_session_close(bar_start):
     """Resolve an equity daily bar to its authoritative exchange close."""
+    # Twin: backtest_bar_events.equity_daily_session_open; keep the two in step.
     try:
         import pandas as pd
         import live_calendar
@@ -12361,8 +12391,14 @@ def _submit_portfolio_signal(
     cash_per_trade=1000.0,
     sell_fraction=1.0,
     order_source,
+    execution_hints=None,
 ):
-    """Submit with source provenance only when using next-event execution."""
+    """Submit with source provenance only when using next-event execution.
+
+    ``execution_hints`` is `backtest_bar_events.execution_hint_kwargs(...)`:
+    empty unless a strategy's sizing hint set bracket / whole_shares /
+    fill_at_next_open, so every other call passes exactly what it did.
+    """
     kwargs = {
         "timestamp": timestamp,
         "cash_per_trade": cash_per_trade,
@@ -12370,6 +12406,8 @@ def _submit_portfolio_signal(
     }
     if bool(getattr(portfolio, "has_next_event_execution", False)):
         kwargs["order_source"] = order_source
+        if execution_hints:
+            kwargs.update(execution_hints)
     return portfolio.execute_signal(ticker, signal, price, **kwargs)
 
 
@@ -12702,6 +12740,7 @@ def _backtest_symbol_price_lookup_block_reason(data, symbol, current_time):
 # broker.py (not import-safe — runs argparse + main path at load).
 import backtest_price_history as _bph
 import backtest_prices_cursor as _bprices_cursor
+import backtest_bar_events as _bbe
 
 
 def _invalidate_price_history_cursor() -> None:
@@ -12723,6 +12762,67 @@ def get_price_history_up_to_current(data, symbols, current_time):
             for_history=True,
         ),
     )
+
+
+def _backtest_bar_open_resolver():
+    """When each fetched bar's first trade could print: the NYSE session open
+    for a daily bar, the bar's own label for an intraday one (spec 6.2)."""
+    interval = _backtest_bar_interval()
+    return _bbe.make_bar_open_resolver(
+        interval=interval,
+        session_open_resolver=(
+            _bbe.equity_daily_session_open
+            if interval >= datetime.timedelta(days=1) else None),
+    )
+
+
+def _process_backtest_bar_events(portfolio, data, prices, current_time):
+    """Next-open fills and bracket legs over every bar not yet processed.
+
+    Called after the pending-fill block and before the strategy call, and only
+    when the emulator has a bracket leg or a next-open order, so a run that
+    never asked for either never reaches it (spec 6.2).
+    """
+    clock = _aware_backtest_clock(current_time)
+    if clock is None:
+        return ()
+    bars = _bbe.collect_bar_events(
+        data,
+        portfolio.bar_event_requirements(),
+        clock,
+        bar_time_to_datetime=_bar_time_to_datetime,
+        bar_available_at=_backtest_bar_availability_resolver(),
+        bar_open_at=_backtest_bar_open_resolver(),
+    )
+    if not bars:
+        return ()
+    marks = _backtest_fill_snapshot_marks(portfolio, prices, data, current_time)
+    fills = portfolio.process_bar_events(bars, clock)
+    for fill in fills:
+        # Twin: the "[execution] FILL" log in the main loop's pending-fill block.
+        try:
+            _log(
+                "[execution] FILL %s %s qty=%.8f cumulative=%.8f "
+                "price=%.6f fees=%.6f quote=%s model=%s source=%s "
+                "exit_reason=%s"
+                % (
+                    fill.side.upper(),
+                    fill.symbol,
+                    fill.incremental_quantity,
+                    fill.cumulative_quantity,
+                    fill.price,
+                    fill.fees,
+                    fill.quote_timestamp,
+                    fill.cost_model_version,
+                    fill.source,
+                    fill.exit_reason or "-",
+                ),
+                "green",
+            )
+        finally:
+            _apply_backtest_confirmed_fill_state(fill, marks)
+    return tuple(fills)
+
 
 print("Time Increment:", time_increment)
 
@@ -14541,6 +14641,7 @@ while not shutdown_requested:
                     # so a grep sees execution -> reconciliation in causal order.
                     # The finally preserves reconciliation if both logger
                     # sinks fail.
+                    # Twin: _process_backtest_bar_events logs bar-driven fills.
                     try:
                         _log(
                             "[execution] FILL %s %s qty=%.8f cumulative=%.8f "
@@ -14563,6 +14664,13 @@ while not shutdown_requested:
                         _apply_backtest_confirmed_fill_state(
                             _bt_fill, _bt_fill_prices)
             _reconcile_anchor_pending_orders(portfolio_emulator)
+            # Swing port (spec 6.2): next-open fills and bracket legs, off
+            # every bar since the last one processed. Only a run that has
+            # submitted a bracket or a next-open order ever gets past this.
+            if (portfolio_emulator.has_bracket_legs()
+                    or portfolio_emulator.has_next_open_orders()):
+                _process_backtest_bar_events(
+                    portfolio_emulator, data, prices, current_time)
 
         # Backtest: every bar, execute any pending future trades for TODAY before running strategies.
         # NOTE: loops over _strategy_cache (all strategies that ever scheduled trades), NOT _run_once_specs,
@@ -16822,9 +16930,9 @@ while not shutdown_requested:
             # False keeps existing runs byte-identical.
             if portfolio_emulator is not None:
                 try:
-                    portfolio_emulator.credit_pending_sell_proceeds = bool(
-                        (_core_sleeve_cfg_raw(_cached_strategies) or {}).get(
-                            "backtest_credit_pending_sell_proceeds", False))
+                    portfolio_emulator.credit_pending_sell_proceeds = (
+                        _backtest_credit_pending_sell_proceeds(
+                            _cached_strategies))
                 except Exception:
                     pass
             _mpg_full_exits: set = set()   # names FULLY exited this cycle (sells run first)
@@ -19081,6 +19189,8 @@ while not shutdown_requested:
                                     cash_per_trade=cash_to_use,
                                     sell_fraction=sell_fraction,
                                     order_source=_anchor_order_source,
+                                    execution_hints=_bbe.execution_hint_kwargs(
+                                        nexus_hint, decision),
                                 )
                                 _mpg_submit_ok = bool(_mpg_result)
                                 if _anchor_policy:
