@@ -317,6 +317,8 @@ class AlpacaAdapter(BrokerAdapter):
         self._option_contract_cache: dict[str, OptionContractDTO] = {}
         self._option_contract_misses: dict[str, float] = {}
         self._last_option_misses: frozenset = frozenset()
+        #: Contract symbols seen in the last reconciliation snapshot.
+        self._reconciliation_option_symbols: frozenset = frozenset()
 
         # Seed from Alpaca
         self.refresh_cash()
@@ -334,6 +336,11 @@ class AlpacaAdapter(BrokerAdapter):
             _broker_view = []
             if self._defer_ownership_reconciliation:
                 for _position in _seeded_broker_positions or ():
+                    if getattr(_position, "asset_class", None) == "us_option":
+                        # swing-port: a contract lives in _option_positions;
+                        # it is never an equity position awaiting ownership,
+                        # nor "-1sh external" in the boot audit.
+                        continue
                     _broker_view.append(
                         {
                             "symbol": _position.symbol,
@@ -1619,10 +1626,15 @@ class AlpacaAdapter(BrokerAdapter):
         )
 
         observed_at = datetime.now(timezone.utc)
+        option_symbols: set[str] = set()
 
         def _positions(raw_positions):
             out = []
             for raw in raw_positions or ():
+                if _is_us_option_position(raw):
+                    option_symbols.add(
+                        str(getattr(raw, "symbol", "") or "").strip().upper()
+                    )
                 try:
                     out.append(
                         BrokerPositionSnapshot(
@@ -1663,6 +1675,7 @@ class AlpacaAdapter(BrokerAdapter):
             except ImportError:
                 raw_orders = list(self._client.get_orders() or [])
             second_positions = _positions(self._client.get_all_positions())
+            self._reconciliation_option_symbols = frozenset(option_symbols)
             normalized_orders = []
             for raw in raw_orders:
                 # swing-port: a multi-leg (mleg) option order's top level has
@@ -1778,11 +1791,21 @@ class AlpacaAdapter(BrokerAdapter):
         if any(event.instance_id != self._instance_id for event in result.events):
             raise BrokerError("reconciliation instance identity mismatch")
         now = datetime.now(timezone.utc)
+        # swing-port: option contracts live in _option_positions only. They
+        # stay out of every long-only equity mirror a reconcile publishes:
+        # owned, external (broker.py's boot audit would print "-1.0000sh"),
+        # unresolved and the equity trade history. Empty on EB's account.
+        contracts = (
+            set(getattr(result, "option_symbols", ()) or ())
+            | set(self._reconciliation_option_symbols)
+            | set(self._option_positions)
+            | set(self._last_option_misses)
+        )
         with self._lock:
             self._positions = {
                 symbol: float(quantity)
                 for symbol, quantity in result.owned.items()
-                if quantity > 0
+                if quantity > 0 and symbol not in contracts
             }
             self._external_positions = {
                 symbol: {
@@ -1793,6 +1816,7 @@ class AlpacaAdapter(BrokerAdapter):
                     "first_seen_utc": now.isoformat(),
                 }
                 for symbol, quantity in result.external.items()
+                if symbol not in contracts
             }
             self._unresolved_positions = {
                 symbol: {
@@ -1801,6 +1825,7 @@ class AlpacaAdapter(BrokerAdapter):
                     "first_seen_utc": now.isoformat(),
                 }
                 for symbol, quantity in result.unresolved.items()
+                if symbol not in contracts
             }
             self._trades = [
                 {
@@ -1816,6 +1841,7 @@ class AlpacaAdapter(BrokerAdapter):
                 }
                 for event in result.events
                 if event.incremental_quantity > 0
+                and event.symbol not in contracts
             ]
             self._pending_broker_positions = ()
             self._reconciliation_healthy = result.healthy

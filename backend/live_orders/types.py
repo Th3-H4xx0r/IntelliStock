@@ -146,6 +146,14 @@ def _session_date(value: datetime) -> str:
         return value.astimezone(timezone.utc).strftime("%Y-%m-%d")
 
 
+def instance_key_prefix(instance_id) -> str:
+    """The prefix every hash-keyed client order id of this instance carries:
+    its first 8 alphanumerics (or "x") and a dash. The same string as
+    broker_adapters._classifier.derive_cid_prefix and the reconciler's
+    cid_prefix in broker.py (pinned in tests/test_swing_live_service.py)."""
+    return f"{re.sub(r'[^A-Za-z0-9]', '', str(instance_id or ''))[:8] or 'x'}-"
+
+
 def _optional_text(value, *, case: str = "") -> Optional[str]:
     """A stripped string, or None for None or blank; ``case`` folds it."""
     if value is None:
@@ -258,6 +266,20 @@ def _swing_fields(
         raise ValueError(
             "broker_client_order_id is reserved for bracket legs and option activity"
         )
+    if source is OrderSource.BRACKET_LEG:
+        # L1 review: the broker mints a leg's client order id, so the leg's
+        # key carries no instance prefix. What makes the row ours is its
+        # parent, which must be an order this instance minted.
+        if broker_key is None:
+            raise ValueError("a bracket leg needs the broker's client order id")
+        if side is not OrderSide.SELL or not bool(intent.reduce_only):
+            raise ValueError("a bracket leg must be a reduce-only SELL")
+        own = instance_key_prefix(intent.instance_id)
+        if parent is None or not parent.startswith(own):
+            raise ValueError(
+                "a bracket leg needs a parent_client_order_id minted by this "
+                f"instance ({own}...)"
+            )
     return {
         "asset_class": asset_class,
         "order_class": order_class,
@@ -487,10 +509,10 @@ class OrderIntent:
         else:
             # Preserve the existing clean-room classifier contract: every
             # strategy-owned WAL row begins with this instance's 8-char prefix.
-            instance_prefix = re.sub(r"[^A-Za-z0-9]", "", instance_id)[:8] or "x"
+            instance_prefix = instance_key_prefix(instance_id)
             retry_suffix = f"-{retry_ordinal}"
-            digest_room = 48 - len(instance_prefix) - 1 - len(retry_suffix)
-            key = f"{instance_prefix}-{digest[:digest_room]}{retry_suffix}"
+            digest_room = 48 - len(instance_prefix) - len(retry_suffix)
+            key = f"{instance_prefix}{digest[:digest_room]}{retry_suffix}"
         object.__setattr__(self, "identity_payload", payload)
         object.__setattr__(self, "idempotency_key", key)
 
