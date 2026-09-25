@@ -3874,11 +3874,11 @@ class AlpacaAdapter(BrokerAdapter):
             pass
 
 
-#: Order states in which a cancel is confirmed and nothing more can fill.
 #: Fix wave round 2: how many option fills the adapter remembers for a
 #: refresh in flight (far more than can land during one GET).
 _OPTION_FILL_JOURNAL_MAX = 256
 
+#: Order states in which a cancel is confirmed and nothing more can fill.
 _CANCEL_CONFIRMED_STATES = frozenset(
     {"canceled", "cancelled", "expired", "rejected", "done_for_day"}
 )
