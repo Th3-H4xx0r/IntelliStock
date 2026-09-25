@@ -2608,6 +2608,13 @@ class AlpacaAdapter(BrokerAdapter):
             multiplier=100,
         )
         self._option_positions = updated
+        if meta is None and new_qty < 0:
+            # Fix wave FW-lo-I3: a short with no contract meta carries
+            # collateral nobody can count (no type, underlying or strike).
+            # The map is incomplete until a refresh reads the meta, which
+            # fails closed for new sell-to-opens, the duplicate-put check and
+            # the 25% cap; a buy-to-close needs only the signed quantity.
+            self._option_positions_complete = False
 
     def get_option_activities(
         self,

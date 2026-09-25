@@ -10036,10 +10036,23 @@ def _live_option_dependency_snapshot(adapter, intent, *, now_utc=None):
         calendar, calendar_at = Health.UNKNOWN, None
     open_short = Decimal("0")
     open_short_on_underlying = Decimal("0")
+    meta_known = True
     for row in positions.values():
-        if int(row.qty) < 0 and str(row.option_type).lower() == "put":
-            collateral = (Decimal(str(row.strike)) * int(row.multiplier)
-                          * abs(int(row.qty)))
+        if int(row.qty) >= 0:
+            continue
+        kind = str(row.option_type or "").strip().lower()
+        try:
+            strike = Decimal(str(row.strike))
+        except Exception:
+            strike = Decimal("0")
+        if (kind not in ("put", "call") or not strike > 0
+                or not str(row.underlying or "").strip()):
+            # Fix wave FW-lo-I3: a short whose type, underlying or strike is
+            # unknown carries collateral this view cannot count.
+            meta_known = False
+            continue
+        if kind == "put":
+            collateral = strike * int(row.multiplier) * abs(int(row.qty))
             open_short += collateral
             if str(row.underlying).upper() == underlying:
                 open_short_on_underlying += collateral
@@ -10051,7 +10064,8 @@ def _live_option_dependency_snapshot(adapter, intent, *, now_utc=None):
     except Exception:
         pending_total, pending_underlying = Decimal("0"), Decimal("0")
         pending_known = False
-    known = bool(getattr(adapter, "_option_positions_complete", False)) and pending_known
+    known = (bool(getattr(adapter, "_option_positions_complete", False))
+             and pending_known and meta_known)
     equity = getattr(adapter, "_account_equity", None)
     positions_health = state.get("positions", "unknown")
     if getattr(adapter, "_positions_stale_since", None) is not None:
