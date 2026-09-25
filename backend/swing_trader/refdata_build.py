@@ -75,6 +75,7 @@ RENAME_MAP = {
     "HRS": "LHX",      # Harris -> L3Harris, 2019-07-01
     "JEC": "J",        # Jacobs Engineering, 2019-12-10
     "LB": "BBWI",      # L Brands -> Bath & Body Works, 2021-08-03
+    "MMC": "MRSH",     # Marsh & McLennan -> Marsh McLennan (MRSH), 2026-01-14
     "MYL": "VTRS",     # Mylan -> Viatris, 2020-11-16
     "NLOK": "GEN",     # NortonLifeLock -> Gen Digital, 2022-11-08
     "PARA": "PSKY",    # Paramount Global -> Paramount Skydance, Aug 2025
