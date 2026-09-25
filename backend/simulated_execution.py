@@ -300,6 +300,21 @@ class SimulationOrder:
     #: get — so an unfilled limit must EXPIRE and be visible, never linger
     #: silently. 0 means "never expire".
     expire_after_quotes: int = 0
+    #: 2026-09-24 swing port (spec 6.2). All three default to today's
+    #: behaviour, and nothing below reads them unless an order sets one.
+    #:
+    #: `bracket` -- {"take_profit_price", "stop_loss_price"}: ABSOLUTE prices,
+    #: the same numbers a live Alpaca bracket carries. When this BUY fills, the
+    #: simulator arms a stop leg and a target leg for the filled quantity and
+    #: checks them against every later bar's high and low (`on_bar`).
+    bracket: dict | None = None
+    #: The quantity is a whole number of shares, and every clamp that could cut
+    #: it (the cash budget) floors to a whole share rather than a fraction.
+    whole_shares: bool = False
+    #: Fill at the OPEN of the first bar whose session starts after
+    #: `decision_at`, not at a later close. Filled only by `on_bar`; `on_quote`
+    #: skips it. One shot: whatever is unfilled after that bar is dropped.
+    fill_at_next_open: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.order_id, str) or not self.order_id.strip():
@@ -344,6 +359,67 @@ class SimulationOrder:
         if expire < 0:
             raise ValueError("expire_after_quotes cannot be negative")
         object.__setattr__(self, "expire_after_quotes", expire)
+        bracket = self.bracket
+        if bracket is not None:
+            if side != "buy":
+                raise ValueError("bracket is only valid for buy orders")
+            if not isinstance(bracket, dict):
+                raise ValueError("bracket must be a mapping")
+            take_profit = _finite_number(
+                bracket.get("take_profit_price"),
+                field="bracket.take_profit_price", positive=True)
+            stop_loss = _finite_number(
+                bracket.get("stop_loss_price"),
+                field="bracket.stop_loss_price", positive=True)
+            if not stop_loss < take_profit:
+                raise ValueError(
+                    "bracket stop_loss_price must be below take_profit_price")
+            bracket = {"take_profit_price": take_profit,
+                       "stop_loss_price": stop_loss}
+        object.__setattr__(self, "bracket", bracket)
+        whole_shares = bool(self.whole_shares)
+        if whole_shares and not float(quantity).is_integer():
+            raise ValueError("whole_shares orders need a whole-share quantity")
+        object.__setattr__(self, "whole_shares", whole_shares)
+        fill_at_next_open = bool(self.fill_at_next_open)
+        if fill_at_next_open and limit_price is not None:
+            raise ValueError("fill_at_next_open orders are market orders")
+        object.__setattr__(self, "fill_at_next_open", fill_at_next_open)
+
+
+@dataclass(frozen=True)
+class SimulationBarEvent:
+    """One completed bar, for next-open fills and bracket legs.
+
+    `bar_ts` is the instant the bar's first trade could print: the NYSE
+    session open for a daily bar, the bar's own label for an intraday one.
+    `available_at` is when the whole bar is known (the session close for a
+    daily bar). Both are what `backtest_bar_events.collect_bar_events` builds.
+    """
+
+    symbol: str
+    open: float
+    high: float
+    low: float
+    close: float
+    bar_ts: datetime
+    available_at: datetime
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.symbol, str) or not self.symbol.strip():
+            raise ValueError("symbol must be a non-empty string")
+        for field in ("open", "high", "low", "close"):
+            object.__setattr__(
+                self, field,
+                _finite_number(getattr(self, field), field=field,
+                               positive=True))
+        if self.high < self.low:
+            raise ValueError("high cannot be below low")
+        opened = _event_seconds(self.bar_ts, field="bar_ts")
+        known = _event_seconds(self.available_at, field="available_at")
+        if known < opened:
+            raise ValueError("available_at cannot precede bar_ts")
+        object.__setattr__(self, "symbol", self.symbol.strip().upper())
 
 
 @dataclass(frozen=True)
@@ -447,6 +523,9 @@ class SimulationFill:
     source: str = "equity_backtest"
     order_quantity: float | None = None
     is_final: bool = False
+    #: "stop_loss" | "take_profit" on a bracket-leg fill; None on every other
+    #: fill, and then absent from `as_dict()` so fill provenance is unchanged.
+    exit_reason: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.order_id, str) or not self.order_id.strip():
@@ -514,11 +593,19 @@ class SimulationFill:
                 )
         object.__setattr__(self, "order_quantity", order_quantity)
         object.__setattr__(self, "is_final", bool(self.is_final))
+        exit_reason = self.exit_reason
+        if exit_reason is not None:
+            exit_reason = str(exit_reason).strip()
+            if not exit_reason:
+                raise ValueError("exit_reason must be a non-empty string")
+        object.__setattr__(self, "exit_reason", exit_reason)
 
     def as_dict(self) -> dict:
         result = asdict(self)
         result["quote_timestamp"] = self.quote_timestamp.isoformat()
         result["executed_at"] = self.executed_at.isoformat()
+        if result.get("exit_reason") is None:
+            result.pop("exit_reason", None)
         return result
 
 
