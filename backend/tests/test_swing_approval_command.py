@@ -723,8 +723,8 @@ def test_the_re_approval_round_trip_through_the_real_store_and_service(store,
 
     monkeypatch.setattr(signals_store, "store", store)
     notices = []
-    monkeypatch.setattr(notify, "notify_swing_approval_failed",
-                        lambda *a, **k: notices.append(k))
+    # G8b minor 3: the real sender runs; only its outbox sink is stubbed.
+    monkeypatch.setattr(notify, "_sink", lambda **kwargs: notices.append(kwargs))
     doc = signals_store.new_signal(
         instance_id="instance-1", lane="swing", symbol="AAPL",
         session="2026-10-02", score=62, recommendation="review", reasoning="r",
@@ -765,7 +765,7 @@ def test_the_re_approval_round_trip_through_the_real_store_and_service(store,
         "pending", None, None)
     assert list(service.lifecycle_store.list_for_instance("instance-1")) == []
     assert sent == [] and len(notices) == 1
-    assert notices[0]["reason"].endswith("approve again after the open")
+    assert notices[0]["body"].endswith("approve again after the open")
 
     quote["health"] = Health.HEALTHY
     operator()
