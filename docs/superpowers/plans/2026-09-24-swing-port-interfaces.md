@@ -228,7 +228,7 @@ The `LiveCommands` type `submit_order` payload is `{"source": "swing_approval", 
 - Strategy ids and classes: `strategy_swing` → `StrategySwing` in `backend/strategies/strategy_swing.py`, and `strategy_wheel` → `StrategyWheel` in `backend/strategies/strategy_wheel.py`.
 - Enable flags: `strategy_swing_enabled` and `strategy_wheel_enabled`.
 - Model key in both: `conviction_llm_model_id`. The resolver injects `conviction_llm_provider`, `conviction_llm_model` and `conviction_llm_api_key`.
-- Notification types: `swing_entry`, `swing_pending_review`, `swing_exit`, `swing_run_summary`, `wheel_put_placed`, `wheel_pending_review`, `wheel_position_alert`, `wheel_assignment`.
+- Notification types: `swing_entry`, `swing_pending_review`, `swing_exit`, `swing_run_summary`, `wheel_put_placed`, `wheel_pending_review`, `wheel_position_alert`, `wheel_assignment`, `swing_approval_failed` (added by the plan C final review: an approved order the broker refused; push on by default; sender `notify_swing_approval_failed(instance_id, *, symbol, lane, reason)`, called by A-live Task 15).
 - API routes:
   - `GET /instances/{instance_id}/swing/signals?status=`
   - `POST /instances/{instance_id}/swing/signals/{signal_id}/decision` with body `{"decision", "reason"}`
@@ -266,3 +266,22 @@ The `LiveCommands` type `submit_order` payload is `{"source": "swing_approval", 
    - `multiplier` is 100 for options.
    - `last_price`, `market_value`, `unrealized_pnl` and `unrealized_pnl_pct` may be `null` when Alpaca has no `current_price`.
    - `recent_trades` rows carry **no** `asset_class`, so the UI falls back to the OCC symbol shape for them.
+
+## 11. Additions from plan B
+
+- `swing_trader.constants.SWING_DEFAULTS` and `WHEEL_DEFAULTS`: the header defaults. The six swing `live_*` values equal A-live's `_SW_DEFAULTS` row (0.2 / 0.2 / 0.2 / 0.25 / 0.35 / 0.45).
+- Intent labels `swing_stop_exit` and `swing_target_exit` (ST `exit_signal` close-based stop and target).
+- The live swing entry hint has no share count: `buy_cash = max(min(equity × 0.125, buying power) × size_adjustment, prior close)`; the engine buys `floor(buy_cash / live price)`. Approval orders carry `qty` (`approvals.build_approved_order`).
+- Swing strategy-cache key `_swing_pending_exits` (`{symbol: {"reason", "intent", "since"}}`): an emitted exit is re-emitted on every later tick while the stock is held with no working non-bracket sell (answers A-live addition 15).
+- Option order dict key `"session": "YYYY-MM-DD"`, informational (A-live keys option sells on the session itself).
+- The wheel lane reads `_engine_wheel_assignments` (A-live addition 13) from its strategy cache: only assigned shares are covered-call candidates.
+- `SwingSignals` may carry `score: None` (AI gate off), `context: dict`, and `error` on a `failed` row the lane wrote (A-live's approval handler writes only `status` and `order_client_id`).
+- `swing_trader.signals_store`: `signal_id_for(instance_id, lane, session, symbol) -> str`, `new_signal(**fields) -> dict`, `cas_signal(signal_id, *, expect_status, doc) -> bool`, `swing_owned_symbols(instance_id, held) -> set[str]`, `insert_wheel_scan(row) -> str`, `list_wheel_scans(instance_id, limit=50) -> list[dict]`, `all_signals(instance_id) -> list[dict]`, `ensure_tables() -> None`, `OPEN_STATUSES`.
+- `swing_trader.approvals.SignalConflict(ValueError)`: a decision on a signal that is not pending; `_run` maps it to 400 per §9 item 2. A click that lost the compare-and-swap: `interactive_utils.SwingDecisionRaceError` → 409. An approval that cannot reach the broker, or an unreadable wheel book: `interactive_utils.SwingBrokerUnavailableError` → 503, and the signal stays pending. Unknown or foreign signal id: `LookupError` → 404.
+- `swing_trader.account`: read-only book views shared by both lanes (`equity_positions`, `option_symbols`, `live_equity`, `live_buying_power`, `option_positions`, `open_orders`, `account_options`, `spendable`, `pending_symbols`, `entry_price_from_trades`).
+- The approval command handler (§7) is plan A-live Task 15's `_execute_swing_approval`; plan B does not edit `broker.py`.
+- `swing_trader.notify.send(category, instance_id, title, message, *, priority=0)` and `notify_wheel_assignment(instance_id, *, symbol, qty, price=None, date=None)` (A-live's activities poller calls the latter).
+- `llm_utils.call_llm_with_web_search(provider, api_key, model, prompt, *, max_output_tokens=300, max_uses=2, timeout_sec=None, provider_config=None) -> str`.
+- What plan B relies on from the live engine:
+  - (a) Option position type: A-live's live position rows carry `option_type` (A-live pre-flight F4 adds it) in `live_broker_fetch.fetch_broker_live_state`; B still falls back to the OCC symbol.
+  - (b) Price marks: entries are price-marked by the existing broker helper `_ensure_live_candidate_marks` (A-live adds no marking).
