@@ -2471,6 +2471,21 @@ class AlpacaAdapter(BrokerAdapter):
             "equity": number("equity", float),
         }
 
+    def option_positions_health(self) -> dict:
+        """The option book's health for the wheel lane, so it never reads
+        this adapter's private attributes (plan B G7 review I-1).
+
+        ``complete`` is False until one positions refresh has read every
+        option row: a positions outage at startup, an unreadable row or a
+        contract lookup miss keeps it False. ``stale_since`` is the epoch
+        second the last positions refresh started failing (None while
+        refreshes succeed); the option map a stale refresh leaves behind is
+        the last good read, not broker truth. A fresh dict on every call."""
+        return {
+            "complete": bool(getattr(self, "_option_positions_complete", False)),
+            "stale_since": getattr(self, "_positions_stale_since", None),
+        }
+
     def option_contract_meta(self, symbol) -> Optional[OptionContractDTO]:
         """Alpaca's contract fields for one OCC symbol, cached for the process;
         a failed lookup is not retried for 60 s."""

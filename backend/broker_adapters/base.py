@@ -333,6 +333,14 @@ class BrokerAdapter(ABC):
     def get_latest_trades(self, symbols) -> dict:
         raise NotImplementedError(f"{type(self).__name__} does not support get_latest_trades")
 
+    def option_positions_health(self) -> dict:
+        """``{"complete": bool, "stale_since": <stamp or None>}`` for the
+        option book (plan B G7 review I-1). Refuses here, like every option
+        method above: an adapter that cannot trade options must never be read
+        as holding a complete, empty option book. A caller treats the refusal
+        as "unknown"."""
+        raise NotImplementedError(f"{type(self).__name__} does not support option_positions_health")
+
 
 #: Order classes whose exit legs are conditional children of another order.
 _MULTI_LEG_CLASSES = frozenset({"bracket", "oco", "oto"})
