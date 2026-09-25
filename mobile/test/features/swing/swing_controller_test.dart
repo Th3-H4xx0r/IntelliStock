@@ -386,6 +386,82 @@ void main() {
     });
   });
 
+  group('round 4: R3-1 skew, R3-2 dismissal', () {
+    setUp(() => clock = DateTime.utc(2026, 9, 25, 13, 30));
+
+    Future<(ProviderContainer, PendingSignalsNotifier, FakeSwingRepo)> joined() async {
+      // The device runs 90 s behind the server: decided_at is 13:31:30.
+      final repo = FakeSwingRepo([signal('a1')])
+        ..decideReceipt = const DecisionReceipt(uncertain: true);
+      final c = await start(repo);
+      final notifier = c.read(pendingSignalsProvider('i1').notifier);
+      await notifier.decide(signal('a1'), 'approve');
+      repo
+        ..pending = []
+        ..approved = [approvedSignal('a1', '2026-09-25T13:31:30Z')];
+      return (c, notifier, repo);
+    }
+
+    test('R3-1: a card that joined the stuck list stays there under clock skew', () async {
+      final (c, notifier, repo) = await joined();
+      final start0 = clock;
+      final seen = <String>[];
+      for (final s in [121, 151, 181, 211]) {
+        clock = start0.add(Duration(seconds: s));
+        await notifier.refresh();
+        seen.add(read(c).stuck.map((x) => x.id).join(','));
+      }
+      expect(seen, ['a1', 'a1', 'a1', 'a1']);
+      // A poll that no longer finds it approved forgets it.
+      repo.approved = [];
+      await notifier.refresh();
+      expect(read(c).stuck, isEmpty);
+      // Forgotten: listed again at 200 s on the device (110 s by the server),
+      // the ordinary age rule governs, and it is not stuck yet.
+      repo.approved = [approvedSignal('a1', '2026-09-25T13:31:30Z')];
+      clock = start0.add(const Duration(seconds: 200));
+      await notifier.refresh();
+      expect(read(c).stuck, isEmpty);
+    });
+
+    test('R3-1: a joined card still waits out a re-send like any stuck card', () async {
+      final (c, notifier, _) = await joined();
+      clock = clock.add(const Duration(seconds: 121));
+      await notifier.refresh();
+      await notifier.resend(read(c).stuck.single);
+      clock = clock.add(const Duration(seconds: 60));
+      await notifier.refresh();
+      expect(read(c).stuck, isEmpty);
+      clock = clock.add(const Duration(seconds: 61));
+      await notifier.refresh();
+      expect(read(c).stuck.map((s) => s.id), ['a1']);
+    });
+
+    test('R3-2: a new decision on a dismissed signal forgets the dismissal', () async {
+      final repo = FakeSwingRepo([],
+          approved: [approvedSignal('a1', '2026-09-25T13:20:00Z')]);
+      final c = await start(repo);
+      final notifier = c.read(pendingSignalsProvider('i1').notifier);
+      notifier.dismissStuck('a1');
+      // The broker put it back to pending; the operator approves it again,
+      // and that approval answers 202 and is still approved 2 minutes on.
+      repo
+        ..approved = []
+        ..pending = [signal('a1')]
+        ..decideReceipt = const DecisionReceipt(uncertain: true);
+      clock = clock.add(const Duration(seconds: 30));
+      await notifier.refresh();
+      await notifier.decide(signal('a1'), 'approve');
+      repo
+        ..pending = []
+        ..approved = [approvedSignal('a1', '2026-09-25T13:30:30Z')];
+      clock = clock.add(const Duration(seconds: 121));
+      await notifier.refresh();
+      expect(read(c).uncertain, isEmpty);
+      expect(read(c).stuck.map((s) => s.id), ['a1']);
+    });
+  });
+
   group('round 3 FU-1: a waiting card never waits forever with no action', () {
     setUp(() => clock = DateTime.utc(2026, 9, 25, 13, 30));
 

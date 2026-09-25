@@ -8,6 +8,7 @@ import {
   classifyResendFailure,
   confirmPrompt,
   createDecisionLatch,
+  createStuckMemory,
   createInFlightGuard,
   decisionSuccessMessage,
   decisionsFor,
@@ -594,4 +595,64 @@ test('cardSections: the stuck list shows even when the pending read failed on fi
   assert.deepEqual(cardSections({ loaded: true, loading: false, signals: [SWING], stuck: [], uncertain: {} }),
     { loadingText: false, empty: false, pending: true, waiting: false, stuck: false })
   assert.equal(cardSections({ loaded: false, loading: true, signals: [], stuck: [], uncertain: {} }).loadingText, true)
+})
+
+// -- Round 4: R3-1 (a joined card survives device clock skew), R3-2 (a new decision
+// -- forgets a dismissal) -----------------------------------------------------------------
+
+function pollAll(latch, memory, { uncertain, nowMs, rows, resentAt = new Map(), previous }) {
+  return foldSignalLoad({
+    generation: latch.beginLoad(), latch, nowMs, resentAt, previous, uncertain,
+    dismissed: memory.dismissed, joined: memory.joined,
+    results: { pending: ok([]), approved: ok(rows), approved_half: ok([]), submitted: ok([]), failed: ok([]) },
+  })
+}
+
+test('R3-1: a card that joined the stuck list stays there under device clock skew', () => {
+  // The reviewer's probe: the device runs 90 s behind the server.
+  const row = { ...SWING, status: 'approved', decided_at: '2026-09-25T13:31:30Z' }
+  const latch = createDecisionLatch()
+  const memory = createStuckMemory()
+  let uncertain = addUncertain({}, row, 0, T0)
+  let previous = { signals: [], stuck: [] }
+  const seen = []
+  for (const dt of [STUCK_AFTER_MS + 1000, STUCK_AFTER_MS + 31000, STUCK_AFTER_MS + 61000, STUCK_AFTER_MS + 91000]) {
+    const out = pollAll(latch, memory, { uncertain, nowMs: T0 + dt, rows: [row], previous })
+    memory.joined = out.joined
+    seen.push(out.stuck.map(s => s.id).join(',') || '-')
+    uncertain = out.uncertain
+    previous = { signals: out.signals, stuck: out.stuck }
+  }
+  assert.deepEqual(seen, ['a1', 'a1', 'a1', 'a1'])
+  // Once a poll no longer finds it approved, it is forgotten.
+  const gone = pollAll(latch, memory, { uncertain, nowMs: T0 + 400000, rows: [], previous })
+  assert.deepEqual([gone.stuck, [...gone.joined]], [[], []])
+})
+
+test('R3-1: a joined card still waits out a re-send (resentAt) like any stuck card', () => {
+  const row = { ...SWING, status: 'approved', decided_at: '2026-09-25T13:31:30Z' }
+  const latch = createDecisionLatch()
+  const memory = createStuckMemory()
+  memory.joined = new Set(['a1'])
+  const resentAt = new Map([['a1', T0]])
+  const previous = { signals: [], stuck: [] }
+  assert.deepEqual(pollAll(latch, memory, { uncertain: {}, nowMs: T0 + 60000, rows: [row], resentAt, previous }).stuck, [])
+  assert.deepEqual(pollAll(latch, memory, { uncertain: {}, nowMs: T0 + STUCK_AFTER_MS + 1000, rows: [row], resentAt, previous })
+    .stuck.map(s => s.id), ['a1'])
+})
+
+test('R3-2: a new decision on a dismissed signal forgets the dismissal', () => {
+  const row = { ...SWING, status: 'approved', decided_at: '2026-09-25T13:30:00Z' }
+  const latch = createDecisionLatch()
+  const memory = createStuckMemory()
+  memory.dismiss('a1')
+  assert.equal(memory.dismissed.has('a1'), true)
+  // The broker reset it, the operator approved it again, and that got a 202.
+  memory.noteDecision('a1')
+  const uncertain = addUncertain({}, row, 0, T0)
+  const out = pollAll(latch, memory, { uncertain, nowMs: T0 + STUCK_AFTER_MS + 1000, rows: [row],
+    previous: { signals: [], stuck: [] } })
+  assert.deepEqual(out.stuck.map(s => s.id), ['a1'])     // joined, not filtered out
+  memory.clear()
+  assert.deepEqual([memory.dismissed.size, memory.joined.size], [0, 0])
 })

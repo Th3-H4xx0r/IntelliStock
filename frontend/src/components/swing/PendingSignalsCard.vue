@@ -274,6 +274,7 @@ import {
   joinKeyRisks,
   addUncertain,
   cardSections,
+  createStuckMemory,
   foldSignalLoad,
   nyDate,
   proposalRows,
@@ -315,7 +316,7 @@ const resending = ref({})        // signal id -> true while the POST .../resend 
 const resendGuard = createInFlightGuard()
 const resentAt = new Map()       // signal id -> epoch ms of this page's last re-send (or refusal)
 const uncertain = ref({})        // signal id -> { signal, since, sinceMs, resolved } after a 202 (follow-up 2)
-const dismissedStuck = new Set() // stuck ids the operator dismissed on this page (round 3 FU-1)
+const stuckMemory = createStuckMemory() // dismissed and joined stuck ids on this page (round 3 FU-1, round 4)
 const sections = computed(() => cardSections({
   loaded: loaded.value, loading: loading.value, signals: signals.value,
   stuck: stuck.value, uncertain: uncertain.value,
@@ -417,7 +418,7 @@ async function load() {
     nowMs.value = Date.now()
     const out = foldSignalLoad({
       generation, latch, results, nowMs: nowMs.value, resentAt, uncertain: uncertain.value,
-      dismissed: dismissedStuck,
+      dismissed: stuckMemory.dismissed, joined: stuckMemory.joined,
       previous: { signals: signals.value, stuck: stuck.value },
     })
     const live = new Set(out.signals.map(s => s.id))
@@ -432,6 +433,7 @@ async function load() {
     signals.value = out.signals
     stuck.value = out.stuck
     uncertain.value = out.uncertain
+    stuckMemory.joined = out.joined
     if (out.unauthorized) stopPolling()
     loadError.value = out.error
     if (out.pendingLoaded) loaded.value = true
@@ -445,7 +447,7 @@ function dismissUncertain(id) {
 }
 
 function dismissStuck(id) {
-  dismissedStuck.add(id)
+  stuckMemory.dismiss(id)
   removeStuck(id)
 }
 
@@ -491,6 +493,7 @@ async function resend(signal) {
       resentAt.set(signal.id, Date.now())
       removeStuck(signal.id)
       if (outcome.uncertain) {
+        stuckMemory.noteDecision(signal.id) // R3-2
         uncertain.value = addUncertain(uncertain.value, signal, latch.current(), Date.now())
       } else {
         showNotice(outcome.tone, outcome.message)
@@ -546,6 +549,7 @@ async function submit(signal) {
       const outcome = classifyDecisionSuccess(res.status, body, signal, decision)
       latch.record(signal.id)
       removeCard(signal.id)
+      stuckMemory.noteDecision(signal.id) // R3-2: a new decision forgets an old dismissal
       if (outcome.uncertain) {
         // Follow-up 2: the advice stays on a card until a poll settles it.
         uncertain.value = addUncertain(uncertain.value, { ...signal, ...(body?.signal || {}), id: signal.id },
@@ -606,7 +610,7 @@ watch(() => props.instanceId, (next, prev) => {
   resendConfirming.value = {}
   resentAt.clear()
   uncertain.value = {}
-  dismissedStuck.clear()
+  stuckMemory.clear()
   load()
   startPolling()
 })

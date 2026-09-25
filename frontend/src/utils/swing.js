@@ -358,7 +358,7 @@ function foldUncertain(uncertain, generation, results, nowMs) {
  * `unauthorized: true` is a 401. An uncertain card is never also a stuck one.
  */
 export function foldSignalLoad({ generation, latch, results, previous, nowMs, resentAt, uncertain = {},
-  dismissed = new Set() }) {
+  dismissed = new Set(), joined = new Set() }) {
   const done = key => results?.[key]?.status === 'fulfilled'
   const failures = Object.values(results || {})
     .filter(r => r?.status === 'rejected').map(r => r.reason)
@@ -369,21 +369,53 @@ export function foldSignalLoad({ generation, latch, results, previous, nowMs, re
     ? latch.apply(generation, normalizeSignalList(results.pending.value), approvedRows.map(s => s.id))
     : previous.signals
   const { next: nextUncertain, joinedStuck } = foldUncertain(uncertain, generation, results, nowMs)
-  let stuck = done('approved') && done('approved_half')
-    ? stuckApprovals(approvedRows, nowMs, resentAt)
-    : previous.stuck
-  // A card that just left waiting is stuck now, whatever its server-clock age.
+  const approvedRead = done('approved') && done('approved_half')
+  // Round 3 R3-1: a card that left waiting for the stuck list stays joined
+  // while it still reads approved, and a joined card skips the server-clock
+  // age check (a device clock behind the server would otherwise hide it
+  // between polls). Only this page's re-send snooze (resentAt, device clock)
+  // still applies. A failed approved read keeps the set as it was.
+  const approvedIds = new Set(approvedRows.map(s => s.id))
+  const nextJoined = approvedRead
+    ? new Set([...joined, ...joinedStuck].filter(id => approvedIds.has(id)))
+    : new Set([...joined, ...joinedStuck])
+  let stuck = approvedRead ? stuckApprovals(approvedRows, nowMs, resentAt) : previous.stuck
   const listed = new Set(stuck.map(s => s.id))
-  stuck = [...stuck, ...approvedRows.filter(s => joinedStuck.has(s.id) && !listed.has(s.id))]
+  const snoozed = id => resentAt?.has?.(id) && nowMs - resentAt.get(id) <= STUCK_AFTER_MS
+  stuck = [...stuck, ...approvedRows.filter(s => nextJoined.has(s.id) && !listed.has(s.id) && !snoozed(s.id))]
     .filter(s => !nextUncertain[s.id] && !dismissed.has(s.id))
   const first = failures[0]
   return {
     signals,
     stuck,
     uncertain: nextUncertain,
+    joined: nextJoined,
     pendingLoaded: done('pending'),
     error: first ? (first.message || String(first)) : '',
     unauthorized: failures.some(r => r?.unauthorized === true),
+  }
+}
+
+/**
+ * Round 4: what a page remembers about stuck cards across polls.
+ * `dismissed`: ids the operator dismissed. `joined`: ids that left the
+ * waiting state for the stuck list (R3-1; foldSignalLoad returns the next
+ * set). A new decision or 202 on the same id forgets both (R3-2), so a
+ * re-approved signal is never filtered out by an old dismissal.
+ */
+export function createStuckMemory() {
+  return {
+    dismissed: new Set(),
+    joined: new Set(),
+    dismiss(id) { this.dismissed.add(id) },
+    noteDecision(id) {
+      this.dismissed.delete(id)
+      this.joined.delete(id)
+    },
+    clear() {
+      this.dismissed.clear()
+      this.joined.clear()
+    },
   }
 }
 

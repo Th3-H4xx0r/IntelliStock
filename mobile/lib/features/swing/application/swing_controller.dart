@@ -300,8 +300,14 @@ class PendingSignalsNotifier
   /// pull-to-refresh: only a poll that settles it, or Dismiss, removes it.
   final Map<String, UncertainCard> _uncertain = <String, UncertainCard>{};
 
-  /// Stuck ids the operator dismissed on this device (round 3 FU-1).
+  /// Stuck ids the operator dismissed on this device (round 3 FU-1). A new
+  /// decision or 202 on the id forgets it (round 4, R3-2).
   final Set<String> _dismissedStuck = <String>{};
+
+  /// Ids that left the waiting state for the stuck list. While they still
+  /// read approved they skip the server-clock age check, so a device clock
+  /// behind the server cannot hide them between polls (round 4, R3-1).
+  final Set<String> _joinedStuck = <String>{};
 
   @override
   Future<PendingSignalsState> build(String arg) async {
@@ -413,7 +419,18 @@ class PendingSignalsNotifier
     final now = ref.read(swingClockProvider)();
     final pending = load.pending;
     final approved = load.approved;
-    final joinedStuck = _foldUncertain(generation, load, now);
+    _joinedStuck.addAll(_foldUncertain(generation, load, now));
+    if (approved != null) {
+      final ids = approved.map((s) => s.id).toSet();
+      _joinedStuck.retainWhere(ids.contains);
+    }
+    // Only this device's re-send snooze (device clock) still applies to a
+    // joined card.
+    bool snoozed(String id) {
+      final at = _resentAt[id];
+      return at != null && now.difference(at) <= stuckAfter;
+    }
+
     final base =
         approved == null ? current.stuck : stuckApprovals(approved, now, _resentAt);
     final listed = base.map((s) => s.id).toSet();
@@ -427,8 +444,10 @@ class PendingSignalsNotifier
       // stays off.
       stuck: [
         ...base,
-        ...(approved ?? const <SwingSignal>[]).where(
-            (s) => joinedStuck.contains(s.id) && !listed.contains(s.id)),
+        ...(approved ?? const <SwingSignal>[]).where((s) =>
+            _joinedStuck.contains(s.id) &&
+            !listed.contains(s.id) &&
+            !snoozed(s.id)),
       ]
           .where((s) =>
               !_uncertain.containsKey(s.id) && !_dismissedStuck.contains(s.id))
@@ -487,6 +506,7 @@ class PendingSignalsNotifier
           .read(swingRepositoryProvider)
           .decide(arg, signal.id, decision, reason: reason);
       _hidden[signal.id] = _generation;
+      _forgetStuck(signal.id); // R3-2: a new decision forgets an old dismissal
       _drop(signal.id);
       if (receipt.uncertain) {
         final message =
@@ -587,8 +607,15 @@ class PendingSignalsNotifier
     }
   }
 
+  /// Round 4 (R3-2): a new decision or 202 on [id] starts it afresh.
+  void _forgetStuck(String id) {
+    _dismissedStuck.remove(id);
+    _joinedStuck.remove(id);
+  }
+
   /// Follow-up 2: a 202 puts the signal on a waiting card.
   void _wait(SwingSignal signal) {
+    _forgetStuck(signal.id);
     _uncertain[signal.id] = UncertainCard(
         signal: signal,
         since: _generation,
