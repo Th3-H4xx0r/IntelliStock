@@ -113,3 +113,40 @@ def working_orders(emu):
     if not isinstance(orders, (list, tuple)):
         return None
     return list(orders)
+
+
+def option_positions(emu):
+    """Open option positions (OptionPositionDTOs, contract §3), or None when
+    the adapter cannot say — the wheel then sells nothing (fix 1 needs them)."""
+    try:
+        return list(emu.list_option_positions() or [])
+    except Exception:
+        return None
+
+
+def open_orders(emu):
+    """Working orders (OrderRefs), or None when unreadable.
+
+    fix F3: read through working_orders, the adapter's STRICT reader when it
+    has one. An outage is None — the wheel then sells nothing that tick —
+    never an empty book, which would let a duplicate put through (fix 1)."""
+    return working_orders(emu)
+
+
+def account_options(emu) -> dict:
+    """{"cash", "equity", ...} for the wheel's caps (plan A-live
+    get_account_options), falling back to settled cash and account equity."""
+    try:
+        acct = dict(emu.get_account_options() or {})
+    except Exception:
+        acct = {}
+    if acct.get("cash") is None:
+        try:
+            acct["cash"] = float(emu.get_cash() or 0.0)
+        except Exception:
+            acct["cash"] = 0.0
+    if acct.get("equity") is None:
+        acct["equity"] = live_equity(emu)
+    acct["cash"] = float(acct["cash"])
+    acct["equity"] = float(acct["equity"])
+    return acct
