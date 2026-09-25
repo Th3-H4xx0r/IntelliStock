@@ -494,14 +494,24 @@ void main() {
       expect(nyDate(DateTime.utc(2026, 1, 1, 4, 59)), '2025-12-31'); // 23:59 EST
     });
 
-    test('resendBlockedReason names the stale session', () {
-      expect(resendBlockedReason(approvedSignal('a', '2026-09-25T13:00:00Z'), '2026-09-25'),
+    test('resendBlockedReason (round 3 minor 1) reads when it was approved, in New York',
+        () {
+      // A wheel signal's session is its weekly scan day: only decidedAt counts.
+      expect(
+          resendBlockedReason(
+              approvedSignal('a', '2026-09-25T14:00:00Z', session: '2026-09-21'),
+              '2026-09-25'),
           isNull);
       expect(
           resendBlockedReason(
-              approvedSignal('a', '2026-09-24T13:00:00Z', session: '2026-09-24'),
+              approvedSignal('a', '2026-09-24T15:00:00Z', session: '2026-09-25'),
               '2026-09-25'),
-          'This approval is from 2026-09-24; approve a fresh signal instead.');
+          'This approval was made on 2026-09-24; approve a fresh signal instead.');
+      // 01:30 UTC on the 25th is 21:30 ET on the 24th.
+      expect(resendBlockedReason(approvedSignal('a', '2026-09-25T01:30:00Z'), '2026-09-24'),
+          isNull);
+      expect(resendBlockedReason(approvedSignal('a', 'nope'), '2026-09-25'),
+          'This approval was made on an unknown date; approve a fresh signal instead.');
     });
   });
 

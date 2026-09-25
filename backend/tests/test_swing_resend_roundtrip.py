@@ -36,10 +36,10 @@ def api(store, monkeypatch, notices):
     monkeypatch.setattr(live_state, "store", store)
     monkeypatch.setattr(live_state, "ensure_tables", lambda r=None, conn=None: None)
     store.insert("Instances", [{"id": IID, "name": IID, "runCommand": True}])
-    # Follow-up 3: a re-send needs the signal's session (the harness's
-    # 2026-09-28) to be today in New York.
+    # Round 3 minor 1: a re-send needs the approval to have been made today
+    # in New York; the harness decides at RTH, 11:00 ET on 2026-10-05.
     monkeypatch.setattr(interactive_utils, "_ny_today",
-                        lambda now=None: datetime.date(2026, 9, 28))
+                        lambda now=None: datetime.date(2026, 10, 5))
     main.app.dependency_overrides[main.conn_dependency] = lambda: None
     main.app.dependency_overrides[main.get_current_user] = lambda: {"id": "u1",
                                                                     "username": "pranav"}

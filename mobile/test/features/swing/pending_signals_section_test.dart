@@ -203,7 +203,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Approved, not yet sent (1)'), findsOneWidget);
       expect(find.text('session 2026-09-24'), findsOneWidget);
-      expect(find.text('This approval is from 2026-09-24; approve a fresh signal instead.'),
+      expect(find.text('This approval was made on 2026-09-24; approve a fresh signal instead.'),
           findsOneWidget);
       expect(_cardButton('Re-send'), findsNothing);
     });

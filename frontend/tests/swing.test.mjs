@@ -413,12 +413,17 @@ test('nyDate is the New York calendar date, across the DST switches', () => {
   assert.equal(nyDate(Date.parse('2026-11-02T04:30:00Z')), '2026-11-01')   // 23:30 EST
 })
 
-test('resendBlockedReason: only an approval from today\'s session can be re-sent', () => {
-  assert.equal(resendBlockedReason({ ...SWING, session: '2026-09-25' }, '2026-09-25'), null)
-  assert.equal(resendBlockedReason({ ...SWING, session: '2026-09-24' }, '2026-09-25'),
-    'This approval is from 2026-09-24; approve a fresh signal instead.')
-  assert.equal(resendBlockedReason({ ...SWING, session: '' }, '2026-09-25'),
-    'This approval is from an unknown session; approve a fresh signal instead.')
+test('resendBlockedReason (round 3 minor 1): only an approval made today in New York can be re-sent', () => {
+  // A wheel signal's session is its weekly scan day: only decided_at counts.
+  assert.equal(resendBlockedReason({ ...WHEEL, session: '2026-09-21', decided_at: '2026-09-25T14:00:00Z' }, '2026-09-25'), null)
+  assert.equal(resendBlockedReason({ ...SWING, session: '2026-09-25', decided_at: '2026-09-24T15:00:00Z' }, '2026-09-25'),
+    'This approval was made on 2026-09-24; approve a fresh signal instead.')
+  // 01:30 UTC on the 25th is 21:30 ET on the 24th.
+  assert.equal(resendBlockedReason({ ...SWING, decided_at: '2026-09-25T01:30:00Z' }, '2026-09-24'), null)
+  for (const decided_at of [undefined, null, '', 'nope']) {
+    assert.equal(resendBlockedReason({ ...SWING, decided_at }, '2026-09-25'),
+      'This approval was made on an unknown date; approve a fresh signal instead.')
+  }
 })
 
 // -- Follow-up 4: the list reads settle independently -------------------------------------

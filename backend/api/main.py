@@ -4090,9 +4090,9 @@ def api_swing_resend_signal(instance_id: str, signal_id: str,
     - 200: queued, {"signal", "command_id"}.
     - 202: the queue write raised but may have landed; the same
       {"uncertain": true, "detail"} body as the decision route.
-    - 404: unknown, or another instance's. 409: not approved, from a session
-      other than today's New York date, or a command for it is still pending
-      or running.
+    - 404: unknown, or another instance's. 409: not approved, approved on a
+      day other than today's New York date (decided_at), or a command for it
+      is still pending or running.
     - 503: the instance is not running or has crashed, the queue could not be
       read, or the command provably was not queued: try again.
     """

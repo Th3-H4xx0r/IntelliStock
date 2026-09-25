@@ -60,6 +60,9 @@ def signal(symbol="AAPL", *, instance_id=IID, status="pending", lane="swing",
         recommendation="review", reasoning="r", key_risks=["x"], size_adjustment=0.5,
         proposal={"entry": 98.0, "stop": 92.12, "target": 106.82, "shares": 76},
         status=status, created_at=created_at)
+    if status in ("approved", "approved_half"):
+        # What approvals.decide writes: 09:25 ET on the fixtures' "today".
+        doc.update(decided_by="pranav", decided_at="2026-09-24T13:25:00+00:00")
     signals_store.insert_signal(doc)
     return doc["id"]
 
@@ -674,24 +677,56 @@ def test_a_second_resend_is_409_while_the_first_is_queued(api, store, monkeypatc
     assert again.status_code == 409 and first.json()["command_id"] in again.json()["detail"]
 
 
-def _signal_on(session, *, status="approved", symbol="OLD"):
+def _approved_at(decided_at, *, session="2026-09-24", lane="swing", symbol="OLD"):
     doc = signals_store.new_signal(
-        instance_id=IID, lane="swing", symbol=symbol, session=session, score=62,
+        instance_id=IID, lane=lane, symbol=symbol, session=session, score=62,
         recommendation="review", reasoning="r", key_risks=[], size_adjustment=1.0,
         proposal={"entry": 98.0, "stop": 92.12, "target": 106.82, "shares": 76},
-        status=status, created_at=f"{session}T13:20:00+00:00")
+        status="approved", created_at=f"{session}T13:20:00+00:00")
+    doc.update(decided_by="pranav", decided_at=decided_at)
     signals_store.insert_signal(doc)
     return doc["id"]
 
 
-@pytest.mark.parametrize("session", ["2026-09-23", "2026-09-17", "2026-09-25"])
-def test_followup_3_a_resend_from_another_session_is_409(api, session):
-    sid = _signal_on(session)
+# Round 3 minor 1: the rule reads when the approval was made (decided_at, in
+# New York), not the signal's session: a wheel signal's session is its
+# weekly scan day. "Today" in these tests is 2026-09-24.
+
+@pytest.mark.parametrize("decided_at,made_on", [
+    ("2026-09-23T15:00:00+00:00", "2026-09-23"),   # yesterday
+    ("2026-09-17T15:00:00+00:00", "2026-09-17"),   # last week
+    ("2026-09-25T04:30:00+00:00", "2026-09-25"),   # 00:30 ET tomorrow
+    ("2026-09-24T03:30:00+00:00", "2026-09-23"),   # 23:30 ET the night before
+])
+def test_round3_a_resend_of_an_approval_made_on_another_day_is_409(api, decided_at, made_on):
+    sid = _approved_at(decided_at)
     res = api.post(resend_url(sid))
     assert res.status_code == 409
-    assert res.json()["detail"] == (f"this approval is from {session}; approve a fresh "
-                                    "signal instead")
+    assert res.json()["detail"] == (f"this approval was made on {made_on}; approve a "
+                                    "fresh signal instead")
     assert api.commands == [] and signals_store.get_signal(sid)["status"] == "approved"
+
+
+def test_round3_a_wheel_approval_made_today_resends_though_its_scan_was_monday(api):
+    sid = _approved_at("2026-09-24T14:05:00+00:00", session="2026-09-21", lane="wheel",
+                       symbol="APH")
+    assert api.post(resend_url(sid)).status_code == 200
+    assert len(api.commands) == 1
+
+
+def test_round3_the_approval_date_is_read_in_new_york(api):
+    # 2026-09-25 01:30 UTC is 21:30 ET on 2026-09-24: made today.
+    sid = _approved_at("2026-09-25T01:30:00+00:00", symbol="LATE")
+    assert api.post(resend_url(sid)).status_code == 200
+
+
+@pytest.mark.parametrize("decided_at", [None, "", "not-a-time"])
+def test_round3_an_approval_with_no_readable_date_is_409(api, decided_at):
+    sid = _approved_at(decided_at)
+    res = api.post(resend_url(sid))
+    assert res.status_code == 409
+    assert res.json()["detail"] == ("this approval was made on an unknown date; approve "
+                                    "a fresh signal instead")
 
 
 def test_followup_3_today_is_the_new_york_date_not_utc():
@@ -701,12 +736,6 @@ def test_followup_3_today_is_the_new_york_date_not_utc():
         datetime(2026, 9, 25, 1, 30, tzinfo=timezone.utc)) == date(2026, 9, 24)
     assert interactive_utils._ny_today(
         datetime(2026, 3, 8, 6, 30, tzinfo=timezone.utc)) == date(2026, 3, 8)
-
-
-def test_followup_3_a_resend_from_this_session_still_queues(api):
-    sid = _signal_on("2026-09-24", symbol="NOW")
-    assert api.post(resend_url(sid)).status_code == 200
-    assert len(api.commands) == 1
 
 
 def test_resend_of_an_unknown_or_foreign_signal_is_404(api):

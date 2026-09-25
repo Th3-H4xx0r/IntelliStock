@@ -6730,11 +6730,16 @@ def _swing_read(read, empty):
         raise
 
 
-def _ny_today(now=None):
-    """Today's New York date (the swing lanes' `session`), at `now` or now."""
+def _ny_date_of(instant):
+    """The New York calendar date of an aware datetime (swing_trader.clock's
+    ET conversion)."""
     from swing_trader import clock
-    return datetime.date.fromisoformat(
-        clock.ny_date(now or datetime.datetime.now(datetime.timezone.utc)))
+    return datetime.date.fromisoformat(clock.ny_date(instant))
+
+
+def _ny_today(now=None):
+    """Today's New York date, at `now` or now."""
+    return _ny_date_of(now or datetime.datetime.now(datetime.timezone.utc))
 
 
 def action_swing_list_signals(conn, instance_id, status=None, limit=100):
@@ -6909,9 +6914,9 @@ def action_swing_resend_signal(conn, instance_id, signal_id, requested_by=None):
     copy that arrives second (a late original, a second re-send) places
     nothing.
 
-    Unknown, or another instance's: LookupError (404). Not approved, from
-    a session other than today's (New York), or a command for it still
-    pending or running: SwingResendConflictError (409).
+    Unknown, or another instance's: LookupError (404). Not approved, approved
+    on a day other than today (New York, from decided_at), or a command for
+    it still pending or running: SwingResendConflictError (409).
     The instance not running or crashed, the queue unreadable, or the command
     provably not queued: SwingBrokerUnavailableError (503). A queue write
     that raised but may have landed: the 202 "uncertain" body."""
@@ -6925,13 +6930,16 @@ def action_swing_resend_signal(conn, instance_id, signal_id, requested_by=None):
         raise SwingResendConflictError(
             "signal %s is %s, not approved; there is no approval to re-send"
             % (signal_id, status or "unset"))
-    session = str(signal.get("session") or "")[:10]
-    if session != _ny_today().isoformat():
-        # Follow-up 3: an approval from an earlier session is stale; the lane
-        # scores the name again, and the operator approves that signal.
+    # Round 3 minor 1: only an approval made today (New York) is re-sent; an
+    # older one is stale, and the operator approves the lane's fresh signal.
+    # It reads decided_at, not `session`: a wheel signal's session is its
+    # weekly scan day. The server alone decides this 409.
+    decided_at = _as_utc(signal.get("decided_at"))
+    made_on = _ny_date_of(decided_at).isoformat() if decided_at else None
+    if made_on != _ny_today().isoformat():
         raise SwingResendConflictError(
-            "this approval is from %s; approve a fresh signal instead"
-            % (session or "an unknown session"))
+            "this approval was made on %s; approve a fresh signal instead"
+            % (made_on or "an unknown date"))
     try:
         open_commands = _swing_approval_commands(real_id, signal_id, open_only=True)
     except Exception as exc:

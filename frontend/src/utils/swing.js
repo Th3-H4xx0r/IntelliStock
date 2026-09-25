@@ -398,20 +398,23 @@ const NY_DATE = new Intl.DateTimeFormat('en-CA', {
   timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
 })
 
-/** The New York calendar date at epoch ms `nowMs`, "YYYY-MM-DD": the lanes' `session`. */
+/** The New York calendar date at epoch ms `nowMs`, "YYYY-MM-DD". */
 export function nyDate(nowMs) {
   return NY_DATE.format(new Date(nowMs))
 }
 
 /**
- * Follow-up 3: the server re-sends only an approval from today's New York
- * session (an older one is stale: approve the fresh signal). null when the
- * card may offer Re-send, else the reason shown in its place.
+ * Round 3 minor 1: the server re-sends only an approval made today in New
+ * York (its decided_at, not its session: a wheel signal's session is its
+ * weekly scan day), and it alone decides the 409. The button follows the
+ * same rule. null when the card may offer Re-send, else the reason shown in
+ * its place. `today` is nyDate(now).
  */
 export function resendBlockedReason(signal, today) {
-  const session = String(signal?.session ?? '').slice(0, 10)
-  if (session && session === today) return null
-  return `This approval is from ${session || 'an unknown session'}; approve a fresh signal instead.`
+  const decided = Date.parse(signal?.decided_at ?? '')
+  const madeOn = Number.isFinite(decided) ? nyDate(decided) : null
+  if (madeOn && madeOn === today) return null
+  return `This approval was made on ${madeOn || 'an unknown date'}; approve a fresh signal instead.`
 }
 
 export function resendPrompt(signal) {
