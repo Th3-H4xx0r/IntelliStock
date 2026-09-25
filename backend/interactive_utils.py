@@ -6704,6 +6704,32 @@ def _swing_instance(conn, instance_id):
     return inst, str(inst.get("id", instance_id))
 
 
+def _swing_table_missing(exc) -> bool:
+    """A swing table no lane has created yet: Postgres SQLSTATE 42P01
+    (undefined_table), which db.pool re-raises unwrapped, found anywhere in
+    the exception's cause chain. The lanes create their tables only when a
+    scan is due (signals_store.ensure_tables), so an instance started after
+    the day's scan has none until the next session (FW item 4, M-4)."""
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if getattr(exc, "sqlstate", None) == "42P01":
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
+
+
+def _swing_read(read, empty):
+    """read(), or `empty` when a swing table does not exist yet. Every other
+    failure propagates."""
+    try:
+        return read()
+    except Exception as exc:
+        if _swing_table_missing(exc):
+            return empty
+        raise
+
+
 def _ny_today():
     from swing_trader import clock
     return datetime.date.fromisoformat(
@@ -6711,11 +6737,13 @@ def _ny_today():
 
 
 def action_swing_list_signals(conn, instance_id, status=None, limit=100):
-    """{"signals": [...]} newest first (interfaces §9 item 1)."""
+    """{"signals": [...]} newest first (interfaces §9 item 1); empty before a
+    lane has created its tables."""
     from swing_trader import signals_store
     _inst, real_id = _swing_instance(conn, instance_id)
-    return {"signals": signals_store.list_signals(real_id, status=(status or None),
-                                                  limit=limit)}
+    return {"signals": _swing_read(
+        lambda: signals_store.list_signals(real_id, status=(status or None), limit=limit),
+        [])}
 
 
 def action_swing_decide_signal(conn, instance_id, signal_id, decision, reason=None,
@@ -6731,7 +6759,7 @@ def action_swing_decide_signal(conn, instance_id, signal_id, decision, reason=No
     rejection needs no broker."""
     from swing_trader import approvals, signals_store
     inst, real_id = _swing_instance(conn, instance_id)
-    signal = signals_store.get_signal(signal_id)
+    signal = _swing_read(lambda: signals_store.get_signal(signal_id), None)
     if not signal or str(signal.get("instance_id") or "") != real_id:
         raise LookupError("Signal not found: %s" % signal_id)
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -6889,7 +6917,7 @@ def action_swing_resend_signal(conn, instance_id, signal_id, requested_by=None):
     that raised but may have landed: the 202 "uncertain" body."""
     from swing_trader import approvals, signals_store
     inst, real_id = _swing_instance(conn, instance_id)
-    signal = signals_store.get_signal(signal_id)
+    signal = _swing_read(lambda: signals_store.get_signal(signal_id), None)
     if not signal or str(signal.get("instance_id") or "") != real_id:
         raise LookupError("Signal not found: %s" % signal_id)
     status = str(signal.get("status") or "")
@@ -7033,13 +7061,15 @@ def action_wheel_overview(conn, instance_id, *, today=None):
     return {"open_puts": rows,
             "collateral_total": round(sum(r["collateral"] for r in rows), 2),
             "cash": _finite_or_none(state.get("cash")),
-            "recent_scans": signals_store.list_wheel_scans(real_id, limit=20)}
+            "recent_scans": _swing_read(
+                lambda: signals_store.list_wheel_scans(real_id, limit=20), [])}
 
 
 def action_swing_calibration(conn, instance_id):
     from swing_trader import calibration
     _inst, real_id = _swing_instance(conn, instance_id)
-    return calibration.calibration_report(real_id)
+    report = _swing_read(lambda: calibration.calibration_report(real_id), None)
+    return report if report is not None else calibration.calibration_report(rows=[])
 
 
 def action_live_trading_logs(conn, instance_id, since_line=0):

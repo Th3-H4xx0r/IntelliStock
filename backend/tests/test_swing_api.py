@@ -725,3 +725,89 @@ def test_resend_route_is_authenticated_like_its_neighbours():
     finally:
         main.app.dependency_overrides.pop(main.conn_dependency, None)
     assert res.status_code == 401
+
+
+# -- FW item 4 (M-4): the swing routes before a lane has created its tables --------
+
+def _undefined_table(table="SwingSignals"):
+    """What Postgres raises through db.store for a table no lane has created
+    yet: psycopg's UndefinedTable (SQLSTATE 42P01), unwrapped by db.pool."""
+    import psycopg
+
+    return psycopg.errors.UndefinedTable(f'relation "{table}" does not exist')
+
+
+def _no_swing_tables(monkeypatch):
+    def missing(*a, **k):
+        raise _undefined_table()
+
+    for name in ("list_signals", "get_signal", "list_wheel_scans", "all_signals"):
+        monkeypatch.setattr(signals_store, name, missing)
+
+
+def test_m4_signals_before_the_tables_exist_are_an_empty_list(api, monkeypatch):
+    _no_swing_tables(monkeypatch)
+    for params in ({"status": "pending"}, {"status": "approved"}, {}):
+        res = api.get(f"/instances/{IID}/swing/signals", params=params)
+        assert res.status_code == 200 and res.json() == {"signals": []}
+    assert api.get("/instances/nope/swing/signals").status_code == 404
+
+
+def test_m4_the_wheel_book_before_the_scan_table_exists_has_no_scans(api, monkeypatch):
+    _no_swing_tables(monkeypatch)
+    _book_with(monkeypatch, option_row("APH", 130.0, "2026-10-02", -1))
+    res = api.get(f"/instances/{IID}/wheel")
+    assert res.status_code == 200
+    assert res.json()["recent_scans"] == []
+    assert [p["underlying"] for p in res.json()["open_puts"]] == ["APH"]
+
+
+def test_m4_calibration_before_the_tables_exist_is_the_empty_report(api, monkeypatch):
+    from swing_trader import calibration
+
+    _no_swing_tables(monkeypatch)
+    res = api.get(f"/instances/{IID}/swing/calibration")
+    assert res.status_code == 200
+    assert res.json() == calibration.calibration_report(rows=[])
+
+
+def test_m4_decide_and_resend_before_the_tables_exist_are_404(api, monkeypatch):
+    _no_swing_tables(monkeypatch)
+    assert api.post(decision_url("sid"), json={"decision": "approve"}).status_code == 404
+    assert api.post(resend_url("sid")).status_code == 404
+    assert api.commands == []
+
+
+def test_m4_any_other_failure_still_surfaces(api, monkeypatch):
+    import psycopg
+
+    def broken(*a, **k):
+        raise psycopg.errors.UndefinedColumn('column "doc" does not exist')
+
+    monkeypatch.setattr(signals_store, "list_signals", broken)
+    with pytest.raises(psycopg.errors.UndefinedColumn):
+        api.get(f"/instances/{IID}/swing/signals")
+
+
+def test_m4_a_missing_table_is_recognised_through_a_wrapper():
+    from db.errors import StoreError
+
+    try:
+        try:
+            raise _undefined_table("SwingWheelScans")
+        except Exception as inner:
+            raise StoreError("query failed") from inner
+    except StoreError as outer:
+        assert interactive_utils._swing_table_missing(outer) is True
+    assert interactive_utils._swing_table_missing(RuntimeError("x")) is False
+    assert interactive_utils._swing_table_missing(None) is False
+
+
+def test_m4_real_postgres_without_the_swing_tables(pg_schema, monkeypatch):
+    # Needs PG_TEST_DSN. The real producer: a schema with no tables at all.
+    from db import store as real_store
+
+    monkeypatch.setattr(signals_store, "store", real_store)
+    with pytest.raises(Exception) as caught:
+        signals_store.list_signals(IID, status="pending")
+    assert interactive_utils._swing_table_missing(caught.value) is True
