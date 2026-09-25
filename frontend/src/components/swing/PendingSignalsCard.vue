@@ -14,7 +14,13 @@
      and the next poll brings the card back only if it really is still pending.
      A decided card is hidden only from a poll that was already in flight when
      the decision landed (FW-api-I2): after that the server's status governs,
-     so a signal the broker puts back to pending shows again. -->
+     so a signal the broker puts back to pending shows again.
+
+     An approval no broker command has claimed for more than 2 minutes (the
+     instance stopped, or the broker's handler returned early) is listed
+     under "Approved, not yet sent" with a Re-send button (fix wave item 3).
+     The server refuses a re-send while a command for it is still queued, and
+     the broker's approved -> submitted claim ignores a second copy. -->
 <template>
   <section class="glass-card rounded-2xl p-5">
     <div class="flex items-center justify-between mb-4 gap-2">
@@ -138,6 +144,54 @@
       </div>
     </div>
 
+    <div v-if="loaded && stuck.length" class="mt-4">
+      <p class="text-[11px] font-bold uppercase tracking-widest text-amber-400/80 mb-2">
+        Approved, not yet sent ({{ stuck.length }})
+      </p>
+      <div class="space-y-2">
+        <div
+          v-for="s in stuck"
+          :key="`stuck-${s.id}`"
+          class="rounded-lg border border-amber-500/20 bg-amber-500/5 px-4 py-3"
+        >
+          <div class="flex items-center gap-2 flex-wrap">
+            <span class="text-base font-black text-slate-100 tracking-wide font-mono">{{ s.symbol }}</span>
+            <span class="px-2 py-0.5 rounded-full text-[10px] font-bold border uppercase" :class="laneClass(s.lane)">
+              {{ s.lane }}
+            </span>
+            <span class="px-2 py-0.5 rounded-full text-[10px] font-bold border uppercase text-amber-300 bg-amber-500/10 border-amber-500/20">
+              {{ s.status === 'approved_half' ? 'approved ½' : 'approved' }}
+            </span>
+            <span class="text-[11px] text-slate-600">session {{ s.session || '—' }}</span>
+          </div>
+          <p class="text-xs text-slate-300 mt-2">{{ stuckLabel(s, nowMs) }}</p>
+
+          <div v-if="resendConfirming[s.id]" class="mt-3 rounded-lg border border-amber-500/25 bg-amber-500/5 px-3 py-2">
+            <p class="text-xs text-slate-200">{{ resendPrompt(s) }}</p>
+            <div class="flex gap-2 mt-2 flex-wrap">
+              <button
+                @click="resend(s)"
+                :disabled="!!resending[s.id]"
+                class="px-3 py-1.5 rounded-lg text-xs font-semibold border border-amber-500/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20 disabled:opacity-50"
+              >{{ resending[s.id] ? 'Working…' : 'Confirm Re-send' }}</button>
+              <button
+                @click="cancelResend(s.id)"
+                :disabled="!!resending[s.id]"
+                class="px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-800 disabled:opacity-50"
+              >Cancel</button>
+            </div>
+          </div>
+          <div v-else class="flex gap-2 mt-3 flex-wrap">
+            <button
+              @click="startResend(s.id)"
+              :disabled="!!resending[s.id]"
+              class="px-3 py-1.5 rounded-lg text-xs font-semibold border border-amber-500/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20 disabled:opacity-50"
+            >Re-send</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <p class="text-[10px] text-slate-600 mt-3 leading-relaxed">
       Approval rebuilds the order at the live price: shares, stop and target for swing, strike and expiry for the wheel.
     </p>
@@ -151,16 +205,22 @@ import {
   DECISION_LABELS,
   classifyDecisionFailure,
   classifyDecisionSuccess,
+  classifyResendFailure,
   confirmPrompt,
   createDecisionLatch,
   createInFlightGuard,
   decisionsFor,
   detailText,
   joinKeyRisks,
+  normalizeApprovedList,
   normalizeSignalList,
   proposalRows,
   reasoningPreview,
+  resendPrompt,
+  resendSuccess,
   scoreTone,
+  stuckApprovals,
+  stuckLabel,
 } from '../../utils/swing.js'
 
 const POLL_MS = 30000
@@ -181,6 +241,12 @@ const reasons = ref({})
 const expanded = ref({})
 const guard = createInFlightGuard()
 const latch = createDecisionLatch() // hides a decided card from a poll that raced its 2xx
+const stuck = ref([])            // approved, and no broker command has claimed it for 2+ minutes
+const nowMs = ref(Date.now())    // the clock stuck labels were computed at
+const resendConfirming = ref({}) // signal id -> true while its Re-send awaits the confirm click
+const resending = ref({})        // signal id -> true while the POST .../resend is in flight
+const resendGuard = createInFlightGuard()
+const resentAt = new Map()       // signal id -> epoch ms of this page's last re-send (or refusal)
 let pollTimer = null
 let noticeTimer = null
 
@@ -250,35 +316,100 @@ function removeCard(id) {
   reasons.value = omit(reasons.value, id)
 }
 
+class SessionExpired extends Error {}
+
+async function fetchSignals(status) {
+  const res = await fetch(`${signalsUrl()}?status=${status}`, { headers: authHeaders() })
+  if (res.status === 401) throw new SessionExpired('Session expired — please sign in again.')
+  if (!res.ok) {
+    let detail = ''
+    try { detail = detailText((await res.json())?.detail) } catch { /* keep */ }
+    throw new Error(detail || `Could not load signals (${res.status})`)
+  }
+  return res.json()
+}
+
 async function load() {
   if (loading.value) return
   loading.value = true
   const generation = latch.beginLoad()
   try {
-    const res = await fetch(`${signalsUrl()}?status=pending`, { headers: authHeaders() })
-    if (res.status === 401) {
-      stopPolling()
-      loadError.value = 'Session expired — please sign in again.'
-      return
-    }
-    if (!res.ok) {
-      let detail = ''
-      try { detail = detailText((await res.json())?.detail) } catch { /* keep */ }
-      throw new Error(detail || `Could not load signals (${res.status})`)
-    }
-    const next = latch.apply(generation, normalizeSignalList(await res.json()))
+    // The approved lists feed the "Approved, not yet sent" cards, and they
+    // end the hide on a card this page decided (FW-api-I2).
+    const [pendingBody, approvedBody, halfBody] = await Promise.all(
+      ['pending', 'approved', 'approved_half'].map(fetchSignals))
+    const approved = normalizeApprovedList(approvedBody, halfBody)
+    const next = latch.apply(generation, normalizeSignalList(pendingBody), approved.map(s => s.id))
     const live = new Set(next.map(s => s.id))
     // A card that vanished server-side takes its half-finished confirm with it.
     for (const id of Object.keys(confirming.value)) {
       if (!live.has(id) && !deciding.value[id]) confirming.value = omit(confirming.value, id)
     }
+    nowMs.value = Date.now()
+    const nextStuck = stuckApprovals(approved, nowMs.value, resentAt)
+    const stuckIds = new Set(nextStuck.map(s => s.id))
+    for (const id of Object.keys(resendConfirming.value)) {
+      if (!stuckIds.has(id) && !resending.value[id]) resendConfirming.value = omit(resendConfirming.value, id)
+    }
     signals.value = next
+    stuck.value = nextStuck
     loadError.value = ''
     loaded.value = true
   } catch (e) {
+    if (e instanceof SessionExpired) stopPolling()
     loadError.value = e?.message || 'Could not load signals'
   } finally {
     loading.value = false
+  }
+}
+
+function startResend(id) {
+  if (resending.value[id]) return
+  resendConfirming.value = { ...resendConfirming.value, [id]: true }
+}
+
+function cancelResend(id) {
+  if (resending.value[id]) return
+  resendConfirming.value = omit(resendConfirming.value, id)
+}
+
+function removeStuck(id) {
+  stuck.value = stuck.value.filter(s => s.id !== id)
+  resendConfirming.value = omit(resendConfirming.value, id)
+}
+
+async function resend(signal) {
+  if (!resendConfirming.value[signal.id] || !resendGuard.tryAcquire(signal.id)) return
+  resending.value = { ...resending.value, [signal.id]: true }
+  try {
+    const res = await fetch(`${signalsUrl()}/${encodeURIComponent(signal.id)}/resend`, {
+      method: 'POST',
+      headers: authHeaders(),
+    })
+    if (res.ok) {
+      let body = null
+      try { body = await res.json() } catch { /* the body is optional */ }
+      const outcome = resendSuccess(res.status, body, signal)
+      resentAt.set(signal.id, Date.now())
+      removeStuck(signal.id)
+      showNotice(outcome.tone, outcome.message)
+      return
+    }
+    let detail = ''
+    try { detail = (await res.json())?.detail } catch { /* keep */ }
+    const verdict = classifyResendFailure(res.status, detail)
+    if (verdict.stopPolling) {
+      stopPolling()
+      loadError.value = verdict.message
+    }
+    if (verdict.snooze) resentAt.set(signal.id, Date.now())
+    if (verdict.removeCard) removeStuck(signal.id)
+    showNotice(verdict.removeCard ? 'warn' : 'error', verdict.message)
+  } catch (e) {
+    showNotice('error', classifyResendFailure(0, e?.message).message)
+  } finally {
+    resendGuard.release(signal.id)
+    resending.value = omit(resending.value, signal.id)
   }
 }
 
@@ -363,6 +494,9 @@ watch(() => props.instanceId, (next, prev) => {
   confirming.value = {}
   reasons.value = {}
   latch.clear()
+  stuck.value = []
+  resendConfirming.value = {}
+  resentAt.clear()
   load()
   startPolling()
 })

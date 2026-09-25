@@ -7,9 +7,14 @@ class _FakeApiClient implements ApiClient {
   Object? getResponse;
   Object? postResponse;
 
+  /// When set, GET answers by the `status` query instead of [getResponse].
+  Map<String, Object?>? byStatus;
+
   @override
   Future<T> get<T>(String path, {Map<String, dynamic>? query}) async {
     calls.add({'method': 'GET', 'path': path, 'query': query});
+    final table = byStatus;
+    if (table != null) return table[query?['status']] as T;
     return getResponse as T;
   }
 
@@ -155,6 +160,42 @@ void main() {
       final r = await repo.decide('i1', 'a1', 'approve');
       expect(r.uncertain, isTrue);
       expect(r.detail, 'approval received — the order may be in flight');
+    });
+
+    test('approvedSignals reads approved and approved_half, approved rows only', () async {
+      final api = _FakeApiClient()
+        ..byStatus = {
+          'approved': {
+            'signals': [
+              swingJson(id: 'a1', status: 'approved')
+                ..['decided_at'] = '2026-09-25T13:20:00+00:00',
+              swingJson(id: 'p1'),
+            ],
+          },
+          'approved_half': [
+            swingJson(id: 'h1', status: 'approved_half')
+              ..['decided_at'] = '2026-09-25T13:25:00+00:00',
+          ],
+        };
+      final rows = await SwingRepository(api).approvedSignals('swing-paper');
+      expect(rows.map((s) => s.id), ['h1', 'a1']);
+      expect(rows.first.decidedAt, DateTime.utc(2026, 9, 25, 13, 25));
+      expect(api.calls.map((c) => c['query']), [
+        {'status': 'approved'},
+        {'status': 'approved_half'},
+      ]);
+      expect(SwingSignal.fromJson(const {'id': 'x'}).decidedAt, isNull);
+    });
+
+    test('resend POSTs to .../resend with no body and reads the receipt', () async {
+      final api = _FakeApiClient()
+        ..postResponse = {'signal': {}, 'command_id': 'c1'};
+      final repo = SwingRepository(api);
+      expect((await repo.resend('i1', 'a1')).uncertain, isFalse);
+      expect(api.calls.single['path'], '/instances/i1/swing/signals/a1/resend');
+      expect(api.calls.single['body'], isNull);
+      api.postResponse = {'uncertain': true, 'detail': 're-send received — x'};
+      expect((await repo.resend('i1', 'a1')).detail, 're-send received — x');
     });
 
     test('wheel parses the addendum shape and tolerates nulls', () async {

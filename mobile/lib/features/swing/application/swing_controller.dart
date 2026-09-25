@@ -98,34 +98,87 @@ class DecisionResult {
   final String message;
 }
 
+/// The clock the stuck-approval rule reads; tests override it.
+final swingClockProvider = Provider<DateTime Function()>((ref) => DateTime.now);
+
+/// An approval no broker command has claimed this long is offered a re-send
+/// (fix wave item 3).
+const stuckAfter = Duration(minutes: 2);
+
+/// Approved signals no broker command has claimed for more than
+/// [stuckAfter], counted from the later of the decision and this device's
+/// last re-send. An undated one counts as stuck: the server refuses a
+/// re-send while a command for it is still queued.
+List<SwingSignal> stuckApprovals(List<SwingSignal> approved, DateTime now,
+    Map<String, DateTime> resentAt) {
+  return approved.where((s) {
+    final times = [s.decidedAt, resentAt[s.id]].whereType<DateTime>();
+    if (times.isEmpty) return true;
+    final since = times.reduce((a, b) => a.isAfter(b) ? a : b);
+    return now.difference(since) > stuckAfter;
+  }).toList();
+}
+
+String stuckLabel(SwingSignal s, DateTime now) {
+  final at = s.decidedAt;
+  if (at == null) return 'Approved; the broker has not picked it up yet.';
+  final mins = now.difference(at).inMinutes;
+  return 'Approved ${mins < 1 ? 1 : mins} min ago; the broker has not picked it up yet.';
+}
+
+String resendConfirmBody(SwingSignal s) =>
+    'Re-send the approval for ${s.symbol}? The broker rebuilds the order at the '
+    'live price and checks it before sending; a copy it already picked up is '
+    'ignored.';
+
 class PendingSignalsState {
   const PendingSignalsState({
     this.signals = const [],
+    this.stuck = const [],
     this.deciding = const {},
+    this.resending = const {},
     this.refreshError,
+    this.asOf,
   });
 
   final List<SwingSignal> signals;
 
+  /// Approved signals no broker command has claimed for [stuckAfter]: each
+  /// gets a Re-send button.
+  final List<SwingSignal> stuck;
+
   /// Signal ids whose decision request is in flight — their buttons disable.
   final Set<String> deciding;
+
+  /// Signal ids whose re-send request is in flight.
+  final Set<String> resending;
 
   /// Set when the latest poll failed; [signals] is then the last good list.
   final String? refreshError;
 
+  /// The clock [stuck] was computed at.
+  final DateTime? asOf;
+
   bool isDeciding(String id) => deciding.contains(id);
+  bool isResending(String id) => resending.contains(id);
 
   PendingSignalsState copyWith({
     List<SwingSignal>? signals,
+    List<SwingSignal>? stuck,
     Set<String>? deciding,
+    Set<String>? resending,
     String? refreshError,
     bool clearRefreshError = false,
+    DateTime? asOf,
   }) =>
       PendingSignalsState(
         signals: signals ?? this.signals,
+        stuck: stuck ?? this.stuck,
         deciding: deciding ?? this.deciding,
+        resending: resending ?? this.resending,
         refreshError:
             clearRefreshError ? null : (refreshError ?? this.refreshError),
+        asOf: asOf ?? this.asOf,
       );
 }
 
@@ -148,6 +201,10 @@ class PendingSignalsNotifier
   /// lands after it is dropped, not applied over it.
   int _applied = 0;
 
+  /// id -> when this device last re-sent it, or was refused because a
+  /// command was already queued (fix wave item 3).
+  final Map<String, DateTime> _resentAt = <String, DateTime>{};
+
   @override
   Future<PendingSignalsState> build(String arg) async {
     // Registered before the first await: if the screen is left while the
@@ -164,9 +221,10 @@ class PendingSignalsNotifier
     _hidden.clear();
     final lifecycle = ref.read(appLifecycleProvider);
     final generation = ++_generation;
-    final rows = await ref.read(swingRepositoryProvider).pendingSignals(arg);
+    final (pending, approved) = await _fetch();
     if (generation > _applied) _applied = generation;
-    if (disposed) return PendingSignalsState(signals: _visible(generation, rows));
+    final first = _apply(const PendingSignalsState(), generation, pending, approved);
+    if (disposed) return first;
 
     _poller?.dispose();
     _poller = IntervalPoller(fetch: refresh, interval: () => pollEvery);
@@ -182,28 +240,53 @@ class PendingSignalsNotifier
         _poller?.pause();
       }
     });
-    return PendingSignalsState(signals: _visible(generation, rows));
+    return first;
+  }
+
+  /// The pending list and the approved lists, requested together. The
+  /// approved ones feed [PendingSignalsState.stuck] and end a hide.
+  Future<(List<SwingSignal>, List<SwingSignal>)> _fetch() async {
+    final repo = ref.read(swingRepositoryProvider);
+    // Future.wait: the first error is thrown and the other one is handled.
+    final lists = await Future.wait(
+        [repo.pendingSignals(arg), repo.approvedSignals(arg)]);
+    return (lists[0], lists[1]);
+  }
+
+  PendingSignalsState _apply(PendingSignalsState current, int generation,
+      List<SwingSignal> pending, List<SwingSignal> approved) {
+    final now = ref.read(swingClockProvider)();
+    return current.copyWith(
+      signals: _visible(generation, pending,
+          nonPending: approved.map((s) => s.id)),
+      stuck: stuckApprovals(approved, now, _resentAt),
+      asOf: now,
+      clearRefreshError: true,
+    );
   }
 
   /// [rows] are the pending rows of the fetch that took [generation];
-  /// [nonPending] the ids it saw with another status.
+  /// [nonPending] the ids it saw with another status. The lists are separate
+  /// requests, so a row the same fetch also saw non-pending is not shown
+  /// pending (its pending read may predate the decision).
   List<SwingSignal> _visible(int generation, List<SwingSignal> rows,
       {Iterable<String> nonPending = const []}) {
     final seen = nonPending.toSet();
     _hidden.removeWhere((id, at) => generation > at || seen.contains(id));
-    return rows.where((s) => !_hidden.containsKey(s.id)).toList();
+    return rows
+        .where((s) => !_hidden.containsKey(s.id) && !seen.contains(s.id))
+        .toList();
   }
 
   /// One poll cycle. A failure keeps the last good list and says so.
   Future<void> refresh() async {
     final generation = ++_generation;
     try {
-      final rows = await ref.read(swingRepositoryProvider).pendingSignals(arg);
+      final (pending, approved) = await _fetch();
       if (generation < _applied) return;
       _applied = generation;
       final current = state.valueOrNull ?? const PendingSignalsState();
-      state = AsyncData(current.copyWith(
-          signals: _visible(generation, rows), clearRefreshError: true));
+      state = AsyncData(_apply(current, generation, pending, approved));
     } catch (err) {
       final current = state.valueOrNull;
       if (current == null) return;
@@ -279,6 +362,74 @@ class PendingSignalsNotifier
       return DecisionResult(
           DecisionOutcome.failed, 'Could not record that decision: $err');
     }
+  }
+
+  /// Re-send a stuck approval (fix wave item 3). 200: queued. 202: the
+  /// queue write may or may not have landed. 404/409: nothing to re-send now
+  /// (no longer approved, or a command is still queued); the card goes and
+  /// waits another [stuckAfter]. Anything else keeps the card.
+  Future<DecisionResult> resend(SwingSignal signal) async {
+    final current = state.valueOrNull;
+    if (current == null || current.resending.contains(signal.id)) {
+      return const DecisionResult(DecisionOutcome.ignored, '');
+    }
+    state = AsyncData(
+        current.copyWith(resending: {...current.resending, signal.id}));
+    try {
+      final receipt =
+          await ref.read(swingRepositoryProvider).resend(arg, signal.id);
+      _snooze(signal.id);
+      if (receipt.uncertain) {
+        return DecisionResult(
+          DecisionOutcome.uncertain,
+          receipt.detail.isEmpty
+              ? 'Re-send received for ${signal.symbol} — the order may be in '
+                  'flight; check the signal status and open orders.'
+              : receipt.detail,
+        );
+      }
+      return DecisionResult(
+          DecisionOutcome.recorded, 'Re-sent ${signal.symbol} to the broker.');
+    } on ApiError catch (err) {
+      final code = err.statusCode;
+      final detail = err.message.trim();
+      if (code == 404 || code == 409) {
+        _snooze(signal.id);
+        return DecisionResult(DecisionOutcome.noLongerPending,
+            detail.isEmpty ? 'Nothing to re-send for this signal.' : detail);
+      }
+      _releaseResend(signal.id);
+      if (code == 401) {
+        return const DecisionResult(
+            DecisionOutcome.failed, 'Session expired — please sign in again.');
+      }
+      if (code == 503) {
+        return DecisionResult(DecisionOutcome.failed,
+            detail.isEmpty ? 'Not queued — try again.' : detail);
+      }
+      return DecisionResult(DecisionOutcome.failed,
+          detail.isEmpty ? 'Could not re-send that approval.' : detail);
+    } catch (err) {
+      _releaseResend(signal.id);
+      return DecisionResult(
+          DecisionOutcome.failed, 'Could not re-send that approval: $err');
+    }
+  }
+
+  /// Takes the stuck card off and holds it back for another [stuckAfter].
+  void _snooze(String id) {
+    _resentAt[id] = ref.read(swingClockProvider)();
+    final current = state.valueOrNull ?? const PendingSignalsState();
+    state = AsyncData(current.copyWith(
+      stuck: current.stuck.where((s) => s.id != id).toList(),
+      resending: {...current.resending}..remove(id),
+    ));
+  }
+
+  void _releaseResend(String id) {
+    final current = state.valueOrNull ?? const PendingSignalsState();
+    state = AsyncData(
+        current.copyWith(resending: {...current.resending}..remove(id)));
   }
 
   void _drop(String id) {

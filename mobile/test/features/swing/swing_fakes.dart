@@ -5,12 +5,20 @@ import 'package:intellistock_mobile/features/swing/data/swing_repository.dart';
 /// Test double for [SwingRepository]. Not a *_test.dart file, so the runner
 /// does not execute it on its own.
 class FakeSwingRepo implements SwingRepository {
-  FakeSwingRepo(this.pending, {this.wheelSnapshot = WheelSnapshot.empty});
+  FakeSwingRepo(this.pending,
+      {this.wheelSnapshot = WheelSnapshot.empty, List<SwingSignal>? approved})
+      : approved = approved ?? <SwingSignal>[];
 
   List<SwingSignal> pending;
+
+  /// What `?status=approved` and `?status=approved_half` answer.
+  List<SwingSignal> approved;
   WheelSnapshot wheelSnapshot;
   final decideCalls = <String>[];
+  final resendCalls = <String>[];
   Object? decideError;
+  Object? resendError;
+  DecisionReceipt resendReceipt = DecisionReceipt.recorded;
   Object? listError;
   Object? wheelError;
 
@@ -34,6 +42,20 @@ class FakeSwingRepo implements SwingRepository {
     if (gate != null) await gate!.future;
     if (decideError != null) throw decideError!;
     return decideReceipt;
+  }
+
+  @override
+  Future<List<SwingSignal>> approvedSignals(String instanceId) async {
+    if (listError != null) throw listError!;
+    return List.of(approved);
+  }
+
+  @override
+  Future<DecisionReceipt> resend(String instanceId, String signalId) async {
+    resendCalls.add(signalId);
+    if (gate != null) await gate!.future;
+    if (resendError != null) throw resendError!;
+    return resendReceipt;
   }
 
   @override
@@ -61,6 +83,25 @@ SwingSignal swingSignal(
       'key_risks': ['earnings in 9 days'],
       'proposal': {'entry': 200.0, 'stop': 188.0, 'target': 218.0, 'shares': 6},
       'status': 'pending',
+    });
+
+/// A swing signal that reads approved (or approved_half) since [decidedAt].
+SwingSignal approvedSignal(String id, String decidedAt,
+        {String status = 'approved', String symbol = 'AAPL'}) =>
+    SwingSignal.fromJson({
+      'id': id,
+      'lane': 'swing',
+      'symbol': symbol,
+      'session': '2026-09-25',
+      'created_at': '2026-09-25T13:15:00Z',
+      'score': 62,
+      'recommendation': 'REVIEW',
+      'reasoning': 'r',
+      'key_risks': <String>[],
+      'proposal': {'entry': 200.0, 'stop': 188.0, 'target': 218.0, 'shares': 6},
+      'status': status,
+      'decided_by': 'pranav',
+      'decided_at': decidedAt,
     });
 
 SwingSignal wheelSignal(String id) => SwingSignal.fromJson({

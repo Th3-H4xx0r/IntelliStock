@@ -590,3 +590,138 @@ def test_m3_collateral_uses_the_row_multiplier(api, monkeypatch, multiplier, col
     res = api.get(f"/instances/{IID}/wheel")
     (aph,) = res.json()["open_puts"]
     assert aph["collateral"] == collateral and res.json()["collateral_total"] == collateral
+
+
+# -- FW item 3: re-send a stuck approval -------------------------------------------
+
+def resend_url(sid, instance_id=IID):
+    return f"/instances/{instance_id}/swing/signals/{sid}/resend"
+
+
+def _queued(live_state, store, sid, status="pending", instance_id=IID):
+    cid = live_state.submit_command(None, None, instance_id=instance_id, type="submit_order",
+                                    payload={"source": "swing_approval", "signal_id": sid})
+    if status != "pending":
+        store.update(live_state.LIVE_COMMANDS_TABLE, cid, {"status": status})
+    return cid
+
+
+@pytest.mark.parametrize("status", ["approved", "approved_half"])
+def test_resend_queues_the_same_approval_payload_again(api, status):
+    sid = signal(status=status)
+    res = api.post(resend_url(sid))
+    assert res.status_code == 200
+    assert res.json()["command_id"] == "cmd-1"
+    assert res.json()["signal"]["status"] == status
+    assert api.commands == [(IID, "submit_order",
+                             {"source": "swing_approval", "signal_id": sid}, "pranav")]
+    # The re-send changes nothing on the row: the broker's claim needs it approved.
+    assert signals_store.get_signal(sid)["status"] == status
+
+
+@pytest.mark.parametrize("status", ["pending", "submitted", "rejected", "failed",
+                                    "ai_rejected", "auto_approved"])
+def test_resend_of_a_signal_that_is_not_approved_is_409(api, status):
+    sid = signal(status=status)
+    res = api.post(resend_url(sid))
+    assert res.status_code == 409 and "not approved" in res.json()["detail"]
+    assert api.commands == []
+
+
+@pytest.mark.parametrize("status", ["pending", "running"])
+def test_resend_while_a_command_is_open_is_409(api, store, monkeypatch, status):
+    live_state = _real_queue(monkeypatch, store)
+    sid = signal(status="approved")
+    cid = _queued(live_state, store, sid, status)
+    res = api.post(resend_url(sid))
+    assert res.status_code == 409
+    assert cid in res.json()["detail"] and status in res.json()["detail"]
+    assert api.commands == []
+
+
+@pytest.mark.parametrize("status", ["completed", "failed", "reconciliation_required"])
+def test_a_finished_command_does_not_block_a_resend(api, store, monkeypatch, status):
+    live_state = _real_queue(monkeypatch, store)
+    sid = signal(status="approved")
+    _queued(live_state, store, sid, status)
+    # Open commands for another signal or another instance do not block either.
+    _queued(live_state, store, signal("OTHER", status="approved"))
+    _queued(live_state, store, sid, instance_id="other")
+    assert api.post(resend_url(sid)).status_code == 200
+    assert len(api.commands) == 1
+
+
+def test_a_second_resend_is_409_while_the_first_is_queued(api, store, monkeypatch):
+    _real_queue(monkeypatch, store)
+    monkeypatch.setattr(interactive_utils, "action_submit_live_command", _REAL_SUBMIT)
+    sid = signal(status="approved")
+    first = api.post(resend_url(sid))
+    assert first.status_code == 200
+    again = api.post(resend_url(sid))
+    assert again.status_code == 409 and first.json()["command_id"] in again.json()["detail"]
+
+
+def test_resend_of_an_unknown_or_foreign_signal_is_404(api):
+    assert api.post(resend_url("nope")).status_code == 404
+    foreign = signal(instance_id="other", status="approved")
+    assert api.post(resend_url(foreign)).status_code == 404
+    assert api.post(resend_url(foreign, "nope")).status_code == 404
+    assert api.commands == []
+
+
+@pytest.mark.parametrize("instance_id,why", [("stopped", "not running"), ("crashed", "crashed")])
+def test_resend_to_an_instance_that_cannot_run_it_is_503(api, instance_id, why):
+    sid = signal(instance_id=instance_id, status="approved")
+    res = api.post(resend_url(sid, instance_id))
+    assert res.status_code == 503 and why in res.json()["detail"]
+    assert api.commands == []
+
+
+def test_resend_with_an_unreadable_queue_is_503_and_queues_nothing(api, monkeypatch):
+    def unreadable(*a, **k):
+        raise RuntimeError("postgres unavailable")
+
+    monkeypatch.setattr(interactive_utils, "_swing_approval_commands", unreadable)
+    res = api.post(resend_url(signal(status="approved")))
+    assert res.status_code == 503 and "could not be read" in res.json()["detail"]
+    assert api.commands == []
+
+
+def test_resend_whose_write_raised_but_landed_is_202_uncertain(api, store, monkeypatch):
+    landed = _landed_then_raised(monkeypatch, store)
+    sid = signal(status="approved")
+    res = api.post(resend_url(sid))
+    assert res.status_code == 202
+    body = res.json()
+    assert body["uncertain"] is True and body["command_id"] == landed[0]["command_id"]
+    assert "may be in flight" in body["detail"] and "manually" not in body["detail"]
+
+
+def test_resend_whose_write_provably_failed_is_503_try_again(api, monkeypatch):
+    _queue_down(monkeypatch)
+    sid = signal(status="approved")
+    res = api.post(resend_url(sid))
+    assert res.status_code == 503
+    assert "not queued" in res.json()["detail"] and "try again" in res.json()["detail"]
+    assert signals_store.get_signal(sid)["status"] == "approved"
+
+
+def test_resend_route_is_authenticated_like_its_neighbours():
+    import inspect
+
+    from fastapi.testclient import TestClient
+
+    from api import main
+
+    path = "/instances/{instance_id}/swing/signals/{signal_id}/resend"
+    (endpoint,) = [r.endpoint for r in main.app.routes
+                   if getattr(r, "path", None) == path and "POST" in r.methods]
+    assert inspect.signature(endpoint).parameters["current_user"].default.dependency \
+        is main.get_current_user
+    main.app.dependency_overrides[main.conn_dependency] = lambda: None
+    try:
+        res = TestClient(main.app).post(f"/instances/{IID}/swing/signals/sid/resend",
+                                        headers={"Authorization": "Bearer not-a-token"})
+    finally:
+        main.app.dependency_overrides.pop(main.conn_dependency, None)
+    assert res.status_code == 401

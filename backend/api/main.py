@@ -209,8 +209,10 @@ from interactive_utils import (
     action_list_push_devices,
     SwingBrokerUnavailableError,
     SwingDecisionRaceError,
+    SwingResendConflictError,
     action_swing_list_signals,
     action_swing_decide_signal,
+    action_swing_resend_signal,
     action_wheel_overview,
     action_swing_calibration,
 )
@@ -4025,6 +4027,7 @@ def api_get_live_command(command_id: str, conn=Depends(conn_dependency), current
 #
 # GET  /instances/{id}/swing/signals?status=     — review queue (web + iOS)
 # POST /instances/{id}/swing/signals/{sid}/decision — approve / approve_half / reject
+# POST /instances/{id}/swing/signals/{sid}/resend   — re-queue a stuck approval
 # GET  /instances/{id}/wheel                     — open puts, collateral, recent scans
 # GET  /instances/{id}/swing/calibration         — score buckets vs outcomes
 
@@ -4066,6 +4069,37 @@ def api_swing_decide_signal(instance_id: str, signal_id: str, body: SwingDecisio
                    str(current_user.get("username") or current_user.get("id")
                        or "operator"))
     except SwingDecisionRaceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except SwingBrokerUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    if isinstance(out, dict) and out.get("uncertain"):
+        return JSONResponse(status_code=202, content=jsonable_encoder(out))
+    return out
+
+
+@app.post("/instances/{instance_id}/swing/signals/{signal_id}/resend",
+          response_class=JSONResponse)
+def api_swing_resend_signal(instance_id: str, signal_id: str,
+                            conn=Depends(conn_dependency),
+                            current_user: dict = Depends(get_current_user)):
+    """Re-send a stuck approval: queue the approval's submit_order payload
+    again for a signal that reads approved or approved_half with no pending
+    or running command. The broker claims approved -> submitted before it
+    sends anything, so a duplicate copy places nothing.
+
+    - 200: queued, {"signal", "command_id"}.
+    - 202: the queue write raised but may have landed; the same
+      {"uncertain": true, "detail"} body as the decision route.
+    - 404: unknown, or another instance's. 409: not approved, or a command
+      for it is still pending or running.
+    - 503: the instance is not running or has crashed, the queue could not be
+      read, or the command provably was not queued: try again.
+    """
+    try:
+        out = _run(action_swing_resend_signal, conn, instance_id, signal_id,
+                   str(current_user.get("username") or current_user.get("id")
+                       or "operator"))
+    except SwingResendConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     except SwingBrokerUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc))

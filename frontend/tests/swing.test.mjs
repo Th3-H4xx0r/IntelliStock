@@ -5,6 +5,7 @@ import {
   REASONING_PREVIEW_CHARS,
   classifyDecisionFailure,
   classifyDecisionSuccess,
+  classifyResendFailure,
   confirmPrompt,
   createDecisionLatch,
   createInFlightGuard,
@@ -14,10 +15,16 @@ import {
   fmtItm,
   itmTone,
   joinKeyRisks,
+  normalizeApprovedList,
   normalizeSignalList,
   parseWheelPayload,
   proposalRows,
   reasoningPreview,
+  resendPrompt,
+  resendSuccess,
+  STUCK_AFTER_MS,
+  stuckApprovals,
+  stuckLabel,
   scoreTone,
   swingLanesOf,
 } from '../src/utils/swing.js'
@@ -271,6 +278,17 @@ test('a poll that returns the id with a non-pending status ends the hide at once
   assert.deepEqual(latch.apply(racing, [SWING]).map(s => s.id), ['a1'])
 })
 
+test('a row one poll saw both pending and approved is not shown pending (separate requests)', () => {
+  const latch = createDecisionLatch()
+  const racing = latch.beginLoad()
+  latch.record('a1')
+  // ?status=pending was served before the decision, ?status=approved after it.
+  assert.deepEqual(latch.apply(racing, [SWING, WHEEL], ['a1']).map(s => s.id), ['w1'])
+  assert.equal(latch.has('a1'), false)
+  // Without any decision on this page the same rule holds.
+  assert.deepEqual(createDecisionLatch().apply(1, [SWING], ['a1']), [])
+})
+
 test('a decision recorded before any load began is hidden only from no load at all', () => {
   const latch = createDecisionLatch()
   latch.record('a1')                        // generation 0: nothing is in flight
@@ -284,4 +302,66 @@ test('clear() drops every hide (instance switch)', () => {
   latch.record('a1')
   latch.clear()
   assert.deepEqual(latch.apply(gen, [SWING]).map(s => s.id), ['a1'])
+})
+
+// -- FW item 3: re-send a stuck approval ------------------------------------------------
+
+const T0 = Date.parse('2026-09-25T13:30:00Z')
+const approvedAt = (id, decidedAt, status = 'approved') =>
+  ({ ...SWING, id, status, decided_at: decidedAt, decided_by: 'pranav' })
+
+test('normalizeApprovedList merges the approved and approved_half lists, approved only', () => {
+  const rows = normalizeApprovedList(
+    { signals: [approvedAt('a1', '2026-09-25T13:20:00Z'), { ...SWING, id: 'p1' }] },
+    [approvedAt('h1', '2026-09-25T13:25:00Z', 'approved_half'), null, 'junk'],
+  )
+  assert.deepEqual(rows.map(s => s.id), ['h1', 'a1'])
+  assert.deepEqual(normalizeApprovedList(undefined, { detail: 'x' }), [])
+})
+
+test('stuckApprovals: approved for more than 2 minutes, counted from the latest of decision and re-send', () => {
+  assert.equal(STUCK_AFTER_MS, 120000)
+  const rows = [
+    approvedAt('old', '2026-09-25T13:27:59Z'),      // 2m01s ago
+    approvedAt('edge', '2026-09-25T13:28:00Z'),     // exactly 2m: not yet
+    approvedAt('new', '2026-09-25T13:29:30Z'),
+    approvedAt('resent', '2026-09-25T13:00:00Z'),
+    approvedAt('undated', null),
+  ]
+  const resentAt = new Map([['resent', T0 - 60000]])
+  assert.deepEqual(stuckApprovals(rows, T0, resentAt).map(s => s.id), ['old', 'undated'])
+  assert.deepEqual(stuckApprovals(rows, T0 + 61000, resentAt).map(s => s.id),
+    ['old', 'edge', 'resent', 'undated'])
+})
+
+test('stuckLabel says how long it has waited and that nothing was sent', () => {
+  assert.equal(stuckLabel(approvedAt('a1', '2026-09-25T13:25:00Z'), T0),
+    'Approved 5 min ago; the broker has not picked it up yet.')
+  assert.equal(stuckLabel(approvedAt('a1', null), T0),
+    'Approved; the broker has not picked it up yet.')
+})
+
+test('resend copy never promises a placed order or a notification', () => {
+  assert.equal(resendPrompt(SWING),
+    'Re-send the approval for AAPL? The broker rebuilds the order at the live price and checks it before sending; a copy it already picked up is ignored.')
+  const ok = resendSuccess(200, { command_id: 'c1' }, SWING)
+  assert.deepEqual([ok.uncertain, ok.tone, ok.message], [false, 'ok', 'Re-sent AAPL to the broker.'])
+  const unsure = resendSuccess(202, { uncertain: true, detail: 're-send received — the order may be in flight; x' }, SWING)
+  assert.deepEqual([unsure.uncertain, unsure.tone], [true, 'warn'])
+  assert.match(unsure.message, /may be in flight/)
+  for (const m of [resendPrompt(SWING), ok.message, unsure.message]) {
+    assert.doesNotMatch(m, /placed|notif|manually/)
+  }
+})
+
+test('classifyResendFailure: 409/404 drop the stuck card and snooze it; 503 keeps it', () => {
+  const busy = classifyResendFailure(409, 'command c1 for signal a1 is still pending; ...')
+  assert.deepEqual([busy.removeCard, busy.snooze, busy.stopPolling], [true, true, false])
+  assert.match(busy.message, /still pending/)
+  assert.equal(classifyResendFailure(404, '').removeCard, true)
+  const down = classifyResendFailure(503, '')
+  assert.deepEqual([down.removeCard, down.snooze], [false, false])
+  assert.equal(down.message, 'Not queued — try again.')
+  assert.equal(classifyResendFailure(401, '').stopPolling, true)
+  assert.equal(classifyResendFailure(0, '').message, 'Could not reach the server.')
 })

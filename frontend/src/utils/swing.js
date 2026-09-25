@@ -51,6 +51,8 @@ export function normalizeSignalList(payload) {
  *
  * beginLoad() is called as each load starts and returns its generation;
  * apply(generation, pendingRows, nonPendingIds) filters that load's answer.
+ * A row the same load also saw with a non-pending status is dropped from the
+ * pending rows: the lists come from separate requests.
  */
 export function createDecisionLatch() {
   let generation = 0
@@ -68,7 +70,9 @@ export function createDecisionLatch() {
       for (const [id, at] of [...hidden]) {
         if (loadGeneration > at || seen.has(id)) hidden.delete(id)
       }
-      return pendingRows.filter(s => !hidden.has(s.id))
+      // The lists are separate requests: a row this same load also saw with
+      // another status is not shown pending (its pending read may predate it).
+      return pendingRows.filter(s => !hidden.has(s.id) && !seen.has(s.id))
     },
   }
 }
@@ -220,6 +224,98 @@ export function classifyDecisionFailure(status, detail) {
     return { kind: 'failed', removeCard: false, stopPolling: false, message: text || 'Could not reach the server.' }
   }
   return { kind: 'failed', removeCard: false, stopPolling: false, message: text || `Request failed (${status})` }
+}
+
+// -- Re-send a stuck approval (fix wave item 3) -------------------------------
+
+export const APPROVED_STATUSES = ['approved', 'approved_half']
+
+/** An approval the broker has not claimed this long is offered a Re-send. */
+export const STUCK_AFTER_MS = 2 * 60 * 1000
+
+/**
+ * GET ...?status=approved and ...?status=approved_half, merged: the rows that
+ * still read approved, newest decision first. Each payload may be a bare list
+ * or {signals: [...]}.
+ */
+export function normalizeApprovedList(...payloads) {
+  const byId = new Map()
+  for (const payload of payloads) {
+    const rows = Array.isArray(payload) ? payload : (Array.isArray(payload?.signals) ? payload.signals : [])
+    for (const r of rows) {
+      if (r && typeof r === 'object' && r.id && APPROVED_STATUSES.includes(String(r.status))) byId.set(r.id, r)
+    }
+  }
+  return [...byId.values()]
+    .sort((a, b) => String(b.decided_at ?? '').localeCompare(String(a.decided_at ?? '')))
+}
+
+function approvedSinceMs(signal, resentAt) {
+  const decided = Date.parse(signal?.decided_at ?? '')
+  const resent = resentAt?.get?.(signal?.id)
+  const times = [decided, resent].filter(Number.isFinite)
+  return times.length ? Math.max(...times) : null
+}
+
+/**
+ * Approved signals no broker command has claimed for more than
+ * STUCK_AFTER_MS, counted from the later of the decision and this page's last
+ * re-send (`resentAt`: id -> epoch ms). An undated one counts as stuck: the
+ * server refuses a re-send while a command for it is still queued.
+ */
+export function stuckApprovals(approved, nowMs, resentAt = new Map()) {
+  return approved.filter(s => {
+    const since = approvedSinceMs(s, resentAt)
+    return since == null || nowMs - since > STUCK_AFTER_MS
+  })
+}
+
+export function stuckLabel(signal, nowMs) {
+  const decided = Date.parse(signal?.decided_at ?? '')
+  if (!Number.isFinite(decided)) return 'Approved; the broker has not picked it up yet.'
+  const mins = Math.max(1, Math.floor((nowMs - decided) / 60000))
+  return `Approved ${mins} min ago; the broker has not picked it up yet.`
+}
+
+export function resendPrompt(signal) {
+  const sym = signal?.symbol || 'this signal'
+  return `Re-send the approval for ${sym}? The broker rebuilds the order at the live price and checks it before sending; a copy it already picked up is ignored.`
+}
+
+/** A 2xx from POST .../resend; a 202 is the same accepted-but-uncertain answer as a decision's. */
+export function resendSuccess(status, body, signal) {
+  const sym = signal?.symbol || 'the signal'
+  if (status === 202 || body?.uncertain === true) {
+    return {
+      uncertain: true,
+      tone: 'warn',
+      message: detailText(body?.detail)
+        || `Re-send received for ${sym} — the order may be in flight; check the signal status and open orders.`,
+    }
+  }
+  return { uncertain: false, tone: 'ok', message: `Re-sent ${sym} to the broker.` }
+}
+
+/**
+ * A failed POST .../resend. 409 (not approved any more, or a command for it
+ * is still queued) and 404 drop the stuck card and snooze it for another
+ * STUCK_AFTER_MS; the polls say what happens next. 503 and the rest keep it.
+ */
+export function classifyResendFailure(status, detail) {
+  const text = detailText(detail)
+  if (status === 401) {
+    return { removeCard: false, snooze: false, stopPolling: true, message: 'Session expired — please sign in again.' }
+  }
+  if (status === 404 || status === 409) {
+    return { removeCard: true, snooze: true, stopPolling: false, message: text || 'Nothing to re-send for this signal.' }
+  }
+  if (status === 503) {
+    return { removeCard: false, snooze: false, stopPolling: false, message: text || 'Not queued — try again.' }
+  }
+  if (!status) {
+    return { removeCard: false, snooze: false, stopPolling: false, message: text || 'Could not reach the server.' }
+  }
+  return { removeCard: false, snooze: false, stopPolling: false, message: text || `Request failed (${status})` }
 }
 
 /**

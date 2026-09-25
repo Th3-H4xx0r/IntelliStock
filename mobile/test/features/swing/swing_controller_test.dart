@@ -12,9 +12,15 @@ import 'swing_fakes.dart';
 SwingSignal signal(String id) =>
     swingSignal(id, createdAt: '2026-09-24T13:15:0${id.length}Z');
 
+/// The notifier's clock; tests move it.
+var clock = DateTime.utc(2026, 9, 25, 13, 30);
+
 Future<ProviderContainer> start(FakeSwingRepo repo) async {
   final container = ProviderContainer(
-    overrides: [swingRepositoryProvider.overrideWithValue(repo)],
+    overrides: [
+      swingRepositoryProvider.overrideWithValue(repo),
+      swingClockProvider.overrideWithValue(() => clock),
+    ],
   );
   addTearDown(container.dispose);
   container.listen(pendingSignalsProvider('i1'), (_, _) {});
@@ -26,13 +32,16 @@ PendingSignalsState read(ProviderContainer c) =>
     c.read(pendingSignalsProvider('i1')).requireValue;
 
 /// Holds every pendingSignals() call on [listGate] and counts the calls.
-/// [nextListGate], when set, holds only the next call, and it answers with
-/// the rows as they were when the call began.
+/// [nextListGate], when set, holds only the next poll: its pending list
+/// answers with the rows as they were when it began, and its approved list
+/// with the rows as they are when the gate opens (the two are separate
+/// requests, served at different moments).
 class _GatedListRepo extends FakeSwingRepo {
   _GatedListRepo(super.pending);
 
   final listGate = Completer<void>();
   Completer<void>? nextListGate;
+  Completer<void>? _approvedHold;
   int listCalls = 0;
 
   @override
@@ -41,9 +50,19 @@ class _GatedListRepo extends FakeSwingRepo {
     final snapshot = await super.pendingSignals(instanceId);
     final hold = nextListGate;
     nextListGate = null;
+    _approvedHold = hold;
     await listGate.future;
     if (hold != null) await hold.future;
     return snapshot;
+  }
+
+  @override
+  Future<List<SwingSignal>> approvedSignals(String instanceId) async {
+    await Future<void>.delayed(Duration.zero); // after pendingSignals began
+    final hold = _approvedHold;
+    _approvedHold = null;
+    if (hold != null) await hold.future;
+    return super.approvedSignals(instanceId);
   }
 }
 
@@ -250,6 +269,122 @@ void main() {
       await c.read(pendingSignalsProvider('i1').notifier).refresh();
       expect(read(c).signals.map((s) => s.id), ['a1']);
       expect(read(c).refreshError, 'Cannot reach the server.');
+    });
+  });
+
+  group('FW item 3: stuck approvals', () {
+    setUp(() => clock = DateTime.utc(2026, 9, 25, 13, 30));
+
+    test('an approval unclaimed for more than 2 minutes is offered a re-send', () async {
+      final repo = FakeSwingRepo([], approved: [
+        approvedSignal('old', '2026-09-25T13:27:59Z'),
+        approvedSignal('edge', '2026-09-25T13:28:00Z'),
+        approvedSignal('new', '2026-09-25T13:29:30Z', status: 'approved_half'),
+      ]);
+      final c = await start(repo);
+      expect(read(c).stuck.map((s) => s.id), ['old']);
+      clock = clock.add(const Duration(seconds: 31));
+      await c.read(pendingSignalsProvider('i1').notifier).refresh();
+      expect(read(c).stuck.map((s) => s.id), ['old', 'edge']);
+      expect(read(c).signals, isEmpty);
+    });
+
+    test('a re-send queues once, then waits another 2 minutes before offering again',
+        () async {
+      final repo = FakeSwingRepo([],
+          approved: [approvedSignal('a1', '2026-09-25T13:20:00Z')]);
+      final c = await start(repo);
+      final notifier = c.read(pendingSignalsProvider('i1').notifier);
+      final result = await notifier.resend(read(c).stuck.single);
+      expect(result.outcome, DecisionOutcome.recorded);
+      expect(result.message, 'Re-sent AAPL to the broker.');
+      expect(repo.resendCalls, ['a1']);
+      expect(read(c).stuck, isEmpty);
+
+      await notifier.refresh(); // still approved: the broker has not run it yet
+      expect(read(c).stuck, isEmpty);
+      clock = clock.add(const Duration(minutes: 2, seconds: 1));
+      await notifier.refresh();
+      expect(read(c).stuck.map((s) => s.id), ['a1']);
+    });
+
+    test('a double tap on Re-send sends one request', () async {
+      final repo = FakeSwingRepo([],
+          approved: [approvedSignal('a1', '2026-09-25T13:20:00Z')])
+        ..gate = Completer<void>();
+      final c = await start(repo);
+      final notifier = c.read(pendingSignalsProvider('i1').notifier);
+      final s = read(c).stuck.single;
+      final first = notifier.resend(s);
+      expect(read(c).isResending('a1'), isTrue);
+      expect((await notifier.resend(s)).outcome, DecisionOutcome.ignored);
+      repo.gate!.complete();
+      await first;
+      expect(repo.resendCalls, ['a1']);
+    });
+
+    test('409 (a command is still queued) drops the card and snoozes it', () async {
+      final repo = FakeSwingRepo([],
+          approved: [approvedSignal('a1', '2026-09-25T13:20:00Z')])
+        ..resendError = ApiError('command c1 for signal a1 is still pending; ...',
+            statusCode: 409);
+      final c = await start(repo);
+      final notifier = c.read(pendingSignalsProvider('i1').notifier);
+      final result = await notifier.resend(read(c).stuck.single);
+      expect(result.outcome, DecisionOutcome.noLongerPending);
+      expect(result.message, contains('still pending'));
+      await notifier.refresh();
+      expect(read(c).stuck, isEmpty);
+    });
+
+    test('503 keeps the card and says not queued', () async {
+      final repo = FakeSwingRepo([],
+          approved: [approvedSignal('a1', '2026-09-25T13:20:00Z')])
+        ..resendError = ApiError('', statusCode: 503);
+      final c = await start(repo);
+      final result = await c
+          .read(pendingSignalsProvider('i1').notifier)
+          .resend(read(c).stuck.single);
+      expect(result.outcome, DecisionOutcome.failed);
+      expect(result.message, 'Not queued — try again.');
+      expect(read(c).stuck.map((s) => s.id), ['a1']);
+      expect(read(c).isResending('a1'), isFalse);
+    });
+
+    test('a 202 re-send is uncertain and carries the server advice', () async {
+      final repo = FakeSwingRepo([],
+          approved: [approvedSignal('a1', '2026-09-25T13:20:00Z')])
+        ..resendReceipt = const DecisionReceipt(
+            uncertain: true, detail: 're-send received — the order may be in flight');
+      final c = await start(repo);
+      final result = await c
+          .read(pendingSignalsProvider('i1').notifier)
+          .resend(read(c).stuck.single);
+      expect(result.outcome, DecisionOutcome.uncertain);
+      expect(result.message, 're-send received — the order may be in flight');
+      expect(read(c).stuck, isEmpty);
+    });
+
+    test('FW-api-I2: a racing poll that also sees the id approved never shows it pending',
+        () async {
+      final repo = _GatedListRepo([signal('a1')])..listGate.complete();
+      final c = await start(repo);
+      final notifier = c.read(pendingSignalsProvider('i1').notifier);
+      final hold = Completer<void>();
+      repo.nextListGate = hold;
+      final racing = notifier.refresh(); // its pending list predates the decision
+      await notifier.decide(signal('a1'), 'approve');
+      repo.pending = [];
+      repo.approved = [approvedSignal('a1', '2026-09-25T13:29:59Z')];
+      hold.complete(); // its approved list is served after it
+      await racing;
+      expect(read(c).signals, isEmpty);
+      expect(read(c).stuck, isEmpty); // approved one second ago: not stuck
+      // The broker then put it back to pending: the next poll shows it.
+      repo.pending = [signal('a1')];
+      repo.approved = [];
+      await notifier.refresh();
+      expect(read(c).signals.map((s) => s.id), ['a1']);
     });
   });
 

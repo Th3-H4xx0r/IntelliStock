@@ -6674,6 +6674,11 @@ class SwingDecisionRaceError(RuntimeError):
     """This click lost the compare-and-swap to a concurrent decision (409)."""
 
 
+class SwingResendConflictError(RuntimeError):
+    """A re-send refused (409): the signal is not approved, or a broker
+    command for it is still pending or running."""
+
+
 def _swing_log(msg, color="white"):
     try:
         from intellistock_logger import intellistock_logger as _ilog
@@ -6804,13 +6809,14 @@ def _swing_approval_commands(real_id, signal_id, *, since=None, open_only=False,
     return out
 
 
-def _swing_uncertain(signal_doc, command_id, why):
+def _swing_uncertain(signal_doc, command_id, why, *, what="approval"):
     """FW-api-I1: the approval is recorded, and the broker command may have
     been queued. The route answers 202 with this body; nothing here may tell
     the operator to place the order by hand."""
     return {"signal": signal_doc, "command_id": command_id, "uncertain": True,
-            "detail": ("approval received — the order may be in flight; check the signal "
-                       "status and open orders before placing anything by hand (%s)" % why)}
+            "detail": ("%s received — the order may be in flight; check the signal "
+                       "status and open orders before placing anything by hand (%s)"
+                       % (what, why))}
 
 
 def _swing_after_failed_enqueue(real_id, signal_id, prior, decided, exc, started):
@@ -6866,6 +6872,80 @@ def _swing_after_failed_enqueue(real_id, signal_id, prior, decided, exc, started
     raise SwingBrokerUnavailableError(
         "the approval was not queued for the broker (%s); the signal is pending again "
         "— not queued, try again" % exc)
+
+
+def action_swing_resend_signal(conn, instance_id, signal_id, requested_by=None):
+    """Re-send a stuck approval (FW item 3). An approved or approved_half
+    signal with no pending or running command for it gets the approval's
+    submit_order payload queued again. The row is not touched: the broker's
+    handler claims it approved -> submitted before it sends anything, so a
+    copy that arrives second (a late original, a second re-send) places
+    nothing.
+
+    Unknown, or another instance's: LookupError (404). Not approved, or a
+    command for it still pending or running: SwingResendConflictError (409).
+    The instance not running or crashed, the queue unreadable, or the command
+    provably not queued: SwingBrokerUnavailableError (503). A queue write
+    that raised but may have landed: the 202 "uncertain" body."""
+    from swing_trader import approvals, signals_store
+    inst, real_id = _swing_instance(conn, instance_id)
+    signal = signals_store.get_signal(signal_id)
+    if not signal or str(signal.get("instance_id") or "") != real_id:
+        raise LookupError("Signal not found: %s" % signal_id)
+    status = str(signal.get("status") or "")
+    if status not in approvals.APPROVED_STATUSES:
+        raise SwingResendConflictError(
+            "signal %s is %s, not approved; there is no approval to re-send"
+            % (signal_id, status or "unset"))
+    try:
+        open_commands = _swing_approval_commands(real_id, signal_id, open_only=True)
+    except Exception as exc:
+        raise SwingBrokerUnavailableError(
+            "the command queue could not be read (%s: %s), so a re-send cannot rule out "
+            "one already queued; nothing was re-sent — try again"
+            % (type(exc).__name__, exc))
+    if open_commands:
+        cmd = open_commands[0]
+        raise SwingResendConflictError(
+            "command %s for signal %s is still %s; the broker runs it when it picks it "
+            "up, so nothing was re-sent" % (cmd.get("id"), signal_id, cmd.get("status")))
+    if not inst.get("runCommand", False):
+        raise SwingBrokerUnavailableError(
+            "Instance %s is not running, so the re-send could not reach the broker; the "
+            "signal still reads %s" % (real_id, status))
+    if inst.get("crashed"):
+        raise SwingBrokerUnavailableError(
+            "Instance %s has crashed, so the re-send could not reach the broker; the "
+            "signal still reads %s" % (real_id, status))
+    started = datetime.datetime.now(datetime.timezone.utc)
+    try:
+        cmd = action_submit_live_command(
+            conn, real_id, "submit_order",
+            {"source": "swing_approval", "signal_id": str(signal_id)}, requested_by)
+    except Exception as exc:
+        # The same re-read as a failed approval (FW-api-I1). Nothing to revert:
+        # the row was never changed.
+        try:
+            found = _swing_approval_commands(
+                real_id, signal_id, since=started - datetime.timedelta(seconds=1))
+        except Exception as rexc:
+            _swing_log("swing re-send %s on %s: the command write raised (%s) and the "
+                       "queue could not be re-read (%s: %s); the order may be in flight"
+                       % (signal_id, real_id, exc, type(rexc).__name__, rexc), "red")
+            return _swing_uncertain(signal, None, "the queue write raised and could not "
+                                    "be re-read: %s" % exc, what="re-send")
+        if found:
+            _swing_log("swing re-send %s on %s: the command write raised (%s), but command "
+                       "%s is queued" % (signal_id, real_id, exc, found[0].get("id")), "red")
+            return _swing_uncertain(signal, found[0].get("id"),
+                                    "the queue write raised: %s" % exc, what="re-send")
+        raise SwingBrokerUnavailableError(
+            "the re-send was not queued for the broker (%s); the signal still reads %s "
+            "— not queued, try again" % (exc, status))
+    _swing_log("swing approval %s on %s re-sent by %s (command %s)"
+               % (signal_id, real_id, requested_by or "operator",
+                  (cmd or {}).get("command_id")), "yellow")
+    return {"signal": signal, "command_id": (cmd or {}).get("command_id")}
 
 
 def _wheel_underlying_prices(instance_id, symbols):

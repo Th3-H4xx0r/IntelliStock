@@ -43,6 +43,24 @@ class PendingSignalsSection extends ConsumerWidget {
         .showSnackBar(SnackBar(content: Text(result.message)));
   }
 
+  Future<void> _resend(
+      BuildContext context, WidgetRef ref, SwingSignal signal) async {
+    final confirmed = await showConfirmDialog(
+      context,
+      title: 'Re-send ${signal.symbol}',
+      body: resendConfirmBody(signal),
+      confirmLabel: 'Re-send',
+      confirmColor: AppColors.warning,
+      icon: symbol('send'),
+    );
+    if (!confirmed || !context.mounted) return;
+    final result =
+        await ref.read(pendingSignalsProvider(instanceId).notifier).resend(signal);
+    if (!context.mounted || result.outcome == DecisionOutcome.ignored) return;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(result.message)));
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final async = ref.watch(pendingSignalsProvider(instanceId));
@@ -89,6 +107,28 @@ class PendingSignalsSection extends ConsumerWidget {
                         onDecide: (d) => _decide(context, ref, s, d),
                       ),
                     ),
+                // Approvals no broker command has claimed for 2+ minutes
+                // (fix wave item 3). Absent for an account with none.
+                if (state.stuck.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    'Approved, not yet sent (${state.stuck.length})',
+                    style: AppTextStyles.nano.copyWith(
+                        color: AppColors.warning, letterSpacing: 0.6),
+                  ),
+                  const SizedBox(height: 6),
+                  for (final s in state.stuck)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: _StuckCard(
+                        key: ValueKey('stuck-${s.id}'),
+                        signal: s,
+                        label: stuckLabel(s, state.asOf ?? DateTime.now()),
+                        busy: state.isResending(s.id),
+                        onResend: () => _resend(context, ref, s),
+                      ),
+                    ),
+                ],
                 const SizedBox(height: 4),
                 Text(
                   'Approval rebuilds the order at the live price.',
@@ -278,6 +318,76 @@ class _SignalCardState extends State<_SignalCard> {
             ],
           ),
           if (widget.busy) ...[
+            const SizedBox(height: 6),
+            Text('Working…',
+                style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// An approval no broker command has claimed for 2+ minutes: the instance
+/// stopped, or the broker's handler returned early. Re-send queues the same
+/// command again; the broker ignores a copy it already claimed.
+class _StuckCard extends StatelessWidget {
+  const _StuckCard({
+    super.key,
+    required this.signal,
+    required this.label,
+    required this.busy,
+    required this.onResend,
+  });
+
+  final SwingSignal signal;
+  final String label;
+  final bool busy;
+  final VoidCallback onResend;
+
+  @override
+  Widget build(BuildContext context) {
+    final s = signal;
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppColors.warning.withValues(alpha: 0.06),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppColors.warning.withValues(alpha: 0.3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text(
+                s.symbol,
+                style: AppTextStyles.cardTitle.copyWith(
+                    color: AppColors.textHi, fontWeight: FontWeight.w800),
+              ),
+              const SizedBox(width: 8),
+              AppBadge(
+                label: s.lane,
+                color: s.isWheel ? AppColors.primary : AppColors.info,
+              ),
+              const SizedBox(width: 6),
+              AppBadge(
+                label: s.status == 'approved_half' ? 'approved ½' : 'approved',
+                color: AppColors.warning,
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(label,
+              style: AppTextStyles.micro.copyWith(color: AppColors.textMd)),
+          const SizedBox(height: 10),
+          AppButton.semantic(
+            label: 'Re-send',
+            color: AppColors.warning,
+            dense: true,
+            onPressed: busy ? null : onResend,
+          ),
+          if (busy) ...[
             const SizedBox(height: 6),
             Text('Working…',
                 style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),

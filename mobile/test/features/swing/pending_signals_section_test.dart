@@ -3,14 +3,20 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:intellistock_mobile/core/network/api_error.dart';
 import 'package:intellistock_mobile/core/widgets/app_button.dart';
+import 'package:intellistock_mobile/features/swing/application/swing_controller.dart';
 import 'package:intellistock_mobile/features/swing/data/swing_repository.dart';
 import 'package:intellistock_mobile/features/swing/presentation/pending_signals_section.dart';
 import 'package:intellistock_mobile/features/swing/presentation/wheel_card.dart';
 
 import 'swing_fakes.dart';
 
+final _now = DateTime.utc(2026, 9, 25, 13, 30);
+
 Widget _app(FakeSwingRepo repo, Widget child) => ProviderScope(
-      overrides: [swingRepositoryProvider.overrideWithValue(repo)],
+      overrides: [
+        swingRepositoryProvider.overrideWithValue(repo),
+        swingClockProvider.overrideWithValue(() => _now),
+      ],
       child: MaterialApp(
         home: Scaffold(body: SingleChildScrollView(child: child)),
       ),
@@ -135,6 +141,42 @@ void main() {
       expect(find.text('not your instance'), findsOneWidget);
       expect(tester.widget<AppButton>(_cardButton('Reject')).onPressed,
           isNotNull);
+    });
+
+    testWidgets('FW item 3: a stuck approval offers Re-send behind a confirm',
+        (tester) async {
+      _phone(tester); // 320pt wide: the badges and the button must fit
+      final repo = FakeSwingRepo([swingSignal('p1', symbol: 'MSFT')], approved: [
+        approvedSignal('a1', '2026-09-25T13:25:00Z'),
+        approvedSignal('fresh', '2026-09-25T13:29:30Z', symbol: 'NVDA'),
+      ]);
+      await tester.pumpWidget(_app(repo, _section));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Pending AI signals (1)'), findsOneWidget);
+      expect(find.text('Approved, not yet sent (1)'), findsOneWidget);
+      expect(find.text('Approved 5 min ago; the broker has not picked it up yet.'),
+          findsOneWidget);
+      expect(find.text('NVDA'), findsNothing); // approved 30 s ago: in flight
+      expect(tester.takeException(), isNull);
+
+      await tester.tap(_cardButton('Re-send'));
+      await tester.pumpAndSettle();
+      expect(find.byType(Dialog), findsOneWidget);
+      expect(repo.resendCalls, isEmpty);
+      await tester.tap(_dialogButton('Re-send'));
+      await tester.pumpAndSettle();
+      expect(repo.resendCalls, ['a1']);
+      expect(find.text('Re-sent AAPL to the broker.'), findsOneWidget);
+      expect(find.text('Approved, not yet sent (1)'), findsNothing);
+    });
+
+    testWidgets('an account with no stuck approvals renders no re-send section',
+        (tester) async {
+      await tester.pumpWidget(_app(FakeSwingRepo([swingSignal('a1')]), _section));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('not yet sent'), findsNothing);
+      expect(_cardButton('Re-send'), findsNothing);
     });
 
     testWidgets('long reasoning on a 320pt phone: no overflow, collapsible',
