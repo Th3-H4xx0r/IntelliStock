@@ -170,3 +170,18 @@ def test_the_claim_is_stamped_and_the_wheel_intent_names_its_signal():
     assert 'reason=f"swing_approval:{signal_id}"' in body
     option = body[body.index("_build_option_intent("):]
     assert 'dict(order, reason=f"swing_approval:{signal_id}")' in option[:200]
+
+
+def test_a_row_whose_approval_is_in_flight_is_skipped(world):
+    """Round 2, minor 3: the handler that claimed it is still placing it (a
+    slow HTTP call before create_intent); the sweep must not fail it."""
+    sid = _row(claimed_minutes_ago=30)
+    in_flight = {sid}
+    sweep = extract(("_sweep_stale_submitted_signals",),
+                    namespace={"datetime": dtm,
+                               "_swing_approvals_in_flight": in_flight})[
+        "_sweep_stale_submitted_signals"]
+    assert sweep(world.service, now_utc=NOW) == []
+    assert signals_store.get_signal(sid)["status"] == "submitted"
+    in_flight.clear()
+    assert sweep(world.service, now_utc=NOW) == [sid]

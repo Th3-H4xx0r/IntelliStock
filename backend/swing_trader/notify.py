@@ -106,3 +106,17 @@ def notify_swing_approval_unconfirmed(instance_id, *, symbol, lane, detail) -> N
          f"{symbol}: the {lane_name} order you approved may not have been "
          f"placed — check open orders. {_keep_suffix(detail or '', 200)}".rstrip(),
          priority=1)
+
+
+def notify_swing_order_placed_for_failed(instance_id, *, symbol, lane,
+                                         client_order_id) -> None:
+    """Fix wave round 2, minor 3: an approved order WAS placed, but its signal
+    had been marked failed (the stale-row sweep) before the write-back. The
+    operator was told it may not have been placed: placing it by hand now
+    would double it. Red and urgent."""
+    lane_name = str(lane or "swing")
+    send("swing_approval_failed", instance_id,
+         f"Approved {lane_name} order WAS placed: {symbol}",
+         f"{symbol}: the {lane_name} order you approved WAS placed "
+         f"({client_order_id}), though its signal reads failed — do not place "
+         "it by hand. Check open orders.", priority=2)

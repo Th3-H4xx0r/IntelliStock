@@ -10854,10 +10854,13 @@ def _sweep_stale_submitted_signals(order_service, *, now_utc=None, log=None,
     now_utc = now_utc or datetime.datetime.now(datetime.timezone.utc)
     instance_key = str(order_service.instance_id)
     signals_store.ensure_tables()
+    in_flight = globals().setdefault("_swing_approvals_in_flight", set())
     stale = []
     for row in signals_store.list_signals(instance_key, status="submitted", limit=500):
         if row.get("order_client_id") or row.get("lane") not in ("swing", "wheel"):
             continue
+        if str(row.get("id") or "") in in_flight:
+            continue    # round 2, minor 3: its handler is still placing it
         claimed = None
         for name in ("claimed_at", "decided_at", "created_at"):
             claimed = parse(row.get(name)) if row.get(name) else None
@@ -11133,194 +11136,249 @@ def _execute_swing_approval(adapter, payload, order_service, *,
                 f"({type(exc).__name__}: {exc})", "red")
             return False
 
-    claimed = dict(signal)
-    claimed["status"] = "submitted"
-    # Fix wave FW1 item 9: the stale-row sweep ages a claim from here.
-    claimed["claimed_at"] = (now_utc or datetime.datetime.now(
-        datetime.timezone.utc)).isoformat()
+    # Fix wave round 2, minor 3: from the claim until this handler has
+    # written its outcome, the stale-row sweep (the loop thread of this same
+    # process) must not judge this signal.
+    in_flight = globals().setdefault("_swing_approvals_in_flight", set())
+    in_flight.add(signal_id)
     try:
-        won = signals_store.cas_signal(signal_id, expect_status=status, doc=claimed)
-    except Exception as exc:
-        say(f"{label}: the claim could not be written ({type(exc).__name__}: "
-            f"{exc}); nothing placed", "red")
-        tell(f"the approval could not be claimed ({type(exc).__name__}); "
-             "nothing was sent")
-        return (False, f"signal {signal_id} could not be claimed: "
-                       f"{type(exc).__name__}: {exc}", {})
-    if not won:
-        say(f"{label}: another command claimed it first; nothing placed", "yellow")
-        return (False, f"signal {signal_id} was claimed by another command; "
-                       "nothing placed", {})
-
-    def failed(error, reason, key=None, result=None):
-        write({"status": "failed", "order_client_id": key})
-        say(f"{label} FAILED: {error}", "red")
-        tell(reason)
-        return (False, error, result or {})
-
-    def back_to_pending(why, *, quote=False, detail="", result=None):
-        """I-1: a transient failure. Nothing reached the broker, so the
-        decision is undone and the operator may approve again."""
-        reason = f"{why} — approve again" + (" after the open" if quote else "")
-        if write({"status": "pending", "decided_by": None, "decided_at": None,
-                  "decision_reason": None}):
-            say(f"{label} put back to pending: {why}"
-                + (f" ({detail})" if detail else ""), "yellow")
-            tell(reason)
-        else:
-            # M-1: never "approve again" when the reset did not land -- in
-            # the notice nor in the command's error (fix wave FW1 item 3).
-            reason = (f"{why} — nothing was sent, and the signal could not be "
-                      "put back to pending (it may still read submitted)")
-            say(f"{label}: {why}; nothing placed, and the signal could not be "
-                "put back to pending (it may still read submitted)", "red")
-            tell(reason)
-        return (False, reason + (f" ({detail})" if detail else ""), result or {})
-
-    # "Not now" gate codes (I-1; fix round 1b adds the market-hours two).
-    after_open = ("quote.stale", "market.closed", "market.regular_hours_required")
-    # Fix wave FW1 item 3 (FW-lo-I2): pure races, also "not now". The mark
-    # stream or the 3 s position refresh rewrote the mark between the
-    # approval's price read and the gate's, or the tick rotated the risk
-    # snapshot between the build and the gate. Every gate refusal is decided
-    # before the service creates a lifecycle row, so re-arming is safe.
-    races = ("quote.timestamp_mismatch", "quote.reference_price_mismatch",
-             "risk.snapshot_mismatch")
-
-    def all_transient(codes):
-        return bool(codes) and all(
-            code.startswith("dependency.")
-            or code in after_open or code in races
-            or code == "positions.stale" for code in codes)
-
-    now_utc = now_utc or datetime.datetime.now(datetime.timezone.utc)
-    try:
-        lane_name = {"swing": "strategy_swing", "wheel": "strategy_wheel"}.get(lane)
-        if lane_name is None:
-            raise ValueError(f"unknown lane {signal.get('lane')!r}")
-        specs = cached_strategies
-        if specs is None:
-            # The command thread starts before the live loop caches the
-            # strategy document; an approval queued across a restart reads it.
-            loader = globals().get("load_strategies_from_db")
-            specs = loader()[0] if loader is not None else None
-        cfg = _lane_config(specs, lane_name)
-        if not cfg:
-            raise ValueError(f"the {lane_name} lane is not enabled on this document")
-        # FW-lo-I1: the gate's control inputs are re-read NOW and laid over
-        # this approval's snapshot only; the loop's stamps are fresh only
-        # within 60 s of a tick. Round 2: re-read BEFORE the price, so its
-        # round trips never sit between the quote read (which pins the
-        # intent's quote_at) and the gate's read of the same mark -- the
-        # controls have a 60 s budget, the quote does not. A failed re-read is
-        # transient, like the stale stamps it replaces.
+        claimed = dict(signal)
+        claimed["status"] = "submitted"
+        # Fix wave FW1 item 9: the stale-row sweep ages a claim from here.
+        claimed["claimed_at"] = (now_utc or datetime.datetime.now(
+            datetime.timezone.utc)).isoformat()
         try:
-            controls = _approval_control_overlay(adapter, instance_key=owner,
-                                                 now_utc=now_utc)
+            won = signals_store.cas_signal(signal_id, expect_status=status, doc=claimed)
         except Exception as exc:
-            raise _Retryable("the order gate's controls could not be re-read",
-                             detail=f"{type(exc).__name__}: {exc}") from exc
-        live = _approval_live_price(adapter, symbol)
-        if live is None:
-            raise _Retryable(f"no live price for {symbol}", quote=True)
-        live_price, quote_at = live
-        equity = getattr(adapter, "_account_equity", None)
-        if equity is None:
-            try:
-                equity = adapter.refresh_account().equity
-            except Exception as exc:
-                raise _Retryable(f"account equity unreadable "
-                                 f"({type(exc).__name__}: {exc})") from exc
-            if equity is None:
-                # Fix wave FW1 item 3: a refresh that answered with no equity
-                # is as transient as one that raised.
-                raise _Retryable("account equity unreadable (the broker "
-                                 "returned none)")
-        with _live_order_dependency_lock:
-            risk_id = str(_live_order_dependency_state.get("risk_snapshot_id")
-                          or "risk:unavailable")
-        order = approvals.build_approved_order(
-            signal, live_price=float(live_price), equity=float(equity), cfg=cfg,
-            adapter=adapter,
-            today=now_utc.astimezone(ZoneInfo("America/New_York")).date())
-        kind = str((order or {}).get("kind") or "")
-        if kind == "equity_bracket":
-            intent = _build_bracket_intent(
-                order_service, symbol=str(order["symbol"]).strip().upper(),
-                price=live_price, decision_at=now_utc, quantity=order["qty"],
-                bracket={"take_profit_price": order["take_profit_price"],
-                         "stop_loss_price": order["stop_loss_price"]},
-                risk_snapshot_id=risk_id, quote_at=quote_at,
-                source=OrderSource.MANUAL, reason=f"swing_approval:{signal_id}")
-        elif kind == "option":
-            try:
-                quote = _refresh_option_quote(adapter, order.get("contract"),
-                                              now_utc)
-            except Exception as exc:
-                raise _Retryable(
-                    f"no usable options snapshot for {order.get('contract')} "
-                    f"({type(exc).__name__})", quote=True) from exc
-            if quote is None:
-                raise _Retryable(
-                    f"no usable options snapshot for {order.get('contract')}",
-                    quote=True)
-            # Fix wave FW1 item 9: the intent names its signal, as a swing
-            # approval's does, so the stale-row sweep can find it.
-            intent = _build_option_intent(
-                order_service, dict(order, reason=f"swing_approval:{signal_id}"),
-                quote_at=quote["quote_at"], decision_at=now_utc,
-                risk_snapshot_id=risk_id, source=OrderSource.MANUAL)
-        else:
-            raise ValueError(f"unknown approved order kind {kind!r}")
-    except _Retryable as exc:
-        return back_to_pending(str(exc), quote=exc.quote, detail=exc.detail)
-    except Exception as exc:
-        unreadable = getattr(approvals, "BookUnreadable", None)
-        if isinstance(unreadable, type) and isinstance(exc, unreadable):
-            return back_to_pending("broker order book unreadable", detail=str(exc))
-        return failed(f"swing approval failed: {type(exc).__name__}: {exc}",
-                      str(exc) or type(exc).__name__)
+            say(f"{label}: the claim could not be written ({type(exc).__name__}: "
+                f"{exc}); nothing placed", "red")
+            tell(f"the approval could not be claimed ({type(exc).__name__}); "
+                 "nothing was sent")
+            return (False, f"signal {signal_id} could not be claimed: "
+                           f"{type(exc).__name__}: {exc}", {})
+        if not won:
+            say(f"{label}: another command claimed it first; nothing placed", "yellow")
+            return (False, f"signal {signal_id} was claimed by another command; "
+                           "nothing placed", {})
 
-    # An option snapshot reads the calendar itself.
-    if getattr(intent, "asset_class", "us_equity") == "us_option":
-        controls = {name: value for name, value in dict(controls).items()
-                    if name not in ("calendar", "calendar_at", "market_open")}
-    try:
-        submission = order_service.enqueue(intent, snapshot_overlay=controls)
-    except Exception as exc:
-        write({"submitted_order": order})
-        say(f"{label}: submit raised {type(exc).__name__}: {exc}; the outcome "
-            f"is unknown, the signal stays submitted and the next reconcile "
-            f"resolves {intent.idempotency_key}", "red")
-        return (False, f"order outcome unknown ({type(exc).__name__}: {exc}); "
-                       "the next reconcile resolves it",
-                {"signal_id": signal_id, "client_order_id": intent.idempotency_key})
-    key = str(getattr(submission.decision, "idempotency_key", "")
-              or intent.idempotency_key)
-    codes = [str(code) for code in submission.decision.reason_codes]
-    result = {
-        "signal_id": signal_id,
-        "client_order_id": key,
-        "order_id": getattr(submission.reference, "broker_order_id", None),
-        "reason_codes": codes,
-    }
-    if not submission.decision.allowed:
-        error = "order gate blocked: " + ",".join(codes)
-        if all_transient(codes):
-            # The gate refused before the service created a lifecycle row, so
-            # a re-approval builds the same identity afresh: one order.
-            return back_to_pending(error, quote=any(
-                code in after_open or code.startswith("dependency.quote.")
-                for code in codes), result=result)
-        return failed(error, error, key=key, result=result)
-    if not submission.accepted:
-        write({"order_client_id": key, "submitted_order": order})
-        say(f"{label}: outcome unknown ({','.join(codes) or 'transport'}); the "
-            f"signal stays submitted and the next reconcile resolves {key}", "red")
-        return (False, "order outcome unknown; the next reconcile resolves it", result)
-    write({"status": "submitted", "order_client_id": key, "submitted_order": order})
-    say(f"{label} submitted ({key})", "green")
-    return (True, "", result)
+        def claim_write(patch):
+            """(landed, current row): the patch written only while the row is
+            still this claim's (status submitted, this claim's claimed_at)."""
+            try:
+                current = signals_store.get_signal(signal_id)
+            except Exception as exc:
+                say(f"{label}: signal re-read before write-back failed "
+                    f"({type(exc).__name__}: {exc})", "red")
+                return False, None
+            if (not current or str(current.get("status") or "") != "submitted"
+                    or current.get("claimed_at") != claimed.get("claimed_at")):
+                return False, current
+            doc = dict(current)
+            doc.update(patch)
+            try:
+                won = signals_store.cas_signal(signal_id, expect_status="submitted",
+                                               doc=doc)
+            except Exception as exc:
+                say(f"{label}: signal write-back {patch} failed "
+                    f"({type(exc).__name__}: {exc})", "red")
+                return False, current
+            if not won:
+                try:
+                    current = signals_store.get_signal(signal_id)
+                except Exception:
+                    pass
+            return bool(won), current
+
+        def failed(error, reason, key=None, result=None):
+            write({"status": "failed", "order_client_id": key})
+            say(f"{label} FAILED: {error}", "red")
+            tell(reason)
+            return (False, error, result or {})
+
+        def back_to_pending(why, *, quote=False, detail="", result=None):
+            """I-1: a transient failure. Nothing reached the broker, so the
+            decision is undone and the operator may approve again."""
+            reason = f"{why} — approve again" + (" after the open" if quote else "")
+            if write({"status": "pending", "decided_by": None, "decided_at": None,
+                      "decision_reason": None}):
+                say(f"{label} put back to pending: {why}"
+                    + (f" ({detail})" if detail else ""), "yellow")
+                tell(reason)
+            else:
+                # M-1: never "approve again" when the reset did not land -- in
+                # the notice nor in the command's error (fix wave FW1 item 3).
+                reason = (f"{why} — nothing was sent, and the signal could not be "
+                          "put back to pending (it may still read submitted)")
+                say(f"{label}: {why}; nothing placed, and the signal could not be "
+                    "put back to pending (it may still read submitted)", "red")
+                tell(reason)
+            return (False, reason + (f" ({detail})" if detail else ""), result or {})
+
+        # "Not now" gate codes (I-1; fix round 1b adds the market-hours two).
+        after_open = ("quote.stale", "market.closed", "market.regular_hours_required")
+        # Fix wave FW1 item 3 (FW-lo-I2): pure races, also "not now". The mark
+        # stream or the 3 s position refresh rewrote the mark between the
+        # approval's price read and the gate's, or the tick rotated the risk
+        # snapshot between the build and the gate. Every gate refusal is decided
+        # before the service creates a lifecycle row, so re-arming is safe.
+        races = ("quote.timestamp_mismatch", "quote.reference_price_mismatch",
+                 "risk.snapshot_mismatch")
+
+        def all_transient(codes):
+            return bool(codes) and all(
+                code.startswith("dependency.")
+                or code in after_open or code in races
+                or code == "positions.stale" for code in codes)
+
+        now_utc = now_utc or datetime.datetime.now(datetime.timezone.utc)
+        try:
+            lane_name = {"swing": "strategy_swing", "wheel": "strategy_wheel"}.get(lane)
+            if lane_name is None:
+                raise ValueError(f"unknown lane {signal.get('lane')!r}")
+            specs = cached_strategies
+            if specs is None:
+                # The command thread starts before the live loop caches the
+                # strategy document; an approval queued across a restart reads it.
+                loader = globals().get("load_strategies_from_db")
+                specs = loader()[0] if loader is not None else None
+            cfg = _lane_config(specs, lane_name)
+            if not cfg:
+                raise ValueError(f"the {lane_name} lane is not enabled on this document")
+            # FW-lo-I1: the gate's control inputs are re-read NOW and laid over
+            # this approval's snapshot only; the loop's stamps are fresh only
+            # within 60 s of a tick. Round 2: re-read BEFORE the price, so its
+            # round trips never sit between the quote read (which pins the
+            # intent's quote_at) and the gate's read of the same mark -- the
+            # controls have a 60 s budget, the quote does not. A failed re-read is
+            # transient, like the stale stamps it replaces.
+            try:
+                controls = _approval_control_overlay(adapter, instance_key=owner,
+                                                     now_utc=now_utc)
+            except Exception as exc:
+                raise _Retryable("the order gate's controls could not be re-read",
+                                 detail=f"{type(exc).__name__}: {exc}") from exc
+            live = _approval_live_price(adapter, symbol)
+            if live is None:
+                raise _Retryable(f"no live price for {symbol}", quote=True)
+            live_price, quote_at = live
+            equity = getattr(adapter, "_account_equity", None)
+            if equity is None:
+                try:
+                    equity = adapter.refresh_account().equity
+                except Exception as exc:
+                    raise _Retryable(f"account equity unreadable "
+                                     f"({type(exc).__name__}: {exc})") from exc
+                if equity is None:
+                    # Fix wave FW1 item 3: a refresh that answered with no equity
+                    # is as transient as one that raised.
+                    raise _Retryable("account equity unreadable (the broker "
+                                     "returned none)")
+            with _live_order_dependency_lock:
+                risk_id = str(_live_order_dependency_state.get("risk_snapshot_id")
+                              or "risk:unavailable")
+            order = approvals.build_approved_order(
+                signal, live_price=float(live_price), equity=float(equity), cfg=cfg,
+                adapter=adapter,
+                today=now_utc.astimezone(ZoneInfo("America/New_York")).date())
+            kind = str((order or {}).get("kind") or "")
+            if kind == "equity_bracket":
+                intent = _build_bracket_intent(
+                    order_service, symbol=str(order["symbol"]).strip().upper(),
+                    price=live_price, decision_at=now_utc, quantity=order["qty"],
+                    bracket={"take_profit_price": order["take_profit_price"],
+                             "stop_loss_price": order["stop_loss_price"]},
+                    risk_snapshot_id=risk_id, quote_at=quote_at,
+                    source=OrderSource.MANUAL, reason=f"swing_approval:{signal_id}")
+            elif kind == "option":
+                try:
+                    quote = _refresh_option_quote(adapter, order.get("contract"),
+                                                  now_utc)
+                except Exception as exc:
+                    raise _Retryable(
+                        f"no usable options snapshot for {order.get('contract')} "
+                        f"({type(exc).__name__})", quote=True) from exc
+                if quote is None:
+                    raise _Retryable(
+                        f"no usable options snapshot for {order.get('contract')}",
+                        quote=True)
+                # Fix wave FW1 item 9: the intent names its signal, as a swing
+                # approval's does, so the stale-row sweep can find it.
+                intent = _build_option_intent(
+                    order_service, dict(order, reason=f"swing_approval:{signal_id}"),
+                    quote_at=quote["quote_at"], decision_at=now_utc,
+                    risk_snapshot_id=risk_id, source=OrderSource.MANUAL)
+            else:
+                raise ValueError(f"unknown approved order kind {kind!r}")
+        except _Retryable as exc:
+            return back_to_pending(str(exc), quote=exc.quote, detail=exc.detail)
+        except Exception as exc:
+            unreadable = getattr(approvals, "BookUnreadable", None)
+            if isinstance(unreadable, type) and isinstance(exc, unreadable):
+                return back_to_pending("broker order book unreadable", detail=str(exc))
+            return failed(f"swing approval failed: {type(exc).__name__}: {exc}",
+                          str(exc) or type(exc).__name__)
+
+        # An option snapshot reads the calendar itself.
+        if getattr(intent, "asset_class", "us_equity") == "us_option":
+            controls = {name: value for name, value in dict(controls).items()
+                        if name not in ("calendar", "calendar_at", "market_open")}
+        try:
+            submission = order_service.enqueue(intent, snapshot_overlay=controls)
+        except Exception as exc:
+            write({"submitted_order": order})
+            say(f"{label}: submit raised {type(exc).__name__}: {exc}; the outcome "
+                f"is unknown, the signal stays submitted and the next reconcile "
+                f"resolves {intent.idempotency_key}", "red")
+            return (False, f"order outcome unknown ({type(exc).__name__}: {exc}); "
+                           "the next reconcile resolves it",
+                    {"signal_id": signal_id, "client_order_id": intent.idempotency_key})
+        key = str(getattr(submission.decision, "idempotency_key", "")
+                  or intent.idempotency_key)
+        codes = [str(code) for code in submission.decision.reason_codes]
+        result = {
+            "signal_id": signal_id,
+            "client_order_id": key,
+            "order_id": getattr(submission.reference, "broker_order_id", None),
+            "reason_codes": codes,
+        }
+        if not submission.decision.allowed:
+            error = "order gate blocked: " + ",".join(codes)
+            if all_transient(codes):
+                # The gate refused before the service created a lifecycle row, so
+                # a re-approval builds the same identity afresh: one order.
+                return back_to_pending(error, quote=any(
+                    code in after_open or code.startswith("dependency.quote.")
+                    for code in codes), result=result)
+            return failed(error, error, key=key, result=result)
+        if not submission.accepted:
+            write({"order_client_id": key, "submitted_order": order})
+            say(f"{label}: outcome unknown ({','.join(codes) or 'transport'}); the "
+                f"signal stays submitted and the next reconcile resolves {key}", "red")
+            return (False, "order outcome unknown; the next reconcile resolves it", result)
+        # Round 2, minor 3: the success write-back is a compare-and-swap from
+        # the row THIS claim wrote (status submitted, this claim's claimed_at),
+        # so it can never flip a row the sweep marked failed back to submitted.
+        landed, current = claim_write({"status": "submitted",
+                                       "order_client_id": key,
+                                       "submitted_order": order})
+        if landed:
+            say(f"{label} submitted ({key})", "green")
+        elif str((current or {}).get("status") or "") == "failed":
+            say(f"{label}: the order WAS placed ({key}) but the signal had been "
+                "marked failed meanwhile — do not place it by hand", "red")
+            try:
+                from swing_trader.notify import notify_swing_order_placed_for_failed
+                notify_swing_order_placed_for_failed(
+                    owner, symbol=symbol, lane=lane, client_order_id=key)
+            except Exception as exc:
+                say(f"{label}: the placed-for-failed notice was not sent "
+                    f"({type(exc).__name__}: {exc})", "red")
+        else:
+            say(f"{label}: submitted ({key}), but the signal write-back did not "
+                f"land (the row reads {(current or {}).get('status')!r})", "red")
+        return (True, "", result)
+    finally:
+        in_flight.discard(signal_id)
 
 
 def _live_order_dependency_snapshot(adapter, intent):
@@ -11761,6 +11819,12 @@ def _swing_next_open_exit(hint, intents) -> bool:
         return bool(_SWING_EXIT_INTENTS & {str(i) for i in (intents or ())})
     except TypeError:
         return False
+
+
+#: Fix wave round 2, minor 3: approval signal ids a handler in this process
+#: is placing right now (claimed, outcome not yet written). The stale-row
+#: sweep skips them.
+_swing_approvals_in_flight: set = set()
 
 
 #: Fix wave round 2: the unprotected-exit alerts already sent this New York
