@@ -22,6 +22,7 @@ Crash safety:
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 import concurrent.futures
 import hashlib
 import os
@@ -60,6 +61,7 @@ from broker_adapters.errors import (
     WashSale,
     FractionalNotAllowed,
     BrokerRateLimited,
+    OptionsNotPermitted,
 )
 from broker_adapters._client_order_id import make_client_order_id
 from broker_adapters._wal import LiveOrderWAL
@@ -304,6 +306,15 @@ class AlpacaAdapter(BrokerAdapter):
         # Cache value: (Optional[bool], expires_at_epoch). None=unknown.
         self._fractionable_cache: dict[str, tuple[Optional[bool], float]] = {}
         self._fractionable_negative_ttl_sec: float = 60.0
+
+        # swing-port: option positions (signed; a short put is negative) live
+        # apart from the equity mirror, which stays long-only. refresh_positions
+        # fills them; EB's account holds none, so both stay empty there.
+        self._option_positions: dict[str, OptionPositionDTO] = {}
+        self._option_positions_complete = True
+        self._option_contract_cache: dict[str, OptionContractDTO] = {}
+        self._option_contract_misses: dict[str, float] = {}
+        self._last_option_misses: frozenset = frozenset()
 
         # Seed from Alpaca
         self.refresh_cash()
@@ -892,6 +903,14 @@ class AlpacaAdapter(BrokerAdapter):
                 order_type=order_type, tif=tif,
                 extended_hours=extended_hours, take_profit=take_profit,
                 stop_loss=stop_loss)
+        # swing-port: an option order is admitted only as whole contracts,
+        # regular hours, a legal position_intent and a market or limit type.
+        _is_option = str(asset_class or "").strip().lower() == "us_option"
+        if _is_option:
+            qty = _checked_option_order(
+                symbol=symbol, side=side, qty=qty, notional=notional,
+                order_type=order_type, limit_price=limit_price, tif=tif,
+                extended_hours=extended_hours, position_intent=position_intent)
 
         # 2026-08-02 extended-hours order class. Alpaca supports fractional
         # quantities during regular hours only, so a fractional order that also
@@ -925,7 +944,12 @@ class AlpacaAdapter(BrokerAdapter):
                 )
                 qty = _whole
 
-        if side.lower() == "buy":
+        # swing-port: a buy-to-close REDUCES risk; the PDT rule must never keep
+        # the account short a put it is trying to close.
+        if side.lower() == "buy" and not (
+            _is_option
+            and str(position_intent or "").strip().lower() == "buy_to_close"
+        ):
             self._preflight_buy(
                 symbol=symbol,
                 qty=qty,
@@ -1010,6 +1034,12 @@ class AlpacaAdapter(BrokerAdapter):
                 f"stop_loss=${float(stop_loss):.2f} cid={client_order_id[:24]}",
                 "cyan",
             )
+        if _is_option:
+            from alpaca.trading.enums import PositionIntent
+
+            kw["position_intent"] = PositionIntent(
+                str(position_intent).strip().lower()
+            )
 
         if order_type.lower() == "market":
             req = MarketOrderRequest(**kw)
@@ -1084,6 +1114,12 @@ class AlpacaAdapter(BrokerAdapter):
                 ) from e
 
             parsed = _parse_error(e)
+            if _is_option:
+                # swing-port: Alpaca answers an option order the account may
+                # not place with 40310000, the code the equity path reads as
+                # "not fractionable". Mapped here, before the definitive flag
+                # is set, so it never reaches the whole-share retry.
+                parsed = _option_order_error(e, parsed)
             # A lookup that found nothing is positive evidence Alpaca holds no
             # such order -- BUT ONLY IF ALPACA ANSWERED THE ORIGINAL POST.
             #
@@ -1870,12 +1906,32 @@ class AlpacaAdapter(BrokerAdapter):
         # doesn't have a fill-priced entry yet.
         new_last_prices: dict[str, float] = {}
         out: list[PositionDTO] = []
+        new_option_positions: dict[str, OptionPositionDTO] = {}
+        option_misses: list[str] = []
         for p in positions:
             try:
                 sym = str(p.symbol)
                 qty = float(p.qty)
                 mv = float(p.market_value or 0.0)
                 new_positions[sym] = qty
+                if _is_us_option_position(p):
+                    # swing-port: an option row keeps its broker quantity in
+                    # new_positions (the clean-room filter below still decides
+                    # what the equity mirror adopts, and it never adopts a
+                    # short) and is described from Alpaca's contract fields,
+                    # not an OCC-symbol parse (spec section 9 fix 10).
+                    try:
+                        out.append(
+                            self._collect_option_position(
+                                p, new_option_positions, option_misses
+                            )
+                        )
+                    except (TypeError, ValueError):
+                        # An unreadable option row must not vanish from a map
+                        # that still reads complete: that would hide an open
+                        # short put from the collateral check.
+                        option_misses.append(sym.strip().upper())
+                    continue
                 if qty > 0 and mv > 0:
                     new_last_prices[sym] = mv / qty
                 out.append(PositionDTO(
@@ -1932,6 +1988,21 @@ class AlpacaAdapter(BrokerAdapter):
                 self._positions = owned_new
             else:
                 self._positions = new_positions
+            _option_symbols = set(new_option_positions) | set(option_misses)
+            if _option_symbols:
+                # swing-port: the equity mirror never holds a contract, long or
+                # short, in either mode. The clean-room filter already drops a
+                # short; a long option would otherwise be adopted. EB's account
+                # holds no options, so this never runs there.
+                self._positions = {
+                    _sym: _qty
+                    for _sym, _qty in self._positions.items()
+                    if str(_sym).strip().upper() not in _option_symbols
+                }
+            self._option_positions = new_option_positions
+            # An outage that outlived the staleness cap reaches here with an
+            # empty broker view: that is not proof of no open shorts.
+            self._option_positions_complete = rest_ok and not option_misses
             # Successful REST refresh — clear the staleness flag set by
             # any prior outage so SELL branches stop suppressing.
             if self._positions_stale_since is not None:
@@ -1965,6 +2036,16 @@ class AlpacaAdapter(BrokerAdapter):
                     _newest = self._market_marks.get(_sym)
                     if _newest is not None:
                         self._last_prices[_sym] = _newest.price
+        if frozenset(option_misses) != self._last_option_misses:
+            self._last_option_misses = frozenset(option_misses)
+            if option_misses:
+                _alog(
+                    "BROKER",
+                    f"option contract fields unavailable for "
+                    f"{sorted(option_misses)}; sell-to-open collateral is "
+                    "unknown (new puts refused) until they resolve",
+                    "red",
+                )
         return out
 
     def refresh_cash(self) -> CashDTO:
@@ -2357,6 +2438,122 @@ class AlpacaAdapter(BrokerAdapter):
             "equity": number("equity", float),
         }
 
+    def option_contract_meta(self, symbol) -> Optional[OptionContractDTO]:
+        """Alpaca's contract fields for one OCC symbol, cached for the process;
+        a failed lookup is not retried for 60 s."""
+        sym = str(symbol or "").strip().upper()
+        with self._lock:
+            cached = self._option_contract_cache.get(sym)
+            retry_at = self._option_contract_misses.get(sym, 0.0)
+        if cached is not None:
+            return cached
+        if time.time() < retry_at:
+            return None
+        try:
+            dto = _option_contract_dto(self._client.get_option_contract(sym))
+        except Exception as exc:
+            with self._lock:
+                self._option_contract_misses[sym] = time.time() + 60.0
+            _alog(
+                "BROKER",
+                f"option contract lookup failed for {sym}: "
+                f"{type(exc).__name__}: {exc}",
+                "yellow",
+            )
+            return None
+        with self._lock:
+            self._option_contract_cache[sym] = dto
+            self._option_contract_misses.pop(sym, None)
+        return dto
+
+    def list_option_positions(self) -> list[OptionPositionDTO]:
+        with self._lock:
+            return list(self._option_positions.values())
+
+    def _collect_option_position(self, raw, sink, misses) -> PositionDTO:
+        """Record one broker option row in ``sink`` and return its display row.
+        Unknown contract fields keep the signed quantity (a buy-to-close needs
+        only that) but mark the map incomplete, which refuses new puts."""
+        symbol = str(raw.symbol).strip().upper()
+        qty = int(float(raw.qty))
+        meta = self.option_contract_meta(symbol)
+        if meta is None:
+            misses.append(symbol)
+        current = _as_float(getattr(raw, "current_price", None))
+        market_value = _as_float(getattr(raw, "market_value", None))
+        unrealized = _as_float(getattr(raw, "unrealized_pl", None))
+        avg_entry = float(getattr(raw, "avg_entry_price", 0) or 0)
+        sink[symbol] = OptionPositionDTO(
+            symbol=symbol,
+            underlying=meta.underlying if meta else "",
+            option_type=meta.option_type if meta else "",
+            strike=meta.strike if meta else 0.0,
+            expiry=meta.expiration if meta else "",
+            qty=qty,
+            avg_entry_price=avg_entry,
+            current_price=current,
+            market_value=market_value,
+            unrealized_pl=unrealized,
+            multiplier=100,
+        )
+        return PositionDTO(
+            symbol=symbol,
+            qty=float(qty),
+            avg_entry_price=avg_entry,
+            market_value=market_value or 0.0,
+            asset_class="us_option",
+            side=_enum_value(getattr(raw, "side", None))
+            or ("short" if qty < 0 else "long"),
+            unrealized_pl=unrealized,
+            unrealized_plpc=_as_float(getattr(raw, "unrealized_plpc", None)),
+            current_price=current,
+            multiplier=100,
+            underlying=meta.underlying if meta else None,
+            # Ruling F4 (A-live pre-flight): put/call from the contract fields.
+            option_type=meta.option_type if meta else None,
+            strike=meta.strike if meta else None,
+            expiry=meta.expiration if meta else None,
+        )
+
+    def _apply_option_fill_locked(self, event, fill) -> None:
+        """One confirmed option fill: the signed contract count moves by
+        position_delta, cash by the service's x100 cash_delta. Caller holds
+        self._lock. The next refresh_positions rebinds from broker truth.
+
+        The map is rebuilt and rebound, never mutated in place: the same
+        rebind contract refresh_positions documents, so a reader iterating the
+        previous dict without the lock never sees it change size."""
+        symbol = event.symbol
+        updated = dict(self._option_positions)
+        current = updated.get(symbol)
+        new_qty = (current.qty if current is not None else 0) + int(
+            fill.position_delta
+        )
+        self._cash += float(fill.cash_delta)
+        if new_qty == 0:
+            updated.pop(symbol, None)
+            self._option_positions = updated
+            return
+        if current is not None:
+            updated[symbol] = replace(current, qty=new_qty)
+            self._option_positions = updated
+            return
+        meta = self._option_contract_cache.get(symbol)
+        updated[symbol] = OptionPositionDTO(
+            symbol=symbol,
+            underlying=meta.underlying if meta else "",
+            option_type=meta.option_type if meta else "",
+            strike=meta.strike if meta else 0.0,
+            expiry=meta.expiration if meta else "",
+            qty=new_qty,
+            avg_entry_price=float(fill.incremental_price),
+            current_price=None,
+            market_value=None,
+            unrealized_pl=None,
+            multiplier=100,
+        )
+        self._option_positions = updated
+
     def get_option_activities(
         self,
         types=("OPASN", "OPEXP", "OPEXC"),
@@ -2674,7 +2871,15 @@ class AlpacaAdapter(BrokerAdapter):
             elif event.state is LifecycleState.EXPIRED:
                 self._wal.mark_expired(event.client_order_id)
 
-            if fill is not None:
+            # swing-port: an option fill moves the option map and cash only;
+            # the long-only equity mirror and _trades never see a contract.
+            _option_fill = (
+                fill is not None
+                and getattr(fill, "asset_class", "us_equity") == "us_option"
+            )
+            if _option_fill:
+                self._apply_option_fill_locked(event, fill)
+            if fill is not None and not _option_fill:
                 symbol = event.symbol
                 new_position = (
                     Decimal(str(self._positions.get(symbol, 0) or 0))
@@ -3513,6 +3718,70 @@ def _checked_bracket_order(
     if not 0 < float(stop_loss) < float(take_profit):
         refuse(f"stop_loss={stop_loss} must be below take_profit={take_profit}")
     return int(float(qty))
+
+
+def _as_float(value) -> Optional[float]:
+    """Float, or None for anything unusable. Negatives stay (short values)."""
+    try:
+        return float(value) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_us_option_position(raw) -> bool:
+    return _enum_value(getattr(raw, "asset_class", None)) == "us_option"
+
+
+def _checked_option_order(
+    *, symbol, side, qty, notional, order_type, limit_price, tif,
+    extended_hours, position_intent,
+) -> int:
+    """Whole contracts, regular hours, a position_intent that agrees with the
+    side, a market or priced limit order (spec section 6.1)."""
+    def refuse(why: str):
+        raise BrokerPreflightBlocked(
+            f"{symbol} option order refused before submission: {why}"
+        )
+
+    intent = str(position_intent or "").strip().lower()
+    expected = {
+        "buy_to_open": "buy",
+        "buy_to_close": "buy",
+        "sell_to_open": "sell",
+        "sell_to_close": "sell",
+    }.get(intent)
+    if expected is None:
+        refuse(f"position_intent={position_intent!r}")
+    if str(side).strip().lower() != expected:
+        refuse(f"side={side} contradicts position_intent={intent}")
+    if notional is not None or qty is None:
+        refuse("options trade whole contracts, not a notional")
+    if float(qty) != int(float(qty)) or int(float(qty)) < 1:
+        refuse(f"qty={qty} is not a whole number of contracts >= 1")
+    if extended_hours:
+        refuse("options trade in regular hours only")
+    if str(tif).strip().lower() not in ("day", "gtc"):
+        refuse(f"tif={tif}")
+    kind = str(order_type).strip().lower()
+    if kind not in ("market", "limit"):
+        refuse(f"order_type={order_type}")
+    if kind == "limit" and (limit_price is None or float(limit_price) <= 0):
+        refuse("a limit order needs limit_price > 0")
+    return int(float(qty))
+
+
+def _option_order_error(exc, parsed):
+    """Alpaca's answer to an option order the account may not place."""
+    if isinstance(parsed, (InsufficientBuyingPower, BrokerRateLimited)):
+        return parsed
+    message = str(exc).lower()
+    if (
+        isinstance(parsed, FractionalNotAllowed)
+        or "40310000" in message
+        or "option" in message
+    ):
+        return OptionsNotPermitted(str(exc))
+    return parsed
 
 
 def _option_contract_dto(raw) -> OptionContractDTO:
