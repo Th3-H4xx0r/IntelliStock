@@ -30,7 +30,8 @@ BUY_AT = datetime_module.datetime(2026, 9, 24, 13, 31, 5, 123456,
 
 
 def _builders():
-    return extract(("_build_strategy_stock_intent", "_build_bracket_intent"),
+    return extract(("_build_strategy_stock_intent", "_build_bracket_intent",
+                    "_swing_exit_held_after_close"),
                    namespace={"datetime": datetime_module})
 
 

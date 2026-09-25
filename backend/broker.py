@@ -11489,6 +11489,14 @@ def _build_strategy_stock_intent(
     if quantity <= 0:
         raise ValueError("computed order quantity <= 0")
     side = "buy" if decision == 1 else "sell"
+    if next_open_sell and side == "sell" and _swing_exit_held_after_close(decision_at):
+        # Fix wave round 2, minor 2: Alpaca rejects a non-extended-hours
+        # market order between the close and 20:00 ET. Nothing is created;
+        # the lane re-sends the exit on the next pre-market or RTH tick.
+        raise ValueError(
+            f"order deferred: {symbol} swing exit held until the next "
+            "pre-market or regular-hours tick (a market DAY order is not "
+            "accepted between the close and 20:00 ET)")
     # quantity= is REQUIRED, not optional. _order_style_for_now grew
     # quantity/defer on 2026-08-02 because the extended-hours flip was only half
     # the rule: Alpaca supports fractional quantities during regular hours ONLY,
@@ -11572,6 +11580,24 @@ def _build_strategy_stock_intent(
         extended_hours=bool(style.get("extended_hours")),
         reference_price=Decimal(str(price)),
     )
+
+
+def _swing_exit_held_after_close(at) -> bool:
+    """Fix wave round 2, minor 2: True between the regular close (16:00 ET,
+    13:00 on a half day) and 20:00 ET, when Alpaca rejects the plain market
+    DAY order a swing exit is. Pre-market is not held (the order queues for
+    the open); after 20:00 the gate's own market.closed refuses. Without a
+    calendar, 16:00-20:00 ET."""
+    from zoneinfo import ZoneInfo
+
+    et = at.astimezone(ZoneInfo("America/New_York"))
+    if not 12 <= et.hour < 20:
+        return False
+    try:
+        from live_calendar import is_nyse_open
+        return not bool(is_nyse_open(at))
+    except Exception:
+        return et.hour >= 16
 
 
 def _build_bracket_intent(

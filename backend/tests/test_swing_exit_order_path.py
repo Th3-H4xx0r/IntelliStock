@@ -42,7 +42,8 @@ class _Styled:
 
 
 def _builder():
-    return extract(("_build_strategy_stock_intent", "_build_bracket_intent"),
+    return extract(("_build_strategy_stock_intent", "_build_bracket_intent",
+                    "_swing_exit_held_after_close"),
                    namespace={"datetime": datetime_module})[
         "_build_strategy_stock_intent"]
 
@@ -544,3 +545,48 @@ def test_the_lane_re_sends_the_exit_while_only_its_legs_are_working():
         decisions, sizes, intents)
     assert decisions == {"AAPL": -1}
     assert intents == {"AAPL": "swing_stop_exit"}
+
+
+# --- round 2, minor 2: a swing exit is held 16:00-20:00 ET --------------------
+
+def _at(iso):
+    return datetime_module.datetime.fromisoformat(iso)
+
+
+@pytest.mark.parametrize("when", [
+    "2026-10-05T20:00:00+00:00",      # 16:00 ET, the close
+    "2026-10-05T20:30:00+00:00",      # 16:30 ET
+    "2026-10-05T23:59:00+00:00",      # 19:59 ET
+    "2026-11-27T18:30:00+00:00",      # 13:30 ET after the half day's 13:00 close
+])
+def test_a_swing_exit_after_the_close_is_held_not_sent(when):
+    """Alpaca rejects a non-extended-hours market order between the close and
+    20:00 ET, so the plain market DAY exit is not built: it is deferred (a
+    definite non-submission, nothing reaches the broker, no leg is touched)
+    and the lane re-sends it on the next pre-market or regular-hours tick."""
+    at = _at(when)
+    with pytest.raises(ValueError) as held:
+        _sell(_builder(), next_open_sell=True, current_time=at, quote_at=at)
+    assert str(held.value).startswith("order deferred: AAPL swing exit held")
+    from test_swing_broker_bracket import _exception_lane_outcome
+    assert _exception_lane_outcome()(held.value) == "deferred"
+
+
+@pytest.mark.parametrize("when", [
+    "2026-10-05T13:20:00+00:00",      # 09:20 ET, pre-market: queued for the open
+    "2026-10-05T14:40:00+00:00",      # 10:40 ET, regular hours
+    "2026-10-06T00:00:00+00:00",      # 20:00 ET: the gate's own market.closed
+    "2026-11-27T17:30:00+00:00",      # 12:30 ET on the half day, still open
+])
+def test_a_swing_exit_outside_that_window_goes_out_as_market_day(when):
+    at = _at(when)
+    order = _sell(_builder(), next_open_sell=True, current_time=at, quote_at=at)
+    assert (order.order_type, order.tif, order.extended_hours) == (
+        "market", "day", False)
+
+
+def test_an_after_hours_sell_without_the_flag_is_unchanged():
+    """EB's (and any non-exit) sell at 16:30 ET keeps the extended-hours limit."""
+    at = _at("2026-10-05T20:30:00+00:00")
+    order = _sell(_builder(), current_time=at, quote_at=at)
+    assert (order.order_type, order.extended_hours) == ("limit", True)
