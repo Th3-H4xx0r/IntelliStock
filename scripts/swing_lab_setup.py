@@ -5,9 +5,12 @@
     python3 scripts/swing_lab_setup.py --paper --brokerage-id <paper brokerage id>
 
 Lab (default): doc "Swing trader lab" with one strategy_swing lane at enabled
-SWING_DEFAULTS plus backtest_credit_pending_sell_proceeds (plan A-backtest:
-an entry decided with an exit is otherwise sized before the exit's cash
-exists), and the backtest-only instance "swing-lab" at daily granularity. Its
+SWING_DEFAULTS plus the two same-tick funding flags (plan A-backtest: an
+entry decided with an exit is otherwise sized before the exit's cash exists):
+backtest_credit_pending_sell_proceeds lets the emulator count the submitted
+exit, and backtest_credit_sell_proceeds_enabled lets the broker's buy gate
+count it (FW-bt-I1: without it the gate clamps the entry to raw cash). It
+also creates the backtest-only instance "swing-lab" at daily granularity. Its
 watchlist is every S&P member visible in [--start, --end] from
 SwingIndexMembership (run scripts/build_swing_reference_data.py first), plus
 SPY, QQQ and the defensive ETFs (spec §7). The lab carries ONLY the swing
@@ -95,7 +98,11 @@ def assert_writable(doc_id):
 def swing_lane(*, lab) -> dict:
     config = {**SWING_DEFAULTS, "strategy_swing_enabled": True}
     if lab:
+        # Both ends of ruling F1: the emulator's clamp (get_buying_power) and
+        # the broker's backtest buy gate (broker.py `_scp_bt`) each credit a
+        # same-tick exit only when their own flag is set.
         config["backtest_credit_pending_sell_proceeds"] = True
+        config["backtest_credit_sell_proceeds_enabled"] = True
     return {"strategy": "strategy_swing", "weight": 1.0, "execution_position": 10,
             "decision_phase": "pre", "execution_scope": "run_once", "conditions": {},
             "config": config}

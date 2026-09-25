@@ -70,13 +70,15 @@ def test_the_lab_lane_is_enabled_defaults_plus_the_funding_flag():
             lane["execution_position"], lane["weight"], lane["conditions"]) == (
         "strategy_swing", "run_once", "pre", 10, 1.0, {})
     assert lane["config"] == {**SWING_DEFAULTS, "strategy_swing_enabled": True,
-                              "backtest_credit_pending_sell_proceeds": True}
+                              "backtest_credit_pending_sell_proceeds": True,
+                              "backtest_credit_sell_proceeds_enabled": True}
     # Only the swing lane: another lane's close-filled sell of a bracketed
     # symbol would run before a same-session stop in the simulator.
     assert s.lab_payload() == {"name": s.LAB_DOC_NAME, "strategies": [lane]}
     paper = s.paper_payload()["strategies"]
     assert [l["strategy"] for l in paper] == ["strategy_swing", "strategy_wheel"]
     assert "backtest_credit_pending_sell_proceeds" not in paper[0]["config"]
+    assert "backtest_credit_sell_proceeds_enabled" not in paper[0]["config"]
     assert paper[1]["config"] == {**WHEEL_DEFAULTS, "strategy_wheel_enabled": True}
     assert paper[1]["execution_position"] == 20
 
