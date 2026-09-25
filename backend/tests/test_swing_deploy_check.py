@@ -59,7 +59,9 @@ EXPECTED = (
 
 
 def _literal(path, name):
-    for node in ast.parse(open(path).read()).body:
+    with open(path) as handle:
+        body = ast.parse(handle.read()).body
+    for node in body:
         if isinstance(node, ast.Assign) and any(
                 isinstance(t, ast.Name) and t.id == name for t in node.targets):
             return list(ast.literal_eval(node.value))
@@ -69,6 +71,19 @@ def _literal(path, name):
 def _checked():
     return _literal(os.path.join(_ROOT, "scripts", "check_deployed_code.py"),
                     "FILES")
+
+
+def test_literal_closes_the_file_it_reads():
+    """T16 minor: the helper read with a bare open(); CPython then warns
+    ResourceWarning: unclosed file when the object is collected."""
+    import gc
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ResourceWarning)
+        assert _checked()
+        gc.collect()
+    assert [str(w.message) for w in caught if issubclass(w.category, ResourceWarning)] == []
 
 
 def _served():
