@@ -228,7 +228,7 @@ The `LiveCommands` type `submit_order` payload is `{"source": "swing_approval", 
 - Strategy ids and classes: `strategy_swing` → `StrategySwing` in `backend/strategies/strategy_swing.py`, and `strategy_wheel` → `StrategyWheel` in `backend/strategies/strategy_wheel.py`.
 - Enable flags: `strategy_swing_enabled` and `strategy_wheel_enabled`.
 - Model key in both: `conviction_llm_model_id`. The resolver injects `conviction_llm_provider`, `conviction_llm_model` and `conviction_llm_api_key`.
-- Notification types: `swing_entry`, `swing_pending_review`, `swing_exit`, `swing_run_summary`, `wheel_put_placed`, `wheel_pending_review`, `wheel_position_alert`, `wheel_assignment`.
+- Notification types: `swing_entry`, `swing_pending_review`, `swing_exit`, `swing_run_summary`, `wheel_put_placed`, `wheel_pending_review`, `wheel_position_alert`, `wheel_assignment`, `swing_approval_failed` (added by the plan C final review: an approved order the broker refused; push on by default; sender `notify_swing_approval_failed(instance_id, *, symbol, lane, reason)`, called by A-live Task 15).
 - API routes:
   - `GET /instances/{instance_id}/swing/signals?status=`
   - `POST /instances/{instance_id}/swing/signals/{signal_id}/decision` with body `{"decision", "reason"}`
