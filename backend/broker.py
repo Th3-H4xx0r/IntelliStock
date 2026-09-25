@@ -11765,12 +11765,23 @@ def _swing_unprotected_alert(instance_id, symbol, detail, *, kind="unprotected",
         if key in state["sent"]:
             return False
         from swing_trader import notify as _swing_notify
-        _swing_notify.send(
-            "swing_exit", instance_id,
-            f"EXIT NOT PLACED — {symbol} may be unprotected",
-            f"{symbol}: position may be unprotected — the bracket stop may "
-            "have been cancelled; the exit will retry next tick. Check open "
-            f"orders. ({detail})", priority=2)
+        if kind == "unknown":
+            # Round 2, minor 1: the sell may have reached the broker (the
+            # service can raise after the transport); never "not placed".
+            _swing_notify.send(
+                "swing_exit", instance_id,
+                f"EXIT OUTCOME UNKNOWN — check open orders — {symbol}",
+                f"{symbol}: the exit sell may or may not have been placed "
+                f"({detail}) — check open orders. Its bracket stop was "
+                "cancelled; if no sell is working the position is "
+                "unprotected, and the exit will retry next tick.", priority=2)
+        else:
+            _swing_notify.send(
+                "swing_exit", instance_id,
+                f"EXIT NOT PLACED — {symbol} may be unprotected",
+                f"{symbol}: position may be unprotected — the bracket stop may "
+                "have been cancelled; the exit will retry next tick. Check open "
+                f"orders. ({detail})", priority=2)
         state["sent"].add(key)
         return True
     except Exception:
@@ -11816,27 +11827,33 @@ def _submit_swing_sell(adapter, order_service, intent, *, log=None,
                 f"order deferred: {intent.symbol} bracket legs did not confirm "
                 f"cancelled within {float(timeout_s):.0f}s; the sell waits a tick")
 
-    def unprotected(detail, *, legs_text=None):
-        say(f"[swing] {intent.symbol} exit NOT placed after a cancel of its "
+    def unprotected(detail, *, legs_text=None, kind="unprotected"):
+        what = ("exit OUTCOME UNKNOWN (check open orders)" if kind == "unknown"
+                else "exit NOT placed")
+        say(f"[swing] {intent.symbol} {what} after a cancel of its "
             f"bracket legs {legs_text if legs_text is not None else legs} "
             f"({detail}): the position may be UNPROTECTED until the lane "
             "re-sends the exit next tick", "red")
         _swing_unprotected_alert(
             str(getattr(order_service, "instance_id", "") or ""),
-            intent.symbol, detail)
+            intent.symbol, detail, kind=kind)
 
     try:
         submission = order_service.enqueue(intent, before_submit=cancel_legs)
     except Exception as exc:
         if legs:
-            unprotected(f"submit raised {type(exc).__name__}: {exc}")
+            # Round 2, minor 1: the service can raise AFTER the transport
+            # (applying the broker's answer), so the outcome is unknown.
+            unprotected(f"submit raised {type(exc).__name__}: {exc}",
+                        kind="unknown")
         raise
     if legs and not submission.accepted:
         codes = ",".join(submission.decision.reason_codes)
-        unprotected(
-            f"outcome unknown ({codes or 'transport'}); it may not have been "
-            "placed" if getattr(submission, "uncertain", False)
-            else f"refused: {codes or 'no reason given'}")
+        if getattr(submission, "uncertain", False):
+            unprotected(f"outcome unknown ({codes or 'transport'}); it may not "
+                        "have been placed", kind="unknown")
+        else:
+            unprotected(f"refused: {codes or 'no reason given'}")
     return submission
 
 

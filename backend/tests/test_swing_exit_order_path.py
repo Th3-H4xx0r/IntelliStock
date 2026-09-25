@@ -221,12 +221,13 @@ def _open_leg(symbol="AAPL"):
                            side="sell", status="held", order_class="bracket")
 
 
-def _submit(alerts=None, lines=None):
+def _submit(alerts=None, lines=None, kinds=None):
+    def record(instance_id, symbol, detail, *, kind="unprotected", **_kw):
+        (alerts if alerts is not None else []).append((instance_id, symbol, detail))
+        (kinds if kinds is not None else []).append(kind)
+
     ns = extract(("_submit_swing_sell", "_cancel_bracket_legs_confirmed"),
-                 namespace={"_swing_unprotected_alert": (
-                     lambda instance_id, symbol, detail, **kw:
-                     (alerts if alerts is not None else []).append(
-                         (instance_id, symbol, detail)))})
+                 namespace={"_swing_unprotected_alert": record})
     return ns["_submit_swing_sell"]
 
 
@@ -301,10 +302,13 @@ def test_an_unknown_outcome_after_the_legs_were_cancelled_is_alerted_too():
     def drop(**_kwargs):
         raise ConnectionError("socket closed")
 
-    out = _submit(alerts)(adapter, _service(events, transport=drop),
-                          _sell_intent())
+    kinds = []
+    out = _submit(alerts, kinds=kinds)(adapter, _service(events, transport=drop),
+                                       _sell_intent())
     assert out.uncertain and not out.accepted
     assert len(alerts) == 1 and "may not have been placed" in alerts[0][2]
+    # Round 2, minor 1: the outcome is unknown, not "not placed".
+    assert kinds == ["unknown"]
 
 
 def test_a_failed_sell_with_no_legs_to_cancel_raises_no_alert():
@@ -332,9 +336,43 @@ def test_a_submit_that_raises_after_the_legs_were_cancelled_is_alerted():
             before_submit(intent, None)
             raise RuntimeError("lifecycle backend down")
 
+    kinds = []
     with pytest.raises(RuntimeError):
-        _submit(alerts)(adapter, Broken(), _sell_intent())
+        _submit(alerts, kinds=kinds)(adapter, Broken(), _sell_intent())
     assert len(alerts) == 1 and "RuntimeError" in alerts[0][2]
+    # Round 2, minor 1: a raise can come after a successful transport.
+    assert kinds == ["unknown"]
+
+
+def test_a_definite_refusal_after_the_cancel_stays_not_placed():
+    events, alerts, kinds = [], [], []
+    adapter = _LegAdapter(events, working=[_open_leg()])
+
+    def refuse(**_kwargs):
+        raise _Refused("insufficient qty available for order")
+
+    _submit(alerts, kinds=kinds)(adapter, _service(events, transport=refuse),
+                                 _sell_intent())
+    assert kinds == ["unprotected"]
+
+
+def test_the_unknown_outcome_alert_says_check_open_orders(monkeypatch):
+    from swing_trader import notify
+
+    sent = []
+    monkeypatch.setattr(notify, "_sink", lambda **kw: sent.append(kw))
+    ns = extract(("_swing_unprotected_alert",), check=())
+    at = datetime_module.datetime(2026, 10, 5, 14, 0, tzinfo=datetime_module.timezone.utc)
+    alert = ns["_swing_unprotected_alert"]
+    assert alert("swing-paper", "AAPL", "RuntimeError: x", kind="unknown", now_utc=at)
+    assert alert("swing-paper", "AAPL", "again", kind="unknown", now_utc=at) is False
+    # The unprotected alert has its own once-per-session slot.
+    assert alert("swing-paper", "AAPL", "refused", now_utc=at)
+    unknown, not_placed = sent
+    assert unknown["push_title"].startswith("EXIT OUTCOME UNKNOWN — check open orders")
+    assert "AAPL" in unknown["push_title"] and "(URGENT)" in unknown["push_title"]
+    assert "NOT PLACED" not in unknown["body"]
+    assert not_placed["push_title"].startswith("EXIT NOT PLACED")
 
 
 # --- the live loop wiring (source assertions: the loop is module-level) -------
