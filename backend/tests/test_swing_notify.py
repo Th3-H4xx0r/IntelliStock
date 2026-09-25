@@ -2,6 +2,8 @@
 import os
 import sys
 
+import pytest
+
 _backend = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _backend not in sys.path:
     sys.path.insert(0, _backend)
@@ -110,3 +112,37 @@ def test_the_helpers_never_raise(monkeypatch):
     notify.notify_swing_approval_failed("swing-paper", symbol="AAPL", lane="wheel",
                                         reason="x")
     notify.notify_wheel_assignment("swing-paper", symbol="APH", qty="not-a-number")
+
+
+# -- fix wave FW1 item 3: a long reason keeps its "approve again" suffix --------
+
+LONG_WHY = "order gate blocked: " + ",".join(
+    f"dependency.{name}.stale" for name in (
+        "kill_switch", "cash", "calendar", "risk_state", "watchdog",
+        "persistence", "positions", "quote")) * 3
+
+
+@pytest.mark.parametrize("suffix", [" — approve again",
+                                    " — approve again after the open"])
+def test_a_long_reason_keeps_its_approve_again_suffix(monkeypatch, suffix):
+    sent = []
+    monkeypatch.setattr(notify, "_sink", lambda **kw: sent.append(kw))
+    assert len(LONG_WHY) > 300
+    notify.notify_swing_approval_failed("swing-paper", symbol="AAPL",
+                                        lane="swing", reason=LONG_WHY + suffix)
+    (msg,) = sent
+    assert msg["body"].endswith(suffix)
+    assert msg["push_body"].endswith(suffix) and len(msg["push_body"]) <= 220
+    assert "order gate blocked: dependency.kill_switch.stale" in msg["body"]
+    # Only the <why> part was cut.
+    why = msg["body"].split("was not sent — ", 1)[1]
+    assert len(why) <= 300 and why.endswith(suffix)
+
+
+def test_a_long_reason_without_a_suffix_is_truncated_as_before(monkeypatch):
+    sent = []
+    monkeypatch.setattr(notify, "_sink", lambda **kw: sent.append(kw))
+    notify.notify_swing_approval_failed("swing-paper", symbol="AAPL",
+                                        lane="swing", reason=LONG_WHY)
+    why = sent[0]["body"].split("was not sent — ", 1)[1]
+    assert why == LONG_WHY[:300]

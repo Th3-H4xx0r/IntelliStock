@@ -372,3 +372,49 @@ def test_the_real_halt_and_kill_loops_keep_only_risk_reducers(monkeypatch):
     assert killed == [o.broker_order_id for o in eb
                       if str(getattr(o, "side", "")).lower() == "buy"]
     assert killed  # the EB buy tagged buy_to_close is still cancelled
+
+
+# --- fix wave FW-lo-I4: the kill rung cancels a working sell-to-open ----------
+
+def test_the_kill_rung_cancels_a_working_sell_to_open_but_leaves_stock_sells():
+    """A sell-to-open put is a SELL that OPENS a strike x 100 obligation; the
+    kill rung exists to stop new exposure. EB's stock sells stay working,
+    whatever position_intent Alpaca tags them with (ruling F1)."""
+    sto = OrderRef("sto", "swingpap-sto-0", OCC, "sell", 1.0, "new",
+                   order_class="simple", position_intent="sell_to_open",
+                   asset_class="us_option", order_type="limit", limit_price=1.14)
+    sto_enum = SimpleNamespace(broker_order_id="sto-enum", symbol=OCC,
+                               side=enum("sell"), status=enum("new"),
+                               order_class=enum("simple"),
+                               position_intent=enum("sell_to_open"),
+                               asset_class=enum("us_option"))
+    stc = OrderRef("stc", "swingpap-stc-0", OCC, "sell", 1.0, "new",
+                   order_class="simple", position_intent="sell_to_close",
+                   asset_class="us_option")
+    eb_sell = OrderRef("eb-sell", "alpacama-s-0", "GLD", "sell", 4.0, "new")
+    eb_tagged = OrderRef("eb-tagged", "alpacama-t-0", "GDX", "sell", 3.0, "new",
+                         position_intent="sell_to_open", asset_class="us_equity")
+    eb_untyped = SimpleNamespace(broker_order_id="eb-untyped", symbol="XLE",
+                                 side="sell", status="new",
+                                 position_intent="sell_to_open")
+    leg = OrderRef("leg", "leg-sl", "AAPL", "sell", 5.0, "held",
+                   order_class="bracket")
+    buy = OrderRef("buy", "alpacama-b-0", "TQQQ", "buy", 2.0, "new")
+    cancelled = []
+    adapter = SimpleNamespace(
+        list_open_orders_strict=lambda: [sto, sto_enum, stc, eb_sell, eb_tagged,
+                                         eb_untyped, leg, buy],
+        cancel_order=lambda oid: cancelled.append(oid) or True)
+    assert cancel_open_buy_orders(adapter, log=_quiet) == 3
+    assert cancelled == ["sto", "sto-enum", "buy"]
+
+
+def test_a_sell_to_open_the_broker_will_not_cancel_is_reported():
+    sto = OrderRef("sto", "swingpap-sto-0", OCC, "sell", 1.0, "new",
+                   position_intent="sell_to_open", asset_class="us_option")
+    lines = []
+    adapter = SimpleNamespace(list_open_orders_strict=lambda: [sto],
+                              cancel_order=lambda oid: False)
+    assert cancel_open_buy_orders(
+        adapter, log=lambda message, color="red": lines.append(message)) == 0
+    assert any("sell-to-open" in line and OCC in line for line in lines)

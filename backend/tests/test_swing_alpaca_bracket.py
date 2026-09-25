@@ -4,6 +4,7 @@ and multi-leg rows that must not break reconciliation.
 The two EB payloads below were produced by the PRE-change adapter on
 2026-09-24. Never edit them to make a test pass."""
 from datetime import datetime, timezone
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -406,6 +407,37 @@ def test_a_leg_that_fills_during_the_cancel_is_not_confirmed():
         sleep=lambda _s: None, clock=_clock()) is False
 
 
+def test_a_leg_already_canceled_after_a_booked_partial_fill_is_confirmed():
+    """Fix wave FW1 item 8 (review M-1): a stop leg that filled 2 of 5 and was
+    then cancelled, with its stream "canceled" event missed, deferred the exit
+    on every attempt until the 60 s reconcile. When the caller has already
+    booked those 2 shares, nothing moved while we waited: confirmed."""
+    client = _leg_client()
+    client.status_script = {"leg-sl": [("canceled", "2")],
+                            "leg-tp": [("canceled", "0")]}
+    adapter = make_adapter(client)
+    assert adapter.cancel_orders_confirmed(
+        ["leg-tp", "leg-sl"], timeout_s=5.0, poll_interval_s=0.0,
+        sleep=lambda _s: None, clock=_clock(),
+        booked_fills={"leg-sl": Decimal("2"), "leg-tp": Decimal("0")}) is True
+
+
+@pytest.mark.parametrize("script,booked", [
+    ([("canceled", "3")], {"leg-sl": Decimal("2")}),     # a fill while we waited
+    ([("canceled", "2")], {}),                            # nothing booked
+    ([("canceled", "2")], None),
+    ([("partially_filled", "2")], {"leg-sl": Decimal("2")}),   # still working
+    ([("filled", "5")], {"leg-sl": Decimal("5")}),
+])
+def test_an_unbooked_or_still_working_partial_leg_is_not_confirmed(script, booked):
+    client = _leg_client()
+    client.status_script = {"leg-sl": script}
+    adapter = make_adapter(client)
+    assert adapter.cancel_orders_confirmed(
+        ["leg-sl"], timeout_s=1.0, poll_interval_s=0.0,
+        sleep=lambda _s: None, clock=_clock(), booked_fills=booked) is False
+
+
 def test_nothing_to_cancel_is_confirmed_without_a_call():
     client = _leg_client()
     adapter = make_adapter(client)
@@ -435,23 +467,75 @@ def test_the_eb_order_walks_send_no_symbols_filter():
                for r in client.order_requests)
 
 
-def test_a_multi_leg_order_does_not_make_the_account_unavailable():
+def _snapshot_of(*orders):
+    client = FakeTradingClient(orders=list(orders))
+    return make_adapter(client).capture_reconciliation_snapshot(account_id="acct-1")
+
+
+_EB_FILL = dict(id="eb-1", client_order_id="alpacama-x-0", symbol="TQQQ",
+                status=enum("filled"), filled_qty="5", filled_avg_price="88")
+
+
+def test_a_multi_leg_order_makes_the_snapshot_unhealthy():
+    """Fix wave FW-eb-m2: main's fail-closed rule is restored. An mleg order
+    (placed by hand in the Alpaca UI; IntelliStock never submits one) cannot
+    be read, so reconcile cannot rule it out: the snapshot is
+    broker-unavailable, as on main."""
     mleg = order_row(id="mleg-1", client_order_id="ui-mleg", symbol=None,
                      side=None, order_class=enum("mleg"), status=enum("filled"))
+    snap = _snapshot_of(mleg, order_row(**_EB_FILL))
+    assert snap.broker_available is False and snap.orders == ()
+
+
+def test_an_mleg_order_with_a_side_is_still_unreadable():
+    mleg = order_row(id="mleg-2", client_order_id="ui-mleg-2",
+                     symbol="APH261002P00130000", side=enum("sell"),
+                     order_class=enum("mleg"), status=enum("new"))
+    assert _snapshot_of(mleg).broker_available is False
+
+
+@pytest.mark.parametrize("side", [None, "", enum(None), enum("")])
+def test_an_order_with_no_side_and_no_intent_makes_the_snapshot_unhealthy(side):
+    odd = order_row(id="odd-1", client_order_id="ui-odd", symbol="AAPL",
+                    side=side, position_intent=None, status=enum("filled"),
+                    filled_qty="1", filled_avg_price="10")
+    assert _snapshot_of(odd, order_row(**_EB_FILL)).broker_available is False
+
+
+def test_a_single_leg_option_order_without_a_side_stays_parseable():
     sideless = order_row(id="opt-1", client_order_id="ui-opt",
                          symbol="APH261002P00130000", side=None,
                          position_intent=enum("sell_to_open"),
                          order_class=enum("simple"), status=enum("filled"),
-                         filled_qty="1", filled_avg_price="1.2")
-    eb = order_row(id="eb-1", client_order_id="alpacama-x-0", symbol="TQQQ",
-                   status=enum("filled"), filled_qty="5",
-                   filled_avg_price="88")
-    client = FakeTradingClient(orders=[mleg, sideless, eb])
-    adapter = make_adapter(client)
-    snap = adapter.capture_reconciliation_snapshot(account_id="acct-1")
+                         filled_qty="1", filled_avg_price="1.2",
+                         asset_class=enum("us_option"))
+    with_side = order_row(id="opt-2", client_order_id="ui-opt-2",
+                          symbol="APH261002P00125000", side=enum("buy"),
+                          position_intent=enum("buy_to_close"),
+                          order_class=enum("simple"), status=enum("filled"),
+                          filled_qty="1", filled_avg_price="0.4",
+                          asset_class=enum("us_option"))
+    snap = _snapshot_of(sideless, with_side, order_row(**_EB_FILL))
     assert snap.broker_available is True
-    assert sorted(o.broker_order_id for o in snap.orders) == ["eb-1", "opt-1"]
-    assert {o.broker_order_id: o.side.value for o in snap.orders}["opt-1"] == "sell"
+    assert {o.broker_order_id: o.side.value for o in snap.orders} == {
+        "opt-1": "sell", "opt-2": "buy", "eb-1": "buy"}
+
+
+def test_the_unreadable_order_is_named_in_red(monkeypatch):
+    import broker_adapters.alpaca as alpaca_module
+
+    lines = []
+    monkeypatch.setattr(alpaca_module, "_alog",
+                        lambda service, msg, color="white":
+                        lines.append((service, msg, color)))
+    mleg = order_row(id="mleg-1", client_order_id="ui-mleg", symbol=None,
+                     side=None, order_class=enum("mleg"), status=enum("filled"))
+    adapter = make_adapter(FakeTradingClient(orders=[mleg]))
+    for _ in range(3):                      # the 60 s reconcile, three times
+        assert adapter.capture_reconciliation_snapshot(
+            account_id="acct-1").broker_available is False
+    named = [msg for _s, msg, color in lines if color == "red" and "mleg-1" in msg]
+    assert len(named) == 1, "one red line per unreadable order, not per reconcile"
 
 
 def test_stream_events_held_and_pending_cancel_are_acknowledged():

@@ -35,6 +35,21 @@ def _sink(**kwargs):
     _notify(**kwargs)
 
 
+def _keep_suffix(text, limit) -> str:
+    """``text`` cut to ``limit`` characters, keeping a short closing
+    instruction (the last " — ..." clause, e.g. "— approve again after the
+    open") whole: only the part before it is cut (fix wave FW1 item 3). Text
+    with no such clause is cut as before."""
+    text = str(text)
+    if len(text) <= limit:
+        return text
+    head, sep, tail = text.rpartition(" — ")
+    if sep and len(sep) + len(tail) < limit // 2:
+        room = limit - len(sep) - len(tail) - 1
+        return head[:room] + "…" + sep + tail
+    return text[:limit]
+
+
 def send(category, instance_id, title, message, *, priority=0) -> None:
     """Enqueue one notification. Never raises: a notification failure must
     never cost a scan its orders."""
@@ -46,7 +61,8 @@ def send(category, instance_id, title, message, *, priority=0) -> None:
         body = f"{prefix} [{instance_id}] {title}{urgent}\n{message}"
         _sink(category=category, instance_id=str(instance_id), title=str(title),
               body=body, discord_channel=meta.get("channel") or "notifications",
-              push_title=f"{title}{urgent}"[:120], push_body=str(message)[:220])
+              push_title=f"{title}{urgent}"[:120],
+              push_body=_keep_suffix(message, 220))
     except Exception as exc:
         _log(f"notify failed [{category}]: {type(exc).__name__}: {exc}", "yellow")
 
@@ -71,8 +87,36 @@ def notify_swing_approval_failed(instance_id, *, symbol, lane, reason) -> None:
     approved could not be rebuilt or the broker refused it: the operator
     believes that trade is on, so this category pushes by default."""
     lane_name = str(lane or "swing")
-    why = str(reason or "no reason given")[:300]
+    why = _keep_suffix(reason or "no reason given", 300)
     send("swing_approval_failed", instance_id,
          f"Approved {lane_name} order refused: {symbol}",
          f"{symbol}: the {lane_name} order you approved was not sent — {why}",
          priority=1)
+
+
+def notify_swing_approval_unconfirmed(instance_id, *, symbol, lane, detail) -> None:
+    """Fix wave FW1 item 9 (plan B final review M-2): an approval claimed
+    long ago that recorded no order id and left no order intent. The process
+    may have died between the claim and the send, so the order MAY NOT have
+    been placed; the operator checks the broker's open orders. Pushes, like
+    a refusal: the operator believes that trade is on."""
+    lane_name = str(lane or "swing")
+    send("swing_approval_failed", instance_id,
+         f"Approved {lane_name} order unconfirmed: {symbol}",
+         f"{symbol}: the {lane_name} order you approved may not have been "
+         f"placed — check open orders. {_keep_suffix(detail or '', 200)}".rstrip(),
+         priority=1)
+
+
+def notify_swing_order_placed_for_failed(instance_id, *, symbol, lane,
+                                         client_order_id) -> None:
+    """Fix wave round 2, minor 3: an approved order WAS placed, but its signal
+    had been marked failed (the stale-row sweep) before the write-back. The
+    operator was told it may not have been placed: placing it by hand now
+    would double it. Red and urgent."""
+    lane_name = str(lane or "swing")
+    send("swing_approval_failed", instance_id,
+         f"Approved {lane_name} order WAS placed: {symbol}",
+         f"{symbol}: the {lane_name} order you approved WAS placed "
+         f"({client_order_id}), though its signal reads failed — do not place "
+         "it by hand. Check open orders.", priority=2)

@@ -9914,6 +9914,13 @@ def _refresh_option_quote(adapter, contract, now_utc, *, max_age_s=60.0):
             quote_at = now_utc
     entry = {"price": Decimal(str(round(price, 4))), "quote_at": quote_at,
              "fetched_at": now_utc}
+    if cached is not None:
+        # Fix wave FW1 item 8 (review M-4): the loop and the approval thread
+        # share this cache. The entry this refresh replaces is kept one level
+        # deep, so an intent built on it moments ago is still gated on ITS
+        # quote (the gate refuses a quote_at that differs from the intent's).
+        entry["previous"] = {name: cached[name]
+                             for name in ("price", "quote_at", "fetched_at")}
     _live_option_quotes[symbol] = entry
     return entry
 
@@ -10016,6 +10023,13 @@ def _live_option_dependency_snapshot(adapter, intent, *, now_utc=None):
     held = positions.get(symbol)
     position_quantity = Decimal(int(held.qty)) if held is not None else Decimal("0")
     quote = _live_option_quotes.get(symbol)
+    if (quote is not None and quote.get("quote_at") != intent.quote_at
+            and isinstance(quote.get("previous"), dict)
+            and quote["previous"].get("quote_at") == intent.quote_at):
+        # Fix wave FW1 item 8 (review M-4): another thread refreshed this
+        # contract between the intent's build and this gate read; gate the
+        # intent on the quote it was built on (freshness is still judged).
+        quote = quote["previous"]
     if quote is None:
         quote_price = Decimal("0")
         quote_at = datetime.datetime.fromtimestamp(0, datetime.timezone.utc)
@@ -10036,10 +10050,23 @@ def _live_option_dependency_snapshot(adapter, intent, *, now_utc=None):
         calendar, calendar_at = Health.UNKNOWN, None
     open_short = Decimal("0")
     open_short_on_underlying = Decimal("0")
+    meta_known = True
     for row in positions.values():
-        if int(row.qty) < 0 and str(row.option_type).lower() == "put":
-            collateral = (Decimal(str(row.strike)) * int(row.multiplier)
-                          * abs(int(row.qty)))
+        if int(row.qty) >= 0:
+            continue
+        kind = str(row.option_type or "").strip().lower()
+        try:
+            strike = Decimal(str(row.strike))
+        except Exception:
+            strike = Decimal("0")
+        if (kind not in ("put", "call") or not strike > 0
+                or not str(row.underlying or "").strip()):
+            # Fix wave FW-lo-I3: a short whose type, underlying or strike is
+            # unknown carries collateral this view cannot count.
+            meta_known = False
+            continue
+        if kind == "put":
+            collateral = strike * int(row.multiplier) * abs(int(row.qty))
             open_short += collateral
             if str(row.underlying).upper() == underlying:
                 open_short_on_underlying += collateral
@@ -10051,7 +10078,14 @@ def _live_option_dependency_snapshot(adapter, intent, *, now_utc=None):
     except Exception:
         pending_total, pending_underlying = Decimal("0"), Decimal("0")
         pending_known = False
-    known = bool(getattr(adapter, "_option_positions_complete", False)) and pending_known
+    known = (bool(getattr(adapter, "_option_positions_complete", False))
+             and pending_known and meta_known)
+    available_cash = Decimal(str(getattr(adapter, "_cash", 0) or 0))
+    if available_cash < 0 and intent.reduce_only:
+        # Fix wave FW-lo-I5: a buy/sell-to-close is risk-reducing (ruling F1);
+        # a margin debit after an assignment must not stop it being gated.
+        # An opening order still fails closed on negative cash.
+        available_cash = Decimal("0")
     equity = getattr(adapter, "_account_equity", None)
     positions_health = state.get("positions", "unknown")
     if getattr(adapter, "_positions_stale_since", None) is not None:
@@ -10088,7 +10122,7 @@ def _live_option_dependency_snapshot(adapter, intent, *, now_utc=None):
         position_symbol=symbol,
         position_quantity=position_quantity,
         positions_at=positions_at,
-        available_cash=Decimal(str(getattr(adapter, "_cash", 0) or 0)),
+        available_cash=available_cash,
         market_open=market_open,
         risk_snapshot_id=str(state.get("risk_snapshot_id") or intent.risk_snapshot_id),
         kill_switch_at=stamp("kill_switch_at"),
@@ -10782,6 +10816,200 @@ def _approval_live_price(adapter, symbol):
     return float(price), stamp_dt
 
 
+def _sweep_stale_submitted_signals(order_service, *, now_utc=None, log=None,
+                                   max_age_s=600.0):
+    """Fix wave FW1 item 9 (plan B final review M-2): a swing/wheel signal
+    left "submitted" with no order key and no lifecycle intent.
+
+    The approval handler claims a signal approved -> submitted BEFORE it
+    sends anything and writes the order's key back after. A process that died
+    between the two leaves a row that reads submitted forever. Once such a
+    row is ``max_age_s`` past its claim (claimed_at, else decided_at, else
+    created_at), it is compare-and-swapped to failed and the operator is told
+    the order may not have been placed. A row whose intent exists (reason
+    swing_approval:<id>, or, for a wheel approval made before its intent
+    carried the id, a MANUAL option intent on its underlying since the claim)
+    is left to reconcile. Runs from the swing/wheel lane tick only. An
+    unreadable lifecycle store raises: nothing is marked on a guess.
+    Returns the ids marked failed."""
+    from live_orders import OrderSource
+    from swing_trader import notify as swing_notify
+    from swing_trader import signals_store
+
+    def say(message, color="white"):
+        if log is not None:
+            try:
+                log(message, color)
+            except Exception:
+                pass
+
+    def parse(stamp):
+        try:
+            value = datetime.datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+        return value if value.tzinfo is not None else value.replace(
+            tzinfo=datetime.timezone.utc)
+
+    now_utc = now_utc or datetime.datetime.now(datetime.timezone.utc)
+    instance_key = str(order_service.instance_id)
+    signals_store.ensure_tables()
+    in_flight = globals().setdefault("_swing_approvals_in_flight", set())
+    stale = []
+    for row in signals_store.list_signals(instance_key, status="submitted", limit=500):
+        if row.get("order_client_id") or row.get("lane") not in ("swing", "wheel"):
+            continue
+        if str(row.get("id") or "") in in_flight:
+            continue    # round 2, minor 3: its handler is still placing it
+        claimed = None
+        for name in ("claimed_at", "decided_at", "created_at"):
+            claimed = parse(row.get(name)) if row.get(name) else None
+            if claimed is not None:
+                break
+        if claimed is None or (now_utc - claimed).total_seconds() < float(max_age_s):
+            continue
+        stale.append((row, claimed))
+    if not stale:
+        return []
+    records = list(order_service.lifecycle_store.list_for_instance(instance_key))
+    reasons = {str(record.intent.reason) for record in records}
+    swept = []
+    for row, claimed in stale:
+        signal_id = str(row.get("id") or "")
+        symbol = str(row.get("symbol") or "").strip().upper()
+        lane = str(row.get("lane") or "")
+        if f"swing_approval:{signal_id}" in reasons:
+            continue
+        if lane == "wheel" and any(
+                record.intent.source is OrderSource.MANUAL
+                and record.intent.asset_class == "us_option"
+                and str(record.intent.underlying or "").upper() == symbol
+                and record.intent.decision_at >= claimed
+                for record in records):
+            continue
+        minutes = int((now_utc - claimed).total_seconds() // 60)
+        doc = dict(row)
+        doc.update({"status": "failed", "order_client_id": None})
+        if not signals_store.cas_signal(signal_id, expect_status="submitted", doc=doc):
+            continue
+        say(f"[swing] approval {signal_id} ({lane} {symbol}) marked failed: "
+            f"claimed {minutes} min ago with no order key and no order intent; "
+            "the order may not have been placed — check open orders", "red")
+        swing_notify.notify_swing_approval_unconfirmed(
+            instance_key, symbol=symbol, lane=lane,
+            detail=(f"The approval was claimed {minutes} min ago and no order "
+                    "was ever recorded; the signal is marked failed."))
+        swept.append(signal_id)
+    return swept
+
+
+def _approval_control_overlay(adapter, *, instance_key, now_utc=None):
+    """The order gate's control inputs, RE-READ for an operator approval
+    (swing-port fix wave, FW-lo-I1).
+
+    An approval runs in the 1-second command thread, off-tick. The live loop
+    stamps kill_switch_at, cash_at, calendar_at, risk_state_at and
+    watchdog_at only inside a tick (every 20 minutes on the equity grid), and
+    the gate wants each within 60 s for an opening order, so an approval five
+    minutes after a tick was refused dependency.*.stale however healthy the
+    account was. Each input is read here the way the tick reads it:
+
+    - kill switch: the Instances row (runCommand False is unhealthy; no row
+      is unknown);
+    - watchdog: the AlphaState control_health row, stamped with the
+      evidence's own observed_at, never with now (a heartbeat older than 60 s
+      stays stale);
+    - cash: refresh_account(), Alpaca's cash (and the equity below);
+    - calendar: adapter.is_market_open(now);
+    - risk state: the durable risk row re-loaded and evaluated against the
+      fresh equity, NOT saved, so the risk row's version and risk_snapshot_id
+      stay the tick's and an intent the loop is gating cannot see its snapshot
+      id move.
+
+    Returns DependencySnapshot field overrides for this approval's own
+    snapshot. The loop's dependency state is never written (it is left to the
+    loop; the snapshot provider only reads it, under its lock). The one
+    shared write is refresh_account(), which updates the adapter's cached
+    account fields from Alpaca under the adapter's own lock, as the tick's
+    and the snapshot thread's refreshes already do: _cash, _account_equity,
+    and the pre-submit PDT guard's facts _daytrade_count,
+    _pattern_day_trader and _account_facts_at. Any read that fails raises;
+    the caller treats it as transient. Each read is bounded like the tick's.
+    """
+    from live_orders import Health
+    from live_risk_state import evaluate_drawdown
+
+    def now():
+        return datetime.datetime.now(datetime.timezone.utc)
+
+    pool = globals().get("_PRICE_FETCH_EXECUTOR")
+
+    def bounded(fn, *args, timeout=15.0):
+        if pool is None:
+            return fn(*args)
+        return pool.submit(fn, *args).result(timeout=timeout)
+
+    reader = globals().get("_KS_RDB")
+    if reader is None:
+        raise RuntimeError("the kill-switch store is unavailable")
+    key = str(instance_key)
+    row, health_row = bounded(
+        lambda: (reader.get("Instances", key),
+                 reader.get("AlphaState", f"control_health:{key}")),
+        timeout=10.0)
+    kill_switch_at = now()
+    if row is None:
+        kill_switch = Health.UNKNOWN
+    elif row.get("runCommand") is False:
+        kill_switch = Health.UNHEALTHY
+    else:
+        kill_switch = Health.HEALTHY
+    try:
+        from benchmark_alpha.watchdog import ControlHealth
+
+        payload = dict((health_row or {}).get("payload") or {})
+        evidence = ControlHealth(
+            instance_id=payload.get("instance_id"),
+            status=payload.get("status"),
+            observed_at=datetime.datetime.fromisoformat(
+                str(payload.get("observed_at"))),
+            result_status=payload.get("result_status"),
+            degraded_audit=payload.get("degraded_audit"),
+            evidence_hash=payload.get("evidence_hash"),
+        )
+        watchdog = (Health.HEALTHY
+                    if evidence.status == "healthy" and not evidence.degraded_audit
+                    else Health.UNHEALTHY)
+        watchdog_at = evidence.observed_at
+    except Exception:
+        watchdog, watchdog_at = Health.UNKNOWN, None
+    account = bounded(adapter.refresh_account)
+    cash_at = now()
+    equity = getattr(account, "equity", None)
+    if equity is None:
+        raise RuntimeError("the broker returned no account equity")
+    market_open = bool(bounded(adapter.is_market_open, now_utc or now(),
+                               timeout=10.0))
+    calendar_at = now()
+    risk_store, risk_state = _live_risk_store, _live_risk_state
+    if risk_store is None or risk_state is None:
+        raise RuntimeError("durable risk state is unavailable")
+    durable = risk_store.load_required(risk_state.instance_id,
+                                       risk_state.account_id)
+    evaluated = evaluate_drawdown(
+        durable, equity, now(), limits=_live_risk_limits_for_this_document())
+    return {
+        "kill_switch": kill_switch, "kill_switch_at": kill_switch_at,
+        "watchdog": watchdog, "watchdog_at": watchdog_at,
+        "cash": Health.HEALTHY, "cash_at": cash_at,
+        "calendar": Health.HEALTHY, "calendar_at": calendar_at,
+        "market_open": market_open,
+        "risk_state": (Health.HEALTHY if evaluated.new_exposure_allowed
+                       else Health.UNHEALTHY),
+        "risk_state_at": evaluated.observed_at,
+    }
+
+
 def _execute_swing_approval(adapter, payload, order_service, *,
                             cached_strategies=None, now_utc=None, log=None,
                             sleep=None):
@@ -10832,9 +11060,10 @@ def _execute_swing_approval(adapter, payload, order_service, *,
     class _Retryable(Exception):
         """A transient failure: the signal goes back to pending (I-1)."""
 
-        def __init__(self, why, *, quote=False):
+        def __init__(self, why, *, quote=False, detail=""):
             super().__init__(why)
             self.quote = quote
+            self.detail = detail
 
     def say(message, color="white"):
         if log is not None:
@@ -10909,157 +11138,249 @@ def _execute_swing_approval(adapter, payload, order_service, *,
                 f"({type(exc).__name__}: {exc})", "red")
             return False
 
-    claimed = dict(signal)
-    claimed["status"] = "submitted"
+    # Fix wave round 2, minor 3: from the claim until this handler has
+    # written its outcome, the stale-row sweep (the loop thread of this same
+    # process) must not judge this signal.
+    in_flight = globals().setdefault("_swing_approvals_in_flight", set())
+    in_flight.add(signal_id)
     try:
-        won = signals_store.cas_signal(signal_id, expect_status=status, doc=claimed)
-    except Exception as exc:
-        say(f"{label}: the claim could not be written ({type(exc).__name__}: "
-            f"{exc}); nothing placed", "red")
-        tell(f"the approval could not be claimed ({type(exc).__name__}); "
-             "nothing was sent")
-        return (False, f"signal {signal_id} could not be claimed: "
-                       f"{type(exc).__name__}: {exc}", {})
-    if not won:
-        say(f"{label}: another command claimed it first; nothing placed", "yellow")
-        return (False, f"signal {signal_id} was claimed by another command; "
-                       "nothing placed", {})
+        claimed = dict(signal)
+        claimed["status"] = "submitted"
+        # Fix wave FW1 item 9: the stale-row sweep ages a claim from here.
+        claimed["claimed_at"] = (now_utc or datetime.datetime.now(
+            datetime.timezone.utc)).isoformat()
+        try:
+            won = signals_store.cas_signal(signal_id, expect_status=status, doc=claimed)
+        except Exception as exc:
+            say(f"{label}: the claim could not be written ({type(exc).__name__}: "
+                f"{exc}); nothing placed", "red")
+            tell(f"the approval could not be claimed ({type(exc).__name__}); "
+                 "nothing was sent")
+            return (False, f"signal {signal_id} could not be claimed: "
+                           f"{type(exc).__name__}: {exc}", {})
+        if not won:
+            say(f"{label}: another command claimed it first; nothing placed", "yellow")
+            return (False, f"signal {signal_id} was claimed by another command; "
+                           "nothing placed", {})
 
-    def failed(error, reason, key=None, result=None):
-        write({"status": "failed", "order_client_id": key})
-        say(f"{label} FAILED: {error}", "red")
-        tell(reason)
-        return (False, error, result or {})
+        def claim_write(patch):
+            """(landed, current row): the patch written only while the row is
+            still this claim's (status submitted, this claim's claimed_at)."""
+            try:
+                current = signals_store.get_signal(signal_id)
+            except Exception as exc:
+                say(f"{label}: signal re-read before write-back failed "
+                    f"({type(exc).__name__}: {exc})", "red")
+                return False, None
+            if (not current or str(current.get("status") or "") != "submitted"
+                    or current.get("claimed_at") != claimed.get("claimed_at")):
+                return False, current
+            doc = dict(current)
+            doc.update(patch)
+            try:
+                won = signals_store.cas_signal(signal_id, expect_status="submitted",
+                                               doc=doc)
+            except Exception as exc:
+                say(f"{label}: signal write-back {patch} failed "
+                    f"({type(exc).__name__}: {exc})", "red")
+                return False, current
+            if not won:
+                try:
+                    current = signals_store.get_signal(signal_id)
+                except Exception:
+                    pass
+            return bool(won), current
 
-    def back_to_pending(why, *, quote=False, detail="", result=None):
-        """I-1: a transient failure. Nothing reached the broker, so the
-        decision is undone and the operator may approve again."""
-        reason = f"{why} — approve again" + (" after the open" if quote else "")
-        if write({"status": "pending", "decided_by": None, "decided_at": None,
-                  "decision_reason": None}):
-            say(f"{label} put back to pending: {why}"
-                + (f" ({detail})" if detail else ""), "yellow")
+        def failed(error, reason, key=None, result=None):
+            write({"status": "failed", "order_client_id": key})
+            say(f"{label} FAILED: {error}", "red")
             tell(reason)
-        else:
-            # M-1: never "approve again" when the reset did not land.
-            say(f"{label}: {why}; nothing placed, and the signal could not be "
-                "put back to pending (it may still read submitted)", "red")
-            tell(f"{why} — nothing was sent, and the signal could not be put "
-                 "back to pending")
-        return (False, reason + (f" ({detail})" if detail else ""), result or {})
+            return (False, error, result or {})
 
-    # "Not now" gate codes (I-1; fix round 1b adds the market-hours two).
-    after_open = ("quote.stale", "market.closed", "market.regular_hours_required")
+        def back_to_pending(why, *, quote=False, detail="", result=None):
+            """I-1: a transient failure. Nothing reached the broker, so the
+            decision is undone and the operator may approve again."""
+            reason = f"{why} — approve again" + (" after the open" if quote else "")
+            if write({"status": "pending", "decided_by": None, "decided_at": None,
+                      "decision_reason": None}):
+                say(f"{label} put back to pending: {why}"
+                    + (f" ({detail})" if detail else ""), "yellow")
+                tell(reason)
+            else:
+                # M-1: never "approve again" when the reset did not land -- in
+                # the notice nor in the command's error (fix wave FW1 item 3).
+                reason = (f"{why} — nothing was sent, and the signal could not be "
+                          "put back to pending (it may still read submitted)")
+                say(f"{label}: {why}; nothing placed, and the signal could not be "
+                    "put back to pending (it may still read submitted)", "red")
+                tell(reason)
+            return (False, reason + (f" ({detail})" if detail else ""), result or {})
 
-    def all_transient(codes):
-        return bool(codes) and all(
-            code.startswith("dependency.")
-            or code in after_open or code == "positions.stale" for code in codes)
+        # "Not now" gate codes (I-1; fix round 1b adds the market-hours two).
+        after_open = ("quote.stale", "market.closed", "market.regular_hours_required")
+        # Fix wave FW1 item 3 (FW-lo-I2): pure races, also "not now". The mark
+        # stream or the 3 s position refresh rewrote the mark between the
+        # approval's price read and the gate's, or the tick rotated the risk
+        # snapshot between the build and the gate. Every gate refusal is decided
+        # before the service creates a lifecycle row, so re-arming is safe.
+        races = ("quote.timestamp_mismatch", "quote.reference_price_mismatch",
+                 "risk.snapshot_mismatch")
 
-    now_utc = now_utc or datetime.datetime.now(datetime.timezone.utc)
-    try:
-        lane_name = {"swing": "strategy_swing", "wheel": "strategy_wheel"}.get(lane)
-        if lane_name is None:
-            raise ValueError(f"unknown lane {signal.get('lane')!r}")
-        specs = cached_strategies
-        if specs is None:
-            # The command thread starts before the live loop caches the
-            # strategy document; an approval queued across a restart reads it.
-            loader = globals().get("load_strategies_from_db")
-            specs = loader()[0] if loader is not None else None
-        cfg = _lane_config(specs, lane_name)
-        if not cfg:
-            raise ValueError(f"the {lane_name} lane is not enabled on this document")
-        live = _approval_live_price(adapter, symbol)
-        if live is None:
-            raise _Retryable(f"no live price for {symbol}", quote=True)
-        live_price, quote_at = live
-        equity = getattr(adapter, "_account_equity", None)
-        if equity is None:
+        def all_transient(codes):
+            return bool(codes) and all(
+                code.startswith("dependency.")
+                or code in after_open or code in races
+                or code == "positions.stale" for code in codes)
+
+        now_utc = now_utc or datetime.datetime.now(datetime.timezone.utc)
+        try:
+            lane_name = {"swing": "strategy_swing", "wheel": "strategy_wheel"}.get(lane)
+            if lane_name is None:
+                raise ValueError(f"unknown lane {signal.get('lane')!r}")
+            specs = cached_strategies
+            if specs is None:
+                # The command thread starts before the live loop caches the
+                # strategy document; an approval queued across a restart reads it.
+                loader = globals().get("load_strategies_from_db")
+                specs = loader()[0] if loader is not None else None
+            cfg = _lane_config(specs, lane_name)
+            if not cfg:
+                raise ValueError(f"the {lane_name} lane is not enabled on this document")
+            # FW-lo-I1: the gate's control inputs are re-read NOW and laid over
+            # this approval's snapshot only; the loop's stamps are fresh only
+            # within 60 s of a tick. Round 2: re-read BEFORE the price, so its
+            # round trips never sit between the quote read (which pins the
+            # intent's quote_at) and the gate's read of the same mark -- the
+            # controls have a 60 s budget, the quote does not. A failed re-read is
+            # transient, like the stale stamps it replaces.
             try:
-                equity = adapter.refresh_account().equity
+                controls = _approval_control_overlay(adapter, instance_key=owner,
+                                                     now_utc=now_utc)
             except Exception as exc:
-                raise _Retryable(f"account equity unreadable "
-                                 f"({type(exc).__name__}: {exc})") from exc
-        with _live_order_dependency_lock:
-            risk_id = str(_live_order_dependency_state.get("risk_snapshot_id")
-                          or "risk:unavailable")
-        order = approvals.build_approved_order(
-            signal, live_price=float(live_price), equity=float(equity), cfg=cfg,
-            adapter=adapter,
-            today=now_utc.astimezone(ZoneInfo("America/New_York")).date())
-        kind = str((order or {}).get("kind") or "")
-        if kind == "equity_bracket":
-            intent = _build_bracket_intent(
-                order_service, symbol=str(order["symbol"]).strip().upper(),
-                price=live_price, decision_at=now_utc, quantity=order["qty"],
-                bracket={"take_profit_price": order["take_profit_price"],
-                         "stop_loss_price": order["stop_loss_price"]},
-                risk_snapshot_id=risk_id, quote_at=quote_at,
-                source=OrderSource.MANUAL, reason=f"swing_approval:{signal_id}")
-        elif kind == "option":
-            try:
-                quote = _refresh_option_quote(adapter, order.get("contract"),
-                                              now_utc)
-            except Exception as exc:
-                raise _Retryable(
-                    f"no usable options snapshot for {order.get('contract')} "
-                    f"({type(exc).__name__})", quote=True) from exc
-            if quote is None:
-                raise _Retryable(
-                    f"no usable options snapshot for {order.get('contract')}",
-                    quote=True)
-            intent = _build_option_intent(
-                order_service, order, quote_at=quote["quote_at"],
-                decision_at=now_utc, risk_snapshot_id=risk_id,
-                source=OrderSource.MANUAL)
-        else:
-            raise ValueError(f"unknown approved order kind {kind!r}")
-    except _Retryable as exc:
-        return back_to_pending(str(exc), quote=exc.quote)
-    except Exception as exc:
-        unreadable = getattr(approvals, "BookUnreadable", None)
-        if isinstance(unreadable, type) and isinstance(exc, unreadable):
-            return back_to_pending("broker order book unreadable", detail=str(exc))
-        return failed(f"swing approval failed: {type(exc).__name__}: {exc}",
-                      str(exc) or type(exc).__name__)
+                raise _Retryable("the order gate's controls could not be re-read",
+                                 detail=f"{type(exc).__name__}: {exc}") from exc
+            live = _approval_live_price(adapter, symbol)
+            if live is None:
+                raise _Retryable(f"no live price for {symbol}", quote=True)
+            live_price, quote_at = live
+            equity = getattr(adapter, "_account_equity", None)
+            if equity is None:
+                try:
+                    equity = adapter.refresh_account().equity
+                except Exception as exc:
+                    raise _Retryable(f"account equity unreadable "
+                                     f"({type(exc).__name__}: {exc})") from exc
+                if equity is None:
+                    # Fix wave FW1 item 3: a refresh that answered with no equity
+                    # is as transient as one that raised.
+                    raise _Retryable("account equity unreadable (the broker "
+                                     "returned none)")
+            with _live_order_dependency_lock:
+                risk_id = str(_live_order_dependency_state.get("risk_snapshot_id")
+                              or "risk:unavailable")
+            order = approvals.build_approved_order(
+                signal, live_price=float(live_price), equity=float(equity), cfg=cfg,
+                adapter=adapter,
+                today=now_utc.astimezone(ZoneInfo("America/New_York")).date())
+            kind = str((order or {}).get("kind") or "")
+            if kind == "equity_bracket":
+                intent = _build_bracket_intent(
+                    order_service, symbol=str(order["symbol"]).strip().upper(),
+                    price=live_price, decision_at=now_utc, quantity=order["qty"],
+                    bracket={"take_profit_price": order["take_profit_price"],
+                             "stop_loss_price": order["stop_loss_price"]},
+                    risk_snapshot_id=risk_id, quote_at=quote_at,
+                    source=OrderSource.MANUAL, reason=f"swing_approval:{signal_id}")
+            elif kind == "option":
+                try:
+                    quote = _refresh_option_quote(adapter, order.get("contract"),
+                                                  now_utc)
+                except Exception as exc:
+                    raise _Retryable(
+                        f"no usable options snapshot for {order.get('contract')} "
+                        f"({type(exc).__name__})", quote=True) from exc
+                if quote is None:
+                    raise _Retryable(
+                        f"no usable options snapshot for {order.get('contract')}",
+                        quote=True)
+                # Fix wave FW1 item 9: the intent names its signal, as a swing
+                # approval's does, so the stale-row sweep can find it.
+                intent = _build_option_intent(
+                    order_service, dict(order, reason=f"swing_approval:{signal_id}"),
+                    quote_at=quote["quote_at"], decision_at=now_utc,
+                    risk_snapshot_id=risk_id, source=OrderSource.MANUAL)
+            else:
+                raise ValueError(f"unknown approved order kind {kind!r}")
+        except _Retryable as exc:
+            return back_to_pending(str(exc), quote=exc.quote, detail=exc.detail)
+        except Exception as exc:
+            unreadable = getattr(approvals, "BookUnreadable", None)
+            if isinstance(unreadable, type) and isinstance(exc, unreadable):
+                return back_to_pending("broker order book unreadable", detail=str(exc))
+            return failed(f"swing approval failed: {type(exc).__name__}: {exc}",
+                          str(exc) or type(exc).__name__)
 
-    try:
-        submission = order_service.enqueue(intent)
-    except Exception as exc:
-        write({"submitted_order": order})
-        say(f"{label}: submit raised {type(exc).__name__}: {exc}; the outcome "
-            f"is unknown, the signal stays submitted and the next reconcile "
-            f"resolves {intent.idempotency_key}", "red")
-        return (False, f"order outcome unknown ({type(exc).__name__}: {exc}); "
-                       "the next reconcile resolves it",
-                {"signal_id": signal_id, "client_order_id": intent.idempotency_key})
-    key = str(getattr(submission.decision, "idempotency_key", "")
-              or intent.idempotency_key)
-    codes = [str(code) for code in submission.decision.reason_codes]
-    result = {
-        "signal_id": signal_id,
-        "client_order_id": key,
-        "order_id": getattr(submission.reference, "broker_order_id", None),
-        "reason_codes": codes,
-    }
-    if not submission.decision.allowed:
-        error = "order gate blocked: " + ",".join(codes)
-        if all_transient(codes):
-            # The gate refused before the service created a lifecycle row, so
-            # a re-approval builds the same identity afresh: one order.
-            return back_to_pending(error, quote=any(
-                code in after_open or code.startswith("dependency.quote.")
-                for code in codes), result=result)
-        return failed(error, error, key=key, result=result)
-    if not submission.accepted:
-        write({"order_client_id": key, "submitted_order": order})
-        say(f"{label}: outcome unknown ({','.join(codes) or 'transport'}); the "
-            f"signal stays submitted and the next reconcile resolves {key}", "red")
-        return (False, "order outcome unknown; the next reconcile resolves it", result)
-    write({"status": "submitted", "order_client_id": key, "submitted_order": order})
-    say(f"{label} submitted ({key})", "green")
-    return (True, "", result)
+        # An option snapshot reads the calendar itself.
+        if getattr(intent, "asset_class", "us_equity") == "us_option":
+            controls = {name: value for name, value in dict(controls).items()
+                        if name not in ("calendar", "calendar_at", "market_open")}
+        try:
+            submission = order_service.enqueue(intent, snapshot_overlay=controls)
+        except Exception as exc:
+            write({"submitted_order": order})
+            say(f"{label}: submit raised {type(exc).__name__}: {exc}; the outcome "
+                f"is unknown, the signal stays submitted and the next reconcile "
+                f"resolves {intent.idempotency_key}", "red")
+            return (False, f"order outcome unknown ({type(exc).__name__}: {exc}); "
+                           "the next reconcile resolves it",
+                    {"signal_id": signal_id, "client_order_id": intent.idempotency_key})
+        key = str(getattr(submission.decision, "idempotency_key", "")
+                  or intent.idempotency_key)
+        codes = [str(code) for code in submission.decision.reason_codes]
+        result = {
+            "signal_id": signal_id,
+            "client_order_id": key,
+            "order_id": getattr(submission.reference, "broker_order_id", None),
+            "reason_codes": codes,
+        }
+        if not submission.decision.allowed:
+            error = "order gate blocked: " + ",".join(codes)
+            if all_transient(codes):
+                # The gate refused before the service created a lifecycle row, so
+                # a re-approval builds the same identity afresh: one order.
+                return back_to_pending(error, quote=any(
+                    code in after_open or code.startswith("dependency.quote.")
+                    for code in codes), result=result)
+            return failed(error, error, key=key, result=result)
+        if not submission.accepted:
+            write({"order_client_id": key, "submitted_order": order})
+            say(f"{label}: outcome unknown ({','.join(codes) or 'transport'}); the "
+                f"signal stays submitted and the next reconcile resolves {key}", "red")
+            return (False, "order outcome unknown; the next reconcile resolves it", result)
+        # Round 2, minor 3: the success write-back is a compare-and-swap from
+        # the row THIS claim wrote (status submitted, this claim's claimed_at),
+        # so it can never flip a row the sweep marked failed back to submitted.
+        landed, current = claim_write({"status": "submitted",
+                                       "order_client_id": key,
+                                       "submitted_order": order})
+        if landed:
+            say(f"{label} submitted ({key})", "green")
+        elif str((current or {}).get("status") or "") == "failed":
+            say(f"{label}: the order WAS placed ({key}) but the signal had been "
+                "marked failed meanwhile — do not place it by hand", "red")
+            try:
+                from swing_trader.notify import notify_swing_order_placed_for_failed
+                notify_swing_order_placed_for_failed(
+                    owner, symbol=symbol, lane=lane, client_order_id=key)
+            except Exception as exc:
+                say(f"{label}: the placed-for-failed notice was not sent "
+                    f"({type(exc).__name__}: {exc})", "red")
+        else:
+            say(f"{label}: submitted ({key}), but the signal write-back did not "
+                f"land (the row reads {(current or {}).get('status')!r})", "red")
+        return (True, "", result)
+    finally:
+        in_flight.discard(signal_id)
 
 
 def _live_order_dependency_snapshot(adapter, intent):
@@ -11112,6 +11433,16 @@ def _live_order_dependency_snapshot(adapter, intent):
         value = state.get(name)
         return value if isinstance(value, datetime.datetime) else None
 
+    available_cash = Decimal(str(getattr(adapter, "_cash", 0) or 0))
+    if available_cash < 0 and intent.reduce_only and any(
+            _lane_enabled(globals().get("_cached_strategies"), lane)
+            for lane in ("strategy_swing", "strategy_wheel")):
+        # Fix wave FW-lo-I5: a margin debit after an assignment must not stop
+        # a swing/wheel document's EXIT from being gated (the snapshot refuses
+        # negative cash). A reduce-only sell never spends cash. Checked only
+        # when cash is negative, and EB's document enables neither lane, so
+        # EB's snapshot still raises exactly as before.
+        available_cash = Decimal("0")
     max_order_notional = None
     max_position_quantity = None
     if _live_risk_state is not None:
@@ -11149,7 +11480,7 @@ def _live_order_dependency_snapshot(adapter, intent):
         position_symbol=symbol,
         position_quantity=position_quantity,
         positions_at=positions_at,
-        available_cash=Decimal(str(getattr(adapter, "_cash", 0) or 0)),
+        available_cash=available_cash,
         market_open=bool(state.get("market_open", False)),
         risk_snapshot_id=risk_snapshot_id,
         kill_switch_at=_state_time("kill_switch_at"),
@@ -11178,8 +11509,13 @@ def _live_order_dependency_snapshot(adapter, intent):
 def _build_strategy_stock_intent(
         order_service, portfolio, *, symbol, decision, price, current_time,
         cash_to_use, sell_fraction, action_intents, is_risk_exit,
-        risk_snapshot_id, quote_at, bracket=None):
-    """Create the immutable intent for one normal/risk strategy emission."""
+        risk_snapshot_id, quote_at, bracket=None, next_open_sell=False):
+    """Create the immutable intent for one normal/risk strategy emission.
+
+    ``next_open_sell`` (swing-port fix wave, FW-str-I1): a swing exit is a
+    plain MARKET DAY sell, which Alpaca queues for the open (ST's exit), never
+    the extended-hours limit the session style makes before 09:30 ET. EB never
+    passes it."""
     from decimal import Decimal
     from live_orders import OrderIntent, OrderSide, OrderSource
     if bracket is not None and decision == 1:
@@ -11213,6 +11549,14 @@ def _build_strategy_stock_intent(
     if quantity <= 0:
         raise ValueError("computed order quantity <= 0")
     side = "buy" if decision == 1 else "sell"
+    if next_open_sell and side == "sell" and _swing_exit_held_after_close(decision_at):
+        # Fix wave round 2, minor 2: Alpaca rejects a non-extended-hours
+        # market order between the close and 20:00 ET. Nothing is created;
+        # the lane re-sends the exit on the next pre-market or RTH tick.
+        raise ValueError(
+            f"order deferred: {symbol} swing exit held until the next "
+            "pre-market or regular-hours tick (a market DAY order is not "
+            "accepted between the close and 20:00 ET)")
     # quantity= is REQUIRED, not optional. _order_style_for_now grew
     # quantity/defer on 2026-08-02 because the extended-hours flip was only half
     # the rule: Alpaca supports fractional quantities during regular hours ONLY,
@@ -11233,7 +11577,9 @@ def _build_strategy_stock_intent(
     # session. Honour defer here so the order is never created, rather than
     # created and then silently truncated.
     style = (
-        portfolio._order_style_for_now(
+        {"order_type": "market", "limit_price": None, "extended_hours": False}
+        if next_open_sell and side == "sell"
+        else portfolio._order_style_for_now(
             price, side, decision_at, quantity=float(quantity)
         )
         if hasattr(portfolio, "_order_style_for_now")
@@ -11294,6 +11640,24 @@ def _build_strategy_stock_intent(
         extended_hours=bool(style.get("extended_hours")),
         reference_price=Decimal(str(price)),
     )
+
+
+def _swing_exit_held_after_close(at) -> bool:
+    """Fix wave round 2, minor 2: True between the regular close (16:00 ET,
+    13:00 on a half day) and 20:00 ET, when Alpaca rejects the plain market
+    DAY order a swing exit is. Pre-market is not held (the order queues for
+    the open); after 20:00 the gate's own market.closed refuses. Without a
+    calendar, 16:00-20:00 ET."""
+    from zoneinfo import ZoneInfo
+
+    et = at.astimezone(ZoneInfo("America/New_York"))
+    if not 12 <= et.hour < 20:
+        return False
+    try:
+        from live_calendar import is_nyse_open
+        return not bool(is_nyse_open(at))
+    except Exception:
+        return et.hour >= 16
 
 
 def _build_bracket_intent(
@@ -11366,7 +11730,8 @@ def _build_bracket_intent(
 
 
 def _cancel_bracket_legs_confirmed(adapter, order_service, symbol, *,
-                                   timeout_s=10.0, log=None):
+                                   timeout_s=10.0, log=None, cancelled=None,
+                                   attempted=None):
     """Cancel every working bracket leg on ``symbol`` and wait for Alpaca to
     confirm (spec 6.1 broker item 4). True when nothing is left working and the
     sell may go; False defers the sell a tick.
@@ -11374,6 +11739,12 @@ def _cancel_bracket_legs_confirmed(adapter, order_service, symbol, *,
     Leg ids come from two places, because each can miss one: the lifecycle
     store (a held stop leg is not always listed as open) and the broker's
     open orders (a leg whose registration has not happened yet).
+
+    ``cancelled`` (a list) receives the leg ids whose cancel Alpaca confirmed,
+    so the caller knows the position has lost its stop. ``attempted`` (a
+    list) receives every leg id a cancel was SENT for, confirmed or not: a
+    cancel that times out, or a leg that fills while being cancelled, may
+    already have taken the stop away (fix wave round 2, must-check 2(d)).
     """
     from broker_adapters.base import is_bracket_child_order
     from live_orders import OrderSource
@@ -11387,6 +11758,7 @@ def _cancel_bracket_legs_confirmed(adapter, order_service, symbol, *,
 
     wanted = str(symbol or "").strip().upper()
     leg_ids = []
+    booked = {}
     try:
         for record in order_service.lifecycle_store.list_for_instance(
                 order_service.instance_id):
@@ -11394,6 +11766,9 @@ def _cancel_bracket_legs_confirmed(adapter, order_service, symbol, *,
                 continue
             if record.intent.symbol == wanted and record.broker_order_id:
                 leg_ids.append(record.broker_order_id)
+                # Fix wave FW1 item 8: what this leg has already booked, so a
+                # leg cancelled after a partial fill does not defer the sell.
+                booked[record.broker_order_id] = record.cumulative_quantity
     except Exception as exc:
         say(f"[swing] {wanted} sell deferred: the lifecycle store is "
             f"unreadable ({type(exc).__name__}: {exc}), so its bracket legs "
@@ -11412,8 +11787,11 @@ def _cancel_bracket_legs_confirmed(adapter, order_service, symbol, *,
             leg_ids.append(ref_id)
     if not leg_ids:
         return True
+    if attempted is not None:
+        attempted.extend(leg_ids)
     try:
-        confirmed = bool(adapter.cancel_orders_confirmed(leg_ids, timeout_s=timeout_s))
+        confirmed = bool(adapter.cancel_orders_confirmed(
+            leg_ids, timeout_s=timeout_s, booked_fills=booked))
     except Exception as exc:
         say(f"[swing] {wanted} bracket leg cancel raised "
             f"{type(exc).__name__}: {exc}", "red")
@@ -11421,7 +11799,154 @@ def _cancel_bracket_legs_confirmed(adapter, order_service, symbol, *,
     say(f"[swing] {wanted} bracket legs {leg_ids} cancel "
         f"{'confirmed' if confirmed else 'NOT confirmed; the sell waits a tick'}",
         "cyan" if confirmed else "yellow")
+    if confirmed and cancelled is not None:
+        cancelled.extend(leg_ids)
     return confirmed
+
+
+#: swing-port fix wave (FW-str-I1): the swing lane's exit intents
+#: (strategies/strategy_swing.py INTENT_EXIT). A re-sent pending exit carries
+#: its intent but not the fill_at_next_open hint.
+_SWING_EXIT_INTENTS = frozenset(
+    {"swing_rsi_exit", "swing_stop_exit", "swing_target_exit"})
+
+
+def _swing_next_open_exit(hint, intents) -> bool:
+    """True for a swing exit: its hint says fill_at_next_open (exactly True),
+    or its action intents name one of the lane's exits. EB's hints and
+    intents carry neither."""
+    if isinstance(hint, dict) and hint.get("fill_at_next_open") is True:
+        return True
+    try:
+        return bool(_SWING_EXIT_INTENTS & {str(i) for i in (intents or ())})
+    except TypeError:
+        return False
+
+
+#: Fix wave round 2, minor 3: approval signal ids a handler in this process
+#: is placing right now (claimed, outcome not yet written). The stale-row
+#: sweep skips them.
+_swing_approvals_in_flight: set = set()
+
+
+#: Fix wave round 2: the unprotected-exit alerts already sent this New York
+#: session, keyed (symbol, kind): one per symbol per session and kind.
+_swing_unprotected_alerts: dict = {"session": None, "sent": set()}
+
+
+def _swing_unprotected_alert(instance_id, symbol, detail, *, kind="unprotected",
+                             now_utc=None):
+    """A swing exit that did not go out after a cancel was SENT for its
+    bracket legs: the stop may be gone until the lane re-sends the exit on the
+    next tick. RED, priority 2 (URGENT), through the lane's own sender, once
+    per symbol per New York session (and kind). Returns True when sent; never
+    raises. Self-contained (local imports, state through globals()) so an
+    alert can never fail on a missing name."""
+    try:
+        import datetime as _dt
+        from zoneinfo import ZoneInfo
+
+        now = now_utc or _dt.datetime.now(_dt.timezone.utc)
+        session = now.astimezone(ZoneInfo("America/New_York")).date().isoformat()
+        state = globals().setdefault("_swing_unprotected_alerts",
+                                     {"session": None, "sent": set()})
+        if state.get("session") != session:
+            state["session"] = session
+            state["sent"] = set()
+        key = (str(symbol or "").strip().upper(), str(kind))
+        if key in state["sent"]:
+            return False
+        from swing_trader import notify as _swing_notify
+        if kind == "unknown":
+            # Round 2, minor 1: the sell may have reached the broker (the
+            # service can raise after the transport); never "not placed".
+            _swing_notify.send(
+                "swing_exit", instance_id,
+                f"EXIT OUTCOME UNKNOWN — check open orders — {symbol}",
+                f"{symbol}: the exit sell may or may not have been placed "
+                f"({detail}) — check open orders. Its bracket stop was "
+                "cancelled; if no sell is working the position is "
+                "unprotected, and the exit will retry next tick.", priority=2)
+        else:
+            _swing_notify.send(
+                "swing_exit", instance_id,
+                f"EXIT NOT PLACED — {symbol} may be unprotected",
+                f"{symbol}: position may be unprotected — the bracket stop may "
+                "have been cancelled; the exit will retry next tick. Check open "
+                f"orders. ({detail})", priority=2)
+        state["sent"].add(key)
+        return True
+    except Exception:
+        return False
+
+
+def _submit_swing_sell(adapter, order_service, intent, *, log=None,
+                       timeout_s=10.0):
+    """A SELL on a document with an enabled swing lane (FW-str-I1).
+
+    Its bracket legs are cancelled only once the gate has accepted the sell,
+    inside the service's before-submit hook, and only then is it sent: a sell
+    the gate refuses (a stale pre-market mark) leaves its stop working. Legs
+    that do not confirm cancelled raise "order deferred: ..." before anything
+    exists, exactly as the loop's pre-gate cancel used to. A sell that does not
+    go out after its legs were cancelled is a red line and a priority-2 alert;
+    the lane re-sends the exit on the next tick (strategy_swing._reemit_exits).
+    """
+    legs = []
+    attempted = []
+
+    def say(message, color="white"):
+        if log is not None:
+            try:
+                log(message, color)
+            except Exception:
+                pass
+
+    def cancel_legs(_intent, _decision):
+        if not _cancel_bracket_legs_confirmed(
+                adapter, order_service, intent.symbol, timeout_s=timeout_s,
+                log=log, cancelled=legs, attempted=attempted):
+            if attempted:
+                # Round 2, must-check 2(d): the cancel went out but was not
+                # confirmed (a timeout, or a leg filled while being cancelled).
+                # The stop may already be gone and no sell goes this tick.
+                unprotected(
+                    f"a cancel was sent for bracket legs {attempted} and not "
+                    f"confirmed within {float(timeout_s):.0f}s (or a leg filled "
+                    "while being cancelled); the exit sell was NOT sent this "
+                    "tick", legs_text=attempted)
+            raise ValueError(
+                f"order deferred: {intent.symbol} bracket legs did not confirm "
+                f"cancelled within {float(timeout_s):.0f}s; the sell waits a tick")
+
+    def unprotected(detail, *, legs_text=None, kind="unprotected"):
+        what = ("exit OUTCOME UNKNOWN (check open orders)" if kind == "unknown"
+                else "exit NOT placed")
+        say(f"[swing] {intent.symbol} {what} after a cancel of its "
+            f"bracket legs {legs_text if legs_text is not None else legs} "
+            f"({detail}): the position may be UNPROTECTED until the lane "
+            "re-sends the exit next tick", "red")
+        _swing_unprotected_alert(
+            str(getattr(order_service, "instance_id", "") or ""),
+            intent.symbol, detail, kind=kind)
+
+    try:
+        submission = order_service.enqueue(intent, before_submit=cancel_legs)
+    except Exception as exc:
+        if legs:
+            # Round 2, minor 1: the service can raise AFTER the transport
+            # (applying the broker's answer), so the outcome is unknown.
+            unprotected(f"submit raised {type(exc).__name__}: {exc}",
+                        kind="unknown")
+        raise
+    if legs and not submission.accepted:
+        codes = ",".join(submission.decision.reason_codes)
+        if getattr(submission, "uncertain", False):
+            unprotected(f"outcome unknown ({codes or 'transport'}); it may not "
+                        "have been placed", kind="unknown")
+        else:
+            unprotected(f"refused: {codes or 'no reason given'}")
+    return submission
 
 
 def _execute_live_command(adapter, cmd: dict, order_service=None) -> tuple[bool, str, dict]:
@@ -20454,28 +20979,21 @@ while not shutdown_requested:
                                         and not _is_crypto_instance_runtime()
                                     )
                                     if _is_alpaca_stock_gate:
-                                        # swing-port (spec 6.1 broker item 4):
-                                        # a SELL of a bracketed position first
-                                        # cancels its legs and waits for Alpaca
-                                        # to confirm; unconfirmed, the sell
-                                        # waits a tick. Only a document with an
-                                        # enabled swing lane holds legs.
-                                        if (
+                                        # swing-port (spec 6.1 broker item 4;
+                                        # fix wave FW-str-I1): a SELL on a
+                                        # document with an enabled swing lane
+                                        # is a swing sell. Its bracket legs are
+                                        # cancelled only AFTER the gate accepts
+                                        # it (_submit_swing_sell; unconfirmed,
+                                        # the sell waits a tick), and a lane
+                                        # exit is a plain market DAY sell that
+                                        # Alpaca queues for the open. Only a
+                                        # document with an enabled swing lane
+                                        # holds legs; EB's never does.
+                                        _swing_sell = (
                                             decision == -1
                                             and _lane_enabled(_cached_strategies, "strategy_swing")
-                                            and not _cancel_bracket_legs_confirmed(
-                                                live_adapter,
-                                                _live_stock_order_service,
-                                                symbol,
-                                                timeout_s=10.0,
-                                                log=_log,
-                                            )
-                                        ):
-                                            raise ValueError(
-                                                f"order deferred: {symbol} bracket "
-                                                "legs did not confirm cancelled "
-                                                "within 10s; the sell waits a tick"
-                                            )
+                                        )
                                         # Single source of truth, shared with the
                                         # holding-floor gate above — see
                                         # _RISK_EXIT_INTENTS. Two copies would
@@ -20543,12 +21061,26 @@ while not shutdown_requested:
                                                     and isinstance(nexus_hint, dict)
                                                     else None
                                                 ),
+                                                next_open_sell=(
+                                                    _swing_sell
+                                                    and _swing_next_open_exit(
+                                                        nexus_hint, _z21_intents)
+                                                ),
                                             )
                                         )
-                                        _es_fut = _PRICE_FETCH_EXECUTOR.submit(
-                                            _live_stock_order_service.enqueue,
-                                            _stock_intent,
-                                        )
+                                        if _swing_sell:
+                                            _es_fut = _PRICE_FETCH_EXECUTOR.submit(
+                                                _submit_swing_sell,
+                                                live_adapter,
+                                                _live_stock_order_service,
+                                                _stock_intent,
+                                                log=_log,
+                                            )
+                                        else:
+                                            _es_fut = _PRICE_FETCH_EXECUTOR.submit(
+                                                _live_stock_order_service.enqueue,
+                                                _stock_intent,
+                                            )
                                         _submission = _es_fut.result(
                                             timeout=90.0
                                         )
@@ -20856,6 +21388,24 @@ while not shutdown_requested:
                         "strategies": list(strategy_summary) if strategy_summary else [],
                         "post_decision": list(post_decision_trace) if post_decision_trace else [],
                     })
+
+            # swing-port fix wave (plan B final review M-2): a swing/wheel
+            # approval claimed long ago that recorded no order is marked failed
+            # and told. Swing/wheel documents only; doc 200 never enters.
+            if (
+                mode == MODE_LIVE
+                and str(live_broker_type or "").strip().lower() == "alpaca"
+                and _live_stock_order_service is not None
+                and (_lane_enabled(_cached_strategies, "strategy_swing")
+                     or _lane_enabled(_cached_strategies, "strategy_wheel"))
+            ):
+                try:
+                    _sweep_stale_submitted_signals(
+                        _live_stock_order_service, log=_log)
+                except Exception as _sweep_exc:
+                    _log(f"[swing] stale approval sweep failed "
+                         f"({type(_sweep_exc).__name__}: {_sweep_exc}); retried "
+                         "next tick", "yellow")
 
             # swing-port (spec 6.1 broker item 8): option assignments, expiries
             # and exercises, polled only for a document with an enabled wheel

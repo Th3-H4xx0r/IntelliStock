@@ -30,7 +30,8 @@ BUY_AT = datetime_module.datetime(2026, 9, 24, 13, 31, 5, 123456,
 
 
 def _builders():
-    return extract(("_build_strategy_stock_intent", "_build_bracket_intent"),
+    return extract(("_build_strategy_stock_intent", "_build_bracket_intent",
+                    "_swing_exit_held_after_close"),
                    namespace={"datetime": datetime_module})
 
 
@@ -286,6 +287,13 @@ def test_eb_builds_with_the_call_sites_bracket_none_are_byte_identical():
     assert _digest(_eb_grid(_eb_builder(), bracket=None)) == EB_GRID_DIGEST
 
 
+def test_eb_builds_with_next_open_sell_false_are_byte_identical():
+    """Fix wave FW-str-I1: the call site passes next_open_sell=False for every
+    EB buy and sell (its document has no swing lane)."""
+    assert _digest(_eb_grid(_eb_builder(), bracket=None,
+                            next_open_sell=False)) == EB_GRID_DIGEST
+
+
 # --- F8: a bracket refused before any order exists is a definite refusal ------
 
 def _exception_lane_outcome():
@@ -376,14 +384,17 @@ class _Adapter:
         self.confirmed = confirmed
         self.readable = readable
         self.cancel_calls = []
+        self.booked = []
 
     def list_open_orders_strict(self, limit=200):
         if not self.readable:
             raise RuntimeError("orders endpoint unreachable")
         return list(self.working)
 
-    def cancel_orders_confirmed(self, order_ids, timeout_s=10.0):
+    def cancel_orders_confirmed(self, order_ids, timeout_s=10.0, *,
+                                booked_fills=None):
         self.cancel_calls.append((list(order_ids), timeout_s))
+        self.booked.append(dict(booked_fills or {}))
         return self.confirmed
 
 
@@ -432,6 +443,58 @@ def test_a_plain_working_sell_is_not_a_leg():
         instance_id="instance-1")
     assert _cancel()(adapter, empty, "AAPL") is True
     assert adapter.cancel_calls == []
+
+
+def test_the_booked_fill_of_each_store_leg_goes_to_the_cancel():
+    """Fix wave FW1 item 8 (review M-1): the lifecycle rows say how much of
+    each leg is already booked; a broker-only leg has no booked figure."""
+    from live_orders import BrokerOrderEvent, LifecycleState, OrderSide
+
+    service = _service_with_legs()
+    (sl_row,) = [r for r in service.lifecycle_store.list_for_instance("instance-1")
+                 if r.intent.reason == "bracket_stop_loss"]
+    assert service.apply_broker_event(BrokerOrderEvent(
+        event_id="sl-partial", account_id="acct-1", instance_id="instance-1",
+        client_order_id=sl_row.client_order_id, broker_order_id="broker-leg-sl",
+        symbol="AAPL", side=OrderSide.SELL, state=LifecycleState.PARTIAL,
+        cumulative_quantity=Decimal("2"), cumulative_average_price=Decimal("94"),
+        cumulative_fees=Decimal("0"), occurred_at=RTH)).applied
+    stray = SimpleNamespace(broker_order_id="broker-stray", symbol="AAPL",
+                            side="sell", status="new", order_class="bracket")
+    adapter = _Adapter(working=[stray])
+    assert _cancel()(adapter, service, "AAPL") is True
+    (booked,) = adapter.booked
+    assert booked == {"broker-leg-sl": Decimal("2"), "broker-leg-tp": Decimal("0")}
+
+
+def test_a_partially_filled_leg_cancelled_since_lets_the_sell_go_end_to_end():
+    """The real adapter over a fake client: the stop leg filled 2 and is now
+    canceled at the broker, its row still PARTIAL (the stream event was
+    missed). The exit is no longer deferred a tick."""
+    from broker_adapters.alpaca import AlpacaAdapter
+    from live_orders import BrokerOrderEvent, LifecycleState, OrderSide
+    from swing_alpaca_fakes import FakeTradingClient, enum, make_adapter, order_row
+
+    service = _service_with_legs()
+    (sl_row,) = [r for r in service.lifecycle_store.list_for_instance("instance-1")
+                 if r.intent.reason == "bracket_stop_loss"]
+    service.apply_broker_event(BrokerOrderEvent(
+        event_id="sl-partial", account_id="acct-1", instance_id="instance-1",
+        client_order_id=sl_row.client_order_id, broker_order_id="broker-leg-sl",
+        symbol="AAPL", side=OrderSide.SELL, state=LifecycleState.PARTIAL,
+        cumulative_quantity=Decimal("2"), cumulative_average_price=Decimal("94"),
+        cumulative_fees=Decimal("0"), occurred_at=RTH))
+    client = FakeTradingClient(orders=[
+        order_row(id="broker-leg-sl", client_order_id="leg-sl", side=enum("sell"),
+                  status=enum("canceled"), filled_qty="2", filled_avg_price="94",
+                  order_class=enum("bracket"), type=enum("stop")),
+        order_row(id="broker-leg-tp", client_order_id="leg-tp", side=enum("sell"),
+                  status=enum("canceled"), order_class=enum("bracket"),
+                  type=enum("limit"))])
+    adapter = make_adapter(client)
+    assert isinstance(adapter, AlpacaAdapter)
+    adapter.list_open_orders_strict = lambda limit=200: []
+    assert _cancel()(adapter, service, "AAPL", timeout_s=1.0) is True
 
 
 # --- ruling 7 (L3 carry): a parent with one leg recorded gets the other -------
@@ -561,24 +624,29 @@ def test_a_failed_leg_registration_never_stops_the_reconcile(monkeypatch):
 
 # --- wiring (source assertions: the loop and boot are module-level code) --------
 
-def test_the_submit_block_cancels_legs_before_building_a_sell():
+def test_the_submit_block_cancels_legs_only_after_the_gate_accepts():
+    """Fix wave FW-str-I1 reverses the Task 9 order: the loop no longer
+    cancels a position's legs before it builds (and gates) the sell. A sell
+    on a swing document goes through _submit_swing_sell, whose after-the-gate
+    hook cancels the legs; the deferral message is unchanged."""
     text = source()
     gate = text.index("if _is_alpaca_stock_gate:")
-    guard = text.index("_cancel_bracket_legs_confirmed(", gate)
     build = text.index("_build_strategy_stock_intent(", gate)
-    assert guard < build
     window = text[gate:build]
+    assert "_cancel_bracket_legs_confirmed(" not in window
     assert "decision == -1" in window
     assert '_lane_enabled(_cached_strategies, "strategy_swing")' in window
-    assert 'f"order deferred: {symbol} bracket ' in window
+    hook = function_source("_submit_swing_sell")
+    assert "_cancel_bracket_legs_confirmed(" in hook
+    assert 'f"order deferred: {intent.symbol} bracket legs did not confirm "' in hook
 
 
-def test_the_leg_cancel_guard_is_evaluated_sells_first():
+def test_the_swing_sell_guard_is_evaluated_sells_first():
     """EB pin: an EB buy never reads the lane registry, and an EB sell never
     reaches the cancel (the registry answers False for doc 200)."""
     text = source()
     gate = text.index("if _is_alpaca_stock_gate:")
-    window = text[gate:text.index("_cancel_bracket_legs_confirmed(", gate)]
+    window = text[gate:text.index("_build_strategy_stock_intent(", gate)]
     assert window.index("decision == -1") < window.index("_lane_enabled(")
 
 

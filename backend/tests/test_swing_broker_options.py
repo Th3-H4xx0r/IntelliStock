@@ -654,6 +654,8 @@ def test_the_equity_provider_dispatches_only_option_intents():
             "_live_stock_order_service": None, "instance_id": "instance-1",
             "_live_option_dependency_snapshot":
                 lambda adapter, intent: (marker, intent),
+            # Fix wave FW-lo-I5: read only when cash is negative.
+            "_lane_enabled": lambda strategies, lane: False,
         })
     provider = ns["_live_order_dependency_snapshot"]
     order = option_intent()
@@ -981,3 +983,60 @@ def test_an_alert_that_failed_to_send_is_retried_next_tick():
                                       adapter=_Quotes(), now_utc=RTH,
                                       risk_snapshot_id="risk-1")
     assert len(sent) == 2
+
+
+# --- fix wave FW1 item 8 (live-orders review M-4): the shared quote cache ------
+
+def test_an_approval_refreshing_the_same_contract_mid_close_is_no_auto_close_failure():
+    """The loop builds a buy_to_close on quote Q1; before its gate read, the
+    approval thread refreshes the same contract (Q2, a later quote_at). The
+    snapshot used to read Q2, the gate refused quote.timestamp_mismatch, and
+    the operator got a false "AUTO-CLOSE FAILED — CLOSE MANUALLY". The
+    snapshot now gates the intent on the quote it was built on."""
+    alerts = []
+    shared = _executor(alerts)
+    snapshot_ns = _snapshot_ns(None)
+    # One process: the executor, the approval thread and the snapshot
+    # provider share ONE _live_option_quotes.
+    snapshot_ns["_live_option_quotes"] = shared["_live_option_quotes"]
+    adapter = _adapter(_option_positions={OCC: _position(OCC, "APH", 130.0)})
+    later = RTH + timedelta(seconds=61)
+    approval_adapter = _Quotes(stamp=later, bid=1.4, ask=1.6)
+
+    def provider(intent):
+        # The approval thread's refresh lands between the build and the gate.
+        shared["_refresh_option_quote"](approval_adapter, OCC, later)
+        return snapshot_ns["_live_option_dependency_snapshot"](
+            adapter, intent, now_utc=RTH)
+
+    calls = []
+    service = LiveOrderService(
+        account_id="acct-1", instance_id="instance-1",
+        snapshot_provider=provider,
+        transport=lambda **kw: calls.append(kw) or SimpleNamespace(
+            status="accepted", broker_order_id="b-1", id="b-1", filled_qty=0,
+            filled_avg_price=None),
+        lifecycle_store=OrderLifecycleStore(InMemoryLifecycleBackend()))
+    snapshot_ns["_live_stock_order_service"] = service
+    results = shared["_execute_option_intents"](
+        [dict(BTC)], order_service=service, adapter=_Quotes(), now_utc=RTH,
+        risk_snapshot_id="risk-1")
+    assert results[0]["status"] == "submitted", results
+    assert len(calls) == 1 and alerts == []
+    # The approval's newer quote is the cached one for everything after.
+    assert shared["_live_option_quotes"][OCC]["quote_at"] == later
+
+
+def test_a_quote_the_intent_was_not_built_on_is_still_refused():
+    """The earlier quote is used only when it IS the intent's quote."""
+    ns = _snapshot_ns(None)
+    stale = RTH - timedelta(seconds=30)
+    ns["_live_option_quotes"][OCC] = {
+        "price": Decimal("1.5"), "quote_at": RTH, "fetched_at": RTH,
+        "previous": {"price": Decimal("1.2"), "quote_at": RTH - timedelta(seconds=5),
+                     "fetched_at": RTH - timedelta(seconds=5)}}
+    intent = option_intent(quote_at=stale)
+    snap = ns["_live_option_dependency_snapshot"](_adapter(), intent, now_utc=RTH)
+    assert snap.quote_at == RTH
+    assert "quote.timestamp_mismatch" in UnifiedOrderGate().evaluate(
+        intent, snap).reason_codes

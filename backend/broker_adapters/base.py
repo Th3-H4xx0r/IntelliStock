@@ -321,7 +321,8 @@ class BrokerAdapter(ABC):
     def get_order_with_legs(self, order_id) -> "OrderRef":
         raise NotImplementedError(f"{type(self).__name__} does not support get_order_with_legs")
 
-    def cancel_orders_confirmed(self, order_ids, timeout_s: float = 10.0) -> bool:
+    def cancel_orders_confirmed(self, order_ids, timeout_s: float = 10.0, *,
+                                booked_fills=None) -> bool:
         raise NotImplementedError(f"{type(self).__name__} does not support cancel_orders_confirmed")
 
     def list_closed_orders(self, symbols, after) -> list:
@@ -387,4 +388,19 @@ def is_risk_reducing_order(order) -> bool:
         _enum_text(getattr(order, "asset_class", None)) == "us_option"
         and _enum_text(getattr(order, "position_intent", None))
         in _CLOSING_POSITION_INTENTS
+    )
+
+
+def is_opening_option_sell(order) -> bool:
+    """True for an OPTION sell-to-open: a SELL that opens a strike x 100
+    obligation (swing-port fix wave, FW-lo-I4). The kill rung cancels it with
+    the working buys.
+
+    Ruling F1 applies as in ``is_risk_reducing_order``: ``position_intent``
+    counts only on an order whose ``asset_class`` is ``us_option``, so an EB
+    stock sell is never one, whatever Alpaca tags it with.
+    """
+    return (
+        _enum_text(getattr(order, "asset_class", None)) == "us_option"
+        and _enum_text(getattr(order, "position_intent", None)) == "sell_to_open"
     )

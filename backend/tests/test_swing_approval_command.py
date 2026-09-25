@@ -317,10 +317,12 @@ class _Service:
         self.swing = swing
         self.codes = tuple(codes)
         self.intents = []
+        self.overlays = []
         self.status_at_enqueue = []
 
-    def enqueue(self, intent):
+    def enqueue(self, intent, *, snapshot_overlay=None):
         self.intents.append(intent)
+        self.overlays.append(snapshot_overlay)
         if self.swing is not None:
             self.swing.events.append("enqueue")
             self.status_at_enqueue.append(
@@ -373,12 +375,22 @@ class _Adapter:
                                      None, RTH.isoformat()) for c in contracts}
 
 
+FRESH_CONTROLS = {"kill_switch": "healthy", "kill_switch_at": RTH}
+
+
+def _fresh_controls(adapter, *, instance_key, now_utc=None):
+    return dict(FRESH_CONTROLS)
+
+
 def _extract_handler(extra=None):
     """The extraction plan B Task 20 repeats: same functions, assigns,
     namespace and free-name check."""
     namespace = {"datetime": datetime_module,
                  "_live_order_dependency_lock": threading.Lock(),
-                 "_live_order_dependency_state": {"risk_snapshot_id": "risk-9"}}
+                 "_live_order_dependency_state": {"risk_snapshot_id": "risk-9"},
+                 # FW-lo-I1's control re-read, stubbed (its own tests are in
+                 # test_swing_approval_controls.py).
+                 "_approval_control_overlay": _fresh_controls}
     namespace.update(extra or {})
     return extract(
         ("_execute_swing_approval", "_lane_config", "_approval_live_price",
@@ -420,10 +432,14 @@ def test_a_swing_approval_places_a_manual_bracket_at_the_live_price(swing):
     assert swing.built[0]["live_price"] == 100.5
     assert swing.built[0]["equity"] == 60000.0
     assert swing.built[0]["today"] == datetime_module.date(2026, 10, 5)
-    # ruling 4 (plan B G5): the key the service used and the rebuilt order.
-    assert swing.updates == [("sig-1", {"status": "submitted",
-                                        "order_client_id": intent.idempotency_key,
-                                        "submitted_order": SWING_ORDER})]
+    # ruling 4 (plan B G5): the key the service used and the rebuilt order,
+    # written (round 2, minor 3) by a compare-and-swap from this claim's row.
+    assert swing.updates == []
+    (_claim, (signal_id, expect, doc)) = swing.cas
+    assert (signal_id, expect) == ("sig-1", "submitted")
+    assert (doc["status"], doc["order_client_id"], doc["submitted_order"]) == (
+        "submitted", intent.idempotency_key, SWING_ORDER)
+    assert doc["claimed_at"] == _claim[2]["claimed_at"]
     assert result == {"signal_id": "sig-1",
                       "client_order_id": intent.idempotency_key,
                       "order_id": "b-1", "reason_codes": []}
@@ -486,8 +502,9 @@ def test_the_signal_is_claimed_approved_to_submitted_before_the_order_goes_out(s
     swing.rows["sig-1"] = _signal()
     service, (ok, _error, _result) = _run(swing)
     assert ok is True
-    ((signal_id, expect, doc),) = swing.cas
+    (signal_id, expect, doc), _write_back = swing.cas
     assert (signal_id, expect, doc["status"]) == ("sig-1", "approved", "submitted")
+    assert doc["claimed_at"] == RTH.isoformat()
     assert doc["decided_by"] == "pranav" and doc["decided_at"]
     assert swing.events.index("cas") < swing.events.index("enqueue")
     assert service.status_at_enqueue == ["submitted"]
@@ -659,7 +676,7 @@ def test_a_transient_reset_then_a_re_approval_places_exactly_one_order(swing):
     _service, (ok, _error, _result) = _run(swing, service)
     assert ok is True and len(service.intents) == 1
     assert swing.rows["sig-1"]["status"] == "submitted"
-    assert [c[1] for c in swing.cas] == ["approved", "approved"]
+    assert [c[1] for c in swing.cas] == ["approved", "approved", "submitted"]
     again = _run(swing, service)[1]
     assert again[0] is False and len(service.intents) == 1
 
@@ -671,7 +688,8 @@ def test_a_signal_read_that_fails_twice_is_retried_and_placed(swing):
     swing.read_failures = 2
     service, (ok, _error, _result) = _run(swing)
     assert ok is True and len(service.intents) == 1
-    assert swing.reads == 3 and swing.pauses == [1.0, 1.0]
+    # three tries, then (round 2, minor 3) one re-read before the write-back
+    assert swing.reads == 4 and swing.pauses == [1.0, 1.0]
 
 
 def test_a_signal_that_cannot_be_read_is_reported_and_nothing_is_placed(swing):
@@ -711,8 +729,8 @@ def test_the_re_approval_round_trip_through_the_real_store_and_service(store,
 
     monkeypatch.setattr(signals_store, "store", store)
     notices = []
-    monkeypatch.setattr(notify, "notify_swing_approval_failed",
-                        lambda *a, **k: notices.append(k))
+    # G8b minor 3: the real sender runs; only its outbox sink is stubbed.
+    monkeypatch.setattr(notify, "_sink", lambda **kwargs: notices.append(kwargs))
     doc = signals_store.new_signal(
         instance_id="instance-1", lane="swing", symbol="AAPL",
         session="2026-10-02", score=62, recommendation="review", reasoning="r",
@@ -753,7 +771,7 @@ def test_the_re_approval_round_trip_through_the_real_store_and_service(store,
         "pending", None, None)
     assert list(service.lifecycle_store.list_for_instance("instance-1")) == []
     assert sent == [] and len(notices) == 1
-    assert notices[0]["reason"].endswith("approve again after the open")
+    assert notices[0]["body"].endswith("approve again after the open")
 
     quote["health"] = Health.HEALTHY
     operator()
@@ -970,3 +988,174 @@ def test_the_live_command_routes_swing_approvals_first():
     ((payload, kwargs),) = seen
     assert payload == {"source": "swing_approval", "signal_id": "s"}
     assert kwargs == {"cached_strategies": LANES, "log": None}
+
+
+# --- FW-lo-I1: the re-read controls reach this approval's snapshot only -------
+
+def test_the_re_read_controls_reach_the_service(swing):
+    swing.rows["sig-1"] = _signal()
+    service, (ok, _error, _result) = _run(swing)
+    assert ok is True and service.overlays == [FRESH_CONTROLS]
+
+
+def test_an_option_approval_keeps_its_own_calendar(swing):
+    """The option snapshot reads the calendar itself (regular hours)."""
+    swing.rows["sig-1"] = _signal(lane="wheel", symbol="APH")
+    controls = {"calendar": "healthy", "calendar_at": RTH, "market_open": True,
+                "cash": "healthy", "cash_at": RTH}
+    service, (ok, _error, _result) = _run(swing, extra={
+        "_approval_control_overlay": lambda adapter, **kw: dict(controls)})
+    assert ok is True
+    assert service.overlays == [{"cash": "healthy", "cash_at": RTH}]
+
+
+def test_a_control_re_read_that_raises_is_transient_and_places_nothing(swing):
+    def broken(adapter, **kw):
+        raise ConnectionError("pg down")
+
+    swing.rows["sig-1"] = _signal()
+    service, (ok, error, _result) = _run(swing, extra={
+        "_approval_control_overlay": broken})
+    assert ok is False and service.intents == []
+    assert error == ("the order gate's controls could not be re-read — approve "
+                     "again (ConnectionError: pg down)")
+    assert swing.updates == [("sig-1", _PENDING)]
+
+
+# --- FW-lo-I2 + T15 re-review: more transient codes ----------------------------
+
+@pytest.mark.parametrize("codes,after_the_open", [
+    # The mark stream or the 3 s position refresh rewrote the mark between
+    # the approval's price read and the gate's (a pure race).
+    (("quote.timestamp_mismatch",), False),
+    (("quote.reference_price_mismatch",), False),
+    # The tick rotated the risk snapshot between the build and the gate.
+    (("risk.snapshot_mismatch",), False),
+    (("quote.timestamp_mismatch", "quote.reference_price_mismatch",
+      "risk.snapshot_mismatch"), False),
+    (("quote.timestamp_mismatch", "dependency.cash.stale"), False),
+    (("quote.reference_price_mismatch", "quote.stale"), True),
+    (("risk.snapshot_mismatch", "market.regular_hours_required"), True),
+])
+def test_a_race_refusal_returns_the_signal_to_pending(swing, codes, after_the_open):
+    swing.rows["sig-1"] = _signal()
+    service, (ok, error, result) = _run(swing, _Service("deny", swing, codes))
+    reason = ("order gate blocked: " + ",".join(codes) + " — approve again"
+              + (" after the open" if after_the_open else ""))
+    assert ok is False and error == reason
+    assert swing.updates == [("sig-1", _PENDING)]
+    assert swing.notices[0]["reason"] == reason
+
+
+@pytest.mark.parametrize("codes", [
+    ("quote.timestamp_mismatch", "exposure.max_order_notional"),
+    ("risk.snapshot_mismatch", "cash.insufficient"),
+    ("quote.reference_price_mismatch", "idempotency.open_order_exists"),
+    ("quote.symbol_mismatch",),
+    ("quote.invalid_price",),
+])
+def test_a_race_code_beside_a_lasting_code_stays_failed(swing, codes):
+    swing.rows["sig-1"] = _signal()
+    service, (ok, error, _result) = _run(swing, _Service("deny", swing, codes))
+    (intent,) = service.intents
+    assert ok is False and error == "order gate blocked: " + ",".join(codes)
+    assert swing.updates == [("sig-1", {"status": "failed",
+                                        "order_client_id": intent.idempotency_key})]
+
+
+class _NoEquityAdapter(_Adapter):
+    def refresh_account(self):
+        return SimpleNamespace(equity=None)
+
+
+def test_a_refreshed_account_with_no_equity_is_transient(swing):
+    swing.rows["sig-1"] = _signal()
+    service, (ok, error, _result) = _run(swing, adapter=_NoEquityAdapter(equity=None))
+    reason = "account equity unreadable (the broker returned none) — approve again"
+    assert ok is False and error == reason and service.intents == []
+    assert swing.updates == [("sig-1", _PENDING)]
+    assert swing.built == []
+
+
+def test_a_reset_that_did_not_land_never_tells_the_command_approve_again(swing):
+    """The command's error (the LiveCommands row the UI shows) says what the
+    notice says: nothing was sent, and the signal may still read submitted."""
+    swing.rows["sig-1"] = _signal()
+    swing.update_raises_for = "pending"
+    _service, (ok, error, _result) = _run(swing, _Service("deny", swing,
+                                                           ("quote.stale",)))
+    assert ok is False
+    assert "approve again" not in error
+    assert error.startswith("order gate blocked: quote.stale — nothing was sent")
+    assert "could not be put back to pending" in error
+    ((notice),) = swing.notices
+    assert "approve again" not in notice["reason"]
+
+
+# --- round 2, minor 3: the sweep's check-then-act gap -------------------------
+
+def test_the_signal_is_in_flight_from_the_claim_until_the_outcome(swing):
+    swing.rows["sig-1"] = _signal()
+    in_flight = set()
+    seen = []
+
+    class Watching(_Service):
+        def enqueue(self, intent, **kwargs):
+            seen.append(set(in_flight))
+            return super().enqueue(intent, **kwargs)
+
+    _service, (ok, _e, _r) = _run(swing, Watching(swing=swing),
+                                  extra={"_swing_approvals_in_flight": in_flight})
+    assert ok is True and seen == [{"sig-1"}] and in_flight == set()
+
+
+@pytest.mark.parametrize("mode", ["deny", "raise", "uncertain"])
+def test_the_in_flight_mark_is_cleared_on_every_outcome(swing, mode):
+    swing.rows["sig-1"] = _signal()
+    in_flight = set()
+    _run(swing, _Service(mode, swing), extra={"_swing_approvals_in_flight": in_flight})
+    assert in_flight == set()
+
+
+def test_a_row_swept_to_failed_meanwhile_is_not_flipped_back(swing):
+    """The sweep marked the row failed while the order was going out: the
+    write-back must not resurrect it, and the operator is told in red that
+    the order WAS placed and must not be placed by hand."""
+    swing.rows["sig-1"] = _signal()
+    placed_for_failed = []
+    swing_notify = sys.modules["swing_trader.notify"]
+    swing_notify.notify_swing_order_placed_for_failed = (
+        lambda instance_id, **fields: placed_for_failed.append(fields))
+
+    class SweptMeanwhile(_Service):
+        def enqueue(self, intent, **kwargs):
+            out = super().enqueue(intent, **kwargs)
+            swing.rows["sig-1"]["status"] = "failed"      # the sweep's CAS
+            return out
+
+    logs = []
+    service, (ok, error, _result) = _run(swing, SweptMeanwhile(swing=swing),
+                                         logs=logs)
+    assert ok is True and error == ""                   # the order is placed
+    assert swing.rows["sig-1"]["status"] == "failed"    # not flipped back
+    assert [c[1] for c in swing.cas] == ["approved"]    # no write-back CAS
+    ((fields),) = placed_for_failed
+    assert fields["symbol"] == "AAPL"
+    assert fields["client_order_id"] == service.intents[0].idempotency_key
+    assert any(color == "red" and "do not place it by hand" in message
+               for color, message in logs)
+
+
+def test_a_row_claimed_by_another_claim_is_not_overwritten(swing):
+    swing.rows["sig-1"] = _signal()
+
+    class Reclaimed(_Service):
+        def enqueue(self, intent, **kwargs):
+            out = super().enqueue(intent, **kwargs)
+            swing.rows["sig-1"]["claimed_at"] = "2026-10-05T16:00:00+00:00"
+            return out
+
+    _service, (ok, _e, _r) = _run(swing, Reclaimed(swing=swing))
+    assert ok is True
+    assert swing.rows["sig-1"].get("order_client_id") is None
+    assert [c[1] for c in swing.cas] == ["approved"]

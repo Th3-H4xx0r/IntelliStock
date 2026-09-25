@@ -160,6 +160,21 @@ def _transport_extras(intent: OrderIntent) -> dict:
     return extras
 
 
+def _option_fill_meta(intent: OrderIntent) -> dict:
+    """The contract of a fill on an option order WE placed (FW1 follow-up):
+    its intent's underlying, type, strike and expiry, which OrderIntent
+    requires of every us_option intent. {} for every other intent, so an
+    equity fill (EB's) is built with exactly the keywords it always was."""
+    if intent.asset_class != "us_option":
+        return {}
+    return {
+        "underlying": intent.underlying,
+        "option_type": intent.option_type,
+        "strike": intent.strike,
+        "expiry": intent.expiry,
+    }
+
+
 def bracket_leg_intent(parent: OrderIntent, leg) -> OrderIntent:
     """The lifecycle intent for one child leg of a bracket parent.
 
@@ -482,7 +497,28 @@ class LiveOrderService:
             except TerminalRetryExhausted:
                 return candidate, existing, "idempotency.terminal_retry_exhausted"
 
-    def submit(self, intent: OrderIntent) -> OrderSubmission:
+    def submit(
+        self,
+        intent: OrderIntent,
+        *,
+        snapshot_overlay: Optional[dict] = None,
+        before_submit: Optional[Callable[[OrderIntent, GateDecision], None]] = None,
+    ) -> OrderSubmission:
+        """Gate, record and send one intent.
+
+        ``snapshot_overlay`` (swing-port fix wave, FW-lo-I1) replaces fields
+        of the provider's snapshot with values the caller has just re-read:
+        an operator approval runs off-tick, after the loop's control stamps
+        have aged past the gate's 60 s. It changes this one evaluation only;
+        an overlay the snapshot rejects is ``dependency.snapshot.invalid``.
+
+        ``before_submit`` (swing-port fix wave, FW-str-I1) runs once the gate
+        has allowed the intent and before anything exists: no lifecycle row,
+        no reservation, no broker call. A swing exit cancels its bracket legs
+        there, so a refused sell leaves its stop working. To refuse, it
+        raises; the exception reaches the caller and nothing was created.
+        Every EB call passes no hook and takes exactly the old path.
+        """
         if not isinstance(intent, OrderIntent):
             raise TypeError("LiveOrderService.submit requires an OrderIntent")
         if intent.source in _RECORD_ONLY_SOURCES:
@@ -505,9 +541,17 @@ class LiveOrderService:
                 intent, "dependency.snapshot.invalid",
                 TypeError(f"snapshot provider returned {type(snapshot).__name__}"))
             return _denial(intent, "dependency.snapshot.invalid")
+        if snapshot_overlay:
+            try:
+                snapshot = replace(snapshot, **dict(snapshot_overlay))
+            except Exception as exc:
+                self._report_swallowed(intent, "dependency.snapshot.invalid", exc)
+                return _denial(intent, "dependency.snapshot.invalid")
         decision = self._gate.evaluate(intent, snapshot)
         if not decision.allowed:
             return OrderSubmission(decision=decision)
+        if before_submit is not None:
+            before_submit(intent, decision)
         try:
             record = self.lifecycle_store.create_intent(intent)
         except Exception as exc:
@@ -666,6 +710,7 @@ class LiveOrderService:
                 cash_delta=cash_delta,
                 asset_class=record.intent.asset_class,
                 contract_multiplier=multiplier,
+                **_option_fill_meta(record.intent),
             )
             reservation = self._reservations.get(event.client_order_id)
             if reservation is not None:

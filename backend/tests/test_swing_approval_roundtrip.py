@@ -35,7 +35,7 @@ class Service:
     def __init__(self):
         self.intents = []
 
-    def enqueue(self, intent):
+    def enqueue(self, intent, *, snapshot_overlay=None):
         self.intents.append(intent)
         decision = GateDecision(allowed=True, approved_quantity=intent.quantity,
                                 reason_codes=(), idempotency_key=intent.idempotency_key)
@@ -85,18 +85,25 @@ def handler():
         assigns=("_live_option_quotes", "_LANE_ENABLE_FLAGS"),
         namespace={"datetime": datetime_module,
                    "_live_order_dependency_lock": threading.Lock(),
-                   "_live_order_dependency_state": {"risk_snapshot_id": "risk-9"}},
+                   "_live_order_dependency_state": {"risk_snapshot_id": "risk-9"},
+                   # FW-lo-I1's control re-read, stubbed; its own tests are in
+                   # test_swing_approval_controls.py.
+                   "_approval_control_overlay":
+                       lambda adapter, *, instance_key, now_utc=None: {}},
         check=("_execute_swing_approval", "_lane_config",
                "_approval_live_price"))["_execute_swing_approval"]
 
 
 @pytest.fixture
 def notices(monkeypatch):
-    """The handler's swing_approval_failed sender, recorded: the real one
-    reaches for Discord and push (about 2 s a call)."""
+    """What the handler's REAL swing_approval_failed sender hands the outbox,
+    recorded at notify._sink (the real sink reaches for Discord and push,
+    about 2 s a call). Stubbing the sink, not the sender, runs the sender's
+    real signature: a handler call that drifts from it raises inside the
+    handler's notice helper, no notice reaches the sink, and the test fails
+    (G8b minor 3)."""
     sent = []
-    monkeypatch.setattr(notify, "notify_swing_approval_failed",
-                        lambda instance_id, **fields: sent.append((instance_id, fields)))
+    monkeypatch.setattr(notify, "_sink", lambda **kwargs: sent.append(kwargs))
     return sent
 
 
@@ -202,6 +209,11 @@ def test_an_approval_on_an_underlying_already_short_fails_and_places_nothing(sig
     row = signals_store.get_signal(sid)
     assert (row["status"], row["order_client_id"]) == ("failed", None)
     # The operator believes that trade is on: one swing_approval_failed notice.
-    ((instance_id, fields),) = notices
-    assert (instance_id, fields["symbol"], fields["lane"]) == (IID, "APH", "wheel")
-    assert "duplicate" in fields["reason"]
+    (notice,) = notices
+    assert notice["category"] == "swing_approval_failed"
+    assert notice["instance_id"] == IID
+    assert notice["push_title"] == "Approved wheel order refused: APH"
+    assert notice["body"].startswith(
+        f"SWING APPROVAL FAILED [{IID}] Approved wheel order refused: APH\n"
+        "APH: the wheel order you approved was not sent — ")
+    assert "duplicate" in notice["body"] and "duplicate" in notice["push_body"]

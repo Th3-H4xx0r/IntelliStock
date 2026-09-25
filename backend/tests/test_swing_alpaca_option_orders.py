@@ -563,3 +563,43 @@ def test_a_sideless_stream_event_is_logged_once_then_dropped(monkeypatch):
     assert event is None
     assert len(lines) == 1 and lines[0][2] == "yellow"
     assert "ui-mleg" in lines[0][1] and "fill" in lines[0][1]
+
+
+# --- fix wave FW1 item 8 (live-orders review M-2): only Alpaca's own refusal --
+
+def _answered(status, text):
+    error = Exception(text)
+    error.status_code = status
+    return error
+
+
+@pytest.mark.parametrize("error", [
+    _answered(503, f"503 Service Unavailable while routing {OCC}"),
+    _answered(500, f'{{"message":"internal error on option order {OCC}"}}'),
+    _answered(422, f'{{"code":42210000,"message":"invalid expiration for option {OCC}"}}'),
+    _answered(422, '{"code":42210000,"message":"limit price must be in 0.05 '
+                   'increments for this option"}'),
+])
+def test_an_answered_error_that_merely_names_an_option_keeps_its_own_type(error):
+    """M-2: any answered error whose text said "option" read as "options not
+    permitted", including a 5xx whose body names the contract, so the alert
+    named the wrong cause. Still definitive (Alpaca answered), as before."""
+    adapter = make_adapter(FakeTradingClient(submit_error=error))
+    with pytest.raises(BrokerError) as info:
+        _sto(adapter)
+    assert not isinstance(info.value, OptionsNotPermitted)
+    assert info.value.broker_definitive_rejection is True
+
+
+@pytest.mark.parametrize("error", [
+    _answered(403, '{"code":40310000,"message":"account not eligible to trade '
+                   'uncovered option contracts"}'),
+    _answered(422, "options trading not approved"),
+    _answered(403, '{"message":"options trading is not enabled for this account"}'),
+    _answered(403, "account is not approved for options trading level 2"),
+])
+def test_alpacas_options_refusals_still_map_to_options_not_permitted(error):
+    adapter = make_adapter(FakeTradingClient(submit_error=error))
+    with pytest.raises(OptionsNotPermitted) as info:
+        _sto(adapter)
+    assert info.value.broker_definitive_rejection is True
