@@ -580,7 +580,9 @@ class DependencySnapshot:
     regular_session_open: Optional[bool] = None
     account_equity: Optional[Decimal] = None
     open_short_put_collateral: Optional[Decimal] = None
-    pending_sell_to_open_collateral: Decimal = Decimal("0")
+    # None = unknown, like open_short_put_collateral: a snapshot that omits
+    # it must fail closed, never read as "no pending puts" (L3 review M3).
+    pending_sell_to_open_collateral: Optional[Decimal] = None
     underlying_put_collateral: Optional[Decimal] = None
     max_underlying_collateral_fraction: Decimal = Decimal("0.25")
 
@@ -643,7 +645,7 @@ class DependencySnapshot:
         open_short_put_collateral = _optional_decimal(
             self.open_short_put_collateral, "open_short_put_collateral"
         )
-        pending_sell_to_open_collateral = _decimal(
+        pending_sell_to_open_collateral = _optional_decimal(
             self.pending_sell_to_open_collateral,
             "pending_sell_to_open_collateral",
         )

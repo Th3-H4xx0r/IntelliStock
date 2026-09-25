@@ -323,7 +323,13 @@ class UnifiedOrderGate:
                 blockers.append("option.sell_to_open_requires_put")
             else:
                 collateral = intent.strike * multiplier * intent.quantity
-                if snapshot.open_short_put_collateral is None:
+                if (
+                    snapshot.open_short_put_collateral is None
+                    or snapshot.pending_sell_to_open_collateral is None
+                ):
+                    # Either half unknown is the whole answer unknown (L3
+                    # review M3): an omitted pending figure must not read as
+                    # "no pending puts" and admit a put the cash cannot cover.
                     blockers.append("option.collateral_unknown")
                 elif collateral > (
                     snapshot.available_cash

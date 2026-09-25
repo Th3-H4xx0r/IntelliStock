@@ -303,7 +303,7 @@ def test_only_an_option_snapshot_may_carry_a_short_position():
     plain = snapshot(order)
     assert plain.asset_class == "us_equity"
     assert plain.open_short_put_collateral is None
-    assert plain.pending_sell_to_open_collateral == Decimal("0")
+    assert plain.pending_sell_to_open_collateral is None  # L3 review M3: unknown
     assert plain.max_underlying_collateral_fraction == Decimal("0.25")
     with pytest.raises(ValueError):
         snapshot(order, asset_class="us_option",

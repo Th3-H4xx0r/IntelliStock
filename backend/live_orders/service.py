@@ -784,7 +784,23 @@ class LiveOrderService:
     ) -> EventApplication:
         """Record a fill no order produced (an option assignment) as a FILLED
         lifecycle row. Exactly once: a second call finds the row terminal and
-        applies nothing, so no fill is counted or announced twice."""
+        applies nothing, so no fill is counted or announced twice.
+
+        Option activity only (L3 review M1). Any other source is an order the
+        broker fills itself: writing one FILLED here would book a position
+        and cash no broker order produced, and the real submit of that intent
+        would then be refused idempotency.terminal_requires_retry. The
+        broker's activity id is required for the same reason: without it the
+        row could not be traced to anything the broker did."""
+        if intent.source is not OrderSource.OPTION_ACTIVITY:
+            raise ValueError(
+                "record_external_fill records option activity only; a "
+                f"{intent.source.value} intent is filled by its own broker order"
+            )
+        if not str(broker_order_id or "").strip():
+            raise ValueError(
+                "record_external_fill needs the broker's activity id"
+            )
         if self.lifecycle_store.get(intent.idempotency_key) is None:
             self.lifecycle_store.create_intent(intent)
         quantity = Decimal(str(quantity))
