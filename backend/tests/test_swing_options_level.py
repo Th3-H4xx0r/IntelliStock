@@ -202,3 +202,55 @@ def test_a_level_zero_refusal_places_no_option_order():
         log=lambda m, c="white": lines.append((m, c)))
     assert result["status"] == "refused"
     assert any(c == "red" and "options_trading_level=0" in m for m, c in lines)
+
+
+def test_an_unreadable_options_level_still_closes_a_short_put():
+    """L5 review ruling: the verdict the call site hands over (here the
+    unreadable account's) refuses opening orders only. A buy_to_close is
+    risk-reducing (F1): it is submitted, and no CLOSE MANUALLY page goes
+    out, so the session's definite AUTO-CLOSE slot is still free."""
+    import datetime as datetime_module
+    from decimal import Decimal
+
+    from live_orders import (
+        InMemoryLifecycleBackend,
+        LiveOrderService,
+        OrderLifecycleStore,
+    )
+    from broker_adapters.base import OptionSnapshotDTO
+    from swing_live_fixtures import OCC, RTH, option_snapshot
+
+    refusal = _check()(_Account(fail=True), WHEEL)
+    assert refusal.startswith("options level unreadable")
+    pages = []
+    ns = extract(("_execute_option_intents", "_build_option_intent",
+                  "_refresh_option_quote"),
+                 assigns=("_live_option_quotes", "_auto_close_alerts"),
+                 namespace={"datetime": datetime_module,
+                            "_wheel_alert": lambda *a, **k: pages.append(a) or True})
+    sent = []
+    service = LiveOrderService(
+        account_id="acct-1", instance_id="instance-1",
+        snapshot_provider=lambda intent: option_snapshot(
+            intent, position_quantity=Decimal("-1")),
+        transport=lambda **kw: sent.append(kw) or SimpleNamespace(
+            status="accepted", broker_order_id="b-1", id="b-1",
+            filled_qty=0, filled_avg_price=None),
+        lifecycle_store=OrderLifecycleStore(InMemoryLifecycleBackend()))
+
+    class _Quotes:
+        def get_option_snapshots(self, contracts):
+            return {c: OptionSnapshotDTO(c, 1.1, 1.3, 1.2, None, None, None,
+                                         None, None, RTH.isoformat())
+                    for c in contracts}
+
+    btc = {"contract": OCC, "position_intent": "buy_to_close",
+           "underlying": "APH", "option_type": "put", "strike": 130.0,
+           "expiry": "2026-10-09", "qty": 1, "order_type": "market",
+           "tif": "day", "reason": "wheel_btc_itm"}
+    (result,) = ns["_execute_option_intents"](
+        [btc], order_service=service, adapter=_Quotes(), now_utc=RTH,
+        risk_snapshot_id="risk-1", refused_reason=refusal)
+    assert result["status"] == "submitted"
+    assert [kw["position_intent"] for kw in sent] == ["buy_to_close"]
+    assert pages == [] and ns["_auto_close_alerts"]["sent"] == set()

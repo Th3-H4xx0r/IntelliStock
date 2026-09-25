@@ -10178,6 +10178,8 @@ def _execute_option_intents(option_orders, *, order_service, adapter, now_utc,
       IMMEDIATELY"; an unknown outcome says the close may be working (M-1).
       One close-failure alert per contract per New York session and kind
       (M-3).
+    - L5 review: `refused_reason` (the options-level verdict) refuses only
+      opening orders; a buy_to_close or sell_to_close still goes out.
     """
     duplicate_codes = frozenset({"idempotency.open_order_exists",
                                  "idempotency.terminal_requires_retry"})
@@ -10193,7 +10195,12 @@ def _execute_option_intents(option_orders, *, order_service, adapter, now_utc,
     def place(entry, result):
         """Places one order; returns why it did not go out ("" if it did)."""
         contract = result["contract"]
-        if refused_reason:
+        # L5 review: the options-level verdict refuses OPENING orders only. A
+        # close is risk-reducing (F1): refusing a buy_to_close would keep the
+        # short put open and spend the session's AUTO-CLOSE alert on it.
+        closing = str(entry.get("position_intent") or "").strip().lower() in (
+            "buy_to_close", "sell_to_close")
+        if refused_reason and not closing:
             result["status"] = "refused"
             say(f"[wheel] {contract} {entry.get('position_intent')} NOT placed: "
                 f"the wheel lane is refused ({refused_reason})", "red")
@@ -10376,6 +10383,15 @@ def _poll_option_activities(adapter, order_service, wheel_cache, *, now_utc,
     resolved, or whose record fails, stays unseen and is retried. An
     unreadable activities answer (the adapter raises on a non-list body)
     changes nothing and is retried on the next poll.
+
+    L5 review, fail safe: a lifecycle read that fails is UNKNOWN and holds
+    the activity (no cursor advance, no notice); if the unconfirmed read came
+    right after this poll's record, the notice is owed
+    (_engine_option_activity_owed) and the retry that finds the row FILLED
+    sends it, once. An assignment with a zero, fractional-below-one or
+    missing quantity is held in red, never booked as one contract. A
+    contract neither held nor listed by Alpaca any more (a restart after
+    expiry) is booked from its OCC symbol's fields, an adjusted root refused.
     """
     import hashlib
     import time as _time
@@ -10421,11 +10437,42 @@ def _poll_option_activities(adapter, order_service, wheel_cache, *, now_utc,
             return now_utc
 
     def filled(key):
+        """True or False from the durable row; None when the store could not
+        be read (L5 review). Unknown is never "not filled": read that way, a
+        replay would take itself for the poll that filled the row and
+        announce the assignment twice."""
         try:
             record = order_service.lifecycle_store.get(key)
         except Exception:
-            return False
+            return None
         return record is not None and record.state is LifecycleState.FILLED
+
+    def occ_fields(symbol):
+        """(underlying, option_type, strike) read from an OCC symbol, or None.
+        L5 review: only for BOOKING an assignment of a contract Alpaca no
+        longer lists (a restart after expiry), never for identifying a
+        position. An adjusted root (a digit in it) names no tradable
+        underlying and is refused."""
+        try:
+            from swing_trader.wheel_rules import occ_parts
+            parts = occ_parts(symbol)
+        except Exception:
+            return None
+        if parts is None or not str(parts[0]).isalpha():
+            return None
+        return str(parts[0]), parts[2], Decimal(str(parts[3]))
+
+    def whole_contracts(raw):
+        """The activity's contract count, or None when it is missing, zero,
+        fractional below one or unreadable (L5 review: never booked as one)."""
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return None
+        if value != value or value in (float("inf"), float("-inf")):
+            return None
+        count = abs(int(round(value)))
+        return count if count >= 1 else None
 
     clock = monotonic or _time.monotonic
     last = _option_activity_last_poll.get("at")
@@ -10446,6 +10493,10 @@ def _poll_option_activities(adapter, order_service, wheel_cache, *, now_utc,
     processed = []
     newest = None
     retry_from = None
+    # L5 review: assignments this instance recorded but could not confirm;
+    # the poll that later finds the row FILLED sends their one notice.
+    owed = [str(x) for x in (wheel_cache.get("_engine_option_activity_owed")
+                             or []) if x]
 
     def hold(activity, why):
         nonlocal retry_from
@@ -10460,26 +10511,44 @@ def _poll_option_activities(adapter, order_service, wheel_cache, *, now_utc,
             continue
         symbol = activity.symbol
         if activity.activity_type == "OPASN":
+            contracts = whole_contracts(activity.qty)
+            if contracts is None:
+                hold(activity, f"its quantity {activity.qty!r} is zero or missing")
+                continue
             meta = (getattr(adapter, "_option_positions", {}) or {}).get(symbol)
             if (meta is None or not getattr(meta, "underlying", "")
                     or not getattr(meta, "strike", 0)):
                 meta = adapter.option_contract_meta(symbol)
-            option_type = str(getattr(meta, "option_type", "") or "").lower()
-            try:
-                strike = Decimal(str(getattr(meta, "strike", 0) or 0))
-            except Exception:
-                strike = Decimal("0")
-            if (meta is None or not getattr(meta, "underlying", "")
-                    or option_type not in ("put", "call") or strike <= 0):
-                hold(activity, "its contract fields are unknown")
-                continue
-            contracts = max(1, abs(int(round(float(activity.qty or 0)))))
+            if meta is None:
+                fields = occ_fields(symbol)
+                if fields is None:
+                    hold(activity, "its contract fields are unknown")
+                    continue
+                underlying, option_type, strike = fields
+                say(f"[wheel] assignment {activity.id} on {symbol}: the contract "
+                    f"is no longer listed; booked from its OCC symbol "
+                    f"({underlying} {option_type} {strike})", "yellow")
+            else:
+                underlying = str(getattr(meta, "underlying", "") or "")
+                option_type = str(getattr(meta, "option_type", "") or "").lower()
+                try:
+                    strike = Decimal(str(getattr(meta, "strike", 0) or 0))
+                except Exception:
+                    strike = Decimal("0")
+                if (not underlying or option_type not in ("put", "call")
+                        or strike <= 0):
+                    hold(activity, "its contract fields are unknown")
+                    continue
             shares = contracts * 100
             side = OrderSide.BUY if option_type == "put" else OrderSide.SELL
             occurred = when(activity.date)
             key = "opasn-" + hashlib.sha256(
                 activity.id.encode("utf-8")).hexdigest()[:32]
-            first = not filled(key)
+            state = filled(key)
+            if state is None:
+                hold(activity, "the lifecycle store is unreadable")
+                continue
+            first = not state
             failure = None
             if first:
                 try:
@@ -10488,7 +10557,7 @@ def _poll_option_activities(adapter, order_service, wheel_cache, *, now_utc,
                         instance_id=order_service.instance_id,
                         source=OrderSource.OPTION_ACTIVITY,
                         reason=f"wheel_assignment:{symbol}",
-                        symbol=meta.underlying,
+                        symbol=underlying,
                         side=side,
                         quantity=Decimal(shares),
                         reduce_only=side is OrderSide.SELL,
@@ -10505,7 +10574,16 @@ def _poll_option_activities(adapter, order_service, wheel_cache, *, now_utc,
                         reason=f"option assignment {symbol}")
                 except Exception as exc:
                     failure = f"{type(exc).__name__}: {exc}"
-            if not filled(key):
+            state = filled(key)
+            if state is None:
+                # Recorded by this poll, perhaps, but the row cannot be read
+                # back: the retry that finds it FILLED owes the one notice.
+                if first and activity.id not in owed:
+                    owed.append(activity.id)
+                hold(activity, "the lifecycle store is unreadable, so the "
+                               "record cannot be confirmed")
+                continue
+            if not state:
                 hold(activity, f"the record failed ({failure or 'not filled'})")
                 continue
             if failure is not None:
@@ -10520,17 +10598,19 @@ def _poll_option_activities(adapter, order_service, wheel_cache, *, now_utc,
                        for row in listed):
                 listed.append({
                     "activity_id": activity.id, "contract": symbol,
-                    "underlying": meta.underlying, "shares": shares,
+                    "underlying": underlying, "shares": shares,
                     "side": side.value, "strike": float(strike),
                     "date": str(activity.date)[:10],
                 })
-            if first:
+            if first or activity.id in owed:
+                if activity.id in owed:
+                    owed.remove(activity.id)
                 say(f"[wheel] ASSIGNED {symbol}: {side.value} {shares} "
-                    f"{meta.underlying} at {strike}", "yellow")
+                    f"{underlying} at {strike}", "yellow")
                 try:
                     (notify or default_notify)(
                         str(order_service.instance_id),
-                        symbol=meta.underlying, qty=shares,
+                        symbol=underlying, qty=shares,
                         price=float(strike), date=str(activity.date)[:10])
                 except Exception as exc:
                     say(f"[wheel] assignment notification failed "
@@ -10543,6 +10623,8 @@ def _poll_option_activities(adapter, order_service, wheel_cache, *, now_utc,
         day = str(activity.date or "")[:10]
         if day and (newest is None or day > newest):
             newest = day
+    if owed or "_engine_option_activity_owed" in wheel_cache:
+        wheel_cache["_engine_option_activity_owed"] = owed[-500:]
     if processed:
         def day_before(text):
             try:

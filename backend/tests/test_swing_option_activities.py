@@ -196,17 +196,22 @@ def test_a_seen_activity_is_skipped_by_id():
     assert account.calls[0][1] == "2026-10-08" and fills == []
 
 
+#: An adjusted contract (a corporate action renamed its root): its OCC symbol
+#: names no tradable underlying, so it is never booked from the symbol.
+ADJUSTED = "APH1261009P00130000"
+
+
 def test_an_unresolvable_contract_is_retried_not_marked_seen():
     poll = _poller()
     service, fills = _service()
     lines = []
-    account = _Account([_assigned()])
+    account = _Account([_assigned(symbol=ADJUSTED)])
     cache = {}
     assert poll(account, service, cache, now_utc=RTH, min_interval_s=0,
                 log=lambda m, c="white": lines.append((m, c))) == []
     assert fills == [] and "_engine_option_activity_cursor" not in cache
     assert any(c == "red" and "NOT recorded" in m for m, c in lines)
-    account.contracts[OCC] = _put()
+    account.contracts[ADJUSTED] = _put(ADJUSTED)
     poll(account, service, cache, now_utc=RTH, min_interval_s=0,
          notify=_ignore)
     assert len(fills) == 1
@@ -480,7 +485,7 @@ def test_a_lost_cache_relists_the_assignment_without_a_second_notice():
 def test_the_cursor_never_moves_past_an_assignment_it_must_retry():
     poll = _poller()
     service, fills = _service()
-    stuck = _assigned("act-old", symbol=CALL, day="2026-10-02")
+    stuck = _assigned("act-old", symbol="APH1261009C00140000", day="2026-10-02")
     expiry = OptionActivityDTO("exp-1", "OPEXP", OCC, -1.0, "2026-10-09", 0.0)
     account = _Account([stuck, expiry], positions={OCC: _put()})
     cache = {}
@@ -489,7 +494,8 @@ def test_the_cursor_never_moves_past_an_assignment_it_must_retry():
     assert [a.id for a in done] == ["exp-1"]
     assert cache["_engine_option_activity_cursor"] == {
         "after": "2026-10-01", "seen": ["exp-1"]}
-    account.contracts[CALL] = _put(CALL, "call", 140.0)
+    account.contracts["APH1261009C00140000"] = _put("APH1261009C00140000",
+                                                    "call", 140.0)
     poll(account, service, cache, now_utc=RTH, notify=_ignore, min_interval_s=0)
     assert account.calls[-1][1] == "2026-10-01" and len(fills) == 1
 
@@ -549,3 +555,125 @@ def test_without_plan_b_the_notice_is_a_bare_wheel_assignment(monkeypatch):
     assert notice["instance_id"] == "instance-1"
     assert "APH" in notice["title"]
     assert "100 shares @ $130.00 on 2026-10-09" in notice["body"]
+
+
+# --- L5 review ruling: the poller fails safe ----------------------------------
+
+class _FlakyStore:
+    """The service's lifecycle store with reads that fail on demand."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.fail_next = 0
+
+    def get(self, key):
+        if self.fail_next:
+            self.fail_next -= 1
+            raise ConnectionError("lifecycle store unreachable")
+        return self.inner.get(key)
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+
+def test_a_lost_cursor_and_one_failed_store_read_announce_exactly_once():
+    """A failed read is UNKNOWN, never "not filled": read as not filled, the
+    replay would take itself for the poll that filled the row and announce
+    the assignment a second time."""
+    poll = _poller()
+    service, fills = _service()
+    flaky = service.lifecycle_store = _FlakyStore(service.lifecycle_store)
+    account = _Account([_assigned()], positions={OCC: _put()})
+    sent, notify = _collect()
+    poll(account, service, {}, now_utc=RTH, notify=notify, min_interval_s=0)
+    assert len(sent) == 1
+    fresh, lines = {}, []
+    flaky.fail_next = 1
+    assert poll(account, service, fresh, now_utc=RTH, notify=notify,
+                min_interval_s=0,
+                log=lambda m, c="white": lines.append((m, c))) == []
+    assert "_engine_option_activity_cursor" not in fresh
+    assert any(c == "red" and "NOT recorded" in m and "unreadable" in m
+               for m, c in lines)
+    done = poll(account, service, fresh, now_utc=RTH, notify=notify,
+                min_interval_s=0)
+    assert [a.id for a in done] == ["act-1"]
+    assert len(sent) == 1 and len(fills) == 1
+    assert [row["activity_id"] for row in fresh["_engine_wheel_assignments"]] == [
+        "act-1"]
+
+
+def test_a_failed_read_after_the_record_announces_once_on_the_retry():
+    """The poll that recorded the assignment could not confirm the row: it
+    holds the activity and owes the notice, which the retry that finds the
+    row FILLED sends, once."""
+    poll = _poller()
+    service, fills = _service()
+    flaky = service.lifecycle_store = _FlakyStore(service.lifecycle_store)
+    real_record = service.record_external_fill
+
+    def record_then_lose_the_store(*args, **kwargs):
+        out = real_record(*args, **kwargs)
+        flaky.fail_next = 1
+        return out
+
+    service.record_external_fill = record_then_lose_the_store
+    account = _Account([_assigned()], positions={OCC: _put()})
+    cache, (sent, notify) = {}, _collect()
+    assert poll(account, service, cache, now_utc=RTH, notify=notify,
+                min_interval_s=0) == []
+    assert sent == [] and len(fills) == 1
+    assert "_engine_option_activity_cursor" not in cache
+    service.record_external_fill = real_record
+    done = poll(account, service, cache, now_utc=RTH, notify=notify,
+                min_interval_s=0)
+    assert [a.id for a in done] == ["act-1"]
+    assert sent == [{"instance_id": "instance-1", "symbol": "APH", "qty": 100,
+                     "price": 130.0, "date": "2026-10-09"}]
+    poll(account, service, cache, now_utc=RTH, notify=notify, min_interval_s=0)
+    poll(account, service, {}, now_utc=RTH, notify=notify, min_interval_s=0)
+    assert len(sent) == 1 and len(fills) == 1
+
+
+@pytest.mark.parametrize("symbol,side,cash", [
+    (OCC, OrderSide.BUY, Decimal("-13000")),
+    (CALL, OrderSide.SELL, Decimal("14000")),
+])
+def test_an_assignment_whose_contract_is_gone_is_booked_from_its_symbol(
+        symbol, side, cash):
+    """After a restart that follows expiry the contract is neither held nor
+    listed by Alpaca: its accounting fields come from the OCC symbol, so the
+    assignment is booked instead of held forever."""
+    poll = _poller()
+    service, fills = _service()
+    account = _Account([_assigned(symbol=symbol)])
+    cache, (sent, notify) = {}, _collect()
+    lines = []
+    done = poll(account, service, cache, now_utc=RTH, notify=notify,
+                min_interval_s=0, log=lambda m, c="white": lines.append((m, c)))
+    assert [a.id for a in done] == ["act-1"]
+    (fill,) = fills
+    assert (fill.event.symbol, fill.event.side, fill.incremental_quantity,
+            fill.cash_delta) == ("APH", side, Decimal("100"), cash)
+    (listed,) = cache["_engine_wheel_assignments"]
+    assert (listed["underlying"], listed["contract"], listed["side"]) == (
+        "APH", symbol, side.value)
+    assert [n["symbol"] for n in sent] == ["APH"]
+    assert any(c == "yellow" and "OCC symbol" in m for m, c in lines)
+
+
+@pytest.mark.parametrize("qty", [0.0, None, "", "nan", 0.4, "lots"])
+def test_an_assignment_without_a_quantity_is_held_never_booked_as_one(qty):
+    poll = _poller()
+    service, fills = _service()
+    account = _Account([_assigned(qty=qty)], positions={OCC: _put()})
+    cache, (sent, notify) = {}, _collect()
+    lines = []
+    assert poll(account, service, cache, now_utc=RTH, notify=notify,
+                min_interval_s=0,
+                log=lambda m, c="white": lines.append((m, c))) == []
+    assert fills == [] and sent == []
+    assert "_engine_option_activity_cursor" not in cache
+    assert not service.lifecycle_store.list_for_instance("instance-1")
+    assert any(c == "red" and "NOT recorded" in m and "quantity" in m
+               for m, c in lines)

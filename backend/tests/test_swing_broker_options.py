@@ -309,7 +309,10 @@ def test_an_unknown_outcome_is_never_written_back_as_failed(signal_updates):
 
 # --- G7 review I-3: an auto-close that did not go out is shouted --------------
 
-@pytest.mark.parametrize("case", ["blocked", "no_quote", "error", "refused",
+# L5 review ruling: an options-level refusal never refuses a buy_to_close
+# (risk-reducing, F1), so "refused" is not a buy_to_close outcome any more;
+# see test_an_options_level_refusal_never_blocks_a_buy_to_close.
+@pytest.mark.parametrize("case", ["blocked", "no_quote", "error",
                                   "uncertain", "invalid"])
 def test_a_buy_to_close_that_was_not_submitted_alerts_urgently(case):
     alerts = []
@@ -325,9 +328,6 @@ def test_a_buy_to_close_that_was_not_submitted_alerts_urgently(case):
         service = SimpleNamespace(
             account_id="acct-1", instance_id="instance-1",
             submit=lambda intent: (_ for _ in ()).throw(RuntimeError("boom")))
-    elif case == "refused":
-        service, _calls = _service()
-        kwargs["refused_reason"] = "options_trading_level=0"
     elif case == "uncertain":
         service = SimpleNamespace(
             account_id="acct-1", instance_id="instance-1",
@@ -352,6 +352,54 @@ def test_a_buy_to_close_that_was_not_submitted_alerts_urgently(case):
         assert "was NOT placed" in message
     assert priority == 2
     assert OCC in message
+
+
+# --- L5 review ruling: the options-level refusal refuses opening orders only --
+
+@pytest.mark.parametrize("refusal", ["options_trading_level=0",
+                                     "options level unreadable (RuntimeError)"])
+def test_an_options_level_refusal_never_blocks_a_buy_to_close(refusal):
+    """A buy_to_close is risk-reducing (F1): the options-level verdict must
+    not keep a short put open, and must not spend the session's definite
+    AUTO-CLOSE alert slot on a close it refused itself."""
+    alerts = []
+    ns = _executor(alerts)
+    service, calls = _service(provider=lambda cur: option_snapshot(
+        cur, position_quantity=Decimal("-1")))
+    (result,) = ns["_execute_option_intents"](
+        [dict(BTC)], order_service=service, adapter=_Quotes(), now_utc=RTH,
+        risk_snapshot_id="risk-1", refused_reason=refusal)
+    assert result["status"] == "submitted" and len(calls) == 1
+    assert calls[0]["position_intent"] == "buy_to_close"
+    assert alerts == []
+    assert ns["_auto_close_alerts"]["sent"] == set()
+
+
+def test_an_options_level_refusal_lets_a_sell_to_close_through():
+    ns = _executor()
+    service, calls = _service(provider=lambda cur: option_snapshot(
+        cur, position_quantity=Decimal("1")))
+    stc = dict(ORDER, position_intent="sell_to_close", order_type="market",
+               limit_price=None)
+    (result,) = ns["_execute_option_intents"](
+        [stc], order_service=service, adapter=_Quotes(), now_utc=RTH,
+        risk_snapshot_id="risk-1", refused_reason="options_trading_level=0")
+    assert result["status"] != "refused"
+    assert result["client_order_id"] is not None
+
+
+@pytest.mark.parametrize("position_intent", ["sell_to_open", "buy_to_open",
+                                             None, "sell_short"])
+def test_an_options_level_refusal_refuses_every_opening_or_unknown_order(
+        position_intent):
+    ns = _executor()
+    service, calls = _service()
+    quotes = _Quotes()
+    (result,) = ns["_execute_option_intents"](
+        [dict(ORDER, position_intent=position_intent)], order_service=service,
+        adapter=quotes, now_utc=RTH, risk_snapshot_id="risk-1",
+        refused_reason="options_trading_level=0")
+    assert result["status"] == "refused" and calls == [] and quotes.calls == []
 
 
 def test_a_submitted_buy_to_close_sends_no_failure_alert():
