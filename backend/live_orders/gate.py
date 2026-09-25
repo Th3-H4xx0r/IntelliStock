@@ -31,9 +31,22 @@ class UnifiedOrderGate:
         "watchdog",
     )
 
+    #: The side each option position intent must carry.
+    _OPTION_INTENT_SIDES = {
+        "sell_to_open": OrderSide.SELL,
+        "sell_to_close": OrderSide.SELL,
+        "buy_to_open": OrderSide.BUY,
+        "buy_to_close": OrderSide.BUY,
+    }
+
     def evaluate(
         self, intent: OrderIntent, snapshot: DependencySnapshot
     ) -> GateDecision:
+        # swing-port: options take their own branch, entered ONLY for an
+        # intent that says asset_class == "us_option". Every EB intent is
+        # us_equity and runs the unchanged body below.
+        if intent.asset_class == "us_option":
+            return self._evaluate_option(intent, snapshot)
         blockers: list[str] = []
         notices: list[str] = []
         approved = intent.quantity
@@ -193,6 +206,155 @@ class UnifiedOrderGate:
             blockers.append("idempotency.open_order_exists")
 
         # 8. Source authorization.
+        if intent.source not in snapshot.authorized_sources:
+            blockers.append("authorization.source_denied")
+
+        allowed = not blockers
+        return GateDecision(
+            allowed=allowed,
+            approved_quantity=approved if allowed else Decimal("0"),
+            reason_codes=tuple(blockers + notices),
+            idempotency_key=intent.idempotency_key,
+        )
+
+    def _dependency_blockers(self, required, snapshot) -> list[str]:
+        """Step 2 of ``evaluate`` (health, then freshness) for the options
+        branch. A copy rather than a refactor, so EB's gate body stays
+        literally the lines it was."""
+        blockers: list[str] = []
+        for name in required:
+            health = getattr(snapshot, name)
+            if health is Health.UNKNOWN:
+                blockers.append(f"dependency.{name}.unknown")
+            elif health is Health.UNHEALTHY:
+                blockers.append(f"dependency.{name}.unhealthy")
+        freshness = {
+            "kill_switch": (snapshot.kill_switch_at, snapshot.max_control_age),
+            "cash": (snapshot.cash_at, snapshot.max_cash_age),
+            "calendar": (snapshot.calendar_at, snapshot.max_calendar_age),
+            "persistence": (snapshot.persistence_at, snapshot.max_control_age),
+            "risk_state": (snapshot.risk_state_at, snapshot.max_control_age),
+            "watchdog": (snapshot.watchdog_at, snapshot.max_control_age),
+        }
+        for name in required:
+            if name in ("quote", "positions"):
+                continue
+            timestamp, max_age = freshness[name]
+            if timestamp is None:
+                blockers.append(f"dependency.{name}.stale")
+            elif timestamp - snapshot.observed_at > snapshot.max_clock_skew:
+                blockers.append(f"dependency.{name}.clock_skew")
+            elif snapshot.observed_at - timestamp > max_age:
+                blockers.append(f"dependency.{name}.stale")
+        return blockers
+
+    def _evaluate_option(
+        self, intent: OrderIntent, snapshot: DependencySnapshot
+    ) -> GateDecision:
+        """Spec section 6.1, options branch.
+
+        Regular hours only. A sell-to-open put is cash-secured against cash
+        less the collateral of open short puts and of pending sells-to-open
+        (spec section 9 fix 8), and capped at 25% of equity per underlying
+        with existing puts counted (fix 3). A contract already short is not
+        sold again (fix 1). A buy-to-close needs a short at least as large.
+        Notional and the order cap use quantity x price x multiplier; the
+        order cap binds only opening orders. Whole contracts and the x100
+        multiplier are enforced by OrderIntent itself.
+        """
+        blockers: list[str] = []
+        notices: list[str] = []
+        approved = intent.quantity
+        multiplier = Decimal(intent.contract_multiplier)
+        opening = intent.position_intent in ("sell_to_open", "buy_to_open")
+
+        if intent.account_id != snapshot.account_id:
+            blockers.append("identity.account_mismatch")
+        if intent.instance_id != snapshot.instance_id:
+            blockers.append("identity.instance_mismatch")
+        if not snapshot.armed:
+            blockers.append("identity.not_armed")
+        if snapshot.asset_class != "us_option":
+            blockers.append("option.snapshot_asset_class_mismatch")
+
+        required = (
+            self._DEPENDENCIES if opening else ("quote", "positions", "persistence")
+        )
+        blockers.extend(self._dependency_blockers(required, snapshot))
+
+        if self._OPTION_INTENT_SIDES.get(intent.position_intent) is not intent.side:
+            blockers.append("option.intent_side_mismatch")
+        if snapshot.regular_session_open is not True:
+            blockers.append("market.regular_hours_required")
+
+        if snapshot.quote_symbol != intent.symbol:
+            blockers.append("quote.symbol_mismatch")
+        if snapshot.quote_at != intent.quote_at:
+            blockers.append("quote.timestamp_mismatch")
+        if snapshot.quote_at - snapshot.observed_at > snapshot.max_clock_skew:
+            blockers.append("quote.clock_skew")
+        elif snapshot.observed_at - snapshot.quote_at > snapshot.max_quote_age:
+            blockers.append("quote.stale")
+        if snapshot.quote_price <= 0:
+            blockers.append("quote.invalid_price")
+        if snapshot.position_symbol != intent.symbol:
+            blockers.append("positions.symbol_mismatch")
+        if snapshot.positions_at - snapshot.observed_at > snapshot.max_clock_skew:
+            blockers.append("positions.clock_skew")
+        elif (
+            snapshot.observed_at - snapshot.positions_at
+            > snapshot.max_positions_age
+        ):
+            blockers.append("positions.stale")
+        if snapshot.risk_snapshot_id != intent.risk_snapshot_id:
+            blockers.append("risk.snapshot_mismatch")
+
+        held = snapshot.position_quantity
+        if intent.position_intent == "buy_to_close":
+            if -held < intent.quantity:
+                blockers.append("option.short_position_insufficient")
+        elif intent.position_intent == "sell_to_close":
+            if held < intent.quantity:
+                blockers.append("option.long_position_insufficient")
+        elif intent.position_intent == "sell_to_open":
+            if held < 0:
+                blockers.append("option.already_short_contract")
+            if intent.option_type != "put":
+                blockers.append("option.sell_to_open_requires_put")
+            else:
+                collateral = intent.strike * multiplier * intent.quantity
+                if snapshot.open_short_put_collateral is None:
+                    blockers.append("option.collateral_unknown")
+                elif collateral > (
+                    snapshot.available_cash
+                    - snapshot.open_short_put_collateral
+                    - snapshot.pending_sell_to_open_collateral
+                ):
+                    blockers.append("option.collateral_insufficient")
+                if (
+                    snapshot.account_equity is None
+                    or snapshot.underlying_put_collateral is None
+                ):
+                    blockers.append("option.underlying_cap_unknown")
+                elif (
+                    snapshot.underlying_put_collateral + collateral
+                    > snapshot.account_equity
+                    * snapshot.max_underlying_collateral_fraction
+                ):
+                    blockers.append("option.underlying_cap")
+
+        notional = approved * snapshot.quote_price * multiplier
+        if intent.side is OrderSide.BUY and notional > snapshot.available_cash:
+            blockers.append("cash.insufficient")
+        if (
+            opening
+            and snapshot.max_order_notional is not None
+            and notional > snapshot.max_order_notional
+        ):
+            blockers.append("exposure.max_order_notional")
+
+        if intent.idempotency_key in snapshot.open_order_idempotency_keys:
+            blockers.append("idempotency.open_order_exists")
         if intent.source not in snapshot.authorized_sources:
             blockers.append("authorization.source_denied")
 
