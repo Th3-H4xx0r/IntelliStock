@@ -1,0 +1,289 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../core/formatters/formatters.dart';
+import '../../../core/theme/app_colors.dart';
+import '../../../core/theme/app_text_styles.dart';
+import '../../../core/widgets/app_button.dart';
+import '../../../core/widgets/common_widgets.dart';
+import '../../../core/widgets/confirm_dialog.dart';
+import '../../../core/widgets/glass_card.dart';
+import '../../../core/widgets/material_symbols.dart';
+import '../application/swing_controller.dart';
+import '../data/swing_repository.dart';
+
+/// Reasoning longer than this starts collapsed behind "Show more".
+const _reasoningCollapseChars = 240;
+
+/// AI-scored swing and wheel candidates that wait for a human (spec
+/// 2026-09-24 section 10). Shown on the instance detail screen above the
+/// Stocks card when the strategy document has a swing or wheel lane.
+class PendingSignalsSection extends ConsumerWidget {
+  const PendingSignalsSection({super.key, required this.instanceId});
+
+  final String instanceId;
+
+  Future<void> _decide(BuildContext context, WidgetRef ref, SwingSignal signal,
+      String decision) async {
+    // No onConfirm callback: showConfirmDialog swallows errors thrown there,
+    // and the operator has to see why a decision did not land.
+    final confirmed = await showConfirmDialog(
+      context,
+      title: '${decisionLabel(decision)} ${signal.symbol}',
+      body: decisionConfirmBody(signal, decision),
+      confirmLabel: decisionLabel(decision),
+      confirmColor: decision == 'reject' ? AppColors.danger : AppColors.success,
+      icon: decision == 'reject' ? symbol('block') : symbol('check'),
+    );
+    if (!confirmed || !context.mounted) return;
+    final result = await ref
+        .read(pendingSignalsProvider(instanceId).notifier)
+        .decide(signal, decision);
+    if (!context.mounted || result.outcome == DecisionOutcome.ignored) return;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(result.message)));
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final async = ref.watch(pendingSignalsProvider(instanceId));
+    final count = async.valueOrNull?.signals.length;
+    return GlassCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            count == null ? 'Pending AI signals' : 'Pending AI signals ($count)',
+            style: AppTextStyles.cardTitle,
+          ),
+          const SizedBox(height: 10),
+          async.when(
+            loading: () => Text('Loading…', style: AppTextStyles.meta),
+            error: (err, _) => ErrorBanner(
+              message: err.toString(),
+              onRetry: () => ref.invalidate(pendingSignalsProvider(instanceId)),
+            ),
+            data: (state) => Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (state.refreshError != null) ...[
+                  Text(
+                    'Last refresh failed: ${state.refreshError}',
+                    style: AppTextStyles.nano.copyWith(color: AppColors.warning),
+                  ),
+                  const SizedBox(height: 8),
+                ],
+                if (state.signals.isEmpty)
+                  Text(
+                    'Nothing waiting for review.',
+                    style: AppTextStyles.meta
+                        .copyWith(fontStyle: FontStyle.italic),
+                  )
+                else
+                  for (final s in state.signals)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: _SignalCard(
+                        key: ValueKey(s.id),
+                        signal: s,
+                        busy: state.isDeciding(s.id),
+                        onDecide: (d) => _decide(context, ref, s, d),
+                      ),
+                    ),
+                const SizedBox(height: 4),
+                Text(
+                  'Approval rebuilds the order at the live price.',
+                  style: AppTextStyles.nano.copyWith(color: AppColors.textFaint),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+Color _scoreColor(int? score) {
+  if (score == null) return AppColors.textMuted;
+  if (score >= 75) return AppColors.success;
+  if (score >= 50) return AppColors.warning;
+  return AppColors.danger;
+}
+
+/// (label, value) pairs for the proposal grid.
+List<(String, String)> proposalFields(SwingSignal s) {
+  if (s.isWheel) {
+    final credit = s.creditEst;
+    return [
+      ('CONTRACT', s.contract.isEmpty ? '—' : s.contract),
+      ('STRIKE', fmtMoney(s.strike)),
+      ('EXPIRY', s.expiry.isEmpty ? '—' : s.expiry),
+      ('QTY', s.qty?.toString() ?? '—'),
+      ('LIMIT', fmtMoney(s.limitPrice)),
+      (
+        'PREMIUM',
+        credit == null
+            ? fmtMoney(s.premiumEst)
+            : '${fmtMoney(s.premiumEst)} (${fmtMoney(credit)})'
+      ),
+      ('COLLATERAL', fmtMoney(s.collateral)),
+    ];
+  }
+  return [
+    ('ENTRY', fmtMoney(s.entry)),
+    ('STOP', fmtMoney(s.stop)),
+    ('TARGET', fmtMoney(s.target)),
+    ('SHARES', s.shares?.toString() ?? '—'),
+  ];
+}
+
+class _SignalCard extends StatefulWidget {
+  const _SignalCard({
+    super.key,
+    required this.signal,
+    required this.busy,
+    required this.onDecide,
+  });
+
+  final SwingSignal signal;
+  final bool busy;
+  final void Function(String decision) onDecide;
+
+  @override
+  State<_SignalCard> createState() => _SignalCardState();
+}
+
+class _SignalCardState extends State<_SignalCard> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final s = widget.signal;
+    final longReasoning = s.reasoning.length > _reasoningCollapseChars;
+    // Buttons go inert while this card's request is in flight.
+    VoidCallback? tap(String decision) =>
+        widget.busy ? null : () => widget.onDecide(decision);
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppColors.surface.withValues(alpha: 0.5),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text(
+                s.symbol,
+                style: AppTextStyles.cardTitle.copyWith(
+                    color: AppColors.textHi, fontWeight: FontWeight.w800),
+              ),
+              const SizedBox(width: 8),
+              AppBadge(
+                label: s.lane,
+                color: s.isWheel ? AppColors.primary : AppColors.info,
+              ),
+              const SizedBox(width: 6),
+              AppBadge(
+                  label: s.score?.toString() ?? '—',
+                  color: _scoreColor(s.score)),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'session ${s.session.isEmpty ? '—' : s.session}',
+                  textAlign: TextAlign.end,
+                  overflow: TextOverflow.ellipsis,
+                  style: AppTextStyles.nano.copyWith(color: AppColors.textFaint),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 16,
+            runSpacing: 8,
+            children: [
+              for (final (label, value) in proposalFields(s))
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(label,
+                        style: AppTextStyles.nano.copyWith(
+                            color: AppColors.textDim, letterSpacing: 0.4)),
+                    Text(value,
+                        style: AppTextStyles.micro.copyWith(
+                            color: AppColors.textMd,
+                            fontWeight: FontWeight.w700)),
+                  ],
+                ),
+            ],
+          ),
+          if (s.reasoning.trim().isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Text(
+              s.reasoning.trim(),
+              style: AppTextStyles.micro.copyWith(color: AppColors.textMd),
+              maxLines: _expanded || !longReasoning ? null : 4,
+              overflow: _expanded || !longReasoning
+                  ? TextOverflow.visible
+                  : TextOverflow.ellipsis,
+            ),
+            if (longReasoning)
+              TextButton(
+                onPressed: () => setState(() => _expanded = !_expanded),
+                style: TextButton.styleFrom(
+                  padding: EdgeInsets.zero,
+                  minimumSize: const Size(0, 32),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                child: Text(_expanded ? 'Show less' : 'Show more'),
+              ),
+          ],
+          if (s.keyRisksText.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text(
+              'Risks: ${s.keyRisksText}',
+              style: AppTextStyles.nano.copyWith(color: AppColors.warning),
+            ),
+          ],
+          const SizedBox(height: 10),
+          // A Wrap rather than a Row of Expanded: three labelled buttons do
+          // not fit a 320pt-wide phone on one line.
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              AppButton.semantic(
+                label: decisionLabel('approve'),
+                color: AppColors.success,
+                dense: true,
+                onPressed: tap('approve'),
+              ),
+              if (s.allowsHalf)
+                AppButton.semantic(
+                  label: decisionLabel('approve_half'),
+                  color: AppColors.success,
+                  dense: true,
+                  onPressed: tap('approve_half'),
+                ),
+              AppButton.ghost(
+                label: decisionLabel('reject'),
+                dense: true,
+                onPressed: tap('reject'),
+              ),
+            ],
+          ),
+          if (widget.busy) ...[
+            const SizedBox(height: 6),
+            Text('Working…',
+                style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),
+          ],
+        ],
+      ),
+    );
+  }
+}

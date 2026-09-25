@@ -4,6 +4,8 @@
 
 import 'dart:math' as math;
 
+import '../../../core/models/option_symbol.dart';
+
 /// One sector's share of invested value.
 class SectorSlice {
   const SectorSlice(
@@ -15,6 +17,12 @@ class SectorSlice {
 
 /// Group holdings' market value by sector, biggest first. Unknown/blank sectors
 /// fold into "Other". Returns [] when there's no positive value.
+///
+/// Option contracts (OCC symbols) are left out on purpose, long or short. An
+/// option's market value is its premium, not sector exposure: a short put
+/// reports a negative value while it commits strike x 100 of the
+/// underlying's sector. Counting either number would misstate the breakdown,
+/// so the chart shows the stock book only.
 List<SectorSlice> aggregateBySector(
   Map<String, double> valueBySymbol,
   Map<String, String?> sectorBySymbol,
@@ -22,6 +30,7 @@ List<SectorSlice> aggregateBySector(
   final bySector = <String, double>{};
   var total = 0.0;
   valueBySymbol.forEach((sym, val) {
+    if (isOccOptionSymbol(sym)) return;
     if (val <= 0) return;
     final raw = (sectorBySymbol[sym] ?? '').trim();
     final key = raw.isEmpty ? 'Other' : raw;

@@ -1,0 +1,206 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:intellistock_mobile/core/network/api_error.dart';
+import 'package:intellistock_mobile/core/widgets/app_button.dart';
+import 'package:intellistock_mobile/features/swing/data/swing_repository.dart';
+import 'package:intellistock_mobile/features/swing/presentation/pending_signals_section.dart';
+import 'package:intellistock_mobile/features/swing/presentation/wheel_card.dart';
+
+import 'swing_fakes.dart';
+
+Widget _app(FakeSwingRepo repo, Widget child) => ProviderScope(
+      overrides: [swingRepositoryProvider.overrideWithValue(repo)],
+      child: MaterialApp(
+        home: Scaffold(body: SingleChildScrollView(child: child)),
+      ),
+    );
+
+const _section = PendingSignalsSection(instanceId: 'i1');
+
+Finder _cardButton(String label) => find.widgetWithText(AppButton, label);
+
+Finder _dialogButton(String label) => find.descendant(
+    of: find.byType(Dialog), matching: find.widgetWithText(AppButton, label));
+
+void _phone(WidgetTester tester) {
+  tester.view.physicalSize = const Size(320 * 3, 2400 * 3);
+  tester.view.devicePixelRatio = 3.0;
+  addTearDown(tester.view.resetPhysicalSize);
+  addTearDown(tester.view.resetDevicePixelRatio);
+}
+
+void main() {
+  group('PendingSignalsSection', () {
+    testWidgets('renders swing and wheel cards; Approve ½ on swing only',
+        (tester) async {
+      final repo = FakeSwingRepo([swingSignal('a1'), wheelSignal('w1')]);
+      await tester.pumpWidget(_app(repo, _section));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Pending AI signals (2)'), findsOneWidget);
+      expect(find.text('AAPL'), findsOneWidget);
+      expect(find.text('APH'), findsOneWidget);
+      expect(_cardButton('Approve ½'), findsOneWidget);
+      expect(_cardButton('Approve'), findsNWidgets(2));
+      expect(find.text('APH261002P00130000'), findsOneWidget);
+      expect(find.text('\$1.30 (\$130.00)'), findsOneWidget);
+      expect(find.text('\$13,000.00'), findsOneWidget);
+      expect(find.text('Risks: earnings in 9 days'), findsOneWidget);
+    });
+
+    testWidgets('empty list says so', (tester) async {
+      await tester.pumpWidget(_app(FakeSwingRepo([]), _section));
+      await tester.pumpAndSettle();
+      expect(find.text('Nothing waiting for review.'), findsOneWidget);
+    });
+
+    testWidgets('approve goes through the confirm dialog, then the card leaves',
+        (tester) async {
+      final repo = FakeSwingRepo([swingSignal('a1')]);
+      await tester.pumpWidget(_app(repo, _section));
+      await tester.pumpAndSettle();
+
+      await tester.tap(_cardButton('Approve'));
+      await tester.pumpAndSettle();
+      expect(find.byType(Dialog), findsOneWidget);
+      expect(repo.decideCalls, isEmpty);
+
+      await tester.tap(_dialogButton('Approve'));
+      await tester.pumpAndSettle();
+      expect(repo.decideCalls, ['a1:approve']);
+      expect(find.text('AAPL'), findsNothing);
+      expect(find.textContaining('Approved AAPL'), findsOneWidget);
+    });
+
+    testWidgets('cancel in the dialog sends nothing', (tester) async {
+      final repo = FakeSwingRepo([swingSignal('a1')]);
+      await tester.pumpWidget(_app(repo, _section));
+      await tester.pumpAndSettle();
+
+      await tester.tap(_cardButton('Reject'));
+      await tester.pumpAndSettle();
+      await tester.tap(_dialogButton('Cancel'));
+      await tester.pumpAndSettle();
+      expect(repo.decideCalls, isEmpty);
+      expect(find.text('AAPL'), findsOneWidget);
+    });
+
+    testWidgets('decided on another device (400): card removed, reason shown',
+        (tester) async {
+      final repo = FakeSwingRepo([swingSignal('a1')])
+        ..decideError =
+            ApiError('signal a1 is approved, not pending', statusCode: 400);
+      await tester.pumpWidget(_app(repo, _section));
+      await tester.pumpAndSettle();
+
+      await tester.tap(_cardButton('Approve'));
+      await tester.pumpAndSettle();
+      await tester.tap(_dialogButton('Approve'));
+      await tester.pumpAndSettle();
+      expect(find.text('AAPL'), findsNothing);
+      expect(find.text('signal a1 is approved, not pending'), findsOneWidget);
+    });
+
+    testWidgets('forbidden (403): card stays and can be retried',
+        (tester) async {
+      final repo = FakeSwingRepo([swingSignal('a1')])
+        ..decideError = ApiError('not your instance', statusCode: 403);
+      await tester.pumpWidget(_app(repo, _section));
+      await tester.pumpAndSettle();
+
+      await tester.tap(_cardButton('Reject'));
+      await tester.pumpAndSettle();
+      await tester.tap(_dialogButton('Reject'));
+      await tester.pumpAndSettle();
+      expect(find.text('AAPL'), findsOneWidget);
+      expect(find.text('not your instance'), findsOneWidget);
+      expect(tester.widget<AppButton>(_cardButton('Reject')).onPressed,
+          isNotNull);
+    });
+
+    testWidgets('long reasoning on a 320pt phone: no overflow, collapsible',
+        (tester) async {
+      _phone(tester);
+      final long = List.filled(120, 'momentum').join(' ') + 'x' * 600;
+      final repo = FakeSwingRepo([swingSignal('a1', reasoning: long)]);
+      await tester.pumpWidget(_app(repo, _section));
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      expect(find.text('Show more'), findsOneWidget);
+      await tester.tap(find.text('Show more'));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      expect(find.text('Show less'), findsOneWidget);
+    });
+  });
+
+  group('WheelCard', () {
+    testWidgets('lists open puts; a missing mark shows a dash', (tester) async {
+      final repo = FakeSwingRepo([],
+          wheelSnapshot: WheelSnapshot.fromJson({
+            'open_puts': [
+              {
+                'contract': 'APH261002P00130000',
+                'underlying': 'APH',
+                'strike': 130,
+                'expiry': '2026-10-02',
+                'qty': 1,
+                'avg_entry_price': 1.23,
+                'current_price': null,
+                'itm_pct': 2.0,
+                'dte': 8,
+                'collateral': 13000,
+                'unrealized_pl': null,
+              },
+            ],
+            'collateral_total': 13000,
+            'cash': 25000,
+            'recent_scans': [],
+          }));
+      await tester.pumpWidget(_app(repo, const WheelCard(instanceId: 'i1')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('APH \$130.00 P · 2026-10-02'), findsOneWidget);
+      expect(find.text('2.0% ITM'), findsOneWidget);
+      expect(find.text('\$13,000.00'), findsOneWidget);
+      expect(find.text('No scans recorded yet.'), findsOneWidget);
+      // MARK and P&L both have no value; neither may render as $0.00.
+      expect(find.text('\$0.00'), findsNothing);
+      expect(find.text('—'), findsNWidgets(2));
+    });
+
+    testWidgets('an API build without the route (404) says so', (tester) async {
+      final repo = FakeSwingRepo([])
+        ..wheelError = ApiError('Not Found', statusCode: 404);
+      await tester.pumpWidget(_app(repo, const WheelCard(instanceId: 'i1')));
+      await tester.pumpAndSettle();
+      expect(find.text('This API build has no wheel endpoint yet.'),
+          findsOneWidget);
+    });
+
+    testWidgets('an outage (503) is an error, never an empty book; Retry works',
+        (tester) async {
+      final repo = FakeSwingRepo([])
+        ..wheelError = ApiError('broker unavailable', statusCode: 503);
+      await tester.pumpWidget(_app(repo, const WheelCard(instanceId: 'i1')));
+      await tester.pumpAndSettle();
+      expect(find.text('broker unavailable'), findsOneWidget);
+      expect(find.text('OPEN PUTS'), findsNothing);
+      expect(find.text('No open puts.'), findsNothing);
+
+      repo.wheelError = null;
+      await tester.tap(find.text('Retry'));
+      await tester.pumpAndSettle();
+      expect(find.text('broker unavailable'), findsNothing);
+      expect(find.text('No open puts.'), findsOneWidget);
+    });
+  });
+
+  test('fmtItm', () {
+    expect(fmtItm(2.0), '2.0% ITM');
+    expect(fmtItm(-3.0), '3.0% OTM');
+    expect(fmtItm(null), '—');
+  });
+}

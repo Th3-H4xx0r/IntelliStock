@@ -298,6 +298,220 @@ const STRATEGY_FIELD_META = {
       description: 'Maximum unrealized P&L (%) of a held LOSING position for v28_hc_losing_break_glass to fire. Decoupled from rotation_replace_loss_threshold_pct (which can be set very strict, e.g. -5%) so the V28.2 losing path can fire on marginal losers (pnl -1 to -4%). Default: -1.5.',
     },
   },
+  // Spec 2026-09-24 section 5.1. Defaults are ST's (swing_trader/constants.py).
+  strategy_swing: {
+    strategy_swing_enabled: {
+      label: 'Swing Lane Enabled',
+      description: 'Master switch for the swing lane, in backtests and live. Off means the lane emits nothing.',
+    },
+    rsi_period: {
+      label: 'RSI Period (Bars)',
+      description: 'Daily bars in the RSI behind both the entry filter and the RSI-cross exit. ST default 14.',
+    },
+    rsi_entry_max: {
+      label: 'Max RSI At Entry',
+      description: 'An entry needs RSI at or below this value. ST default 50.',
+    },
+    rsi_overbought: {
+      label: 'RSI Exit Level',
+      description: 'The overbought level the RSI-cross exit watches. ST default 70.',
+    },
+    sma_long: {
+      label: 'Long Trend SMA (Bars)',
+      description: 'Length of the long-term trend filter in daily bars. ST default 200.',
+    },
+    macd_fast: {
+      label: 'MACD Fast EMA (Bars)',
+      description: 'Fast EMA length of the MACD entry filter. ST default 12.',
+    },
+    macd_slow: {
+      label: 'MACD Slow EMA (Bars)',
+      description: 'Slow EMA length of the MACD entry filter. ST default 26.',
+    },
+    macd_signal: {
+      label: 'MACD Signal EMA (Bars)',
+      description: 'Signal-line EMA length of the MACD entry filter. ST default 9.',
+    },
+    vol_avg_period: {
+      label: 'Volume Average (Bars)',
+      description: 'Bars in the volume average the entry filter compares against. ST default 20.',
+    },
+    adx_period: {
+      label: 'ADX Period (Bars)',
+      description: 'Lookback of the ADX trend-strength filter. ST default 14.',
+    },
+    adx_min: {
+      label: 'Min ADX',
+      description: 'An entry needs ADX at or above this trend-strength floor. ST default 15.',
+    },
+    spy_buffer: {
+      label: 'SPY Regime Buffer',
+      description: 'The bull regime needs SPY above its 200-day SMA times this multiplier. ST default 1.03.',
+    },
+    vix_max: {
+      label: 'Max VIX',
+      description: 'The bull regime also needs VIX at or below this level. ST default 25.',
+    },
+    position_size_pct: {
+      label: 'Position Size (Fraction Of Equity)',
+      description: 'Each entry buys this fraction of equity in whole shares, scaled by the AI size adjustment. ST default 0.125.',
+    },
+    max_positions: {
+      label: 'Max Open Positions',
+      description: 'The lane holds at most this many swing positions at once. ST default 8.',
+    },
+    max_per_sector: {
+      label: 'Max Positions Per Sector',
+      description: 'At most this many open swing positions may share one GICS sector. ST default 1.',
+    },
+    profit_target: {
+      label: 'Take-Profit (Fraction)',
+      description: 'The bracket take-profit sits this far above the prior close. ST default 0.09 (+9%).',
+    },
+    stop_loss: {
+      label: 'Stop-Loss (Fraction)',
+      description: 'The bracket stop sits this far below the prior close. ST default 0.06 (-6%).',
+    },
+    bear_regime_days: {
+      label: 'Bear Sessions Before Defensive Mode',
+      description: 'Consecutive bear-regime NY sessions before the lane trades the defensive universe. ST default 10.',
+    },
+    defensive_universe: {
+      label: 'Defensive Universe',
+      description: 'Symbols the lane may buy in bear mode. ST default XLP, XLU, XLV, GLD, SHY.',
+    },
+    earnings_hard_block_days: {
+      label: 'Earnings Block (Days)',
+      description: 'Live only: no entry within this many days of an earnings date. Off in backtests, as in ST. ST default 5.',
+    },
+    ai_gate_enabled: {
+      label: 'AI Conviction Gate',
+      description: 'Live only: the linked Conviction LLM scores every candidate before it is placed. With no model linked, live entries are refused.',
+    },
+    ai_approve_threshold: {
+      label: 'AI Auto-Approve Score',
+      description: 'Scores at or above this are placed without asking. ST default 75.',
+    },
+    ai_review_threshold: {
+      label: 'AI Review Score',
+      description: 'Scores from this up to the auto-approve score wait for your approval on web or iOS. Lower scores are rejected. ST default 50.',
+    },
+    scan_time_et: {
+      label: 'Scan Time (ET)',
+      description: 'The live scan runs once per NY session, at the first tick at or after this time, and submits GTC brackets that queue for the open. ST default 09:15.',
+    },
+    live_max_order_fraction: {
+      label: 'Live Max Order Fraction',
+      description: 'The order gate refuses any single order larger than this fraction of equity.',
+    },
+    live_max_symbol_fraction: {
+      label: 'Live Max Symbol Fraction',
+      description: 'The order gate refuses a buy that would take one symbol above this fraction of equity.',
+    },
+    live_max_leveraged_fraction: {
+      label: 'Live Max Leveraged-ETF Fraction',
+      description: 'The order gate caps leveraged-ETF exposure at this fraction of equity.',
+    },
+    live_soft_drawdown: {
+      label: 'Live Soft Drawdown',
+      description: 'Drawdown from the equity peak that puts the account at the soft risk level, where new buys freeze.',
+    },
+    live_hard_drawdown: {
+      label: 'Live Hard Drawdown',
+      description: 'Drawdown from the equity peak that puts the account at the hard risk level. Must sit above the soft rung.',
+    },
+    live_kill_drawdown: {
+      label: 'Live Kill Drawdown',
+      description: 'Drawdown from the equity peak that reaches the kill level: working orders are cancelled and trading halts. Must sit above the hard rung.',
+    },
+    honour_single_position_cap: {
+      label: 'Honour Single-Position Cap',
+      description: 'Apply the broker single-position cap below to every swing buy.',
+    },
+    broker_max_single_position_pct: {
+      label: 'Single-Position Cap (Fraction)',
+      description: 'No single position may exceed this fraction of equity.',
+    },
+  },
+  // Spec 2026-09-24 section 5.2. Live and paper only; backtests skip the wheel.
+  strategy_wheel: {
+    strategy_wheel_enabled: {
+      label: 'Wheel Lane Enabled',
+      description: 'Master switch for the cash-secured-put wheel. Live and paper only; the account needs options level 1 or higher.',
+    },
+    rsi_min: {
+      label: 'Min RSI',
+      description: 'A put candidate needs RSI at or above this value. ST default 30.',
+    },
+    rsi_max: {
+      label: 'Max RSI',
+      description: 'A put candidate needs RSI at or below this value. ST default 60.',
+    },
+    sma_trend: {
+      label: 'Trend SMA (Bars)',
+      description: 'Length of the trend filter in daily bars. ST default 50.',
+    },
+    atr_period: {
+      label: 'ATR Period (Bars)',
+      description: 'Lookback of the ATR the candidate screen uses to place the strike. ST default 14.',
+    },
+    strike_atr_mult: {
+      label: 'Strike Offset (ATR Multiple)',
+      description: 'How many ATRs below the price the screen looks for a strike. ST default 0.5.',
+    },
+    min_premium_pct: {
+      label: 'Min Premium (Fraction)',
+      description: 'Skip a candidate whose premium is below this fraction of the price. ST default 0.005 (0.5%).',
+    },
+    target_delta: {
+      label: 'Target Put Delta',
+      description: 'The lane sells the put whose delta is closest to this, read from the full chain. ST default 0.25.',
+    },
+    days_to_expiry: {
+      label: 'Days To Expiry',
+      description: 'Target days to expiry for the sold put. ST default 7.',
+    },
+    max_collateral_pct: {
+      label: 'Max Collateral Per Underlying',
+      description: 'Cash-secured collateral on one underlying, counting puts already open, stays under this fraction of equity. ST default 0.25.',
+    },
+    max_per_sector: {
+      label: 'Max Puts Per Sector',
+      description: 'At most this many open puts may share one sector. ST default 2.',
+    },
+    auto_covered_call: {
+      label: 'Auto Covered Call',
+      description: 'After an assignment, sell a covered call automatically. Off logs the candidate only (dry run), as in ST.',
+    },
+    approve_threshold: {
+      label: 'AI Auto-Approve Score',
+      description: 'Put candidates scoring at or above this are sold without asking. ST default 75.',
+    },
+    review_threshold: {
+      label: 'AI Review Score',
+      description: 'Scores from this up to the auto-approve score wait for your approval on web or iOS. Lower scores are rejected. ST default 50.',
+    },
+    earnings_block_days: {
+      label: 'Earnings Block (Days)',
+      description: 'No put is sold within this many days of an earnings date. ST default 7.',
+    },
+    limit_bid_mult: {
+      label: 'Limit Price (Bid Multiple)',
+      description: 'The sell-to-open limit starts at the live bid times this, then follows the ST fallback ladder. ST default 0.95.',
+    },
+    scan_weekday: {
+      label: 'Scan Weekday',
+      description: '0 is Monday. If the Monday scan does not complete, it runs on Tuesday. ST default 0.',
+    },
+    scan_time_et: {
+      label: 'Scan Time (ET)',
+      description: 'The weekly put scan runs at the first tick at or after this time on the scan weekday. ST default 10:30.',
+    },
+    monitor_time_et: {
+      label: 'Monitor Time (ET)',
+      description: 'Daily check that buys a put back at 10% ITM, at 5% ITM with 2 or fewer days left, or ITM on expiry day. ST default 15:45.',
+    },
+  },
 }
 
 export const LLM_PROVIDER_OPTIONS = [
@@ -370,6 +584,7 @@ const KNOWN_LLM_ROLE_LABELS = {
   'event_maintenance_': 'Event Maintenance LLM',
   'overlay_': 'Trade Overlay LLM',
   'analyst_panel_': 'Analyst Panel LLM (R1+R2 Debate)',
+  'conviction_': 'Conviction LLM',
 }
 
 const KNOWN_LOOKBACK_LLM_ROLE_LABELS = {
@@ -383,6 +598,10 @@ const KNOWN_LOOKBACK_LLM_ROLE_LABELS = {
 
 const KNOWN_LLM_ROLE_PREFIXES_BY_STRATEGY = {
   graph_nexus_analysis: ['', 'sentiment_', 'company_article_', 'macro_article_', 'event_maintenance_', 'overlay_', 'analyst_panel_'],
+  // Registered, not only discovered from a key: a document saved before the
+  // header gained conviction_llm_model_id still shows the model card.
+  strategy_swing: ['conviction_'],
+  strategy_wheel: ['conviction_'],
 }
 
 const KNOWN_LOOKBACK_LLM_ROLE_PREFIXES_BY_STRATEGY = {

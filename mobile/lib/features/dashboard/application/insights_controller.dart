@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/formatters/formatters.dart';
+import '../../../core/models/option_symbol.dart';
 import '../../../core/network/api_client.dart';
 import '../../../core/polling/poller.dart';
 import '../../live_trading/data/live_repository.dart';
@@ -276,8 +277,13 @@ final sectorAllocationProvider =
     try {
       final holdings =
           await ref.read(accountHoldingsProvider(brokerageId).future);
+      // Options never reach the sector chart (see aggregateBySector); skip
+      // them here too so no /symbols/{occ}/info lookup is made for them.
       final positions = holdings.positions
-          .where((p) => p.symbol.isNotEmpty && p.marketValue > 0)
+          .where((p) =>
+              p.symbol.isNotEmpty &&
+              p.marketValue > 0 &&
+              !isOccOptionSymbol(p.symbol))
           .toList();
       if (positions.isEmpty) return const [];
       final client = ref.read(apiClientProvider);

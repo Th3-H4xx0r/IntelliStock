@@ -24,6 +24,20 @@ void main() {
       expect(slices.every((s) => s.value == 50), isTrue);
     });
 
+    test('option contracts are excluded, long or short', () {
+      final slices = aggregateBySector(
+        {'AAPL': 60, 'APH261002P00130000': -85, 'SPY261218C00612500': 400},
+        {
+          'AAPL': 'Technology',
+          'APH261002P00130000': 'Technology',
+          'SPY261218C00612500': 'Other',
+        },
+      );
+      expect(slices.single.sector, 'Technology');
+      expect(slices.single.value, 60);
+      expect(slices.single.pct, closeTo(100, 0.001));
+    });
+
     test('empty input → empty list', () {
       expect(aggregateBySector({}, {}), isEmpty);
       expect(aggregateBySector({'A': 0}, {'A': 'Tech'}), isEmpty);

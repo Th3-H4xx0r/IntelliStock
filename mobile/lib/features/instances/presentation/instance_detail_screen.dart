@@ -13,6 +13,9 @@ import '../../../core/widgets/material_symbols.dart';
 import '../../../core/widgets/skeleton.dart';
 import '../../../core/widgets/status_pill.dart';
 import '../../../core/widgets/typed_confirm_field.dart';
+import '../../swing/application/swing_controller.dart';
+import '../../swing/presentation/pending_signals_section.dart';
+import '../../swing/presentation/wheel_card.dart';
 import '../application/instances_controller.dart';
 import '../data/models/instance.dart';
 import 'live_logs_panel.dart';
@@ -98,10 +101,13 @@ class _DetailContent extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final inst = state.instance!;
     final ctrl = ref.read(instanceDetailControllerProvider(instanceId).notifier);
+    final lanes = swingLanesOf(inst.strategy);
 
     return RefreshIndicator(
       onRefresh: () async {
         await ctrl.refreshInstance();
+        if (lanes.any) ref.invalidate(pendingSignalsProvider(instanceId));
+        if (lanes.wheel) ref.invalidate(wheelSnapshotProvider(instanceId));
       },
       child: CustomScrollView(
         slivers: [
@@ -124,6 +130,16 @@ class _DetailContent extends ConsumerWidget {
                   const SizedBox(height: 12),
                   _StrategyCard(instanceId: instanceId, inst: inst),
                   const SizedBox(height: 12),
+                  // Swing / wheel lanes: AI signals awaiting approval, and the
+                  // wheel's open puts (spec 2026-09-24 section 10).
+                  if (lanes.any) ...[
+                    PendingSignalsSection(instanceId: instanceId),
+                    const SizedBox(height: 12),
+                  ],
+                  if (lanes.wheel) ...[
+                    WheelCard(instanceId: instanceId),
+                    const SizedBox(height: 12),
+                  ],
                   // Stocks
                   _StocksCard(instanceId: instanceId, inst: inst),
                   const SizedBox(height: 12),
