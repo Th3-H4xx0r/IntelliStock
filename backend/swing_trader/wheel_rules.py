@@ -73,7 +73,12 @@ except Exception:  # pragma: no cover - standalone/test import
 def next_friday(today: date, calendar, *, min_dte: int = MIN_DTE, log=None) -> str:
     """
     Return the date string (YYYY-MM-DD) of the next valid options expiry
-    Friday that is at least MIN_DTE days away.
+    Friday that is at least MIN_DTE days away — except on the holiday branch
+    below: the Thursday before a holiday Friday is one day short, so called
+    on a Friday before a holiday Friday this returns a 6-DTE expiry. ST
+    behaves the same (verbatim, parity-pinned by
+    test_next_friday_matches_st_across_a_good_friday); a wheel approval
+    recomputes the expiry through here (approvals, fix 2).
 
     1. Find the next Friday that is MIN_DTE+ days away
     2. Ask the calendar if that Friday is a trading day
