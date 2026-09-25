@@ -26,6 +26,7 @@ from dataclasses import replace
 import concurrent.futures
 import hashlib
 import os
+import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -3868,22 +3869,42 @@ def _checked_option_order(
     return int(float(qty))
 
 
+#: Fix wave FW1 item 8 (live-orders review M-2): Alpaca's own refusal of an
+#: option order the account may not place -- its 403 code 40310000 (which the
+#: equity path reads as "not fractionable"), or a message that says the
+#: account is not eligible / approved / enabled / permitted, or names its
+#: options (trading) level. The word "option" alone is not one: a 5xx or a
+#: validation error that names the contract kept its own type.
+_OPTIONS_REFUSAL = re.compile(
+    r"40310000"
+    r"|\bnot (?:eligible|approved|enabled|permitted|authorized|allowed)\b"
+    r"|\boptions? trading (?:is )?not\b"
+    r"|\boptions? (?:trading )?level\b"
+)
+
+
 def _option_order_error(exc, parsed, *, answered: bool):
     """Alpaca's answer to an option order the account may not place.
 
     Only an HTTP answer is a refusal. A transport failure (no response) is
     returned unchanged so it stays ambiguous, even when its text mentions
-    an option."""
+    an option. A server error (5xx) is never read as a permissions answer,
+    and neither is an answer that merely names the contract."""
     if not answered:
         return parsed
     if isinstance(parsed, (InsufficientBuyingPower, BrokerRateLimited)):
         return parsed
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(parsed, "http_status", None)
+    try:
+        status = int(status) if status is not None else None
+    except (TypeError, ValueError):
+        status = None
+    if status is not None and status >= 500:
+        return parsed
     message = str(exc).lower()
-    if (
-        isinstance(parsed, FractionalNotAllowed)
-        or "40310000" in message
-        or "option" in message
-    ):
+    if isinstance(parsed, FractionalNotAllowed) or _OPTIONS_REFUSAL.search(message):
         return OptionsNotPermitted(str(exc))
     return parsed
 
