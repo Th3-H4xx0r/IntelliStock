@@ -193,8 +193,12 @@ class LiveStateNotifier
   Future<void> _refreshPositionHistoricals() async {
     final prev = state.valueOrNull;
     if (prev == null) return;
-    final symbols =
-        prev.liveState?.positions.map((p) => p.symbol).toList() ?? [];
+    // Stock only: /symbol-historicals has nothing for an OCC contract.
+    final symbols = prev.liveState?.positions
+            .where((p) => !p.isOption)
+            .map((p) => p.symbol)
+            .toList() ??
+        [];
     if (symbols.isEmpty) return;
     try {
       final hist = await ref

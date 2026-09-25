@@ -1319,7 +1319,7 @@ class _TradeRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final isBuy = trade.side.toLowerCase() == 'buy';
     final sideColor = isBuy ? AppColors.chartUp : AppColors.chartDown;
-    final total = trade.price * trade.qty;
+    final total = trade.total;
 
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
@@ -1343,13 +1343,20 @@ class _TradeRow extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 8),
-              Text(
-                trade.symbol,
-                style: AppTextStyles.cardTitle.copyWith(
-                  color: AppColors.textHi,
-                  fontWeight: FontWeight.w800,
+              Flexible(
+                child: Text(
+                  trade.symbol,
+                  overflow: TextOverflow.ellipsis,
+                  style: AppTextStyles.cardTitle.copyWith(
+                    color: AppColors.textHi,
+                    fontWeight: FontWeight.w800,
+                  ),
                 ),
               ),
+              if (trade.isOption) ...[
+                const SizedBox(width: 6),
+                const AppBadge(label: 'Option', color: AppColors.primary),
+              ],
               const Spacer(),
               Column(
                 crossAxisAlignment: CrossAxisAlignment.end,
@@ -1378,8 +1385,8 @@ class _TradeRow extends StatelessWidget {
             children: [
               _TradeField(label: 'WHEN', value: fmtDateTime(trade.ts)),
               _TradeField(
-                label: 'SHARES',
-                value: trade.qty.toStringAsFixed(4),
+                label: trade.quantityLabel,
+                value: trade.quantityText,
               ),
               _TradeField(label: 'TOTAL', value: fmtMoney(total)),
             ],
