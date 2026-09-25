@@ -11055,9 +11055,10 @@ def _execute_swing_approval(adapter, payload, order_service, *,
     class _Retryable(Exception):
         """A transient failure: the signal goes back to pending (I-1)."""
 
-        def __init__(self, why, *, quote=False):
+        def __init__(self, why, *, quote=False, detail=""):
             super().__init__(why)
             self.quote = quote
+            self.detail = detail
 
     def say(message, color="white"):
         if log is not None:
@@ -11206,6 +11207,19 @@ def _execute_swing_approval(adapter, payload, order_service, *,
         cfg = _lane_config(specs, lane_name)
         if not cfg:
             raise ValueError(f"the {lane_name} lane is not enabled on this document")
+        # FW-lo-I1: the gate's control inputs are re-read NOW and laid over
+        # this approval's snapshot only; the loop's stamps are fresh only
+        # within 60 s of a tick. Round 2: re-read BEFORE the price, so its
+        # round trips never sit between the quote read (which pins the
+        # intent's quote_at) and the gate's read of the same mark -- the
+        # controls have a 60 s budget, the quote does not. A failed re-read is
+        # transient, like the stale stamps it replaces.
+        try:
+            controls = _approval_control_overlay(adapter, instance_key=owner,
+                                                 now_utc=now_utc)
+        except Exception as exc:
+            raise _Retryable("the order gate's controls could not be re-read",
+                             detail=f"{type(exc).__name__}: {exc}") from exc
         live = _approval_live_price(adapter, symbol)
         if live is None:
             raise _Retryable(f"no live price for {symbol}", quote=True)
@@ -11259,7 +11273,7 @@ def _execute_swing_approval(adapter, payload, order_service, *,
         else:
             raise ValueError(f"unknown approved order kind {kind!r}")
     except _Retryable as exc:
-        return back_to_pending(str(exc), quote=exc.quote)
+        return back_to_pending(str(exc), quote=exc.quote, detail=exc.detail)
     except Exception as exc:
         unreadable = getattr(approvals, "BookUnreadable", None)
         if isinstance(unreadable, type) and isinstance(exc, unreadable):
@@ -11267,17 +11281,7 @@ def _execute_swing_approval(adapter, payload, order_service, *,
         return failed(f"swing approval failed: {type(exc).__name__}: {exc}",
                       str(exc) or type(exc).__name__)
 
-    # FW-lo-I1: the gate's control inputs are re-read NOW, after the build and
-    # just before the gate, and laid over this approval's snapshot only. The
-    # loop's stamps are only fresh within 60 s of a tick; a failed re-read is
-    # transient, like the stale stamps it replaces. An option snapshot reads
-    # the calendar itself.
-    try:
-        controls = _approval_control_overlay(adapter, instance_key=owner,
-                                             now_utc=now_utc)
-    except Exception as exc:
-        return back_to_pending("the order gate's controls could not be re-read",
-                               detail=f"{type(exc).__name__}: {exc}")
+    # An option snapshot reads the calendar itself.
     if getattr(intent, "asset_class", "us_equity") == "us_option":
         controls = {name: value for name, value in dict(controls).items()
                     if name not in ("calendar", "calendar_at", "market_open")}

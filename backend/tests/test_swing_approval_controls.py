@@ -122,6 +122,7 @@ class _Adapter:
         self.market_open = market_open
         self.calendar_raises = calendar_raises
         self.account_reads = 0
+        self.calls = []
         mark = MarketMark(
             symbol="AAPL", price=100.5, bid=100.49, ask=100.51, bid_size=100,
             ask_size=100, observed_at=NOW - datetime_module.timedelta(seconds=1),
@@ -131,12 +132,14 @@ class _Adapter:
             get=lambda symbol: mark if symbol == "AAPL" else None)
 
     def fetch_rest_quote_marks(self, symbols):
+        self.calls.append("price-read")
         return tuple(symbols)
 
     def get_latest_trades(self, symbols):
         return {}
 
     def refresh_account(self):
+        self.calls.append("control-re-read")
         self.account_reads += 1
         if self.account_raises is not None:
             raise self.account_raises
@@ -304,10 +307,13 @@ def _handler_and_service(*, controls=None, adapter=None, overlay=True):
     risk_store, risk_state = _risk()
     sent = []
     ns_holder = {}
+    def gate_read(intent):
+        adapter.calls.append("gate")
+        return ns_holder["ns"]["_live_order_dependency_snapshot"](adapter, intent)
+
     service = LiveOrderService(
         account_id="acct-1", instance_id=IID,
-        snapshot_provider=lambda intent: ns_holder["ns"][
-            "_live_order_dependency_snapshot"](adapter, intent),
+        snapshot_provider=gate_read,
         transport=lambda **kw: sent.append(kw) or SimpleNamespace(
             status="accepted", broker_order_id="b-1", id="b-1", filled_qty=0,
             filled_avg_price=None),
@@ -333,6 +339,7 @@ def _handler_and_service(*, controls=None, adapter=None, overlay=True):
             service, cached_strategies=LANES, now_utc=NOW,
             sleep=lambda _s: None)
 
+    approve.adapter = adapter
     return approve, service, sent, state
 
 
@@ -390,11 +397,51 @@ def test_a_failed_re_read_is_transient(signals, notices):
     assert len(notices) == 1 and "approve again" in notices[0]["body"]
 
 
-def test_the_handler_re_reads_after_it_builds_and_passes_only_its_view():
+def test_the_controls_are_re_read_before_the_price_then_the_gate(signals,
+                                                                   notices):
+    """Round 2, item 2: the re-read's round trips must never sit between the
+    approval's quote read (which pins the intent's quote_at) and the gate's
+    read of the same mark, or a stream quote in between is a
+    quote.timestamp_mismatch "approve again" bounce. Order pinned:
+    control re-read -> price read -> gate."""
+    approve, _service, sent, _state = _handler_and_service()
+    ok, error, _result = approve(_approved())
+    assert (ok, error) == (True, "")
+    assert approve.adapter.calls == ["control-re-read", "price-read", "gate"]
+    assert len(sent) == 1
+
+
+def test_a_mark_that_moves_after_the_price_read_is_not_widened_by_the_re_read(
+        signals, notices):
+    """The window between the price read and the gate is pure again: a mark
+    update between the re-read and the price read no longer matters."""
+    adapter = _Adapter()
+    original = adapter.refresh_account
+
+    def slow_refresh():
+        # A stream quote landing while the controls are being re-read.
+        later = adapter._market_marks.get("AAPL")
+        adapter._market_marks = SimpleNamespace(get=lambda s: MarketMark(
+            symbol="AAPL", price=100.52, bid=100.51, ask=100.53, bid_size=100,
+            ask_size=100, observed_at=later.observed_at + datetime_module.timedelta(
+                milliseconds=400), received_at=NOW, source=MarkSource.STREAM_QUOTE,
+            feed="sip", quality=MarkQuality.CONSOLIDATED,
+            session=classify_session(NOW)) if s == "AAPL" else None)
+        return original()
+
+    adapter.refresh_account = slow_refresh
+    approve, _service, sent, _state = _handler_and_service(adapter=adapter)
+    ok, error, _result = approve(_approved())
+    assert (ok, error) == (True, "")
+    assert len(sent) == 1
+
+
+def test_the_handler_re_reads_before_the_price_and_passes_only_its_view():
     body = function_source("_execute_swing_approval")
     reread = body.index("_approval_control_overlay(")
-    assert body.index("_build_bracket_intent(") < reread
-    assert reread < body.index("order_service.enqueue(")
+    assert reread < body.index("_approval_live_price(")
+    assert body.index("_approval_live_price(") < body.index("_build_bracket_intent(")
+    assert body.index("_build_bracket_intent(") < body.index("order_service.enqueue(")
     assert "snapshot_overlay=" in body
     overlay = function_source("_approval_control_overlay")
     assert "_live_order_dependency_state" not in overlay
