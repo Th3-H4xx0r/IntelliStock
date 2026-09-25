@@ -387,6 +387,22 @@ export function foldSignalLoad({ generation, latch, results, previous, nowMs, re
   }
 }
 
+/**
+ * Round 3 minor 2: which parts of the card render. The pending list and its
+ * empty state wait for a first good pending read; the waiting and stuck
+ * lists render on their own, so a failed first pending read never hides an
+ * approval that needs a Re-send.
+ */
+export function cardSections({ loaded, loading, signals, stuck, uncertain }) {
+  return {
+    loadingText: Boolean(!loaded && loading),
+    empty: Boolean(loaded && !signals.length),
+    pending: Boolean(loaded && signals.length),
+    waiting: Object.keys(uncertain || {}).length > 0,
+    stuck: stuck.length > 0,
+  }
+}
+
 export function stuckLabel(signal, nowMs) {
   const decided = Date.parse(signal?.decided_at ?? '')
   if (!Number.isFinite(decided)) return 'Approved; the broker has not picked it up yet.'

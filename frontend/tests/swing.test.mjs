@@ -13,6 +13,7 @@ import {
   decisionsFor,
   detailText,
   addUncertain,
+  cardSections,
   fmtAsOf,
   foldSignalLoad,
   UNCERTAIN_BADGE,
@@ -579,4 +580,18 @@ test('a dismissed stuck card stays off the stuck list', () => {
   const lists = { pending: [], approved: [approvedAt('a1', '2026-09-25T13:00:00Z')], approved_half: [] }
   assert.deepEqual(fold(latch, latch.beginLoad(), {}, lists).stuck.map(s => s.id), ['a1'])
   assert.deepEqual(fold(latch, latch.beginLoad(), {}, lists, { dismissed: new Set(['a1']) }).stuck, [])
+})
+
+// -- Round 3 minor 2: the stuck list renders on its own ------------------------------------
+
+test('cardSections: the stuck list shows even when the pending read failed on first load', () => {
+  const stuckRow = approvedAt('a1', '2026-09-25T13:00:00Z')
+  const firstLoadFailed = cardSections({ loaded: false, loading: false, signals: [], stuck: [stuckRow], uncertain: {} })
+  assert.deepEqual(firstLoadFailed, { loadingText: false, empty: false, pending: false, waiting: false, stuck: true })
+  assert.equal(cardSections({ loaded: false, loading: true, signals: [], stuck: [stuckRow], uncertain: {} }).stuck, true)
+  assert.deepEqual(cardSections({ loaded: true, loading: false, signals: [], stuck: [], uncertain: { a1: {} } }),
+    { loadingText: false, empty: true, pending: false, waiting: true, stuck: false })
+  assert.deepEqual(cardSections({ loaded: true, loading: false, signals: [SWING], stuck: [], uncertain: {} }),
+    { loadingText: false, empty: false, pending: true, waiting: false, stuck: false })
+  assert.equal(cardSections({ loaded: false, loading: true, signals: [], stuck: [], uncertain: {} }).loadingText, true)
 })

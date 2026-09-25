@@ -58,9 +58,9 @@
       {{ loadError }}
     </div>
 
-    <div v-if="!loaded && loading" class="text-xs text-slate-500">Loading…</div>
+    <div v-if="sections.loadingText" class="text-xs text-slate-500">Loading…</div>
     <div
-      v-else-if="loaded && !signals.length"
+      v-else-if="sections.empty"
       class="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-6 text-center"
     >
       <p class="text-sm text-slate-400">Nothing waiting for review.</p>
@@ -69,7 +69,7 @@
       </p>
     </div>
 
-    <div v-else class="space-y-2">
+    <div v-else-if="sections.pending" class="space-y-2">
       <div
         v-for="s in signals"
         :key="s.id"
@@ -156,7 +156,7 @@
       </div>
     </div>
 
-    <div v-if="Object.keys(uncertain).length" class="mt-4">
+    <div v-if="sections.waiting" class="mt-4">
       <p class="text-[11px] font-bold uppercase tracking-widest text-amber-400/80 mb-2">
         Waiting for the broker ({{ Object.keys(uncertain).length }})
       </p>
@@ -194,7 +194,8 @@
       </div>
     </div>
 
-    <div v-if="loaded && stuck.length" class="mt-4">
+    <!-- Round 3 minor 2: not gated on a good pending read. -->
+    <div v-if="sections.stuck" class="mt-4">
       <p class="text-[11px] font-bold uppercase tracking-widest text-amber-400/80 mb-2">
         Approved, not yet sent ({{ stuck.length }})
       </p>
@@ -272,6 +273,7 @@ import {
   detailText,
   joinKeyRisks,
   addUncertain,
+  cardSections,
   foldSignalLoad,
   nyDate,
   proposalRows,
@@ -314,6 +316,10 @@ const resendGuard = createInFlightGuard()
 const resentAt = new Map()       // signal id -> epoch ms of this page's last re-send (or refusal)
 const uncertain = ref({})        // signal id -> { signal, since, sinceMs, resolved } after a 202 (follow-up 2)
 const dismissedStuck = new Set() // stuck ids the operator dismissed on this page (round 3 FU-1)
+const sections = computed(() => cardSections({
+  loaded: loaded.value, loading: loading.value, signals: signals.value,
+  stuck: stuck.value, uncertain: uncertain.value,
+}))
 let pollTimer = null
 let noticeTimer = null
 
