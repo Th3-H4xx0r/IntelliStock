@@ -177,7 +177,7 @@ def test_a_level_zero_refusal_places_no_option_order():
     refusal = check(_Account(level=0), WHEEL, alert=lambda **kw: None)
     ns = extract(("_execute_option_intents", "_build_option_intent",
                   "_refresh_option_quote"),
-                 assigns=("_live_option_quotes",),
+                 assigns=("_live_option_quotes", "_auto_close_alerts"),
                  namespace={"datetime": datetime_module,
                             "_wheel_alert": lambda *a, **k: True})
 

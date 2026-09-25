@@ -60,7 +60,7 @@ def _executor(alerts=None):
     sent = alerts if alerts is not None else []
     ns = extract(("_execute_option_intents", "_build_option_intent",
                   "_refresh_option_quote"),
-                 assigns=("_live_option_quotes",),
+                 assigns=("_live_option_quotes", "_auto_close_alerts"),
                  namespace={
                      "datetime": datetime_module,
                      "_wheel_alert": lambda title, message, *, priority=0: (
@@ -342,7 +342,14 @@ def test_a_buy_to_close_that_was_not_submitted_alerts_urgently(case):
                                               **kwargs)
     assert result["status"] == case
     ((title, message, priority),) = alerts
-    assert title == f"AUTO-CLOSE FAILED — {OCC} — CLOSE MANUALLY IMMEDIATELY"
+    # L4 review M-1: only a definite refusal tells the operator to close by
+    # hand; an unknown outcome says the close may be working.
+    if case in ("error", "uncertain"):
+        assert title == f"AUTO-CLOSE UNCONFIRMED — {OCC} — CHECK OPEN ORDERS"
+        assert "may not have been placed — check open orders" in message
+    else:
+        assert title == f"AUTO-CLOSE FAILED — {OCC} — CLOSE MANUALLY IMMEDIATELY"
+        assert "was NOT placed" in message
     assert priority == 2
     assert OCC in message
 
@@ -746,3 +753,183 @@ def test_eb_equity_snapshots_are_byte_identical():
     digest = hashlib.sha256(json.dumps(rows, sort_keys=True,
                                        default=str).encode()).hexdigest()
     assert digest == EB_SNAPSHOT_DIGEST
+
+
+# --- L4 review fixes (routed to L5): retried order ids, per-order isolation,
+# --- honest close-failure alerts, one alert per contract per session ----------
+
+def _scripted_service(*statuses, provider=option_snapshot):
+    """A real service whose broker answers each submit with the next status
+    (the last one repeats)."""
+    calls = []
+    order = option_intent()
+    script = list(statuses)
+
+    def transport(**kw):
+        calls.append(kw)
+        status = script.pop(0) if len(script) > 1 else script[0]
+        return SimpleNamespace(status=status, broker_order_id=f"b-{len(calls)}",
+                               id=f"b-{len(calls)}", filled_qty=0,
+                               filled_avg_price=None)
+
+    service = LiveOrderService(
+        account_id=order.account_id, instance_id=order.instance_id,
+        snapshot_provider=provider, transport=transport,
+        lifecycle_store=OrderLifecycleStore(InMemoryLifecycleBackend()))
+    return service, calls
+
+
+def test_a_retried_put_reports_the_key_it_was_sent_under(signal_updates):
+    """I-1: the broker cancelled the first put with nothing filled; the same
+    decision re-emitted that session goes out under retry ordinal 1. The
+    signal, the result and the log carry that key, not the dead one."""
+    ns = _executor()
+    service, calls = _scripted_service("canceled", "accepted")
+    execute = ns["_execute_option_intents"]
+    (first,) = execute([dict(ORDER, signal_id="sig-1")], order_service=service,
+                       adapter=_Quotes(), now_utc=RTH, risk_snapshot_id="risk-1")
+    lines, log = _lines()
+    (second,) = execute([dict(ORDER, signal_id="sig-2")], order_service=service,
+                        adapter=_Quotes(), now_utc=RTH,
+                        risk_snapshot_id="risk-1", log=log)
+    assert first["client_order_id"].endswith("-0")
+    assert second["status"] == "submitted"
+    assert second["client_order_id"].endswith("-1")
+    assert calls[1]["client_order_id"] == second["client_order_id"]
+    assert signal_updates[-1] == ("sig-2", {
+        "status": "submitted", "order_client_id": second["client_order_id"]})
+    assert any(second["client_order_id"] in m and c == "green"
+               for m, c in lines)
+
+
+@pytest.mark.parametrize("poison", [
+    dict(ORDER, limit_price="abc"),          # decimal.InvalidOperation
+    dict(ORDER, qty=float("inf")),           # OverflowError
+    dict(ORDER, strike="not-a-strike"),      # InvalidOperation in OrderIntent
+])
+def test_a_malformed_entry_never_stops_the_buy_to_close_behind_it(poison):
+    """I-2: one bad entry costs only itself; the close queued behind it is
+    still attempted (here it goes out)."""
+    alerts = []
+    ns = _executor(alerts)
+    service, calls = _service(provider=lambda cur: option_snapshot(
+        cur, position_quantity=Decimal("-1")))
+    lines, log = _lines()
+    bad, btc = ns["_execute_option_intents"](
+        [poison, dict(BTC)], order_service=service, adapter=_Quotes(),
+        now_utc=RTH, risk_snapshot_id="risk-1", log=log)
+    assert bad["status"] == "invalid"
+    assert btc["status"] == "submitted" and len(calls) == 1
+    assert calls[0]["position_intent"] == "buy_to_close"
+    assert alerts == []
+    assert any(c == "red" for _m, c in lines)
+
+
+def test_an_unexpected_failure_costs_one_order_and_the_close_still_alerts():
+    """I-2, the per-order net: a service answer nobody expected (here None)
+    marks that order "error"; the buy-to-close behind it is attempted and,
+    refused, sends its alert."""
+    alerts = []
+    ns = _executor(alerts)
+    answers = [None]
+
+    class _Odd:
+        account_id, instance_id = "acct-1", "instance-1"
+
+        def submit(self, intent):
+            if answers:
+                return answers.pop(0)
+            return SimpleNamespace(accepted=False, uncertain=False,
+                                   decision=SimpleNamespace(
+                                       allowed=False, idempotency_key="k",
+                                       reason_codes=("dependency.quote.stale",)))
+
+    lines, log = _lines()
+    first, btc = ns["_execute_option_intents"](
+        [dict(ORDER), dict(BTC)], order_service=_Odd(), adapter=_Quotes(),
+        now_utc=RTH, risk_snapshot_id="risk-1", log=log)
+    assert first["status"] == "error"
+    assert btc["status"] == "blocked"
+    ((title, _message, priority),) = alerts
+    assert title == f"AUTO-CLOSE FAILED — {OCC} — CLOSE MANUALLY IMMEDIATELY"
+    assert priority == 2
+    assert any(c == "red" and "AttributeError" in m for m, c in lines)
+
+
+def test_one_close_failure_alert_per_contract_per_session():
+    """M-3: the wheel re-emits its buy-to-close every tick; the operator hears
+    once per contract per New York session, and again the next session."""
+    alerts = []
+    ns = _executor(alerts)
+    service, _calls = _service()        # no short on the book: always blocked
+    execute = ns["_execute_option_intents"]
+    for minutes in (0, 5, 10, 300):
+        execute([dict(BTC)], order_service=service, adapter=_Quotes(
+            stamp=RTH + timedelta(minutes=minutes)),
+            now_utc=RTH + timedelta(minutes=minutes), risk_snapshot_id="risk-1")
+    assert len(alerts) == 1
+    tomorrow = RTH + timedelta(days=1)
+    execute([dict(BTC)], order_service=service,
+            adapter=_Quotes(stamp=tomorrow), now_utc=tomorrow,
+            risk_snapshot_id="risk-1")
+    assert len(alerts) == 2
+    other = dict(BTC, contract="APH261009P00125000", strike=125.0)
+    execute([other], order_service=service, adapter=_Quotes(stamp=tomorrow),
+            now_utc=tomorrow, risk_snapshot_id="risk-1")
+    assert len(alerts) == 3
+
+
+def test_the_session_follows_new_york_not_utc():
+    alerts = []
+    ns = _executor(alerts)
+    service, _calls = _service()
+    execute = ns["_execute_option_intents"]
+    evening = datetime_module.datetime(2026, 10, 5, 23, 30,
+                                       tzinfo=datetime_module.timezone.utc)
+    after_midnight_utc = evening + timedelta(hours=1)   # still Oct 5 in NY
+    for now in (evening, after_midnight_utc):
+        execute([dict(BTC)], order_service=service, adapter=_Quotes(stamp=now),
+                now_utc=now, risk_snapshot_id="risk-1")
+    assert len(alerts) == 1
+
+
+def test_an_unconfirmed_close_then_a_refused_one_both_alert():
+    """The two kinds say different things (check open orders, close by hand),
+    so a definite refusal after an unknown outcome is still sent."""
+    alerts = []
+    ns = _executor(alerts)
+    unknown = SimpleNamespace(
+        account_id="acct-1", instance_id="instance-1",
+        submit=lambda intent: SimpleNamespace(
+            accepted=False, uncertain=True,
+            decision=SimpleNamespace(allowed=True, idempotency_key="k",
+                                     reason_codes=())))
+    execute = ns["_execute_option_intents"]
+    execute([dict(BTC)], order_service=unknown, adapter=_Quotes(), now_utc=RTH,
+            risk_snapshot_id="risk-1")
+    execute([dict(BTC)], order_service=unknown, adapter=_Quotes(), now_utc=RTH,
+            risk_snapshot_id="risk-1")
+    blocked, _calls = _service()
+    execute([dict(BTC)], order_service=blocked, adapter=_Quotes(), now_utc=RTH,
+            risk_snapshot_id="risk-1")
+    assert [title.split(" — ")[0] for title, _m, _p in alerts] == [
+        "AUTO-CLOSE UNCONFIRMED", "AUTO-CLOSE FAILED"]
+
+
+def test_an_alert_that_failed_to_send_is_retried_next_tick():
+    sent = []
+    outcomes = [False, True]
+    ns = extract(("_execute_option_intents", "_build_option_intent",
+                  "_refresh_option_quote"),
+                 assigns=("_live_option_quotes", "_auto_close_alerts"),
+                 namespace={
+                     "datetime": datetime_module,
+                     "_wheel_alert": lambda title, message, *, priority=0: (
+                         sent.append(title) or outcomes.pop(0)),
+                 })
+    service, _calls = _service()
+    for _tick in range(3):
+        ns["_execute_option_intents"]([dict(BTC)], order_service=service,
+                                      adapter=_Quotes(), now_utc=RTH,
+                                      risk_snapshot_id="risk-1")
+    assert len(sent) == 2

@@ -10087,6 +10087,12 @@ def _wheel_alert(title, message, *, priority=0):
         return False
 
 
+#: swing-port (L4 review M-3): the close-failure alerts already sent this New
+#: York session, keyed (contract, kind). The wheel re-emits its buy-to-close on
+#: every tick; the operator hears once per contract per session and kind.
+_auto_close_alerts: dict = {"session": None, "sent": set()}
+
+
 def _execute_option_intents(option_orders, *, order_service, adapter, now_utc,
                             risk_snapshot_id, refused_reason="", log=None):
     """Submit the wheel lane's option orders through the unified order path
@@ -10107,6 +10113,13 @@ def _execute_option_intents(option_orders, *, order_service, adapter, now_utc,
       "AUTO-CLOSE FAILED" alert; a sell-to-open carrying a signal_id that was
       definitely not placed marks its signal failed and sends a correction
       "Put order NOT placed: <reason>".
+    - L4 review: the service can escalate a spent identity to the next retry
+      ordinal, so an order is reported under the key the gate decided on
+      (I-1). One malformed entry, or anything else an order raises, costs
+      only that order (I-2). Only a definite refusal says "CLOSE MANUALLY
+      IMMEDIATELY"; an unknown outcome says the close may be working (M-1).
+      One close-failure alert per contract per New York session and kind
+      (M-3).
     """
     duplicate_codes = frozenset({"idempotency.open_order_exists",
                                  "idempotency.terminal_requires_retry"})
@@ -10142,7 +10155,9 @@ def _execute_option_intents(option_orders, *, order_service, adapter, now_utc,
             intent = _build_option_intent(
                 order_service, entry, quote_at=quote["quote_at"],
                 decision_at=now_utc, risk_snapshot_id=risk_snapshot_id)
-        except (TypeError, ValueError) as exc:
+        except Exception as exc:
+            # No intent, so nothing was sent: a definite refusal, whatever
+            # the entry raised (decimal.InvalidOperation, OverflowError...).
             result["status"] = "invalid"
             say(f"[wheel] malformed option order dropped ({exc}): {entry!r}", "red")
             return f"malformed order ({exc})"
@@ -10153,12 +10168,16 @@ def _execute_option_intents(option_orders, *, order_service, adapter, now_utc,
             result["status"] = "error"
             say(f"[wheel] {contract} submit raised {type(exc).__name__}: {exc}", "red")
             return f"submit raised {type(exc).__name__}: {exc}"
+        # I-1: a retried identity goes out under the escalated key.
+        result["client_order_id"] = (
+            getattr(submission.decision, "idempotency_key", None)
+            or intent.idempotency_key)
         codes = tuple(submission.decision.reason_codes)
         result["reason_codes"] = codes
         if submission.accepted:
             result["status"] = "submitted"
             say(f"[wheel] {intent.position_intent} {intent.quantity} {contract} "
-                f"submitted ({intent.idempotency_key})", "green")
+                f"submitted ({result['client_order_id']})", "green")
             return ""
         if not submission.decision.allowed:
             result["status"] = "blocked"
@@ -10174,6 +10193,15 @@ def _execute_option_intents(option_orders, *, order_service, adapter, now_utc,
             f"({','.join(codes) or 'transport'}); "
             "the next reconcile resolves it", "red")
         return f"outcome unknown ({','.join(codes) or 'transport'})"
+
+    try:
+        from zoneinfo import ZoneInfo
+        session = now_utc.astimezone(ZoneInfo("America/New_York")).date().isoformat()
+    except Exception:
+        session = str(now_utc)[:10]
+    if _auto_close_alerts.get("session") != session:
+        _auto_close_alerts["session"] = session
+        _auto_close_alerts["sent"] = set()
 
     results = []
     for order in list(option_orders or ()):
@@ -10191,7 +10219,15 @@ def _execute_option_intents(option_orders, *, order_service, adapter, now_utc,
             result["status"] = "invalid"
             say(f"[wheel] malformed option order dropped: {order!r}", "red")
             continue
-        detail = place(entry, result)
+        try:
+            detail = place(entry, result)
+        except Exception as exc:
+            # I-2: whatever this order raised, the rest of the batch (a
+            # buy-to-close among it) is still attempted.
+            result["status"] = "error"
+            detail = f"{type(exc).__name__}: {exc}"
+            say(f"[wheel] {result['contract'] or entry!r} order failed "
+                f"({detail}); the rest of the batch goes on", "red")
         status = result["status"]
         codes = tuple(result["reason_codes"])
         contract = result["contract"] or "(no contract)"
@@ -10200,11 +10236,26 @@ def _execute_option_intents(option_orders, *, order_service, adapter, now_utc,
         position_intent = str(entry.get("position_intent") or "").strip().lower()
         if (position_intent == "buy_to_close" and status != "submitted"
                 and not duplicate):
-            _wheel_alert(
-                f"AUTO-CLOSE FAILED — {contract} — CLOSE MANUALLY IMMEDIATELY",
-                f"The buy-to-close of {contract} was NOT placed ({status}: "
-                f"{detail}). The short put is still open.",
-                priority=2)
+            definite = status in definite_refusals
+            alert_key = (contract, "definite" if definite else "unconfirmed")
+            if alert_key in _auto_close_alerts["sent"]:
+                say(f"[wheel] buy-to-close of {contract} still not placed "
+                    f"({status}: {detail}); alerted earlier this session", "red")
+            elif definite:
+                if _wheel_alert(
+                        f"AUTO-CLOSE FAILED — {contract} — CLOSE MANUALLY "
+                        "IMMEDIATELY",
+                        f"The buy-to-close of {contract} was NOT placed "
+                        f"({status}: {detail}). The short put is still open.",
+                        priority=2):
+                    _auto_close_alerts["sent"].add(alert_key)
+            elif _wheel_alert(
+                    f"AUTO-CLOSE UNCONFIRMED — {contract} — CHECK OPEN ORDERS",
+                    f"The buy-to-close of {contract} may not have been placed "
+                    f"— check open orders ({status}: {detail}). Closing it by "
+                    "hand while it is working would close twice.",
+                    priority=2):
+                _auto_close_alerts["sent"].add(alert_key)
         signal_id = entry.get("signal_id")
         if not signal_id or duplicate:
             continue
