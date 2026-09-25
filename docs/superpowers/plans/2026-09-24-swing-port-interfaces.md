@@ -337,3 +337,17 @@ Copied from plan A-live's "Contract additions" (Task 1 Step 0). Three items carr
   - (b) Price marks: entries are price-marked by the existing broker helper `_ensure_live_candidate_marks` (A-live adds no marking).
 
 - SwingSignals `outcome` for a swing entry that never filled within 2 NY sessions (plan B G8a, ruling 4): `{"unfilled": true, "as_of": "YYYY-MM-DD", "sessions_waited": int}`. The status is unchanged and no `pnl` is recorded, so it never counts as a round trip. Entries still working at the broker (GTC brackets) are never closed as unfilled.
+
+### Deploy fingerprint hand-off (plan B Task 25 → A-live Task 16)
+
+Source: `git diff --name-status $(git merge-base main HEAD)..HEAD -- backend`, test files excluded, at `c6b5771d` (2026-09-25). There are 41 changed backend `.py` files across plans A-backtest, A-live and B; plan C changes no backend file. Paths are backend-relative, as `_CODE_FINGERPRINT_FILES` lists them. `scripts/check_deployed_code.py`'s `FILES` takes the same paths prefixed with `backend/`. Scripts are not deployed.
+
+Already fingerprinted on both sides (7), so no change: `broker.py`, `broker_adapters/alpaca.py`, `api/main.py`, `llm_utils.py`, `simulated_execution.py`, `portfolio_emulator.py`, `backtest_bar_events.py`.
+
+To add to both lists (34):
+- plan A-live (11): `broker_adapters/base.py`, `broker_adapters/errors.py`, `live_broker_fetch.py`, `live_orders/__init__.py`, `live_orders/types.py`, `live_orders/store.py`, `live_orders/gate.py`, `live_orders/service.py`, `live_orders/reconcile.py`, `live_pending_orders.py`, `live_risk_state.py`;
+- plan B, strategies (2): `strategies/strategy_swing.py`, `strategies/strategy_wheel.py`;
+- plan B, package (18): `swing_trader/__init__.py`, `swing_trader/account.py`, `swing_trader/ai_analyst.py`, `swing_trader/approvals.py`, `swing_trader/calibration.py`, `swing_trader/clock.py`, `swing_trader/constants.py`, `swing_trader/indicators.py`, `swing_trader/iv.py`, `swing_trader/market_data.py`, `swing_trader/notify.py`, `swing_trader/refdata.py`, `swing_trader/regime.py`, `swing_trader/sectors.py`, `swing_trader/signals.py`, `swing_trader/signals_store.py`, `swing_trader/universe.py`, `swing_trader/wheel_rules.py`;
+- plan B, shared modules (3): `db/schema.py`, `interactive_utils.py`, `notification_types.py`.
+
+Compared with A-live Task 16's `EXPECTED` and its paste block, five entries are missing there: `swing_trader/account.py`, `clock.py`, `notify.py` and `refdata.py` (ruling F2), and `live_orders/__init__.py`, which A-live's own commit 786af5a2 changed. Two entries share the basename `__init__.py` (`live_orders/` and `swing_trader/`), so both sides key them by full path. The existing duplicate-basename rule already does that.
