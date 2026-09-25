@@ -71,6 +71,9 @@ _HINT_FLAGS = ("whole_shares", "fill_at_next_open")
 #: A bar spacing at or above this is a daily bar (market_data uses the same cut).
 _DAILY_MIN_GAP_S = 23 * 3600
 _UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+#: Review fix c: while yfinance returns no VIX, the live scan waits for it
+#: until this ET time, then proceeds with the regime blocked, as ST did.
+_VIX_RETRY_UNTIL_ET = "10:00"
 
 
 def _log_once(cache, reason, scope, msg, color="white"):
@@ -171,6 +174,8 @@ def _exits(ind, positions, entry_of, cfg, decisions, sizes, intents) -> dict:
         try:
             entry = entry_of(symbol)
             if not entry or entry <= 0:
+                _log(f"StrategySwing | {symbol}: exit check skipped — the held position has "
+                     "no entry price", "yellow")
                 continue
             should_exit, reason = signals.exit_signal(i, float(entry), **kw)
         except Exception as exc:
@@ -227,6 +232,52 @@ def _valid_hhmm(value):
     if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59:
         return None
     return f"{int(m.group(1)):02d}:{m.group(2)}"
+
+
+def _positions_for_scan(emu):
+    """(positions, None) — {symbol: {"qty", "avg_entry_price", "market_value"}},
+    the book the scan counts exits, slots and sectors from — or (None, reason)
+    when the read is degraded (review fix a). account.equity_positions reads
+    the same book but degrades to "no data", which here would mean free
+    slots and silently skipped exits.
+
+    AlpacaAdapter.refresh_positions never raises. On a REST failure it returns
+    the cached quantities with avg_entry_price=0.0; after 10 minutes, or in a
+    process whose first refresh failed, it returns an empty book. Its health
+    flag `_positions_stale_since` is set while refreshes fail and is set
+    BEFORE the call that clears the cache, so it is read on both sides."""
+    before = getattr(emu, "_positions_stale_since", None)
+    dtos = []
+    refresh = getattr(emu, "refresh_positions", None)
+    if callable(refresh):
+        try:
+            dtos = list(refresh() or [])
+        except Exception as exc:
+            return None, f"refresh_positions failed ({type(exc).__name__}: {exc})"
+    try:
+        held = {str(s).upper(): float(q or 0.0) for s, q in (emu.get_positions() or {}).items()}
+    except Exception as exc:
+        return None, f"get_positions failed ({type(exc).__name__}: {exc})"
+    if before is not None or getattr(emu, "_positions_stale_since", None) is not None:
+        return None, "the broker's positions snapshot is stale (its REST refresh is failing)"
+    out = {}
+    for d in dtos:
+        sym = str(getattr(d, "symbol", "") or "").upper()
+        qty = float(getattr(d, "qty", 0) or 0.0)
+        if qty > 0 and sym in held:
+            out[sym] = {"qty": qty,
+                        "avg_entry_price": float(getattr(d, "avg_entry_price", 0) or 0.0),
+                        "market_value": float(getattr(d, "market_value", 0) or 0.0)}
+    for sym, qty in held.items():
+        if qty > 0 and sym not in out:
+            out[sym] = {"qty": qty, "avg_entry_price": 0.0, "market_value": 0.0}
+    for sym, pos in sorted(out.items()):
+        if _price(pos["avg_entry_price"]) is None:
+            filled = _price(account.entry_price_from_trades(emu, sym))
+            if filled is None:
+                return None, f"{sym} is held with no entry price (a degraded positions read)"
+            pos["avg_entry_price"] = filled
+    return out, None
 
 
 def _increment_seconds(value):
@@ -501,8 +552,8 @@ class StrategySwing:
                 scan = None
                 if clock.time_left(deadline) >= clock.PREPARE_RESERVE_S:
                     try:
-                        scan = self._prepare(prices, session, iid, cfg, emu, cache, book,
-                                             decisions, sizes, intents)
+                        scan = self._prepare(prices, current_time, session, iid, cfg, emu,
+                                             cache, book, decisions, sizes, intents)
                     except Exception as exc:
                         _log(f"StrategySwing {session} | scan preparation failed "
                              f"({type(exc).__name__}: {exc}); retried next tick", "red")
@@ -520,16 +571,37 @@ class StrategySwing:
         self._remember_emitted(current_time, session, cache, decisions, sizes, intents)
         return _emit(decisions, sizes, intents)
 
-    def _prepare(self, prices, session, iid, cfg, emu, cache, book, decisions, sizes,
-                 intents):
+    def _prepare(self, prices, current_time, session, iid, cfg, emu, cache, book, decisions,
+                 sizes, intents):
         """paper_trader.py:446-626 up to the entry loop: data, regime, exits,
         the bear counter, and the queue of names whose signal fired. Exits are
-        merged into the payload only once everything above them succeeded."""
+        merged into the payload only once everything above them succeeded.
+        None means not ready: nothing is decided, and the next tick retries."""
         try:
             client = market_data.data_client(cfg.get("alpaca_key"), cfg.get("alpaca_secret"))
         except RuntimeError as exc:
             _log_once(cache, "no-creds", session,
                       f"StrategySwing {session} | REFUSING to scan — {exc}", "red")
+            return None
+        vix = regime.fetch_vix_close()
+        if vix is None:
+            # Review fix c: a VIX read that fails at 09:20 would block the
+            # regime and advance the bear counter for the whole session.
+            if not clock.at_or_after(current_time, _VIX_RETRY_UNTIL_ET):
+                _log_once(cache, "vix-retry", session,
+                          f"StrategySwing {session} | VIX unavailable — the scan waits and "
+                          f"retries each tick until {_VIX_RETRY_UNTIL_ET} ET", "yellow")
+                return None
+            _log_once(cache, "vix-blocked", session,
+                      f"StrategySwing {session} | VIX still unavailable at "
+                      f"{_VIX_RETRY_UNTIL_ET} ET — the regime is blocked, as a missing VIX "
+                      "blocked ST", "yellow")
+        equity_pos, not_ready = _positions_for_scan(emu)
+        if equity_pos is None:
+            _log_once(cache, "positions-not-ready", session,
+                      f"StrategySwing {session} | scan not ready: positions unreadable — "
+                      f"{not_ready}. Nothing is decided or latched; the scan retries next "
+                      "tick.", "red")
             return None
         live_universe = [universe.norm_symbol(s) for s in universe.get_sp500_symbols()]
         defensive = _list(cfg["defensive_universe"])
@@ -543,12 +615,10 @@ class StrategySwing:
                       f"StrategySwing {session} | no SPY daily bars — the scan retries "
                       "next tick", "red")
             return None
-        vix = regime.fetch_vix_close()
         reg = regime.regime_decision(spy.get("close"), spy.get("sma200"), vix,
                                      spy_buffer=float(cfg["spy_buffer"]),
                                      vix_max=float(cfg["vix_max"]))
 
-        equity_pos = account.equity_positions(emu)
         option_syms = account.option_symbols(emu)
         equity = account.live_equity(emu, prices)
         bp = account.live_buying_power(emu)

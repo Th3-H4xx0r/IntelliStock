@@ -526,3 +526,128 @@ def test_g1_minor_5_a_bad_row_skips_only_that_symbol_in_the_scan(live, monkeypat
     assert ai.calls == ["BBB", "CCC", "DDD"]          # AAA skipped; BBB no longer blocked
     assert cache[live._SCAN_DONE_KEY] == "2026-06-01"
     assert any("AAA" in line for line in lines) and any("EEE" in line for line in lines)
+
+
+# -- review fix round 1 (G6) -----------------------------------------------------
+
+class Blind(LiveAdapter):
+    def refresh_positions(self):
+        raise RuntimeError("positions endpoint down")
+
+    def get_positions(self):
+        raise RuntimeError("positions endpoint down")
+
+
+class Preserved(LiveAdapter):
+    """AlpacaAdapter.refresh_positions on a REST failure under 10 minutes old:
+    the cached quantities come back with avg_entry_price=0.0."""
+
+    def refresh_positions(self):
+        return [NS(symbol=s, qty=v[0], avg_entry_price=0.0, market_value=v[2])
+                for s, v in self.pos.items()]
+
+
+def test_fix_a_unreadable_positions_are_not_ready(live, monkeypatch):
+    # Review probe 1: eight names fill every slot. With the positions read
+    # down, the scan must not see an empty book and enter AAA, CCC and DDD.
+    lines = []
+    monkeypatch.setattr(live, "_log", lambda msg, color="white": lines.append(msg))
+    ai = scripted({"AAA": APPROVE, "CCC": APPROVE, "DDD": APPROVE})
+    monkeypatch.setattr(live.ai_analyst, "analyse", ai)
+    held = {f"H{i}": (10, 100.0, 1_000.0) for i in range(8)}
+    assert tick(live, MON_0920, LiveAdapter(positions=held), {}) == {}     # no open slot
+    cache = {}
+    assert tick(live, MON_0920, Blind(positions=held), cache) == {}
+    assert tick(live, MON_0940, Blind(positions=held), cache) == {}
+    assert ai.calls == []
+    assert live._SCAN_DONE_KEY not in cache and live._SCAN_KEY not in cache
+    assert sum("positions" in line and "not ready" in line for line in lines) == 1
+    assert tick(live, MON_1000, LiveAdapter(positions=held), cache) == {}
+    assert cache[live._SCAN_DONE_KEY] == "2026-06-01"
+
+
+def test_fix_a_a_preserved_snapshot_is_not_ready_and_the_exit_survives(live, monkeypatch):
+    # Review probe 2: the cached snapshot carries no entry price, so the RSI
+    # cross on EEE was skipped silently and the scan latched, losing the
+    # one-bar signal. Not ready: no latch, and the next tick sells EEE.
+    monkeypatch.setattr(live.ai_analyst, "analyse",
+                        scripted({"AAA": REJECT, "CCC": REJECT, "DDD": REJECT}))
+    monkeypatch.setattr(live, "swing_indicators",
+                        lambda f, c: dict(IND, EEE=ind(104.0, rsi=72.0, rsi_prev=68.0)))
+    cache = {}
+    assert tick(live, MON_0920, Preserved(positions={"EEE": (10, 100.0, 1_040.0)}),
+                cache) == {}
+    assert live._SCAN_DONE_KEY not in cache and not cache.get(live._PENDING_EXIT_KEY)
+    out = tick(live, MON_1000, LiveAdapter(positions={"EEE": (10, 100.0, 1_040.0)}), cache)
+    assert out["EEE"] == -1 and out["_nexus_action_intents"] == {"EEE": "swing_rsi_exit"}
+    assert cache[live._SCAN_DONE_KEY] == "2026-06-01"
+
+
+def test_fix_a_a_missing_entry_price_the_trade_history_fills_is_ready(live, monkeypatch):
+    monkeypatch.setattr(live.ai_analyst, "analyse",
+                        scripted({"AAA": REJECT, "CCC": REJECT, "DDD": REJECT}))
+    monkeypatch.setattr(live, "swing_indicators",
+                        lambda f, c: dict(IND, EEE=ind(104.0, rsi=72.0, rsi_prev=68.0)))
+
+    class Filled(Preserved):
+        def get_trade_history(self):
+            return [{"action": "buy", "ticker": "EEE", "price": 100.0}]
+
+    out = tick(live, MON_0920, Filled(positions={"EEE": (10, 100.0, 1_040.0)}), {})
+    assert out["EEE"] == -1
+
+
+def test_fix_a_the_adapters_stale_positions_flag_is_not_ready(live, monkeypatch):
+    ai = scripted({"AAA": APPROVE, "CCC": REJECT, "DDD": REJECT})
+    monkeypatch.setattr(live.ai_analyst, "analyse", ai)
+    # A fresh process whose first refresh failed: an empty book, flag set.
+    first_failed = LiveAdapter()
+    first_failed._positions_stale_since = 1_000.0
+    cache = {}
+    assert tick(live, MON_0920, first_failed, cache) == {}
+
+    # The call that clobbers the cache after 10 minutes clears the flag it
+    # found set, and returns an empty book.
+    class Clobbering(LiveAdapter):
+        _positions_stale_since = 1_000.0
+
+        def refresh_positions(self):
+            self._positions_stale_since = None
+            return []
+
+    assert tick(live, MON_0940, Clobbering(), cache) == {}
+    assert ai.calls == [] and live._SCAN_DONE_KEY not in cache
+    out = tick(live, MON_1000, LiveAdapter(), cache)
+    assert out["AAA"] == 1 and cache[live._SCAN_DONE_KEY] == "2026-06-01"
+
+
+def test_fix_c_a_missing_vix_retries_until_the_scan_reads_it(live, monkeypatch):
+    ai = scripted({"AAA": APPROVE, "CCC": REJECT, "DDD": REJECT})
+    monkeypatch.setattr(live.ai_analyst, "analyse", ai)
+    vix = iter([None, 15.0])
+    monkeypatch.setattr(live.regime, "fetch_vix_close", lambda: next(vix))
+    prior = {"session": "2026-05-29", "blocked_days": 3}
+    cache = {live._BEAR_KEY: dict(prior)}
+    assert tick(live, MON_0920, LiveAdapter(), cache) == {}
+    assert live._SCAN_DONE_KEY not in cache and cache[live._BEAR_KEY] == prior
+    assert ai.calls == []
+    out = tick(live, MON_0940, LiveAdapter(), cache)
+    assert out["AAA"] == 1 and cache[live._SCAN_DONE_KEY] == "2026-06-01"
+    bear = cache[live._BEAR_KEY]
+    assert (bear["session"], bear["blocked_days"]) == ("2026-06-01", 0)   # ruling 4
+
+
+def test_fix_c_a_vix_still_missing_at_1000_proceeds_blocked(live, monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("regime blocked: nothing to score")
+
+    monkeypatch.setattr(live.ai_analyst, "analyse", boom)
+    monkeypatch.setattr(live.regime, "fetch_vix_close", lambda: None)
+    prior = {"session": "2026-05-29", "blocked_days": 3}
+    cache = {live._BEAR_KEY: dict(prior)}
+    for at in (MON_0920, MON_0940):
+        assert tick(live, at, LiveAdapter(), cache) == {}
+        assert live._SCAN_DONE_KEY not in cache and cache[live._BEAR_KEY] == prior
+    assert tick(live, MON_1000, LiveAdapter(), cache) == {}
+    assert cache[live._SCAN_DONE_KEY] == "2026-06-01"
+    assert cache[live._BEAR_KEY]["blocked_days"] == 4                     # ST: VIX None blocks

@@ -391,3 +391,25 @@ def test_a6_hint_flags_are_python_bools(mod, monkeypatch):
                                              ("AAA", "fill_at_next_open"),
                                              ("XOM", "fill_at_next_open")}
     assert all(type(v) is bool and v is True for _, _, v in flags)
+
+
+# -- review fix round 1 (G6) -----------------------------------------------------
+
+def test_fix_b_emit_coerces_numpy_bools_to_python_bools(mod):
+    import numpy as np
+    out = mod._emit({"AAA": 1, "XOM": -1},
+                    {"AAA": {"buy_cash": 1.0, "whole_shares": np.bool_(True),
+                             "fill_at_next_open": np.bool_(True)},
+                     "XOM": {"sell_fraction": 1.0, "fill_at_next_open": np.bool_(True)}}, {})
+    flags = [v for s in ("AAA", "XOM") for k, v in out["_nexus_position_sizes"][s].items()
+             if k in ("whole_shares", "fill_at_next_open")]
+    assert len(flags) == 3 and all(type(v) is bool and v is True for v in flags)
+
+
+def test_fix_a_an_exit_without_an_entry_price_is_logged(mod, monkeypatch):
+    lines = []
+    monkeypatch.setattr(mod, "_log", lambda msg, color="white": lines.append(msg))
+    out = run(mod, monkeypatch, {"SPY": SPY, "XOM": ind(104.0, rsi=72.0, rsi_prev=68.0)},
+              emu=BtEmulator(positions={"XOM": 5.0}))
+    assert "XOM" not in out
+    assert any("XOM" in line and "entry price" in line for line in lines)
