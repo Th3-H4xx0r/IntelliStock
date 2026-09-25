@@ -214,3 +214,31 @@ def test_m8_help_says_only_an_active_asset_is_a_good_rename_target(capsys):
     text = capsys.readouterr().out
     assert "active" in text and "PSKY" in text and "PARA" in text
     assert "FISV" in text and "FI" in text
+
+
+# -- FW-str minor (b): the current S&P list's symbols win ----------------------------
+
+def test_no_rename_carries_a_current_sp500_symbol_away():
+    """strategies-review M-4: the port's own universe (ST's May 2026 list)
+    carries FISV and PSKY, not FI or PARA. A rename whose source is a current
+    S&P symbol sends that name's history to a ticker Alpaca no longer lists
+    as current, and drops the name from the lab watchlist."""
+    from swing_trader.universe import SP500_SYMBOLS, norm_symbol
+
+    b = _script()
+    current = {norm_symbol(s) for s in SP500_SYMBOLS}
+    assert sorted(k for k in b.RENAME_MAP if k in current) == []
+    assert b.RENAME_MAP["FI"] == "FISV"
+    assert {b.RENAME_MAP[k] for k in ("CBS", "VIAC", "PARA")} == {"PSKY"}
+    assert "FI" not in b.RENAME_MAP.values() and "PARA" not in b.RENAME_MAP.values()
+
+
+def test_fiserv_and_paramount_rows_carry_the_current_tickers():
+    b = _script()
+    csv_text = ('date,tickers\n'
+                '2019-01-02,"AAPL,CBS,FISV"\n'
+                '2020-01-02,"AAPL,FISV,VIAC"\n'
+                '2023-06-07,"AAPL,FI,PARA"\n'
+                '2025-12-01,"AAPL,FISV,PSKY"\n')
+    assert [m for _d, m in b.parse_membership(csv_text)] == [
+        ["AAPL", "FISV", "PSKY"]] * 4
