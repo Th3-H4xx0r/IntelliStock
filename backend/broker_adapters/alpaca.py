@@ -857,6 +857,12 @@ class AlpacaAdapter(BrokerAdapter):
         tif: str,
         extended_hours: bool,
         client_order_id: str,
+        *,
+        order_class: Optional[str] = None,
+        take_profit: Optional[float] = None,
+        stop_loss: Optional[float] = None,
+        position_intent: Optional[str] = None,
+        asset_class: Optional[str] = None,
     ) -> OrderRef:
         from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest
         from alpaca.trading.enums import OrderSide, TimeInForce
@@ -871,6 +877,17 @@ class AlpacaAdapter(BrokerAdapter):
             raise BrokerError(
                 f"pre-submit reconciliation unavailable for {client_order_id}"
             ) from lookup_error
+
+        # swing-port: a bracket is admitted only in its one legal shape, and
+        # the check runs before the WAL row exists, so a refusal is a definite
+        # non-submission. No EB call passes order_class; this is skipped.
+        _is_bracket = str(order_class or "").strip().lower() == "bracket"
+        if _is_bracket:
+            qty = _checked_bracket_order(
+                symbol=symbol, side=side, qty=qty, notional=notional,
+                order_type=order_type, tif=tif,
+                extended_hours=extended_hours, take_profit=take_profit,
+                stop_loss=stop_loss)
 
         # 2026-08-02 extended-hours order class. Alpaca supports fractional
         # quantities during regular hours only, so a fractional order that also
@@ -973,6 +990,22 @@ class AlpacaAdapter(BrokerAdapter):
             kw["qty"] = qty
         if notional is not None and qty is None:
             kw["notional"] = notional
+        if _is_bracket:
+            from alpaca.trading.enums import OrderClass
+            from alpaca.trading.requests import StopLossRequest, TakeProfitRequest
+
+            kw["order_class"] = OrderClass.BRACKET
+            kw["take_profit"] = TakeProfitRequest(
+                limit_price=round(float(take_profit), 2))
+            kw["stop_loss"] = StopLossRequest(
+                stop_price=round(float(stop_loss), 2))
+            _alog(
+                "BROKER",
+                f"Alpaca SUBMIT bracket legs: {symbol} "
+                f"take_profit=${float(take_profit):.2f} "
+                f"stop_loss=${float(stop_loss):.2f} cid={client_order_id[:24]}",
+                "cyan",
+            )
 
         if order_type.lower() == "market":
             req = MarketOrderRequest(**kw)
@@ -1320,7 +1353,128 @@ class AlpacaAdapter(BrokerAdapter):
             filled_qty=float(o.filled_qty or 0.0),
             filled_avg_price=float(o.filled_avg_price) if o.filled_avg_price else None,
             submitted_at_utc=getattr(o, "submitted_at", None),
+            # swing-port: multi-leg and option fields, read with getattr so
+            # older doubles and every EB order simply read as simple orders.
+            order_class=_enum_value(getattr(o, "order_class", None)),
+            legs=tuple(
+                self._to_orderref(leg) for leg in (getattr(o, "legs", None) or ())
+            ),
+            position_intent=_enum_value(getattr(o, "position_intent", None)),
+            asset_class=_enum_value(getattr(o, "asset_class", None)),
+            order_type=_enum_value(
+                getattr(o, "type", None) or getattr(o, "order_type", None)
+            ),
+            limit_price=_as_positive_float(getattr(o, "limit_price", None)),
+            stop_price=_as_positive_float(getattr(o, "stop_price", None)),
         )
+
+    def get_order_with_legs(self, order_id) -> OrderRef:
+        """The order with its child legs, read with ``nested=True`` so a
+        bracket's take-profit and stop-loss come back under ``legs``."""
+        from alpaca.trading.requests import GetOrderByIdRequest
+
+        raw = self._client.get_order_by_id(
+            str(order_id), filter=GetOrderByIdRequest(nested=True)
+        )
+        return self._to_orderref(raw)
+
+    def _order_status(self, order_id: str) -> tuple[str, float]:
+        raw = self._client.get_order_by_id(str(order_id))
+        return (
+            _enum_value(getattr(raw, "status", None)) or "",
+            float(getattr(raw, "filled_qty", 0) or 0),
+        )
+
+    def cancel_orders_confirmed(
+        self,
+        order_ids,
+        timeout_s: float = 10.0,
+        *,
+        poll_interval_s: float = 0.5,
+        sleep=time.sleep,
+        clock=time.monotonic,
+    ) -> bool:
+        """Cancel ``order_ids`` and wait until Alpaca confirms every one.
+
+        True only when each order ended cancelled (or was already dead) with
+        nothing filled. False when any is still working at the timeout, and
+        False when any FILLED, even partly, while we waited: the position
+        changed under the caller, and a sell sized off the old position would
+        oversell -- on a margin paper account, into a short. The caller defers
+        its sell a tick and re-reads broker truth.
+        """
+        ids = [
+            str(value).strip()
+            for value in (order_ids or ())
+            if str(value or "").strip()
+        ]
+        if not ids:
+            return True
+        for order_id in ids:
+            try:
+                self._client.cancel_order_by_id(order_id)
+            except Exception as exc:
+                # "not cancelable" is routine for an order that already
+                # finished; its status below says which way it finished.
+                _alog(
+                    "BROKER",
+                    f"cancel {order_id} raised {type(exc).__name__}: {exc}; "
+                    "confirming by status",
+                    "yellow",
+                )
+        deadline = clock() + max(0.0, float(timeout_s))
+        pending = list(ids)
+        while True:
+            still_working = []
+            for order_id in pending:
+                try:
+                    status, filled = self._order_status(order_id)
+                except Exception:
+                    still_working.append(order_id)
+                    continue
+                if filled > 0 or status in ("filled", "partially_filled"):
+                    _alog(
+                        "BROKER",
+                        f"order {order_id} filled ({filled}) while being "
+                        "cancelled; the caller must re-read positions",
+                        "yellow",
+                    )
+                    return False
+                if status not in _CANCEL_CONFIRMED_STATES:
+                    still_working.append(order_id)
+            if not still_working:
+                return True
+            if clock() >= deadline:
+                _alog(
+                    "BROKER",
+                    f"cancel of {still_working} not confirmed within "
+                    f"{float(timeout_s):.0f}s",
+                    "yellow",
+                )
+                return False
+            pending = still_working
+            sleep(poll_interval_s)
+
+    def list_closed_orders(self, symbols, after) -> list[OrderRef]:
+        """Every CLOSED order for ``symbols`` submitted after ``after`` (an ISO
+        date or a datetime). Raises rather than return a truncated history."""
+        from alpaca.trading.enums import QueryOrderStatus
+
+        if isinstance(after, datetime):
+            after_dt = after
+        else:
+            after_dt = datetime.fromisoformat(str(after).replace("Z", "+00:00"))
+        if after_dt.tzinfo is None:
+            after_dt = after_dt.replace(tzinfo=timezone.utc)
+        wanted = sorted(
+            {str(s).strip().upper() for s in (symbols or ()) if str(s).strip()}
+        )
+        rows, complete = self._walk_orders(
+            status=QueryOrderStatus.CLOSED, since=after_dt, symbols=wanted or None
+        )
+        if not complete:
+            raise BrokerError(f"closed-order history for {wanted} is truncated")
+        return [self._to_orderref(row) for row in rows]
 
     def _walk_orders(
         self,
@@ -1329,6 +1483,7 @@ class AlpacaAdapter(BrokerAdapter):
         since: Optional[datetime] = None,
         page_size: int = 500,
         max_pages: int = 40,
+        symbols: Optional[list] = None,
     ) -> tuple[list, bool]:
         """Page through get_orders until exhausted. Returns (orders, complete).
 
@@ -1354,6 +1509,8 @@ class AlpacaAdapter(BrokerAdapter):
                 kwargs["after"] = since
             if until is not None:
                 kwargs["until"] = until
+            if symbols:
+                kwargs["symbols"] = list(symbols)
             page = list(
                 self._client.get_orders(filter=GetOrdersRequest(**kwargs)) or []
             )
@@ -1464,9 +1621,20 @@ class AlpacaAdapter(BrokerAdapter):
             second_positions = _positions(self._client.get_all_positions())
             normalized_orders = []
             for raw in raw_orders:
+                # swing-port: a multi-leg (mleg) option order's top level has
+                # no side and no symbol. IntelliStock never submits one, and
+                # letting it raise here marked the whole account
+                # broker-unavailable for the 30-day history window.
+                if _enum_value(getattr(raw, "order_class", None)) == "mleg":
+                    continue
                 side_value = getattr(getattr(raw, "side", None), "value", None)
                 if side_value is None:
                     side_value = getattr(raw, "side", "")
+                if not side_value:
+                    side_value = _side_from_position_intent(
+                        getattr(raw, "position_intent", None))
+                    if side_value is None:
+                        continue
                 status_value = getattr(
                     getattr(raw, "status", None), "value", None
                 )
@@ -2127,6 +2295,11 @@ class AlpacaAdapter(BrokerAdapter):
             "cancelled": LifecycleState.CANCELED,
             "expired": LifecycleState.EXPIRED,
             "done_for_day": LifecycleState.EXPIRED,
+            # swing-port: a bracket's stop leg waits in "held"; a leg being
+            # cancelled before a strategy sell passes through "pending_cancel".
+            # Both are still working orders.
+            "held": LifecycleState.ACKNOWLEDGED,
+            "pending_cancel": LifecycleState.ACKNOWLEDGED,
         }.get(raw_event)
         if state is None:
             return None
@@ -2140,6 +2313,14 @@ class AlpacaAdapter(BrokerAdapter):
         # record missed them). Read `.value` first, as the neighbouring
         # call sites already do.
         _raw_side = getattr(order, "side", "") or ""
+        if not _raw_side:
+            # swing-port: an mleg top level carries no side. It is not an
+            # order this instance placed; dropping it beats raising inside
+            # the stream callback.
+            _raw_side = _side_from_position_intent(
+                getattr(order, "position_intent", None)) or ""
+            if not _raw_side:
+                return None
         side = OrderSide(
             str(getattr(_raw_side, "value", _raw_side)).lower())
         cumulative = Decimal(str(getattr(order, "filled_qty", 0) or 0))
@@ -3014,6 +3195,60 @@ class AlpacaAdapter(BrokerAdapter):
                         self._orders_today.pop(symbol, None)
         except Exception:
             pass
+
+
+#: Order states in which a cancel is confirmed and nothing more can fill.
+_CANCEL_CONFIRMED_STATES = frozenset(
+    {"canceled", "cancelled", "expired", "rejected", "done_for_day"}
+)
+
+
+def _enum_value(value) -> Optional[str]:
+    """An alpaca-py enum or a plain string as lower-case text; None if empty."""
+    text = str(getattr(value, "value", value) or "").strip().lower()
+    return text or None
+
+
+def _side_from_position_intent(value) -> Optional[str]:
+    """buy_*/sell_* position intents imply the side of an order that has none."""
+    text = _enum_value(value) or ""
+    if text.startswith("buy_"):
+        return "buy"
+    if text.startswith("sell_"):
+        return "sell"
+    return None
+
+
+def _checked_bracket_order(
+    *, symbol, side, qty, notional, order_type, tif, extended_hours,
+    take_profit, stop_loss,
+) -> int:
+    """The one bracket shape IntelliStock sends (spec section 6.1): a BUY
+    market parent, whole shares, day or GTC, regular hours, both leg prices
+    with the stop below the target. Anything else is refused before the WAL
+    row exists."""
+    def refuse(why: str):
+        raise BrokerPreflightBlocked(
+            f"{symbol} bracket refused before submission: {why}"
+        )
+
+    if str(side).strip().lower() != "buy":
+        refuse("only BUY-entry brackets are supported")
+    if notional is not None or qty is None:
+        refuse("a bracket needs a whole-share qty, not a notional")
+    if float(qty) != int(float(qty)) or int(float(qty)) < 1:
+        refuse(f"qty={qty} is not a whole number of shares >= 1")
+    if str(order_type).strip().lower() != "market":
+        refuse("the parent must be a market order")
+    if str(tif).strip().lower() not in ("day", "gtc"):
+        refuse(f"tif={tif} (bracket legs need day or gtc)")
+    if extended_hours:
+        refuse("brackets are regular-hours orders")
+    if take_profit is None or stop_loss is None:
+        refuse("take_profit and stop_loss are both required")
+    if not 0 < float(stop_loss) < float(take_profit):
+        refuse(f"stop_loss={stop_loss} must be below take_profit={take_profit}")
+    return int(float(qty))
 
 
 def _as_positive_float(value):
