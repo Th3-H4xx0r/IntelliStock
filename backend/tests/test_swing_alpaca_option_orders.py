@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from broker_adapters.errors import (
+    BrokerError,
     BrokerPreflightBlocked,
     FractionalNotAllowed,
     OptionsNotPermitted,
@@ -115,13 +116,15 @@ def test_an_option_rejection_is_options_not_permitted_not_fractional():
 
 
 def test_an_unanswered_option_submit_stays_ambiguous():
-    """The option mapping runs before the definitive flag is set, so a
-    transport failure (no HTTP answer) is still recorded as ambiguous."""
+    """A transport failure (no HTTP answer) is never mapped to
+    OptionsNotPermitted, even when its text mentions an option: it stays an
+    ambiguous transport error, retried under the same client order id."""
     client = FakeTradingClient(submit_error=ConnectionError(
         "option order connection reset"))
     adapter = make_adapter(client)
-    with pytest.raises(OptionsNotPermitted) as info:
+    with pytest.raises(BrokerError) as info:
         _sto(adapter)
+    assert not isinstance(info.value, OptionsNotPermitted)
     assert info.value.broker_definitive_rejection is False
 
 
@@ -430,3 +433,133 @@ def test_eb_lifecycle_fills_are_byte_identical():
     }, sort_keys=True, default=str)
     assert got == EB_FILLS
     assert adapter._option_positions == {}
+
+
+# --- L2 review fixes (controller ruling, 2026-09-25): fail closed ------------
+
+def test_a_failed_first_positions_read_leaves_the_option_map_incomplete():
+    """Fix 1. The adapter used to start at complete=True, so a positions
+    endpoint that was down at construction left "no options, complete" on an
+    account that may hold a short put."""
+    client = FakeOptionsTradingClient(positions=[option_position()])
+
+    def _down():
+        raise ConnectionError("positions endpoint down")
+
+    client.get_all_positions = _down
+    adapter = make_adapter(client, clean_room=True)
+    assert adapter._option_positions == {}
+    assert adapter._option_positions_complete is False
+    client.get_all_positions = lambda: [option_position()]
+    client.contracts_by_symbol = {OCC: contract_row()}
+    adapter.refresh_positions()
+    assert adapter._option_positions[OCC].qty == -1
+    assert adapter._option_positions_complete is True
+
+
+@pytest.mark.parametrize("clean_room", [False, True])
+def test_a_garbage_market_value_never_drops_an_option_row(clean_room):
+    """Fix 2. The asset class is read before the equity float parsing, so a
+    market value the equity path cannot parse no longer drops a short put
+    silently. The option branch reads it as unknown and keeps the row."""
+    client = FakeOptionsTradingClient(
+        positions=[option_position(market_value="n/a")],
+        contracts_by_symbol={OCC: contract_row()})
+    adapter = make_adapter(client, clean_room=clean_room)
+    held = adapter._option_positions[OCC]
+    assert (held.qty, held.market_value, held.strike) == (-1, None, 130.0)
+    assert adapter._option_positions_complete is True
+    assert OCC not in adapter._positions
+
+
+@pytest.mark.parametrize("clean_room", [False, True])
+def test_an_unparseable_option_quantity_marks_the_map_incomplete(clean_room):
+    """Fix 2 (and L2 concern 4). An option row whose qty cannot be read is a
+    miss, never a silent drop."""
+    client = FakeOptionsTradingClient(
+        positions=[option_position(qty="n/a")],
+        contracts_by_symbol={OCC: contract_row()})
+    adapter = make_adapter(client, clean_room=clean_room)
+    assert OCC not in adapter._option_positions
+    assert adapter._option_positions_complete is False
+    assert OCC not in adapter._positions
+
+
+def test_an_equity_row_with_a_garbage_market_value_is_still_skipped():
+    """EB: the equity path is unchanged -- an unparseable row is skipped."""
+    rows = [SimpleNamespace(symbol="TQQQ", qty="10", market_value="n/a",
+                            avg_entry_price="80",
+                            asset_class=enum("us_equity")),
+            SimpleNamespace(symbol="GLD", qty="4", market_value="1200",
+                            avg_entry_price="290",
+                            asset_class=enum("us_equity"))]
+    adapter = make_adapter(FakeTradingClient(positions=rows),
+                           instance_id="alpaca-main")
+    assert adapter._positions == {"GLD": 4.0}
+    assert adapter._option_positions_complete is True
+
+
+class _AnsweredOptionError(Exception):
+    status_code = 422
+
+
+@pytest.mark.parametrize("error,mapped,definitive", [
+    (_AnsweredOptionError("options trading not approved"), True, True),
+    (ConnectionError("option order connection reset"), False, False),
+    (TimeoutError("read timed out on option order"), False, False),
+])
+def test_option_errors_map_only_when_alpaca_answered(error, mapped, definitive):
+    """Fix 3. "option" in the text is Alpaca's refusal only when Alpaca
+    answered (an HTTP response is present)."""
+    adapter = make_adapter(FakeTradingClient(submit_error=error))
+    with pytest.raises(BrokerError) as info:
+        _sto(adapter)
+    assert isinstance(info.value, OptionsNotPermitted) is mapped
+    assert info.value.broker_definitive_rejection is definitive
+
+
+def test_an_eb_transport_failure_is_unchanged():
+    client = FakeTradingClient(submit_error=ConnectionError("reset"))
+    adapter = make_adapter(client, instance_id="alpaca-main")
+    with pytest.raises(BrokerError) as info:
+        adapter.submit_order("TQQQ", "buy", 2.0, None, "market", None, "day",
+                             False, "alpacama-reset-0")
+    assert type(info.value) is BrokerError
+    assert info.value.broker_definitive_rejection is False
+
+
+@pytest.mark.parametrize("answer", [None, {"message": "forbidden"}, "x"])
+def test_a_non_list_activities_answer_fails_closed(answer):
+    """Fix 4. A 200 whose body is not a list is not "no activities"."""
+    client = FakeOptionsTradingClient()
+    client.get = lambda path, data=None: answer
+    adapter = make_adapter(client)
+    with pytest.raises(BrokerError, match="OPASN"):
+        adapter.get_option_activities(types=("OPASN",))
+
+
+def test_an_empty_activities_list_is_still_no_activities():
+    client = FakeOptionsTradingClient(activities={"OPASN": []})
+    adapter = make_adapter(client)
+    assert adapter.get_option_activities(types=("OPASN",)) == []
+
+
+def test_a_sideless_stream_event_is_logged_once_then_dropped(monkeypatch):
+    """Fix 5: the drop is not silent."""
+    import broker_adapters.alpaca as alpaca_module
+
+    lines = []
+    monkeypatch.setattr(alpaca_module, "_alog",
+                        lambda service, msg, color="white":
+                        lines.append((service, msg, color)))
+    adapter = make_adapter(FakeTradingClient())
+    adapter._order_event_account_id = "acct-1"
+    event = adapter._normalized_trade_update(SimpleNamespace(
+        event="fill", order=SimpleNamespace(
+            id="mleg-1", client_order_id="ui-mleg", symbol="", side=None,
+            position_intent=None, order_class=enum("mleg"),
+            status=enum("filled"), filled_qty="1", filled_avg_price="1.2"),
+        message=""))
+    assert event is None
+    assert len(lines) == 1 and lines[0][2] == "yellow"
+    assert "ui-mleg" in lines[0][1] and "fill" in lines[0][1]

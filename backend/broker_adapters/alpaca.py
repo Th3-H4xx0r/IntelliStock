@@ -310,8 +310,10 @@ class AlpacaAdapter(BrokerAdapter):
         # swing-port: option positions (signed; a short put is negative) live
         # apart from the equity mirror, which stays long-only. refresh_positions
         # fills them; EB's account holds none, so both stay empty there.
+        # Incomplete until one positions read succeeds: a failed first read
+        # must not report "no options" on an account holding a short put.
         self._option_positions: dict[str, OptionPositionDTO] = {}
-        self._option_positions_complete = True
+        self._option_positions_complete = False
         self._option_contract_cache: dict[str, OptionContractDTO] = {}
         self._option_contract_misses: dict[str, float] = {}
         self._last_option_misses: frozenset = frozenset()
@@ -1114,12 +1116,6 @@ class AlpacaAdapter(BrokerAdapter):
                 ) from e
 
             parsed = _parse_error(e)
-            if _is_option:
-                # swing-port: Alpaca answers an option order the account may
-                # not place with 40310000, the code the equity path reads as
-                # "not fractionable". Mapped here, before the definitive flag
-                # is set, so it never reaches the whole-share retry.
-                parsed = _option_order_error(e, parsed)
             # A lookup that found nothing is positive evidence Alpaca holds no
             # such order -- BUT ONLY IF ALPACA ANSWERED THE ORIGINAL POST.
             #
@@ -1142,6 +1138,14 @@ class AlpacaAdapter(BrokerAdapter):
                 or getattr(e, "response", None) is not None
                 or getattr(parsed, "http_status", None) is not None
             )
+            if _is_option:
+                # swing-port: Alpaca answers an option order the account may
+                # not place with 40310000, the code the equity path reads as
+                # "not fractionable". Mapped here, before the definitive flag
+                # is set, so it never reaches the whole-share retry -- and
+                # only when Alpaca answered: a transport failure stays
+                # ambiguous whatever its text says.
+                parsed = _option_order_error(e, parsed, answered=_answered)
             parsed.broker_definitive_rejection = bool(_answered)
             if not _answered:
                 _alog(
@@ -1911,16 +1915,16 @@ class AlpacaAdapter(BrokerAdapter):
         for p in positions:
             try:
                 sym = str(p.symbol)
-                qty = float(p.qty)
-                mv = float(p.market_value or 0.0)
-                new_positions[sym] = qty
                 if _is_us_option_position(p):
                     # swing-port: an option row keeps its broker quantity in
                     # new_positions (the clean-room filter below still decides
                     # what the equity mirror adopts, and it never adopts a
                     # short) and is described from Alpaca's contract fields,
-                    # not an OCC-symbol parse (spec section 9 fix 10).
+                    # not an OCC-symbol parse (spec section 9 fix 10). It is
+                    # recognised BEFORE the equity float parsing below, which
+                    # would otherwise drop it silently on an unreadable field.
                     try:
+                        new_positions[sym] = float(p.qty)
                         out.append(
                             self._collect_option_position(
                                 p, new_option_positions, option_misses
@@ -1932,6 +1936,9 @@ class AlpacaAdapter(BrokerAdapter):
                         # short put from the collateral check.
                         option_misses.append(sym.strip().upper())
                     continue
+                qty = float(p.qty)
+                mv = float(p.market_value or 0.0)
+                new_positions[sym] = qty
                 if qty > 0 and mv > 0:
                     new_last_prices[sym] = mv / qty
                 out.append(PositionDTO(
@@ -2583,7 +2590,14 @@ class AlpacaAdapter(BrokerAdapter):
                 if token:
                     params["page_token"] = token
                 raw = self._client.get(f"/account/activities/{kind}", params)
-                rows = raw if isinstance(raw, list) else []
+                if not isinstance(raw, list):
+                    # A 200 whose body is not a list is not "no activities";
+                    # reading it as empty would lose an assignment.
+                    raise BrokerError(
+                        f"{kind} activities answered {type(raw).__name__}, "
+                        "not a list"
+                    )
+                rows = raw
                 for row in rows:
                     out.append(_option_activity_dto(kind, row))
                 if len(rows) < int(page_size):
@@ -2781,6 +2795,14 @@ class AlpacaAdapter(BrokerAdapter):
             _raw_side = _side_from_position_intent(
                 getattr(order, "position_intent", None)) or ""
             if not _raw_side:
+                _alog(
+                    "ALPACA",
+                    f"stream {raw_event or '?'} event for order "
+                    f"{getattr(order, 'client_order_id', '') or '?'} "
+                    f"({getattr(order, 'id', '') or '?'}) carries no side "
+                    "and no position intent; dropped",
+                    "yellow",
+                )
                 return None
         side = OrderSide(
             str(getattr(_raw_side, "value", _raw_side)).lower())
@@ -3770,8 +3792,14 @@ def _checked_option_order(
     return int(float(qty))
 
 
-def _option_order_error(exc, parsed):
-    """Alpaca's answer to an option order the account may not place."""
+def _option_order_error(exc, parsed, *, answered: bool):
+    """Alpaca's answer to an option order the account may not place.
+
+    Only an HTTP answer is a refusal. A transport failure (no response) is
+    returned unchanged so it stays ambiguous, even when its text mentions
+    an option."""
+    if not answered:
+        return parsed
     if isinstance(parsed, (InsufficientBuyingPower, BrokerRateLimited)):
         return parsed
     message = str(exc).lower()
