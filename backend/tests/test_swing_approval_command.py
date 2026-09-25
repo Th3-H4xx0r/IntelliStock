@@ -317,10 +317,12 @@ class _Service:
         self.swing = swing
         self.codes = tuple(codes)
         self.intents = []
+        self.overlays = []
         self.status_at_enqueue = []
 
-    def enqueue(self, intent):
+    def enqueue(self, intent, *, snapshot_overlay=None):
         self.intents.append(intent)
+        self.overlays.append(snapshot_overlay)
         if self.swing is not None:
             self.swing.events.append("enqueue")
             self.status_at_enqueue.append(
@@ -373,12 +375,22 @@ class _Adapter:
                                      None, RTH.isoformat()) for c in contracts}
 
 
+FRESH_CONTROLS = {"kill_switch": "healthy", "kill_switch_at": RTH}
+
+
+def _fresh_controls(adapter, *, instance_key, now_utc=None):
+    return dict(FRESH_CONTROLS)
+
+
 def _extract_handler(extra=None):
     """The extraction plan B Task 20 repeats: same functions, assigns,
     namespace and free-name check."""
     namespace = {"datetime": datetime_module,
                  "_live_order_dependency_lock": threading.Lock(),
-                 "_live_order_dependency_state": {"risk_snapshot_id": "risk-9"}}
+                 "_live_order_dependency_state": {"risk_snapshot_id": "risk-9"},
+                 # FW-lo-I1's control re-read, stubbed (its own tests are in
+                 # test_swing_approval_controls.py).
+                 "_approval_control_overlay": _fresh_controls}
     namespace.update(extra or {})
     return extract(
         ("_execute_swing_approval", "_lane_config", "_approval_live_price",
@@ -970,3 +982,35 @@ def test_the_live_command_routes_swing_approvals_first():
     ((payload, kwargs),) = seen
     assert payload == {"source": "swing_approval", "signal_id": "s"}
     assert kwargs == {"cached_strategies": LANES, "log": None}
+
+
+# --- FW-lo-I1: the re-read controls reach this approval's snapshot only -------
+
+def test_the_re_read_controls_reach_the_service(swing):
+    swing.rows["sig-1"] = _signal()
+    service, (ok, _error, _result) = _run(swing)
+    assert ok is True and service.overlays == [FRESH_CONTROLS]
+
+
+def test_an_option_approval_keeps_its_own_calendar(swing):
+    """The option snapshot reads the calendar itself (regular hours)."""
+    swing.rows["sig-1"] = _signal(lane="wheel", symbol="APH")
+    controls = {"calendar": "healthy", "calendar_at": RTH, "market_open": True,
+                "cash": "healthy", "cash_at": RTH}
+    service, (ok, _error, _result) = _run(swing, extra={
+        "_approval_control_overlay": lambda adapter, **kw: dict(controls)})
+    assert ok is True
+    assert service.overlays == [{"cash": "healthy", "cash_at": RTH}]
+
+
+def test_a_control_re_read_that_raises_is_transient_and_places_nothing(swing):
+    def broken(adapter, **kw):
+        raise ConnectionError("pg down")
+
+    swing.rows["sig-1"] = _signal()
+    service, (ok, error, _result) = _run(swing, extra={
+        "_approval_control_overlay": broken})
+    assert ok is False and service.intents == []
+    assert error == ("the order gate's controls could not be re-read — approve "
+                     "again (ConnectionError: pg down)")
+    assert swing.updates == [("sig-1", _PENDING)]

@@ -486,9 +486,16 @@ class LiveOrderService:
         self,
         intent: OrderIntent,
         *,
+        snapshot_overlay: Optional[dict] = None,
         before_submit: Optional[Callable[[OrderIntent, GateDecision], None]] = None,
     ) -> OrderSubmission:
         """Gate, record and send one intent.
+
+        ``snapshot_overlay`` (swing-port fix wave, FW-lo-I1) replaces fields
+        of the provider's snapshot with values the caller has just re-read:
+        an operator approval runs off-tick, after the loop's control stamps
+        have aged past the gate's 60 s. It changes this one evaluation only;
+        an overlay the snapshot rejects is ``dependency.snapshot.invalid``.
 
         ``before_submit`` (swing-port fix wave, FW-str-I1) runs once the gate
         has allowed the intent and before anything exists: no lifecycle row,
@@ -519,6 +526,12 @@ class LiveOrderService:
                 intent, "dependency.snapshot.invalid",
                 TypeError(f"snapshot provider returned {type(snapshot).__name__}"))
             return _denial(intent, "dependency.snapshot.invalid")
+        if snapshot_overlay:
+            try:
+                snapshot = replace(snapshot, **dict(snapshot_overlay))
+            except Exception as exc:
+                self._report_swallowed(intent, "dependency.snapshot.invalid", exc)
+                return _denial(intent, "dependency.snapshot.invalid")
         decision = self._gate.evaluate(intent, snapshot)
         if not decision.allowed:
             return OrderSubmission(decision=decision)

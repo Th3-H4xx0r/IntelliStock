@@ -35,7 +35,7 @@ class Service:
     def __init__(self):
         self.intents = []
 
-    def enqueue(self, intent):
+    def enqueue(self, intent, *, snapshot_overlay=None):
         self.intents.append(intent)
         decision = GateDecision(allowed=True, approved_quantity=intent.quantity,
                                 reason_codes=(), idempotency_key=intent.idempotency_key)
@@ -85,7 +85,11 @@ def handler():
         assigns=("_live_option_quotes", "_LANE_ENABLE_FLAGS"),
         namespace={"datetime": datetime_module,
                    "_live_order_dependency_lock": threading.Lock(),
-                   "_live_order_dependency_state": {"risk_snapshot_id": "risk-9"}},
+                   "_live_order_dependency_state": {"risk_snapshot_id": "risk-9"},
+                   # FW-lo-I1's control re-read, stubbed; its own tests are in
+                   # test_swing_approval_controls.py.
+                   "_approval_control_overlay":
+                       lambda adapter, *, instance_key, now_utc=None: {}},
         check=("_execute_swing_approval", "_lane_config",
                "_approval_live_price"))["_execute_swing_approval"]
 

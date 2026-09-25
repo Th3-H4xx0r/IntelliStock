@@ -10782,6 +10782,108 @@ def _approval_live_price(adapter, symbol):
     return float(price), stamp_dt
 
 
+def _approval_control_overlay(adapter, *, instance_key, now_utc=None):
+    """The order gate's control inputs, RE-READ for an operator approval
+    (swing-port fix wave, FW-lo-I1).
+
+    An approval runs in the 1-second command thread, off-tick. The live loop
+    stamps kill_switch_at, cash_at, calendar_at, risk_state_at and
+    watchdog_at only inside a tick (every 20 minutes on the equity grid), and
+    the gate wants each within 60 s for an opening order, so an approval five
+    minutes after a tick was refused dependency.*.stale however healthy the
+    account was. Each input is read here the way the tick reads it:
+
+    - kill switch: the Instances row (runCommand False is unhealthy; no row
+      is unknown);
+    - watchdog: the AlphaState control_health row, stamped with the
+      evidence's own observed_at, never with now (a heartbeat older than 60 s
+      stays stale);
+    - cash: refresh_account(), Alpaca's cash (and the equity below);
+    - calendar: adapter.is_market_open(now);
+    - risk state: the durable risk row re-loaded and evaluated against the
+      fresh equity, NOT saved, so the risk row's version and risk_snapshot_id
+      stay the tick's and an intent the loop is gating cannot see its snapshot
+      id move.
+
+    Returns DependencySnapshot field overrides for this approval's own
+    snapshot. Nothing shared is written: the loop's dependency state is left
+    to the loop. Any read that fails raises; the caller treats it as
+    transient. Each read is bounded like the tick's.
+    """
+    from live_orders import Health
+    from live_risk_state import evaluate_drawdown
+
+    def now():
+        return datetime.datetime.now(datetime.timezone.utc)
+
+    pool = globals().get("_PRICE_FETCH_EXECUTOR")
+
+    def bounded(fn, *args, timeout=15.0):
+        if pool is None:
+            return fn(*args)
+        return pool.submit(fn, *args).result(timeout=timeout)
+
+    reader = globals().get("_KS_RDB")
+    if reader is None:
+        raise RuntimeError("the kill-switch store is unavailable")
+    key = str(instance_key)
+    row, health_row = bounded(
+        lambda: (reader.get("Instances", key),
+                 reader.get("AlphaState", f"control_health:{key}")),
+        timeout=10.0)
+    kill_switch_at = now()
+    if row is None:
+        kill_switch = Health.UNKNOWN
+    elif row.get("runCommand") is False:
+        kill_switch = Health.UNHEALTHY
+    else:
+        kill_switch = Health.HEALTHY
+    try:
+        from benchmark_alpha.watchdog import ControlHealth
+
+        payload = dict((health_row or {}).get("payload") or {})
+        evidence = ControlHealth(
+            instance_id=payload.get("instance_id"),
+            status=payload.get("status"),
+            observed_at=datetime.datetime.fromisoformat(
+                str(payload.get("observed_at"))),
+            result_status=payload.get("result_status"),
+            degraded_audit=payload.get("degraded_audit"),
+            evidence_hash=payload.get("evidence_hash"),
+        )
+        watchdog = (Health.HEALTHY
+                    if evidence.status == "healthy" and not evidence.degraded_audit
+                    else Health.UNHEALTHY)
+        watchdog_at = evidence.observed_at
+    except Exception:
+        watchdog, watchdog_at = Health.UNKNOWN, None
+    account = bounded(adapter.refresh_account)
+    cash_at = now()
+    equity = getattr(account, "equity", None)
+    if equity is None:
+        raise RuntimeError("the broker returned no account equity")
+    market_open = bool(bounded(adapter.is_market_open, now_utc or now(),
+                               timeout=10.0))
+    calendar_at = now()
+    risk_store, risk_state = _live_risk_store, _live_risk_state
+    if risk_store is None or risk_state is None:
+        raise RuntimeError("durable risk state is unavailable")
+    durable = risk_store.load_required(risk_state.instance_id,
+                                       risk_state.account_id)
+    evaluated = evaluate_drawdown(
+        durable, equity, now(), limits=_live_risk_limits_for_this_document())
+    return {
+        "kill_switch": kill_switch, "kill_switch_at": kill_switch_at,
+        "watchdog": watchdog, "watchdog_at": watchdog_at,
+        "cash": Health.HEALTHY, "cash_at": cash_at,
+        "calendar": Health.HEALTHY, "calendar_at": calendar_at,
+        "market_open": market_open,
+        "risk_state": (Health.HEALTHY if evaluated.new_exposure_allowed
+                       else Health.UNHEALTHY),
+        "risk_state_at": evaluated.observed_at,
+    }
+
+
 def _execute_swing_approval(adapter, payload, order_service, *,
                             cached_strategies=None, now_utc=None, log=None,
                             sleep=None):
@@ -11024,8 +11126,22 @@ def _execute_swing_approval(adapter, payload, order_service, *,
         return failed(f"swing approval failed: {type(exc).__name__}: {exc}",
                       str(exc) or type(exc).__name__)
 
+    # FW-lo-I1: the gate's control inputs are re-read NOW, after the build and
+    # just before the gate, and laid over this approval's snapshot only. The
+    # loop's stamps are only fresh within 60 s of a tick; a failed re-read is
+    # transient, like the stale stamps it replaces. An option snapshot reads
+    # the calendar itself.
     try:
-        submission = order_service.enqueue(intent)
+        controls = _approval_control_overlay(adapter, instance_key=owner,
+                                             now_utc=now_utc)
+    except Exception as exc:
+        return back_to_pending("the order gate's controls could not be re-read",
+                               detail=f"{type(exc).__name__}: {exc}")
+    if getattr(intent, "asset_class", "us_equity") == "us_option":
+        controls = {name: value for name, value in dict(controls).items()
+                    if name not in ("calendar", "calendar_at", "market_open")}
+    try:
+        submission = order_service.enqueue(intent, snapshot_overlay=controls)
     except Exception as exc:
         write({"submitted_order": order})
         say(f"{label}: submit raised {type(exc).__name__}: {exc}; the outcome "
