@@ -25,11 +25,14 @@
 
      A 202 (the approval or re-send is recorded, but its delivery could not be
      confirmed) puts the signal on a "Waiting for the broker" card with an
-     "uncertain — waiting for the broker" badge and the server's advice
-     (follow-up 2). While one waits, each poll also reads the submitted and
-     failed lists; a poll begun after the 202 that finds the signal pending
-     brings its pending card back, and one that finds it submitted or failed
-     says so on the card until the operator dismisses it. -->
+     "uncertain — waiting for the broker" badge (follow-up 2). While one
+     waits, each poll also reads the submitted and failed lists; a poll begun
+     after the 202 that finds the signal pending brings its pending card
+     back, and one that finds it submitted or failed says so on the card
+     until the operator dismisses it. One that still finds it approved more
+     than 2 minutes after the 202 moves it to "Approved, not yet sent", with
+     Re-send and Dismiss; a waiting card offers Dismiss after 2 minutes in
+     any case (round 3 FU-1). -->
 <template>
   <section class="glass-card rounded-2xl p-5">
     <div class="flex items-center justify-between mb-4 gap-2">
@@ -174,14 +177,14 @@
             </span>
             <span class="text-[11px] text-slate-600">session {{ entry.signal.session || '—' }}</span>
           </div>
-          <p v-if="!entry.resolved" class="text-xs text-amber-200/90 mt-2 leading-relaxed">{{ entry.message }}</p>
+          <p v-if="!entry.resolved" class="text-xs text-amber-200/90 mt-2 leading-relaxed">{{ WAITING_COPY }}</p>
           <p v-else-if="entry.resolved === 'submitted'" class="text-xs text-slate-300 mt-2">
             The broker submitted it. Check open orders for the fill.
           </p>
           <p v-else class="text-xs text-slate-300 mt-2">
             It failed at the broker; the live log says why.
           </p>
-          <div v-if="entry.resolved" class="flex gap-2 mt-3">
+          <div v-if="waitingCanDismiss(entry, nowMs)" class="flex gap-2 mt-3">
             <button
               @click="dismissUncertain(id)"
               class="px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-800"
@@ -216,7 +219,7 @@
           <p v-if="resendBlockedReason(s, today)" class="text-[11px] text-slate-500 mt-2">
             {{ resendBlockedReason(s, today) }}
           </p>
-          <div v-else-if="resendConfirming[s.id]" class="mt-3 rounded-lg border border-amber-500/25 bg-amber-500/5 px-3 py-2">
+          <div v-if="resendConfirming[s.id] && !resendBlockedReason(s, today)" class="mt-3 rounded-lg border border-amber-500/25 bg-amber-500/5 px-3 py-2">
             <p class="text-xs text-slate-200">{{ resendPrompt(s) }}</p>
             <div class="flex gap-2 mt-2 flex-wrap">
               <button
@@ -233,10 +236,16 @@
           </div>
           <div v-else class="flex gap-2 mt-3 flex-wrap">
             <button
+              v-if="!resendBlockedReason(s, today)"
               @click="startResend(s.id)"
               :disabled="!!resending[s.id]"
               class="px-3 py-1.5 rounded-lg text-xs font-semibold border border-amber-500/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20 disabled:opacity-50"
             >Re-send</button>
+            <button
+              @click="dismissStuck(s.id)"
+              :disabled="!!resending[s.id]"
+              class="px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-800 disabled:opacity-50"
+            >Dismiss</button>
           </div>
         </div>
       </div>
@@ -274,6 +283,8 @@ import {
   stuckLabel,
   uncertainBadge,
   uncertainListsNeeded,
+  WAITING_COPY,
+  waitingCanDismiss,
 } from '../../utils/swing.js'
 
 const POLL_MS = 30000
@@ -301,7 +312,8 @@ const resendConfirming = ref({}) // signal id -> true while its Re-send awaits t
 const resending = ref({})        // signal id -> true while the POST .../resend is in flight
 const resendGuard = createInFlightGuard()
 const resentAt = new Map()       // signal id -> epoch ms of this page's last re-send (or refusal)
-const uncertain = ref({})        // signal id -> { signal, message, since, resolved } after a 202 (follow-up 2)
+const uncertain = ref({})        // signal id -> { signal, since, sinceMs, resolved } after a 202 (follow-up 2)
+const dismissedStuck = new Set() // stuck ids the operator dismissed on this page (round 3 FU-1)
 let pollTimer = null
 let noticeTimer = null
 
@@ -399,6 +411,7 @@ async function load() {
     nowMs.value = Date.now()
     const out = foldSignalLoad({
       generation, latch, results, nowMs: nowMs.value, resentAt, uncertain: uncertain.value,
+      dismissed: dismissedStuck,
       previous: { signals: signals.value, stuck: stuck.value },
     })
     const live = new Set(out.signals.map(s => s.id))
@@ -423,6 +436,11 @@ async function load() {
 
 function dismissUncertain(id) {
   uncertain.value = omit(uncertain.value, id)
+}
+
+function dismissStuck(id) {
+  dismissedStuck.add(id)
+  removeStuck(id)
 }
 
 function uncertainCardClass(entry) {
@@ -467,7 +485,7 @@ async function resend(signal) {
       resentAt.set(signal.id, Date.now())
       removeStuck(signal.id)
       if (outcome.uncertain) {
-        uncertain.value = addUncertain(uncertain.value, signal, outcome.message, latch.current())
+        uncertain.value = addUncertain(uncertain.value, signal, latch.current(), Date.now())
       } else {
         showNotice(outcome.tone, outcome.message)
       }
@@ -525,7 +543,7 @@ async function submit(signal) {
       if (outcome.uncertain) {
         // Follow-up 2: the advice stays on a card until a poll settles it.
         uncertain.value = addUncertain(uncertain.value, { ...signal, ...(body?.signal || {}), id: signal.id },
-          outcome.message, latch.current())
+          latch.current(), Date.now())
       } else {
         showNotice(outcome.tone, outcome.message)
       }
@@ -582,6 +600,7 @@ watch(() => props.instanceId, (next, prev) => {
   resendConfirming.value = {}
   resentAt.clear()
   uncertain.value = {}
+  dismissedStuck.clear()
   load()
   startPolling()
 })

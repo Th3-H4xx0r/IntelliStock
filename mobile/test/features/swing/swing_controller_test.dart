@@ -307,10 +307,14 @@ void main() {
       final card = read(c).uncertain.single;
       expect(card.signal.id, 'a1');
       expect(card.badge, 'uncertain — waiting for the broker');
-      expect(card.message, kUncertainApproval);
+      expect(waitingCopy,
+          'Delivery to the broker could not be confirmed. Do NOT place this '
+          'order by hand. This should show submitted or failed within a minute; '
+          'if it is still waiting after 2 minutes you can re-send it here.');
       expect(read(c).signals, isEmpty);
 
-      // Still approved half an hour on: it waits, and it is not a stuck card.
+      // Approved half an hour ago, but the 202 was just now: it waits, and
+      // it is not a stuck card.
       repo
         ..pending = []
         ..approved = [approvedSignal('a1', '2026-09-25T13:00:00Z')];
@@ -377,7 +381,66 @@ void main() {
           .resend(read(c).stuck.single);
       expect(result.outcome, DecisionOutcome.uncertain);
       expect(read(c).stuck, isEmpty);
-      expect(read(c).uncertain.single.message, uncertainMessage('Re-send'));
+      expect(result.message, uncertainMessage('Re-send'));
+      expect(read(c).uncertain.single.signal.id, 'a1');
+    });
+  });
+
+  group('round 3 FU-1: a waiting card never waits forever with no action', () {
+    setUp(() => clock = DateTime.utc(2026, 9, 25, 13, 30));
+
+    test('still approved 2 minutes after the 202: it leaves waiting and joins the stuck list',
+        () async {
+      final repo = FakeSwingRepo([signal('a1')])
+        ..decideReceipt = const DecisionReceipt(uncertain: true);
+      final c = await start(repo);
+      final notifier = c.read(pendingSignalsProvider('i1').notifier);
+      await notifier.decide(signal('a1'), 'approve');
+      // Decided (server clock) 30 s after the 202 (device clock): skew must
+      // not hide it once it leaves the waiting state.
+      repo
+        ..pending = []
+        ..approved = [approvedSignal('a1', '2026-09-25T13:30:30Z')];
+      clock = clock.add(stuckAfter);
+      await notifier.refresh();
+      expect(read(c).uncertain.single.resolved, isNull); // exactly 2 min: waiting
+      expect(read(c).stuck, isEmpty);
+      clock = clock.add(const Duration(seconds: 1));
+      await notifier.refresh();
+      expect(read(c).uncertain, isEmpty);
+      expect(read(c).stuck.map((s) => s.id), ['a1']);
+    });
+
+    test('a failed approved read cannot move it, but Dismiss is offered after 2 minutes',
+        () async {
+      final repo = FakeSwingRepo([signal('a1')])
+        ..decideReceipt = const DecisionReceipt(uncertain: true);
+      final c = await start(repo);
+      final notifier = c.read(pendingSignalsProvider('i1').notifier);
+      await notifier.decide(signal('a1'), 'approve');
+      final card = read(c).uncertain.single;
+      expect(card.canDismiss(clock.add(const Duration(minutes: 1))), isFalse);
+      expect(card.canDismiss(clock.add(stuckAfter + const Duration(seconds: 1))), isTrue);
+      repo
+        ..pending = []
+        ..approvedError = ApiError('down');
+      clock = clock.add(const Duration(minutes: 3));
+      await notifier.refresh();
+      expect(read(c).uncertain.single.resolved, isNull);
+      notifier.dismissUncertain('a1');
+      expect(read(c).uncertain, isEmpty);
+    });
+
+    test('a dismissed stuck card stays off the stuck list across polls', () async {
+      final repo = FakeSwingRepo([],
+          approved: [approvedSignal('a1', '2026-09-25T13:20:00Z')]);
+      final c = await start(repo);
+      final notifier = c.read(pendingSignalsProvider('i1').notifier);
+      expect(read(c).stuck.map((s) => s.id), ['a1']);
+      notifier.dismissStuck('a1');
+      expect(read(c).stuck, isEmpty);
+      await notifier.refresh();
+      expect(read(c).stuck, isEmpty);
     });
   });
 

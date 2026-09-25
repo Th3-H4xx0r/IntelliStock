@@ -96,8 +96,10 @@ void main() {
       expect(find.text('Waiting for the broker (1)'), findsOneWidget);
       // AppBadge upper-cases its label.
       expect(find.text('UNCERTAIN — WAITING FOR THE BROKER'), findsOneWidget);
-      expect(find.text(detail), findsOneWidget);
+      expect(find.text(waitingCopy), findsOneWidget); // round 3 FU-1 copy
+      expect(find.text(detail), findsNothing);
       expect(find.byType(SnackBar), findsNothing);
+      expect(_cardButton('Dismiss'), findsNothing); // not before 2 minutes
       expect(tester.takeException(), isNull);
       expect(_cardButton('Approve'), findsNothing); // no longer a pending card
       expect(find.textContaining('Approved AAPL'), findsNothing);
@@ -111,7 +113,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('SUBMITTED'), findsOneWidget);
       expect(find.text('UNCERTAIN — WAITING FOR THE BROKER'), findsNothing);
-      expect(find.text(detail), findsNothing);
+      expect(find.text(waitingCopy), findsNothing);
       await tester.tap(_cardButton('Dismiss'));
       await tester.pumpAndSettle();
       expect(find.textContaining('Waiting for the broker'), findsNothing);
@@ -204,6 +206,19 @@ void main() {
       expect(find.text('This approval is from 2026-09-24; approve a fresh signal instead.'),
           findsOneWidget);
       expect(_cardButton('Re-send'), findsNothing);
+    });
+
+    testWidgets('round 3 FU-1: a stuck card offers Dismiss beside Re-send',
+        (tester) async {
+      final repo = FakeSwingRepo([],
+          approved: [approvedSignal('a1', '2026-09-25T13:25:00Z')]);
+      await tester.pumpWidget(_app(repo, _section));
+      await tester.pumpAndSettle();
+      expect(_cardButton('Re-send'), findsOneWidget);
+      await tester.tap(_cardButton('Dismiss'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('not yet sent'), findsNothing);
+      expect(repo.resendCalls, isEmpty);
     });
 
     testWidgets('an account with no stuck approvals renders no re-send section',

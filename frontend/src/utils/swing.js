@@ -282,13 +282,22 @@ export function stuckApprovals(approved, nowMs, resentAt = new Map()) {
 
 export const UNCERTAIN_BADGE = 'uncertain — waiting for the broker'
 
+/** Round 3 FU-1: what a waiting card says. */
+export const WAITING_COPY = 'Delivery to the broker could not be confirmed. Do NOT place this order by hand. This should show submitted or failed within a minute; if it is still waiting after 2 minutes you can re-send it here.'
+
 /**
  * Put a 202'd approval or re-send on an "uncertain" card. `since` is the
  * generation of the newest load started when the 202 arrived: only a load
- * begun after it may settle the card. Returns a new map (id -> entry).
+ * begun after it may settle the card. `sinceMs` is when the 202 arrived.
+ * Returns a new map (id -> entry).
  */
-export function addUncertain(uncertain, signal, message, since) {
-  return { ...uncertain, [signal.id]: { signal, message, since, resolved: null } }
+export function addUncertain(uncertain, signal, since, sinceMs = Date.now()) {
+  return { ...uncertain, [signal.id]: { signal, since, sinceMs, resolved: null } }
+}
+
+/** Round 3 FU-1: a waiting card is never without an action: Dismiss after 2 minutes. */
+export function waitingCanDismiss(entry, nowMs) {
+  return Boolean(entry?.resolved) || nowMs - (entry?.sinceMs ?? nowMs) > STUCK_AFTER_MS
 }
 
 export function uncertainBadge(entry) {
@@ -310,14 +319,18 @@ function idsOf(result) {
 /**
  * A waiting card settles only on a load begun after its 202: pending (the
  * card goes, and the pending card is back), submitted or failed (the badge
- * says so until the operator dismisses it). Anything else, or a failed
- * read, leaves it waiting.
+ * says so until the operator dismisses it). Round 3 FU-1: still approved
+ * more than STUCK_AFTER_MS after the 202, it leaves the waiting state and
+ * joins the stuck list (`joinedStuck`), where Re-send and Dismiss are.
+ * Anything else, or a failed read, leaves it waiting.
  */
-function foldUncertain(uncertain, generation, results) {
+function foldUncertain(uncertain, generation, results, nowMs) {
   const pending = idsOf(results?.pending)
   const submitted = idsOf(results?.submitted)
   const failed = idsOf(results?.failed)
+  const approved = new Set([...(idsOf(results?.approved) || []), ...(idsOf(results?.approved_half) || [])])
   const next = {}
+  const joinedStuck = new Set()
   for (const [id, entry] of Object.entries(uncertain || {})) {
     if (entry.resolved || generation <= entry.since) {
       next[id] = entry
@@ -327,11 +340,13 @@ function foldUncertain(uncertain, generation, results) {
       next[id] = { ...entry, resolved: 'submitted' }
     } else if (failed?.has(id)) {
       next[id] = { ...entry, resolved: 'failed' }
+    } else if (approved.has(id) && nowMs - entry.sinceMs > STUCK_AFTER_MS) {
+      joinedStuck.add(id)
     } else {
       next[id] = entry
     }
   }
-  return next
+  return { next, joinedStuck }
 }
 
 /**
@@ -342,7 +357,8 @@ function foldUncertain(uncertain, generation, results) {
  * its error; it never stops another list refreshing. A reason carrying
  * `unauthorized: true` is a 401. An uncertain card is never also a stuck one.
  */
-export function foldSignalLoad({ generation, latch, results, previous, nowMs, resentAt, uncertain = {} }) {
+export function foldSignalLoad({ generation, latch, results, previous, nowMs, resentAt, uncertain = {},
+  dismissed = new Set() }) {
   const done = key => results?.[key]?.status === 'fulfilled'
   const failures = Object.values(results || {})
     .filter(r => r?.status === 'rejected').map(r => r.reason)
@@ -352,10 +368,14 @@ export function foldSignalLoad({ generation, latch, results, previous, nowMs, re
   const signals = done('pending')
     ? latch.apply(generation, normalizeSignalList(results.pending.value), approvedRows.map(s => s.id))
     : previous.signals
-  const nextUncertain = foldUncertain(uncertain, generation, results)
-  const stuck = (done('approved') && done('approved_half')
+  const { next: nextUncertain, joinedStuck } = foldUncertain(uncertain, generation, results, nowMs)
+  let stuck = done('approved') && done('approved_half')
     ? stuckApprovals(approvedRows, nowMs, resentAt)
-    : previous.stuck).filter(s => !nextUncertain[s.id])
+    : previous.stuck
+  // A card that just left waiting is stuck now, whatever its server-clock age.
+  const listed = new Set(stuck.map(s => s.id))
+  stuck = [...stuck, ...approvedRows.filter(s => joinedStuck.has(s.id) && !listed.has(s.id))]
+    .filter(s => !nextUncertain[s.id] && !dismissed.has(s.id))
   const first = failures[0]
   return {
     signals,

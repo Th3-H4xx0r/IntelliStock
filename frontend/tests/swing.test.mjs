@@ -16,6 +16,8 @@ import {
   fmtAsOf,
   foldSignalLoad,
   UNCERTAIN_BADGE,
+  WAITING_COPY,
+  waitingCanDismiss,
   uncertainBadge,
   uncertainListsNeeded,
   fmtItm,
@@ -472,26 +474,26 @@ test('the latch reports the newest load generation (the one a 202 must outlive)'
   assert.equal(latch.current(), 2)
 })
 
-test('addUncertain records the card with the poll generation it must outlive', () => {
-  const u = addUncertain({}, SWING, UNCERTAIN_APPROVAL, 3)
-  assert.deepEqual(u.a1, { signal: SWING, message: UNCERTAIN_APPROVAL, since: 3, resolved: null })
+test('addUncertain records the card with the poll generation and the time it must outlive', () => {
+  const u = addUncertain({}, SWING, 3, T0)
+  assert.deepEqual(u.a1, { signal: SWING, since: 3, sinceMs: T0, resolved: null })
   assert.equal(uncertainBadge(u.a1), 'uncertain — waiting for the broker')
   assert.equal(UNCERTAIN_BADGE, 'uncertain — waiting for the broker')
   assert.equal(uncertainListsNeeded(u), true)
   assert.equal(uncertainListsNeeded({}), false)
 })
 
-function fold(latch, generation, uncertain, lists) {
+function fold(latch, generation, uncertain, lists, { nowMs = T0, dismissed = new Set() } = {}) {
   const results = {}
   for (const [k, v] of Object.entries(lists)) results[k] = v instanceof Error ? { status: 'rejected', reason: v } : ok(v)
-  return foldSignalLoad({ generation, latch, results, previous: { signals: [], stuck: [] }, nowMs: T0,
-    resentAt: new Map(), uncertain })
+  return foldSignalLoad({ generation, latch, results, previous: { signals: [], stuck: [] }, nowMs,
+    resentAt: new Map(), uncertain, dismissed })
 }
 
 test('an uncertain card waits while the signal still reads approved or is nowhere', () => {
   const latch = createDecisionLatch()
   latch.beginLoad(); latch.record('a1')
-  const u = addUncertain({}, SWING, UNCERTAIN_APPROVAL, 1)
+  const u = addUncertain({}, SWING, 1, T0)
   const gen = latch.beginLoad()
   const out = fold(latch, gen, u, { pending: [], approved: [approvedAt('a1', '2026-09-25T13:00:00Z')],
     approved_half: [], submitted: [], failed: [] })
@@ -504,7 +506,7 @@ test('an uncertain card waits while the signal still reads approved or is nowher
 
 test('a later poll that reports submitted or failed settles the badge', () => {
   const latch = createDecisionLatch()
-  const u = addUncertain({}, SWING, UNCERTAIN_APPROVAL, 0)
+  const u = addUncertain({}, SWING, 0, T0)
   const sub = fold(latch, latch.beginLoad(), u, { pending: [], approved: [], approved_half: [],
     submitted: [{ ...SWING, status: 'submitted' }], failed: [] })
   assert.equal(sub.uncertain.a1.resolved, 'submitted')
@@ -517,7 +519,7 @@ test('a later poll that reports submitted or failed settles the badge', () => {
 test('a later poll that reports pending ends the uncertain card: the pending card is back', () => {
   const latch = createDecisionLatch()
   latch.beginLoad(); latch.record('a1')
-  const u = addUncertain({}, SWING, UNCERTAIN_APPROVAL, 1)
+  const u = addUncertain({}, SWING, 1, T0)
   const out = fold(latch, latch.beginLoad(), u, { pending: [SWING], approved: [], approved_half: [],
     submitted: [], failed: [] })
   assert.deepEqual(out.uncertain, {})
@@ -528,10 +530,48 @@ test('a poll that began before the 202 cannot settle it; a failed read settles n
   const latch = createDecisionLatch()
   const racing = latch.beginLoad()
   latch.record('a1')
-  const u = addUncertain({}, SWING, UNCERTAIN_APPROVAL, racing)
+  const u = addUncertain({}, SWING, racing, T0)
   const out = fold(latch, racing, u, { pending: [SWING], approved: [], approved_half: [], submitted: [], failed: [] })
   assert.equal(out.uncertain.a1.resolved, null)
   const down = fold(latch, latch.beginLoad(), u, { pending: new Error('x'), approved: [], approved_half: [],
     submitted: new Error('y'), failed: [] })
   assert.equal(down.uncertain.a1.resolved, null)
+})
+
+// -- Round 3 FU-1: a waiting card never waits forever with no action -----------------------
+
+test('the waiting copy says what to do, and when Re-send becomes possible', () => {
+  assert.equal(WAITING_COPY, 'Delivery to the broker could not be confirmed. Do NOT place this order by hand. This should show submitted or failed within a minute; if it is still waiting after 2 minutes you can re-send it here.')
+})
+
+test('still approved 2 minutes after the 202: the card leaves waiting and joins the stuck list', () => {
+  const latch = createDecisionLatch()
+  const u = addUncertain({}, SWING, 0, T0)
+  // Decided (server clock) 30 s after the 202 (client clock): skew must not hide it.
+  const row = approvedAt('a1', '2026-09-25T13:30:30Z')
+  const lists = { pending: [], approved: [row], approved_half: [], submitted: [], failed: [] }
+  const atTwo = fold(latch, latch.beginLoad(), u, lists, { nowMs: T0 + STUCK_AFTER_MS })
+  assert.equal(atTwo.uncertain.a1.resolved, null)                 // exactly 2 min: still waiting
+  assert.deepEqual(atTwo.stuck, [])
+  const after = fold(latch, latch.beginLoad(), u, lists, { nowMs: T0 + STUCK_AFTER_MS + 1000 })
+  assert.deepEqual(after.uncertain, {})
+  assert.deepEqual(after.stuck.map(s => s.id), ['a1'])
+  // A failed approved read cannot move it: it keeps waiting (with Dismiss, below).
+  const down = fold(latch, latch.beginLoad(), u, { ...lists, approved: new Error('x') },
+    { nowMs: T0 + STUCK_AFTER_MS + 1000 })
+  assert.equal(down.uncertain.a1.resolved, null)
+})
+
+test('a waiting card offers Dismiss once 2 minutes have passed, or once it is settled', () => {
+  const entry = addUncertain({}, SWING, 0, T0).a1
+  assert.equal(waitingCanDismiss(entry, T0 + 60000), false)
+  assert.equal(waitingCanDismiss(entry, T0 + STUCK_AFTER_MS + 1), true)
+  assert.equal(waitingCanDismiss({ ...entry, resolved: 'submitted' }, T0), true)
+})
+
+test('a dismissed stuck card stays off the stuck list', () => {
+  const latch = createDecisionLatch()
+  const lists = { pending: [], approved: [approvedAt('a1', '2026-09-25T13:00:00Z')], approved_half: [] }
+  assert.deepEqual(fold(latch, latch.beginLoad(), {}, lists).stuck.map(s => s.id), ['a1'])
+  assert.deepEqual(fold(latch, latch.beginLoad(), {}, lists, { dismissed: new Set(['a1']) }).stuck, [])
 })

@@ -132,6 +132,7 @@ class PendingSignalsSection extends ConsumerWidget {
                       child: _UncertainCardView(
                         key: ValueKey('uncertain-${card.signal.id}'),
                         card: card,
+                        canDismiss: card.canDismiss(state.asOf ?? DateTime.now()),
                         onDismiss: () => ref
                             .read(pendingSignalsProvider(instanceId).notifier)
                             .dismissUncertain(card.signal.id),
@@ -159,6 +160,9 @@ class PendingSignalsSection extends ConsumerWidget {
                             s, nyDate(state.asOf ?? DateTime.now())),
                         busy: state.isResending(s.id),
                         onResend: () => _resend(context, ref, s),
+                        onDismiss: () => ref
+                            .read(pendingSignalsProvider(instanceId).notifier)
+                            .dismissStuck(s.id),
                       ),
                     ),
                 ],
@@ -372,10 +376,12 @@ class _StuckCard extends StatelessWidget {
     required this.blockedReason,
     required this.busy,
     required this.onResend,
+    required this.onDismiss,
   });
 
   final SwingSignal signal;
   final String label;
+  final VoidCallback onDismiss;
 
   /// Why Re-send is not offered (an approval from an older session), or null.
   final String? blockedReason;
@@ -421,16 +427,27 @@ class _StuckCard extends StatelessWidget {
           Text(label,
               style: AppTextStyles.micro.copyWith(color: AppColors.textMd)),
           const SizedBox(height: 10),
-          if (blockedReason != null)
+          if (blockedReason != null) ...[
             Text(blockedReason!,
-                style: AppTextStyles.nano.copyWith(color: AppColors.textDim))
-          else
-            AppButton.semantic(
-              label: 'Re-send',
-              color: AppColors.warning,
-              dense: true,
-              onPressed: busy ? null : onResend,
-            ),
+                style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),
+            const SizedBox(height: 8),
+          ],
+          // Round 3 FU-1: Re-send (today's approvals) and Dismiss.
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              if (blockedReason == null)
+                AppButton.semantic(
+                  label: 'Re-send',
+                  color: AppColors.warning,
+                  dense: true,
+                  onPressed: busy ? null : onResend,
+                ),
+              AppButton.ghost(
+                  label: 'Dismiss', dense: true, onPressed: busy ? null : onDismiss),
+            ],
+          ),
           if (busy) ...[
             const SizedBox(height: 6),
             Text('Working…',
@@ -449,10 +466,14 @@ class _UncertainCardView extends StatelessWidget {
   const _UncertainCardView({
     super.key,
     required this.card,
+    required this.canDismiss,
     required this.onDismiss,
   });
 
   final UncertainCard card;
+
+  /// Settled, or waiting for more than 2 minutes (round 3 FU-1).
+  final bool canDismiss;
   final VoidCallback onDismiss;
 
   Color get _tone => switch (card.resolved) {
@@ -499,11 +520,11 @@ class _UncertainCardView extends StatelessWidget {
               'submitted' =>
                 'The broker submitted it. Check open orders for the fill.',
               'failed' => 'It failed at the broker; the live log says why.',
-              _ => card.message,
+              _ => waitingCopy,
             },
             style: AppTextStyles.micro.copyWith(color: AppColors.textMd),
           ),
-          if (card.resolved != null) ...[
+          if (canDismiss) ...[
             const SizedBox(height: 10),
             AppButton.ghost(label: 'Dismiss', dense: true, onPressed: onDismiss),
           ],
