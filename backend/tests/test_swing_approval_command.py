@@ -1239,3 +1239,55 @@ def test_m4_a_wheel_approval_is_not_held_by_the_swing_rule(swing):
                                   decided_at="2026-10-05T19:30:00+00:00")
     _service, (_ok, error, _result) = _run(swing, now=_at("2026-10-05T20:30:00+00:00"))
     assert len(swing.built) == 1 and AFTER_CLOSE not in error
+
+
+# --- seams m6: the broker places only an approval made today (New York) --------
+
+@pytest.mark.parametrize("decided,made_on", [
+    ("2026-10-02T19:30:00+00:00", "2026-10-02"),     # the Friday before
+    ("2026-10-05T03:30:00+00:00", "2026-10-04"),     # 23:30 ET on Sunday: not today in NY
+    (None, "an unknown date"),
+    ("not a time", "an unknown date"),
+])
+def test_m6_an_approval_from_another_day_ends_failed_before_the_claim(swing, decided, made_on):
+    """The re-send route refuses an approval not made today in New York; the
+    broker had no matching rule, so an original command still queued across a
+    day (the instance stopped or wedged after the approval) was claimed and
+    placed at the next day's price on restart. It now ends failed, BEFORE the
+    claim: nothing is built, re-read or sent."""
+    swing.rows["sig-1"] = _signal(decided_at=decided)
+    controls = []
+    service, (ok, error, result) = _run(
+        swing, extra={"_approval_control_overlay": _recording_controls(controls)})
+    reason = f"approval from {made_on} — approve a fresh signal"
+    assert (ok, error, result) == (False, reason, {})
+    assert service.intents == [] and swing.built == [] and controls == []
+    (cas,) = swing.cas
+    assert cas[:2] == ("sig-1", "approved") and cas[2]["status"] == "failed"
+    assert "claimed_at" not in cas[2]
+    assert swing.rows["sig-1"]["status"] == "failed"
+    assert swing.rows["sig-1"]["order_client_id"] is None
+    assert swing.notices == [{"instance_id": "instance-1", "symbol": "AAPL",
+                              "lane": "swing", "reason": reason}]
+
+
+def test_m6_an_approval_made_just_after_midnight_new_york_is_today(swing):
+    swing.rows["sig-1"] = _signal(decided_at="2026-10-05T04:30:00+00:00")   # 00:30 ET
+    service, (ok, error, _result) = _run(swing)
+    assert (ok, error) == (True, "") and len(service.intents) == 1
+
+
+def test_m6_a_half_approval_from_another_day_fails_too(swing):
+    swing.rows["sig-1"] = _signal(status="approved_half",
+                                  decided_at="2026-10-02T19:30:00+00:00")
+    service, (ok, error, _result) = _run(swing)
+    assert ok is False and error.startswith("approval from 2026-10-02")
+    assert swing.cas[0][:2] == ("sig-1", "approved_half") and service.intents == []
+
+
+def test_m6_a_stale_approval_that_loses_its_cas_places_and_tells_nothing(swing):
+    swing.rows["sig-1"] = _signal(decided_at="2026-10-02T19:30:00+00:00")
+    swing.cas_wins = False
+    service, (ok, error, _result) = _run(swing)
+    assert ok is False and "nothing placed" in error
+    assert service.intents == [] and swing.built == [] and swing.notices == []

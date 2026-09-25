@@ -11139,6 +11139,44 @@ def _execute_swing_approval(adapter, payload, order_service, *,
                 f"({type(exc).__name__}: {exc})", "red")
             return False
 
+    # Seams m6: only an approval made today (New York, from decided_at) is
+    # placed, the re-send route's day rule. An original command still queued
+    # across a day (the instance stopped or wedged after the approval) would
+    # otherwise be claimed and placed at a later day's price. Decided BEFORE
+    # the claim, by a compare-and-swap from the approved status it read.
+    now_utc = now_utc or datetime.datetime.now(datetime.timezone.utc)
+    new_york = ZoneInfo("America/New_York")
+    decided_at = signal.get("decided_at")
+    if not isinstance(decided_at, datetime.datetime):
+        try:
+            decided_at = datetime.datetime.fromisoformat(
+                str(decided_at).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            decided_at = None
+    if decided_at is not None and decided_at.tzinfo is None:
+        decided_at = decided_at.replace(tzinfo=datetime.timezone.utc)
+    made_on = decided_at.astimezone(new_york).date() if decided_at else None
+    if made_on != now_utc.astimezone(new_york).date():
+        stale_why = (f"approval from {made_on.isoformat() if made_on else 'an unknown date'}"
+                     " — approve a fresh signal")
+        stale = dict(signal)
+        stale.update({"status": "failed", "order_client_id": None})
+        try:
+            won = signals_store.cas_signal(signal_id, expect_status=status, doc=stale)
+        except Exception as exc:
+            say(f"{label}: {stale_why}, but it could not be marked failed "
+                f"({type(exc).__name__}: {exc}); nothing placed", "red")
+            return (False, f"{stale_why}; nothing placed, and the signal could not "
+                           f"be marked failed ({type(exc).__name__}: {exc})", {})
+        if not won:
+            say(f"{label}: {stale_why}; another command changed it first; "
+                "nothing placed", "yellow")
+            return (False, f"signal {signal_id} changed before it could be marked "
+                           "failed; nothing placed", {})
+        say(f"{label} FAILED: {stale_why}", "red")
+        tell(stale_why)
+        return (False, stale_why, {})
+
     # Fix wave round 2, minor 3: from the claim until this handler has
     # written its outcome, the stale-row sweep (the loop thread of this same
     # process) must not judge this signal.

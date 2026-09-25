@@ -164,8 +164,10 @@ def test_the_sweep_runs_only_on_a_swing_or_wheel_document():
 
 def test_the_claim_is_stamped_and_the_wheel_intent_names_its_signal():
     body = function_source("_execute_swing_approval")
-    claim = body[body.index('claimed["status"] = "submitted"'):body.index(
-        "signals_store.cas_signal(")]
+    # Seams m6: the day rule's own compare-and-swap precedes the claim; the
+    # slice is the claim up to ITS compare-and-swap.
+    start = body.index('claimed["status"] = "submitted"')
+    claim = body[start:body.index("signals_store.cas_signal(", start)]
     assert 'claimed["claimed_at"]' in claim
     assert 'reason=f"swing_approval:{signal_id}"' in body
     option = body[body.index("_build_option_intent("):]
