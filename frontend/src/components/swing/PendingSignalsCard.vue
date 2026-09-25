@@ -16,7 +16,7 @@
   <section class="glass-card rounded-2xl p-5">
     <div class="flex items-center justify-between mb-4 gap-2">
       <p class="text-xs font-bold uppercase tracking-widest text-slate-500">
-        Pending AI Signals <span class="text-slate-700 ml-1">({{ signals.length }})</span>
+        Pending AI Signals <span v-if="loaded" class="text-slate-700 ml-1">({{ signals.length }})</span>
       </p>
       <button
         @click="load"
