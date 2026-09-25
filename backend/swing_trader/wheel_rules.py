@@ -16,8 +16,14 @@
                                contract, the limit ladder, the sizing) and
                                build_put_order_live (the adapter reads);
                                fixes 1, 3 and 8
-Task 10 adds the position rules (check_open_wheel_positions,
-check_assigned_positions and app.py's api_check_wheel_positions).
+    wheel_trader.py:230-321    check_open_wheel_positions -> two_x_exits and
+                               btc_order (short PUTS only, fix 6)
+    app.py:1259-1411           api_check_wheel_positions, the per-position
+                               rules -> put_monitor_decision (contract
+                               fields, fix 10; itm_pct signed, contract §9)
+    wheel_trader.py:348-507    check_assigned_positions, the detection and
+                               the strike pick -> covered_call_candidates,
+                               dry_run_message and pick_covered_call
 
 Operator-approved fixes (spec §9): 1 duplicate put, 3 the cap counts existing
 puts, 6 the contract type is checked, 8 cash not margin, 9 the full chain,
@@ -26,6 +32,7 @@ puts, 6 the contract type is checked, 8 cash not margin, 9 the full chain,
 from __future__ import annotations
 
 import datetime as dt_module
+import math
 from datetime import date, datetime, timedelta
 
 import pandas as pd
@@ -33,6 +40,8 @@ import yfinance as yf
 
 from swing_trader.constants import (
     ATR_PERIOD,
+    AUTO_CLOSE_DTE2_PCT,
+    AUTO_CLOSE_ITM_PCT,
     ETF_NO_EARNINGS,
     LIMIT_BID_MIN,
     LIMIT_BID_MULT,
@@ -596,3 +605,221 @@ def build_put_order_live(candidate, *, adapter, cfg, equity, cash, option_positi
                            existing_underlying_collateral=existing,
                            reserved_collateral=reserved, signal_id=signal_id,
                            session=session)
+
+
+# -- position rules ----------------------------------------------------------
+
+def btc_order(pos, qty, reason, *, signal_id=None, session=None) -> dict:
+    """A buy-to-close market order in the contract §1 shape."""
+    return {"signal_id": signal_id, "session": session,
+            "underlying": str(pos.underlying).upper(), "contract": pos.symbol,
+            "option_type": str(pos.option_type).lower(), "strike": float(pos.strike),
+            "expiry": str(pos.expiry)[:10], "position_intent": "buy_to_close",
+            "qty": int(qty), "order_type": "market", "limit_price": None,
+            "tif": "day", "reason": reason}
+
+
+def two_x_exits(option_positions, *, open_orders=()):
+    """wheel_trader.py:230-321 check_open_wheel_positions: a short PUT (fix 6:
+    ST read any negative quantity) worth 2× the premium collected is bought
+    back at market — a 100% loss on the premium caps the trade. A contract
+    that already has a working buy is skipped."""
+    working = {str(getattr(o, "symbol", "")).upper() for o in (open_orders or ())
+               if str(getattr(o, "side", "")).lower() == "buy"}
+    out = []
+    for pos in option_positions or []:
+        try:
+            symbol = pos.symbol
+            qty    = abs(int(float(pos.qty)))
+
+            # Short puts have negative qty in Alpaca
+            if float(pos.qty) >= 0:
+                continue
+            if str(pos.option_type).lower() != "put":  # fix 6
+                continue
+
+            # cost_basis is what we collected when selling
+            # current market_value (negative for short) is what it costs to close
+            cost_basis    = abs(float(pos.avg_entry_price)) * qty * 100
+            current_value = abs(float(pos.market_value))
+
+            if cost_basis <= 0:
+                continue
+
+            loss_ratio = current_value / cost_basis
+            if loss_ratio >= 2.0 and str(symbol).upper() not in working:
+                out.append((btc_order(pos, qty, "wheel_btc_2x"),
+                            {"cost_basis": cost_basis, "current_value": current_value,
+                             "loss_ratio": round(loss_ratio, 4)}))
+        except Exception:
+            continue
+    return out
+
+
+def put_monitor_decision(*, contract, underlying, strike, expiry, stock_price, today):
+    """app.py:1309-1411, the per-position rules of api_check_wheel_positions,
+    over Alpaca's contract fields (fix 10). Callers pass short PUTS only (fix 6).
+
+    Tier 2 auto-close rules (no AI — deterministic):
+      - ITM ≥ 10% at any DTE         → buy-to-close market order, priority 2
+      - ITM ≥ 5% AND DTE ≤ 2         → buy-to-close market order, priority 2
+      - DTE = 0 AND any ITM amount   → buy-to-close market order, priority 2
+    Alert-only (human decides):
+      - ITM < thresholds above       → priority 1, no auto action
+      - DTE ≤ 1 AND OTM              → priority 0 informational
+    """
+    expiry_date = date.fromisoformat(str(expiry)[:10])
+    dte         = (expiry_date - today).days
+
+    # A price is a finite positive number or it is no price: ST's
+    # `if itm and stock_price` kept a $0 print off the thresholds, and a
+    # signed itm_pct would read it as 100% in the money.
+    try:
+        stock_price = float(stock_price) if stock_price is not None else None
+    except (TypeError, ValueError):
+        stock_price = None
+    if stock_price is not None and not (math.isfinite(stock_price) and stock_price > 0):
+        stock_price = None
+
+    itm     = stock_price is not None and stock_price < strike
+    # Signed (contract §9 item 3): > 0 in the money, < 0 out of it, None
+    # without a price. ST reported 0.0 unless ITM; the thresholds below are
+    # read only when itm, so they see the same values.
+    itm_pct = ((strike - stock_price) / strike * 100) if stock_price is not None and strike else None
+    deep_itm = bool(itm and itm_pct >= 3.0)
+
+    out = {"contract": contract, "underlying": underlying, "strike": strike,
+           "expiry": str(expiry_date), "stock_price": stock_price, "dte": dte,
+           "itm": itm, "itm_pct": itm_pct, "deep_itm": deep_itm, "action": None,
+           "intent": None, "reason": "", "title": None, "message": None,
+           "priority": None}
+
+    should_auto_close = False
+    auto_close_reason = ""
+    intent = None
+
+    if stock_price is not None and itm:
+        if itm_pct >= AUTO_CLOSE_ITM_PCT:
+            should_auto_close = True
+            auto_close_reason = f"{itm_pct:.1f}% ITM (≥{AUTO_CLOSE_ITM_PCT:.0f}% threshold) — bust regardless of DTE"
+            intent = "wheel_btc_itm"
+        elif dte <= 2 and itm_pct >= AUTO_CLOSE_DTE2_PCT:
+            should_auto_close = True
+            auto_close_reason = f"{itm_pct:.1f}% ITM with only {dte} day(s) to expiry — not recovering"
+            intent = "wheel_btc_itm"
+        elif dte == 0:
+            should_auto_close = True
+            auto_close_reason = f"Expiry TODAY and ITM ${stock_price:.2f} vs strike ${strike:.2f} — closing before assignment"
+            intent = "wheel_btc_expiry"
+
+    if should_auto_close:
+        out.update(action="auto_close", intent=intent, reason=auto_close_reason,
+                   priority=2, title=f"🚨 Auto-Closed: {underlying}",
+                   message=(f"🚨 AUTO-CLOSE ORDERED\n"
+                            f"{contract}\n"
+                            f"Reason: {auto_close_reason}\n"
+                            f"A buy-to-close market order was sent."))
+        return out
+
+    if stock_price is None:
+        # ST formatted a None price into its alert and crashed out of the
+        # position; say so instead of guessing.
+        out["reason"] = "no underlying price"
+        return out
+
+    if itm:
+        # ITM but below auto-close thresholds — monitor, may recover
+        out.update(action="alert_itm", priority=1, title=f"⚠️ ITM PUT: {underlying}",
+                   message=(f"{contract}\n"
+                            f"Strike: ${strike:.2f} | Stock: ${stock_price:.2f}\n"
+                            f"{itm_pct:.1f}% ITM | {dte} days to expiry\n"
+                            f"Below auto-close threshold — monitor closely."))
+    elif dte <= 1 and not itm:
+        # Expiring soon but OTM — will expire worthless, informational only
+        out.update(action="info_expiring", priority=0,
+                   title=f"⏰ EXPIRING {'TODAY' if dte == 0 else 'TOMORROW'} OTM: {underlying}",
+                   message=(f"{contract}\n"
+                            f"Strike: ${strike:.2f} | Stock: ${stock_price:.2f}\n"
+                            f"OTM — on track to expire worthless ✅\n"
+                            f"Expiry: {expiry_date}"))
+    return out
+
+
+def covered_call_strike(cost_basis) -> float:
+    """wheel_trader.py:432: cost basis × 1.05."""
+    return round(float(cost_basis) * 1.05, 2)
+
+
+def covered_call_candidates(equity_positions, option_positions, open_orders, *,
+                            swing_owned=()):
+    """wheel_trader.py:348-449 check_assigned_positions, the detection half.
+
+    `equity_positions` is {symbol: {"qty", "avg_entry_price"}} (long stock).
+    A name is covered when a held short option sits on it (contract fields,
+    fix 10) or a working SELL option order does (its OCC root); ST counted a
+    short put there too, and so does this. Open swing inventory is never an
+    assignment (ST: _is_swing_position)."""
+    covered_symbols = set()
+    for o in open_orders or []:
+        parts = occ_parts(getattr(o, "symbol", ""))
+        if parts and str(getattr(o, "side", "")).lower() == "sell":
+            covered_symbols.add(parts[0])
+    for p in option_positions or []:
+        try:
+            if float(p.qty) < 0:
+                covered_symbols.add(str(p.underlying).upper())  # fix 10
+        except Exception:
+            continue
+    owned = {str(s).upper() for s in (swing_owned or ())}
+    out = []
+    for symbol, pos in sorted((equity_positions or {}).items()):
+        qty = int(float(pos.get("qty") or 0))
+        if qty <= 0:
+            continue
+        if qty < 100:
+            _log(f"  [covered-call] {symbol}: only {qty} shares — need 100 for covered call, skipping")
+            continue
+        if str(symbol).upper() in owned:
+            _log(f"  [covered-call] {symbol}: open swing position — skipping")
+            continue
+        if str(symbol).upper() in covered_symbols:
+            _log(f"  [covered-call] {symbol}: already has open short call — skipping")
+            continue
+        cost_basis = float(pos.get("avg_entry_price") or 0.0)
+        out.append({"symbol": symbol, "qty": qty, "cost_basis": cost_basis,
+                    "call_strike": covered_call_strike(cost_basis),
+                    "n_contracts": qty // 100})
+    return out
+
+
+def dry_run_message(c, expiry):
+    """wheel_trader.py:436-448, the AUTO_COVERED_CALL=False notification."""
+    title = f"🔍 Assignment detected: {c['symbol']} (dry-run)"
+    msg = (
+        f"ASSIGNMENT DETECTED — dry-run, NO order placed\n"
+        f"{c['symbol']}: {c['qty']} shares @ cost ${c['cost_basis']:.2f}\n"
+        f"Would sell {c['n_contracts']} covered call(s):\n"
+        f"Strike ≥ ${c['call_strike']:.2f} (cost basis × 1.05)  exp {expiry}\n"
+        f"To enable: set auto_covered_call=true on the wheel lane"
+    )
+    return title, msg
+
+
+def pick_covered_call(calls, call_strike, cost_basis):
+    """wheel_trader.py:477-495: the closest strike AT OR ABOVE cost × 1.05
+    (else the lowest available), priced at its close (else 1% of cost).
+    Returns (contract, strike, limit_price) or None."""
+    if not calls:
+        return None
+    eligible = [c for c in calls if float(c.strike) >= call_strike]
+    if not eligible:
+        eligible = list(calls)
+    best = min(eligible, key=lambda c: float(c.strike))
+    close_price = float(best.close_price) if getattr(best, "close_price", None) else None
+    if close_price and close_price > 0:
+        limit_price = round(close_price, 2)
+    else:
+        limit_price = round(cost_basis * 0.01, 2)
+    if limit_price < 0.01:
+        return None
+    return best, float(best.strike), limit_price
