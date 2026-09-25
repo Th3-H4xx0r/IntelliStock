@@ -10632,11 +10632,18 @@ def _execute_live_command(adapter, cmd: dict, order_service=None) -> tuple[bool,
                     _a_halt(instance_id=str(instance_id), reason=_halt_reason_text)
                 except Exception:
                     pass
+                # swing-port (spec 6.1 broker item 6): halt leaves risk-reducing
+                # orders working (bracket legs, option buy-to-close). Ruling
+                # F1: an EB stock order is cancelled whatever position_intent
+                # Alpaca tags it with; only us_option closes and legs stay.
+                from broker_adapters.base import is_risk_reducing_order
                 orders_canceled = 0
                 for _pass in range(2):
                     try:
                         for od in adapter.list_open_orders(limit=500) or []:
                             try:
+                                if is_risk_reducing_order(od):
+                                    continue
                                 if adapter.cancel_order(od.broker_order_id):
                                     orders_canceled += 1
                             except Exception:
@@ -14139,6 +14146,7 @@ def _core_sell_may_be_working(adapter, symbol, say) -> bool:
     True. `list_open_orders_strict` raises rather than reporting a dead orders
     endpoint as a clear book, which is exactly why it is the one asked.
     """
+    from broker_adapters.base import is_bracket_child_order
     if adapter is None:
         say("strategy_eb exit NOT re-armed: no broker adapter to read the "
             "working-order book from, so a working SELL cannot be ruled out. "
@@ -14154,6 +14162,8 @@ def _core_sell_may_be_working(adapter, symbol, say) -> bool:
         return True
     wanted = str(symbol or "").strip().upper()
     for ref in (working or []):
+        if is_bracket_child_order(ref):
+            continue
         if str(getattr(ref, "side", "") or "").strip().lower() != "sell":
             continue
         if str(getattr(ref, "symbol", "") or "").strip().upper() == wanted:
@@ -14175,6 +14185,7 @@ def _eb_buy_may_be_working(adapter, say) -> bool:
     cannot be proven from a missing adapter or an unreachable endpoint, so
     both answer True and the latch stays stamped.
     """
+    from broker_adapters.base import is_bracket_child_order
     if adapter is None:
         say("strategy_eb buy latches NOT re-armed: no broker adapter to read "
             "the working-order book from, so a working BUY cannot be ruled "
@@ -14188,6 +14199,8 @@ def _eb_buy_may_be_working(adapter, say) -> bool:
             "cannot be ruled out.", "yellow")
         return True
     for ref in (working or []):
+        if is_bracket_child_order(ref):
+            continue
         if str(getattr(ref, "side", "") or "").strip().lower() == "buy":
             say("strategy_eb buy latches NOT re-armed: a BUY is already "
                 "working at the broker.", "yellow")
@@ -14203,6 +14216,7 @@ def _eb_order_may_be_working(adapter, say) -> bool:
     affirmatively empty. A missing adapter or unreachable endpoint cannot
     prove that, so both answer True and the latch stays stamped.
     """
+    from broker_adapters.base import is_bracket_child_order
     if adapter is None:
         say("strategy_eb deferral NOT re-armed: no broker adapter to read the "
             "working-order book from.", "yellow")
@@ -14213,6 +14227,9 @@ def _eb_order_may_be_working(adapter, say) -> bool:
         say("strategy_eb deferral NOT re-armed: the working-order book is "
             f"unreachable ({type(exc).__name__}: {exc}).", "yellow")
         return True
+    # swing-port: bracket legs are exits a parent created, not working
+    # orders a re-plan could duplicate. alpaca-main has none.
+    working = [ref for ref in (working or []) if not is_bracket_child_order(ref)]
     if working:
         say("strategy_eb deferral NOT re-armed: an order is already working at "
             "the broker.", "yellow")
@@ -14234,6 +14251,7 @@ def _eb_sell_leg_may_be_working(adapter, symbol, say) -> bool:
     has not spent yet, so the re-plan would size it again.
     A missing adapter or unreachable endpoint cannot prove absence: True.
     """
+    from broker_adapters.base import is_bracket_child_order
     wanted = str(symbol or "").strip().upper()
     if adapter is None:
         say(f"strategy_eb {wanted} trim NOT re-armed: no broker adapter to "
@@ -14248,6 +14266,8 @@ def _eb_sell_leg_may_be_working(adapter, symbol, say) -> bool:
             "the next cadence day.", "red")
         return True
     for ref in (working or []):
+        if is_bracket_child_order(ref):
+            continue
         side = str(getattr(ref, "side", "") or "").strip().lower()
         ref_symbol = str(getattr(ref, "symbol", "") or "").strip().upper()
         if side == "sell" and ref_symbol == wanted:

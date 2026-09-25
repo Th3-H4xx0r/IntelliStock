@@ -43,6 +43,7 @@ from broker_adapters.base import (
     OptionContractDTO,
     OptionPositionDTO,
     OptionSnapshotDTO,
+    is_bracket_child_order,
 )
 from market_marks import (
     MarkQuality,
@@ -665,6 +666,12 @@ class AlpacaAdapter(BrokerAdapter):
                 # Exclude terminal-negative states so a rejected / canceled
                 # order doesn't block a legitimate new attempt today.
                 if status in ("rejected", "canceled", "expired", "denied"):
+                    continue
+                # swing-port: a bracket's take-profit and stop-loss legs are
+                # exits the parent created; counting them as "sell ordered
+                # today" would skip the swing lane's own exit. The parent BUY
+                # still counts, so a duplicate entry is still refused.
+                if is_bracket_child_order(o):
                     continue
                 sym = str(getattr(o, "symbol", "") or "").upper()
                 side = str(getattr(o.side, "value", o.side) if getattr(o, "side", None) else "").lower()

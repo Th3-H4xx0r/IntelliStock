@@ -22,6 +22,8 @@ which is the safe side of the error for an account that is already long.
 """
 from __future__ import annotations
 
+from broker_adapters.base import is_bracket_child_order
+
 #: Order states from which no further fill can arrive. Anything else — `new`,
 #: `accepted`, `pending_new`, `partially_filled`, `held`, or a state Alpaca
 #: adds tomorrow — counts as unresolved. Unrecognised is not evidence of a
@@ -80,6 +82,12 @@ def live_pending_symbols(adapter) -> tuple[str, ...]:
             raise LivePendingOrdersUnavailable(
                 f"the open order for {symbol.strip().upper()} carries no "
                 "usable status")
+        # swing-port: a bracket's legs are exits, not pending buys; counting
+        # them would block every re-entry while a position is protected. A
+        # held order OUTSIDE a multi-leg class still counts: the guard stays
+        # closed on what it cannot explain.
+        if is_bracket_child_order(order):
+            continue
         if status.strip().lower() in TERMINAL_ORDER_STATES:
             continue
         pending[symbol.strip().upper()] = None

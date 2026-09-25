@@ -553,6 +553,8 @@ def cancel_open_buy_orders(adapter, *, log=None) -> int:
     SELLs are deliberately left alone: at the kill level an open sell is a
     reduce-only exit, the one order you want to survive.
     """
+    from broker_adapters.base import is_risk_reducing_order
+
     def _say(message, color="red"):
         try:
             (log if log is not None else _default_risk_log)(message, color)
@@ -573,6 +575,12 @@ def cancel_open_buy_orders(adapter, *, log=None) -> int:
     cancelled = 0
     for ref in (working or []):
         if str(getattr(ref, "side", "") or "").strip().lower() != "buy":
+            continue
+        # swing-port (spec 6.1 broker item 6): a buy-to-close REDUCES risk;
+        # the kill rung exists to stop new exposure, not to strand a short put.
+        # Ruling F1: only an OPTION buy-to-close counts; an EB stock buy is
+        # cancelled whatever position_intent it carries.
+        if is_risk_reducing_order(ref):
             continue
         broker_order_id = getattr(ref, "broker_order_id", "")
         try:
