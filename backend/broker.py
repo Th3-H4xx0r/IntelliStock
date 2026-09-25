@@ -9521,6 +9521,16 @@ def _reconcile_alpaca_ownership(adapter, order_service):
             _cid_prefix = f"{_cid_safe(str(instance_id), 8) or 'x'}-"
         except Exception:
             _cid_prefix = ""
+        # swing-port: re-read any bracket whose legs are not recorded yet (a
+        # nested read that failed after submit, or a restart), so a leg fill
+        # resolves before ownership is judged. Swing documents only.
+        if _lane_enabled(globals().get("_cached_strategies"), "strategy_swing"):
+            try:
+                order_service.ensure_bracket_legs()
+            except Exception as _legs_exc:
+                _log(f"[swing] bracket leg registration failed "
+                     f"({type(_legs_exc).__name__}: {_legs_exc}); retried next "
+                     "reconcile", "yellow")
         result = StartupReconciler(
             lifecycle_store=order_service.lifecycle_store,
             event_applier=order_service.apply_broker_event,
@@ -9921,10 +9931,17 @@ def _live_order_dependency_snapshot(adapter, intent):
 def _build_strategy_stock_intent(
         order_service, portfolio, *, symbol, decision, price, current_time,
         cash_to_use, sell_fraction, action_intents, is_risk_exit,
-        risk_snapshot_id, quote_at):
+        risk_snapshot_id, quote_at, bracket=None):
     """Create the immutable intent for one normal/risk strategy emission."""
     from decimal import Decimal
     from live_orders import OrderIntent, OrderSide, OrderSource
+    if bracket is not None and decision == 1:
+        # swing-port (spec 6.1 broker item 3): a bracket entry.
+        return _build_bracket_intent(
+            order_service, symbol=symbol, price=price,
+            decision_at=current_time, cash_to_use=cash_to_use,
+            bracket=bracket, action_intents=action_intents,
+            risk_snapshot_id=risk_snapshot_id, quote_at=quote_at)
 
     decision_at = current_time
     if not isinstance(decision_at, datetime.datetime):
@@ -10030,6 +10047,134 @@ def _build_strategy_stock_intent(
         extended_hours=bool(style.get("extended_hours")),
         reference_price=Decimal(str(price)),
     )
+
+
+def _build_bracket_intent(
+        order_service, *, symbol, price, decision_at, bracket,
+        risk_snapshot_id, quote_at, cash_to_use=None, quantity=None,
+        action_intents=(), source=None, reason=None):
+    """One swing entry as an Alpaca GTC market bracket (spec section 6.1,
+    broker item 3): whole shares, tif=gtc, order_class=bracket, and the
+    absolute leg prices the lane anchored on the prior close.
+
+    It never calls _order_style_for_now. That conversion would turn a 09:15 ET
+    entry into an extended-hours limit DAY order; a plain market bracket is
+    what Alpaca queues for the open, which is ST's behaviour.
+
+    Every refusal here is raised before any broker order exists. The live
+    submit block routes a "bracket refused" ValueError, like "computed order
+    quantity <= 0", as a definite refusal (outcome blocked), never as an
+    unknown outcome (ruling F8).
+    """
+    from decimal import ROUND_FLOOR, Decimal
+    from live_orders import OrderIntent, OrderSide, OrderSource
+
+    if not isinstance(decision_at, datetime.datetime):
+        decision_at = datetime.datetime.now(datetime.timezone.utc)
+    elif decision_at.tzinfo is None:
+        decision_at = decision_at.replace(tzinfo=datetime.timezone.utc)
+    price_d = Decimal(str(price))
+    if quantity is not None:
+        shares = Decimal(int(quantity))
+    elif price_d > 0:
+        shares = (Decimal(str(cash_to_use or 0)) / price_d).to_integral_value(
+            rounding=ROUND_FLOOR)
+    else:
+        shares = Decimal("0")
+    if shares <= 0:
+        raise ValueError("computed order quantity <= 0")
+    legs = bracket if isinstance(bracket, dict) else {}
+    if legs.get("take_profit_price") is None or legs.get("stop_loss_price") is None:
+        raise ValueError(f"bracket refused: {symbol} hint lacks a leg price")
+    cent = Decimal("0.01")
+    take_profit = Decimal(str(legs["take_profit_price"])).quantize(cent)
+    stop_loss = Decimal(str(legs["stop_loss_price"])).quantize(cent)
+    if not Decimal("0") < stop_loss < price_d < take_profit:
+        raise ValueError(
+            f"bracket refused: stop {stop_loss} and target {take_profit} do "
+            f"not straddle {price_d} for {symbol}")
+    return OrderIntent(
+        account_id=order_service.account_id,
+        instance_id=order_service.instance_id,
+        source=source or OrderSource.STRATEGY,
+        reason=reason or (
+            ",".join(sorted(action_intents)) if action_intents
+            else "strategy signal"),
+        symbol=symbol,
+        side=OrderSide.BUY,
+        quantity=shares,
+        reduce_only=False,
+        decision_at=decision_at,
+        quote_at=quote_at,
+        risk_snapshot_id=risk_snapshot_id,
+        order_type="market",
+        limit_price=None,
+        tif="gtc",
+        extended_hours=False,
+        reference_price=price_d,
+        order_class="bracket",
+        take_profit_price=take_profit,
+        stop_loss_price=stop_loss,
+    )
+
+
+def _cancel_bracket_legs_confirmed(adapter, order_service, symbol, *,
+                                   timeout_s=10.0, log=None):
+    """Cancel every working bracket leg on ``symbol`` and wait for Alpaca to
+    confirm (spec 6.1 broker item 4). True when nothing is left working and the
+    sell may go; False defers the sell a tick.
+
+    Leg ids come from two places, because each can miss one: the lifecycle
+    store (a held stop leg is not always listed as open) and the broker's
+    open orders (a leg whose registration has not happened yet).
+    """
+    from broker_adapters.base import is_bracket_child_order
+    from live_orders import OrderSource
+
+    def say(message, color="yellow"):
+        if log is not None:
+            try:
+                log(message, color)
+            except Exception:
+                pass
+
+    wanted = str(symbol or "").strip().upper()
+    leg_ids = []
+    try:
+        for record in order_service.lifecycle_store.list_for_instance(
+                order_service.instance_id):
+            if record.terminal or record.intent.source is not OrderSource.BRACKET_LEG:
+                continue
+            if record.intent.symbol == wanted and record.broker_order_id:
+                leg_ids.append(record.broker_order_id)
+    except Exception as exc:
+        say(f"[swing] {wanted} sell deferred: the lifecycle store is "
+            f"unreadable ({type(exc).__name__}: {exc}), so its bracket legs "
+            "cannot be ruled out", "red")
+        return False
+    try:
+        working = adapter.list_open_orders_strict()
+    except Exception as exc:
+        say(f"[swing] {wanted} sell deferred: the open-order book is "
+            f"unreachable ({type(exc).__name__}: {exc})", "red")
+        return False
+    for ref in (working or ()):
+        ref_id = str(getattr(ref, "broker_order_id", "") or "")
+        if (ref_id and ref_id not in leg_ids and is_bracket_child_order(ref)
+                and str(getattr(ref, "symbol", "") or "").strip().upper() == wanted):
+            leg_ids.append(ref_id)
+    if not leg_ids:
+        return True
+    try:
+        confirmed = bool(adapter.cancel_orders_confirmed(leg_ids, timeout_s=timeout_s))
+    except Exception as exc:
+        say(f"[swing] {wanted} bracket leg cancel raised "
+            f"{type(exc).__name__}: {exc}", "red")
+        return False
+    say(f"[swing] {wanted} bracket legs {leg_ids} cancel "
+        f"{'confirmed' if confirmed else 'NOT confirmed; the sell waits a tick'}",
+        "cyan" if confirmed else "yellow")
+    return confirmed
 
 
 def _execute_live_command(adapter, cmd: dict, order_service=None) -> tuple[bool, str, dict]:
@@ -11291,6 +11436,10 @@ elif mode == MODE_LIVE:
                         _RethinkLifecycleBackend()
                     ),
                     lookup_by_client_id=live_adapter.get_order_by_client_id,
+                    # swing-port: a bracket parent's legs are read back with
+                    # nested=True and become lifecycle rows. Only an intent
+                    # with order_class="bracket" ever calls it.
+                    legs_lookup=live_adapter.get_order_with_legs,
                     confirmed_fill_handler=_apply_live_confirmed_fill_risk,
                     event_handler=live_adapter.apply_lifecycle_event,
                     # E4: the service turns five different exceptions into
@@ -19020,6 +19169,28 @@ while not shutdown_requested:
                                         and not _is_crypto_instance_runtime()
                                     )
                                     if _is_alpaca_stock_gate:
+                                        # swing-port (spec 6.1 broker item 4):
+                                        # a SELL of a bracketed position first
+                                        # cancels its legs and waits for Alpaca
+                                        # to confirm; unconfirmed, the sell
+                                        # waits a tick. Only a document with an
+                                        # enabled swing lane holds legs.
+                                        if (
+                                            decision == -1
+                                            and _lane_enabled(_cached_strategies, "strategy_swing")
+                                            and not _cancel_bracket_legs_confirmed(
+                                                live_adapter,
+                                                _live_stock_order_service,
+                                                symbol,
+                                                timeout_s=10.0,
+                                                log=_log,
+                                            )
+                                        ):
+                                            raise ValueError(
+                                                f"order deferred: {symbol} bracket "
+                                                "legs did not confirm cancelled "
+                                                "within 10s; the sell waits a tick"
+                                            )
                                         # Single source of truth, shared with the
                                         # holding-floor gate above — see
                                         # _RISK_EXIT_INTENTS. Two copies would
@@ -19080,6 +19251,12 @@ while not shutdown_requested:
                                                 risk_snapshot_id=_risk_id,
                                                 quote_at=(
                                                     _authoritative_quote_at
+                                                ),
+                                                bracket=(
+                                                    nexus_hint.get("bracket")
+                                                    if decision == 1
+                                                    and isinstance(nexus_hint, dict)
+                                                    else None
                                                 ),
                                             )
                                         )
@@ -19217,7 +19394,7 @@ while not shutdown_requested:
                                             "deferred"
                                             if str(_es_e).startswith("order deferred")
                                             else "blocked"
-                                            if str(_es_e) == "computed order quantity <= 0"
+                                            if str(_es_e) == "computed order quantity <= 0" or str(_es_e).startswith("bracket refused")
                                             else "failed"),
                                         eb_universe=_strategy_eb_universe_symbols(
                                             _cached_strategies),

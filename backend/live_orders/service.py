@@ -35,6 +35,11 @@ _RECORD_ONLY_SOURCES = frozenset(
     {OrderSource.BRACKET_LEG, OrderSource.OPTION_ACTIVITY}
 )
 
+#: An Alpaca bracket parent carries exactly two child legs, the take-profit
+#: limit and the stop-loss stop. ensure_bracket_legs retries a parent until
+#: both are recorded.
+_BRACKET_LEG_COUNT = 2
+
 
 class TerminalRetryExhausted(RuntimeError):
     pass
@@ -733,29 +738,35 @@ class LiveOrderService:
         return tuple(records)
 
     def ensure_bracket_legs(self) -> int:
-        """Register the legs of every bracket parent that has none recorded:
-        a nested read that failed right after submission, or a restart.
-        Returns the number of leg rows registered. Idempotent."""
+        """Register the legs of every bracket parent that has fewer than both
+        recorded: a nested read that failed right after submission, a second
+        leg that failed after the first was stored, or a restart. Returns the
+        number of leg rows newly registered. Idempotent."""
         if self._legs_lookup is None:
             return 0
         records = self.lifecycle_store.list_for_instance(self.instance_id)
-        with_legs = {
-            record.intent.parent_client_order_id
-            for record in records
-            if record.intent.source is OrderSource.BRACKET_LEG
-        }
+        legs_of: dict[str, set[str]] = {}
+        for record in records:
+            if record.intent.source is OrderSource.BRACKET_LEG:
+                legs_of.setdefault(
+                    record.intent.parent_client_order_id, set()
+                ).add(record.client_order_id)
         registered = 0
         for record in records:
             intent = record.intent
             if intent.order_class != "bracket":
                 continue
-            if record.client_order_id in with_legs or not record.broker_order_id:
+            known = legs_of.get(record.client_order_id, set())
+            # L3 carry: a parent with ONE leg recorded is incomplete too; its
+            # other leg (take-profit or stop-loss) would never resolve a fill.
+            if len(known) >= _BRACKET_LEG_COUNT or not record.broker_order_id:
                 continue
             if record.terminal and record.cumulative_quantity <= 0:
                 continue
             try:
-                registered += len(
-                    self._register_legs_for(intent, record.broker_order_id)
+                rows = self._register_legs_for(intent, record.broker_order_id)
+                registered += sum(
+                    1 for row in rows if row.client_order_id not in known
                 )
             except Exception as exc:
                 self._report_swallowed(intent, "bracket.legs.unregistered", exc)
