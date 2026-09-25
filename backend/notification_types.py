@@ -162,10 +162,11 @@ NOTIFICATION_TYPES = [
      "desc": "A wheel candidate scored 50-74 and waits for your approval",
      "channel": "trades", "discord": True, "push": True, "prefixes": ["WHEEL REVIEW ["]},
     {"key": "wheel_position_alert", "group": "Swing & Wheel", "label": "Wheel position alert",
-     "desc": "A short put is in the money, near expiry, or is being bought back",
+     "desc": ("A short put is in the money, near expiry, has no price, or is being "
+              "bought back; or assigned shares are a covered-call candidate (dry run)"),
      "channel": "trades", "discord": True, "push": True, "prefixes": ["WHEEL ALERT ["]},
     {"key": "wheel_assignment", "group": "Swing & Wheel", "label": "Wheel assignment",
-     "desc": "A put was assigned; includes the covered-call dry run",
+     "desc": "A put was assigned and its shares are now held",
      "channel": "trades", "discord": True, "push": False,
      "prefixes": ["WHEEL ASSIGNMENT ["]},
     # An order the operator approved that the broker then refused: the

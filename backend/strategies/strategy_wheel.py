@@ -52,6 +52,7 @@ _MONITOR_KEY = "_wheel_monitor_session"          # the daily monitor, once a ses
 _IV_KEY = "_wheel_iv_session"                    # the IV snapshot, once a session
 _NO_MODEL_KEY = "_wheel_no_model_session"
 _CHECKS_KEY = "_wheel_checks_session"            # the scan's position checks, once a session
+_NO_PRICE_KEY = "_wheel_no_price_alerted"        # {"session", "contracts"}: one alert each
 _LOGGED_KEY = "_wheel_logged"
 
 #: One yfinance earnings lookup.
@@ -88,6 +89,23 @@ def _valid_hhmm(value):
     if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59:
         return None
     return f"{int(m.group(1)):02d}:{m.group(2)}"
+
+
+def _one_close_per_contract(orders) -> list:
+    """The monitor and the scan's 2× check each skip a contract with a WORKING
+    buy, but neither sees the other's order from the same tick: the first
+    buy-to-close of a contract wins (the monitor runs first)."""
+    out, closing = [], set()
+    for o in orders:
+        if o.get("position_intent") == "buy_to_close":
+            key = str(o.get("contract") or "").upper()
+            if key in closing:
+                _log(f"StrategyWheel | {o.get('contract')}: a buy-to-close was already "
+                     f"emitted this tick — dropping the second ({o.get('reason')})", "yellow")
+                continue
+            closing.add(key)
+        out.append(o)
+    return out
 
 
 def _emit_options(orders) -> dict:
@@ -144,7 +162,7 @@ class StrategyWheel:
             except Exception as exc:
                 _log(f"StrategyWheel {session} | {step.__name__.lstrip('_')} failed "
                      f"({type(exc).__name__}: {exc})", "red")
-        return _emit_options(orders)
+        return _emit_options(_one_close_per_contract(orders))
 
     # -- the weekly scan (wheel_trader.py:1257-1407) ---------------------------
 
@@ -402,13 +420,206 @@ class StrategyWheel:
         lines.append(f"Scanned: {scanned} | Rejected: {rejected}")
         notify.send("swing_run_summary", iid, "Wheel Scanner ✅ Run Complete", "\n".join(lines))
 
-    # -- Task 19 replaces these three ------------------------------------------
+    # -- position checks (wheel_trader.py:230-449) -------------------------------
+
+    @staticmethod
+    def _assigned_shares(cache) -> dict:
+        """Net shares the engine recorded as assigned to this lane (A-live
+        contract addition 13): put assignments add, call assignments remove."""
+        net = {}
+        for a in (cache or {}).get("_engine_wheel_assignments") or []:
+            try:
+                u = str(a.get("underlying") or "").strip().upper()
+                shares = int(float(a.get("shares") or 0))
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if not u or shares <= 0:
+                continue
+            side = str(a.get("side") or "").strip().lower()
+            net[u] = net.get(u, 0) + (shares if side == "buy" else -shares)
+        return {u: n for u, n in net.items() if n > 0}
 
     def _position_checks(self, session, today, iid, cfg, emu, cache):
-        return []
+        """ST ran check_open_wheel_positions and check_assigned_positions at
+        the start of every scan. Returns the buy-to-close orders, and latches
+        the session once the book was read (an unreadable book retries)."""
+        positions, book = account.option_positions(emu), account.open_orders(emu)
+        if positions is None or book is None:
+            _log(f"StrategyWheel {session} | the option book is unreadable — the 2× "
+                 "premium check and the assignment check are retried next tick", "yellow")
+            return []
+
+        orders = []
+        for p in [p for p in positions if float(getattr(p, "qty", 0) or 0) < 0]:
+            try:
+                qty = abs(int(float(p.qty)))
+                cost_basis = abs(float(p.avg_entry_price)) * qty * 100
+                current_value = abs(float(p.market_value))
+                if cost_basis > 0:
+                    _log(f"  [wheel-exit] {p.symbol}: collected=${cost_basis:.2f}  "
+                         f"current_cost_to_close=${current_value:.2f}  "
+                         f"ratio={current_value / cost_basis:.2f}x")
+            except (TypeError, ValueError):
+                continue
+        for order, info in wheel_rules.two_x_exits(positions, open_orders=book):
+            order["session"] = session
+            orders.append(order)
+            _log(f"  [wheel-exit] ⚠️ {order['contract']} at {info['loss_ratio']:.1f}× "
+                 "premium — buying to close at market", "yellow")
+            notify.send("wheel_position_alert", iid, f"⚠️ Wheel Exit: {order['contract']}",
+                        f"⚠️ BUY-TO-CLOSE placed\n{order['contract']}\n"
+                        f"Premium collected: ${info['cost_basis']:.2f}\n"
+                        f"Cost to close: ${info['current_value']:.2f} "
+                        f"({info['loss_ratio']:.1f}× premium)", priority=1)
+        _log("  [wheel-exit] Position check complete")
+
+        # Covered calls only for shares the ENGINE assigned to this lane. ST
+        # treated every uncovered 100-share holding that was not swing
+        # inventory as an assignment; on a shared instance that would write
+        # calls against shares the wheel never bought.
+        assigned = self._assigned_shares(cache)
+        held = account.equity_positions(emu)
+        mine = {s: dict(p, qty=min(float(p["qty"]), float(assigned[s])))
+                for s, p in held.items() if s in assigned}
+        for s in sorted(set(held) - set(mine)):
+            if float(held[s]["qty"]) >= 100:
+                _log(f"  [covered-call] {s}: {held[s]['qty']:g} shares, none assigned to the "
+                     "wheel lane — not a covered-call candidate")
+        swing_owned = signals_store.swing_owned_symbols(iid, set(held))
+        candidates = wheel_rules.covered_call_candidates(mine, positions, book,
+                                                         swing_owned=swing_owned)
+        if candidates:
+            expiry = wheel_rules.next_friday(today, clock.trading_days)
+            for c in candidates:
+                title, msg = wheel_rules.dry_run_message(c, expiry)
+                if _truthy(cfg.get("auto_covered_call", False)):
+                    msg += ("\nauto_covered_call is on, but the engine's option gate accepts "
+                            "sell-to-open puts only (option.sell_to_open_requires_put), so no "
+                            "call was sent. Sell it manually.")
+                _log(f"  [covered-call] DRY-RUN {c['symbol']}: would sell {c['n_contracts']} "
+                     f"call(s) strike ≥ ${c['call_strike']:.2f} exp {expiry} — no order placed")
+                # A-live F12: the engine's activity poller sends the one
+                # wheel_assignment notification; this dry run is a position alert.
+                notify.send("wheel_position_alert", iid, title, msg, priority=1)
+        _log("  [covered-call] Assignment check complete")
+        cache[_CHECKS_KEY] = session
+        return orders
+
+    # -- the daily monitor (app.py:1259-1411) -------------------------------------
 
     def _monitor(self, now, session, today, iid, cfg, emu, cache, deadline):
-        return []
+        if cfg.get("monitor_time_et") is None:
+            return []                    # refused and logged at config load
+        if cache.get(_MONITOR_KEY) == session or not clock.is_rth(now):
+            return []
+        # One tick early: on the 20-minute grid the next tick (16:00) is after the close.
+        if not clock.at_or_after(now, cfg["monitor_time_et"], lead_min=clock.TICK_GRID_MIN):
+            return []
+        positions, book = account.option_positions(emu), account.open_orders(emu)
+        if positions is None or book is None:
+            _log(f"StrategyWheel {session} | monitor deferred — the option book is "
+                 "unreadable; it runs on the next tick", "yellow")
+            return []
+        shorts = [p for p in positions if float(getattr(p, "qty", 0) or 0) < 0]
+        # fix 6: short PUTS only; ST parsed any short OCC symbol as a put.
+        puts = [p for p in shorts if str(getattr(p, "option_type", "")).lower() == "put"]
+        for p in shorts:
+            if not any(p is q for q in puts):
+                _log(f"[wheel-monitor] {p.symbol}: a short {p.option_type}, not a wheel put "
+                     "— not checked (fix 6)")
+        working = {str(getattr(o, "symbol", "")).upper() for o in book
+                   if str(getattr(o, "side", "")).lower() == "buy"}
+        try:
+            client = market_data.data_client(cfg.get("alpaca_key"), cfg.get("alpaca_secret"))
+        except RuntimeError:
+            client = None
+        prices = market_data.live_prices(sorted({str(p.underlying).upper() for p in puts}),
+                                         adapter=emu, client=client, now=now) if puts else {}
+        orders, alerts = [], 0
+        for p in puts:
+            try:
+                d = wheel_rules.put_monitor_decision(
+                    contract=p.symbol, underlying=str(p.underlying).upper(),
+                    strike=float(p.strike), expiry=p.expiry,
+                    stock_price=prices.get(str(p.underlying).upper()), today=today)
+                _log(f"[wheel-monitor] {p.symbol}: underlying={d['underlying']} "
+                     f"strike={d['strike']:.2f} stock={d['stock_price']} DTE={d['dte']} "
+                     f"ITM={d['itm']} deep_itm={d['deep_itm']}")
+                if d["stock_price"] is None:
+                    # G3 minor 2: with no usable price the rules cannot see an
+                    # ITM put; one near expiry is the operator's to check.
+                    if d["dte"] <= 1 and self._no_price_alert(p, d, session, iid, cache):
+                        alerts += 1
+                    continue
+                if d["action"] == "auto_close":
+                    if str(p.symbol).upper() in working:
+                        _log(f"[wheel-monitor] {p.symbol}: {d['reason']} — a buy-to-close "
+                             "is already working; not sending another", "yellow")
+                        continue
+                    _log(f"[wheel-monitor] 🚨 AUTO-CLOSE triggered: {p.symbol} — {d['reason']}",
+                         "red")
+                    orders.append(wheel_rules.btc_order(p, abs(int(float(p.qty))), d["intent"],
+                                                        session=session))
+                if d["title"]:
+                    notify.send("wheel_position_alert", iid, d["title"], d["message"],
+                                priority=int(d["priority"] or 0))
+                    alerts += 1
+            except Exception as exc:
+                _log(f"[wheel-monitor] Error processing {p.symbol}: {exc}", "yellow")
+                continue
+        cache[_MONITOR_KEY] = session
+        calibration.record_outcomes(iid, emu, "wheel")
+        _log(f"[wheel-monitor] Done — checked {len(puts)} short put positions, "
+             f"{alerts} alerts sent")
+        return orders
+
+    def _no_price_alert(self, p, d, session, iid, cache) -> bool:
+        """One "no price — check manually" alert per contract per session.
+        Returns True when it was sent."""
+        seen = cache.get(_NO_PRICE_KEY)
+        if not isinstance(seen, dict) or seen.get("session") != session:
+            seen = {"session": session, "contracts": []}
+            cache[_NO_PRICE_KEY] = seen
+        contract = str(p.symbol).upper()
+        if contract in seen["contracts"]:
+            return False
+        seen["contracts"].append(contract)
+        _log(f"[wheel-monitor] {p.symbol}: no usable price for {d['underlying']} with "
+             f"{d['dte']} day(s) to expiry — alerting the operator", "yellow")
+        notify.send("wheel_position_alert", iid,
+                    f"❓ No price — check manually: {d['underlying']}",
+                    f"{p.symbol}\nNo usable price for {d['underlying']}, so the monitor "
+                    "cannot tell whether this put is in the money.\n"
+                    f"Strike: ${d['strike']:.2f} | {d['dte']} day(s) to expiry\n"
+                    "Check it manually before the close.",
+                    priority=2 if d["dte"] <= 0 else 1)
+        return True
+
+    # -- the IV snapshot (iv_collector.py:232-257) ---------------------------------
 
     def _iv(self, now, session, today, iid, cfg, emu, cache, deadline):
+        if cache.get(_IV_KEY) == session or not clock.at_or_after(now, IV_SNAPSHOT_TIME_ET):
+            return []
+        try:
+            client = market_data.data_client(cfg.get("alpaca_key"), cfg.get("alpaca_secret"))
+        except RuntimeError:
+            client = None
+
+        def spot_for(symbol):
+            # iv_collector.py:128-133: the IEX latest trade, else the last close.
+            if client is None:
+                return None
+            price = market_data.get_latest_price(symbol, client=client)
+            if price is None:
+                frame = market_data.get_daily_bars([symbol], days=7, client=client).get(symbol)
+                if frame is None or frame.empty:
+                    return None
+                price = float(frame["Close"].iloc[-1])
+            return price
+
+        adapter = emu if callable(getattr(emu, "get_option_contracts", None)) else None
+        summary = iv.run_iv_snapshot(store, adapter=adapter, spot_for=spot_for, today=today,
+                                     deadline=deadline)
+        if summary.get("complete"):
+            cache[_IV_KEY] = session
         return []

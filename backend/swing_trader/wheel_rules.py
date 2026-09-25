@@ -798,14 +798,19 @@ def covered_call_candidates(equity_positions, option_positions, open_orders, *,
 
 
 def dry_run_message(c, expiry):
-    """wheel_trader.py:436-448, the AUTO_COVERED_CALL=False notification."""
-    title = f"🔍 Assignment detected: {c['symbol']} (dry-run)"
+    """wheel_trader.py:436-448, the AUTO_COVERED_CALL=False notification,
+    reworded for the port. The engine's activity poller announces the
+    assignment itself (A-live F12), and its option gate refuses a call
+    sell-to-open, so this names a covered-call candidate and never promises
+    that a flag would place the call (G3 minor 7)."""
+    title = f"🔍 Covered-call candidate: {c['symbol']} (dry-run)"
     msg = (
-        f"ASSIGNMENT DETECTED — dry-run, NO order placed\n"
+        f"Covered-call candidate (dry run; live call orders are not enabled in this port)"
+        f" — NO order placed\n"
         f"{c['symbol']}: {c['qty']} shares @ cost ${c['cost_basis']:.2f}\n"
         f"Would sell {c['n_contracts']} covered call(s):\n"
         f"Strike ≥ ${c['call_strike']:.2f} (cost basis × 1.05)  exp {expiry}\n"
-        f"To enable: set auto_covered_call=true on the wheel lane"
+        f"Sell the call manually if you want it."
     )
     return title, msg
 
