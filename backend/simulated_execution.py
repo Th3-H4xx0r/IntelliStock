@@ -645,6 +645,11 @@ class NextEventExecutionSimulator:
         self._rejected_order_count = 0
         self._expired_order_count = 0
         self._refused_fill_count = 0
+        # Swing port (spec 6.2). Empty/zero for every run that never submits a
+        # bracket or a next-open order, and nothing reads them then.
+        self._bar_cursor: dict[str, float] = {}
+        self._next_open_order_count = 0
+        self._next_open_expired_count = 0
 
     def _model_for(self, symbol) -> ExecutionCostModel:
         """The cost model for one symbol. Identity when untiered, so an
@@ -693,6 +698,38 @@ class NextEventExecutionSimulator:
             raise ValueError(f"duplicate order_id: {order.order_id}")
         self._known_order_ids.add(order.order_id)
         self._pending[order.order_id] = _PendingOrder(order=order)
+        if order.fill_at_next_open:
+            self._next_open_order_count += 1
+
+    @property
+    def has_next_open_orders(self) -> bool:
+        return any(
+            state.order.fill_at_next_open for state in self._pending.values())
+
+    def bar_event_requirements(self) -> dict[str, datetime]:
+        """{symbol: the earliest bar_ts `on_bar` still needs}, aware UTC.
+
+        A next-open order needs bars after its decision; a leg needs bars from
+        the one it was armed in. Raised to the last bar already processed for
+        the symbol, which `on_bar` then skips, so the caller never has to know
+        what has been seen.
+        """
+        needs: dict[str, float] = {}
+
+        def _need(symbol, when):
+            seconds = _event_seconds(when, field="requirement")
+            if symbol not in needs or seconds < needs[symbol]:
+                needs[symbol] = seconds
+
+        for state in self._pending.values():
+            if state.order.fill_at_next_open:
+                _need(state.order.symbol, state.order.decision_at)
+        return {
+            symbol: datetime.fromtimestamp(
+                max(seconds, self._bar_cursor.get(symbol, seconds)),
+                tz=timezone.utc)
+            for symbol, seconds in needs.items()
+        }
 
     def affordable_buy_quantity(
         self, cash: float, reference_price: float, symbol=None
@@ -724,12 +761,17 @@ class NextEventExecutionSimulator:
         *,
         accept_fill=None,
         cash_budget=None,
+        _next_open_only: bool = False,
     ) -> tuple[SimulationFill, ...]:
         """Propose, account, then commit each fill.
 
         When ``accept_fill`` is supplied it runs before simulator state changes.
         If accounting rejects the candidate, the order remains pending and no
         fill provenance is recorded.
+
+        ``_next_open_only`` is `on_bar`'s: a quote built from a bar's OPEN
+        fills only `fill_at_next_open` orders, and every ordinary quote skips
+        them.
         """
         if not isinstance(quote, SimulationQuote):
             raise ValueError("quote must be a SimulationQuote")
@@ -747,6 +789,8 @@ class NextEventExecutionSimulator:
         for order_id, state in tuple(self._pending.items()):
             order = state.order
             if order.symbol != quote.symbol or liquidity <= 0:
+                continue
+            if order.fill_at_next_open != _next_open_only:
                 continue
             model = self._model_for(order.symbol)
             decision_seconds = _event_seconds(
@@ -865,6 +909,9 @@ class NextEventExecutionSimulator:
                     affordable = _budget / all_in_per_share
                     if affordable < incremental:
                         incremental, budget_bound = affordable, True
+            if order.whole_shares:
+                # A clamp may cut a whole-share order, never split a share.
+                incremental = float(math.floor(incremental + 1e-9))
             if incremental <= 1e-12:
                 # Own notional exhausted => the order is done. Cash-starved =>
                 # NOT done: the funding sell may fill on a later quote.
@@ -941,8 +988,66 @@ class NextEventExecutionSimulator:
             self._pending.pop(order_id, None)
         return tuple(emitted)
 
+    # -- swing port: next-open fills and bracket legs (spec 6.2) -------------
+
+    @staticmethod
+    def _due_next_open(order, bar_seconds) -> bool:
+        return (
+            order.fill_at_next_open
+            and bar_seconds > _event_seconds(
+                order.decision_at, field="decision_at")
+            and bar_seconds >= _event_seconds(
+                order.execute_not_before, field="execute_not_before")
+        )
+
+    def on_bar(
+        self,
+        event: SimulationBarEvent,
+        *,
+        accept_fill=None,
+        cash_budget=None,
+        position_of=None,
+    ) -> list[SimulationFill]:
+        """Next-open fills, then bracket legs, for ONE completed bar.
+
+        Bars must arrive oldest first per symbol; one already processed is
+        skipped, so a caller may resend it. ``position_of(symbol)`` caps a leg
+        at the shares actually held.
+        """
+        if not isinstance(event, SimulationBarEvent):
+            raise ValueError("event must be a SimulationBarEvent")
+        bar_seconds = _event_seconds(event.bar_ts, field="bar_ts")
+        last = self._bar_cursor.get(event.symbol)
+        if last is not None and bar_seconds <= last:
+            return []
+        emitted: list[SimulationFill] = []
+
+        due = [
+            order_id for order_id, state in self._pending.items()
+            if state.order.symbol == event.symbol
+            and self._due_next_open(state.order, bar_seconds)
+        ]
+        if due:
+            quote = SimulationQuote.from_mid(
+                symbol=event.symbol,
+                timestamp=event.bar_ts,
+                mid=event.open,
+                spread_bps=self._model_for(event.symbol).spread_bps,
+            )
+            emitted.extend(self.on_quote(
+                quote, accept_fill=accept_fill, cash_budget=cash_budget,
+                _next_open_only=True))
+            # One shot. Whatever this open did not fill is dropped and
+            # counted, never left to fill at a later, different open.
+            for order_id in due:
+                if self._pending.pop(order_id, None) is not None:
+                    self._next_open_expired_count += 1
+
+        self._bar_cursor[event.symbol] = bar_seconds
+        return emitted
+
     def execution_summary(self) -> dict:
-        return {
+        summary = {
             "execution_provenance_complete": True,
             "execution_cost_model_version": self.cost_model.version,
             "execution_cost_model": self.cost_model.as_dict(),
@@ -956,3 +1061,10 @@ class NextEventExecutionSimulator:
                 fill.as_dict() for fill in self._fills
             ],
         }
+        # Swing-port keys appear only on a run that used the feature, so every
+        # other run's summary is byte-identical.
+        if self._next_open_order_count:
+            summary["next_open_order_count"] = self._next_open_order_count
+            summary["next_open_expired_order_count"] = (
+                self._next_open_expired_count)
+        return summary
