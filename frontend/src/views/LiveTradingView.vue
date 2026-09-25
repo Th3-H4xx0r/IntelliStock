@@ -6,6 +6,16 @@ import InstanceLiveLogs from '../components/InstanceLiveLogs.vue'
 import VueApexCharts from 'vue3-apexcharts'
 import { getToken } from '../utils/auth.js'
 import { fullscreenMode } from '../composables/useFullscreen.js'
+import {
+  canClosePosition,
+  describeOption,
+  displayQuantity,
+  historicalsSymbols,
+  isOptionRow,
+  isShortPosition,
+  quantityLabel,
+  tradeTotal,
+} from '../utils/optionPositions.js'
 
 // fullscreenMode is a module-level shared ref — flipping it here hides the
 // sidebar in AppShell and removes the content's left padding. We pair it
@@ -435,7 +445,8 @@ const positionHistError = ref(null)
 const positionHistLoading = ref(false)
 let positionHistAbort = null
 
-const positionSymbols = computed(() => positions.value.map(p => p.symbol).filter(Boolean))
+// Stock only: /symbol-historicals has nothing for an OCC contract symbol.
+const positionSymbols = computed(() => historicalsSymbols(positions.value))
 const positionSymbolsKey = computed(() => [...positionSymbols.value].sort().join(','))
 
 async function fetchPositionHistoricals() {
@@ -1171,7 +1182,12 @@ watch(
                         :class="t.side === 'buy' ? 'text-emerald-400' : 'text-red-400'"
                       >{{ t.side || '—' }}</span>
                       <span class="text-base font-black text-slate-100 tracking-wide">{{ t.symbol || '' }}</span>
+                      <span
+                        v-if="isOptionRow(t)"
+                        class="px-1.5 py-0.5 rounded text-[9px] font-bold border uppercase tracking-wider text-violet-300 bg-violet-500/10 border-violet-500/20"
+                      >Option</span>
                     </div>
+                    <div v-if="isOptionRow(t)" class="text-[10px] text-slate-500 mt-0.5">{{ describeOption(t) }}</div>
                   </div>
                   <div class="text-right shrink-0">
                     <div class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Fill Price</div>
@@ -1184,15 +1200,15 @@ watch(
                     <div class="text-sm font-bold text-slate-100 tabular-nums">{{ fmtDateTime(t.ts) }}</div>
                   </div>
                   <div>
-                    <div class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Shares</div>
+                    <div class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">{{ quantityLabel(t) }}</div>
                     <div
                       class="text-sm font-bold text-slate-100 tabular-nums"
                       :title="String(t.qty || 0)"
-                    >{{ Number(t.qty || 0).toLocaleString(undefined, { maximumFractionDigits: 4 }) }}</div>
+                    >{{ displayQuantity(t, 4) }}</div>
                   </div>
                   <div>
                     <div class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Total</div>
-                    <div class="text-sm font-bold text-slate-100 tabular-nums">{{ fmtMoney((Number(t.qty) || 0) * (Number(t.price) || 0)) }}</div>
+                    <div class="text-sm font-bold text-slate-100 tabular-nums">{{ fmtMoney(tradeTotal(t)) }}</div>
                   </div>
                 </div>
               </div>
@@ -1221,10 +1237,19 @@ watch(
                     <div class="flex items-baseline gap-2 flex-wrap">
                       <span class="text-base font-black text-slate-100 tracking-wide">{{ p.symbol }}</span>
                       <span
+                        v-if="isOptionRow(p)"
+                        class="px-1.5 py-0.5 rounded text-[9px] font-bold border uppercase tracking-wider text-violet-300 bg-violet-500/10 border-violet-500/20"
+                      >Option</span>
+                      <span
+                        v-if="isOptionRow(p) && isShortPosition(p)"
+                        class="px-1.5 py-0.5 rounded text-[9px] font-bold border uppercase tracking-wider text-amber-300 bg-amber-500/10 border-amber-500/20"
+                      >Short</span>
+                      <span
                         class="text-xs font-bold tabular-nums"
                         :class="p.avg_entry_price ? pnlColorClass(p.unrealized_pnl_pct) : 'text-slate-500'"
                       >{{ p.avg_entry_price ? fmtPct(p.unrealized_pnl_pct) : '—' }}</span>
                     </div>
+                    <div v-if="isOptionRow(p)" class="text-[10px] text-slate-500 mt-0.5">{{ describeOption(p) }}</div>
                     <!-- Range change from RH historicals (matches global range/style) -->
                     <div
                       v-if="positionChange(p.symbol).hasData"
@@ -1249,7 +1274,7 @@ watch(
                     v-if="!(positionHistoricals[p.symbol] && positionHistoricals[p.symbol].length)"
                     class="h-[80px] flex items-center justify-center text-[10px] text-slate-600 font-mono"
                   >
-                    {{ positionHistLoading ? 'Loading chart…' : 'No price history' }}
+                    {{ isOptionRow(p) ? 'No price chart for options' : (positionHistLoading ? 'Loading chart…' : 'No price history') }}
                   </div>
                   <VueApexCharts
                     v-else
@@ -1262,11 +1287,11 @@ watch(
                 </div>
                 <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-2">
                   <div>
-                    <div class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Shares</div>
+                    <div class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">{{ quantityLabel(p) }}</div>
                     <div
                       class="text-xs font-bold text-slate-300 tabular-nums"
                       :title="String(p.qty || 0)"
-                    >{{ Number(p.qty || 0).toLocaleString(undefined, { maximumFractionDigits: 8 }) }}</div>
+                    >{{ displayQuantity(p, 8) }}</div>
                   </div>
                   <div>
                     <div class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Last</div>
@@ -1284,7 +1309,7 @@ watch(
                     >{{ p.avg_entry_price ? fmtMoney(p.unrealized_pnl) : '—' }}</div>
                   </div>
                 </div>
-                <div class="flex justify-end">
+                <div v-if="canClosePosition(p)" class="flex justify-end">
                   <button
                     @click="openClosePosModal(p.symbol)"
                     class="inline-flex items-center gap-1 px-3 py-2 rounded-lg text-[11px] font-bold border border-red-500/30 bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors min-h-[36px]"
@@ -1294,6 +1319,9 @@ watch(
                     Close
                   </button>
                 </div>
+                <p v-else class="text-[10px] text-slate-600 text-right">
+                  Managed by the wheel lane. Use Halt to stop it.
+                </p>
               </div>
             </div>
           </section>
