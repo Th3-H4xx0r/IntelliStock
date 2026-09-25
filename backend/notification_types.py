@@ -148,9 +148,12 @@ NOTIFICATION_TYPES = [
     {"key": "swing_pending_review", "group": "Swing & Wheel", "label": "Swing review needed",
      "desc": "A swing candidate scored 50-74 and waits for your approval",
      "channel": "trades", "discord": True, "push": True, "prefixes": ["SWING REVIEW ["]},
+    # Seams m5: FW1's priority-2 exit alerts ("EXIT NOT PLACED", "EXIT OUTCOME
+    # UNKNOWN", "position may be unprotected") ride this category too.
     {"key": "swing_exit", "group": "Swing & Wheel", "label": "Swing exit",
-     "desc": "The swing lane sold a position", "channel": "trades",
-     "discord": True, "push": True, "prefixes": ["SWING EXIT ["]},
+     "desc": ("The swing lane sold a position; or an exit was not placed or its "
+              "outcome is unknown, so the position may be unprotected"),
+     "channel": "trades", "discord": True, "push": True, "prefixes": ["SWING EXIT ["]},
     {"key": "swing_run_summary", "group": "Swing & Wheel", "label": "Swing & wheel run summary",
      "desc": "A swing or wheel scan finished; AI rejects and bear-mode notes",
      "channel": "notifications", "discord": True, "push": False,
@@ -173,9 +176,12 @@ NOTIFICATION_TYPES = [
      "prefixes": ["WHEEL ASSIGNMENT ["]},
     # An order the operator approved that the broker then refused: the
     # operator believes a trade is on, so it pushes (plan C final review).
+    # Seams m5: it also carries FW1's "order unconfirmed" (may not have been
+    # placed) and priority-2 "order WAS placed — do not place it by hand".
     {"key": "swing_approval_failed", "group": "Swing & Wheel",
-     "label": "Approved order refused",
-     "desc": "A swing or wheel order you approved could not be sent",
+     "label": "Approved order refused or unconfirmed",
+     "desc": ("A swing or wheel order you approved was not sent, may not have been "
+              "placed, or WAS placed though its signal reads failed"),
      "channel": "trades", "discord": True, "push": True,
      "prefixes": ["SWING APPROVAL FAILED ["]},
 

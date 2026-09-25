@@ -162,7 +162,8 @@ const kNotificationCategories = <NotificationCategoryMeta>[
   NotificationCategoryMeta(
     'swing_exit',
     'Swing exit',
-    'The swing lane sold a position',
+    'The swing lane sold a position; or an exit was not placed or its '
+        'outcome is unknown, so the position may be unprotected',
   ),
   NotificationCategoryMeta(
     'swing_run_summary',
@@ -192,7 +193,8 @@ const kNotificationCategories = <NotificationCategoryMeta>[
   ),
   NotificationCategoryMeta(
     'swing_approval_failed',
-    'Approved order refused',
-    'A swing or wheel order you approved could not be sent',
+    'Approved order refused or unconfirmed',
+    'A swing or wheel order you approved was not sent, may not have been '
+        'placed, or WAS placed though its signal reads failed',
   ),
 ];

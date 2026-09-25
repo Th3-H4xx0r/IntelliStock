@@ -79,7 +79,18 @@ void main() {
     final failed = kNotificationCategories.firstWhere(
       (c) => c.key == 'swing_approval_failed',
     );
-    expect(failed.label, 'Approved order refused');
+    expect(failed.label, 'Approved order refused or unconfirmed');
+    expect(
+      failed.description,
+      'A swing or wheel order you approved was not sent, may not have been '
+      'placed, or WAS placed though its signal reads failed',
+    );
+    final exit = kNotificationCategories.firstWhere((c) => c.key == 'swing_exit');
+    expect(
+      exit.description,
+      'The swing lane sold a position; or an exit was not placed or its '
+      'outcome is unknown, so the position may be unprotected',
+    );
     expect(keys.toSet().length, keys.length);
   });
 }

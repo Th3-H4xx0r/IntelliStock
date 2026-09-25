@@ -67,7 +67,7 @@ void main() {
 
       expect(find.text('Order filled'), findsOneWidget);
       expect(find.text('Crash loop'), findsOneWidget);
-      expect(find.text('Approved order refused'), findsOneWidget);
+      expect(find.text('Approved order refused or unconfirmed'), findsOneWidget);
       expect(find.byType(AppToggle), findsNWidgets(38)); // 19 categories x 2
       expect(find.text('Test Discord'), findsOneWidget);
       expect(find.text('Test iOS push'), findsOneWidget);
