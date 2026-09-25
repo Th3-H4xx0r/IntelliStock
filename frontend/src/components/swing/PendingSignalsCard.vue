@@ -216,8 +216,7 @@ import {
   decisionsFor,
   detailText,
   joinKeyRisks,
-  normalizeApprovedList,
-  normalizeSignalList,
+  foldSignalLoad,
   nyDate,
   proposalRows,
   reasoningPreview,
@@ -225,7 +224,6 @@ import {
   resendPrompt,
   resendSuccess,
   scoreTone,
-  stuckApprovals,
   stuckLabel,
 } from '../../utils/swing.js'
 
@@ -323,11 +321,11 @@ function removeCard(id) {
   reasons.value = omit(reasons.value, id)
 }
 
-class SessionExpired extends Error {}
-
 async function fetchSignals(status) {
   const res = await fetch(`${signalsUrl()}?status=${status}`, { headers: authHeaders() })
-  if (res.status === 401) throw new SessionExpired('Session expired — please sign in again.')
+  if (res.status === 401) {
+    throw Object.assign(new Error('Session expired — please sign in again.'), { unauthorized: true })
+  }
   if (!res.ok) {
     let detail = ''
     try { detail = detailText((await res.json())?.detail) } catch { /* keep */ }
@@ -342,29 +340,30 @@ async function load() {
   const generation = latch.beginLoad()
   try {
     // The approved lists feed the "Approved, not yet sent" cards, and they
-    // end the hide on a card this page decided (FW-api-I2).
-    const [pendingBody, approvedBody, halfBody] = await Promise.all(
-      ['pending', 'approved', 'approved_half'].map(fetchSignals))
-    const approved = normalizeApprovedList(approvedBody, halfBody)
-    const next = latch.apply(generation, normalizeSignalList(pendingBody), approved.map(s => s.id))
-    const live = new Set(next.map(s => s.id))
+    // end the hide on a card this page decided (FW-api-I2). Each read settles
+    // on its own (follow-up 4): one failing never stops the others.
+    const statuses = ['pending', 'approved', 'approved_half']
+    const settled = await Promise.allSettled(statuses.map(fetchSignals))
+    const results = Object.fromEntries(statuses.map((status, i) => [status, settled[i]]))
+    nowMs.value = Date.now()
+    const out = foldSignalLoad({
+      generation, latch, results, nowMs: nowMs.value, resentAt,
+      previous: { signals: signals.value, stuck: stuck.value },
+    })
+    const live = new Set(out.signals.map(s => s.id))
     // A card that vanished server-side takes its half-finished confirm with it.
     for (const id of Object.keys(confirming.value)) {
       if (!live.has(id) && !deciding.value[id]) confirming.value = omit(confirming.value, id)
     }
-    nowMs.value = Date.now()
-    const nextStuck = stuckApprovals(approved, nowMs.value, resentAt)
-    const stuckIds = new Set(nextStuck.map(s => s.id))
+    const stuckIds = new Set(out.stuck.map(s => s.id))
     for (const id of Object.keys(resendConfirming.value)) {
       if (!stuckIds.has(id) && !resending.value[id]) resendConfirming.value = omit(resendConfirming.value, id)
     }
-    signals.value = next
-    stuck.value = nextStuck
-    loadError.value = ''
-    loaded.value = true
-  } catch (e) {
-    if (e instanceof SessionExpired) stopPolling()
-    loadError.value = e?.message || 'Could not load signals'
+    signals.value = out.signals
+    stuck.value = out.stuck
+    if (out.unauthorized) stopPolling()
+    loadError.value = out.error
+    if (out.pendingLoaded) loaded.value = true
   } finally {
     loading.value = false
   }

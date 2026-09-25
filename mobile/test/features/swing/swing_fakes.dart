@@ -25,8 +25,12 @@ class FakeSwingRepo implements SwingRepository {
   /// When set, decide() waits on it: lets a test hold a request in flight.
   Completer<void>? gate;
 
+  /// Fails only the pending list (follow-up 4); [listError] fails both.
+  Object? pendingError;
+
   @override
   Future<List<SwingSignal>> pendingSignals(String instanceId) async {
+    if (pendingError != null) throw pendingError!;
     if (listError != null) throw listError!;
     return List.of(pending);
   }
@@ -44,8 +48,12 @@ class FakeSwingRepo implements SwingRepository {
     return decideReceipt;
   }
 
+  /// Fails only the approved lists (follow-up 4); [listError] fails both.
+  Object? approvedError;
+
   @override
   Future<List<SwingSignal>> approvedSignals(String instanceId) async {
+    if (approvedError != null) throw approvedError!;
     if (listError != null) throw listError!;
     return List.of(approved);
   }

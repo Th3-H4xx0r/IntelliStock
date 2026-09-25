@@ -261,9 +261,12 @@ class PendingSignalsNotifier
     _hidden.clear();
     final lifecycle = ref.read(appLifecycleProvider);
     final generation = ++_generation;
-    final (pending, approved) = await _fetch();
+    final load = await _fetch();
+    // No pending list at all yet: the section shows the error with Retry. A
+    // failed approved read alone does not stop it (follow-up 4).
+    if (load.pending == null) throw load.error!;
     if (generation > _applied) _applied = generation;
-    final first = _apply(const PendingSignalsState(), generation, pending, approved);
+    final first = _apply(const PendingSignalsState(), generation, load);
     if (disposed) return first;
 
     _poller?.dispose();
@@ -283,26 +286,47 @@ class PendingSignalsNotifier
     return first;
   }
 
-  /// The pending list and the approved lists, requested together. The
-  /// approved ones feed [PendingSignalsState.stuck] and end a hide.
-  Future<(List<SwingSignal>, List<SwingSignal>)> _fetch() async {
+  /// The pending list and the approved lists, requested together and
+  /// settled independently (follow-up 4): a failed read leaves its list null
+  /// and never stops the other. The approved ones feed
+  /// [PendingSignalsState.stuck] and end a hide.
+  Future<_Load> _fetch() async {
     final repo = ref.read(swingRepositoryProvider);
-    // Future.wait: the first error is thrown and the other one is handled.
-    final lists = await Future.wait(
-        [repo.pendingSignals(arg), repo.approvedSignals(arg)]);
-    return (lists[0], lists[1]);
+    Future<(List<SwingSignal>?, Object?)> settle(
+        Future<List<SwingSignal>> read) async {
+      try {
+        return (await read, null);
+      } catch (err) {
+        return (null, err);
+      }
+    }
+
+    final pendingRead = settle(repo.pendingSignals(arg));
+    final approvedRead = settle(repo.approvedSignals(arg));
+    final (pending, pendingError) = await pendingRead;
+    final (approved, approvedError) = await approvedRead;
+    return _Load(pending, approved, pendingError ?? approvedError);
   }
 
-  PendingSignalsState _apply(PendingSignalsState current, int generation,
-      List<SwingSignal> pending, List<SwingSignal> approved) {
+  /// A failed read keeps its part of [current]; the first error is shown.
+  PendingSignalsState _apply(
+      PendingSignalsState current, int generation, _Load load) {
     final now = ref.read(swingClockProvider)();
-    return current.copyWith(
-      signals: _visible(generation, pending,
-          nonPending: approved.map((s) => s.id)),
-      stuck: stuckApprovals(approved, now, _resentAt),
+    final pending = load.pending;
+    final approved = load.approved;
+    final next = current.copyWith(
+      signals: pending == null
+          ? current.signals
+          : _visible(generation, pending,
+              nonPending: (approved ?? const []).map((s) => s.id)),
+      stuck: approved == null
+          ? current.stuck
+          : stuckApprovals(approved, now, _resentAt),
       asOf: now,
       clearRefreshError: true,
     );
+    final error = load.error;
+    return error == null ? next : next.copyWith(refreshError: error.toString());
   }
 
   /// [rows] are the pending rows of the fetch that took [generation];
@@ -321,17 +345,16 @@ class PendingSignalsNotifier
   /// One poll cycle. A failure keeps the last good list and says so.
   Future<void> refresh() async {
     final generation = ++_generation;
-    try {
-      final (pending, approved) = await _fetch();
-      if (generation < _applied) return;
-      _applied = generation;
-      final current = state.valueOrNull ?? const PendingSignalsState();
-      state = AsyncData(_apply(current, generation, pending, approved));
-    } catch (err) {
-      final current = state.valueOrNull;
-      if (current == null) return;
-      state = AsyncData(current.copyWith(refreshError: err.toString()));
+    final load = await _fetch();
+    if (generation < _applied) return;
+    final current = state.valueOrNull;
+    if (current == null) return;
+    if (load.pending == null && load.approved == null) {
+      state = AsyncData(current.copyWith(refreshError: load.error.toString()));
+      return;
     }
+    _applied = generation;
+    state = AsyncData(_apply(current, generation, load));
   }
 
   Future<DecisionResult> decide(
@@ -480,6 +503,15 @@ class PendingSignalsNotifier
     state =
         AsyncData(current.copyWith(deciding: {...current.deciding}..remove(id)));
   }
+}
+
+/// One poll's reads, each settled on its own (follow-up 4): null when that
+/// read failed; [error] is the first failure.
+class _Load {
+  const _Load(this.pending, this.approved, this.error);
+  final List<SwingSignal>? pending;
+  final List<SwingSignal>? approved;
+  final Object? error;
 }
 
 final pendingSignalsProvider = AsyncNotifierProvider.autoDispose

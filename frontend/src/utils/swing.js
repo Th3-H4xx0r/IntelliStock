@@ -276,6 +276,36 @@ export function stuckApprovals(approved, nowMs, resentAt = new Map()) {
   })
 }
 
+/**
+ * Follow-up 4: fold one poll's list reads into the next card state. Each read
+ * settles on its own (`results` holds Promise.allSettled outcomes keyed by
+ * status: pending, approved, approved_half). A failed read keeps its part of
+ * `previous` and reports its error; it never stops another list refreshing.
+ * A reason carrying `unauthorized: true` is a 401.
+ */
+export function foldSignalLoad({ generation, latch, results, previous, nowMs, resentAt }) {
+  const done = key => results?.[key]?.status === 'fulfilled'
+  const failures = Object.values(results || {})
+    .filter(r => r?.status === 'rejected').map(r => r.reason)
+  const approvedRows = normalizeApprovedList(
+    done('approved') ? results.approved.value : null,
+    done('approved_half') ? results.approved_half.value : null)
+  const signals = done('pending')
+    ? latch.apply(generation, normalizeSignalList(results.pending.value), approvedRows.map(s => s.id))
+    : previous.signals
+  const stuck = done('approved') && done('approved_half')
+    ? stuckApprovals(approvedRows, nowMs, resentAt)
+    : previous.stuck
+  const first = failures[0]
+  return {
+    signals,
+    stuck,
+    pendingLoaded: done('pending'),
+    error: first ? (first.message || String(first)) : '',
+    unauthorized: failures.some(r => r?.unauthorized === true),
+  }
+}
+
 export function stuckLabel(signal, nowMs) {
   const decided = Date.parse(signal?.decided_at ?? '')
   if (!Number.isFinite(decided)) return 'Approved; the broker has not picked it up yet.'

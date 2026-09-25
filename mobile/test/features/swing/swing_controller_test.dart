@@ -66,6 +66,21 @@ class _GatedListRepo extends FakeSwingRepo {
   }
 }
 
+/// Fails the next pending read only (follow-up 4).
+class _PendingDown {
+  _PendingDown(this.repo);
+  final FakeSwingRepo repo;
+
+  Future<void> refreshWith(ProviderContainer c) async {
+    final keep = repo.pending;
+    repo.pendingError = ApiError('pending down');
+    await c.read(pendingSignalsProvider('i1').notifier).refresh();
+    repo
+      ..pendingError = null
+      ..pending = keep;
+  }
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -270,6 +285,45 @@ void main() {
       await c.read(pendingSignalsProvider('i1').notifier).refresh();
       expect(read(c).signals.map((s) => s.id), ['a1']);
       expect(read(c).refreshError, 'Cannot reach the server.');
+    });
+  });
+
+  group('follow-up 4: the list reads settle independently', () {
+    setUp(() => clock = DateTime.utc(2026, 9, 25, 13, 30));
+
+    test('a failed approved read never stops the pending list refreshing', () async {
+      final repo = FakeSwingRepo([signal('a1')],
+          approved: [approvedSignal('old', '2026-09-25T13:20:00Z')]);
+      final c = await start(repo);
+      expect(read(c).stuck.map((s) => s.id), ['old']);
+      repo
+        ..pending = [signal('a1'), signal('b22')]
+        ..approvedError = ApiError('Could not load signals (502)');
+      await c.read(pendingSignalsProvider('i1').notifier).refresh();
+      expect(read(c).signals.map((s) => s.id), ['a1', 'b22']); // refreshed
+      expect(read(c).stuck.map((s) => s.id), ['old']); // last good
+      expect(read(c).refreshError, 'Could not load signals (502)');
+    });
+
+    test('an approved read that fails on the first load still shows the pending list',
+        () async {
+      final repo = FakeSwingRepo([signal('a1')])
+        ..approvedError = ApiError('Could not load signals (502)');
+      final c = await start(repo);
+      expect(read(c).signals.map((s) => s.id), ['a1']);
+      expect(read(c).refreshError, 'Could not load signals (502)');
+    });
+
+    test('a failed pending read keeps the last good list; the approved lists refresh',
+        () async {
+      final repo = FakeSwingRepo([signal('a1')]);
+      final c = await start(repo);
+      repo.approved = [approvedSignal('old', '2026-09-25T13:20:00Z')];
+      final gated = _PendingDown(repo);
+      await gated.refreshWith(c);
+      expect(read(c).signals.map((s) => s.id), ['a1']);
+      expect(read(c).stuck.map((s) => s.id), ['old']);
+      expect(read(c).refreshError, 'pending down');
     });
   });
 

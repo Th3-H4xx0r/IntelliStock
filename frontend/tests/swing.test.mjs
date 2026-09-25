@@ -13,6 +13,7 @@ import {
   decisionsFor,
   detailText,
   fmtAsOf,
+  foldSignalLoad,
   fmtItm,
   itmTone,
   joinKeyRisks,
@@ -412,4 +413,48 @@ test('resendBlockedReason: only an approval from today\'s session can be re-sent
     'This approval is from 2026-09-24; approve a fresh signal instead.')
   assert.equal(resendBlockedReason({ ...SWING, session: '' }, '2026-09-25'),
     'This approval is from an unknown session; approve a fresh signal instead.')
+})
+
+// -- Follow-up 4: the list reads settle independently -------------------------------------
+
+const ok = value => ({ status: 'fulfilled', value })
+const no = message => ({ status: 'rejected', reason: Object.assign(new Error(message), {}) })
+
+test('foldSignalLoad: a failed approved read never stops the pending list refreshing', () => {
+  const latch = createDecisionLatch()
+  const previous = { signals: [WHEEL], stuck: [approvedAt('kept', '2026-09-25T13:00:00Z')] }
+  const out = foldSignalLoad({
+    generation: latch.beginLoad(), latch, nowMs: T0, resentAt: new Map(), previous,
+    results: { pending: ok({ signals: [SWING] }), approved: no('Could not load signals (502)'), approved_half: ok([]) },
+  })
+  assert.deepEqual(out.signals.map(s => s.id), ['a1'])            // refreshed
+  assert.deepEqual(out.stuck.map(s => s.id), ['kept'])             // last good
+  assert.deepEqual([out.pendingLoaded, out.error, out.unauthorized], [true, 'Could not load signals (502)', false])
+})
+
+test('foldSignalLoad: a failed pending read keeps the last good list; the approved lists still refresh', () => {
+  const latch = createDecisionLatch()
+  const previous = { signals: [WHEEL], stuck: [] }
+  const out = foldSignalLoad({
+    generation: latch.beginLoad(), latch, nowMs: T0, resentAt: new Map(), previous,
+    results: { pending: no('boom'), approved: ok([approvedAt('old', '2026-09-25T13:20:00Z')]), approved_half: ok([]) },
+  })
+  assert.deepEqual(out.signals.map(s => s.id), ['w1'])
+  assert.deepEqual(out.stuck.map(s => s.id), ['old'])
+  assert.deepEqual([out.pendingLoaded, out.error], [false, 'boom'])
+})
+
+test('foldSignalLoad: all settled clears the error; a 401 anywhere says so', () => {
+  const latch = createDecisionLatch()
+  const clean = foldSignalLoad({
+    generation: latch.beginLoad(), latch, nowMs: T0, resentAt: new Map(), previous: { signals: [], stuck: [] },
+    results: { pending: ok([SWING]), approved: ok([]), approved_half: ok([]) },
+  })
+  assert.deepEqual([clean.error, clean.unauthorized, clean.signals.length], ['', false, 1])
+  const expired = Object.assign(new Error('Session expired — please sign in again.'), { unauthorized: true })
+  const out = foldSignalLoad({
+    generation: latch.beginLoad(), latch, nowMs: T0, resentAt: new Map(), previous: { signals: [], stuck: [] },
+    results: { pending: ok([SWING]), approved: { status: 'rejected', reason: expired }, approved_half: ok([]) },
+  })
+  assert.deepEqual([out.unauthorized, out.error], [true, 'Session expired — please sign in again.'])
 })
