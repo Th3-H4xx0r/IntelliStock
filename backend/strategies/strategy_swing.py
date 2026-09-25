@@ -1,4 +1,4 @@
-# INTELLISTOCK_SCHEMA: {"strategy": "strategy_swing", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_swing_enabled": false, "rsi_period": 14, "rsi_entry_max": 50, "rsi_overbought": 70, "sma_long": 200, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9, "vol_avg_period": 20, "adx_period": 14, "adx_min": 15, "spy_buffer": 1.03, "vix_max": 25.0, "position_size_pct": 0.125, "max_positions": 8, "max_per_sector": 1, "profit_target": 0.09, "stop_loss": 0.06, "bear_regime_days": 10, "defensive_universe": ["XLP", "XLU", "XLV", "GLD", "SHY"], "earnings_hard_block_days": 5, "ai_gate_enabled": true, "ai_approve_threshold": 75, "ai_review_threshold": 50, "conviction_llm_model_id": "", "scan_time_et": "09:15", "live_max_order_fraction": 0.2, "live_max_symbol_fraction": 0.2, "live_max_leveraged_fraction": 0.2, "live_soft_drawdown": 0.25, "live_hard_drawdown": 0.35, "live_kill_drawdown": 0.45, "honour_single_position_cap": true, "broker_max_single_position_pct": 0.2}}
+# INTELLISTOCK_SCHEMA: {"strategy": "strategy_swing", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_swing_enabled": false, "rsi_period": 14, "rsi_entry_max": 50, "rsi_overbought": 70, "sma_long": 200, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9, "vol_avg_period": 20, "adx_period": 14, "adx_min": 15, "spy_buffer": 1.03, "vix_max": 25.0, "position_size_pct": 0.125, "max_positions": 8, "max_per_sector": 1, "profit_target": 0.09, "stop_loss": 0.06, "bear_regime_days": 10, "defensive_universe": ["XLP", "XLU", "XLV", "GLD", "SHY"], "earnings_hard_block_days": 5, "ai_gate_enabled": true, "ai_approve_threshold": 75, "ai_review_threshold": 50, "ai_gate_in_backtest": false, "ai_backtest_max_calls": 300, "conviction_llm_model_id": "", "scan_time_et": "09:15", "live_max_order_fraction": 0.2, "live_max_symbol_fraction": 0.2, "live_max_leveraged_fraction": 0.2, "live_soft_drawdown": 0.25, "live_hard_drawdown": 0.35, "live_kill_drawdown": 0.45, "honour_single_position_cap": true, "broker_max_single_position_pct": 0.2}}
 # INTELLISTOCK_DESCRIPTION: ST's swing strategy (github.com/tmasters2876/swing-trader), ported verbatim: buy an S&P 500 name when RSI(14) is under 50 and rising, the MACD histogram improves, volume beats its 20-day average, price is above its 200-day SMA and ADX is over 15 — while SPY is above its SMA200 × 1.03 and VIX is at most 25, else the defensive ETFs after 10 blocked sessions. 12.5% of equity per name, 8 names, 1 per sector, a −6%/+9% bracket anchored on the prior close, and an RSI-70 cross exit. Live, the linked conviction model scores each candidate: 75+ enters, 50–74 waits for your approval.
 """Strategy Swing wrapper: the swing lane of the swing-trader port.
 
@@ -71,6 +71,7 @@ _SECTOR_CACHE_KEY = "_swing_sector_cache"      # live: yfinance fallback sectors
 _PENDING_EXIT_KEY = "_swing_pending_exits"     # live: exits re-sent until the stock is gone
 _SCAN_FIRST_KEY = "_swing_scan_first_tick"     # live: {"session", "at", "late"} (FW-str d)
 _BT_PREP_KEY = "_swing_bt_prep"                # backtest: {"run", "first_session", "end"}
+_AI_BT_CALLS_KEY = "_swing_ai_bt_calls"        # backtest: model calls this run (cost guard)
 
 #: backtest: the lane's own daily bars (backtest_bars.OwnBars) for the run
 #: named in the cache's _BT_PREP_KEY. Module-level, not in the strategy
@@ -101,6 +102,9 @@ _PROCESS_TOKEN = f"{os.getpid()}-{time.time():.0f}"
 _FILL_MARK: dict = {}
 #: Logging: the disabled-lane notice, once per process per instance.
 _DISABLED_LOGGED: set = set()
+#: ai_gate_in_backtest: the run's banner says this, once.
+_AI_BT_BANNER = ("AI gate ON in backtest (point-in-time inputs only; model training data may "
+                 "still know outcomes — use windows after the model's cutoff)")
 _EXIT_WHY = {"rsi_overbought": "RSI crossed the overbought line",
              "stop_loss": "close at or below the stop",
              "profit_target": "close at or above the target"}
@@ -122,6 +126,12 @@ def _truthy(value) -> bool:
     if isinstance(value, bool):
         return value
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _ai_in_backtest(cfg) -> bool:
+    """ai_gate_in_backtest, which means nothing unless the gate itself is on."""
+    return (_truthy(cfg.get("ai_gate_in_backtest", False))
+            and _truthy(cfg.get("ai_gate_enabled", True)))
 
 
 # -- logging helpers (logging only: none of these decides anything) ------------
@@ -250,8 +260,19 @@ def _banner_text(cfg, backtest, time_increment) -> str:
         secs = _increment_seconds(time_increment)
         mode = (f"BACKTEST, granularity {secs}s" if secs is not None
                 else "BACKTEST, granularity unset") + (" (daily)" if secs == 86400 else "")
-        ai = ("AI gate SKIPPED in backtests (ST's backtester ran no AI score and no earnings "
-              "block): passing candidates are decided by slots, sector and budget")
+        if _ai_in_backtest(cfg):
+            role = ai_analyst.llm_role_from_config(cfg)
+            model = (f"{role['provider']}/{role['model']}" if role
+                     else "NONE LINKED (AI-gated entries skipped)")
+            approve = int(cfg.get("ai_approve_threshold"))
+            ai = (f"{_AI_BT_BANNER}: auto-enter >= {approve}, "
+                  f"{cfg.get('ai_review_threshold')}-{approve - 1} would wait for approval → "
+                  f"skipped in backtest, reject below; model {model}; at most "
+                  f"{cfg.get('ai_backtest_max_calls')} model calls this run; earnings unknown "
+                  "(block not applied), no news or web search")
+        else:
+            ai = ("AI gate SKIPPED in backtests (ST's backtester ran no AI score and no "
+                  "earnings block): passing candidates are decided by slots, sector and budget")
     else:
         mode = f"LIVE/PAPER, scan {cfg.get('scan_time_et')} ET"
         if gate:
@@ -619,6 +640,76 @@ def _backtest_end(cfg, first):
     return max(first, date.today() - timedelta(days=1)), why
 
 
+class _BacktestAIGate:
+    """ai_gate_in_backtest: the live conviction gate (_consider) on one
+    backtest session, over point-in-time inputs only (ai_analyst.analyse
+    point_in_time=True): no news, web search, earnings lookup or live client;
+    the sector ETF RSI from the run's bars dated before the session. Nothing
+    is written to SwingSignals and nothing is notified. No operator answers
+    in a backtest, so the approval band is skipped. A missing model, a failed
+    call or a spent call budget skips the entry; nothing raises."""
+
+    def __init__(self, cfg, data, as_of, session, cache, sector_of, prefix):
+        self.cfg, self.data, self.as_of, self.session = cfg, data, as_of, session
+        self.cache, self.sector_of, self.prefix = cache, sector_of, prefix
+
+    def decide(self, symbol, ind, shares, stop_price, target_price, skip):
+        """The size adjustment to enter with, or None to skip (logged)."""
+        cfg, prefix = self.cfg, self.prefix
+        t0 = time.monotonic()
+        model = "no model"
+        try:
+            role = ai_analyst.llm_role_from_config(cfg)
+            if role is None:
+                _log_once(self.cache, "ai-bt-no-model", self.session,
+                          f"{prefix} | REFUSING AI-gated entries — ai_gate_in_backtest is on "
+                          "but no conviction model is linked (conviction_llm_model_id); "
+                          "passing candidates are skipped, never entered unscored.", "red")
+                skip(symbol, ind, "no AI model", "no conviction model linked")
+                return None
+            model = f"{role['provider']}/{role['model']}"
+            try:
+                cap = max(0, int(float(cfg.get("ai_backtest_max_calls"))))
+            except (TypeError, ValueError):
+                cap = int(DEFAULTS["ai_backtest_max_calls"])
+            calls = int(self.cache.get(_AI_BT_CALLS_KEY) or 0)
+            if calls >= cap:
+                _log_once(self.cache, "ai-bt-cap", "run",
+                          f"{prefix} | AI call budget spent: {calls} model call(s) reached "
+                          f"ai_backtest_max_calls={cap}; every later AI-gated entry this run "
+                          "is skipped, never entered unscored.", "red")
+                skip(symbol, ind, "AI call budget spent",
+                     f"ai_backtest_max_calls {cap} reached")
+                return None
+            approve = int(cfg["ai_approve_threshold"])
+            review = int(cfg["ai_review_threshold"])
+            self.cache[_AI_BT_CALLS_KEY] = calls + 1
+            result = ai_analyst.analyse(
+                {"symbol": symbol, "rsi": ind["rsi"], "rsi_prev": ind["rsi_prev"],
+                 "macd_hist": ind["macd_hist"], "macd_hist_prev": ind["macd_hist_prev"],
+                 "entry_price": ind["close"], "shares": shares,
+                 "stop_price": stop_price, "target_price": target_price},
+                role=role, sector_of=self.sector_of, point_in_time=True,
+                sector_rsi_fn=lambda etf: ai_analyst.sector_etf_rsi_before(
+                    etf, self.data, self.as_of),
+                approve_threshold=approve, review_threshold=review)
+            rec = result["recommendation"]
+            adj = float(result.get("position_size_adjustment") or 1.0)
+        except Exception as exc:
+            _log(f"{prefix} | {symbol}: AI scoring FAILED after {time.monotonic() - t0:.1f}s "
+                 f"({model}): {type(exc).__name__}: {exc} -> SKIP (never entered unscored)",
+                 "red")
+            return None
+        fate = {"approve": f"AUTO-ENTER (>= {approve})",
+                "review": (f"APPROVAL BAND ({review}-{approve - 1}): would wait for approval "
+                           "→ skipped in backtest"),
+                "reject": f"REJECTED (< {review}) → skipped"}.get(rec, rec)
+        _log(f"{prefix} | {symbol}: AI score {result.get('conviction_score')}/100 -> {fate} | "
+             f"size adj {adj:g}x | model {model} | {time.monotonic() - t0:.1f}s",
+             "green" if rec == "approve" else "yellow")
+        return adj if rec == "approve" else None
+
+
 class StrategySwing:
     # The class name is NOT free: broker.py resolves a run-once strategy by
     # CamelCasing its id — strategy_swing -> StrategySwing — and runs the whole
@@ -697,6 +788,11 @@ class StrategySwing:
         t_sync = time.monotonic() - t0
         feed = str(cfg.get("alpaca_data_feed") or "iex").strip().lower()
         run = f"{cfg.get('_telemetry_backtest_id') or ''}|{first}|{end}|{feed}"
+        if _ai_in_backtest(cfg):
+            # The point-in-time sector RSI reads these off the run's own bars.
+            universe_now = list(universe_now) + [e for e in ai_analyst.SECTOR_ETFS
+                                                 if e not in set(universe_now)]
+            run += "|ai"
         own = _OWN_BARS.get(run)
         if own is None:
             carried = {str(s).upper() for s, v in (data or {}).items()
@@ -826,8 +922,10 @@ class StrategySwing:
                                equity, bp, ind)
             _log_exits(prefix, exited, ind, lambda s: account.entry_price_from_trades(emu, s),
                        lambda s: positions.get(s), cfg, "at the next open")
+            ai_gate = (_BacktestAIGate(cfg, data, current_time, session, cache, sector_of,
+                                       prefix) if _ai_in_backtest(cfg) else None)
             self._entries(univ, ind, active, cfg, equity, bp, sector_of, phase,
-                          decisions, sizes, intents, prefix=prefix)
+                          decisions, sizes, intents, prefix=prefix, ai_gate=ai_gate)
         else:
             self._bt_book_line(prefix, positions, pending, exited, None, cfg, None, None, None,
                                ind)
@@ -886,9 +984,11 @@ class StrategySwing:
                  "yellow")
 
     def _entries(self, univ, ind, active, cfg, equity, bp, sector_of, phase,
-                 decisions, sizes, intents, prefix="StrategySwing"):
+                 decisions, sizes, intents, prefix="StrategySwing", ai_gate=None):
         """paper_trader.py:626-756 without the AI gate or the earnings block
         (ST's backtester ran neither). One bad row skips its symbol (G1 minor 5).
+        `ai_gate` (a _BacktestAIGate, ai_gate_in_backtest only) scores each
+        entry that clears slots, sector and budget, as live does.
 
         Logging: one line per candidate that passed the signal, with its key
         numbers and its fate; past _MAX_SKIP_LINES skips, the rest are
@@ -944,6 +1044,14 @@ class StrategySwing:
                 skip(symbol, i, "zero shares",
                      f"{_money(use)} buys no whole share at {_fmt(close)}")
                 continue
+            if ai_gate is not None:
+                adj = ai_gate.decide(symbol, i, shares, round(close * (1 - stop_loss), 2),
+                                     round(close * (1 + profit_target), 2), skip)
+                if adj is None:
+                    continue                 # never entered unscored
+                # _consider's sizing: the size adjustment, never under one share.
+                shares = max(1, int(shares * adj))
+                use = max(use * adj, close)
             decisions[symbol] = 1
             sizes[symbol] = {
                 "buy_cash": round(use, 2),

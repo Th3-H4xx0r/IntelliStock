@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sys
+import types
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -421,3 +422,177 @@ def test_fw_str_d_the_backtest_path_enters_at_any_tick_time(mod, monkeypatch):
     after_open = datetime(2026, 6, 2, 15, 0, tzinfo=timezone.utc)     # 11:00 ET
     out = run(mod, monkeypatch, {"SPY": SPY, "AAA": ind(100.0)}, at=after_open)
     assert out["_nexus_executable_buys"] == ["AAA"]
+
+
+
+# -- ai_gate_in_backtest: the conviction gate over point-in-time inputs --------
+
+AI_ON = dict(ai_gate_in_backtest=True, conviction_llm_provider="claude-cli",
+             conviction_llm_model="claude-sonnet-4-6")
+
+
+@pytest.fixture
+def ai(mod, monkeypatch):
+    """The linked model, stubbed at llm_utils. Every live-only input -- news,
+    web search, earnings, the live bars client, notifications and the
+    SwingSignals table -- fails the test if it is read."""
+    state = types.SimpleNamespace(score=80, scores={}, adj=1.0, error=None, calls=[],
+                                  prompts=[])
+
+    def structured(provider, api_key, model, prompt, output_type, **kw):
+        symbol = re.search(r"Symbol:\s+(\S+)", prompt).group(1)
+        state.calls.append(symbol)
+        state.prompts.append(prompt)
+        if state.error is not None:
+            raise state.error
+        return output_type(conviction_score=state.scores.get(symbol, state.score),
+                           recommendation="approve", reasoning="stub",
+                           position_size_adjustment=state.adj, key_risks=())
+
+    def boom(*a, **k):
+        raise AssertionError("a live-only input was read in a backtest")
+
+    monkeypatch.setitem(sys.modules, "llm_utils", types.SimpleNamespace(
+        call_structured_llm_by_provider=structured, call_llm_with_web_search=boom))
+    for name in ("days_until_earnings", "fetch_news_summary", "sector_etf_rsi"):
+        monkeypatch.setattr(mod.ai_analyst, name, boom)
+    monkeypatch.setattr(mod.ai_analyst.yf, "Ticker", boom)
+    monkeypatch.setattr(mod.market_data, "data_client", boom)
+    monkeypatch.setattr(mod.market_data, "get_daily_bars", boom)
+    monkeypatch.setattr(mod.notify, "send", boom)
+    for name in ("insert_signal", "update_signal", "get_signal"):
+        monkeypatch.setattr(mod.signals_store, name, boom)
+    return state
+
+
+def _lines(mod, monkeypatch):
+    lines = []
+    monkeypatch.setattr(mod, "_log", lambda msg, color="white": lines.append((color, str(msg))))
+    return lines
+
+
+def test_ai_in_backtest_is_off_by_default_even_with_a_model_linked(mod, monkeypatch, ai):
+    assert SWING_DEFAULTS["ai_gate_in_backtest"] is False
+    assert SWING_DEFAULTS["ai_backtest_max_calls"] == 300
+    linked = {k: v for k, v in AI_ON.items() if k != "ai_gate_in_backtest"}
+    out = run(mod, monkeypatch, {"SPY": SPY, "AAA": ind(100.0)}, config=cfg(**linked))
+    assert out["AAA"] == 1 and ai.calls == []
+
+
+def test_ai_in_backtest_needs_the_gate_itself_on(mod, monkeypatch, ai):
+    out = run(mod, monkeypatch, {"SPY": SPY, "AAA": ind(100.0)},
+              config=cfg(ai_gate_enabled=False, **AI_ON))
+    assert out["AAA"] == 1 and ai.calls == []
+
+
+def test_ai_in_backtest_a_score_of_80_enters_with_the_size_adjustment(mod, monkeypatch, ai):
+    ai.adj = 0.5
+    lines = _lines(mod, monkeypatch)
+    out = run(mod, monkeypatch, {"SPY": SPY, "AAA": ind(100.0)}, config=cfg(**AI_ON))
+    assert ai.calls == ["AAA"]
+    assert out["_nexus_executable_buys"] == ["AAA"]
+    assert out["_nexus_position_sizes"]["AAA"] == {
+        "buy_cash": 6_250.0,                    # 12,500 x the model's 0.5 size adjustment
+        "bracket": {"take_profit_price": 109.0, "stop_loss_price": 94.0},
+        "whole_shares": True, "fill_at_next_open": True}
+    assert any(c == "green" and "AAA: AI score 80/100 -> AUTO-ENTER (>= 75)" in m
+               and "model claude-cli/claude-sonnet-4-6" in m and "size adj 0.5x" in m
+               for c, m in lines)
+
+
+def test_ai_in_backtest_the_approval_band_is_skipped_and_frees_the_slot(mod, monkeypatch, ai):
+    ai.scores = {"AAA": 60}
+    lines = _lines(mod, monkeypatch)
+    held = {f"H{i}": 10.0 for i in range(7)}            # one open slot
+    out = run(mod, monkeypatch, {"SPY": SPY, "AAA": ind(100.0), "CCC": ind(80.0)},
+              emu=BtEmulator(positions=held), config=cfg(**AI_ON))
+    assert sorted(ai.calls) == ["AAA", "CCC"]
+    assert out["_nexus_executable_buys"] == ["CCC"]
+    assert any("AAA: AI score 60/100" in m
+               and "would wait for approval → skipped in backtest" in m for _c, m in lines)
+
+
+def test_ai_in_backtest_a_score_of_30_is_skipped(mod, monkeypatch, ai):
+    ai.score = 30
+    lines = _lines(mod, monkeypatch)
+    out = run(mod, monkeypatch, {"SPY": SPY, "AAA": ind(100.0)}, config=cfg(**AI_ON))
+    assert out == {} and ai.calls == ["AAA"]
+    assert any("AAA: AI score 30/100 -> REJECTED (< 50)" in m for _c, m in lines)
+
+
+def test_ai_in_backtest_reads_no_live_input_and_says_so_in_the_prompt(mod, monkeypatch, ai):
+    # The fixture fails on any news, web, earnings, live-bars, notify or
+    # SwingSignals read; this run must still score and enter.
+    out = run(mod, monkeypatch, {"SPY": SPY, "AAA": ind(100.0)}, config=cfg(**AI_ON))
+    assert out["AAA"] == 1
+    prompt = ai.prompts[0]
+    assert "Days to earnings: unknown" in prompt
+    assert "Recent news:     unavailable (point-in-time backtest" in prompt
+    assert "earnings block is not applied" in prompt
+    assert "Search" not in prompt and "search" not in prompt
+
+
+def test_ai_in_backtest_the_sector_rsi_reads_only_bars_before_the_session(mod, monkeypatch, ai):
+    import pandas as pd
+    from swing_trader.indicators import rsi_last
+    start = datetime(2026, 1, 5, 5, 0, tzinfo=timezone.utc)
+    xlk = []
+    for k in range(170):                                 # through 2026-06-22
+        day = start + timedelta(days=k)
+        close = 100.0 + 3 * ((k * 7) % 5) - 6 + 0.1 * k
+        if day.date().isoformat() >= SESSION:
+            close = 20.0                                 # a crash the rule must not see
+        xlk.append({"t": day.isoformat(), "o": close, "h": close + 1, "l": close - 1,
+                    "c": close, "v": 1_000_000})
+    window = [b["c"] for b in xlk if "2026-03-04" <= b["t"][:10] < SESSION]  # live's 90 days
+    expected = round(rsi_last(pd.Series(window)), 1)
+    leaky = round(rsi_last(pd.Series(window + [20.0])), 1)
+    assert expected != leaky
+    run(mod, monkeypatch, {"SPY": SPY, "AAA": ind(100.0)}, config=cfg(**AI_ON),
+        data={"SPY": [], "AAA": [], "XLK": xlk})
+    assert "Sector ETF:      XLK" in ai.prompts[0]
+    assert f"Sector RSI(14): {expected:.1f}" in ai.prompts[0]
+
+
+def test_ai_in_backtest_the_call_cap_stops_scoring_and_never_enters_unscored(mod, monkeypatch,
+                                                                           ai):
+    lines = _lines(mod, monkeypatch)
+    indicators = {"SPY": SPY, "AAA": ind(100.0), "BBB": ind(50.0), "CCC": ind(80.0),
+                  "XOM": ind(90.0)}
+    config = cfg(max_per_sector=8, ai_backtest_max_calls=2, **AI_ON)
+    cache = {}
+    out = run(mod, monkeypatch, indicators, cache=cache, config=config)
+    assert len(ai.calls) == 2
+    assert out["_nexus_executable_buys"] == sorted(ai.calls)
+    cache.pop(mod._BT_SESSION_KEY)                       # decide the session again
+    assert run(mod, monkeypatch, indicators, cache=cache, config=config) == {}
+    assert len(ai.calls) == 2
+    assert sum(c == "red" and "ai_backtest_max_calls" in m for c, m in lines) == 1
+
+
+def test_ai_in_backtest_a_failed_call_skips_the_entry_and_never_raises(mod, monkeypatch, ai):
+    ai.error = RuntimeError("provider down")
+    lines = _lines(mod, monkeypatch)
+    out = run(mod, monkeypatch, {"SPY": SPY, "AAA": ind(100.0)}, config=cfg(**AI_ON))
+    assert out == {} and ai.calls == ["AAA"]
+    assert any(c == "red" and "AAA" in m and "provider down" in m for c, m in lines)
+
+
+def test_ai_in_backtest_without_a_linked_model_nothing_enters(mod, monkeypatch, ai):
+    lines = _lines(mod, monkeypatch)
+    out = run(mod, monkeypatch, {"SPY": SPY, "AAA": ind(100.0)},
+              config=cfg(ai_gate_in_backtest=True))
+    assert out == {} and ai.calls == []
+    assert any(c == "red" and "no conviction model" in m for c, m in lines)
+
+
+def test_ai_in_backtest_the_banner_says_so_once(mod, monkeypatch, ai):
+    lines = _lines(mod, monkeypatch)
+    cache = {}
+    run(mod, monkeypatch, {"SPY": SPY, "AAA": ind(100.0)}, cache=cache, config=cfg(**AI_ON))
+    run(mod, monkeypatch, {"SPY": SPY, "AAA": ind(100.0)}, cache=cache, config=cfg(**AI_ON),
+        at=TICK + timedelta(days=1))
+    banners = [m for _c, m in lines if "| CONFIG |" in m]
+    assert len(banners) == 1
+    assert ("AI gate ON in backtest (point-in-time inputs only; model training data may still "
+            "know outcomes — use windows after the model's cutoff)") in banners[0]

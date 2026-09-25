@@ -207,6 +207,21 @@ def test_the_first_session_syncs_and_fetches_its_own_bars_once(lane, monkeypatch
                                        "end": END.isoformat()}
 
 
+
+def test_ai_gate_in_backtest_also_fetches_the_sector_etfs(lane, monkeypatch):
+    """ai_gate_in_backtest reads the sector ETF RSI off the run's own bars (no
+    live client), so the ETFs join the fetch -- and only then."""
+    from swing_trader.ai_analyst import SECTOR_ETFS
+    capture_frames(lane, monkeypatch)
+    cache = {}
+    decide(lane, _at("2026-03-03"), {}, cache=cache,
+           config=cfg(ai_gate_in_backtest=True))
+    [(symbols, *_rest)] = lane.fetches
+    assert symbols == sorted({"AAA", "BBB", "SPY", "QQQ"} | set(DEFENSIVE_UNIVERSE)
+                             | set(SECTOR_ETFS))
+    assert {"XLK", "XLF", "XLC", "XLRE"} <= set(SECTOR_ETFS)
+    assert cache["_swing_bt_prep"]["run"] == f"{BT_ID}|{FIRST}|{END}|sip|ai"
+
 def test_without_a_backtest_id_the_window_runs_through_yesterday(lane, monkeypatch):
     capture_frames(lane, monkeypatch)
     logs = []

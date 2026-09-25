@@ -16,6 +16,7 @@ const SWING_KEYS = [
   'max_positions', 'max_per_sector', 'profit_target', 'stop_loss',
   'bear_regime_days', 'defensive_universe', 'earnings_hard_block_days',
   'ai_gate_enabled', 'ai_approve_threshold', 'ai_review_threshold', 'scan_time_et',
+  'ai_gate_in_backtest', 'ai_backtest_max_calls',
   'live_max_order_fraction', 'live_max_symbol_fraction', 'live_max_leveraged_fraction',
   'live_soft_drawdown', 'live_hard_drawdown', 'live_kill_drawdown',
   'honour_single_position_cap', 'broker_max_single_position_pct',

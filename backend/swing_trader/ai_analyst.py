@@ -101,6 +101,19 @@ _SECTOR_TO_ETF: dict[str, str] = {
     "commodity":              "GLD",
 }
 
+#: Every sector ETF resolve_sector_etf can name: the bars a point-in-time
+#: (backtest) sector RSI needs.
+SECTOR_ETFS = tuple(sorted(set(SECTOR_ETF.values()) | set(_SECTOR_TO_ETF.values())))
+
+#: The calendar days of bars the sector RSI reads, live and point-in-time.
+SECTOR_RSI_DAYS = 90
+
+#: Point-in-time mode (ai_gate_in_backtest): what the prompt carries where
+#: live has a web-searched news summary, and the note on what is missing.
+PIT_NEWS = "unavailable (point-in-time backtest: no news or web lookup)"
+PIT_NOTE = ("point-in-time replay: the earnings date and news are not available, so days "
+            "to earnings is unknown and the earnings block is not applied.")
+
 SWING_NEWS_PROMPT = (
     "Search for '{symbol} stock news this week' and write "
     "1–2 sentences summarising recent news sentiment. "
@@ -211,11 +224,27 @@ def sector_etf_rsi(symbol: str, *, sector_of, client):
     try:
         # Alpaca bars via market_data (R8-05); 90 calendar days ≈ the old
         # yfinance period="60d" (60 trading days) — EWM RSI is warmup-sensitive.
-        df = market_data.get_daily_bars([etf], days=90, client=client).get(etf)
+        df = market_data.get_daily_bars([etf], days=SECTOR_RSI_DAYS, client=client).get(etf)
         if df is None or df.empty:
             return None
         close = df["Close"].squeeze()
         val = rsi_last(close)
+        return round(val, 1) if val is not None else None
+    except Exception:
+        return None
+
+
+def sector_etf_rsi_before(etf: str, data, as_of):
+    """sector_etf_rsi for a backtest: RSI(14) of `etf` over the run's bars in
+    `data` dated strictly before the session of `as_of`, across the same
+    SECTOR_RSI_DAYS calendar days the live read fetches. No client and no
+    network: None when `data` holds no such bars."""
+    try:
+        frame = market_data.frames_from_engine_bars(
+            data, [etf], as_of, lookback_days=SECTOR_RSI_DAYS).get(etf)
+        if frame is None or frame.empty:
+            return None
+        val = rsi_last(frame["Close"])
         return round(val, 1) if val is not None else None
     except Exception:
         return None
@@ -242,8 +271,11 @@ def fetch_news_summary(symbol: str, role, *, prompt_template: str = SWING_NEWS_P
 
 def build_swing_prompt(*, symbol, entry_price, shares, stop_price, target_price,
                        risk_pct, reward_pct, rr_ratio, rsi, rsi_prev, macd_hist,
-                       macd_hist_prev, etf_sym, etf_rsi, earnings_days, news) -> str:
-    """ai_analyst.py:239-288, byte for byte."""
+                       macd_hist_prev, etf_sym, etf_rsi, earnings_days, news,
+                       backtest_note=None) -> str:
+    """ai_analyst.py:239-288, byte for byte. `backtest_note` (point-in-time
+    mode only) adds one CONTEXT line; without it the prompt is ST's."""
+    note = f"\n  Backtest note:   {backtest_note}" if backtest_note else ""
     prompt = f"""You are an AI risk analyst for a swing trading system.
 Evaluate this proposed trade and return ONLY a valid JSON object — no text outside it.
 
@@ -262,7 +294,7 @@ TECHNICAL INDICATORS
 CONTEXT
   Sector ETF:      {etf_sym}  |  Sector RSI(14): {f'{etf_rsi:.1f}' if etf_rsi is not None else 'unavailable'}
   Days to earnings:{f' {earnings_days}' if earnings_days is not None else ' unknown'}
-  Recent news:     {news}
+  Recent news:     {news}{note}
 
 UPSTREAM FILTERS ALREADY PASSED
   RSI < 50 and rising (pullback in uptrend), MACD histogram improving, price > SMA(200),
@@ -450,10 +482,17 @@ def handle_result(result: dict) -> None:
 def analyse(signal: dict, *, role, sector_of, bars_client=None, llm=None,
             earnings_fn=None, news_fn=None,
             approve_threshold=AI_APPROVE_THRESHOLD,
-            review_threshold=AI_REVIEW_THRESHOLD) -> dict:
+            review_threshold=AI_REVIEW_THRESHOLD,
+            point_in_time=False, sector_rsi_fn=None) -> dict:
     """ai_analyst.py:203-338 over the linked model. Raises on a failed call,
     an out-of-range score, or a REVIEW whose prices fail the checks; the
-    caller skips that candidate and moves on (spec §9 fix 5)."""
+    caller skips that candidate and moves on (spec §9 fix 5).
+
+    point_in_time=True (ai_gate_in_backtest) reads no live-only input: no
+    earnings lookup (earnings_fn), no web-searched news (news_fn), no live
+    bars client (bars_client). The sector ETF RSI comes only from
+    `sector_rsi_fn(etf)` (bars dated before the session), else it is
+    unavailable, and the prompt says what is missing."""
     if role is None:
         # Before the earnings, bars and news calls a score could never use.
         raise RuntimeError("no conviction model linked")
@@ -472,17 +511,29 @@ def analyse(signal: dict, *, role, sector_of, bars_client=None, llm=None,
     rr_ratio   = reward_pct / risk_pct if risk_pct else 0.0
 
     # ── Enrichment (runs in serial to avoid rate-limiting) ────────────────
-    earnings_days = (earnings_fn or days_until_earnings)(symbol)
-    etf_sym  = resolve_sector_etf(symbol, sector_of) or "unknown"
-    etf_rsi  = sector_etf_rsi(symbol, sector_of=sector_of, client=bars_client)
-    news = (news_fn or fetch_news_summary)(symbol, role)
+    note = None
+    if point_in_time:
+        earnings_days = None
+        etf_sym = resolve_sector_etf(symbol, sector_of) or "unknown"
+        etf_rsi = None
+        if sector_rsi_fn is not None and etf_sym != "unknown":
+            try:
+                etf_rsi = sector_rsi_fn(etf_sym)
+            except Exception:
+                etf_rsi = None
+        news, note = PIT_NEWS, PIT_NOTE
+    else:
+        earnings_days = (earnings_fn or days_until_earnings)(symbol)
+        etf_sym  = resolve_sector_etf(symbol, sector_of) or "unknown"
+        etf_rsi  = sector_etf_rsi(symbol, sector_of=sector_of, client=bars_client)
+        news = (news_fn or fetch_news_summary)(symbol, role)
 
     prompt = build_swing_prompt(
         symbol=symbol, entry_price=entry_price, shares=shares, stop_price=stop_price,
         target_price=target_price, risk_pct=risk_pct, reward_pct=reward_pct,
         rr_ratio=rr_ratio, rsi=rsi, rsi_prev=rsi_prev, macd_hist=macd_hist,
         macd_hist_prev=macd_hist_prev, etf_sym=etf_sym, etf_rsi=etf_rsi,
-        earnings_days=earnings_days, news=news)
+        earnings_days=earnings_days, news=news, backtest_note=note)
 
     result = apply_thresholds(_score(prompt, SwingConviction, role, llm),
                               approve_threshold, review_threshold)

@@ -350,3 +350,34 @@ def test_analyse_with_no_linked_model_fails_before_any_enrichment():
     with pytest.raises(RuntimeError, match="no conviction model"):
         aa.analyse(dict(SIGNAL), role=None, sector_of=must_not_run,
                    earnings_fn=must_not_run, news_fn=must_not_run, llm=must_not_run)
+
+
+def test_point_in_time_analyse_reads_no_live_input(monkeypatch):
+    """ai_gate_in_backtest: no earnings, news, web search or live bars client;
+    the sector RSI comes only from the caller's point-in-time reader, and the
+    prompt says what is missing. The live prompt is untouched (ST parity
+    above)."""
+    def must_not_run(*a, **k):
+        raise AssertionError("a live-only input was read in point-in-time mode")
+
+    monkeypatch.setattr(aa, "sector_etf_rsi", must_not_run)
+    monkeypatch.setattr(aa, "days_until_earnings", must_not_run)
+    monkeypatch.setattr(aa, "fetch_news_summary", must_not_run)
+    seen, asked = [], []
+    result = aa.analyse(dict(SIGNAL), role=ROLE, sector_of=lambda s: "communication_services",
+                        bars_client=object(), earnings_fn=must_not_run, news_fn=must_not_run,
+                        llm=_llm(PAYLOAD, seen), point_in_time=True,
+                        sector_rsi_fn=lambda etf: asked.append(etf) or 61.25)
+    assert asked == ["XLC"]
+    prompt = seen[0]["prompt"]
+    assert "Sector RSI(14): 61.2" in prompt or "Sector RSI(14): 61.3" in prompt
+    assert "Days to earnings: unknown" in prompt
+    assert "Recent news:     unavailable (point-in-time backtest" in prompt
+    assert "earnings block is not applied" in prompt
+    assert result["earnings_days"] is None and result["sector_etf"] == "XLC"
+    assert result["recommendation"] == "approve"
+    # Without a reader the sector RSI is unavailable, never fetched.
+    seen.clear()
+    aa.analyse(dict(SIGNAL), role=ROLE, sector_of=lambda s: "technology",
+               llm=_llm(PAYLOAD, seen), point_in_time=True)
+    assert "Sector RSI(14): unavailable" in seen[0]["prompt"]

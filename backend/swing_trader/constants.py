@@ -152,6 +152,11 @@ SWING_DEFAULTS = {
     "ai_gate_enabled": True,
     "ai_approve_threshold": AI_APPROVE_THRESHOLD,
     "ai_review_threshold": AI_REVIEW_THRESHOLD,
+    # Opt-in, for a short experiment: the AI gate in a BACKTEST, over
+    # point-in-time inputs only (no news, web search or earnings lookup),
+    # stopping after ai_backtest_max_calls model calls a run.
+    "ai_gate_in_backtest": False,
+    "ai_backtest_max_calls": 300,
     "conviction_llm_model_id": "",
     "scan_time_et": "09:15",
     # The live envelope, in EB's form (spec §5.1). The lane is sized at 12.5%

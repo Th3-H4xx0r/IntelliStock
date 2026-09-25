@@ -386,7 +386,7 @@ const STRATEGY_FIELD_META = {
     },
     ai_gate_enabled: {
       label: 'AI Conviction Gate',
-      description: 'Live only: the linked Conviction LLM scores every candidate before it is placed. With no model linked, live entries are refused.',
+      description: 'Live, and backtests with AI Gate In Backtests on: the linked Conviction LLM scores every candidate before it is placed. With no model linked, those entries are refused.',
     },
     ai_approve_threshold: {
       label: 'AI Auto-Approve Score',
@@ -395,6 +395,14 @@ const STRATEGY_FIELD_META = {
     ai_review_threshold: {
       label: 'AI Review Score',
       description: 'Scores from this up to the auto-approve score wait for your approval on web or iOS. Lower scores are rejected. ST default 50.',
+    },
+    ai_gate_in_backtest: {
+      label: 'AI Gate In Backtests',
+      description: 'Opt-in experiment: a backtest scores each passing candidate with the Conviction LLM on point-in-time inputs only (no news, web search or earnings), and skips the approval band. The model may know how a trade turned out, so test windows after its training cutoff. Default off.',
+    },
+    ai_backtest_max_calls: {
+      label: 'AI Backtest Call Limit',
+      description: 'With AI Gate In Backtests on, the run stops calling the model after this many calls and skips every later AI-gated entry. Default 300.',
     },
     scan_time_et: {
       label: 'Scan Time (ET)',

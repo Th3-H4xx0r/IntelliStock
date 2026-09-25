@@ -78,6 +78,7 @@ SWING_KEYS = {
     "max_positions", "max_per_sector", "profit_target", "stop_loss",
     "bear_regime_days", "defensive_universe", "earnings_hard_block_days",
     "ai_gate_enabled", "ai_approve_threshold", "ai_review_threshold",
+    "ai_gate_in_backtest", "ai_backtest_max_calls",
     "conviction_llm_model_id", "scan_time_et", "live_max_order_fraction",
     "live_max_symbol_fraction", "live_max_leveraged_fraction",
     "live_soft_drawdown", "live_hard_drawdown", "live_kill_drawdown",
@@ -113,6 +114,7 @@ def test_swing_defaults_are_st_values_under_the_spec_keys():
     assert d["earnings_hard_block_days"] == C.EARNINGS_HARD_BLOCK
     assert d["ai_gate_enabled"] is True
     assert (d["ai_approve_threshold"], d["ai_review_threshold"]) == (75, 50)
+    assert d["ai_gate_in_backtest"] is False and d["ai_backtest_max_calls"] == 300
     assert d["conviction_llm_model_id"] == "" and d["scan_time_et"] == "09:15"
     assert (d["live_max_order_fraction"], d["live_max_symbol_fraction"]) == (0.2, 0.2)
     assert d["honour_single_position_cap"] is True
