@@ -345,7 +345,8 @@ def test_ruling_6_one_scan_never_sells_two_puts_on_one_underlying(wheel, monkeyp
     assert [c for c, _ in wheel.sent].count("wheel_put_placed") == 1
 
 
-@pytest.mark.parametrize("bad", ["10h30", "25:00", "", None, "10:75"])
+@pytest.mark.parametrize("bad", ["10h30", "25:00", "", None, "10:75",
+                                 "08:00", "09:29", "16:00", "17:15"])
 def test_ruling_8_an_unparseable_scan_time_refuses_the_scan_and_says_so_once(
         wheel, monkeypatch, bad):
     lines = []
@@ -422,13 +423,18 @@ def checks(m, adapter, cache, config=None):
 def test_the_monday_scan_buys_back_a_put_at_twice_its_premium(wheel):
     # ST check_open_wheel_positions: collected $100, $250 to close -> 2.5x.
     xyz = short("XYZ", 40.0, expiry="2026-06-05", entry=1.0, value=-250.0)
-    out = tick(wheel, MON_1040, WheelAdapter(option_positions=[xyz]), {})
-    assert [(o["contract"], o["reason"]) for o in orders(out)] == [
-        (xyz.symbol, "wheel_btc_2x"), (occ("APH", 127.0), "wheel_sto_put")]
+    cache = {}
+    out = tick(wheel, MON_1040, WheelAdapter(option_positions=[xyz]), cache)
+    # M2: the buy-back goes out alone; the scan starts on the next tick.
+    assert [(o["contract"], o["reason"]) for o in orders(out)] == [(xyz.symbol, "wheel_btc_2x")]
     btc = orders(out)[0]
     assert (btc["position_intent"], btc["order_type"], btc["limit_price"], btc["qty"],
             btc["session"]) == ("buy_to_close", "market", None, 1, "2026-06-01")
-    assert wheel.sent[0] == ("wheel_position_alert", f"⚠️ Wheel Exit: {xyz.symbol}")
+    assert wheel.sent[0] == ("wheel_position_alert", "Auto-close ordered: XYZ")
+    assert wheel.ai_analyst.score_candidate.calls == [] and wheel._SCAN_KEY not in cache
+    later = tick(wheel, MON_1100, WheelAdapter(option_positions=[xyz]), cache)
+    assert [(o["contract"], o["reason"]) for o in orders(later)] == [
+        (occ("APH", 127.0), "wheel_sto_put")]
 
 
 def test_a_put_with_a_working_buy_is_not_bought_back_twice(daily):
@@ -498,7 +504,7 @@ def test_the_monitor_buys_back_a_deep_itm_put_once_a_session(daily, monkeypatch)
         (occ("AAA", 100.0), "wheel_btc_itm", "buy_to_close", "market", 1)]
     assert seen == [["AAA", "BBB", "CCC"]]
     assert [(c, t, p) for c, t, _m, p in daily.sent] == [
-        ("wheel_position_alert", "🚨 Auto-Closed: AAA", 2),
+        ("wheel_position_alert", "Auto-close ordered: AAA", 2),
         ("wheel_position_alert", "⚠️ ITM PUT: BBB", 1),
         ("wheel_position_alert", "⏰ EXPIRING TODAY OTM: CCC", 0)]
     assert cache[daily._MONITOR_KEY] == "2026-06-01"
@@ -518,7 +524,10 @@ def test_the_monitor_waits_for_its_tick_and_skips_a_working_buy(daily, monkeypat
     assert tick(daily, MON_1540, working, {}) == {}
 
 
-def test_an_unreadable_book_defers_the_monitor(daily, monkeypatch):
+def test_an_unreadable_book_on_the_last_tick_alerts_once_and_never_latches(
+        daily, monkeypatch):
+    # I-2: 15:40 is the monitor's only grid tick (16:00 is the close). The
+    # failure is alerted there, once; the 16:00 tick adds nothing.
     monkeypatch.setattr(daily.market_data, "live_prices",
                         lambda syms, adapter=None, client=None, now=None:
                         {s: PRICES[s] for s in syms if s in PRICES})
@@ -530,9 +539,12 @@ def test_an_unreadable_book_defers_the_monitor(daily, monkeypatch):
     cache = {}
     assert tick(daily, MON_1540, Down(), cache) == {}
     assert daily._MONITOR_KEY not in cache
-    out = tick(daily, datetime(2026, 6, 1, 19, 45, tzinfo=timezone.utc),
-               WheelAdapter(option_positions=monitor_book()), cache)
-    assert [o["reason"] for o in orders(out)] == ["wheel_btc_itm"]
+    assert [(c, t, p) for c, t, _m, p in daily.sent] == [
+        ("wheel_position_alert", "⚠️ Wheel monitor incomplete — check puts manually", 1)]
+    assert "positions endpoint down" in daily.sent[0][2]
+    close = datetime(2026, 6, 1, 20, 0, tzinfo=timezone.utc)
+    assert tick(daily, close, WheelAdapter(option_positions=monitor_book()), cache) == {}
+    assert len(daily.sent) == 1 and daily._MONITOR_KEY not in cache
 
 
 # -- the IV snapshot ---------------------------------------------------------------
@@ -632,7 +644,7 @@ def test_ruling_5_the_monitor_checks_short_puts_only(daily, monkeypatch):
     assert cache[daily._MONITOR_KEY] == "2026-06-01"
 
 
-@pytest.mark.parametrize("bad", ["3:45pm", "24:00", ""])
+@pytest.mark.parametrize("bad", ["3:45pm", "24:00", "", "08:45", "16:00", "16:30"])
 def test_ruling_8_an_unparseable_monitor_time_refuses_the_monitor(daily, monkeypatch, bad):
     lines = []
     monkeypatch.setattr(daily, "_log", lambda msg, color="white": lines.append(msg))
@@ -682,3 +694,285 @@ def test_one_tick_never_emits_two_buy_to_closes_for_one_contract(daily, monkeypa
     out = tick(daily, MON_1540, WheelAdapter(option_positions=[aaa]), {})
     assert [(o["contract"], o["reason"]) for o in orders(out)] == [
         (aaa.symbol, "wheel_btc_itm"), (occ("APH", 127.0), "wheel_sto_put")]
+
+
+# -- fix round 1 (G7 review): I-1 incomplete maps, I-2 the monitor's window, --
+# -- I-3 intent wording, M1-M5 -------------------------------------------------
+
+FRI = "2026-06-05"
+FRI_1540 = datetime(2026, 6, 5, 19, 40, tzinfo=timezone.utc)
+FRI_1600 = datetime(2026, 6, 5, 20, 0, tzinfo=timezone.utc)
+HALF_DAY = "2026-11-27"                         # NYSE closes 13:00 ET (18:00 UTC)
+
+
+def _prices(m, monkeypatch, table):
+    monkeypatch.setattr(m.market_data, "live_prices",
+                        lambda syms, adapter=None, client=None, now=None:
+                        {s: table[s] for s in syms if s in table})
+
+
+def meta_miss(underlying, strike, expiry, qty=-1):
+    """A-live alpaca.py _collect_option_position when option_contract_meta
+    misses: the signed quantity survives, the contract fields are empty."""
+    return NS(symbol=occ(underlying, strike, expiry=expiry), underlying="", option_type="",
+              strike=0.0, expiry="", qty=qty, avg_entry_price=1.0, market_value=-2000.0,
+              current_price=None)
+
+
+def incomplete(adapter, *, stale=False):
+    """AlpacaAdapter's private health flags; list_option_positions still
+    returns rows without raising."""
+    adapter._option_positions_complete = False
+    if stale:
+        adapter._positions_stale_since = 1.0
+    return adapter
+
+
+def titles(m):
+    return [(c, t, p) for c, t, _m, p in m.sent]
+
+
+def test_i1_probe_a_meta_miss_short_put_is_alerted_never_skipped(daily, monkeypatch):
+    # Probe 1: an expiry-Friday put 20% in the money whose contract fields
+    # are missing, on a map flagged incomplete.
+    lines = []
+    monkeypatch.setattr(daily, "_log", lambda msg, color="white": lines.append(msg))
+    _prices(daily, monkeypatch, {"AAA": 80.0})
+    miss = meta_miss("AAA", 100.0, FRI)
+    cache = {}
+    out = tick(daily, FRI_1540, incomplete(WheelAdapter(option_positions=[miss])), cache)
+    assert orders(out) == []
+    assert not any("not a wheel put" in line for line in lines)
+    assert titles(daily) == [
+        ("wheel_position_alert", f"❓ Unreadable option — check manually: {miss.symbol}", 2),
+        ("wheel_position_alert", "⚠️ Wheel monitor incomplete — check puts manually", 2)]
+    assert "put $100.00 on AAA, expiring 2026-06-05 (0 day(s))" in daily.sent[0][2]
+    assert daily._MONITOR_KEY not in cache
+
+
+def test_i1_probe_an_emptied_incomplete_map_is_not_read_as_no_puts(daily, monkeypatch):
+    # Probe 2: the cache Alpaca clears after a long outage.
+    lines = []
+    monkeypatch.setattr(daily, "_log", lambda msg, color="white": lines.append(msg))
+    cache = {}
+    tick(daily, FRI_1540, incomplete(WheelAdapter(option_positions=[]), stale=True), cache)
+    assert not any("checked 0 short put positions" in line for line in lines)
+    assert daily._MONITOR_KEY not in cache
+    assert titles(daily) == [
+        ("wheel_position_alert", "⚠️ Wheel monitor incomplete — check puts manually", 1)]
+    assert "incomplete" in daily.sent[0][2]
+
+
+def test_i1_probe_an_unreadable_book_at_1540_is_alerted_not_silently_dropped(
+        daily, monkeypatch):
+    # Probe 3: nothing retries it in regular hours, so the 15:40 tick alerts.
+    _prices(daily, monkeypatch, {"AAA": 80.0})
+
+    class Down(WheelAdapter):
+        def list_option_positions(self):
+            raise RuntimeError("down")
+
+    cache = {}
+    tick(daily, FRI_1540, Down(), cache)
+    out = tick(daily, FRI_1600, WheelAdapter(option_positions=[short("AAA", 100.0, expiry=FRI)]),
+               cache)
+    assert orders(out) == [] and daily._MONITOR_KEY not in cache
+    assert titles(daily) == [
+        ("wheel_position_alert", "⚠️ Wheel monitor incomplete — check puts manually", 1)]
+
+
+def test_i1_the_monitor_closes_what_it_can_read_on_an_incomplete_map(daily, monkeypatch):
+    _prices(daily, monkeypatch, PRICES)
+    book = [short("AAA", 100.0), meta_miss("ZZZ", 50.0, "2026-06-12")]
+    cache = {}
+    out = tick(daily, MON_1540, incomplete(WheelAdapter(option_positions=book)), cache)
+    assert [(o["contract"], o["reason"]) for o in orders(out)] == [
+        (occ("AAA", 100.0), "wheel_btc_itm")]
+    assert [t for _c, t, _p in titles(daily)] == [
+        f"❓ Unreadable option — check manually: {book[1].symbol}",
+        "Auto-close ordered: AAA",
+        "⚠️ Wheel monitor incomplete — check puts manually"]
+    assert daily._MONITOR_KEY not in cache
+
+
+def test_i1_a_short_row_without_a_type_on_a_complete_map_is_still_alerted(daily, monkeypatch):
+    lines = []
+    monkeypatch.setattr(daily, "_log", lambda msg, color="white": lines.append(msg))
+    _prices(daily, monkeypatch, PRICES)
+    cache = {}
+    tick(daily, MON_1540, WheelAdapter(option_positions=[meta_miss("ZZZ", 50.0, EXPIRY)]),
+         cache)
+    assert [t for _c, t, _p in titles(daily)][0].startswith("❓ Unreadable option")
+    assert not any("not a wheel put" in line for line in lines)
+    assert daily._MONITOR_KEY not in cache
+
+
+@pytest.mark.parametrize("stale", [False, True])
+def test_i1_the_scan_and_the_checks_treat_an_unready_map_as_not_ready(wheel, stale):
+    xyz = short("XYZ", 40.0, expiry="2026-06-05", entry=1.0, value=-250.0)
+    unready = WheelAdapter(option_positions=[xyz])
+    if stale:
+        unready._positions_stale_since = 1.0
+    else:
+        unready._option_positions_complete = False
+    cache = {}
+    assert orders(tick(wheel, MON_1040, unready, cache)) == []      # no 2x, no put
+    assert wheel._CHECKS_KEY not in cache
+    assert cache[wheel._SCAN_KEY]["phase"] == "scoring" and cache[wheel._SCAN_KEY]["cursor"] == 0
+    assert signals_store.all_signals("swing-paper") == []
+    ready = tick(wheel, MON_1100, WheelAdapter(option_positions=[xyz]), cache)
+    assert [o["reason"] for o in orders(ready)] == ["wheel_btc_2x"]
+    assert cache[wheel._CHECKS_KEY] == "2026-06-01"
+
+
+def test_i2_a_half_day_monitor_runs_at_1240(daily, monkeypatch):
+    _prices(daily, monkeypatch, {"AAA": 80.0})
+    book = [short("AAA", 100.0, expiry=HALF_DAY)]
+    cache = {}
+    at = lambda h, m: datetime(2026, 11, 27, h, m, tzinfo=timezone.utc)  # noqa: E731
+    assert tick(daily, at(17, 20), WheelAdapter(option_positions=book), cache) == {}   # 12:20
+    out = tick(daily, at(17, 40), WheelAdapter(option_positions=book), cache)          # 12:40
+    assert [(o["contract"], o["reason"]) for o in orders(out)] == [
+        (occ("AAA", 100.0, expiry=HALF_DAY), "wheel_btc_itm")]
+    assert cache[daily._MONITOR_KEY] == HALF_DAY
+    assert tick(daily, at(20, 40), WheelAdapter(option_positions=book), cache) == {}   # 15:40
+
+
+def test_i2_a_half_day_failure_is_urgent_when_a_known_put_expires(daily, monkeypatch):
+    # Wednesday's monitor saw the put that expires on the half day.
+    _prices(daily, monkeypatch, {"AAA": 120.0})
+    cache = {}
+    book = [short("AAA", 100.0, expiry=HALF_DAY)]
+    tick(daily, datetime(2026, 11, 25, 20, 40, tzinfo=timezone.utc),
+         WheelAdapter(option_positions=book), cache)
+    assert cache[daily._MONITOR_KEY] == "2026-11-25" and daily.sent == []
+
+    class Down(WheelAdapter):
+        def list_option_positions(self):
+            raise RuntimeError("down")
+
+    tick(daily, datetime(2026, 11, 27, 17, 40, tzinfo=timezone.utc), Down(), cache)
+    assert titles(daily) == [
+        ("wheel_position_alert", "⚠️ Wheel monitor incomplete — check puts manually", 2)]
+    assert occ("AAA", 100.0, expiry=HALF_DAY) in daily.sent[0][2]
+
+
+def test_i2_an_exception_on_the_last_tick_is_alerted(daily, monkeypatch):
+    def boom(syms, adapter=None, client=None, now=None):
+        raise RuntimeError("quote feed exploded")
+
+    monkeypatch.setattr(daily.market_data, "live_prices", boom)
+    cache = {}
+    assert tick(daily, MON_1540, WheelAdapter(option_positions=monitor_book()), cache) == {}
+    assert daily._MONITOR_KEY not in cache
+    # Urgent: the book read before the failure shows CCC expiring today.
+    assert titles(daily) == [
+        ("wheel_position_alert", "⚠️ Wheel monitor incomplete — check puts manually", 2)]
+    assert "quote feed exploded" in daily.sent[0][2]
+
+
+def test_i2_an_earlier_window_retries_on_its_grid_without_alerting(daily, monkeypatch):
+    _prices(daily, monkeypatch, PRICES)
+
+    class Down(WheelAdapter):
+        def list_option_positions(self):
+            raise RuntimeError("down")
+
+    cache, early = {}, cfg(monitor_time_et="15:00")
+    tick(daily, datetime(2026, 6, 1, 18, 40, tzinfo=timezone.utc), Down(), cache, config=early)
+    assert daily.sent == []                                         # 14:40: not yet
+    tick(daily, datetime(2026, 6, 1, 19, 0, tzinfo=timezone.utc), Down(), cache, config=early)
+    assert daily.sent == [] and daily._MONITOR_KEY not in cache    # 15:00 fails; 15:20 next
+    out = tick(daily, datetime(2026, 6, 1, 19, 20, tzinfo=timezone.utc),
+               WheelAdapter(option_positions=monitor_book()), cache, config=early)
+    assert [o["reason"] for o in orders(out)] == ["wheel_btc_itm"]
+    assert cache[daily._MONITOR_KEY] == "2026-06-01"
+    assert "⚠️ Wheel monitor incomplete — check puts manually" not in [
+        t for _c, t, _p in titles(daily)]
+
+
+def test_i2_a_missed_window_is_alerted_once_after_the_close(daily, monkeypatch):
+    cache = {daily._KNOWN_PUTS_KEY: {occ("AAA", 100.0, expiry="2026-06-02"): "2026-06-02"}}
+    after = datetime(2026, 6, 1, 20, 20, tzinfo=timezone.utc)                    # 16:20
+    tick(daily, after, WheelAdapter(option_positions=[short("AAA", 100.0, expiry="2026-06-02")]),
+         cache)
+    tick(daily, datetime(2026, 6, 1, 20, 40, tzinfo=timezone.utc),
+         WheelAdapter(option_positions=[short("AAA", 100.0, expiry="2026-06-02")]), cache)
+    assert titles(daily) == [
+        ("wheel_position_alert", "⚠️ Wheel monitor incomplete — check puts manually", 2)]
+    assert "no tick completed the daily monitor" in daily.sent[0][2]
+
+
+def test_i2_a_missed_window_with_nothing_held_is_quiet(daily):
+    cache = {}
+    tick(daily, datetime(2026, 6, 1, 20, 20, tzinfo=timezone.utc), WheelAdapter(), cache)
+    assert daily.sent == [] and cache[daily._MONITOR_KEY] == "2026-06-01"
+
+
+def test_i3_pushes_describe_intent_not_outcome(store, monkeypatch, wheel):
+    msgs = []
+    monkeypatch.setattr(wheel.notify, "send",
+                        lambda cat, iid, title, msg, priority=0: msgs.append((cat, title, msg)))
+    xyz = short("XYZ", 40.0, expiry="2026-06-05", entry=1.0, value=-250.0)
+    cache = {}
+    tick(wheel, MON_1040, WheelAdapter(option_positions=[xyz]), cache)
+    tick(wheel, MON_1100, WheelAdapter(option_positions=[xyz]), cache)
+    by_title = {t: (c, m) for c, t, m in msgs}
+    assert by_title["Auto-close ordered: XYZ"][0] == "wheel_position_alert"
+    assert (f"Auto-close ordered: {xyz.symbol} — buy-to-close handed to the order gate; "
+            "a refusal is alerted separately") in by_title["Auto-close ordered: XYZ"][1]
+    assert by_title["Put order submitted: APH"][0] == "wheel_put_placed"
+    assert "a refusal is alerted separately" in by_title["Put order submitted: APH"][1]
+    text = " ".join(t + " " + m for _c, t, m in msgs)
+    for claim in ("Put Sold", "PUT ORDER SENT", "BUY-TO-CLOSE placed", "Auto-Closed",
+                  "was sent"):
+        assert claim not in text
+
+
+def test_m1_a_put_whose_build_raises_is_recorded_failed_and_pushed(wheel, monkeypatch):
+    def broken(*a, **k):
+        raise RuntimeError("chain endpoint 500")
+
+    monkeypatch.setattr(wheel.wheel_rules, "build_put_order_live", broken)
+    out = tick(wheel, MON_1040, WheelAdapter(), {})
+    assert orders(out) == []
+    sig = signals_store.get_signal(signals_store.signal_id_for(
+        "swing-paper", "wheel", "2026-06-01", "APH"))
+    assert sig["status"] == "failed" and "chain endpoint 500" in sig["error"]
+    scan = {r["symbol"]: r for r in signals_store.list_wheel_scans("swing-paper")}["APH"]
+    assert scan["status"] == "skipped" and "chain endpoint 500" in scan["skip_reason"]
+    assert ("wheel_position_alert", "Wheel order failed — place manually: APH") in wheel.sent
+    assert wheel.ai_analyst.score_candidate.calls == ["APH", "GIS", "KO"]
+
+
+def test_m3_an_order_that_cannot_be_built_pushes_a_position_alert(wheel):
+    out = tick(wheel, MON_1040, WheelAdapter(cash=1_000.0), {})
+    assert orders(out) == []
+    assert ("wheel_position_alert", "Wheel order failed — place manually: APH") in wheel.sent
+    assert not [t for c, t in wheel.sent if c == "swing_run_summary" and "Failed" in t]
+
+
+def test_m4_an_unreadable_account_is_not_ready_not_a_burned_candidate(wheel):
+    class NoAccount(WheelAdapter):
+        def get_account_options(self):
+            raise RuntimeError("account endpoint down")
+
+        def get_cash(self):
+            raise RuntimeError("account endpoint down")
+
+    cache = {}
+    assert orders(tick(wheel, MON_1040, NoAccount(), cache)) == []
+    assert cache[wheel._SCAN_KEY]["cursor"] == 0 and signals_store.all_signals("swing-paper") == []
+    assert wheel.ai_analyst.score_candidate.calls == []
+    out = tick(wheel, MON_1100, WheelAdapter(), cache)
+    assert [o["underlying"] for o in orders(out)] == ["APH"]
+
+
+def test_m4_a_real_zero_cash_read_is_still_a_read(wheel):
+    class Broke(WheelAdapter):
+        def get_account_options(self):
+            return {"cash": 0.0, "equity": 100_000.0}
+
+    tick(wheel, MON_1040, Broke(), {})
+    scan = {r["symbol"]: r for r in signals_store.list_wheel_scans("swing-paper")}["APH"]
+    assert scan["status"] == "skipped" and "Insufficient cash" in scan["skip_reason"]

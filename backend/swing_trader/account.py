@@ -6,6 +6,8 @@ that lacks the method: it degrades to "no data" — which the callers treat as
 """
 from __future__ import annotations
 
+import math
+
 
 def spendable(emulator, prices) -> float:
     """Buying power when the emulator offers it, else settled cash."""
@@ -115,13 +117,39 @@ def working_orders(emu):
     return list(orders)
 
 
+def option_book(emu):
+    """(rows, reason): the option positions the adapter lists, and why they
+    are not a complete, current map — reason is None when they are.
+
+    I-1: AlpacaAdapter.list_option_positions never raises; it returns its
+    in-memory map. That map reads incomplete (`_option_positions_complete`
+    False) until a refresh succeeds, after a failed one, and while a
+    contract's fields could not be looked up (the row then keeps its signed
+    quantity with an empty type, underlying and expiry). It reads stale
+    (`_positions_stale_since` set) while the REST refresh fails. Both flags
+    are private for now; plan A-live gives them a public accessor at the
+    merge. Each is read on both sides of the call, as a refresh may land in
+    between. rows is None when the call itself failed."""
+    complete_before = getattr(emu, "_option_positions_complete", True)
+    stale_before = getattr(emu, "_positions_stale_since", None)
+    try:
+        rows = list(emu.list_option_positions() or [])
+    except Exception as exc:
+        return None, f"list_option_positions failed ({type(exc).__name__}: {exc})"
+    if complete_before is False or getattr(emu, "_option_positions_complete", True) is False:
+        return rows, ("the broker's option map is incomplete (no successful refresh yet, a "
+                      "failed one, or a contract whose fields could not be read)")
+    if stale_before is not None or getattr(emu, "_positions_stale_since", None) is not None:
+        return rows, "the broker's positions snapshot is stale (its REST refresh is failing)"
+    return rows, None
+
+
 def option_positions(emu):
     """Open option positions (OptionPositionDTOs, contract §3), or None when
-    the adapter cannot say — the wheel then sells nothing (fix 1 needs them)."""
-    try:
-        return list(emu.list_option_positions() or [])
-    except Exception:
-        return None
+    the map is unreadable, incomplete or stale (I-1) — the wheel then sells
+    nothing and latches nothing (fix 1 needs the whole map)."""
+    rows, reason = option_book(emu)
+    return rows if reason is None else None
 
 
 def open_orders(emu):
@@ -133,20 +161,38 @@ def open_orders(emu):
     return working_orders(emu)
 
 
-def account_options(emu) -> dict:
+def _finite(value):
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    return v if math.isfinite(v) else None
+
+
+def account_options(emu):
     """{"cash", "equity", ...} for the wheel's caps (plan A-live
-    get_account_options), falling back to settled cash and account equity."""
+    get_account_options), falling back to settled cash and account equity —
+    or None when either cannot be READ (M4). A cash of 0.0 invented because
+    both reads failed would fail every candidate for "insufficient cash" and
+    burn the week's scan; None is "not ready", and the scan retries next tick.
+    A real 0.0 read from the broker is a real 0.0."""
     try:
         acct = dict(emu.get_account_options() or {})
     except Exception:
         acct = {}
-    if acct.get("cash") is None:
+    cash = _finite(acct.get("cash"))
+    if cash is None:
         try:
-            acct["cash"] = float(emu.get_cash() or 0.0)
+            cash = _finite(emu.get_cash())
         except Exception:
-            acct["cash"] = 0.0
-    if acct.get("equity") is None:
-        acct["equity"] = live_equity(emu)
-    acct["cash"] = float(acct["cash"])
-    acct["equity"] = float(acct["equity"])
+            cash = None
+    equity = _finite(acct.get("equity"))
+    if equity is None:
+        try:
+            equity = _finite(emu.refresh_account().equity)
+        except Exception:
+            equity = None
+    if cash is None or equity is None or equity <= 0:
+        return None
+    acct["cash"], acct["equity"] = cash, equity
     return acct

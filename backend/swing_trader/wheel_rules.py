@@ -718,12 +718,14 @@ def put_monitor_decision(*, contract, underlying, strike, expiry, stock_price, t
             intent = "wheel_btc_expiry"
 
     if should_auto_close:
+        # I-3: the lane hands the order to the engine's gate, which may still
+        # refuse it (and alerts that separately); say what was ordered, not
+        # that it was sent.
         out.update(action="auto_close", intent=intent, reason=auto_close_reason,
-                   priority=2, title=f"🚨 Auto-Closed: {underlying}",
-                   message=(f"🚨 AUTO-CLOSE ORDERED\n"
-                            f"{contract}\n"
-                            f"Reason: {auto_close_reason}\n"
-                            f"A buy-to-close market order was sent."))
+                   priority=2, title=f"Auto-close ordered: {underlying}",
+                   message=(f"Auto-close ordered: {contract} — buy-to-close handed to the "
+                            f"order gate; a refusal is alerted separately\n"
+                            f"Reason: {auto_close_reason}"))
         return out
 
     if stock_price is None:

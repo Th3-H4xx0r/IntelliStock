@@ -8,15 +8,17 @@ snapshot, and the `_nexus_option_orders` payload (interface contract §1).
 
 Spec: docs/superpowers/specs/2026-09-24-swing-trader-port-design.md §5.2
 """
+import math
 import os
 import re
 import sys
-from datetime import date
+from datetime import date, datetime, time as dtime, timedelta, timezone
 
 _BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
+import live_calendar  # noqa: E402
 from db import store  # noqa: E402  (tests monkeypatch this name)
 from swing_trader import (  # noqa: E402
     account,
@@ -52,11 +54,19 @@ _MONITOR_KEY = "_wheel_monitor_session"          # the daily monitor, once a ses
 _IV_KEY = "_wheel_iv_session"                    # the IV snapshot, once a session
 _NO_MODEL_KEY = "_wheel_no_model_session"
 _CHECKS_KEY = "_wheel_checks_session"            # the scan's position checks, once a session
-_NO_PRICE_KEY = "_wheel_no_price_alerted"        # {"session", "contracts"}: one alert each
+_ROW_ALERTS_KEY = "_wheel_row_alerts"            # {"session", "keys"}: one alert per row
+_KNOWN_PUTS_KEY = "_wheel_known_puts"            # {contract: expiry}: short puts seen lately
+_MONITOR_ALERT_KEY = "_wheel_monitor_alert_session"  # "monitor incomplete", once a session
 _LOGGED_KEY = "_wheel_logged"
 
 #: One yfinance earnings lookup.
 EARNINGS_RESERVE_S = 5.0
+
+_GRID = timedelta(minutes=clock.TICK_GRID_MIN)
+#: A tick belongs to the grid tick it lands within half a step of.
+_GRID_SLACK = timedelta(minutes=clock.TICK_GRID_MIN / 2)
+#: Regular hours, for the schedule check at config load (M5).
+_RTH_OPEN, _RTH_CLOSE = "09:30", "16:00"
 
 
 def _once(cache, reason, scope) -> bool:
@@ -115,6 +125,113 @@ def _emit_options(orders) -> dict:
             "_nexus_option_orders": list(orders)}
 
 
+# -- the monitor's view of the option book (I-1) and its window (I-2) ----------
+
+def _qty(p):
+    """The signed quantity, or None when it cannot be read."""
+    try:
+        q = float(getattr(p, "qty", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    return q if math.isfinite(q) else None
+
+
+def _is_short(p) -> bool:
+    q = _qty(p)
+    return q is None or q < 0
+
+
+def _readable_put(p) -> bool:
+    """A short put whose contract fields the monitor's rules can use."""
+    try:
+        strike = float(getattr(p, "strike", 0) or 0)
+        date.fromisoformat(str(getattr(p, "expiry", "") or "")[:10])
+    except (TypeError, ValueError):
+        return False
+    return (_qty(p) is not None and math.isfinite(strike) and strike > 0
+            and bool(str(getattr(p, "underlying", "") or "").strip()))
+
+
+def _put_identity(p):
+    """(kind, expiry) from the contract fields, else from the OCC symbol."""
+    kind = str(getattr(p, "option_type", "") or "").strip().lower()
+    expiry = str(getattr(p, "expiry", "") or "")[:10]
+    if kind in ("put", "call") and expiry:
+        return kind, expiry
+    parts = wheel_rules.occ_parts(getattr(p, "symbol", ""))
+    return (parts[2], parts[1]) if parts else (None, None)
+
+
+def _remember_puts(cache, rows, today, *, complete):
+    """The short puts on record, for the "monitor incomplete" alert's
+    priority when the book itself cannot be read. A complete read replaces
+    the record; an incomplete one only adds to it."""
+    found = {}
+    for p in rows or []:
+        if not _is_short(p):
+            continue
+        kind, expiry = _put_identity(p)
+        if kind == "put" and expiry:
+            found[str(p.symbol).upper()] = expiry
+    prior = cache.get(_KNOWN_PUTS_KEY)
+    merged = found if complete or not isinstance(prior, dict) else {**prior, **found}
+    cache[_KNOWN_PUTS_KEY] = {c: e for c, e in merged.items() if e >= today.isoformat()}
+
+
+def _known_puts(cache, today) -> dict:
+    """{contract: DTE} for the short puts on record that have not expired."""
+    out = {}
+    for c, e in (cache.get(_KNOWN_PUTS_KEY) or {}).items():
+        try:
+            dte = (date.fromisoformat(str(e)[:10]) - today).days
+        except ValueError:
+            continue
+        if dte >= 0:
+            out[c] = dte
+    return out
+
+
+def _row_alert_once(cache, session, key) -> bool:
+    """True the first time `key` (a contract alert) is seen this session."""
+    seen = cache.get(_ROW_ALERTS_KEY)
+    if not isinstance(seen, dict) or seen.get("session") != session:
+        seen = {"session": session, "keys": []}
+        cache[_ROW_ALERTS_KEY] = seen
+    if key in seen["keys"]:
+        return False
+    seen["keys"].append(key)
+    return True
+
+
+def _session_close(today, cache, session):
+    """The session's regular close in UTC from the exchange calendar — 16:00
+    ET, 13:00 on a half day. When the calendar cannot say, 16:00 ET, logged
+    once: a half day would then be missed, and the log says so."""
+    try:
+        return live_calendar.nyse_session_close_utc(today)
+    except Exception as exc:
+        _log_once(cache, "no-close", session,
+                  f"StrategyWheel {session} | the exchange calendar has no close for today "
+                  f"({type(exc).__name__}: {exc}); the monitor assumes 16:00 ET, so a half "
+                  "day would be missed", "yellow")
+        return datetime.combine(today, dtime(16, 0), tzinfo=clock.NY).astimezone(timezone.utc)
+
+
+def _monitor_start(today, monitor_time, close):
+    """I-2: the last broker grid tick at or before min(monitor_time_et, the
+    close) that is still before the close — 15:40 for 15:45 on a normal day,
+    12:40 on a half day (13:00 close)."""
+    hh, mm = (int(x) for x in monitor_time.split(":"))
+    target = min(datetime.combine(today, dtime(hh, mm), tzinfo=clock.NY).astimezone(timezone.utc),
+                 close)
+    t_et = target.astimezone(clock.NY)
+    minutes = t_et.hour * 60 + t_et.minute
+    minutes -= minutes % clock.TICK_GRID_MIN
+    start = datetime.combine(today, dtime(minutes // 60, minutes % 60),
+                             tzinfo=clock.NY).astimezone(timezone.utc)
+    return start - _GRID if start >= close else start
+
+
 class StrategyWheel:
     # broker.py resolves strategy_wheel -> StrategyWheel; the name is not free.
 
@@ -150,6 +267,13 @@ class StrategyWheel:
                           f"StrategyWheel {session} | REFUSING the {job} — {key} "
                           f"{cfg.get(key)!r} is not an HH:MM time (ET); fix it in the "
                           "strategy editor.", "red")
+            elif not _RTH_OPEN <= valid < _RTH_CLOSE:
+                # M5: both jobs trade, so each must fall inside regular hours.
+                _log_once(cache, f"bad-{key}", session,
+                          f"StrategyWheel {session} | REFUSING the {job} — {key} "
+                          f"{cfg.get(key)!r} is outside regular hours ({_RTH_OPEN}–"
+                          f"{_RTH_CLOSE} ET); fix it in the strategy editor.", "red")
+                valid = None
             cfg[key] = valid
         iid = str(cfg.get("instance_id") or "wheel")
         signals_store.ensure_tables()
@@ -187,6 +311,10 @@ class StrategyWheel:
         # so a failing preparation does not repeat them every tick.
         if cache.get(_CHECKS_KEY) != session:
             orders += self._position_checks(session, today, iid, cfg, emu, cache) or []
+            if orders:
+                # M2: a buy-back goes out alone; the scan starts next tick,
+                # on a book that shows it.
+                return orders
         role = ai_analyst.llm_role_from_config(cfg)
         if role is None:
             if cache.get(_NO_MODEL_KEY) != session:
@@ -266,11 +394,17 @@ class StrategyWheel:
             # strictly. Unreadable, no put is sold and the cursor stays put.
             positions, book = account.option_positions(emu), account.open_orders(emu)
             if positions is None or book is None:
-                _log(f"StrategyWheel {session} | the option book is unreadable — no put "
-                     "is sold this tick (fix 1 needs it); the scan resumes next tick",
-                     "yellow")
+                _log(f"StrategyWheel {session} | the option book is unreadable or not "
+                     "ready — no put is sold this tick (fix 1 needs it); the scan resumes "
+                     "next tick", "yellow")
                 return orders
             acct = account.account_options(emu)
+            if acct is None:
+                # M4: cash or equity could not be read; a candidate sized on
+                # an invented 0.0 would be burned for "insufficient cash".
+                _log(f"StrategyWheel {session} | the account (cash, equity) is unreadable "
+                     "— no put is sold this tick; the scan resumes next tick", "yellow")
+                return orders
             while state["cursor"] < len(state["queue"]):
                 if clock.time_left(deadline) < clock.CANDIDATE_RESERVE_S:
                     return orders
@@ -363,16 +497,24 @@ class StrategyWheel:
                 signals_store.insert_wheel_scan(dict(scan_row, status="skipped",
                                                      skip_reason=duplicate))
             return None
-        order, error, meta = wheel_rules.build_put_order_live(
-            dict(c, position_size_contracts=contracts), adapter=emu, cfg=cfg,
-            equity=acct["equity"], cash=acct["cash"], option_positions=positions,
-            open_orders=book, committed_collateral=state["committed"], signal_id=sid,
-            session=session)
+        try:
+            order, error, meta = wheel_rules.build_put_order_live(
+                dict(c, position_size_contracts=contracts), adapter=emu, cfg=cfg,
+                equity=acct["equity"], cash=acct["cash"], option_positions=positions,
+                open_orders=book, committed_collateral=state["committed"], signal_id=sid,
+                session=session)
+        except Exception as exc:
+            # M1: an approved candidate whose order cannot be built is a
+            # recorded failure the operator hears about, not a silent skip.
+            order, error, meta = None, f"order build failed ({type(exc).__name__}: {exc})", {}
         if order is None:
             record("failed", review_proposal, error=error)
             signals_store.insert_wheel_scan(dict(scan_row, status="skipped", skip_reason=error))
-            notify.send("swing_run_summary", iid, f"⚠️ Wheel Order Failed: {symbol}",
-                        f"⚠️ ORDER NOT SENT — {symbol}\nReason: {error}\n"
+            # M3: a push, not the run summary.
+            notify.send("wheel_position_alert", iid,
+                        f"Wheel order failed — place manually: {symbol}",
+                        f"No order was handed to the broker for {symbol}\n"
+                        f"Reason: {error}\n"
                         f"Place manually: Sell ${c['strike_price']} put  exp {c['expiry']}\n"
                         f"Est. premium: ${c['est_premium']:.2f}/share\nScore: {score}",
                         priority=1)
@@ -390,8 +532,11 @@ class StrategyWheel:
                                   "limit_price": order["limit_price"], "qty": order["qty"],
                                   "conviction_score": score})
         if existing is None:
-            notify.send("wheel_put_placed", iid, f"✅ Wheel: {symbol} Put Sold",
-                        f"✅ PUT ORDER SENT\n{symbol} ${order['strike']} put\n"
+            # I-3: intent, not outcome — the engine's gate may still refuse
+            # it, and that refusal is alerted on its own.
+            notify.send("wheel_put_placed", iid, f"Put order submitted: {symbol}",
+                        f"Sell-to-open handed to the order gate; a refusal is alerted "
+                        f"separately\n{symbol} ${order['strike']} put\n"
                         f"Expiry: {order['expiry']}\n"
                         f"Limit: ${order['limit_price']:.2f}/share "
                         f"(~${order['limit_price'] * 100:.0f}/contract)\n"
@@ -466,12 +611,15 @@ class StrategyWheel:
             orders.append(order)
             _log(f"  [wheel-exit] ⚠️ {order['contract']} at {info['loss_ratio']:.1f}× "
                  "premium — buying to close at market", "yellow")
-            notify.send("wheel_position_alert", iid, f"⚠️ Wheel Exit: {order['contract']}",
-                        f"⚠️ BUY-TO-CLOSE placed\n{order['contract']}\n"
+            notify.send("wheel_position_alert", iid, f"Auto-close ordered: {order['underlying']}",
+                        f"Auto-close ordered: {order['contract']} — buy-to-close handed to "
+                        f"the order gate; a refusal is alerted separately\n"
+                        f"Reason: {info['loss_ratio']:.1f}× the premium collected\n"
                         f"Premium collected: ${info['cost_basis']:.2f}\n"
                         f"Cost to close: ${info['current_value']:.2f} "
                         f"({info['loss_ratio']:.1f}× premium)", priority=1)
         _log("  [wheel-exit] Position check complete")
+        _remember_puts(cache, positions, today, complete=True)
 
         # Covered calls only for shares the ENGINE assigned to this lane. ST
         # treated every uncovered 100-share holding that was not swing
@@ -508,25 +656,64 @@ class StrategyWheel:
     # -- the daily monitor (app.py:1259-1411) -------------------------------------
 
     def _monitor(self, now, session, today, iid, cfg, emu, cache, deadline):
+        """Once a session, on the last grid tick before min(monitor_time_et, the
+        session's close) (I-2). It latches only when it saw the whole book; a
+        failure on its last eligible tick, or a window no tick completed, is
+        alerted once."""
         if cfg.get("monitor_time_et") is None:
             return []                    # refused and logged at config load
-        if cache.get(_MONITOR_KEY) == session or not clock.is_rth(now):
+        if cache.get(_MONITOR_KEY) == session:
             return []
-        # One tick early: on the 20-minute grid the next tick (16:00) is after the close.
-        if not clock.at_or_after(now, cfg["monitor_time_et"], lead_min=clock.TICK_GRID_MIN):
+        t = clock.as_utc(now)
+        close = _session_close(today, cache, session)
+        start = _monitor_start(today, cfg["monitor_time_et"], close)
+        if t < start - _GRID_SLACK:
             return []
-        positions, book = account.option_positions(emu), account.open_orders(emu)
-        if positions is None or book is None:
-            _log(f"StrategyWheel {session} | monitor deferred — the option book is "
-                 "unreadable; it runs on the next tick", "yellow")
+        if t >= close:
+            self._monitor_after_close(session, today, iid, emu, cache)
             return []
-        shorts = [p for p in positions if float(getattr(p, "qty", 0) or 0) < 0]
-        # fix 6: short PUTS only; ST parsed any short OCC symbol as a put.
-        puts = [p for p in shorts if str(getattr(p, "option_type", "")).lower() == "put"]
-        for p in shorts:
-            if not any(p is q for q in puts):
-                _log(f"[wheel-monitor] {p.symbol}: a short {p.option_type}, not a wheel put "
-                     "— not checked (fix 6)")
+        if not clock.is_rth(now):
+            return []
+        try:
+            orders, reason = self._run_monitor(now, session, today, iid, cfg, emu, cache)
+        except Exception as exc:
+            orders, reason = [], f"the monitor raised {type(exc).__name__}: {exc}"
+        if reason is None:
+            cache[_MONITOR_KEY] = session
+            calibration.record_outcomes(iid, emu, "wheel")
+            return orders
+        last = t + _GRID + timedelta(minutes=1) >= close
+        _log(f"StrategyWheel {session} | the daily monitor did not complete — {reason}; "
+             + ("this was its last tick before the close" if last else "it retries next tick"),
+             "yellow")
+        if last:
+            self._monitor_incomplete_alert(session, today, iid, cache, reason)
+        return orders
+
+    def _run_monitor(self, now, session, today, iid, cfg, emu, cache):
+        """app.py:1259-1411 over the rows it can read. Returns (orders,
+        reason): reason is None only when the whole book was seen (I-1)."""
+        rows, not_ready = account.option_book(emu)
+        if rows is None:
+            return [], not_ready
+        book = account.open_orders(emu)
+        if book is None:
+            return [], "the working-order book is unreadable"
+        puts, unknown = [], []
+        for p in [p for p in rows if _is_short(p)]:
+            kind = str(getattr(p, "option_type", "") or "").strip().lower()
+            if kind == "call":
+                # fix 6: short PUTS only; ST parsed any short OCC symbol as a put.
+                _log(f"[wheel-monitor] {p.symbol}: a short call, not a wheel put — not "
+                     "checked (fix 6)")
+            elif kind == "put" and _readable_put(p):
+                puts.append(p)
+            else:
+                unknown.append(p)        # I-1: alerted, never labelled "not a wheel put"
+        _remember_puts(cache, [p for p in rows if _is_short(p)], today,
+                       complete=not_ready is None and not unknown)
+        for p in unknown:
+            self._unknown_row_alert(p, session, today, iid, cache)
         working = {str(getattr(o, "symbol", "")).upper() for o in book
                    if str(getattr(o, "side", "")).lower() == "buy"}
         try:
@@ -556,7 +743,7 @@ class StrategyWheel:
                         _log(f"[wheel-monitor] {p.symbol}: {d['reason']} — a buy-to-close "
                              "is already working; not sending another", "yellow")
                         continue
-                    _log(f"[wheel-monitor] 🚨 AUTO-CLOSE triggered: {p.symbol} — {d['reason']}",
+                    _log(f"[wheel-monitor] 🚨 AUTO-CLOSE ordered: {p.symbol} — {d['reason']}",
                          "red")
                     orders.append(wheel_rules.btc_order(p, abs(int(float(p.qty))), d["intent"],
                                                         session=session))
@@ -567,23 +754,84 @@ class StrategyWheel:
             except Exception as exc:
                 _log(f"[wheel-monitor] Error processing {p.symbol}: {exc}", "yellow")
                 continue
-        cache[_MONITOR_KEY] = session
-        calibration.record_outcomes(iid, emu, "wheel")
+        if not_ready or unknown:
+            reason = not_ready or (f"{len(unknown)} short option(s) listed without contract "
+                                   "fields")
+            _log(f"[wheel-monitor] Incomplete — checked {len(puts)} readable short put(s), "
+                 f"{alerts} alerts sent; {reason}", "yellow")
+            return orders, reason
         _log(f"[wheel-monitor] Done — checked {len(puts)} short put positions, "
              f"{alerts} alerts sent")
-        return orders
+        return orders, None
+
+    def _monitor_after_close(self, session, today, iid, emu, cache):
+        """No tick completed the monitor before the close (every eligible
+        tick failed, or none landed in the window). Quiet only when a ready
+        book shows nothing a put-monitor would check."""
+        if cache.get(_MONITOR_ALERT_KEY) == session:
+            return
+        rows, not_ready = account.option_book(emu)
+        at_risk = [p for p in rows or [] if _is_short(p)
+                   and str(getattr(p, "option_type", "") or "").strip().lower() != "call"]
+        if rows is not None and not_ready is None and not at_risk \
+                and not _known_puts(cache, today):
+            cache[_MONITOR_KEY] = session         # nothing was at risk
+            return
+        if rows is not None:
+            _remember_puts(cache, at_risk, today, complete=False)
+        self._monitor_incomplete_alert(
+            session, today, iid, cache, "no tick completed the daily monitor before the close")
+
+    def _monitor_incomplete_alert(self, session, today, iid, cache, reason):
+        """I-2: once a session; priority 2 when a short put on record expires
+        within a day."""
+        if cache.get(_MONITOR_ALERT_KEY) == session:
+            return
+        cache[_MONITOR_ALERT_KEY] = session
+        known = _known_puts(cache, today)
+        listing = (", ".join(f"{c} ({d} DTE)" for c, d in sorted(known.items()))
+                   or "none on record")
+        _log(f"StrategyWheel {session} | ALERT — the daily put monitor did not complete: "
+             f"{reason}", "red")
+        notify.send("wheel_position_alert", iid,
+                    "⚠️ Wheel monitor incomplete — check puts manually",
+                    f"The daily put monitor did not complete on {session}: {reason}.\n"
+                    "No monitor tick is left before the close, so an in-the-money put may "
+                    "not have been bought back.\n"
+                    f"Short puts on record: {listing}\n"
+                    "Check them manually.",
+                    priority=2 if any(d <= 1 for d in known.values()) else 1)
+
+    def _unknown_row_alert(self, p, session, today, iid, cache):
+        """I-1: a short option listed without its contract fields, once per
+        contract per session. The OCC symbol says what it probably is."""
+        symbol = str(getattr(p, "symbol", "") or "").upper()
+        if not _row_alert_once(cache, session, f"unknown:{symbol}"):
+            return
+        parts = wheel_rules.occ_parts(symbol)
+        urgent = False
+        if parts:
+            root, expiry, kind, strike = parts
+            dte = (date.fromisoformat(expiry) - today).days
+            urgent = kind == "put" and dte <= 1
+            detail = (f"Its OCC symbol reads: {kind} ${strike:.2f} on {root}, expiring "
+                      f"{expiry} ({dte} day(s)).")
+        else:
+            detail = "Its symbol is not a readable OCC symbol either."
+        _log(f"[wheel-monitor] {symbol}: a short option without contract fields — alerting "
+             "the operator (the rules cannot run on it)", "yellow")
+        notify.send("wheel_position_alert", iid,
+                    f"❓ Unreadable option — check manually: {symbol}",
+                    f"{symbol}\nThe broker lists this short option without its contract "
+                    "fields (type, underlying, strike or expiry), so the monitor cannot apply "
+                    f"its rules to it.\n{detail}\nCheck it manually before the close.",
+                    priority=2 if urgent else 1)
 
     def _no_price_alert(self, p, d, session, iid, cache) -> bool:
         """One "no price — check manually" alert per contract per session.
         Returns True when it was sent."""
-        seen = cache.get(_NO_PRICE_KEY)
-        if not isinstance(seen, dict) or seen.get("session") != session:
-            seen = {"session": session, "contracts": []}
-            cache[_NO_PRICE_KEY] = seen
-        contract = str(p.symbol).upper()
-        if contract in seen["contracts"]:
+        if not _row_alert_once(cache, session, f"noprice:{str(p.symbol).upper()}"):
             return False
-        seen["contracts"].append(contract)
         _log(f"[wheel-monitor] {p.symbol}: no usable price for {d['underlying']} with "
              f"{d['dte']} day(s) to expiry — alerting the operator", "yellow")
         notify.send("wheel_position_alert", iid,
