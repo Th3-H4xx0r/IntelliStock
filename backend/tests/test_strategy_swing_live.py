@@ -651,3 +651,93 @@ def test_fix_c_a_vix_still_missing_at_1000_proceeds_blocked(live, monkeypatch):
     assert tick(live, MON_1000, LiveAdapter(), cache) == {}
     assert cache[live._SCAN_DONE_KEY] == "2026-06-01"
     assert cache[live._BEAR_KEY]["blocked_days"] == 4                     # ST: VIX None blocks
+
+
+# -- review fix round 2 (G6) -----------------------------------------------------
+
+class ClearedBook(LiveAdapter):
+    """Another caller's refresh cleared the adapter's cache after 600 s (the
+    flag reads None, the cache {}); the scan's own refresh fails again, sets
+    the flag and returns the empty cache."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self._positions_stale_since = None
+
+    def refresh_positions(self):
+        self._positions_stale_since = 1_000.0
+        return []
+
+    def get_positions(self):
+        return {}
+
+
+def _pending(*symbols):
+    return {s: {"reason": "rsi_overbought", "intent": "swing_rsi_exit", "since": "2026-05-29"}
+            for s in symbols}
+
+
+def test_fix2_1_a_degraded_empty_book_keeps_every_pending_exit(live, monkeypatch):
+    # Review round 2, finding 1: the degraded empty book read as "position gone
+    # — exit complete", and the healthy book at 10:00 still held EEE unsold.
+    monkeypatch.setattr(live.ai_analyst, "analyse",
+                        scripted({"AAA": REJECT, "CCC": REJECT, "DDD": REJECT}))
+    cache = {live._PENDING_EXIT_KEY: _pending("EEE")}
+    assert tick(live, MON_0920, ClearedBook(), cache) == {}
+    assert tick(live, MON_0940, Blind(positions={"EEE": (10, 100.0, 1_040.0)}), cache) == {}
+    assert set(cache[live._PENDING_EXIT_KEY]) == {"EEE"}
+    assert live._SCAN_DONE_KEY not in cache
+    out = tick(live, MON_1000, LiveAdapter(positions={"EEE": (10, 100.0, 1_040.0)}), cache)
+    assert out["EEE"] == -1 and out["_nexus_action_intents"]["EEE"] == "swing_rsi_exit"
+
+
+def test_fix2_1_a_degraded_read_still_resends_a_visibly_held_exit(live, monkeypatch):
+    # The cached snapshot still shows EEE (entry 0.0, not ready): its exit is
+    # re-sent; FFF is not visible, but only a ready read may forget it.
+    cache = {live._PENDING_EXIT_KEY: _pending("EEE", "FFF"), live._SCAN_DONE_KEY: "2026-06-01"}
+    out = tick(live, MON_1000, Preserved(positions={"EEE": (10, 100.0, 1_040.0)}), cache)
+    assert {s: d for s, d in out.items() if not s.startswith("_")} == {"EEE": -1}
+    assert set(cache[live._PENDING_EXIT_KEY]) == {"EEE", "FFF"}
+    # A ready read that shows FFF gone forgets it.
+    tick(live, MON_1000, LiveAdapter(positions={"EEE": (10, 100.0, 1_040.0)}), cache)
+    assert set(cache[live._PENDING_EXIT_KEY]) == {"EEE"}
+
+
+def test_fix2_2_a_refresh_that_fails_during_the_scan_is_not_ready(live, monkeypatch):
+    # The flag is None before the scan's refresh; the refresh fails, sets it
+    # and returns [] — an empty book that must not read as eight free slots.
+    ai = scripted({"AAA": APPROVE, "CCC": APPROVE, "DDD": APPROVE})
+    monkeypatch.setattr(live.ai_analyst, "analyse", ai)
+    cache = {}
+    assert tick(live, MON_0920, ClearedBook(), cache) == {}
+    assert ai.calls == [] and live._SCAN_DONE_KEY not in cache
+
+
+def test_fix2_3_one_entryless_name_is_skipped_and_the_scan_proceeds(live, monkeypatch):
+    lines = []
+    monkeypatch.setattr(live, "_log", lambda msg, color="white": lines.append(msg))
+    monkeypatch.setattr(live.ai_analyst, "analyse",
+                        scripted({"AAA": REJECT, "CCC": REJECT, "DDD": REJECT}))
+    monkeypatch.setattr(live, "swing_indicators", lambda f, c: dict(
+        IND, EEE=ind(104.0, rsi=72.0, rsi_prev=68.0), ZZZ=ind(104.0, rsi=72.0, rsi_prev=68.0)))
+
+    class OneEntryless(LiveAdapter):
+        def refresh_positions(self):
+            return [NS(symbol="EEE", qty=10, avg_entry_price=100.0, market_value=1_040.0),
+                    NS(symbol="ZZZ", qty=5, avg_entry_price=0.0, market_value=520.0)]
+
+    cache = {}
+    out = tick(live, MON_0920, OneEntryless(positions={"EEE": (10, 100.0, 1_040.0),
+                                                       "ZZZ": (5, 0.0, 520.0)}), cache)
+    assert {s: d for s, d in out.items() if not s.startswith("_")} == {"EEE": -1}
+    assert cache[live._SCAN_DONE_KEY] == "2026-06-01"
+    assert any("ZZZ" in line and "entry price" in line for line in lines)
+
+
+def test_fix2_3_every_held_name_without_an_entry_price_is_not_ready(live, monkeypatch):
+    monkeypatch.setattr(live.ai_analyst, "analyse",
+                        scripted({"AAA": APPROVE, "CCC": REJECT, "DDD": REJECT}))
+    cache = {}
+    snapshot = Preserved(positions={"EEE": (10, 100.0, 1_040.0), "FFF": (5, 100.0, 465.0)})
+    assert tick(live, MON_0920, snapshot, cache) == {}
+    assert live._SCAN_DONE_KEY not in cache

@@ -235,49 +235,68 @@ def _valid_hhmm(value):
 
 
 def _positions_for_scan(emu):
-    """(positions, None) — {symbol: {"qty", "avg_entry_price", "market_value"}},
-    the book the scan counts exits, slots and sectors from — or (None, reason)
-    when the read is degraded (review fix a). account.equity_positions reads
-    the same book but degrades to "no data", which here would mean free
-    slots and silently skipped exits.
+    """(positions, None, visible) — positions is {symbol: {"qty",
+    "avg_entry_price", "market_value"}}, the book the scan counts exits, slots
+    and sectors from — or (None, reason, visible) when the read is degraded
+    (review fix a). `visible` is every name the read shows held, ready or not.
+    account.equity_positions reads the same book but degrades to "no data",
+    which here would mean free slots, skipped exits and forgotten ones.
 
     AlpacaAdapter.refresh_positions never raises. On a REST failure it returns
     the cached quantities with avg_entry_price=0.0; after 10 minutes, or in a
     process whose first refresh failed, it returns an empty book. Its health
     flag `_positions_stale_since` is set while refreshes fail and is set
-    BEFORE the call that clears the cache, so it is read on both sides."""
+    BEFORE the call that clears the cache, so it is read on both sides.
+    Every held name reading no entry price is that cached snapshot's
+    signature; one such name among priced ones is only skipped by _exits
+    (review round 2, finding 3)."""
     before = getattr(emu, "_positions_stale_since", None)
-    dtos = []
+    dtos, held, reason = [], None, None
     refresh = getattr(emu, "refresh_positions", None)
     if callable(refresh):
         try:
             dtos = list(refresh() or [])
         except Exception as exc:
-            return None, f"refresh_positions failed ({type(exc).__name__}: {exc})"
+            reason = f"refresh_positions failed ({type(exc).__name__}: {exc})"
     try:
         held = {str(s).upper(): float(q or 0.0) for s, q in (emu.get_positions() or {}).items()}
     except Exception as exc:
-        return None, f"get_positions failed ({type(exc).__name__}: {exc})"
-    if before is not None or getattr(emu, "_positions_stale_since", None) is not None:
-        return None, "the broker's positions snapshot is stale (its REST refresh is failing)"
-    out = {}
+        reason = reason or f"get_positions failed ({type(exc).__name__}: {exc})"
+    rows = {}
     for d in dtos:
-        sym = str(getattr(d, "symbol", "") or "").upper()
-        qty = float(getattr(d, "qty", 0) or 0.0)
-        if qty > 0 and sym in held:
-            out[sym] = {"qty": qty,
-                        "avg_entry_price": float(getattr(d, "avg_entry_price", 0) or 0.0),
-                        "market_value": float(getattr(d, "market_value", 0) or 0.0)}
+        try:
+            sym = str(getattr(d, "symbol", "") or "").upper()
+            rows[sym] = {"qty": float(getattr(d, "qty", 0) or 0.0),
+                         "avg_entry_price": float(getattr(d, "avg_entry_price", 0) or 0.0),
+                         "market_value": float(getattr(d, "market_value", 0) or 0.0)}
+        except (TypeError, ValueError):
+            continue
+    visible = ({s for s, q in held.items() if q > 0} if held is not None
+               else {s for s, r in rows.items() if r["qty"] > 0})
+    if reason:
+        return None, reason, visible
+    if before is not None or getattr(emu, "_positions_stale_since", None) is not None:
+        return None, ("the broker's positions snapshot is stale (its REST refresh is "
+                      "failing)"), visible
+    out = {}
     for sym, qty in held.items():
-        if qty > 0 and sym not in out:
-            out[sym] = {"qty": qty, "avg_entry_price": 0.0, "market_value": 0.0}
+        if qty > 0:
+            row = rows.get(sym)
+            out[sym] = (dict(row) if row and row["qty"] > 0
+                        else {"qty": qty, "avg_entry_price": 0.0, "market_value": 0.0})
+    entryless = []
     for sym, pos in sorted(out.items()):
         if _price(pos["avg_entry_price"]) is None:
             filled = _price(account.entry_price_from_trades(emu, sym))
             if filled is None:
-                return None, f"{sym} is held with no entry price (a degraded positions read)"
-            pos["avg_entry_price"] = filled
-    return out, None
+                pos["avg_entry_price"] = 0.0      # _exits skips it, logged
+                entryless.append(sym)
+            else:
+                pos["avg_entry_price"] = filled
+    if out and len(entryless) == len(out):
+        return None, (f"every held name reads no entry price ({', '.join(entryless)}) — "
+                      "the signature of a cached snapshot"), visible
+    return out, None, visible
 
 
 def _increment_seconds(value):
@@ -540,7 +559,16 @@ class StrategySwing:
             return {}
 
         decisions, sizes, intents = {}, {}, {}
-        self._reemit_exits(session, emu, cache, book, decisions, sizes, intents)
+        memo = {}
+
+        def positions_read():
+            # One strict positions read (one REST refresh) per tick, shared by
+            # the pending-exit re-send and the scan.
+            if "read" not in memo:
+                memo["read"] = _positions_for_scan(emu)
+            return memo["read"]
+
+        self._reemit_exits(session, positions_read, cache, book, decisions, sizes, intents)
         if rearm_due:
             self._rearm_stale(rearm, session, emu, cache, book, decisions, sizes, intents)
 
@@ -553,7 +581,8 @@ class StrategySwing:
                 if clock.time_left(deadline) >= clock.PREPARE_RESERVE_S:
                     try:
                         scan = self._prepare(prices, current_time, session, iid, cfg, emu,
-                                             cache, book, decisions, sizes, intents)
+                                             positions_read, cache, book, decisions, sizes,
+                                             intents)
                     except Exception as exc:
                         _log(f"StrategySwing {session} | scan preparation failed "
                              f"({type(exc).__name__}: {exc}); retried next tick", "red")
@@ -571,8 +600,8 @@ class StrategySwing:
         self._remember_emitted(current_time, session, cache, decisions, sizes, intents)
         return _emit(decisions, sizes, intents)
 
-    def _prepare(self, prices, current_time, session, iid, cfg, emu, cache, book, decisions,
-                 sizes, intents):
+    def _prepare(self, prices, current_time, session, iid, cfg, emu, positions_read, cache,
+                 book, decisions, sizes, intents):
         """paper_trader.py:446-626 up to the entry loop: data, regime, exits,
         the bear counter, and the queue of names whose signal fired. Exits are
         merged into the payload only once everything above them succeeded.
@@ -596,7 +625,7 @@ class StrategySwing:
                       f"StrategySwing {session} | VIX still unavailable at "
                       f"{_VIX_RETRY_UNTIL_ET} ET — the regime is blocked, as a missing VIX "
                       "blocked ST", "yellow")
-        equity_pos, not_ready = _positions_for_scan(emu)
+        equity_pos, not_ready, _visible = positions_read()
         if equity_pos is None:
             _log_once(cache, "positions-not-ready", session,
                       f"StrategySwing {session} | scan not ready: positions unreadable — "
@@ -876,27 +905,32 @@ class StrategySwing:
                         f"{symbol} — {shares} shares @ ${ind['close']:.2f}\n"
                         f"Stop ${stop_price:.2f} | Target ${target_price:.2f}", priority=1)
 
-    def _reemit_exits(self, session, emu, cache, book, decisions, sizes, intents):
+    def _reemit_exits(self, session, positions_read, cache, book, decisions, sizes, intents):
         """A-live contract addition 15: the engine never retries an exit it
         deferred. Re-send every pending exit whose stock is still held and has
         no working non-bracket sell; forget it once the stock is gone. `book`
-        is the strict working-order read (fix F3)."""
+        is the strict working-order read (fix F3).
+
+        Review round 2, finding 1: only a READY positions read may forget a
+        pending exit. A degraded read (a cached snapshot, or the empty book
+        the adapter reports after clearing its cache) keeps every one, and
+        still re-sends those for names it visibly shows held."""
         pending = cache.get(_PENDING_EXIT_KEY)
         if not isinstance(pending, dict) or not pending:
             return
-        try:
-            held = {str(s).upper() for s, q in (emu.get_positions() or {}).items()
-                    if float(q or 0.0) > 0}
-        except Exception as exc:
+        positions, not_ready, visible = positions_read()
+        if positions is None:
             _log_once(cache, "exit-book", session,
-                      f"StrategySwing {session} | pending exits not re-sent — positions are "
-                      f"unreadable ({type(exc).__name__}: {exc})", "yellow")
-            return
+                      f"StrategySwing {session} | positions read not ready ({not_ready}) — "
+                      "every pending exit is kept; exits are re-sent only for names visibly "
+                      "held", "yellow")
+        held = set(positions) if positions is not None else set(visible)
         selling = _symbols_of(book, _working_exit)
         for symbol in sorted(pending):
             if symbol not in held:
-                pending.pop(symbol)
-                _log(f"StrategySwing {session} | {symbol}: position gone — exit complete")
+                if positions is not None:
+                    pending.pop(symbol)
+                    _log(f"StrategySwing {session} | {symbol}: position gone — exit complete")
                 continue
             if symbol in selling:
                 continue
