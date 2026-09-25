@@ -180,6 +180,17 @@ def _swing_fields(
     ):
         if value is not None and value <= 0:
             raise ValueError(f"{name} must be > 0")
+    if (
+        (take_profit is not None or stop_loss is not None)
+        and order_class != "bracket"
+        and source is not OrderSource.BRACKET_LEG
+    ):
+        # L1 review: a leg price with no bracket flag would send the entry it
+        # meant to protect as a plain order with no exit legs at all. Only a
+        # bracket parent, or the record of one of its legs, carries them.
+        raise ValueError(
+            "take_profit_price/stop_loss_price need order_class='bracket'"
+        )
     position_intent = _optional_text(intent.position_intent, case="lower")
     if position_intent is not None and position_intent not in POSITION_INTENTS:
         raise ValueError(f"unsupported position_intent: {intent.position_intent!r}")
@@ -231,7 +242,9 @@ def _swing_fields(
         if strike is None or strike <= 0:
             raise ValueError("an option order needs strike > 0")
         try:
-            date.fromisoformat(expiry or "")
+            # Stored normalised (L1 review): "20261002" and "2026-10-02" are
+            # one contract, and must never be keyed as two.
+            expiry = date.fromisoformat(expiry or "").isoformat()
         except ValueError as exc:
             raise ValueError("expiry must be YYYY-MM-DD") from exc
     else:
