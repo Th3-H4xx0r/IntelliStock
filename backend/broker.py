@@ -11166,6 +11166,8 @@ def _execute_swing_approval(adapter, payload, order_service, *,
         except Exception as exc:
             say(f"{label}: {stale_why}, but it could not be marked failed "
                 f"({type(exc).__name__}: {exc}); nothing placed", "red")
+            tell(f"{stale_why}; the signal could not be marked failed "
+                 f"({type(exc).__name__}) and still reads approved; nothing was sent")
             return (False, f"{stale_why}; nothing placed, and the signal could not "
                            f"be marked failed ({type(exc).__name__}: {exc})", {})
         if not won:

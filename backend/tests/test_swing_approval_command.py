@@ -1291,3 +1291,19 @@ def test_m6_a_stale_approval_that_loses_its_cas_places_and_tells_nothing(swing):
     service, (ok, error, _result) = _run(swing)
     assert ok is False and "nothing placed" in error
     assert service.intents == [] and swing.built == [] and swing.notices == []
+
+
+def test_m6_a_stale_approval_whose_failed_write_raises_places_nothing_and_says_so(swing):
+    """The row still reads approved and will never be placed; the operator is
+    told, as a claim that raises tells."""
+    swing.rows["sig-1"] = _signal(decided_at="2026-10-02T19:30:00+00:00")
+    swing.cas_raises = ConnectionError("signals table unreachable")
+    service, (ok, error, _result) = _run(swing)
+    assert ok is False and error.startswith("approval from 2026-10-02 — approve a fresh signal")
+    assert "could not be marked failed" in error
+    assert service.intents == [] and swing.built == []
+    assert swing.rows["sig-1"]["status"] == "approved"
+    (notice,) = swing.notices
+    assert notice["reason"] == ("approval from 2026-10-02 — approve a fresh signal; "
+                                "the signal could not be marked failed (ConnectionError) "
+                                "and still reads approved; nothing was sent")
