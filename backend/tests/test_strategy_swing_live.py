@@ -839,3 +839,63 @@ def test_g8a_the_scan_passes_its_working_buys_to_the_outcome_pass(live, monkeypa
             NS(symbol="APH261002P00130000", side="buy")]         # a wheel buy-to-close
     tick(live, MON_0920, LiveAdapter(open_orders=book), {})
     assert seen and seen[0]["working"] == {"EEE"}
+
+
+# -- FW-str minor (d): no entries from a scan that first ran after the open ----------
+
+MON_1400 = datetime(2026, 6, 1, 18, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("first_tick", [MON_0940, MON_1400])
+def test_a_first_scan_tick_after_the_open_plans_exits_but_no_entries(
+        live, monkeypatch, first_tick):
+    """strategies-review M-6: an instance started (or restarted) after 09:30
+    scanned then and entered at intraday prices, with legs anchored on the
+    prior close. ST's cron only ever ran at 09:15."""
+    ai = scripted({"AAA": APPROVE, "CCC": APPROVE, "DDD": APPROVE})
+    monkeypatch.setattr(live.ai_analyst, "analyse", ai)
+    monkeypatch.setattr(live, "swing_indicators",
+                        lambda f, c: dict(IND, EEE=ind(104.0, rsi=72.0, rsi_prev=68.0)))
+    lines = []
+    monkeypatch.setattr(live, "_log", lambda msg, color="white": lines.append(msg))
+    held = LiveAdapter(positions={"EEE": (10, 100.0, 1_040.0)})
+    cache = {}
+    out = tick(live, first_tick, held, cache)
+    assert {s: d for s, d in out.items() if not s.startswith("_")} == {"EEE": -1}
+    assert out["_nexus_action_intents"] == {"EEE": "swing_rsi_exit"}
+    assert out["_nexus_executable_buys"] == []
+    assert cache[live._SCAN_DONE_KEY] == "2026-06-01"
+    assert ai.calls == [] and rows() == {}
+    late = [m for m in lines if "NO ENTRIES" in m]
+    assert len(late) == 1 and "09:30" in late[0]
+    assert [c for c, _ in live.sent].count("swing_run_summary") == 1
+    # The next session's pre-market scan enters as usual.
+    monkeypatch.setattr(live.ai_analyst, "analyse",
+                        scripted({"AAA": APPROVE, "CCC": REJECT, "DDD": REJECT}))
+    monkeypatch.setattr(live, "swing_indicators", lambda f, c: dict(IND))
+    assert tick(live, TUE_0920, LiveAdapter(), cache)["AAA"] == 1
+
+
+def test_a_pre_market_first_tick_that_was_not_ready_still_enters_later(live, monkeypatch):
+    """The rule reads the day's FIRST scan tick: a 09:20 scan held back
+    (positions, VIX) and prepared at 09:40 keeps its entries (fix a, fix c)."""
+    ai = scripted({"AAA": APPROVE, "CCC": REJECT, "DDD": REJECT})
+    monkeypatch.setattr(live.ai_analyst, "analyse", ai)
+    unready = LiveAdapter()
+    unready._positions_stale_since = 1_000.0
+    cache = {}
+    assert tick(live, MON_0920, unready, cache) == {}
+    assert tick(live, MON_0940, LiveAdapter(), cache)["AAA"] == 1
+
+
+def test_a_restart_after_the_open_keeps_the_first_tick_it_saw(live, monkeypatch):
+    """The first-tick stamp lives in the strategy cache, which survives a
+    restart; a cache that never saw the pre-market tick is late."""
+    ai = scripted({"AAA": APPROVE, "CCC": REJECT, "DDD": REJECT})
+    monkeypatch.setattr(live.ai_analyst, "analyse", ai)
+    monkeypatch.setattr(live.regime, "fetch_vix_close", lambda: None)
+    cache = {}
+    assert tick(live, MON_0920, LiveAdapter(), cache) == {}      # VIX retry
+    monkeypatch.setattr(live.regime, "fetch_vix_close", lambda: 15.0)
+    restarted = dict(cache)
+    assert tick(live, MON_0940, LiveAdapter(), restarted)["AAA"] == 1

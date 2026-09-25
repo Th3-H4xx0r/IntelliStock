@@ -65,6 +65,7 @@ _EMITTED_KEY = "_swing_emitted"                # live: entries sent this session
 _NO_MODEL_KEY = "_swing_no_model_session"      # live: the no-model alert, once a session
 _SECTOR_CACHE_KEY = "_swing_sector_cache"      # live: yfinance fallback sectors
 _PENDING_EXIT_KEY = "_swing_pending_exits"     # live: exits re-sent until the stock is gone
+_SCAN_FIRST_KEY = "_swing_scan_first_tick"     # live: {"session", "at", "late"} (FW-str d)
 
 #: Hint flags the engine tests with `is True` (plan A-backtest Task 6).
 _HINT_FLAGS = ("whole_shares", "fill_at_next_open")
@@ -74,6 +75,9 @@ _UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 #: Review fix c: while yfinance returns no VIX, the live scan waits for it
 #: until this ET time, then proceeds with the regime blocked, as ST did.
 _VIX_RETRY_UNTIL_ET = "10:00"
+#: FW-str minor (d): the regular-hours open. A session whose FIRST scan tick
+#: is at or after it plans no entries (ST's cron only ever ran at 09:15).
+_MARKET_OPEN_ET = "09:30"
 
 
 def _log_once(cache, reason, scope, msg, color="white"):
@@ -550,6 +554,15 @@ class StrategySwing:
                       "strategy editor. Pending exits are still re-sent.", "red")
         scan_due = (scan_time is not None and cache.get(_SCAN_DONE_KEY) != session
                     and clock.at_or_after(current_time, scan_time))
+        if scan_due:
+            first = cache.get(_SCAN_FIRST_KEY)
+            if not isinstance(first, dict) or first.get("session") != session:
+                # Stamped on the first tick the scan is due, whatever happens
+                # next: a pre-market tick that is not ready keeps its entries.
+                cache[_SCAN_FIRST_KEY] = {
+                    "session": session,
+                    "at": clock.ny_now(current_time).strftime("%H:%M"),
+                    "late": clock.at_or_after(current_time, _MARKET_OPEN_ET)}
         rearm = self._rearm_todo(cache, session)
         rearm_due = bool(rearm) and clock.is_rth(current_time)
         pending = cache.get(_PENDING_EXIT_KEY)
@@ -689,6 +702,18 @@ class StrategySwing:
             reg["regime_ok"], bear["blocked_days"],
             bear_regime_days=int(cfg["bear_regime_days"]),
             live_universe=live_universe, defensive_universe=defensive)
+        first = cache.get(_SCAN_FIRST_KEY)
+        if univ and isinstance(first, dict) and first.get("session") == session \
+                and first.get("late"):
+            # FW-str minor (d): a missed pre-market scan is no entries today.
+            # Entries now would fill at intraday prices with legs anchored on
+            # the prior close; ST's cron only ever ran at 09:15. Exits run.
+            _log_once(cache, "late-scan", session,
+                      f"StrategySwing {session} | NO ENTRIES today — the day's first scan "
+                      f"tick came at {first.get('at')} ET, at or after the "
+                      f"{_MARKET_OPEN_ET} open (a missed pre-market scan; ST's cron ran "
+                      "only at 09:15). Exits still run.", "yellow")
+            univ = None
         vix_str = f"{vix:.1f}" if vix is not None else "n/a"
         if phase == "bear_mode":
             notify.send("swing_run_summary", iid, f"🐻 Bear Mode Day {bear['blocked_days']}",
