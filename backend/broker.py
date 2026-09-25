@@ -11060,10 +11060,11 @@ def _execute_swing_approval(adapter, payload, order_service, *,
     class _Retryable(Exception):
         """A transient failure: the signal goes back to pending (I-1)."""
 
-        def __init__(self, why, *, quote=False, detail=""):
+        def __init__(self, why, *, quote=False, detail="", again=""):
             super().__init__(why)
             self.quote = quote
             self.detail = detail
+            self.again = again
 
     def say(message, color="white"):
         if log is not None:
@@ -11197,10 +11198,11 @@ def _execute_swing_approval(adapter, payload, order_service, *,
             tell(reason)
             return (False, error, result or {})
 
-        def back_to_pending(why, *, quote=False, detail="", result=None):
+        def back_to_pending(why, *, quote=False, detail="", result=None, again=""):
             """I-1: a transient failure. Nothing reached the broker, so the
-            decision is undone and the operator may approve again."""
-            reason = f"{why} — approve again" + (" after the open" if quote else "")
+            decision is undone and the operator may approve again (`again`
+            says when, if not after the open)."""
+            reason = f"{why} — approve again" + (" after the open" if quote else again)
             if write({"status": "pending", "decided_by": None, "decided_at": None,
                       "decision_reason": None}):
                 say(f"{label} put back to pending: {why}"
@@ -11246,6 +11248,13 @@ def _execute_swing_approval(adapter, payload, order_service, *,
             cfg = _lane_config(specs, lane_name)
             if not cfg:
                 raise ValueError(f"the {lane_name} lane is not enabled on this document")
+            if lane == "swing" and _swing_exit_held_after_close(now_utc):
+                # Seams m4: Alpaca rejects a non-extended-hours market order
+                # between the close (13:00 on a half day) and 20:00 ET, the
+                # window FW1 holds a swing exit in. The bracket is a market
+                # GTC entry: hold it rather than send it to be refused.
+                raise _Retryable("after the close",
+                                 again=" after 20:00 ET or pre-market")
             # FW-lo-I1: the gate's control inputs are re-read NOW and laid over
             # this approval's snapshot only; the loop's stamps are fresh only
             # within 60 s of a tick. Round 2: re-read BEFORE the price, so its
@@ -11312,7 +11321,8 @@ def _execute_swing_approval(adapter, payload, order_service, *,
             else:
                 raise ValueError(f"unknown approved order kind {kind!r}")
         except _Retryable as exc:
-            return back_to_pending(str(exc), quote=exc.quote, detail=exc.detail)
+            return back_to_pending(str(exc), quote=exc.quote, detail=exc.detail,
+                                   again=exc.again)
         except Exception as exc:
             unreadable = getattr(approvals, "BookUnreadable", None)
             if isinstance(unreadable, type) and isinstance(exc, unreadable):

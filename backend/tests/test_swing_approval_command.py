@@ -395,7 +395,8 @@ def _extract_handler(extra=None):
     return extract(
         ("_execute_swing_approval", "_lane_config", "_approval_live_price",
          "_build_bracket_intent", "_build_option_intent",
-         "_refresh_option_quote", "_truthy", "_merged_strategy_settings"),
+         "_refresh_option_quote", "_truthy", "_merged_strategy_settings",
+         "_swing_exit_held_after_close"),
         assigns=("_live_option_quotes", "_LANE_ENABLE_FLAGS"),
         namespace=namespace,
         check=("_execute_swing_approval", "_lane_config",
@@ -403,14 +404,14 @@ def _extract_handler(extra=None):
 
 
 def _run(swing, service=None, *, lanes=LANES, adapter=None, payload=None,
-         logs=None, extra=None):
+         logs=None, extra=None, now=RTH):
     service = service or _Service(swing=swing)
     log = (lambda message, color="white": logs.append((color, message))) \
         if logs is not None else None
     result = _extract_handler(extra)["_execute_swing_approval"](
         adapter or _Adapter(),
         payload or {"source": "swing_approval", "signal_id": "sig-1"},
-        service, cached_strategies=lanes, now_utc=RTH, log=log,
+        service, cached_strategies=lanes, now_utc=now, log=log,
         sleep=swing.pauses.append)
     return service, result
 
@@ -1176,3 +1177,65 @@ def test_a_row_claimed_by_another_claim_is_not_overwritten(swing):
     assert ok is True
     assert swing.rows["sig-1"].get("order_client_id") is None
     assert [c[1] for c in swing.cas] == ["approved"]
+
+
+# --- seams m4: a swing approval between the close and 20:00 ET is held --------
+
+AFTER_CLOSE = "after the close — approve again after 20:00 ET or pre-market"
+
+
+def _at(iso):
+    return datetime_module.datetime.fromisoformat(iso)
+
+
+def _recording_controls(calls):
+    def overlay(adapter, *, instance_key, now_utc=None):
+        calls.append(now_utc)
+        return dict(FRESH_CONTROLS)
+    return overlay
+
+
+@pytest.mark.parametrize("when,decided", [
+    ("2026-10-05T20:00:00+00:00", "2026-10-05T19:30:00+00:00"),   # 16:00 ET, the close
+    ("2026-10-05T20:30:00+00:00", "2026-10-05T19:30:00+00:00"),   # 16:30 ET
+    ("2026-10-05T23:59:00+00:00", "2026-10-05T19:30:00+00:00"),   # 19:59 ET
+    ("2026-11-27T18:30:00+00:00", "2026-11-27T16:00:00+00:00"),   # 13:30 ET, half day
+])
+def test_m4_a_swing_approval_after_the_close_goes_back_to_pending(swing, when, decided):
+    """FW1 holds a swing EXIT from the close (13:00 on a half day) to 20:00 ET,
+    because Alpaca rejects a non-extended-hours market order then. An
+    operator-approved market GTC bracket in that window used to be sent and
+    end failed on the refusal, against the approve copy's promise that it
+    returns to be approved again. It is held: back to pending, nothing
+    built or re-read, nothing sent."""
+    swing.rows["sig-1"] = _signal(decided_at=decided)
+    controls = []
+    service, (ok, error, _result) = _run(
+        swing, now=_at(when),
+        extra={"_approval_control_overlay": _recording_controls(controls)})
+    assert (ok, error) == (False, AFTER_CLOSE)
+    assert service.intents == [] and swing.built == [] and controls == []
+    assert swing.updates == [("sig-1", _PENDING)]
+    assert swing.notices == [{"instance_id": "instance-1", "symbol": "AAPL",
+                              "lane": "swing", "reason": AFTER_CLOSE}]
+
+
+@pytest.mark.parametrize("when,decided", [
+    ("2026-10-05T13:20:00+00:00", "2026-10-05T13:10:00+00:00"),   # 09:20 ET, pre-market
+    ("2026-10-05T15:00:00+00:00", "2026-10-05T14:59:00+00:00"),   # 11:00 ET, regular hours
+    ("2026-10-06T00:30:00+00:00", "2026-10-05T19:30:00+00:00"),   # 20:30 ET: the gate decides
+    ("2026-11-27T17:30:00+00:00", "2026-11-27T16:00:00+00:00"),   # 12:30 ET, half day open
+])
+def test_m4_outside_that_window_a_swing_approval_is_built(swing, when, decided):
+    swing.rows["sig-1"] = _signal(decided_at=decided)
+    _service, (_ok, error, _result) = _run(swing, now=_at(when))
+    assert len(swing.built) == 1 and AFTER_CLOSE not in error
+
+
+def test_m4_a_wheel_approval_is_not_held_by_the_swing_rule(swing):
+    """Wheel approvals are refused outside regular hours by the option gate
+    (market.regular_hours_required, transient)."""
+    swing.rows["sig-1"] = _signal(lane="wheel", symbol="APH",
+                                  decided_at="2026-10-05T19:30:00+00:00")
+    _service, (_ok, error, _result) = _run(swing, now=_at("2026-10-05T20:30:00+00:00"))
+    assert len(swing.built) == 1 and AFTER_CLOSE not in error

@@ -343,7 +343,8 @@ def _handler_and_service(*, controls=None, adapter=None, overlay=True):
     functions = ["_execute_swing_approval", "_lane_config",
                  "_approval_live_price", "_build_bracket_intent",
                  "_build_option_intent", "_refresh_option_quote", "_truthy",
-                 "_merged_strategy_settings", "_live_order_dependency_snapshot"]
+                 "_merged_strategy_settings", "_live_order_dependency_snapshot",
+                 "_swing_exit_held_after_close"]
     if overlay:
         functions.append("_approval_control_overlay")
     ns = extract(functions, assigns=("_live_option_quotes", "_LANE_ENABLE_FLAGS"),

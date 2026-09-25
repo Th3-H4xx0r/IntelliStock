@@ -87,7 +87,8 @@ def handler():
     return extract(
         ("_execute_swing_approval", "_lane_config", "_approval_live_price",
          "_build_bracket_intent", "_build_option_intent",
-         "_refresh_option_quote", "_truthy", "_merged_strategy_settings"),
+         "_refresh_option_quote", "_truthy", "_merged_strategy_settings",
+         "_swing_exit_held_after_close"),
         assigns=("_live_option_quotes", "_LANE_ENABLE_FLAGS"),
         namespace={"datetime": datetime_module,
                    "_live_order_dependency_lock": threading.Lock(),
