@@ -136,6 +136,40 @@ def test_the_golden_itself_was_not_regenerated():
         "code; restore it from git instead of regenerating it.")
 
 
+def _submit_with_explicit_defaults(emulator, day, now):
+    """The same orders, each passing the three swing-port keywords at their
+    defaults -- what an EB tick looks like after the change."""
+    plain = emulator.execute_signal
+
+    def execute_signal(*args, **kwargs):
+        kwargs.update(bracket=None, whole_shares=False,
+                      fill_at_next_open=False)
+        return plain(*args, **kwargs)
+
+    emulator.execute_signal = execute_signal
+    try:
+        _submit_plain(emulator, day, now)
+    finally:
+        del emulator.execute_signal
+
+
+def test_default_swing_keywords_change_nothing():
+    assert _canonical(_run(_submit_with_explicit_defaults)) == GOLDEN.read_text()
+
+
+def test_a_run_without_bar_work_never_needs_the_bar_hook():
+    seen = []
+
+    def submit(emulator, day, now):
+        _submit_plain(emulator, day, now)
+        seen.append((emulator.has_bracket_legs(),
+                     emulator.has_next_open_orders(),
+                     emulator.bar_event_requirements()))
+
+    _run(submit)
+    assert set(map(repr, seen)) == {repr((False, False, {}))}
+
+
 GOLDEN_SHA256 = "9731cf219e9e0f6405a9e5ffdea3dc5244218015a60c9f448872d099f4b6a182"
 
 

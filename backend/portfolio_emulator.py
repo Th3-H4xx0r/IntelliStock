@@ -26,6 +26,7 @@ try:
         LIQUIDITY_ADJUSTED_EQUITY_COST_MODEL,
         ExecutionCostModel,
         NextEventExecutionSimulator,
+        SimulationBarEvent,
         SimulationFill,
         SimulationOrder,
         SimulationPriceEvent,
@@ -40,6 +41,7 @@ except ImportError:  # Package import path used by repository-root pytest.
         LIQUIDITY_ADJUSTED_EQUITY_COST_MODEL,
         ExecutionCostModel,
         NextEventExecutionSimulator,
+        SimulationBarEvent,
         SimulationFill,
         SimulationOrder,
         SimulationPriceEvent,
@@ -1241,7 +1243,7 @@ class PortfolioEmulator:
             fill.cumulative_quantity
         )
         self._confirmed_simulation_fills.append(fill)
-        self._trades.append({
+        trade = {
             "timestamp": fill.executed_at,
             "action": fill.side,
             "ticker": fill.symbol,
@@ -1257,7 +1259,10 @@ class PortfolioEmulator:
             "cost_model_version": fill.cost_model_version,
             "source": fill.source,
             "cash_after": self._cash,
-        })
+        }
+        if fill.exit_reason:
+            trade["exit_reason"] = fill.exit_reason
+        self._trades.append(trade)
 
     def process_quote(self, quote):
         """Apply all normalized fills emitted for one quote event."""
@@ -1270,6 +1275,12 @@ class PortfolioEmulator:
             accept_fill=self.apply_fill,
             cash_budget=self.spendable_cash,
         )
+        self._book_reservation_fills(fills)
+        self._drop_stale_reservations()
+        return fills
+
+    def _book_reservation_fills(self, fills):
+        """Release what each fill consumed from its order's reservation."""
         for fill in fills:
             if fill.side == "buy":
                 spent = fill.incremental_quantity * fill.price + fill.fees
@@ -1298,6 +1309,9 @@ class PortfolioEmulator:
                 self._execution_position_reservations[
                     fill.order_id
                 ] = remaining
+
+    def _drop_stale_reservations(self):
+        """An order that is no longer pending reserves nothing."""
         pending_ids = {
             order.order_id for order in self._execution_simulator.pending_orders
         }
@@ -1308,12 +1322,82 @@ class PortfolioEmulator:
             for order_id in tuple(reservations):
                 if order_id not in pending_ids:
                     reservations.pop(order_id, None)
-        return fills
 
     def pending_execution_symbols(self):
         if self._execution_simulator is None:
             return ()
         return self._execution_simulator.pending_symbols
+
+    def has_bracket_legs(self):
+        """True while any bracket leg is armed (spec 6.2)."""
+        sim = self._execution_simulator
+        return sim is not None and sim.has_bracket_legs
+
+    def has_next_open_orders(self):
+        """True while any `fill_at_next_open` order is waiting for its open."""
+        sim = self._execution_simulator
+        return sim is not None and sim.has_next_open_orders
+
+    def bar_event_requirements(self):
+        """{symbol: earliest bar_ts still needed} for the broker's bar
+        collector; empty when there is no bar-driven work."""
+        sim = self._execution_simulator
+        if sim is None:
+            return {}
+        return sim.bar_event_requirements()
+
+    def _position_quantity(self, symbol):
+        return float(self._positions.get(symbol, 0.0) or 0.0)
+
+    def process_bar_events(self, bars_by_symbol, clock):
+        """Apply next-open fills and bracket legs for every bar handed in.
+
+        ``bars_by_symbol`` is `backtest_bar_events.collect_bar_events`'s output:
+        {symbol: [{"t", "o", "h", "l", "c", "bar_ts", "available_at"}, ...]}.
+        A bar not yet available at ``clock`` is a look-ahead bug in the caller
+        and raises. Bars run oldest first; bars sharing a bar_ts run sells at
+        the open, then buys at the open, then the rest
+        (`NextEventExecutionSimulator.bar_event_priority`). Returns the fills.
+        """
+        sim = self._execution_simulator
+        if sim is None:
+            return []
+        now = _as_utc(clock)
+        if now is None:
+            raise ValueError("clock must be a datetime")
+        grouped = {}
+        for symbol, bars in (bars_by_symbol or {}).items():
+            for bar in bars or ():
+                event = SimulationBarEvent(
+                    symbol=symbol,
+                    open=bar["o"],
+                    high=bar["h"],
+                    low=bar["l"],
+                    close=bar["c"],
+                    bar_ts=bar["bar_ts"],
+                    available_at=bar["available_at"],
+                )
+                if _as_utc(event.available_at) > now:
+                    raise ValueError(
+                        f"bar {event.symbol} {event.bar_ts} is not available "
+                        f"at {clock}")
+                grouped.setdefault(_as_utc(event.bar_ts), []).append(event)
+        emitted = []
+        for bar_ts in sorted(grouped):
+            batch = sorted(
+                grouped[bar_ts],
+                key=lambda ev: (sim.bar_event_priority(ev), ev.symbol))
+            for event in batch:
+                fills = sim.on_bar(
+                    event,
+                    accept_fill=self.apply_fill,
+                    cash_budget=self.spendable_cash,
+                    position_of=self._position_quantity,
+                )
+                self._book_reservation_fills(fills)
+                emitted.extend(fills)
+        self._drop_stale_reservations()
+        return emitted
 
     def process_price_event(self, prices, *, timestamp):
         """Legacy timestamp relabeling facade; never promotable."""
@@ -1479,12 +1563,23 @@ class PortfolioEmulator:
         cash_per_trade=1000.0,
         sell_fraction=1.0,
         order_source=None,
+        bracket=None,
+        whole_shares=False,
+        fill_at_next_open=False,
     ):
         """
         Convenience: execute a strategy signal (1=buy, -1=sell, 0=hold) with a simple rule.
         Buy: invest up to cash_per_trade; if cash is less than cash_per_trade, use all available cash so the trade still goes through.
         Sell: sell sell_fraction (0-1) of shares of ticker; default 1.0 = sell all.
         Returns True if a trade was executed.
+
+        ``bracket``, ``whole_shares`` and ``fill_at_next_open`` (spec 6.2) are
+        next-event-only and default to today's behaviour: the broker forwards
+        them only when a strategy's sizing hint sets them. A whole-share buy is
+        a QUANTITY order, as live: its share count is floored here and it
+        carries no notional limit, so an opening gap moves the cost, not the
+        count. A next-open order may fill at the first open after the
+        decision, so it gets no execution delay and never rests passively.
         """
         if price is None:
             return False
@@ -1546,6 +1641,10 @@ class PortfolioEmulator:
                 shares = self._execution_simulator.affordable_buy_quantity(
                     amount_to_use, price, symbol=ticker
                 )
+                if whole_shares:
+                    shares = float(math.floor(shares + 1e-9))
+                    if shares <= 0:
+                        return False
                 side = "buy"
             else:
                 try:
@@ -1598,18 +1697,28 @@ class PortfolioEmulator:
             # simulator surfaces via `expired_order_count` rather than hiding.
             # Only viable alongside a holding floor: waiting hours for a fill is
             # free on a 30-day hold and fatal at a 15-minute cadence.
-            _limit_px, _expire = self._passive_limit_for(side, price)
+            if fill_at_next_open:
+                _limit_px, _expire = None, 0
+            else:
+                _limit_px, _expire = self._passive_limit_for(side, price)
+            _whole = bool(whole_shares) and side == "buy"
             order = SimulationOrder(
                 order_id=order_id,
                 symbol=ticker,
                 side=side,
                 quantity=shares,
                 decision_at=timestamp,
-                execute_not_before=timestamp + self._execution_delay,
+                execute_not_before=(
+                    timestamp if fill_at_next_open
+                    else timestamp + self._execution_delay),
                 source=order_source.strip(),
-                notional_limit=amount_to_use if side == "buy" else None,
+                notional_limit=(
+                    amount_to_use if side == "buy" and not _whole else None),
                 limit_price=_limit_px,
                 expire_after_quotes=_expire,
+                bracket=bracket if side == "buy" else None,
+                whole_shares=_whole,
+                fill_at_next_open=bool(fill_at_next_open),
             )
             self.record_order(order)
             self._simulation_order_sequence = next_sequence

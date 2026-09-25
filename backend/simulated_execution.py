@@ -1092,6 +1092,33 @@ class NextEventExecutionSimulator:
                 order.execute_not_before, field="execute_not_before")
         )
 
+    def bar_event_priority(self, event) -> int:
+        """Order bars that share a bar_ts: 0 sells at the open (a next-open
+        sell, or a leg the open gaps through), 1 buys at the open, 2 the rest.
+
+        At one session open, sale proceeds fund the buys; without this an
+        entry sorted alphabetically ahead of the exit it replaces is starved.
+        """
+        seconds = _event_seconds(event.bar_ts, field="bar_ts")
+        buys = False
+        for state in self._pending.values():
+            order = state.order
+            if order.symbol != event.symbol or not self._due_next_open(
+                    order, seconds):
+                continue
+            if order.side == "sell":
+                return 0
+            buys = True
+        # Twin: on_bar's armed check and _trigger_bracket_leg's rules 1-2.
+        for leg in self._bracket_legs.values():
+            if (leg["symbol"] == event.symbol
+                    and _event_seconds(leg["armed_from_bar_ts"],
+                                       field="armed_from_bar_ts") <= seconds
+                    and (event.open <= leg["stop_loss_price"]
+                         or event.open >= leg["take_profit_price"])):
+                return 0
+        return 1 if buys else 2
+
     def on_bar(
         self,
         event: SimulationBarEvent,
@@ -1166,6 +1193,7 @@ class NextEventExecutionSimulator:
         """
         stop = leg["stop_loss_price"]
         target = leg["take_profit_price"]
+        # Twin: bar_event_priority repeats rules 1-2; keep the two in step.
         if event.open <= stop:
             kind, trigger, stamp = "stop_loss_gap", event.open, event.bar_ts
         elif event.open >= target:
