@@ -946,7 +946,13 @@ def test_m1_a_put_whose_build_raises_is_recorded_failed_and_pushed(wheel, monkey
 
 
 def test_m3_an_order_that_cannot_be_built_pushes_a_position_alert(wheel):
-    out = tick(wheel, MON_1040, WheelAdapter(cash=1_000.0), {})
+    # G8a ruling 3(f): a routine sizing skip (cash, the collateral cap) is a
+    # run-summary line instead; any other build failure is still a push.
+    class NoChain(WheelAdapter):
+        def get_option_contracts(self, underlying, **kw):
+            return []
+
+    out = tick(wheel, MON_1040, NoChain(), {})
     assert orders(out) == []
     assert ("wheel_position_alert", "Wheel order failed — place manually: APH") in wheel.sent
     assert not [t for c, t in wheel.sent if c == "swing_run_summary" and "Failed" in t]
@@ -976,3 +982,123 @@ def test_m4_a_real_zero_cash_read_is_still_a_read(wheel):
     tick(wheel, MON_1040, Broke(), {})
     scan = {r["symbol"]: r for r in signals_store.list_wheel_scans("swing-paper")}["APH"]
     assert scan["status"] == "skipped" and "Insufficient cash" in scan["skip_reason"]
+
+
+# -- G8a ruling 3 (G7 carries c-f): per-row isolation, the monitor latch, -----
+# -- push dedupe and routine sizing skips ----------------------------------------
+
+def _capture(m, monkeypatch):
+    sent = []
+    monkeypatch.setattr(m.notify, "send", lambda cat, iid, title, msg, priority=0:
+                        sent.append((cat, title, msg, priority)))
+    return sent
+
+
+def test_c_an_unreadable_qty_skips_that_row_and_never_raises_out_of_the_scan(
+        wheel, monkeypatch):
+    lines = []
+    monkeypatch.setattr(wheel, "_log", lambda msg, color="white": lines.append(msg))
+    bad = short("BAD", 40.0, expiry="2026-06-05", entry=1.0, value=-250.0)
+    bad.qty = "n/a"
+    xyz = short("XYZ", 40.0, expiry="2026-06-05", entry=1.0, value=-250.0)
+    cache = {}
+    out = tick(wheel, MON_1040, WheelAdapter(option_positions=[bad, xyz]), cache)
+    assert [(o["contract"], o["reason"]) for o in orders(out)] == [(xyz.symbol, "wheel_btc_2x")]
+    assert cache[wheel._CHECKS_KEY] == "2026-06-01"
+    assert not any("weekly failed" in line for line in lines)
+    assert any(bad.symbol in line and "unreadable qty" in line for line in lines)
+
+
+def _flaky_decisions(m, monkeypatch, broken):
+    real = m.wheel_rules.put_monitor_decision
+
+    def decide(**kw):
+        if kw["underlying"] in broken:
+            raise RuntimeError(f"bad contract data for {kw['underlying']}")
+        return real(**kw)
+
+    monkeypatch.setattr(m.wheel_rules, "put_monitor_decision", decide)
+
+
+def test_d_a_put_that_raises_keeps_the_monitor_unlatched_and_is_alerted(daily, monkeypatch):
+    _prices(daily, monkeypatch, dict(PRICES, EEE=10.0))
+    _flaky_decisions(daily, monkeypatch, {"EEE"})
+    book = monitor_book() + [short("EEE", 20.0)]
+    cache = {}
+    out = tick(daily, MON_1540, WheelAdapter(option_positions=book), cache)
+    # The readable puts are still handled...
+    assert [(o["contract"], o["reason"]) for o in orders(out)] == [
+        (occ("AAA", 100.0), "wheel_btc_itm")]
+    # ...but the monitor is not "Done": 15:40 is its last tick, so it alerts.
+    assert daily._MONITOR_KEY not in cache
+    incomplete = [(t, m, p) for c, t, m, p in daily.sent
+                  if t == "⚠️ Wheel monitor incomplete — check puts manually"]
+    assert len(incomplete) == 1 and "EEE" in incomplete[0][1]
+
+
+def test_d_a_put_that_raised_is_retried_on_the_next_grid_tick(daily, monkeypatch):
+    _prices(daily, monkeypatch, PRICES)
+    broken = {"BBB"}
+    _flaky_decisions(daily, monkeypatch, broken)
+    cache, early = {}, cfg(monitor_time_et="15:00")
+    tick(daily, datetime(2026, 6, 1, 19, 0, tzinfo=timezone.utc),
+         WheelAdapter(option_positions=monitor_book()), cache, config=early)
+    assert daily._MONITOR_KEY not in cache
+    broken.clear()
+    working = WheelAdapter(option_positions=monitor_book(),
+                           open_orders=[NS(symbol=occ("AAA", 100.0), side="buy", qty=1,
+                                           filled_qty=0)])
+    tick(daily, datetime(2026, 6, 1, 19, 20, tzinfo=timezone.utc), working, cache,
+         config=early)
+    assert cache[daily._MONITOR_KEY] == "2026-06-01"
+    assert "⚠️ Wheel monitor incomplete — check puts manually" not in [
+        t for _c, t, _p in titles(daily)]
+    assert "⚠️ ITM PUT: BBB" in [t for _c, t, _p in titles(daily)]
+
+
+def test_e_informational_pushes_are_not_repeated_on_retry_ticks(daily, monkeypatch):
+    table = {"BBB": 49.0, "CCC": 31.0, "GGG": 52.0}
+    _prices(daily, monkeypatch, table)
+    _flaky_decisions(daily, monkeypatch, {"EEE"})     # keeps the monitor retrying
+    book = [short("BBB", 50.0),                           # 2% ITM, 11 DTE: alert
+            short("CCC", 30.0, expiry="2026-06-01"),      # OTM, expires today: info
+            short("GGG", 50.0, expiry="2026-06-02"),      # OTM, expires tomorrow: info
+            short("EEE", 20.0)]
+    cache, early = {}, cfg(monitor_time_et="15:00")
+    at = lambda h, m: datetime(2026, 6, 1, h, m, tzinfo=timezone.utc)  # noqa: E731
+    tick(daily, at(19, 0), WheelAdapter(option_positions=book), cache, config=early)
+    first = [t for _c, t, _p in titles(daily)]
+    assert first == ["⚠️ ITM PUT: BBB", "⏰ EXPIRING TODAY OTM: CCC",
+                     "⏰ EXPIRING TOMORROW OTM: GGG"]
+    # A retry tick with nothing new: no repeats.
+    tick(daily, at(19, 20), WheelAdapter(option_positions=book), cache, config=early)
+    assert [t for _c, t, _p in titles(daily)] == first
+    # GGG slips into the money: a new state for that contract is still told.
+    table["GGG"] = 49.0
+    tick(daily, at(19, 40), WheelAdapter(option_positions=book), cache, config=early)
+    later = [t for _c, t, _p in titles(daily)][len(first):]
+    assert later == ["⚠️ ITM PUT: GGG",
+                     "⚠️ Wheel monitor incomplete — check puts manually"]
+    # The next session starts over.
+    daily.StrategyWheel()._monitor(datetime(2026, 6, 2, 19, 0, tzinfo=timezone.utc),
+                                   "2026-06-02", date(2026, 6, 2), "swing-paper", early,
+                                   WheelAdapter(option_positions=book[:1]), cache, None)
+    assert [t for _c, t, _p in titles(daily)][-1] == "⚠️ ITM PUT: BBB"
+
+
+@pytest.mark.parametrize("adapter,needle", [
+    (WheelAdapter(cash=1_000.0), "Insufficient cash"),
+    (WheelAdapter(equity=10_000.0), "Collateral cap"),
+])
+def test_f_a_routine_sizing_skip_goes_to_the_run_summary_not_a_push(
+        wheel, monkeypatch, adapter, needle):
+    sent = _capture(wheel, monkeypatch)
+    assert orders(tick(wheel, MON_1040, adapter, {})) == []
+    skips = [(c, t, m, p) for c, t, m, p in sent if t == "Wheel put skipped: APH"]
+    assert len(skips) == 1
+    cat, _t, msg, priority = skips[0]
+    assert (cat, priority) == ("swing_run_summary", 0) and needle in msg
+    assert not [t for c, t, _m, _p in sent if c == "wheel_position_alert"]
+    sig = signals_store.get_signal(signals_store.signal_id_for(
+        "swing-paper", "wheel", "2026-06-01", "APH"))
+    assert sig["status"] == "failed" and needle in sig["error"]

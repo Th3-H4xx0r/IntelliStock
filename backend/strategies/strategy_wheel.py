@@ -118,6 +118,14 @@ def _one_close_per_contract(orders) -> list:
     return out
 
 
+#: wheel_rules.size_contracts' refusals: the lane's own sizing rules.
+_ROUTINE_SKIPS = ("Insufficient cash", "Collateral cap")
+
+
+def _routine_sizing_skip(error) -> bool:
+    return str(error or "").startswith(_ROUTINE_SKIPS)
+
+
 def _emit_options(orders) -> dict:
     if not orders:
         return {}
@@ -510,6 +518,14 @@ class StrategyWheel:
         if order is None:
             record("failed", review_proposal, error=error)
             signals_store.insert_wheel_scan(dict(scan_row, status="skipped", skip_reason=error))
+            if _routine_sizing_skip(error):
+                # G8a ruling 3(f): the lane's own sizing rules refused it (cash,
+                # the per-name collateral cap). Routine, and "place manually"
+                # would advise past the caps: a run-summary line, no push.
+                notify.send("swing_run_summary", iid, f"Wheel put skipped: {symbol}",
+                            f"Sell ${c['strike_price']} put  exp {c['expiry']} was not sent\n"
+                            f"Reason: {error}\nScore: {score}", priority=0)
+                return None
             # M3: a push, not the run summary.
             notify.send("wheel_position_alert", iid,
                         f"Wheel order failed — place manually: {symbol}",
@@ -595,9 +611,18 @@ class StrategyWheel:
             return []
 
         orders = []
-        for p in [p for p in positions if float(getattr(p, "qty", 0) or 0) < 0]:
+        for p in positions:
+            # G8a ruling 3(c): one unreadable row is skipped and logged; it
+            # never raises out of _weekly on every tick (the monitor alerts it).
+            q = _qty(p)
+            if q is None:
+                _log(f"  [wheel-exit] {getattr(p, 'symbol', '?')}: unreadable qty "
+                     f"{getattr(p, 'qty', None)!r} — row skipped", "yellow")
+                continue
+            if q >= 0:
+                continue
             try:
-                qty = abs(int(float(p.qty)))
+                qty = abs(int(q))
                 cost_basis = abs(float(p.avg_entry_price)) * qty * 100
                 current_value = abs(float(p.market_value))
                 if cost_basis > 0:
@@ -722,7 +747,7 @@ class StrategyWheel:
             client = None
         prices = market_data.live_prices(sorted({str(p.underlying).upper() for p in puts}),
                                          adapter=emu, client=client, now=now) if puts else {}
-        orders, alerts = [], 0
+        orders, alerts, errors = [], 0, []
         for p in puts:
             try:
                 d = wheel_rules.put_monitor_decision(
@@ -748,15 +773,28 @@ class StrategyWheel:
                     orders.append(wheel_rules.btc_order(p, abs(int(float(p.qty))), d["intent"],
                                                         session=session))
                 if d["title"]:
+                    # G8a ruling 3(e): an alert-only push is told once per
+                    # contract and state per session, never again on a retry
+                    # tick; a new state (OTM -> ITM) is still told.
+                    if d["action"] != "auto_close" and not _row_alert_once(
+                            cache, session, f"info:{str(p.symbol).upper()}:{d['action']}"):
+                        continue
                     notify.send("wheel_position_alert", iid, d["title"], d["message"],
                                 priority=int(d["priority"] or 0))
                     alerts += 1
             except Exception as exc:
+                # G8a ruling 3(d): a put the rules could not evaluate keeps the
+                # monitor from "Done": it retries next tick and, on its last
+                # tick, alerts like an incomplete map.
                 _log(f"[wheel-monitor] Error processing {p.symbol}: {exc}", "yellow")
+                errors.append(f"{p.symbol} ({type(exc).__name__}: {exc})")
                 continue
-        if not_ready or unknown:
-            reason = not_ready or (f"{len(unknown)} short option(s) listed without contract "
-                                   "fields")
+        if not_ready or unknown or errors:
+            reason = "; ".join(r for r in (
+                not_ready,
+                unknown and f"{len(unknown)} short option(s) listed without contract fields",
+                errors and (f"{len(errors)} short put(s) could not be evaluated: "
+                            + ", ".join(errors))) if r)
             _log(f"[wheel-monitor] Incomplete — checked {len(puts)} readable short put(s), "
                  f"{alerts} alerts sent; {reason}", "yellow")
             return orders, reason
