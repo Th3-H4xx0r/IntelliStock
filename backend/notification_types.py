@@ -165,9 +165,11 @@ NOTIFICATION_TYPES = [
      "desc": ("A short put is in the money, near expiry, has no price, or is being "
               "bought back; or assigned shares are a covered-call candidate (dry run)"),
      "channel": "trades", "discord": True, "push": True, "prefixes": ["WHEEL ALERT ["]},
+    # An assignment leaves strike x 100 x contracts of stock held: it pushes
+    # (ST sent it at priority 1; fix wave item 4).
     {"key": "wheel_assignment", "group": "Swing & Wheel", "label": "Wheel assignment",
      "desc": "A put was assigned and its shares are now held",
-     "channel": "trades", "discord": True, "push": False,
+     "channel": "trades", "discord": True, "push": True,
      "prefixes": ["WHEEL ASSIGNMENT ["]},
     # An order the operator approved that the broker then refused: the
     # operator believes a trade is on, so it pushes (plan C final review).
@@ -197,10 +199,10 @@ def type_for_key(key):
 _PUSH_ON_BY_DEFAULT = {
     "instance_crash",
     # swing-trader port (spec §10): pending reviews, entries, exits, position
-    # alerts, and an approved order the broker refused
+    # alerts, assignments, and an approved order the broker refused
     "swing_entry", "swing_pending_review", "swing_exit",
     "wheel_put_placed", "wheel_pending_review", "wheel_position_alert",
-    "swing_approval_failed",
+    "wheel_assignment", "swing_approval_failed",
 }
 
 
