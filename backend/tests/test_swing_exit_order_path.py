@@ -224,7 +224,7 @@ def _open_leg(symbol="AAPL"):
 def _submit(alerts=None, lines=None):
     ns = extract(("_submit_swing_sell", "_cancel_bracket_legs_confirmed"),
                  namespace={"_swing_unprotected_alert": (
-                     lambda instance_id, symbol, detail:
+                     lambda instance_id, symbol, detail, **kw:
                      (alerts if alerts is not None else []).append(
                          (instance_id, symbol, detail)))})
     return ns["_submit_swing_sell"]
@@ -269,7 +269,8 @@ def test_unconfirmed_legs_defer_the_sell_with_the_old_message():
         "10s; the sell waits a tick")
     assert "transport" not in events
     assert list(service.lifecycle_store.list_for_instance("instance-1")) == []
-    assert alerts == []
+    # Round 2 (must-check 2(d)): the cancel WAS sent, so the stop may be gone.
+    assert len(alerts) == 1
 
 
 class _Refused(InsufficientBuyingPower):
@@ -379,3 +380,129 @@ def test_the_builder_call_passes_the_next_open_flag_only_for_a_swing_sell():
 def test_the_leg_cancel_lives_in_the_after_the_gate_hook():
     body = function_source("_submit_swing_sell")
     assert "before_submit=" in body and "_cancel_bracket_legs_confirmed(" in body
+
+
+# --- round 2, item 1 (must-check 2(d)): a leg cancel ATTEMPTED and the exit
+# not sent is a red alert, once per symbol per session -------------------------
+
+UNPROTECTED = ("position may be unprotected — the bracket stop may have been "
+               "cancelled; the exit will retry next tick")
+
+
+class _RaisingCancel(_LegAdapter):
+    def cancel_orders_confirmed(self, order_ids, timeout_s=10.0, *,
+                                booked_fills=None):
+        self.events.append("cancel-legs")
+        self.cancel_calls.append(sorted(order_ids))
+        raise ConnectionError("reset after the DELETE went out")
+
+
+@pytest.mark.parametrize("adapter_kind", ["unconfirmed", "raised"])
+def test_a_cancel_sent_but_not_confirmed_is_alerted_before_the_deferral(adapter_kind):
+    events, alerts, lines = [], [], []
+    adapter = (_LegAdapter(events, confirmed=False, working=[_open_leg()])
+               if adapter_kind == "unconfirmed"
+               else _RaisingCancel(events, working=[_open_leg()]))
+    service = _service(events)
+    with pytest.raises(ValueError, match="^order deferred: AAPL bracket legs"):
+        _submit(alerts)(adapter, service, _sell_intent(), log=_log(lines))
+    assert adapter.cancel_calls == [["broker-leg-sl"]] and "transport" not in events
+    ((instance_id, symbol, detail),) = alerts
+    assert (instance_id, symbol) == ("instance-1", "AAPL")
+    assert any(color == "red" and "UNPROTECTED" in message
+               for color, message in lines)
+
+
+def test_no_cancel_sent_no_alert():
+    """The book was unreadable, so no cancel went out: the stop is intact."""
+    events, alerts = [], []
+
+    class Unreadable(_LegAdapter):
+        def list_open_orders_strict(self, limit=200):
+            raise ConnectionError("orders endpoint down")
+
+    with pytest.raises(ValueError, match="order deferred"):
+        _submit(alerts)(Unreadable(events), _service(events), _sell_intent())
+    assert alerts == []
+
+
+def _real_alert(sent, now):
+    ns = extract(("_swing_unprotected_alert",), check=())
+    return lambda symbol, detail="d", **kw: ns["_swing_unprotected_alert"](
+        "swing-paper", symbol, detail, now_utc=now, **kw)
+
+
+def test_the_unprotected_alert_is_red_urgent_and_once_per_symbol_per_session(
+        monkeypatch):
+    from swing_trader import notify
+
+    sent = []
+    monkeypatch.setattr(notify, "_sink", lambda **kw: sent.append(kw))
+    monday = datetime_module.datetime(2026, 10, 5, 14, 0,
+                                      tzinfo=datetime_module.timezone.utc)
+    alert = _real_alert(sent, monday)
+    assert alert("AAPL") is True
+    assert alert("AAPL", "again") is False            # throttled
+    assert alert("MSFT") is True
+    tuesday = _real_alert(sent, monday + datetime_module.timedelta(days=1))
+    assert tuesday("AAPL") is True
+    assert len(sent) == 3
+    first = sent[0]
+    assert first["category"] == "swing_exit"
+    assert "(URGENT)" in first["push_title"] and "AAPL" in first["push_title"]
+    assert UNPROTECTED in first["body"] and UNPROTECTED in first["push_body"]
+
+
+def test_the_reviewers_probe_now_raises_one_alert(monkeypatch):
+    """fw1rr/probe_partial_cancel.py: cancels requested for both legs, the
+    confirm never comes, 0 orders sent -> exactly 1 push (was 0)."""
+    from swing_trader import notify
+
+    alerts, lines = [], []
+    monkeypatch.setattr(notify, "_sink", lambda **kw: alerts.append(kw))
+    ns = extract(("_submit_swing_sell", "_cancel_bracket_legs_confirmed",
+                  "_swing_unprotected_alert"), check=())
+
+    class Adapter:
+        def __init__(self):
+            self.cancel_calls = []
+
+        def list_open_orders_strict(self):
+            return [SimpleNamespace(broker_order_id="leg-tp", symbol="AAPL",
+                                    side="sell", order_class="bracket", status="new"),
+                    SimpleNamespace(broker_order_id="leg-sl", symbol="AAPL",
+                                    side="sell", order_class="bracket", status="held")]
+
+        def cancel_orders_confirmed(self, ids, timeout_s=10.0, *, booked_fills=None):
+            self.cancel_calls.append(list(ids))
+            return False
+
+    events = []
+    adapter = Adapter()
+    for _tick in range(2):                     # two ticks, one alert
+        with pytest.raises(ValueError, match="order deferred"):
+            ns["_submit_swing_sell"](adapter, _service(events), _sell_intent(),
+                                     log=_log(lines))
+    assert adapter.cancel_calls == [["leg-tp", "leg-sl"]] * 2
+    assert "transport" not in events
+    assert len(alerts) == 1 and UNPROTECTED in alerts[0]["body"]
+    assert sum(1 for c, m in lines if c == "red" and "UNPROTECTED" in m) == 2
+
+
+def test_the_lane_re_sends_the_exit_while_only_its_legs_are_working():
+    """The deferral re-arms nothing in the engine: the lane re-sends its
+    pending exit next tick because a bracket leg (even pending_cancel or
+    held) is not a working exit sell."""
+    from strategies.strategy_swing import StrategySwing, _PENDING_EXIT_KEY
+
+    cache = {_PENDING_EXIT_KEY: {"AAPL": {"reason": "stop_loss",
+                                          "intent": "swing_stop_exit",
+                                          "since": "2026-10-05"}}}
+    book = [SimpleNamespace(symbol="AAPL", side="sell", order_class="bracket",
+                            status=status) for status in ("pending_cancel", "held")]
+    decisions, sizes, intents = {}, {}, {}
+    StrategySwing()._reemit_exits(
+        "2026-10-05", lambda: ({"AAPL": {"qty": 12}}, None, {"AAPL"}), cache, book,
+        decisions, sizes, intents)
+    assert decisions == {"AAPL": -1}
+    assert intents == {"AAPL": "swing_stop_exit"}

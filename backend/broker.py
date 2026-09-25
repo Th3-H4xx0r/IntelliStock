@@ -11640,7 +11640,8 @@ def _build_bracket_intent(
 
 
 def _cancel_bracket_legs_confirmed(adapter, order_service, symbol, *,
-                                   timeout_s=10.0, log=None, cancelled=None):
+                                   timeout_s=10.0, log=None, cancelled=None,
+                                   attempted=None):
     """Cancel every working bracket leg on ``symbol`` and wait for Alpaca to
     confirm (spec 6.1 broker item 4). True when nothing is left working and the
     sell may go; False defers the sell a tick.
@@ -11650,7 +11651,10 @@ def _cancel_bracket_legs_confirmed(adapter, order_service, symbol, *,
     open orders (a leg whose registration has not happened yet).
 
     ``cancelled`` (a list) receives the leg ids whose cancel Alpaca confirmed,
-    so the caller knows the position has lost its stop.
+    so the caller knows the position has lost its stop. ``attempted`` (a
+    list) receives every leg id a cancel was SENT for, confirmed or not: a
+    cancel that times out, or a leg that fills while being cancelled, may
+    already have taken the stop away (fix wave round 2, must-check 2(d)).
     """
     from broker_adapters.base import is_bracket_child_order
     from live_orders import OrderSource
@@ -11693,6 +11697,8 @@ def _cancel_bracket_legs_confirmed(adapter, order_service, symbol, *,
             leg_ids.append(ref_id)
     if not leg_ids:
         return True
+    if attempted is not None:
+        attempted.extend(leg_ids)
     try:
         confirmed = bool(adapter.cancel_orders_confirmed(
             leg_ids, timeout_s=timeout_s, booked_fills=booked))
@@ -11727,21 +11733,44 @@ def _swing_next_open_exit(hint, intents) -> bool:
         return False
 
 
-def _swing_unprotected_alert(instance_id, symbol, detail):
-    """A swing exit that did not go out after its bracket legs were cancelled:
-    the position has no stop until the lane re-sends it. Priority 2 (URGENT),
-    through the lane's own sender. Never raises."""
+#: Fix wave round 2: the unprotected-exit alerts already sent this New York
+#: session, keyed (symbol, kind): one per symbol per session and kind.
+_swing_unprotected_alerts: dict = {"session": None, "sent": set()}
+
+
+def _swing_unprotected_alert(instance_id, symbol, detail, *, kind="unprotected",
+                             now_utc=None):
+    """A swing exit that did not go out after a cancel was SENT for its
+    bracket legs: the stop may be gone until the lane re-sends the exit on the
+    next tick. RED, priority 2 (URGENT), through the lane's own sender, once
+    per symbol per New York session (and kind). Returns True when sent; never
+    raises. Self-contained (local imports, state through globals()) so an
+    alert can never fail on a missing name."""
     try:
+        import datetime as _dt
+        from zoneinfo import ZoneInfo
+
+        now = now_utc or _dt.datetime.now(_dt.timezone.utc)
+        session = now.astimezone(ZoneInfo("America/New_York")).date().isoformat()
+        state = globals().setdefault("_swing_unprotected_alerts",
+                                     {"session": None, "sent": set()})
+        if state.get("session") != session:
+            state["session"] = session
+            state["sent"] = set()
+        key = (str(symbol or "").strip().upper(), str(kind))
+        if key in state["sent"]:
+            return False
         from swing_trader import notify as _swing_notify
         _swing_notify.send(
             "swing_exit", instance_id,
-            f"EXIT NOT PLACED — {symbol} has no stop",
-            f"{symbol}: the bracket legs were cancelled for an exit, and the "
-            f"exit sell did not go out ({detail}). The position is "
-            "UNPROTECTED; the lane re-sends the exit on the next tick. Check "
-            "open orders.", priority=2)
+            f"EXIT NOT PLACED — {symbol} may be unprotected",
+            f"{symbol}: position may be unprotected — the bracket stop may "
+            "have been cancelled; the exit will retry next tick. Check open "
+            f"orders. ({detail})", priority=2)
+        state["sent"].add(key)
+        return True
     except Exception:
-        pass
+        return False
 
 
 def _submit_swing_sell(adapter, order_service, intent, *, log=None,
@@ -11757,6 +11786,7 @@ def _submit_swing_sell(adapter, order_service, intent, *, log=None,
     the lane re-sends the exit on the next tick (strategy_swing._reemit_exits).
     """
     legs = []
+    attempted = []
 
     def say(message, color="white"):
         if log is not None:
@@ -11768,15 +11798,25 @@ def _submit_swing_sell(adapter, order_service, intent, *, log=None,
     def cancel_legs(_intent, _decision):
         if not _cancel_bracket_legs_confirmed(
                 adapter, order_service, intent.symbol, timeout_s=timeout_s,
-                log=log, cancelled=legs):
+                log=log, cancelled=legs, attempted=attempted):
+            if attempted:
+                # Round 2, must-check 2(d): the cancel went out but was not
+                # confirmed (a timeout, or a leg filled while being cancelled).
+                # The stop may already be gone and no sell goes this tick.
+                unprotected(
+                    f"a cancel was sent for bracket legs {attempted} and not "
+                    f"confirmed within {float(timeout_s):.0f}s (or a leg filled "
+                    "while being cancelled); the exit sell was NOT sent this "
+                    "tick", legs_text=attempted)
             raise ValueError(
                 f"order deferred: {intent.symbol} bracket legs did not confirm "
                 f"cancelled within {float(timeout_s):.0f}s; the sell waits a tick")
 
-    def unprotected(detail):
-        say(f"[swing] {intent.symbol} exit NOT placed after its bracket legs "
-            f"{legs} were cancelled ({detail}): the position is UNPROTECTED "
-            "until the lane re-sends the exit next tick", "red")
+    def unprotected(detail, *, legs_text=None):
+        say(f"[swing] {intent.symbol} exit NOT placed after a cancel of its "
+            f"bracket legs {legs_text if legs_text is not None else legs} "
+            f"({detail}): the position may be UNPROTECTED until the lane "
+            "re-sends the exit next tick", "red")
         _swing_unprotected_alert(
             str(getattr(order_service, "instance_id", "") or ""),
             intent.symbol, detail)
