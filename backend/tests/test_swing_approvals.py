@@ -142,9 +142,34 @@ def test_an_unknown_decision_is_a_value_error():
 
 # -- build_approved_order: swing (app.py:1004-1045) ---------------------------
 
+PUT_400 = ("XYZ261016P00400000", "XYZ", 400.0)
+
+
+def alpaca(*, cash="1000000", bp="1000000", equity="1000000", puts=(), meta=True,
+           orders=()):
+    """A REAL AlpacaAdapter over the network-free alpaca-py doubles: its
+    refresh_cash, strict order book and option map are the producers the
+    swing budget reads (seams I-1). `puts` are (contract, underlying, strike)
+    shorts of one contract; meta=False leaves their contract lookups
+    unanswered, so the map reads incomplete."""
+    from swing_alpaca_fakes import FakeOptionsTradingClient
+    from swing_alpaca_fakes import account as account_row
+    from swing_alpaca_fakes import contract_row, make_adapter, option_position
+
+    client = FakeOptionsTradingClient(
+        account_row=account_row(cash=cash, buying_power=bp, equity=equity),
+        positions=[option_position(occ, qty="-1") for occ, _u, _k in puts],
+        orders=orders,
+        contracts_by_symbol=({occ: contract_row(occ, underlying=u, strike=k,
+                                                expiration="2026-10-16")
+                              for occ, u, k in puts} if meta else {}))
+    return make_adapter(client)
+
+
 def test_the_swing_order_is_rebuilt_at_the_live_price():
     s = dict(sig(), status="approved")
-    out = approvals.build_approved_order(s, live_price=100.0, equity=100_000.0, cfg=CFG)
+    out = approvals.build_approved_order(s, live_price=100.0, equity=100_000.0, cfg=CFG,
+                                         adapter=alpaca())
     # base = int(12_500 / 100) = 125; x0.5 adjustment = 62 shares
     assert out == {"kind": "equity_bracket", "symbol": "AAPL", "qty": 62,
                    "take_profit_price": 109.0, "stop_loss_price": 94.0}
@@ -153,15 +178,75 @@ def test_the_swing_order_is_rebuilt_at_the_live_price():
 def test_approve_half_halves_the_adjusted_shares():
     s = dict(sig(), status="approved_half")
     assert approvals.build_approved_order(s, live_price=100.0, equity=100_000.0,
-                                          cfg=CFG)["qty"] == 31
+                                          cfg=CFG, adapter=alpaca())["qty"] == 31
 
 
 def test_a_price_too_small_for_the_brackets_fails_the_sanity_check():
     s = dict(sig(), status="approved")
     with pytest.raises(ValueError, match="after recalc"):
-        approvals.build_approved_order(s, live_price=0.1, equity=100_000.0, cfg=CFG)
+        approvals.build_approved_order(s, live_price=0.1, equity=100_000.0, cfg=CFG,
+                                       adapter=alpaca())
     with pytest.raises(ValueError):
-        approvals.build_approved_order(s, live_price=0.0, equity=100_000.0, cfg=CFG)
+        approvals.build_approved_order(s, live_price=0.0, equity=100_000.0, cfg=CFG,
+                                       adapter=alpaca())
+
+
+# -- Seams I-1: an approved swing entry spends the lane's collateral-aware budget
+
+def test_i1_an_approved_entry_stays_inside_the_lanes_budget_and_the_puts_stay_covered():
+    """The reviewer's probe (seams/probe_approval_collateral.py): $45k cash,
+    $90k buying power, one short $400 put ($40k collateral). The lane's
+    budget is $5,000; ST's equity sizing alone built 62 shares ($6,200) and
+    left $38,800 of cash under the $40,000 the put needs."""
+    adapter = alpaca(cash="45000", bp="90000", equity="50000", puts=[PUT_400])
+    budget, collateral, reason = account.swing_live_budget(adapter, [])
+    assert (budget, collateral, reason) == (5_000.0, 40_000.0, None)
+    out = approvals.build_approved_order(dict(sig("AAA", adj=1.0), status="approved"),
+                                         live_price=100.0, equity=50_000.0, cfg=CFG,
+                                         adapter=adapter)
+    assert out["qty"] == 50 and out["qty"] * 100.0 <= budget
+    assert 45_000.0 - out["qty"] * 100.0 >= collateral
+
+
+def test_i1_under_the_budget_st_s_sizing_stands():
+    adapter = alpaca(cash="45000", bp="90000", equity="50000", puts=[PUT_400])
+    half = approvals.build_approved_order(dict(sig("AAA", adj=1.0), status="approved_half"),
+                                          live_price=100.0, equity=50_000.0, cfg=CFG,
+                                          adapter=adapter)
+    assert half["qty"] == 31                      # int(62 / 2), under the 50 the budget buys
+
+
+def test_i1_an_unknown_option_book_is_option_book_unreadable():
+    # A contract whose fields cannot be looked up leaves the map incomplete.
+    adapter = alpaca(cash="45000", bp="90000", equity="50000", puts=[PUT_400], meta=False)
+    with pytest.raises(approvals.OptionBookUnreadable, match="incomplete"):
+        approvals.build_approved_order(dict(sig("AAA"), status="approved"), live_price=100.0,
+                                       equity=50_000.0, cfg=CFG, adapter=adapter)
+    assert issubclass(approvals.OptionBookUnreadable, approvals.BookUnreadable)
+
+
+def test_i1_an_unreadable_working_order_book_refuses_the_swing_approval():
+    class Down:
+        def list_open_orders_strict(self, limit=200):
+            raise RuntimeError("orders endpoint unreachable")
+
+    with pytest.raises(approvals.BookUnreadable, match="unreadable"):
+        approvals.build_approved_order(dict(sig(), status="approved"), live_price=100.0,
+                                       equity=100_000.0, cfg=CFG, adapter=Down())
+
+
+def test_i1_a_budget_that_buys_no_whole_share_is_a_definite_refusal():
+    adapter = alpaca(cash="40050", bp="90000", equity="50000", puts=[PUT_400])
+    with pytest.raises(ValueError, match="buys no whole share") as caught:
+        approvals.build_approved_order(dict(sig("AAA"), status="approved"), live_price=100.0,
+                                       equity=50_000.0, cfg=CFG, adapter=adapter)
+    assert not isinstance(caught.value, approvals.BookUnreadable)
+
+
+def test_i1_a_swing_approval_needs_the_adapter():
+    with pytest.raises(ValueError, match="adapter"):
+        approvals.build_approved_order(dict(sig(), status="approved"), live_price=100.0,
+                                       equity=100_000.0, cfg=CFG)
 
 
 # -- build_approved_order: wheel (app.py:888-940, fix 2) ----------------------

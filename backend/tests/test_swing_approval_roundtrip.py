@@ -9,7 +9,8 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from broker_adapters.base import OptionContractDTO, OptionSnapshotDTO
+from broker_adapters.base import (CashDTO, OptionContractDTO, OptionPositionDTO,
+                                  OptionSnapshotDTO)
 from live_orders import GateDecision, OrderSide, OrderSource
 from live_orders.service import OrderSubmission
 from swing_broker_harness import extract
@@ -61,6 +62,11 @@ class Adapter:
 
     def list_open_orders(self, limit=200):
         return list(self.open_orders)
+
+    def refresh_cash(self):
+        # Seams I-1: the swing budget's cash and buying power (CashDTO).
+        return CashDTO(cash=60_000.0, buying_power=60_000.0,
+                       daytrading_buying_power=0.0)
 
     def get_account_options(self):
         return {"cash": 60_000.0, "equity": 60_000.0}
@@ -217,3 +223,53 @@ def test_an_approval_on_an_underlying_already_short_fails_and_places_nothing(sig
         f"SWING APPROVAL FAILED [{IID}] Approved wheel order refused: APH\n"
         "APH: the wheel order you approved was not sent — ")
     assert "duplicate" in notice["body"] and "duplicate" in notice["push_body"]
+
+
+# -- Seams I-1: an approved swing entry spends the lane's collateral-aware budget
+
+class PutAccount(Adapter):
+    """The reviewer's account: $45k cash, $90k buying power, $50k equity, and
+    one short $400 put securing $40,000 of that cash."""
+    _account_equity = 50_000.0
+
+    def __init__(self, health=None):
+        super().__init__(option_positions=[OptionPositionDTO(
+            symbol="XYZ261016P00400000", underlying="XYZ", option_type="put",
+            strike=400.0, expiry="2026-10-16", qty=-1, avg_entry_price=3.0,
+            current_price=3.0, market_value=-300.0, unrealized_pl=0.0)])
+        self.health = health or {"complete": True, "stale_since": None}
+
+    def refresh_cash(self):
+        return CashDTO(cash=45_000.0, buying_power=90_000.0, daytrading_buying_power=0.0)
+
+    def option_positions_health(self):
+        return dict(self.health)
+
+
+def test_i1_an_approved_swing_entry_leaves_the_put_collateral_covered(signals, notices):
+    sid = pending()
+    operator(sid, "approve")
+    service = Service()
+    ok, error, _result = command(service, PutAccount(), sid)
+    assert (ok, error) == (True, "")
+    (intent,) = service.intents
+    # ST's equity sizing: int(6_250 / 100.5) = 62 shares ($6,231). The lane's
+    # budget is $45k - $40k = $5,000: 49 shares at the live 100.5.
+    assert intent.quantity == Decimal("49")
+    assert 45_000.0 - float(intent.quantity) * LIVE >= 40_000.0
+    assert signals_store.get_signal(sid)["status"] == "submitted"
+    assert notices == []
+
+
+def test_i1_an_unknown_option_book_puts_the_approval_back_to_pending(signals, notices):
+    sid = pending()
+    operator(sid, "approve")
+    service = Service()
+    ok, error, _result = command(
+        service, PutAccount(health={"complete": False, "stale_since": None}), sid)
+    assert ok is False and error.startswith("option book unreadable — approve again")
+    assert service.intents == []
+    row = signals_store.get_signal(sid)
+    assert (row["status"], row["decided_at"]) == ("pending", None)
+    (notice,) = notices
+    assert "option book unreadable — approve again" in notice["body"]

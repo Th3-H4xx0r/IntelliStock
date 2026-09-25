@@ -21,13 +21,18 @@ account.option_book. AlpacaAdapter.list_option_positions never raises; after
 an outage or while a contract's fields are unreadable it returns a partial
 map, so an incomplete or stale map refuses the approval like an unreadable
 order book.
+
+Seams I-1: an approved swing entry spends from the lane's own budget
+(account.swing_live_budget), so it can never spend the cash that secures the
+wheel's short puts. An option book that cannot be read is
+OptionBookUnreadable, and the approval goes back to pending.
 """
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
 from swing_trader import clock, wheel_rules
-from swing_trader.account import option_book
+from swing_trader.account import option_book, swing_live_budget
 from swing_trader.constants import POSITION_SIZE_PCT, PROFIT_TARGET, STOP_LOSS
 
 DECISION_STATUS = {"approve": "approved", "approve_half": "approved_half",
@@ -49,6 +54,14 @@ class BookUnreadable(ValueError):
     the book is whole."""
 
 
+class OptionBookUnreadable(BookUnreadable):
+    """Seams I-1: the option book is unreadable, incomplete, stale or holds a
+    short whose collateral is unknown, so a swing entry cannot tell how much
+    cash secures the short puts. Transient, like BookUnreadable: the
+    approval handler puts the signal back to pending ("option book
+    unreadable — approve again")."""
+
+
 def decide(signal: dict, decision: str, user, reason, now_iso: str) -> dict:
     status = DECISION_STATUS.get(str(decision or "").strip().lower())
     if status is None:
@@ -65,7 +78,7 @@ def decide(signal: dict, decision: str, user, reason, now_iso: str) -> dict:
     return out
 
 
-def _working_orders(adapter) -> list:
+def _working_orders(adapter, lane="wheel") -> list:
     """fix F3: the working-order book, or BookUnreadable. The strict reader
     when the adapter has one (AlpacaAdapter.list_open_orders_strict), else
     its list_open_orders; either way an error is a refusal, never []."""
@@ -75,7 +88,7 @@ def _working_orders(adapter) -> list:
     except Exception as exc:
         raise BookUnreadable(
             f"the broker's working-order book is unreadable ({type(exc).__name__}: "
-            f"{exc}); refusing the wheel approval rather than reading it as empty") from exc
+            f"{exc}); refusing the {lane} approval rather than reading it as empty") from exc
     if not isinstance(orders, (list, tuple)):
         raise BookUnreadable(f"the broker's working-order book is unreadable (got "
                              f"{type(orders).__name__}, not a list)")
@@ -92,6 +105,24 @@ def _option_positions(adapter) -> list:
             f"the broker's option positions are not a complete, current map ({not_ready}); "
             "refusing the wheel approval rather than reading a partial book")
     return rows
+
+
+def _swing_budget(adapter) -> float:
+    """Seams I-1: what an approved swing entry may spend -- the budget the
+    lane's own entries use (account.swing_live_budget): buying power with no
+    short put open, else the smaller of buying power and cash less the
+    collateral of every open short put and working sell-to-open put. An
+    unreadable working-order book is BookUnreadable; an option book that
+    cannot be read as a complete, current map is OptionBookUnreadable."""
+    if adapter is None:
+        raise ValueError("a swing approval needs the broker adapter")
+    book = _working_orders(adapter, lane="swing")
+    budget, _collateral, reason = swing_live_budget(adapter, book)
+    if budget is None:
+        raise OptionBookUnreadable(
+            f"the cash securing short puts cannot be read ({reason}); refusing the "
+            "swing approval rather than spending it")
+    return float(budget)
 
 
 def build_approved_order(signal: dict, *, live_price, equity, cfg, adapter=None,
@@ -126,6 +157,15 @@ def build_approved_order(signal: dict, *, live_price, equity, cfg, adapter=None,
         if target_price <= live_price + 0.01:
             raise ValueError(f"target_price ${target_price:.4f} <= live_price "
                              f"${live_price:.4f} + 0.01 after recalc")
+
+        # Seams I-1: never more than the lane's budget buys at the live price,
+        # so the cash securing the wheel's short puts stays unspent.
+        budget = _swing_budget(adapter)
+        affordable = int(budget // live_price)
+        if affordable < 1:
+            raise ValueError(f"the swing budget ${budget:,.2f} buys no whole share of "
+                             f"{signal.get('symbol')} at ${live_price:,.2f}")
+        shares = min(shares, affordable)
         return {"kind": "equity_bracket", "symbol": signal["symbol"], "qty": shares,
                 "take_profit_price": target_price, "stop_loss_price": stop_price}
 

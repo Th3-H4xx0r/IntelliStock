@@ -30,6 +30,7 @@ from live_risk_state import (
     initialize_risk_state,
 )
 from benchmark_alpha.watchdog import ControlHealth
+from broker_adapters.base import CashDTO
 from market_marks import MarketMark, MarkQuality, MarkSource, classify_session
 from swing_broker_harness import extract, function_source
 from swing_trader import approvals, notify, signals_store
@@ -151,6 +152,22 @@ class _Adapter:
         if self.calendar_raises is not None:
             raise self.calendar_raises
         return self.market_open
+
+    # Seams I-1: what swing_trader.approvals reads for a swing entry's budget
+    # (AlpacaAdapter's strict order book, option map and refresh_cash, which
+    # also refreshes the cached cash).
+    def list_open_orders_strict(self, limit=200):
+        return []
+
+    def list_option_positions(self):
+        return []
+
+    def option_positions_health(self):
+        return {"complete": True, "stale_since": None}
+
+    def refresh_cash(self):
+        self._cash = self.cash
+        return CashDTO(cash=self.cash, buying_power=self.cash, daytrading_buying_power=0.0)
 
 
 def _risk():

@@ -758,8 +758,25 @@ def test_the_re_approval_round_trip_through_the_real_store_and_service(store,
         lifecycle_store=OrderLifecycleStore(InMemoryLifecycleBackend()))
     handler = _extract_handler()["_execute_swing_approval"]
 
+    class _BudgetAdapter(_Adapter):
+        """Seams I-1: what the real approvals reads for a swing entry's budget
+        (an empty strict order book and option map; CashDTO cash)."""
+
+        def list_open_orders_strict(self, limit=200):
+            return []
+
+        def list_option_positions(self):
+            return []
+
+        def option_positions_health(self):
+            return {"complete": True, "stale_since": None}
+
+        def refresh_cash(self):
+            from broker_adapters.base import CashDTO
+            return CashDTO(cash=60000.0, buying_power=60000.0, daytrading_buying_power=0.0)
+
     def command():
-        return handler(_Adapter(), {"source": "swing_approval", "signal_id": sid},
+        return handler(_BudgetAdapter(), {"source": "swing_approval", "signal_id": sid},
                        service, cached_strategies=LANES, now_utc=RTH,
                        sleep=lambda seconds: None)
 

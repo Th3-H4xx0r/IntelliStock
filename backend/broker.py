@@ -11316,6 +11316,10 @@ def _execute_swing_approval(adapter, payload, order_service, *,
         except Exception as exc:
             unreadable = getattr(approvals, "BookUnreadable", None)
             if isinstance(unreadable, type) and isinstance(exc, unreadable):
+                # Seams I-1: a swing entry whose put collateral is unknown.
+                option_book = getattr(approvals, "OptionBookUnreadable", None)
+                if isinstance(option_book, type) and isinstance(exc, option_book):
+                    return back_to_pending("option book unreadable", detail=str(exc))
                 return back_to_pending("broker order book unreadable", detail=str(exc))
             return failed(f"swing approval failed: {type(exc).__name__}: {exc}",
                           str(exc) or type(exc).__name__)
