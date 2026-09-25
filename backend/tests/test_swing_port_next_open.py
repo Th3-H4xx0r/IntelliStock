@@ -66,6 +66,7 @@ def test_a_buy_fills_at_the_open_with_the_market_cost_model():
     assert fill.executed_at == MON_OPEN
     assert fill.source == "main_signal"
     assert sim.pending_order_count == 0
+    assert sim.execution_summary()["next_open_expired_order_count"] == 0
 
 
 def test_a_sell_fills_at_the_open_below_it():

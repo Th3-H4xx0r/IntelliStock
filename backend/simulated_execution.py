@@ -650,6 +650,13 @@ class NextEventExecutionSimulator:
         self._bar_cursor: dict[str, float] = {}
         self._next_open_order_count = 0
         self._next_open_expired_count = 0
+        self._bracket_legs: dict[str, dict] = {}
+        self._cancelled_order_count = 0
+        self._bracket_order_count = 0
+        self._bracket_exit_counts = {
+            "stop_loss": 0, "stop_loss_gap": 0,
+            "take_profit": 0, "take_profit_gap": 0,
+        }
 
     def _model_for(self, symbol) -> ExecutionCostModel:
         """The cost model for one symbol. Identity when untiered, so an
@@ -698,8 +705,40 @@ class NextEventExecutionSimulator:
             raise ValueError(f"duplicate order_id: {order.order_id}")
         self._known_order_ids.add(order.order_id)
         self._pending[order.order_id] = _PendingOrder(order=order)
+        if order.bracket is not None:
+            self._bracket_order_count += 1
         if order.fill_at_next_open:
             self._next_open_order_count += 1
+
+    def cancel(self, order_id) -> bool:
+        """Withdraw a pending order. True when one was pending.
+
+        Only the bracket one-cancels-other rule calls this today. A cancelled
+        order is not pending, so it never reaches `unfilled_order_count`; it
+        is counted in `cancelled_order_count` instead.
+        """
+        state = self._pending.pop(str(order_id or "").strip(), None)
+        if state is None:
+            return False
+        self._cancelled_order_count += 1
+        return True
+
+    @property
+    def has_bracket_legs(self) -> bool:
+        return bool(self._bracket_legs)
+
+    @property
+    def bracket_legs(self) -> tuple[dict, ...]:
+        """Armed legs, oldest first, as copies with `parent_id` added.
+
+        Deliberately NOT part of `pending_orders`: a leg is a contingent exit
+        on shares already held, not an order waiting to fill, so it must not
+        count as unfilled or make its symbol look pending to a guard.
+        """
+        return tuple(
+            {"parent_id": parent_id, **leg}
+            for parent_id, leg in self._bracket_legs.items()
+        )
 
     @property
     def has_next_open_orders(self) -> bool:
@@ -724,6 +763,8 @@ class NextEventExecutionSimulator:
         for state in self._pending.values():
             if state.order.fill_at_next_open:
                 _need(state.order.symbol, state.order.decision_at)
+        for leg in self._bracket_legs.values():
+            _need(leg["symbol"], leg["armed_from_bar_ts"])
         return {
             symbol: datetime.fromtimestamp(
                 max(seconds, self._bar_cursor.get(symbol, seconds)),
@@ -861,6 +902,7 @@ class NextEventExecutionSimulator:
                     1.0 + model.slippage_bps / 10_000.0
                 )
             else:
+                # Twin: _trigger_bracket_leg prices a triggered stop this way.
                 touch_price = min(quote.bid, mid - modeled_half_spread)
                 fill_price = touch_price * (
                     1.0 - model.slippage_bps / 10_000.0
@@ -983,12 +1025,62 @@ class NextEventExecutionSimulator:
             liquidity -= incremental
             if is_final:
                 completed.append(order_id)
+            if order.bracket is not None:
+                self._arm_bracket_legs(order, incremental, quote.timestamp)
+            elif order.side == "sell" and self._bracket_legs:
+                self._shrink_bracket_legs(order.symbol, incremental)
 
         for order_id in completed:
             self._pending.pop(order_id, None)
         return tuple(emitted)
 
     # -- swing port: next-open fills and bracket legs (spec 6.2) -------------
+
+    def _arm_bracket_legs(self, order, quantity, armed_from) -> None:
+        """Arm (or grow) the legs for a bracket parent's fill.
+
+        `armed_from` is the fill's quote time. A leg checks every bar whose
+        bar_ts is at or after it: a next-open fill is stamped at its bar's
+        open, so that bar's whole range counts; a fill at a close is stamped
+        after its bar's open, so the check starts with the next bar.
+        """
+        leg = self._bracket_legs.get(order.order_id)
+        if leg is None:
+            self._bracket_legs[order.order_id] = {
+                "symbol": order.symbol,
+                "qty": float(quantity),
+                "stop_loss_price": order.bracket["stop_loss_price"],
+                "take_profit_price": order.bracket["take_profit_price"],
+                "armed_from_bar_ts": armed_from,
+            }
+        else:
+            leg["qty"] += float(quantity)
+
+    def _shrink_bracket_legs(self, symbol, quantity) -> None:
+        """A strategy sell that FILLED takes its shares out of the legs,
+        oldest parent first; a leg left with nothing is deleted."""
+        remaining = float(quantity)
+        for parent_id in tuple(self._bracket_legs):
+            if remaining <= 1e-12:
+                break
+            leg = self._bracket_legs[parent_id]
+            if leg["symbol"] != symbol:
+                continue
+            taken = min(leg["qty"], remaining)
+            leg["qty"] -= taken
+            remaining -= taken
+            if leg["qty"] <= 1e-9:
+                del self._bracket_legs[parent_id]
+
+    def _close_bracket(self, parent_id, symbol) -> None:
+        """One-cancels-other: the legs go, and so does anything still waiting
+        to sell the same shares -- a strategy sell, or the parent's unfilled
+        remainder."""
+        self._bracket_legs.pop(parent_id, None)
+        self.cancel(parent_id)
+        for order_id, state in tuple(self._pending.items()):
+            if state.order.symbol == symbol and state.order.side == "sell":
+                self.cancel(order_id)
 
     @staticmethod
     def _due_next_open(order, bar_seconds) -> bool:
@@ -1043,8 +1135,101 @@ class NextEventExecutionSimulator:
                 if self._pending.pop(order_id, None) is not None:
                     self._next_open_expired_count += 1
 
+        for parent_id in tuple(self._bracket_legs):
+            leg = self._bracket_legs.get(parent_id)
+            if leg is None or leg["symbol"] != event.symbol:
+                continue
+            if _event_seconds(leg["armed_from_bar_ts"],
+                              field="armed_from_bar_ts") > bar_seconds:
+                continue
+            fill = self._trigger_bracket_leg(
+                parent_id, leg, event,
+                accept_fill=accept_fill, position_of=position_of)
+            if fill is not None:
+                emitted.append(fill)
+
         self._bar_cursor[event.symbol] = bar_seconds
         return emitted
+
+    def _trigger_bracket_leg(self, parent_id, leg, event, *, accept_fill,
+                             position_of):
+        """Spec 6.2's five rules, first match wins:
+
+        1. open <= stop            -> stop fills AT THE OPEN (gapped through)
+        2. open >= target          -> target fills AT THE OPEN
+        3. low <= stop, high >= target -> the STOP, at the stop price: the path
+           inside a bar is unknown, so assume the worse outcome
+        4. low <= stop             -> stop at the stop price
+        5. high >= target          -> target at the target price
+
+        Rule 3 is rule 4 reached first, which is the point of the ordering.
+        """
+        stop = leg["stop_loss_price"]
+        target = leg["take_profit_price"]
+        if event.open <= stop:
+            kind, trigger, stamp = "stop_loss_gap", event.open, event.bar_ts
+        elif event.open >= target:
+            kind, trigger, stamp = "take_profit_gap", event.open, event.bar_ts
+        elif event.low <= stop:
+            kind, trigger, stamp = "stop_loss", stop, event.available_at
+        elif event.high >= target:
+            kind, trigger, stamp = "take_profit", target, event.available_at
+        else:
+            return None
+        quantity = float(leg["qty"])
+        if position_of is not None:
+            try:
+                held = max(0.0, float(position_of(event.symbol) or 0.0))
+            except (TypeError, ValueError):
+                held = quantity
+            quantity = min(quantity, held)
+        if quantity <= 1e-12:
+            # Nothing left to protect: the shares went some other way.
+            self._close_bracket(parent_id, event.symbol)
+            return None
+        model = self._model_for(event.symbol)
+        is_stop = kind.startswith("stop_loss")
+        if is_stop:
+            # A triggered stop is a market sell: it pays the half spread and
+            # the slippage, measured from the trigger.
+            # Twin: on_quote's market-sell branch; keep the two in step.
+            touch = trigger * (1.0 - model.spread_bps / 20_000.0)
+            price = touch * (1.0 - model.slippage_bps / 10_000.0)
+            spread_cost = abs(trigger - touch) * quantity
+            slippage_cost = abs(touch - price) * quantity
+        else:
+            # The target is a resting limit: like a passive fill it crosses
+            # nothing, and the fee is its only cost.
+            price = trigger
+            spread_cost = slippage_cost = 0.0
+        price = _finite_number(price, field="bracket fill price", positive=True)
+        fees = quantity * price * model.fee_bps / 10_000.0
+        leg_code = "sl" if is_stop else "tp"
+        gap = "_gap" if kind.endswith("_gap") else ""
+        fill = SimulationFill(
+            order_id=f"{parent_id}:{leg_code}",
+            symbol=event.symbol,
+            side="sell",
+            incremental_quantity=quantity,
+            cumulative_quantity=quantity,
+            price=price,
+            fees=fees,
+            spread_cost=spread_cost,
+            slippage_cost=slippage_cost,
+            quote_timestamp=stamp,
+            executed_at=stamp,
+            cost_model_version=self.cost_model.version,
+            source=f"bracket_{leg_code}{gap}:{parent_id}",
+            order_quantity=quantity,
+            is_final=True,
+            exit_reason="stop_loss" if is_stop else "take_profit",
+        )
+        if accept_fill is not None:
+            accept_fill(fill)
+        self._fills.append(fill)
+        self._bracket_exit_counts[kind] += 1
+        self._close_bracket(parent_id, event.symbol)
+        return fill
 
     def execution_summary(self) -> dict:
         summary = {
@@ -1067,4 +1252,9 @@ class NextEventExecutionSimulator:
             summary["next_open_order_count"] = self._next_open_order_count
             summary["next_open_expired_order_count"] = (
                 self._next_open_expired_count)
+        if self._bracket_order_count:
+            summary["bracket_order_count"] = self._bracket_order_count
+            summary["bracket_open_leg_count"] = len(self._bracket_legs)
+            summary["bracket_exit_counts"] = dict(self._bracket_exit_counts)
+            summary["cancelled_order_count"] = self._cancelled_order_count
         return summary
