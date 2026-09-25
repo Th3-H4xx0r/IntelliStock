@@ -134,3 +134,95 @@ def test_a_stop_the_open_gaps_through_funds_an_earlier_named_entry():
     assert buy.incremental_quantity == 12.0
     assert emu.get_execution_summary()["next_open_expired_order_count"] == 0
     assert emu.get_positions() == {"AAPL": 12.0}
+
+
+# -- FW-bt minor 2: a next-open order never waits more than 5 sessions --------
+
+def _day_tick(emu, data, now, prices=None):
+    """One broker tick: pending closes and the bar hook, then the end-of-tick
+    snapshot that moves the emulator's clock (save_portfolio_snapshot)."""
+    fills = _tick(emu, data, now)
+    emu.save_portfolio_snapshot(dict(prices or {}), now)
+    return fills
+
+
+def test_a_next_open_order_whose_symbol_never_prints_again_is_cancelled_after_5_sessions(
+        monkeypatch):
+    """backtest-review M2: a delisting, an acquisition or a data gap left the
+    order pending for the rest of the run -- a slot and a sector held, and
+    12.5% of equity reserved away from every later buy."""
+    warned = []
+    monkeypatch.setattr(bbe, "_warn", warned.append)
+    emu = _emulator()
+    assert _enter(emu, _at("2026-03-02"), symbol="GONE")
+    emu.save_portfolio_snapshot({}, _at("2026-03-02"))
+    assert emu.get_buying_power(sum(emu._execution_cash_reservations.values())) < 10_000.0
+    data = {"GONE": [_bar("2026-02-27", 100, 101, 99, 100)]}
+    # Mon-Fri 03-02..03-06 are the 5 sessions after the decision. The tick
+    # after the fifth has closed still waits (its clock is the last tick's).
+    for day in ("2026-03-03", "2026-03-04", "2026-03-05", "2026-03-06", "2026-03-09"):
+        _day_tick(emu, data, _at(day))
+        assert emu.pending_execution_symbols() == ("GONE",), day
+    assert warned == []
+    _day_tick(emu, data, _at("2026-03-10"))
+    assert emu.pending_execution_symbols() == ()
+    assert emu._execution_cash_reservations == {}
+    assert emu.get_buying_power() == 10_000.0
+    assert emu.has_next_open_orders() is False
+    summary = emu._execution_simulator.execution_summary()
+    assert summary["next_open_order_count"] == 1
+    assert summary["next_open_expired_order_count"] == 1
+    assert summary["unfilled_order_count"] == 0
+    [line] = warned
+    assert "GONE" in line and "5 sessions" in line
+
+
+def test_a_halt_shorter_than_5_sessions_still_fills_at_the_reopen():
+    """T7's halt case stands: four sessions without a bar, then the reopen."""
+    emu = _emulator()
+    _enter(emu, _at("2026-03-02"))
+    data = {"AAPL": [_bar("2026-02-27", 100, 101, 99, 100)]}
+    for day in ("2026-03-03", "2026-03-04", "2026-03-05", "2026-03-06"):
+        assert _day_tick(emu, data, _at(day)) == []
+    data["AAPL"].append(_bar("2026-03-06", 97, 99, 96, 98))       # Fri reopens
+    [buy] = _day_tick(emu, data, _at("2026-03-09"))
+    assert (buy.side, buy.quote_timestamp) == (
+        "buy", datetime(2026, 3, 6, 14, 30, tzinfo=UTC))
+    assert emu.has_bracket_legs() is True
+
+
+def test_a_next_open_sell_of_a_name_that_stops_printing_is_cancelled_too(monkeypatch):
+    monkeypatch.setattr(bbe, "_warn", lambda message: None)
+    emu = _emulator()
+    emu._positions = {"GONE": 10.0}
+    assert emu.execute_signal("GONE", -1, 100.0, timestamp=_at("2026-03-02"),
+                              sell_fraction=1.0, order_source="main_signal",
+                              fill_at_next_open=True)
+    emu.save_portfolio_snapshot({}, _at("2026-03-02"))
+    for day in ("2026-03-03", "2026-03-04", "2026-03-05", "2026-03-06", "2026-03-09",
+                "2026-03-10"):
+        _day_tick(emu, {}, _at(day))
+    assert emu.pending_execution_symbols() == ()
+    assert emu._execution_position_reservations == {}
+    assert emu.get_positions() == {"GONE": 10.0}
+
+
+def test_sessions_are_counted_on_the_nyse_calendar():
+    after = datetime(2026, 2, 13, 13, 0, tzinfo=UTC)         # Fri 08:00 ET
+    # Fri 02-13, then Presidents' Day, then Tue-Fri 02-17..02-20.
+    assert bbe.completed_sessions_after(after, datetime(2026, 2, 20, 20, 0, tzinfo=UTC)) == 4
+    assert bbe.completed_sessions_after(after, datetime(2026, 2, 20, 21, 0, tzinfo=UTC)) == 5
+    assert bbe.completed_sessions_after(after, after) == 0
+    # A decision after the open does not count that session.
+    assert bbe.completed_sessions_after(
+        datetime(2026, 2, 13, 15, 0, tzinfo=UTC), datetime(2026, 2, 13, 22, 0, tzinfo=UTC)) == 0
+
+
+def test_without_the_calendar_library_sessions_are_weekdays(monkeypatch):
+    import live_calendar
+
+    monkeypatch.setattr(live_calendar, "_HAS_LIB", False)
+    after = datetime(2026, 2, 13, 13, 0, tzinfo=UTC)
+    # Presidents' Day counts as a weekday session in the fallback.
+    assert bbe.completed_sessions_after(after, datetime(2026, 2, 19, 21, 0, tzinfo=UTC)) == 5
+    assert bbe.completed_sessions_after(after, datetime(2026, 2, 19, 20, 0, tzinfo=UTC)) == 4

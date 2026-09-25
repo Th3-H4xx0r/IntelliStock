@@ -126,6 +126,11 @@ SETTLED_SELL_PROCEEDS_FRACTION = 0.95
 #: When the withheld remainder becomes spendable. US equities settle T+1.
 DEFAULT_SETTLEMENT_DELAY = timedelta(days=1)
 
+#: A `fill_at_next_open` order whose symbol prints no bar for this many NYSE
+#: sessions after its decision is cancelled (FW-bt minor 2). Swing port only:
+#: nothing else submits next-open orders.
+NEXT_OPEN_MAX_SESSIONS = 5
+
 #: Annual distribution yields used to accrue dividends onto held equities.
 #:
 #: This exists because the two sides of the benchmark comparison do NOT share a
@@ -1340,11 +1345,61 @@ class PortfolioEmulator:
 
     def bar_event_requirements(self):
         """{symbol: earliest bar_ts still needed} for the broker's bar
-        collector; empty when there is no bar-driven work."""
+        collector; empty when there is no bar-driven work.
+
+        A next-open order that can no longer be filled is not needed: it is
+        cancelled first (`_expire_unbarred_next_open_orders`). The broker
+        calls this at the top of every tick's bar hook, which runs while any
+        next-open order waits, so the check needs no hook of its own."""
         sim = self._execution_simulator
         if sim is None:
             return {}
+        if sim.has_next_open_orders:
+            self._expire_unbarred_next_open_orders()
         return sim.bar_event_requirements()
+
+    def _expire_unbarred_next_open_orders(self):
+        """FW-bt minor 2: cancel each next-open order whose symbol has printed
+        no bar in NEXT_OPEN_MAX_SESSIONS sessions after its decision (a
+        delisting, an acquisition, a data gap), and release its reservation.
+        A live DAY or GTC order would be cancelled or rejected; left pending,
+        a buy reserved its cash away from every later buy for the rest of the
+        run. A shorter halt still fills at the reopen.
+
+        Judged on the emulator's clock, the last timestamp the run handed it
+        (the previous tick's snapshot): every bar available by then went
+        through the hook, and any bar after the decision fills or drops a
+        next-open order, so one still waiting saw no bar in those sessions."""
+        now = self._clock
+        if now is None:
+            return ()
+        try:
+            import backtest_bar_events as _bbe
+        except ImportError:  # Package import path used by repository-root pytest.
+            from backend import backtest_bar_events as _bbe
+        limit = NEXT_OPEN_MAX_SESSIONS
+
+        def _stale(order):
+            decided = _as_utc(order.decision_at)
+            # Five sessions need more than four calendar days; skip the
+            # calendar for the common case, an order one tick old.
+            if decided is None or now - decided < timedelta(days=4):
+                return False
+            return _bbe.completed_sessions_after(decided, now) >= limit
+
+        dropped = self._execution_simulator.expire_next_open_orders(_stale)
+        for order in dropped:
+            reserved = (self._execution_cash_reservations.get(order.order_id)
+                        if order.side == "buy"
+                        else self._execution_position_reservations.get(order.order_id))
+            _bbe._warn(
+                f"[execution] NEXT-OPEN EXPIRED {order.side.upper()} {order.symbol} "
+                f"{order.order_id}: no bar in {limit} sessions since its decision at "
+                f"{order.decision_at}; cancelled, releasing its reservation "
+                f"({'$%.2f' % float(reserved or 0.0) if order.side == 'buy' else '%s shares' % reserved}).")
+        if dropped:
+            self._drop_stale_reservations()
+        return dropped
 
     def _position_quantity(self, symbol):
         return float(self._positions.get(symbol, 0.0) or 0.0)

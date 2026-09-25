@@ -772,6 +772,21 @@ class NextEventExecutionSimulator:
             for symbol, seconds in needs.items()
         }
 
+    def expire_next_open_orders(self, is_stale) -> tuple[SimulationOrder, ...]:
+        """Drop every waiting next-open order ``is_stale(order)`` is True
+        for, counted with the one-shot drops in
+        `next_open_expired_order_count`. The caller judges staleness (the
+        emulator counts exchange sessions), so the simulator stays
+        calendar-free. A next-open order fills whole at one bar, so a
+        waiting one has filled nothing."""
+        dropped = []
+        for order_id, state in tuple(self._pending.items()):
+            if state.order.fill_at_next_open and is_stale(state.order):
+                del self._pending[order_id]
+                self._next_open_expired_count += 1
+                dropped.append(state.order)
+        return tuple(dropped)
+
     def affordable_buy_quantity(
         self, cash: float, reference_price: float, symbol=None
     ) -> float:
