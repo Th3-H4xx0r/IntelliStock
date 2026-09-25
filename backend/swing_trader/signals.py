@@ -80,12 +80,22 @@ def sector_conflict(symbol: str, active_positions, *, sector_of,
 def update_regime_tracker(state, regime_ok: bool, session: str) -> dict:
     """paper_trader.py:143-149 — `days = 0 if regime_ok else blocked + 1` — but
     keyed on the NY session: ST's cron re-ran on retries and restarts and each
-    run advanced the counter (fix 11). The first evaluation of a session wins."""
+    run advanced the counter (fix 11).
+
+    fix (G1 minor 1): the state keeps the PRIOR session's count and every call
+    within a session recomputes from it, so the count still moves once per
+    session but the session's latest verdict wins — a transient VIX failure
+    on the first evaluation no longer freezes a false bear-mode day."""
     state = dict(state or {})
     if state.get("session") == session:
-        return {"session": session, "blocked_days": int(state.get("blocked_days") or 0)}
-    days = 0 if regime_ok else int(state.get("blocked_days") or 0) + 1
-    return {"session": session, "blocked_days": days}
+        prior = state.get("prior_blocked_days")
+        if prior is None:   # a state written before the fix: blocked_days = prior + 1
+            prior = max(int(state.get("blocked_days") or 0) - 1, 0)
+    else:
+        prior = state.get("blocked_days")
+    prior = int(prior or 0)
+    days = 0 if regime_ok else prior + 1
+    return {"session": session, "blocked_days": days, "prior_blocked_days": prior}
 
 
 def select_entry_universe(regime_ok, blocked_days, *, bear_regime_days,

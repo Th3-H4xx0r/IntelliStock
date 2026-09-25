@@ -121,10 +121,27 @@ def test_fix_11_a_second_tick_in_the_same_session_does_not_count(tmp_path):
     assert st.update_regime_tracker(False) == 2      # ST counted runs
     state = signals.update_regime_tracker(None, False, "2026-06-01")
     state = signals.update_regime_tracker(state, False, "2026-06-01")
-    assert state == {"session": "2026-06-01", "blocked_days": 1}
+    assert (state["session"], state["blocked_days"]) == ("2026-06-01", 1)
     state = signals.update_regime_tracker(state, False, "2026-06-02")
     assert state["blocked_days"] == 2
     assert signals.update_regime_tracker(state, True, "2026-06-03")["blocked_days"] == 0
+
+
+def test_the_bear_counter_follows_a_sessions_latest_verdict():
+    # G1 minor 1: a transient VIX failure on the first evaluation of a session
+    # must not freeze a false bear-mode count for the whole session.
+    state = {"session": "2026-06-01", "blocked_days": 8}
+    state = signals.update_regime_tracker(state, False, "2026-06-02")   # transient block
+    assert state["blocked_days"] == 9
+    state = signals.update_regime_tracker(state, True, "2026-06-02")    # recovered rerun
+    assert state["blocked_days"] == 0
+    state = signals.update_regime_tracker(state, False, "2026-06-02")   # blocked again
+    assert state["blocked_days"] == 9                                   # still once a session
+    assert signals.update_regime_tracker(state, False, "2026-06-03")["blocked_days"] == 10
+    # The other way round: recovered first, then blocked, in one session.
+    state = signals.update_regime_tracker({"session": "2026-06-01", "blocked_days": 8},
+                                          True, "2026-06-02")
+    assert signals.update_regime_tracker(state, False, "2026-06-02")["blocked_days"] == 9
 
 
 def test_select_entry_universe_follows_paper_trader_600_626():
