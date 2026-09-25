@@ -171,12 +171,12 @@ def test_an_entry_unfilled_after_two_sessions_is_closed_as_unfilled(store, monke
     adapter = ClosedOrders([order("FIL", "buy", 50.0, at="2026-07-02T13:31:00+00:00")])
 
     # One session after (Monday 07-06): still inside the window.
-    assert cal.record_outcomes("swing-paper", adapter, "swing", held={"HLD"},
+    assert cal.record_outcomes("swing-paper", adapter, "swing", held={"HLD"}, working=set(),
                                today=date(2026, 7, 6)) == 0
     assert signals_store.get_signal(never)["outcome"] is None
 
     # Two sessions after (Tuesday 07-07): the entries with no fill close.
-    assert cal.record_outcomes("swing-paper", adapter, "swing", held={"HLD"},
+    assert cal.record_outcomes("swing-paper", adapter, "swing", held={"HLD"}, working=set(),
                                today=date(2026, 7, 7)) == 2
     for sid in (never, submitted):
         row = signals_store.get_signal(sid)
@@ -190,7 +190,7 @@ def test_an_entry_unfilled_after_two_sessions_is_closed_as_unfilled(store, monke
     assert signals_store.swing_owned_symbols("swing-paper", {"NVR", "HLD"}) == {"HLD"}
     _open_swing("NEW", "2026-07-08")
     cal.record_outcomes("swing-paper", adapter, "swing", held={"HLD", "FIL"},
-                        today=date(2026, 7, 8))
+                        working=set(), today=date(2026, 7, 8))
     assert adapter.calls[-1] == (["NEW"], "2026-07-08")
     # An unfilled close never counts as a round trip.
     report = cal.calibration_report("swing-paper")
@@ -224,6 +224,25 @@ def test_a_closed_orders_outage_closes_nothing(store, monkeypatch):
         def list_closed_orders(self, symbols, after):
             raise RuntimeError("orders endpoint down")
 
-    assert cal.record_outcomes("swing-paper", Down(), "swing", held=set(),
+    assert cal.record_outcomes("swing-paper", Down(), "swing", held=set(), working=set(),
                                today=date(2026, 7, 9)) == 0
     assert signals_store.get_signal(sid)["outcome"] is None
+
+
+# -- G8a fix round 1, M4: a GTC entry still working at the broker is not unfilled --
+
+def test_a_still_working_entry_is_never_closed_as_unfilled(store, monkeypatch):
+    # A-live places swing entries as GTC brackets: one halted for days can
+    # still fill, so a working buy keeps the signal open.
+    monkeypatch.setattr(signals_store, "store", store)
+    sid = _open_swing("NVR", "2026-07-02")
+    assert cal.record_outcomes("swing-paper", ClosedOrders(), "swing", held=set(),
+                               working={"NVR"}, today=date(2026, 7, 9)) == 0
+    assert signals_store.get_signal(sid)["outcome"] is None
+    # Without the lane's working-order read nothing is closed (fail closed).
+    assert cal.record_outcomes("swing-paper", ClosedOrders(), "swing", held=set(),
+                               today=date(2026, 7, 9)) == 0
+    assert signals_store.get_signal(sid)["outcome"] is None
+    assert cal.record_outcomes("swing-paper", ClosedOrders(), "swing", held=set(),
+                               working=set(), today=date(2026, 7, 9)) == 1
+    assert signals_store.get_signal(sid)["outcome"]["unfilled"] is True

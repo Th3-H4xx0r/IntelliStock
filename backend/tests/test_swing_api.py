@@ -27,7 +27,9 @@ def api(store, monkeypatch):
     monkeypatch.setattr(signals_store, "store", store)
     store.insert("Instances", [{"id": IID, "name": IID, "runCommand": True},
                                {"id": "stopped", "name": "stopped", "runCommand": False},
-                               {"id": "other", "name": "other", "runCommand": True}])
+                               {"id": "other", "name": "other", "runCommand": True},
+                               {"id": "crashed", "name": "crashed", "runCommand": True,
+                                "crashed": True}])
     commands = []
 
     def submit(conn, instance_id, command_type, payload, submitted_by=None):
@@ -335,3 +337,118 @@ def test_a_malformed_broker_row_never_turns_the_book_into_a_400(api, monkeypatch
     (put,) = res.json()["open_puts"]
     assert (put["underlying"], put["strike"], put["expiry"], put["dte"]) == (
         "APH", 130.0, "2026-10-02", 8)
+
+
+# -- G8a fix round 1 ---------------------------------------------------------------
+
+def _queue_down(monkeypatch):
+    def down(*a, **k):
+        raise ValueError("submit_command failed: database unavailable")
+
+    monkeypatch.setattr(interactive_utils, "action_submit_live_command", down)
+
+
+def _cas_second_call(monkeypatch, behaviour):
+    """The first compare-and-swap (the decision) is real; the second (the
+    revert after a failed enqueue) raises or returns False."""
+    real, calls = signals_store.cas_signal, {"n": 0}
+
+    def cas(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return real(*a, **k)
+        if isinstance(behaviour, Exception):
+            raise behaviour
+        return behaviour
+
+    monkeypatch.setattr(signals_store, "cas_signal", cas)
+
+
+def test_important_2_a_revert_that_raises_is_a_503_that_says_nothing_was_queued(
+        api, monkeypatch):
+    _queue_down(monkeypatch)
+    _cas_second_call(monkeypatch, RuntimeError("db down"))
+    lines = []
+    monkeypatch.setattr(interactive_utils, "_swing_log",
+                        lambda msg, color="white": lines.append((msg, color)))
+    sid = signal()
+    res = api.post(decision_url(sid), json={"decision": "approve"})
+    assert res.status_code == 503
+    detail = res.json()["detail"]
+    assert "approved" in detail and "no broker command was queued" in detail
+    assert "pending again" not in detail
+    # The row really does read approved, with nothing queued: the operator must know.
+    assert signals_store.get_signal(sid)["status"] == "approved" and api.commands == []
+    assert any(color == "red" and sid in msg for msg, color in lines)
+
+
+def test_important_2_a_revert_that_finds_the_row_moved_is_not_pending_again(
+        api, monkeypatch):
+    _queue_down(monkeypatch)
+    _cas_second_call(monkeypatch, False)
+    sid = signal()
+    res = api.post(decision_url(sid), json={"decision": "approve"})
+    assert res.status_code == 503
+    detail = res.json()["detail"]
+    assert "pending again" not in detail and "no broker command was queued" in detail
+
+
+def test_m6_an_approval_on_a_crashed_instance_is_a_503_and_stays_pending(api):
+    sid = signal(instance_id="crashed")
+    res = api.post(decision_url(sid, "crashed"), json={"decision": "approve"})
+    assert res.status_code == 503 and "crashed" in res.json()["detail"]
+    assert signals_store.get_signal(sid)["status"] == "pending" and api.commands == []
+
+
+def _book_with(monkeypatch, *rows):
+    monkeypatch.setattr(live_broker_fetch, "fetch_broker_live_state",
+                        lambda conn, iid: {"cash": 1.0, "broker_fetch_error": None,
+                                           "positions": list(rows)})
+    monkeypatch.setattr(interactive_utils, "_wheel_underlying_prices",
+                        lambda iid, s: {"APH": 120.0, "KO": 50.0})
+    monkeypatch.setattr(interactive_utils, "_ny_today", lambda: date(2026, 9, 24))
+
+
+@pytest.mark.parametrize("value", ["nan", float("nan"), float("-inf"), "inf"])
+def test_m3_a_non_finite_qty_skips_that_row_only(api, monkeypatch, value):
+    bad = option_row("APH", 130.0, "2026-10-02", -1)
+    bad["qty"] = value
+    _book_with(monkeypatch, bad, option_row("KO", 60.0, "2026-10-02", -1))
+    res = api.get(f"/instances/{IID}/wheel")
+    assert res.status_code == 200
+    assert [p["underlying"] for p in res.json()["open_puts"]] == ["KO"]
+
+
+@pytest.mark.parametrize("value", ["nan", float("nan"), float("inf"), "inf"])
+def test_m3_a_non_finite_strike_reads_from_the_occ_symbol(api, monkeypatch, value):
+    bad = option_row("APH", 130.0, "2026-10-02", -1)
+    bad["strike"] = value
+    _book_with(monkeypatch, bad)
+    res = api.get(f"/instances/{IID}/wheel")
+    assert res.status_code == 200
+    (aph,) = res.json()["open_puts"]
+    assert (aph["strike"], aph["collateral"], aph["itm_pct"]) == (130.0, 13000.0, 7.69)
+
+
+def test_m3_non_finite_prices_are_null_never_non_finite_json(api, monkeypatch):
+    row = option_row("APH", 130.0, "2026-10-02", -1, entry=float("nan"), last=float("inf"),
+                     pnl=float("-inf"))
+    _book_with(monkeypatch, row)
+    monkeypatch.setattr(interactive_utils, "_wheel_underlying_prices",
+                        lambda iid, s: {"APH": float("nan")})
+    res = api.get(f"/instances/{IID}/wheel")
+    assert res.status_code == 200
+    (aph,) = res.json()["open_puts"]
+    assert (aph["avg_entry_price"], aph["current_price"], aph["unrealized_pl"],
+            aph["underlying_price"], aph["itm_pct"]) == (None, None, None, None, None)
+
+
+@pytest.mark.parametrize("multiplier,collateral", [(10, 1300.0), (None, 13000.0),
+                                                   (0, 13000.0), ("nan", 13000.0)])
+def test_m3_collateral_uses_the_row_multiplier(api, monkeypatch, multiplier, collateral):
+    row = option_row("APH", 130.0, "2026-10-02", -1)
+    row["multiplier"] = multiplier
+    _book_with(monkeypatch, row)
+    res = api.get(f"/instances/{IID}/wheel")
+    (aph,) = res.json()["open_puts"]
+    assert aph["collateral"] == collateral and res.json()["collateral_total"] == collateral

@@ -25,7 +25,8 @@ should be on or before the backtest window's Monday.
 
 Paper (--paper): doc "Swing trader paper" with both lanes enabled, and the
 instance "swing-paper" on --brokerage-id, which must be a PAPER Alpaca account
-and must not be alpaca-main's. The instance is never started here, and
+and must not be alpaca-main's. An existing swing-paper on another brokerage is
+refused, never re-linked. The instance is never started here, and
 alpaca-main is only READ (to prove the brokerage differs and to clone its
 granularity), never written.
 
@@ -71,8 +72,19 @@ def _is_duplicate(error) -> bool:
     return "already" in text and any(f"http {code}" in text for code in _DUPLICATE_CODES)
 
 
+def _doc_number(doc_id) -> str:
+    """The doc id as the API's integer spelling: "0200", 200.0, "200.0" and
+    " 200 " are all "200" (M7). A non-numeric id is returned stripped."""
+    text = str(doc_id).strip()
+    try:
+        number = float(text)
+    except ValueError:
+        return text
+    return str(int(number)) if number.is_integer() else text
+
+
 def assert_writable(doc_id):
-    if str(doc_id).strip() in PROTECTED_DOC_IDS:
+    if _doc_number(doc_id) in PROTECTED_DOC_IDS:
         raise SystemExit(
             f"REFUSING to write doc {doc_id}: docs 200-203 are the live champion, the "
             "EB lab and the frontier research documents. The swing port runs in its "
@@ -160,6 +172,23 @@ def assert_paper_brokerage(call, brokerage_id):
     return live
 
 
+def assert_same_brokerage(inst, instance_id, brokerage_id):
+    """Fix round 1 (Important 1): an existing instance keeps its brokerage.
+    A rerun naming another one is refused, never silently re-linked: the
+    doc would be linked to an instance that trades somewhere else."""
+    if not inst or brokerage_id is None:
+        return
+    current = str(inst.get("brokerage_id") or "")
+    if current != str(brokerage_id):
+        raise SystemExit(
+            f"REFUSING: instance {instance_id} already exists on brokerage "
+            f"{current or '(none)'}, not {brokerage_id}. Nothing was written. Move it to "
+            f"{brokerage_id} in the Instances editor (or delete it) and rerun, or rerun with "
+            f"--brokerage-id {current}." if current else
+            f"REFUSING: instance {instance_id} already exists with no brokerage, not "
+            f"{brokerage_id}. Nothing was written. Link it in the Instances editor and rerun.")
+
+
 def _upsert_doc(call, name, payload):
     _, docs = call("GET", "/strategies")
     existing = next((d for d in _rows(docs) if d.get("name") == name), None)
@@ -177,6 +206,8 @@ def _upsert_doc(call, name, payload):
 
 def _upsert_instance(call, instance_id, *, name, doc_id, granularity, brokerage_id, stocks):
     code, inst = _safe_get(call, f"/instances/{instance_id}")
+    if inst:
+        assert_same_brokerage(inst, instance_id, brokerage_id)
     if code == 404 or not inst:
         # `granularity` is the field CreateInstanceBody reads (a string of
         # seconds); under any other name it is dropped and the instance is
@@ -206,12 +237,14 @@ def main(argv=None, *, call=None, store=None) -> int:
     ap.add_argument("--paper", action="store_true",
                     help="create swing-paper (both lanes) instead of the backtest lab")
     ap.add_argument("--brokerage-id", help="the PAPER brokerage for --paper")
-    ap.add_argument("--start", default=DEFAULT_START,
-                    help="first day of the lab watchlist window (backtest windows "
-                         "should start on a Monday on or after it)")
+    ap.add_argument("--start", default=DEFAULT_START, type=date.fromisoformat,
+                    help="first day of the lab watchlist window, YYYY-MM-DD (backtest "
+                         "windows should start on a Monday on or after it)")
     ap.add_argument("--end", default=(date.today() - timedelta(days=1)).isoformat(),
-                    help="last day of the lab watchlist window")
+                    type=date.fromisoformat,
+                    help="last day of the lab watchlist window, YYYY-MM-DD")
     args = ap.parse_args(argv)
+    args.start, args.end = args.start.isoformat(), args.end.isoformat()
     if call is None:
         from _api import call as call  # noqa: PLW0127
 
@@ -219,6 +252,9 @@ def main(argv=None, *, call=None, store=None) -> int:
         if not args.brokerage_id:
             raise SystemExit("--paper needs --brokerage-id (a paper Alpaca account)")
         live = assert_paper_brokerage(call, args.brokerage_id)
+        # Important 1: checked before anything is written.
+        _code, existing = _safe_get(call, f"/instances/{PAPER_INSTANCE_ID}")
+        assert_same_brokerage(existing, PAPER_INSTANCE_ID, args.brokerage_id)
         doc_id = _upsert_doc(call, PAPER_DOC_NAME, paper_payload())
         granularity = str(live.get("granularity_time_increment") or "60")
         _upsert_instance(call, PAPER_INSTANCE_ID, name="Swing trader (paper)",

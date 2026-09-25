@@ -106,7 +106,11 @@ Check them once against Alpaca's asset list, with the lab's own keys:
             print(symbol, "NOT FOUND", exc)
     PY
 
-A RENAME_MAP target that is not found is a wrong entry: fix the map and rerun.
+A RENAME_MAP target must print status "active": anything else (not found,
+"inactive", delisted) is a wrong target, so fix the map and rerun. Known
+suspects to check first: PARA (CBS and VIAC map to it; Paramount Skydance has
+traded as PSKY since August 2025) and FISV/FI (Fiserv traded as FI from 2023;
+check which symbol Alpaca lists as active today).
 A former member that is not found, but whose company still trades under a new
 symbol, needs a RENAME_MAP entry (old -> new). Rerunning is idempotent.
 """
@@ -302,10 +306,12 @@ def main(argv=None, *, store=None, fetch=None, sector_of=None, today=None) -> in
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--only", action="append", choices=("vix", "membership", "sectors"),
                     help="build only this table (repeatable); default all three")
-    ap.add_argument("--start", default=DEFAULT_START)
+    ap.add_argument("--start", default=DEFAULT_START, type=date.fromisoformat,
+                    help="first date to build, YYYY-MM-DD (default %(default)s)")
     ap.add_argument("--membership-csv",
                     help="path or URL of fja05680's historical-components CSV")
     args = ap.parse_args(argv)
+    args.start = args.start.isoformat()       # M7: validated by argparse, used as text
     parts = set(args.only or ("vix", "membership", "sectors"))
     if parts & {"membership", "sectors"} and not args.membership_csv:
         ap.error("--membership-csv is required to build membership or sectors")

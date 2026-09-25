@@ -251,3 +251,46 @@ def test_a_window_that_does_not_start_on_a_monday_is_noted(store, capsys, start,
     assert s.main(["--start", start, "--end", "2021-12-31"], call=api, store=store) == 0
     out = capsys.readouterr().out
     assert ("not a Monday" in out) is noted
+
+
+
+# -- G8a fix round 1 ---------------------------------------------------------------
+
+def test_important_1_an_existing_paper_instance_on_another_brokerage_is_refused(store):
+    s = _setup()
+    instances = dict(LIVE)
+    instances[s.PAPER_INSTANCE_ID] = {"id": s.PAPER_INSTANCE_ID, "brokerage_id": "brk-live",
+                                      "strategy_id": 5}
+    api = Api(instances=instances, brokerages=BROKERAGES)
+    with pytest.raises(SystemExit, match="brk-live") as refused:
+        s.main(["--paper", "--brokerage-id", "brk-paper"], call=api, store=store)
+    assert refused.value.code not in (0, None)
+    assert _writes(api) == []                      # no doc, no link, no stocks
+    assert api.instances[s.PAPER_INSTANCE_ID]["brokerage_id"] == "brk-live"
+
+
+def test_important_1_a_rerun_on_the_same_paper_brokerage_relinks(store):
+    s = _setup()
+    instances = dict(LIVE)
+    instances[s.PAPER_INSTANCE_ID] = {"id": s.PAPER_INSTANCE_ID, "brokerage_id": "brk-paper",
+                                      "strategy_id": 5}
+    api = Api(docs=[{"id": 444, "name": s.PAPER_DOC_NAME}], instances=instances,
+              brokerages=BROKERAGES)
+    assert s.main(["--paper", "--brokerage-id", "brk-paper"], call=api, store=store) == 0
+    assert api.calls("POST", f"/instances/{s.PAPER_INSTANCE_ID}/link-strategy") == [
+        (f"/instances/{s.PAPER_INSTANCE_ID}/link-strategy", {"strategy_id": 444})]
+
+
+@pytest.mark.parametrize("doc_id", [200.0, "0200", "200\n", "201.0", " 0203 ", "2e2"])
+def test_m7_every_spelling_of_a_protected_doc_id_is_refused(doc_id):
+    with pytest.raises(SystemExit):
+        _setup().assert_writable(doc_id)
+
+
+@pytest.mark.parametrize("argv", [["--start", "2021-13-01"], ["--end", "yesterday"],
+                                  ["--start", "07/01/2021"]])
+def test_m7_dates_are_validated(store, argv):
+    s = _setup()
+    with pytest.raises(SystemExit) as bad:
+        s.main(argv, call=Api(), store=store)
+    assert bad.value.code == 2

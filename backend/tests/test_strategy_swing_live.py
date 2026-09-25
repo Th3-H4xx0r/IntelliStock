@@ -741,3 +741,16 @@ def test_fix2_3_every_held_name_without_an_entry_price_is_not_ready(live, monkey
     snapshot = Preserved(positions={"EEE": (10, 100.0, 1_040.0), "FFF": (5, 100.0, 465.0)})
     assert tick(live, MON_0920, snapshot, cache) == {}
     assert live._SCAN_DONE_KEY not in cache
+
+
+def test_g8a_the_scan_passes_its_working_buys_to_the_outcome_pass(live, monkeypatch):
+    seen = []
+    monkeypatch.setattr(live.calibration, "record_outcomes",
+                        lambda *a, **k: seen.append(k) or 0)
+    monkeypatch.setattr(live.ai_analyst, "analyse",
+                        scripted({"AAA": REJECT, "CCC": REJECT, "DDD": REJECT}))
+    book = [NS(symbol="EEE", side="buy"),                       # a GTC entry still working
+            NS(symbol="FFF", side="sell"),
+            NS(symbol="APH261002P00130000", side="buy")]         # a wheel buy-to-close
+    tick(live, MON_0920, LiveAdapter(open_orders=book), {})
+    assert seen and seen[0]["working"] == {"EEE"}

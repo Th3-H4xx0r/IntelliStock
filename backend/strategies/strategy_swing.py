@@ -651,7 +651,9 @@ class StrategySwing:
         option_syms = account.option_symbols(emu)
         equity = account.live_equity(emu, prices)
         bp = account.live_buying_power(emu)
-        calibration.record_outcomes(iid, emu, "swing", held=set(equity_pos))
+        # G8a M4: a GTC entry still working at the broker is not "unfilled".
+        calibration.record_outcomes(iid, emu, "swing", held=set(equity_pos),
+                                    working=_symbols_of(book, _working_entry))
         # fix F3: a name with a working sell is already exiting (never stack a
         # second sell on it); a working buy is an entry queued for the open and
         # holds its slot and sector like a position.

@@ -6668,6 +6668,24 @@ class SwingDecisionRaceError(RuntimeError):
     """This click lost the compare-and-swap to a concurrent decision (409)."""
 
 
+def _swing_log(msg, color="white"):
+    try:
+        from intellistock_logger import intellistock_logger as _ilog
+        _ilog.log(str(msg), color, service="SwingApi")
+    except Exception:
+        print("[SwingApi] %s" % msg)
+
+
+def _finite_or_none(value):
+    """A finite float, else None: a nan/inf from the broker is no value (and
+    would make the JSON response itself fail)."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    return v if v == v and v not in (float("inf"), float("-inf")) else None
+
+
 def _swing_instance(conn, instance_id):
     inst = _resolve_instance_doc(conn, instance_id) if instance_id else None
     if inst is None:
@@ -6709,6 +6727,12 @@ def action_swing_decide_signal(conn, instance_id, signal_id, decision, reason=No
         raise SwingBrokerUnavailableError(
             "Instance %s is not running, so the approval could not reach the broker; "
             "the signal stays pending" % real_id)
+    if approving and inst.get("crashed"):
+        # M6: a crashed instance is held open for its logs; no broker loop
+        # would pick the command up.
+        raise SwingBrokerUnavailableError(
+            "Instance %s has crashed, so the approval could not reach the broker; "
+            "the signal stays pending" % real_id)
     if not signals_store.cas_signal(signal_id, expect_status="pending", doc=decided):
         raise SwingDecisionRaceError("signal %s was decided first by another click; "
                                      "decisions are final" % signal_id)
@@ -6721,8 +6745,28 @@ def action_swing_decide_signal(conn, instance_id, signal_id, decision, reason=No
         except Exception as exc:
             # Undo the decision so the operator can approve again once the
             # broker is reachable. Only a row still in the decided status is
-            # put back.
-            signals_store.cas_signal(signal_id, expect_status=decided["status"], doc=signal)
+            # put back. Fix round 1 (Important 2): the revert is checked. When
+            # it raises (the database is down) or finds the row moved, the
+            # signal may read approved with nothing queued, and the operator
+            # is told so rather than "pending again".
+            try:
+                reverted, revert_error = signals_store.cas_signal(
+                    signal_id, expect_status=decided["status"], doc=signal), None
+            except Exception as rexc:
+                reverted, revert_error = False, rexc
+            if not reverted:
+                why = ("the revert failed: %s: %s" % (type(revert_error).__name__, revert_error)
+                       if revert_error is not None
+                       else "the row no longer read %s" % decided["status"])
+                _swing_log("swing approval %s on %s: the command could not be queued (%s) "
+                           "and the signal could not be put back to pending (%s) — it may "
+                           "read %s with no broker command queued"
+                           % (signal_id, real_id, exc, why, decided["status"]), "red")
+                raise SwingBrokerUnavailableError(
+                    "the approval could not be queued for the broker (%s), and the signal "
+                    "could not be put back to pending (%s). It may read %s, but no broker "
+                    "command was queued: place the order manually or have the signal reset"
+                    % (exc, why, decided["status"]))
             raise SwingBrokerUnavailableError(
                 "the approval could not be queued for the broker (%s); the signal is "
                 "pending again" % exc)
@@ -6747,10 +6791,11 @@ def _wheel_underlying_prices(instance_id, symbols):
     except RuntimeError:
         return {}
     try:
-        return {s: float(p) for s, p in (market_data.live_prices(wanted, client=client)
-                                         or {}).items() if p is not None}
+        prices = market_data.live_prices(wanted, client=client) or {}
     except Exception:
         return {}
+    return {s: v for s, v in ((s, _finite_or_none(p)) for s, p in prices.items())
+            if v is not None and v > 0}
 
 
 def _wheel_put_fields(p, parsed):
@@ -6758,9 +6803,8 @@ def _wheel_put_fields(p, parsed):
     falling back to the OCC symbol when the broker could not fill it in: one
     malformed row never turns the whole book into a 400."""
     underlying = str(p.get("underlying") or parsed[0]).upper()
-    try:
-        strike = float(p.get("strike") or parsed[3])
-    except (TypeError, ValueError):
+    strike = _finite_or_none(p.get("strike"))
+    if not strike or strike <= 0:              # M3: nan/inf/0/"n/a" read the OCC strike
         strike = float(parsed[3])
     expiry = str(p.get("expiry") or "")[:10]
     try:
@@ -6785,36 +6829,36 @@ def action_wheel_overview(conn, instance_id, *, today=None):
     for p in state.get("positions") or []:
         parsed = wheel_rules.occ_parts(p.get("symbol"))
         kind = str(p.get("option_type") or (parsed[2] if parsed else "")).lower()
-        try:
-            qty = float(p.get("qty") or 0.0)
-        except (TypeError, ValueError):
-            continue
-        if parsed is None or qty >= 0 or kind != "put":
-            continue
+        qty = _finite_or_none(p.get("qty"))
+        if qty is None or parsed is None or qty >= 0 or kind != "put":
+            continue                           # M3: a nan/inf qty skips only that row
         underlying, strike, expiry = _wheel_put_fields(p, parsed)
         puts.append((p, underlying, strike, expiry, int(round(abs(qty)))))
     prices = _wheel_underlying_prices(real_id, [u for _p, u, _s, _e, _q in puts])
     rows = []
     for p, underlying, strike, expiry, n in puts:
-        spot = prices.get(underlying)
+        spot = _finite_or_none(prices.get(underlying))
+        multiplier = _finite_or_none(p.get("multiplier"))
+        if not multiplier or multiplier <= 0:
+            multiplier = 100.0                 # M3: the row's multiplier, default 100
         rows.append({
             "contract": str(p.get("symbol")).upper(),
             "underlying": underlying,
             "strike": strike,
             "expiry": expiry,
             "qty": n,
-            "avg_entry_price": p.get("avg_entry_price"),
-            "current_price": p.get("last_price"),
+            "avg_entry_price": _finite_or_none(p.get("avg_entry_price")),
+            "current_price": _finite_or_none(p.get("last_price")),
             "underlying_price": spot,
             "itm_pct": (round((strike - spot) / strike * 100.0, 2)
                         if spot is not None and strike > 0 else None),
             "dte": (datetime.date.fromisoformat(expiry) - today).days,
-            "collateral": round(strike * 100.0 * n, 2),
-            "unrealized_pl": p.get("unrealized_pnl"),
+            "collateral": round(strike * multiplier * n, 2),
+            "unrealized_pl": _finite_or_none(p.get("unrealized_pnl")),
         })
     return {"open_puts": rows,
             "collateral_total": round(sum(r["collateral"] for r in rows), 2),
-            "cash": state.get("cash"),
+            "cash": _finite_or_none(state.get("cash")),
             "recent_scans": signals_store.list_wheel_scans(real_id, limit=20)}
 
 

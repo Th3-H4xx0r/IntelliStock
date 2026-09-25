@@ -10,10 +10,11 @@ Honesty rule (ST): a bucket with count < MIN_BUCKET_N is insufficient_n=True.
 Outcomes are written by the lanes (record_outcomes) from the broker's closed
 orders, so the record carries the FILL price (spec §9 fix 7).
 
-G8a ruling 4 (G5 minor 2): a swing entry with no filled buy once
-UNFILLED_AFTER_SESSIONS NY sessions have passed since its own is closed with
-outcome {"unfilled": True, ...}. Left open it would claim a later trade's
-round trip, keep its symbol swing-owned, and pin record_outcomes' window.
+G8a ruling 4 (G5 minor 2): a swing entry with no filled buy and no working
+buy at the broker, once UNFILLED_AFTER_SESSIONS NY sessions have passed since
+its own, is closed with outcome {"unfilled": True, ...}. Left open it would
+claim a later trade's round trip, keep its symbol swing-owned, and pin
+record_outcomes' window.
 """
 from __future__ import annotations
 
@@ -35,9 +36,10 @@ except Exception:  # pragma: no cover - standalone/test import
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
-#: G8a ruling 4: an entry gets its own session and the next to fill (a day
-#: order expires with its session); on the second session after its own it
-#: never filled.
+#: G8a ruling 4: an entry with no fill by the second session after its own is
+#: closed as unfilled, unless it is still WORKING at the broker. A-live places
+#: swing entries as GTC brackets, so a halted entry can fill days later; the
+#: lane passes its working buys (fix round 1, M4) and those stay open.
 UNFILLED_AFTER_SESSIONS = 2
 
 
@@ -243,11 +245,15 @@ def resolve_wheel_outcome(signal: dict, orders):
     return None
 
 
-def record_outcomes(instance_id, adapter, lane: str, *, held=None, today=None) -> int:
+def record_outcomes(instance_id, adapter, lane: str, *, held=None, working=None,
+                    today=None) -> int:
     """Write the outcome of every open swing or wheel signal the broker's
     closed orders can resolve. A swing symbol still held is still open. With
-    a positions read (`held`), a swing entry that never filled is closed as
-    unfilled (G8a ruling 4). Never raises; returns the number of rows updated."""
+    a positions read (`held`) AND the symbols with a working buy (`working`,
+    from the lane's strict order-book read), a swing entry that never filled
+    and is not working is closed as unfilled (G8a ruling 4). Without either
+    read nothing is closed that way. Never raises; returns the number of rows
+    updated."""
     try:
         today = today or date.fromisoformat(clock.ny_date(datetime.now(timezone.utc)))
         rows = [r for r in signals_store.all_signals(instance_id)
@@ -263,12 +269,15 @@ def record_outcomes(instance_id, adapter, lane: str, *, held=None, today=None) -
         if not symbols:
             return 0
         after = min(str(r.get("created_at") or "") for r in rows)[:10]
+        still_working = {str(s).upper() for s in (working or ())}
         orders = list(adapter.list_closed_orders(symbols, after) or [])
         n = 0
         for r in rows:
             out = (resolve_swing_outcome(r, orders) if lane == "swing"
                    else resolve_wheel_outcome(r, orders))
-            if out is None and lane == "swing" and held is not None:
+            if (out is None and lane == "swing" and held is not None
+                    and working is not None
+                    and str(r.get("symbol") or "").upper() not in still_working):
                 out = unfilled_swing_outcome(r, orders, today)
                 if out:
                     _log(f"{r.get('symbol')}: swing entry of {r.get('session')} never "

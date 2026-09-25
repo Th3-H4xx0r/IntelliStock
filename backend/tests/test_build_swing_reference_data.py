@@ -193,3 +193,24 @@ def test_help_documents_the_operator_verification_step(capsys):
     assert done.value.code == 0
     text = capsys.readouterr().out
     assert "RENAME_MAP" in text and "get_asset" in text and "former member" in text
+
+
+
+# -- G8a fix round 1 ---------------------------------------------------------------
+
+@pytest.mark.parametrize("start", ["2019-13-01", "01/01/2019", "soon"])
+def test_m7_start_is_validated(store, start):
+    b = _script()
+    with pytest.raises(SystemExit) as bad:
+        b.main(["--only", "vix", "--start", start], store=store, fetch=fetcher({}),
+               sector_of=lambda s: None)
+    assert bad.value.code == 2
+
+
+def test_m8_help_says_only_an_active_asset_is_a_good_rename_target(capsys):
+    b = _script()
+    with pytest.raises(SystemExit):
+        b.main(["--help"])
+    text = capsys.readouterr().out
+    assert "active" in text and "PSKY" in text and "PARA" in text
+    assert "FISV" in text and "FI" in text
