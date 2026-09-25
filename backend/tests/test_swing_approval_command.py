@@ -581,6 +581,11 @@ def test_a_transient_read_failure_returns_the_signal_to_pending(
     (("positions.stale",), False),
     (("dependency.cash.stale", "dependency.watchdog.unhealthy"), False),
     (("dependency.positions.unhealthy", "quote.stale", "positions.stale"), True),
+    # T15 fix round 1b: a market-hours refusal is "not now", like a quote.
+    (("market.closed",), True),
+    (("market.regular_hours_required",), True),
+    (("market.closed", "quote.stale"), True),
+    (("market.regular_hours_required", "positions.stale"), True),
 ])
 def test_a_gate_refusal_on_transient_codes_returns_the_signal_to_pending(
         swing, codes, after_the_open):
@@ -602,8 +607,7 @@ def test_a_gate_refusal_on_transient_codes_returns_the_signal_to_pending(
     ("idempotency.terminal_requires_retry",),
     ("broker.rejected.APIError",),
     ("option.collateral_insufficient",),
-    # The ruling's transient list is exact: a closed market is not on it.
-    ("market.closed",),
+    ("market.closed", "exposure.max_order_notional"),
     ("quote.stale", "exposure.max_order_notional"),
     ("positions.stale", "idempotency.open_order_exists"),
     (),

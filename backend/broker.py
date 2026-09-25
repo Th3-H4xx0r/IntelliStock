@@ -10807,7 +10807,8 @@ def _execute_swing_approval(adapter, payload, order_service, *,
       cleared, so the operator can approve again (plan B G5 review; T15 fix
       round 1, I-1): approvals.BookUnreadable, no live price, an equity read
       that raised, no options snapshot, and a gate refusal whose codes are
-      ALL transient (dependency.*, quote.stale, positions.stale). A gate
+      ALL transient (dependency.*, quote.stale, positions.stale, and, fix
+      round 1b, market.closed and market.regular_hours_required). A gate
       refusal returns before the service creates a lifecycle record, so the
       re-approval takes the normal path and places exactly one order. Its
       notice ("... — approve again") goes out only when the reset was
@@ -10947,10 +10948,13 @@ def _execute_swing_approval(adapter, payload, order_service, *,
                  "back to pending")
         return (False, reason + (f" ({detail})" if detail else ""), result or {})
 
+    # "Not now" gate codes (I-1; fix round 1b adds the market-hours two).
+    after_open = ("quote.stale", "market.closed", "market.regular_hours_required")
+
     def all_transient(codes):
         return bool(codes) and all(
             code.startswith("dependency.")
-            or code in ("quote.stale", "positions.stale") for code in codes)
+            or code in after_open or code == "positions.stale" for code in codes)
 
     now_utc = now_utc or datetime.datetime.now(datetime.timezone.utc)
     try:
@@ -11045,7 +11049,7 @@ def _execute_swing_approval(adapter, payload, order_service, *,
             # The gate refused before the service created a lifecycle row, so
             # a re-approval builds the same identity afresh: one order.
             return back_to_pending(error, quote=any(
-                code == "quote.stale" or code.startswith("dependency.quote.")
+                code in after_open or code.startswith("dependency.quote.")
                 for code in codes), result=result)
         return failed(error, error, key=key, result=result)
     if not submission.accepted:
