@@ -128,10 +128,12 @@ test('approval copy says the broker rebuilds and checks the order, never that it
   for (const decision of ['approve', 'approve_half']) {
     const confirm = confirmPrompt(SWING, decision)
     const success = decisionSuccessMessage(SWING, decision)
+    // Follow-up 5: an approval is not final; a transient refusal returns it here.
     assert.equal(
       confirm,
-      `Approve AAPL${decision === 'approve_half' ? ' at half size' : ''}? The broker rebuilds the order at the live price and checks it before sending. Decisions are final.`,
+      `Approve AAPL${decision === 'approve_half' ? ' at half size' : ''}? The broker rebuilds the order at the live price and checks it before sending. Approving sends the order. If the broker can't place it yet (e.g. before the open) the signal returns here to approve again.`,
     )
+    assert.doesNotMatch(confirm, /final/)
     // FW item 4 (M-1): some refusals send no notification, so none is promised.
     assert.equal(
       success,

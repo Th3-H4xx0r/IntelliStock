@@ -6,8 +6,9 @@
      broker rebuilds the order at the live price, so the numbers on a card
      are the proposal, not the fill.
 
-     Decisions are final (swing_trader.approvals.decide). So every button goes
-     through a confirm step, is disabled while its request is in flight, and a
+     A decision cannot be undone from here (swing_trader.approvals.decide),
+     though a transient broker refusal returns an approval to pending. So
+     every button goes through a confirm step, is disabled while its request is in flight, and a
      synchronous guard drops a second click that lands before Vue re-renders.
      A 400/404/409 means the signal is no longer pending, usually because
      another device decided first. The card goes, the server's reason is shown,

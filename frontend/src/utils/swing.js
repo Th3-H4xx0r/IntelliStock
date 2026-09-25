@@ -160,8 +160,11 @@ export function proposalRows(signal) {
 
 export function confirmPrompt(signal, decision) {
   const sym = signal?.symbol || 'this signal'
-  if (decision === 'approve') return `Approve ${sym}? The broker rebuilds the order at the live price and checks it before sending. Decisions are final.`
-  if (decision === 'approve_half') return `Approve ${sym} at half size? The broker rebuilds the order at the live price and checks it before sending. Decisions are final.`
+  // Follow-up 5: an approval is not final. A transient refusal (no quote
+  // before the open, say) puts the signal back to pending.
+  const after = "Approving sends the order. If the broker can't place it yet (e.g. before the open) the signal returns here to approve again."
+  if (decision === 'approve') return `Approve ${sym}? The broker rebuilds the order at the live price and checks it before sending. ${after}`
+  if (decision === 'approve_half') return `Approve ${sym} at half size? The broker rebuilds the order at the live price and checks it before sending. ${after}`
   return `Reject ${sym}? Decisions are final.`
 }
 

@@ -47,11 +47,16 @@ String decisionLabel(String decision) => switch (decision) {
       _ => 'Reject',
     };
 
+// Follow-up 5: an approval is not final. A transient refusal (no quote before
+// the open, say) puts the signal back to pending.
+const _approveAfter = "Approving sends the order. If the broker can't place it "
+    'yet (e.g. before the open) the signal returns here to approve again.';
+
 String decisionConfirmBody(SwingSignal s, String decision) => switch (decision) {
       'approve' =>
-        'Approve ${s.symbol}? The broker rebuilds the order at the live price and checks it before sending. Decisions are final.',
+        'Approve ${s.symbol}? The broker rebuilds the order at the live price and checks it before sending. $_approveAfter',
       'approve_half' =>
-        'Approve ${s.symbol} at half size? The broker rebuilds the order at the live price and checks it before sending. Decisions are final.',
+        'Approve ${s.symbol} at half size? The broker rebuilds the order at the live price and checks it before sending. $_approveAfter',
       _ => 'Reject ${s.symbol}? Decisions are final.',
     };
 

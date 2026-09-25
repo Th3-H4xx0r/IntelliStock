@@ -426,16 +426,22 @@ void main() {
   test('approval copy says the broker rebuilds and checks, never that it placed',
       () {
     final s = signal('a1');
+    // Follow-up 5: an approval is not final; a transient refusal returns it here.
     expect(
       decisionConfirmBody(s, 'approve'),
       'Approve AAPL? The broker rebuilds the order at the live price and '
-      'checks it before sending. Decisions are final.',
+      'checks it before sending. Approving sends the order. If the broker '
+      "can't place it yet (e.g. before the open) the signal returns here to "
+      'approve again.',
     );
     expect(
       decisionConfirmBody(s, 'approve_half'),
       'Approve AAPL at half size? The broker rebuilds the order at the live '
-      'price and checks it before sending. Decisions are final.',
+      'price and checks it before sending. Approving sends the order. If the '
+      "broker can't place it yet (e.g. before the open) the signal returns "
+      'here to approve again.',
     );
+    expect(decisionConfirmBody(s, 'approve'), isNot(contains('final')));
     // FW item 4 (M-1): some refusals send no notification, so none is promised.
     expect(
       decisionSuccessMessage(s, 'approve'),
