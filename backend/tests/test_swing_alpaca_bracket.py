@@ -435,23 +435,71 @@ def test_the_eb_order_walks_send_no_symbols_filter():
                for r in client.order_requests)
 
 
-def test_a_multi_leg_order_does_not_make_the_account_unavailable():
+def _snapshot_of(*orders):
+    client = FakeTradingClient(orders=list(orders))
+    return make_adapter(client).capture_reconciliation_snapshot(account_id="acct-1")
+
+
+_EB_FILL = dict(id="eb-1", client_order_id="alpacama-x-0", symbol="TQQQ",
+                status=enum("filled"), filled_qty="5", filled_avg_price="88")
+
+
+def test_a_multi_leg_order_makes_the_snapshot_unhealthy():
+    """Fix wave FW-eb-m2: main's fail-closed rule is restored. An mleg order
+    (placed by hand in the Alpaca UI; IntelliStock never submits one) cannot
+    be read, so reconcile cannot rule it out: the snapshot is
+    broker-unavailable, as on main."""
     mleg = order_row(id="mleg-1", client_order_id="ui-mleg", symbol=None,
                      side=None, order_class=enum("mleg"), status=enum("filled"))
+    snap = _snapshot_of(mleg, order_row(**_EB_FILL))
+    assert snap.broker_available is False and snap.orders == ()
+
+
+def test_an_mleg_order_with_a_side_is_still_unreadable():
+    mleg = order_row(id="mleg-2", client_order_id="ui-mleg-2",
+                     symbol="APH261002P00130000", side=enum("sell"),
+                     order_class=enum("mleg"), status=enum("new"))
+    assert _snapshot_of(mleg).broker_available is False
+
+
+@pytest.mark.parametrize("side", [None, "", enum(None), enum("")])
+def test_an_order_with_no_side_and_no_intent_makes_the_snapshot_unhealthy(side):
+    odd = order_row(id="odd-1", client_order_id="ui-odd", symbol="AAPL",
+                    side=side, position_intent=None, status=enum("filled"),
+                    filled_qty="1", filled_avg_price="10")
+    assert _snapshot_of(odd, order_row(**_EB_FILL)).broker_available is False
+
+
+def test_a_single_leg_option_order_without_a_side_stays_parseable():
     sideless = order_row(id="opt-1", client_order_id="ui-opt",
                          symbol="APH261002P00130000", side=None,
                          position_intent=enum("sell_to_open"),
                          order_class=enum("simple"), status=enum("filled"),
-                         filled_qty="1", filled_avg_price="1.2")
-    eb = order_row(id="eb-1", client_order_id="alpacama-x-0", symbol="TQQQ",
-                   status=enum("filled"), filled_qty="5",
-                   filled_avg_price="88")
-    client = FakeTradingClient(orders=[mleg, sideless, eb])
-    adapter = make_adapter(client)
-    snap = adapter.capture_reconciliation_snapshot(account_id="acct-1")
+                         filled_qty="1", filled_avg_price="1.2",
+                         asset_class=enum("us_option"))
+    with_side = order_row(id="opt-2", client_order_id="ui-opt-2",
+                          symbol="APH261002P00125000", side=enum("buy"),
+                          position_intent=enum("buy_to_close"),
+                          order_class=enum("simple"), status=enum("filled"),
+                          filled_qty="1", filled_avg_price="0.4",
+                          asset_class=enum("us_option"))
+    snap = _snapshot_of(sideless, with_side, order_row(**_EB_FILL))
     assert snap.broker_available is True
-    assert sorted(o.broker_order_id for o in snap.orders) == ["eb-1", "opt-1"]
-    assert {o.broker_order_id: o.side.value for o in snap.orders}["opt-1"] == "sell"
+    assert {o.broker_order_id: o.side.value for o in snap.orders} == {
+        "opt-1": "sell", "opt-2": "buy", "eb-1": "buy"}
+
+
+def test_the_unreadable_order_is_named_in_red(monkeypatch):
+    import broker_adapters.alpaca as alpaca_module
+
+    lines = []
+    monkeypatch.setattr(alpaca_module, "_alog",
+                        lambda service, msg, color="white":
+                        lines.append((service, msg, color)))
+    mleg = order_row(id="mleg-1", client_order_id="ui-mleg", symbol=None,
+                     side=None, order_class=enum("mleg"), status=enum("filled"))
+    _snapshot_of(mleg)
+    assert any(color == "red" and "mleg-1" in msg for _s, msg, color in lines)
 
 
 def test_stream_events_held_and_pending_cancel_are_acknowledged():

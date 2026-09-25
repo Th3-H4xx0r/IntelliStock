@@ -1685,12 +1685,24 @@ class AlpacaAdapter(BrokerAdapter):
             self._reconciliation_option_symbols = frozenset(option_symbols)
             normalized_orders = []
             for raw in raw_orders:
-                # swing-port: a multi-leg (mleg) option order's top level has
-                # no side and no symbol. IntelliStock never submits one, and
-                # letting it raise here marked the whole account
-                # broker-unavailable for the 30-day history window.
+                # Fix wave FW-eb-m2: an order this snapshot cannot read FAILS
+                # CLOSED, as on main: a multi-leg (mleg) order, or one with no
+                # side that no position_intent explains, makes the whole
+                # snapshot broker-unavailable (reconcile cannot rule it out).
+                # IntelliStock never submits an mleg order; one placed by hand
+                # in the Alpaca UI is named here in red. A single-leg option
+                # order with no side stays readable through its intent.
                 if _enum_value(getattr(raw, "order_class", None)) == "mleg":
-                    continue
+                    _alog(
+                        "BROKER",
+                        f"reconcile snapshot: order {getattr(raw, 'id', '?')} "
+                        f"({getattr(raw, 'client_order_id', '?')}) is multi-leg "
+                        "(mleg) and cannot be reconciled; the snapshot is "
+                        "unhealthy until it is closed",
+                        "red",
+                    )
+                    raise BrokerError(
+                        f"unreadable multi-leg order {getattr(raw, 'id', '?')}")
                 side_value = getattr(getattr(raw, "side", None), "value", None)
                 if side_value is None:
                     side_value = getattr(raw, "side", "")
@@ -1698,7 +1710,16 @@ class AlpacaAdapter(BrokerAdapter):
                     side_value = _side_from_position_intent(
                         getattr(raw, "position_intent", None))
                     if side_value is None:
-                        continue
+                        _alog(
+                            "BROKER",
+                            f"reconcile snapshot: order {getattr(raw, 'id', '?')} "
+                            f"({getattr(raw, 'client_order_id', '?')}) has no "
+                            "side and no position_intent; the snapshot is "
+                            "unhealthy",
+                            "red",
+                        )
+                        raise BrokerError(
+                            f"order {getattr(raw, 'id', '?')} has no side")
                 status_value = getattr(
                     getattr(raw, "status", None), "value", None
                 )
