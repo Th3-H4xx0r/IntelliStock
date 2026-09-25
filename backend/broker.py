@@ -10388,8 +10388,8 @@ def _poll_option_activities(adapter, order_service, wheel_cache, *, now_utc,
     the activity (no cursor advance, no notice); if the unconfirmed read came
     right after this poll's record, the notice is owed
     (_engine_option_activity_owed) and the retry that finds the row FILLED
-    sends it, once. An assignment with a zero, fractional-below-one or
-    missing quantity is held in red, never booked as one contract. A
+    sends it, once. An assignment with a zero, missing or non-integral
+    quantity is held in red, never booked as one contract or rounded. A
     contract neither held nor listed by Alpaca any more (a restart after
     expiry) is booked from its OCC symbol's fields, an adjusted root refused.
     """
@@ -10464,14 +10464,17 @@ def _poll_option_activities(adapter, order_service, wheel_cache, *, now_utc,
 
     def whole_contracts(raw):
         """The activity's contract count, or None when it is missing, zero,
-        fractional below one or unreadable (L5 review: never booked as one)."""
+        not a whole number of contracts or unreadable (L5 review: never
+        booked as one; T15 fix round 1 M-3: never rounded)."""
         try:
             value = float(raw)
         except (TypeError, ValueError):
             return None
         if value != value or value in (float("inf"), float("-inf")):
             return None
-        count = abs(int(round(value)))
+        if value != int(value):
+            return None
+        count = abs(int(value))
         return count if count >= 1 else None
 
     clock = monotonic or _time.monotonic
@@ -10513,7 +10516,8 @@ def _poll_option_activities(adapter, order_service, wheel_cache, *, now_utc,
         if activity.activity_type == "OPASN":
             contracts = whole_contracts(activity.qty)
             if contracts is None:
-                hold(activity, f"its quantity {activity.qty!r} is zero or missing")
+                hold(activity, f"its quantity {activity.qty!r} is zero, missing "
+                               "or not a whole number of contracts")
                 continue
             meta = (getattr(adapter, "_option_positions", {}) or {}).get(symbol)
             if (meta is None or not getattr(meta, "underlying", "")
@@ -10779,7 +10783,8 @@ def _approval_live_price(adapter, symbol):
 
 
 def _execute_swing_approval(adapter, payload, order_service, *,
-                            cached_strategies=None, now_utc=None, log=None):
+                            cached_strategies=None, now_utc=None, log=None,
+                            sleep=None):
     """A LiveCommands submit_order carrying {"source": "swing_approval",
     "signal_id"} (spec 6.1 broker item 9; interfaces doc section 7).
 
@@ -10798,18 +10803,37 @@ def _execute_swing_approval(adapter, payload, order_service, *,
     - accepted: status submitted, order_client_id = the key the service used
       (it can escalate a spent identity), submitted_order = the rebuilt order
       (plan B G5), so calibration scores the contract actually sold;
-    - approvals.BookUnreadable (a transient broker read): back to pending,
-      decision cleared, so the operator can approve again (plan B G5 review);
-    - any other definite failure (lane, price, rebuild, intent, gate or
-      broker refusal): failed; and every failure the operator did not cause
-      is sent as swing_approval_failed (plan C final review P1);
+    - a TRANSIENT failure puts the signal back to pending with its decision
+      cleared, so the operator can approve again (plan B G5 review; T15 fix
+      round 1, I-1): approvals.BookUnreadable, no live price, an equity read
+      that raised, no options snapshot, and a gate refusal whose codes are
+      ALL transient (dependency.*, quote.stale, positions.stale). A gate
+      refusal returns before the service creates a lifecycle record, so the
+      re-approval takes the normal path and places exactly one order. Its
+      notice ("... — approve again") goes out only when the reset was
+      written (M-1);
+    - any other definite failure (unknown or disabled lane, rebuild error,
+      bracket refused, risk-cap, duplicate or broker refusal): failed; and
+      every failure the operator did not cause is sent as
+      swing_approval_failed (plan C final review P1);
+    - the signal read is tried three times about 1 s apart before the
+      command fails, with a red line and a notice naming the signal (I-2);
+      the claim is never retried;
     - an unknown submit outcome (the service raised, or answered without a
       broker reference) stays submitted with a red log line, never failed:
       the service can raise after the broker accepted, and the next
       reconcile resolves it (L4).
     """
+    import time as _time
     from zoneinfo import ZoneInfo
     from live_orders import OrderSource
+
+    class _Retryable(Exception):
+        """A transient failure: the signal goes back to pending (I-1)."""
+
+        def __init__(self, why, *, quote=False):
+            super().__init__(why)
+            self.quote = quote
 
     def say(message, color="white"):
         if log is not None:
@@ -10827,10 +10851,34 @@ def _execute_swing_approval(adapter, payload, order_service, *,
         from swing_trader import approvals, signals_store
     except Exception as exc:
         return (False, f"swing_trader unavailable: {type(exc).__name__}: {exc}", {})
-    signal = signals_store.get_signal(signal_id)
+    owner = str(order_service.instance_id)
+    pause = sleep or _time.sleep
+    read_error = None
+    for attempt in range(3):
+        if attempt:
+            pause(1.0)
+        try:
+            signal = signals_store.get_signal(signal_id)
+            read_error = None
+            break
+        except Exception as exc:
+            read_error = exc
+    if read_error is not None:
+        why = f"{type(read_error).__name__}: {read_error}"
+        say(f"[swing] approval {signal_id}: the signal could not be read after "
+            f"3 tries ({why}); nothing placed, and it may still read approved",
+            "red")
+        try:
+            from swing_trader.notify import notify_swing_approval_failed
+            notify_swing_approval_failed(
+                owner, symbol=f"signal {signal_id}", lane="swing or wheel",
+                reason=(f"the approved signal could not be read "
+                        f"({type(read_error).__name__}); nothing was sent"))
+        except Exception:
+            pass
+        return (False, f"signal {signal_id} could not be read: {why}", {})
     if not signal:
         return (False, f"unknown signal {signal_id}", {})
-    owner = str(order_service.instance_id)
     if str(signal.get("instance_id") or "") != owner:
         return (False, f"signal {signal_id} belongs to another instance", {})
     status = str(signal.get("status") or "")
@@ -10851,12 +10899,14 @@ def _execute_swing_approval(adapter, payload, order_service, *,
             say(f"{label}: the failure notice was not sent "
                 f"({type(exc).__name__}: {exc})", "yellow")
 
-    def write(patch):
+    def write(patch) -> bool:
         try:
             signals_store.update_signal(signal_id, patch)
+            return True
         except Exception as exc:
             say(f"{label}: signal write-back {patch} failed "
                 f"({type(exc).__name__}: {exc})", "red")
+            return False
 
     claimed = dict(signal)
     claimed["status"] = "submitted"
@@ -10880,6 +10930,28 @@ def _execute_swing_approval(adapter, payload, order_service, *,
         tell(reason)
         return (False, error, result or {})
 
+    def back_to_pending(why, *, quote=False, detail="", result=None):
+        """I-1: a transient failure. Nothing reached the broker, so the
+        decision is undone and the operator may approve again."""
+        reason = f"{why} — approve again" + (" after the open" if quote else "")
+        if write({"status": "pending", "decided_by": None, "decided_at": None,
+                  "decision_reason": None}):
+            say(f"{label} put back to pending: {why}"
+                + (f" ({detail})" if detail else ""), "yellow")
+            tell(reason)
+        else:
+            # M-1: never "approve again" when the reset did not land.
+            say(f"{label}: {why}; nothing placed, and the signal could not be "
+                "put back to pending (it may still read submitted)", "red")
+            tell(f"{why} — nothing was sent, and the signal could not be put "
+                 "back to pending")
+        return (False, reason + (f" ({detail})" if detail else ""), result or {})
+
+    def all_transient(codes):
+        return bool(codes) and all(
+            code.startswith("dependency.")
+            or code in ("quote.stale", "positions.stale") for code in codes)
+
     now_utc = now_utc or datetime.datetime.now(datetime.timezone.utc)
     try:
         lane_name = {"swing": "strategy_swing", "wheel": "strategy_wheel"}.get(lane)
@@ -10896,11 +10968,15 @@ def _execute_swing_approval(adapter, payload, order_service, *,
             raise ValueError(f"the {lane_name} lane is not enabled on this document")
         live = _approval_live_price(adapter, symbol)
         if live is None:
-            raise ValueError(f"no live price for {symbol}")
+            raise _Retryable(f"no live price for {symbol}", quote=True)
         live_price, quote_at = live
         equity = getattr(adapter, "_account_equity", None)
         if equity is None:
-            equity = adapter.refresh_account().equity
+            try:
+                equity = adapter.refresh_account().equity
+            except Exception as exc:
+                raise _Retryable(f"account equity unreadable "
+                                 f"({type(exc).__name__}: {exc})") from exc
         with _live_order_dependency_lock:
             risk_id = str(_live_order_dependency_state.get("risk_snapshot_id")
                           or "risk:unavailable")
@@ -10918,25 +10994,29 @@ def _execute_swing_approval(adapter, payload, order_service, *,
                 risk_snapshot_id=risk_id, quote_at=quote_at,
                 source=OrderSource.MANUAL, reason=f"swing_approval:{signal_id}")
         elif kind == "option":
-            quote = _refresh_option_quote(adapter, order.get("contract"), now_utc)
+            try:
+                quote = _refresh_option_quote(adapter, order.get("contract"),
+                                              now_utc)
+            except Exception as exc:
+                raise _Retryable(
+                    f"no usable options snapshot for {order.get('contract')} "
+                    f"({type(exc).__name__})", quote=True) from exc
             if quote is None:
-                raise ValueError(
-                    f"no usable options snapshot for {order.get('contract')}")
+                raise _Retryable(
+                    f"no usable options snapshot for {order.get('contract')}",
+                    quote=True)
             intent = _build_option_intent(
                 order_service, order, quote_at=quote["quote_at"],
                 decision_at=now_utc, risk_snapshot_id=risk_id,
                 source=OrderSource.MANUAL)
         else:
             raise ValueError(f"unknown approved order kind {kind!r}")
+    except _Retryable as exc:
+        return back_to_pending(str(exc), quote=exc.quote)
     except Exception as exc:
         unreadable = getattr(approvals, "BookUnreadable", None)
         if isinstance(unreadable, type) and isinstance(exc, unreadable):
-            reason = "broker order book unreadable — approve again"
-            write({"status": "pending", "decided_by": None, "decided_at": None,
-                   "decision_reason": None})
-            say(f"{label} put back to pending: {exc}", "yellow")
-            tell(reason)
-            return (False, f"{reason} ({exc})", {})
+            return back_to_pending("broker order book unreadable", detail=str(exc))
         return failed(f"swing approval failed: {type(exc).__name__}: {exc}",
                       str(exc) or type(exc).__name__)
 
@@ -10961,6 +11041,12 @@ def _execute_swing_approval(adapter, payload, order_service, *,
     }
     if not submission.decision.allowed:
         error = "order gate blocked: " + ",".join(codes)
+        if all_transient(codes):
+            # The gate refused before the service created a lifecycle row, so
+            # a re-approval builds the same identity afresh: one order.
+            return back_to_pending(error, quote=any(
+                code == "quote.stale" or code.startswith("dependency.quote.")
+                for code in codes), result=result)
         return failed(error, error, key=key, result=result)
     if not submission.accepted:
         write({"order_client_id": key, "submitted_order": order})

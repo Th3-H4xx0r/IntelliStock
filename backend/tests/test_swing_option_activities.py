@@ -662,7 +662,8 @@ def test_an_assignment_whose_contract_is_gone_is_booked_from_its_symbol(
     assert any(c == "yellow" and "OCC symbol" in m for m, c in lines)
 
 
-@pytest.mark.parametrize("qty", [0.0, None, "", "nan", 0.4, "lots"])
+@pytest.mark.parametrize("qty", [0.0, None, "", "nan", 0.4, "lots",
+                                 1.5, -1.5, "2.5", 1.0000001, "inf"])
 def test_an_assignment_without_a_quantity_is_held_never_booked_as_one(qty):
     poll = _poller()
     service, fills = _service()
@@ -677,3 +678,15 @@ def test_an_assignment_without_a_quantity_is_held_never_booked_as_one(qty):
     assert not service.lifecycle_store.list_for_instance("instance-1")
     assert any(c == "red" and "NOT recorded" in m and "quantity" in m
                for m, c in lines)
+
+
+@pytest.mark.parametrize("qty,shares", [(-2.0, 200), ("-3", 300), (1, 100)])
+def test_a_whole_contract_quantity_is_booked_in_full(qty, shares):
+    """The positive control for the hold above: whole contract counts, as a
+    float, a string or an int, book 100 shares each."""
+    poll = _poller()
+    service, fills = _service()
+    account = _Account([_assigned(qty=qty)], positions={OCC: _put()})
+    poll(account, service, {}, now_utc=RTH, notify=_ignore, min_interval_s=0)
+    (fill,) = fills
+    assert fill.incremental_quantity == Decimal(shares)
