@@ -12,6 +12,8 @@ import math
 import os
 import re
 import sys
+import time
+import zlib
 from datetime import date, datetime, time as dtime, timedelta, timezone
 
 _BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -61,6 +63,13 @@ _LOGGED_KEY = "_wheel_logged"
 
 #: One yfinance earnings lookup.
 EARNINGS_RESERVE_S = 5.0
+#: Logging: the config banner shows once per process (and again when the
+#: config it prints changes), so a restart shows it again.
+_PROCESS_TOKEN = f"{os.getpid()}-{time.time():.0f}"
+_WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+_SCREEN_LABELS = {"rsi_range": "RSI in range", "above_sma": "close>SMA{n}",
+                  "atr_pct": "ATR%>=1.5", "premium": "est. premium ok",
+                  "otm": "strike>=1.5% OTM"}
 
 _GRID = timedelta(minutes=clock.TICK_GRID_MIN)
 #: A tick belongs to the grid tick it lands within half a step of.
@@ -90,6 +99,39 @@ def _truthy(value) -> bool:
     if isinstance(value, bool):
         return value
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _banner_text(cfg) -> str:
+    """The once-per-run config banner (logging only)."""
+    role = ai_analyst.llm_role_from_config(cfg)
+    model = f"{role['provider']}/{role['model']}" if role else "NONE LINKED (scan refused)"
+    wd = int(cfg.get("scan_weekday", 0)) % 7
+    return (f"StrategyWheel | CONFIG | lane ENABLED | weekly put scan {_WEEKDAYS[wd]} "
+            f"{cfg.get('scan_time_et')} ET ({_WEEKDAYS[(wd + 1) % 7]} if it did not finish), "
+            f"daily put monitor {cfg.get('monitor_time_et')} ET | screen: RSI "
+            f"{cfg.get('rsi_min')}-{cfg.get('rsi_max')}, close > SMA{cfg.get('sma_trend')}, "
+            f"ATR({cfg.get('atr_period')})% >= 1.5, strike = close - "
+            f"{cfg.get('strike_atr_mult')} x ATR and >= 1.5% OTM, est. premium >= "
+            f"{float(cfg.get('min_premium_pct')) * 100:g}%, no earnings within "
+            f"{cfg.get('earnings_block_days')} days, {cfg.get('max_per_sector')} per sector | "
+            f"put: delta ~{cfg.get('target_delta')}, {cfg.get('days_to_expiry')} DTE target, "
+            f"limit bid x {cfg.get('limit_bid_mult')}, collateral <= "
+            f"{float(cfg.get('max_collateral_pct')) * 100:g}% of equity per name | AI: "
+            f"auto-sell >= {cfg.get('approve_threshold')}, approval queue "
+            f"{cfg.get('review_threshold')}-{int(cfg.get('approve_threshold')) - 1}, model "
+            f"{model}" + (f" (id {cfg.get('conviction_llm_model_id')})"
+                          if cfg.get("conviction_llm_model_id") else "")
+            + " | covered calls " + ("auto (dry run)" if _truthy(cfg.get("auto_covered_call"))
+                                      else "off (dry run alerts)"))
+
+
+def _log_banner(cache, cfg):
+    try:
+        text = _banner_text(cfg)
+    except Exception as exc:
+        text = f"StrategyWheel | CONFIG | lane ENABLED | (banner unavailable: {exc})"
+    _log_once(cache, "config-banner", f"{_PROCESS_TOKEN}|{zlib.crc32(text.encode('utf-8'))}",
+              text, "cyan")
 
 
 def _valid_hhmm(value):
@@ -256,6 +298,7 @@ class StrategyWheel:
                       "option data (spec §1) — so this lane is inert in backtests.",
                       "yellow")
             return {}
+        _log_banner(cache, cfg)
         if portfolio_emulator is None:
             _log_once(cache, "no-emulator", str(current_time)[:10],
                       "StrategyWheel: REFUSING — no broker adapter to read the book.", "red")
@@ -263,6 +306,9 @@ class StrategyWheel:
         session = clock.ny_date(current_time)
         today = date.fromisoformat(session)
         if not clock.is_trading_day(today):
+            _log_once(cache, "no-session", session,
+                      f"StrategyWheel {session} | not a trading day — no scan, no monitor",
+                      "cyan")
             return {}
         # G2 minor: each schedule is validated here, at config load. An
         # unparseable time refuses its own job (None below) and says so once a
@@ -303,13 +349,23 @@ class StrategyWheel:
             return []                    # refused and logged at config load
         scan_wd = int(cfg.get("scan_weekday", 0)) % 7
         if today.weekday() not in (scan_wd, (scan_wd + 1) % 7):
+            _log_once(cache, "scan-day", session,
+                      f"StrategyWheel {session} | no weekly put scan today — it runs "
+                      f"{_WEEKDAYS[scan_wd]} at {cfg['scan_time_et']} ET "
+                      f"({_WEEKDAYS[(scan_wd + 1) % 7]} if it did not finish)", "cyan")
             return []
         if not clock.at_or_after(now, cfg["scan_time_et"]) or not clock.is_rth(now):
+            _log_once(cache, "scan-wait", session,
+                      f"StrategyWheel {session} | the weekly put scan waits for "
+                      f"{cfg['scan_time_et']} ET in regular hours", "cyan")
             return []
         # The Tuesday fallback runs only when Monday's scan did not COMPLETE
         # (wheel_trader.py:1274-1277); the marker, never partial rows or a
         # started scan's state, says so.
         if wheel_rules.scan_already_ran_this_week(cache.get(_COMPLETE_KEY), today):
+            _log_once(cache, "scan-done-week", session,
+                      f"StrategyWheel {session} | this week's put scan already completed "
+                      f"({cache.get(_COMPLETE_KEY)}) — nothing to scan", "cyan")
             return []
         orders = []
         # ST ran its position checks at the start of every scan run
@@ -346,8 +402,24 @@ class StrategyWheel:
         if state["phase"] == "done":
             cache[_COMPLETE_KEY] = session
             cache.pop(_SCAN_KEY, None)
+            self._log_scan_funnel(state, session)
             self._notify_results(state, session, iid)
         return orders
+
+    @staticmethod
+    def _log_scan_funnel(state, session):
+        """The weekly scan's funnel, once, when it completes (logging only)."""
+        try:
+            approved, review, rejected = state["approved"], state["review"], state["rejected"]
+            skipped = len(state["queue"]) - len(approved) - len(review) - rejected
+            _log(f"StrategyWheel {session} | weekly put scan COMPLETE — universe "
+                 f"{state.get('scanned', 0)} -> technical screen {len(state['pre'])} -> no "
+                 f"earnings soon {len(state['candidates'])} -> sector cap {len(state['queue'])} "
+                 f"-> AI: {len(approved) + max(skipped, 0)} approve, {len(review)} review, "
+                 f"{rejected} reject -> {len(approved)} put(s) ordered, {max(skipped, 0)} "
+                 f"approved but not ordered | expiry {state.get('expiry')}", "green")
+        except Exception as exc:  # pragma: no cover - logging never decides
+            _log(f"StrategyWheel {session} | scan summary unavailable ({exc})", "yellow")
 
     def _prepare(self, session, today, iid, cfg, cache):
         """wheel_trader.py:1285-1300: bars and the technical screen. Returns
@@ -368,14 +440,48 @@ class StrategyWheel:
                 notify.send("swing_run_summary", iid, "Wheel Scanner ⚠️ Failed",
                             f"{session}\nNo market data returned")
             return None
-        pre = wheel_rules.screen_technicals(raw, live_universe, cfg=cfg)
+        stats = {}
+
+        def quiet(msg, color="white"):
+            # One line per universe symbol is too many for the live log: the
+            # per-symbol verdicts are counted below; errors still show.
+            if "ERROR" in str(msg):
+                _log(msg, "yellow")
+
+        pre = wheel_rules.screen_technicals(raw, live_universe, cfg=cfg, log=quiet,
+                                            stats=stats)
         expiry = wheel_rules.next_friday(today, clock.trading_days)
         _log(f"StrategyWheel {session} | {len(pre)} of {len(live_universe)} passed the "
              f"technical screen; expiry {expiry}", "cyan")
+        self._log_screen_funnel(session, live_universe, stats, pre, cfg)
         return {"session": session, "phase": "earnings", "expiry": expiry, "pre": pre,
                 "cursor": 0, "candidates": [], "queue": [],
                 "scanned": len(live_universe), "approved": [], "review": [],
                 "rejected": 0, "committed": {}}
+
+    @staticmethod
+    def _log_screen_funnel(session, universe_, stats, pre, cfg):
+        """The technical screen as a cumulative funnel (logging only)."""
+        try:
+            failed = stats.get("failed") or {}
+            n = len(universe_)
+            with_bars = n - len(stats.get("no_bars") or [])
+            history = with_bars - len(stats.get("short_history") or [])
+            readable = history - len(stats.get("nan") or []) - len(stats.get("errors") or [])
+            parts = [f"universe {n}", f"with bars {with_bars}", f"enough history {history}",
+                     f"indicators ok {readable}"]
+            alive = [s for s in failed]
+            for key in wheel_rules.SCREEN_FILTERS:
+                alive = [s for s in alive if key not in failed[s]]
+                label = _SCREEN_LABELS[key].format(n=cfg.get("sma_trend"))
+                parts.append(f"{label} {len(alive)}")
+            parts.append(f"PASSED {len(pre)}")
+            _log(f"StrategyWheel {session} | screen funnel: " + " -> ".join(parts)
+                 + (f" | passed: {', '.join(p['symbol'] for p in pre[:20])}"
+                    + (f", +{len(pre) - 20} more" if len(pre) > 20 else "") if pre else ""),
+                 "cyan")
+        except Exception as exc:  # pragma: no cover - logging never decides
+            _log(f"StrategyWheel {session} | screen funnel unavailable ({exc})", "yellow")
 
     def _advance(self, state, session, iid, cfg, role, emu, deadline):
         orders = []
@@ -444,12 +550,31 @@ class StrategyWheel:
                           position_size_contracts=int((existing.get("proposal") or {}).get("qty") or 1),
                           key_risks=existing.get("key_risks") or [])
         else:
+            t_ai = time.monotonic()
             scored = ai_analyst.score_candidate(
                 c, role=role, approve_threshold=int(cfg["approve_threshold"]),
                 review_threshold=int(cfg["review_threshold"]), rsi_min=cfg["rsi_min"],
                 rsi_max=cfg["rsi_max"], days_to_expiry=int(cfg["days_to_expiry"]))
+            ai_secs = time.monotonic() - t_ai
         rec, score = scored["recommendation"], scored["conviction_score"]
         contracts = int(scored.get("position_size_contracts") or 1)
+        try:
+            head = (f"StrategyWheel {session} | {symbol} ${c['stock_price']:.2f}, RSI "
+                    f"{c['rsi']}, ATR {c['atr_pct']}%, strike ${c['strike_price']} "
+                    f"({c['otm_pct']}% OTM), est. premium ${c['est_premium']:.2f}")
+            if existing is not None:
+                _log(f"{head} | already scored this session (score {score}, "
+                     f"{existing.get('status')}) — not re-scored", "cyan")
+            else:
+                fate = {"approve": f"AUTO-SELL (>= {cfg['approve_threshold']})",
+                        "review": (f"APPROVAL QUEUE ({cfg['review_threshold']}-"
+                                   f"{int(cfg['approve_threshold']) - 1})"),
+                        "reject": f"REJECTED (< {cfg['review_threshold']})"}.get(rec, rec)
+                _log(f"{head} | AI score {score}/100 -> {fate}, {contracts} contract(s) | model "
+                     f"{role['provider']}/{role['model']} | {ai_secs:.1f}s",
+                     "green" if rec == "approve" else "yellow")
+        except Exception:  # pragma: no cover - logging never decides
+            pass
         scan_row = {"instance_id": iid, "session": session, "symbol": symbol,
                     "stock_price": c["stock_price"], "strike": c["strike_price"],
                     "expiry": c["expiry"], "premium_est": c["est_premium"], "score": score,
@@ -479,6 +604,8 @@ class StrategyWheel:
             return None
 
         if rec == "review":
+            if existing is None:
+                _log(f"  [wheel] {symbol}: QUEUED for approval (signal {sid})", "yellow")
             record("pending", review_proposal)
             signals_store.insert_wheel_scan(dict(scan_row, status="pending", skip_reason=None))
             state["review"].append({"symbol": symbol, "strike_price": c["strike_price"],
@@ -494,6 +621,8 @@ class StrategyWheel:
 
         # approve
         if existing is not None and existing.get("status") != "auto_approved":
+            _log(f"  [wheel] {symbol}: decided earlier ({existing.get('status')}) — no new "
+                 "order", "cyan")
             return None
         # fix 1: an open short put, a working sell order, or a put this scan
         # already ordered on the underlying refuses a second one.
@@ -516,6 +645,10 @@ class StrategyWheel:
             # recorded failure the operator hears about, not a silent skip.
             order, error, meta = None, f"order build failed ({type(exc).__name__}: {exc})", {}
         if order is None:
+            _log(f"  [wheel] {symbol}: NO ORDER — {error}"
+                 + (f" ({'; '.join(str(n) for n in meta['notes'])})"
+                    if isinstance(meta, dict) and meta.get("notes") else ""),
+                 "yellow" if _routine_sizing_skip(error) else "red")
             record("failed", review_proposal, error=error)
             signals_store.insert_wheel_scan(dict(scan_row, status="skipped", skip_reason=error))
             if _routine_sizing_skip(error):
@@ -542,6 +675,19 @@ class StrategyWheel:
         signals_store.insert_wheel_scan(dict(scan_row, strike=order["strike"],
                                              expiry=order["expiry"], status="placed",
                                              skip_reason=None))
+        try:
+            dte = (date.fromisoformat(str(order["expiry"])[:10])
+                   - date.fromisoformat(session)).days
+            notes = meta.get("notes") if isinstance(meta, dict) else None
+            _log(f"StrategyWheel {session} | PUT ORDER {symbol}: sell-to-open {order['qty']} x "
+                 f"{order['contract']} — strike ${order['strike']}, exp {order['expiry']} "
+                 f"({dte} DTE), delta {meta.get('delta')}, bid {meta.get('bid')}, limit "
+                 f"${order['limit_price']:.2f} ({meta.get('price_source')}) | collateral "
+                 f"${order['strike'] * 100 * order['qty']:,.0f} of cash "
+                 f"${acct['cash']:,.0f}"
+                 + (f" | {'; '.join(str(n) for n in notes)}" if notes else ""), "green")
+        except Exception:  # pragma: no cover - logging never decides
+            pass
         state["committed"][symbol] = order["strike"] * 100 * order["qty"]
         state["approved"].append({"symbol": symbol, "strike_price": order["strike"],
                                   "expiry": order["expiry"], "est_premium": c["est_premium"],

@@ -119,7 +119,7 @@ def wheel(store, monkeypatch):
     monkeypatch.setattr(m.market_data, "data_client", lambda k, s: object())
     monkeypatch.setattr(m.market_data, "get_daily_bars", lambda syms, days, client: {"APH": object()})
     monkeypatch.setattr(m.universe, "get_wheel_universe", lambda: ["APH", "GIS", "KO"])
-    monkeypatch.setattr(m.wheel_rules, "screen_technicals", lambda raw, syms, cfg=None: [dict(p) for p in PRE])
+    monkeypatch.setattr(m.wheel_rules, "screen_technicals", lambda raw, syms, cfg=None, **_kw: [dict(p) for p in PRE])
     monkeypatch.setattr(m.wheel_rules, "wheel_earnings_days", lambda s: None)
     monkeypatch.setattr(m.clock, "is_trading_day", lambda d: True)
     monkeypatch.setattr(m.calibration, "record_outcomes", lambda *a, **k: 0)
@@ -335,7 +335,7 @@ def test_ruling_6_a_started_but_unfinished_monday_scan_gets_the_tuesday_fallback
 
 def test_ruling_6_one_scan_never_sells_two_puts_on_one_underlying(wheel, monkeypatch):
     monkeypatch.setattr(wheel.wheel_rules, "screen_technicals",
-                        lambda raw, syms, cfg=None: [dict(p) for p in PRE + PRE[:1]])
+                        lambda raw, syms, cfg=None, **_kw: [dict(p) for p in PRE + PRE[:1]])
     # A $1M account: the collateral cap alone would allow a second APH put.
     rich = WheelAdapter(cash=1_000_000.0, equity=1_000_000.0)
     out = tick(wheel, MON_1040, rich, {})

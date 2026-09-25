@@ -131,8 +131,12 @@ def next_friday(today: date, calendar, *, min_dte: int = MIN_DTE, log=None) -> s
         return str(candidate)
 
 
+#: The technical screen's filters, in the order its funnel reports them.
+SCREEN_FILTERS = ("rsi_range", "above_sma", "atr_pct", "premium", "otm")
+
+
 def screen_technicals(raw: dict, symbols: list, *, cfg: dict | None = None,
-                      log=None) -> list[dict]:
+                      log=None, stats: dict | None = None) -> list[dict]:
     """wheel_trader.py:839-953 without the earnings lookup and the expiry.
 
     Screening criteria (ALL must pass):
@@ -142,8 +146,16 @@ def screen_technicals(raw: dict, symbols: list, *, cfg: dict | None = None,
     4. Estimated weekly premium > MIN_OPTION_PREMIUM_PCT of stock price
     6. Strike at least 1.5% OTM
     (5, no earnings within 7 days, is apply_earnings.)
+
+    `stats` (logging only), when given, is filled with {"no_bars",
+    "short_history", "nan", "errors": [symbols], "failed": {symbol: [the
+    SCREEN_FILTERS it failed]}} for the caller's funnel line.
     """
     cfg = cfg or {}
+    if stats is not None:
+        for key in ("no_bars", "short_history", "nan", "errors"):
+            stats.setdefault(key, [])
+        stats.setdefault("failed", {})
     log = log or _log
     rsi_min = cfg.get("rsi_min", RSI_MIN)
     rsi_max = cfg.get("rsi_max", RSI_MAX)
@@ -157,10 +169,14 @@ def screen_technicals(raw: dict, symbols: list, *, cfg: dict | None = None,
             # raw is {symbol: DataFrame} from market_data (R8-05)
             df = raw.get(symbol)
             if df is None:
+                if stats is not None:
+                    stats["no_bars"].append(symbol)
                 continue
             df = df.copy().dropna(subset=["Close"]).reset_index()
 
             if len(df) < sma_n + 5:
+                if stats is not None:
+                    stats["short_history"].append(symbol)
                 log(f"  [wheel] {symbol}: insufficient data ({len(df)} bars), skipping")
                 continue
 
@@ -178,6 +194,8 @@ def screen_technicals(raw: dict, symbols: list, *, cfg: dict | None = None,
             last_atr   = float(atr_series.iloc[-1])  if not pd.isna(atr_series.iloc[-1]) else None
 
             if any(v is None for v in [last_rsi, last_sma50, last_atr]):
+                if stats is not None:
+                    stats["nan"].append(symbol)
                 log(f"  [wheel] {symbol}: indicator NaN, skipping")
                 continue
 
@@ -191,17 +209,24 @@ def screen_technicals(raw: dict, symbols: list, *, cfg: dict | None = None,
             est_premium     = round(last_atr * 0.25, 2)
             est_premium_pct = est_premium / last_close * 100
 
-            reasons_failed = []
+            reasons_failed, keys = [], []
             if not (rsi_min <= last_rsi <= rsi_max):
                 reasons_failed.append(f"RSI {last_rsi:.1f} out of [{rsi_min},{rsi_max}]")
+                keys.append("rsi_range")
             if last_close < last_sma50:
                 reasons_failed.append(f"below SMA50 (${last_close:.2f} < ${last_sma50:.2f})")
+                keys.append("above_sma")
             if atr_pct < 1.5:
                 reasons_failed.append(f"ATR% {atr_pct:.2f}% < 1.5%")
+                keys.append("atr_pct")
             if est_premium_pct < min_premium_pct * 100:
                 reasons_failed.append(f"est. premium {est_premium_pct:.3f}% < {min_premium_pct*100:.2f}%")
+                keys.append("premium")
             if otm_pct < 1.5:
                 reasons_failed.append(f"strike only {otm_pct:.1f}% OTM (min 1.5%) — too close to ATM")
+                keys.append("otm")
+            if stats is not None:
+                stats["failed"][symbol] = keys
 
             if reasons_failed:
                 log(f"  [wheel] {symbol}: FILTERED — {'; '.join(reasons_failed)}")
@@ -221,6 +246,8 @@ def screen_technicals(raw: dict, symbols: list, *, cfg: dict | None = None,
             })
 
         except Exception as exc:
+            if stats is not None:
+                stats["errors"].append(symbol)
             log(f"  [wheel] {symbol}: ERROR — {exc}")
             continue
 

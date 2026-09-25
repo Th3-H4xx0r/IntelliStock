@@ -12,6 +12,8 @@ import math
 import os
 import re
 import sys
+import time
+import zlib
 from datetime import date, timedelta
 
 _BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -86,6 +88,22 @@ _VIX_RETRY_UNTIL_ET = "10:00"
 #: FW-str minor (d): the regular-hours open. A session whose FIRST scan tick
 #: is at or after it plans no entries (ST's cron only ever ran at 09:15).
 _MARKET_OPEN_ET = "09:30"
+#: Logging: a backtest session names at most this many skipped candidates
+#: one per line; the rest are counted, by reason, on one line.
+_MAX_SKIP_LINES = 10
+#: Logging: at most this many fill lines per backtest session.
+_MAX_FILL_LINES = 20
+#: Logging: the config banner shows once per process (and again when the
+#: config it prints changes), so a restart shows it again.
+_PROCESS_TOKEN = f"{os.getpid()}-{time.time():.0f}"
+#: Logging: the trade-history watermark of the fills already reported, per
+#: emulator. Module-level, not in the strategy cache (logging only).
+_FILL_MARK: dict = {}
+#: Logging: the disabled-lane notice, once per process per instance.
+_DISABLED_LOGGED: set = set()
+_EXIT_WHY = {"rsi_overbought": "RSI crossed the overbought line",
+             "stop_loss": "close at or below the stop",
+             "profit_target": "close at or above the target"}
 
 
 def _log_once(cache, reason, scope, msg, color="white"):
@@ -104,6 +122,223 @@ def _truthy(value) -> bool:
     if isinstance(value, bool):
         return value
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+# -- logging helpers (logging only: none of these decides anything) ------------
+
+def _fmt(value, spec=".2f", none="n/a") -> str:
+    try:
+        return format(float(value), spec)
+    except (TypeError, ValueError):
+        return none
+
+
+def _money(value) -> str:
+    text = _fmt(value, ",.2f")
+    return text if text == "n/a" else f"${text}"
+
+
+def _pct(value, spec=".0f") -> str:
+    return f"{_fmt(float(value) * 100, spec)}%" if _price(value) is not None else "n/a"
+
+
+def _names(symbols, limit=12) -> str:
+    names = sorted(str(s) for s in (symbols or ()))
+    if not names:
+        return "none"
+    more = f", +{len(names) - limit} more" if len(names) > limit else ""
+    return ", ".join(names[:limit]) + more
+
+
+def _candidate_text(symbol, i) -> str:
+    """A candidate's key numbers, as its log line shows them."""
+    i = i if isinstance(i, dict) else {}
+    try:
+        ratio = f"{float(i.get('volume')) / float(i.get('vol_avg20')):.2f}x"
+    except (TypeError, ValueError, ZeroDivisionError):
+        ratio = "n/a"
+    return (f"{symbol} RSI {_fmt(i.get('rsi'), '.1f')} (prev {_fmt(i.get('rsi_prev'), '.1f')}) | "
+            f"MACD hist {_fmt(i.get('macd_hist'), '.3f')} (prev "
+            f"{_fmt(i.get('macd_hist_prev'), '.3f')}) | ADX {_fmt(i.get('adx'), '.1f')} | "
+            f"vol {ratio} of 20d avg | close {_fmt(i.get('close'))}")
+
+
+def _funnel_text(counts, cfg) -> str:
+    """signals.entry_funnel's counts, under entry_signal's own filter names."""
+    labels = {"universe": "universe", "not_held": "not held/queued",
+              "has_indicators": "has indicators",
+              "above_sma": f"above_sma (close>SMA{cfg.get('sma_long', 200)})",
+              "rsi_signal": f"rsi_signal (RSI<{_fmt(cfg.get('rsi_entry_max'), 'g')}, rising)",
+              "macd_improving": "macd_improving (hist up)",
+              "vol_above_avg": f"vol_above_avg (>{cfg.get('vol_avg_period', 20)}d avg)",
+              "trend_confirmed": f"trend_confirmed (ADX>{_fmt(cfg.get('adx_min'), 'g')})",
+              "rr_ok": "rr_ok (target/stop>=1.5)", "passed": "PASSED"}
+    parts = [f"{labels[k]} {counts.get(k, 0)}" for k in signals.FUNNEL_STAGES]
+    text = " -> ".join(parts)
+    if counts.get("errors"):
+        text += f" | {counts['errors']} unreadable row(s) skipped"
+    return text
+
+
+def _regime_text(reg, vix, bear, cfg) -> str:
+    """The regime verdict with its inputs: SPY vs SMA200 x buffer, VIX vs max,
+    the blocked-session count and bear mode."""
+    buf, vmax = float(cfg["spy_buffer"]), float(cfg["vix_max"])
+    days, need = int(bear.get("blocked_days") or 0), int(cfg["bear_regime_days"])
+    try:
+        line = f"{float(reg['spy_sma200']) * buf:.2f}"
+    except (TypeError, ValueError):
+        line = "n/a"
+    text = (f"regime {'ACTIVE' if reg['regime_ok'] else 'BLOCKED'} | SPY "
+            f"{_fmt(reg.get('spy_close'))} vs SMA200 {_fmt(reg.get('spy_sma200'))} x {buf:g} = "
+            f"{line} ({'ok' if reg.get('spy_ok') else 'below'}) | VIX {_fmt(vix, '.1f')} vs max "
+            f"{vmax:g} ({'ok' if reg.get('vix_ok') else ('n/a' if vix is None else 'too high')}) | "
+            f"blocked_days {days} (bear mode at {need}), bear mode "
+            f"{'ON' if not reg['regime_ok'] and days >= need else 'off'}")
+    if reg.get("blocked_reason"):
+        text += f" | blocked: {reg['blocked_reason']}"
+    return text
+
+
+def _no_scan_text(phase, reg, bear, cfg) -> str:
+    if phase == "blocked":
+        left = int(cfg["bear_regime_days"]) - int(bear.get("blocked_days") or 0)
+        return (f"no entry scan — regime blocked ({reg.get('blocked_reason')}); bear mode "
+                f"(defensive ETFs) after {left} more blocked session(s)")
+    return "no entry scan — the entry universe is empty"
+
+
+def _exit_text(symbol, reason, i, entry, qty, cfg, when) -> str:
+    """One exit decision: why, entry -> exit price and P&L."""
+    close = (i or {}).get("close")
+    try:
+        pnl = f"{(float(close) - float(entry)) / float(entry) * 100:+.1f}%"
+    except (TypeError, ValueError, ZeroDivisionError):
+        pnl = "n/a"
+    why = _EXIT_WHY.get(reason, str(reason))
+    if reason == "rsi_overbought":
+        why += (f" {_fmt(cfg.get('rsi_overbought'), 'g')} ({_fmt((i or {}).get('rsi_prev'), '.1f')}"
+                f" -> {_fmt((i or {}).get('rsi'), '.1f')})")
+    elif reason == "stop_loss":
+        why += f" (-{_pct(cfg.get('stop_loss'), 'g')})"
+    elif reason == "profit_target":
+        why += f" (+{_pct(cfg.get('profit_target'), 'g')})"
+    return (f"EXIT {symbol} — {why} | entry {_fmt(entry)} -> close {_fmt(close)}, P&L {pnl} | "
+            f"sell all {_fmt(qty, 'g')} sh {when}")
+
+
+def _log_exits(prefix, reasons, ind, entry_of, qty_of, cfg, when, *, cache=None,
+               session=None):
+    """One green line per exit decided. With a cache, once per symbol per
+    session (a live scan retried this session re-decides its exits)."""
+    for symbol, reason in sorted((reasons or {}).items()):
+        try:
+            text = _exit_text(symbol, reason, ind.get(symbol), entry_of(symbol),
+                              qty_of(symbol), cfg, when)
+        except Exception as exc:  # pragma: no cover - logging never decides
+            text = f"EXIT {symbol} — {reason} ({type(exc).__name__} formatting the details)"
+        if cache is None:
+            _log(f"{prefix} | {text}", "green")
+        else:
+            _log_once(cache, f"exit-{symbol}", session, f"{prefix} | {text}", "green")
+
+
+def _banner_text(cfg, backtest, time_increment) -> str:
+    """The once-per-run config banner: the thresholds this run trades on."""
+    gate = _truthy(cfg.get("ai_gate_enabled", True))
+    if backtest:
+        secs = _increment_seconds(time_increment)
+        mode = (f"BACKTEST, granularity {secs}s" if secs is not None
+                else "BACKTEST, granularity unset") + (" (daily)" if secs == 86400 else "")
+        ai = ("AI gate SKIPPED in backtests (ST's backtester ran no AI score and no earnings "
+              "block): passing candidates are decided by slots, sector and budget")
+    else:
+        mode = f"LIVE/PAPER, scan {cfg.get('scan_time_et')} ET"
+        if gate:
+            role = ai_analyst.llm_role_from_config(cfg)
+            model = (f"{role['provider']}/{role['model']}" if role
+                     else "NONE LINKED (entries refused)")
+            ai = (f"AI gate ON: auto-enter >= {cfg.get('ai_approve_threshold')}, approval queue "
+                  f"{cfg.get('ai_review_threshold')}-{int(cfg.get('ai_approve_threshold')) - 1}, "
+                  f"reject below; model {model}"
+                  + (f" (id {cfg.get('conviction_llm_model_id')})"
+                     if cfg.get("conviction_llm_model_id") else "")
+                  + f"; earnings block < {cfg.get('earnings_hard_block_days')} days")
+        else:
+            ai = "AI gate OFF: every passing candidate is entered (no score, no approval)"
+    return (f"StrategySwing | CONFIG | lane ENABLED | {mode} | entry: RSI({cfg.get('rsi_period')})"
+            f" < {cfg.get('rsi_entry_max')} and rising, MACD({cfg.get('macd_fast')}/"
+            f"{cfg.get('macd_slow')}/{cfg.get('macd_signal')}) hist improving, volume > "
+            f"{cfg.get('vol_avg_period')}d avg, close > SMA{cfg.get('sma_long')}, "
+            f"ADX({cfg.get('adx_period')}) > {cfg.get('adx_min')} | exit: RSI crosses "
+            f"{cfg.get('rsi_overbought')}, stop -{_pct(cfg.get('stop_loss'), 'g')}, target "
+            f"+{_pct(cfg.get('profit_target'), 'g')} (bracket on the prior close) | book: "
+            f"{cfg.get('max_positions')} slots x {_pct(cfg.get('position_size_pct'), 'g')} of "
+            f"equity, {cfg.get('max_per_sector')} per sector | regime: SPY > SMA200 x "
+            f"{cfg.get('spy_buffer')} and VIX <= {cfg.get('vix_max')}; bear mode "
+            f"({_names(_list(cfg.get('defensive_universe')))}) after "
+            f"{cfg.get('bear_regime_days')} blocked sessions | {ai}")
+
+
+def _log_banner(cache, cfg, backtest, time_increment):
+    """Once per run (per process, and again if the printed config changes)."""
+    try:
+        text = _banner_text(cfg, backtest, time_increment)
+    except Exception as exc:
+        text = (f"StrategySwing | CONFIG | lane ENABLED | (banner unavailable: "
+                f"{type(exc).__name__}: {exc})")
+    scope = f"{_PROCESS_TOKEN}|{zlib.crc32(text.encode('utf-8'))}"
+    _log_once(cache, "config-banner", scope, text, "cyan")
+
+
+def _log_fills(emu, session, first_session):
+    """Backtest: the fills the engine made since the last session -- entries
+    at the open, next-open exits and the bracket legs (exit_reason) -- with
+    entry -> exit and P&L. A new emulator, or the run's first session,
+    starts the watermark at its current history (no backlog)."""
+    try:
+        trades = list(emu.get_trade_history() or [])
+    except Exception:
+        return
+    mark = _FILL_MARK.get("n")
+    if _FILL_MARK.get("emu") != id(emu) or first_session or mark is None or mark > len(trades):
+        _FILL_MARK.update({"emu": id(emu), "n": len(trades)})
+        return
+    new = trades[mark:]
+    _FILL_MARK["n"] = len(trades)
+    shown = 0
+    for k, t in enumerate(new, mark):
+        if not isinstance(t, dict):
+            continue
+        action = str(t.get("action") or t.get("side") or "").lower()
+        if action not in ("buy", "sell"):
+            continue
+        if shown >= _MAX_FILL_LINES:
+            _log(f"StrategySwing {session} | +{len(new) - (k - mark)} more fill(s) not shown",
+                 "green")
+            return
+        shown += 1
+        sym = str(t.get("ticker") or t.get("symbol") or "").upper()
+        qty, price = _fmt(t.get("shares"), "g"), t.get("price")
+        if action == "buy":
+            _log(f"StrategySwing {session} | FILLED BUY {sym} {qty} sh @ {_fmt(price)}", "green")
+            continue
+        entry = None
+        for prior in reversed(trades[:k]):
+            if (isinstance(prior, dict)
+                    and str(prior.get("ticker") or prior.get("symbol") or "").upper() == sym
+                    and str(prior.get("action") or prior.get("side") or "").lower() == "buy"):
+                entry = prior.get("price")
+                break
+        try:
+            pnl = f"{(float(price) - float(entry)) / float(entry) * 100:+.1f}%"
+        except (TypeError, ValueError, ZeroDivisionError):
+            pnl = "n/a"
+        leg = t.get("exit_reason")
+        what = (f"EXIT {sym} — bracket {'stop' if leg == 'stop_loss' else 'target'} leg "
+                f"({leg}) filled" if leg else f"FILLED SELL {sym}")
+        _log(f"StrategySwing {session} | {what} {qty} sh @ {_fmt(price)} | entry "
+             f"{_fmt(entry)} -> exit {_fmt(price)}, P&L {pnl}", "green")
 
 
 def _list(value) -> list:
@@ -394,8 +629,15 @@ class StrategySwing:
                  time_increment=None, mode=None, **kwargs):
         cfg = {**DEFAULTS, **(config or {})}
         if not _truthy(cfg.get("strategy_swing_enabled", False)):
+            who = str(cfg.get("instance_id") or cfg.get("_telemetry_backtest_id") or "")
+            if who not in _DISABLED_LOGGED:
+                _DISABLED_LOGGED.add(who)
+                _log("StrategySwing | lane DISABLED (strategy_swing_enabled is off) — inert: "
+                     "no scan, no entries, no exits. Enable it in the strategy editor.",
+                     "yellow")
             return {}
         cache = strategy_cache if isinstance(strategy_cache, dict) else {}
+        _log_banner(cache, cfg, data is not None, time_increment)
         if portfolio_emulator is None:
             _log_once(cache, "no-emulator", str(current_time)[:10],
                       "StrategySwing: REFUSING to trade — no portfolio emulator, so "
@@ -441,13 +683,18 @@ class StrategySwing:
             return None
 
     def _prepare_backtest_once(self, cfg, session, data, cache):
+        t0 = time.monotonic()
         first = date.fromisoformat(session)
         end, why = _backtest_end(cfg, first)
         if why:
             _log(f"StrategySwing {session} | backtest window end unknown ({why}); the "
                  f"lane's own data runs through {end}", "yellow")
+        _log(f"StrategySwing {session} | DATA PREP start for {first}..{end}: reference rows "
+             "(VIX, membership, sectors), then the lane's own bars for the point-in-time "
+             "universe. Runs once, on the first session.", "cyan")
         universe_now = refdata_sync.sync_reference_data(
             first, end, defensive_universe=_list(cfg["defensive_universe"]), store=store)
+        t_sync = time.monotonic() - t0
         feed = str(cfg.get("alpaca_data_feed") or "iex").strip().lower()
         run = f"{cfg.get('_telemetry_backtest_id') or ''}|{first}|{end}|{feed}"
         own = _OWN_BARS.get(run)
@@ -455,19 +702,29 @@ class StrategySwing:
             carried = {str(s).upper() for s, v in (data or {}).items()
                        if backtest_bars.has_bars(v)} if isinstance(data, dict) else set()
             wanted = [s for s in universe_now if s not in carried]
+            _log(f"StrategySwing {session} | bars: {len(universe_now)} universe symbol(s), "
+                 f"{len(universe_now) - len(wanted)} carried by the engine, {len(wanted)} to "
+                 f"load from {first - timedelta(days=market_data.LIVE_WINDOW_DAYS)} "
+                 f"(warm-up) to {end}", "cyan")
             own = backtest_bars.OwnBars(backtest_bars.fetch_daily_bars(
                 wanted, first - timedelta(days=market_data.LIVE_WINDOW_DAYS), end,
                 key=cfg.get("alpaca_key"), secret=cfg.get("alpaca_secret"), feed=feed))
             _OWN_BARS.clear()
             _OWN_BARS[run] = own
+        else:
+            _log(f"StrategySwing {session} | bars: reusing this process's own bars for the "
+                 "run", "cyan")
         cache[_BT_PREP_KEY] = {"run": run, "first_session": session, "end": end.isoformat()}
-        _log(f"StrategySwing {session} | universe {first}..{end}: {len(universe_now)} "
-             f"symbols, own daily bars for {len(own.symbols)}", "cyan")
+        _log(f"StrategySwing {session} | DATA PREP done: universe {first}..{end}: "
+             f"{len(universe_now)} symbols, own daily bars for {len(own.symbols)} | reference "
+             f"sync {t_sync:.1f}s, bars {time.monotonic() - t0 - t_sync:.1f}s, total "
+             f"{time.monotonic() - t0:.1f}s", "cyan")
         return own
 
     def _backtest(self, prices, current_time, cfg, data, emu, cache, time_increment=None):
         session = clock.ny_date(current_time)
-        if cache.get(_BT_SESSION_KEY) == session:
+        prev_session = cache.get(_BT_SESSION_KEY)
+        if prev_session == session:
             return {}
         # F6: the engine's legacy window ticks on weekdays, NYSE holidays
         # included; a holiday would re-decide the next session on the same
@@ -515,6 +772,7 @@ class StrategySwing:
         bear = signals.update_regime_tracker(cache.get(_BEAR_KEY), reg["regime_ok"], session)
         cache[_BEAR_KEY] = bear
 
+        _log_fills(emu, session, first_session=prev_session is None)
         decisions, sizes, intents = {}, {}, {}
         positions = {str(s).upper(): float(q or 0.0)
                      for s, q in (emu.get_positions() or {}).items() if float(q or 0.0) > 0}
@@ -542,6 +800,9 @@ class StrategySwing:
                       "survivorship-biased. Run scripts/build_swing_reference_data.py.", "red")
             univ = None
 
+        prefix = f"StrategySwing {session}"
+        self._bt_summary_head(prefix, reg, vix, bear, cfg, phase, univ, members, ind,
+                              (set(positions) | pending) - set(exited))
         if univ:
             smap = self._sector_map(cache, names)
             eff = {}
@@ -560,8 +821,18 @@ class StrategySwing:
             # (paper_trader.py:585), at the close the exit was decided on.
             bp += sum(positions[s] * float(ind[s]["close"]) for s in exited)
             active = (set(positions) | pending) - set(exited)
-            self._entries(univ, ind, active, cfg, equity, bp, _sector_reader(smap), phase,
-                          decisions, sizes, intents)
+            sector_of = _sector_reader(smap)
+            self._bt_book_line(prefix, positions, pending, exited, active, cfg, sector_of,
+                               equity, bp, ind)
+            _log_exits(prefix, exited, ind, lambda s: account.entry_price_from_trades(emu, s),
+                       lambda s: positions.get(s), cfg, "at the next open")
+            self._entries(univ, ind, active, cfg, equity, bp, sector_of, phase,
+                          decisions, sizes, intents, prefix=prefix)
+        else:
+            self._bt_book_line(prefix, positions, pending, exited, None, cfg, None, None, None,
+                               ind)
+            _log_exits(prefix, exited, ind, lambda s: account.entry_price_from_trades(emu, s),
+                       lambda s: positions.get(s), cfg, "at the next open")
 
         cache[_BT_SESSION_KEY] = session
         if decisions:
@@ -571,16 +842,73 @@ class StrategySwing:
                  f"exits={sorted(s for s, d in decisions.items() if d == -1)}", "cyan")
         return _emit(decisions, sizes, intents)
 
+    # -- logging: the backtest session summary (logging only) -----------------
+
+    @staticmethod
+    def _bt_summary_head(prefix, reg, vix, bear, cfg, phase, univ, members, ind, exclude):
+        """Session summary lines 1-2: the regime verdict and the signal funnel."""
+        try:
+            _log(f"{prefix} | {_regime_text(reg, vix, bear, cfg)} | phase {phase}", "cyan")
+            if not univ:
+                why = ("no entry scan — no point-in-time membership row (refused above)"
+                       if phase == "regime_ok" and members is None
+                       else _no_scan_text(phase, reg, bear, cfg))
+                _log(f"{prefix} | {why}", "cyan")
+                return
+            source = ("defensive ETFs (bear mode)" if phase == "bear_mode"
+                      else f"{len(members or [])} point-in-time members + SPY, QQQ")
+            counts = signals.entry_funnel(univ, ind, exclude=exclude,
+                                          **signals.entry_kwargs(cfg))
+            _log(f"{prefix} | funnel over {source}: {_funnel_text(counts, cfg)}", "cyan")
+        except Exception as exc:  # pragma: no cover - logging never decides
+            _log(f"{prefix} | session summary unavailable ({type(exc).__name__}: {exc})",
+                 "yellow")
+
+    @staticmethod
+    def _bt_book_line(prefix, positions, pending, exited, active, cfg, sector_of, equity, bp,
+                      ind):
+        """Session summary line 3: the book the entry pass sees."""
+        try:
+            text = (f"{prefix} | book: {len(positions)} held ({_names(positions)}), "
+                    f"{len(pending)} pending fill, {len(exited)} exit(s) decided")
+            if active is not None:
+                used = len(active)
+                in_use = sorted({sector_of(s) for s in active})
+                proceeds = sum(positions[s] * float(ind[s]["close"]) for s in exited)
+                text += (f" | slots {max(int(cfg['max_positions']) - used, 0)}/"
+                         f"{cfg['max_positions']} open | sectors in use: "
+                         f"{', '.join(in_use) or 'none'} | equity {_money(equity)}, buying "
+                         f"power {_money(bp)}"
+                         + (f" (incl. {_money(proceeds)} from today's exits)" if exited else ""))
+            _log(text, "cyan")
+        except Exception as exc:  # pragma: no cover - logging never decides
+            _log(f"{prefix} | book summary unavailable ({type(exc).__name__}: {exc})",
+                 "yellow")
+
     def _entries(self, univ, ind, active, cfg, equity, bp, sector_of, phase,
-                 decisions, sizes, intents):
+                 decisions, sizes, intents, prefix="StrategySwing"):
         """paper_trader.py:626-756 without the AI gate or the earnings block
-        (ST's backtester ran neither). One bad row skips its symbol (G1 minor 5)."""
+        (ST's backtester ran neither). One bad row skips its symbol (G1 minor 5).
+
+        Logging: one line per candidate that passed the signal, with its key
+        numbers and its fate; past _MAX_SKIP_LINES skips, the rest are
+        counted by reason on one line."""
         entries_placed = 0
         available_slots = int(cfg["max_positions"]) - len(active)
         ekw = signals.entry_kwargs(cfg)
         size_pct = float(cfg["position_size_pct"])
         stop_loss, profit_target = float(cfg["stop_loss"]), float(cfg["profit_target"])
         max_per_sector = int(cfg["max_per_sector"])
+        overflow = {}
+
+        def skip(symbol, i, key, why):
+            if sum(len(v) for v in overflow.values()) or skip.shown >= _MAX_SKIP_LINES:
+                overflow.setdefault(key, []).append(symbol)
+                return
+            skip.shown += 1
+            _log(f"{prefix} | {_candidate_text(symbol, i)} -> SKIP: {why}", "yellow")
+        skip.shown = 0
+
         for symbol in univ:
             if symbol in active or symbol not in ind:
                 continue
@@ -588,8 +916,12 @@ class StrategySwing:
             try:
                 if not signals.entry_signal(i, **ekw):
                     continue
-                if signals.sector_conflict(symbol, active, sector_of=sector_of,
-                                           max_per_sector=max_per_sector):
+                conflict = signals.sector_conflict(symbol, active, sector_of=sector_of,
+                                                   max_per_sector=max_per_sector)
+                if conflict:
+                    skip(symbol, i, "sector taken",
+                         f"sector {sector_of(symbol)} already held via {conflict} (max "
+                         f"{max_per_sector} per sector)")
                     continue
                 close = float(i["close"])
             except Exception as exc:
@@ -597,13 +929,20 @@ class StrategySwing:
                      f"{exc}) — the scan continues", "yellow")
                 continue
             if entries_placed >= available_slots:
+                skip(symbol, i, "no slot",
+                     f"no open slot ({int(cfg['max_positions']) - available_slots + entries_placed}"
+                     f"/{int(cfg['max_positions'])} used)")
                 continue
             alloc = equity * size_pct
             if bp < alloc * 0.5:
+                skip(symbol, i, "budget",
+                     f"buying power {_money(bp)} is under half the {_money(alloc)} allocation")
                 continue
             use = min(alloc, bp)
             shares = int(use / close)
             if shares < 1:
+                skip(symbol, i, "zero shares",
+                     f"{_money(use)} buys no whole share at {_fmt(close)}")
                 continue
             decisions[symbol] = 1
             sizes[symbol] = {
@@ -617,6 +956,19 @@ class StrategySwing:
             bp -= shares * close
             entries_placed += 1
             active.add(symbol)               # fix 4: the sector set follows each buy
+            hint = sizes[symbol]
+            _log(f"{prefix} | {_candidate_text(symbol, i)} -> ENTER"
+                 f"{' (defensive)' if phase == 'bear_mode' else ''} {shares} sh at the next "
+                 f"open (prior close {_fmt(close)}), stop "
+                 f"{_fmt(hint['bracket']['stop_loss_price'])}, target "
+                 f"{_fmt(hint['bracket']['take_profit_price'])}, cash "
+                 f"{_money(hint['buy_cash'])} | slot "
+                 f"{int(cfg['max_positions']) - available_slots + entries_placed}/"
+                 f"{int(cfg['max_positions'])}", "green")
+        if overflow:
+            _log(f"{prefix} | +{sum(len(v) for v in overflow.values())} more candidate(s) "
+                 "skipped: " + "; ".join(f"{k} {len(v)} ({_names(v, 10)})"
+                                         for k, v in sorted(overflow.items())), "yellow")
 
     # -- live ----------------------------------------------------------------
 
@@ -641,6 +993,9 @@ class StrategySwing:
         session = clock.ny_date(current_time)
         self._start_live_sync(cfg, session)
         if not clock.is_trading_day(date.fromisoformat(session)):
+            _log_once(cache, "no-session", session,
+                      f"StrategySwing {session} | not a trading day — no scan and no exits "
+                      "today", "cyan")
             return {}
         iid = str(cfg.get("instance_id") or "swing")
         scan_time = _valid_hhmm(cfg.get("scan_time_et"))
@@ -651,6 +1006,15 @@ class StrategySwing:
                       "strategy editor. Pending exits are still re-sent.", "red")
         scan_due = (scan_time is not None and cache.get(_SCAN_DONE_KEY) != session
                     and clock.at_or_after(current_time, scan_time))
+        if scan_time is not None and cache.get(_SCAN_DONE_KEY) == session:
+            _log_once(cache, "scan-latched", session,
+                      f"StrategySwing {session} | today's scan is complete (latched) — the "
+                      "next one is the next session's; pending exits are still re-sent", "cyan")
+        elif scan_time is not None and not scan_due:
+            _log_once(cache, "scan-wait", session,
+                      f"StrategySwing {session} | waiting for the {scan_time} ET scan (first "
+                      f"tick of the session at {clock.ny_now(current_time).strftime('%H:%M')} "
+                      "ET)", "cyan")
         if scan_due:
             first = cache.get(_SCAN_FIRST_KEY)
             if not isinstance(first, dict) or first.get("session") != session:
@@ -660,6 +1024,11 @@ class StrategySwing:
                     "session": session,
                     "at": clock.ny_now(current_time).strftime("%H:%M"),
                     "late": clock.at_or_after(current_time, _MARKET_OPEN_ET)}
+                stamp = cache[_SCAN_FIRST_KEY]
+                _log(f"StrategySwing {session} | scan due: first tick at {stamp['at']} ET — "
+                     + (f"at or after the {_MARKET_OPEN_ET} open, so exits only and NO entries "
+                        "today" if stamp["late"] else "pre-market, entries allowed"),
+                     "yellow" if stamp["late"] else "cyan")
         rearm = self._rearm_todo(cache, session)
         rearm_due = bool(rearm) and clock.is_rth(current_time)
         pending = cache.get(_PENDING_EXIT_KEY)
@@ -705,12 +1074,26 @@ class StrategySwing:
                         scan = None
                     if scan is not None:
                         cache[_SCAN_KEY] = scan
+                else:
+                    _log_once(cache, "prep-budget", session,
+                              f"StrategySwing {session} | too little of this tick's time "
+                              f"budget is left to prepare the scan (under "
+                              f"{clock.PREPARE_RESERVE_S:.0f}s) — it starts next tick",
+                              "yellow")
+            elif scan["cursor"] < len(scan["queue"]):
+                _log(f"StrategySwing {session} | resuming the scan at candidate "
+                     f"{scan['cursor'] + 1}/{len(scan['queue'])}", "cyan")
             if scan is not None:
                 self._score_queue(scan, session, iid, cfg, emu, cache, deadline,
                                   decisions, sizes, intents)
                 if scan["cursor"] >= len(scan["queue"]):
                     cache[_SCAN_DONE_KEY] = session
                     cache.pop(_SCAN_KEY, None)
+                    c = scan["counts"]
+                    _log(f"StrategySwing {session} | scan COMPLETE — {c['entered']} entered, "
+                         f"{c['pending']} queued for approval, {c['rejected']} rejected by the "
+                         f"AI, {c['skipped']} skipped, {c['ai_errors']} AI error(s); latched "
+                         "until the next session", "green")
                     self._run_summary(scan, session, iid, emu)
 
         self._remember_emitted(current_time, session, cache, decisions, sizes, intents)
@@ -775,10 +1158,6 @@ class StrategySwing:
 
         option_syms = account.option_symbols(emu)
         equity = account.live_equity(emu, prices)
-        if collateral:
-            _log(f"StrategySwing {session} | ${collateral:,.0f} is committed to short puts; "
-                 f"the swing budget is ${bp:,.2f} (cash and buying power less that "
-                 "collateral)", "cyan")
         # G8a M4: a GTC entry still working at the broker is not "unfilled".
         calibration.record_outcomes(iid, emu, "swing", held=set(equity_pos),
                                     working=_symbols_of(book, _working_entry))
@@ -807,6 +1186,7 @@ class StrategySwing:
         for symbol, reason in reasons.items():
             pending.setdefault(symbol, {"reason": reason, "intent": INTENT_EXIT[reason],
                                         "since": session})
+        prefix = f"StrategySwing {session}"
         if bp is None:
             _log_once(cache, "put-collateral", session,
                       f"StrategySwing {session} | REFUSING ENTRIES this tick — the cash "
@@ -814,6 +1194,10 @@ class StrategySwing:
                       f"entry could spend it. Exits are decided and sent "
                       f"({sorted(reasons) or 'none'}); the scan is not latched and its "
                       "entries retry next tick.", "red")
+            _log_exits(prefix, reasons, ind, lambda s: equity_pos[s]["avg_entry_price"],
+                       lambda s: equity_pos[s]["qty"], cfg,
+                       "(market; re-sent each tick until the stock is gone)",
+                       cache=cache, session=session)
             decisions.update(ex_dec)
             sizes.update(ex_sizes)
             intents.update(ex_int)
@@ -838,7 +1222,6 @@ class StrategySwing:
                       f"{_MARKET_OPEN_ET} open (a missed pre-market scan; ST's cron ran "
                       "only at 09:15). Exits still run.", "yellow")
             univ = None
-        vix_str = f"{vix:.1f}" if vix is not None else "n/a"
         if phase == "bear_mode":
             notify.send("swing_run_summary", iid, f"🐻 Bear Mode Day {bear['blocked_days']}",
                         f"Regime blocked {bear['blocked_days']} consecutive days.\n"
@@ -859,10 +1242,13 @@ class StrategySwing:
                     continue
                 if fired:
                     queue.append({"symbol": symbol, "ind": ind[symbol]})
-        _log(f"StrategySwing {session} | regime "
-             f"{'ACTIVE' if reg['regime_ok'] else 'BLOCKED'} ({phase}) | SPY "
-             f"{reg['spy_close']} vs SMA200 {reg['spy_sma200']} | VIX {vix_str} | "
-             f"exits={sorted(reasons)} | signals={[c['symbol'] for c in queue]}", "cyan")
+        self._live_summary(prefix, reg, vix, bear, cfg, phase, univ, live_universe, ind,
+                           active, queue, equity_pos, option_syms, queued, selling, reasons,
+                           bp, collateral, equity, first)
+        _log_exits(prefix, reasons, ind, lambda s: equity_pos[s]["avg_entry_price"],
+                   lambda s: equity_pos[s]["qty"], cfg,
+                   "(market; re-sent each tick until the stock is gone)",
+                   cache=cache, session=session)
 
         decisions.update(ex_dec)
         sizes.update(ex_sizes)
@@ -874,6 +1260,40 @@ class StrategySwing:
                 "available_slots": int(cfg["max_positions"]) - len(active),
                 "counts": {"entered": 0, "pending": 0, "rejected": 0, "skipped": 0,
                            "ai_errors": 0}}
+
+    @staticmethod
+    def _live_summary(prefix, reg, vix, bear, cfg, phase, univ, live_universe, ind, active,
+                      queue, equity_pos, option_syms, queued, selling, reasons, bp, collateral,
+                      equity, first):
+        """The live scan's summary block: regime, funnel, book and budget."""
+        try:
+            _log(f"{prefix} | {_regime_text(reg, vix, bear, cfg)} | VIX from yfinance ^VIX | "
+                 f"phase {phase}", "cyan")
+            if univ:
+                source = ("defensive ETFs (bear mode)" if phase == "bear_mode"
+                          else f"today's S&P 500 list ({len(live_universe)})")
+                counts = signals.entry_funnel(univ, ind, exclude=active,
+                                              **signals.entry_kwargs(cfg))
+                _log(f"{prefix} | funnel over {source}: {_funnel_text(counts, cfg)} | "
+                     f"queued for scoring: {_names([c['symbol'] for c in queue], 15)}", "cyan")
+            elif phase != "blocked" and isinstance(first, dict) and first.get("late"):
+                _log(f"{prefix} | no entry scan — the first scan tick came at or after the "
+                     "open (no entries today)", "cyan")
+            else:
+                _log(f"{prefix} | {_no_scan_text(phase, reg, bear, cfg)}", "cyan")
+            slots = int(cfg["max_positions"]) - len(active)
+            budget = ("buying power (no short puts)" if not collateral
+                      else f"min(cash, buying power) less {_money(collateral)} securing "
+                           "short puts")
+            _log(f"{prefix} | book: {len(equity_pos)} held ({_names(equity_pos)}), "
+                 f"{len(option_syms)} option underlying(s), {len(queued)} buy(s) and "
+                 f"{len(selling)} sell(s) working, {len(reasons)} exit(s) decided | slots "
+                 f"{max(slots, 0)}/{cfg['max_positions']} open | budget {_money(bp)} = "
+                 f"{budget}" + (" + today's exit proceeds" if reasons else "")
+                 + f" | equity {_money(equity)}", "cyan")
+        except Exception as exc:  # pragma: no cover - logging never decides
+            _log(f"{prefix} | scan summary unavailable ({type(exc).__name__}: {exc})",
+                 "yellow")
 
     def _score_queue(self, scan, session, iid, cfg, emu, cache, deadline,
                      decisions, sizes, intents):
@@ -905,6 +1325,19 @@ class StrategySwing:
             smap = {}
         read_sector = _sector_reader(smap, allow_network=True,
                                      cache=cache.setdefault(_SECTOR_CACHE_KEY, {}))
+        if scan["cursor"] == 0 and scan["queue"]:
+            try:
+                in_use = sorted({sectors.get_symbol_sector(s, smap) or "unknown"
+                                 for s in scan["active"]})
+                model = (f"{role['provider']}/{role['model']}" if role
+                         else "AI gate off (every candidate approved)")
+                _log(f"StrategySwing {session} | scoring {len(scan['queue'])} candidate(s) "
+                     f"with {model} | sectors in use (stored map): "
+                     f"{', '.join(in_use) or 'none'} | {scan['available_slots']} slot(s) open, "
+                     f"budget {_money(scan['buying_power'])}", "cyan")
+            except Exception as exc:  # pragma: no cover - logging never decides
+                _log(f"StrategySwing {session} | scoring summary unavailable "
+                     f"({type(exc).__name__}: {exc})", "yellow")
 
         def sector_of(symbol):
             if symbol in option_syms:
@@ -935,29 +1368,33 @@ class StrategySwing:
                   emu, cache, decisions, sizes, intents):
         symbol, ind = item["symbol"], item["ind"]
         active = set(scan["active"])
+        _log(f"StrategySwing {session} | candidate {scan['cursor']}/{len(scan['queue'])}: "
+             f"{_candidate_text(symbol, ind)}", "cyan")
         if symbol in active:
+            _log(f"  {symbol}: Skipped (already held or queued)", "yellow")
             return
         conflict = signals.sector_conflict(symbol, active, sector_of=sector_of,
                                            max_per_sector=int(cfg["max_per_sector"]))
         if conflict:
             _log(f"  {symbol}: SIGNAL blocked — sector conflict ({sector_of(symbol)} "
-                 f"already held via {conflict})")
+                 f"already held via {conflict})", "yellow")
             scan["counts"]["skipped"] += 1
             return
         if scan["entries_placed"] >= scan["available_slots"]:
-            _log(f"  {symbol}: Skipped (no open slots)")
+            _log(f"  {symbol}: Skipped (no open slots)", "yellow")
             scan["counts"]["skipped"] += 1
             return
         alloc = scan["equity"] * float(cfg["position_size_pct"])
         if scan["buying_power"] < alloc * 0.5:
             _log(f"  {symbol}: Skipped (insufficient buying power: "
-                 f"${scan['buying_power']:,.2f})")
+                 f"${scan['buying_power']:,.2f}, under half the {_money(alloc)} allocation)",
+                 "yellow")
             scan["counts"]["skipped"] += 1
             return
         use = min(alloc, scan["buying_power"])
         base_shares = int(use / ind["close"])
         if base_shares < 1:
-            _log(f"  {symbol}: Skipped (share count rounds to 0)")
+            _log(f"  {symbol}: Skipped (share count rounds to 0)", "yellow")
             scan["counts"]["skipped"] += 1
             return
 
@@ -969,7 +1406,7 @@ class StrategySwing:
         block = int(cfg["earnings_hard_block_days"])
         if earnings_days is not None and earnings_days < block:
             _log(f"  [{symbol}] SKIP — earnings in {earnings_days} day(s) "
-                 f"(hard block: < {block} days)")
+                 f"(hard block: < {block} days)", "yellow")
             scan["counts"]["skipped"] += 1
             return
 
@@ -985,15 +1422,23 @@ class StrategySwing:
                       "position_size_adjustment": float(existing.get("size_adjustment") or 1.0),
                       "key_risks": existing.get("key_risks") or []}
         elif gate:
-            result = ai_analyst.analyse(
-                {"symbol": symbol, "rsi": ind["rsi"], "rsi_prev": ind["rsi_prev"],
-                 "macd_hist": ind["macd_hist"], "macd_hist_prev": ind["macd_hist_prev"],
-                 "entry_price": ind["close"], "shares": base_shares,
-                 "stop_price": stop_price, "target_price": target_price},
-                role=role, sector_of=sector_of, bars_client=client,
-                earnings_fn=lambda s: earnings_days,
-                approve_threshold=int(cfg["ai_approve_threshold"]),
-                review_threshold=int(cfg["ai_review_threshold"]))
+            model = f"{role['provider']}/{role['model']}" if role else "no model"
+            t_ai = time.monotonic()
+            try:
+                result = ai_analyst.analyse(
+                    {"symbol": symbol, "rsi": ind["rsi"], "rsi_prev": ind["rsi_prev"],
+                     "macd_hist": ind["macd_hist"], "macd_hist_prev": ind["macd_hist_prev"],
+                     "entry_price": ind["close"], "shares": base_shares,
+                     "stop_price": stop_price, "target_price": target_price},
+                    role=role, sector_of=sector_of, bars_client=client,
+                    earnings_fn=lambda s: earnings_days,
+                    approve_threshold=int(cfg["ai_approve_threshold"]),
+                    review_threshold=int(cfg["ai_review_threshold"]))
+            except Exception as exc:
+                _log(f"  {symbol}: AI scoring FAILED after {time.monotonic() - t_ai:.1f}s "
+                     f"({model}): {type(exc).__name__}: {exc}", "red")
+                raise
+            ai_secs = time.monotonic() - t_ai
         else:
             result = {"conviction_score": None, "recommendation": "approve",
                       "reasoning": "AI gate disabled", "position_size_adjustment": 1.0,
@@ -1001,6 +1446,21 @@ class StrategySwing:
         rec = result["recommendation"]
         score = result.get("conviction_score")
         adj = float(result.get("position_size_adjustment") or 1.0)
+        try:
+            if existing is not None:
+                _log(f"  {symbol}: already scored this session (score {score}, "
+                     f"{existing.get('status')}) — not re-scored", "cyan")
+            elif gate:
+                fate = {"approve": f"AUTO-ENTER (>= {cfg['ai_approve_threshold']})",
+                        "review": (f"APPROVAL QUEUE ({cfg['ai_review_threshold']}-"
+                                   f"{int(cfg['ai_approve_threshold']) - 1})"),
+                        "reject": f"REJECTED (< {cfg['ai_review_threshold']})"}.get(rec, rec)
+                _log(f"  {symbol}: AI score {score}/100 -> {fate} | size adj {adj:g}x | "
+                     f"model {model} | {ai_secs:.1f}s", "green" if rec == "approve" else "yellow")
+            else:
+                _log(f"  {symbol}: AI gate disabled — treated as an approval", "cyan")
+        except Exception:  # pragma: no cover - logging never decides
+            pass
         context = {k: result.get(k) for k in ("earnings_days", "sector_etf", "sector_rsi",
                                               "news_summary") if k in result}
 
@@ -1031,6 +1491,9 @@ class StrategySwing:
             record("pending")
             scan["counts"]["pending"] += 1
             if existing is None:
+                _log(f"  {symbol}: QUEUED for approval (signal {sid}) — stop "
+                     f"{_fmt(stop_price)}, target {_fmt(target_price)}; approve or reject in "
+                     "IntelliStock", "yellow")
                 notify.send("swing_pending_review", iid,
                             f"⚠️ REVIEW: {symbol} (score {score}/100)",
                             f"{symbol} @ ${ind['close']:.2f}\n"
@@ -1043,6 +1506,8 @@ class StrategySwing:
 
         # approve — apply position size adjustment before placing
         if existing is not None and existing.get("status") != "auto_approved":
+            _log(f"  {symbol}: decided earlier ({existing.get('status')}) — no new order",
+                 "cyan")
             return          # the operator decided it, or it already failed
         shares = max(1, int(base_shares * adj))
         # The engine sizes a live whole-share bracket as floor(buy_cash / live
@@ -1059,7 +1524,7 @@ class StrategySwing:
             # candidate may take them.
             why = (f"the share count rounds to 0: ${buy_cash:,.2f} buys no whole share at "
                    f"the live ${live_px:,.2f} (prior close ${ind['close']:,.2f})")
-            _log(f"  {symbol}: Skipped ({why}) — its slot and sector stay free")
+            _log(f"  {symbol}: Skipped ({why}) — its slot and sector stay free", "yellow")
             record("failed", why)
             scan["counts"]["skipped"] += 1
             return
@@ -1069,6 +1534,8 @@ class StrategySwing:
         scan["active"].append(symbol)            # fix 4: the sector set follows each buy
         scan["counts"]["entered"] += 1
         if sent:
+            _log(f"  {symbol}: entry already sent before a restart — counted, not re-sent",
+                 "cyan")
             return          # already sent before a restart; the broker holds it
         decisions[symbol] = 1
         sizes[symbol] = {"buy_cash": buy_cash,
@@ -1076,6 +1543,11 @@ class StrategySwing:
                                      "stop_loss_price": stop_price},
                          "whole_shares": True, "fill_at_next_open": True}
         intents[symbol] = INTENT_DEFENSIVE if scan["phase"] == "bear_mode" else INTENT_ENTRY
+        defensive = " (defensive)" if scan["phase"] == "bear_mode" else ""
+        _log(f"StrategySwing {session} | ENTRY{defensive} {symbol}: ~{shares} sh (prior close {_fmt(ind['close'])}), stop "
+             f"{_fmt(stop_price)}, target {_fmt(target_price)}, cash {_money(buy_cash)} (AI size "
+             f"adj {adj:g}x) — bracket handed to the order gate for the open"
+             + (f"; live price {_fmt(live_px)}" if live_px is not None else ""), "green")
         if existing is None:
             notify.send("swing_entry", iid, f"BUY {symbol}",
                         f"{symbol} — {shares} shares @ ${ind['close']:.2f}\n"

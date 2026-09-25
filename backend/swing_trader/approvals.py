@@ -35,6 +35,15 @@ from swing_trader import clock, wheel_rules
 from swing_trader.account import latest_trade_price, option_book, swing_live_budget
 from swing_trader.constants import POSITION_SIZE_PCT, PROFIT_TARGET, STOP_LOSS
 
+try:
+    from intellistock_logger import intellistock_logger as _ilog  # type: ignore
+
+    def _log(msg, color="white"):
+        _ilog.log(str(msg), color, service="SwingApprovals")
+except Exception:  # pragma: no cover - standalone/test import
+    def _log(msg, color="white"):
+        print(f"[SwingApprovals] {msg}")
+
 DECISION_STATUS = {"approve": "approved", "approve_half": "approved_half",
                    "reject": "rejected"}
 APPROVED_STATUSES = ("approved", "approved_half")
@@ -75,6 +84,10 @@ def decide(signal: dict, decision: str, user, reason, now_iso: str) -> dict:
     out.update({"status": status, "decided_by": (str(user) if user else None),
                 "decided_at": now_iso,
                 "decision_reason": (str(reason).strip()[:500] or None) if reason else None})
+    _log(f"[{out.get('lane') or 'swing'}-approval] {out.get('id')} {out.get('symbol')}: "
+         f"pending -> {status} by {out['decided_by'] or 'unknown'}"
+         + (f" ({out['decision_reason']})" if out["decision_reason"] else ""),
+         "yellow" if status == "rejected" else "green")
     return out
 
 
@@ -190,6 +203,11 @@ def build_approved_order(signal: dict, *, live_price, equity, cfg, adapter=None,
         if affordable < 1:
             raise ValueError(f"the swing budget ${budget:,.2f} buys no whole share of "
                              f"{signal.get('symbol')} at ${live_price:,.2f}")
+        _log(f"[swing-approval] {signal.get('id')} {signal.get('symbol')} "
+             f"({signal.get('status')}): rebuilt at the live ${live_price:,.2f} — "
+             f"{min(shares, affordable)} sh (base {base_shares}, AI adj {stored_adj:g}x"
+             f"{', halved' if half else ''}; the ${budget:,.2f} budget buys {affordable}), "
+             f"stop {stop_price:.2f}, target {target_price:.2f}", "green")
         shares = min(shares, affordable)
         return {"kind": "equity_bracket", "symbol": signal["symbol"], "qty": shares,
                 "take_profit_price": target_price, "stop_loss_price": stop_price}
@@ -223,6 +241,10 @@ def build_approved_order(signal: dict, *, live_price, equity, cfg, adapter=None,
             session=today.isoformat())
         if order is None:
             raise ValueError(error or "no order could be built")
+        _log(f"[wheel-approval] {signal.get('id')} {signal.get('symbol')} "
+             f"({signal.get('status')}): sell-to-open {order.get('qty')} x "
+             f"{order.get('contract')} (strike {order.get('strike')}, exp {order.get('expiry')}, "
+             f"limit {order.get('limit_price')}), expiry recomputed for {today}", "green")
         return {"kind": "option", **order}
 
     raise ValueError(f"unknown lane {lane!r}")

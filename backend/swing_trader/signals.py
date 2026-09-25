@@ -36,6 +36,58 @@ def entry_signal(ind: dict, *, rsi_oversold=RSI_OVERSOLD, adx_trend_min=ADX_TREN
     return rsi_signal and macd_improving and vol_above_avg and above_sma and trend_confirmed and rr_ok
 
 
+#: entry_signal's filters, by the names it gives them, in the order the
+#: funnel reports them (the order an operator reads a chart in).
+FUNNEL_STAGES = ("universe", "not_held", "has_indicators", "above_sma", "rsi_signal",
+                 "macd_improving", "vol_above_avg", "trend_confirmed", "rr_ok", "passed")
+
+
+def entry_funnel(universe, ind: dict, *, exclude=(), rsi_oversold=RSI_OVERSOLD,
+                 adx_trend_min=ADX_TREND_MIN, profit_target=PROFIT_TARGET,
+                 stop_loss=STOP_LOSS) -> dict:
+    """LOGGING ONLY -- entry_signal decides. How many names of `universe`
+    survive each of entry_signal's filters, applied cumulatively in
+    FUNNEL_STAGES order: a name held or queued (`exclude`) or without
+    indicators is not checked, exactly as the entry passes skip it. The
+    filters AND together, so "passed" is the count entry_signal returns True
+    for. A row the filters cannot evaluate counts under "errors" (the entry
+    pass logs and skips it). Never raises."""
+    counts = dict.fromkeys(FUNNEL_STAGES, 0)
+    counts["errors"] = 0
+    try:
+        rr_ok = (float(profit_target) / float(stop_loss)) >= 1.5
+    except (TypeError, ValueError, ZeroDivisionError):
+        rr_ok = False
+    exclude = set(exclude or ())
+    for symbol in universe or []:
+        counts["universe"] += 1
+        if symbol in exclude:
+            continue
+        counts["not_held"] += 1
+        i = (ind or {}).get(symbol)
+        if not isinstance(i, dict) or not i or any(v is None for v in i.values()):
+            continue
+        counts["has_indicators"] += 1
+        try:
+            stages = (("above_sma", i["close"] > i["sma200"]),
+                      ("rsi_signal", i["rsi"] < rsi_oversold and i["rsi"] > i["rsi_prev"]),
+                      ("macd_improving", i["macd_hist"] > i["macd_hist_prev"]),
+                      ("vol_above_avg", i["volume"] > i["vol_avg20"]),
+                      ("trend_confirmed", i["adx"] > adx_trend_min),
+                      ("rr_ok", rr_ok))
+            stages = [(name, bool(ok)) for name, ok in stages]
+        except Exception:
+            counts["errors"] += 1
+            continue
+        for name, ok in stages:
+            if not ok:
+                break
+            counts[name] += 1
+        else:
+            counts["passed"] += 1
+    return counts
+
+
 def exit_signal(ind: dict, entry_price: float, *, profit_target=PROFIT_TARGET,
                 stop_loss=STOP_LOSS, rsi_overbought=RSI_OVERBOUGHT):
     """Returns (should_exit: bool, reason: str | None)."""

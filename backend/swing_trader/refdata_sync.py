@@ -253,11 +253,17 @@ def sync_reference_data(start, end, *, defensive_universe=None, store=None, fetc
             signals_store.ensure_tables()
         except Exception as exc:
             log(f"{_TAG} tables unavailable: {type(exc).__name__}: {exc}", "yellow")
-    for key, step in (("vix", lambda: _sync_vix(st, fetch, start, end, today, log)),
-                      ("membership",
-                       lambda: _sync_membership(st, fetch, start, end, today, log))):
+    log(f"{_TAG} reference sync start for {start}..{end}: VIX, membership, sectors",
+        "cyan")
+    for key, label, step in (
+            ("vix", "VIX", lambda: _sync_vix(st, fetch, start, end, today, log)),
+            ("membership", "membership",
+             lambda: _sync_membership(st, fetch, start, end, today, log))):
+        t_step = clock()
         try:
             counts[key] = step()
+            log(f"{_TAG} {label} phase done: {counts[key]} new row(s) stored, "
+                f"{clock() - t_step:.1f}s", "cyan")
         except Exception as exc:
             log(f"{_TAG} {key} not refreshed ({type(exc).__name__}: {exc}); the run "
                 "continues on what is stored", "yellow")
@@ -266,9 +272,14 @@ def sync_reference_data(start, end, *, defensive_universe=None, store=None, fetc
     except Exception as exc:
         log(f"{_TAG} membership unreadable ({type(exc).__name__}: {exc}); universe is "
             "SPY, QQQ and the defensive ETFs only", "yellow")
+    t_step = clock()
+    log(f"{_TAG} sectors phase start: {len(symbols)} symbol(s) in the window's universe",
+        "cyan")
     try:
         counts["sectors"] = _sync_sectors(st, fetch, symbols, sector_of, today,
                                           sector_budget_s, clock, log)
+        log(f"{_TAG} sectors phase done: {counts['sectors']} new sector row(s), "
+            f"{clock() - t_step:.1f}s", "cyan")
     except Exception as exc:
         log(f"{_TAG} sectors not refreshed ({type(exc).__name__}: {exc})", "yellow")
     log(f"{_TAG} {start}..{end}: VIX rows added {counts['vix']}, membership rows added "
@@ -294,11 +305,17 @@ def start_background_sync(ny_day, *, defensive_universe=None, sync=None,
     target = sync or sync_reference_data
 
     def run():
+        t0 = time.monotonic()
         try:
             target(day, day, defensive_universe=defensive_universe)
         except Exception as exc:  # the sync never raises; a stub might
-            log(f"{_TAG} live sync failed: {type(exc).__name__}: {exc}", "yellow")
+            log(f"{_TAG} live sync failed after {time.monotonic() - t0:.1f}s: "
+                f"{type(exc).__name__}: {exc}; the scan runs on the stored rows", "yellow")
+            return
+        log(f"{_TAG} live sync for {day} finished in {time.monotonic() - t0:.1f}s", "cyan")
 
     thread = thread_factory(target=run, name=f"swing-refdata-{day}", daemon=True)
     thread.start()
+    log(f"{_TAG} live sync for {day} started in a background thread (once a day; the "
+        "scan never waits on it)", "cyan")
     return True

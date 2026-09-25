@@ -46,6 +46,8 @@ CHUNK_DAYS = 365
 PAGE_LIMIT = 10000
 MAX_PAGES = 500
 MAX_429_RETRIES = 3
+#: Operator requirement: a progress line every 10 symbols loaded.
+PROGRESS_EVERY = 10
 _TAG = "[swing-bars]"
 #: price_utils.get_bars_chunk_cached reads its handle only as "not None".
 _CACHE_HANDLE = True
@@ -53,6 +55,46 @@ _CACHE_HANDLE = True
 
 def _iso(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _duration(seconds) -> str:
+    """"2m40s", "45s", "1h02m": a short wall-clock span for progress lines."""
+    try:
+        seconds = max(0, int(round(float(seconds))))
+    except (TypeError, ValueError):
+        return "?"
+    if seconds >= 3600:
+        return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}m"
+    if seconds >= 60:
+        return f"{seconds // 60}m{seconds % 60:02d}s"
+    return f"{seconds}s"
+
+
+class Progress:
+    """Logs "n/total symbols, rate/s, ETA" every `every` symbols and at the
+    last one (operator requirement: every 10), so a long load never looks
+    stuck. Logging only: it never raises into the caller."""
+
+    def __init__(self, total, log, *, every=PROGRESS_EVERY, clock=time.monotonic,
+                 tag=_TAG, noun="symbols"):
+        self.total, self.log, self.every, self.clock = int(total), log, int(every), clock
+        self.tag, self.noun = tag, noun
+        self.t0 = clock()
+
+    def line(self, n, extra="") -> str:
+        elapsed = max(self.clock() - self.t0, 1e-9)
+        rate = n / elapsed
+        eta = (self.total - n) / rate if rate > 0 else 0.0
+        return (f"{self.tag} {n}/{self.total} {self.noun}, {rate:.1f}/s, "
+                f"ETA {_duration(eta)}" + (f" | {extra}" if extra else ""))
+
+    def step(self, n, extra=""):
+        if n % self.every and n != self.total:
+            return
+        try:
+            self.log(self.line(n, extra), "cyan")
+        except Exception:  # pragma: no cover - logging never breaks the load
+            pass
 
 
 def _http_get(url, *, headers, params, timeout):
@@ -90,7 +132,7 @@ def _fetch_chunk(symbol, chunk_start, chunk_end, *, key, secret, feed, http_get,
 
 
 def fetch_daily_bars(symbols, start, end, *, key, secret, feed, http_get=None,
-                     cached=True, sleep=time.sleep, log=None) -> dict:
+                     cached=True, sleep=time.sleep, log=None, clock=time.monotonic) -> dict:
     """{symbol: [bar, ...]} of 1Day bars over [start, end] (dates, both
     inclusive), sorted and de-duplicated by "t". Best-effort: a chunk that
     fails is logged and skipped, and a symbol with no bars is absent."""
@@ -114,7 +156,33 @@ def fetch_daily_bars(symbols, start, end, *, key, secret, feed, http_get=None,
     start_dt = datetime(start.year, start.month, start.day)
     # The engine's inclusive end: the last day's 23:59:59.
     end_dt = datetime(end.year, end.month, end.day, 23, 59, 59)
-    t0, out, failed = time.monotonic(), {}, []
+    t0, out, failed = clock(), {}, []
+    stats = {"hits": 0, "network": 0, "throttled": 0, "waited": 0.0}
+
+    def counted_sleep(seconds):
+        # Logging only: the same wait, counted for the progress lines.
+        stats["throttled"] += 1
+        try:
+            stats["waited"] += float(seconds)
+        except (TypeError, ValueError):
+            pass
+        return sleep(seconds)
+
+    def tally():
+        return (f"cache hits {stats['hits']}, network {stats['network']}, "
+                f"429 back-offs {stats['throttled']} ({stats['waited']:.0f}s), "
+                f"failed chunks {len(failed)}")
+
+    chunks = 0
+    probe = start_dt
+    while probe < end_dt:
+        chunks += 1
+        probe = min(probe + timedelta(days=CHUNK_DAYS), end_dt)
+    log(f"{_TAG} bars phase start: {len(symbols)} symbols, {start}..{end} ({feed}, "
+        f"{ADJUSTMENT}), {chunks} chunk(s) of {CHUNK_DAYS} days each, "
+        f"{'through the bars cache' if get_cached is not None else 'no bars cache'}; "
+        f"progress every {PROGRESS_EVERY} symbols", "cyan")
+    progress = Progress(len(symbols), log, clock=clock)
     for n, sym in enumerate(symbols, 1):
         bars, chunk_start = [], start_dt
         while chunk_start < end_dt:
@@ -122,12 +190,14 @@ def fetch_daily_bars(symbols, start, end, *, key, secret, feed, http_get=None,
 
             def fetch(sym=sym, a=chunk_start, b=chunk_end):
                 return _fetch_chunk(sym, a, b, key=key, secret=secret, feed=feed,
-                                    http_get=http_get, sleep=sleep)
+                                    http_get=http_get, sleep=counted_sleep)
             try:
                 if get_cached is not None:
                     got, _hit = get_cached(_CACHE_HANDLE, sym, chunk_start, chunk_end,
                                            TIMEFRAME, feed, fetch, adjustment=ADJUSTMENT)
+                    stats["hits" if _hit else "network"] += 1
                 else:
+                    stats["network"] += 1
                     got = fetch()
                 bars.extend(got or [])
             except Exception as exc:
@@ -142,14 +212,23 @@ def fetch_daily_bars(symbols, start, end, *, key, secret, feed, http_get=None,
                 unique.append(bar)
         if unique:
             out[sym] = unique
-        if n % 100 == 0:
-            log(f"{_TAG} {n}/{len(symbols)} symbols fetched", "cyan")
+        progress.step(n, tally())
     if failed:
         log(f"{_TAG} {len(failed)} chunk(s) failed and were skipped: "
-            + "; ".join(failed[:5]), "yellow")
-    log(f"{_TAG} own daily bars {start}..{end} ({feed}, {ADJUSTMENT}): "
-        f"{len(out)}/{len(symbols)} symbols, {sum(len(v) for v in out.values())} bars, "
-        f"{time.monotonic() - t0:.1f}s", "cyan")
+            + "; ".join(failed[:5]) + (f"; +{len(failed) - 5} more" if len(failed) > 5 else ""),
+            "yellow")
+    if stats["throttled"]:
+        log(f"{_TAG} Alpaca rate limit: {stats['throttled']} 429 back-off(s), "
+            f"{stats['waited']:.0f}s waited in total", "yellow")
+    missing = [s for s in symbols if s not in out]
+    days = [str(b["t"])[:10] for v in out.values() for b in (v[0], v[-1])]
+    span = f"{min(days)}..{max(days)}" if days else "none"
+    log(f"{_TAG} bars phase done: own daily bars {start}..{end} ({feed}, {ADJUSTMENT}): "
+        f"{len(out)}/{len(symbols)} symbols with bars, {sum(len(v) for v in out.values())} "
+        f"bars dated {span}; {len(missing)} with none"
+        + (f" ({', '.join(missing[:10])}{', ...' if len(missing) > 10 else ''})"
+           if missing else "")
+        + f"; {tally()}; {clock() - t0:.1f}s", "cyan")
     return out
 
 

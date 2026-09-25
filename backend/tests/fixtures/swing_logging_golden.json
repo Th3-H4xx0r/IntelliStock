@@ -1,0 +1,338 @@
+[
+ [
+  "2026-04-01",
+  {}
+ ],
+ [
+  "2026-04-02",
+  {
+   "S02": 1,
+   "S03": 1,
+   "_nexus_action_intents": {
+    "S02": "swing_entry",
+    "S03": "swing_entry"
+   },
+   "_nexus_discovered": [
+    "S02",
+    "S03"
+   ],
+   "_nexus_executable_buys": [
+    "S02",
+    "S03"
+   ],
+   "_nexus_position_sizes": {
+    "S02": {
+     "bracket": {
+      "stop_loss_price": 43.8,
+      "take_profit_price": 50.79
+     },
+     "buy_cash": 12500.0,
+     "fill_at_next_open": true,
+     "whole_shares": true
+    },
+    "S03": {
+     "bracket": {
+      "stop_loss_price": 74.34,
+      "take_profit_price": 86.2
+     },
+     "buy_cash": 12500.0,
+     "fill_at_next_open": true,
+     "whole_shares": true
+    },
+    "_cash_reserve_floor_pct": 0.0
+   },
+   "_nexus_sell_enforcement": []
+  }
+ ],
+ [
+  "2026-04-06",
+  {}
+ ],
+ [
+  "2026-04-07",
+  {}
+ ],
+ [
+  "2026-04-08",
+  {}
+ ],
+ [
+  "2026-04-09",
+  {}
+ ],
+ [
+  "2026-04-10",
+  {
+   "S16": 1,
+   "_nexus_action_intents": {
+    "S16": "swing_entry"
+   },
+   "_nexus_discovered": [
+    "S16"
+   ],
+   "_nexus_executable_buys": [
+    "S16"
+   ],
+   "_nexus_position_sizes": {
+    "S16": {
+     "bracket": {
+      "stop_loss_price": 134.12,
+      "take_profit_price": 155.53
+     },
+     "buy_cash": 12554.66,
+     "fill_at_next_open": true,
+     "whole_shares": true
+    },
+    "_cash_reserve_floor_pct": 0.0
+   },
+   "_nexus_sell_enforcement": []
+  }
+ ],
+ [
+  "2026-04-13",
+  {
+   "S05": 1,
+   "_nexus_action_intents": {
+    "S05": "swing_entry"
+   },
+   "_nexus_discovered": [
+    "S05"
+   ],
+   "_nexus_executable_buys": [
+    "S05"
+   ],
+   "_nexus_position_sizes": {
+    "S05": {
+     "bracket": {
+      "stop_loss_price": 57.15,
+      "take_profit_price": 66.26
+     },
+     "buy_cash": 12633.06,
+     "fill_at_next_open": true,
+     "whole_shares": true
+    },
+    "_cash_reserve_floor_pct": 0.0
+   },
+   "_nexus_sell_enforcement": []
+  }
+ ],
+ [
+  "2026-04-14",
+  {}
+ ],
+ [
+  "2026-04-15",
+  {}
+ ],
+ [
+  "2026-04-16",
+  {}
+ ],
+ [
+  "2026-04-17",
+  {}
+ ],
+ [
+  "2026-04-20",
+  {}
+ ],
+ [
+  "2026-04-21",
+  {}
+ ],
+ [
+  "2026-04-22",
+  {}
+ ],
+ [
+  "2026-04-23",
+  {}
+ ],
+ [
+  "2026-04-24",
+  {}
+ ],
+ [
+  "2026-04-27",
+  {}
+ ],
+ [
+  "2026-04-28",
+  {
+   "S29": 1,
+   "_nexus_action_intents": {
+    "S29": "swing_entry"
+   },
+   "_nexus_discovered": [
+    "S29"
+   ],
+   "_nexus_executable_buys": [
+    "S29"
+   ],
+   "_nexus_position_sizes": {
+    "S29": {
+     "bracket": {
+      "stop_loss_price": 184.75,
+      "take_profit_price": 214.23
+     },
+     "buy_cash": 12213.36,
+     "fill_at_next_open": true,
+     "whole_shares": true
+    },
+    "_cash_reserve_floor_pct": 0.0
+   },
+   "_nexus_sell_enforcement": []
+  }
+ ],
+ [
+  "2026-04-29",
+  {}
+ ],
+ [
+  "2026-04-30",
+  {}
+ ],
+ [
+  "2026-05-01",
+  {}
+ ],
+ [
+  "2026-05-04",
+  {}
+ ],
+ [
+  "2026-05-05",
+  {}
+ ],
+ [
+  "2026-05-06",
+  {}
+ ],
+ [
+  "2026-05-07",
+  {}
+ ],
+ [
+  "2026-05-08",
+  {
+   "S29": -1,
+   "_nexus_action_intents": {
+    "S29": "swing_target_exit"
+   },
+   "_nexus_discovered": [
+    "S29"
+   ],
+   "_nexus_executable_buys": [],
+   "_nexus_position_sizes": {
+    "S29": {
+     "fill_at_next_open": true,
+     "sell_fraction": 1.0
+    },
+    "_cash_reserve_floor_pct": 0.0
+   },
+   "_nexus_sell_enforcement": [
+    "S29"
+   ]
+  }
+ ],
+ [
+  "2026-05-11",
+  {}
+ ],
+ [
+  "2026-05-12",
+  {}
+ ],
+ [
+  "2026-05-13",
+  {}
+ ],
+ [
+  "2026-05-14",
+  {}
+ ],
+ [
+  "2026-05-15",
+  {
+   "GLD": 1,
+   "_nexus_action_intents": {
+    "GLD": "swing_defensive_entry"
+   },
+   "_nexus_discovered": [
+    "GLD"
+   ],
+   "_nexus_executable_buys": [
+    "GLD"
+   ],
+   "_nexus_position_sizes": {
+    "GLD": {
+     "bracket": {
+      "stop_loss_price": 138.67,
+      "take_profit_price": 160.8
+     },
+     "buy_cash": 12247.14,
+     "fill_at_next_open": true,
+     "whole_shares": true
+    },
+    "_cash_reserve_floor_pct": 0.0
+   },
+   "_nexus_sell_enforcement": []
+  }
+ ],
+ [
+  "2026-05-18",
+  {}
+ ],
+ [
+  "2026-05-19",
+  {}
+ ],
+ [
+  "2026-05-20",
+  {
+   "S21": 1,
+   "_nexus_action_intents": {
+    "S21": "swing_entry"
+   },
+   "_nexus_discovered": [
+    "S21"
+   ],
+   "_nexus_executable_buys": [
+    "S21"
+   ],
+   "_nexus_position_sizes": {
+    "S21": {
+     "bracket": {
+      "stop_loss_price": 130.03,
+      "take_profit_price": 150.78
+     },
+     "buy_cash": 12336.47,
+     "fill_at_next_open": true,
+     "whole_shares": true
+    },
+    "_cash_reserve_floor_pct": 0.0
+   },
+   "_nexus_sell_enforcement": []
+  }
+ ],
+ [
+  "2026-05-21",
+  {}
+ ],
+ [
+  "2026-05-22",
+  {}
+ ],
+ [
+  "2026-05-26",
+  {}
+ ],
+ [
+  "2026-05-27",
+  {}
+ ],
+ [
+  "2026-05-28",
+  {}
+ ]
+]
