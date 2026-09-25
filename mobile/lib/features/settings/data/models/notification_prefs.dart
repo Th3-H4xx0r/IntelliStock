@@ -148,4 +148,51 @@ const kNotificationCategories = <NotificationCategoryMeta>[
     'Instance crashed',
     'An instance process died (not a Stop) and was held open for log capture',
   ),
+  // Swing & Wheel (backend/notification_types.py, same order and wording).
+  NotificationCategoryMeta(
+    'swing_entry',
+    'Swing entry',
+    'The swing lane sent a bracket buy',
+  ),
+  NotificationCategoryMeta(
+    'swing_pending_review',
+    'Swing review needed',
+    'A swing candidate scored 50-74 and waits for your approval',
+  ),
+  NotificationCategoryMeta(
+    'swing_exit',
+    'Swing exit',
+    'The swing lane sold a position',
+  ),
+  NotificationCategoryMeta(
+    'swing_run_summary',
+    'Swing & wheel run summary',
+    'A swing or wheel scan finished; AI rejects and bear-mode notes',
+  ),
+  NotificationCategoryMeta(
+    'wheel_put_placed',
+    'Wheel put sent',
+    'The wheel lane sent a cash-secured put',
+  ),
+  NotificationCategoryMeta(
+    'wheel_pending_review',
+    'Wheel review needed',
+    'A wheel candidate scored 50-74 and waits for your approval',
+  ),
+  NotificationCategoryMeta(
+    'wheel_position_alert',
+    'Wheel position alert',
+    'A short put is in the money, near expiry, has no price, or is being '
+        'bought back; or assigned shares are a covered-call candidate (dry run)',
+  ),
+  NotificationCategoryMeta(
+    'wheel_assignment',
+    'Wheel assignment',
+    'A put was assigned and its shares are now held',
+  ),
+  NotificationCategoryMeta(
+    'swing_approval_failed',
+    'Approved order refused',
+    'A swing or wheel order you approved could not be sent',
+  ),
 ];
