@@ -1452,6 +1452,7 @@ class AlpacaAdapter(BrokerAdapter):
         poll_interval_s: float = 0.5,
         sleep=time.sleep,
         clock=time.monotonic,
+        booked_fills=None,
     ) -> bool:
         """Cancel ``order_ids`` and wait until Alpaca confirms every one.
 
@@ -1461,7 +1462,19 @@ class AlpacaAdapter(BrokerAdapter):
         changed under the caller, and a sell sized off the old position would
         oversell -- on a margin paper account, into a short. The caller defers
         its sell a tick and re-reads broker truth.
+
+        ``booked_fills`` (fix wave FW1 item 8, review M-1) maps an order id to
+        the quantity the caller has ALREADY booked for it. An order that is
+        dead (cancelled, expired...) with no more filled than that is
+        confirmed: its partial fill is in the position the sell was sized
+        from, so nothing changed while we waited.
         """
+        booked = {}
+        for key, value in dict(booked_fills or {}).items():
+            try:
+                booked[str(key).strip()] = Decimal(str(value))
+            except Exception:
+                continue
         ids = [
             str(value).strip()
             for value in (order_ids or ())
@@ -1491,6 +1504,13 @@ class AlpacaAdapter(BrokerAdapter):
                 except Exception:
                     still_working.append(order_id)
                     continue
+                if (
+                    filled > 0
+                    and status in _CANCEL_CONFIRMED_STATES
+                    and order_id in booked
+                    and Decimal(str(filled)) <= booked[order_id]
+                ):
+                    continue    # dead, and its partial fill already booked
                 if filled > 0 or status in ("filled", "partially_filled"):
                     _alog(
                         "BROKER",

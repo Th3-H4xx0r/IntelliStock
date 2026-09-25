@@ -4,6 +4,7 @@ and multi-leg rows that must not break reconciliation.
 The two EB payloads below were produced by the PRE-change adapter on
 2026-09-24. Never edit them to make a test pass."""
 from datetime import datetime, timezone
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -404,6 +405,37 @@ def test_a_leg_that_fills_during_the_cancel_is_not_confirmed():
     assert adapter.cancel_orders_confirmed(
         ["leg-tp", "leg-sl"], timeout_s=5.0, poll_interval_s=0.0,
         sleep=lambda _s: None, clock=_clock()) is False
+
+
+def test_a_leg_already_canceled_after_a_booked_partial_fill_is_confirmed():
+    """Fix wave FW1 item 8 (review M-1): a stop leg that filled 2 of 5 and was
+    then cancelled, with its stream "canceled" event missed, deferred the exit
+    on every attempt until the 60 s reconcile. When the caller has already
+    booked those 2 shares, nothing moved while we waited: confirmed."""
+    client = _leg_client()
+    client.status_script = {"leg-sl": [("canceled", "2")],
+                            "leg-tp": [("canceled", "0")]}
+    adapter = make_adapter(client)
+    assert adapter.cancel_orders_confirmed(
+        ["leg-tp", "leg-sl"], timeout_s=5.0, poll_interval_s=0.0,
+        sleep=lambda _s: None, clock=_clock(),
+        booked_fills={"leg-sl": Decimal("2"), "leg-tp": Decimal("0")}) is True
+
+
+@pytest.mark.parametrize("script,booked", [
+    ([("canceled", "3")], {"leg-sl": Decimal("2")}),     # a fill while we waited
+    ([("canceled", "2")], {}),                            # nothing booked
+    ([("canceled", "2")], None),
+    ([("partially_filled", "2")], {"leg-sl": Decimal("2")}),   # still working
+    ([("filled", "5")], {"leg-sl": Decimal("5")}),
+])
+def test_an_unbooked_or_still_working_partial_leg_is_not_confirmed(script, booked):
+    client = _leg_client()
+    client.status_script = {"leg-sl": script}
+    adapter = make_adapter(client)
+    assert adapter.cancel_orders_confirmed(
+        ["leg-sl"], timeout_s=1.0, poll_interval_s=0.0,
+        sleep=lambda _s: None, clock=_clock(), booked_fills=booked) is False
 
 
 def test_nothing_to_cancel_is_confirmed_without_a_call():

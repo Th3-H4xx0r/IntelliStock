@@ -383,14 +383,17 @@ class _Adapter:
         self.confirmed = confirmed
         self.readable = readable
         self.cancel_calls = []
+        self.booked = []
 
     def list_open_orders_strict(self, limit=200):
         if not self.readable:
             raise RuntimeError("orders endpoint unreachable")
         return list(self.working)
 
-    def cancel_orders_confirmed(self, order_ids, timeout_s=10.0):
+    def cancel_orders_confirmed(self, order_ids, timeout_s=10.0, *,
+                                booked_fills=None):
         self.cancel_calls.append((list(order_ids), timeout_s))
+        self.booked.append(dict(booked_fills or {}))
         return self.confirmed
 
 
@@ -439,6 +442,58 @@ def test_a_plain_working_sell_is_not_a_leg():
         instance_id="instance-1")
     assert _cancel()(adapter, empty, "AAPL") is True
     assert adapter.cancel_calls == []
+
+
+def test_the_booked_fill_of_each_store_leg_goes_to_the_cancel():
+    """Fix wave FW1 item 8 (review M-1): the lifecycle rows say how much of
+    each leg is already booked; a broker-only leg has no booked figure."""
+    from live_orders import BrokerOrderEvent, LifecycleState, OrderSide
+
+    service = _service_with_legs()
+    (sl_row,) = [r for r in service.lifecycle_store.list_for_instance("instance-1")
+                 if r.intent.reason == "bracket_stop_loss"]
+    assert service.apply_broker_event(BrokerOrderEvent(
+        event_id="sl-partial", account_id="acct-1", instance_id="instance-1",
+        client_order_id=sl_row.client_order_id, broker_order_id="broker-leg-sl",
+        symbol="AAPL", side=OrderSide.SELL, state=LifecycleState.PARTIAL,
+        cumulative_quantity=Decimal("2"), cumulative_average_price=Decimal("94"),
+        cumulative_fees=Decimal("0"), occurred_at=RTH)).applied
+    stray = SimpleNamespace(broker_order_id="broker-stray", symbol="AAPL",
+                            side="sell", status="new", order_class="bracket")
+    adapter = _Adapter(working=[stray])
+    assert _cancel()(adapter, service, "AAPL") is True
+    (booked,) = adapter.booked
+    assert booked == {"broker-leg-sl": Decimal("2"), "broker-leg-tp": Decimal("0")}
+
+
+def test_a_partially_filled_leg_cancelled_since_lets_the_sell_go_end_to_end():
+    """The real adapter over a fake client: the stop leg filled 2 and is now
+    canceled at the broker, its row still PARTIAL (the stream event was
+    missed). The exit is no longer deferred a tick."""
+    from broker_adapters.alpaca import AlpacaAdapter
+    from live_orders import BrokerOrderEvent, LifecycleState, OrderSide
+    from swing_alpaca_fakes import FakeTradingClient, enum, make_adapter, order_row
+
+    service = _service_with_legs()
+    (sl_row,) = [r for r in service.lifecycle_store.list_for_instance("instance-1")
+                 if r.intent.reason == "bracket_stop_loss"]
+    service.apply_broker_event(BrokerOrderEvent(
+        event_id="sl-partial", account_id="acct-1", instance_id="instance-1",
+        client_order_id=sl_row.client_order_id, broker_order_id="broker-leg-sl",
+        symbol="AAPL", side=OrderSide.SELL, state=LifecycleState.PARTIAL,
+        cumulative_quantity=Decimal("2"), cumulative_average_price=Decimal("94"),
+        cumulative_fees=Decimal("0"), occurred_at=RTH))
+    client = FakeTradingClient(orders=[
+        order_row(id="broker-leg-sl", client_order_id="leg-sl", side=enum("sell"),
+                  status=enum("canceled"), filled_qty="2", filled_avg_price="94",
+                  order_class=enum("bracket"), type=enum("stop")),
+        order_row(id="broker-leg-tp", client_order_id="leg-tp", side=enum("sell"),
+                  status=enum("canceled"), order_class=enum("bracket"),
+                  type=enum("limit"))])
+    adapter = make_adapter(client)
+    assert isinstance(adapter, AlpacaAdapter)
+    adapter.list_open_orders_strict = lambda limit=200: []
+    assert _cancel()(adapter, service, "AAPL", timeout_s=1.0) is True
 
 
 # --- ruling 7 (L3 carry): a parent with one leg recorded gets the other -------

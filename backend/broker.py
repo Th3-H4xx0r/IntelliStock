@@ -11558,6 +11558,7 @@ def _cancel_bracket_legs_confirmed(adapter, order_service, symbol, *,
 
     wanted = str(symbol or "").strip().upper()
     leg_ids = []
+    booked = {}
     try:
         for record in order_service.lifecycle_store.list_for_instance(
                 order_service.instance_id):
@@ -11565,6 +11566,9 @@ def _cancel_bracket_legs_confirmed(adapter, order_service, symbol, *,
                 continue
             if record.intent.symbol == wanted and record.broker_order_id:
                 leg_ids.append(record.broker_order_id)
+                # Fix wave FW1 item 8: what this leg has already booked, so a
+                # leg cancelled after a partial fill does not defer the sell.
+                booked[record.broker_order_id] = record.cumulative_quantity
     except Exception as exc:
         say(f"[swing] {wanted} sell deferred: the lifecycle store is "
             f"unreadable ({type(exc).__name__}: {exc}), so its bracket legs "
@@ -11584,7 +11588,8 @@ def _cancel_bracket_legs_confirmed(adapter, order_service, symbol, *,
     if not leg_ids:
         return True
     try:
-        confirmed = bool(adapter.cancel_orders_confirmed(leg_ids, timeout_s=timeout_s))
+        confirmed = bool(adapter.cancel_orders_confirmed(
+            leg_ids, timeout_s=timeout_s, booked_fills=booked))
     except Exception as exc:
         say(f"[swing] {wanted} bracket leg cancel raised "
             f"{type(exc).__name__}: {exc}", "red")

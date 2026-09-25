@@ -321,7 +321,8 @@ class BrokerAdapter(ABC):
     def get_order_with_legs(self, order_id) -> "OrderRef":
         raise NotImplementedError(f"{type(self).__name__} does not support get_order_with_legs")
 
-    def cancel_orders_confirmed(self, order_ids, timeout_s: float = 10.0) -> bool:
+    def cancel_orders_confirmed(self, order_ids, timeout_s: float = 10.0, *,
+                                booked_fills=None) -> bool:
         raise NotImplementedError(f"{type(self).__name__} does not support cancel_orders_confirmed")
 
     def list_closed_orders(self, symbols, after) -> list:
