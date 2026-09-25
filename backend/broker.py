@@ -9914,6 +9914,13 @@ def _refresh_option_quote(adapter, contract, now_utc, *, max_age_s=60.0):
             quote_at = now_utc
     entry = {"price": Decimal(str(round(price, 4))), "quote_at": quote_at,
              "fetched_at": now_utc}
+    if cached is not None:
+        # Fix wave FW1 item 8 (review M-4): the loop and the approval thread
+        # share this cache. The entry this refresh replaces is kept one level
+        # deep, so an intent built on it moments ago is still gated on ITS
+        # quote (the gate refuses a quote_at that differs from the intent's).
+        entry["previous"] = {name: cached[name]
+                             for name in ("price", "quote_at", "fetched_at")}
     _live_option_quotes[symbol] = entry
     return entry
 
@@ -10016,6 +10023,13 @@ def _live_option_dependency_snapshot(adapter, intent, *, now_utc=None):
     held = positions.get(symbol)
     position_quantity = Decimal(int(held.qty)) if held is not None else Decimal("0")
     quote = _live_option_quotes.get(symbol)
+    if (quote is not None and quote.get("quote_at") != intent.quote_at
+            and isinstance(quote.get("previous"), dict)
+            and quote["previous"].get("quote_at") == intent.quote_at):
+        # Fix wave FW1 item 8 (review M-4): another thread refreshed this
+        # contract between the intent's build and this gate read; gate the
+        # intent on the quote it was built on (freshness is still judged).
+        quote = quote["previous"]
     if quote is None:
         quote_price = Decimal("0")
         quote_at = datetime.datetime.fromtimestamp(0, datetime.timezone.utc)
