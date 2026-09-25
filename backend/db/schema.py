@@ -115,6 +115,8 @@ ALL_TABLES: tuple = (
     "NexusStrategyCache", "NotificationPreferences", "OutlierGraphPeers",
     "OutlierUniverseFeatures", "PointInTimeDatasetSnapshots",
     "PointInTimeManifests", "PriceHistory", "PushDevices", "Stocks", "Strategies",
+    "SwingIndexMembership", "SwingIvSnapshots", "SwingMacroDaily",
+    "SwingSectorMap", "SwingSignals", "SwingWheelScans",
     "TickerDayFeatures", "Users", "backtest_replay_calls",
     "backtest_replay_fixture_builds", "backtest_replay_fixtures",
     "backtest_replay_matrices", "backtest_replay_receipts", "h2h_history",
@@ -278,6 +280,16 @@ _SPECS = [
     # id = "YYYY-MM-DD|SYMBOL", so one date's cross-section is a single prefix scan.
     TableSpec("OutlierUniverseFeatures", prefix_fields=("id",)),
     TableSpec("OutlierGraphPeers"),
+    # Swing-trader port (docs/superpowers/specs/2026-09-24-swing-trader-port-design.md §7).
+    # The two record tables are read per instance. The three dated series are
+    # read by id prefix ("VIX|", "SPX|", "SYMBOL|") and always strictly before
+    # the NY trading date, so a bytewise prefix scan is the whole access path.
+    TableSpec("SwingSignals", indexed_fields=("instance_id",)),
+    TableSpec("SwingWheelScans", indexed_fields=("instance_id",)),
+    TableSpec("SwingIvSnapshots", prefix_fields=("id",)),
+    TableSpec("SwingMacroDaily", prefix_fields=("id",)),
+    TableSpec("SwingIndexMembership", prefix_fields=("id",)),
+    TableSpec("SwingSectorMap"),
     TableSpec("LiveBootAudit", indexed_fields=("instance_id",), prefix_fields=("id",)),
     # r.now() wrote a native time on these; the ported writer stores an
     # ISO-8601 string and time_fields decodes it back to a tz-aware datetime,

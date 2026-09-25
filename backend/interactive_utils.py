@@ -6652,6 +6652,222 @@ def action_get_live_command(conn, command_id):
     return doc
 
 
+# --- swing-trader port: signals, decisions, the wheel book (plan B Task 21) ---
+# The swing and wheel lanes write SwingSignals / SwingWheelScans (swing_trader.
+# signals_store). An approval is final after one compare-and-swap and reaches
+# the broker as a submit_order LiveCommand {"source": "swing_approval",
+# "signal_id"} that plan A-live's handler rebuilds at the live price.
+
+class SwingBrokerUnavailableError(RuntimeError):
+    """The broker cannot be reached: the wheel book is unknown (an empty book
+    would read as "no open puts"), or an approval cannot be delivered. The
+    routes answer 503; the signal stays pending, so a retry later works."""
+
+
+class SwingDecisionRaceError(RuntimeError):
+    """This click lost the compare-and-swap to a concurrent decision (409)."""
+
+
+def _swing_log(msg, color="white"):
+    try:
+        from intellistock_logger import intellistock_logger as _ilog
+        _ilog.log(str(msg), color, service="SwingApi")
+    except Exception:
+        print("[SwingApi] %s" % msg)
+
+
+def _finite_or_none(value):
+    """A finite float, else None: a nan/inf from the broker is no value (and
+    would make the JSON response itself fail)."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    return v if v == v and v not in (float("inf"), float("-inf")) else None
+
+
+def _swing_instance(conn, instance_id):
+    inst = _resolve_instance_doc(conn, instance_id) if instance_id else None
+    if inst is None:
+        raise LookupError("Instance not found: %s" % instance_id)
+    return inst, str(inst.get("id", instance_id))
+
+
+def _ny_today():
+    from swing_trader import clock
+    return datetime.date.fromisoformat(
+        clock.ny_date(datetime.datetime.now(datetime.timezone.utc)))
+
+
+def action_swing_list_signals(conn, instance_id, status=None, limit=100):
+    """{"signals": [...]} newest first (interfaces §9 item 1)."""
+    from swing_trader import signals_store
+    _inst, real_id = _swing_instance(conn, instance_id)
+    return {"signals": signals_store.list_signals(real_id, status=(status or None),
+                                                  limit=limit)}
+
+
+def action_swing_decide_signal(conn, instance_id, signal_id, decision, reason=None,
+                               decided_by=None):
+    """Decide a pending signal (interfaces §9 item 2). Not pending:
+    SignalConflict, a ValueError (400). Unknown or another instance's:
+    LookupError (404). Lost the compare-and-swap: SwingDecisionRaceError
+    (409). An approval that cannot reach the broker (instance not running,
+    command not queued): SwingBrokerUnavailableError (503), and the signal
+    stays pending. A rejection needs no broker."""
+    from swing_trader import approvals, signals_store
+    inst, real_id = _swing_instance(conn, instance_id)
+    signal = signals_store.get_signal(signal_id)
+    if not signal or str(signal.get("instance_id") or "") != real_id:
+        raise LookupError("Signal not found: %s" % signal_id)
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    decided = approvals.decide(signal, decision, decided_by, reason, now_iso)
+    approving = decided["status"] in approvals.APPROVED_STATUSES
+    if approving and not inst.get("runCommand", False):
+        raise SwingBrokerUnavailableError(
+            "Instance %s is not running, so the approval could not reach the broker; "
+            "the signal stays pending" % real_id)
+    if approving and inst.get("crashed"):
+        # M6: a crashed instance is held open for its logs; no broker loop
+        # would pick the command up.
+        raise SwingBrokerUnavailableError(
+            "Instance %s has crashed, so the approval could not reach the broker; "
+            "the signal stays pending" % real_id)
+    if not signals_store.cas_signal(signal_id, expect_status="pending", doc=decided):
+        raise SwingDecisionRaceError("signal %s was decided first by another click; "
+                                     "decisions are final" % signal_id)
+    out = {"signal": decided, "command_id": None}
+    if approving:
+        try:
+            cmd = action_submit_live_command(
+                conn, real_id, "submit_order",
+                {"source": "swing_approval", "signal_id": str(signal_id)}, decided_by)
+        except Exception as exc:
+            # Undo the decision so the operator can approve again once the
+            # broker is reachable. Only a row still in the decided status is
+            # put back. Fix round 1 (Important 2): the revert is checked. When
+            # it raises (the database is down) or finds the row moved, the
+            # signal may read approved with nothing queued, and the operator
+            # is told so rather than "pending again".
+            try:
+                reverted, revert_error = signals_store.cas_signal(
+                    signal_id, expect_status=decided["status"], doc=signal), None
+            except Exception as rexc:
+                reverted, revert_error = False, rexc
+            if not reverted:
+                why = ("the revert failed: %s: %s" % (type(revert_error).__name__, revert_error)
+                       if revert_error is not None
+                       else "the row no longer read %s" % decided["status"])
+                _swing_log("swing approval %s on %s: the command could not be queued (%s) "
+                           "and the signal could not be put back to pending (%s) — it may "
+                           "read %s with no broker command queued"
+                           % (signal_id, real_id, exc, why, decided["status"]), "red")
+                raise SwingBrokerUnavailableError(
+                    "the approval could not be queued for the broker (%s), and the signal "
+                    "could not be put back to pending (%s). It may read %s, but no broker "
+                    "command was queued: place the order manually or have the signal reset"
+                    % (exc, why, decided["status"]))
+            raise SwingBrokerUnavailableError(
+                "the approval could not be queued for the broker (%s); the signal is "
+                "pending again" % exc)
+        out["command_id"] = (cmd or {}).get("command_id")
+    return out
+
+
+def _wheel_underlying_prices(instance_id, symbols):
+    """{underlying: price} from the instance's own Alpaca data credentials:
+    the IEX latest trade, then yfinance (ST app.py _fetch_live_price). A symbol
+    with no quote is absent, and the row reports null."""
+    import live_broker_fetch as _lbf
+    from swing_trader import market_data
+    wanted = sorted({str(s).upper() for s in (symbols or []) if s})
+    if not wanted:
+        return {}
+    creds = _lbf._load_credentials(str(instance_id))
+    if creds.get("error"):
+        return {}
+    try:
+        client = market_data.data_client(creds.get("key"), creds.get("secret"))
+    except RuntimeError:
+        return {}
+    try:
+        prices = market_data.live_prices(wanted, client=client) or {}
+    except Exception:
+        return {}
+    return {s: v for s, v in ((s, _finite_or_none(p)) for s, p in prices.items())
+            if v is not None and v > 0}
+
+
+def _wheel_put_fields(p, parsed):
+    """(underlying, strike, expiry) from A-live's contract fields, each one
+    falling back to the OCC symbol when the broker could not fill it in: one
+    malformed row never turns the whole book into a 400."""
+    underlying = str(p.get("underlying") or parsed[0]).upper()
+    strike = _finite_or_none(p.get("strike"))
+    if not strike or strike <= 0:              # M3: nan/inf/0/"n/a" read the OCC strike
+        strike = float(parsed[3])
+    expiry = str(p.get("expiry") or "")[:10]
+    try:
+        datetime.date.fromisoformat(expiry)
+    except ValueError:
+        expiry = parsed[1]
+    return underlying, strike, expiry
+
+
+def action_wheel_overview(conn, instance_id, *, today=None):
+    """The wheel book (interfaces §9 item 3): short puts from broker truth,
+    ITM % signed (negative out of the money, null without an underlying
+    quote), collateral, cash, and the 20 newest scan rows."""
+    import live_broker_fetch as _lbf
+    from swing_trader import signals_store, wheel_rules
+    _inst, real_id = _swing_instance(conn, instance_id)
+    state = _lbf.fetch_broker_live_state(conn, real_id) or {}
+    if state.get("broker_fetch_error"):
+        raise SwingBrokerUnavailableError("broker unavailable: %s" % state["broker_fetch_error"])
+    today = today or _ny_today()
+    puts = []
+    for p in state.get("positions") or []:
+        parsed = wheel_rules.occ_parts(p.get("symbol"))
+        kind = str(p.get("option_type") or (parsed[2] if parsed else "")).lower()
+        qty = _finite_or_none(p.get("qty"))
+        if qty is None or parsed is None or qty >= 0 or kind != "put":
+            continue                           # M3: a nan/inf qty skips only that row
+        underlying, strike, expiry = _wheel_put_fields(p, parsed)
+        puts.append((p, underlying, strike, expiry, int(round(abs(qty)))))
+    prices = _wheel_underlying_prices(real_id, [u for _p, u, _s, _e, _q in puts])
+    rows = []
+    for p, underlying, strike, expiry, n in puts:
+        spot = _finite_or_none(prices.get(underlying))
+        multiplier = _finite_or_none(p.get("multiplier"))
+        if not multiplier or multiplier <= 0:
+            multiplier = 100.0                 # M3: the row's multiplier, default 100
+        rows.append({
+            "contract": str(p.get("symbol")).upper(),
+            "underlying": underlying,
+            "strike": strike,
+            "expiry": expiry,
+            "qty": n,
+            "avg_entry_price": _finite_or_none(p.get("avg_entry_price")),
+            "current_price": _finite_or_none(p.get("last_price")),
+            "underlying_price": spot,
+            "itm_pct": (round((strike - spot) / strike * 100.0, 2)
+                        if spot is not None and strike > 0 else None),
+            "dte": (datetime.date.fromisoformat(expiry) - today).days,
+            "collateral": round(strike * multiplier * n, 2),
+            "unrealized_pl": _finite_or_none(p.get("unrealized_pnl")),
+        })
+    return {"open_puts": rows,
+            "collateral_total": round(sum(r["collateral"] for r in rows), 2),
+            "cash": _finite_or_none(state.get("cash")),
+            "recent_scans": signals_store.list_wheel_scans(real_id, limit=20)}
+
+
+def action_swing_calibration(conn, instance_id):
+    from swing_trader import calibration
+    _inst, real_id = _swing_instance(conn, instance_id)
+    return calibration.calibration_report(real_id)
+
+
 def action_live_trading_logs(conn, instance_id, since_line=0):
     """Live-tail of this instance's broker log file.
 

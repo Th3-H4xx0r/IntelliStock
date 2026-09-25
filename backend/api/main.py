@@ -206,6 +206,12 @@ from interactive_utils import (
     action_register_push_device,
     action_delete_push_device,
     action_list_push_devices,
+    SwingBrokerUnavailableError,
+    SwingDecisionRaceError,
+    action_swing_list_signals,
+    action_swing_decide_signal,
+    action_wheel_overview,
+    action_swing_calibration,
 )
 
 # OpenAPI / Swagger UI off in production unless API_DOCS_PUBLIC says otherwise.
@@ -4012,6 +4018,62 @@ def api_get_live_command(command_id: str, conn=Depends(conn_dependency), current
     """Return the status and result of a previously-submitted live command.
     UI polls this until `status` ∈ {completed, failed}."""
     return _run(action_get_live_command, conn, command_id)
+
+
+# --- swing-trader port (plan B Task 21; interfaces §8, §9) ---
+#
+# GET  /instances/{id}/swing/signals?status=     — review queue (web + iOS)
+# POST /instances/{id}/swing/signals/{sid}/decision — approve / approve_half / reject
+# GET  /instances/{id}/wheel                     — open puts, collateral, recent scans
+# GET  /instances/{id}/swing/calibration         — score buckets vs outcomes
+
+
+class SwingDecisionBody(BaseModel):
+    decision: str = Field(pattern="^(approve|approve_half|reject)$")
+    reason: Optional[str] = None      # both UIs omit it when blank
+
+
+@app.get("/instances/{instance_id}/swing/signals", response_class=JSONResponse)
+def api_swing_list_signals(instance_id: str, status: Optional[str] = None, limit: int = 100,
+                           conn=Depends(conn_dependency),
+                           current_user: dict = Depends(get_current_user)):
+    return _run(action_swing_list_signals, conn, instance_id, status, limit)
+
+
+@app.post("/instances/{instance_id}/swing/signals/{signal_id}/decision",
+          response_class=JSONResponse)
+def api_swing_decide_signal(instance_id: str, signal_id: str, body: SwingDecisionBody,
+                            conn=Depends(conn_dependency),
+                            current_user: dict = Depends(get_current_user)):
+    """A decision is final. 400: the signal is no longer pending. 404: unknown,
+    or another instance's. 409: a concurrent click won. 503: the approval
+    cannot reach the broker (the signal stays pending; retry later). 422: a
+    malformed body. An approval queues a submit_order LiveCommand that the
+    broker rebuilds at the live price."""
+    try:
+        return _run(action_swing_decide_signal, conn, instance_id, signal_id,
+                    body.decision, body.reason,
+                    str(current_user.get("username") or current_user.get("id")
+                        or "operator"))
+    except SwingDecisionRaceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except SwingBrokerUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.get("/instances/{instance_id}/wheel", response_class=JSONResponse)
+def api_wheel_overview(instance_id: str, conn=Depends(conn_dependency),
+                       current_user: dict = Depends(get_current_user)):
+    try:
+        return _run(action_wheel_overview, conn, instance_id)
+    except SwingBrokerUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.get("/instances/{instance_id}/swing/calibration", response_class=JSONResponse)
+def api_swing_calibration(instance_id: str, conn=Depends(conn_dependency),
+                          current_user: dict = Depends(get_current_user)):
+    return _run(action_swing_calibration, conn, instance_id)
 
 
 @app.get("/backtests/{backtest_id}/graph-data", response_class=JSONResponse)

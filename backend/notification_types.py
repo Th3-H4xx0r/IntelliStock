@@ -138,6 +138,45 @@ NOTIFICATION_TYPES = [
      "channel": "notifications", "discord": True, "push": True,
      "prefixes": ["LEARNING BUDGET ["]},
 
+    # --- Swing & Wheel (swing-trader port, spec §10) ---
+    # Reviews, entries, exits and position alerts push by default: a review
+    # that waits is a trade the operator meant to decide on, and a short put
+    # going in the money is money at risk. ST sent these as Pushover messages.
+    {"key": "swing_entry", "group": "Swing & Wheel", "label": "Swing entry",
+     "desc": "The swing lane sent a bracket buy", "channel": "trades",
+     "discord": True, "push": True, "prefixes": ["SWING ENTRY ["]},
+    {"key": "swing_pending_review", "group": "Swing & Wheel", "label": "Swing review needed",
+     "desc": "A swing candidate scored 50-74 and waits for your approval",
+     "channel": "trades", "discord": True, "push": True, "prefixes": ["SWING REVIEW ["]},
+    {"key": "swing_exit", "group": "Swing & Wheel", "label": "Swing exit",
+     "desc": "The swing lane sold a position", "channel": "trades",
+     "discord": True, "push": True, "prefixes": ["SWING EXIT ["]},
+    {"key": "swing_run_summary", "group": "Swing & Wheel", "label": "Swing & wheel run summary",
+     "desc": "A swing or wheel scan finished; AI rejects and bear-mode notes",
+     "channel": "notifications", "discord": True, "push": False,
+     "prefixes": ["SWING RUN ["]},
+    {"key": "wheel_put_placed", "group": "Swing & Wheel", "label": "Wheel put sent",
+     "desc": "The wheel lane sent a cash-secured put", "channel": "trades",
+     "discord": True, "push": True, "prefixes": ["WHEEL PUT ["]},
+    {"key": "wheel_pending_review", "group": "Swing & Wheel", "label": "Wheel review needed",
+     "desc": "A wheel candidate scored 50-74 and waits for your approval",
+     "channel": "trades", "discord": True, "push": True, "prefixes": ["WHEEL REVIEW ["]},
+    {"key": "wheel_position_alert", "group": "Swing & Wheel", "label": "Wheel position alert",
+     "desc": ("A short put is in the money, near expiry, has no price, or is being "
+              "bought back; or assigned shares are a covered-call candidate (dry run)"),
+     "channel": "trades", "discord": True, "push": True, "prefixes": ["WHEEL ALERT ["]},
+    {"key": "wheel_assignment", "group": "Swing & Wheel", "label": "Wheel assignment",
+     "desc": "A put was assigned and its shares are now held",
+     "channel": "trades", "discord": True, "push": False,
+     "prefixes": ["WHEEL ASSIGNMENT ["]},
+    # An order the operator approved that the broker then refused: the
+    # operator believes a trade is on, so it pushes (plan C final review).
+    {"key": "swing_approval_failed", "group": "Swing & Wheel",
+     "label": "Approved order refused",
+     "desc": "A swing or wheel order you approved could not be sent",
+     "channel": "trades", "discord": True, "push": True,
+     "prefixes": ["SWING APPROVAL FAILED ["]},
+
     # --- Fallback (hidden default) — never dropped ---
     {"key": "other", "group": "Other", "label": "Other notifications",
      "desc": "Anything not otherwise categorized", "channel": "notifications",
@@ -155,7 +194,14 @@ def type_for_key(key):
 # Push is opt-in by default for everything EXCEPT these curated high-signal keys.
 # A trading instance going dark is the one alert worth a phone push out of the box;
 # the operator can still toggle it off per-channel in the settings screen.
-_PUSH_ON_BY_DEFAULT = {"instance_crash"}
+_PUSH_ON_BY_DEFAULT = {
+    "instance_crash",
+    # swing-trader port (spec §10): pending reviews, entries, exits, position
+    # alerts, and an approved order the broker refused
+    "swing_entry", "swing_pending_review", "swing_exit",
+    "wheel_put_placed", "wheel_pending_review", "wheel_position_alert",
+    "swing_approval_failed",
+}
 
 
 def default_routing():
