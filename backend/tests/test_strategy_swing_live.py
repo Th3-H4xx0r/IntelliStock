@@ -324,6 +324,47 @@ def test_a_bracket_leg_is_not_a_working_exit(live, monkeypatch):
     assert "EEE" in cache[live._PENDING_EXIT_KEY]
 
 
+def _alpaca_book(*rows):
+    """The working-order book as AlpacaAdapter.list_open_orders_strict reads
+    it: real OrderRefs (order_class, status, order_type) from raw rows."""
+    from swing_alpaca_fakes import FakeTradingClient, make_adapter
+
+    return make_adapter(FakeTradingClient(orders=rows)).list_open_orders_strict()
+
+
+def test_g8b_real_bracket_leg_orderrefs_are_not_a_working_exit(live, monkeypatch):
+    # G6 review carry: with OrderRef.order_class on the branch (A-live L1/L2),
+    # a held position whose only working SELLs are its bracket's legs gets
+    # its deferred exit re-sent. The engine cancels those legs before selling.
+    from swing_alpaca_fakes import enum, order_row
+
+    def leg(oid, status, kind, **price):
+        return order_row(id=oid, client_order_id=f"cid-{oid}", symbol="EEE",
+                         side=enum("sell"), qty="10", status=enum(status),
+                         order_class=enum("bracket"), type=enum(kind), **price)
+
+    legs = _alpaca_book(leg("tp", "new", "limit", limit_price="109"),
+                        leg("sl", "held", "stop", stop_price="94"))
+    assert [(o.order_class, o.status, o.side) for o in legs] == [
+        ("bracket", "new", "sell"), ("bracket", "held", "sell")]
+    cache = {live._PENDING_EXIT_KEY: {"EEE": {"reason": "stop_loss",
+                                              "intent": "swing_stop_exit",
+                                              "since": "2026-06-01"}},
+             live._SCAN_DONE_KEY: "2026-06-01"}
+    out = tick(live, MON_1000, LiveAdapter(positions={"EEE": (10, 100.0, 930.0)},
+                                           open_orders=legs), cache)
+    assert out["EEE"] == -1 and out["_nexus_action_intents"] == {"EEE": "swing_stop_exit"}
+    assert out["_nexus_position_sizes"]["EEE"] == {"sell_fraction": 1.0}
+
+    # A simple working sell beside the legs is the exit in flight: nothing stacked.
+    selling = _alpaca_book(leg("tp", "new", "limit", limit_price="109"),
+                           order_row(id="mkt", client_order_id="cid-mkt", symbol="EEE",
+                                     side=enum("sell"), qty="10"))
+    assert tick(live, MON_1000, LiveAdapter(positions={"EEE": (10, 100.0, 930.0)},
+                                            open_orders=selling), cache) == {}
+    assert "EEE" in cache[live._PENDING_EXIT_KEY]
+
+
 def test_the_bear_counter_advances_once_per_session(live, monkeypatch):
     monkeypatch.setattr(live.regime, "fetch_vix_close", lambda: 30.0)
     monkeypatch.setattr(live, "swing_indicators", lambda f, c: dict(IND, XLP=ind(80.0)))
