@@ -4,6 +4,7 @@ import {
   DECISION_LABELS,
   REASONING_PREVIEW_CHARS,
   classifyDecisionFailure,
+  classifyDecisionSuccess,
   confirmPrompt,
   createInFlightGuard,
   decisionSuccessMessage,
@@ -206,4 +207,36 @@ test('fmtItm says which side of the strike the stock is', () => {
   assert.equal(fmtItm(2), '2.0% ITM')
   assert.equal(fmtItm(-3.25), '3.3% OTM')
   assert.equal(fmtItm(null), '—')
+})
+
+// -- FW-api-I1: a 202 is accepted-but-uncertain, a 503 is "not queued" ---------------
+
+test('classifyDecisionSuccess: a 200 is the plain success copy', () => {
+  const v = classifyDecisionSuccess(200, { signal: SWING, command_id: 'c1' }, SWING, 'approve')
+  assert.deepEqual([v.uncertain, v.tone], [false, 'ok'])
+  assert.equal(v.message, decisionSuccessMessage(SWING, 'approve'))
+})
+
+test('classifyDecisionSuccess: a 202 shows the server detail as a warning, never "place manually"', () => {
+  const detail = 'approval received — the order may be in flight; check the signal status and open orders before placing anything by hand (x)'
+  const v = classifyDecisionSuccess(202, { uncertain: true, detail, command_id: null }, SWING, 'approve')
+  assert.deepEqual([v.uncertain, v.tone, v.message], [true, 'warn', detail])
+  // The flag alone (a proxy that rewrote the status) is enough, and no detail still warns.
+  const bare = classifyDecisionSuccess(200, { uncertain: true }, SWING, 'approve_half')
+  assert.equal(bare.uncertain, true)
+  assert.match(bare.message, /^Approval received for AAPL — the order may be in flight; check the signal status and open orders/)
+  const noBody = classifyDecisionSuccess(202, null, WHEEL, 'approve')
+  assert.equal(noBody.uncertain, true)
+  for (const m of [v.message, bare.message, noBody.message]) {
+    assert.doesNotMatch(m, /place the order manually|no broker command was queued/)
+  }
+})
+
+test('classifyDecisionFailure: a 503 keeps the card and says it was not queued', () => {
+  const v = classifyDecisionFailure(503, '')
+  assert.deepEqual([v.kind, v.removeCard, v.stopPolling], ['unavailable', false, false])
+  assert.equal(v.message, 'Not queued — the signal is still pending; try again.')
+  const server = classifyDecisionFailure(503, 'the approval was not queued for the broker (x); the signal is pending again — not queued, try again')
+  assert.match(server.message, /not queued, try again$/)
+  assert.doesNotMatch(v.message, /manually/)
 })

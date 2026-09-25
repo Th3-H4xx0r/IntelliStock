@@ -146,7 +146,11 @@ def test_a_command_that_cannot_be_queued_is_a_503_and_puts_the_signal_back(api, 
     monkeypatch.setattr(interactive_utils, "action_submit_live_command", down)
     sid = signal()
     res = api.post(decision_url(sid), json={"decision": "approve"})
-    assert res.status_code == 503 and "pending again" in res.json()["detail"]
+    detail = res.json()["detail"]
+    assert res.status_code == 503 and "pending again" in detail
+    # FW-api-I1: the 503 is kept for the one case that is provably safe to retry.
+    assert "not queued" in detail and "try again" in detail
+    assert "manually" not in detail
     assert signals_store.get_signal(sid)["status"] == "pending"
 
 
@@ -364,33 +368,167 @@ def _cas_second_call(monkeypatch, behaviour):
     monkeypatch.setattr(signals_store, "cas_signal", cas)
 
 
-def test_important_2_a_revert_that_raises_is_a_503_that_says_nothing_was_queued(
+def _assert_uncertain(res):
+    """FW-api-I1: the accepted-but-uncertain answer. Never an instruction to
+    place the order by hand, never a claim that nothing was queued."""
+    assert res.status_code == 202
+    body = res.json()
+    assert body["uncertain"] is True
+    detail = body["detail"]
+    assert "approval received" in detail and "may be in flight" in detail
+    assert "check the signal status and open orders" in detail
+    assert "no broker command was queued" not in detail
+    assert "place the order manually" not in detail and "pending again" not in detail
+    return body
+
+
+def test_important_2_a_revert_that_raises_is_uncertain_never_nothing_queued(
         api, monkeypatch):
+    # G8a Important 2 said "no broker command was queued" here. FW-api-I1: a
+    # revert that raised proves nothing (it may even have landed), so the
+    # operator is told the order may be in flight, not to place it by hand.
     _queue_down(monkeypatch)
     _cas_second_call(monkeypatch, RuntimeError("db down"))
     lines = []
     monkeypatch.setattr(interactive_utils, "_swing_log",
                         lambda msg, color="white": lines.append((msg, color)))
     sid = signal()
-    res = api.post(decision_url(sid), json={"decision": "approve"})
-    assert res.status_code == 503
-    detail = res.json()["detail"]
-    assert "approved" in detail and "no broker command was queued" in detail
-    assert "pending again" not in detail
-    # The row really does read approved, with nothing queued: the operator must know.
+    body = _assert_uncertain(api.post(decision_url(sid), json={"decision": "approve"}))
+    assert body["signal"]["status"] == "approved" and body["command_id"] is None
     assert signals_store.get_signal(sid)["status"] == "approved" and api.commands == []
     assert any(color == "red" and sid in msg for msg, color in lines)
 
 
-def test_important_2_a_revert_that_finds_the_row_moved_is_not_pending_again(
-        api, monkeypatch):
+def test_important_2_a_revert_that_finds_the_row_moved_is_uncertain(api, monkeypatch):
     _queue_down(monkeypatch)
     _cas_second_call(monkeypatch, False)
     sid = signal()
+    _assert_uncertain(api.post(decision_url(sid), json={"decision": "approve"}))
+
+
+# -- FW-api-I1: a failed queue write is re-read before anything is said ------------
+
+def _real_queue(monkeypatch, store):
+    import live_state
+
+    monkeypatch.setattr(live_state, "store", store)
+    monkeypatch.setattr(live_state, "ensure_tables", lambda r=None, conn=None: None)
+    return live_state
+
+
+def _landed_then_raised(monkeypatch, store, *, claim=False):
+    """The real producer: live_state.submit_command writes the LiveCommands row
+    (the INSERT committed), then the acknowledgement is lost and the caller
+    sees the wrapped error action_submit_live_command raises. With claim, the
+    broker's command worker claims the signal (approved -> submitted) first."""
+    _real_queue(monkeypatch, store)
+    landed = []
+
+    def submit(conn, instance_id, command_type, payload, submitted_by=None):
+        landed.append(_REAL_SUBMIT(conn, instance_id, command_type, payload, submitted_by))
+        if claim:
+            row = dict(signals_store.get_signal(payload["signal_id"]))
+            assert signals_store.cas_signal(row["id"], expect_status=row["status"],
+                                            doc={**row, "status": "submitted"})
+        raise ValueError("submit_command failed: server closed the connection unexpectedly")
+
+    monkeypatch.setattr(interactive_utils, "action_submit_live_command", submit)
+    return landed
+
+
+def test_i1_a_landed_command_the_broker_claimed_is_never_place_it_manually(
+        api, store, monkeypatch):
+    # The final review's probe (test_row_moved_branch_denies_a_queued_command).
+    landed = _landed_then_raised(monkeypatch, store, claim=True)
+    sid = signal()
+    body = _assert_uncertain(api.post(decision_url(sid), json={"decision": "approve"}))
+    (cmd,) = landed
+    assert body["command_id"] == cmd["command_id"]
+    assert body["signal"]["status"] == "submitted"
+    assert signals_store.get_signal(sid)["status"] == "submitted"
+
+
+def test_i1_a_landed_command_not_yet_claimed_is_uncertain_and_left_approved(
+        api, store, monkeypatch):
+    landed = _landed_then_raised(monkeypatch, store)
+    sid = signal()
+    body = _assert_uncertain(api.post(decision_url(sid), json={"decision": "approve"}))
+    assert body["command_id"] == landed[0]["command_id"]
+    # Not reverted: the queued command still runs, and the broker's claim needs
+    # the row to read approved.
+    assert signals_store.get_signal(sid)["status"] == "approved"
+
+
+def test_i1_a_signal_the_broker_already_moved_is_uncertain_without_a_command_row(
+        api, monkeypatch):
+    # No command row is visible, but the signal no longer reads approved. Only
+    # the broker's claim moves it off approved, so a command was queued.
+    def raised_after_the_claim(conn, instance_id, command_type, payload, submitted_by=None):
+        row = dict(signals_store.get_signal(payload["signal_id"]))
+        signals_store.cas_signal(row["id"], expect_status=row["status"],
+                                 doc={**row, "status": "pending", "decided_by": None})
+        raise ValueError("submit_command failed: connection reset")
+
+    monkeypatch.setattr(interactive_utils, "action_submit_live_command",
+                        raised_after_the_claim)
+    sid = signal()
+    body = _assert_uncertain(api.post(decision_url(sid), json={"decision": "approve"}))
+    assert body["signal"]["status"] == "pending" and body["command_id"] is None
+
+
+def test_i1_an_unreadable_queue_is_uncertain_and_nothing_is_reverted(api, monkeypatch):
+    _queue_down(monkeypatch)
+
+    def unreadable(*a, **k):
+        raise RuntimeError("postgres unavailable")
+
+    monkeypatch.setattr(interactive_utils, "_swing_approval_commands", unreadable)
+    reverts = []
+    real_cas = signals_store.cas_signal
+    monkeypatch.setattr(signals_store, "cas_signal",
+                        lambda *a, **k: reverts.append(k) or real_cas(*a, **k))
+    sid = signal()
+    _assert_uncertain(api.post(decision_url(sid), json={"decision": "approve"}))
+    assert len(reverts) == 1                  # the decision itself; no revert
+    assert signals_store.get_signal(sid)["status"] == "approved"
+
+
+def test_i1_an_older_command_for_the_same_signal_does_not_count_as_queued(
+        api, store, monkeypatch):
+    # An earlier approval of this signal queued a command, which the broker
+    # reset to pending (a transient refusal). This approval's own write failed
+    # and nothing new landed: provably not queued, so revert and 503.
+    live_state = _real_queue(monkeypatch, store)
+    sid = signal()
+    old_id = live_state.submit_command(None, None, instance_id=IID, type="submit_order",
+                                       payload={"source": "swing_approval",
+                                                "signal_id": sid})
+    store.update(live_state.LIVE_COMMANDS_TABLE, old_id,
+                 {"status": "completed", "created_at": "2026-09-24T13:21:00+00:00",
+                  "created_at_iso": "2026-09-24T13:21:00+00:00"})
+    _queue_down(monkeypatch)
     res = api.post(decision_url(sid), json={"decision": "approve"})
-    assert res.status_code == 503
-    detail = res.json()["detail"]
-    assert "pending again" not in detail and "no broker command was queued" in detail
+    assert res.status_code == 503 and "not queued" in res.json()["detail"]
+    assert signals_store.get_signal(sid)["status"] == "pending"
+
+
+def test_i1_a_command_for_another_signal_does_not_count_as_queued(api, store, monkeypatch):
+    live_state = _real_queue(monkeypatch, store)
+    sid, other = signal("AAA"), signal("BBB")
+    live_state.submit_command(None, None, instance_id=IID, type="submit_order",
+                              payload={"source": "swing_approval", "signal_id": other})
+    _queue_down(monkeypatch)
+    res = api.post(decision_url(sid), json={"decision": "approve"})
+    assert res.status_code == 503 and signals_store.get_signal(sid)["status"] == "pending"
+
+
+def test_i1_the_route_answers_202_with_a_json_body(api, store, monkeypatch):
+    _landed_then_raised(monkeypatch, store)
+    res = api.post(decision_url(signal()), json={"decision": "approve_half"})
+    assert res.status_code == 202
+    assert res.headers["content-type"].startswith("application/json")
+    assert set(res.json()) == {"signal", "command_id", "uncertain", "detail"}
+    assert res.json()["signal"]["status"] == "approved_half"
 
 
 def test_m6_an_approval_on_a_crashed_instance_is_a_503_and_stays_pending(api):

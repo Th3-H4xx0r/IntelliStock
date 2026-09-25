@@ -147,9 +147,9 @@ import { getToken } from '../../utils/auth.js'
 import {
   DECISION_LABELS,
   classifyDecisionFailure,
+  classifyDecisionSuccess,
   confirmPrompt,
   createInFlightGuard,
-  decisionSuccessMessage,
   decisionsFor,
   detailText,
   joinKeyRisks,
@@ -302,9 +302,14 @@ async function submit(signal) {
       body: JSON.stringify(body),
     })
     if (res.ok) {
+      // 202: recorded, but the broker command may or may not be queued (the
+      // order may be in flight). The card still goes; the notice says so.
+      let body = null
+      try { body = await res.json() } catch { /* the body is optional */ }
+      const outcome = classifyDecisionSuccess(res.status, body, signal, decision)
       decided.add(signal.id)
       removeCard(signal.id)
-      showNotice('ok', decisionSuccessMessage(signal, decision))
+      showNotice(outcome.tone, outcome.message)
       return
     }
     let detail = ''

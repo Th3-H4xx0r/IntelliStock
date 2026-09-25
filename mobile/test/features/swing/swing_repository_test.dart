@@ -5,6 +5,7 @@ import 'package:intellistock_mobile/features/swing/data/swing_repository.dart';
 class _FakeApiClient implements ApiClient {
   final calls = <Map<String, dynamic>>[];
   Object? getResponse;
+  Object? postResponse;
 
   @override
   Future<T> get<T>(String path, {Map<String, dynamic>? query}) async {
@@ -15,7 +16,7 @@ class _FakeApiClient implements ApiClient {
   @override
   Future<T> post<T>(String path, {Object? body, Map<String, dynamic>? query}) async {
     calls.add({'method': 'POST', 'path': path, 'body': body});
-    return null as T;
+    return postResponse as T;
   }
 
   @override
@@ -136,6 +137,24 @@ void main() {
       expect(api.calls[1]['body'],
           {'decision': 'reject', 'reason': 'too close to earnings'});
       expect(api.calls[2]['body'], {'decision': 'reject'});
+    });
+
+    test('decide reads FW-api-I1\'s uncertain 202 body; any other body is recorded',
+        () async {
+      final api = _FakeApiClient();
+      final repo = SwingRepository(api);
+      expect((await repo.decide('i1', 'a1', 'approve')).uncertain, isFalse);
+      api.postResponse = {'signal': {}, 'command_id': 'c1'};
+      expect((await repo.decide('i1', 'a1', 'approve')).uncertain, isFalse);
+      api.postResponse = {
+        'signal': {},
+        'command_id': null,
+        'uncertain': true,
+        'detail': '  approval received — the order may be in flight  ',
+      };
+      final r = await repo.decide('i1', 'a1', 'approve');
+      expect(r.uncertain, isTrue);
+      expect(r.detail, 'approval received — the order may be in flight');
     });
 
     test('wheel parses the addendum shape and tolerates nulls', () async {

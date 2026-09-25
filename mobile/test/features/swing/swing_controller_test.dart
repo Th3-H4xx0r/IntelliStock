@@ -122,6 +122,44 @@ void main() {
       expect(read(c).signals, isEmpty);
     });
 
+    test('FW-api-I1: a 202 (uncertain) drops the card and says the order may be in flight',
+        () async {
+      const detail = 'approval received — the order may be in flight; check the '
+          'signal status and open orders before placing anything by hand (x)';
+      final repo = FakeSwingRepo([signal('a1'), signal('b22')])
+        ..decideReceipt = const DecisionReceipt(uncertain: true, detail: detail);
+      final c = await start(repo);
+      final notifier = c.read(pendingSignalsProvider('i1').notifier);
+      final result = await notifier.decide(signal('a1'), 'approve');
+      expect(result.outcome, DecisionOutcome.uncertain);
+      expect(result.message, detail);
+      expect(read(c).signals.map((s) => s.id), ['b22']);
+      expect(read(c).deciding, isEmpty);
+
+      repo.decideReceipt = const DecisionReceipt(uncertain: true);
+      final bare = await notifier.decide(signal('b22'), 'approve');
+      expect(bare.outcome, DecisionOutcome.uncertain);
+      expect(bare.message,
+          'Approval received for AAPL — the order may be in flight; check the '
+          'signal status and open orders.');
+      for (final m in [result.message, bare.message]) {
+        expect(m, isNot(contains('place the order manually')));
+        expect(m, isNot(contains('no broker command was queued')));
+      }
+    });
+
+    test('FW-api-I1: a 503 without detail says not queued, try again', () async {
+      final repo = FakeSwingRepo([signal('a1')])
+        ..decideError = ApiError('', statusCode: 503);
+      final c = await start(repo);
+      final result = await c
+          .read(pendingSignalsProvider('i1').notifier)
+          .decide(signal('a1'), 'approve');
+      expect(result.outcome, DecisionOutcome.failed);
+      expect(result.message, 'Not queued — the signal is still pending; try again.');
+      expect(read(c).signals.map((s) => s.id), ['a1']);
+    });
+
     test('expired session (401): card stays, message says so', () async {
       final repo = FakeSwingRepo([signal('a1')])
         ..decideError = ApiError('Not authenticated', statusCode: 401);

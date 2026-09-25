@@ -23,12 +23,17 @@ class FakeSwingRepo implements SwingRepository {
     return List.of(pending);
   }
 
+  /// What a 2xx decision answers; FW-api-I1's 202 is `uncertain`.
+  DecisionReceipt decideReceipt = DecisionReceipt.recorded;
+
   @override
-  Future<void> decide(String instanceId, String signalId, String decision,
+  Future<DecisionReceipt> decide(String instanceId, String signalId,
+      String decision,
       {String? reason}) async {
     decideCalls.add('$signalId:$decision');
     if (gate != null) await gate!.future;
     if (decideError != null) throw decideError!;
+    return decideReceipt;
   }
 
   @override

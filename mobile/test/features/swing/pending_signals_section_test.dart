@@ -73,6 +73,24 @@ void main() {
       expect(find.textContaining('Approved AAPL'), findsOneWidget);
     });
 
+    testWidgets('FW-api-I1: a 202 shows the server advice, never the success copy',
+        (tester) async {
+      const detail = 'approval received — the order may be in flight; check '
+          'the signal status and open orders before placing anything by hand (x)';
+      final repo = FakeSwingRepo([swingSignal('a1')])
+        ..decideReceipt = const DecisionReceipt(uncertain: true, detail: detail);
+      await tester.pumpWidget(_app(repo, _section));
+      await tester.pumpAndSettle();
+
+      await tester.tap(_cardButton('Approve'));
+      await tester.pumpAndSettle();
+      await tester.tap(_dialogButton('Approve'));
+      await tester.pumpAndSettle();
+      expect(find.text('AAPL'), findsNothing);
+      expect(find.text(detail), findsOneWidget);
+      expect(find.textContaining('Approved AAPL'), findsNothing);
+    });
+
     testWidgets('cancel in the dialog sends nothing', (tester) async {
       final repo = FakeSwingRepo([swingSignal('a1')]);
       await tester.pumpWidget(_app(repo, _section));

@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional, Union
 
 from fastapi import FastAPI, HTTPException, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, field_validator
@@ -4045,20 +4046,32 @@ def api_swing_list_signals(instance_id: str, status: Optional[str] = None, limit
 def api_swing_decide_signal(instance_id: str, signal_id: str, body: SwingDecisionBody,
                             conn=Depends(conn_dependency),
                             current_user: dict = Depends(get_current_user)):
-    """A decision is final. 400: the signal is no longer pending. 404: unknown,
-    or another instance's. 409: a concurrent click won. 503: the approval
-    cannot reach the broker (the signal stays pending; retry later). 422: a
-    malformed body. An approval queues a submit_order LiveCommand that the
-    broker rebuilds at the live price."""
+    """Decide a pending signal. An approval queues a submit_order LiveCommand
+    that the broker rebuilds at the live price.
+
+    - 200: recorded (and, for an approval, queued).
+    - 202: the approval is recorded, but the queue write raised and the
+      re-read shows the command queued, the signal already moved on, or
+      nothing readable. The order may be in flight: the body carries
+      {"uncertain": true, "detail"}; check the signal status and open orders.
+    - 400: the signal is no longer pending. 404: unknown, or another
+      instance's. 409: a concurrent click won. 422: a malformed body.
+    - 503: the approval provably did not reach the broker (the instance is
+      not running or has crashed, or the command was not queued and the
+      signal was put back to pending): try again.
+    """
     try:
-        return _run(action_swing_decide_signal, conn, instance_id, signal_id,
-                    body.decision, body.reason,
-                    str(current_user.get("username") or current_user.get("id")
-                        or "operator"))
+        out = _run(action_swing_decide_signal, conn, instance_id, signal_id,
+                   body.decision, body.reason,
+                   str(current_user.get("username") or current_user.get("id")
+                       or "operator"))
     except SwingDecisionRaceError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     except SwingBrokerUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
+    if isinstance(out, dict) and out.get("uncertain"):
+        return JSONResponse(status_code=202, content=jsonable_encoder(out))
+    return out
 
 
 @app.get("/instances/{instance_id}/wheel", response_class=JSONResponse)

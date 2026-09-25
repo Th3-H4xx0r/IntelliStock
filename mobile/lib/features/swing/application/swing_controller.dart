@@ -64,11 +64,21 @@ String decisionSuccessMessage(SwingSignal s, String decision) =>
       _ => 'Rejected ${s.symbol}.',
     };
 
+/// FW-api-I1: the fallback when a 202 carries no detail.
+String decisionUncertainMessage(SwingSignal s) =>
+    'Approval received for ${s.symbol} — the order may be in flight; check '
+    'the signal status and open orders.';
+
 // ── Pending signals (polled) ─────────────────────────────────────────────────
 
 enum DecisionOutcome {
   /// The server recorded it; the card is gone for good.
   recorded,
+
+  /// 202 (FW-api-I1): the approval is recorded but the broker command may or
+  /// may not be queued. The card goes as for [recorded]; the message is the
+  /// server's advice (check the signal status and open orders).
+  uncertain,
 
   /// 400/404/409: already decided elsewhere (or gone). The card is removed;
   /// the next poll brings it back only if it is in fact still pending.
@@ -191,11 +201,19 @@ class PendingSignalsNotifier
     state = AsyncData(
         current.copyWith(deciding: {...current.deciding, signal.id}));
     try {
-      await ref
+      final receipt = await ref
           .read(swingRepositoryProvider)
           .decide(arg, signal.id, decision, reason: reason);
       _decided.add(signal.id);
       _drop(signal.id);
+      if (receipt.uncertain) {
+        return DecisionResult(
+          DecisionOutcome.uncertain,
+          receipt.detail.isEmpty
+              ? decisionUncertainMessage(signal)
+              : receipt.detail,
+        );
+      }
       return DecisionResult(
           DecisionOutcome.recorded, decisionSuccessMessage(signal, decision));
     } on ApiError catch (err) {
@@ -219,6 +237,15 @@ class PendingSignalsNotifier
         return DecisionResult(
           DecisionOutcome.failed,
           detail.isEmpty ? 'You are not allowed to decide this signal.' : detail,
+        );
+      }
+      if (code == 503) {
+        // Provably not queued: the signal is pending, so a retry is safe.
+        return DecisionResult(
+          DecisionOutcome.failed,
+          detail.isEmpty
+              ? 'Not queued — the signal is still pending; try again.'
+              : detail,
         );
       }
       return DecisionResult(DecisionOutcome.failed,

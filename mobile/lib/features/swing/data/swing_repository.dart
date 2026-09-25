@@ -232,6 +232,25 @@ class WheelSnapshot {
       );
 }
 
+/// What a 2xx from POST .../decision said. FW-api-I1: a 202 carries
+/// `{"uncertain": true, "detail"}` — the approval is recorded, but the broker
+/// command may or may not be queued, so the order may be in flight.
+class DecisionReceipt {
+  const DecisionReceipt({this.uncertain = false, this.detail = ''});
+
+  static const recorded = DecisionReceipt();
+
+  final bool uncertain;
+  final String detail;
+
+  factory DecisionReceipt.fromJson(Object? data) => data is Map
+      ? DecisionReceipt(
+          uncertain: data['uncertain'] == true,
+          detail: _str(data['detail']).trim(),
+        )
+      : recorded;
+}
+
 // ── Repository ────────────────────────────────────────────────────────────────
 
 class SwingRepository {
@@ -260,7 +279,7 @@ class SwingRepository {
 
   /// POST .../decision with {decision, reason?}. decision is
   /// "approve" | "approve_half" | "reject". Throws ApiError on non-2xx.
-  Future<void> decide(
+  Future<DecisionReceipt> decide(
     String instanceId,
     String signalId,
     String decision, {
@@ -269,10 +288,11 @@ class SwingRepository {
     final body = <String, dynamic>{'decision': decision};
     final r = reason?.trim();
     if (r != null && r.isNotEmpty) body['reason'] = r;
-    await _client.post<dynamic>(
+    final data = await _client.post<dynamic>(
       '/instances/$instanceId/swing/signals/$signalId/decision',
       body: body,
     );
+    return DecisionReceipt.fromJson(data);
   }
 
   Future<WheelSnapshot> wheel(String instanceId) async {

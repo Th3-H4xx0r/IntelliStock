@@ -151,10 +151,28 @@ export function detailText(detail) {
 }
 
 /**
+ * What a 2xx from POST .../decision means. A 202 (or a body flagged
+ * `uncertain`) is FW-api-I1's accepted-but-uncertain answer: the approval is
+ * recorded, but the broker command may or may not be queued, so the order may
+ * be in flight. The card goes like any success; the notice is a warning that
+ * carries the server's advice.
+ */
+export function classifyDecisionSuccess(status, body, signal, decision) {
+  const uncertain = status === 202 || body?.uncertain === true
+  if (!uncertain) return { uncertain: false, tone: 'ok', message: decisionSuccessMessage(signal, decision) }
+  const sym = signal?.symbol || 'the signal'
+  const message = detailText(body?.detail)
+    || `Approval received for ${sym} — the order may be in flight; check the signal status and open orders.`
+  return { uncertain: true, tone: 'warn', message }
+}
+
+/**
  * What a failed POST .../decision means for the card.
  * 400/404/409: the signal is no longer pending (another device decided, or it
  * is gone). Remove the card and show the server's reason; if it IS still
  * pending, the next poll brings it back.
+ * 503: the approval provably did not reach the broker and the signal is
+ * pending, so the card stays and a retry is safe.
  */
 export function classifyDecisionFailure(status, detail) {
   const text = detailText(detail)
@@ -166,6 +184,9 @@ export function classifyDecisionFailure(status, detail) {
   }
   if (status === 400 || status === 404 || status === 409) {
     return { kind: 'stale', removeCard: true, stopPolling: false, message: text || 'This signal is no longer pending — it was decided elsewhere.' }
+  }
+  if (status === 503) {
+    return { kind: 'unavailable', removeCard: false, stopPolling: false, message: text || 'Not queued — the signal is still pending; try again.' }
   }
   if (!status) {
     return { kind: 'failed', removeCard: false, stopPolling: false, message: text || 'Could not reach the server.' }
