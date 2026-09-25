@@ -10458,6 +10458,68 @@ def _poll_option_activities(adapter, order_service, wheel_cache, *, now_utc,
     return processed
 
 
+#: swing-port: this process's one options-level verdict for the wheel lane.
+_wheel_options_check: dict = {"refusal": None}
+
+
+def _wheel_options_refusal(adapter, cached_strategies, *, log=None, alert=None):
+    """"" when the wheel lane may trade options, else why not.
+
+    Spec 6.1: the adapter checks options_trading_level >= 1 when the
+    document has an enabled wheel lane; below that the lane is refused, in
+    red, with an alert. The check runs on the first live tick that carries
+    wheel orders (at boot the strategy document is not loaded yet) and the
+    verdict is kept for the process, so the alert is sent once; an
+    unreadable account refuses THIS tick only and is asked again.
+    """
+    if not _lane_enabled(cached_strategies, "strategy_wheel"):
+        return ""
+    cached = _wheel_options_check.get("refusal")
+    if cached is not None:
+        return cached
+
+    def say(message, color):
+        if log is not None:
+            try:
+                log(message, color)
+            except Exception:
+                pass
+
+    def default_alert(**kwargs):
+        from live_alerts import alert_strategy_error
+        alert_strategy_error(**kwargs)
+
+    try:
+        options = adapter.get_account_options() or {}
+    except Exception as exc:
+        say(f"[wheel] options level unreadable ({type(exc).__name__}: {exc}); "
+            "wheel orders refused this tick", "yellow")
+        return f"options level unreadable ({type(exc).__name__})"
+    level = options.get("options_trading_level")
+    try:
+        level_value = int(level) if level is not None else None
+    except (TypeError, ValueError):
+        level_value = None
+    if level_value is not None and level_value >= 1:
+        _wheel_options_check["refusal"] = ""
+        say(f"[wheel] options_trading_level={level_value}: cash-secured puts "
+            "permitted", "green")
+        return ""
+    refusal = f"options_trading_level={level} is below 1"
+    _wheel_options_check["refusal"] = refusal
+    say(f"[wheel] wheel lane REFUSED: {refusal}. No option order will be "
+        "placed; approve options level 1 on the paper account and restart "
+        "the instance.", "red")
+    try:
+        (alert or default_alert)(
+            instance_id=str(getattr(adapter, "_instance_id", "") or ""),
+            tag="wheel-options-level",
+            message=f"Wheel lane refused: {refusal}")
+    except Exception:
+        pass
+    return refusal
+
+
 def _live_order_dependency_snapshot(adapter, intent):
     """Build a cache-only dependency view for the pure stock order gate."""
     # swing-port: an option intent gets the options view (collateral, regular
@@ -20282,7 +20344,8 @@ while not shutdown_requested:
                         adapter=live_adapter,
                         now_utc=datetime.datetime.now(datetime.timezone.utc),
                         risk_snapshot_id=_opt_risk_id,
-                        refused_reason="",
+                        refused_reason=_wheel_options_refusal(
+                            live_adapter, _cached_strategies, log=_log),
                         log=_log,
                     )
                 except Exception as _opt_exc:
