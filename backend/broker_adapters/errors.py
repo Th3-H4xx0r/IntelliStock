@@ -56,6 +56,14 @@ class FractionalNotAllowed(BrokerError):
     broker_definitive_rejection = True
 
 
+class OptionsNotPermitted(BrokerError):
+    """The account may not trade this option order (options level, contract
+    eligibility). Raised only for us_option orders; never a fractional-share
+    problem, so it must not reach the whole-share retry."""
+
+    broker_definitive_rejection = True
+
+
 class BrokerRateLimited(BrokerError):
     def __init__(self, msg: str, retry_after_sec: float | None = None):
         super().__init__(msg)
@@ -73,4 +81,5 @@ NON_RETRYABLE = (
     WashSale,
     AssetNotTradable,
     FractionalNotAllowed,
+    OptionsNotPermitted,
 )
