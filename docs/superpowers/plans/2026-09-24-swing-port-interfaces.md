@@ -133,6 +133,44 @@ The adapter's option positions live in `self._option_positions: dict[str, Option
 - `@dataclass(frozen=True) class SimulationBarEvent: symbol: str; open: float; high: float; low: float; close: float; bar_ts: datetime; available_at: datetime`
 - Fill `source` strings: `bracket_sl:<parent_id>`, `bracket_sl_gap:<parent_id>`, `bracket_tp:<parent_id>`, `bracket_tp_gap:<parent_id>`.
 
+### 4a. Additions from plan A-backtest (verbatim from its "Contract additions")
+
+1. **`SimulationBarEvent.bar_ts`**: the instant the bar's first trade could print, in aware UTC. For a daily equity bar it is the NYSE session open (09:30 ET); for an intraday bar it is the bar's label. `available_at` is when the whole bar is known: the session close for a daily bar, label + interval for an intraday bar.
+2. **`PortfolioEmulator.process_bar_events(bars_by_symbol, clock)`**:
+   - It returns `list[SimulationFill]`, not `list[dict]` as §4 says. broker.py logs `fill.side` and `fill.source`, and passes each fill to `_apply_backtest_confirmed_fill_state`, exactly as it does with `process_price_events`' fills.
+   - The bar dicts are `{"t", "o", "h", "l", "c", "bar_ts", "available_at"}`: `collect_bar_events`' output.
+   - A bar whose `available_at` is after `clock` raises `ValueError` (look-ahead).
+3. **`NextEventExecutionSimulator.on_bar(event, *, accept_fill=None, cash_budget=None, position_of=None) -> list[SimulationFill]`**. The keywords mirror `on_quote`. `position_of(symbol)` caps a leg's sale at the shares actually held.
+4. **New `NextEventExecutionSimulator` members:**
+   - `cancel(order_id) -> bool`
+   - properties `has_bracket_legs -> bool`, `has_next_open_orders -> bool` and `bracket_legs -> tuple[dict, ...]`. Each dict is `{"parent_id", "symbol", "qty", "stop_loss_price", "take_profit_price", "armed_from_bar_ts"}`.
+   - `bar_event_requirements() -> dict[str, datetime]`
+   - `bar_event_priority(event) -> int`
+   - `on_quote(..., _next_open_only=False)`, a private keyword used only by `on_bar`.
+5. **New `PortfolioEmulator` methods:** `has_next_open_orders() -> bool` and `bar_event_requirements() -> dict[str, datetime]`, alongside the contract's `has_bracket_legs()`. The broker guard is `has_bracket_legs() or has_next_open_orders()`. A next-open order needs the bar hook before any leg exists; §6.2 names only `has_bracket_legs()`.
+6. **`SimulationFill.exit_reason: Optional[str] = None`**, with the values `"stop_loss"` and `"take_profit"` (a gap fill has the same reason; its `source` says `_gap`).
+   - Left out of `as_dict()` when `None`.
+   - Emulator trade rows carry `"exit_reason"` only when it is set.
+7. **Leg fill order ids:** `<parent_id>:sl` and `<parent_id>:tp`. Sources are exactly §4's four.
+8. **Summary keys**, present only on a run that used the feature:
+   - `next_open_order_count` and `next_open_expired_order_count`, when a next-open order was submitted;
+   - `bracket_order_count`, `bracket_open_leg_count`, `bracket_exit_counts` (`{"stop_loss", "stop_loss_gap", "take_profit", "take_profit_gap"}`) and `cancelled_order_count`, when a bracket was submitted.
+9. **New module `backend/backtest_bar_events.py`:**
+   - `execution_hint_kwargs(nexus_hint, decision) -> dict`
+   - `collect_bar_events(data, requirements, clock, *, bar_time_to_datetime, bar_available_at, bar_open_at) -> dict[str, list[dict]]`
+   - `make_bar_open_resolver(*, interval, session_open_resolver=None)`
+   - `equity_daily_session_open(bar_start)`
+   - `reset_label_cache()`
+10. **broker.py:**
+    - `_submit_portfolio_signal(..., execution_hints=None)`
+    - `_backtest_bar_open_resolver()`
+    - `_process_backtest_bar_events(portfolio, data, prices, current_time)`
+11. **Semantics §6.2 leaves open, fixed here:**
+    - A whole-share buy is a *quantity* order with no `notional_limit`, as live Alpaca fills a qty order. An opening gap changes its cost, not its count; the cash budget still clamps it.
+    - A next-open order has one shot: its first eligible open. Whatever that open does not fill is dropped and counted in `next_open_expired_order_count`, never in `unfilled_order_count`.
+    - Intrabar leg fills (rules 3–5) are stamped at the bar's `available_at`, the first instant the range is known. Gap fills (rules 1–2) are stamped at `bar_ts`.
+    - Bars that share a `bar_ts` run in this order: sells at the open (a next-open sell, or a leg the open gaps through), then buys at the open, then the rest.
+
 ## 5. Tables (`backend/db/schema.py`)
 
 | Table | Primary key | Secondary index |
