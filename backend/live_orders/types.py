@@ -882,6 +882,14 @@ class ConfirmedFill:
     # swing-port: a contract fill moves `quantity x price x multiplier` cash.
     asset_class: str = "us_equity"
     contract_multiplier: int = 1
+    # swing-port fix wave (FW1 follow-up): the contract of a fill on an
+    # option order WE placed, from its intent, so the adapter's option map
+    # can type a brand-new position row at once. None on every equity fill
+    # (EB's included) and on a fill of unknown origin.
+    underlying: Optional[str] = None
+    option_type: Optional[str] = None
+    strike: Optional[Decimal] = None
+    expiry: Optional[str] = None
 
     def __post_init__(self) -> None:
         quantity = _decimal(
@@ -908,3 +916,9 @@ class ConfirmedFill:
             raise ValueError("contract_multiplier must be an integer >= 1")
         object.__setattr__(self, "asset_class", asset_class)
         object.__setattr__(self, "contract_multiplier", multiplier)
+        object.__setattr__(
+            self, "underlying", _optional_text(self.underlying, case="upper"))
+        object.__setattr__(
+            self, "option_type", _optional_text(self.option_type, case="lower"))
+        object.__setattr__(self, "strike", _optional_decimal(self.strike, "strike"))
+        object.__setattr__(self, "expiry", _optional_text(self.expiry))

@@ -160,6 +160,21 @@ def _transport_extras(intent: OrderIntent) -> dict:
     return extras
 
 
+def _option_fill_meta(intent: OrderIntent) -> dict:
+    """The contract of a fill on an option order WE placed (FW1 follow-up):
+    its intent's underlying, type, strike and expiry, which OrderIntent
+    requires of every us_option intent. {} for every other intent, so an
+    equity fill (EB's) is built with exactly the keywords it always was."""
+    if intent.asset_class != "us_option":
+        return {}
+    return {
+        "underlying": intent.underlying,
+        "option_type": intent.option_type,
+        "strike": intent.strike,
+        "expiry": intent.expiry,
+    }
+
+
 def bracket_leg_intent(parent: OrderIntent, leg) -> OrderIntent:
     """The lifecycle intent for one child leg of a bracket parent.
 
@@ -695,6 +710,7 @@ class LiveOrderService:
                 cash_delta=cash_delta,
                 asset_class=record.intent.asset_class,
                 contract_multiplier=multiplier,
+                **_option_fill_meta(record.intent),
             )
             reservation = self._reservations.get(event.client_order_id)
             if reservation is not None:

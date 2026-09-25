@@ -2645,6 +2645,11 @@ class AlpacaAdapter(BrokerAdapter):
             self._option_positions = updated
             return
         meta = self._option_contract_cache.get(symbol)
+        if meta is None:
+            # Fix wave FW1 follow-up: a fill on an option order WE placed
+            # carries its intent's contract, so the row is born typed and the
+            # map stays complete; the next refresh re-reads Alpaca's own meta.
+            meta = _fill_contract_meta(symbol, fill)
         updated[symbol] = OptionPositionDTO(
             symbol=symbol,
             underlying=meta.underlying if meta else "",
@@ -2660,11 +2665,12 @@ class AlpacaAdapter(BrokerAdapter):
         )
         self._option_positions = updated
         if meta is None and new_qty < 0:
-            # Fix wave FW-lo-I3: a short with no contract meta carries
-            # collateral nobody can count (no type, underlying or strike).
-            # The map is incomplete until a refresh reads the meta, which
-            # fails closed for new sell-to-opens, the duplicate-put check and
-            # the 25% cap; a buy-to-close needs only the signed quantity.
+            # Fix wave FW-lo-I3: a short of unknown origin (no cached meta
+            # and no intent meta on its fill) carries collateral nobody can
+            # count. The map is incomplete until a refresh reads the meta,
+            # which fails closed for new sell-to-opens, the duplicate-put
+            # check and the 25% cap; a buy-to-close needs only the signed
+            # quantity.
             self._option_positions_complete = False
 
     def get_option_activities(
@@ -3936,6 +3942,25 @@ def _option_order_error(exc, parsed, *, answered: bool):
     if isinstance(parsed, FractionalNotAllowed) or _OPTIONS_REFUSAL.search(message):
         return OptionsNotPermitted(str(exc))
     return parsed
+
+
+def _fill_contract_meta(symbol, fill) -> Optional[OptionContractDTO]:
+    """The contract a ConfirmedFill carries from our own option intent (FW1
+    follow-up), as the contract DTO the option map reads; None unless it
+    names an underlying, a put or call, a strike above zero and an expiry."""
+    underlying = str(getattr(fill, "underlying", None) or "").strip().upper()
+    option_type = str(getattr(fill, "option_type", None) or "").strip().lower()
+    expiry = str(getattr(fill, "expiry", None) or "").strip()
+    try:
+        strike = float(getattr(fill, "strike", None) or 0)
+    except (TypeError, ValueError):
+        strike = 0.0
+    if not underlying or option_type not in ("put", "call") or not strike > 0 or not expiry:
+        return None
+    return OptionContractDTO(
+        symbol=str(symbol).strip().upper(), underlying=underlying,
+        option_type=option_type, strike=strike, expiration=expiry,
+        open_interest=None, close_price=None)
 
 
 def _option_contract_dto(raw) -> OptionContractDTO:
