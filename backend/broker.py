@@ -9819,8 +9819,424 @@ def _open_order_idempotency_keys(instance_identity) -> frozenset:
         return frozenset()
 
 
+#: swing-port: the latest REST options snapshot per contract. Shared by the
+#: intent builder and the gate's snapshot provider so both read ONE quote:
+#: the gate refuses a quote_at that differs from the intent's.
+_live_option_quotes: dict = {}
+
+
+def _refresh_option_quote(adapter, contract, now_utc, *, max_age_s=60.0):
+    """A decision price for one option contract (spec 6.1: option quotes come
+    from the options snapshot, and one older than 60 s is refreshed over REST
+    before the check). Returns {"price", "quote_at", "fetched_at"} or None."""
+    from decimal import Decimal
+
+    symbol = str(contract or "").strip().upper()
+    cached = _live_option_quotes.get(symbol)
+    if (cached is not None
+            and (now_utc - cached["fetched_at"]).total_seconds() <= max_age_s):
+        return cached
+    snap = (adapter.get_option_snapshots([symbol]) or {}).get(symbol)
+    if snap is None:
+        return None
+    if snap.bid and snap.ask and snap.bid > 0 and snap.ask > 0:
+        price = (snap.bid + snap.ask) / 2.0
+    elif snap.last and snap.last > 0:
+        price = snap.last
+    else:
+        return None
+    quote_at = now_utc
+    if snap.quote_ts:
+        try:
+            parsed = datetime.datetime.fromisoformat(
+                str(snap.quote_ts).replace("Z", "+00:00"))
+            quote_at = (parsed if parsed.tzinfo is not None
+                        else parsed.replace(tzinfo=datetime.timezone.utc))
+        except ValueError:
+            quote_at = now_utc
+    entry = {"price": Decimal(str(round(price, 4))), "quote_at": quote_at,
+             "fetched_at": now_utc}
+    _live_option_quotes[symbol] = entry
+    return entry
+
+
+def _build_option_intent(order_service, order, *, quote_at, decision_at,
+                         risk_snapshot_id, source=None):
+    """One `_nexus_option_orders` entry (interfaces doc section 1) as an
+    OrderIntent. Raises ValueError on a malformed entry; nothing is sent."""
+    from decimal import Decimal
+    from live_orders import OrderIntent, OrderSide, OrderSource
+
+    if not isinstance(order, dict):
+        raise ValueError("an option order must be a dict")
+    position_intent = str(order.get("position_intent") or "").strip().lower()
+    if position_intent not in ("buy_to_open", "buy_to_close",
+                               "sell_to_open", "sell_to_close"):
+        raise ValueError(
+            f"unsupported position_intent {order.get('position_intent')!r}")
+    raw_qty = order.get("qty")
+    if (isinstance(raw_qty, bool) or not isinstance(raw_qty, (int, float))
+            or int(raw_qty) != raw_qty or int(raw_qty) < 1):
+        raise ValueError(
+            f"option qty must be a whole number of contracts >= 1, got {raw_qty!r}")
+    order_type = str(order.get("order_type") or "limit").strip().lower()
+    limit_price = order.get("limit_price")
+    closing = position_intent.endswith("_to_close")
+    if source is None:
+        source = OrderSource.RISK_EXIT if closing else OrderSource.STRATEGY
+    return OrderIntent(
+        account_id=order_service.account_id,
+        instance_id=order_service.instance_id,
+        source=source,
+        reason=str(order.get("reason") or position_intent),
+        symbol=str(order.get("contract") or "").strip().upper(),
+        side=OrderSide.SELL if position_intent.startswith("sell") else OrderSide.BUY,
+        quantity=Decimal(int(raw_qty)),
+        reduce_only=closing,
+        decision_at=decision_at,
+        quote_at=quote_at,
+        risk_snapshot_id=risk_snapshot_id,
+        order_type=order_type,
+        limit_price=(Decimal(str(limit_price))
+                     if order_type == "limit" and limit_price is not None
+                     else None),
+        tif=str(order.get("tif") or "day").strip().lower(),
+        extended_hours=False,
+        asset_class="us_option",
+        position_intent=position_intent,
+        contract_multiplier=100,
+        underlying=order.get("underlying"),
+        option_type=order.get("option_type"),
+        strike=order.get("strike"),
+        expiry=order.get("expiry"),
+    )
+
+
+def _pending_sell_to_open_collateral(order_service, *, exclude_key, underlying):
+    """(all, on-underlying) collateral of sell-to-open puts still working at
+    the broker, the intent being judged excluded. Raises when the lifecycle
+    store is unreadable: the caller must not read unknown as zero."""
+    from decimal import Decimal
+
+    total = Decimal("0")
+    mine = Decimal("0")
+    wanted = str(underlying or "").strip().upper()
+    for record in order_service.lifecycle_store.list_for_instance(
+            order_service.instance_id):
+        intent = record.intent
+        if (record.terminal or record.client_order_id == exclude_key
+                or intent.asset_class != "us_option"
+                or intent.position_intent != "sell_to_open"
+                or intent.option_type != "put"):
+            continue
+        remaining = max(Decimal("0"), intent.quantity - record.cumulative_quantity)
+        collateral = intent.strike * intent.contract_multiplier * remaining
+        total += collateral
+        if intent.underlying == wanted:
+            mine += collateral
+    return total, mine
+
+
+def _live_option_dependency_snapshot(adapter, intent, *, now_utc=None):
+    """The gate's dependency view for one us_option intent (spec 6.1 options
+    branch). The quote is the one _execute_option_intents fetched for this
+    intent; the calendar is read here, so regular hours are known even on a
+    tick whose stock loop had nothing to price.
+
+    Unknown is never zero: an incomplete option book leaves the open and
+    per-underlying collateral None, and an unreadable lifecycle store leaves
+    the pending collateral None (L3 review M3); the gate refuses both."""
+    from decimal import Decimal
+    from live_orders import DependencySnapshot, Health, OrderSource
+
+    now_utc = now_utc or datetime.datetime.now(datetime.timezone.utc)
+    with _live_order_dependency_lock:
+        state = dict(_live_order_dependency_state)
+    symbol = str(intent.symbol).strip().upper()
+    underlying = str(intent.underlying or "").strip().upper()
+    positions = dict(getattr(adapter, "_option_positions", {}) or {})
+    held = positions.get(symbol)
+    position_quantity = Decimal(int(held.qty)) if held is not None else Decimal("0")
+    quote = _live_option_quotes.get(symbol)
+    if quote is None:
+        quote_price = Decimal("0")
+        quote_at = datetime.datetime.fromtimestamp(0, datetime.timezone.utc)
+        quote_health = Health.UNKNOWN
+    else:
+        quote_price = quote["price"]
+        quote_at = quote["quote_at"]
+        quote_health = (Health.HEALTHY
+                        if (now_utc - quote_at).total_seconds() <= 60
+                        else Health.UNHEALTHY)
+    try:
+        from live_calendar import is_nyse_open, is_nyse_open_extended
+        regular_session_open = bool(is_nyse_open(now_utc))
+        market_open = bool(is_nyse_open_extended(now_utc))
+        calendar, calendar_at = Health.HEALTHY, now_utc
+    except Exception:
+        regular_session_open, market_open = False, False
+        calendar, calendar_at = Health.UNKNOWN, None
+    open_short = Decimal("0")
+    open_short_on_underlying = Decimal("0")
+    for row in positions.values():
+        if int(row.qty) < 0 and str(row.option_type).lower() == "put":
+            collateral = (Decimal(str(row.strike)) * int(row.multiplier)
+                          * abs(int(row.qty)))
+            open_short += collateral
+            if str(row.underlying).upper() == underlying:
+                open_short_on_underlying += collateral
+    try:
+        pending_total, pending_underlying = _pending_sell_to_open_collateral(
+            _live_stock_order_service, exclude_key=intent.idempotency_key,
+            underlying=underlying)
+        pending_known = True
+    except Exception:
+        pending_total, pending_underlying = Decimal("0"), Decimal("0")
+        pending_known = False
+    known = bool(getattr(adapter, "_option_positions_complete", False)) and pending_known
+    equity = getattr(adapter, "_account_equity", None)
+    positions_health = state.get("positions", "unknown")
+    if getattr(adapter, "_positions_stale_since", None) is not None:
+        positions_health = "unhealthy"
+    positions_at = state.get("positions_at")
+    if not isinstance(positions_at, datetime.datetime):
+        positions_at = datetime.datetime.fromtimestamp(0, datetime.timezone.utc)
+
+    def stamp(name):
+        value = state.get(name)
+        return value if isinstance(value, datetime.datetime) else None
+
+    instance_identity = str(getattr(adapter, "_instance_id", "") or instance_id)
+    return DependencySnapshot(
+        account_id=str(globals().get("live_brokerage_id")
+                       or getattr(adapter, "_account_id", None)
+                       or getattr(adapter, "_instance_id", "")),
+        instance_id=instance_identity,
+        observed_at=now_utc,
+        armed=bool(globals().get("mode") == MODE_LIVE
+                   and str(globals().get("live_broker_type") or "").lower() == "alpaca"
+                   and _live_stock_order_service is not None),
+        kill_switch=Health(state.get("kill_switch", "unknown")),
+        quote=quote_health,
+        cash=Health(state.get("cash", "unknown")),
+        positions=Health(positions_health),
+        calendar=calendar,
+        persistence=Health(state.get("persistence", "unknown")),
+        risk_state=Health(state.get("risk_state", "unknown")),
+        watchdog=Health(state.get("watchdog", "unknown")),
+        quote_symbol=symbol,
+        quote_price=quote_price,
+        quote_at=quote_at,
+        position_symbol=symbol,
+        position_quantity=position_quantity,
+        positions_at=positions_at,
+        available_cash=Decimal(str(getattr(adapter, "_cash", 0) or 0)),
+        market_open=market_open,
+        risk_snapshot_id=str(state.get("risk_snapshot_id") or intent.risk_snapshot_id),
+        kill_switch_at=stamp("kill_switch_at"),
+        cash_at=stamp("cash_at"),
+        calendar_at=calendar_at,
+        persistence_at=stamp("persistence_at"),
+        risk_state_at=stamp("risk_state_at"),
+        watchdog_at=stamp("watchdog_at"),
+        max_order_notional=(_live_risk_state.max_order_notional
+                            if _live_risk_state is not None else None),
+        max_position_quantity=None,
+        max_quote_age=datetime.timedelta(seconds=60),
+        open_order_idempotency_keys=_open_order_idempotency_keys(instance_identity),
+        authorized_sources=frozenset(OrderSource),
+        asset_class="us_option",
+        regular_session_open=regular_session_open,
+        account_equity=Decimal(str(equity)) if equity is not None else None,
+        open_short_put_collateral=open_short if known else None,
+        pending_sell_to_open_collateral=pending_total if pending_known else None,
+        underlying_put_collateral=(
+            open_short_on_underlying + pending_underlying if known else None),
+    )
+
+
+def _wheel_alert(title, message, *, priority=0):
+    """One wheel_position_alert through notifications.notify, formatted as
+    plan B's swing_trader.notify.send formats it: priority 2 is marked
+    URGENT. Never raises; a notification failure is a red log line, never a
+    lost order. Plan B's sender replaces this when the branches meet (A-live
+    ledger, plan B G7 review I-3)."""
+    category = "wheel_position_alert"
+    try:
+        from notifications import notify
+
+        try:
+            from notification_types import type_for_key
+            channel = (type_for_key(category) or {}).get("channel") or "notifications"
+        except Exception:
+            channel = "notifications"
+        urgent = " (URGENT)" if int(priority or 0) >= 2 else ""
+        iid = str(globals().get("instance_id") or "")
+        notify(category=category, instance_id=iid, title=str(title),
+               body=f"WHEEL ALERT [{iid}] {title}{urgent}\n{message}",
+               discord_channel=channel,
+               push_title=f"{title}{urgent}"[:120],
+               push_body=str(message)[:220])
+        return True
+    except Exception as exc:
+        try:
+            _log(f"[wheel] notification failed ({type(exc).__name__}: {exc}): "
+                 f"{title} — {message}", "red")
+        except Exception:
+            pass
+        return False
+
+
+def _execute_option_intents(option_orders, *, order_service, adapter, now_utc,
+                            risk_snapshot_id, refused_reason="", log=None):
+    """Submit the wheel lane's option orders through the unified order path
+    (spec 6.1 broker item 2). Every refusal is logged with its reason (spec
+    section 9 item 16); an order carrying a signal_id has its outcome written
+    back to the signal. Returns one result dict per order.
+
+    Rulings (A-live ledger):
+    - F3: a duplicate refusal (idempotency.open_order_exists, or
+      idempotency.terminal_requires_retry once the order filled) means the
+      order is already at the broker. It is written back to nothing and
+      alerts nobody: "failed" over "submitted" drops a working put from plan
+      B's open statuses.
+    - An "error" (the submit raised) is an unknown outcome, like "uncertain":
+      the service can raise after the broker accepted. Neither is written
+      back as failed; the next reconcile resolves the order.
+    - G7 review I-3: a buy-to-close that did not go out sends a priority-2
+      "AUTO-CLOSE FAILED" alert; a sell-to-open carrying a signal_id that was
+      definitely not placed marks its signal failed and sends a correction
+      "Put order NOT placed: <reason>".
+    """
+    duplicate_codes = frozenset({"idempotency.open_order_exists",
+                                 "idempotency.terminal_requires_retry"})
+    definite_refusals = ("refused", "blocked", "invalid", "no_quote")
+
+    def say(message, color="white"):
+        if log is not None:
+            try:
+                log(message, color)
+            except Exception:
+                pass
+
+    def place(entry, result):
+        """Places one order; returns why it did not go out ("" if it did)."""
+        contract = result["contract"]
+        if refused_reason:
+            result["status"] = "refused"
+            say(f"[wheel] {contract} {entry.get('position_intent')} NOT placed: "
+                f"the wheel lane is refused ({refused_reason})", "red")
+            return f"the wheel lane is refused ({refused_reason})"
+        try:
+            quote = _refresh_option_quote(adapter, contract, now_utc) if contract else None
+        except Exception as exc:
+            quote = None
+            say(f"[wheel] {contract} options snapshot failed "
+                f"({type(exc).__name__}: {exc})", "yellow")
+        if quote is None:
+            result["status"] = "no_quote"
+            say(f"[wheel] {contract or entry!r} NOT placed: no usable options "
+                "snapshot", "red")
+            return "no usable options snapshot"
+        try:
+            intent = _build_option_intent(
+                order_service, entry, quote_at=quote["quote_at"],
+                decision_at=now_utc, risk_snapshot_id=risk_snapshot_id)
+        except (TypeError, ValueError) as exc:
+            result["status"] = "invalid"
+            say(f"[wheel] malformed option order dropped ({exc}): {entry!r}", "red")
+            return f"malformed order ({exc})"
+        result["client_order_id"] = intent.idempotency_key
+        try:
+            submission = order_service.submit(intent)
+        except Exception as exc:
+            result["status"] = "error"
+            say(f"[wheel] {contract} submit raised {type(exc).__name__}: {exc}", "red")
+            return f"submit raised {type(exc).__name__}: {exc}"
+        codes = tuple(submission.decision.reason_codes)
+        result["reason_codes"] = codes
+        if submission.accepted:
+            result["status"] = "submitted"
+            say(f"[wheel] {intent.position_intent} {intent.quantity} {contract} "
+                f"submitted ({intent.idempotency_key})", "green")
+            return ""
+        if not submission.decision.allowed:
+            result["status"] = "blocked"
+            if codes and all(code in duplicate_codes for code in codes):
+                say(f"[wheel] {intent.position_intent} {contract} is already at "
+                    f"the broker ({','.join(codes)}); nothing re-sent", "yellow")
+            else:
+                say(f"[wheel] ORDER GATE BLOCKED {intent.position_intent} {contract}: "
+                    f"{','.join(codes)}", "red")
+            return ",".join(codes) or "refused"
+        result["status"] = "uncertain"
+        say(f"[wheel] {contract} outcome unknown "
+            f"({','.join(codes) or 'transport'}); "
+            "the next reconcile resolves it", "red")
+        return f"outcome unknown ({','.join(codes) or 'transport'})"
+
+    results = []
+    for order in list(option_orders or ()):
+        entry = order if isinstance(order, dict) else {}
+        result = {
+            "contract": str(entry.get("contract") or "").strip().upper(),
+            "position_intent": entry.get("position_intent"),
+            "signal_id": entry.get("signal_id"),
+            "status": "",
+            "reason_codes": (),
+            "client_order_id": None,
+        }
+        results.append(result)
+        if not isinstance(order, dict):
+            result["status"] = "invalid"
+            say(f"[wheel] malformed option order dropped: {order!r}", "red")
+            continue
+        detail = place(entry, result)
+        status = result["status"]
+        codes = tuple(result["reason_codes"])
+        contract = result["contract"] or "(no contract)"
+        duplicate = (status == "blocked" and bool(codes)
+                     and all(code in duplicate_codes for code in codes))
+        position_intent = str(entry.get("position_intent") or "").strip().lower()
+        if (position_intent == "buy_to_close" and status != "submitted"
+                and not duplicate):
+            _wheel_alert(
+                f"AUTO-CLOSE FAILED — {contract} — CLOSE MANUALLY IMMEDIATELY",
+                f"The buy-to-close of {contract} was NOT placed ({status}: "
+                f"{detail}). The short put is still open.",
+                priority=2)
+        signal_id = entry.get("signal_id")
+        if not signal_id or duplicate:
+            continue
+        if status != "submitted" and status not in definite_refusals:
+            say(f"[wheel] signal {signal_id} left as it was: the {contract} "
+                f"outcome is unknown ({status}); the next reconcile resolves it",
+                "red")
+            continue
+        try:
+            from swing_trader.signals_store import update_signal
+            update_signal(str(signal_id), {
+                "status": "submitted" if status == "submitted" else "failed",
+                "order_client_id": result["client_order_id"],
+            })
+        except Exception as exc:
+            say(f"[wheel] signal {signal_id} write-back failed "
+                f"({type(exc).__name__}: {exc})", "yellow")
+        if status in definite_refusals and position_intent == "sell_to_open":
+            _wheel_alert(
+                f"Put order NOT placed: {contract}",
+                f"Put order NOT placed: {detail} ({contract}, signal "
+                f"{signal_id})",
+                priority=1)
+    return results
+
+
 def _live_order_dependency_snapshot(adapter, intent):
     """Build a cache-only dependency view for the pure stock order gate."""
+    # swing-port: an option intent gets the options view (collateral, regular
+    # hours, REST option quote). Every EB intent is us_equity and reads on.
+    if getattr(intent, "asset_class", "us_equity") == "us_option":
+        return _live_option_dependency_snapshot(adapter, intent)
     from decimal import Decimal
     from live_orders import DependencySnapshot, Health, OrderSource
     from market_marks import MarkPurpose, evaluate_mark
@@ -19571,6 +19987,37 @@ while not shutdown_requested:
                         "strategies": list(strategy_summary) if strategy_summary else [],
                         "post_decision": list(post_decision_trace) if post_decision_trace else [],
                     })
+
+            # swing-port (spec 6.1 broker item 2): the wheel lane's option
+            # orders, after the stock loop, through the same LiveOrderService.
+            # Only a tick whose lanes emitted option orders gets here; EB emits
+            # none, so doc 200 never enters.
+            if (
+                nexus_option_orders
+                and mode == MODE_LIVE
+                and str(live_broker_type or "").strip().lower() == "alpaca"
+                and _live_stock_order_service is not None
+                and live_adapter is not None
+            ):
+                with _live_order_dependency_lock:
+                    _opt_risk_id = str(
+                        _live_order_dependency_state.get("risk_snapshot_id")
+                        or "risk:unavailable"
+                    )
+                try:
+                    _execute_option_intents(
+                        nexus_option_orders,
+                        order_service=_live_stock_order_service,
+                        adapter=live_adapter,
+                        now_utc=datetime.datetime.now(datetime.timezone.utc),
+                        risk_snapshot_id=_opt_risk_id,
+                        refused_reason="",
+                        log=_log,
+                    )
+                except Exception as _opt_exc:
+                    _log(f"[wheel] option order execution crashed "
+                         f"({type(_opt_exc).__name__}: {_opt_exc}); nothing "
+                         "further this tick", "red")
 
             ###################################
             ## Save portfolio snapshot every loop (value at current time with current prices).
