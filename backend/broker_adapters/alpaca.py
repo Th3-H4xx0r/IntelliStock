@@ -316,6 +316,11 @@ class AlpacaAdapter(BrokerAdapter):
         # must not report "no options" on an account holding a short put.
         self._option_positions: dict[str, OptionPositionDTO] = {}
         self._option_positions_complete = False
+        #: Fix wave round 2: every confirmed option fill applied to the map,
+        #: numbered, so refresh_positions can reconcile the fills that landed
+        #: while its GET was in flight. EB's account never has one: 0 forever.
+        self._option_fill_seq = 0
+        self._option_fill_journal: list[tuple[int, str, int, int]] = []
         self._option_contract_cache: dict[str, OptionContractDTO] = {}
         self._option_contract_misses: dict[str, float] = {}
         self._last_option_misses: frozenset = frozenset()
@@ -1931,6 +1936,10 @@ class AlpacaAdapter(BrokerAdapter):
         the stale flag and clobbers ``_positions`` as before (that's the
         normal "user liquidated" path, distinct from an outage).
         """
+        # Fix wave round 2: the option fills applied from here on landed while
+        # the GET was in flight; the rebind reconciles them (an int read is
+        # atomic; no lock is taken, so EB's path is unchanged).
+        _option_fill_mark = self._option_fill_seq
         try:
             positions = self._client.get_all_positions()
             rest_ok = True
@@ -2090,10 +2099,19 @@ class AlpacaAdapter(BrokerAdapter):
                     for _sym, _qty in self._positions.items()
                     if str(_sym).strip().upper() not in _option_symbols
                 }
+            _mid_refresh_unsettled = False
+            if self._option_fill_seq != _option_fill_mark:
+                # Fix wave round 2 (FW1 re-review, out-of-scope, ruled in): a
+                # stream fill between the GET and this rebind must not vanish
+                # from a map that reads complete.
+                new_option_positions, _mid_refresh_unsettled = (
+                    self._settle_mid_refresh_option_fills_locked(
+                        _option_fill_mark, new_option_positions, option_misses))
             self._option_positions = new_option_positions
             # An outage that outlived the staleness cap reaches here with an
             # empty broker view: that is not proof of no open shorts.
-            self._option_positions_complete = rest_ok and not option_misses
+            self._option_positions_complete = (
+                rest_ok and not option_misses and not _mid_refresh_unsettled)
             # Successful REST refresh — clear the staleness flag set by
             # any prior outage so SELL branches stop suppressing.
             if self._positions_stale_since is not None:
@@ -2621,6 +2639,55 @@ class AlpacaAdapter(BrokerAdapter):
             expiry=meta.expiration if meta else None,
         )
 
+    def _settle_mid_refresh_option_fills_locked(self, mark, fresh, misses):
+        """Fix wave round 2: reconcile the option fills journalled after
+        ``mark`` (the fill count when a refresh's GET started) with that GET's
+        answer ``fresh``. Caller holds self._lock.
+
+        Per contract: the GET already shows the fills' result -> keep the GET;
+        the GET shows the quantity from before them -> it predates them, so
+        keep what the fills made (the current row, or nothing if they closed
+        it); anything else, an unreadable GET row, a kept row with no known
+        contract, or a journal that no longer reaches back to ``mark`` ->
+        unsettled, and the caller marks the map incomplete (fail closed).
+        Returns (the map to bind, unsettled)."""
+        fresh = dict(fresh)
+        journal = [e for e in self._option_fill_journal if e[0] > mark]
+        unsettled = not journal or journal[0][0] != mark + 1
+        span: dict[str, list[int]] = {}
+        for _seq, symbol, before, after in journal:
+            if symbol in span:
+                span[symbol][1] = after
+            else:
+                span[symbol] = [before, after]
+        missed = {str(m).strip().upper() for m in (misses or ())}
+        for symbol, (before, after) in span.items():
+            if str(symbol).strip().upper() in missed:
+                unsettled = True
+                continue
+            row = fresh.get(symbol)
+            got = int(row.qty) if row is not None else 0
+            if got == after:
+                continue
+            if got != before:
+                unsettled = True
+                continue
+            current = self._option_positions.get(symbol)
+            if after == 0:
+                fresh.pop(symbol, None)
+            elif current is not None and int(current.qty) == after:
+                fresh[symbol] = current
+                typed = (
+                    str(current.option_type or "").lower() in ("put", "call")
+                    and str(current.underlying or "").strip()
+                    and float(current.strike or 0) > 0
+                )
+                if not typed:
+                    unsettled = True
+            else:
+                unsettled = True
+        return fresh, unsettled
+
     def _apply_option_fill_locked(self, event, fill) -> None:
         """One confirmed option fill: the signed contract count moves by
         position_delta, cash by the service's x100 cash_delta. Caller holds
@@ -2635,6 +2702,13 @@ class AlpacaAdapter(BrokerAdapter):
         new_qty = (current.qty if current is not None else 0) + int(
             fill.position_delta
         )
+        # Fix wave round 2: journal the fill for a refresh in flight.
+        self._option_fill_seq += 1
+        self._option_fill_journal.append((
+            self._option_fill_seq, symbol,
+            int(current.qty) if current is not None else 0, int(new_qty)))
+        if len(self._option_fill_journal) > _OPTION_FILL_JOURNAL_MAX:
+            del self._option_fill_journal[:-_OPTION_FILL_JOURNAL_MAX]
         self._cash += float(fill.cash_delta)
         if new_qty == 0:
             updated.pop(symbol, None)
@@ -3801,6 +3875,10 @@ class AlpacaAdapter(BrokerAdapter):
 
 
 #: Order states in which a cancel is confirmed and nothing more can fill.
+#: Fix wave round 2: how many option fills the adapter remembers for a
+#: refresh in flight (far more than can land during one GET).
+_OPTION_FILL_JOURNAL_MAX = 256
+
 _CANCEL_CONFIRMED_STATES = frozenset(
     {"canceled", "cancelled", "expired", "rejected", "done_for_day"}
 )
