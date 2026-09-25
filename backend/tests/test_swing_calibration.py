@@ -136,3 +136,94 @@ def test_record_outcomes_survives_an_adapter_without_the_method(store, monkeypat
         score=80, recommendation="approve", reasoning="", key_risks=[], size_adjustment=1.0,
         proposal={}, status="auto_approved"))
     assert cal.record_outcomes("swing-paper", object(), "swing", held=set()) == 0
+
+
+# -- G8a ruling 4 (G5 minor 2): a swing entry that never fills closes ----------
+
+from datetime import date  # noqa: E402
+
+
+def _open_swing(symbol, session, *, created_at=None, status="auto_approved"):
+    doc = signals_store.new_signal(
+        instance_id="swing-paper", lane="swing", symbol=symbol, session=session, score=80,
+        recommendation="approve", reasoning="", key_risks=[], size_adjustment=1.0,
+        proposal={}, status=status, created_at=created_at or f"{session}T13:25:00+00:00")
+    signals_store.insert_signal(doc)
+    return doc["id"]
+
+
+class ClosedOrders:
+    def __init__(self, orders=()):
+        self.orders, self.calls = list(orders), []
+
+    def list_closed_orders(self, symbols, after):
+        self.calls.append((sorted(symbols), after))
+        return [o for o in self.orders if o.symbol in symbols]
+
+
+def test_an_entry_unfilled_after_two_sessions_is_closed_as_unfilled(store, monkeypatch):
+    monkeypatch.setattr(signals_store, "store", store)
+    # Thursday 2026-07-02; Friday 07-03 is the observed Independence Day holiday.
+    never = _open_swing("NVR", "2026-07-02")
+    filled = _open_swing("FIL", "2026-07-02")            # bought, exit not yet visible
+    submitted = _open_swing("SUB", "2026-07-02", status="submitted")
+    held = _open_swing("HLD", "2026-07-02")
+    adapter = ClosedOrders([order("FIL", "buy", 50.0, at="2026-07-02T13:31:00+00:00")])
+
+    # One session after (Monday 07-06): still inside the window.
+    assert cal.record_outcomes("swing-paper", adapter, "swing", held={"HLD"},
+                               today=date(2026, 7, 6)) == 0
+    assert signals_store.get_signal(never)["outcome"] is None
+
+    # Two sessions after (Tuesday 07-07): the entries with no fill close.
+    assert cal.record_outcomes("swing-paper", adapter, "swing", held={"HLD"},
+                               today=date(2026, 7, 7)) == 2
+    for sid in (never, submitted):
+        row = signals_store.get_signal(sid)
+        assert row["outcome"]["unfilled"] is True
+        assert row["status"] in ("auto_approved", "submitted")      # status kept
+    assert signals_store.get_signal(filled)["outcome"] is None      # it did fill
+    assert signals_store.get_signal(held)["outcome"] is None        # still held
+
+    # Closed: it no longer marks the symbol swing-owned, and it no longer pins
+    # the closed-orders window for later signals.
+    assert signals_store.swing_owned_symbols("swing-paper", {"NVR", "HLD"}) == {"HLD"}
+    _open_swing("NEW", "2026-07-08")
+    cal.record_outcomes("swing-paper", adapter, "swing", held={"HLD", "FIL"},
+                        today=date(2026, 7, 8))
+    assert adapter.calls[-1] == (["NEW"], "2026-07-08")
+    # An unfilled close never counts as a round trip.
+    report = cal.calibration_report("swing-paper")
+    assert report["swing"]["closed_total"] == 0
+
+
+def test_an_unfilled_close_needs_a_positions_read(store, monkeypatch):
+    # Without `held` the lane cannot say the name is not held, so nothing is
+    # closed as unfilled; nor is a wheel signal.
+    monkeypatch.setattr(signals_store, "store", store)
+    sid = _open_swing("NVR", "2026-07-02")
+    assert cal.record_outcomes("swing-paper", ClosedOrders(), "swing",
+                               today=date(2026, 7, 9)) == 0
+    assert signals_store.get_signal(sid)["outcome"] is None
+    wheel = signals_store.new_signal(
+        instance_id="swing-paper", lane="wheel", symbol="APH", session="2026-07-02",
+        score=80, recommendation="approve", reasoning="", key_risks=[],
+        size_adjustment=None, proposal={"contract": "APH260710P00128000"},
+        status="auto_approved")
+    signals_store.insert_signal(wheel)
+    assert cal.record_outcomes("swing-paper", ClosedOrders(), "wheel",
+                               today=date(2026, 7, 9)) == 0
+    assert signals_store.get_signal(wheel["id"])["outcome"] is None
+
+
+def test_a_closed_orders_outage_closes_nothing(store, monkeypatch):
+    monkeypatch.setattr(signals_store, "store", store)
+    sid = _open_swing("NVR", "2026-07-02")
+
+    class Down:
+        def list_closed_orders(self, symbols, after):
+            raise RuntimeError("orders endpoint down")
+
+    assert cal.record_outcomes("swing-paper", Down(), "swing", held=set(),
+                               today=date(2026, 7, 9)) == 0
+    assert signals_store.get_signal(sid)["outcome"] is None

@@ -9,10 +9,15 @@
 Honesty rule (ST): a bucket with count < MIN_BUCKET_N is insufficient_n=True.
 Outcomes are written by the lanes (record_outcomes) from the broker's closed
 orders, so the record carries the FILL price (spec §9 fix 7).
+
+G8a ruling 4 (G5 minor 2): a swing entry with no filled buy once
+UNFILLED_AFTER_SESSIONS NY sessions have passed since its own is closed with
+outcome {"unfilled": True, ...}. Left open it would claim a later trade's
+round trip, keep its symbol swing-owned, and pin record_outcomes' window.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
 
@@ -29,6 +34,11 @@ except Exception:  # pragma: no cover - standalone/test import
         print(f"[SwingCalibration] {msg}")
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+#: G8a ruling 4: an entry gets its own session and the next to fill (a day
+#: order expires with its session); on the second session after its own it
+#: never filled.
+UNFILLED_AFTER_SESSIONS = 2
 
 
 def _bucket_label(lo: int, hi: int) -> str:
@@ -155,16 +165,25 @@ def _filled(o) -> bool:
             and getattr(o, "filled_avg_price", None) not in (None, 0, ""))
 
 
+def _filled_of(signal: dict, orders) -> list:
+    sym = str(signal.get("symbol") or "").upper()
+    return [o for o in _flatten(orders)
+            if str(getattr(o, "symbol", "")).upper() == sym and _filled(o)]
+
+
+def _entry_buys(signal: dict, mine) -> list:
+    """Filled BUYs of the signal's symbol from a day before the signal on."""
+    since = (clock.as_utc(signal.get("created_at")) or _EPOCH) - timedelta(days=1)
+    return sorted((o for o in mine if str(o.side).lower() == "buy" and _at(o) >= since),
+                  key=_at)
+
+
 def resolve_swing_outcome(signal: dict, orders):
     """The round trip behind a swing signal: the first filled BUY of the symbol
     from a day before the signal on, then the first filled SELL after it
     (bracket legs included)."""
-    sym = str(signal.get("symbol") or "").upper()
-    since = (clock.as_utc(signal.get("created_at")) or _EPOCH) - timedelta(days=1)
-    mine = [o for o in _flatten(orders)
-            if str(getattr(o, "symbol", "")).upper() == sym and _filled(o)]
-    buys = sorted((o for o in mine if str(o.side).lower() == "buy" and _at(o) >= since),
-                  key=_at)
+    mine = _filled_of(signal, orders)
+    buys = _entry_buys(signal, mine)
     if not buys:
         return None
     entry = buys[0]
@@ -182,6 +201,27 @@ def resolve_swing_outcome(signal: dict, orders):
             "pnl_pct": round((sell_px - buy_px) / buy_px * 100, 4),
             "exit_order_id": getattr(exit_, "broker_order_id", None),
             "exit_date": _at(exit_).date().isoformat()}
+
+
+def _sessions_after(session: date, today: date) -> int:
+    """NYSE sessions strictly after `session`, up to and including `today`."""
+    if today <= session:
+        return 0
+    return len(clock.trading_days(session + timedelta(days=1), today))
+
+
+def unfilled_swing_outcome(signal: dict, orders, today: date):
+    """G8a ruling 4: {"unfilled": True, ...} when the entry shows no filled
+    buy and UNFILLED_AFTER_SESSIONS sessions have passed since its own; else
+    None."""
+    try:
+        session = date.fromisoformat(str(signal.get("session") or "")[:10])
+    except ValueError:
+        return None
+    waited = _sessions_after(session, today)
+    if waited < UNFILLED_AFTER_SESSIONS or _entry_buys(signal, _filled_of(signal, orders)):
+        return None
+    return {"unfilled": True, "as_of": today.isoformat(), "sessions_waited": waited}
 
 
 def _contract_of(signal: dict):
@@ -203,11 +243,13 @@ def resolve_wheel_outcome(signal: dict, orders):
     return None
 
 
-def record_outcomes(instance_id, adapter, lane: str, *, held=None) -> int:
+def record_outcomes(instance_id, adapter, lane: str, *, held=None, today=None) -> int:
     """Write the outcome of every open swing or wheel signal the broker's
-    closed orders can resolve. A swing symbol still held is still open.
-    Never raises; returns the number of rows updated."""
+    closed orders can resolve. A swing symbol still held is still open. With
+    a positions read (`held`), a swing entry that never filled is closed as
+    unfilled (G8a ruling 4). Never raises; returns the number of rows updated."""
     try:
+        today = today or date.fromisoformat(clock.ny_date(datetime.now(timezone.utc)))
         rows = [r for r in signals_store.all_signals(instance_id)
                 if r.get("lane") == lane and r.get("status") in signals_store.OPEN_STATUSES
                 and not r.get("outcome")]
@@ -226,6 +268,11 @@ def record_outcomes(instance_id, adapter, lane: str, *, held=None) -> int:
         for r in rows:
             out = (resolve_swing_outcome(r, orders) if lane == "swing"
                    else resolve_wheel_outcome(r, orders))
+            if out is None and lane == "swing" and held is not None:
+                out = unfilled_swing_outcome(r, orders, today)
+                if out:
+                    _log(f"{r.get('symbol')}: swing entry of {r.get('session')} never "
+                         f"filled in {out['sessions_waited']} sessions — closed as unfilled")
             if out:
                 signals_store.update_signal(r["id"], {"outcome": out})
                 n += 1
