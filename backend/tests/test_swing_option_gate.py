@@ -263,15 +263,21 @@ def test_a_kill_level_blocks_a_new_put_but_never_a_buy_to_close():
 
 
 def test_notional_is_quantity_times_price_times_one_hundred():
-    order = buy_to_close()
-    poor = option_snapshot(order, position_quantity=Decimal("-1"),
-                           quote_price=Decimal("2.50"),
+    # Fix wave FW-lo-I5: a buy_to_close no longer checks cash (below), so the
+    # x100 cash notional is pinned on an opening buy.
+    buy = option_intent(side=OrderSide.BUY, position_intent="buy_to_open",
+                        option_type="call", limit_price=Decimal("2.50"))
+    poor = option_snapshot(buy, quote_price=Decimal("2.50"),
                            available_cash=Decimal("249.99"))
-    assert "cash.insufficient" in evaluate(order, poor).reason_codes
-    enough = option_snapshot(order, position_quantity=Decimal("-1"),
-                             quote_price=Decimal("2.50"),
+    assert "cash.insufficient" in evaluate(buy, poor).reason_codes
+    enough = option_snapshot(buy, quote_price=Decimal("2.50"),
                              available_cash=Decimal("250"))
-    assert evaluate(order, enough).allowed is True
+    assert "cash.insufficient" not in evaluate(buy, enough).reason_codes
+    order = buy_to_close()
+    poor_close = option_snapshot(order, position_quantity=Decimal("-1"),
+                                 quote_price=Decimal("2.50"),
+                                 available_cash=Decimal("249.99"))
+    assert evaluate(order, poor_close).allowed is True   # the broker decides
     opening = option_intent()
     capped = option_snapshot(opening, max_order_notional=Decimal("119.99"))
     assert "exposure.max_order_notional" in evaluate(opening, capped).reason_codes
@@ -544,6 +550,8 @@ def test_a_closing_intent_is_not_bound_by_the_opening_order_cap():
         order, position_quantity=Decimal("-3"), quote_price=Decimal("40"),
         max_order_notional=Decimal("100")))
     assert decision.allowed is True, decision.reason_codes
-    assert "cash.insufficient" in evaluate(order, option_snapshot(
+    # Fix wave FW-lo-I5: nor by cash ($20,100 against $20,000); Alpaca
+    # enforces the buying power of a risk-reducing close.
+    assert evaluate(order, option_snapshot(
         order, position_quantity=Decimal("-3"), quote_price=Decimal("67"),
-    )).reason_codes
+    )).allowed is True

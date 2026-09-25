@@ -10066,6 +10066,12 @@ def _live_option_dependency_snapshot(adapter, intent, *, now_utc=None):
         pending_known = False
     known = (bool(getattr(adapter, "_option_positions_complete", False))
              and pending_known and meta_known)
+    available_cash = Decimal(str(getattr(adapter, "_cash", 0) or 0))
+    if available_cash < 0 and intent.reduce_only:
+        # Fix wave FW-lo-I5: a buy/sell-to-close is risk-reducing (ruling F1);
+        # a margin debit after an assignment must not stop it being gated.
+        # An opening order still fails closed on negative cash.
+        available_cash = Decimal("0")
     equity = getattr(adapter, "_account_equity", None)
     positions_health = state.get("positions", "unknown")
     if getattr(adapter, "_positions_stale_since", None) is not None:
@@ -10102,7 +10108,7 @@ def _live_option_dependency_snapshot(adapter, intent, *, now_utc=None):
         position_symbol=symbol,
         position_quantity=position_quantity,
         positions_at=positions_at,
-        available_cash=Decimal(str(getattr(adapter, "_cash", 0) or 0)),
+        available_cash=available_cash,
         market_open=market_open,
         risk_snapshot_id=str(state.get("risk_snapshot_id") or intent.risk_snapshot_id),
         kill_switch_at=stamp("kill_switch_at"),
@@ -11257,6 +11263,16 @@ def _live_order_dependency_snapshot(adapter, intent):
         value = state.get(name)
         return value if isinstance(value, datetime.datetime) else None
 
+    available_cash = Decimal(str(getattr(adapter, "_cash", 0) or 0))
+    if available_cash < 0 and intent.reduce_only and any(
+            _lane_enabled(globals().get("_cached_strategies"), lane)
+            for lane in ("strategy_swing", "strategy_wheel")):
+        # Fix wave FW-lo-I5: a margin debit after an assignment must not stop
+        # a swing/wheel document's EXIT from being gated (the snapshot refuses
+        # negative cash). A reduce-only sell never spends cash. Checked only
+        # when cash is negative, and EB's document enables neither lane, so
+        # EB's snapshot still raises exactly as before.
+        available_cash = Decimal("0")
     max_order_notional = None
     max_position_quantity = None
     if _live_risk_state is not None:
@@ -11294,7 +11310,7 @@ def _live_order_dependency_snapshot(adapter, intent):
         position_symbol=symbol,
         position_quantity=position_quantity,
         positions_at=positions_at,
-        available_cash=Decimal(str(getattr(adapter, "_cash", 0) or 0)),
+        available_cash=available_cash,
         market_open=bool(state.get("market_open", False)),
         risk_snapshot_id=risk_snapshot_id,
         kill_switch_at=_state_time("kill_switch_at"),

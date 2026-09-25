@@ -172,6 +172,10 @@ def _namespace(state, controls, adapter, risk_store, risk_state, service=None):
         "_live_stock_order_service": service,
         "_open_order_idempotency_keys": lambda _identity: frozenset(),
         "_live_option_dependency_snapshot": None,
+        "_cached_strategies": LANES,
+        "_lane_enabled": extract(
+            ("_lane_enabled", "_truthy", "_merged_strategy_settings"),
+            assigns=("_LANE_ENABLE_FLAGS",))["_lane_enabled"],
     }
 
 

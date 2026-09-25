@@ -350,7 +350,14 @@ class UnifiedOrderGate:
                     blockers.append("option.underlying_cap")
 
         notional = approved * snapshot.quote_price * multiplier
-        if intent.side is OrderSide.BUY and notional > snapshot.available_cash:
+        # Fix wave FW-lo-I5: a buy_to_close is risk-reducing (ruling F1) and
+        # Alpaca enforces its buying power; refusing it on cash would keep a
+        # short put open into assignment.
+        if (
+            intent.side is OrderSide.BUY
+            and intent.position_intent != "buy_to_close"
+            and notional > snapshot.available_cash
+        ):
             blockers.append("cash.insufficient")
         if (
             opening

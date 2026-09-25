@@ -654,6 +654,8 @@ def test_the_equity_provider_dispatches_only_option_intents():
             "_live_stock_order_service": None, "instance_id": "instance-1",
             "_live_option_dependency_snapshot":
                 lambda adapter, intent: (marker, intent),
+            # Fix wave FW-lo-I5: read only when cash is negative.
+            "_lane_enabled": lambda strategies, lane: False,
         })
     provider = ns["_live_order_dependency_snapshot"]
     order = option_intent()
