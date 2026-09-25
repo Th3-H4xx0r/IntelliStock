@@ -17,6 +17,24 @@ String fmtItm(double? itmPct) {
       : '${itmPct.abs().toStringAsFixed(1)}% OTM';
 }
 
+/// "as of 14:02", local 24-hour time; empty without a time.
+String fmtAsOf(DateTime? at) {
+  if (at == null) return '';
+  final hh = at.hour.toString().padLeft(2, '0');
+  final mm = at.minute.toString().padLeft(2, '0');
+  return 'as of $hh:$mm';
+}
+
+/// What a failed wheel load says. FastAPI's own 404 for a route it does not
+/// have reads exactly "Not Found": that API build has no wheel endpoint. Any
+/// other 404 (an unknown instance, say) shows its detail (FW item 4, M-2).
+String wheelErrorMessage(Object err) {
+  if (err is ApiError && err.statusCode == 404 && err.message.trim() == 'Not Found') {
+    return 'This API build has no wheel endpoint yet.';
+  }
+  return err.toString();
+}
+
 /// The wheel lane's open cash-secured puts and its latest scans. Read-only:
 /// the lane buys puts back by itself, and a red ITM figure means the 15:45 ET
 /// monitor will buy that put back on its next pass.
@@ -32,14 +50,20 @@ class WheelCard extends ConsumerWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Wheel', style: AppTextStyles.cardTitle),
+          Row(
+            children: [
+              Text('Wheel', style: AppTextStyles.cardTitle),
+              const Spacer(),
+              if (async.valueOrNull?.fetchedAt != null)
+                Text(fmtAsOf(async.valueOrNull!.fetchedAt),
+                    style: AppTextStyles.nano.copyWith(color: AppColors.textFaint)),
+            ],
+          ),
           const SizedBox(height: 10),
           async.when(
             loading: () => Text('Loading…', style: AppTextStyles.meta),
             error: (err, _) => ErrorBanner(
-              message: err is ApiError && err.statusCode == 404
-                  ? 'This API build has no wheel endpoint yet.'
-                  : err.toString(),
+              message: wheelErrorMessage(err),
               onRetry: () => ref.invalidate(wheelSnapshotProvider(instanceId)),
             ),
             data: (w) => _WheelBody(wheel: w),

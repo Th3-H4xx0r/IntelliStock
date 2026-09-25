@@ -2,19 +2,14 @@
 import { ref, computed, onMounted } from 'vue'
 import AppShell from '../layouts/AppShell.vue'
 import { authHeaders } from '../utils/auth.js'
+import { FALLBACK_TYPES } from '../utils/notificationFallback.js'
 
 const API_BASE = import.meta.env.DEV
   ? '/api'
   : (import.meta.env.VITE_API_URL || '/api')
 
-// Fallback taxonomy if the API doesn't send `types` (older backend).
-const FALLBACK_TYPES = [
-  { key: 'order_fill',     group: 'Notifications', label: 'Order filled',    desc: 'An order was filled' },
-  { key: 'order_reject',   group: 'Notifications', label: 'Order rejected',  desc: 'The broker rejected an order' },
-  { key: 'halt',           group: 'Notifications', label: 'Halt',            desc: 'Live trading was halted' },
-  { key: 'crash_loop',     group: 'Notifications', label: 'Crash loop',      desc: 'The broker subprocess entered a crash loop' },
-  { key: 'instance_crash', group: 'Notifications', label: 'Instance crashed', desc: 'An instance process died (not a Stop) and was held open for log capture' },
-]
+// Fallback taxonomy if the API doesn't send `types` (older backend):
+// utils/notificationFallback.js.
 
 // The taxonomy (key/group/label/desc) supplied by the backend.
 const types = ref([])

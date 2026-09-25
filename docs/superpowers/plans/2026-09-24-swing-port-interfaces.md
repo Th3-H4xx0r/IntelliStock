@@ -240,12 +240,23 @@ The `LiveCommands` type `submit_order` payload is `{"source": "swing_approval", 
 
 1. `GET /instances/{id}/swing/signals?status=pending` returns `{"signals": [<SwingSignals doc>, ...]}`. The UI also accepts a bare list, and drops rows whose `status` is not `pending`.
 2. `POST .../decision` answers:
-   - any 2xx on success (the body is ignored);
+   - any 2xx on success. **200** is `{"signal", "command_id"}`;
+   - **202** (fix wave FW-api-I1) when the approval is recorded but the command-queue write raised and the re-read shows the command queued, the signal already moved on, or nothing readable. The body is `{"signal", "command_id" (or null), "uncertain": true, "detail"}`. `detail` is exactly "Approval received, but its delivery to the broker could not be confirmed. Do NOT place this order by hand — it may still be queued. The card will show submitted or failed shortly." ("Re-send received, …" from the re-send route). It carries no exception text; the server logs that. The UIs keep the signal on a "Waiting for the broker" card with an "uncertain — waiting for the broker" badge and that text; while one waits, each poll also reads `?status=submitted` and `?status=failed`, and a poll begun after the 202 that finds the signal pending, submitted or failed settles the card;
    - **400** when the signal is not pending (`approvals.decide` raises `ValueError`, which `api/main.py:_run` maps to 400);
    - **404** for an unknown signal id, or one that belongs to another instance;
    - 409 (optional) for a lost race;
+   - **503** only when the approval provably did not reach the broker: the instance is not running or has crashed, or the command was not queued and the signal was put back to pending ("not queued — try again");
    - 401 or 403 from auth;
    - 422 for a malformed body.
+2a. `POST /instances/{id}/swing/signals/{signal_id}/resend` (fix wave item 3) re-sends a stuck approval. It takes no body and needs a session like its neighbours. It queues the approval's own submit_order payload, `{"source": "swing_approval", "signal_id"}`, again for a signal that reads `approved` or `approved_half` with no `pending` or `running` command for it. The signal row is not changed. The broker claims approved → submitted before it sends anything, so a second copy places nothing. It answers:
+   - **200** `{"signal", "command_id"}` when queued;
+   - **202** with the §9 item 2 `uncertain` body when the queue write raised but may have landed;
+   - **404** for an unknown signal id, or one that belongs to another instance (or an unknown instance);
+   - **409** when the signal is not approved, when it was approved on a day other than today in New York (its `decided_at` converted to the New York date, not its `session`, which for a wheel signal is the weekly scan day: "this approval was made on <date>; approve a fresh signal instead"), or when a command for it is still pending or running;
+   - **503** when the instance is not running or has crashed, the queue cannot be read, or the command provably was not queued ("not queued — try again");
+   - 401 from auth.
+
+   The web and iOS cards offer "Re-send" on a signal approved today (the same New York `decided_at` rule; the server alone decides the 409) that has read approved for more than 2 minutes (from `decided_at`, or from this device's last re-send); an older one shows the reason instead. They read those signals with `?status=approved` and `?status=approved_half`, alongside the `?status=pending` list.
 3. `GET /instances/{id}/wheel` returns:
    ```json
    {"open_puts": [{"contract": "APH261002P00130000", "underlying": "APH", "strike": 130.0,
@@ -350,7 +361,7 @@ Copied from plan A-live's "Contract additions" (Task 1 Step 0). Three items carr
 - The wheel lane reads `_engine_wheel_assignments` (A-live addition 13) from its strategy cache: only assigned shares are covered-call candidates.
 - `SwingSignals` may carry `score: None` (AI gate off), `context: dict`, and `error` on a `failed` row the lane wrote. **Drift (T16):** A-live's approval handler never writes `error`. It writes `status`, `order_client_id` and `submitted_order` (the rebuilt order dict), or it resets `status` to `pending` and clears `decided_by`, `decided_at` and `decision_reason` on a transient failure (section 10 item 17).
 - `swing_trader.signals_store`: `signal_id_for(instance_id, lane, session, symbol) -> str`, `new_signal(**fields) -> dict`, `cas_signal(signal_id, *, expect_status, doc) -> bool`, `swing_owned_symbols(instance_id, held) -> set[str]`, `insert_wheel_scan(row) -> str`, `list_wheel_scans(instance_id, limit=50) -> list[dict]`, `all_signals(instance_id) -> list[dict]`, `ensure_tables() -> None`, `OPEN_STATUSES`.
-- `swing_trader.approvals.SignalConflict(ValueError)`: a decision on a signal that is not pending; `_run` maps it to 400 per §9 item 2. A click that lost the compare-and-swap: `interactive_utils.SwingDecisionRaceError` → 409. An approval that cannot reach the broker, or an unreadable wheel book: `interactive_utils.SwingBrokerUnavailableError` → 503, and the signal stays pending. Unknown or foreign signal id: `LookupError` → 404.
+- `swing_trader.approvals.SignalConflict(ValueError)`: a decision on a signal that is not pending; `_run` maps it to 400 per §9 item 2. A click that lost the compare-and-swap: `interactive_utils.SwingDecisionRaceError` → 409. An approval that provably cannot reach the broker, or an unreadable wheel book: `interactive_utils.SwingBrokerUnavailableError` → 503, and the signal is pending. A queue write that raised but may have landed is not a 503: it is the §9 item 2 202 `uncertain` answer (fix wave FW-api-I1). A refused re-send (§9 item 2a): `interactive_utils.SwingResendConflictError` → 409. Unknown or foreign signal id: `LookupError` → 404.
 - `swing_trader.account`: read-only book views shared by both lanes (`equity_positions`, `option_symbols`, `live_equity`, `live_buying_power`, `option_positions`, `open_orders`, `account_options`, `spendable`, `pending_symbols`, `entry_price_from_trades`).
 - The approval command handler (§7) is plan A-live Task 15's `_execute_swing_approval`; plan B does not edit `broker.py`.
 - `swing_trader.notify.send(category, instance_id, title, message, *, priority=0)` and `notify_wheel_assignment(instance_id, *, symbol, qty, price=None, date=None)` (A-live's activities poller calls the latter).

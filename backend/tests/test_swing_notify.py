@@ -16,7 +16,8 @@ SWING_KEYS = ("swing_entry", "swing_pending_review", "swing_exit",
               "swing_run_summary", "wheel_put_placed", "wheel_pending_review",
               "wheel_position_alert", "wheel_assignment")
 PUSH_ON = {"swing_entry", "swing_pending_review", "swing_exit",
-           "wheel_put_placed", "wheel_pending_review", "wheel_position_alert"}
+           "wheel_put_placed", "wheel_pending_review", "wheel_position_alert",
+           "wheel_assignment"}   # fix wave item 4: ST pushed assignments
 
 
 def test_the_eight_types_exist_in_their_own_group():

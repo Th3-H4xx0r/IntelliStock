@@ -38,7 +38,34 @@ class PendingSignalsSection extends ConsumerWidget {
     final result = await ref
         .read(pendingSignalsProvider(instanceId).notifier)
         .decide(signal, decision);
-    if (!context.mounted || result.outcome == DecisionOutcome.ignored) return;
+    // Follow-up 2: a 202's advice lives on its waiting card, not a snackbar.
+    if (!context.mounted ||
+        result.outcome == DecisionOutcome.ignored ||
+        result.outcome == DecisionOutcome.uncertain) {
+      return;
+    }
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(result.message)));
+  }
+
+  Future<void> _resend(
+      BuildContext context, WidgetRef ref, SwingSignal signal) async {
+    final confirmed = await showConfirmDialog(
+      context,
+      title: 'Re-send ${signal.symbol}',
+      body: resendConfirmBody(signal),
+      confirmLabel: 'Re-send',
+      confirmColor: AppColors.warning,
+      icon: symbol('send'),
+    );
+    if (!confirmed || !context.mounted) return;
+    final result =
+        await ref.read(pendingSignalsProvider(instanceId).notifier).resend(signal);
+    if (!context.mounted ||
+        result.outcome == DecisionOutcome.ignored ||
+        result.outcome == DecisionOutcome.uncertain) {
+      return;
+    }
     ScaffoldMessenger.of(context)
         .showSnackBar(SnackBar(content: Text(result.message)));
   }
@@ -89,6 +116,56 @@ class PendingSignalsSection extends ConsumerWidget {
                         onDecide: (d) => _decide(context, ref, s, d),
                       ),
                     ),
+                // 202'd approvals and re-sends (follow-up 2): the card and
+                // its badge stay until a poll settles them.
+                if (state.uncertain.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    'Waiting for the broker (${state.uncertain.length})',
+                    style: AppTextStyles.nano.copyWith(
+                        color: AppColors.warning, letterSpacing: 0.6),
+                  ),
+                  const SizedBox(height: 6),
+                  for (final card in state.uncertain)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: _UncertainCardView(
+                        key: ValueKey('uncertain-${card.signal.id}'),
+                        card: card,
+                        canDismiss: card.canDismiss(state.asOf ?? DateTime.now()),
+                        onDismiss: () => ref
+                            .read(pendingSignalsProvider(instanceId).notifier)
+                            .dismissUncertain(card.signal.id),
+                      ),
+                    ),
+                ],
+                // Approvals no broker command has claimed for 2+ minutes
+                // (fix wave item 3). Absent for an account with none.
+                if (state.stuck.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    'Approved, not yet sent (${state.stuck.length})',
+                    style: AppTextStyles.nano.copyWith(
+                        color: AppColors.warning, letterSpacing: 0.6),
+                  ),
+                  const SizedBox(height: 6),
+                  for (final s in state.stuck)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: _StuckCard(
+                        key: ValueKey('stuck-${s.id}'),
+                        signal: s,
+                        label: stuckLabel(s, state.asOf ?? DateTime.now()),
+                        blockedReason: resendBlockedReason(
+                            s, nyDate(state.asOf ?? DateTime.now())),
+                        busy: state.isResending(s.id),
+                        onResend: () => _resend(context, ref, s),
+                        onDismiss: () => ref
+                            .read(pendingSignalsProvider(instanceId).notifier)
+                            .dismissStuck(s.id),
+                      ),
+                    ),
+                ],
                 const SizedBox(height: 4),
                 Text(
                   'Approval rebuilds the order at the live price.',
@@ -281,6 +358,175 @@ class _SignalCardState extends State<_SignalCard> {
             const SizedBox(height: 6),
             Text('Working…',
                 style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// An approval no broker command has claimed for 2+ minutes: the instance
+/// stopped, or the broker's handler returned early. Re-send queues the same
+/// command again; the broker ignores a copy it already claimed.
+class _StuckCard extends StatelessWidget {
+  const _StuckCard({
+    super.key,
+    required this.signal,
+    required this.label,
+    required this.blockedReason,
+    required this.busy,
+    required this.onResend,
+    required this.onDismiss,
+  });
+
+  final SwingSignal signal;
+  final String label;
+  final VoidCallback onDismiss;
+
+  /// Why Re-send is not offered (an approval from an older session), or null.
+  final String? blockedReason;
+  final bool busy;
+  final VoidCallback onResend;
+
+  @override
+  Widget build(BuildContext context) {
+    final s = signal;
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppColors.warning.withValues(alpha: 0.06),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppColors.warning.withValues(alpha: 0.3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text(
+                s.symbol,
+                style: AppTextStyles.cardTitle.copyWith(
+                    color: AppColors.textHi, fontWeight: FontWeight.w800),
+              ),
+              const SizedBox(width: 8),
+              AppBadge(
+                label: s.lane,
+                color: s.isWheel ? AppColors.primary : AppColors.info,
+              ),
+              const SizedBox(width: 6),
+              AppBadge(
+                label: s.status == 'approved_half' ? 'approved ½' : 'approved',
+                color: AppColors.warning,
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text('session ${s.session.isEmpty ? '—' : s.session}',
+              style: AppTextStyles.nano.copyWith(color: AppColors.textFaint)),
+          const SizedBox(height: 6),
+          Text(label,
+              style: AppTextStyles.micro.copyWith(color: AppColors.textMd)),
+          const SizedBox(height: 10),
+          if (blockedReason != null) ...[
+            Text(blockedReason!,
+                style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),
+            const SizedBox(height: 8),
+          ],
+          // Round 3 FU-1: Re-send (today's approvals) and Dismiss.
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              if (blockedReason == null)
+                AppButton.semantic(
+                  label: 'Re-send',
+                  color: AppColors.warning,
+                  dense: true,
+                  onPressed: busy ? null : onResend,
+                ),
+              AppButton.ghost(
+                  label: 'Dismiss', dense: true, onPressed: busy ? null : onDismiss),
+            ],
+          ),
+          if (busy) ...[
+            const SizedBox(height: 6),
+            Text('Working…',
+                style: AppTextStyles.nano.copyWith(color: AppColors.textDim)),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// A 202'd approval or re-send (follow-up 2): "uncertain — waiting for the
+/// broker" with the server's advice until a poll finds the signal pending
+/// (the card goes), submitted or failed (the badge says so until Dismiss).
+class _UncertainCardView extends StatelessWidget {
+  const _UncertainCardView({
+    super.key,
+    required this.card,
+    required this.canDismiss,
+    required this.onDismiss,
+  });
+
+  final UncertainCard card;
+
+  /// Settled, or waiting for more than 2 minutes (round 3 FU-1).
+  final bool canDismiss;
+  final VoidCallback onDismiss;
+
+  Color get _tone => switch (card.resolved) {
+        'submitted' => AppColors.success,
+        'failed' => AppColors.danger,
+        _ => AppColors.warning,
+      };
+
+  @override
+  Widget build(BuildContext context) {
+    final s = card.signal;
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: _tone.withValues(alpha: 0.06),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: _tone.withValues(alpha: 0.3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text(
+                s.symbol,
+                style: AppTextStyles.cardTitle.copyWith(
+                    color: AppColors.textHi, fontWeight: FontWeight.w800),
+              ),
+              const SizedBox(width: 8),
+              AppBadge(
+                label: s.lane,
+                color: s.isWheel ? AppColors.primary : AppColors.info,
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          AppBadge(label: card.badge, color: _tone),
+          const SizedBox(height: 4),
+          Text('session ${s.session.isEmpty ? '—' : s.session}',
+              style: AppTextStyles.nano.copyWith(color: AppColors.textFaint)),
+          const SizedBox(height: 6),
+          Text(
+            switch (card.resolved) {
+              'submitted' =>
+                'The broker submitted it. Check open orders for the fill.',
+              'failed' => 'It failed at the broker; the live log says why.',
+              _ => waitingCopy,
+            },
+            style: AppTextStyles.micro.copyWith(color: AppColors.textMd),
+          ),
+          if (canDismiss) ...[
+            const SizedBox(height: 10),
+            AppButton.ghost(label: 'Dismiss', dense: true, onPressed: onDismiss),
           ],
         ],
       ),

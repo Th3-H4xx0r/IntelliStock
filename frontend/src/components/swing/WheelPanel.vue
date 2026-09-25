@@ -5,12 +5,15 @@
      Read-only. The lane buys puts back by itself (the 15:45 ET monitor and the
      Monday 2x-premium check), so the ITM column is coloured by exactly those
      rules: red means the monitor will buy this put back on its next pass.
-     GET /instances/{id}/wheel; the shape is the plan C Contract addendum. -->
+     GET /instances/{id}/wheel; the shape is the plan C Contract addendum.
+     The header stamps the last successful load ("as of 14:02"): after a failed
+     poll the book on screen is that one. Only a 401 stops polling. -->
 <template>
   <section class="glass-card rounded-2xl p-5">
     <div class="flex items-center justify-between mb-4 gap-2">
       <p class="text-xs font-bold uppercase tracking-widest text-slate-500">
         Wheel <span v-if="loaded" class="text-slate-700 ml-1">({{ wheel.openPuts.length }} open)</span>
+        <span v-if="loadedAt" class="ml-2 normal-case tracking-normal font-medium text-slate-600">{{ fmtAsOf(loadedAt) }}</span>
       </p>
       <button
         @click="load"
@@ -24,6 +27,9 @@
       </button>
     </div>
 
+    <div v-if="loadNote" class="mb-3 rounded-lg border border-slate-700 bg-slate-800/40 px-3 py-2 text-xs text-slate-400">
+      {{ loadNote }}
+    </div>
     <div v-if="loadError" class="mb-3 rounded-lg border border-rose-500/20 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">
       {{ loadError }}
     </div>
@@ -108,7 +114,7 @@
 <script setup>
 import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { getToken } from '../../utils/auth.js'
-import { detailText, fmtItm, fmtUsd, itmTone, parseWheelPayload } from '../../utils/swing.js'
+import { detailText, fmtAsOf, fmtItm, fmtUsd, itmTone, parseWheelPayload, wheelLoadFailure } from '../../utils/swing.js'
 
 // The wheel changes a few times a day; a minute is plenty.
 const POLL_MS = 60000
@@ -122,6 +128,8 @@ const wheel = ref(parseWheelPayload(null))
 const loading = ref(false)
 const loaded = ref(false)
 const loadError = ref('')
+const loadNote = ref('')      // not an error: this API build has no wheel route
+const loadedAt = ref(null)    // Date of the last successful load
 let pollTimer = null
 
 function authHeaders() {
@@ -139,25 +147,24 @@ async function load() {
       `${props.apiBase}/instances/${encodeURIComponent(props.instanceId)}/wheel`,
       { headers: authHeaders() },
     )
-    if (res.status === 401 || res.status === 404) {
-      // 401: the session is gone. 404: this API build has no wheel route yet.
-      // Either way, polling again will not change the answer.
-      stopPolling()
-      loadError.value = res.status === 401
-        ? 'Session expired — please sign in again.'
-        : 'This API build has no wheel endpoint yet.'
-      return
-    }
     if (!res.ok) {
+      // FW item 4 (M-2): a 404 is not always "no wheel route"; only a 401
+      // stops polling, since every other answer can change.
       let detail = ''
       try { detail = detailText((await res.json())?.detail) } catch { /* keep */ }
-      throw new Error(detail || `Could not load the wheel (${res.status})`)
+      const failure = wheelLoadFailure(res.status, detail)
+      if (failure.stopPolling) stopPolling()
+      loadNote.value = failure.kind === 'no-endpoint' ? failure.message : ''
+      loadError.value = failure.kind === 'no-endpoint' ? '' : failure.message
+      return
     }
     wheel.value = parseWheelPayload(await res.json())
     loadError.value = ''
+    loadNote.value = ''
+    loadedAt.value = new Date()
     loaded.value = true
   } catch (e) {
-    loadError.value = e?.message || 'Could not load the wheel'
+    loadError.value = wheelLoadFailure(0, e?.message).message
   } finally {
     loading.value = false
   }
@@ -209,6 +216,8 @@ watch(() => props.instanceId, (next, prev) => {
   wheel.value = parseWheelPayload(null)
   loaded.value = false
   loadError.value = ''
+  loadNote.value = ''
+  loadedAt.value = null
   load()
   startPolling()
 })

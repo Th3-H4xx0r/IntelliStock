@@ -51,12 +51,13 @@ def test_default_routing_discord_on_push_off_except_critical():
         assert v["discord"] is True
         assert v["push"] is (key in _PUSH_ON_BY_DEFAULT)
     # instance_crash, plus the swing-trader port's reviews, entries, exits and
-    # position alerts (spec §10), and an approved swing/wheel order the broker
-    # refused (plan C final review)
+    # position alerts (spec §10), an approved swing/wheel order the broker
+    # refused (plan C final review), and a wheel assignment (fix wave item 4:
+    # the shares now held are money at risk, and ST pushed it at priority 1)
     assert _PUSH_ON_BY_DEFAULT == {
         "instance_crash", "swing_entry", "swing_pending_review", "swing_exit",
         "wheel_put_placed", "wheel_pending_review", "wheel_position_alert",
-        "swing_approval_failed"}
+        "wheel_assignment", "swing_approval_failed"}
     assert r["instance_crash"]["push"] is True
 
 

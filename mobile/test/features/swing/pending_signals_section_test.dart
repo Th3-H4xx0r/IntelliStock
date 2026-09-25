@@ -3,14 +3,20 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:intellistock_mobile/core/network/api_error.dart';
 import 'package:intellistock_mobile/core/widgets/app_button.dart';
+import 'package:intellistock_mobile/features/swing/application/swing_controller.dart';
 import 'package:intellistock_mobile/features/swing/data/swing_repository.dart';
 import 'package:intellistock_mobile/features/swing/presentation/pending_signals_section.dart';
 import 'package:intellistock_mobile/features/swing/presentation/wheel_card.dart';
 
 import 'swing_fakes.dart';
 
+final _now = DateTime.utc(2026, 9, 25, 13, 30);
+
 Widget _app(FakeSwingRepo repo, Widget child) => ProviderScope(
-      overrides: [swingRepositoryProvider.overrideWithValue(repo)],
+      overrides: [
+        swingRepositoryProvider.overrideWithValue(repo),
+        swingClockProvider.overrideWithValue(() => _now),
+      ],
       child: MaterialApp(
         home: Scaffold(body: SingleChildScrollView(child: child)),
       ),
@@ -73,6 +79,46 @@ void main() {
       expect(find.textContaining('Approved AAPL'), findsOneWidget);
     });
 
+    testWidgets('FW-api-I1: a 202 shows the server advice, never the success copy',
+        (tester) async {
+      _phone(tester); // 320pt wide: the long badge and the advice must fit
+      final detail = kUncertainApproval;
+      final repo = FakeSwingRepo([swingSignal('a1')])
+        ..decideReceipt = DecisionReceipt(uncertain: true, detail: detail);
+      await tester.pumpWidget(_app(repo, _section));
+      await tester.pumpAndSettle();
+
+      await tester.tap(_cardButton('Approve'));
+      await tester.pumpAndSettle();
+      await tester.tap(_dialogButton('Approve'));
+      await tester.pumpAndSettle();
+      // Follow-up 2: the advice stays on a waiting card, not a snackbar.
+      expect(find.text('Waiting for the broker (1)'), findsOneWidget);
+      // AppBadge upper-cases its label.
+      expect(find.text('UNCERTAIN — WAITING FOR THE BROKER'), findsOneWidget);
+      expect(find.text(waitingCopy), findsOneWidget); // round 3 FU-1 copy
+      expect(find.text(detail), findsNothing);
+      expect(find.byType(SnackBar), findsNothing);
+      expect(_cardButton('Dismiss'), findsNothing); // not before 2 minutes
+      expect(tester.takeException(), isNull);
+      expect(_cardButton('Approve'), findsNothing); // no longer a pending card
+      expect(find.textContaining('Approved AAPL'), findsNothing);
+
+      // It persists across polls until one settles it.
+      repo
+        ..pending = []
+        ..submitted = [withStatus(swingSignal('a1'), 'submitted')];
+      final container = ProviderScope.containerOf(tester.element(find.byType(PendingSignalsSection)));
+      await container.read(pendingSignalsProvider('i1').notifier).refresh();
+      await tester.pumpAndSettle();
+      expect(find.text('SUBMITTED'), findsOneWidget);
+      expect(find.text('UNCERTAIN — WAITING FOR THE BROKER'), findsNothing);
+      expect(find.text(waitingCopy), findsNothing);
+      await tester.tap(_cardButton('Dismiss'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Waiting for the broker'), findsNothing);
+    });
+
     testWidgets('cancel in the dialog sends nothing', (tester) async {
       final repo = FakeSwingRepo([swingSignal('a1')]);
       await tester.pumpWidget(_app(repo, _section));
@@ -117,6 +163,70 @@ void main() {
       expect(find.text('not your instance'), findsOneWidget);
       expect(tester.widget<AppButton>(_cardButton('Reject')).onPressed,
           isNotNull);
+    });
+
+    testWidgets('FW item 3: a stuck approval offers Re-send behind a confirm',
+        (tester) async {
+      _phone(tester); // 320pt wide: the badges and the button must fit
+      final repo = FakeSwingRepo([swingSignal('p1', symbol: 'MSFT')], approved: [
+        approvedSignal('a1', '2026-09-25T13:25:00Z'),
+        approvedSignal('fresh', '2026-09-25T13:29:30Z', symbol: 'NVDA'),
+      ]);
+      await tester.pumpWidget(_app(repo, _section));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Pending AI signals (1)'), findsOneWidget);
+      expect(find.text('Approved, not yet sent (1)'), findsOneWidget);
+      expect(find.text('Approved 5 min ago; the broker has not picked it up yet.'),
+          findsOneWidget);
+      expect(find.text('session 2026-09-25'), findsOneWidget); // follow-up 3
+      expect(find.text('NVDA'), findsNothing); // approved 30 s ago: in flight
+      expect(tester.takeException(), isNull);
+
+      await tester.tap(_cardButton('Re-send'));
+      await tester.pumpAndSettle();
+      expect(find.byType(Dialog), findsOneWidget);
+      expect(repo.resendCalls, isEmpty);
+      await tester.tap(_dialogButton('Re-send'));
+      await tester.pumpAndSettle();
+      expect(repo.resendCalls, ['a1']);
+      expect(find.text('Re-sent AAPL to the broker.'), findsOneWidget);
+      expect(find.text('Approved, not yet sent (1)'), findsNothing);
+    });
+
+    testWidgets('follow-up 3: an approval from an older session shows its session, no Re-send',
+        (tester) async {
+      final repo = FakeSwingRepo([], approved: [
+        approvedSignal('old', '2026-09-24T13:25:00Z', session: '2026-09-24'),
+      ]);
+      await tester.pumpWidget(_app(repo, _section));
+      await tester.pumpAndSettle();
+      expect(find.text('Approved, not yet sent (1)'), findsOneWidget);
+      expect(find.text('session 2026-09-24'), findsOneWidget);
+      expect(find.text('This approval was made on 2026-09-24; approve a fresh signal instead.'),
+          findsOneWidget);
+      expect(_cardButton('Re-send'), findsNothing);
+    });
+
+    testWidgets('round 3 FU-1: a stuck card offers Dismiss beside Re-send',
+        (tester) async {
+      final repo = FakeSwingRepo([],
+          approved: [approvedSignal('a1', '2026-09-25T13:25:00Z')]);
+      await tester.pumpWidget(_app(repo, _section));
+      await tester.pumpAndSettle();
+      expect(_cardButton('Re-send'), findsOneWidget);
+      await tester.tap(_cardButton('Dismiss'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('not yet sent'), findsNothing);
+      expect(repo.resendCalls, isEmpty);
+    });
+
+    testWidgets('an account with no stuck approvals renders no re-send section',
+        (tester) async {
+      await tester.pumpWidget(_app(FakeSwingRepo([swingSignal('a1')]), _section));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('not yet sent'), findsNothing);
+      expect(_cardButton('Re-send'), findsNothing);
     });
 
     testWidgets('long reasoning on a 320pt phone: no overflow, collapsible',
@@ -178,6 +288,30 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('This API build has no wheel endpoint yet.'),
           findsOneWidget);
+    });
+
+    testWidgets('FW item 4: any other 404 shows its detail, and Retry still works',
+        (tester) async {
+      final repo = FakeSwingRepo([])
+        ..wheelError = ApiError('Instance not found: i1', statusCode: 404);
+      await tester.pumpWidget(_app(repo, const WheelCard(instanceId: 'i1')));
+      await tester.pumpAndSettle();
+      expect(find.text('Instance not found: i1'), findsOneWidget);
+      expect(find.text('This API build has no wheel endpoint yet.'), findsNothing);
+      repo.wheelError = null;
+      await tester.tap(find.text('Retry'));
+      await tester.pumpAndSettle();
+      expect(find.text('No open puts.'), findsOneWidget);
+    });
+
+    testWidgets('FW item 4: the card stamps when the book was fetched',
+        (tester) async {
+      final repo = FakeSwingRepo([],
+          wheelSnapshot: WheelSnapshot.fromJson(const {'open_puts': []},
+              fetchedAt: DateTime(2026, 9, 25, 14, 2, 41)));
+      await tester.pumpWidget(_app(repo, const WheelCard(instanceId: 'i1')));
+      await tester.pumpAndSettle();
+      expect(find.text('as of 14:02'), findsOneWidget);
     });
 
     testWidgets('an outage (503) is an error, never an empty book; Retry works',

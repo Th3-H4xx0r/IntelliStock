@@ -32,6 +32,7 @@ class SwingSignal {
     required this.sizeAdjustment,
     required this.proposal,
     required this.status,
+    this.decidedAt,
   });
 
   final String id;
@@ -50,6 +51,9 @@ class SwingSignal {
   final double? sizeAdjustment;
   final Map<String, dynamic> proposal;
   final String status;
+
+  /// When the operator decided it (UTC); null while pending or unparseable.
+  final DateTime? decidedAt;
 
   bool get isWheel => lane == 'wheel';
 
@@ -105,6 +109,7 @@ class SwingSignal {
         sizeAdjustment: _num(j['size_adjustment']),
         proposal: (j['proposal'] as Map?)?.cast<String, dynamic>() ?? const {},
         status: _str(j['status']).isEmpty ? 'pending' : _str(j['status']),
+        decidedAt: DateTime.tryParse(_str(j['decided_at']))?.toUtc(),
       );
 }
 
@@ -209,6 +214,7 @@ class WheelSnapshot {
     this.collateralTotal,
     this.cash,
     this.recentScans = const [],
+    this.fetchedAt,
   });
 
   static const empty = WheelSnapshot();
@@ -218,7 +224,13 @@ class WheelSnapshot {
   final double? cash;
   final List<WheelScan> recentScans;
 
-  factory WheelSnapshot.fromJson(Map<String, dynamic> j) => WheelSnapshot(
+  /// When this book was fetched (local time). The card loads only on open
+  /// and pull-to-refresh, so it says how old the book is (FW item 4, M-3).
+  final DateTime? fetchedAt;
+
+  factory WheelSnapshot.fromJson(Map<String, dynamic> j,
+          {DateTime? fetchedAt}) =>
+      WheelSnapshot(
         openPuts: ((j['open_puts'] as List?) ?? const [])
             .whereType<Map>()
             .map((m) => WheelPut.fromJson(m.cast<String, dynamic>()))
@@ -229,7 +241,27 @@ class WheelSnapshot {
             .whereType<Map>()
             .map((m) => WheelScan.fromJson(m.cast<String, dynamic>()))
             .toList(),
+        fetchedAt: fetchedAt,
       );
+}
+
+/// What a 2xx from POST .../decision said. FW-api-I1: a 202 carries
+/// `{"uncertain": true, "detail"}` — the approval is recorded, but the broker
+/// command may or may not be queued, so the order may be in flight.
+class DecisionReceipt {
+  const DecisionReceipt({this.uncertain = false, this.detail = ''});
+
+  static const recorded = DecisionReceipt();
+
+  final bool uncertain;
+  final String detail;
+
+  factory DecisionReceipt.fromJson(Object? data) => data is Map
+      ? DecisionReceipt(
+          uncertain: data['uncertain'] == true,
+          detail: _str(data['detail']).trim(),
+        )
+      : recorded;
 }
 
 // ── Repository ────────────────────────────────────────────────────────────────
@@ -239,13 +271,10 @@ class SwingRepository {
 
   final ApiClient _client;
 
-  /// Pending signals, newest first. Accepts a bare list or {signals: [...]}
-  /// and drops anything not pending, in case an older API build ignores the
-  /// status filter.
-  Future<List<SwingSignal>> pendingSignals(String instanceId) async {
+  Future<List<SwingSignal>> _signals(String instanceId, String status) async {
     final data = await _client.get<dynamic>(
       '/instances/$instanceId/swing/signals',
-      query: {'status': 'pending'},
+      query: {'status': status},
     );
     final rows = data is List
         ? data
@@ -253,14 +282,48 @@ class SwingRepository {
     return rows
         .whereType<Map>()
         .map((m) => SwingSignal.fromJson(m.cast<String, dynamic>()))
-        .where((s) => s.id.isNotEmpty && s.status == 'pending')
-        .toList()
-      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+        .where((s) => s.id.isNotEmpty && s.status == status)
+        .toList();
+  }
+
+  /// Pending signals, newest first. Accepts a bare list or {signals: [...]}
+  /// and drops anything not pending, in case an older API build ignores the
+  /// status filter.
+  Future<List<SwingSignal>> pendingSignals(String instanceId) async =>
+      (await _signals(instanceId, 'pending'))
+        ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+
+  /// Signals that read [status] (follow-up 2 reads "submitted" and "failed"
+  /// while a card waits for the broker).
+  Future<List<SwingSignal>> signalsWithStatus(String instanceId, String status) =>
+      _signals(instanceId, status);
+
+  /// Signals that still read approved or approved_half, newest decision
+  /// first: the ones a broker command has not claimed yet (fix wave item 3).
+  Future<List<SwingSignal>> approvedSignals(String instanceId) async {
+    final lists = await Future.wait([
+      _signals(instanceId, 'approved'),
+      _signals(instanceId, 'approved_half'),
+    ]);
+    final rows = [...lists[0], ...lists[1]];
+    final epoch = DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
+    return rows
+      ..sort((a, b) => (b.decidedAt ?? epoch).compareTo(a.decidedAt ?? epoch));
+  }
+
+  /// POST .../resend: queue a stuck approval's broker command again. Throws
+  /// ApiError on non-2xx (409 not approved or a command still queued, 503
+  /// not queued).
+  Future<DecisionReceipt> resend(String instanceId, String signalId) async {
+    final data = await _client.post<dynamic>(
+      '/instances/$instanceId/swing/signals/$signalId/resend',
+    );
+    return DecisionReceipt.fromJson(data);
   }
 
   /// POST .../decision with {decision, reason?}. decision is
   /// "approve" | "approve_half" | "reject". Throws ApiError on non-2xx.
-  Future<void> decide(
+  Future<DecisionReceipt> decide(
     String instanceId,
     String signalId,
     String decision, {
@@ -269,16 +332,18 @@ class SwingRepository {
     final body = <String, dynamic>{'decision': decision};
     final r = reason?.trim();
     if (r != null && r.isNotEmpty) body['reason'] = r;
-    await _client.post<dynamic>(
+    final data = await _client.post<dynamic>(
       '/instances/$instanceId/swing/signals/$signalId/decision',
       body: body,
     );
+    return DecisionReceipt.fromJson(data);
   }
 
   Future<WheelSnapshot> wheel(String instanceId) async {
     final data = await _client.get<dynamic>('/instances/$instanceId/wheel');
     return data is Map
-        ? WheelSnapshot.fromJson(data.cast<String, dynamic>())
+        ? WheelSnapshot.fromJson(data.cast<String, dynamic>(),
+            fetchedAt: DateTime.now())
         : WheelSnapshot.empty;
   }
 }
