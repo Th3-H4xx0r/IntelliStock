@@ -692,6 +692,20 @@ def test_g8b_the_scan_reads_staleness_through_the_public_accessor(live, monkeypa
     assert out["AAA"] == 1 and cache[live._SCAN_DONE_KEY] == "2026-06-01"
 
 
+@pytest.mark.parametrize("answer", ["not a dict", None, ["complete", True],
+                                    {"complete": True}])
+def test_g8b_an_unreadable_health_answer_holds_the_scan(live, monkeypatch, answer):
+    """G8b minor 4: a non-dict accessor answer (and minor 1: a dict with no
+    stale_since) is unknown health, so the scan decides nothing and retries."""
+    ai = scripted({"AAA": APPROVE, "CCC": REJECT, "DDD": REJECT})
+    monkeypatch.setattr(live.ai_analyst, "analyse", ai)
+    cache = {}
+    assert tick(live, MON_0920, HealthAccessor(answer), cache) == {}
+    assert ai.calls == [] and live._SCAN_DONE_KEY not in cache
+    out = tick(live, MON_0940, HealthAccessor({"complete": True, "stale_since": None}), cache)
+    assert out["AAA"] == 1 and cache[live._SCAN_DONE_KEY] == "2026-06-01"
+
+
 def test_fix_c_a_missing_vix_retries_until_the_scan_reads_it(live, monkeypatch):
     ai = scripted({"AAA": APPROVE, "CCC": REJECT, "DDD": REJECT})
     monkeypatch.setattr(live.ai_analyst, "analyse", ai)

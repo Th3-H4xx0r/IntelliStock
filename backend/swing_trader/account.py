@@ -126,8 +126,9 @@ def positions_health(emu):
     flags, where a missing flag reads healthy as before. An accessor that
     refuses (the base adapter raises NotImplementedError), raises or answers
     anything but a dict gives an error and no verdict: the caller reads that
-    as unknown and fails closed. A dict without ``complete: True`` is
-    incomplete."""
+    as unknown and fails closed. So does a dict with no ``stale_since`` key
+    (G8b minor 1): a missing stamp is not a fresh one. A dict without
+    ``complete: True`` is incomplete."""
     accessor = getattr(emu, "option_positions_health", None)
     if callable(accessor):
         try:
@@ -136,6 +137,8 @@ def positions_health(emu):
             return False, None, f"{type(exc).__name__}: {exc}"
         if not isinstance(health, dict):
             return False, None, f"unexpected answer {health!r}"
+        if "stale_since" not in health:
+            return False, None, f"unexpected answer {health!r} (no stale_since)"
         return health.get("complete") is True, health.get("stale_since"), None
     return (getattr(emu, "_option_positions_complete", True) is not False,
             getattr(emu, "_positions_stale_since", None), None)
