@@ -38,6 +38,10 @@ from broker_adapters.base import (
     CashDTO,
     AccountDTO,
     HealthStatus,
+    OptionActivityDTO,
+    OptionContractDTO,
+    OptionPositionDTO,
+    OptionSnapshotDTO,
 )
 from market_marks import (
     MarkQuality,
@@ -2211,6 +2215,266 @@ class AlpacaAdapter(BrokerAdapter):
                     self._last_prices[symbol] = newest.price
         return tuple(marked)
 
+    # --- swing-port: options and reference data -------------------------------
+
+    def _option_data_client(self):
+        """Lazily built options market-data client (cached on the adapter)."""
+        client = getattr(self, "_option_rest_client", None)
+        if client is not None:
+            return client
+        from alpaca.data.historical import OptionHistoricalDataClient
+
+        client = OptionHistoricalDataClient(self._api_key, self._api_secret)
+        self._option_rest_client = client
+        return client
+
+    def get_option_contracts(
+        self,
+        underlying,
+        *,
+        option_type=None,
+        expiration_gte=None,
+        expiration_lte=None,
+        strike_gte=None,
+        strike_lte=None,
+        page_limit: int = 1000,
+        max_pages: int = 50,
+    ) -> list[OptionContractDTO]:
+        """Every contract matching the filters, all pages (spec section 9
+        fix 9). alpaca-py does NOT follow ``next_page_token`` itself; this
+        loops until it is empty and refuses a partial chain rather than
+        returning one."""
+        from alpaca.trading.enums import ContractType
+        from alpaca.trading.requests import GetOptionContractsRequest
+
+        base = {
+            "underlying_symbols": [str(underlying).strip().upper()],
+            "limit": int(page_limit),
+        }
+        if option_type:
+            base["type"] = ContractType(str(option_type).strip().lower())
+        if expiration_gte:
+            base["expiration_date_gte"] = str(expiration_gte)
+        if expiration_lte:
+            base["expiration_date_lte"] = str(expiration_lte)
+        # alpaca-py types the strike bounds as strings.
+        if strike_gte is not None:
+            base["strike_price_gte"] = f"{float(strike_gte):.2f}"
+        if strike_lte is not None:
+            base["strike_price_lte"] = f"{float(strike_lte):.2f}"
+        out: list[OptionContractDTO] = []
+        seen_tokens: set[str] = set()
+        token = None
+        for _page in range(max(1, int(max_pages))):
+            request = GetOptionContractsRequest(
+                **base, **({"page_token": token} if token else {})
+            )
+            response = self._client.get_option_contracts(request)
+            for raw in getattr(response, "option_contracts", None) or ():
+                out.append(_option_contract_dto(raw))
+            token = getattr(response, "next_page_token", None)
+            if not token:
+                return out
+            if token in seen_tokens:
+                raise BrokerError(
+                    f"option contract pagination repeated page token {token!r} "
+                    f"for {underlying}"
+                )
+            seen_tokens.add(token)
+        raise BrokerError(
+            f"option chain for {underlying} exceeded {max_pages} pages; "
+            "refusing a partial chain"
+        )
+
+    def get_option_snapshots(self, contracts) -> dict[str, OptionSnapshotDTO]:
+        """Latest quote, trade, IV and greeks per contract (indicative feed;
+        the OPRA agreement is unsigned), requested 100 symbols at a time."""
+        from alpaca.data.enums import OptionsFeed
+        from alpaca.data.requests import OptionSnapshotRequest
+
+        wanted = sorted(
+            {str(c).strip().upper() for c in (contracts or ()) if str(c).strip()}
+        )
+        out: dict[str, OptionSnapshotDTO] = {}
+        if not wanted:
+            return out
+        client = self._option_data_client()
+        for start in range(0, len(wanted), 100):
+            batch = wanted[start:start + 100]
+            raw = client.get_option_snapshot(
+                OptionSnapshotRequest(
+                    symbol_or_symbols=batch, feed=OptionsFeed.INDICATIVE
+                )
+            ) or {}
+            for symbol in batch:
+                snap = raw.get(symbol)
+                if snap is not None:
+                    out[symbol] = _option_snapshot_dto(symbol, snap)
+        return out
+
+    def get_option_chain(
+        self,
+        underlying,
+        *,
+        option_type=None,
+        expiration_gte=None,
+        expiration_lte=None,
+        strike_gte=None,
+        strike_lte=None,
+    ) -> dict[str, OptionSnapshotDTO]:
+        """Every matching contract (all pages) joined to its snapshot."""
+        contracts = self.get_option_contracts(
+            underlying,
+            option_type=option_type,
+            expiration_gte=expiration_gte,
+            expiration_lte=expiration_lte,
+            strike_gte=strike_gte,
+            strike_lte=strike_lte,
+        )
+        return self.get_option_snapshots([c.symbol for c in contracts])
+
+    def get_account_options(self) -> dict:
+        """Options approval and buying power from the trade account."""
+        acct = self._client.get_account()
+
+        def number(name, cast):
+            value = getattr(acct, name, None)
+            if value in (None, ""):
+                return None
+            try:
+                return cast(value)
+            except (TypeError, ValueError):
+                return None
+
+        return {
+            "options_trading_level": number("options_trading_level", int),
+            "options_approved_level": number("options_approved_level", int),
+            "options_buying_power": number("options_buying_power", float),
+            "non_marginable_buying_power": number(
+                "non_marginable_buying_power", float
+            ),
+            "cash": number("cash", float),
+            "equity": number("equity", float),
+        }
+
+    def get_option_activities(
+        self,
+        types=("OPASN", "OPEXP", "OPEXC"),
+        after=None,
+        *,
+        page_size: int = 100,
+        max_pages: int = 20,
+    ) -> list[OptionActivityDTO]:
+        """Assignment, expiry and exercise activities since ``after``.
+
+        TradingClient has no activities method in alpaca-py 0.43.5; its
+        RESTClient.get builds ``base + /v2 + path`` with the account's own
+        credentials, which is exactly GET /v2/account/activities/{type}.
+        Pages by ``page_token`` (the last row's id) and refuses to return a
+        truncated history.
+        """
+        out: list[OptionActivityDTO] = []
+        for kind in types:
+            kind = str(kind).strip().upper()
+            if kind not in ("OPASN", "OPEXP", "OPEXC"):
+                raise ValueError(f"unsupported option activity type {kind!r}")
+            token = None
+            for _page in range(max(1, int(max_pages))):
+                params = {"direction": "asc", "page_size": int(page_size)}
+                if after:
+                    params["after"] = str(after)
+                if token:
+                    params["page_token"] = token
+                raw = self._client.get(f"/account/activities/{kind}", params)
+                rows = raw if isinstance(raw, list) else []
+                for row in rows:
+                    out.append(_option_activity_dto(kind, row))
+                if len(rows) < int(page_size):
+                    break
+                token = str((rows[-1] or {}).get("id") or "")
+                if not token:
+                    break
+            else:
+                raise BrokerError(f"{kind} activities exceeded {max_pages} pages")
+        out.sort(key=_activity_sort_key)
+        return out
+
+    def get_daily_bars(self, symbols, days) -> dict[str, list[dict]]:
+        """Split- and dividend-adjusted SIP daily bars, oldest first, for a
+        ``days`` CALENDAR-day lookback, 100 symbols per request. The window
+        ends 16 minutes ago: SIP data newer than 15 minutes needs a paid
+        subscription and the free tier answers everything older."""
+        from alpaca.data.enums import Adjustment, DataFeed
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame
+
+        wanted = sorted(
+            {str(s).strip().upper() for s in (symbols or ()) if str(s).strip()}
+        )
+        out: dict[str, list[dict]] = {symbol: [] for symbol in wanted}
+        if not wanted:
+            return out
+        client = self._rest_quote_data_client()
+        if client is None:
+            raise BrokerError("stock market-data client unavailable")
+        now = datetime.now(timezone.utc)
+        start = now - timedelta(days=max(1, int(days)))
+        end = now - timedelta(minutes=16)
+        for index in range(0, len(wanted), 100):
+            batch = wanted[index:index + 100]
+            barset = client.get_stock_bars(
+                StockBarsRequest(
+                    symbol_or_symbols=batch,
+                    timeframe=TimeFrame.Day,
+                    start=start,
+                    end=end,
+                    adjustment=Adjustment.ALL,
+                    feed=DataFeed.SIP,
+                )
+            )
+            data = getattr(barset, "data", None) or {}
+            for symbol in batch:
+                rows = sorted(data.get(symbol) or (), key=_bar_time)
+                out[symbol] = [
+                    {
+                        "t": bar.timestamp.isoformat(),
+                        "o": float(bar.open),
+                        "h": float(bar.high),
+                        "l": float(bar.low),
+                        "c": float(bar.close),
+                        "v": float(bar.volume),
+                    }
+                    for bar in rows
+                ]
+        return out
+
+    def get_latest_trades(self, symbols) -> dict[str, tuple[float, str]]:
+        """IEX latest trade per symbol as (price, ISO timestamp)."""
+        from alpaca.data.enums import DataFeed
+        from alpaca.data.requests import StockLatestTradeRequest
+
+        wanted = sorted(
+            {str(s).strip().upper() for s in (symbols or ()) if str(s).strip()}
+        )
+        out: dict[str, tuple[float, str]] = {}
+        if not wanted:
+            return out
+        client = self._rest_quote_data_client()
+        if client is None:
+            raise BrokerError("stock market-data client unavailable")
+        for index in range(0, len(wanted), 100):
+            batch = wanted[index:index + 100]
+            raw = client.get_stock_latest_trade(
+                StockLatestTradeRequest(symbol_or_symbols=batch, feed=DataFeed.IEX)
+            ) or {}
+            for symbol in batch:
+                trade = raw.get(symbol)
+                price = _as_positive_float(getattr(trade, "price", None))
+                stamp = getattr(trade, "timestamp", None)
+                if price is not None and hasattr(stamp, "isoformat"):
+                    out[symbol] = (price, stamp.isoformat())
+        return out
+
     def start_market_marks(self, symbols) -> dict:
         """Start the read-only quote/trade stream feeding typed marks."""
 
@@ -3249,6 +3513,75 @@ def _checked_bracket_order(
     if not 0 < float(stop_loss) < float(take_profit):
         refuse(f"stop_loss={stop_loss} must be below take_profit={take_profit}")
     return int(float(qty))
+
+
+def _option_contract_dto(raw) -> OptionContractDTO:
+    """One alpaca-py OptionContract as the adapter DTO (spec section 9 fix
+    10: contract fields come from Alpaca, never from parsing the OCC symbol)."""
+    expiration = getattr(raw, "expiration_date", None)
+    open_interest = getattr(raw, "open_interest", None)
+    close_price = getattr(raw, "close_price", None)
+    return OptionContractDTO(
+        symbol=str(raw.symbol).strip().upper(),
+        underlying=str(getattr(raw, "underlying_symbol", "") or "").strip().upper(),
+        option_type=_enum_value(getattr(raw, "type", None)) or "",
+        strike=float(raw.strike_price),
+        expiration=(
+            expiration.isoformat()
+            if hasattr(expiration, "isoformat")
+            else str(expiration or "")
+        ),
+        open_interest=(
+            int(float(open_interest)) if open_interest not in (None, "") else None
+        ),
+        close_price=float(close_price) if close_price not in (None, "") else None,
+    )
+
+
+def _option_snapshot_dto(symbol: str, raw) -> OptionSnapshotDTO:
+    quote = getattr(raw, "latest_quote", None)
+    trade = getattr(raw, "latest_trade", None)
+    greeks = getattr(raw, "greeks", None)
+    stamp = getattr(quote, "timestamp", None) or getattr(trade, "timestamp", None)
+
+    def greek(name):
+        value = getattr(greeks, name, None) if greeks is not None else None
+        return float(value) if value is not None else None
+
+    iv = getattr(raw, "implied_volatility", None)
+    return OptionSnapshotDTO(
+        symbol=symbol,
+        bid=_as_positive_float(getattr(quote, "bid_price", None)),
+        ask=_as_positive_float(getattr(quote, "ask_price", None)),
+        last=_as_positive_float(getattr(trade, "price", None)),
+        iv=float(iv) if iv is not None else None,
+        delta=greek("delta"),
+        gamma=greek("gamma"),
+        theta=greek("theta"),
+        vega=greek("vega"),
+        quote_ts=stamp.isoformat() if hasattr(stamp, "isoformat") else None,
+    )
+
+
+def _option_activity_dto(kind: str, row) -> OptionActivityDTO:
+    row = dict(row or {})
+    price = row.get("price", row.get("per_share_amount"))
+    return OptionActivityDTO(
+        id=str(row.get("id") or ""),
+        activity_type=str(row.get("activity_type") or kind).strip().upper(),
+        symbol=str(row.get("symbol") or "").strip().upper(),
+        qty=float(row.get("qty") or 0),
+        date=str(row.get("date") or row.get("transaction_time") or ""),
+        price=float(price) if price not in (None, "") else None,
+    )
+
+
+def _activity_sort_key(activity: OptionActivityDTO):
+    return (activity.date, activity.id)
+
+
+def _bar_time(bar):
+    return bar.timestamp
 
 
 def _as_positive_float(value):

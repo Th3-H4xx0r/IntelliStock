@@ -129,3 +129,105 @@ def make_adapter(client, *, instance_id="swing-paper", clean_room=False):
     adapter._alert_submit = adapter._alert_fill = None
     adapter._alert_reject = adapter._alert_retry = None
     return adapter
+
+
+# --- appended by swing-port Task 4 -------------------------------------------
+
+def contract_row(symbol="APH261002P00130000", *, underlying="APH", kind="put",
+                 strike=130.0, expiration="2026-10-02", open_interest="120",
+                 close_price="1.10"):
+    return SimpleNamespace(
+        symbol=symbol, underlying_symbol=underlying, type=enum(kind),
+        strike_price=strike, expiration_date=date.fromisoformat(expiration),
+        open_interest=open_interest, close_price=close_price)
+
+
+def option_position(symbol="APH261002P00130000", qty="-1", **changes):
+    values = {
+        "symbol": symbol, "qty": qty, "asset_class": enum("us_option"),
+        "side": enum("short"), "avg_entry_price": "1.23",
+        "market_value": "-110", "current_price": "1.10",
+        "unrealized_pl": "13", "unrealized_plpc": "0.1057",
+    }
+    values.update(changes)
+    return SimpleNamespace(**values)
+
+
+def option_snapshot_row(*, bid=1.0, ask=1.2, last=1.1, iv=0.31, delta=-0.24,
+                        stamp=T0):
+    return SimpleNamespace(
+        latest_quote=SimpleNamespace(bid_price=bid, ask_price=ask,
+                                     timestamp=stamp),
+        latest_trade=SimpleNamespace(price=last, timestamp=stamp),
+        implied_volatility=iv,
+        greeks=SimpleNamespace(delta=delta, gamma=0.05, rho=0.01,
+                               theta=-0.04, vega=0.1))
+
+
+def bar_row(day, close):
+    return SimpleNamespace(
+        timestamp=datetime(2026, 9, day, 4, tzinfo=timezone.utc),
+        open=close - 1, high=close + 1, low=close - 2, close=close,
+        volume=1000.0)
+
+
+def _wanted(request):
+    wanted = request.symbol_or_symbols
+    return [wanted] if isinstance(wanted, str) else list(wanted)
+
+
+class FakeOptionsTradingClient(FakeTradingClient):
+    """Adds the options-contract and account-activities endpoints."""
+
+    def __init__(self, *, contract_pages=(), activities=None, **kwargs):
+        super().__init__(**kwargs)
+        self.contract_pages = list(contract_pages)
+        self.contract_requests = []
+        self.activities = {k: list(v) for k, v in (activities or {}).items()}
+        self.get_calls = []
+
+    def get_option_contracts(self, request):
+        self.contract_requests.append(request)
+        contracts, token = self.contract_pages.pop(0)
+        return SimpleNamespace(option_contracts=list(contracts),
+                               next_page_token=token)
+
+    def get(self, path, data=None):
+        params = dict(data or {})
+        self.get_calls.append((path, params))
+        rows = self.activities.get(path.rsplit("/", 1)[-1], [])
+        start = 0
+        if params.get("page_token"):
+            start = next(i for i, row in enumerate(rows)
+                         if row["id"] == params["page_token"]) + 1
+        return rows[start:start + int(params.get("page_size", 100))]
+
+
+class FakeOptionDataClient:
+    def __init__(self, snapshots):
+        self.snapshots = dict(snapshots)
+        self.requests = []
+
+    def get_option_snapshot(self, request):
+        self.requests.append(request)
+        return {s: self.snapshots[s] for s in _wanted(request)
+                if s in self.snapshots}
+
+
+class FakeStockDataClient:
+    def __init__(self, bars=None, trades=None):
+        self.bars = dict(bars or {})
+        self.trades = dict(trades or {})
+        self.bar_requests = []
+        self.trade_requests = []
+
+    def get_stock_bars(self, request):
+        self.bar_requests.append(request)
+        return SimpleNamespace(data={s: list(self.bars[s])
+                                     for s in _wanted(request)
+                                     if s in self.bars})
+
+    def get_stock_latest_trade(self, request):
+        self.trade_requests.append(request)
+        return {s: self.trades[s] for s in _wanted(request)
+                if s in self.trades}
