@@ -130,8 +130,18 @@ class PendingSignalsNotifier
 
   @override
   Future<PendingSignalsState> build(String arg) async {
+    // Registered before the first await: if the screen is left while the
+    // first GET is in flight, the element is gone by the time it returns,
+    // onDispose would throw, and a poller started then would never stop.
+    var disposed = false;
+    ref.onDispose(() {
+      disposed = true;
+      _poller?.dispose();
+    });
+
     final lifecycle = ref.read(appLifecycleProvider);
     final rows = await ref.read(swingRepositoryProvider).pendingSignals(arg);
+    if (disposed) return PendingSignalsState(signals: _visible(rows));
 
     _poller?.dispose();
     _poller = IntervalPoller(fetch: refresh, interval: () => pollEvery);
@@ -147,7 +157,6 @@ class PendingSignalsNotifier
         _poller?.pause();
       }
     });
-    ref.onDispose(() => _poller?.dispose());
     return PendingSignalsState(signals: _visible(rows));
   }
 

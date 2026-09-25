@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:intellistock_mobile/core/network/api_error.dart';
@@ -23,6 +24,21 @@ Future<ProviderContainer> start(FakeSwingRepo repo) async {
 
 PendingSignalsState read(ProviderContainer c) =>
     c.read(pendingSignalsProvider('i1')).requireValue;
+
+/// Holds every pendingSignals() call on [listGate] and counts the calls.
+class _GatedListRepo extends FakeSwingRepo {
+  _GatedListRepo(super.pending);
+
+  final listGate = Completer<void>();
+  int listCalls = 0;
+
+  @override
+  Future<List<SwingSignal>> pendingSignals(String instanceId) async {
+    listCalls++;
+    await listGate.future;
+    return super.pendingSignals(instanceId);
+  }
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -88,6 +104,24 @@ void main() {
       expect(read(c).isDeciding('a1'), isFalse);
     });
 
+    test('broker not running (503): card stays, buttons re-enable, retry allowed', () async {
+      final repo = FakeSwingRepo([signal('a1')])
+        ..decideError = ApiError('instance i1 is not running', statusCode: 503);
+      final c = await start(repo);
+      final notifier = c.read(pendingSignalsProvider('i1').notifier);
+      final result = await notifier.decide(signal('a1'), 'approve');
+      expect(result.outcome, DecisionOutcome.failed);
+      expect(result.message, 'instance i1 is not running');
+      expect(read(c).signals.map((s) => s.id), ['a1']);
+      expect(read(c).isDeciding('a1'), isFalse);
+
+      repo.decideError = null;
+      final retry = await notifier.decide(signal('a1'), 'approve');
+      expect(retry.outcome, DecisionOutcome.recorded);
+      expect(repo.decideCalls, ['a1:approve', 'a1:approve']);
+      expect(read(c).signals, isEmpty);
+    });
+
     test('expired session (401): card stays, message says so', () async {
       final repo = FakeSwingRepo([signal('a1')])
         ..decideError = ApiError('Not authenticated', statusCode: 401);
@@ -116,6 +150,31 @@ void main() {
       await c.read(pendingSignalsProvider('i1').notifier).refresh();
       expect(read(c).signals.map((s) => s.id), ['a1']);
       expect(read(c).refreshError, 'Cannot reach the server.');
+    });
+  });
+
+  test('disposed during the first fetch: no poller outlives the provider', () {
+    fakeAsync((async) {
+      final repo = _GatedListRepo([signal('a1')]);
+      final c = ProviderContainer(
+        overrides: [swingRepositoryProvider.overrideWithValue(repo)],
+      );
+      final sub = c.listen(pendingSignalsProvider('i1'), (_, _) {});
+      async.flushMicrotasks();
+      expect(repo.listCalls, 1);
+
+      // The screen is left while the first GET is still in flight.
+      sub.close();
+      async.elapse(Duration.zero); // Riverpod's scheduled autoDispose runs
+      expect(c.exists(pendingSignalsProvider('i1')), isFalse);
+
+      repo.listGate.complete();
+      async.flushMicrotasks();
+      async.elapse(PendingSignalsNotifier.pollEvery * 3);
+
+      expect(repo.listCalls, 1);
+      expect(async.pendingTimers, isEmpty);
+      c.dispose();
     });
   });
 
