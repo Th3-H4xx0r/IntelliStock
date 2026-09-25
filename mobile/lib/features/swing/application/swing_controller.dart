@@ -65,10 +65,14 @@ String decisionSuccessMessage(SwingSignal s, String decision) =>
       _ => 'Rejected ${s.symbol}.',
     };
 
-/// FW-api-I1: the fallback when a 202 carries no detail.
-String decisionUncertainMessage(SwingSignal s) =>
-    'Approval received for ${s.symbol} — the order may be in flight; check '
-    'the signal status and open orders.';
+/// FW-api-I1 / follow-up 1: the controller's wording for a 202 (the server
+/// sends the same text); the fallback when a 202 carries no detail.
+String uncertainMessage([String what = 'Approval']) =>
+    '$what received, but its delivery to the broker could not be confirmed. '
+    'Do NOT place this order by hand — it may still be queued. The card will '
+    'show submitted or failed shortly.';
+
+final kUncertainApproval = uncertainMessage();
 
 // ── Pending signals (polled) ─────────────────────────────────────────────────
 
@@ -317,9 +321,7 @@ class PendingSignalsNotifier
       if (receipt.uncertain) {
         return DecisionResult(
           DecisionOutcome.uncertain,
-          receipt.detail.isEmpty
-              ? decisionUncertainMessage(signal)
-              : receipt.detail,
+          receipt.detail.isEmpty ? uncertainMessage() : receipt.detail,
         );
       }
       return DecisionResult(
@@ -383,10 +385,7 @@ class PendingSignalsNotifier
       if (receipt.uncertain) {
         return DecisionResult(
           DecisionOutcome.uncertain,
-          receipt.detail.isEmpty
-              ? 'Re-send received for ${signal.symbol} — the order may be in '
-                  'flight; check the signal status and open orders.'
-              : receipt.detail,
+          receipt.detail.isEmpty ? uncertainMessage('Re-send') : receipt.detail,
         );
       }
       return DecisionResult(

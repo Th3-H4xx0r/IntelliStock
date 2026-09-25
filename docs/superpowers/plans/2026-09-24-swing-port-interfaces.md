@@ -241,7 +241,7 @@ The `LiveCommands` type `submit_order` payload is `{"source": "swing_approval", 
 1. `GET /instances/{id}/swing/signals?status=pending` returns `{"signals": [<SwingSignals doc>, ...]}`. The UI also accepts a bare list, and drops rows whose `status` is not `pending`.
 2. `POST .../decision` answers:
    - any 2xx on success. **200** is `{"signal", "command_id"}`;
-   - **202** (fix wave FW-api-I1) when the approval is recorded but the command-queue write raised and the re-read shows the command queued, the signal already moved on, or nothing readable. The body is `{"signal", "command_id" (or null), "uncertain": true, "detail"}`. The order may be in flight: the UIs show `detail` as a warning and treat the card as decided. Nothing in it tells the operator to place the order by hand;
+   - **202** (fix wave FW-api-I1) when the approval is recorded but the command-queue write raised and the re-read shows the command queued, the signal already moved on, or nothing readable. The body is `{"signal", "command_id" (or null), "uncertain": true, "detail"}`. `detail` is exactly "Approval received, but its delivery to the broker could not be confirmed. Do NOT place this order by hand — it may still be queued. The card will show submitted or failed shortly." ("Re-send received, …" from the re-send route). It carries no exception text; the server logs that;
    - **400** when the signal is not pending (`approvals.decide` raises `ValueError`, which `api/main.py:_run` maps to 400);
    - **404** for an unknown signal id, or one that belongs to another instance;
    - 409 (optional) for a lost race;

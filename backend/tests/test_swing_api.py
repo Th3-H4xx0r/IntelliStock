@@ -368,17 +368,26 @@ def _cas_second_call(monkeypatch, behaviour):
     monkeypatch.setattr(signals_store, "cas_signal", cas)
 
 
-def _assert_uncertain(res):
-    """FW-api-I1: the accepted-but-uncertain answer. Never an instruction to
-    place the order by hand, never a claim that nothing was queued."""
+UNCERTAIN_APPROVAL = ("Approval received, but its delivery to the broker could not be "
+                      "confirmed. Do NOT place this order by hand — it may still be "
+                      "queued. The card will show submitted or failed shortly.")
+UNCERTAIN_RESEND = ("Re-send received, but its delivery to the broker could not be "
+                    "confirmed. Do NOT place this order by hand — it may still be "
+                    "queued. The card will show submitted or failed shortly.")
+
+
+def _assert_uncertain(res, text=UNCERTAIN_APPROVAL):
+    """FW-api-I1 and follow-up 1: the accepted-but-uncertain answer. It never
+    invites a hand order, and it carries no raw exception text (that goes to
+    the server log)."""
     assert res.status_code == 202
     body = res.json()
     assert body["uncertain"] is True
     detail = body["detail"]
-    assert "approval received" in detail and "may be in flight" in detail
-    assert "check the signal status and open orders" in detail
-    assert "no broker command was queued" not in detail
-    assert "place the order manually" not in detail and "pending again" not in detail
+    assert detail == text
+    for leak in ("submit_command", "connection", "db down", "postgres", "raised",
+                 "Error", "manually"):
+        assert leak not in detail
     return body
 
 
@@ -692,9 +701,8 @@ def test_resend_whose_write_raised_but_landed_is_202_uncertain(api, store, monke
     sid = signal(status="approved")
     res = api.post(resend_url(sid))
     assert res.status_code == 202
-    body = res.json()
-    assert body["uncertain"] is True and body["command_id"] == landed[0]["command_id"]
-    assert "may be in flight" in body["detail"] and "manually" not in body["detail"]
+    body = _assert_uncertain(res, UNCERTAIN_RESEND)
+    assert body["command_id"] == landed[0]["command_id"]
 
 
 def test_resend_whose_write_provably_failed_is_503_try_again(api, monkeypatch):
@@ -811,3 +819,15 @@ def test_m4_real_postgres_without_the_swing_tables(pg_schema, monkeypatch):
     with pytest.raises(Exception) as caught:
         signals_store.list_signals(IID, status="pending")
     assert interactive_utils._swing_table_missing(caught.value) is True
+
+
+def test_followup_1_the_raw_exception_goes_to_the_server_log_not_the_answer(
+        api, store, monkeypatch):
+    lines = []
+    monkeypatch.setattr(interactive_utils, "_swing_log",
+                        lambda msg, color="white": lines.append((msg, color)))
+    _landed_then_raised(monkeypatch, store)
+    sid = signal()
+    _assert_uncertain(api.post(decision_url(sid), json={"decision": "approve"}))
+    assert any("server closed the connection unexpectedly" in msg and sid in msg
+               and color == "red" for msg, color in lines)

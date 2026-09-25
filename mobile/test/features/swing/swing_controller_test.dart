@@ -150,10 +150,9 @@ void main() {
 
     test('FW-api-I1: a 202 (uncertain) drops the card and says the order may be in flight',
         () async {
-      const detail = 'approval received — the order may be in flight; check the '
-          'signal status and open orders before placing anything by hand (x)';
+      final detail = kUncertainApproval;
       final repo = FakeSwingRepo([signal('a1'), signal('b22')])
-        ..decideReceipt = const DecisionReceipt(uncertain: true, detail: detail);
+        ..decideReceipt = DecisionReceipt(uncertain: true, detail: detail);
       final c = await start(repo);
       final notifier = c.read(pendingSignalsProvider('i1').notifier);
       final result = await notifier.decide(signal('a1'), 'approve');
@@ -165,9 +164,11 @@ void main() {
       repo.decideReceipt = const DecisionReceipt(uncertain: true);
       final bare = await notifier.decide(signal('b22'), 'approve');
       expect(bare.outcome, DecisionOutcome.uncertain);
+      // Follow-up 1: no detail falls back to the same ruled text.
       expect(bare.message,
-          'Approval received for AAPL — the order may be in flight; check the '
-          'signal status and open orders.');
+          'Approval received, but its delivery to the broker could not be '
+          'confirmed. Do NOT place this order by hand — it may still be '
+          'queued. The card will show submitted or failed shortly.');
       for (final m in [result.message, bare.message]) {
         expect(m, isNot(contains('place the order manually')));
         expect(m, isNot(contains('no broker command was queued')));
@@ -354,14 +355,16 @@ void main() {
     test('a 202 re-send is uncertain and carries the server advice', () async {
       final repo = FakeSwingRepo([],
           approved: [approvedSignal('a1', '2026-09-25T13:20:00Z')])
-        ..resendReceipt = const DecisionReceipt(
-            uncertain: true, detail: 're-send received — the order may be in flight');
+        ..resendReceipt = const DecisionReceipt(uncertain: true);
       final c = await start(repo);
       final result = await c
           .read(pendingSignalsProvider('i1').notifier)
           .resend(read(c).stuck.single);
       expect(result.outcome, DecisionOutcome.uncertain);
-      expect(result.message, 're-send received — the order may be in flight');
+      expect(result.message,
+          'Re-send received, but its delivery to the broker could not be '
+          'confirmed. Do NOT place this order by hand — it may still be '
+          'queued. The card will show submitted or failed shortly.');
       expect(read(c).stuck, isEmpty);
     });
 

@@ -190,13 +190,15 @@ export function detailText(detail) {
  * be in flight. The card goes like any success; the notice is a warning that
  * carries the server's advice.
  */
+/** Follow-up 1: the controller's wording for a 202, which the server sends too. */
+export function uncertainMessage(what = 'Approval') {
+  return `${what} received, but its delivery to the broker could not be confirmed. Do NOT place this order by hand — it may still be queued. The card will show submitted or failed shortly.`
+}
+
 export function classifyDecisionSuccess(status, body, signal, decision) {
   const uncertain = status === 202 || body?.uncertain === true
   if (!uncertain) return { uncertain: false, tone: 'ok', message: decisionSuccessMessage(signal, decision) }
-  const sym = signal?.symbol || 'the signal'
-  const message = detailText(body?.detail)
-    || `Approval received for ${sym} — the order may be in flight; check the signal status and open orders.`
-  return { uncertain: true, tone: 'warn', message }
+  return { uncertain: true, tone: 'warn', message: detailText(body?.detail) || uncertainMessage('Approval') }
 }
 
 /**
@@ -287,12 +289,7 @@ export function resendPrompt(signal) {
 export function resendSuccess(status, body, signal) {
   const sym = signal?.symbol || 'the signal'
   if (status === 202 || body?.uncertain === true) {
-    return {
-      uncertain: true,
-      tone: 'warn',
-      message: detailText(body?.detail)
-        || `Re-send received for ${sym} — the order may be in flight; check the signal status and open orders.`,
-    }
+    return { uncertain: true, tone: 'warn', message: detailText(body?.detail) || uncertainMessage('Re-send') }
   }
   return { uncertain: false, tone: 'ok', message: `Re-sent ${sym} to the broker.` }
 }

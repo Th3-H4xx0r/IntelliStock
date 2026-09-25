@@ -224,19 +224,18 @@ test('classifyDecisionSuccess: a 200 is the plain success copy', () => {
   assert.equal(v.message, decisionSuccessMessage(SWING, 'approve'))
 })
 
-test('classifyDecisionSuccess: a 202 shows the server detail as a warning, never "place manually"', () => {
-  const detail = 'approval received — the order may be in flight; check the signal status and open orders before placing anything by hand (x)'
-  const v = classifyDecisionSuccess(202, { uncertain: true, detail, command_id: null }, SWING, 'approve')
-  assert.deepEqual([v.uncertain, v.tone, v.message], [true, 'warn', detail])
-  // The flag alone (a proxy that rewrote the status) is enough, and no detail still warns.
+const UNCERTAIN_APPROVAL = 'Approval received, but its delivery to the broker could not be confirmed. Do NOT place this order by hand — it may still be queued. The card will show submitted or failed shortly.'
+const UNCERTAIN_RESEND = 'Re-send received, but its delivery to the broker could not be confirmed. Do NOT place this order by hand — it may still be queued. The card will show submitted or failed shortly.'
+
+test('classifyDecisionSuccess: a 202 shows the server detail as a warning, never an invitation to place it by hand', () => {
+  const v = classifyDecisionSuccess(202, { uncertain: true, detail: UNCERTAIN_APPROVAL, command_id: null }, SWING, 'approve')
+  assert.deepEqual([v.uncertain, v.tone, v.message], [true, 'warn', UNCERTAIN_APPROVAL])
+  // The flag alone (a proxy that rewrote the status) is enough, and no detail
+  // falls back to the same ruled text (follow-up 1).
   const bare = classifyDecisionSuccess(200, { uncertain: true }, SWING, 'approve_half')
-  assert.equal(bare.uncertain, true)
-  assert.match(bare.message, /^Approval received for AAPL — the order may be in flight; check the signal status and open orders/)
+  assert.deepEqual([bare.uncertain, bare.message], [true, UNCERTAIN_APPROVAL])
   const noBody = classifyDecisionSuccess(202, null, WHEEL, 'approve')
-  assert.equal(noBody.uncertain, true)
-  for (const m of [v.message, bare.message, noBody.message]) {
-    assert.doesNotMatch(m, /place the order manually|no broker command was queued/)
-  }
+  assert.deepEqual([noBody.uncertain, noBody.message], [true, UNCERTAIN_APPROVAL])
 })
 
 test('classifyDecisionFailure: a 503 keeps the card and says it was not queued', () => {
@@ -349,9 +348,9 @@ test('resend copy never promises a placed order or a notification', () => {
     'Re-send the approval for AAPL? The broker rebuilds the order at the live price and checks it before sending; a copy it already picked up is ignored.')
   const ok = resendSuccess(200, { command_id: 'c1' }, SWING)
   assert.deepEqual([ok.uncertain, ok.tone, ok.message], [false, 'ok', 'Re-sent AAPL to the broker.'])
-  const unsure = resendSuccess(202, { uncertain: true, detail: 're-send received — the order may be in flight; x' }, SWING)
-  assert.deepEqual([unsure.uncertain, unsure.tone], [true, 'warn'])
-  assert.match(unsure.message, /may be in flight/)
+  const unsure = resendSuccess(202, { uncertain: true, detail: UNCERTAIN_RESEND }, SWING)
+  assert.deepEqual([unsure.uncertain, unsure.tone, unsure.message], [true, 'warn', UNCERTAIN_RESEND])
+  assert.equal(resendSuccess(202, null, SWING).message, UNCERTAIN_RESEND)
   for (const m of [resendPrompt(SWING), ok.message, unsure.message]) {
     assert.doesNotMatch(m, /placed|notif|manually/)
   }

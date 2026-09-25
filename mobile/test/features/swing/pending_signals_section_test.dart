@@ -81,10 +81,9 @@ void main() {
 
     testWidgets('FW-api-I1: a 202 shows the server advice, never the success copy',
         (tester) async {
-      const detail = 'approval received — the order may be in flight; check '
-          'the signal status and open orders before placing anything by hand (x)';
+      final detail = kUncertainApproval;
       final repo = FakeSwingRepo([swingSignal('a1')])
-        ..decideReceipt = const DecisionReceipt(uncertain: true, detail: detail);
+        ..decideReceipt = DecisionReceipt(uncertain: true, detail: detail);
       await tester.pumpWidget(_app(repo, _section));
       await tester.pumpAndSettle();
 

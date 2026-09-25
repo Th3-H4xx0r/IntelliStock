@@ -6837,14 +6837,15 @@ def _swing_approval_commands(real_id, signal_id, *, since=None, open_only=False,
     return out
 
 
-def _swing_uncertain(signal_doc, command_id, why, *, what="approval"):
+def _swing_uncertain(signal_doc, command_id, *, what="Approval"):
     """FW-api-I1: the approval is recorded, and the broker command may have
-    been queued. The route answers 202 with this body; nothing here may tell
-    the operator to place the order by hand."""
+    been queued. The route answers 202 with this body. The wording is the
+    controller's (follow-up 1): it never invites a hand order, and it carries
+    no exception text; every caller logs that server-side first."""
     return {"signal": signal_doc, "command_id": command_id, "uncertain": True,
-            "detail": ("%s received — the order may be in flight; check the signal "
-                       "status and open orders before placing anything by hand (%s)"
-                       % (what, why))}
+            "detail": ("%s received, but its delivery to the broker could not be "
+                       "confirmed. Do NOT place this order by hand — it may still be "
+                       "queued. The card will show submitted or failed shortly." % what)}
 
 
 def _swing_after_failed_enqueue(real_id, signal_id, prior, decided, exc, started):
@@ -6872,8 +6873,7 @@ def _swing_after_failed_enqueue(real_id, signal_id, prior, decided, exc, started
         _swing_log("swing approval %s on %s: the command write raised (%s) and the queue "
                    "could not be re-read (%s: %s); the order may be in flight"
                    % (signal_id, real_id, exc, type(rexc).__name__, rexc), "red")
-        return _swing_uncertain(decided, None, "the queue write raised and could not be "
-                                "re-read: %s" % exc)
+        return _swing_uncertain(decided, None)
     now_status = str((current or {}).get("status") or "")
     if found or now_status != status:
         command_id = found[0].get("id") if found else None
@@ -6882,9 +6882,7 @@ def _swing_after_failed_enqueue(real_id, signal_id, prior, decided, exc, started
                    % (signal_id, real_id, exc,
                       "command %s is queued" % command_id if found
                       else "the signal now reads %s" % (now_status or "missing")), "red")
-        return _swing_uncertain(current or decided, command_id,
-                                "the queue write raised: %s; the signal reads %s"
-                                % (exc, now_status or "missing"))
+        return _swing_uncertain(current or decided, command_id)
     try:
         reverted, revert_error = signals_store.cas_signal(
             signal_id, expect_status=status, doc=prior), None
@@ -6896,7 +6894,7 @@ def _swing_after_failed_enqueue(real_id, signal_id, prior, decided, exc, started
         _swing_log("swing approval %s on %s: the command write raised (%s) and the signal "
                    "could not be put back to pending (%s); the order may be in flight"
                    % (signal_id, real_id, exc, why), "red")
-        return _swing_uncertain(decided, None, "the queue write raised: %s; %s" % (exc, why))
+        return _swing_uncertain(decided, None)
     raise SwingBrokerUnavailableError(
         "the approval was not queued for the broker (%s); the signal is pending again "
         "— not queued, try again" % exc)
@@ -6960,13 +6958,11 @@ def action_swing_resend_signal(conn, instance_id, signal_id, requested_by=None):
             _swing_log("swing re-send %s on %s: the command write raised (%s) and the "
                        "queue could not be re-read (%s: %s); the order may be in flight"
                        % (signal_id, real_id, exc, type(rexc).__name__, rexc), "red")
-            return _swing_uncertain(signal, None, "the queue write raised and could not "
-                                    "be re-read: %s" % exc, what="re-send")
+            return _swing_uncertain(signal, None, what="Re-send")
         if found:
             _swing_log("swing re-send %s on %s: the command write raised (%s), but command "
                        "%s is queued" % (signal_id, real_id, exc, found[0].get("id")), "red")
-            return _swing_uncertain(signal, found[0].get("id"),
-                                    "the queue write raised: %s" % exc, what="re-send")
+            return _swing_uncertain(signal, found[0].get("id"), what="Re-send")
         raise SwingBrokerUnavailableError(
             "the re-send was not queued for the broker (%s); the signal still reads %s "
             "— not queued, try again" % (exc, status))
