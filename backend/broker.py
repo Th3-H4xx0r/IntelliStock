@@ -10928,11 +10928,13 @@ def _approval_control_overlay(adapter, *, instance_key, now_utc=None):
 
     Returns DependencySnapshot field overrides for this approval's own
     snapshot. The loop's dependency state is never written (it is left to the
-    loop; the snapshot provider only reads it, under its lock); the one shared
-    write is refresh_account() updating the adapter's cached cash and equity
-    from Alpaca, under the adapter's own lock, as every refresh does. Any read
-    that fails raises; the caller treats it as transient. Each read is bounded
-    like the tick's.
+    loop; the snapshot provider only reads it, under its lock). The one
+    shared write is refresh_account(), which updates the adapter's cached
+    account fields from Alpaca under the adapter's own lock, as the tick's
+    and the snapshot thread's refreshes already do: _cash, _account_equity,
+    and the pre-submit PDT guard's facts _daytrade_count,
+    _pattern_day_trader and _account_facts_at. Any read that fails raises;
+    the caller treats it as transient. Each read is bounded like the tick's.
     """
     from live_orders import Health
     from live_risk_state import evaluate_drawdown

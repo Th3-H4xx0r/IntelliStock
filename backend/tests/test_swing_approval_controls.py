@@ -490,3 +490,25 @@ def test_an_overlay_the_snapshot_rejects_is_an_invalid_snapshot():
     out = service.submit(intent, snapshot_overlay={"no_such_field": 1})
     assert out.decision.reason_codes == ("dependency.snapshot.invalid",)
     assert sent == []
+
+
+def test_the_re_read_docstring_names_every_field_refresh_account_writes():
+    """Round 2, minor 4: the docstring said the one shared write is cash and
+    equity; refresh_account() also writes the PDT facts. Pinned against the
+    adapter's source, so a new write there fails this until it is named."""
+    import ast
+    import inspect
+    import textwrap
+
+    from broker_adapters.alpaca import AlpacaAdapter
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(AlpacaAdapter.refresh_account)))
+    written = {node.attr for node in ast.walk(tree)
+               if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store)
+               and isinstance(node.value, ast.Name) and node.value.id == "self"}
+    assert {"_cash", "_account_equity", "_daytrade_count", "_pattern_day_trader",
+            "_account_facts_at"} <= written
+    doc = ast.get_docstring(next(
+        node for node in ast.parse(function_source("_approval_control_overlay")).body))
+    missing = sorted(name for name in written if name not in doc)
+    assert missing == [], f"not named in the docstring: {missing}"
