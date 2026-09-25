@@ -108,14 +108,46 @@ def put_collateral(emu, book):
     put plus the unfilled remainder of every working sell-to-open put, at
     strike x 100 -- or (None, reason) when the option book cannot be read as
     a complete, current map (option_book). `book` is the strict working-order
-    read (working_orders)."""
+    read (working_orders).
+
+    Seams m3: a short row whose type, underlying or strike is unknown makes
+    the collateral unknown too, as FW1's option snapshot rules (broker.py
+    meta_known) -- it is never counted as 0. Alpaca can answer a contract
+    with no type or underlying, which the adapter maps to "" while its map
+    still reads complete."""
     rows, reason = option_book(emu)
     if reason is not None:
         return None, reason
+    unknown = _short_with_unknown_meta(rows)
+    if unknown is not None:
+        return None, (f"the short option {unknown} has an unknown type, underlying or "
+                      "strike, so the collateral it carries cannot be counted")
     from swing_trader import wheel_rules
     held, _by = wheel_rules.short_put_collateral(rows)
     pending, _by = wheel_rules.pending_sto_collateral(book)
     return held + pending, None
+
+
+def _short_with_unknown_meta(rows):
+    """The symbol of the first short option row whose type is not put or
+    call, whose strike is not above 0, or whose underlying is empty (a
+    quantity that cannot be read counts as short); None when every short is
+    fully known. Mirrors broker.py's meta_known rule."""
+    for row in rows or ():
+        try:
+            if float(row.qty) >= 0:
+                continue
+        except Exception:
+            return str(getattr(row, "symbol", "?"))
+        kind = str(getattr(row, "option_type", "") or "").strip().lower()
+        try:
+            strike = float(getattr(row, "strike", 0) or 0)
+        except (TypeError, ValueError):
+            strike = 0.0
+        if (kind not in ("put", "call") or not strike > 0
+                or not str(getattr(row, "underlying", "") or "").strip()):
+            return str(getattr(row, "symbol", "?"))
+    return None
 
 
 def swing_live_budget(emu, book):

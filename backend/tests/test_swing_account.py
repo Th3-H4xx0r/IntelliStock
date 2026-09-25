@@ -89,3 +89,37 @@ def test_m2_negative_cash_is_no_budget_with_puts_open():
 
 def test_m2_positive_cash_with_no_puts_is_still_st_s_buying_power():
     assert account.swing_live_budget(alpaca(cash="500"), []) == (20_000.0, 0.0, None)
+
+
+# Seams m3: FW1's option snapshot treats a short whose type, underlying or strike
+# is unknown as unknown collateral even when the map reads complete
+# (broker.py meta_known). Alpaca can answer a contract with no type or
+# underlying_symbol, which _option_contract_dto maps to "". The lane counted
+# that short as 0 collateral.
+
+def _contract(**changes):
+    from swing_alpaca_fakes import contract_row
+
+    values = {"underlying": "XYZ", "strike": 400.0, "expiration": "2026-10-16"}
+    values.update(changes)
+    return {PUT_400[0]: contract_row(PUT_400[0], **values)}
+
+
+@pytest.mark.parametrize("contract,missing", [
+    (dict(kind=None), "type"),
+    (dict(underlying=""), "underlying"),
+    (dict(strike=0.0), "strike"),
+])
+def test_m3_a_short_with_unknown_type_underlying_or_strike_is_unknown_collateral(
+        contract, missing):
+    adapter = alpaca(cash="45000", bp="90000", puts=[PUT_400], contracts=_contract(**contract))
+    rows, reason = account.option_book(adapter)
+    assert reason is None and [r.symbol for r in rows] == [PUT_400[0]]   # the map reads whole
+    collateral, why = account.put_collateral(adapter, [])
+    assert collateral is None and PUT_400[0] in why and "unknown" in why
+    assert account.swing_live_budget(adapter, [])[0] is None
+
+
+def test_m3_a_fully_known_short_call_carries_no_put_collateral():
+    adapter = alpaca(cash="45000", bp="90000", puts=[PUT_400], contracts=_contract(kind="call"))
+    assert account.put_collateral(adapter, []) == (0.0, None)
