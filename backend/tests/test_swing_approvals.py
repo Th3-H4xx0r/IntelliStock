@@ -11,7 +11,7 @@ _backend = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _backend not in sys.path:
     sys.path.insert(0, _backend)
 
-from swing_trader import approvals, signals_store  # noqa: E402
+from swing_trader import account, approvals, signals_store  # noqa: E402
 
 CFG = {"stop_loss": 0.06, "profit_target": 0.09, "position_size_pct": 0.125,
        "max_collateral_pct": 0.25, "target_delta": 0.25, "limit_bid_mult": 0.95}
@@ -308,3 +308,82 @@ def test_g8a_a_complete_current_option_map_still_builds_the_order():
                                          cfg=CFG, adapter=OptionMapAdapter([]),
                                          today=date(2026, 6, 1))
     assert out["contract"] == "APH260612P00128000"
+
+
+# -- G8b follow-up 1: the option book's health through A-live's public
+# -- AlpacaAdapter.option_positions_health() accessor (9b1c370) ---------------
+
+HEALTHY = {"complete": True, "stale_since": None}
+
+
+class HealthAdapter(OptionMapAdapter):
+    """An adapter with the public accessor. Its private flags say the
+    opposite of the accessor by default, so a reader that still reads them
+    is caught. ``answers`` are returned call by call (the last one repeats);
+    an exception is raised."""
+
+    def __init__(self, positions=(), *, answers=(HEALTHY,), complete=False,
+                 stale_since=1.0):
+        super().__init__(positions, complete=complete, stale_since=stale_since)
+        self.answers, self.health_calls = list(answers), 0
+
+    def option_positions_health(self):
+        answer = self.answers[min(self.health_calls, len(self.answers) - 1)]
+        self.health_calls += 1
+        if isinstance(answer, Exception):
+            raise answer
+        return dict(answer) if isinstance(answer, dict) else answer
+
+
+def test_g8b_option_book_reads_the_public_accessor_not_the_private_flags():
+    adapter = HealthAdapter([])
+    assert account.option_book(adapter) == ([], None)
+    assert adapter.health_calls == 2                      # both sides of the read
+    out = approvals.build_approved_order(wheel_sig(), live_price=131.2, equity=200_000.0,
+                                         cfg=CFG, adapter=HealthAdapter([]),
+                                         today=date(2026, 6, 1))
+    assert out["contract"] == "APH260612P00128000"
+
+
+@pytest.mark.parametrize("answer,needle", [
+    ({"complete": False, "stale_since": None}, "incomplete"),
+    ({"complete": True, "stale_since": 1.0}, "stale"),
+    ({"stale_since": None}, "incomplete"),                # no verdict is not complete
+    # The base adapter refuses: "unknown", never a complete, empty book.
+    (NotImplementedError("does not support option_positions_health"), "health"),
+    (RuntimeError("lock poisoned"), "health"),
+    ("not a dict", "health"),
+])
+def test_g8b_an_unhealthy_or_unreadable_accessor_fails_closed(answer, needle):
+    adapter = HealthAdapter([], answers=(answer,), complete=True, stale_since=None)
+    rows, reason = account.option_book(adapter)
+    assert reason is not None and needle in reason
+    assert account.option_positions(adapter) is None
+    with pytest.raises(approvals.BookUnreadable, match=needle):
+        approvals.build_approved_order(wheel_sig(), live_price=131.2, equity=200_000.0,
+                                       cfg=CFG, adapter=adapter, today=date(2026, 6, 1))
+
+
+def test_g8b_a_refresh_failing_between_the_two_health_reads_is_seen():
+    adapter = HealthAdapter([], answers=(HEALTHY, {"complete": True, "stale_since": 5.0}),
+                            complete=True, stale_since=None)
+    assert "stale" in account.option_book(adapter)[1]
+
+
+def test_g8b_the_real_alpaca_accessor_drives_option_book():
+    from swing_alpaca_fakes import (FakeOptionsTradingClient, contract_row,
+                                    make_adapter, option_position)
+
+    occ = "APH261002P00130000"
+    client = FakeOptionsTradingClient(positions=[option_position()],
+                                      contracts_by_symbol={occ: contract_row()})
+    adapter = make_adapter(client)
+    rows, reason = account.option_book(adapter)
+    assert reason is None and [r.symbol for r in rows] == [occ]
+
+    def down():
+        raise ConnectionError("positions endpoint down")
+
+    client.get_all_positions = down
+    adapter.refresh_positions()
+    assert "stale" in account.option_book(adapter)[1]

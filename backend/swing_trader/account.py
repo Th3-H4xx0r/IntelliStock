@@ -117,29 +117,55 @@ def working_orders(emu):
     return list(orders)
 
 
+def positions_health(emu):
+    """(complete, stale_since, error): the adapter's option-book health.
+
+    Read through the public ``option_positions_health()`` accessor (A-live
+    9b1c370) when the adapter has one. Only an adapter without it (the
+    backtest emulator, older fakes) falls back to AlpacaAdapter's private
+    flags, where a missing flag reads healthy as before. An accessor that
+    refuses (the base adapter raises NotImplementedError), raises or answers
+    anything but a dict gives an error and no verdict: the caller reads that
+    as unknown and fails closed. A dict without ``complete: True`` is
+    incomplete."""
+    accessor = getattr(emu, "option_positions_health", None)
+    if callable(accessor):
+        try:
+            health = accessor()
+        except Exception as exc:
+            return False, None, f"{type(exc).__name__}: {exc}"
+        if not isinstance(health, dict):
+            return False, None, f"unexpected answer {health!r}"
+        return health.get("complete") is True, health.get("stale_since"), None
+    return (getattr(emu, "_option_positions_complete", True) is not False,
+            getattr(emu, "_positions_stale_since", None), None)
+
+
 def option_book(emu):
     """(rows, reason): the option positions the adapter lists, and why they
     are not a complete, current map — reason is None when they are.
 
     I-1: AlpacaAdapter.list_option_positions never raises; it returns its
-    in-memory map. That map reads incomplete (`_option_positions_complete`
-    False) until a refresh succeeds, after a failed one, and while a
-    contract's fields could not be looked up (the row then keeps its signed
-    quantity with an empty type, underlying and expiry). It reads stale
-    (`_positions_stale_since` set) while the REST refresh fails. Both flags
-    are private for now; plan A-live gives them a public accessor at the
-    merge. Each is read on both sides of the call, as a refresh may land in
-    between. rows is None when the call itself failed."""
-    complete_before = getattr(emu, "_option_positions_complete", True)
-    stale_before = getattr(emu, "_positions_stale_since", None)
+    in-memory map. That map reads incomplete until a refresh succeeds, after
+    a failed one, and while a contract's fields could not be looked up (the
+    row then keeps its signed quantity with an empty type, underlying and
+    expiry). It reads stale while the REST refresh fails. Both come from
+    positions_health (the adapter's public accessor), read on both sides of
+    the call, as a refresh may land in between; health that cannot be read
+    fails closed. rows is None when the call itself failed."""
+    before = positions_health(emu)
     try:
         rows = list(emu.list_option_positions() or [])
     except Exception as exc:
         return None, f"list_option_positions failed ({type(exc).__name__}: {exc})"
-    if complete_before is False or getattr(emu, "_option_positions_complete", True) is False:
+    after = positions_health(emu)
+    for _complete, _stale, error in (before, after):
+        if error is not None:
+            return rows, f"the broker's option-book health could not be read ({error})"
+    if not (before[0] and after[0]):
         return rows, ("the broker's option map is incomplete (no successful refresh yet, a "
                       "failed one, or a contract whose fields could not be read)")
-    if stale_before is not None or getattr(emu, "_positions_stale_since", None) is not None:
+    if before[1] is not None or after[1] is not None:
         return rows, "the broker's positions snapshot is stale (its REST refresh is failing)"
     return rows, None
 

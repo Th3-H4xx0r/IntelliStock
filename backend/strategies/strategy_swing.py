@@ -244,13 +244,15 @@ def _positions_for_scan(emu):
 
     AlpacaAdapter.refresh_positions never raises. On a REST failure it returns
     the cached quantities with avg_entry_price=0.0; after 10 minutes, or in a
-    process whose first refresh failed, it returns an empty book. Its health
-    flag `_positions_stale_since` is set while refreshes fail and is set
-    BEFORE the call that clears the cache, so it is read on both sides.
+    process whose first refresh failed, it returns an empty book. Its
+    staleness stamp (``stale_since`` of the public option_positions_health
+    accessor, read through account.positions_health) is set while refreshes
+    fail and is set BEFORE the call that clears the cache, so it is read on
+    both sides; health that cannot be read is not ready.
     Every held name reading no entry price is that cached snapshot's
     signature; one such name among priced ones is only skipped by _exits
     (review round 2, finding 3)."""
-    before = getattr(emu, "_positions_stale_since", None)
+    _complete, before, health_error = account.positions_health(emu)
     dtos, held, reason = [], None, None
     refresh = getattr(emu, "refresh_positions", None)
     if callable(refresh):
@@ -275,7 +277,11 @@ def _positions_for_scan(emu):
                else {s for s, r in rows.items() if r["qty"] > 0})
     if reason:
         return None, reason, visible
-    if before is not None or getattr(emu, "_positions_stale_since", None) is not None:
+    _complete, after, after_error = account.positions_health(emu)
+    if health_error is not None or after_error is not None:
+        return None, ("the broker's positions health could not be read "
+                      f"({health_error or after_error})"), visible
+    if before is not None or after is not None:
         return None, ("the broker's positions snapshot is stale (its REST refresh is "
                       "failing)"), visible
     out = {}

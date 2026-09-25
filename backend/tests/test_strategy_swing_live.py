@@ -621,6 +621,36 @@ def test_fix_a_the_adapters_stale_positions_flag_is_not_ready(live, monkeypatch)
     assert out["AAA"] == 1 and cache[live._SCAN_DONE_KEY] == "2026-06-01"
 
 
+class HealthAccessor(LiveAdapter):
+    """An adapter with A-live's public option_positions_health() (9b1c370).
+    Its private flag says the opposite of the accessor, so a scan that still
+    reads the flag is caught. An exception answer is raised."""
+
+    def __init__(self, answer, *, private_stale=None, **kw):
+        super().__init__(**kw)
+        self.answer, self._positions_stale_since = answer, private_stale
+
+    def option_positions_health(self):
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        return dict(self.answer)
+
+
+def test_g8b_the_scan_reads_staleness_through_the_public_accessor(live, monkeypatch):
+    ai = scripted({"AAA": APPROVE, "CCC": REJECT, "DDD": REJECT})
+    monkeypatch.setattr(live.ai_analyst, "analyse", ai)
+    cache = {}
+    stale = HealthAccessor({"complete": True, "stale_since": 1_000.0})
+    assert tick(live, MON_0920, stale, cache) == {}
+    # The base adapter refuses the accessor: health unknown, so not ready.
+    unknown = HealthAccessor(NotImplementedError("does not support option_positions_health"))
+    assert tick(live, MON_0940, unknown, cache) == {}
+    assert ai.calls == [] and live._SCAN_DONE_KEY not in cache
+    fresh = HealthAccessor({"complete": True, "stale_since": None}, private_stale=1_000.0)
+    out = tick(live, MON_1000, fresh, cache)
+    assert out["AAA"] == 1 and cache[live._SCAN_DONE_KEY] == "2026-06-01"
+
+
 def test_fix_c_a_missing_vix_retries_until_the_scan_reads_it(live, monkeypatch):
     ai = scripted({"AAA": APPROVE, "CCC": REJECT, "DDD": REJECT})
     monkeypatch.setattr(live.ai_analyst, "analyse", ai)
