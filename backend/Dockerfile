@@ -90,7 +90,9 @@ ENV GIT_COMMIT_SHA=${GIT_COMMIT_SHA}
 
 # Pre-train the CandlesStrategy model so backtests load weights from disk
 # instead of retraining (~30s, 99% CPU) on every run.
-RUN python strategies/pretrain_candles.py
+# Disabled 2026-09-25 (operator): it made every backend build slow. Without
+# candles_v5.pt, strategies/candles.py trains at runtime on first use instead.
+# RUN python strategies/pretrain_candles.py
 
 # Expose Socket.IO / WSGI server port (backend) and API port (api service)
 EXPOSE 5000 8000
