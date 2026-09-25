@@ -10816,6 +10816,90 @@ def _approval_live_price(adapter, symbol):
     return float(price), stamp_dt
 
 
+def _sweep_stale_submitted_signals(order_service, *, now_utc=None, log=None,
+                                   max_age_s=600.0):
+    """Fix wave FW1 item 9 (plan B final review M-2): a swing/wheel signal
+    left "submitted" with no order key and no lifecycle intent.
+
+    The approval handler claims a signal approved -> submitted BEFORE it
+    sends anything and writes the order's key back after. A process that died
+    between the two leaves a row that reads submitted forever. Once such a
+    row is ``max_age_s`` past its claim (claimed_at, else decided_at, else
+    created_at), it is compare-and-swapped to failed and the operator is told
+    the order may not have been placed. A row whose intent exists (reason
+    swing_approval:<id>, or, for a wheel approval made before its intent
+    carried the id, a MANUAL option intent on its underlying since the claim)
+    is left to reconcile. Runs from the swing/wheel lane tick only. An
+    unreadable lifecycle store raises: nothing is marked on a guess.
+    Returns the ids marked failed."""
+    from live_orders import OrderSource
+    from swing_trader import notify as swing_notify
+    from swing_trader import signals_store
+
+    def say(message, color="white"):
+        if log is not None:
+            try:
+                log(message, color)
+            except Exception:
+                pass
+
+    def parse(stamp):
+        try:
+            value = datetime.datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+        return value if value.tzinfo is not None else value.replace(
+            tzinfo=datetime.timezone.utc)
+
+    now_utc = now_utc or datetime.datetime.now(datetime.timezone.utc)
+    instance_key = str(order_service.instance_id)
+    signals_store.ensure_tables()
+    stale = []
+    for row in signals_store.list_signals(instance_key, status="submitted", limit=500):
+        if row.get("order_client_id") or row.get("lane") not in ("swing", "wheel"):
+            continue
+        claimed = None
+        for name in ("claimed_at", "decided_at", "created_at"):
+            claimed = parse(row.get(name)) if row.get(name) else None
+            if claimed is not None:
+                break
+        if claimed is None or (now_utc - claimed).total_seconds() < float(max_age_s):
+            continue
+        stale.append((row, claimed))
+    if not stale:
+        return []
+    records = list(order_service.lifecycle_store.list_for_instance(instance_key))
+    reasons = {str(record.intent.reason) for record in records}
+    swept = []
+    for row, claimed in stale:
+        signal_id = str(row.get("id") or "")
+        symbol = str(row.get("symbol") or "").strip().upper()
+        lane = str(row.get("lane") or "")
+        if f"swing_approval:{signal_id}" in reasons:
+            continue
+        if lane == "wheel" and any(
+                record.intent.source is OrderSource.MANUAL
+                and record.intent.asset_class == "us_option"
+                and str(record.intent.underlying or "").upper() == symbol
+                and record.intent.decision_at >= claimed
+                for record in records):
+            continue
+        minutes = int((now_utc - claimed).total_seconds() // 60)
+        doc = dict(row)
+        doc.update({"status": "failed", "order_client_id": None})
+        if not signals_store.cas_signal(signal_id, expect_status="submitted", doc=doc):
+            continue
+        say(f"[swing] approval {signal_id} ({lane} {symbol}) marked failed: "
+            f"claimed {minutes} min ago with no order key and no order intent; "
+            "the order may not have been placed — check open orders", "red")
+        swing_notify.notify_swing_approval_unconfirmed(
+            instance_key, symbol=symbol, lane=lane,
+            detail=(f"The approval was claimed {minutes} min ago and no order "
+                    "was ever recorded; the signal is marked failed."))
+        swept.append(signal_id)
+    return swept
+
+
 def _approval_control_overlay(adapter, *, instance_key, now_utc=None):
     """The order gate's control inputs, RE-READ for an operator approval
     (swing-port fix wave, FW-lo-I1).
@@ -11047,6 +11131,9 @@ def _execute_swing_approval(adapter, payload, order_service, *,
 
     claimed = dict(signal)
     claimed["status"] = "submitted"
+    # Fix wave FW1 item 9: the stale-row sweep ages a claim from here.
+    claimed["claimed_at"] = (now_utc or datetime.datetime.now(
+        datetime.timezone.utc)).isoformat()
     try:
         won = signals_store.cas_signal(signal_id, expect_status=status, doc=claimed)
     except Exception as exc:
@@ -11160,10 +11247,12 @@ def _execute_swing_approval(adapter, payload, order_service, *,
                 raise _Retryable(
                     f"no usable options snapshot for {order.get('contract')}",
                     quote=True)
+            # Fix wave FW1 item 9: the intent names its signal, as a swing
+            # approval's does, so the stale-row sweep can find it.
             intent = _build_option_intent(
-                order_service, order, quote_at=quote["quote_at"],
-                decision_at=now_utc, risk_snapshot_id=risk_id,
-                source=OrderSource.MANUAL)
+                order_service, dict(order, reason=f"swing_approval:{signal_id}"),
+                quote_at=quote["quote_at"], decision_at=now_utc,
+                risk_snapshot_id=risk_id, source=OrderSource.MANUAL)
         else:
             raise ValueError(f"unknown approved order kind {kind!r}")
     except _Retryable as exc:
@@ -21143,6 +21232,24 @@ while not shutdown_requested:
                         "strategies": list(strategy_summary) if strategy_summary else [],
                         "post_decision": list(post_decision_trace) if post_decision_trace else [],
                     })
+
+            # swing-port fix wave (plan B final review M-2): a swing/wheel
+            # approval claimed long ago that recorded no order is marked failed
+            # and told. Swing/wheel documents only; doc 200 never enters.
+            if (
+                mode == MODE_LIVE
+                and str(live_broker_type or "").strip().lower() == "alpaca"
+                and _live_stock_order_service is not None
+                and (_lane_enabled(_cached_strategies, "strategy_swing")
+                     or _lane_enabled(_cached_strategies, "strategy_wheel"))
+            ):
+                try:
+                    _sweep_stale_submitted_signals(
+                        _live_stock_order_service, log=_log)
+                except Exception as _sweep_exc:
+                    _log(f"[swing] stale approval sweep failed "
+                         f"({type(_sweep_exc).__name__}: {_sweep_exc}); retried "
+                         "next tick", "yellow")
 
             # swing-port (spec 6.1 broker item 8): option assignments, expiries
             # and exercises, polled only for a document with an enabled wheel

@@ -92,3 +92,17 @@ def notify_swing_approval_failed(instance_id, *, symbol, lane, reason) -> None:
          f"Approved {lane_name} order refused: {symbol}",
          f"{symbol}: the {lane_name} order you approved was not sent — {why}",
          priority=1)
+
+
+def notify_swing_approval_unconfirmed(instance_id, *, symbol, lane, detail) -> None:
+    """Fix wave FW1 item 9 (plan B final review M-2): an approval claimed
+    long ago that recorded no order id and left no order intent. The process
+    may have died between the claim and the send, so the order MAY NOT have
+    been placed; the operator checks the broker's open orders. Pushes, like
+    a refusal: the operator believes that trade is on."""
+    lane_name = str(lane or "swing")
+    send("swing_approval_failed", instance_id,
+         f"Approved {lane_name} order unconfirmed: {symbol}",
+         f"{symbol}: the {lane_name} order you approved may not have been "
+         f"placed — check open orders. {_keep_suffix(detail or '', 200)}".rstrip(),
+         priority=1)
