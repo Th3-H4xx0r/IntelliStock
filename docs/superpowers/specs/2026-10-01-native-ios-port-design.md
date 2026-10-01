@@ -281,7 +281,7 @@ parses the same path strings.
 | violet `primary` | `AccentColor` asset: light `#6D28D9` (7.1:1 on white, 6.4:1 on `#F2F2F7`), dark `#A78BFA` (7.7:1 on black, 6.3:1 on `#1C1C1E`) | One colour, one meaning: interactive and brand |
 | success/danger/warning/info/teal | `.green` / `.red` / `.orange` / `.blue` / `.teal` | System colours, adaptive |
 | `GlassCard` | `Card` container: `.background(.background.secondary, in: .rect(cornerRadius: 22, style: .continuous))`, or an inset-grouped `List` section where the content is rows | Glass stays OFF content (`liquid-glass.md`) |
-| `AppBackground` gradients | Plain grouped background. Only Dashboard and Kalshi keep one subtle accent wash at the top | Restraint; one signature |
+| `AppBackground` gradients, gradient crowns, glows, blooms, shimmer | **None.** Every screen sits on the plain system grouped background. There are no gradients anywhere: backgrounds, cards, buttons, icons, the lock mark, chart fills. Charts draw a line with a flat ≤ 15 % area fill | The operator, 2026-10-01: "remove the gradients in the new app as well and make it look more apple UI like" |
 | `AppButton` primary/secondary/danger/ghost | `.borderedProminent` / `.bordered` / `.borderedProminent` + `role: .destructive` / `.borderless`. Full-width form CTAs use `.controlSize(.large)` | `buttons.md` |
 | `AuthPillButton`, chat FAB, floating actions | `.buttonStyle(.glassProminent)` / `.glass`, grouped in `GlassEffectContainer` | The functional layer only |
 | `AppToggle` | `Toggle` | |
@@ -331,7 +331,13 @@ Signature and restraint:
 
 - The coin on the login screen and the dashboard hero balance with numeric transitions are the two
   defining moments.
-- Everything else is quiet system UI.
+- Everything else is quiet system UI, in the manner of Apple's Stocks, Wallet and Settings apps:
+  - inset-grouped lists;
+  - solid secondary-background cards;
+  - SF Symbols;
+  - system controls with no custom chrome.
+- **No gradients, glows, coloured shadows or decorative backgrounds anywhere.** This is the operator's
+  explicit rule.
 - Liquid Glass appears only on the system bars, the floating chat button and floating actions.
 
 ## 8. Work breakdown and ownership
