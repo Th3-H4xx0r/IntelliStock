@@ -157,7 +157,7 @@ struct JSONTests {
         #expect(j[2] == .double(3))
         #expect(j[3] == .double(1000))
         #expect(j[4] == .double(0.02))
-        #expect(j[5].double == 12345678901234567890)
+        #expect(j[5].double == 1.2345678901234567e19)
     }
 
     @Test(arguments: ["", "{", #"{"a" 1}"#, "[1,]", "tru", #""unterminated"#, "{} x", "01"])
