@@ -39,7 +39,11 @@ private struct ConnectForm: View {
             }
 
             Section {
-                TextField("https://your-instance.example.com", text: $model.url)
+                // Verbatim: a string-literal title is Markdown, which would
+                // render the example URL as a link.
+                TextField(text: $model.url, prompt: Text(verbatim: "https://your-instance.example.com")) {
+                    Text("Server URL")
+                }
                     .keyboardType(.URL)
                     .textContentType(.URL)
                     .textInputAutocapitalization(.never)
@@ -62,11 +66,12 @@ private struct ConnectForm: View {
                             .opacity(model.probing ? 0 : 1)
                         if model.probing {
                             ProgressView()
+                                .tint(DS.Palette.onAccent)
                         }
                     }
                     .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.borderedProminent)
+                .dsProminentButton()
                 .controlSize(.large)
                 .disabled(model.probing)
                 .listRowBackground(Color.clear)

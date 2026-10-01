@@ -22,7 +22,7 @@ struct EmptyState: View {
         } actions: {
             if let actionLabel, let onAction {
                 Button(actionLabel, action: onAction)
-                    .buttonStyle(.borderedProminent)
+                    .dsProminentButton()
             }
         }
     }

@@ -17,6 +17,14 @@ nonisolated enum DS {
         /// Price/P&L up and down.
         static let up = Color.green
         static let down = Color.red
+        /// Text and glyphs on an accent fill (prominent buttons). White on the
+        /// light accent #6D28D9 (7.1:1); near-black on the dark accent
+        /// #A78BFA (8:1), where white is only 2.7:1 — Flutter's `onPrimary`.
+        static let onAccent = Color(uiColor: UIColor { traits in
+            traits.userInterfaceStyle == .dark
+                ? UIColor(red: 0.016, green: 0.016, blue: 0.047, alpha: 1)
+                : .white
+        })
     }
 
     /// The Flutter surfaces mapped onto the grouped background family

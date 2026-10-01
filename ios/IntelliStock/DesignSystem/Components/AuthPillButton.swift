@@ -35,6 +35,7 @@ struct AuthPillButton: View {
                     if busy, let busyLabel {
                         HStack(spacing: 10) {
                             ProgressView()
+                                .tint(DS.Palette.onAccent)
                             Text(busyLabel)
                         }
                     } else {
@@ -56,7 +57,7 @@ struct AuthPillButton: View {
             .padding(.horizontal, 8)
             .frame(minHeight: 44)
         }
-        .buttonStyle(.glassProminent)
+        .dsGlassProminentButton()
         .controlSize(.large)
         .disabled(busy)
         .opacity(busy && busyLabel == nil ? 0.6 : 1)
