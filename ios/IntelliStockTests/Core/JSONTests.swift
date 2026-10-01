@@ -103,6 +103,68 @@ struct JSONTests {
         #expect(JSON.dartDoubleString(value) == expected)
     }
 
+    // MARK: Order and encoding (Dart's LinkedHashMap + jsonEncode)
+
+    @Test func objectKeysKeepServerOrder() throws {
+        let j = try parse(#"{"zeta": 1, "alpha": 2, "mid": {"b": 1, "a": 2}}"#)
+        #expect(j.entries.map(\.key) == ["zeta", "alpha", "mid"])
+        #expect(j["mid"].entries.map(\.key) == ["b", "a"])
+        #expect(j.dartDescription == "{zeta: 1, alpha: 2, mid: {b: 1, a: 2}}")
+    }
+
+    @Test func duplicateKeysKeepFirstPositionAndLastValue() throws {
+        let j = try parse(#"{"a": 1, "b": 2, "a": 3}"#)
+        #expect(j.entries.map(\.key) == ["a", "b"])
+        #expect(j["a"].int == 3)
+    }
+
+    @Test func equalityIgnoresKeyOrder() throws {
+        #expect(try parse(#"{"a": 1, "b": 2}"#) == parse(#"{"b": 2, "a": 1}"#))
+        #expect(try parse(#"{"a": 1, "b": 2}"#) == ["b": 2, "a": 1])
+    }
+
+    @Test func dictionaryAccessorsStillWork() throws {
+        let j = try parse(#"{"a": 1}"#)
+        #expect(j.object == ["a": .int(1)])
+        #expect(j.objectValue["a"] == .int(1))
+        let built = JSON.object(["k": "v"])
+        #expect(built["k"].string == "v")
+    }
+
+    @Test func encodesLikeDartJsonEncode() throws {
+        let body: JSON = .object(JSONObject([
+            ("initial_cash", .double(100000)), ("ratio", .double(0.25)), ("n", .int(3)),
+            ("s", .string("a/b \"q\" \\ é\n")), ("flag", .bool(false)), ("none", .null),
+            ("list", [1, 2.5]),
+        ]))
+        let text = String(decoding: try body.data(), as: UTF8.self)
+        #expect(text == #"{"initial_cash":100000.0,"ratio":0.25,"n":3,"s":"a/b \"q\" \\ é\n","flag":false,"none":null,"list":[1,2.5]}"#)
+    }
+
+    @Test func encodingNonFiniteThrows() {
+        #expect(throws: (any Error).self) { _ = try JSON.double(.nan).data() }
+    }
+
+    @Test func parsesEscapesAndSurrogatePairs() throws {
+        let j = try parse(#"{"s": "tab\tq\"é😀\/"}"#)
+        #expect(j["s"].string == "tab\tq\"é😀/")
+    }
+
+    @Test func numbersParseLikeDart() throws {
+        let j = try parse(#"[0, -12, 3.0, 1e3, 2E-2, 12345678901234567890]"#)
+        #expect(j[0] == .int(0))
+        #expect(j[1] == .int(-12))
+        #expect(j[2] == .double(3))
+        #expect(j[3] == .double(1000))
+        #expect(j[4] == .double(0.02))
+        #expect(j[5].double == 12345678901234567890)
+    }
+
+    @Test(arguments: ["", "{", #"{"a" 1}"#, "[1,]", "tru", #""unterminated"#, "{} x", "01"])
+    func malformedInputThrows(text: String) {
+        #expect(throws: (any Error).self) { _ = try JSON(data: Data(text.utf8)) }
+    }
+
     @Test func topLevelFragmentsParse() throws {
         #expect(try parse("\"ok\"").string == "ok")
         #expect(try parse("7").int == 7)
