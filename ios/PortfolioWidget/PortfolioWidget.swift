@@ -1,11 +1,14 @@
-// PortfolioWidget — IntelliStock iOS home-screen widgets (iOS 17+).
-// Design: "Premium Editorial" (V5) — airy spacing, light-weight large value,
-// curve + positions; 2×2 = curve on top half, positions on bottom half.
+// PortfolioWidget — IntelliStock home-screen and Lock Screen widgets.
 //
-// Reads App-Group UserDefaults keys written by the Flutter WidgetSyncService:
+// Apple-native style (2026-10-01): the system widget background, semantic
+// label colours, system green/red for P&L, a flat area fill under the curve,
+// system content margins, and accented-mode support. No gradients.
+//
+// Reads App-Group UserDefaults keys written by the app's `WidgetSync`:
 //   "accounts_data"  → [WidgetAccount] JSON  (selectable portfolios + positions)
 //   "instances_data" → [WidgetInstance] JSON
-// See mobile/docs/NATIVE_SETUP.md.
+//   "synced_at"      → epoch seconds of the last sync
+// and self-fetches `/widget/accounts` with "widget_api_base" + "widget_token".
 
 import WidgetKit
 import SwiftUI
@@ -13,16 +16,9 @@ import AppIntents
 
 private let kAppGroup = "group.dev.pkrishna.intellistock"
 
-// MARK: - Palette (IntelliStock dark theme)
-private let cHi    = Color(red: 0.945, green: 0.961, blue: 0.976)
-private let cDim   = Color(red: 0.58,  green: 0.64,  blue: 0.72)
-private let cFaint = Color(red: 0.39,  green: 0.45,  blue: 0.55)
-private let cGreen = Color(red: 0.204, green: 0.827, blue: 0.600)
-private let cRed   = Color(red: 0.973, green: 0.443, blue: 0.443)
-private let widgetBG = LinearGradient(
-    colors: [Color(red: 0.090, green: 0.055, blue: 0.176),
-             Color(red: 0.043, green: 0.031, blue: 0.094)],
-    startPoint: .top, endPoint: .bottom)
+// MARK: - Palette (adaptive)
+private let cUp = Color.green
+private let cDown = Color.red
 
 private func dbl(_ v: Any?) -> Double { (v as? NSNumber)?.doubleValue ?? 0 }
 
@@ -95,8 +91,8 @@ private func resolveAccount(_ id: String?) -> AccountData? {
 // MARK: - Self-refresh
 //
 // The widget fetches fresh data itself on each timeline reload, so it stays
-// current even when the Flutter app isn't open (the app writes the API base +
-// auth token into the App Group on login). On any failure it keeps the last
+// current even when the app isn't open (the app writes the API base + auth
+// token into the App Group on login). On any failure it keeps the last
 // cached App-Group data. iOS still governs HOW OFTEN reloads happen (budgeted,
 // ~every 15-30 min in the background) — opening the app forces an instant one.
 private func fetchAndCacheAccounts() async {
@@ -163,18 +159,23 @@ private func portfolioEntry(for id: String?, date: Date = Date()) -> PortfolioEn
                           pnlPct: 0, points: [], positions: [], syncedAt: synced, hasData: false)
 }
 
-// MARK: - View (V5 Premium Editorial, per family)
+// MARK: - View (per family)
 
 struct PortfolioWidgetView: View {
     @Environment(\.widgetFamily) private var family
+    @Environment(\.widgetRenderingMode) private var renderingMode
     let entry: PortfolioEntry
 
-    private var trend: Color { entry.pnlAbs >= 0 ? cGreen : cRed }
+    private var trend: Color { entry.pnlAbs >= 0 ? cUp : cDown }
     private var pctText: String {
         "\(entry.pnlPct >= 0 ? "+" : "−")\(String(format: "%.2f%%", abs(entry.pnlPct)))"
     }
     private var absText: String {
         "\(entry.pnlAbs >= 0 ? "+$" : "−$")\(String(format: "%.2f", abs(entry.pnlAbs)))"
+    }
+    /// The up/down glyph that carries the P&L direction without colour.
+    private var trendSymbol: String {
+        entry.pnlAbs >= 0 ? "arrowtriangle.up.fill" : "arrowtriangle.down.fill"
     }
 
     var body: some View {
@@ -201,31 +202,25 @@ struct PortfolioWidgetView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        // Floating corner label — doesn't consume layout height (so it can't push
-        // content or clip from overflow). `.bottomTrailing` resolves to the visual
-        // RIGHT only in LTR; this device runs RTL (Arabic region), which is why
-        // every "trailing" attempt landed on the LEFT. Force LTR so bottom-right
-        // is truly bottom-right. Auto-updating date Text; `+ Text(" ago")` keeps
-        // the live tick.
+        // Floating "x ago" label that doesn't consume layout height. Absolute
+        // positioning (GeometryReader + .position) because the operator's
+        // device runs an RTL region, where leading/trailing alignment resolved
+        // to the left and clipped.
         .overlay {
             if entry.hasData, entry.syncedAt > 0 {
-                // ABSOLUTE positioning — GeometryReader + .position use raw pixel
-                // coordinates that layout direction CANNOT flip (unlike
-                // leading/trailing alignment + padding, which kept resolving to
-                // the left and clipping on this RTL-locale widget). x is measured
-                // from the left edge, so width-46 sits near the right; .position
-                // places the label's centre there. No .fixedSize (it collapses an
-                // auto-updating date Text).
                 GeometryReader { geo in
-                    (Text(syncedDate(entry.syncedAt), style: .relative) + Text(" ago"))
-                        .font(.system(size: 9)).foregroundColor(cFaint)
+                    Text("\(Text(syncedDate(entry.syncedAt), style: .relative)) ago")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                         .lineLimit(1)
-                        .position(x: geo.size.width - 40, y: geo.size.height - 13)
+                        .position(x: geo.size.width - 34, y: geo.size.height - 6)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .containerBackground(widgetBG, for: .widget)
+        .containerBackground(for: .widget) {
+            Color(uiColor: .systemBackground)
+        }
     }
 
     // ── Lock-screen accessory widgets (rendered monochrome by iOS) ──
@@ -234,20 +229,24 @@ struct PortfolioWidgetView: View {
         VStack(alignment: .leading, spacing: 1) {
             if entry.hasData {
                 HStack(spacing: 3) {
-                    Image(systemName: entry.pnlAbs >= 0 ? "arrowtriangle.up.fill" : "arrowtriangle.down.fill")
-                        .font(.system(size: 9))
+                    Image(systemName: trendSymbol)
+                        .font(.caption2)
                     Text("$\(String(format: "%.2f", abs(entry.pnlAbs))) · \(String(format: "%.2f%%", abs(entry.pnlPct)))")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(.caption.weight(.semibold))
                 }
-                Text(money(entry.value)).font(.system(size: 17, weight: .bold))
+                Text(money(entry.value))
+                    .font(.headline)
+                    .widgetAccentable()
                 if entry.syncedAt > 0 {
-                    (Text(syncedDate(entry.syncedAt), style: .relative) + Text(" ago"))
-                        .font(.system(size: 10)).foregroundStyle(.secondary)
-                        .lineLimit(1).minimumScaleFactor(0.8)
+                    Text("\(Text(syncedDate(entry.syncedAt), style: .relative)) ago")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                 }
             } else {
-                Text("IntelliStock").font(.system(size: 12, weight: .semibold))
-                Text("Open app to sync").font(.system(size: 11)).foregroundStyle(.secondary)
+                Text("IntelliStock").font(.caption.weight(.semibold))
+                Text("Open app to sync").font(.caption2).foregroundStyle(.secondary)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
@@ -259,7 +258,7 @@ struct PortfolioWidgetView: View {
             Label {
                 Text("\(money(entry.value)) · \(pctText)")
             } icon: {
-                Image(systemName: entry.pnlAbs >= 0 ? "arrowtriangle.up.fill" : "arrowtriangle.down.fill")
+                Image(systemName: trendSymbol)
             }
         } else {
             Text("IntelliStock — open app")
@@ -269,74 +268,94 @@ struct PortfolioWidgetView: View {
     // ── Empty state ──
     private var empty: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("INTELLISTOCK").font(.system(size: 10, weight: .semibold)).tracking(0.8).foregroundColor(cFaint)
+            Text("INTELLISTOCK")
+                .font(.caption2.weight(.semibold))
+                .tracking(0.8)
+                .foregroundStyle(.secondary)
+                .widgetAccentable()
             Spacer()
-            Text("Open the app to sync your portfolio").font(.system(size: 12)).foregroundColor(cDim)
+            Text("Open the app to sync your portfolio")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
             Spacer()
         }
-        .padding(24)
+    }
+
+    private func eyebrow(_ text: String) -> some View {
+        Text(text)
+            .font(.caption2.weight(.semibold))
+            .tracking(0.6)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .widgetAccentable()
+    }
+
+    private func value(size: CGFloat) -> some View {
+        Text(money(entry.value))
+            .font(.system(size: size, weight: .semibold))
+            .monospacedDigit()
+            .foregroundStyle(.primary)
+            .minimumScaleFactor(0.6)
+            .lineLimit(1)
+    }
+
+    /// The day change; its +/− sign carries the direction without colour.
+    private func change(_ text: String) -> some View {
+        Text(text)
+            .font(.caption)
+            .monospacedDigit()
+            .foregroundStyle(trend)
     }
 
     // ── 1×1 ──
     private var small: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(entry.label.uppercased())
-                .font(.system(size: 9, weight: .semibold)).tracking(0.7)
-                .foregroundColor(cFaint).lineLimit(1)
-            Text(money(entry.value))
-                .font(.system(size: 22, weight: .semibold)).foregroundColor(cHi)
-                .minimumScaleFactor(0.6).lineLimit(1)
-            Text("\(pctText) today").font(.system(size: 11)).foregroundColor(trend).monospacedDigit()
+            eyebrow(entry.label.uppercased())
+            value(size: 22)
+            change("\(pctText) today")
             Spacer(minLength: 4)
             curve(height: 40)
         }
-        .padding(24)
     }
 
     // ── 1×2 ──
     private var medium: some View {
         HStack(spacing: 16) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(entry.label.uppercased())
-                    .font(.system(size: 9, weight: .semibold)).tracking(0.7).foregroundColor(cFaint).lineLimit(1)
-                Text(money(entry.value)).font(.system(size: 24, weight: .semibold))
-                    .foregroundColor(cHi).minimumScaleFactor(0.6).lineLimit(1)
-                Text("\(absText) · \(pctText)").font(.system(size: 11)).foregroundColor(trend).monospacedDigit()
+                eyebrow(entry.label.uppercased())
+                value(size: 24)
+                change("\(absText) · \(pctText)")
                 Spacer(minLength: 6)
                 curve(height: 30)
             }
             positionsGrid(limit: 6, columns: 2, fontSize: 11)
                 .frame(maxWidth: .infinity)
         }
-        .padding(24)
     }
 
     // ── 2×2 : curve top, positions bottom ──
     private var large: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 3) {
-                Text("\(entry.label.uppercased()) · TODAY")
-                    .font(.system(size: 10, weight: .semibold)).tracking(0.7).foregroundColor(cFaint).lineLimit(1)
-                Text(money(entry.value)).font(.system(size: 32, weight: .semibold))
-                    .foregroundColor(cHi).minimumScaleFactor(0.6).lineLimit(1)
-                Text("\(absText) · \(pctText)").font(.system(size: 12)).foregroundColor(trend).monospacedDigit()
+                eyebrow("\(entry.label.uppercased()) · TODAY")
+                value(size: 32)
+                change("\(absText) · \(pctText)")
                 Spacer(minLength: 8)
                 curve(height: 50)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.bottom, 10)
 
-            Divider().overlay(Color.white.opacity(0.10))
+            Divider()
 
             positionsGrid(limit: 8, columns: 2, fontSize: 12.5)
                 .padding(.top, 12)
                 .frame(maxWidth: .infinity, alignment: .top)
         }
-        .padding(26)
     }
 
-    // ── Positions — condensed: no dot, P&L right next to the ticker, packed
-    //    into `columns` so two fit side by side and more holdings show. ──
+    // ── Positions — condensed: P&L right next to the ticker, packed into
+    //    `columns` so two fit side by side and more holdings show. ──
     private func positionsGrid(limit: Int, columns: Int, fontSize: CGFloat) -> some View {
         let items = Array(entry.positions.prefix(limit))
         let rows = stride(from: 0, to: items.count, by: columns).map {
@@ -344,7 +363,7 @@ struct PortfolioWidgetView: View {
         }
         return VStack(alignment: .leading, spacing: fontSize * 0.7) {
             if items.isEmpty {
-                Text("No open positions").font(.system(size: fontSize)).foregroundColor(cFaint)
+                Text("No open positions").font(.system(size: fontSize)).foregroundStyle(.secondary)
             } else {
                 ForEach(rows.indices, id: \.self) { ri in
                     HStack(spacing: 12) {
@@ -352,10 +371,10 @@ struct PortfolioWidgetView: View {
                             HStack(spacing: 5) {
                                 Text(p.symbol)
                                     .font(.system(size: fontSize, weight: .semibold, design: .monospaced))
-                                    .foregroundColor(cHi)
+                                    .foregroundStyle(.primary)
                                 Text("\(p.pnlPct >= 0 ? "+" : "−")\(String(format: "%.2f%%", abs(p.pnlPct)))")
                                     .font(.system(size: fontSize)).monospacedDigit()
-                                    .foregroundColor(p.pnlPct >= 0 ? cGreen : cRed)
+                                    .foregroundStyle(p.pnlPct >= 0 ? cUp : cDown)
                             }
                             .lineLimit(1).minimumScaleFactor(0.8)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -370,10 +389,9 @@ struct PortfolioWidgetView: View {
         }
     }
 
-    // ── Curve — Canvas-drawn so the area reliably fades to transparent at the
-    //    bottom of the tile. X-axis is the 09:30–16:00 ET session, so the line
-    //    stops at "now" (empty space on the right until the session fills in).
-    //    Dashed open / previous-close baseline runs full width. ──
+    // ── Curve — Canvas-drawn line over a flat area fill. The x-axis spans the
+    //    data's own time range so the line fills the tile; a dashed open /
+    //    previous-close baseline runs full width. ──
     @ViewBuilder
     private func curve(height: CGFloat) -> some View {
         let pts = entry.points.sorted { $0.t < $1.t }
@@ -383,10 +401,9 @@ struct PortfolioWidgetView: View {
             let lo = vals.min() ?? 0
             let hi = vals.max() ?? 1
             let range = max(hi - lo, 0.0001)
-            // X-axis spans the data's own time range (works for RTH or the 24/5
-            // continuous/overnight session), so the line fills the tile width.
             let tMin = pts.first!.t
             let tSpan = max(pts.last!.t - tMin, 1)
+            let accented = renderingMode == .accented
             Canvas { ctx, size in
                 let w = size.width, h = size.height
                 let padTop = h * 0.16, padBot = h * 0.06
@@ -396,16 +413,13 @@ struct PortfolioWidgetView: View {
                     padTop + (1 - CGFloat((v - lo) / range)) * plotH
                 }
 
-                // Area under the line → bottom edge, faded to transparent.
+                // Flat area under the line (no gradient).
                 var area = Path()
                 area.move(to: CGPoint(x: px(pts[0].t), y: h))
                 for p in pts { area.addLine(to: CGPoint(x: px(p.t), y: py(p.value))) }
                 area.addLine(to: CGPoint(x: px(pts.last!.t), y: h))
                 area.closeSubpath()
-                ctx.fill(area, with: .linearGradient(
-                    Gradient(colors: [trend.opacity(0.45), trend.opacity(0.0)]),
-                    startPoint: CGPoint(x: 0, y: padTop),
-                    endPoint: CGPoint(x: 0, y: h)))
+                ctx.fill(area, with: .color(trend.opacity(accented ? 0.15 : 0.12)))
 
                 // Line.
                 var line = Path()
@@ -420,10 +434,12 @@ struct PortfolioWidgetView: View {
                 var base = Path()
                 base.move(to: CGPoint(x: 0, y: py(open)))
                 base.addLine(to: CGPoint(x: w, y: py(open)))
-                ctx.stroke(base, with: .color(.white.opacity(0.18)),
+                ctx.stroke(base, with: .color(.secondary.opacity(0.5)),
                            style: StrokeStyle(lineWidth: 1, dash: [2, 3]))
             }
             .frame(height: height)
+            .widgetAccentable()
+            .accessibilityHidden(true)
         } else {
             Color.clear.frame(height: height)
         }
@@ -520,9 +536,6 @@ struct PortfolioWidget: Widget {
             .systemSmall, .systemMedium, .systemLarge,
             .accessoryRectangular, .accessoryInline,
         ])
-        // Drop the chunky default system content margins — the views supply
-        // their own ~12pt padding, roughly halving the outer margin.
-        .contentMarginsDisabled()
     }
 }
 
@@ -548,29 +561,44 @@ struct InstanceProvider: TimelineProvider {
     }
 }
 
+struct InstanceStatusView: View {
+    let entry: InstanceEntry
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("INSTANCES")
+                .font(.caption2.weight(.semibold))
+                .tracking(0.6)
+                .foregroundStyle(.secondary)
+                .widgetAccentable()
+            ForEach(Array(entry.instances.prefix(3).enumerated()), id: \.offset) { _, inst in
+                if let name = inst["name"] as? String {
+                    let running = inst["running"] as? Bool ?? false
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(running ? cUp : Color.secondary)
+                            .frame(width: 6, height: 6)
+                            .accessibilityLabel(running ? "Running" : "Stopped")
+                        Text(name).font(.footnote).foregroundStyle(.primary).lineLimit(1)
+                    }
+                }
+            }
+            if entry.instances.isEmpty {
+                Text("No instances").font(.footnote).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .containerBackground(for: .widget) {
+            Color(uiColor: .systemBackground)
+        }
+    }
+}
+
 struct InstanceStatusWidget: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: "InstanceWidget", provider: InstanceProvider()) { entry in
-            VStack(alignment: .leading, spacing: 6) {
-                Text("INSTANCES").font(.system(size: 9, weight: .semibold)).tracking(0.7).foregroundColor(cFaint)
-                ForEach(Array(entry.instances.prefix(3).enumerated()), id: \.offset) { _, inst in
-                    if let name = inst["name"] as? String {
-                        HStack(spacing: 6) {
-                            Circle()
-                                .fill((inst["running"] as? Bool ?? false) ? cGreen : Color.gray)
-                                .frame(width: 6, height: 6)
-                            Text(name).font(.system(size: 12)).foregroundColor(cHi).lineLimit(1)
-                        }
-                    }
-                }
-                if entry.instances.isEmpty {
-                    Text("No instances").font(.system(size: 12)).foregroundColor(cFaint)
-                }
-                Spacer(minLength: 0)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .padding(12)
-            .containerBackground(widgetBG, for: .widget)
+            InstanceStatusView(entry: entry)
         }
         .configurationDisplayName("Instance Status")
         .description("Running/stopped status of your IntelliStock instances.")
