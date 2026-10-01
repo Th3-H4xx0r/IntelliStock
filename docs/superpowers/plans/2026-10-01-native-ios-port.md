@@ -378,7 +378,19 @@ seams. Commit: `merge: wave 1 foundation`.
 
 ---
 
-## Wave 2 — features (ten agents, parallel worktrees off the Wave 1 merge)
+## Wave 2 — features (three combined agents, parallel worktrees off the Wave 1 merge)
+
+> **Operator change (2026-10-01):** "you don't need 5 agents, do it with less agents and combine a
+> lot of tasks together." The ten work packages below run as three agents, each porting its areas
+> one at a time and committing after each area:
+>
+> | Agent | Work packages | Dart LOC |
+> |---|---|---|
+> | trading | 2.2 dashboard, 2.3 instances, 2.4 live | ~17.7k |
+> | markets | 2.6 kalshi, 2.5 backtests, 2.7 strategies, 2.9 nexus (nexus + learning only) | ~20.3k |
+> | app | 2.1 auth, 2.10 chat, 2.8 models, plus agent runs (moved out of 2.9) | ~17.3k |
+>
+> The merge order becomes trading → markets → app.
 
 Each agent owns `ios/IntelliStock/Features/<F>/{Model,Views}/**` for its features, plus
 `ios/IntelliStockTests/Features/<F>/**` and `ios/parity/<agent>.md`. It ports the Dart
