@@ -1,12 +1,11 @@
 import SwiftUI
 
 /// Design tokens — spec §7. Surfaces and text use the system's semantic
-/// colours (`.background`, `.secondary`, `Color(.secondarySystemGroupedBackground)`)
-/// directly; this file holds only what the system does not name.
+/// colours directly; this file names only what the system does not.
 ///
 /// No gradients anywhere (operator, 2026-10-01). Charts fill their area with a
 /// flat `DS.chartAreaOpacity` tint of the line colour.
-enum DS {
+nonisolated enum DS {
     /// One colour, one meaning. All adapt to Light/Dark.
     enum Palette {
         static let accent = Color.accentColor
@@ -18,6 +17,17 @@ enum DS {
         /// Price/P&L up and down.
         static let up = Color.green
         static let down = Color.red
+    }
+
+    /// The Flutter surfaces mapped onto the grouped background family
+    /// (`AppColors.canvas` / `panel` / `surface`).
+    enum Surface {
+        /// The screen background (`canvas`).
+        static let canvas = Color(uiColor: .systemGroupedBackground)
+        /// Cards and grouped rows (`panel`, `GlassCard`).
+        static let panel = Color(uiColor: .secondarySystemGroupedBackground)
+        /// Insets inside a card (`surface`, inputs, stat tiles).
+        static let inset = Color(uiColor: .tertiarySystemGroupedBackground)
     }
 
     enum Space {

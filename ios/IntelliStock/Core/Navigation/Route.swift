@@ -16,6 +16,17 @@ nonisolated enum AppTab: String, Hashable, CaseIterable, Sendable {
         default: return nil
         }
     }
+
+    /// The go_router branch path of a tab root; More has none (it was a sheet).
+    var rootPath: String? {
+        switch self {
+        case .dashboard: "/dashboard"
+        case .kalshi: "/kalshi"
+        case .instances: "/instances"
+        case .strategies: "/strategies"
+        case .more: nil
+        }
+    }
 }
 
 /// `StockScreenArgs` in `stock_screen.dart`: the symbol from the path plus
