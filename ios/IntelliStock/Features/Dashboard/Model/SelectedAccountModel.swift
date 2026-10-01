@@ -11,14 +11,14 @@ import Observation
 final class SelectedAccountModel {
     static let storageKey = "dashboard_selected_account"
 
-    @ObservationIgnored private let store: KeychainStore
+    @ObservationIgnored private let store: any SecureStorage
 
     private(set) var selectedId: String?
 
     /// Dart's `build()` returned null and then hydrated from storage
     /// asynchronously; the keychain read is synchronous here, so the stored
     /// selection is in place before the first frame.
-    init(store: KeychainStore = KeychainStore()) {
+    init(store: any SecureStorage = KeychainStore()) {
         self.store = store
         if let raw = store.read(Self.storageKey), !raw.isEmpty {
             selectedId = raw

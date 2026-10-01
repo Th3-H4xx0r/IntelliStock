@@ -47,10 +47,18 @@ final class AppServices {
 
     // MARK: Shared models
     //
-    // keepAlive view models shared across screens (DashboardModel,
-    // SelectedAccountModel, …) are added here at the Wave 1 merge. Build them
-    // over `apiClient` lazily (a closure or `self`), never a captured client,
-    // so a server change reaches them too.
+    // keepAlive view models shared across screens. Each reads its repository
+    // through a closure over `self`, never a captured client, so a server
+    // change reaches it too.
+
+    /// `selectedAccountProvider`: the account the dashboard hero shows.
+    let selectedAccount: SelectedAccountModel
+
+    /// `dashboardController` / brokerages + services: shared by the
+    /// dashboard, Kalshi, insights and the stock screen.
+    @ObservationIgnored private(set) lazy var dashboard = DashboardModel(
+        repository: { [unowned self] in self.dashboardRepository }
+    )
 
     /// Reads the server URL, then the session, then the lock seed — all
     /// synchronously, in `main.dart`'s order — so the first frame is already
@@ -84,6 +92,7 @@ final class AppServices {
         self.biometrics = biometrics
         self.urlSession = urlSession
         self.pushRegistrar = pushRegistrar
+        self.selectedAccount = SelectedAccountModel(store: storage)
         self.apiClient = ApiClient(baseURL: urlStore.baseUrl, tokens: session, session: urlSession)
 
         urlStore.onChange = { [weak self] _ in self?.rebuildClient() }

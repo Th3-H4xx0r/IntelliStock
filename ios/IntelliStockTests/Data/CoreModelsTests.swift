@@ -38,7 +38,7 @@ struct NumTests {
     }
 }
 
-struct DartDateTimeTests {
+struct DartDateTimeDataTests {
     private func ms(_ s: String) -> Int? { DartDateTime.tryParse(s).map(DartDateTime.millisecondsSinceEpoch) }
 
     @Test func utcForms() {
