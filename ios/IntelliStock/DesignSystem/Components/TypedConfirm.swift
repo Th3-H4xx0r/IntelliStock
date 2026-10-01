@@ -96,11 +96,13 @@ struct TypedConfirmRequest: Identifiable {
 
 extension View {
     func typedConfirmAlert(_ request: Binding<TypedConfirmRequest?>) -> some View {
-        modifier(TypedConfirmAlertModifier(request: request))
+        modifier(TypedConfirmAlert(request: request))
     }
 }
 
-private struct TypedConfirmAlertModifier: ViewModifier {
+/// The alert behind `.typedConfirmAlert(_:)` — a text field whose content
+/// must match the phrase before the confirm button enables.
+struct TypedConfirmAlert: ViewModifier {
     @Binding var request: TypedConfirmRequest?
     @State private var typed = ""
 

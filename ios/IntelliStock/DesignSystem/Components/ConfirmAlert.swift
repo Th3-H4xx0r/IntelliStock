@@ -56,11 +56,12 @@ struct ConfirmRequest: Identifiable {
 extension View {
     /// Presents `request` while non-nil, as an alert or an action sheet.
     func confirmAlert(_ request: Binding<ConfirmRequest?>) -> some View {
-        modifier(ConfirmAlertModifier(request: request))
+        modifier(ConfirmAlert(request: request))
     }
 }
 
-private struct ConfirmAlertModifier: ViewModifier {
+/// The alert or action sheet behind `.confirmAlert(_:)`.
+struct ConfirmAlert: ViewModifier {
     @Binding var request: ConfirmRequest?
 
     func body(content: Content) -> some View {

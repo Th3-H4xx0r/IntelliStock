@@ -64,6 +64,16 @@ final class ApiBaseUrlStore {
 
     var isConfigured: Bool { !baseUrl.isEmpty }
 
+    /// The module-level `normalizeBaseUrl(_:)`, for discoverability.
+    nonisolated static func normalizeBaseUrl(_ raw: String) -> String {
+        IntelliStock.normalizeBaseUrl(raw)
+    }
+
+    /// The module-level `isValidBaseUrl(_:)`, for discoverability.
+    nonisolated static func isValidBaseUrl(_ raw: String) -> Bool {
+        IntelliStock.isValidBaseUrl(raw)
+    }
+
     /// Called after every `load()` and `set(_:)` with the new URL.
     @ObservationIgnored var onChange: ((String) -> Void)?
 
@@ -76,7 +86,7 @@ final class ApiBaseUrlStore {
     /// Reads the persisted URL, normalized. Synchronous, so the very first
     /// frame already knows whether the app is configured.
     func load() {
-        baseUrl = normalizeBaseUrl(storage.read(Self.storageKey) ?? "")
+        baseUrl = Self.normalizeBaseUrl(storage.read(Self.storageKey) ?? "")
         onChange?(baseUrl)
     }
 
@@ -85,7 +95,7 @@ final class ApiBaseUrlStore {
     /// Persists before updating memory, so a keychain failure leaves the old
     /// URL in place and surfaces to the caller instead of half-applying.
     func set(_ url: String) throws {
-        let next = normalizeBaseUrl(url)
+        let next = Self.normalizeBaseUrl(url)
         if next.isEmpty {
             storage.delete(Self.storageKey)
         } else {

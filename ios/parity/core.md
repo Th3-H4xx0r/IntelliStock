@@ -209,11 +209,32 @@ Legend: `[x]` ported as-is · `[x] → native form: …` deliberately changed in
 
 ## Copy changes (title-style capitalisation, HIG `writing.md`)
 
-- More tab title "More" (unchanged); account action "Sign Out" (Dart had an icon-only button).
-- Connect button "Test & Connect" (unchanged), "Save anyway" kept as Dart wrote it (one-off escape; Apple uses sentence case for such secondary text actions — kept verbatim to avoid churn).
-- LiveLogsPanel "View Live Logs" / "Hide Logs" (unchanged), "Jump to Latest" (was "Jump to latest").
-- Lock "Log Out" (was "Log out").
+- More tab: "Sign Out" for the account action (Dart had an icon-only logout button).
+- Lock screen: "Log Out" (was "Log out").
+- LiveLogsPanel: "Jump to Latest" (was "Jump to latest"); "View Live Logs" / "Hide Logs" unchanged.
+- LiveLogsPanel copy confirmation: "Copied" toast (new, spec §7 clipboard rule).
+- Connect: "Test & Connect" unchanged; "Save anyway" kept verbatim (a secondary escape label, left as Dart wrote it).
+- Connect field label for VoiceOver: "Server URL" (the Dart field had only a hint).
 
 ## Rulings
 
-See `.superpowers/sdd/2026-10-01-native-ios-port/task-1C-report.md` for the full list.
+- Ruling: `pausedAt` keeps the START of an absence (`paused()` only sets it when nil) — Flutter's `inactive` on the way back to the foreground reset it, so the 1- and 5-minute timeouts could never elapse; Review Focus 4 requires them to — cost if wrong: those timeouts lock where Flutter did not.
+- Ruling: `resumed()` always clears `pausedAt`, and `enable()` clears it after a successful prompt (as `unlock()` already did) — with keep-earliest, a stale timestamp would otherwise lock the app right after the enable prompt — cost if wrong: none.
+- Ruling: `LockView` overlays the app (content kept alive, hidden from hit-testing and VoiceOver) instead of replacing the navigator — no reload flash on unlock; the overlay appears instantly and fades out — cost if wrong: pollers under the lock keep running while it is up.
+- Ruling: status text on a 15 % tint (StatusBadge, AppBadge, ErrorRow) is darkened 40 % in light mode — system green/orange text on its own tint is about 2:1; darkened it clears 4.5:1 (`accessibility.md › Vision`) — cost if wrong: slightly darker badge text in light mode.
+- Ruling: prominent buttons draw labels in `DS.Palette.onAccent` (near-black in dark mode, Flutter's `onPrimary` #04040C) — white on the dark accent #A78BFA is 2.7:1 — cost if wrong: dark labels on dark-mode prominent buttons.
+- Ruling: `textDim` text at caption sizes and the unknown-status colour use `.secondary`, not `.tertiary` — tertiary label is about 2.5:1 — cost if wrong: a little less hierarchy.
+- Ruling: More tab glyph is `ellipsis` (Apple's More tab), not the hamburger `menu` — cost if wrong: one icon.
+- Ruling: sign-out remembers the tab as well as the location, so a More destination comes back inside More rather than pushed over Dashboard (Dart pushed every redirect over the shell's current branch) — cost if wrong: none.
+- Ruling: push registration sends `app_version` from `CFBundleShortVersionString` (orchestrator decision; Dart omitted it).
+- Ruling: `LiveLogsPanel` pauses its tailer while the app is backgrounded and resumes (polling at once) on return — Review Focus 4; iOS suspends background apps anyway — cost if wrong: one extra poll on foreground.
+- Ruling: the confirm dialog's busy-spinner-on-failure becomes `onError` on `ConfirmRequest` — system alerts dismiss on tap — cost if wrong: callers report confirm failures themselves (toast or error row).
+- Ruling: `ApiBaseUrlStore.set` persists before updating memory and throws on a keychain failure (Dart updated memory, then threw unhandled) — cost if wrong: none.
+- Ruling: IPv6 hosts keep their brackets in `normalizeBaseUrl` (Dart's `uri.host` dropped them, producing an unusable origin) — cost if wrong: none.
+- Ruling: `intellistock://<path>` deep links route through `AppRouter.open` (spec §6; the Flutter app registered the scheme but never handled it); signed out, the path becomes the login redirect — cost if wrong: none.
+- Ruling: `WidgetDataSyncer` parses the portfolio-history fields it needs privately, mirroring `PortfolioHistory.fromJson` (including the `as num?` throws) — the data agent owns `Core/Models` — cost if wrong: duplicate parsing until the merge switches it to `PortfolioHistory(json:)`.
+- Ruling: the widget drops `contentMarginsDisabled()` and its 24–26 pt padding for the system content margins (`widgets.md › Choosing margins and padding`) — cost if wrong: slightly less room for positions.
+- Ruling: numeric formatters take `Int?` and a disfavoured `Double?`, so an integer reaches `num.toString()` as Dart's int would (`950`, not `950.0`) — cost if wrong: none.
+- Ruling: `parseDateTime` returns nil where Dart threw (NaN, out-of-range epochs) — cost if wrong: none.
+- Ruling: LogTailer mirrors Dart's strict casts — a non-string log entry or a non-numeric cursor is an error and backs off — cost if wrong: none.
+- Ruling: Toast lasts 2.5 s (spec) and can be tapped away — cost if wrong: none.
