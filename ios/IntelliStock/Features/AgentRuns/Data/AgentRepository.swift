@@ -90,7 +90,7 @@ nonisolated struct AgentRepository: Sendable {
     }
 
     func setControl(running: Bool? = nil, paused: Bool? = nil, specialRequest: String? = nil) async throws {
-        var body: [String: JSON] = [:]
+        var body: JSONObject = [:]
         if let running { body["running"] = .bool(running) }
         if let paused { body["paused"] = .bool(paused) }
         if let specialRequest, !specialRequest.isEmpty { body["special_request"] = .string(specialRequest) }

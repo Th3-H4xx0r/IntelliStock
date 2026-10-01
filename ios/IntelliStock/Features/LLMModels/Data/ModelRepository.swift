@@ -9,7 +9,7 @@ nonisolated func llmAsString(_ v: JSON) -> String? {
     switch v {
     case .null: nil
     case .string(let s): s
-    case .object, .array: v.dartEncoded()
+    case .object, .array: (try? v.dartEncoded()) ?? v.dartDescription
     default: v.dartDescription
     }
 }
@@ -177,13 +177,13 @@ nonisolated struct ModelRepository: Sendable {
     /// `{"created": true, "model": {…}}`, so `model` is unwrapped before
     /// parsing (falling back to the bare body). Without this the returned
     /// `LlmModel.id` is empty.
-    func create(_ body: [String: JSON]) async throws -> LlmModel {
+    func create(_ body: JSONObject) async throws -> LlmModel {
         LlmModel(json: Self.unwrapModel(try await client.post("/models", body: .object(body))))
     }
 
     /// PUT /models/:id. Returns `{"updated": true, "model": {…}}` — unwrapped
     /// as in `create`.
-    func update(_ id: String, _ body: [String: JSON]) async throws -> LlmModel {
+    func update(_ id: String, _ body: JSONObject) async throws -> LlmModel {
         LlmModel(json: Self.unwrapModel(try await client.put("/models/\(id)", body: .object(body))))
     }
 
@@ -198,29 +198,29 @@ nonisolated struct ModelRepository: Sendable {
     }
 
     /// POST /models/:id/test-cli
-    func testCli(_ id: String) async throws -> [String: JSON] {
-        try await client.post("/models/\(id)/test-cli").objectValue
+    func testCli(_ id: String) async throws -> JSONObject {
+        try await client.post("/models/\(id)/test-cli").orderedObjectValue
     }
 
     /// POST /llm/test
-    func testLlm(_ body: [String: JSON]) async throws -> LlmTestResult {
+    func testLlm(_ body: JSONObject) async throws -> LlmTestResult {
         LlmTestResult(json: try await client.post("/llm/test", body: .object(body)))
     }
 
     /// POST /ollama/list-models
-    func ollamaModels(_ body: [String: JSON]) async throws -> [[String: JSON]] {
+    func ollamaModels(_ body: JSONObject) async throws -> [JSONObject] {
         Self.modelList(try await client.post("/ollama/list-models", body: .object(body)))
     }
 
     /// POST /bedrock/list-models
-    func bedrockModels(_ body: [String: JSON]) async throws -> [[String: JSON]] {
+    func bedrockModels(_ body: JSONObject) async throws -> [JSONObject] {
         Self.modelList(try await client.post("/bedrock/list-models", body: .object(body)))
     }
 
     /// A bare list, or the `models` list of a map.
-    private static func modelList(_ raw: JSON) -> [[String: JSON]] {
-        if raw.isArray { return raw.objectElements.map(\.objectValue) }
-        if raw.isObject, raw["models"].isArray { return raw["models"].objectElements.map(\.objectValue) }
+    private static func modelList(_ raw: JSON) -> [JSONObject] {
+        if raw.isArray { return raw.objectElements.map(\.orderedObjectValue) }
+        if raw.isObject, raw["models"].isArray { return raw["models"].objectElements.map(\.orderedObjectValue) }
         return []
     }
 
@@ -232,23 +232,23 @@ nonisolated struct ModelRepository: Sendable {
     }
 
     /// POST /codex/install
-    func codexInstall() async throws -> [String: JSON] {
-        try await client.post("/codex/install", body: .object([:])).objectValue
+    func codexInstall() async throws -> JSONObject {
+        try await client.post("/codex/install", body: .object([:])).orderedObjectValue
     }
 
     /// GET /codex/install/:jobId
-    func codexInstallJob(_ jobId: String) async throws -> [String: JSON] {
-        try await client.get("/codex/install/\(jobId)").objectValue
+    func codexInstallJob(_ jobId: String) async throws -> JSONObject {
+        try await client.get("/codex/install/\(jobId)").orderedObjectValue
     }
 
     /// POST /codex/login/start
-    func codexLoginStart(_ body: [String: JSON]) async throws -> [String: JSON] {
-        try await client.post("/codex/login/start", body: .object(body)).objectValue
+    func codexLoginStart(_ body: JSONObject) async throws -> JSONObject {
+        try await client.post("/codex/login/start", body: .object(body)).orderedObjectValue
     }
 
     /// GET /codex/login/:jobId/status
-    func codexLoginStatus(_ jobId: String) async throws -> [String: JSON] {
-        try await client.get("/codex/login/\(jobId)/status").objectValue
+    func codexLoginStatus(_ jobId: String) async throws -> JSONObject {
+        try await client.get("/codex/login/\(jobId)/status").orderedObjectValue
     }
 
     /// POST /codex/login/:jobId/cancel
@@ -268,29 +268,29 @@ nonisolated struct ModelRepository: Sendable {
     /// The model list is dynamic (it depends on the server's claude binary),
     /// so the form always fetches it rather than hardcoding. Pass `cliPath`
     /// to probe a specific binary.
-    func claudeModels(cliPath: String? = nil) async throws -> [String: JSON] {
+    func claudeModels(cliPath: String? = nil) async throws -> JSONObject {
         let query: [String: JSON] = (cliPath?.isEmpty == false) ? ["cli_path": .string(cliPath!)] : [:]
-        return try await client.get("/claude/models", query: query).objectValue
+        return try await client.get("/claude/models", query: query).orderedObjectValue
     }
 
     /// GET /claude/auth/status
-    func claudeAuthStatus() async throws -> [String: JSON] {
-        try await client.get("/claude/auth/status").objectValue
+    func claudeAuthStatus() async throws -> JSONObject {
+        try await client.get("/claude/auth/status").orderedObjectValue
     }
 
     /// POST /claude/login/start
-    func claudeLoginStart(_ body: [String: JSON]) async throws -> [String: JSON] {
-        try await client.post("/claude/login/start", body: .object(body)).objectValue
+    func claudeLoginStart(_ body: JSONObject) async throws -> JSONObject {
+        try await client.post("/claude/login/start", body: .object(body)).orderedObjectValue
     }
 
     /// POST /claude/login/:jobId/submit
-    func claudeLoginSubmit(_ jobId: String, _ code: String) async throws -> [String: JSON] {
-        try await client.post("/claude/login/\(jobId)/submit", body: ["code": .string(code)]).objectValue
+    func claudeLoginSubmit(_ jobId: String, _ code: String) async throws -> JSONObject {
+        try await client.post("/claude/login/\(jobId)/submit", body: ["code": .string(code)]).orderedObjectValue
     }
 
     /// GET /claude/login/:jobId/status
-    func claudeLoginStatus(_ jobId: String) async throws -> [String: JSON] {
-        try await client.get("/claude/login/\(jobId)/status").objectValue
+    func claudeLoginStatus(_ jobId: String) async throws -> JSONObject {
+        try await client.get("/claude/login/\(jobId)/status").orderedObjectValue
     }
 
     /// POST /claude/login/:jobId/cancel

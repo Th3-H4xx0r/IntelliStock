@@ -182,8 +182,8 @@ nonisolated struct BacktestSubStrategy: Hashable, Sendable {
     let executionPosition: Num?
     let decisionPhase: String?
     let executionScope: String?
-    let conditions: [String: JSON]
-    let config: [String: JSON]
+    let conditions: JSONObject
+    let config: JSONObject
 
     init(json j: JSON) {
         strategy = j["strategy"].string
@@ -191,8 +191,8 @@ nonisolated struct BacktestSubStrategy: Hashable, Sendable {
         executionPosition = j["execution_position"].lenientNum
         decisionPhase = j["decision_phase"].string
         executionScope = j["execution_scope"].string
-        conditions = j["conditions"].objectValue
-        config = j["config"].objectValue
+        conditions = j["conditions"].orderedObjectValue
+        config = j["config"].orderedObjectValue
     }
 }
 
@@ -290,7 +290,7 @@ nonisolated struct BacktestDecision: Hashable, Sendable {
     let primaryActionIntent: String?
     let strategies: [DecisionStrategy]
     let postDecision: [PostDecision]
-    let rawJson: [String: JSON]
+    let rawJson: JSONObject
 
     init(json j: JSON) {
         symbol = j["symbol"].string
@@ -306,7 +306,7 @@ nonisolated struct BacktestDecision: Hashable, Sendable {
         primaryActionIntent = j["primary_action_intent"].string
         strategies = j["strategies"].objectElements.map(DecisionStrategy.init(json:))
         postDecision = j["post_decision"].objectElements.map(PostDecision.init(json:))
-        rawJson = j.objectValue
+        rawJson = j.orderedObjectValue
     }
 
     func decisionLabel() -> String {
@@ -375,15 +375,15 @@ nonisolated struct BacktestGraphData: Hashable, Sendable {
 
 nonisolated struct PlaybackMetadata: Hashable, Sendable {
     let initialCash: Num?
-    let extra: [String: JSON]
+    let extra: JSONObject
 
-    init(initialCash: Num? = nil, extra: [String: JSON] = [:]) {
+    init(initialCash: Num? = nil, extra: JSONObject = [:]) {
         self.initialCash = initialCash
         self.extra = extra
     }
 
     init(json j: JSON) {
-        self.init(initialCash: j["initial_cash"].lenientNum, extra: j.objectValue)
+        self.init(initialCash: j["initial_cash"].lenientNum, extra: j.orderedObjectValue)
     }
 }
 
@@ -404,7 +404,7 @@ nonisolated struct PlaybackEvent: Hashable, Sendable, Identifiable {
     let portfolioValue: Num?
     let holdings: [PlaybackHolding]
     let date: String?
-    let raw: [String: JSON]
+    let raw: JSONObject
 
     init(json j: JSON, index: Int) {
         id = "\(j["type"].dartDescription)_\(index)"
@@ -422,7 +422,7 @@ nonisolated struct PlaybackEvent: Hashable, Sendable, Identifiable {
         portfolioValue = j["value"].lenientNum
         holdings = j["holdings"].objectElements.map(PlaybackHolding.init(json:))
         date = j["date"].string
-        raw = j.objectValue
+        raw = j.orderedObjectValue
     }
 }
 

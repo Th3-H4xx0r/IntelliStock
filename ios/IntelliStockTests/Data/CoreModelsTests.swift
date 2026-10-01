@@ -92,12 +92,29 @@ struct DartFormattingTests {
         #expect(dartToStringAsFixed(0, 2) == "0.00")
     }
 
-    @Test func dartEncodedMatchesJsonEncode() {
+    @Test func dartEncodedMatchesJsonEncode() throws {
+        // Key order is kept (a Dart map literal is insertion-ordered).
         let value: JSON = ["b": [1, 2.0, "x\n\"y\""], "a": nil, "c": true]
-        #expect(value.dartEncoded() == #"{"a":null,"b":[1,2.0,"x\n\"y\""],"c":true}"#)
-        #expect(JSON.string("\u{01}").dartEncoded() == #""\u0001""#)
-        #expect(JSON.array([]).dartEncoded(indent: "  ") == "[]")
-        #expect(JSON.object(["k": [1]]).dartEncoded(indent: "  ") == "{\n  \"k\": [\n    1\n  ]\n}")
+        #expect(try value.dartEncoded() == #"{"b":[1,2.0,"x\n\"y\""],"a":null,"c":true}"#)
+        // One encoder: the compact form is exactly JSON.data().
+        #expect(try value.dartEncoded() == String(decoding: try value.data(), as: UTF8.self))
+        #expect(try JSON.string("\u{01}").dartEncoded() == #""\u0001""#)
+        #expect(throws: JSONEncodeError.self) { try JSON.double(.nan).dartEncoded() }
+    }
+
+    @Test func dartEncodedWithIndentMatchesJsonEncoderWithIndent() throws {
+        #expect(try JSON.array([]).dartEncoded(indent: "  ") == "[]")
+        let value: JSON = ["k": [1], "e": [:], "l": [], "s": "a,b:{c}[d] \"q\""]
+        #expect(try value.dartEncoded(indent: "  ") == """
+        {
+          "k": [
+            1
+          ],
+          "e": {},
+          "l": [],
+          "s": "a,b:{c}[d] \\"q\\""
+        }
+        """)
     }
 
     @Test func llmAsStringStringifiesStructuredValues() {

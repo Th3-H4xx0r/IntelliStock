@@ -6,13 +6,13 @@ import Foundation
 nonisolated struct CommandResult: Hashable, Sendable {
     let commandId: String
     let status: String
-    let result: [String: JSON]?
+    let result: JSONObject?
     let error: String?
 
     init(json j: JSON) {
         commandId = j["command_id"].string ?? ""
         status = j["status"].string ?? "pending"
-        result = j["result"].object
+        result = j["result"].orderedObject
         error = j["error"].string
     }
 
@@ -73,7 +73,7 @@ nonisolated struct LiveRepository: Sendable {
     }
 
     /// `POST /instances/{id}/live-command` → `CommandResult`.
-    func sendCommand(_ id: String, _ type: String, _ payload: [String: JSON]) async throws -> CommandResult {
+    func sendCommand(_ id: String, _ type: String, _ payload: JSONObject) async throws -> CommandResult {
         let data = try await client.post(
             "/instances/\(id)/live-command",
             body: ["type": .string(type), "payload": .object(payload)]

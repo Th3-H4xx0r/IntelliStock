@@ -38,7 +38,7 @@ nonisolated struct SwingSignal: Hashable, Sendable, Identifiable {
     let reasoning: String
     let keyRisks: [String]
     let sizeAdjustment: Double?
-    let proposal: [String: JSON]
+    let proposal: JSONObject
     let status: String
     /// When the operator decided it (UTC); nil while pending or unparseable.
     let decidedAt: Date?
@@ -58,7 +58,7 @@ nonisolated struct SwingSignal: Hashable, Sendable, Identifiable {
         reasoning = swingStr(j["reasoning"])
         keyRisks = j["key_risks"].stringElements
         sizeAdjustment = swingNum(j["size_adjustment"])
-        proposal = j["proposal"].objectValue
+        proposal = j["proposal"].orderedObjectValue
         status = swingStr(j["status"]).isEmpty ? "pending" : swingStr(j["status"])
         decidedAt = DartDateTime.tryParse(swingStr(j["decided_at"]))
         orderClientId = swingStr(j["order_client_id"]).isEmpty ? nil : swingStr(j["order_client_id"])
@@ -308,7 +308,7 @@ nonisolated struct SwingRepository: Sendable {
     /// POST .../decision with {decision, reason?}. `decision` is "approve" |
     /// "approve_half" | "reject". Throws `ApiError` on non-2xx.
     func decide(_ instanceId: String, _ signalId: String, _ decision: String, reason: String? = nil) async throws -> DecisionReceipt {
-        var body: [String: JSON] = ["decision": .string(decision)]
+        var body: JSONObject = ["decision": .string(decision)]
         if let r = reason?.trimmingCharacters(in: .whitespacesAndNewlines), !r.isEmpty {
             body["reason"] = .string(r)
         }

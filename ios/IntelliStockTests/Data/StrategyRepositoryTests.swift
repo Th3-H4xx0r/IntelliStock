@@ -80,7 +80,7 @@ struct StrategyRepositoryWireTests {
     }
 
     @Test func mergeStrategyRowsFallsBackToTop5ThenAllBest() {
-        let strategies: [[String: JSON]] = [
+        let strategies: [JSONObject] = [
             ["id": 1, "name": "One", "strategies": [["strategy": "a"]]],
             ["id": 2, "name": "Two"],
             ["id": 3, "name": "Three"],
@@ -88,8 +88,8 @@ struct StrategyRepositoryWireTests {
         let best = StrategyRepository.computeBestByStrategy([
             AgentResult(json: ["backtest_id": "x", "strategy_id": 1, "overall_profit": 4, "pnl_percent": 2]),
         ])
-        let top5: [[String: JSON]] = [["strategy_id": 2, "rank": 1, "overall_profit": "12.5", "pnl_percent": 3, "backtest_id": "t2"]]
-        let allBest: [String: JSON] = ["3": ["best_pnl": 7, "best_pct": 1.5, "backtest_id": "a3"]]
+        let top5: [JSONObject] = [["strategy_id": 2, "rank": 1, "overall_profit": "12.5", "pnl_percent": 3, "backtest_id": "t2"]]
+        let allBest: JSONObject = ["3": ["best_pnl": 7, "best_pct": 1.5, "backtest_id": "a3"]]
 
         let rows = StrategyRepository.mergeStrategyRows(strategies, best, top5, allBest)
         #expect(rows.map(\.id) == [1, 2, 3])

@@ -29,7 +29,7 @@ nonisolated struct InstanceRepository: Sendable {
         maxUsage: Double? = nil,
         strategyId: String? = nil
     ) async throws -> Instance {
-        var body: [String: JSON] = ["id": .string(id)]
+        var body: JSONObject = ["id": .string(id)]
         if let name, !name.isEmpty { body["name"] = .string(name) }
         body["granularity"] = .string(granularity ?? "60")
         body["run_command"] = .bool(runCommand)
@@ -40,7 +40,7 @@ nonisolated struct InstanceRepository: Sendable {
         return Instance(json: data["instance"].isObject ? data["instance"] : data)
     }
 
-    func patchInstance(_ id: String, _ patch: [String: JSON]) async throws -> Instance {
+    func patchInstance(_ id: String, _ patch: JSONObject) async throws -> Instance {
         let data = try await client.patch("/instances/\(id)", body: .object(patch))
         return Instance(json: data["instance"].isObject ? data["instance"] : data)
     }
@@ -58,23 +58,23 @@ nonisolated struct InstanceRepository: Sendable {
     }
 
     func clearState(_ id: String, _ scope: String, apply: Bool = false, confirm: String? = nil) async throws {
-        var body: [String: JSON] = ["scope": .string(scope), "apply": .bool(apply)]
+        var body: JSONObject = ["scope": .string(scope), "apply": .bool(apply)]
         if let confirm { body["confirm"] = .string(confirm) }
         _ = try await client.post("/instances/\(id)/clear-state", body: .object(body))
     }
 
-    func previewClearState(_ id: String, _ scope: String) async throws -> [String: JSON] {
+    func previewClearState(_ id: String, _ scope: String) async throws -> JSONObject {
         try await client.post(
             "/instances/\(id)/clear-state",
             body: ["scope": .string(scope), "apply": false]
-        ).objectValue
+        ).orderedObjectValue
     }
 
-    func applyClearState(_ id: String, _ scope: String) async throws -> [String: JSON] {
+    func applyClearState(_ id: String, _ scope: String) async throws -> JSONObject {
         try await client.post(
             "/instances/\(id)/clear-state",
             body: ["scope": .string(scope), "apply": true, "confirm": .string(id)]
-        ).objectValue
+        ).orderedObjectValue
     }
 
     // MARK: Stock management
@@ -120,7 +120,7 @@ nonisolated struct InstanceRepository: Sendable {
         perPage: Int = 15,
         sortBy: String = "completed_at",
         sortOrder: String = "desc"
-    ) async throws -> [String: JSON] {
+    ) async throws -> JSONObject {
         try await client.get(
             "/instances/\(instanceId)/backtests",
             query: [
@@ -129,7 +129,7 @@ nonisolated struct InstanceRepository: Sendable {
                 "sort_by": .string(sortBy),
                 "sort_order": .string(sortOrder),
             ]
-        ).objectValue
+        ).orderedObjectValue
     }
 
     func createBacktest(
@@ -153,17 +153,17 @@ nonisolated struct InstanceRepository: Sendable {
         )
     }
 
-    func getBacktestStatus(_ backtestId: String) async throws -> [String: JSON] {
-        try await client.get("/backtests/\(backtestId)/status").objectValue
+    func getBacktestStatus(_ backtestId: String) async throws -> JSONObject {
+        try await client.get("/backtests/\(backtestId)/status").orderedObjectValue
     }
 
     // MARK: Selectors
 
-    func listBrokerages() async throws -> [[String: JSON]] {
-        try await client.get("/brokerages")["accounts"].objectElements.map(\.objectValue)
+    func listBrokerages() async throws -> [JSONObject] {
+        try await client.get("/brokerages")["accounts"].objectElements.map(\.orderedObjectValue)
     }
 
-    func listStrategies() async throws -> [[String: JSON]] {
-        try await client.get("/strategies")["strategies"].objectElements.map(\.objectValue)
+    func listStrategies() async throws -> [JSONObject] {
+        try await client.get("/strategies")["strategies"].objectElements.map(\.orderedObjectValue)
     }
 }

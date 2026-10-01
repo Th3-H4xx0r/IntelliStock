@@ -27,15 +27,15 @@ nonisolated struct EngineStatus: Hashable, Sendable, Identifiable {
 /// Full services snapshot (result of the parallel 4-endpoint fetch).
 nonisolated struct ServicesSnapshot: Hashable, Sendable {
     let engines: [EngineStatus]
-    let agentControl: [String: JSON]?
-    let digestControl: [String: JSON]?
-    let nexusStatus: [String: JSON]?
+    let agentControl: JSONObject?
+    let digestControl: JSONObject?
+    let nexusStatus: JSONObject?
 
     init(
         engines: [EngineStatus],
-        agentControl: [String: JSON]? = nil,
-        digestControl: [String: JSON]? = nil,
-        nexusStatus: [String: JSON]? = nil
+        agentControl: JSONObject? = nil,
+        digestControl: JSONObject? = nil,
+        nexusStatus: JSONObject? = nil
     ) {
         self.engines = engines
         self.agentControl = agentControl
@@ -107,8 +107,8 @@ nonisolated struct DashboardRepository: Sendable {
     }
 
     /// Dart `.catchError((_) => <String, dynamic>{})`.
-    private func objectOrEmpty(_ path: String) async -> [String: JSON] {
-        (try? await client.get(path))?.object ?? [:]
+    private func objectOrEmpty(_ path: String) async -> JSONObject {
+        (try? await client.get(path))?.orderedObject ?? JSONObject()
     }
 
     /// GET /brokerages → {accounts: [...]}
@@ -186,7 +186,7 @@ nonisolated struct DashboardRepository: Sendable {
     }
 
     func controlAgent(running: Bool? = nil, paused: Bool? = nil, specialRequest: String? = nil) async throws {
-        var body: [String: JSON] = [:]
+        var body: JSONObject = [:]
         if let running { body["running"] = .bool(running) }
         if let paused { body["paused"] = .bool(paused) }
         if let specialRequest { body["special_request"] = .string(specialRequest) }

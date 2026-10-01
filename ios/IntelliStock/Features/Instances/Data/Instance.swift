@@ -24,16 +24,16 @@ nonisolated struct Instance: Hashable, Sendable, Identifiable {
     var uptimeSeconds: Int?
     var stocks: [String]
     /// Nested brokerage map (if the API returns it).
-    var brokerage: [String: JSON]?
+    var brokerage: JSONObject?
     /// Nested strategy map (if the API returns it).
-    var strategy: [String: JSON]?
+    var strategy: JSONObject?
     /// Instance kind: 'kalshi' | 'crypto' | nil (equity). Drives which screen
     /// the instance is surfaced on (crypto/Kalshi bots have their own tabs).
     var kind: String?
     /// Crypto allocation blob (`{band, allocations:[{symbol,pct}]}`) for
     /// kind='crypto' instances. Present only when the API surfaces it; used
     /// to prefill the crypto edit sheet with exact per-coin weights.
-    var cryptoConfig: [String: JSON]?
+    var cryptoConfig: JSONObject?
 
     init(
         id: String,
@@ -48,10 +48,10 @@ nonisolated struct Instance: Hashable, Sendable, Identifiable {
         maxUsage: Double? = nil,
         uptimeSeconds: Int? = nil,
         stocks: [String] = [],
-        brokerage: [String: JSON]? = nil,
-        strategy: [String: JSON]? = nil,
+        brokerage: JSONObject? = nil,
+        strategy: JSONObject? = nil,
         kind: String? = nil,
-        cryptoConfig: [String: JSON]? = nil
+        cryptoConfig: JSONObject? = nil
     ) {
         self.id = id
         self.name = name
@@ -96,10 +96,10 @@ nonisolated struct Instance: Hashable, Sendable, Identifiable {
             maxUsage: j["max_usage"].double,
             uptimeSeconds: j["uptime_seconds"].int,
             stocks: stocks,
-            brokerage: j["brokerage"].object,
-            strategy: j["strategy"].object,
+            brokerage: j["brokerage"].orderedObject,
+            strategy: j["strategy"].orderedObject,
             kind: j["kind"].string,
-            cryptoConfig: j["crypto_config"].object
+            cryptoConfig: j["crypto_config"].orderedObject
         )
     }
 }

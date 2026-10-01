@@ -68,11 +68,11 @@ nonisolated struct NexusRelCount: Hashable, Sendable {
 
 nonisolated struct NexusGraphSummary: Hashable, Sendable {
     let relationshipCounts: [NexusRelCount]
-    let nodeCounts: [String: JSON]
+    let nodeCounts: JSONObject
 
     init(json j: JSON) {
         relationshipCounts = j["relationship_counts"].objectElements.map(NexusRelCount.init(json:))
-        nodeCounts = j["node_counts"].objectValue
+        nodeCounts = j["node_counts"].orderedObjectValue
     }
 }
 
@@ -115,7 +115,7 @@ nonisolated struct NexusControl: Hashable, Sendable {
     let deleteOperationUnit: String?
     let deleteOperationError: String?
     let deleteOperationSelectedPhases: [Int]
-    let deleteOperationPhaseRows: [[String: JSON]]
+    let deleteOperationPhaseRows: [JSONObject]
 
     let rebuildOperationActive: Bool
     let rebuildOperationDestructive: Bool
@@ -156,7 +156,7 @@ nonisolated struct NexusControl: Hashable, Sendable {
         deleteOperationUnit = j["delete_operation_unit"].string
         deleteOperationError = j["delete_operation_error"].string
         deleteOperationSelectedPhases = ints(j["delete_operation_selected_phases"])
-        deleteOperationPhaseRows = j["delete_operation_phase_rows"].objectElements.map(\.objectValue)
+        deleteOperationPhaseRows = j["delete_operation_phase_rows"].objectElements.map(\.orderedObjectValue)
         rebuildOperationActive = j["rebuild_operation_active"].bool
         rebuildOperationDestructive = j["rebuild_operation_destructive"].bool
         rebuildOperationStep = j["rebuild_operation_step"].string
@@ -174,7 +174,7 @@ nonisolated struct NexusBootstrap: Hashable, Sendable {
     let coverageEnd: String?
     let complete: Bool
     let lastStatus: String?
-    let phases: [[String: JSON]]
+    let phases: [JSONObject]
     let completedPhases: Int?
     let totalPhases: Int?
     let durationSec: Double?
@@ -188,7 +188,7 @@ nonisolated struct NexusBootstrap: Hashable, Sendable {
         coverageEnd = j["coverage_end"].string
         complete = j["complete"].bool
         lastStatus = j["last_status"].string
-        phases = j["phases"].objectElements.map(\.objectValue)
+        phases = j["phases"].objectElements.map(\.orderedObjectValue)
         completedPhases = j["completed_phases"].int
         totalPhases = j["total_phases"].int
         durationSec = j["duration_sec"].double
@@ -299,15 +299,15 @@ nonisolated struct NexusRepository: Sendable {
         NexusStatus(json: try await client.get("/nexus/status"))
     }
 
-    func control(_ body: [String: JSON]) async throws {
+    func control(_ body: JSONObject) async throws {
         _ = try await client.post("/nexus/control", body: .object(body))
     }
 
-    func rebuild(_ body: [String: JSON]) async throws -> [String: JSON] {
-        try await client.post("/nexus/rebuild", body: .object(body)).objectValue
+    func rebuild(_ body: JSONObject) async throws -> JSONObject {
+        try await client.post("/nexus/rebuild", body: .object(body)).orderedObjectValue
     }
 
-    func deleteEdges(_ body: [String: JSON]) async throws {
+    func deleteEdges(_ body: JSONObject) async throws {
         _ = try await client.post("/nexus/delete-edges", body: .object(body))
     }
 

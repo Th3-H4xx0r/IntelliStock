@@ -109,8 +109,8 @@ nonisolated struct KalshiRepository: Sendable {
         return d["positions"].objectElements.map(KalshiPosition.init(json:))
     }
 
-    func kill(_ bid: String) async throws -> [String: JSON] {
-        try await client.post("/brokerages/\(bid)/kalshi/kill").objectValue
+    func kill(_ bid: String) async throws -> JSONObject {
+        try await client.post("/brokerages/\(bid)/kalshi/kill").orderedObjectValue
     }
 
     func instances(_ bid: String) async throws -> [KalshiInstance] {
@@ -118,7 +118,7 @@ nonisolated struct KalshiRepository: Sendable {
         return d["instances"].objectElements.map(KalshiInstance.init(json:))
     }
 
-    func createInstance(_ bid: String, _ body: [String: JSON]) async throws {
+    func createInstance(_ bid: String, _ body: JSONObject) async throws {
         _ = try await client.post("/brokerages/\(bid)/kalshi/instances", body: .object(body))
     }
 
@@ -130,30 +130,30 @@ nonisolated struct KalshiRepository: Sendable {
         _ = try await client.post("/instances/\(id)/stop")
     }
 
-    func instanceDetail(_ id: String) async throws -> [String: JSON] {
-        try await client.get("/instances/\(id)/kalshi/detail").objectValue
+    func instanceDetail(_ id: String) async throws -> JSONObject {
+        try await client.get("/instances/\(id)/kalshi/detail").orderedObjectValue
     }
 
-    func instanceDecisions(_ id: String) async throws -> [String: JSON] {
-        try await client.get("/instances/\(id)/kalshi/decisions", query: ["limit": 200]).objectValue
+    func instanceDecisions(_ id: String) async throws -> JSONObject {
+        try await client.get("/instances/\(id)/kalshi/decisions", query: ["limit": 200]).orderedObjectValue
     }
 
-    func instanceLive(_ id: String) async throws -> [String: JSON] {
-        try await client.get("/instances/\(id)/kalshi/live").objectValue
+    func instanceLive(_ id: String) async throws -> JSONObject {
+        try await client.get("/instances/\(id)/kalshi/live").orderedObjectValue
     }
 
-    func instanceOrders(_ id: String) async throws -> [String: JSON] {
-        try await client.get("/instances/\(id)/kalshi/orders", query: ["limit": 50]).objectValue
+    func instanceOrders(_ id: String) async throws -> JSONObject {
+        try await client.get("/instances/\(id)/kalshi/orders", query: ["limit": 50]).orderedObjectValue
     }
 
     /// GET /models: the `models` list (or a bare list), maps with an `id`.
-    func models() async throws -> [[String: JSON]] {
+    func models() async throws -> [JSONObject] {
         let d = try await client.get("/models")
         let list = d.isObject ? d["models"] : d
-        return list.objectElements.filter { !$0["id"].isNull }.map(\.objectValue)
+        return list.objectElements.filter { !$0["id"].isNull }.map(\.orderedObjectValue)
     }
 
-    func updateInstance(_ id: String, _ body: [String: JSON]) async throws {
+    func updateInstance(_ id: String, _ body: JSONObject) async throws {
         _ = try await client.patch("/instances/\(id)/kalshi/config", body: .object(body))
     }
 
@@ -163,21 +163,21 @@ nonisolated struct KalshiRepository: Sendable {
 
     // MARK: Backtests
 
-    func createBacktest(_ bid: String, _ body: [String: JSON]) async throws -> String {
+    func createBacktest(_ bid: String, _ body: JSONObject) async throws -> String {
         let d = try await client.post("/brokerages/\(bid)/kalshi/backtests", body: .object(body))
         return d["id"].stringOr("")
     }
 
-    func listBacktests(_ bid: String) async throws -> [[String: JSON]] {
-        try await client.get("/brokerages/\(bid)/kalshi/backtests")["backtests"].objectElements.map(\.objectValue)
+    func listBacktests(_ bid: String) async throws -> [JSONObject] {
+        try await client.get("/brokerages/\(bid)/kalshi/backtests")["backtests"].objectElements.map(\.orderedObjectValue)
     }
 
-    func backtestStatus(_ id: String) async throws -> [String: JSON] {
-        try await client.get("/kalshi/backtests/\(id)/status").objectValue
+    func backtestStatus(_ id: String) async throws -> JSONObject {
+        try await client.get("/kalshi/backtests/\(id)/status").orderedObjectValue
     }
 
-    func backtestResults(_ id: String) async throws -> [String: JSON] {
-        try await client.get("/kalshi/backtests/\(id)/results").objectValue
+    func backtestResults(_ id: String) async throws -> JSONObject {
+        try await client.get("/kalshi/backtests/\(id)/results").orderedObjectValue
     }
 
     func stopBacktest(_ id: String) async throws {

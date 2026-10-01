@@ -55,21 +55,38 @@ nonisolated struct NotificationPrefs: Hashable, Sendable {
     /// Ordered taxonomy (key/group/label/desc) for grouped rendering.
     let types: [NotificationType]
 
+    /// `categories`' keys in the Dart map's insertion order: the server's
+    /// order, with a newly routed category appended. `toJSON` writes them in
+    /// this order, as Dart's map iteration did.
+    let categoryOrder: [String]
+
+    /// From an unordered dictionary, keys sorted so the order is stable.
     init(categories: [String: CategoryRoute], types: [NotificationType] = []) {
+        self.init(categories: categories, order: categories.keys.sorted(), types: types)
+    }
+
+    private init(categories: [String: CategoryRoute], order: [String], types: [NotificationType]) {
         self.categories = categories
+        self.categoryOrder = order
         self.types = types
     }
 
     init(json j: JSON) {
         var cats: [String: CategoryRoute] = [:]
-        for (k, v) in j["categories"].objectValue where v.isObject {
+        var order: [String] = []
+        for (k, v) in j["categories"].orderedObjectValue where v.isObject {
+            if cats[k] == nil { order.append(k) }
             cats[k] = CategoryRoute(json: v)
         }
-        self.init(categories: cats, types: j["types"].objectElements.map(NotificationType.init(json:)))
+        self.init(categories: cats, order: order, types: j["types"].objectElements.map(NotificationType.init(json:)))
     }
 
     func toJSON() -> JSON {
-        ["categories": .object(categories.mapValues { $0.toJSON() })]
+        var out = JSONObject()
+        for key in categoryOrder {
+            if let route = categories[key] { out[key] = route.toJSON() }
+        }
+        return ["categories": .object(out)]
     }
 
     /// Group names in first-appearance (display) order.
@@ -88,8 +105,9 @@ nonisolated struct NotificationPrefs: Hashable, Sendable {
     /// A copy with `category`'s route replaced (immutable update).
     func withRoute(_ category: String, _ route: CategoryRoute) -> NotificationPrefs {
         var next = categories
+        let order = next[category] == nil ? categoryOrder + [category] : categoryOrder
         next[category] = route
-        return NotificationPrefs(categories: next, types: types)
+        return NotificationPrefs(categories: next, order: order, types: types)
     }
 
     /// Route for a category, defaulting to Discord-only if absent.

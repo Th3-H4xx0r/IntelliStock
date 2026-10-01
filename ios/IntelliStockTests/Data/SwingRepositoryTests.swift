@@ -4,7 +4,7 @@ import Testing
 
 /// Ported from test/features/swing/swing_repository_test.dart.
 
-private func swingJson(id: String = "a1", status: String = "pending", createdAt: String = "2026-09-24T13:15:02Z") -> [String: JSON] {
+private func swingJson(id: String = "a1", status: String = "pending", createdAt: String = "2026-09-24T13:15:02Z") -> JSONObject {
     [
         "id": .string(id),
         "instance_id": "swing-paper",
@@ -22,7 +22,7 @@ private func swingJson(id: String = "a1", status: String = "pending", createdAt:
     ]
 }
 
-private let wheelJson: [String: JSON] = [
+private let wheelJson: JSONObject = [
     "id": "w1",
     "lane": "wheel",
     "symbol": "APH",
@@ -45,7 +45,7 @@ private let wheelJson: [String: JSON] = [
     "status": "pending",
 ]
 
-private func encode(_ value: JSON) -> String { value.dartEncoded() }
+private func encode(_ value: JSON) -> String { (try? value.dartEncoded()) ?? "" }
 
 struct SwingSignalFromJsonTests {
     @Test func swingProposalFieldsAndRisks() {

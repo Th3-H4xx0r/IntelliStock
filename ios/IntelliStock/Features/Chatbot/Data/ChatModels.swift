@@ -9,12 +9,12 @@ import Foundation
 nonisolated struct ToolCall: Hashable, Sendable, Identifiable {
     let id: String
     let name: String
-    let arguments: [String: JSON]
+    let arguments: JSONObject
     let description: String?
     /// 'safe' | 'write' | 'destructive'
     let safety: String
 
-    init(id: String, name: String, arguments: [String: JSON] = [:], description: String? = nil, safety: String = "write") {
+    init(id: String, name: String, arguments: JSONObject = [:], description: String? = nil, safety: String = "write") {
         self.id = id
         self.name = name
         self.arguments = arguments
@@ -26,7 +26,7 @@ nonisolated struct ToolCall: Hashable, Sendable, Identifiable {
         self.init(
             id: j["id"].or(j["tool_call_id"]).stringOr(""),
             name: j["name"].or(j["function"]).stringOr(""),
-            arguments: j["arguments"].or(j["input"]).objectValue,
+            arguments: j["arguments"].or(j["input"]).orderedObjectValue,
             description: j["description"].string,
             safety: j["safety"].stringOr("write")
         )
@@ -53,7 +53,7 @@ nonisolated struct ChatMessage: Hashable, Sendable, Identifiable {
     /// Populated when `status == 'pending_confirmation'`.
     let pendingTool: ToolCall?
     /// Rich rendered blocks (markdown / table / chart / navigate / stat).
-    let blocks: [[String: JSON]]
+    let blocks: [JSONObject]
     /// Tool-role message source name.
     let name: String?
 
@@ -65,7 +65,7 @@ nonisolated struct ChatMessage: Hashable, Sendable, Identifiable {
         status: String? = nil,
         toolCalls: [ToolCall] = [],
         pendingTool: ToolCall? = nil,
-        blocks: [[String: JSON]] = [],
+        blocks: [JSONObject] = [],
         name: String? = nil
     ) {
         self.id = id
@@ -101,7 +101,7 @@ nonisolated struct ChatMessage: Hashable, Sendable, Identifiable {
             status: j["status"].string,
             toolCalls: toolCalls,
             pendingTool: pendingTool,
-            blocks: j["blocks"].objectElements.map(\.objectValue),
+            blocks: j["blocks"].objectElements.map(\.orderedObjectValue),
             name: j["name"].string
         )
     }

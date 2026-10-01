@@ -16,13 +16,13 @@ nonisolated struct BrokerageRepository: Sendable {
     // MARK: Mutations
 
     /// POST /brokerages — link a new account.
-    func link(_ body: [String: JSON]) async throws -> [String: JSON] {
-        try await client.post("/brokerages", body: .object(body)).objectValue
+    func link(_ body: JSONObject) async throws -> JSONObject {
+        try await client.post("/brokerages", body: .object(body)).orderedObjectValue
     }
 
     /// PUT /brokerages/{id} — edit an existing account.
-    func edit(_ id: String, _ body: [String: JSON]) async throws -> [String: JSON] {
-        try await client.put("/brokerages/\(id)", body: .object(body)).objectValue
+    func edit(_ id: String, _ body: JSONObject) async throws -> JSONObject {
+        try await client.put("/brokerages/\(id)", body: .object(body)).orderedObjectValue
     }
 
     /// DELETE /brokerages/{id}
@@ -31,7 +31,7 @@ nonisolated struct BrokerageRepository: Sendable {
     }
 
     /// POST /brokerages/test-alpaca — diagnostic probe, does NOT save.
-    func testAlpaca(_ body: [String: JSON]) async throws -> [String: JSON] {
-        try await client.post("/brokerages/test-alpaca", body: .object(body)).objectValue
+    func testAlpaca(_ body: JSONObject) async throws -> JSONObject {
+        try await client.post("/brokerages/test-alpaca", body: .object(body)).orderedObjectValue
     }
 }

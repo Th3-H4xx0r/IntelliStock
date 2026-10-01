@@ -69,13 +69,14 @@ nonisolated struct Brokerage: Hashable, Sendable, Identifiable {
     }
 
     func toJSON() -> JSON {
-        var m: [String: JSON] = [
+        // Keys in the Dart map literal's order.
+        var m: JSONObject = [
             "id": .string(id),
             "brokerage_type": .string(brokerageType),
             "account_name": .string(accountName),
-            "paper": .bool(paper),
         ]
         if let status { m["status"] = .string(status) }
+        m["paper"] = .bool(paper)
         if let accountNumber { m["account_number"] = .string(accountNumber) }
         if let alpacaDataFeed { m["alpaca_data_feed"] = .string(alpacaDataFeed) }
         if let lastRefreshAt { m["last_refresh_at"] = .string(lastRefreshAt) }

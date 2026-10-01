@@ -16,7 +16,7 @@ nonisolated struct ChatbotRepository: Sendable {
 
     /// POST /chatbot/conversations  body: `{model_id?, title?}`
     func createConversation(modelId: String? = nil, title: String? = nil) async throws -> Conversation {
-        var body: [String: JSON] = [:]
+        var body: JSONObject = [:]
         if let modelId { body["model_id"] = .string(modelId) }
         if let title { body["title"] = .string(title) }
         return Conversation(json: try await client.post("/chatbot/conversations", body: .object(body)))
@@ -29,7 +29,7 @@ nonisolated struct ChatbotRepository: Sendable {
 
     /// PATCH /chatbot/conversations/:id  body: `{model_id?}` or
     /// `{auto_confirm_safe_tools}`
-    func patchConversation(_ id: String, _ body: [String: JSON]) async throws -> Conversation {
+    func patchConversation(_ id: String, _ body: JSONObject) async throws -> Conversation {
         Conversation(json: try await client.patch("/chatbot/conversations/\(id)", body: .object(body)))
     }
 
@@ -56,18 +56,18 @@ nonisolated struct ChatbotRepository: Sendable {
     }
 
     /// POST /chatbot/conversations/:id/confirm-tool  body: `{message_id, approved}`
-    func confirmTool(_ conversationId: String, _ messageId: String, _ approved: Bool) async throws -> [String: JSON] {
+    func confirmTool(_ conversationId: String, _ messageId: String, _ approved: Bool) async throws -> JSONObject {
         try await client.post(
             "/chatbot/conversations/\(conversationId)/confirm-tool",
             body: ["message_id": .string(messageId), "approved": .bool(approved)]
-        ).objectValue
+        ).orderedObjectValue
     }
 
     // MARK: Catalog
 
     /// GET /chatbot/tools → `{tools: [...]}`
-    func tools() async throws -> [[String: JSON]] {
-        try await client.get("/chatbot/tools")["tools"].objectElements.map(\.objectValue)
+    func tools() async throws -> [JSONObject] {
+        try await client.get("/chatbot/tools")["tools"].objectElements.map(\.orderedObjectValue)
     }
 
     // MARK: Model picker

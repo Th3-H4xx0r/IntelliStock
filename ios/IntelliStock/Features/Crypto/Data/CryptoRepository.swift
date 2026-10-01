@@ -35,13 +35,13 @@ nonisolated struct CryptoRepository: Sendable {
     /// POST /instances — create a crypto instance. `body` is the fully formed
     /// payload (id, name, granularity, run_command, kind, brokerage_id,
     /// strategy_id, stocks, crypto_config) built by the sheet.
-    func createInstance(_ body: [String: JSON]) async throws -> Instance {
+    func createInstance(_ body: JSONObject) async throws -> Instance {
         Self.unwrapInstance(try await client.post("/instances", body: .object(body)))
     }
 
     /// PATCH /instances/:id — edit an existing crypto instance's allocation
     /// (crypto_config + stocks).
-    func updateInstance(_ id: String, _ body: [String: JSON]) async throws -> Instance {
+    func updateInstance(_ id: String, _ body: JSONObject) async throws -> Instance {
         Self.unwrapInstance(try await client.patch("/instances/\(id)", body: .object(body)))
     }
 
@@ -59,7 +59,7 @@ nonisolated struct CryptoRepository: Sendable {
         granularity: String = "900",
         initialCash: Double = 10_000,
         emulateFeeVenue: String = "default"
-    ) async throws -> [String: JSON] {
+    ) async throws -> JSONObject {
         try await client.post(
             "/backtests",
             body: [
@@ -71,7 +71,7 @@ nonisolated struct CryptoRepository: Sendable {
                 "initial_cash": .double(initialCash),
                 "emulate_fee_venue": .string(emulateFeeVenue),
             ]
-        ).objectValue
+        ).orderedObjectValue
     }
 
     // MARK: Lifecycle (shared instance endpoints)
@@ -91,14 +91,14 @@ nonisolated struct CryptoRepository: Sendable {
     // MARK: Selectors used by the create/edit sheet
 
     /// GET /brokerages → raw account maps (id / account_name / brokerage_type).
-    func brokerages() async throws -> [[String: JSON]] {
-        try await client.get("/brokerages")["accounts"].objectElements.map(\.objectValue)
+    func brokerages() async throws -> [JSONObject] {
+        try await client.get("/brokerages")["accounts"].objectElements.map(\.orderedObjectValue)
     }
 
     /// GET /strategies → existing strategy docs (used to resolve the chosen
     /// dynamic-strategy name → its integer strategy_id).
-    func strategies() async throws -> [[String: JSON]] {
-        try await client.get("/strategies")["strategies"].objectElements.map(\.objectValue)
+    func strategies() async throws -> [JSONObject] {
+        try await client.get("/strategies")["strategies"].objectElements.map(\.orderedObjectValue)
     }
 
     /// Account equity for a brokerage: uninvested cash + Σ position market

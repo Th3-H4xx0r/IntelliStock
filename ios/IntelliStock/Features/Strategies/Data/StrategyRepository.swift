@@ -8,14 +8,14 @@ nonisolated struct StrategyRepository: Sendable {
     // MARK: Strategy CRUD
 
     /// GET /strategies → {strategies: [...]}
-    func list() async throws -> [[String: JSON]] {
-        try await client.get("/strategies")["strategies"].objectElements.map(\.objectValue)
+    func list() async throws -> [JSONObject] {
+        try await client.get("/strategies")["strategies"].objectElements.map(\.orderedObjectValue)
     }
 
     /// GET /strategies/:id
-    func get(_ id: String) async throws -> [String: JSON] {
+    func get(_ id: String) async throws -> JSONObject {
         let data = try await client.get("/strategies/\(id)")
-        return data["strategy"].object ?? data.objectValue
+        return data["strategy"].orderedObject ?? data.orderedObjectValue
     }
 
     /// PUT /strategies/:id
@@ -25,10 +25,10 @@ nonisolated struct StrategyRepository: Sendable {
     /// instead of running a destructive lookback + cleanup. Set it only after
     /// the operator confirms the preserve-history prompt (see
     /// `previewConfigChange`).
-    func update(_ id: String, _ body: [String: JSON], preserveHistory: Bool = false) async throws -> [String: JSON] {
+    func update(_ id: String, _ body: JSONObject, preserveHistory: Bool = false) async throws -> JSONObject {
         var payload = body
         if preserveHistory { payload["preserve_history"] = true }
-        return try await client.put("/strategies/\(id)", body: .object(payload)).objectValue
+        return try await client.put("/strategies/\(id)", body: .object(payload)).orderedObjectValue
     }
 
     /// POST /strategies/:id/config-change-preview
@@ -36,11 +36,11 @@ nonisolated struct StrategyRepository: Sendable {
     /// Read-only dry-run: returns `{needs_prompt, instances: [...]}`
     /// indicating whether saving `strategies` would rebuild Nexus history for
     /// any linked instance that has existing live state.
-    func previewConfigChange(_ id: String, _ strategies: [JSON]) async throws -> [String: JSON] {
+    func previewConfigChange(_ id: String, _ strategies: [JSON]) async throws -> JSONObject {
         try await client.post(
             "/strategies/\(id)/config-change-preview",
             body: ["strategies": .array(strategies)]
-        ).objectValue
+        ).orderedObjectValue
     }
 
     /// GET /strategies/available → list of available strategy type names.
@@ -57,31 +57,31 @@ nonisolated struct StrategyRepository: Sendable {
     }
 
     /// GET /agent/top5 → {top5: [...]}
-    func top5() async throws -> [[String: JSON]] {
-        try await client.get("/agent/top5")["top5"].objectElements.map(\.objectValue)
+    func top5() async throws -> [JSONObject] {
+        try await client.get("/agent/top5")["top5"].objectElements.map(\.orderedObjectValue)
     }
 
     /// GET /agent/best → the single best backtest record; nil on any error.
-    func agentBest() async -> [String: JSON]? {
+    func agentBest() async -> JSONObject? {
         guard let data = try? await client.get("/agent/best") else { return nil }
-        return data.object
+        return data.orderedObject
     }
 
     /// GET /backtests/best-per-strategy → {by_strategy: {str(id): {...}}}
-    func bestPerStrategy() async throws -> [String: JSON] {
-        try await client.get("/backtests/best-per-strategy")["by_strategy"].objectValue
+    func bestPerStrategy() async throws -> JSONObject {
+        try await client.get("/backtests/best-per-strategy")["by_strategy"].orderedObjectValue
     }
 
     // MARK: Instances (for the backtest modal)
 
     /// GET /instances → {instances: [...]}
-    func instances() async throws -> [[String: JSON]] {
-        try await client.get("/instances")["instances"].objectElements.map(\.objectValue)
+    func instances() async throws -> [JSONObject] {
+        try await client.get("/instances")["instances"].objectElements.map(\.orderedObjectValue)
     }
 
     /// POST /instances (create new)
-    func createInstance(_ body: [String: JSON]) async throws -> [String: JSON] {
-        try await client.post("/instances", body: .object(body)).objectValue
+    func createInstance(_ body: JSONObject) async throws -> JSONObject {
+        try await client.post("/instances", body: .object(body)).orderedObjectValue
     }
 
     /// POST /instances/:id/link-strategy
@@ -93,8 +93,8 @@ nonisolated struct StrategyRepository: Sendable {
     }
 
     /// POST /backtests (create backtest run)
-    func createBacktest(_ body: [String: JSON]) async throws -> [String: JSON] {
-        try await client.post("/backtests", body: .object(body)).objectValue
+    func createBacktest(_ body: JSONObject) async throws -> JSONObject {
+        try await client.post("/backtests", body: .object(body)).orderedObjectValue
     }
 
     // MARK: Client-side merge helpers
@@ -125,10 +125,10 @@ nonisolated struct StrategyRepository: Sendable {
     /// Merge strategy list JSON with best-backtest stats and top-5 rank info.
     /// Mirrors the Vue `enrichedStrategies` computed.
     static func mergeStrategyRows(
-        _ strategies: [[String: JSON]],
+        _ strategies: [JSONObject],
         _ bestByStrategy: [Int: BestPerStrategy],
-        _ top5Entries: [[String: JSON]],
-        _ allBestByStrat: [String: JSON]
+        _ top5Entries: [JSONObject],
+        _ allBestByStrat: JSONObject
     ) -> [StrategyListRow] {
         // Build rank map: strategy_id → rank
         var rankMap: [Int: Int] = [:]
@@ -142,7 +142,7 @@ nonisolated struct StrategyRepository: Sendable {
             let sid = json["id"].intOr(0)
             let best = bestByStrategy[sid]
             let top5entry = top5Entries.first { JSON.object($0)["strategy_id"].int == sid }.map(JSON.object)
-            let allBest = (allBestByStrat[String(sid)] ?? .null).object.map(JSON.object)
+            let allBest = (allBestByStrat[String(sid)] ?? .null).orderedObject.map(JSON.object)
             let rank = rankMap[sid]
 
             var bestPnl = best?.bestPnl

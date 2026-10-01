@@ -56,8 +56,8 @@ nonisolated struct BacktestRepository: Sendable {
     }
 
     /// GET /backtests/:id/logs?since_line=N
-    func logs(_ id: String, sinceLine: Int = 0) async throws -> [String: JSON] {
-        try await client.get("/backtests/\(id)/logs", query: ["since_line": .string(String(sinceLine))]).objectValue
+    func logs(_ id: String, sinceLine: Int = 0) async throws -> JSONObject {
+        try await client.get("/backtests/\(id)/logs", query: ["since_line": .string(String(sinceLine))]).orderedObjectValue
     }
 
     /// GET /backtests/:id/llm-cost
@@ -66,12 +66,12 @@ nonisolated struct BacktestRepository: Sendable {
     }
 
     /// POST /backtests/:id/:action (pause | resume | stop)
-    func action(_ id: String, _ name: String) async throws -> [String: JSON] {
-        try await client.post("/backtests/\(id)/\(name)").objectValue
+    func action(_ id: String, _ name: String) async throws -> JSONObject {
+        try await client.post("/backtests/\(id)/\(name)").orderedObjectValue
     }
 
     /// POST /backtests
-    func create(_ body: [String: JSON]) async throws -> [String: JSON] {
-        try await client.post("/backtests", body: .object(body)).objectValue
+    func create(_ body: JSONObject) async throws -> JSONObject {
+        try await client.post("/backtests", body: .object(body)).orderedObjectValue
     }
 }

@@ -118,7 +118,7 @@ nonisolated struct RecentCall: Hashable, Sendable {
     let strategy: String?
     let callSite: String?
     /// Full JSON for the detail dialog.
-    let raw: [String: JSON]
+    let raw: JSONObject
 
     init(json j: JSON) {
         id = j["id"].string
@@ -130,7 +130,7 @@ nonisolated struct RecentCall: Hashable, Sendable {
         totalCostUsd = j["total_cost_usd"].double
         strategy = j["strategy"].string
         callSite = j["call_site"].string
-        raw = j.objectValue
+        raw = j.orderedObjectValue
     }
 }
 

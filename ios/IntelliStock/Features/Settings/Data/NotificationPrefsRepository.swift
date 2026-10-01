@@ -17,10 +17,10 @@ nonisolated struct NotificationPrefsRepository: Sendable {
 
     /// POST /notifications/test — send a sample notification via `channel`
     /// so the operator can confirm the delivery option works.
-    func sendTest(_ channel: NotifChannel) async throws -> [String: JSON] {
+    func sendTest(_ channel: NotifChannel) async throws -> JSONObject {
         try await client.post(
             "/notifications/test",
             body: ["channel": .string(channel == .discord ? "discord" : "push")]
-        ).objectValue
+        ).orderedObjectValue
     }
 }

@@ -16,14 +16,14 @@ nonisolated struct SubStrategy: Hashable, Sendable {
     let executionScope: String?
     /// Merged conditions + config map (all non-null/non-empty entries;
     /// config wins over a legacy condition with the same key).
-    let config: [String: JSON]
+    let config: JSONObject
 
     init(json j: JSON, fallbackPosition: Int = 0) {
-        var merged: [String: JSON] = [:]
-        for (k, v) in j["conditions"].objectValue where !v.isNull && v != "" {
+        var merged: JSONObject = [:]
+        for (k, v) in j["conditions"].orderedObjectValue where !v.isNull && v != "" {
             merged[k] = v
         }
-        for (k, v) in j["config"].objectValue where !v.isNull && v != "" {
+        for (k, v) in j["config"].orderedObjectValue where !v.isNull && v != "" {
             merged[k] = v
         }
         strategy = j["strategy"].or(j["type"]).stringOr("")

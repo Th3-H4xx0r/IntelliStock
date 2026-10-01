@@ -36,7 +36,7 @@ nonisolated struct LearningFinding: Hashable, Sendable, Identifiable {
     let detectedAt: String
     let runId: String
     let status: String
-    let evidence: [String: JSON]
+    let evidence: JSONObject
 
     init(json j: JSON) {
         id = j["id"].stringOr("")
@@ -48,7 +48,7 @@ nonisolated struct LearningFinding: Hashable, Sendable, Identifiable {
         detectedAt = j["detected_at"].stringOr("")
         runId = j["run_id"].stringOr("")
         status = j["status"].stringOr("open")
-        evidence = j["evidence"].objectValue
+        evidence = j["evidence"].orderedObjectValue
     }
 }
 
@@ -221,8 +221,8 @@ nonisolated struct LearningRepository: Sendable {
         )
     }
 
-    func control() async throws -> [String: JSON] {
-        try await client.get("/learning/control").objectValue
+    func control() async throws -> JSONObject {
+        try await client.get("/learning/control").orderedObjectValue
     }
 
     func setRunning(_ running: Bool) async throws {
