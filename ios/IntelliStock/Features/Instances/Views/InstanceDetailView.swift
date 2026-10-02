@@ -179,19 +179,30 @@ private struct InstanceDetailContent: View {
 
     private func detail(_ inst: Instance, _ state: InstanceDetailState) -> some View {
         let lanes = swingLanesOf(inst.strategy)
-        return List {
+        let pendingIds = Set(signals.state.value?.signals.map(\.id) ?? [])
+        return ScrollViewReader { proxy in
+          List {
             if let message = state.errorMessage {
                 Section { ErrorRow(message: message) }
+            }
+            heroSection(inst, state)
+            // The review queue sits up top: it is what this screen is for on
+            // a swing or wheel instance.
+            if lanes.any {
+                PendingSignalsSection(
+                    model: signals, actions: signalActions, cash: wheel.state.value?.cash,
+                    showToast: { toast = $0 },
+                    onDecided: { Task { await wheel.loadSignals() } }
+                )
+            }
+            if lanes.wheel {
+                WheelSections(model: wheel, pendingIds: pendingIds) { id in
+                    withAnimation { proxy.scrollTo(swingSignalAnchor(id), anchor: .top) }
+                }
             }
             statusSection(inst, state)
             brokerageSection(inst)
             strategySection(inst)
-            if lanes.any {
-                PendingSignalsSection(model: signals, actions: signalActions) { toast = $0 }
-            }
-            if lanes.wheel {
-                WheelSections(model: wheel)
-            }
             stocksSection(inst)
             Section("Live logs") {
                 LiveLogsPanel(instanceId: inst.id)
@@ -204,6 +215,7 @@ private struct InstanceDetailContent: View {
                 onSort: { field in Task { await model.sortBacktests(field) } },
                 onPage: { page in Task { await model.goToBacktestPage(page) } }
             )
+          }
         }
         .refreshable {
             await model.refreshInstance()
@@ -212,12 +224,59 @@ private struct InstanceDetailContent: View {
         }
     }
 
+    // MARK: Hero
+
+    /// The header: the run state with its uptime, the strategy and the
+    /// brokerage, then the account's cash when the wheel book has it.
+    private func heroSection(_ inst: Instance, _ state: InstanceDetailState) -> some View {
+        let strategy = (inst.strategy?["name"]).flatMap { $0.isNull ? nil : $0.dartDescription } ?? inst.strategyId
+        let brokerage = (inst.brokerage?["account_name"] ?? .null).string
+            ?? inst.brokerageId.map { instanceBrokerageName($0, nested: nil, brokerages: services.dashboard.brokeragesValue) }
+        let subtitle = [strategy, brokerage].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+        let book = wheel.state.value
+        return Section {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 10) {
+                    InstanceStatusDot(inst: inst)
+                    if inst.runCommand, state.liveUptimeSecs > 0 {
+                        Text("Up \(instanceUptimeLabel(state.liveUptimeSecs))")
+                            .font(.subheadline.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                    if case .bool(let paper)? = inst.brokerage?["alpaca_paper"] {
+                        StatusBadge(label: paper ? "Paper" : "Live", color: paper ? DS.Palette.info : DS.Palette.danger)
+                    }
+                }
+                if !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                if let cash = book?.cash {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(fmtMoney(cash))
+                            .font(.largeTitle.weight(.bold))
+                            .monospacedDigit()
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.6)
+                        Text("Cash available")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.top, 2)
+                    .accessibilityElement(children: .combine)
+                }
+            }
+            .padding(.vertical, 6)
+        }
+    }
+
     // MARK: Status
 
     private func statusSection(_ inst: Instance, _ state: InstanceDetailState) -> some View {
-        Section("Status") {
+        Section("Details") {
             StatGrid(columns: 2) {
-                StatCell(label: "Status") { InstanceStatusDot(inst: inst) }
                 StatCell(
                     label: "Uptime",
                     value: instanceUptimeLabel(state.liveUptimeSecs),

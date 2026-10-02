@@ -28,8 +28,12 @@ final class PendingSignalsActions {
 struct PendingSignalsSection: View {
     let model: PendingSignalsModel
     let actions: PendingSignalsActions
+    /// The account's cash (the wheel book's), for the collateral check.
+    var cash: Double?
     /// Shows a result (Dart's SnackBar) on the screen's toast.
     let showToast: (Toast) -> Void
+    /// After a confirmed decision lands (the scan rows re-read their links).
+    var onDecided: () -> Void = {}
 
     static let footer = "Approval rebuilds the order at the live price."
 
@@ -65,8 +69,7 @@ struct PendingSignalsSection: View {
                         .foregroundStyle(DS.Palette.warning)
                 }
                 if state.signals.isEmpty {
-                    Text("Nothing waiting for review.")
-                        .foregroundStyle(.secondary)
+                    SwingQuietRow(title: "Nothing waiting for review.", systemImage: "checkmark.circle")
                 }
             } header: {
                 Text(title)
@@ -79,12 +82,27 @@ struct PendingSignalsSection: View {
                 SwingSignalRows(
                     signal: s,
                     busy: state.isDeciding(s.id) || actions.inFlight.contains(s.id) || actions.confirmRunning,
+                    sending: state.isDeciding(s.id) || actions.inFlight.contains(s.id),
+                    refusal: state.refusals[s.id],
+                    cash: cash,
                     onDecide: { decide(s, $0) }
                 )
             } header: {
                 if i == 0, !hasStatus { Text(title) }
             } footer: {
-                if i == state.signals.count - 1, !hasTail { Text(Self.footer) }
+                if i == state.signals.count - 1, !hasTail, state.tracks.isEmpty { Text(Self.footer) }
+            }
+        }
+        // Approvals followed through their broker command.
+        if !state.tracks.isEmpty {
+            Section {
+                ForEach(state.tracks) { track in
+                    SwingTrackRow(track: track) { model.dismissTrack(track.id) }
+                }
+            } header: {
+                Text("Your approvals")
+            } footer: {
+                if !hasTail { Text(Self.footer) }
             }
         }
         // 202'd approvals and re-sends: the card and its badge stay until a
@@ -133,6 +151,7 @@ struct PendingSignalsSection: View {
         let actions = actions
         let model = model
         let showToast = showToast
+        let onDecided = onDecided
         actions.confirm = ConfirmRequest(
             title: "\(decisionLabel(decision)) \(signal.symbol)",
             body: decisionConfirmBody(signal, decision),
@@ -143,6 +162,7 @@ struct PendingSignalsSection: View {
                 defer { actions.inFlight.remove(signal.id) }
                 let result = await model.decide(signal, decision)
                 Self.report(result, showToast)
+                onDecided()
             },
             onError: { showToast(Toast(swingErrorText($0), style: .error)) }
         )
@@ -199,19 +219,70 @@ private func swingSubtitle(_ s: SwingSignal) -> String {
 private struct SwingSignalRows: View {
     let signal: SwingSignal
     let busy: Bool
+    /// This card's own decision is in flight.
+    let sending: Bool
+    /// Why the broker refused its last approval, when this device saw it.
+    let refusal: SwingRefusal?
+    let cash: Double?
     let onDecide: (String) -> Void
 
     var body: some View {
         let s = signal
         let reasoning = s.reasoning.trimmingCharacters(in: .whitespacesAndNewlines)
-        EntityRow(s.symbol, subtitle: swingSubtitle(s))
-        StatGrid(columns: 3) {
-            StatCell(label: "Score", value: s.score.map(String.init) ?? "—", valueColor: swingScoreColor(s.score))
-            ForEach(Array(swingProposalFields(s).enumerated()), id: \.offset) { _, field in
-                StatCell(label: swingFieldLabel(field.label), value: field.value)
+        // Header: symbol, lane, score capsule, session.
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(s.symbol)
+                    .font(.title2.weight(.bold))
+                Text(swingLaneLabel(s))
+                    .dsBadge(.secondary)
+                Spacer(minLength: 0)
+                StatusBadge(label: swingScoreLabel(s.score), color: swingScoreColor(s.score))
             }
+            Text(swingSessionText(s).dsSentenceCased)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 2)
+        .id(swingSignalAnchor(s.id))
+        .accessibilityElement(children: .combine)
+
+        // Key numbers: premium and collateral lead for a put seller.
+        if s.isWheel {
+            let lead = swingWheelLead(s)
+            StatGrid(columns: 2) {
+                StatCell(label: "Premium", footnote: lead.premiumFootnote) {
+                    Text(lead.premium).font(.title3.weight(.semibold)).foregroundStyle(DS.Palette.success)
+                }
+                StatCell(label: "Collateral", footnote: lead.collateralFootnote) {
+                    Text(lead.collateral).font(.title3.weight(.semibold))
+                }
+            }
+            .padding(.vertical, 4)
+            StatGrid(columns: 3) {
+                ForEach(Array(swingWheelDetails(s).enumerated()), id: \.offset) { _, field in
+                    StatCell(label: field.label, value: field.value)
+                }
+                if let otm = s.otmPct {
+                    StatCell(label: "Cushion", value: fmtItm(-otm))
+                }
+            }
+            .padding(.vertical, 4)
+        } else {
+            StatGrid(columns: 2) {
+                ForEach(Array(swingProposalFields(s).enumerated()), id: \.offset) { _, field in
+                    StatCell(label: swingFieldLabel(field.label), value: field.value)
+                }
+            }
+            .padding(.vertical, 4)
+        }
+        if let warning = swingCollateralWarning(s, cash: cash) {
+            SwingCallout(text: warning, systemImage: "banknote", color: DS.Palette.warning)
+        }
+        if !s.keyRisksText.isEmpty {
+            SwingCallout(text: s.keyRisks.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }.joined(separator: "\n"),
+                         systemImage: "exclamationmark.triangle.fill", color: DS.Palette.warning)
+        }
         if !reasoning.isEmpty {
             DisclosureGroup("Rationale") {
                 Text(reasoning)
@@ -219,40 +290,138 @@ private struct SwingSignalRows: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        if !s.keyRisksText.isEmpty {
-            Text("Risks: \(s.keyRisksText)")
-                .font(.footnote)
-                .foregroundStyle(DS.Palette.warning)
+        // The outcome of the last approval, when it was refused.
+        if let refusal {
+            let text = swingRefusalText(refusal.message)
+            SwingCallout(title: "Not sent", text: text.headline, detail: text.detail,
+                         systemImage: "xmark.octagon.fill", color: DS.Palette.danger)
+        } else if let note = swingReturnedNote(s) {
+            SwingCallout(title: "Returned by the broker", text: note,
+                         systemImage: "arrow.uturn.backward.circle.fill", color: DS.Palette.danger)
         }
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
+            Button { onDecide("approve") } label: {
+                Text(refusal == nil && !s.returnedByBroker ? decisionLabel("approve") : "Approve Again")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity, minHeight: 30)
+            }
+            .dsProminentButton()
             HStack(spacing: 10) {
-                Button { onDecide("approve") } label: {
-                    Text(decisionLabel("approve")).lineLimit(1).minimumScaleFactor(0.7).frame(maxWidth: .infinity)
-                }
-                .tint(DS.Palette.success)
                 if s.allowsHalf {
                     Button { onDecide("approve_half") } label: {
-                        Text(decisionLabel("approve_half")).lineLimit(1).minimumScaleFactor(0.7).frame(maxWidth: .infinity)
+                        Text(decisionLabel("approve_half")).frame(maxWidth: .infinity, minHeight: 30)
                     }
                     .tint(DS.Palette.success)
                 }
                 Button(role: .destructive) { onDecide("reject") } label: {
-                    Text(decisionLabel("reject")).lineLimit(1).minimumScaleFactor(0.7).frame(maxWidth: .infinity)
+                    Text(decisionLabel("reject")).frame(maxWidth: .infinity, minHeight: 30)
                 }
                 .tint(DS.Palette.danger)
             }
             .buttonStyle(.bordered)
-            .controlSize(.large)
-            .disabled(busy)
-            if busy {
+            if sending {
+                HStack(spacing: 8) {
+                    ProgressView()
+                    Text("Sending your decision…")
+                }
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            } else if busy {
                 Text("Working…")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
         }
+        .controlSize(.large)
+        .disabled(busy)
+        .padding(.vertical, 6)
+    }
+}
+
+/// A flat tinted row: risks, a refusal, a collateral warning.
+private struct SwingCallout: View {
+    var title: String?
+    let text: String
+    var detail: String?
+    let systemImage: String
+    let color: Color
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: systemImage)
+                .font(.body)
+                .foregroundStyle(color)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 3) {
+                if let title {
+                    Text(title).font(.subheadline.weight(.semibold))
+                }
+                Text(text)
+                    .font(.subheadline)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let detail, !detail.isEmpty, detail != text {
+                    Text(detail)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 4)
+        .listRowBackground(color.opacity(DS.tintFill))
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// An approval followed through its broker command.
+private struct SwingTrackRow: View {
+    let track: SwingApprovalTrack
+    let onDismiss: () -> Void
+
+    var body: some View {
+        let s = track.signal
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text(s.symbol).font(.headline)
+                Text(swingLaneLabel(s)).dsBadge(.secondary)
+                Spacer(minLength: 0)
+                switch track.phase {
+                case .sending:
+                    ProgressView()
+                case .sent:
+                    StatusBadge(label: "Sent", color: DS.Palette.success)
+                case .refused:
+                    StatusBadge(label: "Not sent", color: DS.Palette.danger)
+                }
+            }
+            switch track.phase {
+            case .sending:
+                Text("Approved. Waiting for the broker to send it…")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            case .sent:
+                Text("The broker sent the order. Check open orders for the fill.")
+                    .font(.subheadline)
+            case .refused:
+                let text = swingRefusalText(track.message)
+                Text(text.headline).font(.subheadline)
+                if text.detail != text.headline, !text.detail.isEmpty {
+                    Text(text.detail).font(.footnote).foregroundStyle(.secondary)
+                }
+            }
+            if track.phase != .sending {
+                Button("Dismiss", action: onDismiss)
+                    .buttonStyle(.borderless)
+                    .padding(.top, 2)
+            }
+        }
         .padding(.vertical, 4)
     }
 }
+
+/// The scroll anchor on a signal card's header.
+func swingSignalAnchor(_ id: String) -> String { "swing-signal-\(id)" }
 
 /// An approval no broker command has claimed for 2+ minutes (`_StuckCard`).
 private struct SwingStuckRow: View {
@@ -344,6 +513,10 @@ private struct SwingUncertainRow: View {
 /// monitor will buy that put back on its next pass. The screen runs the load.
 struct WheelSections: View {
     let model: WheelModel
+    /// The ids in the live pending queue.
+    var pendingIds: Set<String> = []
+    /// Scrolls to a pending signal's card.
+    var onReview: (String) -> Void = { _ in }
 
     var body: some View {
         Section {
@@ -362,7 +535,7 @@ struct WheelSections: View {
                 }
                 .padding(.vertical, 4)
                 if w.openPuts.isEmpty {
-                    Text("No open puts.").foregroundStyle(.secondary)
+                    SwingQuietRow(title: "No open puts.", systemImage: "shield")
                 } else {
                     ForEach(Array(w.openPuts.enumerated()), id: \.offset) { _, put in
                         WheelPutRow(put: put)
@@ -377,16 +550,49 @@ struct WheelSections: View {
             }
         }
         if let w = model.state.value {
-            Section("Recent scans") {
+            Section {
                 if w.recentScans.isEmpty {
-                    Text("No scans recorded yet.").foregroundStyle(.secondary)
+                    SwingQuietRow(title: "No scans recorded yet.", systemImage: "magnifyingglass")
                 } else {
                     ForEach(Array(w.recentScans.prefix(5).enumerated()), id: \.offset) { _, scan in
-                        WheelScanRow(scan: scan)
+                        let signal = wheelScanSignal(scan, in: model.signals)
+                        let status = wheelScanStatus(scan, signal: signal, pendingIds: pendingIds)
+                        if status.reviewable, let signal {
+                            Button { onReview(signal.id) } label: {
+                                WheelScanRow(scan: scan, status: status, showsChevron: true)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityHint("Shows its pending signal, where you approve or reject it")
+                        } else {
+                            WheelScanRow(scan: scan, status: status, showsChevron: false)
+                        }
                     }
+                }
+            } header: {
+                Text("Recent scans")
+            } footer: {
+                if !w.recentScans.isEmpty {
+                    Text("A scan is a log entry. Approve or reject a put on its pending signal above; tap a pending scan to jump to it.")
                 }
             }
         }
+    }
+}
+
+/// A quiet in-section empty state, in the manner of `ContentUnavailableView`.
+private struct SwingQuietRow: View {
+    let title: String
+    let systemImage: String
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: systemImage)
+                .foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
+            Text(title)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, minHeight: 44)
     }
 }
 
@@ -429,23 +635,43 @@ private struct WheelPutRow: View {
 
 private struct WheelScanRow: View {
     let scan: WheelScan
+    let status: WheelScanStatus
+    let showsChevron: Bool
 
     private var statusColor: Color {
-        switch scan.status {
-        case "placed": DS.Palette.success
-        case "pending": DS.Palette.warning
-        case "rejected": DS.Palette.danger
-        default: .secondary
+        switch status.tone {
+        case .good: DS.Palette.success
+        case .waiting: DS.Palette.warning
+        case .bad: DS.Palette.danger
+        case .neutral: .secondary
         }
     }
 
+    private var subtitle: String {
+        var parts: [String] = []
+        if let score = scan.score { parts.append("Score \(score)") }
+        if !scan.session.isEmpty { parts.append("Scanned \(scan.session)") }
+        if !scan.skipReason.isEmpty { parts.append(scan.skipReason) }
+        return parts.joined(separator: " · ")
+    }
+
     var body: some View {
-        EntityRow(
-            "\(scan.symbol) \(fmtMoney(scan.strike)) P · \(scan.expiry.isEmpty ? "—" : scan.expiry)",
-            subtitle: scan.skipReason.isEmpty ? nil : scan.skipReason,
-            subtitleLineLimit: 2
-        ) {
-            AppBadge(label: scan.status.isEmpty ? "—" : scan.status, color: statusColor)
+        HStack(spacing: 8) {
+            EntityRow(
+                "\(scan.symbol) \(fmtMoney(scan.strike)) P · \(scan.expiry.isEmpty ? "—" : scan.expiry)",
+                subtitle: subtitle.isEmpty ? nil : subtitle,
+                subtitleLineLimit: 2
+            ) {
+                StatusBadge(label: status.label, color: statusColor)
+            }
+            if showsChevron {
+                Image(systemName: "chevron.forward")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityHidden(true)
+            }
         }
+        .contentShape(Rectangle())
+        .frame(minHeight: 44)
     }
 }
