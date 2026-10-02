@@ -77,39 +77,9 @@ nonisolated func describeOptionContract(
     return e.isEmpty ? parts.joined(separator: " ") : "\(parts.joined(separator: " ")) · \(e)"
 }
 
-/// Dart `double.toStringAsFixed(digits)`.
-///
-/// Dart rounds the exact binary value half away from zero (`2.5` → `3`,
-/// `0.125` → `0.13`, `1.005` → `1.00`); `String(format:)` rounds exact ties
-/// to even. This reads the exact expansion and rounds it the Dart way.
+/// Dart `double.toStringAsFixed(digits)` — forwards to
+/// `DartNumberFormat.toStringAsFixed`, the single implementation (which also
+/// switches to exponential form at 1e21, as Dart does).
 nonisolated func dartToStringAsFixed(_ value: Double, _ digits: Int) -> String {
-    guard value.isFinite else { return JSON.dartDoubleString(value) }
-    let digits = max(0, digits)
-    // Every double ≥ 1e-6 has an exact decimal expansion within 80 extra
-    // places, so `rest` below decides the rounding exactly.
-    let exact = String(format: "%.\(digits + 80)f", abs(value))
-    let dot = exact.firstIndex(of: ".")!
-    let whole = exact[..<dot]
-    let fraction = exact[exact.index(after: dot)...]
-    var kept = Array((whole + fraction.prefix(digits)).utf8)
-    let roundUp = fraction.dropFirst(digits).first.map { $0 >= "5" } ?? false
-    if roundUp {
-        var i = kept.count - 1
-        while i >= 0 {
-            if kept[i] == UInt8(ascii: "9") {
-                kept[i] = UInt8(ascii: "0")
-                i -= 1
-            } else {
-                kept[i] += 1
-                break
-            }
-        }
-        if i < 0 { kept.insert(UInt8(ascii: "1"), at: 0) }
-    }
-    var text = String(decoding: kept, as: UTF8.self)
-    if digits > 0 {
-        text.insert(".", at: text.index(text.endIndex, offsetBy: -digits))
-    }
-    // Dart keeps the sign of a negative value that rounds to zero ("-0.00").
-    return value.sign == .minus ? "-" + text : text
+    DartNumberFormat.toStringAsFixed(value, digits)
 }

@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import SwiftUI
+import UIKit
 
 /// App-wide services, injected with `.environment(services)` — the native
 /// form of the Riverpod providers `main.dart` and `core/**` set up.
@@ -28,16 +29,29 @@ final class AppServices {
     /// signed out.
     var loginRedirect: String?
 
+    /// False while the keychain cannot be read — iOS may launch (prewarm) the
+    /// app before the first unlock after a reboot. The URL, session and lock
+    /// stay unloaded (and the widget's credentials untouched) until
+    /// protected data becomes available; `RootView` shows a blank screen
+    /// meanwhile rather than Connect.
+    private(set) var isStorageReady = true
+
     @ObservationIgnored let biometrics: any BiometricAuthenticating
+    @ObservationIgnored private let storage: any SecureStorage
+    @ObservationIgnored private var protectedDataObserver: (any NSObjectProtocol)?
+    @ObservationIgnored private let notificationCenter: NotificationCenter
     @ObservationIgnored private let urlSession: URLSession
     @ObservationIgnored private let pushRegistrar: any PushRegistering
     /// The tab that held `loginRedirect`, so a More destination returns to
     /// the More tab rather than over the Dashboard.
     @ObservationIgnored private var loginRedirectTab: AppTab?
 
+    /// Registers only while signed in and unlocked: Dart sent nothing from
+    /// behind the lock screen.
     @ObservationIgnored private(set) lazy var push = PushService(
         repository: { [unowned self] in PushRepository(client: self.apiClient) },
-        registrar: pushRegistrar
+        registrar: pushRegistrar,
+        shouldRegister: { [unowned self] in self.session.isAuthenticated && !self.lock.locked }
     )
 
     @ObservationIgnored private(set) lazy var widgetDataSyncer = WidgetDataSyncer(
@@ -69,12 +83,13 @@ final class AppServices {
         widgetSync: WidgetSync = WidgetSync(),
         urlSession: URLSession = ApiClient.makeSession(),
         pushRegistrar: any PushRegistering = SystemPushRegistrar(),
-        now: @escaping () -> Date = Date.init
+        now: @escaping () -> Date = Date.init,
+        notificationCenter: NotificationCenter = .default
     ) {
         let urlStore = ApiBaseUrlStore(storage: storage)
-        urlStore.load()
+        let urlLoaded = urlStore.load()
         let session = SessionStore(storage: storage, widgetSync: widgetSync, apiBaseUrl: { [urlStore] in urlStore.baseUrl })
-        session.load()
+        let sessionLoaded = session.load()
         let lock = AppLock(
             seed: AppLock.seed(storage: storage, isAuthenticated: session.isAuthenticated),
             storage: storage,
@@ -90,12 +105,40 @@ final class AppServices {
         self.lifecycle = AppLifecycle(now: now)
         self.widgetSync = widgetSync
         self.biometrics = biometrics
+        self.storage = storage
+        self.notificationCenter = notificationCenter
         self.urlSession = urlSession
         self.pushRegistrar = pushRegistrar
         self.selectedAccount = SelectedAccountModel(store: storage)
         self.apiClient = ApiClient(baseURL: urlStore.baseUrl, tokens: session, session: urlSession)
 
         urlStore.onChange = { [weak self] _ in self?.rebuildClient() }
+
+        if !(urlLoaded && sessionLoaded) {
+            isStorageReady = false
+            protectedDataObserver = notificationCenter.addObserver(
+                forName: UIApplication.protectedDataDidBecomeAvailableNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.reloadStorage() }
+            }
+        }
+    }
+
+    /// Loads what the keychain refused at launch, once it can be read: the
+    /// URL (rebuilding the client), the session, the lock seed and the
+    /// selected account. Called when protected data becomes available.
+    func reloadStorage() {
+        guard !isStorageReady else { return }
+        guard urlStore.load(), session.load() else { return }
+        lock.state = AppLock.seed(storage: storage, isAuthenticated: session.isAuthenticated)
+        selectedAccount.reload()
+        isStorageReady = true
+        if let protectedDataObserver {
+            notificationCenter.removeObserver(protectedDataObserver)
+            self.protectedDataObserver = nil
+        }
     }
 
     /// A services graph over an in-memory store, for previews and tests that
@@ -108,6 +151,13 @@ final class AppServices {
     private func rebuildClient() {
         guard apiClient.baseURL != urlStore.baseUrl else { return }
         apiClient = ApiClient(baseURL: urlStore.baseUrl, tokens: session, session: urlSession)
+        // A different server: nothing cached from the old one may show.
+        resetSessionModels()
+    }
+
+    /// Returns the session-scoped shared models to their fresh state.
+    private func resetSessionModels() {
+        dashboard.reset()
     }
 
     // MARK: Lifecycle
@@ -122,11 +172,15 @@ final class AppServices {
     // MARK: Sign-in transitions (router.dart's redirect)
 
     /// The session ended (sign-out, 401, server change): remember where the
-    /// person was, as `/login?redirect=<location>`, and start a fresh shell.
+    /// person was, as `/login?redirect=<location>`, start a fresh shell, drop
+    /// the shared models' data, and open the lock — it protects a session, so
+    /// a password sign-in must not be followed by Face ID.
     func didSignOut() {
         loginRedirect = router.location
         loginRedirectTab = router.location == nil ? nil : router.tab
         router.reset()
+        lock.releaseLock()
+        resetSessionModels()
     }
 
     /// A session began. With onboarding complete, honour a safe redirect;

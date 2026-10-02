@@ -8,7 +8,7 @@ nonisolated enum AppTab: String, Hashable, CaseIterable, Sendable {
 
     /// The go_router branch path of a tab root, e.g. `/kalshi`.
     init?(rootPath: String) {
-        switch rootPath {
+        switch Route.pathOnly(rootPath) {
         case "/dashboard": self = .dashboard
         case "/kalshi": self = .kalshi
         case "/instances": self = .instances
@@ -77,7 +77,9 @@ nonisolated enum Route: Hashable, Sendable {
     /// Parses a go_router location such as `/instances/abc/live`. Path
     /// parameters are percent-decoded, as go_router decodes them.
     init?(path: String) {
-        let parts = path.split(separator: "/", omittingEmptySubsequences: true)
+        // go_router matches the path only; `?query` and `#fragment` are not
+        // part of the location's route.
+        let parts = Route.pathOnly(path).split(separator: "/", omittingEmptySubsequences: true)
             .map { $0.removingPercentEncoding ?? String($0) }
         switch parts.count {
         case 1:

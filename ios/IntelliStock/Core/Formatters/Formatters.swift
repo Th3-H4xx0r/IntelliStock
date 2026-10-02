@@ -76,7 +76,8 @@ nonisolated func fmtTokens(_ v: Int?) -> String {
 nonisolated func fmtDuration(_ seconds: Double?) -> String {
     guard let s = seconds, s.isFinite else { return dash }
     if s < 60 {
-        let text = dartMod(s, 1) == 0 ? String(Int(s)) : DartNumberFormat.toStringAsFixed(s, 1)
+        let whole = dartMod(s, 1) == 0 ? Int(dartTruncating: s) : nil
+        let text = whole.map(String.init) ?? DartNumberFormat.toStringAsFixed(s, 1)
         return "\(text)s"
     }
     if s < 3600 {
@@ -89,7 +90,7 @@ nonisolated func fmtDuration(_ seconds: Double?) -> String {
         let m = Int((dartMod(s, 3600) / 60).rounded(.down))
         return "\(h)h \(m)m"
     }
-    let d = Int((s / 86400).rounded(.down))
+    let d = Int(dartTruncating: (s / 86400).rounded(.down)) ?? 0
     let h = Int((dartMod(s, 86400) / 3600).rounded(.down))
     return "\(d)d \(h)h"
 }
@@ -99,8 +100,8 @@ nonisolated func fmtDuration(_ seconds: Int?) -> String { fmtDuration(seconds.ma
 /// Elapsed: `Xd Xh Xm` / `Xh Xm Xs` / `Xm Xs` / `Xs`.
 @_disfavoredOverload
 nonisolated func fmtElapsed(_ seconds: Double?) -> String {
-    guard let seconds, seconds.isFinite else { return dash }
-    return fmtElapsed(Int(seconds.rounded(.down)))
+    guard let seconds, let whole = Int(dartTruncating: seconds.rounded(.down)) else { return dash }
+    return fmtElapsed(whole)
 }
 
 nonisolated func fmtElapsed(_ seconds: Int?) -> String {
@@ -219,3 +220,61 @@ nonisolated func pnlColor(_ v: Double?) -> Color {
 }
 
 nonisolated func pnlColor(_ v: Int?) -> Color { pnlColor(v.map(Double.init)) }
+
+// MARK: Dart `num` (`Num?`)
+//
+// Models typed `num?` in Dart keep the int/double distinction as `Num?`;
+// these route an int to the `Int?` form and a double to the `Double?` form,
+// so a token count prints `950`, never `950.0`. Disfavoured, so `nil` and
+// integer literals still resolve to `Int?`.
+
+@_disfavoredOverload
+nonisolated func fmtMoney(_ v: Num?) -> String { fmtMoney(v?.double) }
+
+@_disfavoredOverload
+nonisolated func fmtPnl(_ v: Num?) -> String { fmtPnl(v?.double) }
+
+@_disfavoredOverload
+nonisolated func fmtPct(_ v: Num?) -> String { fmtPct(v?.double) }
+
+@_disfavoredOverload
+nonisolated func fmtUsdCost(_ v: Num?) -> String { fmtUsdCost(v?.double) }
+
+@_disfavoredOverload
+nonisolated func fmtTokens(_ v: Num?) -> String {
+    switch v {
+    case .none: fmtTokens(Int?.none)
+    case .int(let i): fmtTokens(i)
+    case .double(let d): fmtTokens(d)
+    }
+}
+
+@_disfavoredOverload
+nonisolated func fmtDuration(_ seconds: Num?) -> String {
+    switch seconds {
+    case .none: fmtDuration(Int?.none)
+    case .int(let i): fmtDuration(i)
+    case .double(let d): fmtDuration(d)
+    }
+}
+
+@_disfavoredOverload
+nonisolated func fmtElapsed(_ seconds: Num?) -> String {
+    switch seconds {
+    case .none: fmtElapsed(Int?.none)
+    case .int(let i): fmtElapsed(i)
+    case .double(let d): fmtElapsed(d)
+    }
+}
+
+@_disfavoredOverload
+nonisolated func pnlColor(_ v: Num?) -> Color { pnlColor(v?.double) }
+
+extension Num: DartDateInput {
+    nonisolated var dartDate: Date? {
+        switch self {
+        case .int(let i): i.dartDate
+        case .double(let d): d.dartDate
+        }
+    }
+}

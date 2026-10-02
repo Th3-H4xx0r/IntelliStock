@@ -85,9 +85,20 @@ final class ApiBaseUrlStore {
 
     /// Reads the persisted URL, normalized. Synchronous, so the very first
     /// frame already knows whether the app is configured.
-    func load() {
-        baseUrl = Self.normalizeBaseUrl(storage.read(Self.storageKey) ?? "")
+    ///
+    /// Returns false — changing nothing — when the keychain cannot be read
+    /// yet (before first unlock): that is not "no server configured".
+    @discardableResult
+    func load() -> Bool {
+        let stored: String?
+        do {
+            stored = try storage.readChecked(Self.storageKey)
+        } catch {
+            return false
+        }
+        baseUrl = Self.normalizeBaseUrl(stored ?? "")
         onChange?(baseUrl)
+        return true
     }
 
     /// Normalizes and persists `url`; an empty value deletes the key.

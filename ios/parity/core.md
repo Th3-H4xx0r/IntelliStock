@@ -13,7 +13,7 @@ Legend: `[x]` ported as-is · `[x] → native form: …` deliberately changed in
 - [x] URL store loads before the session, so the session's widget mirror sees the right URL (`AppServices.init` order).
 - [x] App title `IntelliStock` → native form: display name `Intellistock Mobile` (Info.plist, Wave 0).
 - [x] Dark-only theme → native form: follows system Light/Dark (spec §1 assumption, `dark-mode.md › Best practices`).
-- [x] Lock gate covers everything when `locked && authed`; signing out drops the gate → native form: `LockView` overlay in `RootView` (content kept alive underneath, hidden from hit-testing and VoiceOver) instead of replacing the navigator.
+- [x] Lock gate covers everything when `locked && authed`; signing out drops the gate → `RootView` renders `LockView` INSTEAD of the app (`RootScreen.resolve`), as `app.dart` did; sheets and alerts close, router stacks survive in `AppRouter` (fix round 1, C1).
 - [x] Global chatbot dock overlays the app, self-hidden when signed out → `ChatEntrySlot` renders `ChatbotDockView()` only while authenticated.
 
 ## core/network
@@ -220,7 +220,7 @@ Legend: `[x]` ported as-is · `[x] → native form: …` deliberately changed in
 
 - Ruling: `pausedAt` keeps the START of an absence (`paused()` only sets it when nil) — Flutter's `inactive` on the way back to the foreground reset it, so the 1- and 5-minute timeouts could never elapse; Review Focus 4 requires them to — cost if wrong: those timeouts lock where Flutter did not.
 - Ruling: `resumed()` always clears `pausedAt`, and `enable()` clears it after a successful prompt (as `unlock()` already did) — with keep-earliest, a stale timestamp would otherwise lock the app right after the enable prompt — cost if wrong: none.
-- Ruling: `LockView` overlays the app (content kept alive, hidden from hit-testing and VoiceOver) instead of replacing the navigator — no reload flash on unlock; the overlay appears instantly and fades out — cost if wrong: pollers under the lock keep running while it is up.
+- ~~Ruling: `LockView` overlays the app~~ — reversed in fix round 1 (C1): an overlay left sheets and alerts usable above the lock and kept polling behind it. `LockView` now replaces the app as in Dart.
 - Ruling: status text on a 15 % tint (StatusBadge, AppBadge, ErrorRow) is darkened 40 % in light mode — system green/orange text on its own tint is about 2:1; darkened it clears 4.5:1 (`accessibility.md › Vision`) — cost if wrong: slightly darker badge text in light mode.
 - Ruling: prominent buttons draw labels in `DS.Palette.onAccent` (near-black in dark mode, Flutter's `onPrimary` #04040C) — white on the dark accent #A78BFA is 2.7:1 — cost if wrong: dark labels on dark-mode prominent buttons.
 - Ruling: `textDim` text at caption sizes and the unknown-status colour use `.secondary`, not `.tertiary` — tertiary label is about 2.5:1 — cost if wrong: a little less hierarchy.
@@ -238,3 +238,17 @@ Legend: `[x]` ported as-is · `[x] → native form: …` deliberately changed in
 - Ruling: `parseDateTime` returns nil where Dart threw (NaN, out-of-range epochs) — cost if wrong: none.
 - Ruling: LogTailer mirrors Dart's strict casts — a non-string log entry or a non-numeric cursor is an error and backs off — cost if wrong: none.
 - Ruling: Toast lasts 2.5 s (spec) and can be tapped away — cost if wrong: none.
+
+## Fix round 1 (review of the merged Wave 1)
+
+- [x] C1 — the lock replaces the app (`RootScreen`).
+- [x] I1 — sign-out releases the lock; push registers only signed in and unlocked.
+- [x] I2 — cancellation is `CancellationError`, never an error state; shared models keep their state.
+- [x] I3 — `DashboardModel.reset()` on sign-out and server change; `pollServices(lifecycle:)` on `PollingLoop`.
+- [x] I4 — confirmations expose `isRunning`, drop a second request while running, toast unhandled failures.
+- [x] I5 — 401 and `x-refreshed-token` act only for the token the request carried; `setToken` is a no-op when signed out.
+- [x] I6 — an unreadable keychain at launch defers the load until protected data is available; `load()` never mirrors empty widget credentials.
+- [x] M1, M2, M3, M4, M5, M8, M10, M11 — see the report.
+- Ruling: `DashboardRepository.services()` stays non-throwing for source compatibility (a cancelled call still reads as an empty snapshot); every state writer uses the new `fetchServices()` — cost if wrong: a direct caller of `services()` could still show "stopped" after a cancel.
+- Ruling: the keychain-unavailable case is detected from the keychain status (`errSecInteractionNotAllowed`) rather than `UIApplication.isProtectedDataAvailable`, which `AppServices.init` may run too early to query — cost if wrong: none; the reload trigger is the same notification.
+
