@@ -314,12 +314,17 @@ nonisolated enum DashboardFormat {
     /// The holdings row's short quantity, so the full count always fits:
     /// `22.4 sh`, `5.29 sh`, `5 sh` (redesign spec 2026-10-02).
     static func qtyShort(_ q: Double) -> String {
+        "\(qtyCompact(q)) sh"
+    }
+
+    /// `qtyNumber` without trailing zeros: `22.4`, `5.29`, `82`.
+    static func qtyCompact(_ q: Double) -> String {
         var s = qtyNumber(q)
         if s.contains(".") {
             while s.hasSuffix("0") { s.removeLast() }
             if s.hasSuffix(".") { s.removeLast() }
         }
-        return "\(s) sh"
+        return s
     }
 
     /// Whole quantities without decimals, else 2 dp.

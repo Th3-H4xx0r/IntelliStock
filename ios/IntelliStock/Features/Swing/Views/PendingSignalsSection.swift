@@ -227,17 +227,17 @@ private struct SwingSignalRows: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
                 Button { onDecide("approve") } label: {
-                    Text(decisionLabel("approve")).frame(maxWidth: .infinity)
+                    Text(decisionLabel("approve")).lineLimit(1).minimumScaleFactor(0.7).frame(maxWidth: .infinity)
                 }
                 .tint(DS.Palette.success)
                 if s.allowsHalf {
                     Button { onDecide("approve_half") } label: {
-                        Text(decisionLabel("approve_half")).frame(maxWidth: .infinity)
+                        Text(decisionLabel("approve_half")).lineLimit(1).minimumScaleFactor(0.7).frame(maxWidth: .infinity)
                     }
                     .tint(DS.Palette.success)
                 }
                 Button(role: .destructive) { onDecide("reject") } label: {
-                    Text(decisionLabel("reject")).frame(maxWidth: .infinity)
+                    Text(decisionLabel("reject")).lineLimit(1).minimumScaleFactor(0.7).frame(maxWidth: .infinity)
                 }
                 .tint(DS.Palette.danger)
             }

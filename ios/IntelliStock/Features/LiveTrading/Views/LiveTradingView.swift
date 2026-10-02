@@ -118,6 +118,8 @@ private struct LiveTradingContent: View {
                 .listRowBackground(Color.clear)
                 .accessibilityHidden(true)
         }
+        // The hero starts right under the bar, as in Stocks.
+        .contentMargins(.top, 0, for: .scrollContent)
         .refreshable { await model.refreshNow() }
     }
 

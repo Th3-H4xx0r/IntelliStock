@@ -4,7 +4,8 @@ import SwiftUI
 /// One open position — `PositionCard` in `position_card.dart` — as a list
 /// row: the symbol (with an Option or Short flag) and market value, the
 /// range move and unrealized %, a sparkline in the screen's chart style, then
-/// quantity / last / entry / P&L as a `StatGrid`. Close lives in the row's
+/// quantity / last / entry as a `StatGrid`, the P&L in dollars and percent
+/// under the market value. Close lives in the row's
 /// swipe action and context menu (stock only; the wheel lane buys its puts
 /// back itself, which the row says instead).
 struct LivePositionRow: View {
@@ -41,9 +42,13 @@ struct LivePositionRow: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 8)
-                if p.avgEntryPrice != nil, let pct = p.unrealizedPnlPct {
-                    Text(fmtPct(pct))
-                        .foregroundStyle(pnlColor(p.unrealizedPnl))
+                // The unrealized P&L, dollars then percent (`P&L $` and the
+                // header % in Dart).
+                if p.avgEntryPrice != nil {
+                    Text([p.unrealizedPnl.map { fmtPnl($0) }, p.unrealizedPnlPct.map { fmtPct($0) }]
+                        .compactMap { $0 }
+                        .joined(separator: " · "))
+                        .foregroundStyle(p.unrealizedPnl != nil ? pnlColor(p.unrealizedPnl) : .secondary)
                 }
             }
             .font(.subheadline.monospacedDigit())
@@ -65,15 +70,10 @@ struct LivePositionRow: View {
             }
             .frame(height: chartStyle == .candle ? 90 : 64)
 
-            StatGrid(columns: 4, horizontalSpacing: 12) {
-                StatCell(label: p.isOption ? "Contracts" : "Shares", value: p.quantityText)
+            StatGrid(columns: 3) {
+                StatCell(label: p.isOption ? "Contracts" : "Shares", value: p.isOption ? p.quantityText : DashboardFormat.qtyCompact(p.qty))
                 StatCell(label: "Last", value: fmtMoney(p.lastPrice))
                 StatCell(label: "Entry", value: p.avgEntryPrice != nil ? fmtMoney(p.avgEntryPrice) : "—")
-                StatCell(
-                    label: "P&L",
-                    value: p.avgEntryPrice != nil ? fmtPnl(p.unrealizedPnl) : "—",
-                    valueColor: p.avgEntryPrice != nil && p.unrealizedPnl != nil ? pnlColor(p.unrealizedPnl) : .secondary
-                )
             }
 
             if !p.canClose {
