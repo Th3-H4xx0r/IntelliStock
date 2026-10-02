@@ -46,6 +46,11 @@ nonisolated struct SwingSignal: Hashable, Sendable, Identifiable {
     /// I-2). A submitted row without it is only the broker's claim, which can
     /// still go back to pending or be failed. nil when absent or empty.
     let orderClientId: String?
+    /// When the broker claimed it (approved -> submitted). On a row that
+    /// reads pending again, the broker refused the approval and put it back.
+    let claimedAt: Date?
+    /// The lane's scan context (stock_price, otm_pct, ...).
+    let context: JSONObject
 
     init(json j: JSON) {
         id = swingStr(j["id"])
@@ -62,7 +67,15 @@ nonisolated struct SwingSignal: Hashable, Sendable, Identifiable {
         status = swingStr(j["status"]).isEmpty ? "pending" : swingStr(j["status"])
         decidedAt = DartDateTime.tryParse(swingStr(j["decided_at"]))
         orderClientId = swingStr(j["order_client_id"]).isEmpty ? nil : swingStr(j["order_client_id"])
+        claimedAt = DartDateTime.tryParse(swingStr(j["claimed_at"]))
+        context = j["context"].orderedObjectValue
     }
+
+    /// Pending again after a broker claim: an approval the broker refused.
+    var returnedByBroker: Bool { status == "pending" && claimedAt != nil }
+
+    var stockPrice: Double? { swingNum(context["stock_price"] ?? .null) }
+    var otmPct: Double? { swingNum(context["otm_pct"] ?? .null) }
 
     var isWheel: Bool { lane == "wheel" }
 
@@ -244,22 +257,45 @@ nonisolated struct DecisionReceipt: Hashable, Sendable {
 
     let uncertain: Bool
     let detail: String
+    /// The broker command an approval queued (`command_id`); nil for a
+    /// rejection or when the server had none.
+    let commandId: String?
 
-    init(uncertain: Bool = false, detail: String = "") {
+    init(uncertain: Bool = false, detail: String = "", commandId: String? = nil) {
         self.uncertain = uncertain
         self.detail = detail
+        self.commandId = commandId
     }
 
     init(json data: JSON) {
         if data.isObject {
+            let command = swingStr(data["command_id"])
             self.init(
                 uncertain: data["uncertain"].bool,
-                detail: swingStr(data["detail"]).trimmingCharacters(in: .whitespacesAndNewlines)
+                detail: swingStr(data["detail"]).trimmingCharacters(in: .whitespacesAndNewlines),
+                commandId: command.isEmpty ? nil : command
             )
         } else {
             self = .recorded
         }
     }
+}
+
+/// `GET /live-commands/{id}`: where an approval's broker command stands.
+nonisolated struct SwingCommandStatus: Hashable, Sendable {
+    let id: String
+    /// pending | running | completed | failed.
+    let status: String
+    /// The broker's reason when it failed ("order gate blocked: ...").
+    let error: String
+
+    init(json j: JSON) {
+        id = swingStr(j["id"])
+        status = swingStr(j["status"]).isEmpty ? "pending" : swingStr(j["status"])
+        error = swingStr(j["error"]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var isTerminal: Bool { status == "completed" || status == "failed" }
 }
 
 // MARK: - Repository
@@ -317,6 +353,18 @@ nonisolated struct SwingRepository: Sendable {
             body: .object(body)
         )
         return DecisionReceipt(json: data)
+    }
+
+    /// `GET /live-commands/{id}`: an approval's broker command.
+    func commandStatus(_ commandId: String) async throws -> SwingCommandStatus {
+        SwingCommandStatus(json: try await client.get("/live-commands/\(commandId)"))
+    }
+
+    /// Every recent signal, any status (the wheel's scan rows link to them).
+    func recentSignals(_ instanceId: String, limit: Int = 200) async throws -> [SwingSignal] {
+        let data = try await client.get("/instances/\(instanceId)/swing/signals", query: ["limit": JSON(limit)])
+        let rows: JSON = data.isArray ? data : (data.isObject ? data["signals"] : .array([]))
+        return rows.objectElements.map(SwingSignal.init(json:)).filter { !$0.id.isEmpty }
     }
 
     func wheel(_ instanceId: String) async throws -> WheelSnapshot {
