@@ -7,13 +7,17 @@ import SwiftUI
 /// A tap selects that account (`SelectedAccountModel.select`, as the old
 /// menu did) and closes the sheet.
 ///
-/// The figures come from `DashboardPortfoliosModel` (read-only
-/// `GET /widget/accounts`). Until the first fetch settles each value is
-/// redacted; an account without data reads "—".
+/// The figures come from `DashboardPortfoliosModel`: each account's own
+/// read-only source, fetched in parallel and cached for the session. Each
+/// row stays redacted until its account answers; an account with no data
+/// reads "—". The selected account's row shows the hero's live 1D figures
+/// (`heroSummary`) when it has them, so the two always agree.
 struct DashboardPortfolioSheet: View {
     let accounts: [BrokerageAccount]
     let selectedId: String
     let portfolios: DashboardPortfoliosModel
+    /// The hero's figures for the selected account while it shows 1D.
+    var heroSummary: DashboardAccountSummary?
     let onSelect: (String) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -23,14 +27,15 @@ struct DashboardPortfolioSheet: View {
             List {
                 Section {
                     ForEach(accounts) { account in
+                        let hero = account.id == selectedId ? heroSummary : nil
                         Button {
                             onSelect(account.id)
                             dismiss()
                         } label: {
                             DashboardPortfolioRow(
                                 account: account,
-                                summary: portfolios.summary(account.id),
-                                loading: !portfolios.hasLoaded,
+                                summary: hero ?? portfolios.summary(account.id),
+                                loading: hero == nil && portfolios.isPending(account.id),
                                 selected: account.id == selectedId
                             )
                         }
@@ -49,7 +54,8 @@ struct DashboardPortfolioSheet: View {
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
-        .onAppear { portfolios.refreshDetached() }
+        // Cached figures show at once; fresh ones replace them as they land.
+        .onAppear { portfolios.refreshDetached(accounts) }
     }
 }
 
@@ -92,7 +98,7 @@ private struct DashboardPortfolioRow: View {
     @ViewBuilder
     private var figures: some View {
         if let summary {
-            let direction = ChangeDirection(summary.dayChange)
+            let direction = summary.direction
             VStack(alignment: .trailing, spacing: 2) {
                 Text(fmtMoney(summary.equity))
                     .font(.headline.monospacedDigit())
@@ -113,6 +119,7 @@ private struct DashboardPortfolioRow: View {
             Text("—")
                 .font(.headline)
                 .foregroundStyle(.secondary)
+                .accessibilityLabel("No data")
         }
     }
 }

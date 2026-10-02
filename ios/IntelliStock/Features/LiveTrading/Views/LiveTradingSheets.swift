@@ -1,44 +1,50 @@
 import SwiftUI
 
 /// The manual order sheet — `_ManualOrderSheet` in `manual_order_sheet.dart`.
-/// REAL money on alpaca-main: the validation is the guard, ported exactly,
-/// and Submit Order stays disabled while the command is being sent.
+/// REAL money on alpaca-main: the validation is the guard, ported exactly;
+/// a valid order then asks "Submit order?" with the order spelled out, and
+/// only Submit sends it. Submit Order stays disabled while it is being sent.
 struct LiveManualOrderSheet: View {
-    let model: LiveTradingModel
-
     @Environment(\.dismiss) private var dismiss
-    @State private var form = OrderForm()
-    @State private var submitting = false
-    @State private var error: String?
+    @State private var order: LiveManualOrderModel
+
+    init(model: LiveTradingModel) {
+        _order = State(initialValue: LiveManualOrderModel { payload in
+            // runCommand reports its own failures on the command toast.
+            await model.runCommand("submit_order", payload)
+        })
+    }
 
     var body: some View {
+        @Bindable var order = order
+        let error = order.error
         NavigationStack {
             Form {
                 Section("Symbol") {
-                    TextField("AAPL", text: $form.symbol)
+                    TextField("AAPL", text: $order.form.symbol)
                         .font(.body.monospaced())
                         .textInputAutocapitalization(.characters)
                         .autocorrectionDisabled()
                 }
                 Section {
-                    Picker("Side", selection: $form.side) {
+                    Picker("Side", selection: $order.form.side) {
                         Text("Buy").tag("buy")
                         Text("Sell").tag("sell")
                     }
-                    Picker("Order Type", selection: Binding(get: { form.orderType }, set: { form.setOrderType($0) })) {
+                    Picker("Order Type", selection: Binding(get: { order.form.orderType }, set: { order.form.setOrderType($0) })) {
                         Text("Market").tag("market")
                         Text("Limit").tag("limit")
                     }
                 }
                 Section {
                     LabeledContent("Qty (Shares)") {
-                        TextField("0", text: $form.qty)
+                        TextField("0", text: $order.form.qty)
                             .keyboardType(.decimalPad)
                             .multilineTextAlignment(.trailing)
                             .font(.body.monospaced())
                     }
                     LabeledContent("Notional ($)") {
-                        TextField("0.00", text: $form.notional)
+                        TextField("0.00", text: $order.form.notional)
                             .keyboardType(.decimalPad)
                             .multilineTextAlignment(.trailing)
                             .font(.body.monospaced())
@@ -46,19 +52,19 @@ struct LiveManualOrderSheet: View {
                 } footer: {
                     Text("Fill qty OR notional, not both.")
                 }
-                if form.orderType == "limit" {
+                if order.form.orderType == "limit" {
                     Section("Limit Price") {
-                        TextField("0.00", text: $form.limitPrice)
+                        TextField("0.00", text: $order.form.limitPrice)
                             .keyboardType(.decimalPad)
                             .font(.body.monospaced())
                     }
                 }
                 Section {
-                    Picker("TIF", selection: Binding(get: { form.tif }, set: { form.setTif($0) })) {
+                    Picker("TIF", selection: Binding(get: { order.form.tif }, set: { order.form.setTif($0) })) {
                         ForEach(liveTifOptions, id: \.value) { Text($0.label).tag($0.value) }
                     }
-                    Toggle("Extended hours", isOn: $form.extendedHours)
-                        .disabled(!form.extendedHoursAllowed)
+                    Toggle("Extended hours", isOn: $order.form.extendedHours)
+                        .disabled(!order.form.extendedHoursAllowed)
                 }
                 if let error {
                     Section {
@@ -75,31 +81,37 @@ struct LiveManualOrderSheet: View {
                     Button("Cancel") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    if submitting {
+                    if order.submitting {
                         ProgressView()
                     } else {
-                        Button("Submit Order", action: submit)
+                        Button("Submit Order") { order.requestSubmit() }
                     }
                 }
             }
-            .interactiveDismissDisabled(submitting)
+            .interactiveDismissDisabled(order.submitting)
+            .alert(
+                "Submit order?",
+                isPresented: Binding(
+                    get: { order.confirmation != nil },
+                    set: { if !$0 { order.cancelConfirmation() } }
+                ),
+                presenting: order.confirmation
+            ) { _ in
+                Button("Cancel", role: .cancel) { order.cancelConfirmation() }
+                Button("Submit") { confirm() }
+                    .disabled(order.submitting)
+            } message: { pending in
+                Text(pending.summary)
+            }
         }
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
     }
 
-    private func submit() {
-        if let message = validateOrderForm(form) {
-            error = message
-            return
-        }
-        submitting = true
-        error = nil
-        let payload = buildOrderPayload(form)
+    /// Submit on the alert: the one place the order is sent.
+    private func confirm() {
         Task {
-            // runCommand reports its own failures on the command toast.
-            await model.runCommand("submit_order", payload)
-            dismiss()
+            if await order.confirmSubmit() { dismiss() }
         }
     }
 }

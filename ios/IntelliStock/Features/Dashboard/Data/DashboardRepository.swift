@@ -100,35 +100,6 @@ nonisolated struct BrokerageAccount: Hashable, Sendable, Identifiable {
     var isPaper: Bool { alpacaPaper || kalshiEnvironment.lowercased() == "demo" }
 }
 
-/// One entry of `GET /widget/accounts` — the home-screen widget's
-/// self-refresh payload, one per instance. Its value and day P&L are the
-/// instance's brokerage's 1D portfolio history (`_widget_account` in
-/// `backend/api/main.py`), so every instance on one brokerage carries that
-/// brokerage's figures. Only the fields the portfolio sheet reads.
-nonisolated struct DashboardWidgetAccount: Hashable, Sendable {
-    /// The instance id.
-    let id: String
-    let accountValue: Double
-    let dayPnlAbs: Double
-    let dayPnlPct: Double
-
-    init(id: String, accountValue: Double, dayPnlAbs: Double, dayPnlPct: Double) {
-        self.id = id
-        self.accountValue = accountValue
-        self.dayPnlAbs = dayPnlAbs
-        self.dayPnlPct = dayPnlPct
-    }
-
-    init(json: JSON) {
-        self.init(
-            id: json["id"].stringOr(""),
-            accountValue: json["accountValue"].double ?? 0,
-            dayPnlAbs: json["dayPnlAbs"].double ?? 0,
-            dayPnlPct: json["dayPnlPct"].double ?? 0
-        )
-    }
-}
-
 /// Thin data layer for all dashboard endpoints.
 nonisolated struct DashboardRepository: Sendable {
     let client: ApiClient
@@ -179,14 +150,10 @@ nonisolated struct DashboardRepository: Sendable {
         return data["accounts"].objectElements.map(BrokerageAccount.init(json:))
     }
 
-    /// GET /widget/accounts → {accounts: [...], synced_at} (read-only; the
-    /// portfolio sheet's equity and day change per account).
-    func widgetAccounts() async throws -> [DashboardWidgetAccount] {
-        let data = try await client.get("/widget/accounts")
-        return data["accounts"].objectElements.map(DashboardWidgetAccount.init(json:))
-    }
-
-    /// GET /brokerages/{id}/portfolio-history?range=
+    /// GET /brokerages/{id}/portfolio-history?range= (the hero's source, and
+    /// the portfolio sheet's for every non-Kalshi account).
+    /// `action_get_portfolio_history` serves Alpaca accounts only; any other
+    /// type is a 400 "Unsupported brokerage type".
     func portfolioHistory(_ id: String, _ range: String) async throws -> PortfolioHistory {
         let data = try await client.get("/brokerages/\(id)/portfolio-history", query: ["range": .string(range)])
         return PortfolioHistory(json: data)

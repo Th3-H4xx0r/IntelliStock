@@ -92,33 +92,51 @@ final class InstancesModel {
     func start(_ id: String) async { await instanceAction(id) { try await $0.startInstance(id) } }
     func stop(_ id: String) async { await instanceAction(id) { try await $0.stopInstance(id) } }
 
-    func delete(_ id: String, force: Bool = false) async {
+    /// The one delete: the list's swipe and context-menu Delete, and
+    /// Instance detail's Delete Instance (through `AppServices.instances`).
+    /// Success refetches the list; the result tells the detail screen
+    /// whether to go back.
+    @discardableResult
+    func delete(_ id: String, force: Bool = false) async -> Result<Void, any Error> {
         await instanceAction(id) { try await $0.deleteInstance(id, force: force) }
     }
 
     /// Marks `id` busy, runs, refreshes; an `ApiError` lands in
-    /// `errorMessage`. Busy always clears.
-    private func instanceAction(_ id: String, _ action: (InstanceRepository) async throws -> Void) async {
+    /// `errorMessage`. Busy always clears. Returns how the action ended.
+    @discardableResult
+    private func instanceAction(_ id: String, _ action: (InstanceRepository) async throws -> Void) async -> Result<Void, any Error> {
         if var value = state.value {
             value.busyIds.insert(id)
             state = .loaded(value)
         }
+        let outcome: Result<Void, any Error>
         do {
             try await action(repository())
             await refreshNow()
+            outcome = .success(())
         } catch let error as ApiError {
             if var value = state.value {
                 value.busyIds.remove(id)
                 value.errorMessage = error.message
                 state = .loaded(value)
             }
+            outcome = .failure(error)
         } catch {
             // Dart caught only ApiError; anything else surfaced uncaught.
+            outcome = .failure(error)
         }
         if var value = state.value, value.busyIds.contains(id) {
             value.busyIds.remove(id)
             state = .loaded(value)
         }
+        return outcome
+    }
+
+    /// Back to a fresh list (sign-out, server change): nothing from the old
+    /// session shows, and the next poll loads again.
+    func reset() {
+        state = .loading
+        last = InstancesState()
     }
 
     func isBusy(_ id: String) -> Bool { state.value?.busyIds.contains(id) ?? false }

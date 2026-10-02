@@ -82,6 +82,13 @@ final class AppServices {
         repository: { [unowned self] in self.dashboardRepository }
     )
 
+    /// The Instances list (`instancesController`), shared so Instance
+    /// detail's Delete Instance runs the list's own delete and the list has
+    /// already refetched when the detail pops back to it.
+    @ObservationIgnored private(set) lazy var instances = InstancesModel(
+        repository: { [unowned self] in self.instanceRepository }
+    )
+
     /// The one chatbot model for the signed-in session — the keepAlive
     /// `chatbotProvider`. Held here so the dock's view can come and go (the
     /// lock tears it down) without losing the conversation; a sign-out or a
@@ -217,6 +224,7 @@ final class AppServices {
     /// Returns the session-scoped shared models to their fresh state.
     private func resetSessionModels() {
         dashboard.reset()
+        instances.reset()
         chatbot = Self.makeChatbot(self)
     }
 

@@ -4,6 +4,15 @@ import SwiftUI
 /// Sizes the portfolio hero shares with its skeleton.
 nonisolated enum DashboardPortfolioMetrics {
     static let chartHeight: CGFloat = 224
+    /// The dashboard list's coordinate space: the hero measures its side
+    /// margin against it.
+    static let listSpace = "dashboard.list"
+
+    /// How far the chart runs past the hero's text on each side: half the
+    /// list's side margin, so the chart's margins are half the text's.
+    static func chartBleed(textInset: CGFloat) -> CGFloat {
+        max(0, textInset / 2).rounded()
+    }
 }
 
 /// The portfolio for the selected account — `_PortfolioSection` and
@@ -32,13 +41,18 @@ struct DashboardPortfolioSections: View {
                 onSwitchAccount: onSwitchAccount
             )
             .listRowBackground(Color.clear)
+            // Flush with the top of the safe area: no row padding above.
+            .listRowInsets(.top, 0)
             .listRowSeparator(.hidden)
         }
         DashboardHoldingsSection(holdings: scope.holdings, feed: feed, brokerageId: selected.id)
     }
 }
 
-/// The hero: account label, balance, change, status, chart, range.
+/// The hero: account label, balance, change and status, with the search
+/// button at their trailing end (the dashboard has no navigation bar), then
+/// the chart, the range and the freshness line. The chart's side margins are
+/// half the text's.
 private struct DashboardPortfolioHero: View {
     let accounts: [BrokerageAccount]
     let selected: BrokerageAccount
@@ -46,14 +60,23 @@ private struct DashboardPortfolioHero: View {
     let onSwitchAccount: () -> Void
 
     @Environment(AppServices.self) private var services
+    /// The list's side margin, read from the row; drives the chart's bleed.
+    @State private var textInset: CGFloat = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            accountLabel
-                .padding(.bottom, 4)
-            value
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 0) {
+                    accountLabel
+                        .padding(.bottom, 4)
+                    value
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                DashboardSearchButton()
+            }
             DashboardPortfolioChartArea(chart: chart)
                 .padding(.top, 20)
+                .padding(.horizontal, -DashboardPortfolioMetrics.chartBleed(textInset: textInset))
             Picker("Range", selection: Binding(get: { chart.range }, set: { chart.setRange($0) })) {
                 ForEach(dashboardChartRanges, id: \.self) { Text($0).tag($0) }
             }
@@ -62,6 +85,12 @@ private struct DashboardPortfolioHero: View {
             freshness
         }
         .padding(.vertical, 4)
+        // Against the list, not the screen, so a push's slide leaves it be.
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.frame(in: .named(DashboardPortfolioMetrics.listSpace)).minX
+        } action: { inset in
+            textInset = inset
+        }
     }
 
     // MARK: Account label
@@ -100,12 +129,8 @@ private struct DashboardPortfolioHero: View {
     @ViewBuilder
     private var value: some View {
         if let history = chart.valueHistory {
-            let values = history.values
             let scrub = chart.scrubIndex
-            let active: Double = {
-                if let scrub, scrub >= 0, scrub < values.count { return values[scrub] }
-                return history.currentValue ?? values.last ?? 0
-            }()
+            let active = dashboardHeroValue(history, scrubIndex: scrub)
             let change = computeChange(history, scrubIndex: scrub)
             HeroValueHeader(
                 fmtMoney(active),
