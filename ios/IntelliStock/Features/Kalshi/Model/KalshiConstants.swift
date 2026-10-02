@@ -166,6 +166,11 @@ nonisolated func marketsIsCancellation(_ error: any Error) -> Bool {
 }
 
 nonisolated extension Loadable {
-    /// A failure that was really a cancellation.
-    var marketsCancelled: Bool { error.map(marketsIsCancellation) ?? false }
+    /// A capture that was really a cancellation: core's `Loadable.capture`
+    /// returns `.loading` for a cancelled body (a finished capture is never
+    /// `.loading` otherwise), and older paths surface it as a failure.
+    var marketsCancelled: Bool {
+        if case .loading = self { return true }
+        return error.map(marketsIsCancellation) ?? false
+    }
 }
