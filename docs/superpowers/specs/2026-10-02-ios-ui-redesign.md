@@ -134,11 +134,35 @@ lists).
 
 ### Dashboard (tab root)
 
-- **Top of the screen:**
-  - Large title "Dashboard". The account switcher becomes a toolbar `Menu` titled with the account
-    name, NOT an "ALPACA ⌄" eyebrow under the title.
-  - Hero: `HeroValueHeader`, then the chart, then the range picker. "Markets Closed" goes in the
-    status line.
+The operator asked for both of these on 2026-10-02.
+
+- **No "Dashboard" title.** Keep the numbers only.
+  - **No large title:** the screen has NO large title and NO visible nav title. Set
+    `.navigationTitle("Dashboard")` for the back button and accessibility, with
+    `.toolbarTitleDisplayMode(.inline)` and a hidden principal, or `.toolbar(.visible)` with an
+    empty principal.
+  - **Top bar:** only the glass search button (trailing) shows there.
+  - **Opening:** the content opens straight on the hero, so the balance is the first and biggest
+    thing on screen, as in Stocks and Robinhood.
+- **The portfolio switcher is a bottom sheet.** Above the balance sits a tappable account label: the
+  brokerage logo, the account name in title case (`.subheadline.weight(.semibold)`, NOT an uppercase
+  "ALPACA" eyebrow), and a `chevron.down`. Tapping it presents a `.sheet` titled "Portfolios":
+  - Presentation: `.presentationDetents([.medium, .large])` with a drag indicator.
+  - Rows: one per account, in an insetGrouped `List`:
+    - brokerage logo;
+    - name, with "Live" or "Paper" as the subtitle;
+    - trailing: equity (`.headline.monospacedDigit()`) with today's change below (green or red,
+      "+$65.37 (+1.12%)");
+    - a checkmark on the selected account.
+  - Tapping a row selects that account (the same `services.selectedAccount.select` as today) and
+    dismisses the sheet.
+  - Data: equity and today's change per account come from the existing read-only
+    `GET /widget/accounts`, which already returns each account's value and day P&L. It is the
+    endpoint the home-screen widget uses; `WidgetDataSyncer` may already hold the parsed result.
+  - While loading, show the name with a redacted value; if an account has no data, show "—".
+  - This is the only new data shown in the redesign. It is additive and reads only.
+- **Hero:** `HeroValueHeader`, then the chart, then the range picker. "Markets Closed" goes in the
+  status line.
 - **Holdings:** a `Section("Holdings")` of rows, with the Total/Daily picker in the section header,
   trailing:
   - leading: a small allocation ring (24 pt);
@@ -148,7 +172,10 @@ lists).
   - Show full share counts; drop "sh…" truncation by shortening to "22.4 sh".
 - **Insights:** a horizontally scrolling row of compact cards, kept, but title-case.
   - "Today", "Diversification" and "Risk" become `StatGrid`s.
-  - "Sector allocation" is the donut `Card`.
+  - "Sector allocation" restores the Flutter `Sector3DChart` (operator, 2026-10-02: "there was a
+    very cool 3d anmation that was there int he flutter app, but its not here, fix that and add it
+    here as well"). It is the shared `DesignSystem/Components/Sector3DChart.swift`, inside a `Card`
+    titled "Sector allocation". The flat SectorMark donut is retired here and in Crypto.
   - "Sector performance" is a list of rows with a bar.
 - **Market:** "S&P 500 / Nasdaq / Dow" mini cards stay as cards, Stocks-widget style.
 - **Services and strategy cards:** `Section`s with `EntityRow`s and status dots. Their engine
@@ -256,8 +283,9 @@ lists).
   - the decision log is rows: flags, match, outcome subtitle, trailing edge % and a status word;
   - pregame analysis is rows;
   - the Kalshi backtest form is already a native `Form`, so keep it, and remove any card wrappers.
-- **Crypto instance:** Start and Edit move to the toolbar; the allocation donut is a `Card`; instance
-  info and brokerage are `LabeledContent` rows.
+- **Crypto instance:** Start and Edit move to the toolbar; the allocation is the restored
+  `Sector3DChart` in a `Card` (here and in the crypto instance sheet, as in Flutter); instance info and
+  brokerage are `LabeledContent` rows.
 
 ### Stock · Search
 
