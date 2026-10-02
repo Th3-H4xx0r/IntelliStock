@@ -1,7 +1,9 @@
 import SwiftUI
 
 /// The saved LLM models — `ModelsScreen` in `models_screen.dart`, as an
-/// inset-grouped list with one section per model.
+/// inset-grouped list of rows. Tapping a row opens its editor; Edit, Delete
+/// (and Test CLI Connection for Claude Code CLI models) are swipe actions and
+/// context-menu items; `+` adds a model.
 struct ModelsView: View {
     @Environment(AppServices.self) private var services
     @State private var model: ModelsModel?
@@ -12,32 +14,15 @@ struct ModelsView: View {
 
     var body: some View {
         List {
-            Section {
-                SectionHeader(
-                    title: "LLM Models",
-                    eyebrow: "Models",
-                    subtitle: "Centralized LLM model configurations. Strategies can reference these instead of storing credentials inline."
-                ) {
-                    Button {
-                        editor = ModelEditorTarget(model: nil)
-                    } label: {
-                        Label("Add Model", systemImage: Symbol.named("add"))
-                            .font(.subheadline.weight(.semibold))
-                    }
-                    .dsProminentButton()
-                    .buttonBorderShape(.capsule)
-                }
-                .listRowBackground(Color.clear)
-                .listRowInsets(EdgeInsets(top: 12, leading: 4, bottom: 8, trailing: 4))
-            }
-
             switch model?.models ?? .loading {
             case .loading:
-                ForEach(0..<4, id: \.self) { _ in
-                    ModelCardSection(model: Self.placeholder, test: nil, onTest: {}, onEdit: {}, onDelete: {})
-                        .redacted(reason: .placeholder)
-                        .allowsHitTesting(false)
+                Section {
+                    ForEach(0..<4, id: \.self) { _ in
+                        ModelListRow(model: Self.placeholder, test: nil)
+                    }
                 }
+                .redacted(reason: .placeholder)
+                .allowsHitTesting(false)
             case .failed(let error):
                 Section {
                     ErrorRow(message: llmErrorText(error)) { Task { await model?.refresh() } }
@@ -57,14 +42,12 @@ struct ModelsView: View {
                         .listRowBackground(Color.clear)
                     }
                 } else {
-                    ForEach(models) { m in
-                        ModelCardSection(
-                            model: m,
-                            test: model?.cliTests[m.id],
-                            onTest: { Task { await model?.testCli(m.id) } },
-                            onEdit: { editor = ModelEditorTarget(model: m) },
-                            onDelete: { confirmDelete(m) }
-                        )
+                    Section {
+                        ForEach(models) { m in
+                            modelRow(m)
+                        }
+                    } footer: {
+                        Text("Centralized LLM model configurations. Strategies can reference these instead of storing credentials inline.")
                     }
                 }
             }
@@ -73,13 +56,10 @@ struct ModelsView: View {
         .navigationTitle("Models")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    Task { await model?.refresh() }
-                } label: {
-                    Image(systemName: Symbol.named("refresh"))
+            ToolbarItem(placement: .primaryAction) {
+                ToolbarAddButton("Add Model") {
+                    editor = ModelEditorTarget(model: nil)
                 }
-                .accessibilityLabel("Refresh")
             }
         }
         .refreshable { await model?.refresh() }
@@ -96,6 +76,48 @@ struct ModelsView: View {
                 model = ModelsModel(repository: { services.modelRepository })
             }
             if let model, model.models.needsLoad { await model.load() }
+        }
+    }
+
+    /// One model: the row opens the editor; the old card's buttons are on
+    /// the swipe and the context menu. Delete keeps its confirmation.
+    private func modelRow(_ m: LlmModel) -> some View {
+        let test = model?.cliTests[m.id]
+        let isCli = m.provider == "claude-cli"
+        let testing = test?.testing == true
+        return Button {
+            editor = ModelEditorTarget(model: m)
+        } label: {
+            ModelListRow(model: m, test: test)
+        }
+        .foregroundStyle(.primary)
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            // Red by tint, not by role: a destructive-role swipe button
+            // animates the row away before the confirmation answers.
+            Button("Delete", systemImage: Symbol.named("delete_outline")) { confirmDelete(m) }
+                .tint(DS.Palette.danger)
+            Button("Edit", systemImage: Symbol.named("edit")) { editor = ModelEditorTarget(model: m) }
+                .tint(DS.Palette.accent)
+        }
+        .swipeActions(edge: .leading) {
+            if isCli {
+                Button("Test CLI Connection", systemImage: Symbol.named("cable")) {
+                    Task { await model?.testCli(m.id) }
+                }
+                .tint(DS.Palette.info)
+                .disabled(testing)
+            }
+        }
+        .contextMenu {
+            Button("Edit", systemImage: Symbol.named("edit")) { editor = ModelEditorTarget(model: m) }
+            if isCli {
+                Button("Test CLI Connection", systemImage: Symbol.named("cable")) {
+                    Task { await model?.testCli(m.id) }
+                }
+                .disabled(testing)
+            }
+            Divider()
+            Button("Delete", systemImage: Symbol.named("delete_outline"), role: .destructive) { confirmDelete(m) }
         }
     }
 
@@ -121,95 +143,77 @@ private struct ModelEditorTarget: Identifiable {
     let model: LlmModel?
 }
 
-/// One saved model — `_ModelCard`, as a list section.
-private struct ModelCardSection: View {
-    let model: LlmModel
-    let test: ModelsModel.CliTest?
-    let onTest: () -> Void
-    let onEdit: () -> Void
-    let onDelete: () -> Void
-
-    @Environment(\.colorScheme) private var colorScheme
-
-    var body: some View {
-        let m = model
-        Section {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(m.name).font(.headline)
-                    Text(LlmOptions.providerLabel(m.provider))
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                HStack(spacing: 4) {
-                    if m.provider == "claude-cli" {
-                        Button(action: onTest) {
-                            Group {
-                                if test?.testing == true {
-                                    ProgressView()
-                                } else {
-                                    Image(systemName: Symbol.named("cable"))
-                                }
-                            }
-                            .frame(width: 44, height: 44)
-                            .contentShape(Rectangle())
-                        }
-                        .disabled(test?.testing == true)
-                        .accessibilityLabel("Test CLI connection")
-                    }
-                    Button(action: onEdit) {
-                        Image(systemName: Symbol.named("edit")).frame(width: 44, height: 44).contentShape(Rectangle())
-                    }
-                    .accessibilityLabel("Edit")
-                    Button(role: .destructive, action: onDelete) {
-                        Image(systemName: Symbol.named("delete_outline")).frame(width: 44, height: 44).contentShape(Rectangle())
-                    }
-                    .accessibilityLabel("Delete")
-                }
-                .buttonStyle(.borderless)
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
-                ModelChip(label: "Model", value: m.model, mono: true)
-                ModelChip(label: "Effort", value: LlmModelCells.reasoning(m))
-                ModelChip(label: "Key/CLI", value: LlmModelCells.key(m), mono: true)
-                if let created = m.createdAt {
-                    ModelChip(label: "Created", value: fmtDate(parseDateTime(created)))
-                }
-            }
-
-            if let message = test?.message {
-                let color = test?.ok == true ? DS.Palette.success : DS.Palette.danger
-                Text(message)
-                    .font(.caption)
-                    .foregroundStyle(DS.Palette.onTint(color, in: colorScheme))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(color.opacity(DS.tintFill), in: .rect(cornerRadius: 6, style: .continuous))
-            }
+/// The provider's glyph in a model row.
+nonisolated enum ModelsProviderGlyph {
+    static func symbol(_ provider: String) -> String {
+        switch provider {
+        case "gemini": "sparkle"
+        case "deepseek": "water.waves"
+        case "openai": "circle.hexagongrid"
+        case "azure": "cloud"
+        case "nvidia": "cpu"
+        case "ollama": "desktopcomputer"
+        case "bedrock": "shippingbox"
+        case "openrouter": "arrow.triangle.branch"
+        case "claude-cli", "codex-cli": "terminal"
+        default: Symbol.named("psychology")
         }
+    }
+
+    /// "Azure OpenAI · Created Apr 12, 2026" — the provider, then the old
+    /// card's Created line.
+    static func subtitle(_ m: LlmModel) -> String {
+        let provider = LlmOptions.providerLabel(m.provider)
+        guard let created = m.createdAt else { return provider }
+        return "\(provider) · Created \(fmtDate(parseDateTime(created)))"
     }
 }
 
-/// A `label: value` line — `_chip`.
-private struct ModelChip: View {
-    let label: String
-    let value: String
-    var mono = false
+/// One saved model — `_ModelCard`, as a row in the `EntityRow` style: the
+/// provider glyph, the name (up to two lines, so the effort suffix shows),
+/// and the provider with its date. The model id, effort and masked key are in
+/// the editor. A CLI test's spinner and result show on the row.
+private struct ModelListRow: View {
+    let model: LlmModel
+    let test: ModelsModel.CliTest?
+
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 4) {
-            Text("\(label):")
-                .foregroundStyle(.tertiary)
-            Text(verbatim: value)
-                .font(mono ? .system(.caption, design: .monospaced) : .caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
+        let m = model
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 12) {
+                IconTile(systemImage: ModelsProviderGlyph.symbol(m.provider), size: EntityRowMetrics.iconSize)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(m.name)
+                        .font(.headline)
+                        .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
+                    Text(ModelsProviderGlyph.subtitle(m))
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                if test?.testing == true {
+                    ProgressView()
+                        .accessibilityLabel("Testing CLI connection")
+                }
+            }
+            if let message = test?.message {
+                let color = test?.ok == true ? DS.Palette.success : DS.Palette.danger
+                Label {
+                    Text(message)
+                        .foregroundStyle(DS.Palette.onTint(color, in: colorScheme))
+                } icon: {
+                    Image(systemName: test?.ok == true ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                        .foregroundStyle(color)
+                }
+                .font(.footnote)
+                .padding(.leading, EntityRowMetrics.iconSize + 12)
+            }
         }
-        .font(.caption)
+        .padding(.vertical, 2)
         .accessibilityElement(children: .combine)
     }
 }

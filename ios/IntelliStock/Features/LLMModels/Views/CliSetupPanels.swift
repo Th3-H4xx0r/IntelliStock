@@ -19,9 +19,8 @@ struct ClaudeCliSetupPanel: View {
                 content(model)
             }
         }
-        .padding(12)
+        .padding(.vertical, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(DS.Palette.info.opacity(DS.tintFill), in: .rect(cornerRadius: DS.Radius.small, style: .continuous))
         .confirmAlert($signOutRequest)
         .toast($toast)
         .onAppear {
@@ -44,33 +43,33 @@ struct ClaudeCliSetupPanel: View {
         }
 
         if model.statusLoading {
-            Text("Probing claude CLI status…").font(.caption2).foregroundStyle(.secondary)
+            Text("Probing claude CLI status…").font(.footnote).foregroundStyle(.secondary)
         } else if !model.statusError.isEmpty {
-            Text("Status probe failed: \(model.statusError)").font(.caption2).foregroundStyle(DS.Palette.danger)
+            Text("Status probe failed: \(model.statusError)").font(.footnote).foregroundStyle(DS.Palette.danger)
         } else {
-            ChatFlowLayout(spacing: 16) {
-                CliStatusChip(label: "installed", value: model.installed ? "✓ yes" : "✗ no",
+            VStack(spacing: 6) {
+                CliStatusChip(label: "Installed", value: model.installed ? "✓ yes" : "✗ no",
                               color: model.installed ? DS.Palette.success : DS.Palette.warning)
                 if model.installed, let version = model.version {
-                    CliStatusChip(label: "version", value: version, color: .primary)
+                    CliStatusChip(label: "Version", value: version, color: .primary)
                 }
                 if model.installed {
-                    CliStatusChip(label: "authenticated", value: model.authenticated ? "✓ yes" : "✗ no",
+                    CliStatusChip(label: "Authenticated", value: model.authenticated ? "✓ yes" : "✗ no",
                                   color: model.authenticated ? DS.Palette.success : DS.Palette.warning)
                 }
                 if model.installed, model.authenticated, let account = model.account, !account.isEmpty {
-                    CliStatusChip(label: "account", value: account, color: .primary)
+                    CliStatusChip(label: "Account", value: account, color: .primary)
                 }
             }
         }
 
         if !model.statusLoading, model.statusError.isEmpty {
             if !model.authMessage.isEmpty {
-                Text(model.authMessage).font(.caption2).foregroundStyle(.secondary)
+                Text(model.authMessage).font(.footnote).foregroundStyle(.secondary)
             }
             if !model.installed {
                 Text("The claude binary is not installed on the server. Install it on the server before re-authenticating.")
-                    .font(.caption2)
+                    .font(.footnote)
                     .foregroundStyle(DS.Palette.warning)
             } else {
                 installedFlow(model)
@@ -85,7 +84,7 @@ struct ClaudeCliSetupPanel: View {
         Text(model.authenticated
              ? "Re-authenticate if the saved subscription token has expired (e.g. \"401 Invalid authentication credentials\")."
              : "Claude is installed but not authenticated. Start the sign-in flow.")
-            .font(.caption2)
+            .font(.footnote)
             .foregroundStyle(.secondary)
             .padding(.top, 4)
 
@@ -99,7 +98,6 @@ struct ClaudeCliSetupPanel: View {
                 }
             }
             .dsProminentButton()
-            .controlSize(.small)
             .disabled(model.loginStarting || model.submitting)
             if live {
                 Button("Cancel") { Task { await model.cancelLogin() } }
@@ -118,7 +116,7 @@ struct ClaudeCliSetupPanel: View {
 
         if live {
             Text("1. Open the link and sign in.\n2. Copy the authorization code.\n3. Paste it below.")
-                .font(.caption2)
+                .font(.footnote)
                 .foregroundStyle(.secondary)
             CliUrlRow(url: model.loginUrl, copied: "Copied") { message in
                 toast = Toast(message, style: .success)
@@ -127,8 +125,7 @@ struct ClaudeCliSetupPanel: View {
                 .font(.system(.footnote, design: .monospaced))
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
-                .padding(10)
-                .background(DS.Surface.panel, in: .rect(cornerRadius: DS.Radius.small, style: .continuous))
+                .textFieldStyle(.roundedBorder)
                 .disabled(model.submitting)
             Button {
                 Task { await model.submitCode() }
@@ -139,7 +136,6 @@ struct ClaudeCliSetupPanel: View {
                 }
             }
             .dsProminentButton()
-            .controlSize(.small)
             .disabled(model.submitting)
         }
 
@@ -157,9 +153,9 @@ struct ClaudeCliSetupPanel: View {
                     onConfirm: { await model.logout() }
                 )
             }
-            .font(.caption)
+            .font(.footnote)
             .buttonStyle(.borderless)
-            .tint(.secondary)
+            .tint(DS.Palette.danger)
         }
     }
 }
@@ -180,9 +176,8 @@ struct CodexCliSetupPanel: View {
                 content(model)
             }
         }
-        .padding(12)
+        .padding(.vertical, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(DS.Palette.info.opacity(DS.tintFill), in: .rect(cornerRadius: DS.Radius.small, style: .continuous))
         .confirmAlert($signOutRequest)
         .toast($toast)
         .onAppear {
@@ -207,18 +202,18 @@ struct CodexCliSetupPanel: View {
         }
 
         if model.statusLoading {
-            Text("Probing codex CLI status...").font(.caption2).foregroundStyle(.secondary)
+            Text("Probing codex CLI status...").font(.footnote).foregroundStyle(.secondary)
         } else if !model.statusError.isEmpty {
-            Text("Status probe failed: \(model.statusError)").font(.caption2).foregroundStyle(DS.Palette.danger)
+            Text("Status probe failed: \(model.statusError)").font(.footnote).foregroundStyle(DS.Palette.danger)
         } else {
-            ChatFlowLayout(spacing: 16) {
-                CliStatusChip(label: "installed", value: model.installed ? "✓ yes" : "✗ no",
+            VStack(spacing: 6) {
+                CliStatusChip(label: "Installed", value: model.installed ? "✓ yes" : "✗ no",
                               color: model.installed ? DS.Palette.success : DS.Palette.warning)
                 if model.installed, let version = model.version {
-                    CliStatusChip(label: "version", value: version, color: .primary)
+                    CliStatusChip(label: "Version", value: version, color: .primary)
                 }
                 if model.installed {
-                    CliStatusChip(label: "authenticated", value: model.authenticated ? "✓ yes" : "✗ no",
+                    CliStatusChip(label: "Authenticated", value: model.authenticated ? "✓ yes" : "✗ no",
                                   color: model.authenticated ? DS.Palette.success : DS.Palette.warning)
                 }
             }
@@ -229,10 +224,10 @@ struct CodexCliSetupPanel: View {
             if model.installed, !model.authenticated { loginSection(model) }
             if model.installed, model.authenticated {
                 Text("✓ Codex CLI is installed and authenticated. Strategies can now select codex-cli.")
-                    .font(.caption2)
+                    .font(.footnote)
                     .foregroundStyle(DS.Palette.success)
                 if !model.authMessage.isEmpty {
-                    Text(model.authMessage).font(.caption2).foregroundStyle(.secondary)
+                    Text(model.authMessage).font(.footnote).foregroundStyle(.secondary)
                 }
                 Button("Sign Out of OpenAI") {
                     signOutRequest = ConfirmRequest(
@@ -243,9 +238,9 @@ struct CodexCliSetupPanel: View {
                         onConfirm: { await model.logout() }
                     )
                 }
-                .font(.caption)
+                .font(.footnote)
                 .buttonStyle(.borderless)
-                .tint(.secondary)
+                .tint(DS.Palette.danger)
             }
         }
     }
@@ -254,11 +249,11 @@ struct CodexCliSetupPanel: View {
     private func installSection(_ model: CodexSetupModel) -> some View {
         if model.installMethod == "unknown" {
             Text("The backend has neither npm nor brew available. Rebuild the backend image with INSTALL_CODEX_CLI=1.")
-                .font(.caption2)
+                .font(.footnote)
                 .foregroundStyle(DS.Palette.warning)
         } else {
             Text("Codex CLI is not installed. Click to install via \(model.installMethod == "brew" ? "brew install codex" : "npm install -g @openai/codex").")
-                .font(.caption2)
+                .font(.footnote)
                 .foregroundStyle(.secondary)
             let running = model.installState == "running"
             Button {
@@ -270,7 +265,6 @@ struct CodexCliSetupPanel: View {
                 }
             }
             .dsProminentButton()
-            .controlSize(.small)
             .disabled(running)
         }
         if !model.installState.isEmpty {
@@ -281,7 +275,7 @@ struct CodexCliSetupPanel: View {
                     Text(" (exit \(exit))").foregroundStyle(.tertiary)
                 }
             }
-            .font(.caption2)
+            .font(.footnote)
             if !model.installLog.isEmpty {
                 ScrollView {
                     Text(verbatim: model.installLog.joined(separator: "\n"))
@@ -294,7 +288,7 @@ struct CodexCliSetupPanel: View {
                 .background(DS.Surface.panel, in: .rect(cornerRadius: 4))
             }
             if !model.installError.isEmpty {
-                Text(model.installError).font(.caption2).foregroundStyle(DS.Palette.danger)
+                Text(model.installError).font(.footnote).foregroundStyle(DS.Palette.danger)
             }
         }
     }
@@ -302,7 +296,7 @@ struct CodexCliSetupPanel: View {
     @ViewBuilder
     private func loginSection(_ model: CodexSetupModel) -> some View {
         Text("Codex is installed but not authenticated. Start the OpenAI device-code login.")
-            .font(.caption2)
+            .font(.footnote)
             .foregroundStyle(.secondary)
         HStack(spacing: 8) {
             Button {
@@ -314,7 +308,6 @@ struct CodexCliSetupPanel: View {
                 }
             }
             .dsProminentButton()
-            .controlSize(.small)
             .disabled(model.loginWaiting)
             if model.loginWaiting {
                 Button("Cancel") { Task { await model.cancelLogin() } }
@@ -331,10 +324,9 @@ struct CodexCliSetupPanel: View {
             }
             if !model.loginPairingCode.isEmpty {
                 HStack {
-                    Text("Code: ").font(.caption2).foregroundStyle(.secondary)
+                    Text("Code: ").font(.footnote).foregroundStyle(.secondary)
                     Text(verbatim: model.loginPairingCode)
                         .font(.system(.title2, design: .monospaced).weight(.bold))
-                        .tracking(8)
                         .foregroundStyle(DS.Palette.success)
                         .textSelection(.enabled)
                     Spacer()
@@ -344,7 +336,7 @@ struct CodexCliSetupPanel: View {
                 }
             }
             if !model.loginError.isEmpty {
-                Text(model.loginError).font(.caption2).foregroundStyle(DS.Palette.danger)
+                Text(model.loginError).font(.footnote).foregroundStyle(DS.Palette.danger)
             }
         }
     }
@@ -359,7 +351,7 @@ private struct CliPanelHeader: View {
 
     var body: some View {
         HStack {
-            Text(title).font(.footnote.weight(.semibold))
+            Text(title).font(.headline)
             Spacer()
             Button(action: onRefresh) {
                 Group {
@@ -381,11 +373,10 @@ private struct CliStatusChip: View {
     let color: Color
 
     var body: some View {
-        HStack(spacing: 2) {
-            Text("\(label):").foregroundStyle(.secondary)
+        LabeledContent(label) {
             Text(verbatim: value).foregroundStyle(color)
         }
-        .font(.caption2)
+        .font(.subheadline)
     }
 }
 
@@ -404,7 +395,7 @@ private struct CliLoginStateLine: View {
             Text("Login state: ").foregroundStyle(.secondary)
             Text(state).foregroundStyle(Self.color(state))
         }
-        .font(.caption2)
+        .font(.footnote)
     }
 }
 
@@ -418,7 +409,7 @@ private struct CliUrlRow: View {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
-            Text("Open URL: ").font(.caption2).foregroundStyle(.secondary)
+            Text("Open URL: ").font(.footnote).foregroundStyle(.secondary)
             Button {
                 if let link = URL(string: url) { openURL(link) }
             } label: {
