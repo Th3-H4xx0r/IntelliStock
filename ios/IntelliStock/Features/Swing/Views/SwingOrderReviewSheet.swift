@@ -11,6 +11,35 @@ struct SwingOrderReview: Identifiable {
     let send: () async -> DecisionResult
     /// After the sheet closes on a result.
     let finished: (DecisionResult) -> Void
+    /// A rehearsal: a sample order, and `send` never reaches the server.
+    var demo = false
+
+    /// The sheet with a sample wheel put; sending only plays the animation.
+    static func demo() -> SwingOrderReview {
+        SwingOrderReview(
+            signal: SwingSignal(json: [
+                "id": "demo",
+                "lane": "wheel",
+                "symbol": "QCOM",
+                "session": "2026-10-02",
+                "created_at": "2026-10-02T14:45:33Z",
+                "score": 70,
+                "recommendation": "REVIEW",
+                "reasoning": "A sample order for a demo.",
+                "key_risks": [],
+                "proposal": ["contract": nil, "strike": 177.5, "expiry": "2026-10-09", "qty": 1,
+                             "limit_price": nil, "premium_est": 1.31],
+                "status": "pending",
+            ]),
+            decision: "approve",
+            send: {
+                try? await Task.sleep(for: .milliseconds(700))
+                return DecisionResult(.recorded, "Demo: nothing was sent.")
+            },
+            finished: { _ in },
+            demo: true
+        )
+    }
 }
 
 /// The order review before an approval is sent, in the manner of a
@@ -73,6 +102,11 @@ struct SwingOrderReviewSheet: View {
         return VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
+                    if review.demo {
+                        Label("Demo · nothing is sent", systemImage: "play.circle")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(DS.Palette.info)
+                    }
                     VStack(alignment: .leading, spacing: 4) {
                         Text(review.decision == "approve_half" ? "Review order · half size" : "Review order")
                             .font(.subheadline.weight(.semibold))

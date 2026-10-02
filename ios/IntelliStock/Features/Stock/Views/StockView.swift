@@ -44,9 +44,11 @@ private struct StockContent: View {
                 header(info)
                     .padding(.top, 4)
                     .listRowBackground(Color.clear)
-                    .listRowInsets(.bottom, 0)
+                    .listRowInsets(EdgeInsets(top: 0, leading: DashboardPortfolioMetrics.chartMargin, bottom: 0, trailing: DashboardPortfolioMetrics.chartMargin))
                     .listRowSeparator(.hidden)
             }
+            // Full width with the chart's margins, so the price lines up with it.
+            .listSectionMargins(.horizontal, 0)
             .listSectionSpacing(0)
             Section {
                 VStack(alignment: .leading, spacing: 0) {

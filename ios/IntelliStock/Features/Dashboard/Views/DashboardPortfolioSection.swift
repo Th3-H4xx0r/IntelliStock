@@ -40,10 +40,11 @@ struct DashboardPortfolioSections: View {
             )
             .listRowBackground(Color.clear)
             // Flush with the top of the safe area: no row padding above.
-            .listRowInsets(.top, 0)
-            .listRowInsets(.bottom, 0)
+            .listRowInsets(EdgeInsets(top: 0, leading: DashboardPortfolioMetrics.chartMargin, bottom: 0, trailing: DashboardPortfolioMetrics.chartMargin))
             .listRowSeparator(.hidden)
         }
+        // Full width with the chart's margins, so the balance lines up with it.
+        .listSectionMargins(.horizontal, 0)
         .listSectionSpacing(0)
         // The chart runs nearly edge to edge: a full-width section, so its
         // row cannot clip it.

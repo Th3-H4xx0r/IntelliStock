@@ -74,7 +74,7 @@ struct PendingSignalsSection: View {
                     SwingQuietRow(title: "Nothing waiting for review.", systemImage: "checkmark.circle")
                 }
             } header: {
-                Text(title)
+                header(title)
             } footer: {
                 if state.signals.isEmpty, !hasTail { Text(Self.footer) }
             }
@@ -90,7 +90,7 @@ struct PendingSignalsSection: View {
                     onDecide: { decide(s, $0) }
                 )
             } header: {
-                if i == 0, !hasStatus { Text(title) }
+                if i == 0, !hasStatus { header(title) }
             } footer: {
                 if i == state.signals.count - 1, !hasTail, state.tracks.isEmpty { Text(Self.footer) }
             }
@@ -142,6 +142,19 @@ struct PendingSignalsSection: View {
             } footer: {
                 Text(Self.footer)
             }
+        }
+    }
+
+    /// The section title, with a button that rehearses the order review on
+    /// a sample order (nothing is sent).
+    private func header(_ title: String) -> some View {
+        HStack {
+            Text(title)
+            Spacer()
+            Button("Demo") { actions.review = .demo() }
+                .font(.footnote.weight(.semibold))
+                .textCase(nil)
+                .accessibilityHint("Shows the order review with a sample order. Nothing is sent.")
         }
     }
 
