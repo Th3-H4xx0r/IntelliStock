@@ -1,8 +1,9 @@
 import SwiftUI
 
 /// The Instances tab root — `InstancesScreen` in `instances_screen.dart`:
-/// the equity instances (pinned first), a User/AI filter, and each card's
-/// pin, view, live, start/stop and delete actions.
+/// the equity instances (pinned first) as an inset-grouped list under a
+/// User/AI filter. A row opens the instance; its pin, live, start/stop, add
+/// stock and delete actions sit in swipe actions and the context menu.
 struct InstancesView: View {
     @Environment(AppServices.self) private var services
 
@@ -30,23 +31,12 @@ private struct InstancesContent: View {
 
     var body: some View {
         content
-            .background(DS.Surface.canvas)
+            .listStyle(.insetGrouped)
             .navigationTitle("Instances")
             .navigationBarTitleDisplayMode(.large)
             .toolbar {
-                ToolbarItemGroup(placement: .topBarTrailing) {
-                    Button {
-                        Task { await model.refreshNow() }
-                    } label: {
-                        Image(systemName: Symbol.named("refresh"))
-                    }
-                    .accessibilityLabel("Refresh")
-                    Button {
-                        showCreate = true
-                    } label: {
-                        Label("New Instance", systemImage: Symbol.named("add"))
-                    }
-                    .accessibilityLabel("New Instance")
+                ToolbarItem(placement: .primaryAction) {
+                    ToolbarAddButton("New Instance") { showCreate = true }
                 }
             }
             .task { await model.poll(lifecycle: services.lifecycle) }
@@ -68,11 +58,12 @@ private struct InstancesContent: View {
         case .loading:
             InstancesSkeleton()
         case .failed:
-            ScrollView {
-                ErrorRow(message: model.state.errorMessage ?? "") {
-                    Task { await model.reload() }
+            List {
+                Section {
+                    ErrorRow(message: model.state.errorMessage ?? "") {
+                        Task { await model.reload() }
+                    }
                 }
-                .padding(24)
             }
         case .loaded(let state):
             loadedBody(state)
@@ -81,28 +72,20 @@ private struct InstancesContent: View {
 
     private func loadedBody(_ state: InstancesState) -> some View {
         let items = sortPinnedFirst(state.filtered, pinned.pinned)
-        return ScrollView {
-            LazyVStack(alignment: .leading, spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("TRADING")
-                        .font(.footnote.weight(.bold))
-                        .tracking(1.2)
-                        .foregroundStyle(.tint)
-                    Text("Manage live trading and backtesting instances.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.horizontal, 4)
-
+        return List {
+            Section {
                 Picker("Filter", selection: Binding(get: { state.filter }, set: { model.setFilter($0) })) {
                     Text("All (\(state.allCount))").tag(InstanceFilter.all)
                     Text("User Created (\(state.userCount))").tag(InstanceFilter.user)
                     Text("AI Created (\(state.aiCount))").tag(InstanceFilter.ai)
                 }
                 .pickerStyle(.segmented)
-                .padding(.bottom, 4)
+                .listRowBackground(Color.clear)
+                .listRowInsets(EdgeInsets())
+            }
 
-                if state.instances.isEmpty {
+            if state.instances.isEmpty {
+                Section {
                     EmptyState(
                         systemImage: Symbol.named("memory"),
                         title: "No instances yet",
@@ -110,44 +93,88 @@ private struct InstancesContent: View {
                         actionLabel: "Create Your First Instance",
                         onAction: { showCreate = true }
                     )
-                } else if state.filtered.isEmpty {
+                    .listRowBackground(Color.clear)
+                }
+            } else if state.filtered.isEmpty {
+                Section {
                     EmptyState(
                         systemImage: Symbol.named("filter_alt_off"),
                         title: state.filter == .ai ? "No AI-created instances" : "No user-created instances"
                     )
-                } else {
+                    .listRowBackground(Color.clear)
+                }
+            } else {
+                Section {
                     ForEach(items) { inst in
-                        InstanceListCard(
-                            inst: inst,
-                            busy: state.busyIds.contains(inst.id),
-                            pinned: pinned.isPinned(inst.id),
-                            onPin: { pinned.toggle(inst.id) },
-                            onView: { services.router.push(.instance(inst.id)) },
-                            onLive: { services.router.push(.liveTrading(inst.id)) },
-                            onStart: { Task { await model.start(inst.id) } },
-                            onStop: { Task { await model.stop(inst.id) } },
-                            deleteLocked: confirmRunning,
-                            onDelete: { confirmDelete(inst) },
-                            onAddStock: { addStockFor = InstanceSheetTarget(id: inst.id) },
-                            onRemoveStock: { sym in
-                                Task {
-                                    do { try await model.removeStock(inst.id, sym) } catch {
-                                        if !error.isCancellationOrTaskCancelled { toast = Toast(swingErrorText(error), style: .error) }
-                                    }
-                                }
-                            }
-                        )
+                        row(inst, busy: state.busyIds.contains(inst.id))
                     }
                 }
-                if let message = state.errorMessage {
-                    ErrorRow(message: message)
-                }
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 8)
-            .padding(.bottom, 32)
+            if let message = state.errorMessage {
+                Section { ErrorRow(message: message) }
+            }
         }
         .refreshable { await model.refreshNow() }
+    }
+
+    // MARK: Row
+
+    private func row(_ inst: Instance, busy: Bool) -> some View {
+        let isPinned = pinned.isPinned(inst.id)
+        return NavigationLink(value: Route.instance(inst.id)) {
+            EntityRow(
+                inst.name.isEmpty ? inst.id : inst.name,
+                subtitle: instanceRowSubtitle(inst, brokerages: services.dashboard.brokeragesValue),
+                subtitleLineLimit: 2,
+                isPinned: isPinned
+            ) {
+                if busy {
+                    ProgressView()
+                } else {
+                    InstanceStatusDot(inst: inst)
+                }
+            }
+        }
+        .swipeActions(edge: .leading) {
+            Button(isPinned ? "Unpin" : "Pin", systemImage: isPinned ? "pin.slash" : "pin") {
+                pinned.toggle(inst.id)
+            }
+            .tint(.orange)
+        }
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button("Delete", systemImage: "trash", role: .destructive) { confirmDelete(inst) }
+                .disabled(busy || confirmRunning)
+        }
+        .contextMenu {
+            Section {
+                if inst.runCommand {
+                    Button("Stop", systemImage: "stop.fill") { Task { await model.stop(inst.id) } }
+                        .disabled(busy)
+                } else {
+                    Button("Start", systemImage: "play.fill") { Task { await model.start(inst.id) } }
+                        .disabled(busy)
+                }
+                Button("View Live", systemImage: "chart.xyaxis.line") {
+                    services.router.push(.liveTrading(inst.id))
+                }
+            }
+            Section {
+                Button(isPinned ? "Unpin" : "Pin", systemImage: isPinned ? "pin.slash" : "pin") {
+                    pinned.toggle(inst.id)
+                }
+                Button("Add Stock…", systemImage: "plus") {
+                    addStockFor = InstanceSheetTarget(id: inst.id)
+                }
+                .disabled(busy)
+                Button("Copy ID", systemImage: "doc.on.doc") {
+                    UIPasteboard.general.string = inst.id
+                }
+            }
+            Section {
+                Button("Delete", systemImage: "trash", role: .destructive) { confirmDelete(inst) }
+                    .disabled(busy || confirmRunning)
+            }
+        }
     }
 
     private func confirmDelete(_ inst: Instance) {
@@ -162,241 +189,81 @@ private struct InstancesContent: View {
     }
 }
 
+/// An instance row's subtitle: who made it (AI only; a user instance is the
+/// default), the strategy, and the brokerage by name — "AI · Strategy 197 ·
+/// Alpaca Paper". The brokerage name comes from the nested `brokerage` map,
+/// else the already-loaded brokerage list; an id the app cannot name is
+/// shortened in the middle.
+func instanceRowSubtitle(_ inst: Instance, brokerages: [BrokerageAccount]?) -> String {
+    var parts: [String] = []
+    if inst.createdBy == "ai" { parts.append("AI") }
+    if let sid = inst.strategyId {
+        let name = (inst.strategy?["name"]).flatMap { $0.isNull ? nil : $0.dartDescription }
+        parts.append(name ?? "Strategy \(sid)")
+    } else {
+        parts.append("No strategy linked")
+    }
+    if let bid = inst.brokerageId {
+        parts.append(instanceBrokerageName(bid, nested: inst.brokerage, brokerages: brokerages))
+    }
+    return parts.joined(separator: " · ")
+}
+
+/// A brokerage id as a human name: the nested map's `account_name`, the
+/// loaded list's name, or the id shortened in the middle (`bf78ad0c…3404`).
+func instanceBrokerageName(_ id: String, nested: JSONObject?, brokerages: [BrokerageAccount]?) -> String {
+    if let name = (nested?["account_name"] ?? .null).string, !name.isEmpty { return name }
+    if let match = brokerages?.first(where: { $0.id == id }), !match.accountName.isEmpty { return match.accountName }
+    return instanceShortId(id)
+}
+
+/// A long id shortened in the middle: the first 8 and last 4 characters.
+func instanceShortId(_ id: String) -> String {
+    guard id.count > 14 else { return id }
+    return "\(id.prefix(8))…\(id.suffix(4))"
+}
+
 /// An id to present a sheet for (`.sheet(item:)`).
 struct InstanceSheetTarget: Identifiable, Hashable {
     let id: String
 }
 
-/// One instance card (`_InstanceCard`).
-private struct InstanceListCard: View {
-    let inst: Instance
-    let busy: Bool
-    let pinned: Bool
-    let onPin: () -> Void
-    let onView: () -> Void
-    let onLive: () -> Void
-    let onStart: () -> Void
-    let onStop: () -> Void
-    let deleteLocked: Bool
-    let onDelete: () -> Void
-    let onAddStock: () -> Void
-    let onRemoveStock: (String) -> Void
-
-    var body: some View {
-        let isAi = inst.createdBy == "ai"
-        let strategyName = (inst.strategy?["name"]).flatMap { $0.isNull ? nil : $0.dartDescription } ?? inst.strategyId ?? ""
-        let brokerageName: String = inst.brokerage.map(instanceBrokerageLabel) ?? (inst.brokerageId ?? "")
-        Card(padding: 16) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .top, spacing: 12) {
-                    IconTile(systemImage: Symbol.named("memory"))
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(inst.name.isEmpty ? inst.id : inst.name)
-                            .font(.subheadline.weight(.semibold))
-                            .lineLimit(1)
-                        Text(inst.id)
-                            .font(.caption.monospaced())
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    VStack(alignment: .trailing, spacing: 6) {
-                        AppBadge(label: isAi ? "AI" : "User", color: isAi ? DS.Palette.accent : .secondary)
-                        InstanceStatusBadge(inst: inst)
-                    }
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    if inst.strategyId != nil {
-                        InstanceMetaRow(label: "Strategy", value: strategyName)
-                    } else {
-                        Text("No strategy linked")
-                            .font(.footnote)
-                            .italic()
-                            .foregroundStyle(.secondary)
-                    }
-                    if inst.brokerageId != nil {
-                        InstanceMetaRow(label: "Brokerage", value: brokerageName)
-                    }
-                }
-
-                InstanceStocksBlock(
-                    title: "STOCKS (\(inst.stocks.count))",
-                    stocks: inst.stocks,
-                    busy: busy,
-                    onAdd: onAddStock,
-                    onRemove: onRemoveStock
-                )
-
-                DashboardFlowLayout(spacing: 6) {
-                    InstanceActionButton(
-                        label: pinned ? "Pinned" : "Pin",
-                        symbol: Symbol.named(pinned ? "push_pin" : "push_pin_outlined"),
-                        tint: pinned ? DS.Palette.warning : .secondary,
-                        action: onPin
-                    )
-                    InstanceActionButton(label: "View", symbol: Symbol.named("open_in_new"), tint: DS.Palette.accent, action: onView)
-                    InstanceActionButton(label: "Live", symbol: Symbol.named("show_chart"), tint: DS.Palette.info, action: onLive)
-                    if inst.runCommand {
-                        InstanceActionButton(label: "Stop", symbol: Symbol.named("stop"), tint: DS.Palette.warning, busy: busy, action: onStop)
-                    } else {
-                        InstanceActionButton(label: "Start", symbol: Symbol.named("play_arrow"), tint: DS.Palette.success, busy: busy, action: onStart)
-                    }
-                    InstanceActionButton(label: "Delete", symbol: Symbol.named("delete"), tint: DS.Palette.danger, disabled: busy || deleteLocked, action: onDelete)
-                }
-            }
-        }
-    }
-}
-
-/// `Crashed` (red) / `Running` (green, pulsing) / `Stopped`.
-struct InstanceStatusBadge: View {
+/// Run state as a dot and a word: `Crashed` (red), `Running` (green,
+/// pulsing) or `Stopped`.
+struct InstanceStatusDot: View {
     let inst: Instance
 
     var body: some View {
         let label = inst.crashed ? "Crashed" : (inst.runCommand ? "Running" : "Stopped")
         let color: Color = inst.crashed ? DS.Palette.danger : (inst.runCommand ? DS.Palette.success : .secondary)
-        StatusBadge(label: label, color: color, pulsing: inst.runCommand && !inst.crashed)
+        StatusDot(label, color: color, pulsing: inst.runCommand && !inst.crashed)
     }
 }
 
-/// `Label: value` (`_MetaRow`).
-private struct InstanceMetaRow: View {
-    let label: String
-    let value: String
-
-    var body: some View {
-        HStack(spacing: 0) {
-            Text("\(label): ")
-                .foregroundStyle(.secondary)
-            Text(value)
-                .lineLimit(1)
-        }
-        .font(.footnote)
-    }
-}
-
-/// A small tinted action (`_ActionBtn`): disabled at 40 % while busy, with a
-/// spinner in place of the glyph when it is the busy action.
-struct InstanceActionButton: View {
-    let label: String
-    let symbol: String
-    let tint: Color
-    var busy = false
-    var disabled = false
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 4) {
-                if busy {
-                    ProgressView().controlSize(.mini)
-                } else {
-                    Image(systemName: symbol)
-                }
-                Text(label)
-            }
-            .font(.caption.weight(.semibold))
-        }
-        .buttonStyle(.bordered)
-        .controlSize(.small)
-        .tint(tint)
-        .disabled(busy || disabled)
-        .frame(minHeight: 44)
-    }
-}
-
-/// The stocks block shared by the list card and the detail card: a header
-/// with Add, removable chips, or `No stocks added`.
-struct InstanceStocksBlock: View {
-    let title: String
-    let stocks: [String]
-    var busy = false
-    var titleFont: Font = .caption2.weight(.semibold)
-    let onAdd: () -> Void
-    let onRemove: (String) -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text(title)
-                    .font(titleFont)
-                    .tracking(0.8)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button(action: onAdd) {
-                    Label("Add", systemImage: Symbol.named("add"))
-                        .font(.caption.weight(.semibold))
-                }
-                .buttonStyle(.borderless)
-                .disabled(busy)
-                .frame(minHeight: 44)
-            }
-            if stocks.isEmpty {
-                Text("No stocks added")
-                    .font(.footnote)
-                    .italic()
-                    .foregroundStyle(.secondary)
-            } else {
-                DashboardFlowLayout(spacing: 6) {
-                    ForEach(stocks, id: \.self) { sym in
-                        HStack(spacing: 4) {
-                            Text(sym)
-                                .font(.caption.monospaced())
-                            if !busy {
-                                Button {
-                                    onRemove(sym)
-                                } label: {
-                                    Image(systemName: Symbol.named("close"))
-                                        .font(.caption2.weight(.semibold))
-                                        .foregroundStyle(.secondary)
-                                        .frame(width: 22, height: 22)
-                                        .contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityLabel("Remove \(sym)")
-                            }
-                        }
-                        .padding(.leading, 8)
-                        .padding(.trailing, busy ? 8 : 2)
-                        .padding(.vertical, 3)
-                        .background(DS.Surface.inset, in: .rect(cornerRadius: 6, style: .continuous))
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// The list skeleton: pills and four card shapes.
+/// The list's loading shape: the filter and rows, redacted.
 private struct InstancesSkeleton: View {
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                Skeleton(height: 12, radius: 6)
-                Skeleton(height: 30, radius: 8)
-                ForEach(0..<4, id: \.self) { _ in
-                    Card(padding: 16) {
-                        VStack(alignment: .leading, spacing: 12) {
-                            HStack(spacing: 12) {
-                                Skeleton.circle(40)
-                                VStack(alignment: .leading, spacing: 6) {
-                                    Skeleton(width: 140, height: 14, radius: 6)
-                                    Skeleton(width: 100, height: 10, radius: 5)
-                                }
-                                Spacer()
-                                Skeleton(width: 56, height: 18, radius: 9)
-                            }
-                            Skeleton(height: 12, radius: 6)
-                            Skeleton(width: 220, height: 12, radius: 6)
-                            Skeleton(height: 28, radius: 8)
-                        }
+        List {
+            Section {
+                Picker("Filter", selection: .constant(0)) {
+                    Text("All").tag(0)
+                    Text("User Created").tag(1)
+                    Text("AI Created").tag(2)
+                }
+                .pickerStyle(.segmented)
+                .listRowBackground(Color.clear)
+                .listRowInsets(EdgeInsets())
+            }
+            Section {
+                ForEach(0..<6, id: \.self) { _ in
+                    EntityRow("Instance name", subtitle: "Strategy 000 · Brokerage") {
+                        StatusDot("Stopped", color: .secondary)
                     }
                 }
             }
-            .padding(16)
         }
-        .scrollDisabled(true)
+        .redacted(reason: .placeholder)
+        .disabled(true)
         .accessibilityLabel("Loading")
     }
 }
