@@ -115,7 +115,35 @@ targets:
         TEST_HOST: $(BUILT_PRODUCTS_DIR)/IntelliStock.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/IntelliStock
         BUNDLE_LOADER: $(TEST_HOST)
 
+  # Screenshot tour against a live backend (Wave 3). Its own scheme, so the
+  # unit-test scheme never needs credentials.
+  IntelliStockUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: IntelliStockUITests
+        type: syncedFolder
+    dependencies:
+      - target: IntelliStock
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.pkrishna.intellistockMobile.UITests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: IntelliStock
+        # XCTestCase's initialisers are nonisolated; the tour is test-only code.
+        SWIFT_DEFAULT_ACTOR_ISOLATION: nonisolated
+        SWIFT_VERSION: "5.0"
+
 schemes:
+  IntelliStockTour:
+    build:
+      targets:
+        IntelliStock: all
+        IntelliStockUITests: [test]
+    test:
+      config: Debug
+      targets:
+        - IntelliStockUITests
   IntelliStock:
     build:
       targets:
