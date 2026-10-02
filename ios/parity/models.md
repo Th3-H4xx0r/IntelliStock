@@ -105,7 +105,7 @@ Legend: `[x]` ported as-is · `[x] → native form: …` deliberately changed in
 - Ruling: the pickers refetch on the same triggers as Dart's `didUpdateWidget` (Ollama: shown or URL changes; Bedrock: shown, region or key changes; Claude: shown or CLI path changes) through a keyed `.task` — cost if wrong: none.
 - Ruling: the Claude and Codex login URLs are also tappable (`openURL`) besides the copy button — the brief asks for URLs opened with `openURL`; the host allow-lists still gate what is shown — cost if wrong: one extra affordance.
 - Ruling: saved pricing values prefill with Dart's `double.toString()` (`3` shows `3.0`) — `JSON.dartDoubleString` — cost if wrong: none.
-- Ruling: the token-usage refresh never surfaces an error state because `fetchAll` (data layer) folds failures into `partialError`, exactly as the Dart repository did; the error branch stays for parity — cost if wrong: none.
+- Ruling: the token-usage refresh uses `fetchAllUnlessCancelled` (orchestrator, core round 2): endpoint failures still fold into `partialError` as in Dart, and a cancelled refresh (the screen went away) leaves the state unchanged instead of reporting "6 of 6 requests failed" — cost if wrong: none.
 - Ruling: the top-3 provider sort is stable (ties keep server order); Dart's `List.sort` gave no tie order — cost if wrong: two providers with the exact same cost may swap.
 - Ruling: the spend-trend chart uses Swift Charts stacked `BarMark`s with a top legend and the provider palette; Syncfusion's tooltip becomes the default chart (no scrubbing) — cost if wrong: no per-bar tooltip.
 - Ruling: the Add / Edit sheet and the call detail are native sheets; the setup panels sit inside the form's CLI section as tinted (not glass) containers — cost if wrong: none.

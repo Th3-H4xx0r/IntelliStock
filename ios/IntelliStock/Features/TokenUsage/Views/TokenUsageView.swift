@@ -126,7 +126,7 @@ private struct TokenUsageSections: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                Picker("Range", selection: Binding(get: { range }, set: onRange)) {
+                Picker("Range", selection: Binding(get: { range }, set: { onRange($0) })) {
                     ForEach(TokenUsageModel.ranges, id: \.self) { Text($0).tag($0) }
                 }
                 .pickerStyle(.segmented)

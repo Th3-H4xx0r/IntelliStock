@@ -28,10 +28,15 @@ final class TokenUsageModel {
 
     /// `refreshNow` (pull to refresh, the refresh button, each tick).
     func refreshNow() async {
-        // `fetchAll` never throws: a failing endpoint becomes `partialError`.
-        let fresh = await repository().fetchAll(range)
-        if Task.isCancelled { return }
-        data = .loaded(fresh)
+        // A failing endpoint becomes `partialError`; only a cancellation
+        // throws, and a cancelled refresh leaves the state as it was.
+        do {
+            data = .loaded(try await repository().fetchAllUnlessCancelled(range))
+        } catch is CancellationError {
+            return
+        } catch {
+            data = .failed(error)
+        }
     }
 
     /// Changes the range and refreshes at once.
