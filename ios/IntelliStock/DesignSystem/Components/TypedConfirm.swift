@@ -95,8 +95,11 @@ struct TypedConfirmRequest: Identifiable {
 }
 
 extension View {
-    func typedConfirmAlert(_ request: Binding<TypedConfirmRequest?>) -> some View {
-        modifier(TypedConfirmAlert(request: request))
+    /// Presents `request` while non-nil. `isRunning` is true from the confirm
+    /// tap until the action finishes — disable the trigger while it is; a
+    /// request raised meanwhile is dropped (see `ConfirmRequest`).
+    func typedConfirmAlert(_ request: Binding<TypedConfirmRequest?>, isRunning: Binding<Bool> = .constant(false)) -> some View {
+        modifier(TypedConfirmAlert(request: request, isRunning: isRunning))
     }
 }
 
@@ -104,14 +107,21 @@ extension View {
 /// must match the phrase before the confirm button enables.
 struct TypedConfirmAlert: ViewModifier {
     @Binding var request: TypedConfirmRequest?
+    @Binding var isRunning: Bool
     @State private var typed = ""
+    @State private var runner = ConfirmRunner()
+
+    init(request: Binding<TypedConfirmRequest?>, isRunning: Binding<Bool> = .constant(false)) {
+        _request = request
+        _isRunning = isRunning
+    }
 
     func body(content: Content) -> some View {
         content
             .alert(
                 request?.title ?? "",
                 isPresented: Binding(
-                    get: { request != nil },
+                    get: { request != nil && !runner.isRunning },
                     set: { if !$0 { request = nil } }
                 ),
                 presenting: request
@@ -121,19 +131,17 @@ struct TypedConfirmAlert: ViewModifier {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                 Button(r.confirmLabel, role: r.role) {
-                    Task {
-                        do {
-                            try await r.onConfirm()
-                        } catch {
-                            r.onError?(error)
-                        }
-                    }
+                    runner.run(r.onConfirm, onError: r.onError, isRunning: $isRunning)
                 }
                 .disabled(!TypedConfirmMatcher.matches(typed, phrase: r.phrase))
                 Button("Cancel", role: .cancel) {}
             } message: { r in
                 Text("\(r.body)\n\n\(r.label ?? "Type \"\(r.phrase)\" to confirm")")
             }
-            .onChange(of: request?.id) { typed = "" }
+            .onChange(of: request?.id) { _, id in
+                typed = ""
+                if id != nil, runner.isRunning { request = nil }
+            }
+            .toast($runner.failure)
     }
 }

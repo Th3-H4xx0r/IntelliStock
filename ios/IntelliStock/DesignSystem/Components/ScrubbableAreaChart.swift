@@ -2,9 +2,12 @@ import Charts
 import SwiftUI
 
 /// A point drawn over the chart's area, e.g. a buy or sell — the native form
-/// of the Syncfusion `markerSeries` Dart passed in.
+/// of the Syncfusion `markerSeries` Dart passed in. A value type: markers
+/// built from the same data are equal, so re-rendering a screen never makes
+/// the chart redraw.
 struct ScrubbableChartMarker: Identifiable, Hashable {
-    let id = UUID()
+    /// Derived from the contents, so it is stable across renders.
+    var id: Int { hashValue }
     let date: Date
     let value: Double
     let color: Color
@@ -93,7 +96,10 @@ struct ScrubbableAreaChart: View {
                         .lineStyle(StrokeStyle(lineWidth: 1))
                 }
 
-                ForEach(markers) { marker in
+                // By position: two identical markers (same time, price and
+                // colour) must both draw.
+                ForEach(markers.indices, id: \.self) { index in
+                    let marker = markers[index]
                     PointMark(x: .value("Time", markerX(marker, count: n)), y: .value("Value", marker.value))
                         .foregroundStyle(marker.color)
                         .symbolSize(64)
