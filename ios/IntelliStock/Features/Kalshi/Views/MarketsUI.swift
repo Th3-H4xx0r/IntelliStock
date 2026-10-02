@@ -7,39 +7,36 @@ import SwiftUI
 // The wrapping chip row is `FlowLayout` (DesignSystem), aliased as
 // `MarketsFlowLayout`.
 
-/// A short coloured label on a 15 % tint of its colour — the screens'
-/// `_pill` / `_badge` / `_chip` containers (text kept as written, not
-/// upper-cased).
+/// A short coloured label — the screens' `_pill` / `_badge` / `_chip`
+/// containers, drawn in the app's one badge style (`.dsBadge`: a
+/// `.caption2` semibold capsule, colour text on a 15 % fill). The text is
+/// kept as written; callers pass it in sentence case.
 struct MarketsTag: View {
     let text: String
     var color: Color = DS.Palette.accent
-    var mono = false
-
-    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         Text(text)
-            .font(mono ? .caption2.monospaced().weight(.semibold) : .caption2.weight(.bold))
-            .foregroundStyle(color == .secondary || color == .primary ? color : DS.Palette.onTint(color, in: colorScheme))
-            .padding(.horizontal, 7)
-            .padding(.vertical, 3)
-            .background(color.opacity(DS.tintFill), in: .rect(cornerRadius: 6, style: .continuous))
+            .dsBadge(color)
     }
 }
 
-/// A neutral bordered chip (mono coin tickers, fixed-coin summaries).
+/// A small neutral tag (coin tickers, symbols, sub-strategy names): secondary
+/// text on a system fill capsule, Stocks-style. `tint` gives it a 15 % colour
+/// fill instead (the Dynamic coin).
 struct MarketsChip: View {
     let text: String
-    var color: Color = .primary
+    var color: Color = .secondary
     var tint: Color?
 
     var body: some View {
         Text(text)
-            .font(.caption.monospaced())
+            .font(.caption.weight(.medium))
             .foregroundStyle(color)
+            .lineLimit(1)
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
-            .background(tint?.opacity(DS.tintFill) ?? DS.Surface.inset, in: .rect(cornerRadius: 6, style: .continuous))
+            .background(tint?.opacity(DS.tintFill) ?? Color(uiColor: .tertiarySystemFill), in: Capsule())
     }
 }
 
@@ -72,26 +69,6 @@ struct MarketsInfoLabel: View {
                     .presentationCompactAdaptation(.popover)
             }
         }
-    }
-}
-
-/// A card header: an accent glyph and an upper-cased eyebrow title — the
-/// screens' `_KCard` / `_card` header rows.
-struct MarketsCardHeader: View {
-    let icon: String
-    let title: String
-    var color: Color = DS.Palette.accent
-
-    var body: some View {
-        Label {
-            Text(title.uppercased())
-                .font(.footnote.weight(.semibold))
-                .foregroundStyle(.secondary)
-        } icon: {
-            Image(systemName: Symbol.named(icon))
-                .foregroundStyle(color)
-        }
-        .accessibilityAddTraits(.isHeader)
     }
 }
 

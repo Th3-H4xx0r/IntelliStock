@@ -2,8 +2,9 @@ import SwiftUI
 
 /// The Kalshi tab — `KalshiScreen` in kalshi_screen.dart: account selector,
 /// the brokerage's instances, portfolio hero, Edge Radar, open positions and
-/// live logs. Start / Stop / KILL live on the instance screen. A plain
-/// large-title screen: the Dart gradient crown is gone.
+/// live logs. Start / Stop / KILL live on the instance screen. An
+/// inset-grouped list under a large title: the account switcher and the `+`
+/// sit in the toolbar.
 struct KalshiView: View {
     @Environment(AppServices.self) private var services
     @State private var model: KalshiOverviewModel?
@@ -27,6 +28,7 @@ struct KalshiView: View {
         .background(DS.Surface.canvas)
         .navigationTitle("Kalshi")
         .navigationBarTitleDisplayMode(.large)
+        .toolbar { toolbar(accounts: accounts) }
         .task {
             if model == nil {
                 model = KalshiOverviewModel(repository: { [services] in services.kalshiRepository })
@@ -55,56 +57,83 @@ struct KalshiView: View {
         }
     }
 
+    // MARK: Toolbar
+
+    /// The account switcher (a toolbar `Menu`, only with more than one Kalshi
+    /// account, as the Dart selector) and the `+` for a new instance.
+    @ToolbarContentBuilder
+    private func toolbar(accounts: [BrokerageAccount]) -> some ToolbarContent {
+        if let model, let selectedId = model.selectedId {
+            if accounts.count > 1 {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Picker("Account", selection: Binding(
+                            get: { selectedId },
+                            set: { id in
+                                model.select(id)
+                                Task { await model.loadIfNeeded(id) }
+                            }
+                        )) {
+                            ForEach(accounts) { a in Text(a.accountName).tag(a.id) }
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text(accounts.first { $0.id == selectedId }?.accountName ?? "Account")
+                                .lineLimit(1)
+                            Image(systemName: "chevron.up.chevron.down")
+                                .font(.caption.weight(.semibold))
+                                .accessibilityHidden(true)
+                        }
+                        .accessibilityLabel("Account")
+                        .accessibilityValue(accounts.first { $0.id == selectedId }?.accountName ?? "")
+                    }
+                }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                ToolbarAddButton("New Instance") {
+                    createSheet = CreateSheet(accounts: accounts, brokerageId: selectedId)
+                }
+            }
+        }
+    }
+
+    // MARK: Content
+
     @ViewBuilder
     private func content(_ model: KalshiOverviewModel, accounts: [BrokerageAccount]) -> some View {
         if let selectedId = model.selectedId {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    if accounts.count > 1 {
-                        accountSelector(model, accounts: accounts, selectedId: selectedId)
-                    }
-                    let instances = model.instanceList(selectedId)
-                    if model.instances[selectedId]?.value == nil && model.isLoadingInstances(selectedId) {
-                        LoadingState().padding(.top, 40)
-                    } else if let first = instances.first {
-                        instanceList(instances)
-                        Button {
-                            createSheet = CreateSheet(accounts: accounts, brokerageId: selectedId)
-                        } label: {
-                            Label("New Instance", systemImage: Symbol.named("add"))
-                                .fontWeight(.semibold)
-                        }
-                        .buttonStyle(.borderless)
-                        .padding(.leading, 4)
-                        KalshiPortfolioHero(
-                            title: "Portfolio value",
-                            state: model.portfolio[selectedId],
-                            onRetry: { Task { await model.loadPortfolio(selectedId) } }
-                        )
-                        edgeRadar(model, bid: selectedId)
-                        positionsCard(model, bid: selectedId)
-                        Card(padding: 16) {
-                            VStack(alignment: .leading, spacing: 12) {
-                                MarketsCardHeader(icon: "terminal", title: "Live logs")
-                                LiveLogsPanel(instanceId: first.id)
-                                    .id(first.id)
-                                    .frame(height: 300)
-                            }
-                        }
-                    } else {
-                        EmptyState(
-                            systemImage: Symbol.named("smart_toy"),
-                            title: "No trading instance yet",
-                            subtitle: "Create a Kalshi instance to scan soccer markets, flag edge, and (when started) trade.",
-                            actionLabel: "Create Instance",
-                            onAction: { createSheet = CreateSheet(accounts: accounts, brokerageId: selectedId) }
-                        )
+            let instances = model.instanceList(selectedId)
+            if model.instances[selectedId]?.value == nil && model.isLoadingInstances(selectedId) {
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let first = instances.first {
+                List {
+                    instanceSection(instances)
+                    KalshiPortfolioHero(
+                        title: "Portfolio value",
+                        state: model.portfolio[selectedId],
+                        onRetry: { Task { await model.loadPortfolio(selectedId) } }
+                    )
+                    edgeRadar(model, bid: selectedId)
+                    positionsSection(model, bid: selectedId)
+                    // The log tail opens in place from its one row.
+                    Section("Live logs") {
+                        LiveLogsPanel(instanceId: first.id)
+                            .id(first.id)
+                            .listRowInsets(EdgeInsets())
                     }
                 }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 24)
+                .listStyle(.insetGrouped)
+                .refreshable { await model.refresh() }
+            } else {
+                EmptyState(
+                    systemImage: Symbol.named("smart_toy"),
+                    title: "No trading instance yet",
+                    subtitle: "Create a Kalshi instance to scan soccer markets, flag edge, and (when started) trade.",
+                    actionLabel: "Create Instance",
+                    onAction: { createSheet = CreateSheet(accounts: accounts, brokerageId: selectedId) }
+                )
             }
-            .refreshable { await model.refresh() }
         } else {
             EmptyState(
                 systemImage: Symbol.named("sports_soccer"),
@@ -114,113 +143,71 @@ struct KalshiView: View {
         }
     }
 
-    private func accountSelector(_ model: KalshiOverviewModel, accounts: [BrokerageAccount], selectedId: String) -> some View {
-        Picker("Account", selection: Binding(
-            get: { selectedId },
-            set: { id in
-                model.select(id)
-                Task { await model.loadIfNeeded(id) }
-            }
-        )) {
-            ForEach(accounts) { a in Text(a.accountName).tag(a.id) }
-        }
-        .pickerStyle(.menu)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .background(DS.Surface.panel, in: .rect(cornerRadius: DS.Radius.control, style: .continuous))
-    }
-
     /// Every instance for this brokerage — tap one to manage it. Only one may
     /// run per brokerage (the backend enforces it on Start).
-    private func instanceList(_ instances: [KalshiInstance]) -> some View {
-        VStack(spacing: 0) {
-            ForEach(Array(instances.enumerated()), id: \.element.id) { i, inst in
-                if i > 0 { Divider().padding(.leading, 34) }
+    private func instanceSection(_ instances: [KalshiInstance]) -> some View {
+        Section("Instances") {
+            ForEach(instances) { inst in
                 NavigationLink(value: Route.kalshiInstance(inst.id)) {
-                    HStack(spacing: 10) {
-                        Circle()
-                            .fill(inst.running ? DS.Palette.success : Color(uiColor: .quaternaryLabel))
-                            .frame(width: 8, height: 8)
-                        Text(inst.name)
-                            .font(.body.weight(.semibold))
-                            .foregroundStyle(.primary)
-                            .lineLimit(1)
-                        Spacer(minLength: 8)
-                        MarketsTag(text: inst.running ? "Running" : "Stopped", color: inst.running ? DS.Palette.success : .secondary)
-                        MarketsTag(text: inst.liveEnabled ? "Live" : "Paper", color: inst.liveEnabled ? DS.Palette.danger : DS.Palette.accent)
-                        Image(systemName: Symbol.named("chevron_right"))
-                            .font(.footnote.weight(.semibold))
-                            .foregroundStyle(.tertiary)
+                    EntityRow(inst.name, subtitle: inst.liveEnabled ? "Live" : "Paper") {
+                        StatusDot(
+                            inst.running ? "Running" : "Stopped",
+                            color: inst.running ? DS.Palette.success : .secondary,
+                            pulsing: inst.running
+                        )
                     }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 12)
-                    .contentShape(.rect)
                 }
-                .buttonStyle(.plain)
             }
         }
-        .background(DS.Surface.panel, in: .rect(cornerRadius: DS.Radius.card, style: .continuous))
     }
 
     private func edgeRadar(_ model: KalshiOverviewModel, bid: String) -> some View {
-        Card(padding: 16) {
-            VStack(alignment: .leading, spacing: 12) {
-                MarketsCardHeader(icon: "bolt", title: "Edge Radar")
-                switch model.edges[bid] {
-                case .failed(let e):
-                    ErrorRow(message: KalshiFormat.errorText(e), onRetry: { Task { await model.loadEdges(bid) } })
-                case .loaded(let edges):
-                    if edges.isEmpty {
-                        Text("No +EV contracts right now.")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        VStack(spacing: 0) {
-                            ForEach(Array(edges.enumerated()), id: \.offset) { _, e in
-                                HStack {
-                                    Text("\(e.marketTicker)  ·  \(e.side)")
-                                        .font(.subheadline)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(1)
-                                    Spacer()
-                                    Text("+\(dartToStringAsFixed(e.edge * 100, 1))%")
-                                        .font(.subheadline.weight(.semibold).monospacedDigit())
-                                        .foregroundStyle(DS.Palette.success)
-                                }
-                                .padding(.vertical, 5)
-                            }
+        Section("Edge radar") {
+            switch model.edges[bid] {
+            case .failed(let e):
+                ErrorRow(message: KalshiFormat.errorText(e), onRetry: { Task { await model.loadEdges(bid) } })
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
+            case .loaded(let edges):
+                if edges.isEmpty {
+                    Text("No +EV contracts right now.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(Array(edges.enumerated()), id: \.offset) { _, e in
+                        LabeledContent {
+                            Text("+\(dartToStringAsFixed(e.edge * 100, 1))%")
+                                .monospacedDigit()
+                                .foregroundStyle(DS.Palette.success)
+                        } label: {
+                            Text("\(e.marketTicker)  ·  \(e.side)")
+                                .lineLimit(1)
                         }
                     }
-                case .loading, .none:
-                    LoadingState()
                 }
+            case .loading, .none:
+                LoadingState()
             }
         }
     }
 
-    private func positionsCard(_ model: KalshiOverviewModel, bid: String) -> some View {
-        Card(padding: 16) {
-            VStack(alignment: .leading, spacing: 12) {
-                MarketsCardHeader(icon: "receipt_long", title: "Open positions")
-                switch model.positions[bid] {
-                case .failed(let e):
-                    ErrorRow(message: KalshiFormat.errorText(e), onRetry: { Task { await model.loadPositions(bid) } })
-                case .loaded(let positions):
-                    if positions.isEmpty {
-                        Text("No open positions.")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        VStack(spacing: 10) {
-                            ForEach(Array(positions.enumerated()), id: \.offset) { _, p in
-                                KalshiPositionTile(position: p)
-                            }
-                        }
+    private func positionsSection(_ model: KalshiOverviewModel, bid: String) -> some View {
+        Section("Open positions") {
+            switch model.positions[bid] {
+            case .failed(let e):
+                ErrorRow(message: KalshiFormat.errorText(e), onRetry: { Task { await model.loadPositions(bid) } })
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
+            case .loaded(let positions):
+                if positions.isEmpty {
+                    Text("No open positions.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(Array(positions.enumerated()), id: \.offset) { _, p in
+                        KalshiPositionRow(position: p)
                     }
-                case .loading, .none:
-                    LoadingState()
                 }
+            case .loading, .none:
+                LoadingState()
             }
         }
     }

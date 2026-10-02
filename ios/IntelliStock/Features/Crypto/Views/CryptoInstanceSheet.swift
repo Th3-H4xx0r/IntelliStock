@@ -26,13 +26,6 @@ struct CryptoInstanceSheet: View {
         @Bindable var m = model
         NavigationStack {
             Form {
-                Section {
-                    Text("Pin fixed weights for the coins you want, and leave the rest Dynamic — auto-discovered and traded for you. Empty means 100% dynamic.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .listRowBackground(Color.clear)
-                        .listRowInsets(EdgeInsets())
-                }
                 identitySection
                 bandSection
                 strategySection
@@ -49,8 +42,8 @@ struct CryptoInstanceSheet: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
                 }
+                ToolbarItem(placement: .confirmationAction) { submitButton }
             }
-            .safeAreaInset(edge: .bottom) { submitBar }
         }
         .task { await model.loadSelectors() }
         .presentationDetents([.large])
@@ -155,11 +148,22 @@ struct CryptoInstanceSheet: View {
         let pctPrimary = model.mode == "pct"
         return Group {
             Section {
-                HStack {
-                    Text("ALLOCATION")
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    Spacer()
+                // The Dart sheet's 280 pt `Sector3DChart` over the legend. The
+                // drilled ring reaches 20 pt past its frame, so the legend
+                // sits 20 pt below it.
+                Sector3DChart(slices: model.slices)
+                    .frame(width: 280)
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 20)
+                    .padding(.bottom, 20)
+                legend
+                if model.weightsUnknown {
+                    Text("Current weights couldn’t be loaded — showing an even split. Adjust before saving.")
+                        .font(.footnote)
+                        .foregroundStyle(DS.Palette.warning)
+                }
+            } header: {
+                DSSectionHeader("Allocation") {
                     Picker("Units", selection: $m.mode) {
                         Text("%").tag("pct")
                         Text("$").tag("usd")
@@ -168,15 +172,8 @@ struct CryptoInstanceSheet: View {
                     .labelsHidden()
                     .frame(width: 110)
                 }
-                CryptoAllocationChart(slices: model.slices, colors: sliceColors)
-                    .frame(maxWidth: 280)
-                    .frame(maxWidth: .infinity)
-                legend
-                if model.weightsUnknown {
-                    Text("Current weights couldn’t be loaded — showing an even split. Adjust before saving.")
-                        .font(.caption)
-                        .foregroundStyle(DS.Palette.warning)
-                }
+            } footer: {
+                Text("Pin fixed weights for the coins you want, and leave the rest Dynamic — auto-discovered and traded for you. Empty means 100% dynamic.")
             }
             Section {
                 ForEach(Array(model.rows.enumerated()), id: \.element.id) { i, r in
@@ -186,23 +183,15 @@ struct CryptoInstanceSheet: View {
                 addBar
             } header: {
                 HStack {
-                    Text("COIN")
+                    Text("Coin")
                     Spacer()
-                    Text(pctPrimary ? "WEIGHT · ≈USD" : "USD · ≈WEIGHT")
+                    Text(pctPrimary ? "Weight · ≈USD" : "USD · ≈Weight")
                 }
+                .textCase(nil)
             } footer: {
                 meter
             }
         }
-    }
-
-    /// Colours for the donut slices in table order (row index for coins,
-    /// Dynamic last) so the ring matches the legend.
-    private var sliceColors: [Color] {
-        var colors: [Color] = []
-        for (i, r) in model.rows.enumerated() where r.pct > 0 { colors.append(CryptoCatalog.color(i)) }
-        if model.dynPct > 0 { colors.append(CryptoCatalog.dynamicColor) }
-        return colors
     }
 
     private var legend: some View {
@@ -284,7 +273,6 @@ struct CryptoInstanceSheet: View {
                 .frame(width: 52, alignment: .trailing)
             Color.clear.frame(width: 28, height: 1)
         }
-        .listRowBackground(DS.Palette.accent.opacity(DS.tintFill))
     }
 
     @ViewBuilder
@@ -304,10 +292,9 @@ struct CryptoInstanceSheet: View {
                 Button {
                     model.addCoin(current)
                 } label: {
-                    Label("Add coin", systemImage: Symbol.named("add"))
-                        .font(.subheadline.weight(.semibold))
+                    Label("Add Coin", systemImage: Symbol.named("add"))
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.borderless)
             }
         }
     }
@@ -354,7 +341,10 @@ struct CryptoInstanceSheet: View {
         .padding(.top, 8)
     }
 
-    private var submitBar: some View {
+    /// The confirm action, in the toolbar (Form rule): the prominent
+    /// checkmark, with the Dart button's labels for VoiceOver, a spinner
+    /// while saving, and the same in-flight guard.
+    private var submitButton: some View {
         Button {
             Task {
                 if await model.submit() {
@@ -363,15 +353,13 @@ struct CryptoInstanceSheet: View {
                 }
             }
         } label: {
-            Text(model.saving ? "Saving…" : (model.isEdit ? "Save Changes" : "Create Instance"))
-                .fontWeight(.bold)
-                .frame(maxWidth: .infinity)
+            if model.saving {
+                ProgressView().accessibilityLabel("Saving…")
+            } else {
+                Label(model.isEdit ? "Save Changes" : "Create Instance", systemImage: "checkmark")
+            }
         }
-        .dsProminentButton()
-        .controlSize(.large)
+        .dsGlassProminentButton()
         .disabled(model.saving)
-        .padding(.horizontal, 20)
-        .padding(.vertical, 8)
-        .background(.bar)
     }
 }

@@ -78,8 +78,8 @@ struct KalshiInstanceSheet: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
                 }
+                ToolbarItem(placement: .confirmationAction) { submitButton }
             }
-            .safeAreaInset(edge: .bottom) { submitBar }
         }
         .task { await model.start() }
         .presentationDetents([.large])
@@ -229,7 +229,11 @@ struct KalshiInstanceSheet: View {
         }
     }
 
-    private var submitBar: some View {
+    /// The form's confirm action, in the toolbar (Form rule: confirm and
+    /// Cancel go in the toolbar): the iOS 26 prominent checkmark, with the
+    /// Dart button's labels for VoiceOver, a spinner while saving, and the
+    /// same in-flight guard.
+    private var submitButton: some View {
         Button {
             Task {
                 if let bid = await model.submit() {
@@ -238,15 +242,13 @@ struct KalshiInstanceSheet: View {
                 }
             }
         } label: {
-            Text(model.creating ? "Saving…" : (model.isEdit ? "Save Changes" : "Create Instance"))
-                .fontWeight(.bold)
-                .frame(maxWidth: .infinity)
+            if model.creating {
+                ProgressView().accessibilityLabel("Saving…")
+            } else {
+                Label(model.isEdit ? "Save Changes" : "Create Instance", systemImage: "checkmark")
+            }
         }
-        .dsProminentButton()
-        .controlSize(.large)
+        .dsGlassProminentButton()
         .disabled(model.creating)
-        .padding(.horizontal, 20)
-        .padding(.vertical, 8)
-        .background(.bar)
     }
 }

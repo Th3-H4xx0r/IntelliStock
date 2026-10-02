@@ -1,9 +1,11 @@
 import SwiftUI
 
-/// The portfolio hero card — `KalshiPortfolioHero` in
-/// kalshi_portfolio_hero.dart: value (or paper P&L) with a rolling number,
-/// the day change, and a scrubbable equity chart. Shared by the Kalshi tab
-/// and the instance detail.
+/// The portfolio hero — `KalshiPortfolioHero` in kalshi_portfolio_hero.dart:
+/// value (or paper P&L) with a rolling number, the day change, and a
+/// scrubbable equity chart. A list `Section` (Stocks style: the hero, then the
+/// chart, no card) shared by the Kalshi tab and the instance detail. The
+/// section header names it ("Portfolio value", or "Paper P&L · progress"
+/// with a Mock badge).
 struct KalshiPortfolioHero: View {
     let title: String
     let state: Loadable<KalshiPortfolio>?
@@ -12,22 +14,19 @@ struct KalshiPortfolioHero: View {
     @State private var scrubIdx: Int?
 
     var body: some View {
-        Card(padding: 16) {
-            VStack(alignment: .leading, spacing: 10) {
-                header
-                content
-            }
+        Section {
+            content
+        } header: {
+            header
         }
     }
 
     private var header: some View {
         let paper = state?.value?.isPaper ?? false
         return HStack(spacing: 8) {
-            Text((paper ? "Paper P&L · progress" : title).uppercased())
-                .font(.footnote.weight(.semibold))
-                .foregroundStyle(.secondary)
+            Text(paper ? "Paper P&L · progress" : title)
             if paper {
-                MarketsTag(text: "MOCK", color: DS.Palette.warning)
+                MarketsTag(text: "Mock", color: DS.Palette.warning)
             }
         }
     }
@@ -37,6 +36,8 @@ struct KalshiPortfolioHero: View {
         switch state {
         case .failed(let e):
             ErrorRow(message: KalshiFormat.errorText(e), onRetry: onRetry)
+                .listRowInsets(EdgeInsets())
+                .listRowBackground(Color.clear)
         case .loaded(let p):
             loaded(p)
         case .loading, .none:
@@ -57,51 +58,38 @@ struct KalshiPortfolioHero: View {
         let v = scrubbing ? vals[scrubIdx!] : headline
         let change = scrubbing ? v - baseline : dayChg
         let positive = change >= 0
-        let color = positive ? DS.Palette.success : DS.Palette.danger
 
-        return VStack(alignment: .leading, spacing: 0) {
+        return VStack(alignment: .leading, spacing: DS.cardGroupSpacing) {
             // Paper P&L can be negative: the sign goes before the $.
-            Text("\(v < 0 ? "-" : "")$\(dartToStringAsFixed(abs(v), 2))")
-                .font(.largeTitle.weight(.heavy))
-                .monospacedDigit()
-                .contentTransition(.numericText(value: v))
-                .animation(.easeOut(duration: 0.5), value: v)
-            HStack(spacing: 4) {
-                Image(systemName: Symbol.named(positive ? "trending_up" : "trending_down"))
-                Text("\(positive ? "+" : "-")$\(dartToStringAsFixed(abs(change), 2))")
-                    .fontWeight(.bold)
-                    .monospacedDigit()
-            }
-            .font(.subheadline)
-            .foregroundStyle(color)
-            .padding(.top, 5)
-
+            HeroValueHeader(
+                "\(v < 0 ? "-" : "")$\(dartToStringAsFixed(abs(v), 2))",
+                numericValue: v,
+                valueAnimation: scrubbing ? nil : .easeOut(duration: 0.5),
+                change: "\(positive ? "+" : "-")$\(dartToStringAsFixed(abs(change), 2))",
+                direction: positive ? .up : .down,
+                status: hasSeries ? nil : "Equity curve appears once the engine records snapshots."
+            )
             if hasSeries {
                 ScrubbableAreaChart(
                     timestamps: tss,
                     values: vals,
                     lineColor: dayChg >= 0 ? DS.Palette.success : DS.Palette.danger,
-                    height: 168,
+                    height: 180,
                     baseline: baseline,
                     onScrub: { scrubIdx = $0 },
                     indexed: true,
                     pulsingEndDot: true
                 )
-                .padding(.top, 18)
-            } else {
-                Text("Equity curve appears once the engine records snapshots.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding(.top, 10)
             }
         }
+        .padding(.vertical, 6)
     }
 }
 
-/// A Kalshi open-position tile — `kalshiPositionTile`: crest + match,
-/// "Yes · pick", current value with unrealized P&L, contracts / odds chips
-/// and the max payout.
-struct KalshiPositionTile: View {
+/// A Kalshi open position as a list row — `kalshiPositionTile`: the crest and
+/// match, "Yes · pick", the current value with unrealized P&L, then the
+/// contracts, buy odds and max payout as a footnote.
+struct KalshiPositionRow: View {
     let position: KalshiPosition
 
     var body: some View {
@@ -113,38 +101,28 @@ struct KalshiPositionTile: View {
         let positive = (u ?? 0) >= 0
         let pnlColor: Color = u == nil ? .secondary : (positive ? DS.Palette.success : DS.Palette.danger)
 
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 10) {
-                MarketsCrest(url: p.pickLogo, initials: KalshiFormat.initials(pick))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .font(.subheadline.weight(.semibold))
-                        .lineLimit(1)
-                    Text("Yes · \(pick)")
-                        .font(.caption)
-                        .foregroundStyle(.tint)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 8)
-                VStack(alignment: .trailing, spacing: 2) {
-                    Text(p.currentValue.map { "$\(dartToStringAsFixed($0, 2))" } ?? "—")
-                        .font(.headline.monospacedDigit())
-                    Text(u.map { "\(positive ? "+" : "")$\(dartToStringAsFixed($0, 2))" } ?? "")
-                        .font(.caption.weight(.semibold).monospacedDigit())
-                        .foregroundStyle(pnlColor)
-                }
-            }
-            HStack(spacing: 6) {
-                MarketsTag(text: "\(p.contracts)×")
-                MarketsTag(text: "Buy \(p.oddsPct.map { "\(dartToStringAsFixed($0, 0))%" } ?? "—")")
-                Spacer()
-                Text("$\(dartToStringAsFixed(p.maxPayout, 0)) max payout")
-                    .font(.caption)
+        HStack(alignment: .center, spacing: 12) {
+            MarketsCrest(url: p.pickLogo, initials: KalshiFormat.initials(pick))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.headline)
+                    .lineLimit(1)
+                Text("Yes · \(pick)")
+                    .font(.subheadline)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Text("\(p.contracts)× · Buy \(p.oddsPct.map { "\(dartToStringAsFixed($0, 0))%" } ?? "—") · $\(dartToStringAsFixed(p.maxPayout, 0)) max payout")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            EntityRowValue(
+                p.currentValue.map { "$\(dartToStringAsFixed($0, 2))" } ?? "—",
+                detail: u.map { "\(positive ? "+" : "")$\(dartToStringAsFixed($0, 2))" } ?? "",
+                detailColor: pnlColor
+            )
         }
-        .padding(12)
-        .background(DS.Surface.inset, in: .rect(cornerRadius: DS.Radius.control, style: .continuous))
         .accessibilityElement(children: .combine)
     }
 }
@@ -187,11 +165,12 @@ private struct KalshiLeagueList: View {
                         Spacer()
                         if on {
                             Image(systemName: Symbol.named("check"))
-                                .foregroundStyle(.tint)
+                                .foregroundStyle(DS.Palette.accent)
                                 .fontWeight(.semibold)
                         }
                     }
                 }
+                .tint(.primary)
                 .accessibilityAddTraits(on ? .isSelected : [])
             }
         }

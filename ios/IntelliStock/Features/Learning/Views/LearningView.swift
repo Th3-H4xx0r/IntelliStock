@@ -2,7 +2,9 @@ import SwiftUI
 
 /// The self-learning subsystem (`/learning`) — `LearningScreen`: engine and
 /// mode controls, pending approvals, noise floors, findings and observed
-/// runs.
+/// runs. An inset-grouped list: the overview counts are a `StatGrid`, the
+/// engine is a section with its Start / Stop button and mode picker, and
+/// each finding is a severity-badged row that discloses its body.
 struct LearningView: View {
     @Environment(AppServices.self) private var services
     @State private var model: LearningModel?
@@ -50,170 +52,174 @@ struct LearningView: View {
     }
 
     private func content(_ model: LearningModel, _ s: LearningSnapshot) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                header(s)
-                controls(model, s)
-                if let partial = s.partialError {
+        List {
+            overview(s)
+            engine(model, s)
+            if let partial = s.partialError {
+                Section {
                     ErrorRow(message: partial)
+                        .listRowInsets(EdgeInsets())
+                        .listRowBackground(Color.clear)
                 }
-                SectionHeader(title: "Pending approvals").padding(.top, 8)
+            }
+            Section("Pending approvals") {
                 if s.approvals.isEmpty {
-                    Card {
-                        VStack(spacing: 6) {
-                            Text("No approvals waiting").font(.subheadline.weight(.semibold))
-                            Text("The subsystem is observe-only — it records and reports, and does not yet propose changes.")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                                .multilineTextAlignment(.center)
-                        }
-                        .frame(maxWidth: .infinity)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("No approvals waiting")
+                        Text("The subsystem is observe-only — it records and reports, and does not yet propose changes.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
                     }
                 } else {
-                    ForEach(s.approvals) { a in approvalCard(model, a) }
+                    ForEach(s.approvals) { a in approvalRow(model, a) }
                 }
-                SectionHeader(title: "Measured noise floors").padding(.top, 8)
+            }
+            Section("Measured noise floors") {
                 if s.floors.isEmpty {
-                    Card(padding: 16) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("No floor measured yet").font(.subheadline.weight(.semibold)).foregroundStyle(DS.Palette.warning)
-                            Text("Two runs of one window have differed by ~16pp here, so nothing is promotable until a target has a measured floor.")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                        }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("No floor measured yet").foregroundStyle(DS.Palette.warning)
+                        Text("Two runs of one window have differed by ~16pp here, so nothing is promotable until a target has a measured floor.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
                     }
                 } else {
                     ForEach(Array(s.floors.enumerated()), id: \.offset) { _, f in floorRow(f) }
                 }
-                SectionHeader(title: "Findings & reports").padding(.top, 8)
+            }
+            Section("Findings & reports") {
                 if s.findings.isEmpty {
-                    EmptyState(systemImage: Symbol.named("lightbulb"), title: "Nothing raised yet", subtitle: "Findings appear as completed runs are observed.")
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Nothing raised yet")
+                        Text("Findings appear as completed runs are observed.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
                 } else {
-                    ForEach(s.findings) { f in LearningFindingCard(finding: f) }
+                    ForEach(s.findings) { f in LearningFindingRow(finding: f) }
                 }
-                SectionHeader(title: "Observed runs").padding(.top, 8)
+            }
+            Section("Observed runs") {
                 if s.funnels.isEmpty {
-                    EmptyState(systemImage: Symbol.named("analytics"), title: "No runs observed yet")
+                    Text("No runs observed yet").foregroundStyle(.secondary)
                 } else {
                     ForEach(Array(s.funnels.enumerated()), id: \.offset) { _, r in funnelRow(r) }
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 8)
-            .padding(.bottom, 32)
         }
+        .listStyle(.insetGrouped)
         .refreshable { await model.load() }
     }
 
-    // MARK: Header + controls
+    // MARK: Overview + engine
 
-    private func header(_ s: LearningSnapshot) -> some View {
+    private func overview(_ s: LearningSnapshot) -> some View {
         let ov = s.overview
         let engineOn = ov?.engineRunning ?? false
-        return VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                StatusBadge(label: s.observeOnly ? "Observe only" : (ov?.mode ?? "—"), color: s.observeOnly ? DS.Palette.info : DS.Palette.success, pulsing: !s.observeOnly)
-                StatusBadge(label: engineOn ? "Engine on" : "Engine off", color: engineOn ? DS.Palette.success : .secondary, pulsing: engineOn)
+        return Section {
+            StatGrid(columns: 2) {
+                StatCell(label: "Open findings", value: String(ov?.openFindings ?? 0))
+                StatCell(label: "Runs observed", value: String(ov?.runsObserved ?? 0))
+                StatCell(label: "Decisions", value: String(ov?.decisionsObserved ?? 0))
+                StatCell(label: "Refusals", value: String(ov?.refusalsObserved ?? 0))
             }
-            Grid(horizontalSpacing: 8, verticalSpacing: 8) {
-                GridRow {
-                    StatTile(label: "Open findings", value: String(ov?.openFindings ?? 0))
-                    StatTile(label: "Runs observed", value: String(ov?.runsObserved ?? 0))
-                }
-                GridRow {
-                    StatTile(label: "Decisions", value: String(ov?.decisionsObserved ?? 0))
-                    StatTile(label: "Refusals", value: String(ov?.refusalsObserved ?? 0))
+            .padding(.vertical, 4)
+        } header: {
+            DSSectionHeader("Overview") {
+                HStack(spacing: 10) {
+                    StatusBadge(label: s.observeOnly ? "Observe only" : (ov?.mode ?? "—").dsSentenceCased, color: s.observeOnly ? DS.Palette.info : DS.Palette.success, pulsing: !s.observeOnly)
+                    StatusDot(engineOn ? "Engine on" : "Engine off", color: engineOn ? DS.Palette.success : .secondary, pulsing: engineOn, font: .footnote)
                 }
             }
         }
     }
 
-    private func controls(_ model: LearningModel, _ s: LearningSnapshot) -> some View {
+    private func engine(_ model: LearningModel, _ s: LearningSnapshot) -> some View {
         let running = s.engineRunning
-        return Card(padding: 14) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Text(running ? "Engine running" : "Engine stopped")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(running ? DS.Palette.success : Color.primary)
-                    Spacer()
-                    if running {
-                        Button("Stop") { Task { show(await model.setRunning(false)) } }
-                            .buttonStyle(.bordered)
-                            .disabled(model.acting)
-                    } else {
-                        Button("Start") { Task { show(await model.setRunning(true)) } }
-                            .dsProminentButton()
-                            .disabled(model.acting)
-                    }
+        return Section {
+            HStack {
+                StatusDot(running ? "Engine running" : "Engine stopped", color: running ? DS.Palette.success : .secondary, pulsing: running, font: .body)
+                Spacer()
+                if running {
+                    Button("Stop") { Task { show(await model.setRunning(false)) } }
+                        .buttonStyle(.bordered)
+                        .disabled(model.acting)
+                } else {
+                    Button("Start") { Task { show(await model.setRunning(true)) } }
+                        .dsProminentButton()
+                        .disabled(model.acting)
                 }
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Mode").font(.caption2).foregroundStyle(.secondary)
-                    Picker("Mode", selection: Binding(
-                        get: { s.mode },
-                        set: { mode in Task { show(await model.setMode(mode)) } }
-                    )) {
-                        ForEach(["observe", "propose", "act"], id: \.self) { Text($0).tag($0) }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .disabled(model.acting)
-                }
-                Button {
-                    targetsOpen = true
-                } label: {
-                    Text(s.targetsLabel).frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-                .disabled(s.targets == nil)
-                Text("Budgets and the permission matrix are on the web tab — a phone is where you answer a proposal, not where you tune a matrix.")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
             }
+            LabeledContent("Mode") {
+                Picker("Mode", selection: Binding(
+                    get: { s.mode },
+                    set: { mode in Task { show(await model.setMode(mode)) } }
+                )) {
+                    ForEach(["observe", "propose", "act"], id: \.self) { Text($0.dsSentenceCased).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(maxWidth: 240)
+                .disabled(model.acting)
+            }
+            Button {
+                targetsOpen = true
+            } label: {
+                HStack {
+                    Text(s.targetsLabel).foregroundStyle(.primary)
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                        .accessibilityHidden(true)
+                }
+            }
+            .tint(.primary)
+            .disabled(s.targets == nil)
+        } header: {
+            Text("Engine")
+        } footer: {
+            Text("Budgets and the permission matrix are on the web tab — a phone is where you answer a proposal, not where you tune a matrix.")
         }
     }
 
     // MARK: Approvals
 
-    private func approvalCard(_ model: LearningModel, _ a: LearningApproval) -> some View {
+    /// A proposal waiting for an answer: its rung, class and document, the
+    /// summary and target, then Approve and Reject side by side.
+    private func approvalRow(_ model: LearningModel, _ a: LearningApproval) -> some View {
         let live = a.holdsForever
         let busy = deciding.contains(a.id) || model.acting
-        return Card(padding: 14) {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 8) {
-                    AppBadge(label: a.rung, color: live ? DS.Palette.danger : DS.Palette.info)
-                    Text(a.actionClass).font(.caption2).foregroundStyle(.secondary)
-                    Spacer()
-                    Text("doc \(a.documentId)").font(.caption2).foregroundStyle(.tertiary)
-                }
-                Text(a.summary).font(.body)
-                Text(live ? "\(a.target) · this one waits until you answer" : a.target)
-                    .font(.caption2)
-                    .foregroundStyle(live ? DS.Palette.danger : Color(uiColor: .tertiaryLabel))
-                HStack(spacing: 8) {
-                    Button {
-                        decide(model, a, "approved")
-                    } label: {
-                        Text("Approve").frame(maxWidth: .infinity)
-                    }
-                    .dsProminentButton()
-                    Button {
-                        decide(model, a, "rejected")
-                    } label: {
-                        Text("Reject").frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.bordered)
-                }
-                .disabled(busy)
-                .padding(.top, 4)
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                AppBadge(label: a.rung, color: live ? DS.Palette.danger : DS.Palette.info)
+                Text(a.actionClass).font(.footnote).foregroundStyle(.secondary)
+                Spacer()
+                Text("doc \(a.documentId)").font(.footnote).foregroundStyle(.secondary)
             }
-        }
-        .overlay {
-            if live {
-                RoundedRectangle(cornerRadius: DS.Radius.card, style: .continuous)
-                    .strokeBorder(DS.Palette.danger, lineWidth: 1)
+            Text(a.summary).font(.body)
+            Text(live ? "\(a.target) · this one waits until you answer" : a.target)
+                .font(.footnote)
+                .foregroundStyle(live ? DS.Palette.danger : Color.secondary)
+            HStack(spacing: 10) {
+                Button {
+                    decide(model, a, "approved")
+                } label: {
+                    Text("Approve").frame(maxWidth: .infinity)
+                }
+                .tint(DS.Palette.success)
+                Button {
+                    decide(model, a, "rejected")
+                } label: {
+                    Text("Reject").frame(maxWidth: .infinity)
+                }
+                .tint(DS.Palette.danger)
             }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+            .disabled(busy)
+            .padding(.top, 4)
         }
+        .padding(.vertical, 4)
     }
 
     private func decide(_ model: LearningModel, _ a: LearningApproval, _ decision: String) {
@@ -228,88 +234,79 @@ struct LearningView: View {
     // MARK: Floors + runs
 
     private func floorRow(_ f: LearningFloor) -> some View {
-        Card(padding: 14) {
-            HStack {
-                VStack(alignment: .leading, spacing: 0) {
-                    Text(f.target).font(.subheadline.weight(.semibold))
-                    Text(f.windowClass).font(.caption2).foregroundStyle(.secondary)
-                    if !f.measured, !f.reason.isEmpty {
-                        Text(f.reason).font(.caption2).foregroundStyle(DS.Palette.warning)
-                    }
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(f.target).font(.headline)
+                Text(f.windowClass).font(.subheadline).foregroundStyle(.secondary)
+                if !f.measured, !f.reason.isEmpty {
+                    Text(f.reason).font(.footnote).foregroundStyle(DS.Palette.warning)
                 }
-                Spacer()
-                Text(f.measured ? "\(dartToStringAsFixed(f.floorPp, 2))pp" : "—")
-                    .font(.headline.monospacedDigit())
-                    .foregroundStyle(f.measured ? Color.primary : DS.Palette.warning)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Text(f.measured ? "\(dartToStringAsFixed(f.floorPp, 2))pp" : "—")
+                .monospacedDigit()
+                .foregroundStyle(f.measured ? Color.primary : DS.Palette.warning)
         }
+        .accessibilityElement(children: .combine)
     }
 
     private func funnelRow(_ r: LearningFunnel) -> some View {
         let pct = r.buyConversionPct
-        return Card(padding: 14) {
-            HStack {
-                VStack(alignment: .leading, spacing: 0) {
-                    Text("Run \(r.runId)").font(.subheadline.weight(.semibold))
-                    Text(r.target).font(.caption2).foregroundStyle(.secondary)
-                    Text("\(r.decided) decided · \(r.executed) executed · \(r.refused) refused")
-                        .font(.footnote)
-                        .padding(.top, 4)
-                }
-                Spacer()
-                VStack(alignment: .trailing, spacing: 0) {
-                    Text(pct.map { "\(dartToStringAsFixed($0, 1))%" } ?? "—")
-                        .font(.headline.monospacedDigit())
-                        .foregroundStyle(pct.map { $0 < 25 } == true ? DS.Palette.danger : Color.primary)
-                    Text("buy conv.").font(.caption2).foregroundStyle(.secondary)
-                }
+        return HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Run \(r.runId)").font(.headline)
+                Text(r.target).font(.subheadline).foregroundStyle(.secondary)
+                Text("\(r.decided) decided · \(r.executed) executed · \(r.refused) refused")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            EntityRowValue(
+                pct.map { "\(dartToStringAsFixed($0, 1))%" } ?? "—",
+                color: pct.map { $0 < 25 } == true ? DS.Palette.danger : nil,
+                detail: "buy conv."
+            )
         }
+        .accessibilityElement(children: .combine)
     }
 }
 
-/// A finding, tappable into its ladder stepper (`_FindingCard`).
-private struct LearningFindingCard: View {
+/// A finding (`_FindingCard`): the severity badge, title and target; expand
+/// it for the body and its ladder stepper.
+private struct LearningFindingRow: View {
     let finding: LearningFinding
 
     @State private var open = false
 
     var body: some View {
         let f = finding
-        Button {
-            withAnimation(.snappy) { open.toggle() }
-        } label: {
-            Card(padding: 14) {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 8) {
-                        AppBadge(label: f.severity, color: LearningModel.severityColor(f.severity))
-                        Text(f.target).font(.caption2).foregroundStyle(.secondary)
-                        Spacer()
-                        Image(systemName: Symbol.named(open ? "expand_less" : "expand_more"))
-                            .font(.footnote)
-                            .foregroundStyle(.tertiary)
-                    }
-                    Text(f.title).font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
-                    Text(f.detail).font(.footnote).foregroundStyle(.primary)
-                    if open {
-                        Divider().padding(.vertical, 6)
-                        step("Detected", "\(f.kind) · run \(f.runId.isEmpty ? "—" : f.runId)", DS.Palette.danger, reached: true)
-                        if !f.evidence.isEmpty {
-                            Text(f.evidence.entries.map { "\($0.key): \($0.value.dartDescription)" }.joined(separator: "\n"))
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                                .padding(.leading, 20)
-                                .padding(.bottom, 12)
-                        }
-                        ForEach(LearningModel.ladder, id: \.name) { rung in
-                            step(rung.name, rung.detail, Color(uiColor: .tertiaryLabel), reached: false)
-                        }
-                    }
+        DisclosureGroup(isExpanded: $open) {
+            VStack(alignment: .leading, spacing: 0) {
+                Text(f.detail)
+                    .font(.subheadline)
+                    .padding(.bottom, 12)
+                step("Detected", "\(f.kind) · run \(f.runId.isEmpty ? "—" : f.runId)", DS.Palette.danger, reached: true)
+                if !f.evidence.isEmpty {
+                    Text(f.evidence.entries.map { "\($0.key): \($0.value.dartDescription)" }.joined(separator: "\n"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.leading, 20)
+                        .padding(.bottom, 12)
                 }
-                .multilineTextAlignment(.leading)
+                ForEach(LearningModel.ladder, id: \.name) { rung in
+                    step(rung.name, rung.detail, Color(uiColor: .tertiaryLabel), reached: false)
+                }
+            }
+            .padding(.vertical, 4)
+        } label: {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    StatusBadge(label: f.severity.dsSentenceCased, color: LearningModel.severityColor(f.severity))
+                    Text(f.target).font(.footnote).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Text(f.title).font(.headline).foregroundStyle(.primary)
             }
         }
-        .buttonStyle(.plain)
         .accessibilityHint(open ? "Collapses the ladder" : "Shows the ladder")
     }
 
@@ -317,10 +314,10 @@ private struct LearningFindingCard: View {
         HStack(alignment: .top, spacing: 10) {
             Circle().fill(color).frame(width: 10, height: 10).padding(.top, 4)
             VStack(alignment: .leading, spacing: 0) {
-                Text(label).font(.caption.weight(.semibold)).foregroundStyle(reached ? Color.primary : Color.secondary)
-                Text(detail).font(.caption2).foregroundStyle(.tertiary)
+                Text(label).font(.footnote.weight(.semibold)).foregroundStyle(reached ? Color.primary : Color.secondary)
+                Text(detail).font(.caption).foregroundStyle(.secondary)
                 if !reached {
-                    Text("not reached — the subsystem observes only").font(.caption2).foregroundStyle(.tertiary)
+                    Text("not reached — the subsystem observes only").font(.caption).foregroundStyle(.secondary)
                 }
             }
         }
@@ -330,7 +327,7 @@ private struct LearningFindingCard: View {
 
 /// Which strategy documents the subsystem may write to and which instances it
 /// watches (`_TargetsSheet`). The two lists mean opposite things when empty,
-/// and each says so.
+/// and each says so. Save is the toolbar's confirm action.
 struct LearningTargetsSheet: View {
     let targets: LearningTargets
     let model: LearningModel
@@ -364,8 +361,8 @@ struct LearningTargetsSheet: View {
                                 moneyBadge(doc.money, running: false)
                             }
                             Text(doc.instanceNames.isEmpty ? "#\(doc.id) · not attached to an instance" : "#\(doc.id) · \(doc.instanceNames.joined(separator: ", "))")
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
                         }
                     }
                 } header: {
@@ -381,7 +378,7 @@ struct LearningTargetsSheet: View {
                                 Spacer()
                                 moneyBadge(inst.money, running: inst.running)
                             }
-                            Text("\(inst.kind) · doc #\(inst.strategyId ?? "—")").font(.caption2).foregroundStyle(.tertiary)
+                            Text("\(inst.kind) · doc #\(inst.strategyId ?? "—")").font(.footnote).foregroundStyle(.secondary)
                         }
                     }
                 } header: {
@@ -400,19 +397,19 @@ struct LearningTargetsSheet: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }.disabled(saving)
                 }
-            }
-            .safeAreaInset(edge: .bottom) {
-                Button {
-                    Task { await save() }
-                } label: {
-                    Text(saving ? "Saving…" : "Save").fontWeight(.semibold).frame(maxWidth: .infinity)
+                ToolbarItem(placement: .confirmationAction) {
+                    Button {
+                        Task { await save() }
+                    } label: {
+                        if saving {
+                            ProgressView().accessibilityLabel("Saving…")
+                        } else {
+                            Label("Save", systemImage: "checkmark")
+                        }
+                    }
+                    .dsGlassProminentButton()
+                    .disabled(saving)
                 }
-                .dsProminentButton()
-                .controlSize(.large)
-                .disabled(saving)
-                .padding(.horizontal, 20)
-                .padding(.vertical, 8)
-                .background(.bar)
             }
         }
         .presentationDetents([.large])
@@ -429,9 +426,10 @@ struct LearningTargetsSheet: View {
                 VStack(alignment: .leading, spacing: 2) { label() }
                     .foregroundStyle(.primary)
                 Image(systemName: on ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(on ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
+                    .foregroundStyle(on ? AnyShapeStyle(DS.Palette.accent) : AnyShapeStyle(.tertiary))
             }
         }
+        .tint(.primary)
         .accessibilityAddTraits(on ? .isSelected : [])
     }
 

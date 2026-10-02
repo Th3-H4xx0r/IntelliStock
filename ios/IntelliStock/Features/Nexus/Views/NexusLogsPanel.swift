@@ -4,7 +4,8 @@ import UIKit
 /// The terminal-style build-log panel for the Nexus graph — `NexusLogsPanel`:
 /// a `LogTailer` on `/nexus-graph-builds/latest/logs?since_line=n` (2 s while
 /// building, 15 s idle), started on first open, with search, pause, copy and
-/// a sticky bottom.
+/// a sticky bottom. It sits in a list row: the header is the row, and the log
+/// opens beneath it.
 struct NexusLogsPanel: View {
     @Environment(AppServices.self) private var services
 
@@ -26,7 +27,6 @@ struct NexusLogsPanel: View {
                 logArea(state)
             }
         }
-        .background(DS.Surface.panel, in: .rect(cornerRadius: DS.Radius.card, style: .continuous))
         .toast($toast)
         .task {
             let current: LogTailer
@@ -108,17 +108,18 @@ struct NexusLogsPanel: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Copy")
             }
+            // A plain accent text action, as list rows carry (no capsule).
             Button(action: toggleOpen) {
-                Label(open ? "Hide Logs" : "View Build Logs", systemImage: Symbol.named(open ? "visibility_off" : "terminal"))
-                    .font(.caption.weight(.semibold))
+                Text(open ? "Hide Logs" : "View Build Logs")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(minHeight: 44)
+                    .contentShape(.rect)
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .tint(open ? DS.Palette.info : .secondary)
+            .buttonStyle(.borderless)
         }
-        .padding(.leading, 14)
-        .padding(.trailing, 10)
-        .padding(.vertical, 6)
+        .padding(.leading, 16)
+        .padding(.trailing, 16)
+        .padding(.vertical, 4)
     }
 
     private var searchField: some View {

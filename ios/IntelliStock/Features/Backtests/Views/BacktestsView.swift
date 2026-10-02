@@ -1,7 +1,10 @@
 import SwiftUI
 
-/// All backtests (`/backtests`) — `BacktestsScreen`: a page of backtest
-/// cards with live status, pause / resume / stop, and pagination.
+/// All backtests (`/backtests`) — `BacktestsScreen`: a page of backtests
+/// with live status, pause / resume / stop, and pagination. An inset-grouped
+/// list of `EntityRow`s: the row opens the backtest; Pause, Resume and Stop
+/// are swipe actions and context-menu items (still confirmed); per page and
+/// the page jump sit in the toolbar menu, with Previous / Next at the bottom.
 struct BacktestsView: View {
     @Environment(AppServices.self) private var services
     @State private var model: BacktestsListModel?
@@ -22,16 +25,11 @@ struct BacktestsView: View {
         .navigationTitle("All Backtests")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                if model?.loading == true {
-                    ProgressView()
-                } else {
-                    Button {
-                        Task { await model?.refresh() }
-                    } label: {
-                        Label("Refresh", systemImage: Symbol.named("refresh"))
-                    }
+            if let model {
+                if model.loading, !model.rows.isEmpty {
+                    ToolbarItem(placement: .topBarTrailing) { ProgressView() }
                 }
+                ToolbarItem(placement: .topBarTrailing) { pageMenu(model) }
             }
         }
         .task {
@@ -43,209 +41,228 @@ struct BacktestsView: View {
         .toast($toast)
     }
 
-    private func content(_ model: BacktestsListModel) -> some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Backtests (\(model.total))")
-                            .font(.footnote.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                        Text("\(model.total) total")
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                    }
-                    Spacer()
-                    Text("Per page").font(.footnote).foregroundStyle(.secondary)
-                    Picker("Per page", selection: Binding(
-                        get: { model.perPage },
-                        set: { n in Task { await model.setPerPage(n) } }
-                    )) {
-                        ForEach(BacktestsListModel.perPageOptions, id: \.self) { Text("\($0)").tag($0) }
-                    }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
-                }
-                .padding(.top, 8)
+    // MARK: Toolbar
 
-                if model.loading && model.rows.isEmpty {
-                    ForEach(0..<5, id: \.self) { _ in skeletonCard }
-                } else if model.rows.isEmpty, let error = model.error {
-                    ErrorRow(message: error, onRetry: { Task { await model.refresh() } })
-                } else if model.rows.isEmpty {
-                    EmptyState(
-                        systemImage: Symbol.named("analytics"),
-                        title: "No backtests found",
-                        subtitle: "Run a backtest to see results here."
-                    )
-                    .padding(.top, 40)
-                } else {
-                    ForEach(model.rows) { bt in
-                        card(model, bt).id(bt.id)
-                    }
-                    pagination(model)
-                }
+    /// Per page and the page jump (`_PageButton`s), as checkmarked submenus.
+    private func pageMenu(_ model: BacktestsListModel) -> some View {
+        ToolbarMenu("Page Options") {
+            Picker("Per Page", selection: Binding(
+                get: { model.perPage },
+                set: { n in Task { await model.setPerPage(n) } }
+            )) {
+                ForEach(BacktestsListModel.perPageOptions, id: \.self) { Text("\($0) per page").tag($0) }
             }
-            .padding(.horizontal, 16)
-            .padding(.bottom, 24)
+            .pickerStyle(.menu)
+            if model.totalPages > 1 {
+                Picker("Go to Page", selection: Binding(
+                    get: { model.page },
+                    set: { p in Task { await model.goToPage(p) } }
+                )) {
+                    ForEach(BacktestsListModel.buildPages(current: model.page, total: model.totalPages).compactMap { $0 }, id: \.self) { p in
+                        Text("Page \(p)").tag(p)
+                    }
+                }
+                .pickerStyle(.menu)
+                .disabled(model.loading)
+            }
+        }
+    }
+
+    // MARK: Content
+
+    private func content(_ model: BacktestsListModel) -> some View {
+        List {
+            if model.loading && model.rows.isEmpty {
+                Section {
+                    ForEach(0..<6, id: \.self) { _ in skeletonRow }
+                }
+            } else if model.rows.isEmpty, let error = model.error {
+                Section {
+                    ErrorRow(message: error, onRetry: { Task { await model.refresh() } })
+                        .listRowInsets(EdgeInsets())
+                        .listRowBackground(Color.clear)
+                }
+            } else if !model.rows.isEmpty {
+                Section {
+                    ForEach(model.rows) { bt in
+                        row(model, bt).id(bt.id)
+                    }
+                }
+                pagination(model)
+            }
+        }
+        .listStyle(.insetGrouped)
+        .overlay {
+            if !model.loading, model.rows.isEmpty, model.error == nil {
+                EmptyState(
+                    systemImage: Symbol.named("analytics"),
+                    title: "No backtests found",
+                    subtitle: "Run a backtest to see results here."
+                )
+            }
         }
         .refreshable { await model.refresh() }
     }
 
-    // MARK: Card
+    // MARK: Row
 
-    private var skeletonCard: some View {
-        Card(padding: 16) {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack { Text("instance-id-placeholder"); Spacer(); Text("RUNNING") }
-                Text("AAPL  MSFT  NVDA")
-                Text("2026-01-01 → 2026-02-01")
-                Text("+$1,234.56  +1.23%").font(.title3)
-            }
+    private var skeletonRow: some View {
+        EntityRow("instance-id-placeholder", subtitle: "#000000 · Jan 1 – Feb 1, 2026") {
+            EntityRowValue("+$1,234.56", detail: "+1.23%")
         }
         .redacted(reason: .placeholder)
     }
 
-    private func card(_ model: BacktestsListModel, _ bt: BacktestRow) -> some View {
+    private func row(_ model: BacktestsListModel, _ bt: BacktestRow) -> some View {
         let live = model.statusMap[bt.id]
         let status = live?.status ?? bt.status ?? "queued"
         let s = status.lowercased()
         let isActive = s == "running" || s == "queued" || s == "pending"
         let isPaused = s == "paused" || s == "paused_llm_critical"
         let canStop = isActive || isPaused
+        let finished = s == "finished" || s == "completed"
         let progress = live?.progress
         let lookback = live?.nexusLookback
         let elapsed = live?.timeElapsedSeconds ?? bt.timeElapsedSeconds
         let pnlC = pnlColor(bt.pnl?.double)
         let rowBusy = busy.contains(bt.id)
+        let meta = [fmtElapsed(elapsed?.double), bt.completedAt.isNull ? nil : "Completed \(fmtDateTime(bt.completedAt))"]
+            .compactMap { $0 }
+            .joined(separator: " · ")
 
-        return Button {
-            services.router.push(.backtest(bt.id))
-        } label: {
-            Card(padding: 16) {
-                VStack(alignment: .leading, spacing: 0) {
-                    HStack(alignment: .top, spacing: 8) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            if let instanceId = bt.instanceId {
-                                Button {
-                                    services.router.push(.instance(instanceId))
-                                } label: {
-                                    Text(instanceId)
-                                        .font(.subheadline.weight(.semibold))
-                                        .foregroundStyle(.tint)
-                                        .lineLimit(1)
-                                }
-                                .buttonStyle(.plain)
-                            } else {
-                                Text("Backtest").font(.subheadline.weight(.semibold))
-                            }
-                            Text("#\(bt.id)")
-                                .font(.caption.monospaced())
-                                .foregroundStyle(.tertiary)
-                                .lineLimit(1)
-                        }
-                        Spacer(minLength: 8)
-                        StatusBadge(label: status.uppercased(), color: StatusBadge.color(forStatus: status), pulsing: isActive)
-                    }
-                    if !bt.stocks.isEmpty {
-                        MarketsFlowLayout {
-                            ForEach(Array(bt.stocks.prefix(4).enumerated()), id: \.offset) { _, s in MarketsChip(text: s) }
-                            if bt.stocks.count > 4 {
-                                Text("+\(bt.stocks.count - 4)").font(.footnote).foregroundStyle(.tertiary)
-                            }
-                        }
-                        .padding(.top, 12)
-                    }
+        return NavigationLink(value: Route.backtest(bt.id)) {
+            VStack(alignment: .leading, spacing: 8) {
+                // Stocks-style two columns: the name over "#id · dates" on
+                // the left, the P&L over its % on the right, line by line, so
+                // the dates get the width the narrower % leaves.
+                VStack(alignment: .leading, spacing: 2) {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(bt.instanceId ?? "Backtest")
+                            .font(.headline)
+                            .lineLimit(1)
+                        Spacer(minLength: 8)
                         Text(bt.pnl != nil ? fmtPnl(bt.pnl?.double) : "—")
-                            .font(.title3.weight(.bold).monospacedDigit())
+                            .monospacedDigit()
                             .foregroundStyle(pnlC)
                             .lineLimit(1)
-                        if bt.pnlPercent != nil {
-                            Text(fmtPct(bt.pnlPercent?.double))
-                                .font(.footnote.weight(.semibold).monospacedDigit())
-                                .foregroundStyle(pnlC)
-                        }
-                        Spacer(minLength: 8)
-                        Image(systemName: Symbol.named("arrow_forward"))
-                            .font(.footnote.weight(.semibold))
-                            .foregroundStyle(.tint)
-                            .frame(width: 32, height: 32)
-                            .background(DS.Palette.accent.opacity(DS.tintFill), in: .rect(cornerRadius: 8, style: .continuous))
+                            .layoutPriority(1)
                     }
-                    .padding(.top, 14)
-                    Divider().padding(.vertical, 10)
-                    HStack(spacing: 4) {
-                        Text("\(bt.startDate ?? "?") → \(bt.endDate ?? "?")")
-                            .font(.footnote)
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text("#\(bt.id) · \(BacktestRowFormat.dateRange(bt.startDate, bt.endDate))")
+                            .font(.subheadline)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                         Spacer(minLength: 8)
-                        Image(systemName: "timer").font(.caption2).foregroundStyle(.tertiary)
-                        Text(fmtElapsed(elapsed?.double))
-                            .font(.caption.monospaced())
+                        if bt.pnlPercent != nil {
+                            Text(fmtPct(bt.pnlPercent?.double))
+                                .font(.footnote.monospacedDigit())
+                                .foregroundStyle(pnlC)
+                                .lineLimit(1)
+                                .layoutPriority(1)
+                        }
+                    }
+                }
+                .accessibilityElement(children: .combine)
+                if !meta.isEmpty || !finished {
+                    HStack(spacing: 8) {
+                        if !meta.isEmpty {
+                            Text(meta)
+                                .font(.footnote.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                        if !finished {
+                            Spacer(minLength: 4)
+                            StatusDot(status.dsSentenceCased, status: status, pulsing: isActive, font: .footnote)
+                        }
+                    }
+                }
+                if isActive, let progress {
+                    HStack(spacing: 8) {
+                        ProgressView(value: min(max(progress.double / 100, 0), 1))
+                        Text("\(Int(progress.double.rounded()))%")
+                            .font(.caption.monospacedDigit())
                             .foregroundStyle(.secondary)
                     }
-                    if !bt.completedAt.isNull {
-                        Text("Completed \(fmtDateTime(bt.completedAt))")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                            .padding(.top, 4)
-                    }
-                    if isActive, let progress {
-                        HStack(spacing: 8) {
-                            ProgressView(value: min(max(progress.double / 100, 0), 1))
-                                .tint(DS.Palette.info)
-                            Text("\(Int(progress.double.rounded()))%")
-                                .font(.caption2.monospaced())
+                }
+                if let lookback {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("Lookback").font(.caption).foregroundStyle(.secondary)
+                            Spacer()
+                            Text("\(lookback.current)/\(lookback.total)d")
+                                .font(.caption.monospacedDigit())
                                 .foregroundStyle(.secondary)
                         }
-                        .padding(.top, 10)
-                    }
-                    if let lookback {
-                        VStack(spacing: 4) {
-                            HStack(spacing: 4) {
-                                Image(systemName: Symbol.named("hub")).font(.caption2).foregroundStyle(.tint)
-                                Text("Lookback").font(.caption2.weight(.semibold)).foregroundStyle(.tint)
-                                Spacer()
-                                Text("\(lookback.current)/\(lookback.total)d")
-                                    .font(.caption2.monospaced())
-                                    .foregroundStyle(.secondary)
-                            }
-                            ProgressView(value: min(max(lookback.fraction, 0), 1))
-                                .tint(DS.Palette.accent.opacity(0.7))
-                        }
-                        .padding(.top, 10)
-                    }
-                    if canStop {
-                        HStack(spacing: 4) {
-                            Spacer()
-                            if isActive {
-                                actionButton("pause_circle", "Pause", DS.Palette.accent, disabled: rowBusy) { ask(model, bt, "pause") }
-                            }
-                            if isPaused {
-                                actionButton("play_circle", "Resume", DS.Palette.info, disabled: rowBusy) { ask(model, bt, "resume") }
-                            }
-                            actionButton("stop_circle", "Stop", DS.Palette.danger, disabled: rowBusy) { ask(model, bt, "stop") }
-                        }
-                        .padding(.top, 12)
+                        ProgressView(value: min(max(lookback.fraction, 0), 1))
                     }
                 }
             }
         }
-        .buttonStyle(.plain)
-    }
-
-    private func actionButton(_ icon: String, _ label: String, _ color: Color, disabled: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: Symbol.named(icon))
-                .font(.title3)
-                .foregroundStyle(color)
-                .frame(width: 44, height: 44)
+        // Every swipe opens the Dart confirmation, so none is a destructive
+        // role (which would animate the row away before the answer).
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            if canStop {
+                Button {
+                    ask(model, bt, "stop")
+                } label: {
+                    Label("Stop", systemImage: Symbol.named("stop_circle"))
+                }
+                .tint(DS.Palette.danger)
+                .disabled(rowBusy)
+            }
+            if isActive {
+                Button {
+                    ask(model, bt, "pause")
+                } label: {
+                    Label("Pause", systemImage: Symbol.named("pause_circle"))
+                }
+                .tint(DS.Palette.accent)
+                .disabled(rowBusy)
+            }
+            if isPaused {
+                Button {
+                    ask(model, bt, "resume")
+                } label: {
+                    Label("Resume", systemImage: Symbol.named("play_circle"))
+                }
+                .tint(DS.Palette.info)
+                .disabled(rowBusy)
+            }
         }
-        .buttonStyle(.borderless)
-        .disabled(disabled)
-        .accessibilityLabel(label)
+        .contextMenu {
+            if let instanceId = bt.instanceId {
+                Button {
+                    services.router.push(.instance(instanceId))
+                } label: {
+                    Label("View Instance", systemImage: Symbol.named("smart_toy"))
+                }
+            }
+            if canStop {
+                Section {
+                    if isActive {
+                        Button {
+                            ask(model, bt, "pause")
+                        } label: {
+                            Label("Pause", systemImage: Symbol.named("pause_circle"))
+                        }
+                    }
+                    if isPaused {
+                        Button {
+                            ask(model, bt, "resume")
+                        } label: {
+                            Label("Resume", systemImage: Symbol.named("play_circle"))
+                        }
+                    }
+                    Button(role: .destructive) {
+                        ask(model, bt, "stop")
+                    } label: {
+                        Label("Stop", systemImage: Symbol.named("stop_circle"))
+                    }
+                }
+                .disabled(rowBusy)
+            }
+        }
     }
 
     private func ask(_ model: BacktestsListModel, _ bt: BacktestRow, _ action: String) {
@@ -270,50 +287,81 @@ struct BacktestsView: View {
 
     // MARK: Pagination
 
+    /// Previous / Next with "Page n of m (t total)" between them; the page
+    /// jump is in the toolbar menu.
     @ViewBuilder
     private func pagination(_ model: BacktestsListModel) -> some View {
+        let page = model.page
+        let loading = model.loading
         if model.totalPages > 1 {
-            let page = model.page
-            let loading = model.loading
-            VStack(spacing: 8) {
-                Text("Page \(page) of \(model.totalPages)  (\(model.total) total)")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                HStack(spacing: 4) {
+            Section {
+                HStack {
                     pageNav("chevron_left", "Previous page", enabled: page > 1 && !loading) { Task { await model.goToPage(page - 1) } }
-                    ForEach(Array(BacktestsListModel.buildPages(current: page, total: model.totalPages).enumerated()), id: \.offset) { _, p in
-                        if let p {
-                            Button {
-                                Task { await model.goToPage(p) }
-                            } label: {
-                                Text("\(p)")
-                                    .font(.footnote.weight(p == page ? .semibold : .regular).monospacedDigit())
-                                    .foregroundStyle(p == page ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
-                                    .frame(minWidth: 32, minHeight: 32)
-                                    .background(p == page ? DS.Palette.accent.opacity(DS.tintFill) : .clear, in: .rect(cornerRadius: 8, style: .continuous))
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(loading)
-                            .accessibilityAddTraits(p == page ? .isSelected : [])
-                        } else {
-                            Text("…").font(.footnote).foregroundStyle(.tertiary)
-                        }
-                    }
+                    Spacer()
+                    Text("Page \(page) of \(model.totalPages)  (\(model.total) total)")
+                        .font(.footnote.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    Spacer()
                     pageNav("chevron_right", "Next page", enabled: page < model.totalPages && !loading) { Task { await model.goToPage(page + 1) } }
                 }
             }
-            .frame(maxWidth: .infinity)
-            .padding(.top, 4)
+        } else {
+            Section {
+            } footer: {
+                Text("\(model.total) total")
+            }
         }
     }
 
     private func pageNav(_ icon: String, _ label: String, enabled: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: Symbol.named(icon))
-                .frame(width: 32, height: 32)
+                .font(.body.weight(.semibold))
+                .frame(width: 44, height: 44)
+                .contentShape(.rect)
         }
-        .buttonStyle(.bordered)
+        .buttonStyle(.borderless)
         .disabled(!enabled)
         .accessibilityLabel(label)
+    }
+}
+
+/// Row text for a backtest.
+nonisolated enum BacktestRowFormat {
+    /// "Jul 7 – Sep 18, 2026" for two `yyyy-MM-dd` dates in one year,
+    /// "Dec 1, 2025 – Feb 1, 2026" across years, and the raw "start → end"
+    /// (with "?" for a missing end) when either does not parse.
+    static func dateRange(_ start: String?, _ end: String?) -> String {
+        guard let s = start.flatMap(parse), let e = end.flatMap(parse) else {
+            return "\(start ?? "?") → \(end ?? "?")"
+        }
+        let cal = calendar
+        if cal.component(.year, from: s) == cal.component(.year, from: e) {
+            return "\(monthDay.string(from: s)) – \(full.string(from: e))"
+        }
+        return "\(full.string(from: s)) – \(full.string(from: e))"
+    }
+
+    private static let calendar: Calendar = {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "UTC")!
+        return cal
+    }()
+
+    private static func formatter(_ pattern: String) -> DateFormatter {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.calendar = calendar
+        f.timeZone = calendar.timeZone
+        f.dateFormat = pattern
+        return f
+    }
+
+    private static let iso = formatter("yyyy-MM-dd")
+    private static let monthDay = formatter("MMM d")
+    private static let full = formatter("MMM d, yyyy")
+
+    private static func parse(_ text: String) -> Date? {
+        iso.date(from: String(text.prefix(10)))
     }
 }

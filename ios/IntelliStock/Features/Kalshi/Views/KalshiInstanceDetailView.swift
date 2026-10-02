@@ -2,7 +2,9 @@ import SwiftUI
 
 /// A Kalshi instance — `KalshiInstanceDetailScreen`: status, Start / Stop,
 /// decision summary, portfolio, live matches, orders, pregame analysis, the
-/// LLM-reasoned decision log and live logs.
+/// LLM-reasoned decision log and live logs. An inset-grouped list under the
+/// inline instance name; Start / Stop is the toolbar's primary action and the
+/// rest sit in its More menu.
 struct KalshiInstanceDetailView: View {
     let instanceId: String
 
@@ -17,7 +19,8 @@ struct KalshiInstanceDetailView: View {
             if let model, let detail = model.detailValue {
                 content(model, detail: detail)
             } else {
-                LoadingState().padding(24).frame(maxHeight: .infinity, alignment: .top)
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .background(DS.Surface.canvas)
@@ -54,7 +57,43 @@ struct KalshiInstanceDetailView: View {
     private var toolbar: some ToolbarContent {
         if let model, model.detailValue != nil {
             let running = model.running
-            ToolbarItem(placement: .primaryAction) {
+            ToolbarItem(placement: .topBarTrailing) {
+                ToolbarMenu {
+                    Section {
+                        Button {
+                            services.router.push(.kalshiBacktest(instanceId))
+                        } label: {
+                            Label("Backtest", systemImage: Symbol.named("science"))
+                        }
+                        Button {
+                            editing = true
+                        } label: {
+                            Label("Edit Config", systemImage: Symbol.named("tune"))
+                        }
+                        .disabled(model.busy)
+                    }
+                    Section {
+                        Button(role: .destructive) {
+                            confirm = ConfirmRequest(
+                                title: "Delete instance?",
+                                body: "This cannot be undone.",
+                                confirmLabel: "Delete",
+                                onConfirm: {
+                                    try await model.delete()
+                                    services.router.pop()
+                                },
+                                onError: { error in
+                                    if !error.isCancellation { toast = Toast(KalshiFormat.errorText(error), style: .error) }
+                                }
+                            )
+                        } label: {
+                            Label("Delete", systemImage: Symbol.named("delete"))
+                        }
+                        .disabled(model.busy)
+                    }
+                }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
                 Button {
                     Task {
                         if let message = await model.startStop(!running) {
@@ -62,45 +101,10 @@ struct KalshiInstanceDetailView: View {
                         }
                     }
                 } label: {
-                    Label(running ? "Stop" : "Start", systemImage: Symbol.named(running ? "pause" : "play_arrow"))
-                        .labelStyle(.titleAndIcon)
+                    Text(running ? "Stop" : "Start")
                 }
-                .tint(running ? DS.Palette.warning : DS.Palette.accent)
+                .dsProminentButton()
                 .disabled(model.busy)
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Menu {
-                    Button {
-                        services.router.push(.kalshiBacktest(instanceId))
-                    } label: {
-                        Label("Backtest", systemImage: Symbol.named("science"))
-                    }
-                    Button {
-                        editing = true
-                    } label: {
-                        Label("Edit Config", systemImage: Symbol.named("tune"))
-                    }
-                    .disabled(model.busy)
-                    Button(role: .destructive) {
-                        confirm = ConfirmRequest(
-                            title: "Delete instance?",
-                            body: "This cannot be undone.",
-                            confirmLabel: "Delete",
-                            onConfirm: {
-                                try await model.delete()
-                                services.router.pop()
-                            },
-                            onError: { error in
-                                if !error.isCancellation { toast = Toast(KalshiFormat.errorText(error), style: .error) }
-                            }
-                        )
-                    } label: {
-                        Label("Delete", systemImage: Symbol.named("delete"))
-                    }
-                    .disabled(model.busy)
-                } label: {
-                    Label("More", systemImage: "ellipsis.circle")
-                }
             }
         }
     }
@@ -108,57 +112,54 @@ struct KalshiInstanceDetailView: View {
     // MARK: Content
 
     private func content(_ model: KalshiInstanceDetailModel, detail: JSONObject) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 8) {
-                    MarketsTag(text: model.running ? "Running" : "Stopped", color: model.running ? DS.Palette.success : .secondary)
-                    MarketsTag(text: model.isLive ? "Live" : "Paper", color: model.isLive ? DS.Palette.danger : DS.Palette.accent)
-                }
-                summary(model.decisions.value?["summary"]?.orderedObject)
-                if !model.brokerageId.isEmpty {
-                    KalshiPortfolioHero(
-                        title: "PORTFOLIO VALUE",
-                        state: model.portfolio,
-                        onRetry: { Task { await model.reloadPortfolio() } }
-                    )
-                }
-                liveCards(model.live.value)
-                positionsCard(model.positions?.value ?? [])
-                ordersCard(model.orders.value ?? JSONObject())
-                TimelineView(.periodic(from: .now, by: 1)) { context in
-                    pregameAnalysis(model, now: context.date)
-                }
-                decisionLog(model)
-                Card(padding: 14) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        MarketsCardHeader(icon: "terminal", title: "Live logs")
-                        LiveLogsPanel(instanceId: instanceId)
-                            .id(instanceId)
-                            .frame(height: 300)
-                    }
-                }
+        List {
+            statusSection(model, model.decisions.value?["summary"]?.orderedObject)
+            if !model.brokerageId.isEmpty {
+                KalshiPortfolioHero(
+                    title: "Portfolio value",
+                    state: model.portfolio,
+                    onRetry: { Task { await model.reloadPortfolio() } }
+                )
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 4)
-            .padding(.bottom, 24)
+            liveSection(model.live.value)
+            positionsSection(model.positions?.value ?? [])
+            ordersSections(model.orders.value ?? JSONObject())
+            pregameAnalysis(model)
+            decisionLog(model)
+            // The log tail opens in place from its one row.
+            Section("Live logs") {
+                LiveLogsPanel(instanceId: instanceId)
+                    .id(instanceId)
+                    .listRowInsets(EdgeInsets())
+            }
         }
+        .listStyle(.insetGrouped)
         .refreshable { await model.refresh() }
     }
 
-    // MARK: Summary
+    // MARK: Status + summary
 
-    private func summary(_ s: JSONObject?) -> some View {
+    private func statusSection(_ model: KalshiInstanceDetailModel, _ s: JSONObject?) -> some View {
         func count(_ k: String) -> String {
             guard let v = s?[k], !v.isNull else { return "0" }
             return v.dartDescription
         }
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                StatTile(label: "Placed", value: count("placed"), valueColor: DS.Palette.success)
-                StatTile(label: "Skipped", value: count("skipped"))
-                StatTile(label: "Queued", value: count("queued"), valueColor: DS.Palette.warning)
-                StatTile(label: "Blocked", value: count("blocked"), valueColor: DS.Palette.danger)
+        return Section("Status") {
+            LabeledContent("State") {
+                StatusDot(
+                    model.running ? "Running" : "Stopped",
+                    color: model.running ? DS.Palette.success : .secondary,
+                    pulsing: model.running
+                )
             }
+            LabeledContent("Mode", value: model.isLive ? "Live" : "Paper")
+            StatGrid(columns: 2) {
+                StatCell(label: "Placed", value: count("placed"))
+                StatCell(label: "Skipped", value: count("skipped"))
+                StatCell(label: "Queued", value: count("queued"))
+                StatCell(label: "Blocked", value: count("blocked"))
+            }
+            .padding(.vertical, 4)
             paperPnl(s)
         }
     }
@@ -172,46 +173,34 @@ struct KalshiInstanceDetailView: View {
         if realC != nil || unrealC != nil {
             let realColor: Color = realC == nil ? .secondary : ((realC ?? 0) >= 0 ? DS.Palette.success : DS.Palette.danger)
             let unrealColor: Color = unrealC == nil ? .secondary : ((unrealC ?? 0) >= 0 ? DS.Palette.success : DS.Palette.danger)
-            HStack(spacing: 6) {
-                Image(systemName: Symbol.named("science"))
-                    .foregroundStyle(DS.Palette.warning)
+            VStack(alignment: .leading, spacing: 2) {
                 Text("Paper P&L")
-                    .fontWeight(.bold)
-                    .foregroundStyle(.secondary)
-                let realized = Text("realized \(realC.map { KalshiFormat.signedDollars(cents: $0) } ?? "—")").foregroundStyle(realColor).fontWeight(.semibold)
+                let realized = Text("realized \(realC.map { KalshiFormat.signedDollars(cents: $0) } ?? "—")").foregroundStyle(realColor)
                 let dot = Text("  ·  ").foregroundStyle(.tertiary)
-                let unrealized = Text("unrealized \(unrealC.map { KalshiFormat.signedDollars(cents: $0) } ?? "—")").foregroundStyle(unrealColor).fontWeight(.semibold)
-                let live = Text(openPos.map { " (live · \($0) open)" } ?? " (live)").foregroundStyle(.tertiary)
+                let unrealized = Text("unrealized \(unrealC.map { KalshiFormat.signedDollars(cents: $0) } ?? "—")").foregroundStyle(unrealColor)
+                let live = Text(openPos.map { " (live · \($0) open)" } ?? " (live)").foregroundStyle(.secondary)
                 Text("\(realized)\(dot)\(unrealized)\(live)")
+                    .font(.subheadline.monospacedDigit())
             }
-            .font(.caption)
-            .lineLimit(1)
+            .accessibilityElement(children: .combine)
         }
     }
 
     // MARK: Live matches
 
     @ViewBuilder
-    private func liveCards(_ live: JSONObject?) -> some View {
+    private func liveSection(_ live: JSONObject?) -> some View {
         let matches = live?["matches"]?.arrayValue ?? []
         if !matches.isEmpty {
-            Card(padding: 14) {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 8) {
-                        Circle().fill(DS.Palette.danger).frame(width: 8, height: 8)
-                        Text("LIVE NOW · \(matches.count)")
-                            .font(.footnote.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                    }
-                    ForEach(Array(matches.enumerated()), id: \.offset) { _, raw in
-                        liveCard(raw.orderedObject ?? JSONObject())
-                    }
+            Section("Live now · \(matches.count)") {
+                ForEach(Array(matches.enumerated()), id: \.offset) { _, raw in
+                    liveRow(raw.orderedObject ?? JSONObject())
                 }
             }
         }
     }
 
-    private func liveCard(_ m: JSONObject) -> some View {
+    private func liveRow(_ m: JSONObject) -> some View {
         let score = m["score"]?.orderedObject
         let probs = m["market_probs"]?.orderedObject ?? JSONObject()
         let decisions = m["decisions"]?.arrayValue ?? []
@@ -219,7 +208,7 @@ struct KalshiInstanceDetailView: View {
         let clock: String = {
             if let c = score?["clock"], !c.isNull, !c.dartDescription.isEmpty { return c.dartDescription }
             if let e = m["elapsed_min"]?.double { return "\(Int(e.rounded()))'" }
-            return "LIVE"
+            return "Live"
         }()
         func goals(_ k: String) -> String {
             guard let score else { return "0" }
@@ -235,12 +224,7 @@ struct KalshiInstanceDetailView: View {
                 VStack(spacing: 4) {
                     Text("\(goals("home"))  :  \(goals("away"))")
                         .font(.title3.bold().monospacedDigit())
-                    HStack(spacing: 5) {
-                        Circle().fill(DS.Palette.success).frame(width: 6, height: 6)
-                        Text(clock)
-                            .font(.caption2.weight(.bold))
-                            .foregroundStyle(DS.Palette.success)
-                    }
+                    StatusDot(clock, color: DS.Palette.success, pulsing: true, font: .caption)
                 }
                 .frame(maxWidth: .infinity)
                 teamBadge(logo: KalshiPregame.str(m["away_logo"]), name: away)
@@ -249,20 +233,20 @@ struct KalshiInstanceDetailView: View {
                 let v = min(max(e.value.double ?? 0, 0), 1)
                 HStack(spacing: 8) {
                     Text(sideLabel(m, e.key))
-                        .font(.caption2)
+                        .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .frame(width: 72, alignment: .leading)
                     ProgressView(value: v)
                         .tint(DS.Palette.accent)
                     Text("\(Int((v * 100).rounded()))%")
-                        .font(.caption2.monospacedDigit())
+                        .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
             }
             if !news.isEmpty {
                 Text(news.components(separatedBy: "\n").first ?? "")
-                    .font(.caption2)
+                    .font(.footnote)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
             }
@@ -272,13 +256,12 @@ struct KalshiInstanceDetailView: View {
                         let act = KalshiPregame.str(d["action"])
                         let size = d["size"]
                         let sz = (!size.isNull && size != .int(0) && size != .double(0)) ? " \(size.dartDescription)" : ""
-                        MarketsTag(text: "\(act.uppercased())\(sz)", color: actionColor(act))
+                        MarketsTag(text: "\(act.dsSentenceCased)\(sz)", color: actionColor(act))
                     }
                 }
             }
         }
-        .padding(12)
-        .background(DS.Surface.inset, in: .rect(cornerRadius: DS.Radius.control, style: .continuous))
+        .padding(.vertical, 4)
     }
 
     private func sideLabel(_ m: JSONObject, _ side: String) -> String {
@@ -300,7 +283,7 @@ struct KalshiInstanceDetailView: View {
         VStack(spacing: 6) {
             MarketsCrest(url: logo, initials: KalshiFormat.badgeInitials(name), size: 44)
             Text(name)
-                .font(.caption2)
+                .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         }
@@ -310,113 +293,103 @@ struct KalshiInstanceDetailView: View {
     // MARK: Positions and orders
 
     @ViewBuilder
-    private func positionsCard(_ positions: [KalshiPosition]) -> some View {
+    private func positionsSection(_ positions: [KalshiPosition]) -> some View {
         if !positions.isEmpty {
-            Card(padding: 14) {
-                VStack(alignment: .leading, spacing: 10) {
-                    MarketsCardHeader(icon: "account_balance_wallet", title: "Open positions · \(positions.count)")
-                    ForEach(Array(positions.enumerated()), id: \.offset) { _, p in
-                        KalshiPositionTile(position: p)
-                    }
+            Section("Open positions · \(positions.count)") {
+                ForEach(Array(positions.enumerated()), id: \.offset) { _, p in
+                    KalshiPositionRow(position: p)
                 }
             }
         }
     }
 
-    private func ordersCard(_ data: JSONObject) -> some View {
+    /// The Dart "Orders" card's four groups, each its own section: pending,
+    /// filled, mock positions and mock filled.
+    @ViewBuilder
+    private func ordersSections(_ data: JSONObject) -> some View {
         let placed = data["placed"]?.arrayValue ?? []
         let fills = data["fills"]?.arrayValue ?? []
         let mock = data["mock"]?.arrayValue ?? []
         let mockHistory = data["mock_history"]?.arrayValue ?? []
-        return Card(padding: 14) {
-            VStack(alignment: .leading, spacing: 6) {
-                MarketsCardHeader(icon: "receipt_long", title: "Orders")
-                    .padding(.bottom, 4)
-                subHeader("pending", "PENDING · \(placed.count)", DS.Palette.warning)
-                if placed.isEmpty {
-                    emptyNote("No resting orders — everything filled.")
+        Section("Pending · \(placed.count)") {
+            if placed.isEmpty {
+                emptyNote("No resting orders — everything filled.")
+            }
+            ForEach(Array(placed.prefix(12).enumerated()), id: \.offset) { _, o in
+                orderRow(o.orderedObject ?? JSONObject(), filled: false)
+            }
+        }
+        if !fills.isEmpty {
+            Section("Filled · \(fills.count)") {
+                ForEach(Array(fills.prefix(12).enumerated()), id: \.offset) { _, f in
+                    orderRow(f.orderedObject ?? JSONObject(), filled: true)
                 }
-                ForEach(Array(placed.prefix(12).enumerated()), id: \.offset) { _, o in
-                    orderTile(o.orderedObject ?? JSONObject(), filled: false)
-                }
-                if !fills.isEmpty {
-                    subHeader("check_circle_outline", "FILLED · \(fills.count)", DS.Palette.success).padding(.top, 6)
-                    ForEach(Array(fills.prefix(12).enumerated()), id: \.offset) { _, f in
-                        orderTile(f.orderedObject ?? JSONObject(), filled: true)
-                    }
-                }
-                subHeader("science", "MOCK POSITIONS · \(mock.count)", DS.Palette.warning).padding(.top, 6)
-                if mock.isEmpty {
-                    emptyNote("No mock (paper) positions.")
-                }
-                ForEach(Array(mock.prefix(12).enumerated()), id: \.offset) { _, m in
-                    mockTile(m.orderedObject ?? JSONObject())
-                }
-                if !mockHistory.isEmpty {
-                    subHeader("history", "MOCK FILLED · \(mockHistory.count)", DS.Palette.warning).padding(.top, 6)
-                    ForEach(Array(mockHistory.prefix(12).enumerated()), id: \.offset) { _, m in
-                        mockHistoryTile(m.orderedObject ?? JSONObject())
-                    }
+            }
+        }
+        Section("Mock positions · \(mock.count)") {
+            if mock.isEmpty {
+                emptyNote("No mock (paper) positions.")
+            }
+            ForEach(Array(mock.prefix(12).enumerated()), id: \.offset) { _, m in
+                mockRow(m.orderedObject ?? JSONObject())
+            }
+        }
+        if !mockHistory.isEmpty {
+            Section("Mock filled · \(mockHistory.count)") {
+                ForEach(Array(mockHistory.prefix(12).enumerated()), id: \.offset) { _, m in
+                    mockHistoryRow(m.orderedObject ?? JSONObject())
                 }
             }
         }
     }
 
-    private func subHeader(_ icon: String, _ text: String, _ color: Color) -> some View {
-        HStack(spacing: 5) {
-            Image(systemName: Symbol.named(icon)).foregroundStyle(color)
-            Text(text).fontWeight(.bold).foregroundStyle(.secondary)
-        }
-        .font(.caption2)
-    }
-
     private func emptyNote(_ text: String) -> some View {
-        Text(text).font(.caption).foregroundStyle(.secondary)
+        Text(text).foregroundStyle(.secondary)
     }
 
-    private func tileBackground<V: View>(@ViewBuilder _ content: () -> V) -> some View {
-        content()
-            .padding(11)
+    /// A crest, the match and pick, and a trailing figure: the order rows'
+    /// shared shape.
+    private func tradeRow<Trailing: View>(
+        logo: String,
+        pick: String,
+        match: String,
+        detail: String?,
+        @ViewBuilder trailing: () -> Trailing
+    ) -> some View {
+        HStack(spacing: 12) {
+            MarketsCrest(url: logo, initials: KalshiFormat.initials(pick.replacingOccurrences(of: " to win", with: "")), size: 32)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(match).font(.headline).lineLimit(1)
+                Text(pick).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+                if let detail {
+                    Text(detail).font(.footnote).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(DS.Surface.inset, in: .rect(cornerRadius: 10, style: .continuous))
+            trailing()
+        }
+        .accessibilityElement(children: .combine)
     }
 
-    private func orderTile(_ o: JSONObject, filled: Bool) -> some View {
+    private func orderRow(_ o: JSONObject, filled: Bool) -> some View {
         let match = KalshiPregame.str(o["match"], o["market_ticker"])
         let pick = KalshiPregame.str(o["pick_label"], o["side"])
         let edge = o["edge"]?.double
-        return tileBackground {
-            HStack(spacing: 10) {
-                MarketsCrest(url: KalshiPregame.str(o["pick_logo"]), initials: KalshiFormat.initials(pick.replacingOccurrences(of: " to win", with: "")), size: 30)
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text(match).font(.subheadline.weight(.semibold)).lineLimit(1)
-                        Spacer(minLength: 4)
-                        if !filled, o["in_play"] == .bool(true) {
-                            Text("LIVE").font(.caption2.weight(.bold)).foregroundStyle(DS.Palette.danger)
-                        }
-                        if filled {
-                            Text(KalshiPregame.str(o["action"]).uppercased())
-                                .font(.caption2.weight(.bold))
-                                .foregroundStyle(o["action"] == .string("sell") ? DS.Palette.warning : DS.Palette.success)
-                        }
-                    }
-                    HStack {
-                        Text(pick).font(.caption2.weight(.medium)).foregroundStyle(.tint).lineLimit(1)
-                        Spacer(minLength: 4)
-                        if filled {
-                            Text("\(dartString(o["contracts"])) @ \(dartString(o["price_cents"]))¢")
-                                .font(.caption2).foregroundStyle(.secondary)
-                        } else {
-                            Text("\(KalshiFormat.firstNonNull(o["contracts"], o["size"], .int(0)))×  ")
-                                .font(.caption2).foregroundStyle(.secondary)
-                            if let edge {
-                                Text(KalshiFormat.signedEdge(edge))
-                                    .font(.caption2.weight(.semibold))
-                                    .foregroundStyle(edge >= 0 ? DS.Palette.success : DS.Palette.danger)
-                            }
-                        }
-                    }
+        let detail = filled
+            ? "\(dartString(o["contracts"])) @ \(dartString(o["price_cents"]))¢"
+            : "\(KalshiFormat.firstNonNull(o["contracts"], o["size"], .int(0)))×"
+        return tradeRow(logo: KalshiPregame.str(o["pick_logo"]), pick: pick, match: match, detail: detail) {
+            VStack(alignment: .trailing, spacing: 4) {
+                if !filled, o["in_play"] == .bool(true) {
+                    MarketsTag(text: "Live", color: DS.Palette.danger)
+                }
+                if filled {
+                    let action = KalshiPregame.str(o["action"])
+                    MarketsTag(text: action.dsSentenceCased, color: o["action"] == .string("sell") ? DS.Palette.warning : DS.Palette.success)
+                } else if let edge {
+                    Text(KalshiFormat.signedEdge(edge))
+                        .font(.subheadline.monospacedDigit())
+                        .foregroundStyle(edge >= 0 ? DS.Palette.success : DS.Palette.danger)
                 }
             }
         }
@@ -427,8 +400,8 @@ struct KalshiInstanceDetailView: View {
         (v ?? .null).dartDescription
     }
 
-    /// Settled / expired paper trade: realized P&L + MOCK tag.
-    private func mockHistoryTile(_ m: JSONObject) -> some View {
+    /// Settled / expired paper trade: realized P&L (the section says Mock).
+    private func mockHistoryRow(_ m: JSONObject) -> some View {
         let match = KalshiPregame.str(m["match"], m["market_ticker"])
         let pick = KalshiPregame.str(m["pick_label"], m["side"])
         let contracts = m["contracts"]?.double.map { Int($0) } ?? 0
@@ -436,31 +409,20 @@ struct KalshiInstanceDetailView: View {
         let rCents = m["realized_pnl_cents"]?.double
         let rPos = (rCents ?? 0) >= 0
         let outcome = KalshiPregame.str(m["outcome"])
-        return tileBackground {
-            HStack(spacing: 10) {
-                MarketsCrest(url: KalshiPregame.str(m["pick_logo"]), initials: KalshiFormat.initials(pick.replacingOccurrences(of: " to win", with: "")), size: 30)
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 6) {
-                        Text(match).font(.subheadline.weight(.semibold)).lineLimit(1)
-                        Spacer(minLength: 0)
-                        MarketsTag(text: "MOCK", color: DS.Palette.warning)
-                        Text(rCents.map { KalshiFormat.signedDollars(cents: $0) } ?? "—")
-                            .font(.caption2.weight(.bold))
-                            .foregroundStyle(rCents == nil ? Color.secondary : (rPos ? DS.Palette.success : DS.Palette.danger))
-                    }
-                    HStack {
-                        Text(pick).font(.caption2.weight(.medium)).foregroundStyle(.tint).lineLimit(1)
-                        Spacer(minLength: 4)
-                        Text("\(contracts) @ \(entryCents.map(String.init) ?? "—")¢\(outcome.isEmpty ? "" : " · \(outcome)")")
-                            .font(.caption2).foregroundStyle(.secondary)
-                    }
-                }
-            }
+        return tradeRow(
+            logo: KalshiPregame.str(m["pick_logo"]),
+            pick: pick,
+            match: match,
+            detail: "\(contracts) @ \(entryCents.map(String.init) ?? "—")¢\(outcome.isEmpty ? "" : " · \(outcome)")"
+        ) {
+            Text(rCents.map { KalshiFormat.signedDollars(cents: $0) } ?? "—")
+                .font(.body.monospacedDigit())
+                .foregroundStyle(rCents == nil ? Color.secondary : (rPos ? DS.Palette.success : DS.Palette.danger))
         }
     }
 
     /// Paper position: live unrealized P&L plus the entry → mark trail.
-    private func mockTile(_ m: JSONObject) -> some View {
+    private func mockRow(_ m: JSONObject) -> some View {
         let match = KalshiPregame.str(m["match"], m["market_ticker"])
         let pick = KalshiPregame.str(m["pick_label"], m["side"])
         let contracts = m["contracts"]?.double.map { Int($0) } ?? 0
@@ -470,52 +432,39 @@ struct KalshiInstanceDetailView: View {
         let upPos = (upCents ?? 0) > 0
         // Total current value = contracts × current mark (fallback entry).
         let value = Double(contracts * (markCents ?? entryCents ?? 0)) / 100
-        return tileBackground {
-            HStack(spacing: 10) {
-                MarketsCrest(url: KalshiPregame.str(m["pick_logo"]), initials: KalshiFormat.initials(pick.replacingOccurrences(of: " to win", with: "")), size: 30)
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 6) {
-                        Text(match).font(.subheadline.weight(.semibold)).lineLimit(1)
-                        Spacer(minLength: 0)
-                        MarketsTag(text: "MOCK", color: DS.Palette.warning)
-                        Text("$\(dartToStringAsFixed(value, 2))")
-                            .font(.headline.monospacedDigit())
-                    }
-                    HStack {
-                        Text(pick).font(.caption2.weight(.medium)).foregroundStyle(.tint).lineLimit(1)
-                        Spacer(minLength: 4)
-                        Text(upCents.map { "\(upPos ? "+" : "-")$\(dartToStringAsFixed(abs($0) / 100, 2)) P&L" } ?? "—")
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(upCents == nil ? Color.secondary : (upPos ? DS.Palette.success : DS.Palette.danger))
-                    }
-                    Text("\(contracts) @ \(entryCents.map(String.init) ?? "—")¢ → \(markCents.map(String.init) ?? "—")¢")
-                        .font(.caption2).foregroundStyle(.secondary)
-                }
-            }
+        return tradeRow(
+            logo: KalshiPregame.str(m["pick_logo"]),
+            pick: pick,
+            match: match,
+            detail: "\(contracts) @ \(entryCents.map(String.init) ?? "—")¢ → \(markCents.map(String.init) ?? "—")¢"
+        ) {
+            EntityRowValue(
+                "$\(dartToStringAsFixed(value, 2))",
+                detail: upCents.map { "\(upPos ? "+" : "-")$\(dartToStringAsFixed(abs($0) / 100, 2)) P&L" } ?? "—",
+                detailColor: upCents == nil ? Color.secondary : (upPos ? DS.Palette.success : DS.Palette.danger)
+            )
         }
     }
 
     // MARK: Pregame analysis
 
-    private func pregameAnalysis(_ model: KalshiInstanceDetailModel, now: Date) -> some View {
-        Card(padding: 14) {
-            VStack(alignment: .leading, spacing: 12) {
-                MarketsCardHeader(icon: "sports_soccer", title: "Pregame analysis")
-                switch model.decisions {
-                case .loading:
-                    LoadingState()
-                case .failed(let e):
-                    ErrorRow(message: KalshiFormat.errorText(e), onRetry: { Task { await model.refresh() } })
-                case .loaded:
-                    if model.pregameRowsEmpty {
-                        Text("No games analyzed yet — picks will appear here once the bot scans the slate.")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        VStack(spacing: 10) {
-                            ForEach(Array(model.pregameGames.enumerated()), id: \.offset) { _, sides in
-                                pregameCard(sides, now: now)
-                            }
+    private func pregameAnalysis(_ model: KalshiInstanceDetailModel) -> some View {
+        Section("Pregame analysis") {
+            switch model.decisions {
+            case .loading:
+                LoadingState()
+            case .failed(let e):
+                ErrorRow(message: KalshiFormat.errorText(e), onRetry: { Task { await model.refresh() } })
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
+            case .loaded:
+                if model.pregameRowsEmpty {
+                    Text("No games analyzed yet — picks will appear here once the bot scans the slate.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(Array(model.pregameGames.enumerated()), id: \.offset) { _, sides in
+                        TimelineView(.periodic(from: .now, by: 1)) { context in
+                            pregameRow(sides, now: context.date)
                         }
                     }
                 }
@@ -523,7 +472,7 @@ struct KalshiInstanceDetailView: View {
         }
     }
 
-    private func pregameCard(_ sides: [JSONObject], now: Date) -> some View {
+    private func pregameRow(_ sides: [JSONObject], now: Date) -> some View {
         let head = sides.first ?? JSONObject()
         let match = KalshiPregame.str(head["match"])
         let home = KalshiPregame.str(head["home"])
@@ -539,30 +488,29 @@ struct KalshiInstanceDetailView: View {
         let shown = ordered.isEmpty ? sides : ordered
 
         return VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 10) {
-                MarketsCrest(url: KalshiPregame.str(head["pick_logo"]), initials: KalshiFormat.initials(home.isEmpty ? title : home), size: 30)
-                HStack(spacing: 6) {
-                    Text(title).font(.subheadline.weight(.bold)).lineLimit(1)
-                    if !cd.isEmpty {
-                        Text(cd).font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+            HStack(spacing: 12) {
+                MarketsCrest(url: KalshiPregame.str(head["pick_logo"]), initials: KalshiFormat.initials(home.isEmpty ? title : home), size: 32)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.headline).lineLimit(1)
+                    let meta = ([cd] + parts).filter { !$0.isEmpty }
+                    if !meta.isEmpty {
+                        Text(meta.joined(separator: "  ·  "))
+                            .font(.footnote.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
                     }
                 }
-                Spacer(minLength: 8)
-                MarketsTag(text: "\(bestPos ? "+" : "")\(dartToStringAsFixed(best * 100, 1))% edge", color: bestPos ? DS.Palette.success : DS.Palette.danger)
-            }
-            if !parts.isEmpty {
-                Text(parts.joined(separator: "  ·  "))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .padding(.top, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Text("\(bestPos ? "+" : "")\(dartToStringAsFixed(best * 100, 1))% edge")
+                    .font(.subheadline.monospacedDigit())
+                    .foregroundStyle(bestPos ? DS.Palette.success : DS.Palette.danger)
             }
             ForEach(Array(shown.enumerated()), id: \.offset) { _, r in
+                Divider().padding(.top, 8)
                 pregameSideRow(r, now: now)
             }
-            .padding(.top, 2)
         }
-        .padding(12)
-        .background(DS.Surface.inset, in: .rect(cornerRadius: DS.Radius.control, style: .continuous))
+        .padding(.vertical, 4)
     }
 
     private func pregameSideRow(_ r: JSONObject, now: Date) -> some View {
@@ -581,9 +529,9 @@ struct KalshiInstanceDetailView: View {
         return VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
                 HStack(spacing: 6) {
-                    Text(pick).font(.caption.weight(.semibold)).foregroundStyle(.tint).lineLimit(1)
+                    Text(pick).font(.subheadline.weight(.semibold)).lineLimit(1)
                     if modelOnly {
-                        Text("model-only").font(.caption2).italic().foregroundStyle(.tertiary)
+                        Text("model-only").font(.caption).italic().foregroundStyle(.secondary)
                     }
                 }
                 Spacer(minLength: 0)
@@ -593,19 +541,32 @@ struct KalshiInstanceDetailView: View {
                 }
                 sidePill(dec)
             }
-            HStack(spacing: 14) {
+            let metrics = HStack(spacing: 14) {
                 metric("fair", fair.map { "\(dartToStringAsFixed($0 * 100, 0))%" } ?? "—")
                 metric("price", price.map { "\($0)¢" } ?? "—")
                 metric("edge", edge.map { "\(edgePos ? "+" : "")\(dartToStringAsFixed($0 * 100, 1))%" } ?? "—",
                        color: edge == nil ? nil : (edgePos ? DS.Palette.success : DS.Palette.danger))
-                if !updated.isEmpty {
-                    Spacer(minLength: 0)
-                    Text("updated \(updated)").font(.caption2).foregroundStyle(.tertiary)
+            }
+            let stamp = Text("updated \(updated)").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            if updated.isEmpty {
+                metrics
+            } else {
+                // One line when it fits, else the stamp under the figures.
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 14) {
+                        metrics
+                        Spacer(minLength: 0)
+                        stamp
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
+                        metrics
+                        stamp
+                    }
                 }
             }
             if placed, let entryEdge {
                 Text("placed @ \(KalshiFormat.signedEdge(entryEdge))")
-                    .font(.caption2).italic()
+                    .font(.caption).italic()
                     .foregroundStyle(DS.Palette.success)
             }
         }
@@ -615,51 +576,46 @@ struct KalshiInstanceDetailView: View {
     private func metric(_ label: String, _ value: String, color: Color? = nil) -> some View {
         let l = Text("\(label) ").foregroundStyle(.secondary)
         let v = Text(value).fontWeight(.semibold).foregroundStyle(color ?? .primary)
-        return Text("\(l)\(v)").font(.caption2.monospacedDigit())
+        return Text("\(l)\(v)").font(.caption.monospacedDigit())
     }
 
-    /// PLACED success, BLOCKED warning, anything else muted.
+    /// Placed success, Blocked warning, anything else muted.
     private func sidePill(_ decision: String) -> some View {
         let d = decision.lowercased()
         let c: Color = d == "placed" ? DS.Palette.success : (d == "blocked" ? DS.Palette.warning : .secondary)
-        return MarketsTag(text: decision.isEmpty ? "—" : decision.uppercased(), color: c)
+        return MarketsTag(text: decision.isEmpty ? "—" : decision.dsSentenceCased, color: c)
     }
 
     // MARK: Decision log
 
     private func decisionLog(_ model: KalshiInstanceDetailModel) -> some View {
-        Card(padding: 14) {
-            VStack(alignment: .leading, spacing: 12) {
-                MarketsCardHeader(icon: "hub", title: "Decision log")
-                switch model.decisions {
-                case .loading:
-                    LoadingState()
-                case .failed(let e):
-                    ErrorRow(message: KalshiFormat.errorText(e), onRetry: { Task { await model.refresh() } })
-                case .loaded(let d):
-                    let rows = d["decisions"]?.arrayValue ?? []
-                    if rows.isEmpty {
-                        Text("No decisions logged yet.")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        let p = KalshiPregame.page(rows, requested: model.decPage)
-                        VStack(spacing: 8) {
-                            ForEach(Array(p.slice.enumerated()), id: \.offset) { j, r in
-                                decisionCard(model, r.orderedObject ?? JSONObject(), index: p.start + j)
-                            }
-                            if p.pages > 1 {
-                                HStack {
-                                    pageButton("chevron_left", label: "Previous page", enabled: p.page > 0) { model.setPage(p.page - 1) }
-                                    Spacer()
-                                    Text("Page \(p.page + 1) / \(p.pages)")
-                                        .font(.caption2.monospacedDigit())
-                                        .foregroundStyle(.secondary)
-                                    Spacer()
-                                    pageButton("chevron_right", label: "Next page", enabled: p.page < p.pages - 1) { model.setPage(p.page + 1) }
-                                }
-                                .padding(.top, 8)
-                            }
+        Section("Decision log") {
+            switch model.decisions {
+            case .loading:
+                LoadingState()
+            case .failed(let e):
+                ErrorRow(message: KalshiFormat.errorText(e), onRetry: { Task { await model.refresh() } })
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
+            case .loaded(let d):
+                let rows = d["decisions"]?.arrayValue ?? []
+                if rows.isEmpty {
+                    Text("No decisions logged yet.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    let p = KalshiPregame.page(rows, requested: model.decPage)
+                    ForEach(Array(p.slice.enumerated()), id: \.offset) { j, r in
+                        decisionRow(model, r.orderedObject ?? JSONObject(), index: p.start + j)
+                    }
+                    if p.pages > 1 {
+                        HStack {
+                            pageButton("chevron_left", label: "Previous page", enabled: p.page > 0) { model.setPage(p.page - 1) }
+                            Spacer()
+                            Text("Page \(p.page + 1) / \(p.pages)")
+                                .font(.footnote.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            pageButton("chevron_right", label: "Next page", enabled: p.page < p.pages - 1) { model.setPage(p.page + 1) }
                         }
                     }
                 }
@@ -670,11 +626,11 @@ struct KalshiInstanceDetailView: View {
     private func pageButton(_ icon: String, label: String, enabled: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: Symbol.named(icon))
+                .font(.body.weight(.semibold))
                 .frame(width: 44, height: 44)
+                .contentShape(.rect)
         }
-        .buttonStyle(.bordered)
-        // A 44 pt hit target with the bordered padding kept minimal.
-        .controlSize(.mini)
+        .buttonStyle(.borderless)
         .disabled(!enabled)
         .accessibilityLabel(label)
     }
@@ -688,7 +644,10 @@ struct KalshiInstanceDetailView: View {
         }
     }
 
-    private func decisionCard(_ model: KalshiInstanceDetailModel, _ r: JSONObject, index i: Int) -> some View {
+    /// One decision: crest, match, pick (and "Mock" for paper), the edge and
+    /// the decision word; tap to expand the probabilities, the LLM rationale
+    /// and any block reason.
+    private func decisionRow(_ model: KalshiInstanceDetailModel, _ r: JSONObject, index i: Int) -> some View {
         let open = model.expanded.contains(i)
         let dec = KalshiPregame.str(r["decision"])
         let match = KalshiPregame.str(r["match"], r["market_ticker"])
@@ -702,27 +661,26 @@ struct KalshiInstanceDetailView: View {
             withAnimation(.snappy) { model.toggleExpanded(i) }
         } label: {
             VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 10) {
-                    MarketsCrest(url: KalshiPregame.str(r["pick_logo"]), initials: KalshiFormat.initials(pick.replacingOccurrences(of: " to win", with: "")), size: 30)
+                HStack(spacing: 12) {
+                    MarketsCrest(url: KalshiPregame.str(r["pick_logo"]), initials: KalshiFormat.initials(pick.replacingOccurrences(of: " to win", with: "")), size: 32)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(match).font(.subheadline.weight(.semibold)).foregroundStyle(.primary).lineLimit(1)
-                        Text(pick).font(.caption2).foregroundStyle(.tint).lineLimit(1)
+                        Text(match).font(.headline).foregroundStyle(.primary).lineLimit(1)
+                        Text(paper ? "\(pick) · Mock" : pick).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
                     }
-                    Spacer(minLength: 8)
-                    VStack(alignment: .trailing, spacing: 2) {
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    VStack(alignment: .trailing, spacing: 4) {
                         if let edge {
                             Text(KalshiFormat.signedEdge(edge))
-                                .font(.footnote.weight(.bold).monospacedDigit())
+                                .font(.subheadline.monospacedDigit())
                                 .foregroundStyle(edge >= 0 ? DS.Palette.success : DS.Palette.danger)
                         }
-                        HStack(spacing: 4) {
-                            if paper { MarketsTag(text: "MOCK", color: DS.Palette.warning) }
-                            MarketsTag(text: dec.uppercased(), color: decColor(dec))
-                        }
+                        StatusBadge(label: dec.dsSentenceCased, color: decColor(dec))
                     }
-                    Image(systemName: Symbol.named(open ? "expand_less" : "expand_more"))
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                    Image(systemName: "chevron.right")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                        .rotationEffect(.degrees(open ? 90 : 0))
+                        .accessibilityHidden(true)
                 }
                 if open {
                     MarketsFlowLayout(spacing: 14, runSpacing: 6) {
@@ -736,25 +694,21 @@ struct KalshiInstanceDetailView: View {
                         }
                     }
                     if !rationale.isEmpty {
-                        HStack(alignment: .top, spacing: 6) {
-                            Image(systemName: Symbol.named("psychology")).foregroundStyle(.tint)
+                        Label {
                             Text(rationale).foregroundStyle(.primary).multilineTextAlignment(.leading)
+                        } icon: {
+                            Image(systemName: Symbol.named("psychology")).foregroundStyle(.secondary)
                         }
-                        .font(.caption2)
-                        .padding(10)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(DS.Surface.panel, in: .rect(cornerRadius: DS.Radius.small, style: .continuous))
+                        .font(.footnote)
                     }
                     if !blockReason.isEmpty {
                         Text("\(dec == "blocked" ? "Blocked: " : "Skipped — ")\(blockReason)")
-                            .font(.caption2)
-                            .foregroundStyle(dec == "blocked" ? DS.Palette.danger.opacity(0.85) : Color.secondary)
+                            .font(.footnote)
+                            .foregroundStyle(dec == "blocked" ? DS.Palette.danger : Color.secondary)
                             .multilineTextAlignment(.leading)
                     }
                 }
             }
-            .padding(12)
-            .background(DS.Surface.inset, in: .rect(cornerRadius: DS.Radius.control, style: .continuous))
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
@@ -764,7 +718,7 @@ struct KalshiInstanceDetailView: View {
     private func kv(_ k: String, _ v: String) -> some View {
         let key = Text("\(k) ").foregroundStyle(.secondary)
         let value = Text(v).fontWeight(.semibold)
-        return Text("\(key)\(value)").font(.caption2.monospacedDigit())
+        return Text("\(key)\(value)").font(.caption.monospacedDigit())
     }
 }
 
