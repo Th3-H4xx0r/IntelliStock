@@ -5,6 +5,22 @@ import SwiftUI
 /// of the Syncfusion `markerSeries` Dart passed in. A value type: markers
 /// built from the same data are equal, so re-rendering a screen never makes
 /// the chart redraw.
+/// A labelled horizontal level behind the line — a strike, a breakeven.
+struct ScrubbableChartLevel: Hashable {
+    let value: Double
+    let label: String
+    let color: Color
+}
+
+/// A tinted band of prices behind the line, from `low` to `high` (nil runs
+/// to the plot's edge), with an optional caption in its corner.
+struct ScrubbableChartBand: Hashable {
+    let low: Double?
+    let high: Double?
+    let color: Color
+    var label: String?
+}
+
 struct ScrubbableChartMarker: Identifiable, Hashable {
     /// Derived from the contents, so it is stable across renders.
     var id: Int { hashValue }
@@ -61,6 +77,10 @@ struct ScrubbableAreaChart: View {
     var pulsingEndDot = false
     /// Draw the dotted baseline.
     var showsBaseline = true
+    /// Labelled levels and tinted bands behind the line (an option's strike
+    /// and its outcomes). Both widen the y range to stay in view.
+    var levels: [ScrubbableChartLevel] = []
+    var bands: [ScrubbableChartBand] = []
 
     @State private var selectedX: Double?
     @State private var scrub = ScrubController(onTick: {})
@@ -81,13 +101,40 @@ struct ScrubbableAreaChart: View {
 
     private func chart(count n: Int) -> some View {
         let plotHeight = min(max(height - Self.labelRowHeight, 40), height)
-        let bounds = paddedBounds(baseline.map { values + [$0] } ?? values)
+        let bounds = paddedBounds((baseline.map { values + [$0] } ?? values) + levels.map(\.value))
         let span = timestamps[n - 1].timeIntervalSince(timestamps[0])
         let labels = evenlySpacedLabelIndices(n, 4).map { formatChartDateBySpan(timestamps[$0], span) }
         let sample = scrub.value.flatMap { $0.index < n ? $0 : nil }
 
         return VStack(spacing: 0) {
             Chart {
+                ForEach(bands, id: \.self) { band in
+                    RectangleMark(
+                        xStart: .value("Start", x(0)),
+                        xEnd: .value("End", x(n - 1)),
+                        yStart: .value("Low", band.low ?? bounds.min),
+                        yEnd: .value("High", band.high ?? bounds.max)
+                    )
+                    .foregroundStyle(band.color.opacity(0.10))
+                    .annotation(position: .overlay, alignment: band.high == nil ? .topLeading : .bottomLeading) {
+                        if let label = band.label {
+                            Text(label)
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(band.color)
+                                .padding(4)
+                        }
+                    }
+                }
+                ForEach(levels, id: \.self) { level in
+                    RuleMark(y: .value("Level", level.value))
+                        .foregroundStyle(level.color)
+                        .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
+                        .annotation(position: .top, alignment: .trailing, spacing: 2) {
+                            Text(level.label)
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(level.color)
+                        }
+                }
                 // Behind the line: the one gridline, Stocks' dotted start value.
                 if showsBaseline {
                     RuleMark(y: .value("Baseline", baseline ?? values[0]))

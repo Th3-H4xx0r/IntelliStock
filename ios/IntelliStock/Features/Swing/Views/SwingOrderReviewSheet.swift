@@ -170,7 +170,7 @@ struct SwingOrderReviewSheet: View {
             }
             .accessibilityElement(children: .combine)
 
-            SwingOrderChart(symbol: s.symbol, strike: s.isWheel ? s.proposal["strike"]?.double : nil)
+            SwingOrderChart(symbol: s.symbol, put: SwingPutPlan(s))
 
             StatGrid(columns: 2) {
                 ForEach(Array(rows(s).enumerated()), id: \.offset) { _, row in
@@ -350,38 +350,89 @@ private struct SwingOrderOutcomeView: View {
     }
 }
 
+/// What selling the put means, for the chart: the strike, the premium and
+/// the breakeven (strike − premium per share).
+struct SwingPutPlan {
+    let symbol: String
+    let strike: Double
+    /// Per share.
+    let premium: Double?
+    let contracts: Int
+    let expiry: String?
+
+    init?(_ s: SwingSignal) {
+        guard s.isWheel, let strike = s.proposal["strike"]?.double, strike > 0 else { return nil }
+        symbol = s.symbol
+        self.strike = strike
+        premium = s.proposal["premium_est"]?.double
+        contracts = max(1, s.proposal["qty"]?.int ?? 1)
+        expiry = s.proposal["expiry"]?.string
+    }
+
+    var breakeven: Double? { premium.map { strike - $0 } }
+    /// Total premium collected, e.g. $131 for one contract at $1.31.
+    var collected: Double? { premium.map { $0 * 100 * Double(contracts) } }
+
+    /// "Collect $131 if QCOM stays above $177.50 by Oct 9, 2026."
+    var summary: String {
+        let by = expiry.map { " by \(stockExpiryText($0))" } ?? ""
+        let collect = collected.map { "Collect about \(fmtMoney($0))" } ?? "Collect the premium"
+        return "\(collect) if \(symbol) stays above \(fmtMoney(strike))\(by)."
+    }
+
+    /// "Below $177.50 you buy 100 shares at $177.50."
+    var assignment: String {
+        "Below \(fmtMoney(strike)) you buy \(contracts * 100) shares at \(fmtMoney(strike))."
+    }
+}
+
 /// The underlying's price over a chosen range, for insight before sending.
-/// For a put, the strike is the dotted line, so the cushion shows at a
-/// glance. Scrub to read a price; read-only, nothing is sent.
+/// For a put, the strike and breakeven are labelled lines over a green
+/// keep-the-premium zone and a red assignment zone. Scrub to read a price;
+/// read-only, nothing is sent.
 private struct SwingOrderChart: View {
     let symbol: String
-    let strike: Double?
+    let put: SwingPutPlan?
 
     @Environment(AppServices.self) private var services
 
     var body: some View {
-        SwingOrderChartContent(symbol: symbol, strike: strike, services: services)
+        SwingOrderChartContent(symbol: symbol, put: put, services: services)
             .id(symbol)
     }
 }
 
 private struct SwingOrderChartContent: View {
-    let strike: Double?
+    let put: SwingPutPlan?
     let services: AppServices
 
     @State private var model: StockModel
 
     static let ranges = ["1D", "1W", "1M", "3M", "1Y"]
-    static let height: CGFloat = 150
+    static let height: CGFloat = 170
 
-    init(symbol: String, strike: Double?, services: AppServices) {
-        self.strike = strike
+    init(symbol: String, put: SwingPutPlan?, services: AppServices) {
+        self.put = put
         self.services = services
         _model = State(initialValue: StockModel(symbol: symbol, brokerageId: nil, client: { services.apiClient }))
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if let put {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text("SELL PUT")
+                        .font(.caption.weight(.bold))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .foregroundStyle(DS.Palette.success)
+                        .background(DS.Palette.success.opacity(0.15), in: .capsule)
+                    Text(put.summary)
+                        .font(.subheadline)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .accessibilityElement(children: .combine)
+            }
             header
             chart
             Picker("Range", selection: Binding(get: { model.range }, set: { model.setRange($0) })) {
@@ -389,6 +440,11 @@ private struct SwingOrderChartContent: View {
             }
             .pickerStyle(.segmented)
             .controlSize(.small)
+            if let put {
+                Label(put.assignment, systemImage: "arrow.down.right.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .task(id: model.range) { await model.pollHistory(lifecycle: services.lifecycle) }
     }
@@ -410,10 +466,11 @@ private struct SwingOrderChartContent: View {
                     .foregroundStyle(ChangeDirection(change).color)
                     .monospacedDigit()
                 Spacer(minLength: 0)
-                if let strike, strike > 0 {
-                    Text("\(fmtPct((shown - strike) / strike * 100)) vs strike")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                if let put {
+                    let cushion = (shown - put.strike) / put.strike * 100
+                    Text(cushion >= 0 ? "\(fmtPct(cushion)) above strike" : "\(fmtPct(cushion)) below strike")
+                        .font(.footnote.weight(.medium))
+                        .foregroundStyle(cushion >= 0 ? DS.Palette.success : DS.Palette.danger)
                         .monospacedDigit()
                 }
             }
@@ -434,18 +491,15 @@ private struct SwingOrderChartContent: View {
                 values: series.vals,
                 lineColor: up ? DS.Palette.success : DS.Palette.danger,
                 height: Self.height,
-                baseline: strike,
                 onScrub: { model.scrubIndex = $0 },
                 animate: true,
                 drawInKey: AnyHashable(model.range),
-                indexed: true
+                indexed: true,
+                showsBaseline: put == nil,
+                levels: levels,
+                bands: bands
             )
             .id(model.range)
-            if let strike, strike > 0 {
-                Text("Dotted line: the \(fmtMoney(strike)) strike")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
         } else if model.historyLoading {
             Skeleton(height: Self.height, radius: 10)
         } else {
@@ -454,5 +508,23 @@ private struct SwingOrderChartContent: View {
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, minHeight: Self.height)
         }
+    }
+
+    private var levels: [ScrubbableChartLevel] {
+        guard let put else { return [] }
+        var out = [ScrubbableChartLevel(value: put.strike, label: "Strike \(fmtMoney(put.strike))", color: .primary)]
+        if let be = put.breakeven {
+            out.append(ScrubbableChartLevel(value: be, label: "Breakeven \(fmtMoney(be))", color: DS.Palette.warning))
+        }
+        return out
+    }
+
+    private var bands: [ScrubbableChartBand] {
+        guard let put else { return [] }
+        let keep = put.collected.map { "Keep \(fmtMoney($0))" } ?? "Keep the premium"
+        return [
+            ScrubbableChartBand(low: put.strike, high: nil, color: DS.Palette.success, label: keep),
+            ScrubbableChartBand(low: nil, high: put.strike, color: DS.Palette.danger, label: "Assigned"),
+        ]
     }
 }
