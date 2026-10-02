@@ -216,7 +216,7 @@ private struct InstanceDetailContent: View {
 
     private func statusSection(_ inst: Instance, _ state: InstanceDetailState) -> some View {
         Section("Status") {
-            StatGrid(columns: 3) {
+            StatGrid(columns: 2) {
                 StatCell(label: "Status") { InstanceStatusDot(inst: inst) }
                 StatCell(
                     label: "Uptime",
