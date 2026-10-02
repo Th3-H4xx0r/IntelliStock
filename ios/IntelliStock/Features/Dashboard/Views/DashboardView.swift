@@ -29,6 +29,43 @@ enum DashboardTopActions {
     static let title = "Dashboard"
 }
 
+/// The dashboard's search button. The Dashboard root hides its navigation
+/// bar, so this sits at the trailing end of the hero instead: the same
+/// glass circle, glyph and label the bar's button had, and a 44 pt target.
+struct DashboardSearchButton: View {
+    @Environment(AppServices.self) private var services
+
+    var body: some View {
+        Button {
+            services.router.push(DashboardTopActions.searchRoute)
+        } label: {
+            Image(systemName: Symbol.named("search"))
+                .font(.title3.weight(.medium))
+                .foregroundStyle(Color.primary)
+                .frame(width: 44, height: 44)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .glassEffect(.regular.interactive(), in: Circle())
+        .accessibilityLabel(DashboardTopActions.searchLabel)
+    }
+}
+
+/// The search button on its own row, for the states with no hero beside it
+/// (no accounts, or the account list failed to load).
+private struct DashboardSearchRow: View {
+    var body: some View {
+        Section {
+            HStack {
+                Spacer()
+                DashboardSearchButton()
+            }
+            .listRowBackground(Color.clear)
+            .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+        }
+    }
+}
+
 private struct DashboardContent: View {
     let services: AppServices
 
@@ -52,12 +89,8 @@ private struct DashboardContent: View {
             repository: { [unowned services] in services.dashboardRepository }
         ))
         _portfolios = State(initialValue: DashboardPortfoliosModel(
-            fetch: { [unowned services] in
-                let dashboard = services.dashboardRepository
-                let instances = services.instanceRepository
-                async let widget = dashboard.widgetAccounts()
-                async let list = instances.listInstances()
-                return try await (widget, list)
+            fetcher: { [unowned services] in
+                DashboardPortfolios.fetcher(dashboard: services.dashboardRepository, kalshi: services.kalshiRepository)
             }
         ))
     }
@@ -102,21 +135,21 @@ private struct DashboardContent: View {
             onboardingSection
         }
         .listStyle(.insetGrouped)
-        // The hero starts right under the bar, as in Stocks.
+        .coordinateSpace(.named(DashboardPortfolioMetrics.listSpace))
+        // The hero starts right at the top of the safe area, as in Stocks.
         .contentMargins(.top, 0, for: .scrollContent)
         .navigationTitle(DashboardTopActions.title)
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            // No visible title: the balance leads the screen.
-            ToolbarItem(placement: .principal) { Color.clear.frame(width: 1, height: 1) }
-            ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    services.router.push(DashboardTopActions.searchRoute)
-                } label: {
-                    Image(systemName: Symbol.named("search"))
-                }
-                .accessibilityLabel(DashboardTopActions.searchLabel)
-            }
+        // No bar: the balance leads the screen and the search button sits at
+        // the hero's trailing end (`DashboardSearchButton`).
+        .toolbar(.hidden, for: .navigationBar)
+        // Rows scrolled up pass under a plain strip, never under the clock.
+        .overlay(alignment: .top) {
+            Color(uiColor: .systemGroupedBackground)
+                .frame(height: 0)
+                .ignoresSafeArea(edges: .top)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
         }
         .refreshable { await refreshAll() }
         .task {
@@ -133,12 +166,12 @@ private struct DashboardContent: View {
             if let id = selected?.id { await strategy.arm(id) }
         }
         .task { await services.dashboard.pollServices(lifecycle: services.lifecycle) }
-        // The portfolio sheet's figures load slowly; start once when there is
-        // more than one account to switch between.
+        // Warm the portfolio sheet once there is more than one account to
+        // switch between, so its first opening already has figures.
         .task(id: accounts?.count ?? 0) {
-            if !portfoliosPrefetched, (accounts?.count ?? 0) > 1 {
+            if !portfoliosPrefetched, let accounts, accounts.count > 1 {
                 portfoliosPrefetched = true
-                portfolios.refreshDetached()
+                portfolios.refreshDetached(accounts)
             }
         }
         // Hero chart: live at the range's cadence; restarts on a range or
@@ -199,6 +232,7 @@ private struct DashboardContent: View {
                     accounts: accounts,
                     selectedId: selected.id,
                     portfolios: portfolios,
+                    heroSummary: liveScope?.chart.daySummary,
                     onSelect: { services.selectedAccount.select($0) }
                 )
             }
@@ -228,6 +262,7 @@ private struct DashboardContent: View {
         case .loading:
             DashboardPortfolioSkeleton()
         case .failed:
+            DashboardSearchRow()
             Section {
                 ErrorRow(message: services.dashboard.brokerages.errorMessage ?? "") {
                     Task { await services.dashboard.loadBrokerages() }
@@ -235,6 +270,7 @@ private struct DashboardContent: View {
             }
         case .loaded(let accounts):
             if accounts.isEmpty {
+                DashboardSearchRow()
                 Section {
                     EmptyState(
                         systemImage: Symbol.named("account_balance"),
@@ -291,21 +327,31 @@ private struct DashboardContent: View {
     }
 }
 
-/// The portfolio's loading shape: the hero's layout, redacted.
+/// The portfolio's loading shape: the hero's layout, redacted, with the
+/// live search button already in its place.
 struct DashboardPortfolioSkeleton: View {
     var body: some View {
         Section {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Alpaca Live")
-                    .font(.subheadline.weight(.semibold))
-                HeroValueHeader("$0,000.00", change: "+$00.00 (+0.00%)", direction: .flat, status: "Markets Open")
+                HStack(alignment: .center, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Alpaca Live")
+                            .font(.subheadline.weight(.semibold))
+                        HeroValueHeader("$0,000.00", change: "+$00.00 (+0.00%)", direction: .flat, status: "Markets Open")
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .redacted(reason: .placeholder)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Loading")
+                    DashboardSearchButton()
+                }
                 Skeleton(height: DashboardPortfolioMetrics.chartHeight, radius: 8)
+                    .redacted(reason: .placeholder)
+                    .accessibilityHidden(true)
             }
-            .redacted(reason: .placeholder)
-            .padding(.vertical, 4)
+            .padding(.bottom, 4)
             .listRowBackground(Color.clear)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Loading")
+            .listRowInsets(.top, 0)
         }
     }
 }
