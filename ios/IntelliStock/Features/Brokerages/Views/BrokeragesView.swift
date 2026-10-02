@@ -2,7 +2,8 @@ import SwiftUI
 
 /// The linked brokerage accounts — `BrokeragesScreen` in
 /// `brokerages_screen.dart`. Pushed from More; native form: an inset-grouped
-/// list with one section per account, on the plain grouped background.
+/// list of `EntityRow`s. Tapping a row opens its edit sheet; Edit and Remove
+/// are swipe actions and context-menu items; `+` links a new account.
 struct BrokeragesView: View {
     @Environment(AppServices.self) private var services
     @State private var model: BrokeragesModel?
@@ -13,32 +14,15 @@ struct BrokeragesView: View {
 
     var body: some View {
         List {
-            Section {
-                SectionHeader(
-                    title: "Linked Accounts",
-                    eyebrow: "Brokerages",
-                    subtitle: "Manage your brokerage connections."
-                ) {
-                    Button {
-                        sheet = BrokerageSheetTarget(account: nil)
-                    } label: {
-                        Label("Link Brokerage", systemImage: Symbol.named("add"))
-                            .font(.subheadline.weight(.semibold))
-                    }
-                    .dsProminentButton()
-                    .buttonBorderShape(.capsule)
-                }
-                .listRowBackground(Color.clear)
-                .listRowInsets(EdgeInsets(top: 12, leading: 4, bottom: 8, trailing: 4))
-            }
-
             switch model?.accounts ?? .loading {
             case .loading:
-                ForEach(0..<3, id: \.self) { _ in
-                    BrokerageAccountSection(account: Self.placeholder, onEdit: {}, onRemove: {})
-                        .redacted(reason: .placeholder)
-                        .allowsHitTesting(false)
+                Section("Linked Accounts") {
+                    ForEach(0..<3, id: \.self) { _ in
+                        BrokerageAccountRow(account: Self.placeholder)
+                    }
                 }
+                .redacted(reason: .placeholder)
+                .allowsHitTesting(false)
             case .failed(let error):
                 Section {
                     ErrorRow(message: brokerageErrorText(error)) {
@@ -60,13 +44,14 @@ struct BrokeragesView: View {
                         .listRowBackground(Color.clear)
                     }
                 } else {
-                    ForEach(accounts) { account in
-                        BrokerageAccountSection(
-                            account: account,
-                            onEdit: { sheet = BrokerageSheetTarget(account: account) },
-                            onRemove: { confirmRemove(account) }
-                        )
-                        .disabled(removing == account.id)
+                    Section {
+                        ForEach(accounts) { account in
+                            accountRow(account)
+                        }
+                    } header: {
+                        Text("Linked Accounts")
+                    } footer: {
+                        Text("Manage your brokerage connections.")
                     }
                 }
             }
@@ -75,13 +60,10 @@ struct BrokeragesView: View {
         .navigationTitle("Brokerages")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    Task { await model?.refresh() }
-                } label: {
-                    Image(systemName: Symbol.named("refresh"))
+            ToolbarItem(placement: .primaryAction) {
+                ToolbarAddButton("Link Brokerage") {
+                    sheet = BrokerageSheetTarget(account: nil)
                 }
-                .accessibilityLabel("Refresh")
             }
         }
         .refreshable { await model?.refresh() }
@@ -98,6 +80,39 @@ struct BrokeragesView: View {
                 model = BrokeragesModel(repository: { services.brokerageRepository })
             }
             if let model, model.accounts.needsLoad { await model.load() }
+        }
+    }
+
+    /// One account: the row opens its edit sheet; Edit and Remove are also
+    /// on the swipe and the context menu. Remove keeps its confirmation.
+    private func accountRow(_ account: Brokerage) -> some View {
+        Button {
+            sheet = BrokerageSheetTarget(account: account)
+        } label: {
+            BrokerageAccountRow(account: account)
+        }
+        .foregroundStyle(.primary)
+        .disabled(removing == account.id)
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            // Red by tint, not by role: a destructive-role swipe button
+            // animates the row away before the confirmation answers.
+            Button("Remove", systemImage: Symbol.named("delete_outline")) {
+                confirmRemove(account)
+            }
+            .tint(DS.Palette.danger)
+            Button("Edit", systemImage: Symbol.named("edit")) {
+                sheet = BrokerageSheetTarget(account: account)
+            }
+            .tint(DS.Palette.accent)
+        }
+        .contextMenu {
+            Button("Edit", systemImage: Symbol.named("edit")) {
+                sheet = BrokerageSheetTarget(account: account)
+            }
+            Divider()
+            Button("Remove", systemImage: Symbol.named("delete_outline"), role: .destructive) {
+                confirmRemove(account)
+            }
         }
     }
 
@@ -131,83 +146,35 @@ private struct BrokerageSheetTarget: Identifiable {
     let account: Brokerage?
 }
 
-/// One account — `_AccountCard`, as a list section: header row, details,
-/// then Edit and Remove.
-private struct BrokerageAccountSection: View {
+/// One account — `_AccountCard`, as a row: the brand logo, the name, then
+/// "Alpaca · Paper · PA3IBY5S84PG", and the status as a dot and a word. A
+/// refresh error shows under it in red; the last-refreshed time is in the
+/// edit sheet.
+private struct BrokerageAccountRow: View {
     let account: Brokerage
-    let onEdit: () -> Void
-    let onRemove: () -> Void
 
     var body: some View {
         let a = account
-        let isAlpaca = a.brokerageType == "alpaca"
-        let badgeColor = isAlpaca ? (a.paper ? DS.Palette.info : DS.Palette.warning) : DS.Palette.success
         let statusColor: Color = switch BrokeragesModel.statusTone(a.status) {
         case .active: DS.Palette.success
         case .expired: DS.Palette.danger
         case .other: DS.Palette.warning
         }
-
-        Section {
-            HStack(alignment: .top, spacing: 12) {
-                IconTile(color: DS.Palette.accent, size: 40) {
-                    BrokerageLogo(brokerageType: a.brokerageType, size: 20)
+        VStack(alignment: .leading, spacing: 6) {
+            EntityRow(a.accountName, subtitle: BrokeragesModel.rowSubtitle(a)) {
+                IconTile(color: DS.Palette.accent, size: EntityRowMetrics.iconSize) {
+                    BrokerageLogo(brokerageType: a.brokerageType, size: 16)
                 }
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(a.accountName)
-                        .font(.headline)
-                        .lineLimit(1)
-                    AppBadge(label: BrokeragesModel.badgeLabel(a), color: badgeColor)
-                }
-                Spacer(minLength: 8)
-                HStack(spacing: 6) {
-                    Circle().fill(statusColor).frame(width: 8, height: 8)
-                    Text(a.status ?? "unknown")
-                        .font(.caption)
-                        .foregroundStyle(statusColor)
-                }
-                .accessibilityElement(children: .combine)
+            } trailing: {
+                StatusDot(BrokeragesModel.statusLabel(a.status), color: statusColor)
             }
-            .padding(.vertical, 4)
-
-            if a.accountNumber != nil || a.lastRefreshAt != nil || a.lastError != nil {
-                VStack(alignment: .leading, spacing: 4) {
-                    if let number = a.accountNumber {
-                        BrokerageDetailRow(label: "Account #", value: number)
-                    }
-                    if let refreshed = a.lastRefreshAt {
-                        BrokerageDetailRow(label: "Last refreshed", value: BrokeragesModel.refreshedLabel(refreshed))
-                    }
-                    if let error = a.lastError {
-                        Text("\(Text("Error: ").fontWeight(.semibold))\(error)")
-                            .font(.footnote)
-                            .foregroundStyle(DS.Palette.danger)
-                    }
-                }
+            if let error = a.lastError {
+                Text("\(Text("Error: ").fontWeight(.semibold))\(error)")
+                    .font(.footnote)
+                    .foregroundStyle(DS.Palette.danger)
+                    .padding(.leading, EntityRowMetrics.iconSize + 12)
             }
-
-            HStack {
-                Button(action: onEdit) {
-                    Label("Edit", systemImage: Symbol.named("edit"))
-                }
-                .buttonStyle(.borderless)
-                Spacer()
-                Button(role: .destructive, action: onRemove) {
-                    Label("Remove", systemImage: Symbol.named("delete_outline"))
-                }
-                .buttonStyle(.borderless)
-            }
-            .font(.subheadline)
         }
-    }
-}
-
-private struct BrokerageDetailRow: View {
-    let label: String
-    let value: String
-
-    var body: some View {
-        Text("\(Text("\(label): ").foregroundStyle(.secondary))\(value)")
-            .font(.footnote)
+        .padding(.vertical, 2)
     }
 }

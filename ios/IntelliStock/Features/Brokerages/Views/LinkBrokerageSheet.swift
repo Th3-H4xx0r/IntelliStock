@@ -3,7 +3,8 @@ import SwiftUI
 /// Link or edit a brokerage account — `_LinkBrokerageSheet` in
 /// `link_brokerage_sheet.dart`. Native form: a sheet with an inset-grouped
 /// form; the Alpaca / Binance.US tab bar is a segmented control (create mode
-/// only), credentials use secure fields.
+/// only), credentials use secure fields. Close is the leading toolbar item and
+/// Link Account / Save Changes the trailing one; Test and Save Anyway are rows.
 struct LinkBrokerageSheet: View {
     let editAccount: Brokerage?
     /// Reloads the account list after a save.
@@ -17,7 +18,7 @@ struct LinkBrokerageSheet: View {
         NavigationStack {
             Group {
                 if let form {
-                    LinkBrokerageForm(form: form, onSubmitted: finish, onCancel: { dismiss() })
+                    LinkBrokerageForm(form: form, onSubmitted: finish)
                 } else {
                     Color.clear
                 }
@@ -25,7 +26,9 @@ struct LinkBrokerageSheet: View {
             .navigationTitle(editAccount == nil ? "Link Brokerage Account" : "Edit Brokerage Account")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                // The Dart's close X; the Binance form's Cancel did the same
+                // (dismiss, held while a save runs), so it folds in here.
+                ToolbarItem(placement: .cancellationAction) {
                     Button {
                         dismiss()
                     } label: {
@@ -33,6 +36,11 @@ struct LinkBrokerageSheet: View {
                     }
                     .disabled(form?.submitting ?? false)
                     .accessibilityLabel("Close")
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    if let form {
+                        LinkBrokerageSubmitButton(form: form, onSubmitted: finish)
+                    }
                 }
             }
         }
@@ -54,10 +62,40 @@ struct LinkBrokerageSheet: View {
     }
 }
 
+/// Link Account / Save Changes for the form on screen (the edit form, else
+/// the selected tab), with the double-submit lock.
+private struct LinkBrokerageSubmitButton: View {
+    let form: LinkBrokerageFormModel
+    let onSubmitted: () async -> Void
+
+    var body: some View {
+        // The iOS 26 sheet idiom: an X leading, a checkmark trailing. The
+        // label (Link Account / Save Changes) is what VoiceOver reads; as text
+        // it pushed the title into truncation.
+        Button(role: .confirm) {
+            Task {
+                let saved: Bool
+                switch form.isEditing ? form.editForm : form.tab {
+                case .alpaca: saved = await form.submitAlpaca()
+                case .binanceus: saved = await form.submitBinanceus()
+                }
+                if saved { await onSubmitted() }
+            }
+        } label: {
+            if form.submitting {
+                ProgressView()
+            } else {
+                Label(form.isEditing ? "Save Changes" : "Link Account", systemImage: "checkmark")
+            }
+        }
+        .disabled(form.locked)
+        .accessibilityLabel(form.isEditing ? "Save Changes" : "Link Account")
+    }
+}
+
 private struct LinkBrokerageForm: View {
     @Bindable var form: LinkBrokerageFormModel
     let onSubmitted: () async -> Void
-    let onCancel: () -> Void
 
     var body: some View {
         Form {
@@ -72,6 +110,18 @@ private struct LinkBrokerageForm: View {
                     .listRowInsets(EdgeInsets())
                     .disabled(form.submitting)
                 }
+            }
+
+            // The save's result line, at the top where the toolbar's submit
+            // can be seen to answer.
+            if let message = form.submitMsg, !message.isEmpty {
+                Section {
+                    BrokerageNoteRow(message, color: form.submitOk ? DS.Palette.success : DS.Palette.danger)
+                }
+            }
+
+            if let account = form.editAccount {
+                BrokerageAccountInfoSection(account: account)
             }
 
             switch form.isEditing ? form.editForm : form.tab {
@@ -116,71 +166,27 @@ private struct LinkBrokerageForm: View {
             Text("Paper accounts have free IEX. Live accounts need a subscription for IEX or SIP.")
         }
 
-        if form.showTestPanel {
-            Section {
-                AlpacaTestPanel(form: form)
-            }
-        }
-
         Section {
-            if let message = form.submitMsg, !message.isEmpty {
-                BrokerageStatusRow(message: message, ok: form.submitOk)
+            InlineActionRow(form.testRunning ? "Testing…" : "Test",
+                            systemImage: Symbol.named("network_check"),
+                            isBusy: form.testRunning) {
+                Task { await form.runAlpacaTest() }
             }
-            HStack(spacing: 10) {
-                Button {
-                    Task { await form.runAlpacaTest() }
-                } label: {
-                    HStack(spacing: 6) {
-                        if form.testRunning {
-                            ProgressView()
-                        } else {
-                            Image(systemName: Symbol.named("network_check"))
-                        }
-                        Text(form.testRunning ? "Testing…" : "Test")
-                    }
-                    .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
-                .disabled(form.submitting || form.testRunning)
-
-                Button {
-                    Task {
-                        if await form.submitAlpaca() { await onSubmitted() }
-                    }
-                } label: {
-                    HStack(spacing: 6) {
-                        if form.submitting {
-                            ProgressView().tint(DS.Palette.onAccent)
-                        }
-                        Text(form.isEditing ? "Save Changes" : "Link Account")
-                    }
-                    .frame(maxWidth: .infinity)
-                }
-                .dsProminentButton()
-                .controlSize(.large)
-                .layoutPriority(1)
-                .disabled(form.locked)
-            }
-            .listRowBackground(Color.clear)
-            .listRowInsets(EdgeInsets())
+            .disabled(form.submitting)
 
             if form.showSaveAnyway {
-                Button {
+                InlineActionRow("Save Anyway", systemImage: Symbol.named("warning")) {
                     Task {
                         if await form.submitAlpaca(bypassTest: true) { await onSubmitted() }
                     }
-                } label: {
-                    Text("Save Anyway")
-                        .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
                 .tint(DS.Palette.warning)
                 .disabled(form.locked)
-                .listRowBackground(Color.clear)
-                .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 0, trailing: 0))
             }
+        }
+
+        if form.showTestPanel {
+            AlpacaTestPanel(form: form)
         }
     }
 
@@ -188,14 +194,6 @@ private struct LinkBrokerageForm: View {
 
     @ViewBuilder
     private var binance: some View {
-        Section {
-            BrokerageInfoBox(color: DS.Palette.accent) {
-                Text("Spot fees: \(Text("0.00% maker / 0.02% taker").fontWeight(.bold)) — ~12× cheaper than Alpaca crypto (0.25%), which is what makes high-frequency strategies viable. Create a read+trade API key at binance.us (no withdrawal permission needed).")
-            }
-            .listRowBackground(Color.clear)
-            .listRowInsets(EdgeInsets())
-        }
-
         Section {
             BrokerageFieldRow(label: "Account Name", placeholder: "e.g. Binance.US Paper", text: $form.binanceName)
             BrokerageFieldRow(label: "API Key", placeholder: "Binance.US API key", text: $form.binanceKey, mono: true)
@@ -214,134 +212,109 @@ private struct LinkBrokerageForm: View {
                         .foregroundStyle(.secondary)
                 }
             }
+        } footer: {
+            Text("Spot fees: \(Text("0.00% maker / 0.02% taker").fontWeight(.bold)) — ~12× cheaper than Alpaca crypto (0.25%), which is what makes high-frequency strategies viable. Create a read+trade API key at binance.us (no withdrawal permission needed).")
         }
 
         if !form.binancePaper {
             Section {
-                BrokerageInfoBox(color: DS.Palette.warning) {
-                    Text("⚠ Live account — instances bound here place real Binance.US MARKET orders with real funds.")
-                }
-                .listRowBackground(Color.clear)
-                .listRowInsets(EdgeInsets())
+                BrokerageNoteRow("⚠ Live account — instances bound here place real Binance.US MARKET orders with real funds.",
+                                 color: DS.Palette.warning)
             }
-        }
-
-        Section {
-            if let message = form.submitMsg, !message.isEmpty {
-                BrokerageStatusRow(message: message, ok: form.submitOk)
-            }
-            HStack(spacing: 10) {
-                Button(action: onCancel) {
-                    Text("Cancel").frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
-                .disabled(form.submitting)
-
-                Button {
-                    Task {
-                        if await form.submitBinanceus() { await onSubmitted() }
-                    }
-                } label: {
-                    HStack(spacing: 6) {
-                        if form.submitting {
-                            ProgressView().tint(DS.Palette.onAccent)
-                        }
-                        Text(form.isEditing ? "Save Changes" : "Link Account")
-                    }
-                    .frame(maxWidth: .infinity)
-                }
-                .dsProminentButton()
-                .controlSize(.large)
-                .layoutPriority(1)
-                .disabled(form.locked)
-            }
-            .listRowBackground(Color.clear)
-            .listRowInsets(EdgeInsets())
         }
     }
 }
 
-/// The Alpaca probe results — `_buildTestPanel`.
+/// Edit mode: the account's read-only details (the list row shows only the
+/// number) — the old card's Account # and Last refreshed lines.
+private struct BrokerageAccountInfoSection: View {
+    let account: Brokerage
+
+    var body: some View {
+        if account.accountNumber != nil || account.lastRefreshAt != nil || account.lastError != nil {
+            Section("Account") {
+                if let number = account.accountNumber {
+                    LabeledContent("Account #") { Text(verbatim: number) }
+                }
+                if let refreshed = account.lastRefreshAt {
+                    LabeledContent("Last refreshed", value: BrokeragesModel.refreshedLabel(refreshed))
+                }
+                if let error = account.lastError {
+                    Text("\(Text("Error: ").fontWeight(.semibold))\(error)")
+                        .font(.footnote)
+                        .foregroundStyle(DS.Palette.danger)
+                }
+            }
+        }
+    }
+}
+
+/// The Alpaca probe results — `_buildTestPanel`, as a form section: the
+/// headline (with Hide) in the header, one row per endpoint, then the hints.
 private struct AlpacaTestPanel: View {
     let form: LinkBrokerageFormModel
 
-    @Environment(\.colorScheme) private var colorScheme
-
     var body: some View {
         if form.testRunning {
-            HStack(spacing: 10) {
-                ProgressView()
-                Text("Running 5-endpoint probe against Alpaca…")
-                    .font(.footnote)
-                    .foregroundStyle(DS.Palette.onTint(DS.Palette.info, in: colorScheme))
+            Section {
+                HStack(spacing: 10) {
+                    ProgressView()
+                    Text("Running 5-endpoint probe against Alpaca…")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             }
         } else if let result = form.testResult {
             let summary = LinkBrokerageFormModel.TestSummary(result)
             let tone = summary.total == 0 ? DS.Palette.warning : (summary.ok ? DS.Palette.success : DS.Palette.danger)
-            let ink = DS.Palette.onTint(tone, in: colorScheme)
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 8) {
-                    Image(systemName: Symbol.named(summary.total == 0 ? "info_outline" : (summary.ok ? "check_circle_outline" : "error_outline")))
-                        .foregroundStyle(tone)
-                    Text(summary.headline)
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(ink)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    Button {
-                        form.showTestPanel = false
-                    } label: {
-                        Image(systemName: Symbol.named("close"))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 30, height: 30)
-                    }
-                    .buttonStyle(.borderless)
-                    .accessibilityLabel("Hide test results")
-                }
-
+            Section {
                 ForEach(Array(summary.tests.enumerated()), id: \.offset) { _, test in
                     let ok = test["ok"].bool
                     let color = ok ? DS.Palette.success : DS.Palette.danger
-                    HStack(alignment: .top, spacing: 8) {
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
                         Image(systemName: Symbol.named(ok ? "check_circle_outline" : "cancel"))
-                            .font(.footnote)
                             .foregroundStyle(color)
                         VStack(alignment: .leading, spacing: 2) {
-                            HStack {
+                            HStack(alignment: .firstTextBaseline) {
                                 Text(verbatim: test["name"].string ?? "")
-                                    .font(.system(.caption, design: .monospaced))
+                                    .font(.system(.subheadline, design: .monospaced))
                                 Spacer()
                                 if !test["status"].isNull {
                                     Text("HTTP \(test["status"].dartDescription)")
-                                        .font(.caption2)
-                                        .foregroundStyle(DS.Palette.onTint(color, in: colorScheme))
+                                        .font(.footnote.monospacedDigit())
+                                        .foregroundStyle(.secondary)
                                 }
                             }
                             if let message = test["message"].string, !message.isEmpty {
                                 Text(message)
-                                    .font(.caption2)
+                                    .font(.footnote)
                                     .foregroundStyle(ok ? AnyShapeStyle(.secondary) : AnyShapeStyle(DS.Palette.danger))
                             }
                         }
                     }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                    .background(color.opacity(DS.tintFill), in: .rect(cornerRadius: DS.Radius.small, style: .continuous))
+                    .accessibilityElement(children: .combine)
                 }
 
                 if !summary.hints.isEmpty {
-                    VStack(alignment: .leading, spacing: 2) {
+                    VStack(alignment: .leading, spacing: 4) {
                         Label("Hints", systemImage: Symbol.named("lightbulb"))
-                            .font(.caption2.weight(.semibold))
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(DS.Palette.warning)
                         ForEach(Array(summary.hints.enumerated()), id: \.offset) { _, hint in
-                            Text(hint).font(.caption2)
+                            Text(hint).font(.footnote)
                         }
                     }
-                    .foregroundStyle(DS.Palette.onTint(DS.Palette.warning, in: colorScheme))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(10)
-                    .background(DS.Palette.warning.opacity(DS.tintFill), in: .rect(cornerRadius: DS.Radius.small, style: .continuous))
                 }
+            } header: {
+                HStack(spacing: 6) {
+                    Image(systemName: Symbol.named(summary.total == 0 ? "info_outline" : (summary.ok ? "check_circle_outline" : "error_outline")))
+                        .foregroundStyle(tone)
+                    Text(summary.headline)
+                    Spacer()
+                    Button("Hide") { form.showTestPanel = false }
+                        .accessibilityLabel("Hide test results")
+                }
+                .textCase(nil)
             }
         }
     }
@@ -376,34 +349,31 @@ private struct BrokerageFieldRow: View {
     }
 }
 
-/// The shared status line — `_buildStatusMsg`.
-private struct BrokerageStatusRow: View {
+/// A status or warning line as a plain form row: a coloured glyph and the
+/// text — `_buildStatusMsg` and `_infoBox`, without the tinted box.
+private struct BrokerageNoteRow: View {
     let message: String
-    let ok: Bool
-
-    var body: some View {
-        BrokerageInfoBox(color: ok ? DS.Palette.success : DS.Palette.danger) {
-            Text(message)
-        }
-        .listRowBackground(Color.clear)
-        .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 10, trailing: 0))
-    }
-}
-
-/// A tinted note — `_infoBox`.
-private struct BrokerageInfoBox<Content: View>: View {
     let color: Color
-    @ViewBuilder let content: Content
+
+    init(_ message: String, color: Color) {
+        self.message = message
+        self.color = color
+    }
 
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        content
-            .font(.footnote)
-            .foregroundStyle(DS.Palette.onTint(color, in: colorScheme))
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background(color.opacity(DS.tintFill), in: .rect(cornerRadius: DS.Radius.small, style: .continuous))
+        let symbol = color == DS.Palette.success ? "checkmark.circle.fill"
+            : (color == DS.Palette.danger ? "exclamationmark.circle.fill" : "exclamationmark.triangle.fill")
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Image(systemName: symbol)
+                .foregroundStyle(color)
+                .accessibilityHidden(true)
+            Text(message)
+                .font(.subheadline)
+                .foregroundStyle(DS.Palette.onTint(color, in: colorScheme))
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityElement(children: .combine)
     }
 }

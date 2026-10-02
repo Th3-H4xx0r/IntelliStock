@@ -50,26 +50,20 @@ struct NotificationSettingsView: View {
     private func content(_ prefs: NotificationPrefs) -> some View {
         List {
             Section {
-                Text("Send a sample notification to confirm a channel works.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                HStack(spacing: 10) {
-                    NotificationTestButton(icon: "discord", label: "Test Discord") { await sendTest(.discord) }
-                    NotificationTestButton(icon: "notifications", label: "Test iOS Push") { await sendTest(.push) }
-                }
-                .listRowBackground(Color.clear)
-                .listRowInsets(EdgeInsets())
+                NotificationTestButton(icon: "discord", label: "Test Discord") { await sendTest(.discord) }
+                NotificationTestButton(icon: "notifications", label: "Test iOS Push") { await sendTest(.push) }
             } header: {
-                Text("TEST DELIVERY")
+                Text("Test delivery")
+            } footer: {
+                Text("Send a sample notification to confirm a channel works.")
             }
 
-            Section("REGISTERED DEVICES") {
+            Section("Registered devices") {
                 switch devices?.devices ?? .loading {
                 case .loading:
                     HStack(spacing: 10) {
                         ProgressView()
                         Text("Checking registered devices…")
-                            .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
                 case .failed(let error):
@@ -80,59 +74,67 @@ struct NotificationSettingsView: View {
                     if list.isEmpty {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("No devices registered yet.")
-                                .font(.body.weight(.semibold))
                             Text("Tap \"Enable push on this device\" and allow notifications. Requires a physical device with the app installed (push doesn't work in the simulator).")
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
                         }
                     } else {
                         ForEach(list) { device in
-                            HStack(spacing: 10) {
-                                Image(systemName: Symbol.named("notifications"))
-                                    .foregroundStyle(.tint)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(verbatim: device.tokenSuffix)
-                                    Text(pushDeviceSubtitle(device))
-                                        .font(.footnote)
-                                        .foregroundStyle(.secondary)
-                                }
-                                Spacer()
-                                Button {
+                            let busy = removing.contains(device.deviceToken)
+                            EntityRow(device.tokenSuffix, subtitle: pushDeviceSubtitle(device), systemImage: Symbol.named("notifications")) {
+                                if busy { ProgressView() }
+                            }
+                            // Swipe (or long-press) to remove; there was no
+                            // confirmation before, and there is none now.
+                            .swipeActions(edge: .trailing) {
+                                Button("Remove", systemImage: Symbol.named("delete"), role: .destructive) {
                                     Task { await remove(device) }
-                                } label: {
-                                    Image(systemName: Symbol.named("delete"))
-                                        .frame(width: 44, height: 44)
                                 }
-                                .buttonStyle(.borderless)
-                                .tint(.secondary)
-                                .disabled(removing.contains(device.deviceToken))
-                                .accessibilityLabel("Remove")
+                                .disabled(busy)
+                            }
+                            .contextMenu {
+                                Button("Remove", systemImage: Symbol.named("delete"), role: .destructive) {
+                                    Task { await remove(device) }
+                                }
+                                .disabled(busy)
                             }
                         }
                     }
                 }
-                Button {
+                InlineActionRow("Enable Push on This Device", systemImage: Symbol.named("notifications")) {
                     Task { await enableOnThisDevice() }
-                } label: {
-                    Label("Enable Push on This Device", systemImage: Symbol.named("notifications"))
                 }
             }
 
+            // One section per alert type, titled with the type, holding its
+            // two channel switches. The first type of a group carries the
+            // group's name above its own.
             ForEach(NotificationPrefsModel.groupedTypes(prefs), id: \.group) { group in
-                Section(group.group.uppercased()) {
-                    ForEach(group.types, id: \.key) { type in
-                        NotificationCategoryRow(
-                            label: type.label,
-                            description: type.desc,
-                            route: prefs.routeFor(type.key),
-                            onDiscord: { value in Task { await toggle(type.key, .discord, value) } },
-                            onPush: { value in Task { await toggle(type.key, .push, value) } }
-                        )
+                ForEach(Array(group.types.enumerated()), id: \.element.key) { index, type in
+                    let route = prefs.routeFor(type.key)
+                    Section {
+                        Toggle("Discord", isOn: Binding(
+                            get: { route.discord },
+                            set: { value in Task { await toggle(type.key, .discord, value) } }
+                        ))
+                        Toggle("iOS push", isOn: Binding(
+                            get: { route.push },
+                            set: { value in Task { await toggle(type.key, .push, value) } }
+                        ))
+                    } header: {
+                        NotificationTypeHeader(group: index == 0 ? group.group : nil, label: type.label)
+                    } footer: {
+                        Text(type.desc)
                     }
                 }
             }
         }
         .listStyle(.insetGrouped)
+        .refreshable {
+            async let prefs: Void = model?.load() ?? ()
+            async let list: Void = devices?.refresh() ?? ()
+            _ = await (prefs, list)
+        }
     }
 
     // MARK: Actions
@@ -180,42 +182,31 @@ struct NotificationSettingsView: View {
     }
 }
 
-/// One category — `_CategoryRow`: label, description, two switches.
-private struct NotificationCategoryRow: View {
+/// A type's section header: the group's name over the first type of each
+/// group, then the type's label.
+private struct NotificationTypeHeader: View {
+    let group: String?
     let label: String
-    let description: String
-    let route: CategoryRoute
-    let onDiscord: (Bool) -> Void
-    let onPush: (Bool) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(label).font(.body.weight(.semibold))
-                Text(description)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 6) {
+            if let group {
+                // Color.primary, not the hierarchical .primary, which the
+                // header resolves to its own secondary grey.
+                Text(group)
+                    .font(.title3.bold())
+                    .foregroundStyle(Color.primary)
+                    .padding(.top, 8)
+                    .accessibilityAddTraits(.isHeader)
             }
-            HStack(spacing: 20) {
-                Toggle(isOn: Binding(get: { route.discord }, set: { onDiscord($0) })) {
-                    Text("Discord")
-                        .font(.footnote)
-                        .foregroundStyle(route.discord ? .primary : .secondary)
-                }
-                .fixedSize()
-                Toggle(isOn: Binding(get: { route.push }, set: { onPush($0) })) {
-                    Text("iOS push")
-                        .font(.footnote)
-                        .foregroundStyle(route.push ? .primary : .secondary)
-                }
-                .fixedSize()
-            }
+            Text(label)
         }
-        .padding(.vertical, 4)
+        .textCase(nil)
     }
 }
 
-/// A tinted action button — `_TestButton`.
+/// A test-send action as a list row — `_TestButton`, with a spinner while
+/// the send runs.
 private struct NotificationTestButton: View {
     let icon: String
     let label: String
@@ -224,20 +215,12 @@ private struct NotificationTestButton: View {
     @State private var running = false
 
     var body: some View {
-        Button {
+        InlineActionRow(label, systemImage: Symbol.named(icon), isBusy: running) {
             running = true
             Task {
                 await action()
                 running = false
             }
-        } label: {
-            Label(label, systemImage: Symbol.named(icon))
-                .font(.subheadline)
-                .lineLimit(1)
-                .frame(maxWidth: .infinity)
         }
-        .buttonStyle(.bordered)
-        .controlSize(.large)
-        .disabled(running)
     }
 }

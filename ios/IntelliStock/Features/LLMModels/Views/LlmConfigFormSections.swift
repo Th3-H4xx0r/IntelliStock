@@ -116,19 +116,26 @@ struct LlmConfigFormSections: View {
 
     // MARK: Provider sections
 
+    @ViewBuilder
     private var cliSection: some View {
         let d = draft
-        return Section {
+        Section {
             LlmField(label: "CLI Path", placeholder: d.provider == "codex-cli" ? "codex" : "claude", text: $draft.cliPath, mono: true)
             LlmField(label: "Extra Args",
                      placeholder: d.provider == "codex-cli" ? "--sandbox read-only" : "--fallback-model claude-haiku-4-5",
                      text: $draft.extraArgs, mono: true)
-            if d.provider == "codex-cli" {
+        } footer: {
+            if d.provider == "claude-cli" {
+                Text("Uses the locally-installed claude binary on the server (subscription auth). Tools are disabled — CC is used as a text-only LLM. Use the panel below to re-authenticate when the token expires; no SSH required.")
+            }
+        }
+        if d.provider == "codex-cli" {
+            Section {
                 CodexCliSetupPanel(cliPath: d.cliPath.isEmpty ? "codex" : d.cliPath)
             }
-            if d.provider == "claude-cli" {
-                ModelInfoBox(text: "Uses the locally-installed claude binary on the server (subscription auth). Tools are disabled — CC is used as a text-only LLM. Use the panel below to re-authenticate when the token expires; no SSH required.",
-                             color: DS.Palette.info)
+        }
+        if d.provider == "claude-cli" {
+            Section {
                 ClaudeCliSetupPanel(cliPath: d.cliPath.isEmpty ? "claude" : d.cliPath)
             }
         }
@@ -175,16 +182,15 @@ struct LlmConfigFormSections: View {
         let d = draft
         return Section {
             LlmField(label: "AWS Region", placeholder: "us-east-1", text: $draft.bedrockRegion, mono: true)
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
+            // The region chips, as one menu: picking a region fills the field.
+            Menu {
+                Picker("AWS Region", selection: $draft.bedrockRegion) {
                     ForEach(LlmOptions.bedrockRegions, id: \.self) { region in
-                        Button(region) { draft.bedrockRegion = region }
-                            .font(.system(.caption2, design: .monospaced))
-                            .buttonStyle(.bordered)
-                            .buttonBorderShape(.capsule)
-                            .controlSize(.small)
+                        Text(verbatim: region).tag(region)
                     }
                 }
+            } label: {
+                Label("Common regions", systemImage: "globe")
             }
             LlmField(label: "API Key (required — Bedrock bearer token)", placeholder: "Bedrock API key (bearer token)",
                      text: $draft.apiKey, secure: true)
@@ -221,9 +227,10 @@ struct LlmConfigFormSections: View {
     private var openrouterSection: some View {
         Section {
             LlmField(label: "OpenRouter Base URL", placeholder: "https://openrouter.ai/api/v1", text: $draft.openrouterBaseUrl, mono: true)
-            ModelInfoBox(text: "Model ids are vendor/model, e.g. anthropic/claude-3.5-sonnet.", color: DS.Palette.info)
             LlmField(label: "HTTP-Referer (optional)", placeholder: "https://your-site.example", text: $draft.openrouterReferer, mono: true)
             LlmField(label: "X-Title (optional)", placeholder: "IntelliStock", text: $draft.openrouterTitle, mono: true)
+        } footer: {
+            Text(verbatim: "Model ids are vendor/model, e.g. anthropic/claude-3.5-sonnet.")
         }
     }
 
@@ -232,8 +239,8 @@ struct LlmConfigFormSections: View {
             LlmField(label: "Azure Endpoint", placeholder: "https://your-resource.services.ai.azure.com",
                      text: $draft.azureOpenaiEndpoint, mono: true)
             LlmField(label: "API Version", placeholder: "2024-10-21", text: $draft.azureOpenaiApiVersion, mono: true)
-            ModelInfoBox(text: "Use the Azure resource root plus your deployment/model name. Do not use a full /models/chat/completions or /openai/v1/ URL here.",
-                         color: DS.Palette.info)
+        } footer: {
+            Text(verbatim: "Use the Azure resource root plus your deployment/model name. Do not use a full /models/chat/completions or /openai/v1/ URL here.")
         }
     }
 }

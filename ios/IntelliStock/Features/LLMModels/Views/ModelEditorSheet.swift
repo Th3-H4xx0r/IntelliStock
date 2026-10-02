@@ -3,7 +3,8 @@ import SwiftUI
 /// Add or edit a model — `_AddEditSheet` in `models_screen.dart`: name, the
 /// LLM config form, pricing overrides, status, the test-result panel and the
 /// Cancel / Test only / Test & Save actions. Native form: a sheet with an
-/// inset-grouped form and a bottom action bar.
+/// inset-grouped form; Cancel (Close once saved) leads the toolbar, Test & Save
+/// trails it, and Test Only is a row.
 struct ModelEditorSheet: View {
     let existing: LlmModel?
     /// Reloads the list after a save.
@@ -25,17 +26,10 @@ struct ModelEditorSheet: View {
                 }
             }
             .navigationTitle(existing == nil ? "Add Model" : "Edit Model")
-            .navigationSubtitle("Save a reusable LLM configuration.")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        close()
-                    } label: {
-                        Image(systemName: Symbol.named("close"))
-                    }
-                    .disabled(editor?.submitting == true && editor?.saved != true)
-                    .accessibilityLabel("Close")
+                if let editor {
+                    toolbar(editor)
                 }
             }
         }
@@ -58,12 +52,53 @@ struct ModelEditorSheet: View {
         dismiss()
     }
 
+    /// The old bottom bar and close X: Cancel (Close after a save) leading,
+    /// the primary Test & Save trailing until the save lands. Cancel and the
+    /// X both dismissed, held while a save runs.
+    @ToolbarContentBuilder
+    private func toolbar(_ editor: ModelEditorModel) -> some ToolbarContent {
+        ToolbarItem(placement: .cancellationAction) {
+            if editor.saved {
+                Button("Close") { close() }
+            } else {
+                Button("Cancel") { dismiss() }
+                    .disabled(editor.submitting)
+            }
+        }
+        if !editor.saved {
+            ToolbarItem(placement: .confirmationAction) {
+                Button {
+                    Task { await editor.testAndSave() }
+                } label: {
+                    if editor.submitting {
+                        ProgressView()
+                    } else {
+                        Text(editor.primaryLabel)
+                    }
+                }
+                .dsProminentButton()
+                .disabled(editor.submitting)
+                .accessibilityLabel(editor.primaryLabel)
+            }
+        }
+    }
+
     private func content(_ editor: ModelEditorModel, _ pickers: LlmPickersModel) -> some View {
         @Bindable var editor = editor
         return Form {
-            Section("Name") {
+            if let existing {
+                ModelSavedSection(model: existing)
+            }
+
+            // The sheet's subtitle is this section's footer: as a nav
+            // subtitle it truncated beside the toolbar buttons.
+            Section {
                 TextField("Name", text: $editor.name, prompt: Text("e.g. Gemini Flash — Main"))
                     .autocorrectionDisabled()
+            } header: {
+                Text("Name")
+            } footer: {
+                Text("Save a reusable LLM configuration.")
             }
             .disabled(editor.submitting)
 
@@ -82,73 +117,57 @@ struct ModelEditorSheet: View {
             }
             .disabled(editor.submitting)
 
-            if !editor.statusMsg.isEmpty || editor.testResult != nil || editor.isEdit {
+            if editor.isEdit {
                 Section {
+                    ModelInfoBox(text: "Leave API Key empty to keep the existing key unchanged.", color: DS.Palette.warning)
+                }
+            }
+
+            // The old bottom bar's Test Only (not for Claude Code CLI), and
+            // the run's status line.
+            if (!editor.saved && editor.draft.provider != "claude-cli") || !editor.statusMsg.isEmpty {
+                Section {
+                    if !editor.saved, editor.draft.provider != "claude-cli" {
+                        InlineActionRow(editor.submitting ? "Testing…" : "Test Only",
+                                        systemImage: Symbol.named("network_check"),
+                                        isBusy: editor.submitting) {
+                            Task { await editor.testOnly() }
+                        }
+                    }
                     if !editor.statusMsg.isEmpty {
                         ModelInfoBox(text: editor.statusMsg, color: editor.statusOk ? DS.Palette.success : DS.Palette.danger)
                     }
-                    if let result = editor.testResult {
-                        LlmTestResultPanel(result: result)
-                    }
-                    if editor.isEdit {
-                        ModelInfoBox(text: "Leave API Key empty to keep the existing key unchanged.", color: DS.Palette.warning)
-                    }
                 }
-                .listRowBackground(Color.clear)
-                .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
+            }
+
+            if let result = editor.testResult {
+                Section("LLM connectivity test response") {
+                    LlmTestResultPanel(result: result)
+                }
             }
         }
         .llmPickerFetches(editor.draft, pickers)
-        .safeAreaInset(edge: .bottom) { actions(editor) }
     }
+}
 
-    private func actions(_ editor: ModelEditorModel) -> some View {
-        HStack(spacing: 10) {
-            if editor.saved {
-                Button {
-                    close()
-                } label: {
-                    Text("Close").frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-                .tint(DS.Palette.success)
-            } else {
-                Button {
-                    dismiss()
-                } label: {
-                    Text("Cancel").frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-                .tint(.secondary)
-                .disabled(editor.submitting)
+/// Edit mode: the saved model's details, which the list row no longer
+/// shows — the old card's Model, Effort, Key/CLI (masked) and Created.
+private struct ModelSavedSection: View {
+    let model: LlmModel
 
-                if editor.draft.provider != "claude-cli" {
-                    Button {
-                        Task { await editor.testOnly() }
-                    } label: {
-                        Text(editor.submitting ? "Testing…" : "Test Only").frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(editor.submitting)
-                }
-
-                Button {
-                    Task { await editor.testAndSave() }
-                } label: {
-                    HStack(spacing: 6) {
-                        if editor.submitting { ProgressView().tint(DS.Palette.onAccent) }
-                        Text(editor.primaryLabel).lineLimit(1).minimumScaleFactor(0.8)
-                    }
-                    .frame(maxWidth: .infinity)
-                }
-                .dsProminentButton()
-                .disabled(editor.submitting)
+    var body: some View {
+        Section("Saved model") {
+            LabeledContent("Model") {
+                Text(verbatim: model.model).lineLimit(1).truncationMode(.middle)
+            }
+            LabeledContent("Effort", value: LlmModelCells.reasoning(model))
+            LabeledContent("Key/CLI") {
+                Text(verbatim: LlmModelCells.key(model)).lineLimit(1).truncationMode(.middle)
+            }
+            if let created = model.createdAt {
+                LabeledContent("Created", value: fmtDate(parseDateTime(created)))
             }
         }
-        .controlSize(.large)
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(.bar)
     }
 }
 
@@ -168,7 +187,8 @@ private struct ModelPricingField: View {
     }
 }
 
-/// A tinted note — the screen's status and info containers.
+/// A note — the screen's status and info lines: a coloured glyph and the
+/// text, as a plain row (the redesign drops the tinted box).
 struct ModelInfoBox: View {
     let text: String
     let color: Color
@@ -176,12 +196,23 @@ struct ModelInfoBox: View {
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        Text(text)
-            .font(.footnote)
-            .foregroundStyle(DS.Palette.onTint(color, in: colorScheme))
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(12)
-            .background(color.opacity(DS.tintFill), in: .rect(cornerRadius: DS.Radius.small, style: .continuous))
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: Self.symbol(color))
+                .foregroundStyle(color)
+                .accessibilityHidden(true)
+            Text(text)
+                .font(.footnote)
+                .foregroundStyle(color == DS.Palette.info ? AnyShapeStyle(.secondary) : AnyShapeStyle(DS.Palette.onTint(color, in: colorScheme)))
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    static func symbol(_ color: Color) -> String {
+        if color == DS.Palette.success { return "checkmark.circle.fill" }
+        if color == DS.Palette.danger { return "exclamationmark.circle.fill" }
+        if color == DS.Palette.warning { return "exclamationmark.triangle.fill" }
+        return "info.circle"
     }
 }
 
@@ -193,11 +224,8 @@ struct LlmTestResultPanel: View {
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        let ink = DS.Palette.onTint(DS.Palette.success, in: colorScheme)
+        let ink = Color.primary
         VStack(alignment: .leading, spacing: 8) {
-            Text("LLM connectivity test response")
-                .font(.footnote.weight(.semibold))
-                .foregroundStyle(ink)
             ChatFlowLayout(spacing: 12) {
                 if let provider = result.provider { kv("provider", provider, ink) }
                 if let model = result.model { kv("model", model, ink) }
@@ -236,17 +264,13 @@ struct LlmTestResultPanel: View {
                     Text("smoke generation failed: \(error)")
                         .font(.system(.caption2, design: .monospaced))
                         .foregroundStyle(DS.Palette.onTint(DS.Palette.danger, in: colorScheme))
-                        .padding(8)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(DS.Palette.danger.opacity(DS.tintFill), in: .rect(cornerRadius: 4))
                 }
                 if result.smokeResponse == nil, result.smokeThinking == nil, result.smokeError == nil {
                     Text("smoke generation returned empty — structured check passed but the model did not produce free-form text.")
                         .font(.caption2)
                         .foregroundStyle(DS.Palette.onTint(DS.Palette.warning, in: colorScheme))
-                        .padding(8)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(DS.Palette.warning.opacity(DS.tintFill), in: .rect(cornerRadius: 4))
                 }
             }
             if !result.providerMeta.isNull {
@@ -254,15 +278,14 @@ struct LlmTestResultPanel: View {
                 codeBlock(Self.pretty(result.providerMeta))
             }
         }
-        .padding(12)
+        .padding(.vertical, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(DS.Palette.success.opacity(DS.tintFill), in: .rect(cornerRadius: DS.Radius.small, style: .continuous))
     }
 
     private func kv(_ label: String, _ value: String, _ ink: Color) -> some View {
         HStack(spacing: 2) {
-            Text("\(label):").font(.caption2).foregroundStyle(ink.opacity(0.8))
-            Text(verbatim: value).font(.system(.caption2, design: .monospaced)).foregroundStyle(ink)
+            Text("\(label):").font(.caption).foregroundStyle(.secondary)
+            Text(verbatim: value).font(.system(.caption, design: .monospaced)).foregroundStyle(ink)
         }
     }
 

@@ -89,9 +89,8 @@ private struct ChatToolChip: View {
     let name: String
 
     var body: some View {
-        Label(name.uppercased(), systemImage: Symbol.named("build"))
-            .font(.caption2.weight(.medium))
-            .tracking(0.6)
+        Label(name, systemImage: Symbol.named("build"))
+            .font(.caption.weight(.medium))
             .foregroundStyle(.tint)
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
@@ -150,10 +149,8 @@ private struct ChatTableBlock: View {
         ChatBlockCard {
             VStack(alignment: .leading, spacing: 0) {
                 if let title {
-                    Text(title.uppercased())
-                        .font(.caption.weight(.bold))
-                        .tracking(1.2)
-                        .foregroundStyle(.secondary)
+                    Text(title)
+                        .font(.headline)
                         .padding(.horizontal, 12)
                         .padding(.top, 10)
                         .padding(.bottom, 4)
@@ -202,10 +199,8 @@ private struct ChatChartBlock: View {
             ChatBlockCard {
                 VStack(alignment: .leading, spacing: 8) {
                     if let title = block["title"]?.string {
-                        Text(title.uppercased())
-                            .font(.caption.weight(.bold))
-                            .tracking(1.2)
-                            .foregroundStyle(.secondary)
+                        Text(title)
+                            .font(.headline)
                     }
                     Chart {
                         ForEach(series) { s in
@@ -257,9 +252,8 @@ private struct ChatStatBlock: View {
         let trend = block["trend"]?.string
         ChatBlockCard {
             VStack(alignment: .leading, spacing: 4) {
-                Text(label.uppercased())
-                    .font(.caption.weight(.bold))
-                    .tracking(1.2)
+                Text(label)
+                    .font(.subheadline)
                     .foregroundStyle(.secondary)
                 HStack(spacing: 6) {
                     Text(value)
@@ -327,10 +321,9 @@ struct ChatToolCallCard: View {
                 Image(systemName: Symbol.named(tier.icon))
                     .foregroundStyle(tier.color)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(tier.label.uppercased())
-                        .font(.caption2.weight(.bold))
-                        .tracking(1.2)
-                        .foregroundStyle(ink.opacity(0.8))
+                    Text(tier.label)
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(ink)
                     Text(tool?.name ?? "tool")
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(ink)
@@ -364,8 +357,7 @@ struct ChatToolCallCard: View {
 
             if requiresTyped {
                 Text("Type CONFIRM to proceed")
-                    .font(.caption.weight(.semibold))
-                    .tracking(0.5)
+                    .font(.footnote.weight(.semibold))
                     .foregroundStyle(ink)
                     .padding(.top, 12)
                 TextField("CONFIRM", text: $typed)
@@ -415,7 +407,7 @@ struct ChatToolCallCard: View {
         case "safe":
             Tier(color: DS.Palette.accent, label: "Run tool", icon: "play_circle_outline")
         case "destructive":
-            Tier(color: DS.Palette.danger, label: "DESTRUCTIVE — confirm carefully", icon: "warning_amber_outlined")
+            Tier(color: DS.Palette.danger, label: "Destructive — confirm carefully", icon: "warning_amber_outlined")
         default:
             Tier(color: DS.Palette.warning, label: "This will change your workspace", icon: "play_circle_outline")
         }
@@ -488,13 +480,12 @@ struct ChatModelPicker: View {
         ScrollView {
             VStack(spacing: 0) {
                 IconTile(systemImage: Symbol.named("smart_toy"), size: 56)
-                Text("WELCOME")
-                    .font(.footnote.weight(.bold))
-                    .tracking(1.2)
-                    .foregroundStyle(.tint)
+                Text("Welcome")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
                     .padding(.top, 16)
                 Text("Pick the model that powers me")
-                    .font(.headline)
+                    .font(.title3.bold())
                     .multilineTextAlignment(.center)
                     .padding(.top, 4)
                 Text("I'll use this model for every reply in this conversation. You can swap it later in settings.")
@@ -520,9 +511,8 @@ struct ChatModelPicker: View {
                             .background(DS.Palette.warning.opacity(0.1), in: .rect(cornerRadius: DS.Radius.control, style: .continuous))
                     } else {
                         VStack(alignment: .leading, spacing: 6) {
-                            Text("MODEL")
-                                .font(.caption.weight(.bold))
-                                .tracking(1.2)
+                            Text("Model")
+                                .font(.subheadline.weight(.semibold))
                                 .foregroundStyle(.secondary)
                             ForEach(models) { m in
                                 ChatModelRow(model: m, selected: selectedId == m.id) { selectedId = m.id }

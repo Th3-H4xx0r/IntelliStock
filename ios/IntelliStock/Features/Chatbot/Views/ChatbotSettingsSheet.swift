@@ -19,7 +19,7 @@ struct ChatSettingsSheet: View {
         let convo = st.activeConversation
         NavigationStack {
             Form {
-                Section("MODEL") {
+                Section("Model") {
                     if !st.modelsLoaded, st.models.isEmpty {
                         LoadingState(label: "Loading models…")
                     } else if st.modelsLoaded, st.models.isEmpty {
@@ -35,12 +35,14 @@ struct ChatSettingsSheet: View {
                                 HStack {
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text(m.name)
-                                            .foregroundStyle(selected ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
+                                            // Color.primary: inside a list Button the hierarchical
+                                            // .primary resolves to the tint, which coloured every row.
+                                            .foregroundStyle(selected ? AnyShapeStyle(.tint) : AnyShapeStyle(Color.primary))
                                         let sub = ChatBlockFormat.modelSubtitle(provider: m.provider, model: m.model)
                                         if !sub.isEmpty {
                                             Text(sub)
-                                                .font(.caption)
-                                                .foregroundStyle(.secondary)
+                                                .font(.footnote)
+                                                .foregroundStyle(Color.secondary)
                                         }
                                     }
                                     Spacer()
@@ -65,12 +67,12 @@ struct ChatSettingsSheet: View {
                     }
                     .disabled(convo == nil)
                 } header: {
-                    Text("TOOLS")
+                    Text("Tools")
                 } footer: {
                     Text("When on, the assistant can call read-only tools like list_instances without asking. Mutating tools always require approval.")
                 }
 
-                Section("CONVERSATION") {
+                Section("Conversation") {
                     Button {
                         Task { await model.startNewConversationFromUI() }
                         dismiss()
@@ -108,7 +110,7 @@ struct ChatSettingsSheet: View {
 
                 if !st.toolCatalog.isEmpty {
                     let groups = ChatToolGroups(st.toolCatalog)
-                    Section("TOOLS THE ASSISTANT CAN USE") {
+                    Section("Tools the assistant can use") {
                         if !groups.safe.isEmpty {
                             ChatToolGroupRow(title: "Read-only · auto-runnable", color: DS.Palette.success, tools: groups.safe)
                         }

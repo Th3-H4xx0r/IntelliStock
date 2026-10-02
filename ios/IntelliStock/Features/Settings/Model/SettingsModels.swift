@@ -102,7 +102,10 @@ nonisolated struct NotificationTestOutcome: Equatable, Sendable {
 
 /// A registered device's subtitle — `_DeviceTile`: `IOS · env · seen <date>`.
 nonisolated func pushDeviceSubtitle(_ device: PushDevice) -> String {
-    var parts = [device.platform.uppercased(), device.env]
+    // "iOS" in its own casing (the redesign bans upper case except acronyms);
+    // any other platform is capitalised ("android" → "Android").
+    let platform = device.platform.lowercased() == "ios" ? "iOS" : device.platform.capitalized
+    var parts = [platform, device.env]
     if let seen = device.lastSeen, !seen.isEmpty {
         parts.append("seen \(seen.split(separator: "T", omittingEmptySubsequences: false).first.map(String.init) ?? seen)")
     }

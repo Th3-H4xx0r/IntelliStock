@@ -44,11 +44,32 @@ final class BrokeragesModel {
         }
     }
 
-    /// The card badge: `ALPACA · Paper|Live`, else the upper-cased type.
-    nonisolated static func badgeLabel(_ account: Brokerage) -> String {
-        account.brokerageType == "alpaca"
-            ? "ALPACA · \(account.paper ? "Paper" : "Live")"
-            : account.brokerageType.uppercased()
+    /// A `brokerage_type`'s brand name, in its own casing (the redesign bans
+    /// the Dart's upper-cased badge).
+    nonisolated static func typeLabel(_ type: String) -> String {
+        switch type.lowercased() {
+        case "alpaca": "Alpaca"
+        case "binanceus": "Binance.US"
+        case "kalshi": "Kalshi"
+        case "robinhood": "Robinhood"
+        default: type.capitalized
+        }
+    }
+
+    /// The row subtitle: the old card badge (`Alpaca · Paper|Live`, else the
+    /// type) then the account number, e.g. "Alpaca · Paper · PA3IBY5S84PG".
+    nonisolated static func rowSubtitle(_ account: Brokerage) -> String {
+        var parts = [typeLabel(account.brokerageType)]
+        if account.brokerageType == "alpaca" { parts.append(account.paper ? "Paper" : "Live") }
+        if let number = account.accountNumber, !number.isEmpty { parts.append(number) }
+        return parts.joined(separator: " · ")
+    }
+
+    /// The status word for the row's dot: the server's status, capitalised
+    /// ("active" → "Active"); none reads "Unknown".
+    nonisolated static func statusLabel(_ status: String?) -> String {
+        let raw = status ?? "unknown"
+        return raw.prefix(1).uppercased() + raw.dropFirst()
     }
 
     /// `_fmtDateTime`: parsed and formatted, else the raw text.

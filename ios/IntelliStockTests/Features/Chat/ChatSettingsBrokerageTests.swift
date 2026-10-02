@@ -104,7 +104,9 @@ import Testing
     @Test func deviceSubtitleAndVersion() {
         let device = PushDevice(json: ["device_token": "0123456789abcdef", "platform": "ios", "env": "sandbox", "last_seen": "2026-06-11T00:00:00Z"])
         #expect(device.tokenSuffix == "…89abcdef")
-        #expect(pushDeviceSubtitle(device) == "IOS · sandbox · seen 2026-06-11")
+        #expect(pushDeviceSubtitle(device) == "iOS · sandbox · seen 2026-06-11")
+        let android = PushDevice(json: ["device_token": "0123456789abcdef", "platform": "android", "env": "prod"])
+        #expect(pushDeviceSubtitle(android) == "Android · prod")
         #expect(appVersionString(["CFBundleShortVersionString": "1.2.0", "CFBundleVersion": "7"]) == "1.2.0+7")
         #expect(appVersionString(["CFBundleShortVersionString": "1.2.0", "CFBundleVersion": ""]) == "1.2.0")
     }
@@ -148,9 +150,14 @@ import Testing
     }
 
     @Test func cardHelpers() {
-        #expect(BrokeragesModel.badgeLabel(Brokerage(json: ["brokerage_type": "alpaca", "paper": true])) == "ALPACA · Paper")
-        #expect(BrokeragesModel.badgeLabel(Brokerage(json: ["brokerage_type": "alpaca", "paper": false])) == "ALPACA · Live")
-        #expect(BrokeragesModel.badgeLabel(Brokerage(json: ["brokerage_type": "binanceus"])) == "BINANCEUS")
+        // The row subtitle carries the old badge (title-cased) and the number.
+        #expect(BrokeragesModel.rowSubtitle(Brokerage(json: ["brokerage_type": "alpaca", "paper": true])) == "Alpaca · Paper")
+        #expect(BrokeragesModel.rowSubtitle(Brokerage(json: ["brokerage_type": "alpaca", "paper": false, "account_number": "165399789"]))
+            == "Alpaca · Live · 165399789")
+        #expect(BrokeragesModel.rowSubtitle(Brokerage(json: ["brokerage_type": "binanceus"])) == "Binance.US")
+        #expect(BrokeragesModel.rowSubtitle(Brokerage(json: ["brokerage_type": "kalshi", "alpaca_account_number": "K1"])) == "Kalshi · K1")
+        #expect(BrokeragesModel.statusLabel("active") == "Active")
+        #expect(BrokeragesModel.statusLabel(nil) == "Unknown")
         #expect(BrokeragesModel.statusTone("active") == .active)
         #expect(BrokeragesModel.statusTone("expired") == .expired)
         #expect(BrokeragesModel.statusTone(nil) == .other)

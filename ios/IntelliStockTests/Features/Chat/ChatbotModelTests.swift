@@ -329,7 +329,7 @@ nonisolated final class ChatStubRoutes: @unchecked Sendable {
 
     @Test func toolCardTiers() {
         #expect(ChatToolCallCard.tier("safe").label == "Run tool")
-        #expect(ChatToolCallCard.tier("destructive").label == "DESTRUCTIVE — confirm carefully")
+        #expect(ChatToolCallCard.tier("destructive").label == "Destructive — confirm carefully")
         #expect(ChatToolCallCard.tier("write").label == "This will change your workspace")
         #expect(ChatToolCallCard.tier("anything").label == "This will change your workspace")
     }

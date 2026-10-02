@@ -17,10 +17,10 @@ struct SettingsView: View {
     var body: some View {
         let lock = services.lock
         List {
-            Section("SECURITY") {
+            Section("Security") {
                 SettingsRow(
                     icon: "lock",
-                    color: DS.Palette.accent,
+                    color: .green,
                     title: "Biometric Lock",
                     subtitle: biometricsSubtitle
                 ) {
@@ -38,7 +38,7 @@ struct SettingsView: View {
 
                 SettingsRow(
                     icon: "schedule",
-                    color: DS.Palette.info,
+                    color: .indigo,
                     title: "Auto-lock after",
                     subtitle: "Time before the app locks in background"
                 ) {
@@ -55,13 +55,15 @@ struct SettingsView: View {
                             .pickerStyle(.inline)
                         }
                     } label: {
+                        // The system menu-picker look: the value in secondary
+                        // with the up-down chevrons.
                         HStack(spacing: 4) {
                             Text(lock.timeout.label)
-                            Image(systemName: Symbol.named("expand_more"))
+                            Image(systemName: Symbol.named("unfold_more"))
                                 .font(.caption.weight(.semibold))
                         }
-                        .font(.subheadline)
-                        .foregroundStyle(lock.enabled ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
+                        .font(.body)
+                        .foregroundStyle(lock.enabled ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
                     }
                     .disabled(!lock.enabled)
                     .accessibilityLabel("Auto-lock timeout, \(lock.timeout.label)")
@@ -69,29 +71,32 @@ struct SettingsView: View {
 
                 SettingsRow(
                     icon: "check_circle",
-                    color: DS.Palette.success,
+                    tile: Symbol.named("check"),
+                    color: .blue,
                     title: "Require unlock on launch",
                     subtitle: "Always prompt when the app is opened fresh"
                 ) {
-                    AppBadge(label: lock.enabled ? "ON" : "OFF", color: lock.enabled ? DS.Palette.success : .secondary)
+                    // Settings shows a read-only state as plain secondary text.
+                    Text(lock.enabled ? "On" : "Off")
+                        .foregroundStyle(.secondary)
                 }
             }
 
-            Section("PREFERENCES") {
+            Section("Preferences") {
                 NavigationLink(value: Route.notificationSettings) {
                     SettingsRow(
                         icon: "notifications",
-                        color: DS.Palette.info,
+                        color: .red,
                         title: "Notifications",
                         subtitle: "Discord & iOS push per alert category"
                     ) { EmptyView() }
                 }
             }
 
-            Section("ACCOUNT") {
+            Section("Account") {
                 SettingsRow(
                     icon: "person",
-                    color: .secondary,
+                    color: .gray,
                     title: "Signed in as",
                     subtitle: services.session.username
                 ) { EmptyView() }
@@ -101,10 +106,11 @@ struct SettingsView: View {
                 } label: {
                     SettingsRow(
                         icon: "logout",
-                        color: DS.Palette.danger,
+                        color: .red,
                         title: "Log out",
+                        titleColor: DS.Palette.danger,
                         subtitle: "Sign out of your account"
-                    ) { SettingsChevron() }
+                    ) { EmptyView() }
                 }
                 .buttonStyle(.plain)
                 .disabled(actionBusy)
@@ -114,19 +120,19 @@ struct SettingsView: View {
                 } label: {
                     SettingsRow(
                         icon: "replay",
-                        color: DS.Palette.warning,
+                        color: .orange,
                         title: "Re-run Onboarding",
                         subtitle: "Reset and walk through setup again"
-                    ) { SettingsChevron() }
+                    ) { EmptyView() }
                 }
                 .buttonStyle(.plain)
                 .disabled(actionBusy)
             }
 
-            Section("ABOUT") {
+            Section("About") {
                 SettingsRow(
                     icon: "bolt",
-                    color: DS.Palette.accent,
+                    color: .purple,
                     title: "Version",
                     subtitle: appVersionString()
                 ) { EmptyView() }
@@ -134,7 +140,7 @@ struct SettingsView: View {
                 NavigationLink(value: Route.connect) {
                     SettingsRow(
                         icon: "database",
-                        color: DS.Palette.info,
+                        color: .blue,
                         title: "Backend",
                         subtitle: services.urlStore.baseUrl,
                         verbatimSubtitle: true
@@ -146,7 +152,8 @@ struct SettingsView: View {
                 } label: {
                     SettingsRow(
                         icon: "check",
-                        color: DS.Palette.success,
+                        tile: "doc.text",
+                        color: .gray,
                         title: "Open-source licenses",
                         subtitle: "Third-party package licenses"
                     ) { SettingsChevron() }
@@ -221,22 +228,28 @@ struct SettingsView: View {
     }
 }
 
-/// A settings row: a tinted icon tile, title + subtitle, and a trailing view.
+/// A settings row: a Settings-style icon tile, title + subtitle, and a
+/// trailing view.
 private struct SettingsRow<Trailing: View>: View {
+    /// The Dart (Material) icon name, kept for traceability.
     let icon: String
+    /// The tile's SF Symbol when the mapped one is circled or reads poorly
+    /// filled; nil uses `Symbol.named(icon)`.
+    var tile: String?
     let color: Color
     let title: String
+    var titleColor: Color?
     let subtitle: String?
     var verbatimSubtitle = false
     @ViewBuilder let trailing: Trailing
 
     var body: some View {
         HStack(spacing: 12) {
-            IconTile(systemImage: Symbol.named(icon), color: color, size: 32)
+            SettingsIconTile(systemImage: tile ?? Symbol.named(icon), color: color)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(.body)
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(titleColor.map { AnyShapeStyle($0) } ?? AnyShapeStyle(.primary))
                 if let subtitle, !subtitle.isEmpty {
                     Group {
                         if verbatimSubtitle {

@@ -165,22 +165,21 @@ private struct LoginContent: View {
         }
     }
 
+    /// The biometric switch as a plain Settings-style row under the form: the
+    /// Settings icon tile, the label and the switch, with no card behind it.
     private func biometricRow(busy: Bool) -> some View {
         let disabled = model.biometricBusy || busy
         return Toggle(isOn: Binding(
             get: { services.lock.enabled },
             set: { want in Task { await model.toggleBiometricLock(want, lock: services.lock) } }
         )) {
-            Label {
+            HStack(spacing: 12) {
+                SettingsIconTile(systemImage: model.biometricIsFace ? "faceid" : Symbol.named("fingerprint"), color: .green)
                 Text("Unlock with \(model.biometricMethod)")
-            } icon: {
-                Image(systemName: model.biometricIsFace ? "faceid" : Symbol.named("fingerprint"))
-                    .foregroundStyle(.tint)
             }
         }
-        .padding(.horizontal, 16)
+        .padding(.horizontal, 14)
         .frame(minHeight: 52)
-        .background(DS.Surface.panel, in: .rect(cornerRadius: DS.Radius.control, style: .continuous))
         .disabled(disabled)
         .opacity(disabled ? 0.5 : 1)
     }
