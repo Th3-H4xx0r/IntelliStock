@@ -3,8 +3,12 @@ import SwiftUI
 /// What the root shows — `router.dart`'s redirect plus `app.dart`'s lock
 /// gate, as a pure decision so it can be tested.
 nonisolated enum RootScreen: Hashable, Sendable {
-    /// The keychain is not readable yet (launched before first unlock).
+    /// The keychain is not readable yet (launched while the device was
+    /// locked). Only ever seen briefly: the next `.active` retries.
     case waiting
+    /// The keychain still refused with the app in the foreground — a real
+    /// keychain error. Offers a retry.
+    case storageUnavailable
     /// The biometric lock — shown INSTEAD of the app, as `app.dart` returned
     /// `LockScreen` in place of the navigator.
     case lock
@@ -16,9 +20,10 @@ nonisolated enum RootScreen: Hashable, Sendable {
         isConfigured: Bool,
         isAuthenticated: Bool,
         hasCompletedOnboarding: Bool,
-        locked: Bool
+        locked: Bool,
+        storageUnavailable: Bool = false
     ) -> RootScreen {
-        if !storageReady { return .waiting }
+        if !storageReady { return storageUnavailable ? .storageUnavailable : .waiting }
         // The lock only ever covers a session.
         if locked && isAuthenticated { return .lock }
         return .app(AppGate.resolve(
@@ -61,7 +66,8 @@ struct RootView: View {
             isConfigured: services.urlStore.isConfigured,
             isAuthenticated: session.isAuthenticated,
             hasCompletedOnboarding: session.hasCompletedOnboarding,
-            locked: services.lock.locked
+            locked: services.lock.locked,
+            storageUnavailable: services.isStorageUnavailable
         )
 
         Group {
@@ -69,6 +75,15 @@ struct RootView: View {
             case .waiting:
                 Color(uiColor: .systemGroupedBackground)
                     .ignoresSafeArea()
+            case .storageUnavailable:
+                ContentUnavailableView {
+                    Label("Can't Read Your Sign-In", systemImage: "lock.trianglebadge.exclamationmark")
+                } description: {
+                    Text("IntelliStock couldn't read its saved server and sign-in from the keychain. Make sure your iPhone is unlocked, then try again.")
+                } actions: {
+                    Button("Try Again") { services.retryStorageLoad() }
+                        .dsProminentButton()
+                }
             case .lock:
                 LockView()
             case .app(let gate):
@@ -85,6 +100,14 @@ struct RootView: View {
                     }
                     ChatEntrySlot()
                 }
+            }
+        }
+        // The lock swaps in instantly, as Flutter's builder did, so nothing
+        // (a dismissing sheet or alert) animates over it.
+        .transaction { transaction in
+            if screen == .lock {
+                transaction.disablesAnimations = true
+                transaction.animation = nil
             }
         }
         .onChange(of: scenePhase) { _, phase in

@@ -99,12 +99,21 @@ final class AppLock {
 
     /// The first-frame state, read straight from storage as `main.dart` did:
     /// locked when the preference is on and someone is signed in.
+    ///
+    /// Fails safe: if the preference cannot be read (a keychain error, not
+    /// "not stored"), a signed-in session starts locked rather than open.
     static func seed(storage: any SecureStorage, isAuthenticated: Bool) -> AppLockState {
-        let enabled = storage.read(enabledKey) == "true"
+        let enabled: Bool
+        do {
+            enabled = try storage.readChecked(enabledKey) == "true"
+        } catch {
+            enabled = isAuthenticated
+        }
+        let timeout = (try? storage.readChecked(timeoutKey)) ?? nil
         return AppLockState(
             enabled: enabled,
             locked: enabled && isAuthenticated,
-            timeout: LockTimeout.fromStorageString(storage.read(timeoutKey))
+            timeout: LockTimeout.fromStorageString(timeout)
         )
     }
 
