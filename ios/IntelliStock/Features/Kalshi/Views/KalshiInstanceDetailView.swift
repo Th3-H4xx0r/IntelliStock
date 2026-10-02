@@ -168,7 +168,7 @@ struct KalshiInstanceDetailView: View {
     private func paperPnl(_ s: JSONObject?) -> some View {
         let realC = s?["realized_pnl_cents"]?.double
         let unrealC = s?["unrealized_pnl_cents"]?.double
-        let openPos = s?["open_positions"]?.double.map { Int($0) }
+        let openPos = s?["open_positions"]?.double.flatMap { Int(dartTruncating: $0) }
         if realC != nil || unrealC != nil {
             let realColor: Color = realC == nil ? .secondary : ((realC ?? 0) >= 0 ? DS.Palette.success : DS.Palette.danger)
             let unrealColor: Color = unrealC == nil ? .secondary : ((unrealC ?? 0) >= 0 ? DS.Palette.success : DS.Palette.danger)

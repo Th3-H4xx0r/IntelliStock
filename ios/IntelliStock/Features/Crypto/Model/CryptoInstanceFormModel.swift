@@ -238,14 +238,28 @@ final class CryptoInstanceFormModel {
     var dynPct: Double { min(max(100 - fixedSum, 0), 100) }
     var over: Bool { fixedSum > 100.0001 }
 
-    /// `_fmtNum`: integral → int, else 1 dp.
+    /// `_fmtNum`: integral → int, else 1 dp. Saturates instead of trapping
+    /// on huge values; NaN and infinity print as Dart does.
     static func fmtNum(_ v: Double) -> String {
-        if v == v.rounded() { return String(Int(v)) }
+        if v.isFinite, v == v.rounded(), let i = Int(dartTruncating: v) { return String(i) }
         return dartToStringAsFixed(v, 1)
     }
 
-    /// `_fmtUsd`: `$N` rounded.
-    static func fmtUsd(_ v: Double) -> String { "$\(Int(v.rounded()))" }
+    /// `_fmtUsd`: `$N` rounded (0 for a non-finite value, saturating).
+    static func fmtUsd(_ v: Double) -> String { "$\(roundedInt(v))" }
+
+    /// `x.round()` as an int that never traps: saturates at the 64-bit
+    /// limits, 0 for NaN / infinity (where Dart threw).
+    private static func roundedInt(_ v: Double) -> Int {
+        Int(dartTruncating: v.rounded()) ?? 0
+    }
+
+    /// A typed number: `double.tryParse`, with NaN and infinity rejected
+    /// (they crashed the dollar conversion) and read as 0.
+    private static func typedNumber(_ raw: String) -> Double {
+        let v = JSON.parseDouble(raw.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+        return v.isFinite ? v : 0
+    }
 
     func syncPctText() {
         for i in rows.indices { rows[i].pctText = Self.fmtNum(rows[i].pct) }
@@ -253,23 +267,23 @@ final class CryptoInstanceFormModel {
     }
 
     func syncUsdText() {
-        for i in rows.indices { rows[i].usdText = String(Int((rows[i].pct / 100 * equity).rounded())) }
+        for i in rows.indices { rows[i].usdText = String(Self.roundedInt(rows[i].pct / 100 * equity)) }
     }
 
     func onPctChanged(_ id: UUID, _ raw: String) {
         guard let i = rows.firstIndex(where: { $0.id == id }) else { return }
         rows[i].pctText = raw
-        let v = JSON.parseDouble(raw.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+        let v = Self.typedNumber(raw)
         rows[i].pct = min(max(v, 0), 100)
-        rows[i].usdText = String(Int((rows[i].pct / 100 * equity).rounded()))
+        rows[i].usdText = String(Self.roundedInt(rows[i].pct / 100 * equity))
     }
 
     func onUsdChanged(_ id: UUID, _ raw: String) {
         guard let i = rows.firstIndex(where: { $0.id == id }) else { return }
         rows[i].usdText = raw
-        let usd = JSON.parseDouble(raw.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+        let usd = Self.typedNumber(raw)
         let pct = equity > 0 ? usd / equity * 100 : 0
-        rows[i].pct = min(max(pct, 0), 100)
+        rows[i].pct = pct.isFinite ? min(max(pct, 0), 100) : 0
         rows[i].pctText = Self.fmtNum(rows[i].pct)
     }
 

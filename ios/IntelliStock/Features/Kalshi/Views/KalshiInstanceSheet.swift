@@ -193,7 +193,7 @@ struct KalshiInstanceSheet: View {
                 HStack {
                     Slider(value: Binding(get: { model.usagePct }, set: { model.setUsagePct($0) }), in: 5...100, step: 5)
                         .accessibilityValue("\(Int(model.usagePct.rounded()))%")
-                    Text("\(Int(model.usagePct.rounded()))% · $\(Int(model.effectiveBankroll.rounded()))")
+                    Text("\(Int(model.usagePct.rounded()))% · $\(Int(dartTruncating: model.effectiveBankroll.rounded()) ?? 0)")
                         .font(.footnote.weight(.bold).monospacedDigit())
                         .foregroundStyle(.secondary)
                 }

@@ -79,7 +79,8 @@ final class KalshiInstanceFormModel {
         func n(_ k: String) -> Num? { c[k].flatMap(\.num) }
         func scaled(_ v: Num, _ by: Double) -> Num {
             // Dart `num * 100` keeps int for int; any double makes a double.
-            if case .int(let i) = v, by == 100 { return .int(i * 100) }
+            // Dart's int multiply wraps on overflow; so does `&*` (no trap).
+            if case .int(let i) = v, by == 100 { return .int(i &* 100) }
             return .double(v.double * by)
         }
         func divided(_ v: Num) -> Num { .double(v.double / 100) }
@@ -151,15 +152,19 @@ final class KalshiInstanceFormModel {
 
     var hasBalance: Bool { balance > 0 }
 
+    /// A typed "NaN" or "Infinity" bankroll is rejected (read as 0): it
+    /// crashed the daily-loss scaling.
     var effectiveBankroll: Double {
-        hasBalance
-            ? (balance * usagePct / 100).rounded()
-            : (JSON.parseDouble(manualBankroll.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0)
+        if hasBalance { return (balance * usagePct / 100).rounded() }
+        let typed = JSON.parseDouble(manualBankroll.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+        return typed.isFinite ? typed : 0
     }
 
     func scaleDailyLoss() {
         if dailyLossTouched { return }
-        let v = Int((effectiveBankroll * dailyLossPct).rounded())
+        // `.round().clamp(1, 1 << 30)`: saturate before the clamp, so a
+        // 21-digit bankroll cannot overflow `Int`.
+        let v = Int(dartTruncating: (effectiveBankroll * dailyLossPct).rounded()) ?? 1
         dailyLoss = String(min(max(v, 1), 1 << 30))
     }
 
@@ -234,7 +239,7 @@ final class KalshiInstanceFormModel {
             ("daily_loss_cap_dollars", .double(d(dailyLoss, 100))),
             ("bankroll_dollars", .double(effectiveBankroll)),
             ("poll_seconds", .int(i(poll, 60))),
-            ("bankroll_usage_pct", .int(Int(usagePct.rounded()))),
+            ("bankroll_usage_pct", .int(Int(dartTruncating: usagePct.rounded()) ?? 0)),
             ("live_monitoring", .bool(liveMonitoring)),
         ]
         if !trimmedOdds.isEmpty { pairs.append(("odds_api_key", .string(trimmedOdds))) }

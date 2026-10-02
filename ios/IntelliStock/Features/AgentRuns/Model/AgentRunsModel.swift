@@ -18,7 +18,7 @@ nonisolated struct AgentRunsState: Equatable, Sendable {
     /// Elapsed share (0…1) of the countdown at `now`.
     func countdownFraction(now: Date = Date()) -> Double {
         guard let resumeAt = scheduledResumeAt, scheduledTotalMs != 0 else { return 0 }
-        let remaining = Int((resumeAt.timeIntervalSince(now) * 1000).rounded(.towardZero))
+        let remaining = Int(dartTruncating: resumeAt.timeIntervalSince(now) * 1000) ?? 0
         let elapsed = scheduledTotalMs - min(max(remaining, 0), scheduledTotalMs)
         return min(max(Double(elapsed) / Double(scheduledTotalMs), 0), 1)
     }
@@ -26,7 +26,7 @@ nonisolated struct AgentRunsState: Equatable, Sendable {
     /// Whole seconds left in the countdown at `now`.
     func countdownSecsRemaining(now: Date = Date()) -> Int {
         guard let resumeAt = scheduledResumeAt else { return 0 }
-        let secs = Int(resumeAt.timeIntervalSince(now).rounded(.towardZero))
+        let secs = Int(dartTruncating: resumeAt.timeIntervalSince(now)) ?? 0
         return min(max(secs, 0), scheduledTotalMs / 1000)
     }
 }
@@ -38,6 +38,9 @@ nonisolated struct AgentRunsState: Equatable, Sendable {
 final class AgentRunsModel {
     static let interval: Duration = .seconds(5)
     static let perPageOptions = [10, 20, 50, 100]
+    /// The longest scheduled resume, in ms (~292 000 years): the countdown's
+    /// ms arithmetic stays inside `Int` below it.
+    static let maxScheduleMs = Int.max / 1000
 
     /// `.loading` until the first fetch; `.failed` while the last fetch failed.
     private(set) var state: Loadable<AgentRunsState> = .loading
@@ -150,7 +153,10 @@ final class AgentRunsModel {
             await resumeAgentNow()
             return
         }
-        let durationMs = minutes * 60 * 1000
+        // A typed 15+ digit delay overflowed `minutes * 60 * 1000` (a trap);
+        // it saturates at `maxScheduleMs` instead, which never arrives.
+        let (perMinute, o1) = minutes.multipliedReportingOverflow(by: 60_000)
+        let durationMs = o1 || perMinute > Self.maxScheduleMs || perMinute < 0 ? Self.maxScheduleMs : perMinute
         let resumeAt = now().addingTimeInterval(Double(durationMs) / 1000)
         guard var value = state.value else { return }
         value.scheduledResumeAt = resumeAt

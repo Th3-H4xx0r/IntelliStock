@@ -83,7 +83,9 @@ nonisolated enum KalshiFormat {
         switch v {
         case .int(let i): return String(i)
         case .double(let d):
-            if d.isFinite, d == d.rounded() { return String(Int(d)) }
+            // `toInt()` saturates as on the Dart VM; `Int(_:)` trapped on a
+            // served 1e20.
+            if d.isFinite, d == d.rounded(), let i = Int(dartTruncating: d) { return String(i) }
             return JSON.dartDoubleString(d)
         }
     }
