@@ -22,22 +22,19 @@ struct CryptoBacktestSheet: View {
         NavigationStack {
             Form {
                 Section {
-                    Text("Simulate \(name)'s current allocation over a historical window. Crypto fills include the taker fee.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .listRowBackground(Color.clear)
-                        .listRowInsets(EdgeInsets())
-                }
-                Section("ALLOCATION UNDER TEST") {
                     if model.tickers.isEmpty {
                         Text("100% dynamic — the backtest auto-discovers its universe.")
-                            .font(.footnote)
                             .foregroundStyle(.secondary)
                     } else {
                         MarketsFlowLayout {
                             ForEach(Array(model.tickers.enumerated()), id: \.offset) { _, t in MarketsChip(text: t) }
                         }
+                        .padding(.vertical, 4)
                     }
+                } header: {
+                    Text("Allocation under test")
+                } footer: {
+                    Text("Simulate \(name)'s current allocation over a historical window. Crypto fills include the taker fee.")
                 }
                 Section {
                     DatePicker("Start", selection: $m.start, in: earliest...Date(), displayedComponents: .date)
@@ -83,21 +80,16 @@ struct CryptoBacktestSheet: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
                 }
-            }
-            .safeAreaInset(edge: .bottom) {
-                Button {
-                    Task { await submit() }
-                } label: {
-                    Text(model.busy ? "Queuing…" : "Run Backtest")
-                        .fontWeight(.bold)
-                        .frame(maxWidth: .infinity)
+                // Confirm goes in the toolbar (Form rule), with the Dart
+                // button's labels and in-flight guard.
+                ToolbarItem(placement: .confirmationAction) {
+                    Button {
+                        Task { await submit() }
+                    } label: {
+                        Text(model.busy ? "Queuing…" : "Run Backtest")
+                    }
+                    .disabled(model.busy)
                 }
-                .dsProminentButton()
-                .controlSize(.large)
-                .disabled(model.busy)
-                .padding(.horizontal, 20)
-                .padding(.vertical, 8)
-                .background(.bar)
             }
         }
         .presentationDetents([.large])

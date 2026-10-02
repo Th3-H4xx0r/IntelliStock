@@ -1,7 +1,10 @@
 import SwiftUI
+import UIKit
 
 /// The crypto instances (`/crypto`) — `CryptoScreen`: 24/7 bots with
-/// start / stop / edit / backtest / delete, and a button to create one.
+/// start / stop / edit / backtest / delete, and a button to create one. An
+/// inset-grouped list of `EntityRow`s; the card buttons moved to the row's
+/// swipe actions and context menu, create to the toolbar `+`.
 struct CryptoView: View {
     @Environment(AppServices.self) private var services
     @State private var model: CryptoModel?
@@ -20,20 +23,11 @@ struct CryptoView: View {
         }
         .background(DS.Surface.canvas)
         .navigationTitle("Crypto")
-        .navigationBarTitleDisplayMode(.inline)
+        .navigationBarTitleDisplayMode(.large)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                Button {
-                    Task { await model?.load() }
-                } label: {
-                    Label("Refresh", systemImage: Symbol.named("refresh"))
-                }
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
+                ToolbarAddButton("New Crypto Instance") {
                     sheet = CryptoInstanceSheetRequest()
-                } label: {
-                    Label("New", systemImage: Symbol.named("add"))
                 }
             }
         }
@@ -55,138 +49,149 @@ struct CryptoView: View {
         .toast($toast)
     }
 
+    @ViewBuilder
     private func content(_ model: CryptoModel) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("TRADING")
-                        .font(.footnote.weight(.bold))
-                        .tracking(1.2)
-                        .foregroundStyle(.tint)
-                    Text("24/7 bots — pin fixed coin weights, auto-discover the rest.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-                switch model.instances {
-                case .loading:
-                    LoadingState().padding(.top, 40)
-                case .failed(let e):
+        switch model.instances {
+        case .loading:
+            ProgressView()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        case .failed(let e):
+            List {
+                Section {
                     ErrorRow(message: KalshiFormat.errorText(e), onRetry: { Task { await model.load() } })
-                case .loaded(let instances):
-                    if instances.isEmpty {
-                        EmptyState(
-                            systemImage: Symbol.named("currency_bitcoin"),
-                            title: "No crypto instances yet",
-                            subtitle: "Create a 24/7 crypto bot with a fixed + dynamic coin allocation.",
-                            actionLabel: "New Crypto Instance",
-                            onAction: { sheet = CryptoInstanceSheetRequest() }
-                        )
-                    } else {
-                        VStack(spacing: 12) {
-                            ForEach(instances) { inst in card(model, inst) }
-                        }
-                    }
+                        .listRowInsets(EdgeInsets())
+                        .listRowBackground(Color.clear)
                 }
             }
-            .padding(.horizontal, 20)
-            .padding(.bottom, 40)
+            .listStyle(.insetGrouped)
+            .refreshable { await model.load() }
+        case .loaded(let instances):
+            if instances.isEmpty {
+                EmptyState(
+                    systemImage: Symbol.named("currency_bitcoin"),
+                    title: "No crypto instances yet",
+                    subtitle: "Create a 24/7 crypto bot with a fixed + dynamic coin allocation.",
+                    actionLabel: "New Crypto Instance",
+                    onAction: { sheet = CryptoInstanceSheetRequest() }
+                )
+            } else {
+                List {
+                    DSSection(footer: "24/7 bots — pin fixed coin weights, auto-discover the rest.") {
+                        ForEach(instances) { inst in row(model, inst) }
+                    }
+                }
+                .listStyle(.insetGrouped)
+                .refreshable { await model.load() }
+            }
         }
-        .refreshable { await model.load() }
     }
 
-    private func card(_ model: CryptoModel, _ inst: Instance) -> some View {
+    /// One bot: the name over its coins (or "100% dynamic"), with the run
+    /// state trailing. The row opens the instance; Edit is a leading swipe,
+    /// Delete a trailing one, and the context menu holds every Dart card
+    /// button.
+    private func row(_ model: CryptoModel, _ inst: Instance) -> some View {
         let running = inst.runCommand
         let busy = model.isBusy(inst.id)
-        return Card {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .top, spacing: 12) {
-                    IconTile(systemImage: Symbol.named("currency_bitcoin"))
-                    Button {
-                        services.router.push(.cryptoInstance(inst.id))
-                    } label: {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(CryptoModel.displayName(inst))
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(.primary)
-                                .lineLimit(1)
-                            Text(inst.id)
-                                .font(.caption.monospaced())
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(.rect)
-                    }
-                    .buttonStyle(.plain)
-                    VStack(alignment: .trailing, spacing: 6) {
-                        AppBadge(label: "24/7", color: DS.Palette.info)
-                        StatusBadge(
-                            label: CryptoModel.statusLabel(inst),
-                            color: inst.crashed ? DS.Palette.danger : (running ? DS.Palette.success : .secondary),
-                            pulsing: running && !inst.crashed
-                        )
-                    }
-                }
-                if inst.stocks.isEmpty {
-                    Text("100% dynamic — fully auto-discovered.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+        let coins = inst.stocks.isEmpty ? "100% dynamic — fully auto-discovered." : inst.stocks.joined(separator: " · ")
+        return NavigationLink(value: Route.cryptoInstance(inst.id)) {
+            EntityRow(CryptoModel.displayName(inst), subtitle: coins, systemImage: Symbol.named("currency_bitcoin")) {
+                if busy {
+                    ProgressView()
                 } else {
-                    MarketsFlowLayout {
-                        ForEach(inst.stocks, id: \.self) { s in MarketsChip(text: s) }
+                    StatusDot(
+                        CryptoModel.statusLabel(inst),
+                        color: inst.crashed ? DS.Palette.danger : (running ? DS.Palette.success : .secondary),
+                        pulsing: running && !inst.crashed
+                    )
+                }
+            }
+        }
+        .swipeActions(edge: .leading) {
+            Button {
+                sheet = CryptoInstanceSheetRequest(edit: inst)
+            } label: {
+                Label("Edit", systemImage: Symbol.named("edit"))
+            }
+            .tint(DS.Palette.accent)
+            .disabled(busy)
+        }
+        // Delete opens the Dart confirmation first, so it is tinted rather
+        // than a destructive role (which would animate the row away).
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button {
+                askDelete(model, inst)
+            } label: {
+                Label("Delete", systemImage: Symbol.named("delete"))
+            }
+            .tint(DS.Palette.danger)
+            .disabled(busy)
+        }
+        .contextMenu {
+            Section {
+                if running {
+                    Button {
+                        Task { showError(await model.stop(inst.id)) }
+                    } label: {
+                        Label("Stop", systemImage: Symbol.named("stop"))
+                    }
+                } else {
+                    Button {
+                        Task { showError(await model.start(inst.id)) }
+                    } label: {
+                        Label("Start", systemImage: Symbol.named("play_arrow"))
                     }
                 }
-                MarketsFlowLayout {
-                    action("visibility", "View", .secondary, disabled: busy) {
-                        services.router.push(.cryptoInstance(inst.id))
-                    }
-                    action("edit", "Edit", DS.Palette.accent, disabled: busy) {
-                        sheet = CryptoInstanceSheetRequest(edit: inst)
-                    }
-                    action("analytics", "Backtest", DS.Palette.info, disabled: busy) {
-                        backtestFor = inst
-                    }
-                    if running {
-                        action(busy ? "progress_activity" : "stop", "Stop", DS.Palette.warning, disabled: busy) {
-                            Task { showError(await model.stop(inst.id)) }
-                        }
-                    } else {
-                        action(busy ? "progress_activity" : "play_arrow", "Start", DS.Palette.success, disabled: busy) {
-                            Task { showError(await model.start(inst.id)) }
-                        }
-                    }
-                    action("delete", "Delete", DS.Palette.danger, disabled: busy) {
-                        confirm = ConfirmRequest(
-                            title: "Delete instance",
-                            body: "Delete \"\(CryptoModel.displayName(inst))\"? This cannot be undone.",
-                            confirmLabel: "Delete",
-                            onConfirm: {
-                                if let message = await model.delete(inst.id) { throw ApiError(message: message) }
-                            },
-                            onError: { error in
-                                if !error.isCancellation { toast = Toast(KalshiFormat.errorText(error), style: .error) }
-                            }
-                        )
-                    }
+                Button {
+                    services.router.push(.cryptoInstance(inst.id))
+                } label: {
+                    Label("View", systemImage: Symbol.named("visibility"))
                 }
+                Button {
+                    sheet = CryptoInstanceSheetRequest(edit: inst)
+                } label: {
+                    Label("Edit", systemImage: Symbol.named("edit"))
+                }
+                Button {
+                    backtestFor = inst
+                } label: {
+                    Label("Backtest", systemImage: Symbol.named("analytics"))
+                }
+                Button {
+                    UIPasteboard.general.string = inst.id
+                } label: {
+                    Label("Copy ID", systemImage: "doc.on.doc")
+                }
+            }
+            .disabled(busy)
+            Section {
+                Button(role: .destructive) {
+                    askDelete(model, inst)
+                } label: {
+                    Label("Delete", systemImage: Symbol.named("delete"))
+                }
+                .disabled(busy)
             }
         }
     }
 
-    /// A failed card action's toast.
-    private func showError(_ message: String?) {
-        if let message { toast = Toast(message, style: .error) }
+    private func askDelete(_ model: CryptoModel, _ inst: Instance) {
+        confirm = ConfirmRequest(
+            title: "Delete instance",
+            body: "Delete \"\(CryptoModel.displayName(inst))\"? This cannot be undone.",
+            confirmLabel: "Delete",
+            onConfirm: {
+                if let message = await model.delete(inst.id) { throw ApiError(message: message) }
+            },
+            onError: { error in
+                if !error.isCancellation { toast = Toast(KalshiFormat.errorText(error), style: .error) }
+            }
+        )
     }
 
-    private func action(_ icon: String, _ label: String, _ color: Color, disabled: Bool, _ run: @escaping () -> Void) -> some View {
-        Button(action: run) {
-            Label(label, systemImage: Symbol.named(icon))
-                .font(.caption.weight(.semibold))
-        }
-        .buttonStyle(.bordered)
-        .controlSize(.small)
-        .tint(color)
-        .disabled(disabled)
+    /// A failed row action's toast.
+    private func showError(_ message: String?) {
+        if let message { toast = Toast(message, style: .error) }
     }
 }
 
