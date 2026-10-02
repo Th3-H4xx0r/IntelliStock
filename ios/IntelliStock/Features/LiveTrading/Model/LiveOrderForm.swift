@@ -187,7 +187,7 @@ nonisolated enum LiveEquityGeometry {
 
     /// The labels under the plot.
     static func labels(_ history: PortfolioHistory, range: String, style: LiveChartStyle) -> [String] {
-        if usesTimeAxis(range: range, style: style) { return [0, 6, 12, 18, 24].map(hourAmPm) }
+        if usesTimeAxis(range: range, style: style) { return [0, 8, 16, 24].map(hourAmPm) }
         let n = min(history.timestamps.count, history.values.count)
         return evenlySpacedLabelIndices(n, 4).map { formatChartDate(history.timestamps[$0], range) }
     }
