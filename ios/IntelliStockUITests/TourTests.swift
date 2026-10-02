@@ -93,26 +93,30 @@ final class TourTests: XCTestCase {
     // MARK: Steps
 
     private func signIn(url: String, user: String, pass: String) {
-        let urlField = app.textFields["Server URL"]
-        if urlField.waitForExistence(timeout: 8) {
+        // Connect: the only text field on screen. Its button reads "Test & Connect".
+        if app.staticTexts["Connect to your instance"].waitForExistence(timeout: 8) {
+            let urlField = app.textFields.firstMatch
             urlField.tap()
             urlField.typeText(url)
             shot("01-connect")
-            let connect = app.buttons.matching(NSPredicate(format: "label IN {'Connect', 'Continue', 'Save', 'Save anyway'}")).firstMatch
+            let connect = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] 'Connect' OR label IN {'Continue', 'Save'}")).firstMatch
             connect.tap()
-            settle(4)
-            let saveAnyway = app.buttons["Save anyway"]
+            settle(5)
+            let saveAnyway = app.buttons.matching(NSPredicate(format: "label BEGINSWITH[c] 'Save anyway'")).firstMatch
             if saveAnyway.exists { saveAnyway.tap() }
         }
-        let username = app.textFields["Username"]
-        if username.waitForExistence(timeout: 10) {
+        // Login: a username text field and a password secure field.
+        let signIn = app.buttons["Sign In"]
+        if signIn.waitForExistence(timeout: 15) {
+            settle(2)
             shot("02-login")
+            let username = app.textFields.firstMatch
             username.tap()
             username.typeText(user)
-            let password = app.secureTextFields["Password"].exists ? app.secureTextFields["Password"] : app.textFields["Password"]
+            let password = app.secureTextFields.firstMatch.exists ? app.secureTextFields.firstMatch : app.textFields.element(boundBy: 1)
             password.tap()
             password.typeText(pass)
-            app.buttons["Sign In"].tap()
+            signIn.tap()
         }
         declineNotificationsIfAsked()
         XCTAssertTrue(app.tabBars.buttons["Dashboard"].waitForExistence(timeout: 30), "never reached the signed-in tabs")
@@ -132,6 +136,11 @@ final class TourTests: XCTestCase {
     private func tapTab(_ name: String) {
         let tab = app.tabBars.buttons[name]
         if tab.waitForExistence(timeout: 5) { tab.tap() }
+        // A second tap on the selected tab pops its stack to the root.
+        if name == "More", app.navigationBars.buttons.count > 0, !app.staticTexts["Crypto"].exists {
+            tab.tap()
+            settle(1)
+        }
     }
 
     private func tapRow(_ label: String) -> Bool {
