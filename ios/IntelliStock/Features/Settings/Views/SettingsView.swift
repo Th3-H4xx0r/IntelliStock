@@ -157,7 +157,7 @@ struct SettingsView: View {
         .listStyle(.insetGrouped)
         .navigationTitle("Settings")
         .navigationBarTitleDisplayMode(.inline)
-        .confirmAlert($confirm)
+        .confirmAlert($confirm, isRunning: $actionBusy)
         .toast($toast)
         .sheet(isPresented: $licensesOpen) { SettingsLicensesSheet() }
         .task {
@@ -194,11 +194,7 @@ struct SettingsView: View {
             body: "You will be signed out of IntelliStock. Your data stays on the server.",
             confirmLabel: "Log Out",
             role: .destructive,
-            onConfirm: {
-                actionBusy = true
-                defer { actionBusy = false }
-                await services.session.clear()
-            },
+            onConfirm: { await services.session.clear() },
             onError: { error in toast = Toast(settingsErrorText(error), style: .error) }
         )
     }
@@ -211,8 +207,6 @@ struct SettingsView: View {
             confirmLabel: "Reset & Re-run",
             role: nil,
             onConfirm: {
-                actionBusy = true
-                defer { actionBusy = false }
                 // The gate shows onboarding as soon as the user says so.
                 let res = try await services.onboardingRepository.reset()
                 if let user = res["user"], user.isObject {
