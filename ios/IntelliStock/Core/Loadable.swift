@@ -27,6 +27,12 @@ nonisolated enum Loadable<Value> {
 
     var hasValue: Bool { value != nil }
 
+    /// Nothing to show yet: never loaded, a first load cancelled before it
+    /// landed (`capture` leaves that `.loading`), or failed. A screen's
+    /// `.task` loads whenever this holds, not only when it first builds the
+    /// model, so a first load cut off by a tab switch is retried on return.
+    var needsLoad: Bool { value == nil }
+
     func map<T>(_ transform: (Value) throws -> T) rethrows -> Loadable<T> {
         switch self {
         case .loading: .loading

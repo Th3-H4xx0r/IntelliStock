@@ -40,9 +40,11 @@ struct KalshiInstanceDetailView: View {
             }
         }
         .task(id: instanceId) {
-            let m = KalshiInstanceDetailModel(instanceId: instanceId, repository: { [services] in services.kalshiRepository })
-            model = m
-            await m.poll(lifecycle: services.lifecycle)
+            // Reused on reappear: the data stays on screen while it refreshes.
+            if model?.instanceId != instanceId {
+                model = KalshiInstanceDetailModel(instanceId: instanceId, repository: { [services] in services.kalshiRepository })
+            }
+            await model?.poll(lifecycle: services.lifecycle)
         }
     }
 

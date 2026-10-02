@@ -28,6 +28,10 @@ final class BacktestPlaybackModel {
 
     // MARK: Derived (BacktestPlaybackState getters)
 
+    /// Nothing loaded yet (a first load cut off by leaving stays `loading`),
+    /// or the load failed: the screen's `.task` loads again on appear.
+    var needsLoad: Bool { loading || error != nil }
+
     var speed: Double { backtestPlaybackSpeeds[speedIndex] }
     var isFinished: Bool { frameIndex >= events.count - 1 }
     var isEmpty: Bool { !loading && events.isEmpty }
@@ -173,8 +177,10 @@ final class BacktestPlaybackModel {
         if wasPlaying { scheduleFrame() }
     }
 
-    /// Stops the frame timer (the view went away).
+    /// Stops the frame timer (the view went away). Playback pauses, so the
+    /// screen never comes back saying "playing" with no timer behind it.
     func stop() {
         cancelTimer()
+        isPlaying = false
     }
 }

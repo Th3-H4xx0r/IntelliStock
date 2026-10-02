@@ -108,6 +108,20 @@ final class LogTailer {
         timer = nil
     }
 
+    /// The panel showing this tailer left the screen (a tab switch or a
+    /// push): stop polling but keep the lines and the cursor, so coming back
+    /// is not a fresh, closed panel.
+    func detach() {
+        pause()
+    }
+
+    /// The panel is back on screen: an open panel the person has not paused
+    /// polls again at once (in the foreground only).
+    func reattach(open: Bool, userPaused: Bool, foreground: Bool) {
+        guard open, !userPaused, foreground else { return }
+        resume()
+    }
+
     // MARK: Polling
 
     private func poll() async {

@@ -95,10 +95,9 @@ struct BrokeragesView: View {
         .task {
             if model == nil {
                 let services = services
-                let model = BrokeragesModel(repository: { services.brokerageRepository })
-                self.model = model
-                await model.load()
+                model = BrokeragesModel(repository: { services.brokerageRepository })
             }
+            if let model, model.accounts.needsLoad { await model.load() }
         }
     }
 

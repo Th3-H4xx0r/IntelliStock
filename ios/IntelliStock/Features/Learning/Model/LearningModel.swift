@@ -49,10 +49,14 @@ final class LearningModel {
         self.repository = repository
     }
 
-    /// Runs one call; on failure records "label: error" and returns nil.
-    private static func attempt<T: Sendable>(_ label: String, _ call: () async throws -> T) async -> (T?, String?) {
+    /// Runs one call; on failure records "label: error" and returns nil. A
+    /// cancellation is rethrown: it is the screen going away, never a
+    /// partial failure to show.
+    private static func attempt<T: Sendable>(_ label: String, _ call: () async throws -> T) async throws -> (T?, String?) {
         do {
             return (try await call(), nil)
+        } catch where error.isCancellation {
+            throw CancellationError()
         } catch {
             return (nil, "\(label): \(KalshiFormat.errorText(error))")
         }
@@ -67,7 +71,7 @@ final class LearningModel {
         async let fl = attempt("noise floors") { try await repo.noiseFloors() }
         async let co = attempt("control") { try await repo.control() }
         async let ta = attempt("targets") { try await repo.targets() }
-        let (o, f, u, a, l, c, t) = await (ov, fi, fu, ap, fl, co, ta)
+        let (o, f, u, a, l, c, t) = try await (ov, fi, fu, ap, fl, co, ta)
         let errors = [o.1, f.1, u.1, a.1, l.1, c.1, t.1].compactMap { $0 }
         let control = c.0
         let mode: String = {
@@ -96,9 +100,12 @@ final class LearningModel {
     func load() async {
         let repo = repository()
         do {
-            state = .loaded(try await Self.fetch(repo))
+            let snapshot = try await Self.fetch(repo)
+            // Left mid-fetch: keep what is showing.
+            guard !Task.isCancelled else { return }
+            state = .loaded(snapshot)
         } catch {
-            if marketsIsCancellation(error) || Task.isCancelled { return }
+            if error.isCancellation || Task.isCancelled { return }
             state = .failed(error)
         }
     }

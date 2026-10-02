@@ -43,10 +43,9 @@ struct BacktestPlaybackView: View {
         }
         .task(id: id) {
             if model == nil {
-                let m = BacktestPlaybackModel(repository: { [services] in services.backtestRepository })
-                model = m
-                await m.load(id)
+                model = BacktestPlaybackModel(repository: { [services] in services.backtestRepository })
             }
+            if let model, model.needsLoad { await model.load(id) }
         }
         .onDisappear { model?.stop() }
     }

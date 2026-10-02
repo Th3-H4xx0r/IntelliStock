@@ -49,7 +49,10 @@ final class BacktestDetailModel {
 
     /// `_init`: summary + graph data + LLM cost; start polling when active.
     func load() async {
-        loading = true
+        // A reload with data on screen (back from Playback) keeps it there:
+        // no skeleton flash, and a failed reload leaves it showing.
+        let hadData = summary != nil
+        if !hadData { loading = true }
         error = nil
         let repo = repository()
         let id = id
@@ -73,7 +76,7 @@ final class BacktestDetailModel {
         } catch {
             if marketsIsCancellation(error) { return }
             loading = false
-            self.error = KalshiFormat.errorText(error)
+            if !hadData { self.error = KalshiFormat.errorText(error) }
         }
     }
 

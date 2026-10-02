@@ -26,9 +26,12 @@ struct KalshiBacktestView: View {
         .navigationTitle("Backtest")
         .navigationBarTitleDisplayMode(.inline)
         .task(id: instanceId) {
-            let m = KalshiBacktestModel(instanceId: instanceId, repository: { [services] in services.kalshiRepository })
-            model = m
-            await m.poll(lifecycle: services.lifecycle)
+            // Reused on reappear (after Run Backtest or a result), so the
+            // dates, leagues, model and numbers survive; only the poll restarts.
+            if model?.instanceId != instanceId {
+                model = KalshiBacktestModel(instanceId: instanceId, repository: { [services] in services.kalshiRepository })
+            }
+            await model?.poll(lifecycle: services.lifecycle)
         }
         .sheet(item: $picking) { target in
             if let model {

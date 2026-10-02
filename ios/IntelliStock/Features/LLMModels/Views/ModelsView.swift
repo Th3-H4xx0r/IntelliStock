@@ -93,10 +93,9 @@ struct ModelsView: View {
         .task {
             if model == nil {
                 let services = services
-                let model = ModelsModel(repository: { services.modelRepository })
-                self.model = model
-                await model.load()
+                model = ModelsModel(repository: { services.modelRepository })
             }
+            if let model, model.models.needsLoad { await model.load() }
         }
     }
 

@@ -33,10 +33,9 @@ struct StrategiesView: View {
         }
         .task {
             if model == nil {
-                let m = StrategiesModel(repository: { [services] in services.strategyRepository })
-                model = m
-                await m.fetchAll()
+                model = StrategiesModel(repository: { [services] in services.strategyRepository })
             }
+            if let model, model.needsLoad { await model.fetchAll() }
         }
     }
 

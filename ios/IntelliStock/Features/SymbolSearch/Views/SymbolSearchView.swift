@@ -17,6 +17,9 @@ private struct SymbolSearchContent: View {
     @State private var model: SymbolSearchModel
     @State private var text = ""
     @State private var searchPresented = false
+    /// Flutter's `autofocus`: the first appear only, not every return from a
+    /// result.
+    @State private var autofocused = false
 
     init(services: AppServices) {
         self.services = services
@@ -40,7 +43,11 @@ private struct SymbolSearchContent: View {
             .autocorrectionDisabled()
             .textInputAutocapitalization(.never)
             .onChange(of: text) { _, new in model.onQueryChanged(new) }
-            .onAppear { searchPresented = true }
+            .onAppear {
+                guard !autofocused else { return }
+                autofocused = true
+                searchPresented = true
+            }
     }
 
     @ViewBuilder

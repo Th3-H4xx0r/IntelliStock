@@ -34,10 +34,9 @@ struct LearningView: View {
         .toast($toast)
         .task {
             if model == nil {
-                let m = LearningModel(repository: { [services] in services.learningRepository })
-                model = m
-                await m.load()
+                model = LearningModel(repository: { [services] in services.learningRepository })
             }
+            if let model, model.state.needsLoad { await model.load() }
         }
         .sheet(isPresented: $targetsOpen, onDismiss: { Task { await model?.load() } }) {
             if let model, let targets = model.state.value?.targets {

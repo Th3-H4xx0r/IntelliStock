@@ -83,6 +83,8 @@ struct RootView: View {
                 } actions: {
                     Button("Try Again") { services.retryStorageLoad() }
                         .dsProminentButton()
+                    // The escape when the keychain never reads again.
+                    Button("Sign Out", role: .destructive) { services.signOutOfUnavailableStorage() }
                 }
             case .lock:
                 LockView()
@@ -110,8 +112,16 @@ struct RootView: View {
                 transaction.animation = nil
             }
         }
-        .onChange(of: scenePhase) { _, phase in
+        // Initial too: a launch straight into `.active` retries a deferred
+        // keychain load without waiting for the next phase change.
+        .onChange(of: scenePhase, initial: true) { _, phase in
             services.scenePhaseChanged(phase)
+        }
+        .onChange(of: screen) { old, new in
+            // The onboarding gate handed back (a Settings re-run included).
+            if old == .app(.onboarding), new == .app(.main) {
+                Task { await services.didCompleteOnboarding() }
+            }
         }
         .onChange(of: session.isAuthenticated) { _, authenticated in
             if authenticated {

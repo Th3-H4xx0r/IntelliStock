@@ -49,6 +49,10 @@ final class StrategyDetailModel {
 
     func refresh() async { await load() }
 
+    /// No strategy on screen yet (never loaded, cut off by leaving, or
+    /// failed): the screen's `.task` loads again on every appear.
+    var needsLoad: Bool { strategy == nil }
+
     func setBtSort(_ field: String) {
         if btSortField == field {
             btSortAsc.toggle()

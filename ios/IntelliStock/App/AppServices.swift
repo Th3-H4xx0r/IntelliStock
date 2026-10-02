@@ -162,6 +162,31 @@ final class AppServices {
         isStorageUnavailable = !isStorageReady
     }
 
+    /// The Sign Out escape on the "keychain unavailable" screen: delete the
+    /// stored session, then load whatever can be read. When the keychain
+    /// still refuses, start signed out with no server, so the person can
+    /// reconnect instead of retrying forever.
+    func signOutOfUnavailableStorage() {
+        storage.delete(SessionStore.tokenKey)
+        storage.delete(SessionStore.userKey)
+        reloadStorage()
+        guard !isStorageReady else { return }
+        lock.state = AppLock.seed(storage: storage, isAuthenticated: false)
+        isStorageReady = true
+        isStorageUnavailable = false
+        if let protectedDataObserver {
+            notificationCenter.removeObserver(protectedDataObserver)
+            self.protectedDataObserver = nil
+        }
+    }
+
+    /// The onboarding gate handed back to the app (first run, or a re-run
+    /// from Settings): accounts linked during onboarding must show on the
+    /// dashboard, so the shared brokerage list reloads.
+    func didCompleteOnboarding() async {
+        await dashboard.loadBrokerages()
+    }
+
     /// A services graph over an in-memory store, for previews and tests that
     /// only need a client.
     convenience init(apiClient: ApiClient) {

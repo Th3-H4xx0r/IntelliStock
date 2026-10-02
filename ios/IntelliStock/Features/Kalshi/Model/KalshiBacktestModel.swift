@@ -60,6 +60,8 @@ final class KalshiBacktestModel {
     static let tickInterval: Duration = .seconds(3)
 
     @ObservationIgnored private let repository: () -> KalshiRepository
+    /// The instance config has seeded the form.
+    @ObservationIgnored private var configLoaded = false
 
     init(instanceId: String, repository: @escaping () -> KalshiRepository) {
         self.instanceId = instanceId
@@ -112,6 +114,10 @@ final class KalshiBacktestModel {
             async let detail = repo.instanceDetail(id)
             async let models = repo.models()
             let (d, m) = try await (detail, models)
+            // The form is seeded once: a reappear must not overwrite what
+            // the person typed since.
+            configLoaded = true
+            if err == Self.loadError { err = nil }
             self.models = m
             let c = d["config"]?.orderedObject ?? JSONObject()
             bid = KalshiPregame.str(d["brokerage_id"])
@@ -141,9 +147,11 @@ final class KalshiBacktestModel {
             }
             await loadBacktests()
         } catch {
-            if !marketsIsCancellation(error) { err = "Couldn't load the instance config." }
+            if !marketsIsCancellation(error) { err = Self.loadError }
         }
     }
+
+    static let loadError = "Couldn't load the instance config."
 
     func loadBacktests() async {
         guard !bid.isEmpty else { return }
@@ -152,8 +160,16 @@ final class KalshiBacktestModel {
         } catch {}
     }
 
+    /// The screen's `.task`: seed the form from the config once (again only
+    /// when that never landed), then refresh the backtest list every 3 s.
+    /// A reappear reuses this model, so it only restarts the list poll.
     func poll(lifecycle: AppLifecycle) async {
-        await load()
+        if configLoaded {
+            await loadBacktests()
+        } else {
+            await load()
+        }
+        guard !Task.isCancelled else { return }
         await PollingLoop(interval: { Self.tickInterval }) { [weak self] in
             await self?.loadBacktests()
         }.run(lifecycle: lifecycle)

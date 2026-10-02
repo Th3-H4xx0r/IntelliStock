@@ -39,10 +39,9 @@ struct CryptoView: View {
         }
         .task {
             if model == nil {
-                let m = CryptoModel(repository: { [services] in services.cryptoRepository })
-                model = m
-                await m.load()
+                model = CryptoModel(repository: { [services] in services.cryptoRepository })
             }
+            if let model, model.instances.needsLoad { await model.load() }
         }
         .sheet(item: $sheet) { req in
             CryptoInstanceSheet(request: req, repository: { [services] in services.cryptoRepository }) {

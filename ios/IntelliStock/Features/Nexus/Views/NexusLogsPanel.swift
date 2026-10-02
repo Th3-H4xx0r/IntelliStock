@@ -29,21 +29,30 @@ struct NexusLogsPanel: View {
         .background(DS.Surface.panel, in: .rect(cornerRadius: DS.Radius.card, style: .continuous))
         .toast($toast)
         .task {
-            let fresh = LogTailer(
-                client: services.apiClient,
-                pathBuilder: { "/nexus-graph-builds/latest/logs?since_line=\($0)" },
-                runningInterval: .seconds(2),
-                idleInterval: .seconds(15)
-            )
-            tailer = fresh
+            let current: LogTailer
+            if let tailer {
+                // Back on screen: an open panel resumes where it left off
+                // (it was a dead, open-looking panel before).
+                current = tailer
+                current.reattach(open: open, userPaused: userPaused, foreground: services.lifecycle.isForeground)
+            } else {
+                current = LogTailer(
+                    client: services.apiClient,
+                    pathBuilder: { "/nexus-graph-builds/latest/logs?since_line=\($0)" },
+                    runningInterval: .seconds(2),
+                    idleInterval: .seconds(15)
+                )
+                tailer = current
+            }
             for await foreground in services.lifecycle.changes() {
                 if !foreground {
-                    fresh.pause()
+                    current.pause()
                 } else if open, !userPaused {
-                    fresh.resume()
+                    current.resume()
                 }
             }
-            fresh.dispose()
+            // Off screen: stop polling, keep the lines.
+            current.detach()
         }
     }
 
