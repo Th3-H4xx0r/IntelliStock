@@ -56,6 +56,8 @@ struct SwingOrderReviewSheet: View {
     @State private var drag: CGFloat = 0
     /// The card has flown off the top.
     @State private var launched = false
+    /// Where the finger is during a drag, in the sheet's (unmoving) space.
+    @State private var fingerY: CGFloat?
 
     enum Phase: Equatable {
         case review
@@ -102,52 +104,68 @@ struct SwingOrderReviewSheet: View {
     // MARK: Review
 
     /// The order card and the swipe hint under it. The whole card follows
-    /// the finger up; past the threshold it flies off the top and the order
-    /// sends. A drag down only stretches a little.
+    /// the finger up, and only a drag that reaches the very top sends: the
+    /// finger must end in the top tenth of the sheet, having travelled at
+    /// least 40% of it. Anything short of that, a flick included, springs
+    /// back. A drag down only stretches a little.
     private var reviewContent: some View {
-        let lift = drag < 0 ? drag : drag * 0.2
-        let progress = min(max(0, -drag) / SwipeUpHint.threshold, 1)
-        return VStack(spacing: 0) {
-            ViewThatFits(in: .vertical) {
-                card
-                ScrollView { card }
-            }
-            Spacer(minLength: 0)
-            SwipeUpHint(label: "Swipe up to send", progress: progress, onSend: launch)
-        }
-        .padding(.bottom, 12)
-        .offset(y: launched ? -1400 : lift)
-        .opacity(launched ? 0 : 1)
-        .scaleEffect(launched ? 0.92 : 1, anchor: .top)
-        .contentShape(Rectangle())
-        .gesture(
-            DragGesture(minimumDistance: 8)
-                .onChanged { value in
-                    guard phase == .review, !launched else { return }
-                    drag = value.translation.height
+        GeometryReader { geo in
+            let height = geo.size.height
+            let reached = fingerY.map { SwipeUpHint.reachesTop(fingerY: $0, travel: -drag, height: height) } ?? false
+            let lift = drag < 0 ? drag : drag * 0.2
+            let progress: CGFloat = reached ? 1 : min(max(0, -drag) / max(1, height * 0.6), 0.95)
+            VStack(spacing: 0) {
+                ViewThatFits(in: .vertical) {
+                    card
+                    ScrollView { card }
                 }
-                .onEnded { value in
-                    guard phase == .review, !launched else { return }
-                    if SwipeUpHint.commits(translation: value.translation.height, predicted: value.predictedEndTranslation.height) {
-                        launch()
-                    } else {
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) { drag = 0 }
+                Spacer(minLength: 0)
+                SwipeUpHint(
+                    label: fingerY == nil ? "Swipe up to send" : (reached ? "Release to send" : "All the way up"),
+                    progress: progress,
+                    onSend: launch
+                )
+            }
+            .padding(.bottom, 12)
+            .offset(y: launched ? -1400 : lift)
+            .opacity(launched ? 0 : 1)
+            .scaleEffect(launched ? 0.92 : 1, anchor: .top)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 8, coordinateSpace: .named(Self.space))
+                    .onChanged { value in
+                        guard phase == .review, !launched else { return }
+                        drag = value.translation.height
+                        fingerY = value.location.y
                     }
+                    .onEnded { value in
+                        guard phase == .review, !launched else { return }
+                        let sends = SwipeUpHint.reachesTop(fingerY: value.location.y, travel: -value.translation.height, height: height)
+                        fingerY = nil
+                        if sends {
+                            launch()
+                        } else {
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) { drag = 0 }
+                        }
+                    }
+            )
+            .sensoryFeedback(.impact(weight: .medium), trigger: reached)
+            .overlay {
+                if phase == .sending {
+                    VStack(spacing: 10) {
+                        ProgressView()
+                        Text("Sending…")
+                            .font(.headline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .transition(.opacity)
                 }
-        )
-        .sensoryFeedback(.impact(weight: .medium), trigger: progress >= 1)
-        .overlay {
-            if phase == .sending {
-                VStack(spacing: 10) {
-                    ProgressView()
-                    Text("Sending…")
-                        .font(.headline)
-                        .foregroundStyle(.secondary)
-                }
-                .transition(.opacity)
             }
         }
+        .coordinateSpace(.named(Self.space))
     }
+
+    private static let space = "swing.order.review"
 
     /// The order itself, on a raised card.
     private var card: some View {
@@ -248,15 +266,14 @@ struct SwipeUpHint: View {
     let progress: CGFloat
     let onSend: () -> Void
 
-    nonisolated static let threshold: CGFloat = 120
+    /// Only a drag to the very top sends: the finger ends in the top tenth
+    /// of the sheet, having travelled at least 40% of its height. No flick
+    /// shortcut, so a drag that stops short never sends.
+    nonisolated static func reachesTop(fingerY: CGFloat, travel: CGFloat, height: CGFloat) -> Bool {
+        height > 0 && fingerY <= height * 0.1 && travel >= height * 0.4
+    }
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    /// A drag up of `threshold`, or a flick predicted to travel twice that,
-    /// sends.
-    nonisolated static func commits(translation: CGFloat, predicted: CGFloat, threshold: CGFloat = threshold) -> Bool {
-        -translation >= threshold || -predicted >= threshold * 2
-    }
 
     var body: some View {
         VStack(spacing: 8) {
