@@ -76,8 +76,11 @@ nonisolated class SwingFakeSource: SwingSignalsSource, @unchecked Sendable {
         return decideReceipt
     }
 
+    /// The submitted and failed reads run in parallel: guard the log.
+    private let statusLock = NSLock()
+
     func signalsWithStatus(_ instanceId: String, _ status: String) async throws -> [SwingSignal] {
-        statusReads.append(status)
+        statusLock.withLock { statusReads.append(status) }
         if let listError { throw listError }
         switch status {
         case "submitted": return submitted

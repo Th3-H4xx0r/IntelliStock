@@ -37,6 +37,8 @@ private struct InstanceDetailContent: View {
     @State private var wheel: WheelModel
     @State private var sheet: InstanceDetailSheet?
     @State private var confirm: ConfirmRequest?
+    /// A confirmed unlink is running: the unlink buttons stay disabled.
+    @State private var confirmRunning = false
     @State private var toast: Toast?
     @State private var toggling = false
 
@@ -76,7 +78,7 @@ private struct InstanceDetailContent: View {
             .task { await model.runUptimeTicker() }
             .task { await model.runProgressPoll() }
             .sheet(item: $sheet) { sheetView($0) }
-            .confirmAlert($confirm)
+            .confirmAlert($confirm, isRunning: $confirmRunning)
             .toast($toast)
     }
 
@@ -288,6 +290,7 @@ private struct InstanceDetailContent: View {
                             onError: { toast = Toast(swingErrorText($0), style: .error) }
                         )
                     }
+                    .disabled(confirmRunning)
                     .padding(.top, 4)
                 }
             }
@@ -315,6 +318,7 @@ private struct InstanceDetailContent: View {
                                 onError: { toast = Toast(swingErrorText($0), style: .error) }
                             )
                         }
+                        .disabled(confirmRunning)
                     }
                 }
                 .padding(.bottom, 8)

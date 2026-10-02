@@ -6,7 +6,7 @@ import Observation
 /// Whether `error` is a cancelled request (a view going away), which must
 /// leave state unchanged rather than surface as a failure.
 nonisolated func tradingIsCancellation(_ error: any Error) -> Bool {
-    error is CancellationError || Task.isCancelled
+    error.isCancellation || Task.isCancelled
 }
 
 /// Which P&L each holding row shows: lifetime unrealized `total`, or `daily`

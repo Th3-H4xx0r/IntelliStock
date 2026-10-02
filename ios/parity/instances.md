@@ -121,7 +121,8 @@ Legend: `[x]` ported as-is · `[x] → native form: …` deliberately changed in
 ## Rulings
 
 - Ruling: start/stop instance keep Dart's behaviour of no confirmation (only delete, unlink and clear-state were confirmed) — byte parity; the brief's "native confirmations" applies to the confirmations that exist — cost if wrong: one alert to add.
-- Ruling: every confirmed action (delete, unlink, decision, re-send, clear state) disables its trigger while the request is in flight and passes `onError` (orchestrator instruction) — cost if wrong: none.
+- Ruling: every confirmed action (delete, unlink, decision, re-send, clear state) disables its trigger while the request is in flight (core's `confirmAlert(_:isRunning:)` after fix round 1) and passes `onError` (orchestrator instruction) — cost if wrong: none.
+- Ruling: while one swing decision or re-send runs, every card's actions are inert (Dart disabled only the card being decided) — core's confirm runner drops a second request while one runs, so an enabled button would raise an alert whose confirm does nothing; stricter on a real-trading control — cost if wrong: a second approval waits for the first to land.
 - Ruling: the uptime ticker and backtest-progress poll run while the detail screen is on screen (task-scoped); Dart's `Timer.periodic` ran until dispose — cost if wrong: none.
 - Ruling: `PinnedInstancesModel` lives on the Instances tab root's `@State` (app-lifetime, like the keepAlive provider) — cost if wrong: none.
 - Ruling: the swing repository is reached through a `SwingSignalsSource` protocol so the ported fakes can stand in, exactly as Dart's `FakeSwingRepo implements SwingRepository` — cost if wrong: none.

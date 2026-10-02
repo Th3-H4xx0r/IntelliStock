@@ -92,10 +92,7 @@ private struct DashboardContent: View {
         .task(id: selected?.id) {
             if let id = selected?.id { await strategy.arm(id) }
         }
-        .task {
-            // TODO(merge): pollServices(lifecycle:) once feat/native-ios-app has it.
-            await services.dashboard.pollServices()
-        }
+        .task { await services.dashboard.pollServices(lifecycle: services.lifecycle) }
         .onChange(of: selected?.id, initial: true) { _, id in
             guard let id else {
                 scope = nil

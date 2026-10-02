@@ -19,6 +19,8 @@ private struct InstancesContent: View {
     @State private var showCreate = false
     @State private var addStockFor: InstanceSheetTarget?
     @State private var confirm: ConfirmRequest?
+    /// A confirmed delete is running: every Delete stays disabled.
+    @State private var confirmRunning = false
     @State private var toast: Toast?
 
     init(services: AppServices) {
@@ -56,7 +58,7 @@ private struct InstancesContent: View {
                     try await model.addStock(target.id, symbol)
                 }
             }
-            .confirmAlert($confirm)
+            .confirmAlert($confirm, isRunning: $confirmRunning)
             .toast($toast)
     }
 
@@ -124,6 +126,7 @@ private struct InstancesContent: View {
                             onLive: { services.router.push(.liveTrading(inst.id)) },
                             onStart: { Task { await model.start(inst.id) } },
                             onStop: { Task { await model.stop(inst.id) } },
+                            deleteLocked: confirmRunning,
                             onDelete: { confirmDelete(inst) },
                             onAddStock: { addStockFor = InstanceSheetTarget(id: inst.id) },
                             onRemoveStock: { sym in
@@ -174,6 +177,7 @@ private struct InstanceListCard: View {
     let onLive: () -> Void
     let onStart: () -> Void
     let onStop: () -> Void
+    let deleteLocked: Bool
     let onDelete: () -> Void
     let onAddStock: () -> Void
     let onRemoveStock: (String) -> Void
@@ -238,7 +242,7 @@ private struct InstanceListCard: View {
                     } else {
                         InstanceActionButton(label: "Start", symbol: Symbol.named("play_arrow"), tint: DS.Palette.success, busy: busy, action: onStart)
                     }
-                    InstanceActionButton(label: "Delete", symbol: Symbol.named("delete"), tint: DS.Palette.danger, disabled: busy, action: onDelete)
+                    InstanceActionButton(label: "Delete", symbol: Symbol.named("delete"), tint: DS.Palette.danger, disabled: busy || deleteLocked, action: onDelete)
                 }
             }
         }

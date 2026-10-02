@@ -100,7 +100,7 @@ Legend: `[x]` ported as-is · `[x] → native form: …` deliberately changed in
 
 - [x] Title `Services`, subtitle `Status and controls for all IntelliStock background services.`, refresh button (tooltip `Refresh`) → `refreshNow()`.
 - [x] Loading → 5 skeleton cards; error → ErrorRow + Retry.
-- [x] Services polled every 10 s while the dashboard is visible (`pollServices()` from `.task`; `TODO(merge)`: switch to `pollServices(lifecycle:)` once core lands it, so it pauses in the background).
+- [x] Services polled every 10 s while the dashboard is visible, pausing in the background (`pollServices(lifecycle:)` from `.task`).
 - [x] `ServiceCard`: icon tile, title, subtitle, status pill (first letter capitalised, empty → `Stopped`, pulsing when running), stats grid (1 full width, else 2 columns), buttons in a row.
 - [x] `ServiceStatCell` label + mono value; `NexusProgressCell` `Build progress`, `N%`, bar, last phase.
 - [x] Price Engine (`trending_up`, info): `Live market data`; Details or `No extra details`; running → `Terminate` (danger) → `POST /config/terminate-price`; else `Start` (success) → `POST /config/run-price-service`.

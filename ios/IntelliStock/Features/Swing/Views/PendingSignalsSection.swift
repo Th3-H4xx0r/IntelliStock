@@ -12,6 +12,9 @@ struct PendingSignalsSection: View {
 
     @Environment(AppServices.self) private var services
     @State private var confirm: ConfirmRequest?
+    /// A confirmed decision or re-send is running: every card's actions stay
+    /// inert until it lands (the confirm runner drops a second request).
+    @State private var confirmRunning = false
     /// Signal ids whose confirmed action is running (on top of the model's
     /// own deciding/resending guards).
     @State private var inFlight: Set<String> = []
@@ -37,7 +40,7 @@ struct PendingSignalsSection: View {
                 }
             }
         }
-        .confirmAlert($confirm)
+        .confirmAlert($confirm, isRunning: $confirmRunning)
         .task { await model.poll(lifecycle: services.lifecycle) }
     }
 
@@ -58,7 +61,7 @@ struct PendingSignalsSection: View {
             ForEach(state.signals) { s in
                 SwingSignalCard(
                     signal: s,
-                    busy: state.isDeciding(s.id) || inFlight.contains(s.id),
+                    busy: state.isDeciding(s.id) || inFlight.contains(s.id) || confirmRunning,
                     onDecide: { decide(s, $0) }
                 )
                 .id(s.id)
@@ -84,7 +87,7 @@ struct PendingSignalsSection: View {
                     signal: s,
                     label: stuckLabel(s, now),
                     blockedReason: resendBlockedReason(s, nyDate(now)),
-                    busy: state.isResending(s.id) || inFlight.contains(s.id),
+                    busy: state.isResending(s.id) || inFlight.contains(s.id) || confirmRunning,
                     onResend: { resend(s) },
                     onDismiss: { model.dismissStuck(s.id) }
                 )
