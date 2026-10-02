@@ -7,6 +7,8 @@ import SwiftUI
 @Observable
 final class PendingSignalsActions {
     var confirm: ConfirmRequest?
+    /// An approval's order review (Approve / Approve ½), shown as a sheet.
+    var review: SwingOrderReview?
     /// A confirmed decision or re-send is running: every card's actions stay
     /// inert until it lands (the confirm runner drops a second request).
     var confirmRunning = false
@@ -152,6 +154,24 @@ struct PendingSignalsSection: View {
         let model = model
         let showToast = showToast
         let onDecided = onDecided
+        if decision != "reject" {
+            // Approvals go through the order review and its swipe to send.
+            actions.review = SwingOrderReview(
+                signal: signal,
+                decision: decision,
+                send: {
+                    actions.inFlight.insert(signal.id)
+                    actions.confirmRunning = true
+                    defer {
+                        actions.inFlight.remove(signal.id)
+                        actions.confirmRunning = false
+                    }
+                    return await model.decide(signal, decision)
+                },
+                finished: { _ in onDecided() }
+            )
+            return
+        }
         actions.confirm = ConfirmRequest(
             title: "\(decisionLabel(decision)) \(signal.symbol)",
             body: decisionConfirmBody(signal, decision),
@@ -203,7 +223,7 @@ struct PendingSignalsSection: View {
 
 /// A server label in sentence case ("ENTRY" → "Entry"); acronyms the
 /// signal fields use stay upper case.
-private func swingFieldLabel(_ label: String) -> String {
+func swingFieldLabel(_ label: String) -> String {
     let acronyms: Set<String> = ["DTE", "ITM", "P&L"]
     if acronyms.contains(label) { return label }
     return label.lowercased().dsSentenceCased

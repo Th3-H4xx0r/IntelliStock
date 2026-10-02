@@ -90,8 +90,16 @@ nonisolated func stockCompact(_ v: Double) -> String {
 
 /// `_statsCard`'s cells: label → formatted value, zero/absent numbers
 /// skipped, the range's open/high/low from the series.
-nonisolated func stockStatCells(info: JSONObject, series: StockSeries?, range: String) -> [(label: String, value: String)] {
+nonisolated func stockStatCells(info: JSONObject, series: StockSeries?, range: String, symbol: String? = nil) -> [(label: String, value: String)] {
     var cells: [(label: String, value: String)] = []
+    // An option leads with its contract; a year's range, market cap and the
+    // like describe a company, not a contract that lives for weeks.
+    let option = parseOccSymbol(symbol)
+    if let option {
+        cells.append(("Strike", fmtMoney(option.strike)))
+        cells.append(("Expiry", stockExpiryText(option.expiry)))
+        cells.append(("Type", option.optionType.lowercased() == "put" ? "Put" : "Call"))
+    }
     func add(_ label: String, _ key: String, _ format: (Num) -> String) {
         guard let raw = info[key], let n = raw.num, n.double != 0 else { return }
         cells.append((label, format(n)))
@@ -103,6 +111,10 @@ nonisolated func stockStatCells(info: JSONObject, series: StockSeries?, range: S
         cells.append(("\(range) high", fmtMoney(v.max()!)))
         cells.append(("\(range) low", fmtMoney(v.min()!)))
     }
+    if option != nil {
+        add("Volume", "volume") { stockCompact($0.double) }
+        return cells
+    }
     add("52W high", "fiftyTwoWeekHigh", money)
     add("52W low", "fiftyTwoWeekLow", money)
     add("Volume", "volume") { stockCompact($0.double) }
@@ -113,6 +125,41 @@ nonisolated func stockStatCells(info: JSONObject, series: StockSeries?, range: S
     add("Beta", "beta") { dartToStringAsFixed($0.double, 2) }
     add("Analyst target", "targetMeanPrice", money)
     return cells
+}
+
+/// The screen's title: "QCOM $177.50 Put" for an OCC option symbol, else the
+/// symbol.
+nonisolated func stockDisplayTitle(_ symbol: String) -> String {
+    guard isOccOptionSymbol(symbol) else { return symbol }
+    return describeOptionContract(symbol: symbol).components(separatedBy: " · ").first ?? symbol
+}
+
+/// The line under the price: "Expires Oct 9, 2026" for an option, else the
+/// company name.
+nonisolated func stockStatusLine(symbol: String, name: String) -> String {
+    guard let option = parseOccSymbol(symbol) else { return name }
+    return "Expires \(stockExpiryText(option.expiry))"
+}
+
+/// "1 contract short · avg $1.31", "82 shares · avg $160.00".
+nonisolated func stockPositionLine(symbol: String, qty: Double, avg: Double?) -> String {
+    let count = DashboardFormat.qtyNumber(abs(qty))
+    let unit: String
+    if isOccOptionSymbol(symbol) {
+        unit = abs(qty) == 1 ? "contract" : "contracts"
+    } else {
+        unit = "shares"
+    }
+    let side = qty < 0 ? " short" : ""
+    return "\(count) \(unit)\(side) · avg \(fmtMoney(avg))"
+}
+
+/// "2026-10-09" → "Oct 9, 2026"; anything else as given.
+nonisolated func stockExpiryText(_ ymd: String) -> String {
+    let parts = ymd.split(separator: "-").compactMap { Int($0) }
+    guard parts.count == 3, (1...12).contains(parts[1]) else { return ymd }
+    let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    return "\(months[parts[1] - 1]) \(parts[2]), \(parts[0])"
 }
 
 /// A trimmed string field of the info map (`(info['x'] as String?) ?? ''`).

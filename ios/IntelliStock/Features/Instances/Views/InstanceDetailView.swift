@@ -86,6 +86,9 @@ private struct InstanceDetailContent: View {
             .sheet(item: $sheet) { sheetView($0) }
             .confirmAlert($confirm, isRunning: $confirmRunning)
             .confirmAlert($signalActions.confirm, isRunning: $signalActions.confirmRunning)
+            .sheet(item: $signalActions.review) { review in
+                SwingOrderReviewSheet(review: review, cash: wheel.state.value?.cash)
+            }
             .toast($toast)
     }
 
