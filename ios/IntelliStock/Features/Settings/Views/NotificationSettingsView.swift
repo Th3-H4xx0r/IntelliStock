@@ -195,13 +195,13 @@ private struct NotificationCategoryRow: View {
                     .foregroundStyle(.secondary)
             }
             HStack(spacing: 20) {
-                Toggle(isOn: Binding(get: { route.discord }, set: onDiscord)) {
+                Toggle(isOn: Binding(get: { route.discord }, set: { onDiscord($0) })) {
                     Text("Discord")
                         .font(.footnote)
                         .foregroundStyle(route.discord ? .primary : .secondary)
                 }
                 .fixedSize()
-                Toggle(isOn: Binding(get: { route.push }, set: onPush)) {
+                Toggle(isOn: Binding(get: { route.push }, set: { onPush($0) })) {
                     Text("iOS push")
                         .font(.footnote)
                         .foregroundStyle(route.push ? .primary : .secondary)

@@ -61,7 +61,7 @@ nonisolated final class ChatStubRoutes: @unchecked Sendable {
     }
 
     @Test func bootstrapFailureRecordsTheError() async {
-        let (model, stub, routes) = make()
+        let (model, _, routes) = make()
         routes.set("GET /chatbot/conversations", #"{"detail":"down"}"#, status: 500)
         await model.bootstrap()
         #expect(model.state.error == "down")
