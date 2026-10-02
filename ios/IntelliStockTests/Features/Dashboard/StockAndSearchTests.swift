@@ -112,6 +112,33 @@ struct StockModelTests {
         #expect(cells.map(\.value) == ["$100.00", "$10.00", "$12.00", "$10.00", "1.50M", "$2.50T", "31.46"])
         #expect(stockStatCells(info: [:], series: nil, range: "1D").isEmpty)
     }
+
+    // An option contract reads as a contract, not as its OCC code.
+
+    @Test func anOptionIsTitledByItsContract() {
+        #expect(stockDisplayTitle("QCOM261009P00177500") == "QCOM $177.50 Put")
+        #expect(stockDisplayTitle("SPY") == "SPY")
+    }
+
+    @Test func anOptionStatusLineIsItsExpiry() {
+        #expect(stockStatusLine(symbol: "QCOM261009P00177500", name: "QCOM Oct 2026 177.500 put") == "Expires Oct 9, 2026")
+        #expect(stockStatusLine(symbol: "AAPL", name: "Apple Inc.") == "Apple Inc.")
+    }
+
+    @Test func positionLinesCountContractsAndSayShort() {
+        #expect(stockPositionLine(symbol: "QCOM261009P00177500", qty: -1, avg: 1.31) == "1 contract short · avg $1.31")
+        #expect(stockPositionLine(symbol: "QCOM261009P00177500", qty: 2, avg: 1.31) == "2 contracts · avg $1.31")
+        #expect(stockPositionLine(symbol: "ABNB", qty: 82, avg: 160) == "82 shares · avg $160.00")
+        #expect(stockPositionLine(symbol: "ABNB", qty: -5, avg: 160) == "5 shares short · avg $160.00")
+    }
+
+    @Test func optionStatsAreTheContractNotTheFiftyTwoWeekRange() {
+        let info: JSONObject = ["previousClose": 2.64, "fiftyTwoWeekHigh": 1.78, "fiftyTwoWeekLow": 1.05, "volume": 400]
+        let cells = stockStatCells(info: info, series: StockSeries(ts: [Date(), Date()], vals: [1.12, 1.43]), range: "1D",
+                                   symbol: "QCOM261009P00177500")
+        #expect(cells.map(\.label) == ["Strike", "Expiry", "Type", "Prev close", "Open", "1D high", "1D low", "Volume"])
+        #expect(cells.prefix(3).map(\.value) == ["$177.50", "Oct 9, 2026", "Put"])
+    }
 }
 
 /// symbol_search_screen.dart: the debounced query, stale replies, errors

@@ -4,15 +4,11 @@ import SwiftUI
 /// Sizes the portfolio hero shares with its skeleton.
 nonisolated enum DashboardPortfolioMetrics {
     static let chartHeight: CGFloat = 224
-    /// The dashboard list's coordinate space: the hero measures its side
-    /// margin against it.
-    static let listSpace = "dashboard.list"
-
-    /// How far the chart runs past the hero's text on each side: half the
-    /// list's side margin, so the chart's margins are half the text's.
-    static func chartBleed(textInset: CGFloat) -> CGFloat {
-        max(0, textInset / 2).rounded()
-    }
+    /// The side margin of the chart, its range picker and freshness line,
+    /// which sit in a full-width section of their own. A constant, never a
+    /// measurement: a measured inset fed back into the layout looped forever
+    /// on Back from a stock screen.
+    static let chartMargin: CGFloat = 10
 }
 
 /// The portfolio for the selected account — `_PortfolioSection` and
@@ -33,8 +29,10 @@ struct DashboardPortfolioSections: View {
     let onSwitchAccount: () -> Void
 
     var body: some View {
+        // The text keeps the list's own margins, in line with every section.
         Section {
             DashboardPortfolioHero(
+                part: .header,
                 accounts: accounts,
                 selected: selected,
                 chart: scope.chart,
@@ -43,28 +41,47 @@ struct DashboardPortfolioSections: View {
             .listRowBackground(Color.clear)
             // Flush with the top of the safe area: no row padding above.
             .listRowInsets(.top, 0)
+            .listRowInsets(.bottom, 0)
             .listRowSeparator(.hidden)
         }
+        .listSectionSpacing(0)
+        // The chart runs nearly edge to edge: a full-width section, so its
+        // row cannot clip it.
+        Section {
+            DashboardPortfolioHero(
+                part: .chart,
+                accounts: accounts,
+                selected: selected,
+                chart: scope.chart,
+                onSwitchAccount: onSwitchAccount
+            )
+            .listRowBackground(Color.clear)
+            .listRowInsets(EdgeInsets(top: 0, leading: DashboardPortfolioMetrics.chartMargin, bottom: 8, trailing: DashboardPortfolioMetrics.chartMargin))
+            .listRowSeparator(.hidden)
+        }
+        .listSectionMargins(.horizontal, 0)
         DashboardHoldingsSection(holdings: scope.holdings, feed: feed, brokerageId: selected.id)
     }
 }
 
 /// The hero: account label, balance, change and status, with the search
 /// button at their trailing end (the dashboard has no navigation bar), then
-/// the chart, the range and the freshness line. The chart's side margins are
-/// half the text's.
+/// the chart, the range and the freshness line (`part`), as two rows: the
+/// text in the list's margins, the chart nearly edge to edge.
 private struct DashboardPortfolioHero: View {
+    enum Part { case header, chart }
+
+    let part: Part
     let accounts: [BrokerageAccount]
     let selected: BrokerageAccount
     let chart: DashboardPortfolioChartModel
     let onSwitchAccount: () -> Void
 
     @Environment(AppServices.self) private var services
-    /// The list's side margin, read from the row; drives the chart's bleed.
-    @State private var textInset: CGFloat = 0
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        switch part {
+        case .header:
             HStack(alignment: .center, spacing: 12) {
                 VStack(alignment: .leading, spacing: 0) {
                     accountLabel
@@ -74,22 +91,18 @@ private struct DashboardPortfolioHero: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 DashboardSearchButton()
             }
-            DashboardPortfolioChartArea(chart: chart)
-                .padding(.top, 20)
-                .padding(.horizontal, -DashboardPortfolioMetrics.chartBleed(textInset: textInset))
-            Picker("Range", selection: Binding(get: { chart.range }, set: { chart.setRange($0) })) {
-                ForEach(dashboardChartRanges, id: \.self) { Text($0).tag($0) }
+            .padding(.top, 4)
+        case .chart:
+            VStack(alignment: .leading, spacing: 0) {
+                DashboardPortfolioChartArea(chart: chart)
+                Picker("Range", selection: Binding(get: { chart.range }, set: { chart.setRange($0) })) {
+                    ForEach(dashboardChartRanges, id: \.self) { Text($0).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .padding(.top, 12)
+                freshness
             }
-            .pickerStyle(.segmented)
-            .padding(.top, 12)
-            freshness
-        }
-        .padding(.vertical, 4)
-        // Against the list, not the screen, so a push's slide leaves it be.
-        .onGeometryChange(for: CGFloat.self) { proxy in
-            proxy.frame(in: .named(DashboardPortfolioMetrics.listSpace)).minX
-        } action: { inset in
-            textInset = inset
+            .padding(.top, 20)
         }
     }
 

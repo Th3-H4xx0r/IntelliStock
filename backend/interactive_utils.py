@@ -8535,9 +8535,60 @@ def ensure_bot_trade_decisions_table(conn):
         schema.ensure_schema(tables=[BOT_TRADE_DECISIONS_TABLE])
 
 
-def action_list_bot_trade_decisions(conn, brokerage_id, symbol=None, page=1, per_page=20):
+def _swing_trade_events(instance_id, symbol=None):
+    """The orders the instance's swing/wheel approval lane sent, shaped like
+    BotTradeDecisions events. That lane never writes the decision log, so
+    without these a wheel put the bot sold showed no bot activity. A symbol
+    matches the option contract or its underlying."""
+    if not instance_id:
+        return []
+    from swing_trader import signals_store
+    try:
+        rows = signals_store.all_signals(instance_id)
+    except Exception:
+        return []
+    sym = str(symbol or "").upper()
+    events = []
+    for d in rows:
+        order = d.get("submitted_order")
+        if not isinstance(order, dict):
+            continue
+        contract = str(order.get("contract") or "").upper()
+        underlying = str(order.get("underlying") or d.get("symbol") or "").upper()
+        if sym and sym not in (contract, underlying):
+            continue
+        intent = str(order.get("position_intent") or order.get("side") or "")
+        side = "sell" if intent.lower().startswith("sell") else "buy"
+        outcome = d.get("outcome") if isinstance(d.get("outcome"), dict) else {}
+        price = outcome.get("premium_received")
+        if price is None:
+            price = outcome.get("fill_price")
+        if price is None:
+            price = order.get("limit_price")
+        lane = str(d.get("lane") or "swing")
+        what = " ".join(w for w in (intent.replace("_", " "), str(order.get("option_type") or "")) if w)
+        events.append({
+            "id": f"swing-{d.get('id')}",
+            "symbol": contract or underlying,
+            "side": side,
+            "ts": d.get("claimed_at") or d.get("decided_at") or d.get("created_at"),
+            "price": price,
+            "strategy": f"{lane.capitalize()} · {what}" if what else lane.capitalize(),
+            "action_intent": intent or None,
+            "reason": str(d.get("reasoning") or ""),
+            "score": d.get("score"),
+            "override_applied": False,
+            "contributors": [],
+            "source": "swing",
+        })
+    return events
+
+
+def action_list_bot_trade_decisions(conn, brokerage_id, symbol=None, page=1, per_page=20,
+                                    instance_id=None):
     """Recent bot trade decisions for a brokerage (newest first), optionally
-    filtered to one symbol. Returns {events, total, page, per_page}."""
+    filtered to one symbol, plus the orders the linked instance's swing/wheel
+    lane sent (`instance_id`). Returns {events, total, page, per_page}."""
     ensure_bot_trade_decisions_table(conn)
     sel = store.get_all(BOT_TRADE_DECISIONS_TABLE, str(brokerage_id),
                         index="brokerage_id")
@@ -8545,6 +8596,7 @@ def action_list_bot_trade_decisions(conn, brokerage_id, symbol=None, page=1, per
     if symbol:
         sym = str(symbol).upper()
         rows = [d for d in rows if str(d.get("symbol") or "").upper() == sym]
+    rows += _swing_trade_events(instance_id, symbol)
     rows.sort(key=lambda d: str(d.get("ts") or d.get("created_at") or ""), reverse=True)
     total = len(rows)
     page = max(1, int(page or 1))

@@ -5173,9 +5173,14 @@ def api_brokerage_bot_activity(
     optionally filtered to one symbol — newest first. Read from the
     BotTradeDecisions table that live instances write on each confirmed trade.
     Complements /orders (the fills) with the *why* behind them."""
+    try:
+        instance_id = _resolve_instance_for_brokerage(conn, brokerage_id)
+    except Exception:
+        instance_id = None
     return _run(
         action_list_bot_trade_decisions,
         conn, brokerage_id, (symbol or "").strip() or None, page, per_page,
+        instance_id,
     )
 
 

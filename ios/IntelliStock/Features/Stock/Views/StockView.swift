@@ -37,21 +37,32 @@ private struct StockContent: View {
         let infoLoading = model.info == nil
         let hasSummary = !stockInfoText(info, "summary").isEmpty
         List {
+            // The text keeps the list's margins; the chart and range sit in a
+            // full-width section of their own, nearly edge to edge
+            // (`DashboardPortfolioMetrics.chartMargin`).
+            Section {
+                header(info)
+                    .padding(.top, 4)
+                    .listRowBackground(Color.clear)
+                    .listRowInsets(.bottom, 0)
+                    .listRowSeparator(.hidden)
+            }
+            .listSectionSpacing(0)
             Section {
                 VStack(alignment: .leading, spacing: 0) {
-                    header(info)
                     chartArea
-                        .padding(.top, 20)
                     Picker("Range", selection: Binding(get: { model.range }, set: { model.setRange($0) })) {
                         ForEach(stockRanges, id: \.self) { Text($0).tag($0) }
                     }
                     .pickerStyle(.segmented)
                     .padding(.top, 12)
                 }
-                .padding(.vertical, 4)
+                .padding(.top, 20)
                 .listRowBackground(Color.clear)
+                .listRowInsets(EdgeInsets(top: 0, leading: DashboardPortfolioMetrics.chartMargin, bottom: 8, trailing: DashboardPortfolioMetrics.chartMargin))
                 .listRowSeparator(.hidden)
             }
+            .listSectionMargins(.horizontal, 0)
             if let position = route.position {
                 positionSection(position)
             }
@@ -70,7 +81,7 @@ private struct StockContent: View {
         }
         .listStyle(.insetGrouped)
         .contentMargins(.top, 0, for: .scrollContent)
-        .navigationTitle(route.symbol)
+        .navigationTitle(stockDisplayTitle(route.symbol))
         .navigationBarTitleDisplayMode(.inline)
         .refreshable { await model.refreshHistory() }
         .task(id: model.range) { await model.pollHistory(lifecycle: services.lifecycle) }
@@ -81,7 +92,7 @@ private struct StockContent: View {
 
     @ViewBuilder
     private func header(_ info: JSONObject) -> some View {
-        let name = stockInfoText(info, "name")
+        let name = stockStatusLine(symbol: route.symbol, name: stockInfoText(info, "name"))
         let vals = model.series?.vals
         let ready = (vals?.count ?? 0) >= 2
         if ready, let vals {
@@ -159,7 +170,7 @@ private struct StockContent: View {
                 }
             }
             .padding(.vertical, 4)
-            Text("\(DashboardFormat.qtyNumber(p.qty)) shares · avg \(fmtMoney(p.avgEntryPrice))")
+            Text(stockPositionLine(symbol: route.symbol, qty: p.qty, avg: p.avgEntryPrice))
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }
@@ -173,7 +184,7 @@ private struct StockContent: View {
                 emptyRow("No linked brokerage")
             } else if let events = model.botEvents {
                 if events.isEmpty {
-                    emptyRow("No bot trades logged yet for \(route.symbol)")
+                    emptyRow("No bot trades logged yet for \(stockDisplayTitle(route.symbol))")
                 } else {
                     ForEach(Array(events.enumerated()), id: \.offset) { _, e in
                         StockBotEventRow(event: e)
@@ -193,7 +204,7 @@ private struct StockContent: View {
 
     @ViewBuilder
     private func statsSection(_ info: JSONObject) -> some View {
-        let cells = stockStatCells(info: info, series: model.series, range: model.range)
+        let cells = stockStatCells(info: info, series: model.series, range: model.range, symbol: route.symbol)
         if !cells.isEmpty {
             Section("Key statistics") {
                 StatGrid(columns: 3) {

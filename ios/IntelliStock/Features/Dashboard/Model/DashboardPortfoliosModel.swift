@@ -115,19 +115,22 @@ final class DashboardPortfoliosModel {
         guard !due.isEmpty else { return }
         inFlight.formUnion(due.map(\.id))
         let fetch = fetcher()
-        await withTaskGroup(of: (String, Result<DashboardAccountSummary, any Error>).self) { group in
-            for account in due {
-                group.addTask {
-                    do {
-                        return (account.id, .success(try await fetch(account)))
-                    } catch {
-                        return (account.id, .failure(error))
-                    }
+        // One task per account rather than a task group: calling the
+        // caller-isolated `Fetch` from a task-group child crashed the
+        // Release build in `TaskGroup::offer` at launch.
+        let tasks = due.map { account in
+            Task { [weak self] in
+                let result: Result<DashboardAccountSummary, any Error>
+                do {
+                    result = .success(try await fetch(account))
+                } catch {
+                    result = .failure(error)
                 }
+                self?.apply(account.id, result)
             }
-            for await (id, result) in group {
-                apply(id, result)
-            }
+        }
+        for task in tasks {
+            await task.value
         }
     }
 

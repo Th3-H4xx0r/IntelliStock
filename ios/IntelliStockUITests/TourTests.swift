@@ -103,6 +103,33 @@ final class TourTests: XCTestCase {
 
     // MARK: Steps
 
+    /// Back from a stock screen must leave the app responsive (operator
+    /// report 2026-10-02: Back froze the app). Navigation only.
+    func testBackFromStockStaysResponsive() throws {
+        let url = try XCTUnwrap(env["IS_URL"], "set TEST_RUNNER_IS_URL")
+        let user = try XCTUnwrap(env["IS_USER"], "set TEST_RUNNER_IS_USER")
+        let pass = try XCTUnwrap(env["IS_PASS"], "set TEST_RUNNER_IS_PASS")
+        app.launch()
+        signIn(url: url, user: user, pass: pass)
+        tapTab("Dashboard")
+        settle(6)
+        for symbol in ["QCOM261009P00177500", "ABNB"] {
+            let row = app.staticTexts[symbol]
+            if row.waitForExistence(timeout: 5) { row.tap() } else { openDeepLink("/stock/\(symbol)") }
+            settle(5)
+            shot("hang-\(symbol)-open")
+            back()
+            settle(3)
+            shot("hang-\(symbol)-back")
+            let kalshi = app.tabBars.buttons["Kalshi"]
+            XCTAssertTrue(kalshi.waitForExistence(timeout: 10), "tab bar gone after Back from \(symbol)")
+            kalshi.tap()
+            settle(2)
+            tapTab("Dashboard")
+            settle(3)
+        }
+    }
+
     private func signIn(url: String, user: String, pass: String) {
         // Connect: the only text field on screen. Its button reads "Test & Connect".
         if app.staticTexts["Connect to your instance"].waitForExistence(timeout: 8) {

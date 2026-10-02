@@ -135,7 +135,6 @@ private struct DashboardContent: View {
             onboardingSection
         }
         .listStyle(.insetGrouped)
-        .coordinateSpace(.named(DashboardPortfolioMetrics.listSpace))
         // The hero starts right at the top of the safe area, as in Stocks.
         .contentMargins(.top, 0, for: .scrollContent)
         .navigationTitle(DashboardTopActions.title)
