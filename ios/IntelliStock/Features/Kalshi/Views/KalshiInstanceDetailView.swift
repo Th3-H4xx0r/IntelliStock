@@ -506,15 +506,14 @@ struct KalshiInstanceDetailView: View {
                     LoadingState()
                 case .failed(let e):
                     ErrorRow(message: KalshiFormat.errorText(e), onRetry: { Task { await model.refresh() } })
-                case .loaded(let d):
-                    let rows = KalshiPregame.rows(d)
-                    if rows.isEmpty {
+                case .loaded:
+                    if model.pregameRowsEmpty {
                         Text("No games analyzed yet — picks will appear here once the bot scans the slate.")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     } else {
                         VStack(spacing: 10) {
-                            ForEach(Array(KalshiPregame.games(rows).enumerated()), id: \.offset) { _, sides in
+                            ForEach(Array(model.pregameGames.enumerated()), id: \.offset) { _, sides in
                                 pregameCard(sides, now: now)
                             }
                         }

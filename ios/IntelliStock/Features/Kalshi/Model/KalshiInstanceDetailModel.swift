@@ -9,7 +9,19 @@ final class KalshiInstanceDetailModel {
     let instanceId: String
 
     private(set) var detail: Loadable<JSONObject> = .loading
-    private(set) var decisions: Loadable<JSONObject> = .loading
+    private(set) var decisions: Loadable<JSONObject> = .loading {
+        didSet {
+            // Grouped once per fetch, not on every second of the kickoff
+            // countdown's redraw.
+            let rows = KalshiPregame.rows(decisions.value)
+            pregameRowsEmpty = rows.isEmpty
+            pregameGames = KalshiPregame.games(rows)
+        }
+    }
+    /// The pregame card's fixtures (`KalshiPregame.games` of the decisions).
+    @ObservationIgnored private(set) var pregameGames: [[JSONObject]] = []
+    /// No decision rows at all (the card's empty message).
+    @ObservationIgnored private(set) var pregameRowsEmpty = true
     private(set) var live: Loadable<JSONObject> = .loading
     private(set) var orders: Loadable<JSONObject> = .loading
     private(set) var portfolio: Loadable<KalshiPortfolio>?

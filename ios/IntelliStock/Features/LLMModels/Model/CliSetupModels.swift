@@ -203,16 +203,31 @@ final class CodexSetupModel {
 
     @ObservationIgnored private let repository: () -> ModelRepository
     @ObservationIgnored private let sleep: PollingSleep
+    /// Polls wait out the background on this (nil: never paused).
+    @ObservationIgnored private weak var lifecycle: AppLifecycle?
     @ObservationIgnored private var installTimer: Task<Void, Never>?
     @ObservationIgnored private var loginTimer: Task<Void, Never>?
 
-    init(cliPath: String, repository: @escaping () -> ModelRepository, sleep: @escaping PollingSleep = realPollingSleep) {
+    init(
+        cliPath: String,
+        repository: @escaping () -> ModelRepository,
+        lifecycle: AppLifecycle? = nil,
+        sleep: @escaping PollingSleep = realPollingSleep
+    ) {
         self.cliPath = cliPath
         self.repository = repository
+        self.lifecycle = lifecycle
         self.sleep = sleep
     }
 
-    /// `dispose`: stop both polls.
+    /// `dispose`. The panel is a Form row, which comes and goes as it
+    /// scrolls, so the polls live as long as this model (the sheet), not
+    /// the row's appearance.
+    isolated deinit {
+        stop()
+    }
+
+    /// Stops both polls.
     func stop() {
         installTimer?.cancel()
         loginTimer?.cancel()
@@ -260,8 +275,11 @@ final class CodexSetupModel {
     private func scheduleInstallPoll() {
         installTimer?.cancel()
         let sleep = sleep
+        let lifecycle = lifecycle
         installTimer = Task { [weak self] in
             do { try await sleep(Self.installPollInterval) } catch { return }
+            await lifecycle?.untilForeground()
+            guard !Task.isCancelled else { return }
             await self?.pollInstall()
         }
     }
@@ -319,8 +337,11 @@ final class CodexSetupModel {
     private func scheduleLoginPoll() {
         loginTimer?.cancel()
         let sleep = sleep
+        let lifecycle = lifecycle
         loginTimer = Task { [weak self] in
             do { try await sleep(Self.loginPollInterval) } catch { return }
+            await lifecycle?.untilForeground()
+            guard !Task.isCancelled else { return }
             await self?.pollLogin()
         }
     }

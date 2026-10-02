@@ -168,9 +168,13 @@ import Testing
         #expect(model.tick == 1)
         #expect(model.value?.scheduledResumeAt != nil)
 
+        // Deterministic: await the countdown itself (it carries the resume
+        // request), with no wall-clock wait.
+        let countdown = model.countdownTask
         current = current.addingTimeInterval(31)
         await clock.advance(by: .seconds(1))
-        #expect(await eventually { stub.requests.contains { $0.method == "POST" } })
+        await countdown?.value
+        #expect(stub.requests.contains { $0.method == "POST" })
         #expect(try body(stub.requests.last { $0.method == "POST" }) == ["paused": false])
         #expect(model.value?.scheduledResumeAt == nil)
     }

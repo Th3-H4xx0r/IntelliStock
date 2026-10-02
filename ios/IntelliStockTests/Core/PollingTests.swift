@@ -204,6 +204,8 @@ struct LogTailerTests {
         #expect(t.state.nextLine == 2)
         #expect(t.state.lines.map(\.level) == [.normal, .error])
         #expect(t.state.buildId == "b1")
+        // The next sleep is requested from a new task: let it start.
+        await clock.settle()
         #expect(clock.requested.last == .seconds(5))
 
         await clock.advance(by: .seconds(5))
@@ -245,6 +247,7 @@ struct LogTailerTests {
         t.start()
         #expect(await eventually { t.state.error != nil })
         #expect(t.state.loading == false)
+        await clock.settle()
         #expect(clock.requested == [.seconds(2)])
 
         for (count, expected) in [(2, Duration.seconds(5)), (3, .seconds(10)), (4, .seconds(30)), (5, .seconds(30))] {
@@ -265,6 +268,7 @@ struct LogTailerTests {
         await clock.advance(by: .seconds(2))
         #expect(await eventually { t.state.lines.count == 1 })
         #expect(t.state.error == nil)
+        await clock.settle()
         #expect(clock.requested.last == .seconds(5))
         t.dispose()
     }
@@ -304,7 +308,10 @@ struct LogTailerTests {
         let clock = ManualClock()
         let t = tailer(clock)
         t.start()
-        #expect(await eventually { stub.requests.count == 1 })
+        // Wait for the first poll to finish, not just to reach the stub: a
+        // resume while it is still in flight is absorbed by that poll.
+        #expect(await eventually { !t.state.loading })
+        #expect(stub.requests.count == 1)
         t.pause()
         await clock.advance(by: .seconds(60))
         #expect(stub.requests.count == 1)

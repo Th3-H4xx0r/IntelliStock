@@ -63,15 +63,26 @@ final class AgentRunsModel {
 
     var value: AgentRunsState? { state.value }
 
+    /// The running scheduled-resume countdown, if any (tests await it).
+    var countdownTask: Task<Void, Never>? { countdown }
+
+    /// The 5 s poll. Leaving the screen ends the poll but NOT a scheduled
+    /// resume: like Flutter's periodic timer, the countdown keeps running
+    /// for as long as this model lives, and resumes the agent on time.
     func poll(lifecycle: AppLifecycle?) async {
         await refreshNow()
+        // A schedule whose countdown was stopped picks up again.
+        if countdown == nil, let resumeAt = (state.value ?? last).scheduledResumeAt {
+            startCountdown(resumeAt)
+        }
         await PollingLoop(interval: { Self.interval }, sleep: sleep) { [weak self] in
             await self?.refreshNow()
         }
         .run(lifecycle: lifecycle)
-        stop()
     }
 
+    /// Stops the countdown without clearing the schedule (the next `poll`
+    /// restarts it).
     func stop() {
         countdown?.cancel()
         countdown = nil
@@ -154,11 +165,17 @@ final class AgentRunsModel {
         countdown = Task { [weak self] in
             while !Task.isCancelled {
                 do { try await sleep(.seconds(1)) } catch { return }
-                guard let self, let value = self.state.value else { return }
+                guard let self else { return }
+                // A failed poll (no value) skips the tick, as Dart's
+                // `if (state case AsyncData)` did; the countdown lives on.
+                guard let value = self.state.value else { continue }
                 if value.scheduledResumeAt == nil { return }
                 self.tick += 1
                 if resumeAt.timeIntervalSince(self.now()) <= 0 {
-                    self.cancelCountdown()
+                    // Detach instead of cancelling: this task carries the
+                    // resume request, which a cancelled task would drop.
+                    self.countdown = nil
+                    self.clearSchedule()
                     await self.resumeAgentNow()
                     return
                 }
@@ -169,6 +186,14 @@ final class AgentRunsModel {
     func cancelCountdown() {
         countdown?.cancel()
         countdown = nil
+        clearSchedule()
+    }
+
+    /// Clears the schedule from the state and from the last good state, so
+    /// a cancelled schedule cannot come back with the next good fetch.
+    private func clearSchedule() {
+        last.scheduledResumeAt = nil
+        last.scheduledTotalMs = 0
         guard var value = state.value else { return }
         value.scheduledResumeAt = nil
         value.scheduledTotalMs = 0

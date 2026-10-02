@@ -65,16 +65,9 @@ struct LlmConfigFormSections: View {
             if d.provider == "azure" { azureSection }
         }
         .disabled(disabled)
-        .task(id: PickerKey(d)) {
-            // `initState` / `didUpdateWidget`: refetch a provider's list when
-            // it is shown or its inputs change.
-            switch d.provider {
-            case "ollama": await pickers.fetchOllama(d)
-            case "bedrock": await pickers.fetchBedrock(d)
-            case "claude-cli": await pickers.fetchClaudeModels(d)
-            default: break
-            }
-        }
+        // The picker fetch is NOT attached here: a modifier on this Group
+        // lands on every section, so it ran once per section. The form
+        // attaches `llmPickerFetches` once.
     }
 
     // MARK: Claude model picker
@@ -241,6 +234,22 @@ struct LlmConfigFormSections: View {
             LlmField(label: "API Version", placeholder: "2024-10-21", text: $draft.azureOpenaiApiVersion, mono: true)
             ModelInfoBox(text: "Use the Azure resource root plus your deployment/model name. Do not use a full /models/chat/completions or /openai/v1/ URL here.",
                          color: DS.Palette.info)
+        }
+    }
+}
+
+extension View {
+    /// `initState` / `didUpdateWidget` of the config form: refetch the
+    /// provider's model list when it is shown or its inputs change. Attach
+    /// once, to the `Form` holding `LlmConfigFormSections`.
+    func llmPickerFetches(_ draft: LlmConfigDraft, _ pickers: LlmPickersModel) -> some View {
+        task(id: PickerKey(draft)) {
+            switch draft.provider {
+            case "ollama": await pickers.fetchOllama(draft)
+            case "bedrock": await pickers.fetchBedrock(draft)
+            case "claude-cli": await pickers.fetchClaudeModels(draft)
+            default: break
+            }
         }
     }
 }

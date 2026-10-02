@@ -346,12 +346,21 @@ final class PendingSignalsModel {
     }
 
     /// First load, then a poll every 30 s, pausing in the background.
+    ///
+    /// The loop always runs (Dart restarted its poller on every successful
+    /// build): while there is no list yet, a failed first load included, a
+    /// tick builds instead of refreshing, so the section recovers by itself.
     func poll(lifecycle: AppLifecycle?, sleep: @escaping PollingSleep = realPollingSleep) async {
         if state.value == nil { await build() }
-        // Left during the first fetch, or it failed: no poller starts.
-        guard state.value != nil, !Task.isCancelled else { return }
+        // Left during the first fetch: no poller outlives the screen.
+        guard !Task.isCancelled else { return }
         await PollingLoop(interval: { Self.pollEvery }, sleep: sleep) { [weak self] in
-            await self?.refresh()
+            guard let self else { return }
+            if self.state.value == nil {
+                await self.build()
+            } else {
+                await self.refresh()
+            }
         }
         .run(lifecycle: lifecycle)
     }

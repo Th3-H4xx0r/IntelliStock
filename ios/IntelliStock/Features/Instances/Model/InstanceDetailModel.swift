@@ -125,10 +125,12 @@ final class InstanceDetailModel {
     }
 
     /// The backtest-progress poll (`_startBtPolling`): every 3 s while a
-    /// backtest runs, until the calling task is cancelled.
-    func runProgressPoll(sleep: PollingSleep = realPollingSleep) async {
+    /// backtest runs, until the calling task is cancelled. Ticks are skipped
+    /// while `lifecycle` reports the background.
+    func runProgressPoll(lifecycle: AppLifecycle? = nil, sleep: PollingSleep = realPollingSleep) async {
         while !Task.isCancelled {
             do { try await sleep(Self.btPollEvery) } catch { return }
+            if let lifecycle, !lifecycle.isForeground { continue }
             if hasRunningBacktests { await pollBtProgress() }
         }
     }

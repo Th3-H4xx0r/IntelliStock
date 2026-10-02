@@ -76,7 +76,7 @@ private struct InstanceDetailContent: View {
             }
             .task { if model.value == nil { await model.load() } }
             .task { await model.runUptimeTicker() }
-            .task { await model.runProgressPoll() }
+            .task { await model.runProgressPoll(lifecycle: services.lifecycle) }
             .sheet(item: $sheet) { sheetView($0) }
             .confirmAlert($confirm, isRunning: $confirmRunning)
             .toast($toast)
