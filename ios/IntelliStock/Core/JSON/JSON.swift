@@ -26,6 +26,50 @@ nonisolated enum JSON: Hashable, Sendable {
     static func object(_ dictionary: [String: JSON]) -> JSON {
         .object(JSONObject(dictionary))
     }
+
+    /// Dart's `==`: numbers compare by value, so `5 == 5.0` (an int and a
+    /// double holding the same number) is true; everything else compares
+    /// structurally. `toString()` still tells them apart (`5` vs `5.0`).
+    static func == (lhs: JSON, rhs: JSON) -> Bool {
+        switch (lhs, rhs) {
+        case (.null, .null): true
+        case let (.bool(a), .bool(b)): a == b
+        case let (.int(a), .int(b)): a == b
+        case let (.double(a), .double(b)): a == b
+        case let (.int(a), .double(b)), let (.double(b), .int(a)): Int(exactly: b) == a
+        case let (.string(a), .string(b)): a == b
+        case let (.array(a), .array(b)): a == b
+        case let (.object(a), .object(b)): a == b
+        default: false
+        }
+    }
+
+    /// Numbers hash by their double value, so `.int(5)` and `.double(5)`
+    /// hash alike, as `==` requires.
+    func hash(into hasher: inout Hasher) {
+        switch self {
+        case .null:
+            hasher.combine(0)
+        case .bool(let b):
+            hasher.combine(1)
+            hasher.combine(b)
+        case .int(let i):
+            hasher.combine(2)
+            hasher.combine(Swift.Double(i))
+        case .double(let d):
+            hasher.combine(2)
+            hasher.combine(d)
+        case .string(let s):
+            hasher.combine(3)
+            hasher.combine(s)
+        case .array(let a):
+            hasher.combine(4)
+            hasher.combine(a)
+        case .object(let o):
+            hasher.combine(5)
+            hasher.combine(o)
+        }
+    }
 }
 
 /// An insertion-ordered JSON object — Dart's `LinkedHashMap`. Equality ignores order.
@@ -461,11 +505,12 @@ nonisolated extension JSON {
         }
     }
 
-    /// Dart `(x as num?)?.toInt()` — truncates a double toward zero.
+    /// Dart `(x as num?)?.toInt()` — truncates a double toward zero and, like
+    /// the Dart VM, saturates beyond the 64-bit range instead of trapping.
     var int: Int? {
         switch self {
         case .int(let i): i
-        case .double(let d) where d.isFinite: Int(d)
+        case .double(let d): Int(dartTruncating: d)
         default: nil
         }
     }

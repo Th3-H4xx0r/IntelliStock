@@ -37,6 +37,7 @@ nonisolated enum DartNumberFormat {
     /// (away from zero) at `digits` places; exponential `toString()` at or
     /// above 1e21.
     static func toStringAsFixed(_ v: Double, _ digits: Int) -> String {
+        let digits = max(0, digits)
         if v.isNaN { return "NaN" }
         if v.isInfinite { return v < 0 ? "-Infinity" : "Infinity" }
         if abs(v) >= 1e21 { return JSON.dartDoubleString(v) }
