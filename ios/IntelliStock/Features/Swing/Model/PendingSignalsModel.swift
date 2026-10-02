@@ -219,6 +219,34 @@ nonisolated struct UncertainCard: Hashable, Sendable {
     }
 }
 
+/// Where a followed approval stands.
+nonisolated enum SwingApprovalPhase: Hashable, Sendable {
+    /// Its broker command has not finished.
+    case sending
+    /// The command completed: the broker sent the order.
+    case sent
+    /// The command failed; `message` is the broker's reason.
+    case refused
+}
+
+/// An approval (or re-send) whose 200 named a broker command, followed
+/// through `GET /live-commands/{id}` until the command finishes
+/// (swing-approvals fix, 2026-10-02).
+nonisolated struct SwingApprovalTrack: Hashable, Sendable, Identifiable {
+    let signal: SwingSignal
+    let commandId: String
+    var phase: SwingApprovalPhase = .sending
+    var message: String = ""
+
+    var id: String { signal.id }
+}
+
+/// Why the broker refused a signal's last approval, and when the app saw it.
+nonisolated struct SwingRefusal: Hashable, Sendable {
+    let message: String
+    let at: Date
+}
+
 nonisolated struct PendingSignalsState: Hashable, Sendable {
     var signals: [SwingSignal] = []
     /// Approved signals no broker command has claimed for `stuckAfter`.
@@ -233,6 +261,10 @@ nonisolated struct PendingSignalsState: Hashable, Sendable {
     var refreshError: String?
     /// The clock `stuck` was computed at.
     var asOf: Date?
+    /// Approvals and re-sends followed through their broker command.
+    var tracks: [SwingApprovalTrack] = []
+    /// Pending signals whose last approval the broker refused: id -> why.
+    var refusals: [String: SwingRefusal] = [:]
 
     func isDeciding(_ id: String) -> Bool { deciding.contains(id) }
     func isResending(_ id: String) -> Bool { resending.contains(id) }
@@ -249,6 +281,8 @@ nonisolated protocol SwingSignalsSource: Sendable {
     func decide(_ instanceId: String, _ signalId: String, _ decision: String, reason: String?) async throws -> DecisionReceipt
     func resend(_ instanceId: String, _ signalId: String) async throws -> DecisionReceipt
     func wheel(_ instanceId: String) async throws -> WheelSnapshot
+    func commandStatus(_ commandId: String) async throws -> SwingCommandStatus
+    func recentSignals(_ instanceId: String, limit: Int) async throws -> [SwingSignal]
 }
 
 extension SwingRepository: SwingSignalsSource {}
@@ -260,6 +294,8 @@ private struct SwingLoad {
     let error: (any Error)?
     var submitted: [SwingSignal]?
     var failed: [SwingSignal]?
+    /// The followed commands this poll could read, by command id.
+    var commands: [String: SwingCommandStatus] = [:]
 }
 
 /// The `toString()` of a Dart error: an `ApiError` prints its message.
@@ -297,11 +333,28 @@ final class PendingSignalsModel {
     @ObservationIgnored private var dismissedStuck: Set<String> = []
     /// Ids that left the waiting state for the stuck list (round 4, R3-1).
     @ObservationIgnored private var joinedStuck: Set<String> = []
+    /// Followed approvals, in the order they were made.
+    @ObservationIgnored private var trackList: [SwingApprovalTrack] = []
+    /// Pending signals whose last approval the broker refused.
+    @ObservationIgnored private var refusalMap: [String: SwingRefusal] = [:]
+    /// The quick polls after an approval; nil turns them off (tests).
+    @ObservationIgnored private let followSleep: PollingSleep?
+    @ObservationIgnored private var followTask: Task<Void, Never>?
 
-    init(instanceId: String, source: @escaping () -> any SwingSignalsSource, clock: @escaping () -> Date = Date.init) {
+    /// The quick polls after an approval: the broker answers in about a
+    /// second, so the reason is on the card long before the 30 s poll.
+    static let followDelays: [Duration] = [.milliseconds(1500), .seconds(2), .seconds(3), .seconds(5), .seconds(8), .seconds(12)]
+
+    init(
+        instanceId: String,
+        source: @escaping () -> any SwingSignalsSource,
+        clock: @escaping () -> Date = Date.init,
+        followSleep: PollingSleep? = realPollingSleep
+    ) {
         self.instanceId = instanceId
         self.source = source
         self.clock = clock
+        self.followSleep = followSleep
     }
 
     var value: PendingSignalsState? { state.value }
@@ -379,13 +432,53 @@ final class PendingSignalsModel {
         let (approved, approvedError) = await approvedRead
         let (submitted, submittedError) = await submittedRead
         let (failed, failedError) = await failedRead
+        let commands = await Self.readCommands(repo, trackList.filter { $0.phase == .sending }.map(\.commandId))
         return SwingLoad(
             pending: pending,
             approved: approved,
             error: pendingError ?? approvedError ?? submittedError ?? failedError,
             submitted: submitted,
-            failed: failed
+            failed: failed,
+            commands: commands
         )
+    }
+
+    /// The followed commands' statuses; one that cannot be read is left out
+    /// (it stays sending) and never fails the poll.
+    nonisolated private static func readCommands(_ repo: any SwingSignalsSource, _ ids: [String]) async -> [String: SwingCommandStatus] {
+        if ids.isEmpty { return [:] }
+        return await withTaskGroup(of: (String, SwingCommandStatus)?.self) { group in
+            for id in ids {
+                group.addTask { (try? await repo.commandStatus(id)).map { (id, $0) } }
+            }
+            var out: [String: SwingCommandStatus] = [:]
+            for await entry in group { if let entry { out[entry.0] = entry.1 } }
+            return out
+        }
+    }
+
+    /// Settles the followed approvals this poll can speak for. A refused one
+    /// whose signal is pending again hands its reason to that card; one
+    /// that is stuck now leaves it to the stuck card's Re-send.
+    private func foldTracks(_ load: SwingLoad, stuckIds: Set<String>, _ now: Date) {
+        for i in trackList.indices where trackList[i].phase == .sending {
+            guard let status = load.commands[trackList[i].commandId], status.isTerminal else { continue }
+            if status.status == "completed" {
+                trackList[i].phase = .sent
+            } else {
+                trackList[i].phase = .refused
+                trackList[i].message = status.error.isEmpty ? "The broker did not send it." : status.error
+            }
+        }
+        if let pending = load.pending {
+            let ids = Set(pending.map(\.id))
+            for track in trackList where track.phase == .refused && ids.contains(track.id) {
+                refusalMap[track.id] = SwingRefusal(message: track.message, at: now)
+            }
+            trackList.removeAll { $0.phase == .refused && ids.contains($0.id) }
+            refusalMap = refusalMap.filter { ids.contains($0.key) }
+        }
+        trackList.removeAll { stuckIds.contains($0.id) }
     }
 
     nonisolated private static func settle(_ read: () async throws -> [SwingSignal]) async -> ([SwingSignal]?, (any Error)?) {
@@ -447,6 +540,9 @@ final class PendingSignalsModel {
         next.stuck = (base + joinedRows).filter {
             uncertainCard($0.id) == nil && !dismissedStuck.contains($0.id)
         }
+        foldTracks(load, stuckIds: Set(next.stuck.map(\.id)), now)
+        next.tracks = trackList
+        next.refusals = refusalMap
         next.uncertain = uncertainValues
         next.asOf = now
         next.refreshError = load.error.map(swingErrorText)
@@ -499,6 +595,9 @@ final class PendingSignalsModel {
                 wait(signal)
                 return DecisionResult(.uncertain, message)
             }
+            if decision != "reject", let command = receipt.commandId {
+                follow(signal, command)
+            }
             return DecisionResult(.recorded, decisionSuccessMessage(signal, decision))
         } catch let err as ApiError {
             let code = err.statusCode
@@ -544,6 +643,7 @@ final class PendingSignalsModel {
                 wait(signal)
                 return DecisionResult(.uncertain, message)
             }
+            if let command = receipt.commandId { follow(signal, command) }
             return DecisionResult(.recorded, "Re-sent \(signal.symbol) to the broker.")
         } catch let err as ApiError {
             let code = err.statusCode
@@ -564,6 +664,42 @@ final class PendingSignalsModel {
             releaseResend(signal.id)
             return DecisionResult(.failed, "Could not re-send that approval: \(swingErrorText(error))")
         }
+    }
+
+    // MARK: Followed approvals
+
+    /// Follows `command` for `signal`: its card shows "sending" until the
+    /// command finishes, then the outcome. An old refusal on it is forgotten.
+    private func follow(_ signal: SwingSignal, _ command: String) {
+        trackList.removeAll { $0.id == signal.id }
+        trackList.append(SwingApprovalTrack(signal: signal, commandId: command))
+        refusalMap[signal.id] = nil
+        var next = state.value ?? PendingSignalsState()
+        next.tracks = trackList
+        next.refusals = refusalMap
+        state = .loaded(next)
+        guard followSleep != nil else { return }
+        followTask?.cancel()
+        followTask = Task { [weak self] in await self?.followSending() }
+    }
+
+    /// A few quick polls while any followed command is still running.
+    func followSending() async {
+        guard let followSleep else { return }
+        for delay in Self.followDelays {
+            guard trackList.contains(where: { $0.phase == .sending }) else { return }
+            do { try await followSleep(delay) } catch { return }
+            if Task.isCancelled { return }
+            await refresh()
+        }
+    }
+
+    /// Takes a settled approval's card off (its Dismiss button).
+    func dismissTrack(_ id: String) {
+        trackList.removeAll { $0.id == id }
+        var next = state.value ?? PendingSignalsState()
+        next.tracks = trackList
+        state = .loaded(next)
     }
 
     // MARK: Card bookkeeping
@@ -637,6 +773,9 @@ final class PendingSignalsModel {
 final class WheelModel {
     let instanceId: String
     private(set) var state: Loadable<WheelSnapshot> = .loading
+    /// Recent signals of every status, which the scan rows link to (the scan
+    /// log's own status is written at scan time and never updated).
+    private(set) var signals: [SwingSignal] = []
 
     @ObservationIgnored private let source: () -> any SwingSignalsSource
 
@@ -647,11 +786,20 @@ final class WheelModel {
 
     /// (Re)loads the book; the previous one stays visible meanwhile.
     func load() async {
+        let repo = source()
+        let id = instanceId
+        async let recent = try? repo.recentSignals(id, limit: 200)
         do {
-            state = .loaded(try await source().wheel(instanceId))
+            state = .loaded(try await repo.wheel(id))
         } catch {
             if !error.isCancellationOrTaskCancelled { state = .failed(error) }
         }
+        if let rows = await recent { signals = rows }
+    }
+
+    /// Re-reads only the linked signals (after a decision).
+    func loadSignals() async {
+        if let rows = try? await source().recentSignals(instanceId, limit: 200) { signals = rows }
     }
 
     /// Retry (`ref.invalidate`): back to loading, then load.

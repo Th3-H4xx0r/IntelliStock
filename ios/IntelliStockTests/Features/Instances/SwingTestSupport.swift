@@ -56,6 +56,17 @@ nonisolated class SwingFakeSource: SwingSignalsSource, @unchecked Sendable {
     /// Fails only the approved lists; `listError` fails both.
     var approvedError: (any Error)?
     var wheelCalls = 0
+    /// What `GET /live-commands/{id}` answers, by command id (an absent id
+    /// reads pending).
+    var commandStatuses: [String: SwingCommandStatus] = [:]
+    var commandError: (any Error)?
+    private let commandLock = NSLock()
+    private var _commandReads: [String] = []
+    var commandReads: [String] { commandLock.withLock { _commandReads } }
+    /// What the unfiltered signal list answers (the wheel's scan links).
+    var recent: [SwingSignal] = []
+    var recentError: (any Error)?
+    var recentCalls = 0
 
     init(_ pending: [SwingSignal], wheelSnapshot: WheelSnapshot = .empty, approved: [SwingSignal] = []) {
         self.pending = pending
@@ -108,6 +119,44 @@ nonisolated class SwingFakeSource: SwingSignalsSource, @unchecked Sendable {
         if let wheelError { throw wheelError }
         return wheelSnapshot
     }
+
+    func commandStatus(_ commandId: String) async throws -> SwingCommandStatus {
+        commandLock.withLock { _commandReads.append(commandId) }
+        if let commandError { throw commandError }
+        return commandStatuses[commandId] ?? SwingCommandStatus(json: ["id": .string(commandId), "status": "pending"])
+    }
+
+    func recentSignals(_ instanceId: String, limit: Int) async throws -> [SwingSignal] {
+        recentCalls += 1
+        if let recentError { throw recentError }
+        return recent
+    }
+}
+
+/// A live command as `GET /live-commands/{id}` answers it.
+func swingTestCommand(_ id: String, _ status: String, error: String? = nil) -> SwingCommandStatus {
+    var json: JSONObject = ["id": .string(id), "status": .string(status)]
+    if let error { json["error"] = .string(error) }
+    return SwingCommandStatus(json: .object(json))
+}
+
+/// A pending wheel signal the broker claimed and put back (QCOM, 2026-10-02).
+func returnedTestSignal(_ id: String, symbol: String = "QCOM", claimedAt: String = "2026-10-02T18:39:55+00:00") -> SwingSignal {
+    SwingSignal(json: [
+        "id": .string(id),
+        "lane": "wheel",
+        "symbol": .string(symbol),
+        "session": "2026-09-28",
+        "created_at": "2026-09-28T14:45:33Z",
+        "score": 70,
+        "recommendation": "REVIEW",
+        "reasoning": "r",
+        "key_risks": [],
+        "proposal": ["contract": nil, "strike": 184.15, "expiry": "2026-10-09", "qty": 1, "limit_price": nil, "premium_est": 2.26],
+        "status": "pending",
+        "decided_at": nil,
+        "claimed_at": .string(claimedAt),
+    ])
 }
 
 /// Holds every pendingSignals() call on `listGate` and counts the calls.
