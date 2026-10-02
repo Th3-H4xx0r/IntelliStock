@@ -2,7 +2,8 @@ import SwiftUI
 
 /// Symbol search — `SymbolSearchScreen` in `symbol_search_screen.dart`.
 /// The custom field becomes the system search bar (focused on appear); the
-/// results are an inset-grouped list priced from today's history.
+/// results are an inset-grouped list priced from today's history, each row
+/// Stocks style: the ticker over the name, the price over today's move.
 struct SymbolSearchView: View {
     @Environment(AppServices.self) private var services
 
@@ -58,7 +59,7 @@ private struct SymbolSearchContent: View {
             errorState(error)
         } else if let results = model.results {
             if results.isEmpty {
-                centered("No matching symbols")
+                ContentUnavailableView("No matching symbols", systemImage: "magnifyingglass")
             } else {
                 List {
                     ForEach(Array(results.enumerated()), id: \.offset) { _, r in
@@ -66,111 +67,56 @@ private struct SymbolSearchContent: View {
                     }
                 }
                 .listStyle(.insetGrouped)
-                .scrollContentBackground(.hidden)
             }
         } else {
-            centered("Find an investment")
+            ContentUnavailableView("Find an investment", systemImage: "magnifyingglass")
         }
     }
 
-    private func centered(_ text: String) -> some View {
-        Text(text)
-            .font(.body)
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
+    /// One result. The row opens the stock screen.
     private func resultRow(_ r: SearchInstrument) -> some View {
         let quote = model.quotes?[r.symbol]
-        return Button {
-            services.router.push(.stock(StockRoute(symbol: r.symbol)))
-        } label: {
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 8) {
-                        Text(r.symbol)
-                            .font(.body.weight(.heavy))
-                            .lineLimit(1)
-                        if let pct = quote?.changePct {
-                            Text(fmtPct(pct))
-                                .font(.footnote.weight(.bold).monospacedDigit())
-                                .foregroundStyle(pnlColor(pct))
-                        }
-                    }
-                    Text(r.name)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+        return NavigationLink(value: Route.stock(StockRoute(symbol: r.symbol))) {
+            EntityRow(r.symbol, subtitle: r.name) {
                 if model.quotesLoading {
-                    Skeleton(width: 70, height: 16, radius: 4)
+                    EntityRowValue("$000.00", detail: "+0.00%")
+                        .redacted(reason: .placeholder)
                 } else {
-                    Text(fmtMoney(quote?.price))
-                        .font(.body.weight(.bold).monospacedDigit())
-                        .multilineTextAlignment(.trailing)
+                    EntityRowValue(
+                        fmtMoney(quote?.price),
+                        detail: quote?.changePct.map { fmtPct($0) },
+                        detailColor: quote?.changePct.map { pnlColor($0) }
+                    )
                 }
             }
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .accessibilityElement(children: .combine)
     }
 
     private var skeletonList: some View {
         List {
             ForEach(0..<6, id: \.self) { _ in
-                HStack(spacing: 12) {
-                    VStack(alignment: .leading, spacing: 7) {
-                        Skeleton(width: 72, height: 15, radius: 4)
-                        Skeleton(width: 160, height: 12, radius: 4)
-                    }
-                    Spacer()
-                    Skeleton(width: 70, height: 16, radius: 4)
+                EntityRow("TICK", subtitle: "Instrument name placeholder") {
+                    EntityRowValue("$000.00", detail: "+0.00%")
                 }
-                .padding(.vertical, 2)
+                .redacted(reason: .placeholder)
             }
         }
         .listStyle(.insetGrouped)
-        .scrollContentBackground(.hidden)
         .accessibilityLabel("Loading")
     }
 
     private func errorState(_ message: String) -> some View {
-        VStack {
-            Card(padding: EdgeInsets(top: 28, leading: 24, bottom: 24, trailing: 24)) {
-                VStack(alignment: .leading, spacing: 0) {
-                    IconTile(
-                        systemImage: dashboardSymbol("query_stats", fallback: "chart.bar.xaxis.ascending"),
-                        color: DS.Palette.accent,
-                        size: 48
-                    )
-                    Text("MARKET SEARCH")
-                        .font(.footnote.weight(.bold))
-                        .tracking(1.2)
-                        .foregroundStyle(.tint)
-                        .padding(.top, 22)
-                    Text("We’re reconnecting")
-                        .font(.title3.bold())
-                        .padding(.top, 6)
-                    Text(searchUnavailableMessage(message))
-                        .font(.body)
-                        .foregroundStyle(.secondary)
-                        .padding(.top, 8)
-                    Button {
-                        model.retry()
-                    } label: {
-                        Label("Retry Search", systemImage: Symbol.named("refresh"))
-                            .frame(maxWidth: .infinity)
-                    }
-                    .dsProminentButton()
-                    .controlSize(.large)
-                    .padding(.top, 24)
-                }
+        ContentUnavailableView {
+            Label("We’re reconnecting", systemImage: dashboardSymbol("query_stats", fallback: "chart.bar.xaxis.ascending"))
+        } description: {
+            Text(searchUnavailableMessage(message))
+        } actions: {
+            Button {
+                model.retry()
+            } label: {
+                Label("Retry Search", systemImage: Symbol.named("refresh"))
             }
-            .frame(maxWidth: 360)
-            .padding(.horizontal, 24)
+            .dsProminentButton()
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
