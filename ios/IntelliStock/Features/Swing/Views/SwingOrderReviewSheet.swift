@@ -170,21 +170,11 @@ struct SwingOrderReviewSheet: View {
             }
             .accessibilityElement(children: .combine)
 
-            VStack(spacing: 0) {
-                ForEach(Array(rows(s).enumerated()), id: \.offset) { i, row in
-                    if i > 0 { Divider() }
-                    HStack(alignment: .firstTextBaseline) {
-                        Text(row.label)
-                            .foregroundStyle(.secondary)
-                        Spacer(minLength: 12)
-                        Text(row.value)
-                            .fontWeight(i < 2 && s.isWheel ? .semibold : .regular)
-                            .monospacedDigit()
-                            .multilineTextAlignment(.trailing)
-                    }
-                    .font(.body)
-                    .padding(.vertical, 11)
-                    .accessibilityElement(children: .combine)
+            SwingOrderChart(symbol: s.symbol, strike: s.isWheel ? s.proposal["strike"]?.double : nil)
+
+            StatGrid(columns: 2) {
+                ForEach(Array(rows(s).enumerated()), id: \.offset) { _, row in
+                    StatCell(label: row.label, value: row.value)
                 }
             }
 
@@ -356,6 +346,113 @@ private struct SwingOrderOutcomeView: View {
         case .uncertain: "Approved"
         case .noLongerPending: "No longer pending"
         case .failed, .ignored: "Not sent"
+        }
+    }
+}
+
+/// The underlying's price over a chosen range, for insight before sending.
+/// For a put, the strike is the dotted line, so the cushion shows at a
+/// glance. Scrub to read a price; read-only, nothing is sent.
+private struct SwingOrderChart: View {
+    let symbol: String
+    let strike: Double?
+
+    @Environment(AppServices.self) private var services
+
+    var body: some View {
+        SwingOrderChartContent(symbol: symbol, strike: strike, services: services)
+            .id(symbol)
+    }
+}
+
+private struct SwingOrderChartContent: View {
+    let strike: Double?
+    let services: AppServices
+
+    @State private var model: StockModel
+
+    static let ranges = ["1D", "1W", "1M", "3M", "1Y"]
+    static let height: CGFloat = 150
+
+    init(symbol: String, strike: Double?, services: AppServices) {
+        self.strike = strike
+        self.services = services
+        _model = State(initialValue: StockModel(symbol: symbol, brokerageId: nil, client: { services.apiClient }))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            header
+            chart
+            Picker("Range", selection: Binding(get: { model.range }, set: { model.setRange($0) })) {
+                ForEach(Self.ranges, id: \.self) { Text($0).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .controlSize(.small)
+        }
+        .task(id: model.range) { await model.pollHistory(lifecycle: services.lifecycle) }
+    }
+
+    /// The price (scrubbed, or the latest) and its change over the range;
+    /// for a put, how far it sits above the strike.
+    @ViewBuilder
+    private var header: some View {
+        if let vals = model.series?.vals, vals.count >= 2 {
+            let idx = model.scrubIndex.flatMap { (0..<vals.count).contains($0) ? $0 : nil }
+            let shown = vals[idx ?? vals.count - 1]
+            let change = shown - vals[0]
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(fmtMoney(shown))
+                    .font(.title3.weight(.semibold))
+                    .monospacedDigit()
+                Text("\(fmtPnl(change)) (\(fmtPct(vals[0] != 0 ? change / vals[0] * 100 : 0)))")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(ChangeDirection(change).color)
+                    .monospacedDigit()
+                Spacer(minLength: 0)
+                if let strike, strike > 0 {
+                    Text("\(fmtPct((shown - strike) / strike * 100)) vs strike")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+            }
+            .accessibilityElement(children: .combine)
+        } else {
+            Text("\(model.symbol) price")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private var chart: some View {
+        if let series = model.series, series.vals.count >= 2 {
+            let up = series.vals[series.vals.count - 1] >= series.vals[0]
+            ScrubbableAreaChart(
+                timestamps: series.ts,
+                values: series.vals,
+                lineColor: up ? DS.Palette.success : DS.Palette.danger,
+                height: Self.height,
+                baseline: strike,
+                onScrub: { model.scrubIndex = $0 },
+                animate: true,
+                drawInKey: AnyHashable(model.range),
+                indexed: true
+            )
+            .id(model.range)
+            if let strike, strike > 0 {
+                Text("Dotted line: the \(fmtMoney(strike)) strike")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        } else if model.historyLoading {
+            Skeleton(height: Self.height, radius: 10)
+        } else {
+            Text("Couldn't load prices for \(model.symbol)")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, minHeight: Self.height)
         }
     }
 }
