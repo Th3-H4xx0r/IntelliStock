@@ -69,12 +69,11 @@ private struct OnboardingContent: View {
         HStack(spacing: 10) {
             IconTile(systemImage: Symbol.named("auto_awesome"), size: 36)
             VStack(alignment: .leading, spacing: 1) {
-                Text("INTELLISTOCK")
-                    .font(.caption2.weight(.bold))
-                    .tracking(1.8)
-                    .foregroundStyle(.secondary)
+                Text("IntelliStock")
+                    .font(.subheadline.weight(.semibold))
                 Text("Welcome flow")
-                    .font(.footnote.weight(.semibold))
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
             Spacer()
             Button {
@@ -88,11 +87,12 @@ private struct OnboardingContent: View {
             } label: {
                 Label("Exit", systemImage: Symbol.named("close"))
                     .labelStyle(.titleAndIcon)
-                    .font(.footnote)
+                    .font(.subheadline)
             }
-            .buttonStyle(.bordered)
-            .buttonBorderShape(.capsule)
-            .tint(.secondary)
+            // A floating control over the step (there is no navigation bar
+            // here), so it takes the system glass, like a bar button.
+            .buttonStyle(.glass)
+            .tint(.primary)
         }
     }
 

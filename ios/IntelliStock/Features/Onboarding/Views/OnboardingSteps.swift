@@ -39,12 +39,13 @@ struct OnboardingWelcomeStep: View {
                     .multilineTextAlignment(.center)
                     .padding(.top, 16)
 
-                VStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 20) {
                     OnboardingFeatureRow(icon: "memory", label: "LLM Models", desc: "OpenAI · Gemini · Azure · NVIDIA")
                     OnboardingFeatureRow(icon: "account_balance", label: "Brokerages", desc: "Alpaca")
                     OnboardingFeatureRow(icon: "rocket_launch", label: "Instances", desc: "Live or paper, fully autonomous")
                 }
-                .padding(.top, 28)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 32)
                 .padding(.bottom, 16)
             }
             .padding(.horizontal, 20)
@@ -57,14 +58,18 @@ private struct OnboardingFeatureRow: View {
     let label: String
     let desc: String
 
+    /// A feature line in the "What's New" style: an accent glyph, the name
+    /// and one line about it, straight on the background.
     var body: some View {
-        Card(padding: EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16)) {
-            HStack(spacing: 12) {
-                IconTile(systemImage: Symbol.named(icon), size: 40)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(label).font(.subheadline.weight(.semibold))
-                    Text(desc).font(.caption).foregroundStyle(.secondary)
-                }
+        HStack(alignment: .center, spacing: 16) {
+            Image(systemName: Symbol.named(icon))
+                .font(.title2)
+                .foregroundStyle(.tint)
+                .frame(width: 40)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label).font(.headline)
+                Text(desc).font(.subheadline).foregroundStyle(.secondary)
             }
         }
         .accessibilityElement(children: .combine)
@@ -101,28 +106,26 @@ private struct OnboardingWordsTitle: View {
 
 /// `StepAbout`: what IntelliStock is, four feature cards and the flow row.
 struct OnboardingAboutStep: View {
-    private let columns = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
-
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 OnboardingStepHeading(
-                    eyebrow: "WHAT IS INTELLISTOCK",
+                    eyebrow: "What is IntelliStock",
                     title: "AI-powered autonomous trading.",
                     text: "IntelliStock runs LLM-driven strategies on a schedule, makes buy/sell decisions, and executes through your linked brokerage — all without manual intervention."
                 )
 
-                LazyVGrid(columns: columns, spacing: 10) {
-                    OnboardingFeatureCard(icon: "memory", color: DS.Palette.accent, title: "LLM Models",
-                                          desc: "Plug in any provider — Gemini, OpenAI, Azure, NVIDIA, Ollama, Bedrock.")
-                    OnboardingFeatureCard(icon: "tune", color: DS.Palette.info, title: "Strategies",
-                                          desc: "Choose from the catalog or write your own Python strategy.")
-                    OnboardingFeatureCard(icon: "rocket_launch", color: DS.Palette.success, title: "Instances",
-                                          desc: "Run live or paper on a cadence from 1 min to 1 hour.")
-                    OnboardingFeatureCard(icon: "account_balance", color: DS.Palette.warning, title: "Brokerages",
-                                          desc: "Alpaca for stock paper and live trading.")
+                VStack(alignment: .leading, spacing: 20) {
+                    OnboardingFeatureRow(icon: "memory", label: "LLM Models",
+                                         desc: "Plug in any provider — Gemini, OpenAI, Azure, NVIDIA, Ollama, Bedrock.")
+                    OnboardingFeatureRow(icon: "tune", label: "Strategies",
+                                         desc: "Choose from the catalog or write your own Python strategy.")
+                    OnboardingFeatureRow(icon: "rocket_launch", label: "Instances",
+                                         desc: "Run live or paper on a cadence from 1 min to 1 hour.")
+                    OnboardingFeatureRow(icon: "account_balance", label: "Brokerages",
+                                         desc: "Alpaca for stock paper and live trading.")
                 }
-                .padding(.top, 20)
+                .padding(.top, 24)
 
                 Card(padding: 14) {
                     HStack(spacing: 4) {
@@ -131,7 +134,7 @@ struct OnboardingAboutStep: View {
                                 Image(systemName: Symbol.named(node.icon))
                                     .font(.title3)
                                     .foregroundStyle(.tint)
-                                Text(node.label).font(.caption2)
+                                Text(node.label).font(.caption)
                             }
                             if index < OnboardingFlow.nodes.count - 1 {
                                 Image(systemName: Symbol.named("arrow_forward"))
@@ -142,36 +145,11 @@ struct OnboardingAboutStep: View {
                     }
                     .frame(maxWidth: .infinity)
                 }
-                .padding(.top, 16)
+                .padding(.top, 24)
                 .padding(.bottom, 16)
             }
             .padding(.horizontal, 20)
         }
-    }
-}
-
-private struct OnboardingFeatureCard: View {
-    let icon: String
-    let color: Color
-    let title: String
-    let desc: String
-
-    var body: some View {
-        Card(padding: 12) {
-            VStack(alignment: .leading, spacing: 0) {
-                IconTile(systemImage: Symbol.named(icon), color: color, size: 32)
-                Text(title)
-                    .font(.subheadline.weight(.semibold))
-                    .padding(.top, 8)
-                Text(desc)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(3)
-                    .padding(.top, 4)
-            }
-            .frame(maxWidth: .infinity, minHeight: 112, alignment: .topLeading)
-        }
-        .accessibilityElement(children: .combine)
     }
 }
 
@@ -192,20 +170,20 @@ private enum OnboardingFlow {
 
 // MARK: - Shared step pieces
 
-/// Eyebrow, title and body at the top of a step.
+/// The step line ("Step 1 · Add a model"), title and body at the top of a
+/// step. The step line is sentence case in secondary, not a tracked eyebrow.
 private struct OnboardingStepHeading: View {
     let eyebrow: String
     let title: String
     let text: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             Text(eyebrow)
-                .font(.footnote.weight(.bold))
-                .tracking(1.2)
-                .foregroundStyle(.tint)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
             Text(title)
-                .font(.title3.bold())
+                .font(.title2.bold())
                 .accessibilityAddTraits(.isHeader)
             Text(text)
                 .font(.body)
@@ -256,13 +234,16 @@ private struct OnboardingMessageRow: View {
 
     var body: some View {
         let color = ok ? DS.Palette.success : DS.Palette.danger
-        Text(message)
-            .font(.footnote)
-            .foregroundStyle(DS.Palette.onTint(color, in: colorScheme))
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background(color.opacity(DS.tintFill), in: .rect(cornerRadius: DS.Radius.small, style: .continuous))
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: ok ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                .foregroundStyle(color)
+                .accessibilityHidden(true)
+            Text(message)
+                .font(.subheadline)
+                .foregroundStyle(DS.Palette.onTint(color, in: colorScheme))
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -337,7 +318,7 @@ struct OnboardingAddModelStep: View {
         Form {
             Section {
                 OnboardingStepHeading(
-                    eyebrow: "STEP 1 · ADD A MODEL",
+                    eyebrow: "Step 1 · Add a model",
                     title: "Pick the brain that powers your trades.",
                     text: "Drop in an API key for any supported LLM provider. You can add more later — Gemini's free tier works great as a starter."
                 )
@@ -345,7 +326,7 @@ struct OnboardingAddModelStep: View {
             }
 
             if !form.saved.isEmpty {
-                Section("SAVED THIS SESSION") {
+                Section("Saved this session") {
                     ForEach(Array(form.saved.enumerated()), id: \.offset) { _, saved in
                         OnboardingSavedRow(
                             icon: "memory",
@@ -400,7 +381,7 @@ struct OnboardingLinkBrokerageStep: View {
         Form {
             Section {
                 OnboardingStepHeading(
-                    eyebrow: "STEP 2 · LINK A BROKERAGE",
+                    eyebrow: "Step 2 · Link a brokerage",
                     title: "Connect your trading account.",
                     text: "Connect Alpaca in paper mode first to test without real money."
                 )
@@ -408,7 +389,7 @@ struct OnboardingLinkBrokerageStep: View {
             }
 
             if !form.saved.isEmpty {
-                Section("SAVED THIS SESSION") {
+                Section("Saved this session") {
                     ForEach(Array(form.saved.enumerated()), id: \.offset) { _, saved in
                         OnboardingSavedRow(
                             icon: "account_balance",
@@ -460,7 +441,7 @@ struct OnboardingCreateInstanceStep: View {
         Form {
             Section {
                 OnboardingStepHeading(
-                    eyebrow: "STEP 3 · CREATE AN INSTANCE",
+                    eyebrow: "Step 3 · Create an instance",
                     title: "Spin up your first instance.",
                     text: "An instance is the runtime that runs a strategy on a cadence and places orders through your linked brokerage."
                 )
@@ -468,7 +449,7 @@ struct OnboardingCreateInstanceStep: View {
             }
 
             if !form.saved.isEmpty {
-                Section("SAVED THIS SESSION") {
+                Section("Saved this session") {
                     ForEach(Array(form.saved.enumerated()), id: \.offset) { _, saved in
                         OnboardingSavedRow(
                             icon: "rocket_launch",
@@ -528,7 +509,7 @@ struct OnboardingConnectStep: View {
         Form {
             Section {
                 OnboardingStepHeading(
-                    eyebrow: "STEP 4 · CONNECT THE PIECES",
+                    eyebrow: "Step 4 · Connect the pieces",
                     title: "How a trade actually flows.",
                     text: "Your instance runs a strategy that asks a model. The model returns a buy/sell call. The instance sends that order through the linked brokerage."
                 )
@@ -561,7 +542,7 @@ struct OnboardingConnectStep: View {
                 }
             }
 
-            Section("LINK AN INSTANCE TO A BROKERAGE") {
+            Section("Link an instance to a brokerage") {
                 if form.loading {
                     LoadingState(label: "Loading resources…")
                 } else if let loadError = form.loadError {
@@ -653,10 +634,12 @@ struct OnboardingCompleteStep: View {
                     .multilineTextAlignment(.center)
                     .padding(.top, 12)
 
-                HStack(spacing: 10) {
-                    OnboardingCountTile(icon: "memory", label: "Models", value: state.modelCount)
-                    OnboardingCountTile(icon: "account_balance", label: "Brokerages", value: state.brokerageCount)
-                    OnboardingCountTile(icon: "rocket_launch", label: "Instances", value: state.instanceCount)
+                Card {
+                    HStack(spacing: 8) {
+                        OnboardingCountTile(icon: "memory", label: "Models", value: state.modelCount)
+                        OnboardingCountTile(icon: "account_balance", label: "Brokerages", value: state.brokerageCount)
+                        OnboardingCountTile(icon: "rocket_launch", label: "Instances", value: state.instanceCount)
+                    }
                 }
                 .padding(.top, 28)
                 .padding(.bottom, 16)
@@ -673,23 +656,21 @@ private struct OnboardingCountTile: View {
     let label: String
     let value: Int
 
+    /// One count in the closing card's row (no card of its own).
     var body: some View {
-        Card(padding: EdgeInsets(top: 14, leading: 8, bottom: 14, trailing: 8)) {
-            VStack(spacing: 6) {
-                Image(systemName: Symbol.named(icon))
-                    .font(.title3)
-                    .foregroundStyle(.tint)
-                Text("\(value)")
-                    .font(.title2.bold().monospacedDigit())
-                Text(label.uppercased())
-                    .font(.caption2)
-                    .tracking(1)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .dsMinimumScaleFactor(0.8, textStyle: .caption2)
-            }
-            .frame(maxWidth: .infinity)
+        VStack(spacing: 6) {
+            Image(systemName: Symbol.named(icon))
+                .font(.title3)
+                .foregroundStyle(.tint)
+            Text("\(value)")
+                .font(.title2.bold().monospacedDigit())
+            Text(label)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .dsMinimumScaleFactor(0.8, textStyle: .footnote)
         }
+        .frame(maxWidth: .infinity)
         .accessibilityElement(children: .combine)
     }
 }
