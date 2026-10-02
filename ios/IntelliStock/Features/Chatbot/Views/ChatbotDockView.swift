@@ -71,9 +71,9 @@ struct ChatbotPanel: View {
         .confirmAlert($confirm)
     }
 
+    /// The model's own name, as the server spells it (no longer upper-cased).
     private var modelName: String {
-        let name = model.state.activeConversation?.modelName ?? ""
-        return name.uppercased()
+        model.state.activeConversation?.modelName ?? ""
     }
 
     @ToolbarContentBuilder
@@ -105,29 +105,29 @@ struct ChatbotPanel: View {
                 .accessibilityLabel("\(st.conversations.count) conversations")
             }
         }
-        ToolbarItemGroup(placement: .topBarTrailing) {
-            Button {
-                settingsOpen = true
-            } label: {
-                Image(systemName: Symbol.named("settings"))
+        // Settings and Clear share one menu (Clear last, destructive, still
+        // confirmed); Minimise stays its own button.
+        ToolbarItem(placement: .topBarTrailing) {
+            ToolbarMenu("Chat Options") {
+                Button("Settings", systemImage: Symbol.named("settings")) {
+                    settingsOpen = true
+                }
+                Section {
+                    Button("Clear conversation", systemImage: Symbol.named("delete_sweep"), role: .destructive) {
+                        confirm = ConfirmRequest(
+                            title: "Clear conversation",
+                            body: "This will delete all messages. This cannot be undone.",
+                            confirmLabel: "Clear",
+                            role: .destructive,
+                            onConfirm: { await model.clearConversation() },
+                            onError: { _ in }
+                        )
+                    }
+                    .disabled(st.busy)
+                }
             }
-            .accessibilityLabel("Settings")
-
-            Button {
-                confirm = ConfirmRequest(
-                    title: "Clear conversation",
-                    body: "This will delete all messages. This cannot be undone.",
-                    confirmLabel: "Clear",
-                    role: .destructive,
-                    onConfirm: { await model.clearConversation() },
-                    onError: { _ in }
-                )
-            } label: {
-                Image(systemName: Symbol.named("delete_sweep"))
-            }
-            .disabled(st.busy)
-            .accessibilityLabel("Clear conversation")
-
+        }
+        ToolbarItem(placement: .topBarTrailing) {
             Button {
                 model.minimise()
             } label: {
