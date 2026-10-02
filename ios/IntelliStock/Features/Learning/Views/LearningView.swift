@@ -453,7 +453,7 @@ struct LearningTargetsSheet: View {
             try await model.saveTargets(armed: armed, watched: watched)
             dismiss()
         } catch {
-            if !marketsIsCancellation(error) { self.error = KalshiFormat.errorText(error) }
+            if !error.isCancellation { self.error = KalshiFormat.errorText(error) }
             saving = false
         }
     }

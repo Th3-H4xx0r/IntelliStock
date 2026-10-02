@@ -263,7 +263,7 @@ struct BacktestsView: View {
                 }
             },
             onError: { error in
-                if !marketsIsCancellation(error) { toast = Toast(KalshiFormat.errorText(error), style: .error) }
+                if !error.isCancellation { toast = Toast(KalshiFormat.errorText(error), style: .error) }
             }
         )
     }

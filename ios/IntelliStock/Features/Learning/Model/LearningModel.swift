@@ -121,7 +121,7 @@ final class LearningModel {
             await load()
             return nil
         } catch {
-            if marketsIsCancellation(error) { return nil }
+            if error.isCancellation { return nil }
             return "\(prefix)\(KalshiFormat.errorText(error))"
         }
     }

@@ -124,6 +124,8 @@ nonisolated enum Symbol {
         "keyboard_arrow_down": "chevron.down",
         "fingerprint": "touchid",
         "circle": "circle",
+        "do_not_disturb_on": "minus.circle",
+        "radio_button_unchecked": "circle",
         "chat_bubble_outline": "bubble.left",
         "sync": "arrow.triangle.2.circlepath",
         "storage": "externaldrive",

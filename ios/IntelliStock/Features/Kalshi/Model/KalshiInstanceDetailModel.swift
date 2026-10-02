@@ -140,7 +140,7 @@ final class KalshiInstanceDetailModel {
             await refresh()
             return nil
         } catch {
-            if marketsIsCancellation(error) { return nil }
+            if error.isCancellation { return nil }
             return KalshiFormat.errorText(error)
         }
     }

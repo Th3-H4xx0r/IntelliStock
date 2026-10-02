@@ -88,7 +88,7 @@ private struct KalshiDashboardCardContent: View {
                 do {
                     portfolio = .loaded(try await repo.portfolio(bid))
                 } catch {
-                    if !tradingIsCancellation(error) { portfolio = .failed(error) }
+                    if !error.isCancellationOrTaskCancelled { portfolio = .failed(error) }
                 }
             }
             if positions == nil, let list = try? await repo.positions(bid) {

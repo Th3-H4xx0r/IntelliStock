@@ -74,7 +74,7 @@ final class BacktestDetailModel {
                 await fetchStatus()
             }
         } catch {
-            if marketsIsCancellation(error) { return }
+            if error.isCancellation { return }
             loading = false
             if !hadData { self.error = KalshiFormat.errorText(error) }
         }
@@ -144,7 +144,7 @@ final class BacktestDetailModel {
             llmCostLoading = false
         } catch {
             llmCostLoading = false
-            if !marketsIsCancellation(error) { llmCostError = KalshiFormat.errorText(error) }
+            if !error.isCancellation { llmCostError = KalshiFormat.errorText(error) }
         }
     }
 
@@ -159,7 +159,7 @@ final class BacktestDetailModel {
             logsLoading = false
         } catch {
             logsLoading = false
-            if !marketsIsCancellation(error) { logsError = KalshiFormat.errorText(error) }
+            if !error.isCancellation { logsError = KalshiFormat.errorText(error) }
         }
     }
 
@@ -181,7 +181,7 @@ final class BacktestDetailModel {
             }
             return nil
         } catch {
-            if marketsIsCancellation(error) { return nil }
+            if error.isCancellation { return nil }
             return KalshiFormat.errorText(error)
         }
     }

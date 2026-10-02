@@ -147,7 +147,7 @@ final class KalshiBacktestModel {
             }
             await loadBacktests()
         } catch {
-            if !marketsIsCancellation(error) { err = Self.loadError }
+            if !error.isCancellation { err = Self.loadError }
         }
     }
 
@@ -235,7 +235,7 @@ final class KalshiBacktestModel {
             await loadBacktests()
             return id
         } catch {
-            if !marketsIsCancellation(error) { err = "Failed to start the backtest." }
+            if !error.isCancellation { err = "Failed to start the backtest." }
             return nil
         }
     }

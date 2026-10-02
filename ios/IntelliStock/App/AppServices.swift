@@ -82,6 +82,17 @@ final class AppServices {
         repository: { [unowned self] in self.dashboardRepository }
     )
 
+    /// The one chatbot model for the signed-in session — the keepAlive
+    /// `chatbotProvider`. Held here so the dock's view can come and go (the
+    /// lock tears it down) without losing the conversation; a sign-out or a
+    /// server change starts the next session from a blank one.
+    @ObservationIgnored private(set) lazy var chatbot = Self.makeChatbot(self)
+
+    private static func makeChatbot(_ services: AppServices) -> ChatbotModel {
+        // Reads the client on every call, so a server change reaches it.
+        ChatbotModel(repository: { [unowned services] in services.chatbotRepository })
+    }
+
     /// Reads the server URL, then the session, then the lock seed — all
     /// synchronously, in `main.dart`'s order — so the first frame is already
     /// correct and nothing unprotected flashes.
@@ -206,6 +217,7 @@ final class AppServices {
     /// Returns the session-scoped shared models to their fresh state.
     private func resetSessionModels() {
         dashboard.reset()
+        chatbot = Self.makeChatbot(self)
     }
 
     // MARK: Lifecycle

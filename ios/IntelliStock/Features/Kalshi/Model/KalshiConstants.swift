@@ -158,21 +158,12 @@ nonisolated enum KalshiFormat {
     }
 }
 
-/// Whether `error` means the request was cancelled (the screen went away or
-/// the task was replaced) rather than failed. Cancellation is never shown as
-/// an error; the state stays as it was.
-nonisolated func marketsIsCancellation(_ error: any Error) -> Bool {
-    if error is CancellationError { return true }
-    if let u = error as? URLError, u.code == .cancelled { return true }
-    return false
-}
-
 nonisolated extension Loadable {
     /// A capture that was really a cancellation: core's `Loadable.capture`
     /// returns `.loading` for a cancelled body (a finished capture is never
     /// `.loading` otherwise), and older paths surface it as a failure.
     var marketsCancelled: Bool {
         if case .loading = self { return true }
-        return error.map(marketsIsCancellation) ?? false
+        return error?.isCancellation ?? false
     }
 }

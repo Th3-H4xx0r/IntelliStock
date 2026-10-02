@@ -98,7 +98,7 @@ final class InstanceDetailModel {
             st.liveUptimeSecs = inst.uptimeSeconds ?? 0
             state = .loaded(st)
         } catch {
-            if !tradingIsCancellation(error) { state = .failed(error) }
+            if !error.isCancellationOrTaskCancelled { state = .failed(error) }
         }
     }
 

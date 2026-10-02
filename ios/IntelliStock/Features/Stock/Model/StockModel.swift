@@ -198,7 +198,7 @@ final class StockModel {
             guard r == range else { return }
             history = .loaded(s)
         } catch {
-            guard r == range, !tradingIsCancellation(error) else { return }
+            guard r == range, !error.isCancellationOrTaskCancelled else { return }
             if history.value == nil { history = .failed(error) }
         }
         if r == range { historyLoading = false }

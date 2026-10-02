@@ -78,6 +78,13 @@ nonisolated extension Error {
         if let url = self as? URLError, url.code == .cancelled { return true }
         return false
     }
+
+    /// `isCancellation`, or the calling task was cancelled while this error
+    /// came back: either way the view went away, so state stays unchanged
+    /// rather than showing a failure.
+    var isCancellationOrTaskCancelled: Bool {
+        isCancellation || Task.isCancelled
+    }
 }
 
 extension Loadable: Sendable where Value: Sendable {}

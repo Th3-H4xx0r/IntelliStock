@@ -63,7 +63,7 @@ final class InstancesModel {
         do {
             state = .loaded(try await fetch())
         } catch {
-            if !tradingIsCancellation(error) { state = .failed(error) }
+            if !error.isCancellationOrTaskCancelled { state = .failed(error) }
         }
     }
 

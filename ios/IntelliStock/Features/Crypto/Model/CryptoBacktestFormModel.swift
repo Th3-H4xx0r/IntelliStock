@@ -78,7 +78,7 @@ final class CryptoBacktestFormModel {
             let id = res["id"].flatMap { $0.isNull ? nil : $0 } ?? res["backtest_id"]
             return id.flatMap { $0.isNull ? nil : $0.dartDescription } ?? ""
         } catch {
-            if !marketsIsCancellation(error) { err = KalshiFormat.errorText(error) }
+            if !error.isCancellation { err = KalshiFormat.errorText(error) }
             busy = false
             return nil
         }

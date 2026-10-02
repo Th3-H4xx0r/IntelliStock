@@ -136,7 +136,7 @@ private struct InstanceDetailContent: View {
                         onRemove: { sym in
                             Task {
                                 do { try await model.removeStock(sym) } catch {
-                                    if !tradingIsCancellation(error) { toast = Toast(swingErrorText(error), style: .error) }
+                                    if !error.isCancellationOrTaskCancelled { toast = Toast(swingErrorText(error), style: .error) }
                                 }
                             }
                         }

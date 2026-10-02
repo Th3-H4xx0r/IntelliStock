@@ -54,7 +54,7 @@ final class CryptoInstanceDetailModel {
             self.value = value
             loading = false
         } catch {
-            if marketsIsCancellation(error) { return }
+            if error.isCancellation { return }
             self.error = KalshiFormat.errorText(error)
             loading = false
         }

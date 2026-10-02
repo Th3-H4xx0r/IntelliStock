@@ -31,7 +31,7 @@ final class NexusModel {
             status = .loaded(s)
             errorMessage = nil
         } catch {
-            if marketsIsCancellation(error) { return }
+            if error.isCancellation { return }
             // A failed refetch after data keeps the data (AsyncValue keeps
             // the previous value); a first failure shows the error view.
             if status.value == nil { status = .failed(error) }
@@ -55,7 +55,7 @@ final class NexusModel {
         do {
             try await action()
         } catch {
-            if marketsIsCancellation(error) { busy = false; return }
+            if error.isCancellation { busy = false; return }
             if status.value != nil {
                 busy = false
                 errorMessage = KalshiFormat.errorText(error)

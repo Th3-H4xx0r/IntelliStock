@@ -123,7 +123,7 @@ final class BacktestPlaybackModel {
             loading = false
             error = nil
         } catch {
-            if marketsIsCancellation(error) { return }
+            if error.isCancellation { return }
             loading = false
             self.error = KalshiFormat.errorText(error)
         }

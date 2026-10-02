@@ -337,7 +337,7 @@ final class PendingSignalsModel {
         let load = await fetch()
         guard load.pending != nil else {
             // No pending list at all: the section shows the error with Retry.
-            if let error = load.error, tradingIsCancellation(error) { return }
+            if let error = load.error, error.isCancellationOrTaskCancelled { return }
             state = .failed(load.error ?? ApiError(message: "Could not load signals."))
             return
         }
@@ -650,7 +650,7 @@ final class WheelModel {
         do {
             state = .loaded(try await source().wheel(instanceId))
         } catch {
-            if !tradingIsCancellation(error) { state = .failed(error) }
+            if !error.isCancellationOrTaskCancelled { state = .failed(error) }
         }
     }
 

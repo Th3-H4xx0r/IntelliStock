@@ -286,7 +286,7 @@ final class DashboardFeedModel {
             do {
                 dayChange[brokerageId] = .some(try await loader().dayChange(brokerageId, now: now()))
             } catch {
-                if tradingIsCancellation(error) { return }
+                if error.isCancellationOrTaskCancelled { return }
                 dayChange[brokerageId] = .some(nil)
             }
         }
@@ -338,7 +338,7 @@ final class DashboardFeedModel {
             for p in positions { sectors[p.symbol] = sectorCache[p.symbol] ?? nil }
             sectorAllocation[brokerageId] = aggregateBySector(valueBySymbol, sectors)
         } catch {
-            if tradingIsCancellation(error) { return }
+            if error.isCancellationOrTaskCancelled { return }
             sectorAllocation[brokerageId] = []
         }
     }
@@ -402,7 +402,7 @@ final class DashboardAccountInsightsModel {
                 let order = (try? await holdings.currentHoldings().positions.map(\.symbol)) ?? Array(sparks.keys).sorted()
                 todaysMovers = todaysMoversFromSparks(sparks, order: order)
             } catch {
-                if tradingIsCancellation(error) { return }
+                if error.isCancellationOrTaskCancelled { return }
                 todaysMovers = []
             }
         }

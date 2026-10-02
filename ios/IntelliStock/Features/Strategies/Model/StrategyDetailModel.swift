@@ -41,7 +41,7 @@ final class StrategyDetailModel {
             loading = false
             error = nil
         } catch {
-            if marketsIsCancellation(error) { return }
+            if error.isCancellation { return }
             loading = false
             self.error = KalshiFormat.errorText(error)
         }
@@ -249,7 +249,7 @@ final class StrategyBacktestFormModel {
             await pause(.milliseconds(900))
             return btId
         } catch {
-            if !marketsIsCancellation(error) { fail(KalshiFormat.errorText(error)) }
+            if !error.isCancellation { fail(KalshiFormat.errorText(error)) }
             return nil
         }
     }

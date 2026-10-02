@@ -167,7 +167,7 @@ import Testing
         let clock = ManualClock()
         var setup: CodexSetupModel? = CodexSetupModel(cliPath: "", repository: { ModelRepository(client: client) }, sleep: clock.sleep)
         await setup?.startInstall()
-        weak var gone = setup
+        weak let gone = setup
         setup = nil
         #expect(gone == nil)
         await clock.advance(by: CodexSetupModel.installPollInterval)

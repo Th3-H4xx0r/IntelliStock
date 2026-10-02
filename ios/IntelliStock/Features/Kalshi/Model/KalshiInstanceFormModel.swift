@@ -135,7 +135,7 @@ final class KalshiInstanceFormModel {
             let p = try await repository().portfolio(brokerageId)
             balance = p.cash > 0 ? p.cash : p.value
         } catch {
-            if marketsIsCancellation(error) { loadingBalance = false; return }
+            if error.isCancellation { loadingBalance = false; return }
             balance = 0
         }
         loadingBalance = false
@@ -283,7 +283,7 @@ final class KalshiInstanceFormModel {
             }
             return brokerageId
         } catch {
-            if !marketsIsCancellation(error) { err = KalshiFormat.errorText(error) }
+            if !error.isCancellation { err = KalshiFormat.errorText(error) }
             return nil
         }
     }

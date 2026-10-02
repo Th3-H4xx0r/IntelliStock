@@ -164,7 +164,7 @@ struct CryptoView: View {
                                 if let message = await model.delete(inst.id) { throw ApiError(message: message) }
                             },
                             onError: { error in
-                                if !marketsIsCancellation(error) { toast = Toast(KalshiFormat.errorText(error), style: .error) }
+                                if !error.isCancellation { toast = Toast(KalshiFormat.errorText(error), style: .error) }
                             }
                         )
                     }

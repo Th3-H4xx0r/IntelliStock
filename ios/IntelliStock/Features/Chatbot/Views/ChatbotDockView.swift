@@ -36,13 +36,11 @@ struct ChatbotDockView: View {
             if let route = model.takeNavigations().last { navigate(route) }
         }
         .onAppear {
-            let model = ChatbotSession.model(for: services)
+            // The session's model (AppServices resets it on sign-out, so the
+            // next sign-in starts blank, as the Dart provider did).
+            let model = services.chatbot
             self.model = model
             Task { await model.bootstrap() }
-        }
-        .onDisappear {
-            // Signed out: the Dart provider reset to a blank state.
-            if !services.session.isAuthenticated { ChatbotSession.end() }
         }
     }
 
@@ -59,30 +57,6 @@ struct ChatbotDockView: View {
     private func navigate(_ route: String) {
         model?.minimise()
         services.router.open(route)
-    }
-}
-
-/// The one chatbot model for the signed-in session — the keepAlive
-/// `chatbotProvider`. Held here so the dock's view can come and go (the lock
-/// tears it down) without losing the conversation.
-@MainActor
-enum ChatbotSession {
-    private static var current: ChatbotModel?
-    private static var owner: ObjectIdentifier?
-
-    static func model(for services: AppServices) -> ChatbotModel {
-        if let current, owner == ObjectIdentifier(services) { return current }
-        // Reads the client on every call, so a server change reaches it.
-        let model = ChatbotModel(repository: { ChatbotRepository(client: services.apiClient) })
-        current = model
-        owner = ObjectIdentifier(services)
-        return model
-    }
-
-    /// Sign-out: the next sign-in starts from a blank, freshly bootstrapped model.
-    static func end() {
-        current = nil
-        owner = nil
     }
 }
 
@@ -381,53 +355,3 @@ private struct ChatThinkingRow: View {
     }
 }
 
-/// A simple wrapping row layout (Dart's `Wrap`), optionally centred per line.
-struct ChatFlowLayout: Layout {
-    var spacing: CGFloat = 8
-    var centered = false
-
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let rows = arrange(proposal: proposal, subviews: subviews)
-        let height = rows.reduce(0) { $0 + $1.height } + spacing * CGFloat(max(rows.count - 1, 0))
-        let width = rows.map(\.width).max() ?? 0
-        return CGSize(width: proposal.width ?? width, height: height)
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        var y = bounds.minY
-        for row in arrange(proposal: ProposedViewSize(width: bounds.width, height: nil), subviews: subviews) {
-            var x = centered ? bounds.minX + (bounds.width - row.width) / 2 : bounds.minX
-            for index in row.indices {
-                let size = subviews[index].sizeThatFits(.unspecified)
-                subviews[index].place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
-                x += size.width + spacing
-            }
-            y += row.height + spacing
-        }
-    }
-
-    private struct Row {
-        var indices: [Int] = []
-        var width: CGFloat = 0
-        var height: CGFloat = 0
-    }
-
-    private func arrange(proposal: ProposedViewSize, subviews: Subviews) -> [Row] {
-        let maxWidth = proposal.width ?? .infinity
-        var rows: [Row] = []
-        var current = Row()
-        for index in subviews.indices {
-            let size = subviews[index].sizeThatFits(.unspecified)
-            let needed = current.indices.isEmpty ? size.width : current.width + spacing + size.width
-            if needed > maxWidth, !current.indices.isEmpty {
-                rows.append(current)
-                current = Row()
-            }
-            current.width = current.indices.isEmpty ? size.width : current.width + spacing + size.width
-            current.height = max(current.height, size.height)
-            current.indices.append(index)
-        }
-        if !current.indices.isEmpty { rows.append(current) }
-        return rows
-    }
-}

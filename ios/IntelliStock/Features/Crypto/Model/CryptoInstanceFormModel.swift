@@ -391,7 +391,7 @@ final class CryptoInstanceFormModel {
             }
             return true
         } catch {
-            if !marketsIsCancellation(error) { err = KalshiFormat.errorText(error) }
+            if !error.isCancellation { err = KalshiFormat.errorText(error) }
             saving = false
             return false
         }
