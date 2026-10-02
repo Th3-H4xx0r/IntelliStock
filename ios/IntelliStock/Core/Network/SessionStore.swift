@@ -43,35 +43,57 @@ final class SessionStore: ApiTokenSource {
 
     /// Loads the persisted session. Synchronous, so the first frame already
     /// knows whether someone is signed in (main.dart read it before runApp).
-    func load() {
-        token = storage.read(Self.tokenKey)
-        if let raw = storage.read(Self.userKey) {
-            let decoded = try? JSON(data: Data(raw.utf8))
-            user = decoded?.object != nil ? decoded : nil
+    ///
+    /// Returns false — changing nothing — when the keychain cannot be read
+    /// yet (before first unlock): that is not "signed out". Mirrors the
+    /// widget's credentials only for a real session, so a load never wipes
+    /// them.
+    @discardableResult
+    func load() -> Bool {
+        let storedToken: String?
+        let rawUser: String?
+        do {
+            storedToken = try storage.readChecked(Self.tokenKey)
+            rawUser = try storage.readChecked(Self.userKey)
+        } catch {
+            return false
         }
-        syncWidgetCredentials()
+        token = storedToken
+        if let rawUser {
+            let decoded = try? JSON(data: Data(rawUser.utf8))
+            user = decoded?.object != nil ? decoded : nil
+        } else {
+            user = nil
+        }
+        if isAuthenticated { syncWidgetCredentials() }
+        return true
     }
 
     /// Stores a fresh sign-in. Throws when the keychain refuses the token, so
     /// the login screen can report it.
+    ///
+    /// Persists first, then updates memory (as `ApiBaseUrlStore.set` does),
+    /// so a keychain failure never leaves a session that would not survive a
+    /// relaunch.
     func setSession(token: String, user: JSON?) async throws {
-        self.token = token
-        self.user = user
         try storage.write(Self.tokenKey, token)
         if let user {
             try storage.write(Self.userKey, Self.encode(user))
         } else {
             storage.delete(Self.userKey)
         }
+        self.token = token
+        self.user = user
         syncWidgetCredentials()
     }
 
     /// Replaces just the JWT (a sliding-renewal token from
-    /// `x-refreshed-token`), keeping the cached user. No-op when empty or
-    /// unchanged. Persistence is best-effort: a locked keychain never throws
-    /// out of this fire-and-forget path.
+    /// `x-refreshed-token`), keeping the cached user. No-op when empty,
+    /// unchanged, or signed out — a late renewal after Sign Out must not sign
+    /// the old session back in. Persistence is best-effort: a locked keychain
+    /// never throws out of this fire-and-forget path.
     func setToken(_ token: String) async {
-        if token.isEmpty || token == self.token { return }
+        if token.isEmpty || token == self.token || self.token == nil { return }
         self.token = token
         try? storage.write(Self.tokenKey, token)
         syncWidgetCredentials()

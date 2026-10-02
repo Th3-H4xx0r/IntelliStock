@@ -15,7 +15,7 @@ final class PushDevicesModel {
 
     /// The first load (Dart's `build`).
     func load() async {
-        devices = await Loadable.capture { try await self.repository().listDevices() }
+        devices = await devices.refreshing { try await self.repository().listDevices() }
     }
 
     /// Shows loading, then reloads (Dart's `refresh`).
