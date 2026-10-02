@@ -96,8 +96,10 @@ final class DashboardModel {
     /// as the Dart notifier did; a second call for a busy id is ignored.
     func run(_ id: String, _ action: () async throws -> Void) async {
         if busy.contains(id) { return }
+        let started = generation
         busy.insert(id)
-        defer { busy.remove(id) }
+        // After a reset, a newer run may own this id's flag; leave it.
+        defer { if started == generation { busy.remove(id) } }
         do {
             try await action()
             await refreshNow()
@@ -135,7 +137,20 @@ final class DashboardModel {
     // MARK: Portfolio freshness (portfolioUpdatedAtProvider)
 
     /// Wall-clock time of the last *successful* portfolio-history fetch on
-    /// the dashboard. Stamped by the history loader; read by the freshness
-    /// label.
+    /// the dashboard. Stamped by the history loader (prefer
+    /// `stampPortfolioUpdated(startedGeneration:at:)`); read by the
+    /// freshness label.
     var portfolioUpdatedAt: Date?
+
+    /// The current session generation. Read it when a fetch starts and hand
+    /// it back with the result, so work that started before a `reset()`
+    /// cannot write into the new session.
+    var currentGeneration: Int { generation }
+
+    /// Stamps `portfolioUpdatedAt` for a history fetch that started under
+    /// `startedGeneration`; ignored when the model was reset since.
+    func stampPortfolioUpdated(startedGeneration: Int, at date: Date = Date()) {
+        guard startedGeneration == generation else { return }
+        portfolioUpdatedAt = date
+    }
 }

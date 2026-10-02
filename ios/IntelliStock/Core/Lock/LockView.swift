@@ -123,8 +123,9 @@ struct LockView: View {
     }
 
     /// Signs out of the locked session without changing the lock setting.
+    /// The session clears first, so the screen goes straight from the lock to
+    /// Login; `AppServices.didSignOut()` then releases the lock.
     private func exitToLogin() {
-        services.lock.releaseLock()
         Task { await services.session.clear() }
     }
 }
