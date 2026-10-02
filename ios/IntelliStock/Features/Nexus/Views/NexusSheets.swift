@@ -5,7 +5,10 @@ import SwiftUI
 // closes before its request, as the Dart dialogs did; the screen's busy flag
 // covers the request.
 
-/// A sheet chrome: inline title, Cancel, the primary action at the bottom.
+/// A sheet chrome: inline title, Cancel in the toolbar, the explanation as
+/// the first section's footer, and the primary action as a full-width
+/// prominent button in the form's last section (the action is the sheet's
+/// whole purpose, and its labels are too long for a toolbar item).
 private struct NexusSheetChrome<Content: View>: View {
     let title: String
     let subtitle: String?
@@ -23,35 +26,33 @@ private struct NexusSheetChrome<Content: View>: View {
             Form {
                 if let subtitle {
                     Section {
-                        Text(subtitle).font(.footnote).foregroundStyle(.secondary)
-                            .listRowBackground(Color.clear)
-                            .listRowInsets(EdgeInsets())
+                    } footer: {
+                        Text(subtitle)
                     }
                 }
                 content()
+                if let onConfirm {
+                    Section {
+                        Button {
+                            dismiss()
+                            onConfirm()
+                        } label: {
+                            Text(confirmLabel).fontWeight(.semibold).frame(maxWidth: .infinity)
+                        }
+                        .dsProminentButton()
+                        .tint(confirmTint)
+                        .controlSize(.large)
+                        .disabled(!confirmEnabled)
+                        .listRowBackground(Color.clear)
+                        .listRowInsets(EdgeInsets())
+                    }
+                }
             }
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button(cancelLabel) { dismiss() }
-                }
-            }
-            .safeAreaInset(edge: .bottom) {
-                if let onConfirm {
-                    Button {
-                        dismiss()
-                        onConfirm()
-                    } label: {
-                        Text(confirmLabel).fontWeight(.semibold).frame(maxWidth: .infinity)
-                    }
-                    .dsProminentButton()
-                    .tint(confirmTint)
-                    .controlSize(.large)
-                    .disabled(!confirmEnabled)
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 8)
-                    .background(.bar)
                 }
             }
         }
@@ -107,9 +108,10 @@ private struct NexusCheckboxStyle: ToggleStyle {
                 configuration.label.foregroundStyle(.primary)
                 Spacer()
                 Image(systemName: configuration.isOn ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(configuration.isOn ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
+                    .foregroundStyle(configuration.isOn ? AnyShapeStyle(DS.Palette.accent) : AnyShapeStyle(.tertiary))
             }
         }
+        .tint(.primary)
         .accessibilityAddTraits(configuration.isOn ? .isSelected : [])
     }
 }
@@ -290,18 +292,24 @@ struct NexusRebuildSheet: View {
         }
     }
 
+    /// A mode choice: the title and detail, with a checkmark on the
+    /// selected one (Settings style); the colour stays on the mark only.
     private func modeRow(_ title: String, _ detail: String, _ color: Color, selected: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 10) {
-                Image(systemName: selected ? "largecircle.fill.circle" : "circle")
-                    .foregroundStyle(selected ? color : Color.secondary)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
-                    Text(detail).font(.caption).foregroundStyle(.secondary)
+                    Text(title).foregroundStyle(.primary)
+                    Text(detail).font(.footnote).foregroundStyle(.secondary)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Image(systemName: "checkmark")
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(color)
+                    .opacity(selected ? 1 : 0)
+                    .accessibilityHidden(true)
             }
         }
-        .listRowBackground(selected ? color.opacity(DS.tintFill) : DS.Surface.panel)
+        .tint(.primary)
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
