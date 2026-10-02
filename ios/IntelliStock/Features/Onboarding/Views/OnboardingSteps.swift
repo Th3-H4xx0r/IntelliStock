@@ -299,7 +299,8 @@ private struct OnboardingSubmitButton: View {
 private extension View {
     /// A form section whose row is free-standing content on the background.
     func onboardingBareRow() -> some View {
-        listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 8, trailing: 0))
+        // 4 pt in from the row edge: at 0 the first glyph's side bearing clipped.
+        listRowInsets(EdgeInsets(top: 8, leading: 4, bottom: 8, trailing: 4))
             .listRowBackground(Color.clear)
     }
 }

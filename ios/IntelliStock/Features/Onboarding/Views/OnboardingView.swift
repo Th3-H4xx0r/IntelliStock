@@ -154,6 +154,9 @@ private struct OnboardingContent: View {
                         Image(systemName: Symbol.named("arrow_forward"))
                     }
                 }
+                .lineLimit(1)
+                // Back and Skip for Now beside it squeezed "Next" onto two lines.
+                .fixedSize(horizontal: true, vertical: false)
                 .padding(.horizontal, 4)
             }
             .dsProminentButton()
