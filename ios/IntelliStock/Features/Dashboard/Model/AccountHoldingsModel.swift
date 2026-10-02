@@ -321,12 +321,10 @@ nonisolated enum DashboardFormat {
         q == q.rounded() ? String(Int(q)) : dartToStringAsFixed(q, 2)
     }
 
-    /// `_AllocationRing._label` / `_DiversityGauge._label`.
+    /// `_AllocationRing._label` / `_DiversityGauge._label` — the design
+    /// system's `AllocationRing.percentLabel`, which the ring draws.
     static func allocationLabel(_ fraction: Double) -> String {
-        let pct = fraction * 100
-        if pct <= 0 { return "0%" }
-        if pct < 1 { return "<1%" }
-        return "\(Int(pct.rounded()))%"
+        AllocationRing.percentLabel(fraction)
     }
 
     /// `_accountLabel`.

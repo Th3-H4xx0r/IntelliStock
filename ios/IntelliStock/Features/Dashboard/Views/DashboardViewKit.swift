@@ -1,4 +1,3 @@
-import Charts
 import SafariServices
 import SwiftUI
 
@@ -52,88 +51,14 @@ struct DashboardCardHeader: View {
     }
 }
 
-/// A circular allocation ring: the arc is this item's share of the
-/// portfolio, with the percentage in the centre (`_AllocationRing`,
-/// `_DiversityGauge`). A flat stroke, no gradient.
-struct DashboardAllocationRing: View {
-    let fraction: Double
-    let color: Color
-    var size: CGFloat = 44
-    var lineWidth: CGFloat = 3.5
-    var labelColor: Color?
+/// The allocation ring (`_AllocationRing`, `_DiversityGauge`) now lives in the
+/// design system as `AllocationRing`; the name stays so call sites compile.
+/// New code uses `AllocationRing`, or `MiniAllocationRing` in a row.
+typealias DashboardAllocationRing = AllocationRing
 
-    var body: some View {
-        let f = min(max(fraction, 0), 1)
-        ZStack {
-            Circle()
-                .stroke(Color(uiColor: .systemFill), lineWidth: lineWidth)
-            Circle()
-                .trim(from: 0, to: f)
-                .stroke(color, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
-                .rotationEffect(.degrees(-90))
-            Text(DashboardFormat.allocationLabel(fraction))
-                .font(.caption2.weight(.bold))
-                .monospacedDigit()
-                .minimumScaleFactor(0.7)
-                .lineLimit(1)
-                .foregroundStyle(labelColor ?? color)
-                .padding(.horizontal, 4)
-        }
-        .padding(lineWidth / 2)
-        .frame(width: size, height: size)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(DashboardFormat.allocationLabel(fraction)) of portfolio")
-    }
-}
-
-/// A tiny price line (`_MiniSpark`): green when the last value is at or
-/// above the first, red otherwise. Draws itself in from the left on appear;
-/// give it a new `.id` to replay.
-struct DashboardMiniSpark: View {
-    let values: [Double]
-    var height: CGFloat = 28
-
-    @State private var progress: CGFloat = 0
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    var body: some View {
-        if values.count < 2 {
-            Color.clear.frame(height: height)
-        } else {
-            let up = values[values.count - 1] >= values[0]
-            let lo = values.min()!
-            let hi = values.max()!
-            let span = abs(hi - lo) < 1e-9 ? 1 : hi - lo
-            Chart {
-                ForEach(values.indices, id: \.self) { i in
-                    LineMark(x: .value("i", i), y: .value("v", values[i]))
-                        .foregroundStyle(up ? DS.Palette.up : DS.Palette.down)
-                        .lineStyle(StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
-                }
-            }
-            .chartXAxis(.hidden)
-            .chartYAxis(.hidden)
-            .chartLegend(.hidden)
-            .chartXScale(domain: 0...(values.count - 1))
-            .chartYScale(domain: lo...(lo + span))
-            .chartPlotStyle { $0.padding(.vertical, 2) }
-            .mask(alignment: .leading) {
-                GeometryReader { geo in
-                    Rectangle().frame(width: geo.size.width * progress)
-                }
-            }
-            .frame(height: height)
-            .accessibilityHidden(true)
-            .onAppear {
-                if reduceMotion {
-                    progress = 1
-                } else {
-                    withAnimation(.easeOut(duration: 0.65)) { progress = 1 }
-                }
-            }
-        }
-    }
-}
+/// The mini price line (`_MiniSpark`) now lives in the design system as
+/// `Sparkline`; the name stays so call sites compile.
+typealias DashboardMiniSpark = Sparkline
 
 /// A coloured tag on a 15 % tint of its colour (side chips, event types).
 struct DashboardTintTag: View {

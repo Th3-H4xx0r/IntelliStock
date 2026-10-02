@@ -43,6 +43,26 @@ final class TourTests: XCTestCase {
             }
         }
 
+        // Chat entry: the tab bar's bottom accessory ("Ask IntelliStock"). It
+        // runs here, on a clean shell: at the end of the tour a pushed screen
+        // (Search and its keyboard) can cover the tab bar.
+        tapTab("Dashboard")
+        let chat = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] 'Ask IntelliStock' OR label CONTAINS[c] 'chat' OR label CONTAINS[c] 'assistant'")).firstMatch
+        if chat.waitForExistence(timeout: 5) {
+            chat.tap()
+            settle(3)
+            shot("40-chat")
+            let minimise = app.buttons["Minimise"]
+            if minimise.waitForExistence(timeout: 3) {
+                minimise.tap()
+            } else {
+                app.swipeDown()
+            }
+            settle(1)
+        } else {
+            XCTFail("chat accessory not found")
+        }
+
         // More destinations (more_sheet.dart order).
         tapTab("More")
         settle(1)
@@ -78,15 +98,6 @@ final class TourTests: XCTestCase {
             app.swipeUp()
             settle(1)
             shot("3\(n)-detail-\(name)-scroll")
-        }
-
-        // Chat entry, if the floating button is present.
-        tapTab("Dashboard")
-        let chat = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] 'chat' OR label CONTAINS[c] 'assistant'")).firstMatch
-        if chat.waitForExistence(timeout: 3) {
-            chat.tap()
-            settle(3)
-            shot("40-chat")
         }
     }
 

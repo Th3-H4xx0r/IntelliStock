@@ -3,7 +3,10 @@ import SwiftUI
 // The small building blocks from `common_widgets.dart` (SectionHeader,
 // EmptyState, LoadingState and ErrorBanner live in their own files).
 
-/// A small labelled value tile — `StatTile`.
+/// A labelled value — `StatTile`. It now draws exactly as a `StatCell`
+/// (a caption label over a body value, with no grey tile behind it: the
+/// 2026-10-02 spec bans grey tiles inside cards), so existing grids read Stocks
+/// style. New code uses `StatGrid` and `StatCell` directly.
 struct StatTile: View {
     let label: String
     let value: String
@@ -11,47 +14,40 @@ struct StatTile: View {
     var sub: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(label)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            Text(value)
-                .font(.headline.monospacedDigit())
-                .foregroundStyle(valueColor)
-            if let sub {
-                Text(sub)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(DS.Surface.inset, in: .rect(cornerRadius: DS.Radius.small, style: .continuous))
-        .accessibilityElement(children: .combine)
+        StatCell(label: label, value: value, valueColor: valueColor, footnote: sub)
     }
 }
 
-/// A coloured tag, upper-cased — `AppBadge`.
+/// A coloured tag — `AppBadge`, in the app's one badge style (see
+/// `StatusBadge`). Dart upper-cased the label; the native form shows it in
+/// sentence case instead ("real money" → "Real money", "AI" stays "AI"),
+/// because the redesign allows no upper case outside tickers and acronyms.
 struct AppBadge: View {
     let label: String
     let color: Color
 
-    @Environment(\.colorScheme) private var colorScheme
-
     var body: some View {
-        Text(label.uppercased())
-            .font(.caption2.weight(.bold))
-            .tracking(0.5)
-            .foregroundStyle(DS.Palette.onTint(color, in: colorScheme))
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(color.opacity(DS.tintFill), in: .rect(cornerRadius: 5, style: .continuous))
+        Text(label.dsSentenceCased)
+            .dsBadge(color)
     }
 }
 
-/// A tinted square holding a glyph, used in card headers — `IconTile`. The
-/// glyph draws at half the tile size.
+extension String {
+    /// The first character upper-cased and the rest left alone: "running" →
+    /// "Running", "approved ½" → "Approved ½", "AI" → "AI".
+    nonisolated var dsSentenceCased: String {
+        guard let first else { return self }
+        return first.uppercased() + dropFirst()
+    }
+}
+
+/// A tinted square holding a glyph — `IconTile`. The glyph draws at half the
+/// tile size, and the continuous corners scale with it (30 % of the side, so
+/// the 40 pt default keeps its 12 pt radius).
+///
+/// The redesign allows icon tiles only as the leading image of a row in a
+/// navigation list (More, Settings) or an `EntityRow`, never in a card or
+/// section header.
 struct IconTile<Glyph: View>: View {
     var color: Color = DS.Palette.accent
     var size: CGFloat = 40
@@ -71,7 +67,7 @@ struct IconTile<Glyph: View>: View {
             .frame(width: glyphSize, height: glyphSize)
             .foregroundStyle(color)
             .frame(width: size, height: size)
-            .background(color.opacity(DS.tintFill), in: .rect(cornerRadius: DS.Radius.control, style: .continuous))
+            .background(color.opacity(DS.tintFill), in: .rect(cornerRadius: size * 0.3, style: .continuous))
             .accessibilityHidden(true)
     }
 }

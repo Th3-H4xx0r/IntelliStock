@@ -41,8 +41,9 @@ nonisolated enum RootScreen: Hashable, Sendable {
     }
 }
 
-/// The top of the app: the gates from `router.dart`'s redirect, the chat
-/// overlay from `app.dart`, and the biometric lock.
+/// The top of the app: the gates from `router.dart`'s redirect and the
+/// biometric lock. The chat that `app.dart` overlaid on everything is now the
+/// signed-in shell's tab-bar accessory (`MainTabView`).
 ///
 /// 1. No server URL → `ConnectView`.
 /// 2. Signed out → `LoginView(redirectPath:)`.
@@ -87,18 +88,16 @@ struct RootView: View {
             case .lock:
                 LockView()
             case .app(let gate):
-                ZStack {
-                    switch gate {
-                    case .connect:
-                        NavigationStack { ConnectView() }
-                    case .login:
-                        LoginView(redirectPath: services.loginRedirect)
-                    case .onboarding:
-                        OnboardingView()
-                    case .main:
-                        MainTabView()
-                    }
-                    ChatEntrySlot()
+                switch gate {
+                case .connect:
+                    NavigationStack { ConnectView() }
+                case .login:
+                    LoginView(redirectPath: services.loginRedirect)
+                case .onboarding:
+                    OnboardingView()
+                case .main:
+                    // Carries the chat entry (the tab bar's bottom accessory).
+                    MainTabView()
                 }
             }
         }

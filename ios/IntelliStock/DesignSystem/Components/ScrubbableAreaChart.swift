@@ -19,24 +19,30 @@ struct ScrubbableChartMarker: Identifiable, Hashable {
     }
 }
 
-/// The equity/value chart with the dashboard's look and feel —
+/// The equity/value chart in the app's one chart style (spec 2026-10-02) —
 /// `ScrubbableAreaChart` in `scrubbable_area_chart.dart`, on Swift Charts.
 ///
-/// Hidden axes, a monotone line over a flat `DS.chartAreaOpacity` fill (no
-/// gradient), date labels under the plot, an optional baseline rule, and a
-/// scrub: drag across it for a hairline and a dot on the line, with a
-/// selection haptic each time the snapped point changes. `onScrub` reports the
-/// index, then nil when the finger lifts.
+/// - A 2 pt monotone line over a flat `DS.chartAreaOpacity` fill (never a
+///   gradient), with hidden axes.
+/// - One gridline only: Stocks' dotted baseline at the start value, or at
+///   `baseline` when given (the starting equity, zero P&L). Set
+///   `showsBaseline: false` to drop it.
+/// - At most four date labels under the plot, in `.caption2` `.secondary`.
+/// - A scrub: drag across it for a hairline and a dot on the line, with a
+///   selection haptic each time the snapped point changes. `onScrub` reports
+///   the index, then nil when the finger lifts.
 ///
 /// Plotted against real time, so unevenly spaced samples and `markers` stay
 /// aligned; `indexed` spaces points evenly instead (no weekend or overnight
-/// gaps).
+/// gaps). Give it horizontal margins (a `Card`, or the list's insets): no chart
+/// runs edge to edge.
 struct ScrubbableAreaChart: View {
     let timestamps: [Date]
     let values: [Double]
     let lineColor: Color
     var height: CGFloat = 200
-    /// A horizontal reference line, e.g. the starting equity.
+    /// Where the dotted baseline sits, e.g. the starting equity. nil puts it
+    /// at the first value.
     var baseline: Double?
     var markers: [ScrubbableChartMarker] = []
     var onScrub: ((Int?) -> Void)?
@@ -45,6 +51,8 @@ struct ScrubbableAreaChart: View {
     var indexed = false
     /// A live dot pulsing at the latest value while not scrubbing.
     var pulsingEndDot = false
+    /// Draw the dotted baseline.
+    var showsBaseline = true
 
     @State private var selectedX: Double?
     @State private var scrub = ScrubController(onTick: {})
@@ -74,6 +82,13 @@ struct ScrubbableAreaChart: View {
 
         return VStack(spacing: 0) {
             Chart {
+                // Behind the line: the one gridline, Stocks' dotted start value.
+                if showsBaseline {
+                    RuleMark(y: .value("Baseline", baseline ?? values[0]))
+                        .foregroundStyle(Color(uiColor: .tertiaryLabel))
+                        .lineStyle(StrokeStyle(lineWidth: 1, dash: DS.baselineDash))
+                }
+
                 ForEach(0..<n, id: \.self) { i in
                     let v = showValues ? values[i] : bounds.min
                     AreaMark(
@@ -88,12 +103,6 @@ struct ScrubbableAreaChart: View {
                         .foregroundStyle(lineColor)
                         .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
                         .interpolationMethod(.monotone)
-                }
-
-                if let baseline {
-                    RuleMark(y: .value("Baseline", baseline))
-                        .foregroundStyle(Color(uiColor: .tertiaryLabel))
-                        .lineStyle(StrokeStyle(lineWidth: 1))
                 }
 
                 // By position: two identical markers (same time, price and
@@ -251,4 +260,24 @@ struct ChartDateLabels: View {
             .accessibilityHidden(true)
         }
     }
+}
+
+#Preview {
+    let start = Date(timeIntervalSince1970: 1_790_000_000)
+    let values = (0..<60).map { i in 5_800 + 60 * sin(Double(i) / 6) + Double(i) * 1.5 }
+    return ScrollView {
+        Card {
+            VStack(alignment: .leading, spacing: DS.cardGroupSpacing) {
+                HeroValueHeader(fmtMoney(values.last), change: "+$62.13 (+1.07%)", direction: .up, status: "Markets closed")
+                ScrubbableAreaChart(
+                    timestamps: values.indices.map { start.addingTimeInterval(Double($0) * 3_600) },
+                    values: values,
+                    lineColor: DS.Palette.up,
+                    height: 200
+                )
+            }
+        }
+        .padding()
+    }
+    .background(DS.Surface.canvas)
 }

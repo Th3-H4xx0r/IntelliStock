@@ -58,4 +58,11 @@ nonisolated enum DS {
     static let tintFill: Double = 0.15
     /// Opacity of the flat area fill under a chart line.
     static let chartAreaOpacity: Double = 0.12
+
+    /// Padding inside a `Card` (spec 2026-10-02: 16 pt).
+    static let cardPadding: CGFloat = 16
+    /// Space between groups inside a `Card` (spec 2026-10-02: 12 pt).
+    static let cardGroupSpacing: CGFloat = 12
+    /// The dash of a chart's baseline rule — Stocks' dotted start-value line.
+    static let baselineDash: [CGFloat] = [2, 3]
 }

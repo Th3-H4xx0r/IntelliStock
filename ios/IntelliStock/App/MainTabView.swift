@@ -4,6 +4,11 @@ import SwiftUI
 /// its own navigation stack bound to `AppRouter`, so detail routes push
 /// inside the current tab and the tab bar stays visible
 /// (`tab-bars.md › Best practices`). The tab bar draws the symbols filled.
+///
+/// The chat's entry is the tab bar's bottom accessory, a glass capsule above
+/// the tabs (`ChatAccessoryView`), and `chatbotPresenter()` hosts the chat
+/// sheet. Both live only here, so there is no chat entry outside the signed-in
+/// shell, and none while locked (`LockView` replaces the shell).
 struct MainTabView: View {
     @Environment(AppServices.self) private var services
 
@@ -27,6 +32,8 @@ struct MainTabView: View {
                 TabStack(tab: .more) { MoreTabView() }
             }
         }
+        .tabViewBottomAccessory { ChatAccessoryView() }
+        .chatbotPresenter()
         // Inside the authenticated shell: register for push once per sign-in.
         .task { await services.push.enable() }
     }
