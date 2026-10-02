@@ -64,6 +64,23 @@ WATCHDOG_START_GRACE_SEC = float(
     os.environ.get("ALPHA_WATCHDOG_START_GRACE_SEC", "3") or 3)
 WATCHDOG_START_POLL_SEC = 0.1
 
+# Watchdog self-heal (2026-10-02). On 2026-10-01 at 05:48:52 UTC, during a DNS
+# outage, the sidecar of swing-paper and of alpaca-main stopped writing control
+# health while its process stayed alive, and nothing here looked at it again
+# after start. The order gate refused every opening order for 37 hours. The
+# supervisor loop now restarts a watchdog that exited, or that has not written
+# control health for WATCHDOG_SILENT_SEC, the way it restarts a dead broker.
+WATCHDOG_SILENT_SEC = float(
+    os.environ.get("ALPHA_WATCHDOG_SILENT_SEC", "180") or 180)
+WATCHDOG_SUPERVISE_EVERY_SEC = float(
+    os.environ.get("ALPHA_WATCHDOG_SUPERVISE_EVERY_SEC", "30") or 30)
+WATCHDOG_RESTART_BACKOFF_SEC = float(
+    os.environ.get("ALPHA_WATCHDOG_RESTART_BACKOFF_SEC", "60") or 60)
+_alpha_watchdog_wanted = False       # a watchdog started and should keep running
+_alpha_watchdog_started_at = 0.0     # wall clock of the last successful start
+_alpha_watchdog_last_supervised = 0.0
+_alpha_watchdog_last_restart = 0.0
+
 
 def _stop_alpha_watchdog():
     global alpha_watchdog_process
@@ -72,7 +89,13 @@ def _stop_alpha_watchdog():
             alpha_watchdog_process.terminate()
             alpha_watchdog_process.wait(timeout=10)
         except Exception:
-            pass
+            # A process that ignores SIGTERM would otherwise be orphaned,
+            # still writing control health beside its replacement.
+            try:
+                alpha_watchdog_process.kill()
+                alpha_watchdog_process.wait(timeout=5)
+            except Exception:
+                pass
     alpha_watchdog_process = None
 
 
@@ -154,10 +177,11 @@ def _maybe_start_alpha_watchdog(instance_id_val, instance_doc=None,
     that account is silently sell-only under a green "Started" log line.
     start_broker's funded refusal only fires on a False return, so the grace
     check is what makes that refusal reachable."""
-    global alpha_watchdog_process
+    global alpha_watchdog_process, _alpha_watchdog_wanted, _alpha_watchdog_started_at
     _env_enabled = os.environ.get("ALPHA_MARK_WATCHDOG_ENABLED", "0") == "1"
     _doc_enabled = bool((instance_doc or {}).get("alpha_watchdog_enabled"))
     if not (_env_enabled or _doc_enabled):
+        _alpha_watchdog_wanted = False
         return False
     _stop_alpha_watchdog()
     try:
@@ -188,6 +212,9 @@ def _maybe_start_alpha_watchdog(instance_id_val, instance_doc=None,
                 "blocks all new exposure.",
                 "red", service="INSTANCE")
             return False
+        # From here the supervisor keeps it running (_supervise_alpha_watchdog).
+        _alpha_watchdog_wanted = True
+        _alpha_watchdog_started_at = time.time()
         intellistock_logger.log(
             "Started alpha mark watchdog subprocess", "green", service="INSTANCE")
         return True
@@ -196,6 +223,79 @@ def _maybe_start_alpha_watchdog(instance_id_val, instance_doc=None,
             f"Alpha watchdog failed to start: {_wd_exc}",
             "red", service="INSTANCE")
         return False
+
+
+def _alpha_watchdog_last_report(instance_id):
+    """The `observed_at` of the watchdog's last control-health evidence, or
+    None when it has never written one. Raises when the row cannot be read."""
+    row = store.get("AlphaState", f"control_health:{instance_id}")
+    payload = (row or {}).get("payload") or {}
+    observed = payload.get("observed_at")
+    if not observed:
+        return None
+    when = datetime.fromisoformat(str(observed).replace("Z", "+00:00"))
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return when
+
+
+def _supervise_alpha_watchdog(instance_id, *, now=None):
+    """Restart a watchdog that exited or went silent (2026-10-02).
+
+    Called from the supervisor loop every 2 s. Only a watchdog this process
+    started successfully is supervised, so an instance without one (Kalshi, a
+    non-Alpaca brokerage, the flag off) is never given one, and a sidecar
+    whose own preflight refuses is not retried every 2 s.
+
+    - exited (or a restart that did not take): restarted at once;
+    - alive: its control-health row is read every WATCHDOG_SUPERVISE_EVERY_SEC,
+      and it is restarted when neither its last report nor its start is within
+      WATCHDOG_SILENT_SEC. A row that cannot be read restarts nothing, since
+      the watchdog cannot be judged silent from a database it cannot reach
+      either.
+
+    Restarts are at least WATCHDOG_RESTART_BACKOFF_SEC apart. Returns the
+    restart reason, or None when nothing was restarted."""
+    global _alpha_watchdog_last_supervised, _alpha_watchdog_last_restart
+    if not _alpha_watchdog_wanted or _crash_entered:
+        return None
+    now = time.time() if now is None else float(now)
+    if now - _alpha_watchdog_last_restart < WATCHDOG_RESTART_BACKOFF_SEC:
+        return None
+    proc = alpha_watchdog_process
+    rc = proc.poll() if proc is not None else None
+    if proc is None:
+        reason = "is not running"
+    elif rc is not None:
+        reason = f"exited (rc={rc})"
+    else:
+        if now - _alpha_watchdog_last_supervised < WATCHDOG_SUPERVISE_EVERY_SEC:
+            return None
+        _alpha_watchdog_last_supervised = now
+        try:
+            last = _alpha_watchdog_last_report(instance_id)
+        except Exception:
+            return None
+        newest = max(float(_alpha_watchdog_started_at or 0.0),
+                     last.timestamp() if last is not None else 0.0)
+        if newest <= 0 or now - newest <= WATCHDOG_SILENT_SEC:
+            return None
+        reason = (f"has not reported for {now - newest:.0f}s (last report "
+                  f"{last.isoformat() if last is not None else 'never'})")
+    _alpha_watchdog_last_restart = now
+    intellistock_logger.log(
+        f"Alpha watchdog {reason}; restarting it. Without its control health "
+        "the order gate refuses all new exposure.",
+        "red", service="INSTANCE")
+    try:
+        _instance_doc, _brokerage_doc = _load_instance_and_brokerage(instance_id)
+    except Exception as exc:
+        intellistock_logger.log(
+            "Alpha watchdog restart deferred: instance configuration "
+            f"unavailable ({type(exc).__name__})", "red", service="INSTANCE")
+        return reason
+    _maybe_start_alpha_watchdog(instance_id, _instance_doc, _brokerage_doc)
+    return reason
 
 
 class CleanRoomConfigError(RuntimeError):
@@ -884,6 +984,14 @@ def run():
                     "yellow", service="INSTANCE",
                 )
                 start_broker(current_symbols)
+            # Same for the watchdog sidecar, dead or silent (2026-10-02).
+            # Guarded: this loop's `except BaseException` trips crash keep-alive.
+            try:
+                _supervise_alpha_watchdog(instance_id)
+            except Exception as _wd_sup_exc:
+                intellistock_logger.log(
+                    f"Alpha watchdog supervision failed: {_wd_sup_exc}",
+                    "yellow", service="INSTANCE")
     except KeyboardInterrupt:
         return
     except BaseException as e:

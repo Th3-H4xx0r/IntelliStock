@@ -408,3 +408,38 @@ def alert_instance_crash(*, instance_id: str, reason: str, detail: str = "") -> 
         intellistock_logger.log(
             f"alert_instance_crash failed: {exc}", "yellow", service="INSTANCE",
         )
+
+
+def alert_watchdog_down(*, instance_id: str, codes=(), last_report=None) -> None:
+    """The order gate refused an order because the instance's watchdog (its
+    health monitor) is silent or never reported (2026-10-02). Sent by the
+    broker once per outage, not per refusal (live_orders.watchdog_notice).
+    Best-effort: it fires from an order path, so it must never raise."""
+    try:
+        from live_orders.watchdog_notice import refusal_advice
+
+        codes = tuple(str(code) for code in (codes or ()))
+        advice = refusal_advice(codes, last_report)
+        content = (f"WATCHDOG DOWN [{instance_id}] New orders are refused: "
+                   f"{advice}. Gate codes: {','.join(codes) or 'none'}")
+        embed = {
+            "title": "Health monitor down",
+            "color": 0x992D22,
+            "description": advice[:1500],
+            "fields": [
+                {"name": "instance", "value": str(instance_id), "inline": True},
+                {"name": "gate codes", "value": ",".join(codes)[:900] or "none",
+                 "inline": False},
+            ],
+        }
+        notify(
+            category="watchdog_down", instance_id=instance_id,
+            title="Health monitor down", body=content,
+            discord_channel=_channel("notifications"), discord_embed=embed,
+            push_body="New orders are refused: the health monitor is down. "
+                      "Restart the instance.",
+        )
+    except Exception as exc:
+        intellistock_logger.log(
+            f"alert_watchdog_down failed: {exc}", "yellow", service="LIVE-ALERT",
+        )
