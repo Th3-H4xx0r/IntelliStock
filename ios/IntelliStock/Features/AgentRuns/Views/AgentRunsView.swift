@@ -3,7 +3,9 @@ import SwiftUI
 /// The AI backtest agent's runs — `AgentRunsScreen` in
 /// `agent_runs_screen.dart`: status, controls (start / pause / unpause with a
 /// scheduled resume / stop), runs grouped by cycle with their stage steppers,
-/// and pagination. Polls every 5 s.
+/// and pagination. Polls every 5 s. Native form: an inset-grouped list; the
+/// controls are a section of button rows, each cycle a section of runs, and
+/// the page size a toolbar menu. Pull to refresh replaces the refresh button.
 struct AgentRunsView: View {
     @Environment(AppServices.self) private var services
     @State private var model: AgentRunsModel?
@@ -18,18 +20,21 @@ struct AgentRunsView: View {
                     .redacted(reason: .placeholder)
                     .allowsHitTesting(false)
             case .failed(let error):
-                VStack {
-                    ErrorRow(message: (error as? ApiError)?.message ?? error.localizedDescription) {
-                        Task { await model?.refreshNow() }
+                List {
+                    Section {
+                        ErrorRow(message: (error as? ApiError)?.message ?? error.localizedDescription) {
+                            Task { await model?.refreshNow() }
+                        }
+                        .listRowInsets(EdgeInsets())
+                        .listRowBackground(Color.clear)
                     }
-                    .padding(16)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .listStyle(.insetGrouped)
+                .refreshable { await model?.refreshNow() }
             case .loaded(let state):
                 AgentRunsList(model: model, state: state, onStart: { startOpen = true }, onResume: { resumeOpen = true })
             }
         }
-        .background(DS.Surface.canvas)
         .navigationTitle("Agent Runs")
         .navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $startOpen) {
@@ -75,78 +80,81 @@ private struct AgentRunsList: View {
 
     var body: some View {
         let cycles = AgentRunCycle.group(state.runs)
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 12) {
-                AgentRunsHeader(control: state.control)
-                AgentRunsControls(model: model, state: state, onStart: onStart, onResume: onResume)
-                    .padding(.bottom, 4)
+        List {
+            AgentRunsControls(model: model, state: state, onStart: onStart, onResume: onResume)
 
-                if let error = state.errorMessage {
+            if let error = state.errorMessage {
+                Section {
                     ErrorRow(message: error)
+                        .listRowInsets(EdgeInsets())
+                        .listRowBackground(Color.clear)
                 }
+            }
 
-                if state.busy && state.runs.isEmpty {
+            if state.busy && state.runs.isEmpty {
+                Section {
                     ForEach(0..<3, id: \.self) { _ in
-                        AgentRunCard(run: AgentRunsState.placeholder.runs[0], control: state.control, busy: false, onForceStop: {})
-                            .redacted(reason: .placeholder)
+                        AgentRunRow(run: AgentRunsState.placeholder.runs[0], control: state.control)
                     }
-                } else if state.runs.isEmpty {
+                }
+                .redacted(reason: .placeholder)
+            } else if state.runs.isEmpty {
+                Section {
                     EmptyState(
                         systemImage: Symbol.named("smart_toy"),
                         title: "No agent runs yet",
                         subtitle: "Start the AI Backtest Agent to see strategy attempts here."
                     )
-                    .padding(.vertical, 24)
-                } else {
-                    ForEach(cycles) { cycle in
-                        AgentCycleDivider(date: cycle.startedAt)
+                    .listRowBackground(Color.clear)
+                }
+            } else {
+                // One section per cycle, headed by its start time.
+                ForEach(cycles) { cycle in
+                    Section(cycle.startedAt.map { fmtDateTime($0) } ?? "—") {
                         ForEach(cycle.runs) { run in
-                            AgentRunCard(run: run, control: state.control, busy: state.busy) {
-                                Task { await model?.forceStop(run.id) }
+                            AgentRunRow(run: run, control: state.control)
+                            if AgentRunRow.showsMarkStopped(run, state.control) {
+                                InlineActionRow("Mark Stopped", systemImage: Symbol.named("close"), role: .destructive) {
+                                    Task { await model?.forceStop(run.id) }
+                                }
+                                .tint(DS.Palette.danger) // the glyph red too, not just the title
+                                .disabled(state.busy)
                             }
                         }
                     }
                 }
+            }
 
-                if state.totalPages > 1 {
-                    AgentRunsPager(state: state) { page in
-                        Task { await model?.goToPage(page) }
-                    }
-                    .padding(.top, 8)
+            if state.totalPages > 1 {
+                AgentRunsPager(state: state) { page in
+                    Task { await model?.goToPage(page) }
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 8)
-            .padding(.bottom, 24)
         }
+        .listStyle(.insetGrouped)
         .refreshable { await model?.refreshNow() }
-    }
-}
-
-// MARK: - Header and controls
-
-private struct AgentRunsHeader: View {
-    let control: AgentControl
-
-    var body: some View {
-        let (label, color): (String, Color) = control.isRunning
-            ? ("Running", DS.Palette.success)
-            : (control.isPaused ? ("Paused", DS.Palette.warning) : ("Stopped", .secondary))
-        HStack(alignment: .top, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("AI Agent Runs")
-                    .font(.title2.bold())
-                    .accessibilityAddTraits(.isHeader)
-                Text("Strategy attempts by the AI Backtest Agent.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+        .toolbar {
+            if let model {
+                ToolbarItem(placement: .topBarTrailing) {
+                    ToolbarMenu("Per Page") {
+                        Picker("Per page", selection: Binding(
+                            get: { state.perPage },
+                            set: { value in Task { await model.setPerPage(value) } }
+                        )) {
+                            ForEach(AgentRunsModel.perPageOptions, id: \.self) { Text("\($0)/page").tag($0) }
+                        }
+                    }
+                }
             }
-            Spacer()
-            StatusBadge(label: label, color: color, pulsing: control.isRunning)
         }
     }
 }
 
+// MARK: - Controls
+
+/// The agent's state and its controls — `_Header` and `_Controls`: a status
+/// row, then one button row per action that applies (start, pause, unpause
+/// or the scheduled-resume countdown, stop).
 private struct AgentRunsControls: View {
     let model: AgentRunsModel?
     let state: AgentRunsState
@@ -156,73 +164,36 @@ private struct AgentRunsControls: View {
     var body: some View {
         let control = state.control
         let hasCountdown = state.scheduledResumeAt != nil
-        ChatFlowLayout(spacing: 8) {
+        let (label, color): (String, Color) = control.isRunning
+            ? ("Running", DS.Palette.success)
+            : (control.isPaused ? ("Paused", DS.Palette.warning) : ("Stopped", .secondary))
+        Section {
+            LabeledContent("AI Backtest Agent") {
+                StatusDot(label, color: color, pulsing: control.isRunning)
+            }
             if control.isStopped {
-                AgentControlButton(label: "Start", icon: "play_arrow", color: DS.Palette.success, busy: state.busy, action: onStart)
+                InlineActionRow("Start", systemImage: Symbol.named("play_arrow"), isBusy: state.busy, action: onStart)
             }
             if control.isRunning {
-                AgentControlButton(label: "Pause", icon: "pause", color: DS.Palette.warning, busy: state.busy) {
+                InlineActionRow("Pause", systemImage: Symbol.named("pause"), isBusy: state.busy) {
                     Task { await model?.pauseAgent() }
                 }
             }
             if control.isPaused && !hasCountdown {
-                AgentControlButton(label: "Unpause", icon: "play_arrow", color: DS.Palette.info, busy: state.busy, action: onResume)
+                InlineActionRow("Unpause", systemImage: Symbol.named("play_arrow"), isBusy: state.busy, action: onResume)
             }
             if hasCountdown, let model {
                 AgentCountdownRing(model: model, state: state)
             }
             if !control.isStopped {
-                AgentControlButton(label: "Stop", icon: "stop", color: DS.Palette.danger, busy: state.busy) {
+                InlineActionRow("Stop", systemImage: Symbol.named("stop"), role: .destructive, isBusy: state.busy) {
                     Task { await model?.stopAgent() }
                 }
+                .tint(DS.Palette.danger) // the glyph red too, not just the title
             }
-            Menu {
-                Picker("Per page", selection: Binding(
-                    get: { state.perPage },
-                    set: { value in Task { await model?.setPerPage(value) } }
-                )) {
-                    ForEach(AgentRunsModel.perPageOptions, id: \.self) { Text("\($0)/page").tag($0) }
-                }
-            } label: {
-                Text("\(state.perPage)/page")
-                    .font(.footnote)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
-                    .background(DS.Surface.panel, in: .capsule)
-            }
-            Button {
-                Task { await model?.refreshNow() }
-            } label: {
-                Group {
-                    if state.busy { ProgressView() } else { Image(systemName: Symbol.named("refresh")) }
-                }
-                .frame(width: 44, height: 44)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.borderless)
-            .accessibilityLabel("Refresh")
+        } footer: {
+            Text("Strategy attempts by the AI Backtest Agent.")
         }
-    }
-}
-
-private struct AgentControlButton: View {
-    let label: String
-    let icon: String
-    let color: Color
-    let busy: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 6) {
-                if busy { ProgressView() } else { Image(systemName: Symbol.named(icon)) }
-                Text(label)
-            }
-            .font(.subheadline.weight(.semibold))
-        }
-        .buttonStyle(.bordered)
-        .tint(color)
-        .disabled(busy)
     }
 }
 
@@ -260,33 +231,17 @@ private struct AgentCountdownRing: View {
             .frame(width: 44, height: 44)
             VStack(alignment: .leading, spacing: 0) {
                 Text(agentCountdownLabel(secs))
-                    .font(.system(.caption, design: .monospaced).weight(.semibold))
+                    .font(.body.monospacedDigit().weight(.semibold))
                     .foregroundStyle(DS.Palette.info)
                     .contentTransition(.numericText(countsDown: true))
-                Text("resuming").font(.caption2).foregroundStyle(.tertiary)
+                Text("resuming").font(.footnote).foregroundStyle(.secondary)
             }
+            Spacer(minLength: 0)
         }
     }
 }
 
 // MARK: - Runs
-
-private struct AgentCycleDivider: View {
-    let date: Date?
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Rectangle().fill(Color(uiColor: .separator)).frame(height: 0.5)
-            Text(date.map { fmtDateTime($0) } ?? "—")
-                .font(.system(.caption2, design: .monospaced))
-                .tracking(0.5)
-                .foregroundStyle(.tertiary)
-                .fixedSize()
-            Rectangle().fill(Color(uiColor: .separator)).frame(height: 0.5)
-        }
-        .padding(.top, 4)
-    }
-}
 
 /// `_statusColor` for runs and stages.
 private func agentStatusColor(_ status: String) -> Color {
@@ -311,75 +266,66 @@ private func agentStatusSymbol(_ status: String) -> String {
     }
 }
 
-private struct AgentRunCard: View {
+/// One run — `_RunCard`, as a list row: the name, when, and its status;
+/// the stage stepper; the final result; and, for a run the stopped agent
+/// left running, the stale note (Mark Stopped is the row below it).
+private struct AgentRunRow: View {
     let run: AgentRun
     let control: AgentControl
-    let busy: Bool
-    let onForceStop: () -> Void
+
+    /// Dart's `stale` footer: a running run once the agent has stopped, or
+    /// any run with a final result.
+    static func showsFooter(_ run: AgentRun, _ control: AgentControl) -> Bool {
+        run.finalResult != nil || (run.status.lowercased() == "running" && control.isStopped)
+    }
+
+    /// Mark Stopped: inside that footer, for a run still marked running
+    /// while the agent is not.
+    static func showsMarkStopped(_ run: AgentRun, _ control: AgentControl) -> Bool {
+        showsFooter(run, control) && run.status.lowercased() == "running" && !control.isRunning
+    }
 
     var body: some View {
-        Card(padding: 16) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .top, spacing: 10) {
-                    IconTile(systemImage: Symbol.named("smart_toy"), color: DS.Palette.warning)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(run.name ?? "Unnamed Strategy")
-                            .font(.subheadline.weight(.semibold))
-                            .lineLimit(1)
-                        Text(fmtDateTime(run.createdAt))
-                            .font(.system(.caption2, design: .monospaced))
-                            .foregroundStyle(.tertiary)
-                    }
-                    Spacer()
-                    AppBadge(label: run.status, color: agentStatusColor(run.status))
-                }
+        VStack(alignment: .leading, spacing: 12) {
+            EntityRow(run.name ?? "Unnamed Strategy", subtitle: fmtDateTime(run.createdAt),
+                      systemImage: Symbol.named("smart_toy"), tint: DS.Palette.warning) {
+                AppBadge(label: run.status, color: agentStatusColor(run.status))
+            }
 
-                if run.stages.isEmpty {
-                    HStack(spacing: 10) {
-                        Image(systemName: Symbol.named("hourglass_empty"))
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                            .frame(width: 28, height: 28)
-                            .background(Color(uiColor: .tertiarySystemFill), in: Circle())
-                        Text("Queued…").font(.footnote.italic()).foregroundStyle(.secondary)
-                    }
-                } else {
-                    VStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(run.stages.enumerated()), id: \.offset) { index, stage in
-                            AgentStageRow(stage: stage, isLast: index == run.stages.count - 1, parentRunning: control.isRunning)
-                        }
-                    }
+            if run.stages.isEmpty {
+                HStack(spacing: 10) {
+                    Image(systemName: Symbol.named("hourglass_empty"))
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .frame(width: 28, height: 28)
+                        .background(Color(uiColor: .tertiarySystemFill), in: Circle())
+                    Text("Queued…").font(.subheadline.italic()).foregroundStyle(.secondary)
                 }
-
-                let stale = run.status.lowercased() == "running" && control.isStopped
-                if run.finalResult != nil || stale {
-                    Divider()
-                    if let result = run.finalResult {
-                        HStack(alignment: .firstTextBaseline, spacing: 6) {
-                            Text(run.status == "passed" ? "✓" : (run.status == "failed" ? "✗" : "○"))
-                                .font(.body.weight(.semibold))
-                                .foregroundStyle(agentStatusColor(run.status))
-                            Text(result).font(.footnote).foregroundStyle(.secondary)
-                        }
-                    }
-                    if run.status.lowercased() == "running" && !control.isRunning {
-                        HStack {
-                            Text("Agent stopped — run may be stale")
-                                .font(.caption2.italic())
-                                .foregroundStyle(DS.Palette.warning)
-                            Spacer()
-                            Button(role: .destructive, action: onForceStop) {
-                                Label("Mark Stopped", systemImage: Symbol.named("close"))
-                                    .font(.caption.weight(.semibold))
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                            .disabled(busy)
-                        }
+            } else {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(run.stages.enumerated()), id: \.offset) { index, stage in
+                        AgentStageRow(stage: stage, isLast: index == run.stages.count - 1, parentRunning: control.isRunning)
                     }
                 }
             }
+
+            if Self.showsFooter(run, control) {
+                if let result = run.finalResult {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text(run.status == "passed" ? "✓" : (run.status == "failed" ? "✗" : "○"))
+                            .font(.body.weight(.semibold))
+                            .foregroundStyle(agentStatusColor(run.status))
+                        Text(result).font(.subheadline).foregroundStyle(.secondary)
+                    }
+                }
+                if Self.showsMarkStopped(run, control) {
+                    Text("Agent stopped — run may be stale")
+                        .font(.footnote.italic())
+                        .foregroundStyle(DS.Palette.warning)
+                }
+            }
         }
+        .padding(.vertical, 4)
     }
 }
 
@@ -422,28 +368,28 @@ private struct AgentStageRow: View {
                 Text(stage.label).font(.subheadline.weight(.medium))
                 if !stage.stocks.isEmpty {
                     Text(stage.stocks.joined(separator: ", "))
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
                 if let pnl = stage.pnl {
                     HStack(spacing: 8) {
                         Text(fmtPnl(pnl.double))
-                            .font(.system(.caption, design: .monospaced).weight(.semibold))
+                            .font(.footnote.monospacedDigit().weight(.semibold))
                             .foregroundStyle(pnlColor(pnl.double))
                         if let pct = stage.pnlPct {
                             Text(fmtPct(pct.double))
-                                .font(.system(.caption2, design: .monospaced))
+                                .font(.footnote.monospacedDigit())
                                 .foregroundStyle(.secondary)
                         }
                     }
                     .padding(.top, 2)
                 }
                 if let details = stage.details {
-                    Text(details).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                    Text(details).font(.footnote).foregroundStyle(.secondary).lineLimit(1)
                 }
                 if stage.details == nil, stage.status.lowercased() == "running", parentRunning {
-                    Text("In progress…").font(.caption2.italic()).foregroundStyle(DS.Palette.info)
+                    Text("In progress…").font(.footnote.italic()).foregroundStyle(DS.Palette.info)
                 }
             }
             .padding(.bottom, isLast ? 0 : 8)
@@ -460,38 +406,42 @@ private struct AgentRunsPager: View {
     var body: some View {
         let page = state.page
         let total = state.totalPages
-        VStack(spacing: 8) {
-            Text("\(state.total) runs · page \(page) of \(total)")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            ChatFlowLayout(spacing: 4, centered: true) {
+        Section {
+            HStack(spacing: 2) {
                 pageButton("‹", enabled: page > 1, active: false) { onPage(page - 1) }
                     .accessibilityLabel("Previous page")
+                Spacer(minLength: 0)
                 ForEach(Array(AgentRunsPagination.items(page: page, total: total).enumerated()), id: \.offset) { _, item in
                     if let n = item {
                         pageButton("\(n)", enabled: true, active: n == page) { onPage(n) }
                     } else {
-                        Text("…").font(.footnote).foregroundStyle(.secondary).padding(.horizontal, 4)
+                        Text("…").foregroundStyle(.secondary).padding(.horizontal, 4)
                     }
                 }
+                Spacer(minLength: 0)
                 pageButton("›", enabled: page < total, active: false) { onPage(page + 1) }
                     .accessibilityLabel("Next page")
             }
+        } footer: {
+            Text("\(state.total) runs · page \(page) of \(total)")
+                .frame(maxWidth: .infinity)
         }
-        .frame(maxWidth: .infinity)
     }
 
+    /// A page number as plain text: the current page bold in the primary
+    /// colour, the others in the accent.
     private func pageButton(_ label: String, enabled: Bool, active: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(label)
-                .font(.footnote.weight(active ? .semibold : .regular))
-                .frame(minWidth: 44, minHeight: 44)
+                .font(active ? .body.weight(.semibold) : .body)
+                .monospacedDigit()
+                .foregroundStyle(active ? AnyShapeStyle(Color.primary) : AnyShapeStyle(.tint))
+                .frame(minWidth: 36, minHeight: 44)
+                .contentShape(Rectangle())
         }
-        .buttonStyle(.bordered)
-        // A 44 pt hit target with the bordered padding kept minimal.
-        .controlSize(.mini)
-        .tint(active ? DS.Palette.accent : .secondary)
+        .buttonStyle(.borderless)
         .disabled(!enabled)
+        .accessibilityAddTraits(active ? .isSelected : [])
     }
 }
 
@@ -508,24 +458,17 @@ private struct AgentStartSheet: View {
         NavigationStack {
             Form {
                 Section {
-                    HStack(spacing: 12) {
-                        IconTile(systemImage: Symbol.named("smart_toy"), color: DS.Palette.warning)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Start AI Backtest Agent").font(.subheadline.weight(.semibold))
-                            Text("Optionally provide a special instruction.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .listRowBackground(Color.clear)
-                }
-                Section("Special Request") {
                     TextField("Special Request", text: $request,
                               prompt: Text("e.g. Focus on high-volatility tech stocks…"), axis: .vertical)
                         .lineLimit(4, reservesSpace: true)
+                } header: {
+                    Text("Special Request")
+                } footer: {
+                    Text("Optionally provide a special instruction.")
                 }
             }
             .navigationTitle("Start Agent")
+            .navigationSubtitle("Start AI Backtest Agent")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -564,28 +507,18 @@ private struct AgentResumeSheet: View {
         NavigationStack {
             Form {
                 Section {
-                    HStack(spacing: 12) {
-                        IconTile(systemImage: Symbol.named("play_circle"), color: DS.Palette.info)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Resume Agent").font(.subheadline.weight(.semibold))
-                            Text("Resume now or schedule automatic resume.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                    ForEach(Self.presets, id: \.minutes) { preset in
+                        InlineActionRow(preset.label,
+                                        systemImage: preset.minutes == 0 ? Symbol.named("play_arrow") : Symbol.named("schedule")) {
+                            pick(preset.minutes)
                         }
                     }
-                    .listRowBackground(Color.clear)
+                } header: {
+                    Text("Resume in")
+                } footer: {
+                    Text("Resume now or schedule automatic resume.")
                 }
-                Section("RESUME IN") {
-                    ChatFlowLayout(spacing: 8) {
-                        ForEach(Self.presets, id: \.minutes) { preset in
-                            Button(preset.label) { pick(preset.minutes) }
-                                .buttonStyle(.bordered)
-                                .tint(preset.minutes == 0 ? DS.Palette.success : DS.Palette.info)
-                        }
-                    }
-                    .padding(.vertical, 4)
-                }
-                Section("CUSTOM DELAY") {
+                Section("Custom delay") {
                     HStack(spacing: 8) {
                         TextField("0", text: $custom)
                             .keyboardType(.numberPad)
@@ -596,8 +529,7 @@ private struct AgentResumeSheet: View {
                             let minutes = JSON.parseInt(custom) ?? 0
                             if minutes > 0 { pick(minutes) }
                         }
-                        .buttonStyle(.bordered)
-                        .tint(DS.Palette.info)
+                        .buttonStyle(.borderless)
                     }
                 }
             }
