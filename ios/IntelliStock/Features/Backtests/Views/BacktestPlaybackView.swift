@@ -9,7 +9,6 @@ struct BacktestPlaybackView: View {
 
     @Environment(AppServices.self) private var services
     @State private var model: BacktestPlaybackModel?
-    @Namespace private var transport
 
     var body: some View {
         Group {
@@ -89,9 +88,11 @@ struct BacktestPlaybackView: View {
     /// The transport: restart, play / pause and speed as one glass control
     /// bar, play the prominent (accent) glass.
     private func controls(_ model: BacktestPlaybackModel) -> some View {
-        // One glass shape: the three buttons are united into a single bar.
+        // One container groups the three; the gaps stay wider than its
+        // spacing so the prominent play keeps its own accent glass (a
+        // united shape would take one variant and lose the accent).
         GlassEffectContainer(spacing: 8) {
-            HStack(spacing: 4) {
+            HStack(spacing: 12) {
                 Button {
                     model.reset()
                 } label: {
@@ -100,7 +101,6 @@ struct BacktestPlaybackView: View {
                         .frame(width: 32, height: 32)
                 }
                 .buttonStyle(.glass)
-                .glassEffectUnion(id: "transport", namespace: transport)
                 .accessibilityLabel("Reset")
                 Button {
                     model.togglePlay()
@@ -111,7 +111,6 @@ struct BacktestPlaybackView: View {
                         .contentTransition(.symbolEffect(.replace))
                 }
                 .dsGlassProminentButton()
-                .glassEffectUnion(id: "transport", namespace: transport)
                 .accessibilityLabel(model.isPlaying ? "Pause" : "Play")
                 Button {
                     model.cycleSpeed()
@@ -121,7 +120,6 @@ struct BacktestPlaybackView: View {
                         .frame(minWidth: 32, minHeight: 32)
                 }
                 .buttonStyle(.glass)
-                .glassEffectUnion(id: "transport", namespace: transport)
                 .accessibilityLabel("Speed \(model.speedLabel)")
             }
         }
