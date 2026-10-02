@@ -33,14 +33,16 @@ struct NotificationSettingsView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toast($toast)
         .task {
-            guard model == nil else { return }
             let services = services
-            let model = NotificationPrefsModel(repository: { services.notificationPrefsRepository })
-            let devices = PushDevicesModel(repository: { PushRepository(client: services.apiClient) })
-            self.model = model
-            self.devices = devices
-            async let prefs: Void = model.load()
-            async let list: Void = devices.load()
+            let model = self.model ?? NotificationPrefsModel(repository: { services.notificationPrefsRepository })
+            let devices = self.devices ?? PushDevicesModel(repository: { PushRepository(client: services.apiClient) })
+            if self.model == nil { self.model = model }
+            if self.devices == nil { self.devices = devices }
+            // A first load cut off by leaving (or failed) loads again here.
+            let loadPrefs = model.prefs.needsLoad
+            let loadDevices = devices.devices.needsLoad
+            async let prefs: Void = loadPrefs ? model.load() : ()
+            async let list: Void = loadDevices ? devices.load() : ()
             _ = await (prefs, list)
         }
     }

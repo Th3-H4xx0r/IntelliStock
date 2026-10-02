@@ -160,7 +160,7 @@ private struct LinkBrokerageForm: View {
                 .dsProminentButton()
                 .controlSize(.large)
                 .layoutPriority(1)
-                .disabled(form.submitting)
+                .disabled(form.locked)
             }
             .listRowBackground(Color.clear)
             .listRowInsets(EdgeInsets())
@@ -177,7 +177,7 @@ private struct LinkBrokerageForm: View {
                 .buttonStyle(.bordered)
                 .controlSize(.large)
                 .tint(DS.Palette.warning)
-                .disabled(form.submitting)
+                .disabled(form.locked)
                 .listRowBackground(Color.clear)
                 .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 0, trailing: 0))
             }
@@ -254,7 +254,7 @@ private struct LinkBrokerageForm: View {
                 .dsProminentButton()
                 .controlSize(.large)
                 .layoutPriority(1)
-                .disabled(form.submitting)
+                .disabled(form.locked)
             }
             .listRowBackground(Color.clear)
             .listRowInsets(EdgeInsets())

@@ -3,11 +3,6 @@ import Observation
 
 // Ported from features/dashboard/application/account_positions_controller.dart.
 
-/// Whether `error` is a cancelled request (a view going away), which must
-/// leave state unchanged rather than surface as a failure.
-nonisolated func tradingIsCancellation(_ error: any Error) -> Bool {
-    error.isCancellation || Task.isCancelled
-}
 
 /// Which P&L each holding row shows: lifetime unrealized `total`, or `daily`
 /// (since 12 AM, derived from the 1D sparkline) — `HoldingsPnlMode`.
@@ -191,7 +186,7 @@ final class AccountHoldingsModel {
             return holdings.value ?? value
         } catch {
             firstLoad = nil
-            if holdings.value == nil, !tradingIsCancellation(error) { holdings = .failed(error) }
+            if holdings.value == nil, !error.isCancellationOrTaskCancelled { holdings = .failed(error) }
             throw error
         }
     }

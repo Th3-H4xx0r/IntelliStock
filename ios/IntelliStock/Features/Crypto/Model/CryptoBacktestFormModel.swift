@@ -57,6 +57,8 @@ final class CryptoBacktestFormModel {
     /// `_submit`. On success returns the created row's id (`id` or
     /// `backtest_id`), "" when the response had none; nil on failure.
     func submit() async -> String? {
+        // One tap, one request (busy stays set after success: the sheet closes).
+        guard !busy else { return nil }
         if !(start < end) {
             err = "End date must be after start date"
             return nil
@@ -76,7 +78,7 @@ final class CryptoBacktestFormModel {
             let id = res["id"].flatMap { $0.isNull ? nil : $0 } ?? res["backtest_id"]
             return id.flatMap { $0.isNull ? nil : $0.dartDescription } ?? ""
         } catch {
-            if !marketsIsCancellation(error) { err = KalshiFormat.errorText(error) }
+            if !error.isCancellation { err = KalshiFormat.errorText(error) }
             busy = false
             return nil
         }

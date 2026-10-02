@@ -196,7 +196,8 @@ private struct AgentRunsControls: View {
                 Group {
                     if state.busy { ProgressView() } else { Image(systemName: Symbol.named("refresh")) }
                 }
-                .frame(width: 32, height: 32)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.borderless)
             .accessibilityLabel("Refresh")
@@ -298,15 +299,15 @@ private func agentStatusColor(_ status: String) -> Color {
     }
 }
 
-/// `_statusIcon` (SF Symbols where the Material name has no map entry).
+/// `_statusIcon`.
 private func agentStatusSymbol(_ status: String) -> String {
     switch status.lowercased() {
     case "passed": Symbol.named("check_circle")
     case "failed", "error": Symbol.named("cancel")
-    case "tossed": "minus.circle"          // do_not_disturb_on
+    case "tossed": Symbol.named("do_not_disturb_on")
     case "duplicate": Symbol.named("content_copy")
     case "stopped": Symbol.named("stop_circle")
-    default: "circle"                      // radio_button_unchecked
+    default: Symbol.named("radio_button_unchecked")
     }
 }
 
@@ -484,9 +485,11 @@ private struct AgentRunsPager: View {
         Button(action: action) {
             Text(label)
                 .font(.footnote.weight(active ? .semibold : .regular))
-                .frame(minWidth: 32, minHeight: 32)
+                .frame(minWidth: 44, minHeight: 44)
         }
         .buttonStyle(.bordered)
+        // A 44 pt hit target with the bordered padding kept minimal.
+        .controlSize(.mini)
         .tint(active ? DS.Palette.accent : .secondary)
         .disabled(!enabled)
     }

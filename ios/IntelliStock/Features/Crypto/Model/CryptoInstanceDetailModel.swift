@@ -54,7 +54,7 @@ final class CryptoInstanceDetailModel {
             self.value = value
             loading = false
         } catch {
-            if marketsIsCancellation(error) { return }
+            if error.isCancellation { return }
             self.error = KalshiFormat.errorText(error)
             loading = false
         }
@@ -139,9 +139,9 @@ final class CryptoInstanceDetailModel {
             let pct = (a["pct"].double ?? 0) * 100
             fixed += pct
             let sym = String(KalshiPregame.str(a["symbol"]).split(separator: "/", omittingEmptySubsequences: false).first ?? "")
-            chips.append(("\(sym) \(Int(pct.rounded()))%", false))
+            chips.append(("\(sym) \(Int(dartTruncating: pct.rounded()) ?? 0)%", false))
         }
-        let dyn = Int(min(max(100 - fixed, 0), 100).rounded())
+        let dyn = Int(dartTruncating: min(max(100 - fixed, 0), 100).rounded()) ?? 0
         chips.append(("Dynamic \(dyn)%", true))
         return chips
     }
@@ -150,7 +150,7 @@ final class CryptoInstanceDetailModel {
 
     /// `_fmtUsd`: `$1,234` (rounded, comma-grouped).
     static func fmtUsd(_ n: Double?) -> String {
-        let v = Int((n ?? 0).rounded())
+        let v = Int(dartTruncating: (n ?? 0).rounded()) ?? 0
         let digits = String(abs(v))
         var grouped = ""
         for (i, ch) in digits.enumerated() {

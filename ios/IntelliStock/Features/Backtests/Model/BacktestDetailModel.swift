@@ -49,7 +49,10 @@ final class BacktestDetailModel {
 
     /// `_init`: summary + graph data + LLM cost; start polling when active.
     func load() async {
-        loading = true
+        // A reload with data on screen (back from Playback) keeps it there:
+        // no skeleton flash, and a failed reload leaves it showing.
+        let hadData = summary != nil
+        if !hadData { loading = true }
         error = nil
         let repo = repository()
         let id = id
@@ -71,9 +74,9 @@ final class BacktestDetailModel {
                 await fetchStatus()
             }
         } catch {
-            if marketsIsCancellation(error) { return }
+            if error.isCancellation { return }
             loading = false
-            self.error = KalshiFormat.errorText(error)
+            if !hadData { self.error = KalshiFormat.errorText(error) }
         }
     }
 
@@ -141,7 +144,7 @@ final class BacktestDetailModel {
             llmCostLoading = false
         } catch {
             llmCostLoading = false
-            if !marketsIsCancellation(error) { llmCostError = KalshiFormat.errorText(error) }
+            if !error.isCancellation { llmCostError = KalshiFormat.errorText(error) }
         }
     }
 
@@ -156,7 +159,7 @@ final class BacktestDetailModel {
             logsLoading = false
         } catch {
             logsLoading = false
-            if !marketsIsCancellation(error) { logsError = KalshiFormat.errorText(error) }
+            if !error.isCancellation { logsError = KalshiFormat.errorText(error) }
         }
     }
 
@@ -178,7 +181,7 @@ final class BacktestDetailModel {
             }
             return nil
         } catch {
-            if marketsIsCancellation(error) { return nil }
+            if error.isCancellation { return nil }
             return KalshiFormat.errorText(error)
         }
     }

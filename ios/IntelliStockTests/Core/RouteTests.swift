@@ -101,7 +101,8 @@ struct SymbolTests {
     @Test(arguments: Symbol.materialNames)
     func everyMaterialNameMapsToARealSFSymbol(name: String) {
         let sf = Symbol.named(name)
-        #expect(sf != Symbol.fallback || name == "circle", "unmapped: \(name)")
+        // Names that really are a plain circle may map to the fallback glyph.
+        #expect(sf != Symbol.fallback || ["circle", "radio_button_unchecked"].contains(name), "unmapped: \(name)")
         #expect(UIImage(systemName: sf) != nil, "\(name) → \(sf) is not an SF Symbol")
     }
 

@@ -76,7 +76,7 @@ private struct InstanceDetailContent: View {
             }
             .task { if model.value == nil { await model.load() } }
             .task { await model.runUptimeTicker() }
-            .task { await model.runProgressPoll() }
+            .task { await model.runProgressPoll(lifecycle: services.lifecycle) }
             .sheet(item: $sheet) { sheetView($0) }
             .confirmAlert($confirm, isRunning: $confirmRunning)
             .toast($toast)
@@ -136,7 +136,7 @@ private struct InstanceDetailContent: View {
                         onRemove: { sym in
                             Task {
                                 do { try await model.removeStock(sym) } catch {
-                                    if !tradingIsCancellation(error) { toast = Toast(swingErrorText(error), style: .error) }
+                                    if !error.isCancellationOrTaskCancelled { toast = Toast(swingErrorText(error), style: .error) }
                                 }
                             }
                         }

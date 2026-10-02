@@ -46,10 +46,9 @@ struct StrategyDetailView: View {
         }
         .task(id: strategyId) {
             if model?.strategyId != strategyId {
-                let m = StrategyDetailModel(strategyId: strategyId, repository: { [services] in services.strategyRepository })
-                model = m
-                await m.load()
+                model = StrategyDetailModel(strategyId: strategyId, repository: { [services] in services.strategyRepository })
             }
+            if let model, model.needsLoad { await model.load() }
         }
         .sheet(isPresented: $backtesting) {
             StrategyBacktestSheet(

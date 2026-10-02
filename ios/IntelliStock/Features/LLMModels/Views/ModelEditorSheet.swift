@@ -47,11 +47,14 @@ struct ModelEditorSheet: View {
             editor = ModelEditorModel(existing: existing, repository: { services.modelRepository })
             pickers = LlmPickersModel(repository: { services.modelRepository })
         }
+        // Dart's `onSaved` on close. However the sheet goes (Close, Cancel or
+        // a swipe), a save refreshes the list.
+        .onDisappear {
+            if editor?.saved == true { onSaved() }
+        }
     }
 
-    /// After a save the close button refreshes the list (Dart's `onSaved`).
     private func close() {
-        if editor?.saved == true { onSaved() }
         dismiss()
     }
 
@@ -95,6 +98,7 @@ struct ModelEditorSheet: View {
                 .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
             }
         }
+        .llmPickerFetches(editor.draft, pickers)
         .safeAreaInset(edge: .bottom) { actions(editor) }
     }
 

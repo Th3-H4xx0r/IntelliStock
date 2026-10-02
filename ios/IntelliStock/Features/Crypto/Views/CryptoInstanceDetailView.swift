@@ -40,9 +40,11 @@ struct CryptoInstanceDetailView: View {
             }
         }
         .task(id: instanceId) {
-            let m = CryptoInstanceDetailModel(instanceId: instanceId, repository: { [services] in services.cryptoRepository })
-            model = m
-            await m.poll(lifecycle: services.lifecycle)
+            // Reused on reappear: the data stays on screen while it refreshes.
+            if model?.instanceId != instanceId {
+                model = CryptoInstanceDetailModel(instanceId: instanceId, repository: { [services] in services.cryptoRepository })
+            }
+            await model?.poll(lifecycle: services.lifecycle)
         }
         .sheet(item: $editRequest) { req in
             CryptoInstanceSheet(request: req, repository: { [services] in services.cryptoRepository }) {

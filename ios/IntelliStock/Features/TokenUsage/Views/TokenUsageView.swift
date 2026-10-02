@@ -270,7 +270,7 @@ private struct TokenUsageEyebrow: View {
             .tracking(1.2)
             .foregroundStyle(.tint)
             .lineLimit(1)
-            .minimumScaleFactor(0.8)
+            .dsMinimumScaleFactor(0.8, textStyle: .caption1)
     }
 }
 
@@ -285,7 +285,7 @@ private struct TokenUsageMini: View {
                 .tracking(0.5)
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
-                .minimumScaleFactor(0.8)
+                .dsMinimumScaleFactor(0.8, textStyle: .caption2)
             Text(value)
                 .font(.footnote.monospacedDigit())
         }

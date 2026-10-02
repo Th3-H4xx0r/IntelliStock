@@ -35,6 +35,14 @@ final class AppLifecycle {
         for continuation in subscribers.values { continuation.yield(foreground) }
     }
 
+    /// Returns at once in the foreground; otherwise when the app comes back
+    /// (or the calling task is cancelled). One-shot timers use it to wait
+    /// out the background instead of polling there.
+    func untilForeground() async {
+        if isForeground { return }
+        for await foreground in changes() where foreground { return }
+    }
+
     /// Every later foreground change. The stream ends when the consuming task
     /// is cancelled.
     func changes() -> AsyncStream<Bool> {

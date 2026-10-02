@@ -9,6 +9,7 @@ struct KalshiBacktestView: View {
     @Environment(AppServices.self) private var services
     @State private var model: KalshiBacktestModel?
     @State private var picking: DateTarget?
+    @State private var toast: Toast?
 
     private enum DateTarget: String, Identifiable {
         case start, end
@@ -25,10 +26,14 @@ struct KalshiBacktestView: View {
         }
         .navigationTitle("Backtest")
         .navigationBarTitleDisplayMode(.inline)
+        .toast($toast)
         .task(id: instanceId) {
-            let m = KalshiBacktestModel(instanceId: instanceId, repository: { [services] in services.kalshiRepository })
-            model = m
-            await m.poll(lifecycle: services.lifecycle)
+            // Reused on reappear (after Run Backtest or a result), so the
+            // dates, leagues, model and numbers survive; only the poll restarts.
+            if model?.instanceId != instanceId {
+                model = KalshiBacktestModel(instanceId: instanceId, repository: { [services] in services.kalshiRepository })
+            }
+            await model?.poll(lifecycle: services.lifecycle)
         }
         .sheet(item: $picking) { target in
             if let model {
@@ -176,7 +181,7 @@ struct KalshiBacktestView: View {
             .accessibilityLabel("View results")
             if active {
                 Button {
-                    Task { await model.stopBacktest(id) }
+                    Task { showError(await model.stopBacktest(id)) }
                 } label: {
                     Image(systemName: Symbol.named("stop_circle"))
                 }
@@ -184,7 +189,7 @@ struct KalshiBacktestView: View {
                 .accessibilityLabel("Stop backtest")
             }
             Button {
-                Task { await model.deleteBacktest(id) }
+                Task { showError(await model.deleteBacktest(id)) }
             } label: {
                 Image(systemName: Symbol.named("delete"))
             }
@@ -193,5 +198,10 @@ struct KalshiBacktestView: View {
         }
         .buttonStyle(.borderless)
         .imageScale(.large)
+    }
+
+    /// A failed stop / delete's toast.
+    private func showError(_ message: String?) {
+        if let message { toast = Toast(message, style: .error) }
     }
 }

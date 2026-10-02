@@ -9,7 +9,19 @@ final class KalshiInstanceDetailModel {
     let instanceId: String
 
     private(set) var detail: Loadable<JSONObject> = .loading
-    private(set) var decisions: Loadable<JSONObject> = .loading
+    private(set) var decisions: Loadable<JSONObject> = .loading {
+        didSet {
+            // Grouped once per fetch, not on every second of the kickoff
+            // countdown's redraw.
+            let rows = KalshiPregame.rows(decisions.value)
+            pregameRowsEmpty = rows.isEmpty
+            pregameGames = KalshiPregame.games(rows)
+        }
+    }
+    /// The pregame card's fixtures (`KalshiPregame.games` of the decisions).
+    @ObservationIgnored private(set) var pregameGames: [[JSONObject]] = []
+    /// No decision rows at all (the card's empty message).
+    @ObservationIgnored private(set) var pregameRowsEmpty = true
     private(set) var live: Loadable<JSONObject> = .loading
     private(set) var orders: Loadable<JSONObject> = .loading
     private(set) var portfolio: Loadable<KalshiPortfolio>?
@@ -128,7 +140,7 @@ final class KalshiInstanceDetailModel {
             await refresh()
             return nil
         } catch {
-            if marketsIsCancellation(error) { return nil }
+            if error.isCancellation { return nil }
             return KalshiFormat.errorText(error)
         }
     }
@@ -235,17 +247,18 @@ nonisolated enum KalshiPregame {
     /// `_priceCents`: the fill average, else (fair − edge) × 100.
     static func priceCents(_ r: JSONObject) -> Int? {
         if let entry = r["entry_avg_cents"]?.double, r["entry_avg_cents"]?.isNum == true {
-            return Int(entry.rounded())
+            return Int(dartTruncating: entry.rounded())
         }
         guard let fair = r["fused_fair"]?.double, let edge = r["edge"]?.double else { return nil }
-        return Int(((fair - edge) * 100).rounded())
+        return Int(dartTruncating: ((fair - edge) * 100).rounded())
     }
 
     /// `_kickoffCountdown`: two-unit countdown to an epoch-seconds kickoff;
     /// "today" once the day arrives; "" for a clearly past day or no time.
     static func kickoffCountdown(_ ts: Double?, now: Date) -> String {
         guard let ts else { return "" }
-        var secs = Int((ts - Double(DartDateTime.millisecondsSinceEpoch(now)) / 1000).rounded())
+        // A served kickoff far outside Int range saturates, never traps.
+        guard var secs = Int(dartTruncating: (ts - Double(DartDateTime.millisecondsSinceEpoch(now)) / 1000).rounded()) else { return "" }
         if secs <= -86400 { return "" }
         if secs <= 0 { return "today" }
         let d = secs / 86400; secs -= d * 86400

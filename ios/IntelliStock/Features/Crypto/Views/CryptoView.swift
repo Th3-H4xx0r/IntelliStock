@@ -39,10 +39,9 @@ struct CryptoView: View {
         }
         .task {
             if model == nil {
-                let m = CryptoModel(repository: { [services] in services.cryptoRepository })
-                model = m
-                await m.load()
+                model = CryptoModel(repository: { [services] in services.cryptoRepository })
             }
+            if let model, model.instances.needsLoad { await model.load() }
         }
         .sheet(item: $sheet) { req in
             CryptoInstanceSheet(request: req, repository: { [services] in services.cryptoRepository }) {
@@ -149,11 +148,11 @@ struct CryptoView: View {
                     }
                     if running {
                         action(busy ? "progress_activity" : "stop", "Stop", DS.Palette.warning, disabled: busy) {
-                            Task { await model.stop(inst.id) }
+                            Task { showError(await model.stop(inst.id)) }
                         }
                     } else {
                         action(busy ? "progress_activity" : "play_arrow", "Start", DS.Palette.success, disabled: busy) {
-                            Task { await model.start(inst.id) }
+                            Task { showError(await model.start(inst.id)) }
                         }
                     }
                     action("delete", "Delete", DS.Palette.danger, disabled: busy) {
@@ -161,15 +160,22 @@ struct CryptoView: View {
                             title: "Delete instance",
                             body: "Delete \"\(CryptoModel.displayName(inst))\"? This cannot be undone.",
                             confirmLabel: "Delete",
-                            onConfirm: { await model.delete(inst.id) },
+                            onConfirm: {
+                                if let message = await model.delete(inst.id) { throw ApiError(message: message) }
+                            },
                             onError: { error in
-                                if !marketsIsCancellation(error) { toast = Toast(KalshiFormat.errorText(error), style: .error) }
+                                if !error.isCancellation { toast = Toast(KalshiFormat.errorText(error), style: .error) }
                             }
                         )
                     }
                 }
             }
         }
+    }
+
+    /// A failed card action's toast.
+    private func showError(_ message: String?) {
+        if let message { toast = Toast(message, style: .error) }
     }
 
     private func action(_ icon: String, _ label: String, _ color: Color, disabled: Bool, _ run: @escaping () -> Void) -> some View {

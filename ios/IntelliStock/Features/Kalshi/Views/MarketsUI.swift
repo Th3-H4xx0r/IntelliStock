@@ -4,61 +4,8 @@ import SwiftUI
 // Backtests, Strategies, Nexus, Learning). Not design-system components:
 // each mirrors a recurring Dart idiom in those screens.
 
-/// A wrapping row of chips — Flutter's `Wrap(spacing:runSpacing:)`.
-struct MarketsFlowLayout: Layout {
-    var spacing: CGFloat = 6
-    var runSpacing: CGFloat = 6
-    var alignment: HorizontalAlignment = .leading
-
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let rows = rows(for: proposal.width ?? .infinity, subviews: subviews)
-        let width = rows.map(\.width).max() ?? 0
-        let height = rows.map(\.height).reduce(0, +) + CGFloat(max(rows.count - 1, 0)) * runSpacing
-        return CGSize(width: proposal.width ?? width, height: height)
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        var y = bounds.minY
-        for row in rows(for: bounds.width, subviews: subviews) {
-            var x: CGFloat
-            switch alignment {
-            case .center: x = bounds.minX + (bounds.width - row.width) / 2
-            case .trailing: x = bounds.maxX - row.width
-            default: x = bounds.minX
-            }
-            for index in row.indices {
-                let size = subviews[index].sizeThatFits(.unspecified)
-                subviews[index].place(at: CGPoint(x: x, y: y + (row.height - size.height) / 2), proposal: ProposedViewSize(size))
-                x += size.width + spacing
-            }
-            y += row.height + runSpacing
-        }
-    }
-
-    private struct Row {
-        var indices: [Int] = []
-        var width: CGFloat = 0
-        var height: CGFloat = 0
-    }
-
-    private func rows(for maxWidth: CGFloat, subviews: Subviews) -> [Row] {
-        var rows: [Row] = []
-        var current = Row()
-        for (i, view) in subviews.enumerated() {
-            let size = view.sizeThatFits(.unspecified)
-            let needed = current.indices.isEmpty ? size.width : current.width + spacing + size.width
-            if needed > maxWidth, !current.indices.isEmpty {
-                rows.append(current)
-                current = Row()
-            }
-            current.width = current.indices.isEmpty ? size.width : current.width + spacing + size.width
-            current.height = max(current.height, size.height)
-            current.indices.append(i)
-        }
-        if !current.indices.isEmpty { rows.append(current) }
-        return rows
-    }
-}
+// The wrapping chip row is `FlowLayout` (DesignSystem), aliased as
+// `MarketsFlowLayout`.
 
 /// A short coloured label on a 15 % tint of its colour — the screens'
 /// `_pill` / `_badge` / `_chip` containers (text kept as written, not

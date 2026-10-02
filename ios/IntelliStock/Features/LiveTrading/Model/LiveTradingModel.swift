@@ -65,6 +65,8 @@ final class LiveTradingModel {
     @ObservationIgnored private let now: () -> Date
     @ObservationIgnored private var commandPollTask: Task<Void, Never>?
     @ObservationIgnored private var dismissTask: Task<Void, Never>?
+    /// From `poll`: the command-status poll waits out the background on it.
+    @ObservationIgnored private weak var lifecycle: AppLifecycle?
 
     init(
         instanceId: String,
@@ -131,6 +133,7 @@ final class LiveTradingModel {
     /// First load (unless loaded), then the adaptive poll, pausing in the
     /// background.
     func poll(lifecycle: AppLifecycle?, sleep pollSleep: PollingSleep? = nil) async {
+        self.lifecycle = lifecycle
         if state.value == nil { await load() }
         guard !Task.isCancelled else { return }
         await PollingLoop(interval: { [weak self] in self?.interval ?? Self.idleInterval }, sleep: pollSleep ?? sleep) { [weak self] in
@@ -139,13 +142,16 @@ final class LiveTradingModel {
         .run(lifecycle: lifecycle)
     }
 
-    /// `_pollCycle` / `refreshNow`: the state, then (not awaited) the equity
-    /// history and the position historicals.
+    /// `_pollCycle` / `refreshNow`: the state, then the equity history and
+    /// the position historicals. Dart fired those two and forgot them; here
+    /// they are child tasks of the cycle, so they end with the poll (the
+    /// view going away) instead of outliving it.
     func pollCycle() async {
         let next = await fetchState()
         state = .loaded(next)
-        Task { await self.refreshEquityHistory() }
-        Task { await self.refreshPositionHistoricals() }
+        async let history: Void = refreshEquityHistory()
+        async let historicals: Void = refreshPositionHistoricals()
+        _ = await (history, historicals)
     }
 
     func refreshNow() async {
@@ -159,6 +165,9 @@ final class LiveTradingModel {
             var history = try await repository().equityHistory(instanceId, range)
             // 1D is shown relative to the device's local midnight.
             if range == "1D" { history = history.sinceLocalMidnight(now: now()) }
+            // The range changed while this was in flight: a newer fetch owns
+            // the chart.
+            guard state.value?.currentRange == range else { return }
             update { $0.equityHistory = history }
         } catch {}
     }
@@ -168,8 +177,10 @@ final class LiveTradingModel {
         // Stock only: /symbol-historicals has nothing for an OCC contract.
         let symbols = (prev.liveState?.positions ?? []).filter { !$0.isOption }.map(\.symbol)
         if symbols.isEmpty { return }
+        let range = prev.currentRange
         do {
-            let hist = try await repository().symbolHistoricals(symbols, prev.currentRange)
+            let hist = try await repository().symbolHistoricals(symbols, range)
+            guard state.value?.currentRange == range else { return }
             update { $0.positionHistoricals = hist }
         } catch {}
     }
@@ -210,8 +221,12 @@ final class LiveTradingModel {
         commandPollTask = Task { [weak self] in
             var attempt = 0
             while true {
-                guard let self else { return }
-                do { try await self.sleep(Self.commandPollEvery) } catch { return }
+                guard let sleep = self?.sleep else { return }
+                do { try await sleep(Self.commandPollEvery) } catch { return }
+                // No status polls in the background: wait for the foreground.
+                let lifecycle = self?.lifecycle
+                await lifecycle?.untilForeground()
+                guard let self, !Task.isCancelled else { return }
                 // Stop if this toast is no longer active.
                 guard self.state.value?.commandToast?.commandId == commandId else { return }
                 do {

@@ -33,9 +33,15 @@ nonisolated struct InstancesState: Hashable, Sendable {
 final class InstancesModel {
     static let interval: Duration = .seconds(30)
 
-    private(set) var state: Loadable<InstancesState> = .loading
+    private(set) var state: Loadable<InstancesState> = .loading {
+        didSet { if let value = state.value { last = value } }
+    }
 
     @ObservationIgnored private let repository: () -> InstanceRepository
+    /// The last good state. Riverpod kept the previous value through an
+    /// error, so the next fetch starts from it: the User/AI filter, busy
+    /// flags and error banner survive a failed poll or a Retry.
+    @ObservationIgnored private var last = InstancesState()
 
     init(repository: @escaping () -> InstanceRepository) {
         self.repository = repository
@@ -46,7 +52,7 @@ final class InstancesModel {
     /// `fetch`: the list, keeping filter/busy/error from the current value.
     private func fetch() async throws -> InstancesState {
         let list = try await repository().listInstances()
-        var next = state.value ?? InstancesState()
+        var next = state.value ?? last
         next.instances = list
         return next
     }
@@ -57,7 +63,7 @@ final class InstancesModel {
         do {
             state = .loaded(try await fetch())
         } catch {
-            if !tradingIsCancellation(error) { state = .failed(error) }
+            if !error.isCancellationOrTaskCancelled { state = .failed(error) }
         }
     }
 

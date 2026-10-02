@@ -41,13 +41,17 @@ final class StrategyDetailModel {
             loading = false
             error = nil
         } catch {
-            if marketsIsCancellation(error) { return }
+            if error.isCancellation { return }
             loading = false
             self.error = KalshiFormat.errorText(error)
         }
     }
 
     func refresh() async { await load() }
+
+    /// No strategy on screen yet (never loaded, cut off by leaving, or
+    /// failed): the screen's `.task` loads again on every appear.
+    var needsLoad: Bool { strategy == nil }
 
     func setBtSort(_ field: String) {
         if btSortField == field {
@@ -245,7 +249,7 @@ final class StrategyBacktestFormModel {
             await pause(.milliseconds(900))
             return btId
         } catch {
-            if !marketsIsCancellation(error) { fail(KalshiFormat.errorText(error)) }
+            if !error.isCancellation { fail(KalshiFormat.errorText(error)) }
             return nil
         }
     }

@@ -23,6 +23,11 @@ final class StrategiesModel {
     private(set) var perPage = 20
     private(set) var loading = true
     private(set) var error: String?
+    /// A fetch has landed. Until then the screen keeps its skeleton, and its
+    /// `.task` fetches again on every appear.
+    private(set) var hasLoaded = false
+
+    var needsLoad: Bool { !hasLoaded }
 
     @ObservationIgnored private let repository: () -> StrategyRepository
 
@@ -41,7 +46,14 @@ final class StrategiesModel {
         async let top = (try? await repo.top5()) ?? []
         async let best = (try? await repo.bestPerStrategy()) ?? JSONObject()
         let (l, r, t, b) = await (list, results, top, best)
-        if Task.isCancelled { loading = false; return }
+        if Task.isCancelled {
+            // Cut off by leaving the screen: a list already shown stays. With
+            // nothing shown yet the skeleton stays (never a false "No
+            // strategies found.") and the next appear fetches again.
+            if hasLoaded { loading = false }
+            return
+        }
+        hasLoaded = true
         rawStrategies = l
         agentResults = r
         // Top-5 by rank ascending (missing rank sorts as 99).

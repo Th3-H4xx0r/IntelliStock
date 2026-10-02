@@ -40,9 +40,11 @@ struct KalshiInstanceDetailView: View {
             }
         }
         .task(id: instanceId) {
-            let m = KalshiInstanceDetailModel(instanceId: instanceId, repository: { [services] in services.kalshiRepository })
-            model = m
-            await m.poll(lifecycle: services.lifecycle)
+            // Reused on reappear: the data stays on screen while it refreshes.
+            if model?.instanceId != instanceId {
+                model = KalshiInstanceDetailModel(instanceId: instanceId, repository: { [services] in services.kalshiRepository })
+            }
+            await model?.poll(lifecycle: services.lifecycle)
         }
     }
 
@@ -89,7 +91,7 @@ struct KalshiInstanceDetailView: View {
                                 services.router.pop()
                             },
                             onError: { error in
-                                if !marketsIsCancellation(error) { toast = Toast(KalshiFormat.errorText(error), style: .error) }
+                                if !error.isCancellation { toast = Toast(KalshiFormat.errorText(error), style: .error) }
                             }
                         )
                     } label: {
@@ -166,7 +168,7 @@ struct KalshiInstanceDetailView: View {
     private func paperPnl(_ s: JSONObject?) -> some View {
         let realC = s?["realized_pnl_cents"]?.double
         let unrealC = s?["unrealized_pnl_cents"]?.double
-        let openPos = s?["open_positions"]?.double.map { Int($0) }
+        let openPos = s?["open_positions"]?.double.flatMap { Int(dartTruncating: $0) }
         if realC != nil || unrealC != nil {
             let realColor: Color = realC == nil ? .secondary : ((realC ?? 0) >= 0 ? DS.Palette.success : DS.Palette.danger)
             let unrealColor: Color = unrealC == nil ? .secondary : ((unrealC ?? 0) >= 0 ? DS.Palette.success : DS.Palette.danger)
@@ -504,15 +506,14 @@ struct KalshiInstanceDetailView: View {
                     LoadingState()
                 case .failed(let e):
                     ErrorRow(message: KalshiFormat.errorText(e), onRetry: { Task { await model.refresh() } })
-                case .loaded(let d):
-                    let rows = KalshiPregame.rows(d)
-                    if rows.isEmpty {
+                case .loaded:
+                    if model.pregameRowsEmpty {
                         Text("No games analyzed yet — picks will appear here once the bot scans the slate.")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     } else {
                         VStack(spacing: 10) {
-                            ForEach(Array(KalshiPregame.games(rows).enumerated()), id: \.offset) { _, sides in
+                            ForEach(Array(model.pregameGames.enumerated()), id: \.offset) { _, sides in
                                 pregameCard(sides, now: now)
                             }
                         }
@@ -669,9 +670,11 @@ struct KalshiInstanceDetailView: View {
     private func pageButton(_ icon: String, label: String, enabled: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: Symbol.named(icon))
-                .frame(width: 30, height: 30)
+                .frame(width: 44, height: 44)
         }
         .buttonStyle(.bordered)
+        // A 44 pt hit target with the bordered padding kept minimal.
+        .controlSize(.mini)
         .disabled(!enabled)
         .accessibilityLabel(label)
     }

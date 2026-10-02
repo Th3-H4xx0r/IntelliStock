@@ -36,9 +36,11 @@ struct KalshiBacktestResultView: View {
             }
         }
         .task(id: backtestId) {
-            let m = KalshiBacktestResultModel(backtestId: backtestId, repository: { [services] in services.kalshiRepository })
-            model = m
-            await m.poll(lifecycle: services.lifecycle)
+            // Reused on reappear: the tab and selected day survive.
+            if model?.backtestId != backtestId {
+                model = KalshiBacktestResultModel(backtestId: backtestId, repository: { [services] in services.kalshiRepository })
+            }
+            await model?.poll(lifecycle: services.lifecycle)
         }
     }
 

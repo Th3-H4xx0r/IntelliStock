@@ -20,6 +20,14 @@ final class BacktestPlaybackModel {
     @ObservationIgnored private let repository: () -> BacktestRepository
     @ObservationIgnored private let sleep: PollingSleep
     @ObservationIgnored private var frameTask: Task<Void, Never>?
+    /// The portfolio events' parsed dates, built once per load.
+    @ObservationIgnored private var portfolioPoints: [PortfolioPoint] = []
+
+    private struct PortfolioPoint {
+        let index: Int
+        let time: Date
+        let value: Double?
+    }
 
     init(repository: @escaping () -> BacktestRepository, sleep: @escaping PollingSleep = realPollingSleep) {
         self.repository = repository
@@ -27,6 +35,10 @@ final class BacktestPlaybackModel {
     }
 
     // MARK: Derived (BacktestPlaybackState getters)
+
+    /// Nothing loaded yet (a first load cut off by leaving stays `loading`),
+    /// or the load failed: the screen's `.task` loads again on appear.
+    var needsLoad: Bool { loading || error != nil }
 
     var speed: Double { backtestPlaybackSpeeds[speedIndex] }
     var isFinished: Bool { frameIndex >= events.count - 1 }
@@ -69,31 +81,28 @@ final class BacktestPlaybackModel {
         return "—"
     }
 
-    /// Portfolio points from the start up to the frame.
+    /// Portfolio points from the start up to the frame (from the dates parsed
+    /// once at load, not on every frame).
     var portfolioHistory: [(time: Date, value: Double)] {
-        var pts: [(Date, Double)] = []
-        var i = 0
-        while i <= frameIndex, i < events.count {
-            let ev = events[i]
-            if ev.type == "portfolio", let d = ev.date, let dt = DartDateTime.tryParse(d), let v = ev.portfolioValue {
-                pts.append((dt, v.double))
-            }
-            i += 1
+        portfolioPoints.prefix { $0.index <= frameIndex }.compactMap { p in
+            p.value.map { (p.time, $0) }
         }
-        return pts
     }
 
     /// The full x range: first − 1 day (else now − 7 days) … last (else now).
     func xRange(now: Date = Date()) -> (min: Date, max: Date) {
-        var first: Date?
-        var last: Date?
-        for ev in events where ev.type == "portfolio" {
-            if let d = ev.date, let dt = DartDateTime.tryParse(d) {
-                if first == nil { first = dt }
-                last = dt
-            }
-        }
+        let first = portfolioPoints.first?.time
+        let last = portfolioPoints.last?.time
         return (first.map { $0.addingTimeInterval(-86400) } ?? now.addingTimeInterval(-7 * 86400), last ?? now)
+    }
+
+    /// Every portfolio event with a parseable date, in order: its index, date
+    /// and value (nil when it had none, which still counts for the x range).
+    private static func parsePortfolioPoints(_ events: [PlaybackEvent]) -> [PortfolioPoint] {
+        events.enumerated().compactMap { i, ev in
+            guard ev.type == "portfolio", let d = ev.date, let dt = DartDateTime.tryParse(d) else { return nil }
+            return PortfolioPoint(index: i, time: dt, value: ev.portfolioValue?.double)
+        }
     }
 
     /// The chart series: the initial-cash anchor at the range start, then the
@@ -107,13 +116,14 @@ final class BacktestPlaybackModel {
     func load(_ id: String) async {
         do {
             let data = try await repository().playbackData(id)
+            portfolioPoints = Self.parsePortfolioPoints(data.events)
             events = data.events
             metadata = data.metadata
             frameIndex = -1
             loading = false
             error = nil
         } catch {
-            if marketsIsCancellation(error) { return }
+            if error.isCancellation { return }
             loading = false
             self.error = KalshiFormat.errorText(error)
         }
@@ -173,8 +183,10 @@ final class BacktestPlaybackModel {
         if wasPlaying { scheduleFrame() }
     }
 
-    /// Stops the frame timer (the view went away).
+    /// Stops the frame timer (the view went away). Playback pauses, so the
+    /// screen never comes back saying "playing" with no timer behind it.
     func stop() {
         cancelTimer()
+        isPlaying = false
     }
 }

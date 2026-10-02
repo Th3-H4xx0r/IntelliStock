@@ -188,13 +188,15 @@ struct CodexCliSetupPanel: View {
         .onAppear {
             if model == nil {
                 let services = services
-                model = CodexSetupModel(cliPath: cliPath, repository: { services.modelRepository })
+                model = CodexSetupModel(cliPath: cliPath, repository: { services.modelRepository }, lifecycle: services.lifecycle)
             }
         }
         .task(id: model == nil) {
             await model?.fetchStatus()
         }
-        .onDisappear { model?.stop() }
+        // No onDisappear stop: this is a Form row, which disappears whenever
+        // it scrolls away. The polls stop with the model, when the sheet
+        // closes (or the provider changes and the panel goes).
         .onChange(of: cliPath) { _, new in model?.cliPath = new }
     }
 
@@ -363,7 +365,8 @@ private struct CliPanelHeader: View {
                 Group {
                     if loading { ProgressView() } else { Image(systemName: Symbol.named("refresh")) }
                 }
-                .frame(width: 32, height: 32)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.borderless)
             .disabled(loading)
@@ -442,7 +445,8 @@ private struct CliCopyButton: View {
         } label: {
             Image(systemName: Symbol.named("copy"))
                 .font(.caption)
-                .frame(width: 32, height: 32)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.borderless)
         .tint(.secondary)

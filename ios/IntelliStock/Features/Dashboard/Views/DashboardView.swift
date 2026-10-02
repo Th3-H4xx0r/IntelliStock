@@ -100,10 +100,15 @@ private struct DashboardContent: View {
             }
             if scope?.brokerageId != id {
                 let services = services
+                // Stamped through the generation guard: a scope built
+                // before a sign-out or server change cannot stamp the new session.
+                let generation = services.dashboard.currentGeneration
                 scope = DashboardAccountScope(
                     brokerageId: id,
                     client: { [unowned services] in services.apiClient },
-                    onPortfolioUpdated: { [weak dashboard = services.dashboard] in dashboard?.portfolioUpdatedAt = Date() }
+                    onPortfolioUpdated: { [weak dashboard = services.dashboard] in
+                        dashboard?.stampPortfolioUpdated(startedGeneration: generation)
+                    }
                 )
             }
         }

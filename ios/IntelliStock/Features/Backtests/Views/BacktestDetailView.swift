@@ -108,7 +108,7 @@ struct BacktestDetailView: View {
             HStack(spacing: 12) {
                 IconTile(systemImage: Symbol.named("analytics"), color: DS.Palette.info, size: 44)
                 VStack(alignment: .leading, spacing: 2) {
-                    MarketsFlowLayout(spacing: 8) {
+                    MarketsFlowLayout(spacing: 8, runSpacing: 6) {
                         Text("Backtest #\(id)").font(.title3.bold())
                         StatusBadge(
                             label: model.currentStatus.uppercased(),
@@ -190,7 +190,7 @@ struct BacktestDetailView: View {
                 }
             },
             onError: { error in
-                if !marketsIsCancellation(error) { toast = Toast(KalshiFormat.errorText(error), style: .error) }
+                if !error.isCancellation { toast = Toast(KalshiFormat.errorText(error), style: .error) }
             }
         )
     }
@@ -210,7 +210,7 @@ struct BacktestDetailView: View {
                 }
             },
             onError: { error in
-                if !marketsIsCancellation(error) { toast = Toast(KalshiFormat.errorText(error), style: .error) }
+                if !error.isCancellation { toast = Toast(KalshiFormat.errorText(error), style: .error) }
             }
         )
     }

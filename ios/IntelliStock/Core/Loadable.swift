@@ -27,6 +27,12 @@ nonisolated enum Loadable<Value> {
 
     var hasValue: Bool { value != nil }
 
+    /// Nothing to show yet: never loaded, a first load cancelled before it
+    /// landed (`capture` leaves that `.loading`), or failed. A screen's
+    /// `.task` loads whenever this holds, not only when it first builds the
+    /// model, so a first load cut off by a tab switch is retried on return.
+    var needsLoad: Bool { value == nil }
+
     func map<T>(_ transform: (Value) throws -> T) rethrows -> Loadable<T> {
         switch self {
         case .loading: .loading
@@ -71,6 +77,13 @@ nonisolated extension Error {
         if self is CancellationError { return true }
         if let url = self as? URLError, url.code == .cancelled { return true }
         return false
+    }
+
+    /// `isCancellation`, or the calling task was cancelled while this error
+    /// came back: either way the view went away, so state stays unchanged
+    /// rather than showing a failure.
+    var isCancellationOrTaskCancelled: Bool {
+        isCancellation || Task.isCancelled
     }
 }
 

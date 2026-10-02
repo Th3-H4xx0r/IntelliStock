@@ -452,11 +452,11 @@ struct ChatComposer: View {
                             .symbolRenderingMode(.hierarchical)
                     }
                 }
-                .frame(width: 36, height: 36)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
             }
             .disabled(busy || disabled || !hasText)
-            .padding(.trailing, 6)
-            .padding(.bottom, 4)
+            .padding(.trailing, 2)
             .accessibilityLabel("Send")
         }
         .glassEffect(.regular, in: .rect(cornerRadius: 22, style: .continuous))
@@ -504,7 +504,10 @@ struct ChatModelPicker: View {
                     .padding(.top, 8)
 
                 Group {
-                    if !st.modelsLoaded, models.isEmpty {
+                    if !st.modelsLoaded, models.isEmpty, let error = st.error {
+                        // A failed list used to spin "Loading models…" forever.
+                        ErrorRow(message: error) { Task { await model.retryModels() } }
+                    } else if !st.modelsLoaded, models.isEmpty {
                         LoadingState(label: "Loading models…")
                     } else if st.modelsLoaded, models.isEmpty {
                         Text("No models configured yet. Add one on the Models page.")

@@ -15,6 +15,8 @@ struct LiveLogsPanel: View {
     @Environment(AppServices.self) private var services
 
     @State private var tailer: LogTailer?
+    /// The instance `tailer` tails, so only a new instance rebuilds it.
+    @State private var tailerInstanceId: String?
     @State private var open = false
     /// The person's Pause/Resume toggle (independent of `open`, as in Dart).
     @State private var userPaused = false
@@ -38,26 +40,37 @@ struct LiveLogsPanel: View {
         .background(DS.Surface.panel, in: .rect(cornerRadius: DS.Radius.card, style: .continuous))
         .toast($toast)
         .task(id: instanceId) {
-            // A new instance rebuilds the tailer and closes the panel.
-            let instanceId = instanceId
-            let fresh = LogTailer(
-                client: services.apiClient,
-                pathBuilder: { "/instances/\(instanceId)/live-logs?since_line=\($0)" }
-            )
-            tailer = fresh
-            open = false
-            userPaused = false
-            search = ""
-            autoScroll = true
-            showJump = false
+            let current: LogTailer
+            if let tailer, tailerInstanceId == instanceId {
+                // Back on screen: same panel, same lines; an open panel
+                // resumes where it left off.
+                current = tailer
+                current.reattach(open: open, userPaused: userPaused, foreground: services.lifecycle.isForeground)
+            } else {
+                // A new instance rebuilds the tailer and closes the panel.
+                tailer?.dispose()
+                let instanceId = instanceId
+                current = LogTailer(
+                    client: services.apiClient,
+                    pathBuilder: { "/instances/\(instanceId)/live-logs?since_line=\($0)" }
+                )
+                tailer = current
+                tailerInstanceId = instanceId
+                open = false
+                userPaused = false
+                search = ""
+                autoScroll = true
+                showJump = false
+            }
             for await foreground in services.lifecycle.changes() {
                 if !foreground {
-                    fresh.pause()
+                    current.pause()
                 } else if open, !userPaused {
-                    fresh.resume()
+                    current.resume()
                 }
             }
-            fresh.dispose()
+            // Off screen (a tab switch or a push): stop polling, keep the lines.
+            current.detach()
         }
     }
 

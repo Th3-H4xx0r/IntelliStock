@@ -60,6 +60,8 @@ final class KalshiBacktestModel {
     static let tickInterval: Duration = .seconds(3)
 
     @ObservationIgnored private let repository: () -> KalshiRepository
+    /// The instance config has seeded the form.
+    @ObservationIgnored private var configLoaded = false
 
     init(instanceId: String, repository: @escaping () -> KalshiRepository) {
         self.instanceId = instanceId
@@ -112,6 +114,10 @@ final class KalshiBacktestModel {
             async let detail = repo.instanceDetail(id)
             async let models = repo.models()
             let (d, m) = try await (detail, models)
+            // The form is seeded once: a reappear must not overwrite what
+            // the person typed since.
+            configLoaded = true
+            if err == Self.loadError { err = nil }
             self.models = m
             let c = d["config"]?.orderedObject ?? JSONObject()
             bid = KalshiPregame.str(d["brokerage_id"])
@@ -141,9 +147,11 @@ final class KalshiBacktestModel {
             }
             await loadBacktests()
         } catch {
-            if !marketsIsCancellation(error) { err = "Couldn't load the instance config." }
+            if !error.isCancellation { err = Self.loadError }
         }
     }
+
+    static let loadError = "Couldn't load the instance config."
 
     func loadBacktests() async {
         guard !bid.isEmpty else { return }
@@ -152,8 +160,16 @@ final class KalshiBacktestModel {
         } catch {}
     }
 
+    /// The screen's `.task`: seed the form from the config once (again only
+    /// when that never landed), then refresh the backtest list every 3 s.
+    /// A reappear reuses this model, so it only restarts the list poll.
     func poll(lifecycle: AppLifecycle) async {
-        await load()
+        if configLoaded {
+            await loadBacktests()
+        } else {
+            await load()
+        }
+        guard !Task.isCancelled else { return }
         await PollingLoop(interval: { Self.tickInterval }) { [weak self] in
             await self?.loadBacktests()
         }.run(lifecycle: lifecycle)
@@ -197,6 +213,8 @@ final class KalshiBacktestModel {
 
     /// `_submit`. Returns the new backtest id to open, or nil.
     func submit() async -> String? {
+        // One tap, one request.
+        guard !submitting else { return nil }
         err = nil
         guard let start, let end else {
             err = "Pick a start and end date."
@@ -217,18 +235,31 @@ final class KalshiBacktestModel {
             await loadBacktests()
             return id
         } catch {
-            if !marketsIsCancellation(error) { err = "Failed to start the backtest." }
+            if !error.isCancellation { err = "Failed to start the backtest." }
             return nil
         }
     }
 
-    func stopBacktest(_ id: String) async {
-        try? await repository().stopBacktest(id)
-        await loadBacktests()
+    /// Stop, then refresh the list. Returns the error text for a toast (nil
+    /// on success or when cancelled) instead of failing silently.
+    @discardableResult
+    func stopBacktest(_ id: String) async -> String? {
+        await act { try await $0.stopBacktest(id) }
     }
 
-    func deleteBacktest(_ id: String) async {
-        try? await repository().deleteBacktest(id)
+    @discardableResult
+    func deleteBacktest(_ id: String) async -> String? {
+        await act { try await $0.deleteBacktest(id) }
+    }
+
+    private func act(_ call: (KalshiRepository) async throws -> Void) async -> String? {
+        var failure: String?
+        do {
+            try await call(repository())
+        } catch {
+            if !error.isCancellation { failure = KalshiFormat.errorText(error) }
+        }
         await loadBacktests()
+        return failure
     }
 }

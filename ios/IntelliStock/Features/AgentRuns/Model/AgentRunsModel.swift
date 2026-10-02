@@ -18,7 +18,7 @@ nonisolated struct AgentRunsState: Equatable, Sendable {
     /// Elapsed share (0…1) of the countdown at `now`.
     func countdownFraction(now: Date = Date()) -> Double {
         guard let resumeAt = scheduledResumeAt, scheduledTotalMs != 0 else { return 0 }
-        let remaining = Int((resumeAt.timeIntervalSince(now) * 1000).rounded(.towardZero))
+        let remaining = Int(dartTruncating: resumeAt.timeIntervalSince(now) * 1000) ?? 0
         let elapsed = scheduledTotalMs - min(max(remaining, 0), scheduledTotalMs)
         return min(max(Double(elapsed) / Double(scheduledTotalMs), 0), 1)
     }
@@ -26,7 +26,7 @@ nonisolated struct AgentRunsState: Equatable, Sendable {
     /// Whole seconds left in the countdown at `now`.
     func countdownSecsRemaining(now: Date = Date()) -> Int {
         guard let resumeAt = scheduledResumeAt else { return 0 }
-        let secs = Int(resumeAt.timeIntervalSince(now).rounded(.towardZero))
+        let secs = Int(dartTruncating: resumeAt.timeIntervalSince(now)) ?? 0
         return min(max(secs, 0), scheduledTotalMs / 1000)
     }
 }
@@ -38,6 +38,9 @@ nonisolated struct AgentRunsState: Equatable, Sendable {
 final class AgentRunsModel {
     static let interval: Duration = .seconds(5)
     static let perPageOptions = [10, 20, 50, 100]
+    /// The longest scheduled resume, in ms (~292 000 years): the countdown's
+    /// ms arithmetic stays inside `Int` below it.
+    static let maxScheduleMs = Int.max / 1000
 
     /// `.loading` until the first fetch; `.failed` while the last fetch failed.
     private(set) var state: Loadable<AgentRunsState> = .loading
@@ -63,15 +66,26 @@ final class AgentRunsModel {
 
     var value: AgentRunsState? { state.value }
 
+    /// The running scheduled-resume countdown, if any (tests await it).
+    var countdownTask: Task<Void, Never>? { countdown }
+
+    /// The 5 s poll. Leaving the screen ends the poll but NOT a scheduled
+    /// resume: like Flutter's periodic timer, the countdown keeps running
+    /// for as long as this model lives, and resumes the agent on time.
     func poll(lifecycle: AppLifecycle?) async {
         await refreshNow()
+        // A schedule whose countdown was stopped picks up again.
+        if countdown == nil, let resumeAt = (state.value ?? last).scheduledResumeAt {
+            startCountdown(resumeAt)
+        }
         await PollingLoop(interval: { Self.interval }, sleep: sleep) { [weak self] in
             await self?.refreshNow()
         }
         .run(lifecycle: lifecycle)
-        stop()
     }
 
+    /// Stops the countdown without clearing the schedule (the next `poll`
+    /// restarts it).
     func stop() {
         countdown?.cancel()
         countdown = nil
@@ -139,7 +153,10 @@ final class AgentRunsModel {
             await resumeAgentNow()
             return
         }
-        let durationMs = minutes * 60 * 1000
+        // A typed 15+ digit delay overflowed `minutes * 60 * 1000` (a trap);
+        // it saturates at `maxScheduleMs` instead, which never arrives.
+        let (perMinute, o1) = minutes.multipliedReportingOverflow(by: 60_000)
+        let durationMs = o1 || perMinute > Self.maxScheduleMs || perMinute < 0 ? Self.maxScheduleMs : perMinute
         let resumeAt = now().addingTimeInterval(Double(durationMs) / 1000)
         guard var value = state.value else { return }
         value.scheduledResumeAt = resumeAt
@@ -154,11 +171,17 @@ final class AgentRunsModel {
         countdown = Task { [weak self] in
             while !Task.isCancelled {
                 do { try await sleep(.seconds(1)) } catch { return }
-                guard let self, let value = self.state.value else { return }
+                guard let self else { return }
+                // A failed poll (no value) skips the tick, as Dart's
+                // `if (state case AsyncData)` did; the countdown lives on.
+                guard let value = self.state.value else { continue }
                 if value.scheduledResumeAt == nil { return }
                 self.tick += 1
                 if resumeAt.timeIntervalSince(self.now()) <= 0 {
-                    self.cancelCountdown()
+                    // Detach instead of cancelling: this task carries the
+                    // resume request, which a cancelled task would drop.
+                    self.countdown = nil
+                    self.clearSchedule()
                     await self.resumeAgentNow()
                     return
                 }
@@ -169,6 +192,14 @@ final class AgentRunsModel {
     func cancelCountdown() {
         countdown?.cancel()
         countdown = nil
+        clearSchedule()
+    }
+
+    /// Clears the schedule from the state and from the last good state, so
+    /// a cancelled schedule cannot come back with the next good fetch.
+    private func clearSchedule() {
+        last.scheduledResumeAt = nil
+        last.scheduledTotalMs = 0
         guard var value = state.value else { return }
         value.scheduledResumeAt = nil
         value.scheduledTotalMs = 0

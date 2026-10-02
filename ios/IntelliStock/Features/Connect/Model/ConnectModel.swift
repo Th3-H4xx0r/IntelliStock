@@ -50,7 +50,9 @@ final class ConnectModel {
     /// The primary button: "Test & Connect", or "Save anyway" after a failed
     /// probe.
     func submit() async -> Outcome? {
-        probeFailed ? await save(url) : await testAndConnect()
+        // The keyboard's Go is not disabled like the button: guard here.
+        guard !probing else { return nil }
+        return probeFailed ? await save(url) : await testAndConnect()
     }
 
     func testAndConnect() async -> Outcome? {

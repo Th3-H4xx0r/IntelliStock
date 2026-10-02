@@ -67,7 +67,7 @@ final class BacktestsListModel {
             error = nil
         } catch {
             loading = false
-            if !marketsIsCancellation(error) { self.error = KalshiFormat.errorText(error) }
+            if !error.isCancellation { self.error = KalshiFormat.errorText(error) }
         }
     }
 
@@ -139,7 +139,7 @@ final class BacktestsListModel {
             Task { await self.loadPage(page: self.page) }
             return nil
         } catch {
-            if marketsIsCancellation(error) { return nil }
+            if error.isCancellation { return nil }
             return KalshiFormat.errorText(error)
         }
     }

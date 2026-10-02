@@ -170,7 +170,7 @@ final class DashboardPortfolioChartModel {
             guard r == range else { return }
             apply(h, range: r)
         } catch {
-            guard r == range, state.value == nil, !tradingIsCancellation(error) else { return }
+            guard r == range, state.value == nil, !error.isCancellationOrTaskCancelled else { return }
             state = .failed(error)
         }
     }

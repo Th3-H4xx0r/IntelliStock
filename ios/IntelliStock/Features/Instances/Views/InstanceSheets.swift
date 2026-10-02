@@ -179,7 +179,7 @@ struct InstanceCreateSheet: View {
                 dismiss()
             } catch {
                 busy = false
-                if !tradingIsCancellation(error) { self.error = instanceErrorText(error) }
+                if !error.isCancellationOrTaskCancelled { self.error = instanceErrorText(error) }
             }
         }
     }
@@ -226,7 +226,7 @@ struct InstanceAddStockSheet: View {
                 dismiss()
             } catch {
                 busy = false
-                if !tradingIsCancellation(error) { self.error = instanceErrorText(error) }
+                if !error.isCancellationOrTaskCancelled { self.error = instanceErrorText(error) }
             }
         }
     }
@@ -298,7 +298,7 @@ struct InstanceLinkSheet: View {
                 dismiss()
             } catch {
                 busy = false
-                if !tradingIsCancellation(error) { self.error = instanceErrorText(error) }
+                if !error.isCancellationOrTaskCancelled { self.error = instanceErrorText(error) }
             }
         }
     }
@@ -375,7 +375,7 @@ struct InstanceCreateBacktestSheet: View {
                 dismiss()
             } catch {
                 busy = false
-                if !tradingIsCancellation(error) { self.error = instanceErrorText(error) }
+                if !error.isCancellationOrTaskCancelled { self.error = instanceErrorText(error) }
             }
         }
     }
@@ -492,6 +492,14 @@ struct InstanceClearStateSheet: View {
                 }
             }
             .interactiveDismissDisabled(locked)
+            // A preview speaks for one scope: picking another drops it (and
+            // the typed confirmation), so Confirm can never clear a scope
+            // that was not previewed.
+            .onChange(of: scope) {
+                preview = nil
+                confirmed = false
+                success = nil
+            }
         }
         .presentationDragIndicator(.visible)
     }
@@ -506,7 +514,7 @@ struct InstanceClearStateSheet: View {
             do {
                 preview = try await model.previewClearState(scope)
             } catch {
-                if !tradingIsCancellation(error) { self.error = "Preview failed: \(instanceErrorText(error))" }
+                if !error.isCancellationOrTaskCancelled { self.error = "Preview failed: \(instanceErrorText(error))" }
             }
             previewing = false
         }
@@ -522,7 +530,7 @@ struct InstanceClearStateSheet: View {
                 let result = try await model.applyClearState(scope)
                 success = InstanceClearScope.successMessage(result)
             } catch {
-                if !tradingIsCancellation(error) { self.error = "Clear failed: \(instanceErrorText(error))" }
+                if !error.isCancellationOrTaskCancelled { self.error = "Clear failed: \(instanceErrorText(error))" }
             }
             applying = false
         }

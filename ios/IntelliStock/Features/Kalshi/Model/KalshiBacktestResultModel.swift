@@ -47,12 +47,18 @@ final class KalshiBacktestResultModel {
     }
 
     func poll(lifecycle: AppLifecycle) async {
-        await load()
+        // A reappear reuses this model: a finished run is not refetched.
+        if status == nil || isInFlight { await load() }
         await PollingLoop(interval: { Self.pollInterval }) { [weak self] in
             guard let self else { return }
-            let st = self.status?["status"]
-            if st == .string("pending") || st == .string("running") { await self.load() }
+            if self.isInFlight { await self.load() }
         }.run(lifecycle: lifecycle)
+    }
+
+    /// Pending or running: the 3 s poll keeps loading.
+    private var isInFlight: Bool {
+        let st = status?["status"]
+        return st == .string("pending") || st == .string("running")
     }
 
     // MARK: Derived

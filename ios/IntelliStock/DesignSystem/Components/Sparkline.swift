@@ -133,7 +133,7 @@ struct AllocationRing: View {
                 Text(Self.percentLabel(fraction))
                     .font(.caption2.weight(.bold))
                     .monospacedDigit()
-                    .minimumScaleFactor(0.7)
+                    .dsMinimumScaleFactor(0.7, textStyle: .caption2)
                     .lineLimit(1)
                     .foregroundStyle(labelColor ?? color)
                     .padding(.horizontal, 4)

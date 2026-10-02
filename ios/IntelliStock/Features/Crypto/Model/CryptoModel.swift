@@ -25,20 +25,29 @@ final class CryptoModel {
 
     func isBusy(_ id: String) -> Bool { busy.contains(id) }
 
-    /// `_run`: errors are swallowed (the refreshed list reflects the truth);
-    /// the list is always refetched afterwards.
-    func run(_ id: String, _ action: (CryptoRepository) async throws -> Void) async {
+    /// `_run`: the list is always refetched afterwards (it reflects the
+    /// truth). Returns the error text for a toast, nil on success or when
+    /// cancelled; Dart swallowed it, which left the screen's error path dead.
+    @discardableResult
+    func run(_ id: String, _ action: (CryptoRepository) async throws -> Void) async -> String? {
         busy.insert(id)
+        var failure: String?
         do {
             try await action(repository())
-        } catch {}
+        } catch {
+            if !error.isCancellation { failure = KalshiFormat.errorText(error) }
+        }
         busy.remove(id)
         await load()
+        return failure
     }
 
-    func start(_ id: String) async { await run(id) { try await $0.startInstance(id) } }
-    func stop(_ id: String) async { await run(id) { try await $0.stopInstance(id) } }
-    func delete(_ id: String) async { await run(id) { try await $0.deleteInstance(id, force: true) } }
+    @discardableResult
+    func start(_ id: String) async -> String? { await run(id) { try await $0.startInstance(id) } }
+    @discardableResult
+    func stop(_ id: String) async -> String? { await run(id) { try await $0.stopInstance(id) } }
+    @discardableResult
+    func delete(_ id: String) async -> String? { await run(id) { try await $0.deleteInstance(id, force: true) } }
 
     /// `inst.name.isNotEmpty ? inst.name : inst.id`.
     static func displayName(_ inst: Instance) -> String {

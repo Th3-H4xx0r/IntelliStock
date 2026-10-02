@@ -213,12 +213,10 @@ nonisolated struct TokenUsageRepository: Sendable {
         let results = await (s, t, m, c, b, r)
 
         // A cancelled caller cancels every child request: report the
-        // cancellation, never "N of 6 requests failed".
-        let errors: [any Error] = [
-            results.0.failure, results.1.failure, results.2.failure,
-            results.3.failure, results.4.failure, results.5.failure,
-        ].compactMap { $0 }
-        if Task.isCancelled || errors.contains(where: \.isCancellation) {
+        // cancellation, never "N of 6 requests failed". Only the caller's
+        // cancellation counts: one child cancelled on its own is one
+        // partial failure, not a reason to drop the five that answered.
+        if Task.isCancelled {
             throw CancellationError()
         }
 
@@ -250,14 +248,6 @@ nonisolated struct TokenUsageRepository: Sendable {
 /// Dart `e.toString()`: an `ApiError` prints its message.
 nonisolated private func tokenUsageErrorText(_ error: any Error) -> String {
     (error as? ApiError)?.message ?? String(describing: error)
-}
-
-nonisolated private extension Result {
-    /// The error of a failed result, or nil.
-    var failure: Failure? {
-        if case .failure(let error) = self { return error }
-        return nil
-    }
 }
 
 nonisolated private extension Result where Failure == any Error {

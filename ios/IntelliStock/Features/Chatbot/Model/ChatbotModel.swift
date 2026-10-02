@@ -271,6 +271,13 @@ final class ChatbotModel {
 
     // MARK: Model picker and tool catalog
 
+    /// The model picker's Retry after a failed list: clear the error, fetch
+    /// again.
+    func retryModels() async {
+        state.error = nil
+        await loadModels()
+    }
+
     func loadModels() async {
         if state.modelsLoaded { return }
         do {
