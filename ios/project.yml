@@ -1,0 +1,155 @@
+# XcodeGen spec for the native IntelliStock app. `xcodegen generate` writes
+# IntelliStock.xcodeproj. Every source folder is a synced folder, so adding or
+# removing a file never changes project.pbxproj — regenerate only when this
+# file changes.
+name: IntelliStock
+
+options:
+  deploymentTarget:
+    iOS: "26.0"
+  developmentLanguage: en
+  groupSortPosition: top
+
+settings:
+  base:
+    DEVELOPMENT_TEAM: VY5CNF8734
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "6.0"
+    SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
+    SWIFT_APPROACHABLE_CONCURRENCY: YES
+    TARGETED_DEVICE_FAMILY: "1"
+    MARKETING_VERSION: 1.0.0
+    CURRENT_PROJECT_VERSION: 2
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS: YES
+
+targets:
+  IntelliStock:
+    type: application
+    platform: iOS
+    sources:
+      - path: IntelliStock
+        type: syncedFolder
+    dependencies:
+      - target: PortfolioWidget
+        embed: true
+    settings:
+      base:
+        PRODUCT_NAME: IntelliStock
+        PRODUCT_BUNDLE_IDENTIFIER: dev.pkrishna.intellistockMobile
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+    info:
+      path: Config/IntelliStock-Info.plist
+      properties:
+        CFBundleDisplayName: Intellistock Mobile
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSRequiresIPhoneOS: true
+        ITSAppUsesNonExemptEncryption: false
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        NSFaceIDUsageDescription: IntelliStock uses Face ID to lock the app and protect your portfolio.
+        CFBundleURLTypes:
+          - CFBundleURLName: dev.pkrishna.intellistock
+            CFBundleURLSchemes:
+              - intellistock
+        UIBackgroundModes:
+          - remote-notification
+        # The server URL is whatever the operator types on the Connect screen,
+        # http:// included. The Flutter build's Dart sockets ignored ATS, so
+        # this keeps that behaviour rather than silently refusing http hosts.
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+    entitlements:
+      path: Config/IntelliStock.entitlements
+      properties:
+        aps-environment: development
+        com.apple.security.application-groups:
+          - group.dev.pkrishna.intellistock
+
+  PortfolioWidget:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: PortfolioWidget
+        type: syncedFolder
+    settings:
+      base:
+        PRODUCT_NAME: PortfolioWidget
+        PRODUCT_BUNDLE_IDENTIFIER: dev.pkrishna.intellistockMobile.PortfolioWidget
+        # Timeline providers and App Intent queries run off the main actor, and
+        # WidgetKit's completion-handler API predates Sendable closures, so the
+        # extension keeps Swift 5 mode.
+        SWIFT_DEFAULT_ACTOR_ISOLATION: nonisolated
+        SWIFT_VERSION: "5.0"
+    info:
+      path: Config/PortfolioWidget-Info.plist
+      properties:
+        CFBundleDisplayName: IntelliStock
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    entitlements:
+      path: Config/PortfolioWidget.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.dev.pkrishna.intellistock
+
+  IntelliStockTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: IntelliStockTests
+        type: syncedFolder
+    dependencies:
+      - target: IntelliStock
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.pkrishna.intellistockMobile.Tests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/IntelliStock.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/IntelliStock
+        BUNDLE_LOADER: $(TEST_HOST)
+
+  # Screenshot tour against a live backend (Wave 3). Its own scheme, so the
+  # unit-test scheme never needs credentials.
+  IntelliStockUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: IntelliStockUITests
+        type: syncedFolder
+    dependencies:
+      - target: IntelliStock
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.pkrishna.intellistockMobile.UITests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: IntelliStock
+        # XCTestCase's initialisers are nonisolated; the tour is test-only code.
+        SWIFT_DEFAULT_ACTOR_ISOLATION: nonisolated
+        SWIFT_VERSION: "5.0"
+
+schemes:
+  IntelliStockTour:
+    build:
+      targets:
+        IntelliStock: all
+        IntelliStockUITests: [test]
+    test:
+      config: Debug
+      targets:
+        - IntelliStockUITests
+  IntelliStock:
+    build:
+      targets:
+        IntelliStock: all
+    test:
+      config: Debug
+      gatherCoverageData: false
+      targets:
+        - IntelliStockTests

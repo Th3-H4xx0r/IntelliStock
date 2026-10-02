@@ -19,10 +19,11 @@ eggs/
 .eggs/
 lib/
 lib64/
-# The Flutter mobile app keeps its Dart source under mobile/lib — the Python
-# `lib/` ignore above would otherwise hide the entire app.
-!mobile/lib/
-!mobile/lib/**
+# The deprecated Flutter app keeps its Dart source under
+# mobile_flutter_depricated/lib — the Python `lib/` ignore above would
+# otherwise hide it. The native app lives in ios/.
+!mobile_flutter_depricated/lib/
+!mobile_flutter_depricated/lib/**
 parts/
 sdist/
 var/
@@ -226,7 +227,7 @@ __marimo__/
 # Backtest logs
 backtest_logs/
 # Logs pulled locally via scripts/pull_backtest_logs.py
-# Anchored to repo root so it does NOT swallow mobile/lib/features/backtests/
+# Anchored to repo root so it does NOT swallow mobile_flutter_depricated/lib/features/backtests/
 /backtests/
 
 # Local dev tooling state — Claude Code, MCP, Codex, hive-mind, RuFlo

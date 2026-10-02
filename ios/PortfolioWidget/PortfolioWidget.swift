@@ -1,0 +1,617 @@
+// PortfolioWidget — IntelliStock home-screen and Lock Screen widgets.
+//
+// Apple-native style (2026-10-01): the system widget background, semantic
+// label colours, system green/red for P&L, a flat area fill under the curve,
+// system content margins, and accented-mode support. No gradients.
+//
+// Reads App-Group UserDefaults keys written by the app's `WidgetSync`:
+//   "accounts_data"  → [WidgetAccount] JSON  (selectable portfolios + positions)
+//   "instances_data" → [WidgetInstance] JSON
+//   "synced_at"      → epoch seconds of the last sync
+// and self-fetches `/widget/accounts` with "widget_api_base" + "widget_token".
+
+import WidgetKit
+import SwiftUI
+import AppIntents
+
+private let kAppGroup = "group.dev.pkrishna.intellistock"
+
+// MARK: - Palette (adaptive)
+private let cUp = Color.green
+private let cDown = Color.red
+
+private func dbl(_ v: Any?) -> Double { (v as? NSNumber)?.doubleValue ?? 0 }
+
+private func money(_ v: Double) -> String {
+    let f = NumberFormatter()
+    f.numberStyle = .currency
+    f.currencySymbol = "$"
+    f.minimumFractionDigits = 2
+    f.maximumFractionDigits = 2
+    return f.string(from: NSNumber(value: v)) ?? String(format: "$%.2f", v)
+}
+
+// MARK: - Data
+
+struct ChartPt: Identifiable {
+    let id = UUID()
+    let t: Double      // epoch seconds (x-axis is mapped over the data's own range)
+    let value: Double
+}
+
+struct PositionData: Identifiable {
+    let id = UUID()
+    let symbol: String
+    let pnlPct: Double
+    let marketValue: Double
+}
+
+struct AccountData {
+    let id: String
+    let label: String
+    let value: Double
+    let pnlAbs: Double
+    let pnlPct: Double
+    let points: [ChartPt]
+    let positions: [PositionData]
+}
+
+private func readAccounts() -> [AccountData] {
+    let d = UserDefaults(suiteName: kAppGroup)
+    guard let raw = d?.string(forKey: "accounts_data"),
+          let data = raw.data(using: .utf8),
+          let arr = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]]
+    else { return [] }
+    return arr.map { j in
+        let pts = (j["intradayPoints"] as? [[String: Any]] ?? [])
+            .map { ChartPt(t: dbl($0["t"]), value: dbl($0["v"])) }
+        let pos = (j["positions"] as? [[String: Any]] ?? []).map {
+            PositionData(symbol: $0["symbol"] as? String ?? "",
+                         pnlPct: dbl($0["unrealizedPnlPct"]),
+                         marketValue: dbl($0["marketValue"]))
+        }
+        .sorted { $0.marketValue > $1.marketValue }  // biggest holdings first
+        return AccountData(
+            id: j["id"] as? String ?? "",
+            label: j["label"] as? String ?? "Portfolio",
+            value: dbl(j["accountValue"]),
+            pnlAbs: dbl(j["dayPnlAbs"]),
+            pnlPct: dbl(j["dayPnlPct"]),
+            points: pts,
+            positions: pos)
+    }
+}
+
+private func resolveAccount(_ id: String?) -> AccountData? {
+    let all = readAccounts()
+    if let id = id, let m = all.first(where: { $0.id == id }) { return m }
+    return all.first
+}
+
+// MARK: - Self-refresh
+//
+// The widget fetches fresh data itself on each timeline reload, so it stays
+// current even when the app isn't open (the app writes the API base + auth
+// token into the App Group on login). On any failure it keeps the last
+// cached App-Group data. iOS still governs HOW OFTEN reloads happen (budgeted,
+// ~every 15-30 min in the background) — opening the app forces an instant one.
+private func fetchAndCacheAccounts() async {
+    let d = UserDefaults(suiteName: kAppGroup)
+    guard let base = d?.string(forKey: "widget_api_base"), !base.isEmpty,
+          let token = d?.string(forKey: "widget_token"), !token.isEmpty
+    else { return }
+    let path = base.hasSuffix("/") ? "widget/accounts" : "/widget/accounts"
+    guard let url = URL(string: base + path) else { return }
+    var req = URLRequest(url: url)
+    req.httpMethod = "GET"
+    req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+    req.setValue("application/json", forHTTPHeaderField: "Accept")
+    req.timeoutInterval = 15
+    do {
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, http.statusCode == 200,
+              let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let accounts = obj["accounts"] as? [[String: Any]], !accounts.isEmpty,
+              let blob = try? JSONSerialization.data(withJSONObject: accounts),
+              let str = String(data: blob, encoding: .utf8)
+        else { return }
+        d?.set(str, forKey: "accounts_data")
+        d?.set(Date().timeIntervalSince1970, forKey: "synced_at")
+    } catch {
+        // Keep the cached App-Group data on any network/parse failure.
+    }
+}
+
+// MARK: - Timeline entry
+
+struct PortfolioEntry: TimelineEntry {
+    let date: Date
+    let label: String
+    let value: Double
+    let pnlAbs: Double
+    let pnlPct: Double
+    let points: [ChartPt]
+    let positions: [PositionData]
+    let syncedAt: Double
+    let hasData: Bool
+}
+
+private func lastSyncedAt() -> Double {
+    UserDefaults(suiteName: kAppGroup)?.double(forKey: "synced_at") ?? 0
+}
+
+/// Sync instant clamped to never exceed now, so the auto-updating relative
+/// label can't render a nonsensical future phrasing ("in 2 seconds ago") on
+/// any clock skew between the stored epoch and the render clock.
+private func syncedDate(_ epoch: Double) -> Date {
+    Date(timeIntervalSince1970: min(epoch, Date().timeIntervalSince1970))
+}
+
+private func portfolioEntry(for id: String?, date: Date = Date()) -> PortfolioEntry {
+    let synced = lastSyncedAt()
+    if let a = resolveAccount(id) {
+        return PortfolioEntry(date: date, label: a.label, value: a.value,
+                              pnlAbs: a.pnlAbs, pnlPct: a.pnlPct,
+                              points: a.points, positions: a.positions,
+                              syncedAt: synced, hasData: true)
+    }
+    return PortfolioEntry(date: date, label: "Portfolio", value: 0, pnlAbs: 0,
+                          pnlPct: 0, points: [], positions: [], syncedAt: synced, hasData: false)
+}
+
+// MARK: - View (per family)
+
+struct PortfolioWidgetView: View {
+    @Environment(\.widgetFamily) private var family
+    @Environment(\.widgetRenderingMode) private var renderingMode
+    let entry: PortfolioEntry
+
+    private var trend: Color { entry.pnlAbs >= 0 ? cUp : cDown }
+    private var pctText: String {
+        "\(entry.pnlPct >= 0 ? "+" : "−")\(String(format: "%.2f%%", abs(entry.pnlPct)))"
+    }
+    private var absText: String {
+        "\(entry.pnlAbs >= 0 ? "+$" : "−$")\(String(format: "%.2f", abs(entry.pnlAbs)))"
+    }
+    /// The up/down glyph that carries the P&L direction without colour.
+    private var trendSymbol: String {
+        entry.pnlAbs >= 0 ? "arrowtriangle.up.fill" : "arrowtriangle.down.fill"
+    }
+
+    var body: some View {
+        switch family {
+        case .accessoryRectangular:
+            rectangularLock.containerBackground(.clear, for: .widget)
+        case .accessoryInline:
+            inlineLock
+        default:
+            systemBody
+        }
+    }
+
+    private var systemBody: some View {
+        Group {
+            if !entry.hasData {
+                empty
+            } else {
+                switch family {
+                case .systemSmall:  small
+                case .systemMedium: medium
+                default:            large
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        // Floating "x ago" label that doesn't consume layout height. Absolute
+        // positioning (GeometryReader + .position) because the operator's
+        // device runs an RTL region, where leading/trailing alignment resolved
+        // to the left and clipped.
+        .overlay {
+            if entry.hasData, entry.syncedAt > 0 {
+                GeometryReader { geo in
+                    Text("\(Text(syncedDate(entry.syncedAt), style: .relative)) ago")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .position(x: geo.size.width - 34, y: geo.size.height - 6)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .containerBackground(for: .widget) {
+            Color(uiColor: .systemBackground)
+        }
+    }
+
+    // ── Lock-screen accessory widgets (rendered monochrome by iOS) ──
+    @ViewBuilder
+    private var rectangularLock: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            if entry.hasData {
+                HStack(spacing: 3) {
+                    Image(systemName: trendSymbol)
+                        .font(.caption2)
+                    Text("$\(String(format: "%.2f", abs(entry.pnlAbs))) · \(String(format: "%.2f%%", abs(entry.pnlPct)))")
+                        .font(.caption.weight(.semibold))
+                }
+                Text(money(entry.value))
+                    .font(.headline)
+                    .widgetAccentable()
+                if entry.syncedAt > 0 {
+                    Text("\(Text(syncedDate(entry.syncedAt), style: .relative)) ago")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                }
+            } else {
+                Text("IntelliStock").font(.caption.weight(.semibold))
+                Text("Open app to sync").font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private var inlineLock: some View {
+        if entry.hasData {
+            Label {
+                Text("\(money(entry.value)) · \(pctText)")
+            } icon: {
+                Image(systemName: trendSymbol)
+            }
+        } else {
+            Text("IntelliStock — open app")
+        }
+    }
+
+    // ── Empty state ──
+    private var empty: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("INTELLISTOCK")
+                .font(.caption2.weight(.semibold))
+                .tracking(0.8)
+                .foregroundStyle(.secondary)
+                .widgetAccentable()
+            Spacer()
+            Text("Open the app to sync your portfolio")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Spacer()
+        }
+    }
+
+    private func eyebrow(_ text: String) -> some View {
+        Text(text)
+            .font(.caption2.weight(.semibold))
+            .tracking(0.6)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .widgetAccentable()
+    }
+
+    private func value(size: CGFloat) -> some View {
+        Text(money(entry.value))
+            .font(.system(size: size, weight: .semibold))
+            .monospacedDigit()
+            .foregroundStyle(.primary)
+            .minimumScaleFactor(0.6)
+            .lineLimit(1)
+    }
+
+    /// The day change; its +/− sign carries the direction without colour.
+    private func change(_ text: String) -> some View {
+        Text(text)
+            .font(.caption)
+            .monospacedDigit()
+            .foregroundStyle(trend)
+    }
+
+    // ── 1×1 ──
+    private var small: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            eyebrow(entry.label.uppercased())
+            value(size: 22)
+            change("\(pctText) today")
+            Spacer(minLength: 4)
+            curve(height: 40)
+        }
+    }
+
+    // ── 1×2 ──
+    private var medium: some View {
+        HStack(spacing: 16) {
+            VStack(alignment: .leading, spacing: 3) {
+                eyebrow(entry.label.uppercased())
+                value(size: 24)
+                change("\(absText) · \(pctText)")
+                Spacer(minLength: 6)
+                curve(height: 30)
+            }
+            positionsGrid(limit: 6, columns: 2, fontSize: 11)
+                .frame(maxWidth: .infinity)
+        }
+    }
+
+    // ── 2×2 : curve top, positions bottom ──
+    private var large: some View {
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 3) {
+                eyebrow("\(entry.label.uppercased()) · TODAY")
+                value(size: 32)
+                change("\(absText) · \(pctText)")
+                Spacer(minLength: 8)
+                curve(height: 50)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.bottom, 10)
+
+            Divider()
+
+            positionsGrid(limit: 8, columns: 2, fontSize: 12.5)
+                .padding(.top, 12)
+                .frame(maxWidth: .infinity, alignment: .top)
+        }
+    }
+
+    // ── Positions — condensed: P&L right next to the ticker, packed into
+    //    `columns` so two fit side by side and more holdings show. ──
+    private func positionsGrid(limit: Int, columns: Int, fontSize: CGFloat) -> some View {
+        let items = Array(entry.positions.prefix(limit))
+        let rows = stride(from: 0, to: items.count, by: columns).map {
+            Array(items[$0..<min($0 + columns, items.count)])
+        }
+        return VStack(alignment: .leading, spacing: fontSize * 0.7) {
+            if items.isEmpty {
+                Text("No open positions").font(.system(size: fontSize)).foregroundStyle(.secondary)
+            } else {
+                ForEach(rows.indices, id: \.self) { ri in
+                    HStack(spacing: 12) {
+                        ForEach(rows[ri]) { p in
+                            HStack(spacing: 5) {
+                                Text(p.symbol)
+                                    .font(.system(size: fontSize, weight: .semibold, design: .monospaced))
+                                    .foregroundStyle(.primary)
+                                Text("\(p.pnlPct >= 0 ? "+" : "−")\(String(format: "%.2f%%", abs(p.pnlPct)))")
+                                    .font(.system(size: fontSize)).monospacedDigit()
+                                    .foregroundStyle(p.pnlPct >= 0 ? cUp : cDown)
+                            }
+                            .lineLimit(1).minimumScaleFactor(0.8)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        if rows[ri].count < columns {
+                            Color.clear.frame(maxWidth: .infinity)
+                        }
+                    }
+                }
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    // ── Curve — Canvas-drawn line over a flat area fill. The x-axis spans the
+    //    data's own time range so the line fills the tile; a dashed open /
+    //    previous-close baseline runs full width. ──
+    @ViewBuilder
+    private func curve(height: CGFloat) -> some View {
+        let pts = entry.points.sorted { $0.t < $1.t }
+        if pts.count >= 2 {
+            let open = entry.value - entry.pnlAbs
+            let vals = pts.map(\.value) + [open]
+            let lo = vals.min() ?? 0
+            let hi = vals.max() ?? 1
+            let range = max(hi - lo, 0.0001)
+            let tMin = pts.first!.t
+            let tSpan = max(pts.last!.t - tMin, 1)
+            let accented = renderingMode == .accented
+            Canvas { ctx, size in
+                let w = size.width, h = size.height
+                let padTop = h * 0.16, padBot = h * 0.06
+                let plotH = max(h - padTop - padBot, 1)
+                func px(_ t: Double) -> CGFloat { CGFloat((t - tMin) / tSpan) * w }
+                func py(_ v: Double) -> CGFloat {
+                    padTop + (1 - CGFloat((v - lo) / range)) * plotH
+                }
+
+                // Flat area under the line (no gradient).
+                var area = Path()
+                area.move(to: CGPoint(x: px(pts[0].t), y: h))
+                for p in pts { area.addLine(to: CGPoint(x: px(p.t), y: py(p.value))) }
+                area.addLine(to: CGPoint(x: px(pts.last!.t), y: h))
+                area.closeSubpath()
+                ctx.fill(area, with: .color(trend.opacity(accented ? 0.15 : 0.12)))
+
+                // Line.
+                var line = Path()
+                line.move(to: CGPoint(x: px(pts[0].t), y: py(pts[0].value)))
+                for p in pts.dropFirst() {
+                    line.addLine(to: CGPoint(x: px(p.t), y: py(p.value)))
+                }
+                ctx.stroke(line, with: .color(trend),
+                           style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+
+                // Dashed open / previous-close baseline, full width.
+                var base = Path()
+                base.move(to: CGPoint(x: 0, y: py(open)))
+                base.addLine(to: CGPoint(x: w, y: py(open)))
+                ctx.stroke(base, with: .color(.secondary.opacity(0.5)),
+                           style: StrokeStyle(lineWidth: 1, dash: [2, 3]))
+            }
+            .frame(height: height)
+            .widgetAccentable()
+            .accessibilityHidden(true)
+        } else {
+            Color.clear.frame(height: height)
+        }
+    }
+}
+
+// MARK: - Configuration (portfolio + refresh interval)
+
+struct AccountEntity: AppEntity, Identifiable {
+    let id: String
+    let label: String
+    static var typeDisplayRepresentation: TypeDisplayRepresentation { "Portfolio" }
+    var displayRepresentation: DisplayRepresentation { DisplayRepresentation(title: "\(label)") }
+    static let defaultQuery = AccountQuery()
+}
+
+struct AccountQuery: EntityQuery {
+    func entities(for identifiers: [String]) async throws -> [AccountEntity] {
+        readAccounts().filter { identifiers.contains($0.id) }
+            .map { AccountEntity(id: $0.id, label: $0.label) }
+    }
+    func suggestedEntities() async throws -> [AccountEntity] {
+        readAccounts().map { AccountEntity(id: $0.id, label: $0.label) }
+    }
+    func defaultResult() async -> AccountEntity? {
+        readAccounts().first.map { AccountEntity(id: $0.id, label: $0.label) }
+    }
+}
+
+enum RefreshIntervalChoice: String, AppEnum {
+    case s30, m1, m5, m10, m15, m30, h1
+    static var typeDisplayRepresentation: TypeDisplayRepresentation { "Refresh interval" }
+    static var caseDisplayRepresentations: [RefreshIntervalChoice: DisplayRepresentation] {
+        [
+            .s30: "30 seconds", .m1: "1 minute", .m5: "5 minutes",
+            .m10: "10 minutes", .m15: "15 minutes", .m30: "30 minutes", .h1: "1 hour",
+        ]
+    }
+    var seconds: TimeInterval {
+        switch self {
+        case .s30: return 30
+        case .m1: return 60
+        case .m5: return 300
+        case .m10: return 600
+        case .m15: return 900
+        case .m30: return 1800
+        case .h1: return 3600
+        }
+    }
+}
+
+struct SelectPortfolioIntent: WidgetConfigurationIntent {
+    static var title: LocalizedStringResource { "Select Portfolio" }
+    static var description: IntentDescription {
+        IntentDescription("Choose which portfolio to show and how often to refresh.")
+    }
+    @Parameter(title: "Portfolio") var account: AccountEntity?
+    @Parameter(title: "Refresh every", default: .m15) var refresh: RefreshIntervalChoice
+}
+
+// Static (non-configurable) provider. We deliberately do NOT use an
+// AppIntentConfiguration here: the configuration-intent metadata stopped
+// registering on the build (no "Edit Widget" in the long-press menu, and the
+// configurable widget's timeline stalled on the gray placeholder). A static
+// widget always runs its timeline and shows the primary account
+// (accounts_data.first). Picking which account to show lives in the app.
+struct StaticProvider: TimelineProvider {
+    func placeholder(in context: Context) -> PortfolioEntry { portfolioEntry(for: nil) }
+    func getSnapshot(in context: Context, completion: @escaping (PortfolioEntry) -> Void) {
+        completion(portfolioEntry(for: nil))
+    }
+    func getTimeline(in context: Context, completion: @escaping (Timeline<PortfolioEntry>) -> Void) {
+        Task {
+            // Pull fresh data ourselves so the widget doesn't depend on the app.
+            await fetchAndCacheAccounts()
+            let e = portfolioEntry(for: nil)
+            // iOS budgets background reloads (~every 15-30 min); the relative-time
+            // label is auto-updating, so it stays honest between reloads.
+            let next = Date().addingTimeInterval(900)
+            completion(Timeline(entries: [e], policy: .after(next)))
+        }
+    }
+}
+
+struct PortfolioWidget: Widget {
+    var body: some WidgetConfiguration {
+        StaticConfiguration(kind: "PortfolioWidget",
+                            provider: StaticProvider()) { entry in
+            PortfolioWidgetView(entry: entry)
+        }
+        .configurationDisplayName("Portfolio")
+        .description("Live portfolio value, day P&L & positions.")
+        .supportedFamilies([
+            .systemSmall, .systemMedium, .systemLarge,
+            .accessoryRectangular, .accessoryInline,
+        ])
+    }
+}
+
+// MARK: - Instance status widget
+
+struct InstanceEntry: TimelineEntry {
+    let date: Date
+    let instances: [[String: Any]]
+}
+
+struct InstanceProvider: TimelineProvider {
+    func placeholder(in context: Context) -> InstanceEntry { InstanceEntry(date: Date(), instances: []) }
+    func getSnapshot(in context: Context, completion: @escaping (InstanceEntry) -> Void) { completion(entry()) }
+    func getTimeline(in context: Context, completion: @escaping (Timeline<InstanceEntry>) -> Void) {
+        completion(Timeline(entries: [entry()], policy: .after(Date().addingTimeInterval(900))))
+    }
+    private func entry() -> InstanceEntry {
+        let d = UserDefaults(suiteName: kAppGroup)
+        let raw = d?.string(forKey: "instances_data") ?? "[]"
+        let arr = (try? JSONSerialization.jsonObject(
+            with: raw.data(using: .utf8) ?? Data())) as? [[String: Any]] ?? []
+        return InstanceEntry(date: Date(), instances: arr)
+    }
+}
+
+struct InstanceStatusView: View {
+    let entry: InstanceEntry
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("INSTANCES")
+                .font(.caption2.weight(.semibold))
+                .tracking(0.6)
+                .foregroundStyle(.secondary)
+                .widgetAccentable()
+            ForEach(Array(entry.instances.prefix(3).enumerated()), id: \.offset) { _, inst in
+                if let name = inst["name"] as? String {
+                    let running = inst["running"] as? Bool ?? false
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(running ? cUp : Color.secondary)
+                            .frame(width: 6, height: 6)
+                            .accessibilityLabel(running ? "Running" : "Stopped")
+                        Text(name).font(.footnote).foregroundStyle(.primary).lineLimit(1)
+                    }
+                }
+            }
+            if entry.instances.isEmpty {
+                Text("No instances").font(.footnote).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .containerBackground(for: .widget) {
+            Color(uiColor: .systemBackground)
+        }
+    }
+}
+
+struct InstanceStatusWidget: Widget {
+    var body: some WidgetConfiguration {
+        StaticConfiguration(kind: "InstanceWidget", provider: InstanceProvider()) { entry in
+            InstanceStatusView(entry: entry)
+        }
+        .configurationDisplayName("Instance Status")
+        .description("Running/stopped status of your IntelliStock instances.")
+        .supportedFamilies([.systemSmall, .systemMedium])
+    }
+}
+
+// MARK: - Bundle
+
+@main
+struct IntelliStockWidgetBundle: WidgetBundle {
+    var body: some Widget {
+        PortfolioWidget()
+        InstanceStatusWidget()
+    }
+}
