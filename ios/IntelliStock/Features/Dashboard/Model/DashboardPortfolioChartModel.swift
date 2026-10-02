@@ -101,6 +101,13 @@ nonisolated enum DashboardChartGeometry {
         let span = Double(max(n - 1, 1))
         return fractionToIndex(min(max(selection / span, 0), 1), n)
     }
+
+    /// What names the plotted series for `chartDrawIn`: the account and the
+    /// range. Switching either draws the chart in again; a poll, which only
+    /// appends or updates points, keeps the key and the chart still.
+    static func drawInKey(accountId: String, range: String) -> AnyHashable {
+        AnyHashable([accountId, range])
+    }
 }
 
 /// One account's portfolio history for the selected range, kept live — the

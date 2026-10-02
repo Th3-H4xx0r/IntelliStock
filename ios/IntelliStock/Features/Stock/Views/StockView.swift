@@ -114,8 +114,9 @@ private struct StockContent: View {
     private var chartArea: some View {
         if let series = model.series, series.vals.count >= 2 {
             let up = series.vals[series.vals.count - 1] >= series.vals[0]
-            // A range remounts the chart, which animates once; 10 s polls
-            // redraw in place without replaying the grow-in.
+            // A range clears the series and remounts the chart, which draws
+            // the new one in from the left; 10 s polls redraw in place
+            // without replaying it.
             ScrubbableAreaChart(
                 timestamps: series.ts,
                 values: series.vals,
@@ -123,6 +124,7 @@ private struct StockContent: View {
                 height: 260,
                 onScrub: { model.scrubIndex = $0 },
                 animate: true,
+                drawInKey: AnyHashable(model.range),
                 indexed: true // evenly-spaced points → no weekend/overnight gaps
             )
             .id(model.range)

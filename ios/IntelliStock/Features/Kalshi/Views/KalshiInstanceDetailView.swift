@@ -724,7 +724,8 @@ struct KalshiInstanceDetailView: View {
 
 /// The edge-over-time sparkline — `_EdgeSparkPainter`: the side's edge
 /// history normalised into the box (flat → centre line), green when the
-/// latest edge is ≥ 0, else red.
+/// latest edge is ≥ 0, else red. It draws itself in from the left like
+/// `Sparkline`.
 struct KalshiEdgeSparkline: View {
     let values: [Double]
 
@@ -746,6 +747,7 @@ struct KalshiEdgeSparkline: View {
             let color = values.last! >= 0 ? DS.Palette.success : DS.Palette.danger
             context.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: 1.4, lineCap: .round, lineJoin: .round))
         }
+        .chartDrawIn(duration: ChartDrawIn.sparkDuration, bleed: 2)
         .accessibilityHidden(true)
     }
 }

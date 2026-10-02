@@ -10,6 +10,10 @@ final class TokenUsageModel {
 
     private(set) var range = "24h"
     private(set) var data: Loadable<TokenUsageData> = .loading
+    /// The range `data` was fetched for. It lags `range` while a switch
+    /// loads, so the trend chart draws in again when the new range's data
+    /// lands rather than on the tap.
+    private(set) var loadedRange: String?
 
     @ObservationIgnored private let repository: () -> TokenUsageRepository
 
@@ -30,8 +34,10 @@ final class TokenUsageModel {
     func refreshNow() async {
         // A failing endpoint becomes `partialError`; only a cancellation
         // throws, and a cancelled refresh leaves the state as it was.
+        let r = range
         do {
-            data = .loaded(try await repository().fetchAllUnlessCancelled(range))
+            data = .loaded(try await repository().fetchAllUnlessCancelled(r))
+            loadedRange = r
         } catch is CancellationError {
             return
         } catch {

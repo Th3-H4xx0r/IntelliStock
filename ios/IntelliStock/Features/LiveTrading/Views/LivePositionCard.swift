@@ -13,6 +13,9 @@ struct LivePositionRow: View {
     let chartStyle: LiveChartStyle
     let range: String
     let historicals: [HistPoint]
+    /// The range `historicals` were fetched for (it lags `range` while a
+    /// switch loads); with the style, it names the sparkline's series.
+    var historicalsRange: String?
 
     var body: some View {
         let p = position
@@ -130,6 +133,13 @@ struct LivePositionRow: View {
         .chartYAxis(.hidden)
         .chartLegend(.hidden)
         .chartYScale(domain: (lo - pad)...(lo + span + pad))
+        // A row-sized chart: the sparkline's draw-in, again per style and
+        // per loaded range.
+        .chartDrawIn(
+            trigger: AnyHashable([chartStyle.rawValue, historicalsRange ?? range]),
+            duration: ChartDrawIn.sparkDuration,
+            bleed: 2
+        )
         .accessibilityHidden(true)
     }
 }

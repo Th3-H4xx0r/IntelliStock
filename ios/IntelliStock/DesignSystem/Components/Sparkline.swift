@@ -8,9 +8,9 @@ import SwiftUI
 /// legend. It is green when the last value is at or above the first and red
 /// otherwise, unless you pass `color`. An optional `baseline` draws Stocks'
 /// dotted reference line (the previous close, say). It draws itself in from
-/// the left on first appearance (skipped under Reduce Motion, or with
-/// `animated: false`); give it a new `.id` to replay. Decorative: the row's
-/// text carries the numbers for VoiceOver.
+/// the left on first appearance (`chartDrawIn`; skipped under Reduce Motion,
+/// or with `animated: false`); give it a new `.id` to replay. Decorative: the
+/// row's text carries the numbers for VoiceOver.
 ///
 ///     Sparkline(values: closes).frame(width: 60, height: 24)
 struct Sparkline: View {
@@ -19,9 +19,6 @@ struct Sparkline: View {
     var color: Color?
     var baseline: Double?
     var animated = true
-
-    @State private var progress: CGFloat = 0
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(values: [Double], height: CGFloat = 28, color: Color? = nil, baseline: Double? = nil, animated: Bool = true) {
         self.values = values
@@ -65,20 +62,9 @@ struct Sparkline: View {
             .chartXScale(domain: 0...(values.count - 1))
             .chartYScale(domain: lo...(lo + span))
             .chartPlotStyle { $0.padding(.vertical, 2) }
-            .mask(alignment: .leading) {
-                GeometryReader { geo in
-                    Rectangle().frame(width: geo.size.width * progress)
-                }
-            }
+            .chartDrawIn(duration: ChartDrawIn.sparkDuration, enabled: animated, bleed: 2)
             .frame(height: height)
             .accessibilityHidden(true)
-            .onAppear {
-                if reduceMotion || !animated {
-                    progress = 1
-                } else {
-                    withAnimation(.easeOut(duration: 0.65)) { progress = 1 }
-                }
-            }
         }
     }
 }

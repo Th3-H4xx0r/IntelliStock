@@ -47,6 +47,7 @@ transactions) and Settings (forms, lists).
 | `Card { }` / `Card("Title") { }` | A hero or a chart, with 22 pt corners and 16 pt padding. |
 | `ScrubbableAreaChart(...)` | The value chart: 2 pt monotone line, flat fill, a dotted baseline at the start value, and at most 4 date labels. |
 | `Sparkline(values:)` | A 1.5 pt price line inside a row. |
+| `.chartDrawIn(trigger:, duration:, enabled:, interacting:)` | Every chart's entrance: it draws in from the leading edge, replaying when `trigger` (the series' range or account) changes. |
 | `AllocationRing` / `MiniAllocationRing(fraction:, color:)` | A share of the portfolio: 44 pt with its label, or 24 pt in a row. |
 | `ToolbarMenu { }` | The toolbar's More menu. |
 | `ToolbarAddButton(title) { }` | The `+` create button. The title is what VoiceOver reads. |
@@ -307,6 +308,14 @@ Form rules:
 - Place it with margins: inside a `Card`, or in a list section with the list's insets.
 - Follow it with the range `Picker(.segmented)`.
 - Use `Sparkline` inside rows, framed about 60 × 24.
+- Every chart draws itself in from the leading edge with `.chartDrawIn`, as `Sparkline` does:
+  - It eases out over 0.9 s (0.65 s for a row-sized chart). Under Reduce Motion the chart
+    shows at once.
+  - Key `trigger` on what names the series: the range and account, or the range the data was
+    loaded for. Never key it on the points, so polls leave the chart still.
+  - Pass `interacting: selection != nil` on a scrubbable chart. A scrub during the draw-in
+    uncovers the whole chart.
+  - On a chart with axes, apply it inside `.chartPlotStyle`, so the axes and legend stay put.
 
 ## Empty, loading, error
 

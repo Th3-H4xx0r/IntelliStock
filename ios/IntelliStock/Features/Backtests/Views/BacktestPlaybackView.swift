@@ -148,9 +148,9 @@ struct BacktestPlaybackView: View {
                     values: points.map(\.value),
                     lineColor: DS.Palette.accent,
                     height: 160,
-                    baseline: model.metadata.initialCash?.double,
-                    // Live playback updates every tick — no entry animation.
-                    animate: false
+                    // Draws in once as it appears. Each playback tick only
+                    // appends points, so it never replays.
+                    baseline: model.metadata.initialCash?.double
                 )
             }
         }

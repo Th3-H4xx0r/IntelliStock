@@ -77,6 +77,8 @@ struct KalshiPortfolioHero: View {
                     height: 180,
                     baseline: baseline,
                     onScrub: { scrubIdx = $0 },
+                    // Paper and real are different curves: flipping draws in again.
+                    drawInKey: AnyHashable(p.isPaper),
                     indexed: true,
                     pulsingEndDot: true
                 )

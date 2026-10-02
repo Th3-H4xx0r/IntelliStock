@@ -213,7 +213,8 @@ private struct DashboardChartEmpty: View {
 /// baseline at the period's opening value, a fixed [0, 1440]-minute axis on
 /// 1D (the line fills only the elapsed part of the day) and an index axis
 /// otherwise (gapless), a scrub hairline and dot, and a pulsing dot on the
-/// latest value while not scrubbing.
+/// latest value while not scrubbing. It draws itself in from the leading edge
+/// for each account and range (`chartDrawIn`); polls leave it still.
 private struct DashboardChartPlot: View {
     let chart: DashboardPortfolioChartModel
     let history: PortfolioHistory
@@ -221,7 +222,6 @@ private struct DashboardChartPlot: View {
     let animate: Bool
 
     @State private var selectedX: Double?
-    @State private var revealed = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -232,7 +232,6 @@ private struct DashboardChartPlot: View {
         let bounds = paddedBounds(values + [baseline])
         let change = computeChange(history)
         let lineColor = (change.abs ?? 0) >= 0 ? DS.Palette.success : DS.Palette.danger
-        let showValues = revealed || !animate || reduceMotion
         let scrub = chart.scrubIndex.flatMap { $0 < n ? $0 : nil }
 
         VStack(spacing: 0) {
@@ -241,15 +240,14 @@ private struct DashboardChartPlot: View {
                     .foregroundStyle(Color.secondary.opacity(0.5))
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: DS.baselineDash))
                 ForEach(0..<n, id: \.self) { i in
-                    let v = showValues ? values[i] : bounds.min
                     AreaMark(
                         x: .value("Time", xs[i]),
                         yStart: .value("Floor", bounds.min),
-                        yEnd: .value("Value", v)
+                        yEnd: .value("Value", values[i])
                     )
                     .foregroundStyle(lineColor.opacity(DS.chartAreaOpacity))
                     .interpolationMethod(.monotone)
-                    LineMark(x: .value("Time", xs[i]), y: .value("Value", v))
+                    LineMark(x: .value("Time", xs[i]), y: .value("Value", values[i]))
                         .foregroundStyle(lineColor)
                         .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
                         .interpolationMethod(.monotone)
@@ -260,7 +258,7 @@ private struct DashboardChartPlot: View {
                         .lineStyle(StrokeStyle(lineWidth: 1.2))
                     PointMark(x: .value("Time", xs[scrub]), y: .value("Value", values[scrub]))
                         .symbol { DashboardScrubDot(color: lineColor) }
-                } else if showValues, n > 0 {
+                } else if n > 0 {
                     PointMark(x: .value("Time", xs[n - 1]), y: .value("Value", values[n - 1]))
                         .symbol { DashboardEndDot(color: lineColor, pulsing: !reduceMotion) }
                 }
@@ -272,6 +270,11 @@ private struct DashboardChartPlot: View {
             .chartLegend(.hidden)
             .chartXSelection(value: $selectedX)
             .frame(height: DashboardPortfolioMetrics.chartHeight)
+            .chartDrawIn(
+                trigger: DashboardChartGeometry.drawInKey(accountId: chart.accountId, range: range),
+                enabled: animate,
+                interacting: selectedX != nil
+            )
             .accessibilityElement()
             .accessibilityLabel("Portfolio chart")
             .accessibilityValue("\(fmtMoney(values.last)), \(fmtPct(change.pct))")
@@ -287,14 +290,6 @@ private struct DashboardChartPlot: View {
             if chart.scrubIndex != index { chart.scrubIndex = index }
         }
         .sensoryFeedback(.selection, trigger: chart.scrubIndex) { _, new in new != nil }
-        .onAppear {
-            guard !revealed else { return }
-            if animate, !reduceMotion {
-                withAnimation(.easeOut(duration: 0.9)) { revealed = true }
-            } else {
-                revealed = true
-            }
-        }
     }
 }
 

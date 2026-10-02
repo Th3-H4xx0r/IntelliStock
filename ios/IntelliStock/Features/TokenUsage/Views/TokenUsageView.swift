@@ -59,7 +59,8 @@ struct TokenUsageView: View {
                     data: data,
                     range: model.range,
                     onRange: { range in Task { await model.setRange(range) } },
-                    onCall: { selectedCall = $0 }
+                    onCall: { selectedCall = $0 },
+                    loadedRange: model.loadedRange
                 )
             }
             .listStyle(.insetGrouped)
@@ -90,6 +91,8 @@ private struct TokenUsageSections: View {
     let range: String
     let onRange: (String) -> Void
     let onCall: (RecentCall) -> Void
+    /// The range `data` belongs to, which names the trend's series.
+    var loadedRange: String?
 
     var body: some View {
         let telemetry = TelemetryState(data.summary?.telemetryHealth)
@@ -159,7 +162,7 @@ private struct TokenUsageSections: View {
             }
         }
 
-        TokenUsageSpendTrend(rows: data.timeseries)
+        TokenUsageSpendTrend(rows: data.timeseries, range: loadedRange)
 
         TokenUsageSpenders(title: "Top spenders by model", rows: data.topByModel, empty: "No model spend recorded yet.")
         TokenUsageSpenders(title: "Top spenders by call site", rows: data.topByCallSite, empty: "No call-site spend recorded yet.")
@@ -209,6 +212,8 @@ private struct TokenUsageSections: View {
 
 private struct TokenUsageSpendTrend: View {
     let rows: [TimeseriesRow]
+    /// The range the rows were fetched for: a new one draws the bars in again.
+    let range: String?
 
     private static let palette: [Color] = [DS.Palette.accent, DS.Palette.info, DS.Palette.success,
                                            DS.Palette.warning, DS.Palette.teal, DS.Palette.danger]
@@ -236,6 +241,9 @@ private struct TokenUsageSpendTrend: View {
                 .chartForegroundStyleScale(domain: trend.providers, range: trend.providers.indices.map {
                     Self.palette[$0 % Self.palette.count]
                 })
+                // Only the plot draws in, left to right; the axes and legend
+                // stay put.
+                .chartPlotStyle { $0.chartDrawIn(trigger: AnyHashable(range)) }
                 .chartLegend(position: .top, alignment: .leading)
                 .chartYAxisLabel("Cost (USD)")
                 .chartXAxis {

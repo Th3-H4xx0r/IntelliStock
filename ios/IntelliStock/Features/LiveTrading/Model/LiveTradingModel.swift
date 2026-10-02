@@ -24,6 +24,11 @@ nonisolated struct LiveTradingState: Hashable, Sendable {
     var currentRange = "1D"
     var commandToast: CommandToast?
     var fetchError: String?
+    /// The ranges `equityHistory` and `positionHistoricals` were fetched for.
+    /// They lag `currentRange` while a switch loads; the charts follow these,
+    /// so they draw the new range in when its data lands, not on the tap.
+    var equityHistoryRange: String?
+    var positionHistoricalsRange: String?
 }
 
 /// The ranges the hero chart offers.
@@ -168,7 +173,10 @@ final class LiveTradingModel {
             // The range changed while this was in flight: a newer fetch owns
             // the chart.
             guard state.value?.currentRange == range else { return }
-            update { $0.equityHistory = history }
+            update {
+                $0.equityHistory = history
+                $0.equityHistoryRange = range
+            }
         } catch {}
     }
 
@@ -181,7 +189,10 @@ final class LiveTradingModel {
         do {
             let hist = try await repository().symbolHistoricals(symbols, range)
             guard state.value?.currentRange == range else { return }
-            update { $0.positionHistoricals = hist }
+            update {
+                $0.positionHistoricals = hist
+                $0.positionHistoricalsRange = range
+            }
         } catch {}
     }
 

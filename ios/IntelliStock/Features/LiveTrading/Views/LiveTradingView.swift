@@ -179,10 +179,14 @@ private struct LiveTradingContent: View {
 
                 Group {
                     if let history, !history.isEmpty {
-                        LiveEquityChart(history: history, style: chartStyle, range: s.currentRange, height: 240) {
+                        // The range the history belongs to, which lags the
+                        // picker while a switch loads: the chart remounts and
+                        // draws in when the new range's data lands.
+                        let chartRange = s.equityHistoryRange ?? s.currentRange
+                        LiveEquityChart(history: history, style: chartStyle, range: chartRange, height: 240) {
                             scrubIndex = $0
                         }
-                        .id("\(s.currentRange)-\(chartStyle.rawValue)")
+                        .id("\(chartRange)-\(chartStyle.rawValue)")
                     } else {
                         Text("No equity history yet — broker is fetching…")
                             .font(.footnote)
@@ -311,7 +315,8 @@ private struct LiveTradingContent: View {
                         position: p,
                         chartStyle: chartStyle,
                         range: s.currentRange,
-                        historicals: s.positionHistoricals[p.symbol] ?? []
+                        historicals: s.positionHistoricals[p.symbol] ?? [],
+                        historicalsRange: s.positionHistoricalsRange
                     )
                     .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                         if p.canClose {

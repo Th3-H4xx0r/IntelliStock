@@ -229,6 +229,9 @@ private struct ChatChartBlock: View {
                             AxisValueLabel().font(.caption2)
                         }
                     }
+                    // The plot draws in left to right as the block appears;
+                    // the axes stay put.
+                    .chartPlotStyle { $0.chartDrawIn() }
                     .frame(height: 200)
                 }
                 .padding(12)

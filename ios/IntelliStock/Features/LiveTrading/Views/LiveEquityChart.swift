@@ -3,7 +3,9 @@ import SwiftUI
 
 /// The live equity chart — `EquityChart` in `equity_chart.dart`: area,
 /// line or candles over a gapless index axis (1D area/line on the fixed
-/// full-day minute axis), with a scrub that reports the nearest point.
+/// full-day minute axis), with a scrub that reports the nearest point. It
+/// draws itself in from the leading edge for each range and style
+/// (`chartDrawIn`); polls leave it still.
 struct LiveEquityChart: View {
     let history: PortfolioHistory
     let style: LiveChartStyle
@@ -106,6 +108,7 @@ struct LiveEquityChart: View {
             .chartLegend(.hidden)
             .chartXSelection(value: $selectedX)
             .frame(height: plotHeight)
+            .chartDrawIn(trigger: AnyHashable([range, style.rawValue]), interacting: selectedX != nil)
             .accessibilityElement()
             .accessibilityLabel("Equity chart")
             .accessibilityValue(fmtMoney(values.last))

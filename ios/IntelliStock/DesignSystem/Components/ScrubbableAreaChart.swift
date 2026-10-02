@@ -31,6 +31,9 @@ struct ScrubbableChartMarker: Identifiable, Hashable {
 /// - A scrub: drag across it for a hairline and a dot on the line, with a
 ///   selection haptic each time the snapped point changes. `onScrub` reports
 ///   the index, then nil when the finger lifts.
+/// - It draws itself in from the leading edge (`chartDrawIn`) when it first
+///   appears and whenever `drawInKey` changes; polls that only append or
+///   update points leave it still.
 ///
 /// Plotted against real time, so unevenly spaced samples and `markers` stay
 /// aligned; `indexed` spaces points evenly instead (no weekend or overnight
@@ -46,8 +49,13 @@ struct ScrubbableAreaChart: View {
     var baseline: Double?
     var markers: [ScrubbableChartMarker] = []
     var onScrub: ((Int?) -> Void)?
-    /// Grow the line in on first appearance (skipped under Reduce Motion).
+    /// Draw the line in from the leading edge on first appearance (skipped
+    /// under Reduce Motion).
     var animate = true
+    /// What names the series (its range, its account): a new key draws the
+    /// chart in again. Leave it out for a chart whose series never changes in
+    /// place.
+    var drawInKey = AnyHashable(0)
     var indexed = false
     /// A live dot pulsing at the latest value while not scrubbing.
     var pulsingEndDot = false
@@ -56,7 +64,6 @@ struct ScrubbableAreaChart: View {
 
     @State private var selectedX: Double?
     @State private var scrub = ScrubController(onTick: {})
-    @State private var revealed = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private static let labelRowHeight: CGFloat = 20
@@ -77,7 +84,6 @@ struct ScrubbableAreaChart: View {
         let bounds = paddedBounds(baseline.map { values + [$0] } ?? values)
         let span = timestamps[n - 1].timeIntervalSince(timestamps[0])
         let labels = evenlySpacedLabelIndices(n, 4).map { formatChartDateBySpan(timestamps[$0], span) }
-        let showValues = revealed || !animate || reduceMotion
         let sample = scrub.value.flatMap { $0.index < n ? $0 : nil }
 
         return VStack(spacing: 0) {
@@ -90,16 +96,15 @@ struct ScrubbableAreaChart: View {
                 }
 
                 ForEach(0..<n, id: \.self) { i in
-                    let v = showValues ? values[i] : bounds.min
                     AreaMark(
                         x: .value("Time", x(i)),
                         yStart: .value("Floor", bounds.min),
-                        yEnd: .value("Value", v)
+                        yEnd: .value("Value", values[i])
                     )
                     .foregroundStyle(lineColor.opacity(DS.chartAreaOpacity))
                     .interpolationMethod(.monotone)
 
-                    LineMark(x: .value("Time", x(i)), y: .value("Value", v))
+                    LineMark(x: .value("Time", x(i)), y: .value("Value", values[i]))
                         .foregroundStyle(lineColor)
                         .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
                         .interpolationMethod(.monotone)
@@ -120,7 +125,7 @@ struct ScrubbableAreaChart: View {
                         .lineStyle(StrokeStyle(lineWidth: 1.2))
                     PointMark(x: .value("Time", x(sample.index)), y: .value("Value", values[sample.index]))
                         .symbol { ScrubDot(color: lineColor) }
-                } else if pulsingEndDot, showValues {
+                } else if pulsingEndDot {
                     PointMark(x: .value("Time", x(n - 1)), y: .value("Value", values[n - 1]))
                         .symbol { LiveEndDot(color: lineColor, pulsing: !reduceMotion) }
                 }
@@ -132,6 +137,7 @@ struct ScrubbableAreaChart: View {
             .chartLegend(.hidden)
             .chartXSelection(value: $selectedX)
             .frame(height: plotHeight)
+            .chartDrawIn(trigger: drawInKey, enabled: animate, interacting: selectedX != nil)
 
             ChartDateLabels(labels: labels)
                 .frame(height: Self.labelRowHeight, alignment: .bottom)
@@ -141,14 +147,6 @@ struct ScrubbableAreaChart: View {
             select(newValue, count: n)
         }
         .sensoryFeedback(.selection, trigger: scrub.value?.index) { _, new in new != nil }
-        .onAppear {
-            guard !revealed else { return }
-            if animate, !reduceMotion {
-                withAnimation(.easeOut(duration: 0.7)) { revealed = true }
-            } else {
-                revealed = true
-            }
-        }
     }
 
     // MARK: Geometry
