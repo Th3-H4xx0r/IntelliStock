@@ -261,6 +261,8 @@ final class KalshiInstanceFormModel {
     /// `_submit`. Returns the brokerage id on success (the sheet closes and
     /// calls `onCreated(bid)`); nil when validation or the request failed.
     func submit() async -> String? {
+        // One tap, one request.
+        guard !creating else { return nil }
         if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             err = "Name is required"
             return nil

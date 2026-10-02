@@ -152,9 +152,11 @@ struct CryptoBacktestFormModelTests {
         #expect(body["initial_cash"] == 2500.0)
         #expect(body["emulate_fee_venue"] == "kraken")
         #expect(body["granularity"] == "300")
-        m.start = m.end
-        #expect(await m.submit() == nil)
-        #expect(m.err == "End date must be after start date")
+        // A submitted sheet stays busy (it closes); validate on a fresh one.
+        let fresh = CryptoBacktestFormModel(inst: inst, now: now, repository: { CryptoRepository(client: stub.client) })
+        fresh.start = fresh.end
+        #expect(await fresh.submit() == nil)
+        #expect(fresh.err == "End date must be after start date")
     }
 
     @Test func missingBandFallsBackToMedium() {

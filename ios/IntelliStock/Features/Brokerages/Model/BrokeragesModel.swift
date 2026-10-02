@@ -106,6 +106,12 @@ final class LinkBrokerageFormModel {
     private(set) var submitting = false
     private(set) var submitMsg: String?
     private(set) var submitOk = false
+    /// A save succeeded: the sheet holds the success line for 1.2 s, then
+    /// closes. Nothing may submit again in that window.
+    private(set) var finished = false
+
+    /// The submit buttons are disabled: a save in flight, or done.
+    var locked: Bool { submitting || finished }
 
     @ObservationIgnored private let repository: () -> BrokerageRepository
 
@@ -209,6 +215,7 @@ final class LinkBrokerageFormModel {
     /// `_submitAlpaca`. Returns true after a successful save (the sheet then
     /// refreshes the list and closes after 1.2 s).
     func submitAlpaca(bypassTest: Bool = false) async -> Bool {
+        guard !locked else { return false }
         let name = alpacaName.trimmed
         let key = alpacaKey.trimmed
         let secret = alpacaSecret.trimmed
@@ -273,6 +280,7 @@ final class LinkBrokerageFormModel {
 
     /// `_submitBinanceus`.
     func submitBinanceus() async -> Bool {
+        guard !locked else { return false }
         let name = binanceName.trimmed
         let key = binanceKey.trimmed
         let secret = binanceSecret.trimmed
@@ -318,6 +326,7 @@ final class LinkBrokerageFormModel {
                 _ = try await repository().link(body)
             }
             setMsg(isEditing ? "Account updated!" : "Account linked!", ok: true)
+            finished = true
             submitting = false
             return true
         } catch {

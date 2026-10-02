@@ -213,6 +213,8 @@ final class KalshiBacktestModel {
 
     /// `_submit`. Returns the new backtest id to open, or nil.
     func submit() async -> String? {
+        // One tap, one request.
+        guard !submitting else { return nil }
         err = nil
         guard let start, let end else {
             err = "Pick a start and end date."

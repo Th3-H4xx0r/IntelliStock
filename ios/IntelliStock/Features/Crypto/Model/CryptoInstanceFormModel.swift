@@ -370,6 +370,8 @@ final class CryptoInstanceFormModel {
 
     /// `_submit`. True when saved (the sheet closes and calls `onSaved`).
     func submit() async -> Bool {
+        // One tap, one request.
+        guard !saving else { return false }
         if !isEdit, instanceIdText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             err = "Instance ID is required"
             return false
