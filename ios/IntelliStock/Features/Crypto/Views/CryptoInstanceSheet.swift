@@ -341,8 +341,9 @@ struct CryptoInstanceSheet: View {
         .padding(.top, 8)
     }
 
-    /// The confirm action, in the toolbar (Form rule), with the Dart
-    /// bottom button's labels and in-flight guard.
+    /// The confirm action, in the toolbar (Form rule): the prominent
+    /// checkmark, with the Dart button's labels for VoiceOver, a spinner
+    /// while saving, and the same in-flight guard.
     private var submitButton: some View {
         Button {
             Task {
@@ -352,8 +353,13 @@ struct CryptoInstanceSheet: View {
                 }
             }
         } label: {
-            Text(model.saving ? "Saving…" : (model.isEdit ? "Save Changes" : "Create Instance"))
+            if model.saving {
+                ProgressView().accessibilityLabel("Saving…")
+            } else {
+                Label(model.isEdit ? "Save Changes" : "Create Instance", systemImage: "checkmark")
+            }
         }
+        .dsGlassProminentButton()
         .disabled(model.saving)
     }
 }

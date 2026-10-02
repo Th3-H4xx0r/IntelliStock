@@ -86,8 +86,13 @@ struct CryptoBacktestSheet: View {
                     Button {
                         Task { await submit() }
                     } label: {
-                        Text(model.busy ? "Queuing…" : "Run Backtest")
+                        if model.busy {
+                            ProgressView().accessibilityLabel("Queuing…")
+                        } else {
+                            Label("Run Backtest", systemImage: "checkmark")
+                        }
                     }
+                    .dsGlassProminentButton()
                     .disabled(model.busy)
                 }
             }

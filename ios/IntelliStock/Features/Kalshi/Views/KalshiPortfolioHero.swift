@@ -165,11 +165,12 @@ private struct KalshiLeagueList: View {
                         Spacer()
                         if on {
                             Image(systemName: Symbol.named("check"))
-                                .foregroundStyle(.tint)
+                                .foregroundStyle(DS.Palette.accent)
                                 .fontWeight(.semibold)
                         }
                     }
                 }
+                .tint(.primary)
                 .accessibilityAddTraits(on ? .isSelected : [])
             }
         }

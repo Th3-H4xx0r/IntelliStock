@@ -72,26 +72,6 @@ struct MarketsInfoLabel: View {
     }
 }
 
-/// A card header: an accent glyph and an upper-cased eyebrow title — the
-/// screens' `_KCard` / `_card` header rows.
-struct MarketsCardHeader: View {
-    let icon: String
-    let title: String
-    var color: Color = DS.Palette.accent
-
-    var body: some View {
-        Label {
-            Text(title.uppercased())
-                .font(.footnote.weight(.semibold))
-                .foregroundStyle(.secondary)
-        } icon: {
-            Image(systemName: Symbol.named(icon))
-                .foregroundStyle(color)
-        }
-        .accessibilityAddTraits(.isHeader)
-    }
-}
-
 /// A round team crest: the network image, else initials on a grey disc
 /// (`_posCrest`, `_crest`, `_teamBadge`).
 struct MarketsCrest: View {

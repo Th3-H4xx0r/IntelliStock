@@ -126,7 +126,8 @@ struct CryptoInstanceDetailView: View {
                 Sector3DChart(slices: model.slices)
                     .frame(width: 220)
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 20)
+                    .padding(.top, 8)
+                    .padding(.bottom, 12)
                 LabeledContent("Dynamic strategy", value: strat.isEmpty ? "—" : CryptoCatalog.capitalized(strat))
                 if !model.allocChips.isEmpty {
                     MarketsFlowLayout {
