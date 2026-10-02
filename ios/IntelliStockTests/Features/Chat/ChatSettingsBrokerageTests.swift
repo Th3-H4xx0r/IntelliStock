@@ -104,7 +104,7 @@ import Testing
     @Test func deviceSubtitleAndVersion() {
         let device = PushDevice(json: ["device_token": "0123456789abcdef", "platform": "ios", "env": "sandbox", "last_seen": "2026-06-11T00:00:00Z"])
         #expect(device.tokenSuffix == "…89abcdef")
-        #expect(pushDeviceSubtitle(device) == "IOS · sandbox · seen 2026-06-11")
+        #expect(pushDeviceSubtitle(device) == "iOS · sandbox · seen 2026-06-11")
         #expect(appVersionString(["CFBundleShortVersionString": "1.2.0", "CFBundleVersion": "7"]) == "1.2.0+7")
         #expect(appVersionString(["CFBundleShortVersionString": "1.2.0", "CFBundleVersion": ""]) == "1.2.0")
     }
