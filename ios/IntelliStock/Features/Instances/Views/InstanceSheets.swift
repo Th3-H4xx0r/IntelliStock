@@ -492,6 +492,14 @@ struct InstanceClearStateSheet: View {
                 }
             }
             .interactiveDismissDisabled(locked)
+            // A preview speaks for one scope: picking another drops it (and
+            // the typed confirmation), so Confirm can never clear a scope
+            // that was not previewed.
+            .onChange(of: scope) {
+                preview = nil
+                confirmed = false
+                success = nil
+            }
         }
         .presentationDragIndicator(.visible)
     }

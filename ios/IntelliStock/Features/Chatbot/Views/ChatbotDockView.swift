@@ -231,9 +231,11 @@ private struct ChatbotBody: View {
                 Task { await model.setModel(chosen.id) }
             }
         } else if st.messages.isEmpty {
-            ChatEmptyBody { suggestion in
-                Task { await model.send(suggestion) }
-            }
+            ChatEmptyBody(
+                onSuggestion: { suggestion in Task { await model.send(suggestion) } },
+                error: st.error,
+                onDismissError: { model.clearError() }
+            )
         } else {
             ChatMessageList(model: model)
         }
@@ -243,6 +245,10 @@ private struct ChatbotBody: View {
 /// `_EmptyBody`: what to ask, with three suggestions.
 private struct ChatEmptyBody: View {
     let onSuggestion: (String) -> Void
+    /// A failure with no message list to show it in (e.g. the conversation
+    /// list failed to load).
+    var error: String?
+    var onDismissError: () -> Void = {}
 
     private static let suggestions = [
         "List my instances",
@@ -272,6 +278,10 @@ private struct ChatEmptyBody: View {
                     }
                 }
                 .padding(.top, 16)
+                if let error {
+                    ErrorRow(message: error, onRetry: onDismissError)
+                        .padding(.top, 16)
+                }
             }
             .padding(24)
             .frame(maxWidth: .infinity)

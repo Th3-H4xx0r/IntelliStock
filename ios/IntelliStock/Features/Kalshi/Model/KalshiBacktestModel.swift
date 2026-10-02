@@ -240,13 +240,26 @@ final class KalshiBacktestModel {
         }
     }
 
-    func stopBacktest(_ id: String) async {
-        try? await repository().stopBacktest(id)
-        await loadBacktests()
+    /// Stop, then refresh the list. Returns the error text for a toast (nil
+    /// on success or when cancelled) instead of failing silently.
+    @discardableResult
+    func stopBacktest(_ id: String) async -> String? {
+        await act { try await $0.stopBacktest(id) }
     }
 
-    func deleteBacktest(_ id: String) async {
-        try? await repository().deleteBacktest(id)
+    @discardableResult
+    func deleteBacktest(_ id: String) async -> String? {
+        await act { try await $0.deleteBacktest(id) }
+    }
+
+    private func act(_ call: (KalshiRepository) async throws -> Void) async -> String? {
+        var failure: String?
+        do {
+            try await call(repository())
+        } catch {
+            if !error.isCancellation { failure = KalshiFormat.errorText(error) }
+        }
         await loadBacktests()
+        return failure
     }
 }
