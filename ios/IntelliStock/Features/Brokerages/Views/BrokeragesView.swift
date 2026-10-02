@@ -29,7 +29,7 @@ struct BrokeragesView: View {
                     .buttonBorderShape(.capsule)
                 }
                 .listRowBackground(Color.clear)
-                .listRowInsets(EdgeInsets(top: 0, leading: 4, bottom: 8, trailing: 4))
+                .listRowInsets(EdgeInsets(top: 12, leading: 4, bottom: 8, trailing: 4))
             }
 
             switch model?.accounts ?? .loading {
