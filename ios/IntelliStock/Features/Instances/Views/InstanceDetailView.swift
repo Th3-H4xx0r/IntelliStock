@@ -1,8 +1,11 @@
 import SwiftUI
 
-/// One instance — `InstanceDetailScreen` in `instance_detail_screen.dart`:
-/// header and run control, info / brokerage / strategy cards, the swing and
-/// wheel lanes, stocks, live logs and the instance's backtests.
+/// One instance — `InstanceDetailScreen` in `instance_detail_screen.dart` —
+/// as an inset-grouped list (redesign spec 2026-10-02). The instance's name
+/// is the inline title; Start / Stop is the toolbar's primary action and the
+/// rest (Live Trading, Clear State, the brokerage and strategy links) sits in
+/// its More menu. Sections: status, brokerage, strategy, the swing and wheel
+/// lanes, stocks, live logs and the instance's backtests.
 struct InstanceDetailView: View {
     let instanceId: String
 
@@ -34,6 +37,7 @@ private struct InstanceDetailContent: View {
 
     @State private var model: InstanceDetailModel
     @State private var signals: PendingSignalsModel
+    @State private var signalActions = PendingSignalsActions()
     @State private var wheel: WheelModel
     @State private var sheet: InstanceDetailSheet?
     @State private var confirm: ConfirmRequest?
@@ -59,33 +63,95 @@ private struct InstanceDetailContent: View {
         ))
     }
 
+    private var instance: Instance? { model.value?.instance }
+    private var lanes: SwingLanes { swingLanesOf(instance?.strategy) }
+
     var body: some View {
+        @Bindable var signalActions = signalActions
         content
-            .background(DS.Surface.canvas)
+            .listStyle(.insetGrouped)
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        Task { await model.refreshInstance() }
-                    } label: {
-                        Image(systemName: Symbol.named("refresh"))
-                    }
-                    .accessibilityLabel("Refresh")
-                }
-            }
+            .toolbar { toolbar }
             .task { if model.value == nil { await model.load() } }
             .task { await model.runUptimeTicker() }
             .task { await model.runProgressPoll(lifecycle: services.lifecycle) }
+            // The lanes' polls run for the screen, not for a list row.
+            .task(id: lanes.any) {
+                if lanes.any { await signals.poll(lifecycle: services.lifecycle) }
+            }
+            .task(id: lanes.wheel) {
+                if lanes.wheel, wheel.state.value == nil { await wheel.load() }
+            }
             .sheet(item: $sheet) { sheetView($0) }
             .confirmAlert($confirm, isRunning: $confirmRunning)
+            .confirmAlert($signalActions.confirm, isRunning: $signalActions.confirmRunning)
             .toast($toast)
     }
 
     private var title: String {
-        guard let inst = model.value?.instance else { return "" }
+        guard let inst = instance else { return "" }
         return inst.name.isEmpty ? inst.id : inst.name
     }
+
+    // MARK: Toolbar
+
+    @ToolbarContentBuilder
+    private var toolbar: some ToolbarContent {
+        if let inst = instance {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    toggling = true
+                    Task {
+                        await model.toggleRun()
+                        toggling = false
+                    }
+                } label: {
+                    if toggling {
+                        ProgressView()
+                    } else {
+                        Text(inst.runCommand ? "Stop" : "Start")
+                    }
+                }
+                .dsProminentButton()
+                .disabled(toggling)
+                .accessibilityLabel(inst.runCommand ? "Stop" : "Start")
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                ToolbarMenu {
+                    Section {
+                        Button("Live Trading", systemImage: "chart.xyaxis.line") {
+                            services.router.push(.liveTrading(inst.id))
+                        }
+                        Button("New Backtest", systemImage: "play.circle") { sheet = .createBacktest }
+                    }
+                    Section {
+                        Button(inst.brokerageId != nil ? "Change Brokerage" : "Link Brokerage", systemImage: "link") {
+                            sheet = .linkBrokerage(inst.brokerageId)
+                        }
+                        if inst.strategyId == nil {
+                            Button("Link Strategy", systemImage: "link") { sheet = .linkStrategy }
+                        }
+                        Button("Add Stock…", systemImage: "plus") { sheet = .addStock }
+                        Button("Copy ID", systemImage: "doc.on.doc") { UIPasteboard.general.string = inst.id }
+                    }
+                    Section {
+                        Button("Clear State", systemImage: "eraser", role: .destructive) { sheet = .clearState }
+                        if inst.brokerageId != nil {
+                            Button("Unlink Brokerage", systemImage: "xmark", role: .destructive) { confirmUnlinkBrokerage() }
+                                .disabled(confirmRunning)
+                        }
+                        if inst.strategyId != nil {
+                            Button("Unlink Strategy", systemImage: "xmark", role: .destructive) { confirmUnlinkStrategy() }
+                                .disabled(confirmRunning)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: Content
 
     @ViewBuilder
     private var content: some View {
@@ -93,67 +159,51 @@ private struct InstanceDetailContent: View {
         case .loading:
             InstanceDetailSkeleton()
         case .failed:
-            ScrollView {
-                ErrorRow(message: model.state.errorMessage ?? "") {
-                    Task { await model.reload() }
+            List {
+                Section {
+                    ErrorRow(message: model.state.errorMessage ?? "") {
+                        Task { await model.reload() }
+                    }
                 }
-                .padding(24)
             }
         case .loaded(let state):
             if let inst = state.instance {
                 detail(inst, state)
             } else {
-                ErrorRow(message: "Instance not found")
-                    .padding(24)
+                List {
+                    Section { ErrorRow(message: "Instance not found") }
+                }
             }
         }
     }
 
     private func detail(_ inst: Instance, _ state: InstanceDetailState) -> some View {
         let lanes = swingLanesOf(inst.strategy)
-        return ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                header(inst)
-                    .padding(.bottom, 8)
-                if let message = state.errorMessage {
-                    ErrorRow(message: message)
-                }
-                infoCard(inst, state)
-                brokerageCard(inst)
-                strategyCard(inst)
-                if lanes.any {
-                    PendingSignalsSection(model: signals) { toast = $0 }
-                }
-                if lanes.wheel {
-                    WheelCard(model: wheel)
-                }
-                Card(padding: 16) {
-                    InstanceStocksBlock(
-                        title: "Stocks (\(inst.stocks.count))",
-                        stocks: inst.stocks,
-                        titleFont: .subheadline.weight(.semibold),
-                        onAdd: { sheet = .addStock },
-                        onRemove: { sym in
-                            Task {
-                                do { try await model.removeStock(sym) } catch {
-                                    if !error.isCancellationOrTaskCancelled { toast = Toast(swingErrorText(error), style: .error) }
-                                }
-                            }
-                        }
-                    )
-                }
-                LiveLogsPanel(instanceId: inst.id)
-                InstanceBacktestsSection(
-                    state: state,
-                    onNew: { sheet = .createBacktest },
-                    onSort: { field in Task { await model.sortBacktests(field) } },
-                    onPage: { page in Task { await model.goToBacktestPage(page) } },
-                    onOpen: { services.router.push(.backtest($0)) }
-                )
+        return List {
+            if let message = state.errorMessage {
+                Section { ErrorRow(message: message) }
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 8)
-            .padding(.bottom, 80)
+            statusSection(inst, state)
+            brokerageSection(inst)
+            strategySection(inst)
+            if lanes.any {
+                PendingSignalsSection(model: signals, actions: signalActions) { toast = $0 }
+            }
+            if lanes.wheel {
+                WheelSections(model: wheel)
+            }
+            stocksSection(inst)
+            Section("Live logs") {
+                LiveLogsPanel(instanceId: inst.id)
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
+            }
+            InstanceBacktestsSection(
+                state: state,
+                onNew: { sheet = .createBacktest },
+                onSort: { field in Task { await model.sortBacktests(field) } },
+                onPage: { page in Task { await model.goToBacktestPage(page) } }
+            )
         }
         .refreshable {
             await model.refreshInstance()
@@ -162,198 +212,141 @@ private struct InstanceDetailContent: View {
         }
     }
 
-    // MARK: Header
+    // MARK: Status
 
-    private func header(_ inst: Instance) -> some View {
-        let isAi = inst.createdBy == "ai"
-        return VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top, spacing: 12) {
-                IconTile(systemImage: Symbol.named("memory"), size: 44)
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text(inst.name.isEmpty ? inst.id : inst.name)
-                            .font(.title3.bold())
-                            .lineLimit(1)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        AppBadge(label: isAi ? "AI" : "User", color: isAi ? DS.Palette.accent : .secondary)
-                    }
-                    Text(inst.id)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+    private func statusSection(_ inst: Instance, _ state: InstanceDetailState) -> some View {
+        Section("Status") {
+            StatGrid(columns: 2) {
+                StatCell(label: "Status") { InstanceStatusDot(inst: inst) }
+                StatCell(
+                    label: "Uptime",
+                    value: instanceUptimeLabel(state.liveUptimeSecs),
+                    valueColor: inst.runCommand ? DS.Palette.success : .secondary
+                )
+                StatCell(label: "Granularity", value: instanceGranLabel(inst.granularityTimeIncrement))
+                if let maxUsage = inst.maxUsage {
+                    StatCell(label: "Max usage", value: fmtMoney(maxUsage))
                 }
+                StatCell(label: "Created by", value: inst.createdBy == "ai" ? "AI" : "User")
             }
-            HStack(spacing: 8) {
-                InstanceStatusBadge(inst: inst)
-                Button {
-                    toggling = true
-                    Task {
-                        await model.toggleRun()
-                        toggling = false
-                    }
-                } label: {
-                    HStack(spacing: 4) {
-                        if toggling {
-                            ProgressView().controlSize(.mini)
-                        } else {
-                            Image(systemName: Symbol.named(inst.runCommand ? "stop" : "play_arrow"))
-                        }
-                        Text(inst.runCommand ? "Stop" : "Start")
-                    }
-                }
-                .buttonStyle(.bordered)
-                .tint(inst.runCommand ? DS.Palette.warning : DS.Palette.success)
-                .disabled(toggling)
-                Button {
-                    services.router.push(.liveTrading(inst.id))
-                } label: {
-                    Label("Live Trading", systemImage: Symbol.named("monitoring"))
-                }
-                .buttonStyle(.bordered)
+            .padding(.vertical, 4)
+            LabeledContent("ID") {
+                Text(inst.id)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
-            .controlSize(.small)
-        }
-    }
-
-    // MARK: Cards
-
-    private func cardTitle(_ text: String) -> some View {
-        Text(text)
-            .font(.subheadline.weight(.semibold))
-            .accessibilityAddTraits(.isHeader)
-    }
-
-    private func tinyButton(_ label: String, _ symbol: String, _ tint: Color, role: ButtonRole? = nil, action: @escaping () -> Void) -> some View {
-        Button(role: role, action: action) {
-            Label(label, systemImage: Symbol.named(symbol))
-                .font(.caption.weight(.semibold))
-        }
-        .buttonStyle(.borderless)
-        .tint(tint)
-        .frame(minHeight: 44)
-    }
-
-    private func infoCard(_ inst: Instance, _ state: InstanceDetailState) -> some View {
-        Card(padding: 16) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    cardTitle("Instance Info")
-                    Spacer()
-                    tinyButton("Clear State", "delete_sweep", DS.Palette.danger) { sheet = .clearState }
-                }
-                LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
-                    StatTile(
-                        label: "Uptime",
-                        value: instanceUptimeLabel(state.liveUptimeSecs),
-                        valueColor: inst.runCommand ? DS.Palette.success : .secondary
-                    )
-                    StatTile(label: "Granularity", value: instanceGranLabel(inst.granularityTimeIncrement))
-                    if let maxUsage = inst.maxUsage {
-                        StatTile(label: "Max Usage", value: fmtMoney(maxUsage))
-                    }
-                    StatTile(label: "Created By", value: inst.createdBy == "ai" ? "AI" : "User")
-                }
+            .contextMenu {
+                Button("Copy ID", systemImage: "doc.on.doc") { UIPasteboard.general.string = inst.id }
             }
         }
     }
 
-    private func brokerageCard(_ inst: Instance) -> some View {
+    // MARK: Brokerage
+
+    private func brokerageSection(_ inst: Instance) -> some View {
         var name = "—"
         var type = ""
         if let b = inst.brokerage {
             name = (b["account_name"] ?? .null).string ?? "—"
             type = (b["brokerage_type"] ?? .null).string ?? ""
         } else if let id = inst.brokerageId {
-            name = id
+            name = instanceBrokerageName(id, nested: nil, brokerages: services.dashboard.brokeragesValue)
         }
+        let dataSource = inst.alpacaDataBrokerageId.map {
+            instanceBrokerageName($0, nested: nil, brokerages: services.dashboard.brokeragesValue)
+        } ?? "—"
         let linked = inst.brokerageId != nil
-        return Card(padding: 16) {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    cardTitle("Brokerage")
-                    Spacer()
-                    tinyButton(linked ? "Change" : "Link", "link", DS.Palette.teal) {
-                        sheet = .linkBrokerage(inst.brokerageId)
+        return Section("Brokerage") {
+            LabeledContent("Trading account", value: "\(name)\(type.isEmpty ? "" : " (\(type))")")
+            LabeledContent("Market data source", value: dataSource)
+            if !linked {
+                InlineActionRow("Link Brokerage", systemImage: "link") { sheet = .linkBrokerage(inst.brokerageId) }
+            }
+        }
+    }
+
+    private func confirmUnlinkBrokerage() {
+        confirm = ConfirmRequest(
+            title: "Unlink Brokerage",
+            body: "Remove the brokerage from this instance?",
+            confirmLabel: "Unlink",
+            role: .destructive,
+            onConfirm: { try await model.unlinkBrokerage() },
+            onError: { toast = Toast(swingErrorText($0), style: .error) }
+        )
+    }
+
+    // MARK: Strategy
+
+    private func strategySection(_ inst: Instance) -> some View {
+        let name = (inst.strategy?["name"]).flatMap { $0.isNull ? nil : $0.dartDescription } ?? inst.strategyId ?? "—"
+        let subs = inst.strategy?["strategies"]?.array ?? []
+        return Section("Strategy") {
+            if inst.strategyId == nil {
+                Text("No strategy linked")
+                    .foregroundStyle(.secondary)
+                InlineActionRow("Link Strategy", systemImage: "link") { sheet = .linkStrategy }
+            } else {
+                LabeledContent("Name", value: name)
+                LabeledContent("ID", value: inst.strategyId ?? "—")
+                if !subs.isEmpty {
+                    LabeledContent("Sub-strategies") {
+                        VStack(alignment: .trailing, spacing: 2) {
+                            ForEach(Array(subs.prefix(5).enumerated()), id: \.offset) { _, sub in
+                                if sub.isObject {
+                                    Text(sub["strategy"].isNull ? "?" : sub["strategy"].dartDescription)
+                                        .lineLimit(1)
+                                }
+                            }
+                            if subs.count > 5 {
+                                Text("+\(subs.count - 5) more")
+                                    .font(.footnote)
+                            }
+                        }
                     }
-                }
-                .padding(.bottom, 8)
-                InstanceInfoRow(label: "Trading Account", value: "\(name)\(type.isEmpty ? "" : " (\(type))")")
-                InstanceInfoRow(label: "Market Data Source", value: inst.alpacaDataBrokerageId ?? "—")
-                if linked {
-                    tinyButton("Unlink Brokerage", "close", DS.Palette.danger, role: .destructive) {
-                        confirm = ConfirmRequest(
-                            title: "Unlink Brokerage",
-                            body: "Remove the brokerage from this instance?",
-                            confirmLabel: "Unlink",
-                            role: .destructive,
-                            onConfirm: { try await model.unlinkBrokerage() },
-                            onError: { toast = Toast(swingErrorText($0), style: .error) }
-                        )
-                    }
-                    .disabled(confirmRunning)
-                    .padding(.top, 4)
                 }
             }
         }
     }
 
-    private func strategyCard(_ inst: Instance) -> some View {
-        let name = (inst.strategy?["name"]).flatMap { $0.isNull ? nil : $0.dartDescription } ?? inst.strategyId ?? "—"
-        let subs = inst.strategy?["strategies"]?.array ?? []
-        return Card(padding: 16) {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    cardTitle("Strategy")
-                    Spacer()
-                    if inst.strategyId == nil {
-                        tinyButton("Link", "link", DS.Palette.accent) { sheet = .linkStrategy }
-                    } else {
-                        tinyButton("Unlink", "close", DS.Palette.danger, role: .destructive) {
-                            confirm = ConfirmRequest(
-                                title: "Unlink Strategy",
-                                body: "Remove the strategy from this instance?",
-                                confirmLabel: "Unlink",
-                                role: .destructive,
-                                onConfirm: { try await model.unlinkStrategy() },
-                                onError: { toast = Toast(swingErrorText($0), style: .error) }
-                            )
+    private func confirmUnlinkStrategy() {
+        confirm = ConfirmRequest(
+            title: "Unlink Strategy",
+            body: "Remove the strategy from this instance?",
+            confirmLabel: "Unlink",
+            role: .destructive,
+            onConfirm: { try await model.unlinkStrategy() },
+            onError: { toast = Toast(swingErrorText($0), style: .error) }
+        )
+    }
+
+    // MARK: Stocks
+
+    private func stocksSection(_ inst: Instance) -> some View {
+        DSSection("Stocks (\(inst.stocks.count))", action: DSSectionAction("Add", systemImage: "plus") { sheet = .addStock }) {
+            if inst.stocks.isEmpty {
+                Text("No stocks added")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(inst.stocks, id: \.self) { sym in
+                    Text(sym)
+                        .font(.headline)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button("Remove", systemImage: "trash", role: .destructive) { removeStock(sym) }
                         }
-                        .disabled(confirmRunning)
-                    }
+                        .contextMenu {
+                            Button("Remove", systemImage: "trash", role: .destructive) { removeStock(sym) }
+                        }
+                        .accessibilityHint("Swipe left to remove")
                 }
-                .padding(.bottom, 8)
-                if inst.strategyId == nil {
-                    Text("No strategy linked")
-                        .font(.footnote)
-                        .italic()
-                        .foregroundStyle(.secondary)
-                } else {
-                    InstanceInfoRow(label: "Name", value: name)
-                    InstanceInfoRow(label: "ID", value: inst.strategyId ?? "—")
-                    if !subs.isEmpty {
-                        Text("Sub-strategies")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                            .padding(.top, 8)
-                        ForEach(Array(subs.prefix(5).enumerated()), id: \.offset) { _, sub in
-                            if sub.isObject {
-                                HStack(spacing: 6) {
-                                    Circle()
-                                        .fill(DS.Palette.accent)
-                                        .frame(width: 4, height: 4)
-                                    Text(sub["strategy"].isNull ? "?" : sub["strategy"].dartDescription)
-                                        .font(.footnote)
-                                        .lineLimit(1)
-                                }
-                            }
-                        }
-                        if subs.count > 5 {
-                            Text("+\(subs.count - 5) more")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
+            }
+        }
+    }
+
+    private func removeStock(_ symbol: String) {
+        Task {
+            do { try await model.removeStock(symbol) } catch {
+                if !error.isCancellationOrTaskCancelled { toast = Toast(swingErrorText(error), style: .error) }
             }
         }
     }
@@ -377,168 +370,131 @@ private struct InstanceDetailContent: View {
     }
 }
 
-/// `Label:` (120 pt) and value (`_InfoRow`).
-private struct InstanceInfoRow: View {
-    let label: String
-    let value: String
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 0) {
-            Text("\(label):")
-                .foregroundStyle(.secondary)
-                .frame(width: 120, alignment: .leading)
-            Text(value)
-                .lineLimit(1)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .font(.footnote)
-        .padding(.bottom, 4)
-        .accessibilityElement(children: .combine)
-    }
-}
-
-/// The instance's backtests: sort, rows with progress, pagination
-/// (`_BacktestsSection`).
+/// The instance's backtests (`_BacktestsSection`): sort and New Backtest in
+/// the header, a row per backtest that opens it, and paging.
 private struct InstanceBacktestsSection: View {
     let state: InstanceDetailState
     let onNew: () -> Void
     let onSort: (String) -> Void
     let onPage: (Int) -> Void
-    let onOpen: (String) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text("Backtests")
-                    .font(.headline)
-                    .accessibilityAddTraits(.isHeader)
-                Spacer()
-                Button(action: onNew) {
-                    Label("New Backtest", systemImage: Symbol.named("play_circle"))
-                        .font(.caption.weight(.semibold))
-                }
-                .buttonStyle(.borderless)
-                .tint(DS.Palette.info)
-                .frame(minHeight: 44)
-            }
+        Section {
             if state.btLoading, state.backtests.isEmpty {
-                ForEach(0..<3, id: \.self) { _ in
-                    Skeleton(height: 60, radius: DS.Radius.control)
-                }
+                DashboardPlaceholderRows(count: 3)
             } else if state.backtests.isEmpty {
-                Card(padding: 24) {
-                    Text("No backtests yet")
-                        .font(.footnote)
-                        .italic()
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity)
-                }
+                Text("No backtests yet")
+                    .foregroundStyle(.secondary)
             } else {
-                HStack(spacing: 8) {
-                    sortButton("Date", "completed_at")
-                    sortButton("PnL", "pnl")
-                }
                 ForEach(state.backtests) { bt in
-                    InstanceBacktestCard(bt: bt, progress: state.btProgress[bt.id]) { onOpen(bt.id) }
+                    NavigationLink(value: Route.backtest(bt.id)) {
+                        InstanceBacktestRowView(bt: bt, progress: state.btProgress[bt.id])
+                    }
                 }
                 if state.btTotalPages > 1 {
                     HStack {
                         Button {
                             onPage(state.btPage - 1)
                         } label: {
-                            Image(systemName: Symbol.named("arrow_back"))
+                            Image(systemName: "chevron.backward")
                                 .frame(width: 44, height: 44)
                         }
                         .disabled(state.btPage <= 1)
                         .accessibilityLabel("Previous page")
+                        Spacer()
                         Text("Page \(state.btPage) of \(state.btTotalPages)")
-                            .font(.footnote)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                        Spacer()
                         Button {
                             onPage(state.btPage + 1)
                         } label: {
-                            Image(systemName: Symbol.named("arrow_forward"))
+                            Image(systemName: "chevron.forward")
                                 .frame(width: 44, height: 44)
                         }
                         .disabled(state.btPage >= state.btTotalPages)
                         .accessibilityLabel("Next page")
                     }
-                    .frame(maxWidth: .infinity)
+                    .buttonStyle(.borderless)
+                }
+            }
+        } header: {
+            DSSectionHeader("Backtests") {
+                HStack(spacing: 18) {
+                    if !state.backtests.isEmpty {
+                        Menu {
+                            sortButton("Date", "completed_at")
+                            sortButton("PnL", "pnl")
+                        } label: {
+                            Label("Sort", systemImage: "arrow.up.arrow.down")
+                                .labelStyle(.iconOnly)
+                        }
+                        .accessibilityLabel("Sort")
+                    }
+                    Button(action: onNew) {
+                        Label("New Backtest", systemImage: "plus")
+                            .labelStyle(.iconOnly)
+                    }
+                    .accessibilityLabel("New Backtest")
                 }
             }
         }
     }
 
+    /// One sort field: choosing the active field again flips its order.
     private func sortButton(_ label: String, _ field: String) -> some View {
         let active = state.btSortBy == field
         return Button {
             onSort(field)
         } label: {
-            HStack(spacing: 2) {
+            if active {
+                Label(label, systemImage: state.btSortOrder == "asc" ? "arrow.up" : "arrow.down")
+            } else {
                 Text(label)
-                Image(systemName: Symbol.named(active ? (state.btSortOrder == "asc" ? "arrow_upward" : "arrow_downward") : "unfold_more"))
-                    .font(.caption2)
             }
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(active ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
         }
-        .buttonStyle(.borderless)
-        .frame(minHeight: 44)
-        .accessibilityAddTraits(active ? .isSelected : [])
     }
 }
 
-/// One backtest row (`_BacktestCard`).
-private struct InstanceBacktestCard: View {
+/// One backtest row (`_BacktestCard`): the stocks, the date range, the P&L,
+/// the status when it is not finished, and progress while it runs.
+private struct InstanceBacktestRowView: View {
     let bt: InstanceBacktestRow
     let progress: Int?
-    let onTap: () -> Void
 
     var body: some View {
         let running = instanceBacktestIsRunning(bt.status)
-        Button(action: onTap) {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Text(bt.stocks.isEmpty ? "(no stocks)" : bt.stocks.joined(separator: ", "))
-                        .font(.footnote)
-                        .lineLimit(1)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    StatusBadge(label: bt.status, color: StatusBadge.color(forStatus: bt.status), pulsing: running)
-                }
-                HStack {
-                    if let start = bt.startDate {
-                        Text("\(start) → \(bt.endDate ?? "?")")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    } else {
-                        Spacer()
-                    }
+        let finished = ["finished", "completed"].contains(bt.status.lowercased())
+        VStack(alignment: .leading, spacing: 6) {
+            EntityRow(
+                bt.stocks.isEmpty ? "(no stocks)" : bt.stocks.joined(separator: ", "),
+                subtitle: bt.startDate.map { "\($0) → \(bt.endDate ?? "?")" }
+            ) {
+                VStack(alignment: .trailing, spacing: 2) {
                     if let pnl = bt.pnl {
                         Text(fmtPnl(pnl))
-                            .font(.caption.monospaced().weight(.semibold))
+                            .font(.body.monospacedDigit())
                             .foregroundStyle(pnlColor(pnl))
                     }
-                }
-                if running, let progress {
-                    ProgressView(value: min(max(Double(progress) / 100, 0), 1))
-                        .tint(DS.Palette.info)
-                    Text("\(progress)%")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                if let completed = bt.completedAt {
-                    Text("Completed: \(fmtDateTime(completed))")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                    if !finished {
+                        StatusDot(bt.status.dsSentenceCased, status: bt.status, pulsing: running, font: .footnote)
+                    }
                 }
             }
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(DS.Surface.panel, in: .rect(cornerRadius: DS.Radius.control, style: .continuous))
-            .contentShape(Rectangle())
+            if running, let progress {
+                ProgressView(value: min(max(Double(progress) / 100, 0), 1)) {
+                    EmptyView()
+                } currentValueLabel: {
+                    Text("\(progress)%")
+                }
+                .tint(DS.Palette.info)
+            }
+            if let completed = bt.completedAt {
+                Text("Completed: \(fmtDateTime(completed))")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
         }
-        .buttonStyle(.plain)
         .accessibilityElement(children: .combine)
         .accessibilityHint("Opens the backtest")
     }
@@ -547,23 +503,25 @@ private struct InstanceBacktestCard: View {
 /// The detail screen's loading shape.
 private struct InstanceDetailSkeleton: View {
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 12) {
-                    Skeleton.circle(44)
-                    VStack(alignment: .leading, spacing: 6) {
-                        Skeleton(height: 22, radius: 7)
-                        Skeleton(width: 120, height: 10, radius: 5)
-                    }
-                }
-                Skeleton(width: 240, height: 32, radius: 8)
-                ForEach(0..<4, id: \.self) { _ in
-                    Skeleton(height: 96, radius: DS.Radius.card)
+        List {
+            Section("Status") {
+                StatGrid(columns: 3) {
+                    StatCell(label: "Status", value: "Running")
+                    StatCell(label: "Uptime", value: "00h 00m")
+                    StatCell(label: "Granularity", value: "1d")
                 }
             }
-            .padding(16)
+            Section("Brokerage") {
+                LabeledContent("Trading account", value: "Account name")
+                LabeledContent("Market data source", value: "Account name")
+            }
+            Section("Strategy") {
+                LabeledContent("Name", value: "Strategy name")
+                LabeledContent("ID", value: "000")
+            }
         }
-        .scrollDisabled(true)
+        .redacted(reason: .placeholder)
+        .disabled(true)
         .accessibilityLabel("Loading")
     }
 }

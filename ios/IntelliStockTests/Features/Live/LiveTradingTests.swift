@@ -105,7 +105,7 @@ struct LiveEquityGeometryTests {
         let xs = LiveEquityGeometry.xs(h, range: "1D", style: .line)
         #expect(LiveEquityGeometry.scrubIndex(fraction: 0.01, xs: xs, timeAxis: true) <= 1)
         #expect(LiveEquityGeometry.scrubIndex(fraction: 0.99, xs: xs, timeAxis: true) >= 9)
-        #expect(LiveEquityGeometry.labels(h, range: "1D", style: .area) == ["12AM", "6AM", "12PM", "6PM", "12AM"])
+        #expect(LiveEquityGeometry.labels(h, range: "1D", style: .area) == ["12AM", "8AM", "4PM", "12AM"])
     }
 
     @Test func candlesUseTheIndexAxis() {

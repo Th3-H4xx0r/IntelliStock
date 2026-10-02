@@ -66,6 +66,10 @@ struct LiveEquityChart: View {
                         .foregroundStyle(candleColor)
                     }
                 case .area, .line:
+                    // Stocks' dotted baseline at the range's opening value.
+                    RuleMark(y: .value("Open", values[0]))
+                        .foregroundStyle(Color.secondary.opacity(0.5))
+                        .lineStyle(StrokeStyle(lineWidth: 1, dash: DS.baselineDash))
                     ForEach(0..<n, id: \.self) { i in
                         if style == .area {
                             AreaMark(

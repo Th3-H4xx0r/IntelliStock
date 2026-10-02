@@ -62,13 +62,24 @@ nonisolated struct BrokerageAccount: Hashable, Sendable, Identifiable {
     let brokerageType: String
     let status: String
     let alpacaPaper: Bool
+    /// Kalshi's `kalshi_environment`: `live` or `demo` (paper). Empty for
+    /// other brokerages.
+    let kalshiEnvironment: String
 
-    init(id: String, accountName: String, brokerageType: String, status: String, alpacaPaper: Bool = false) {
+    init(
+        id: String,
+        accountName: String,
+        brokerageType: String,
+        status: String,
+        alpacaPaper: Bool = false,
+        kalshiEnvironment: String = ""
+    ) {
         self.id = id
         self.accountName = accountName
         self.brokerageType = brokerageType
         self.status = status
         self.alpacaPaper = alpacaPaper
+        self.kalshiEnvironment = kalshiEnvironment
     }
 
     init(json: JSON) {
@@ -77,11 +88,45 @@ nonisolated struct BrokerageAccount: Hashable, Sendable, Identifiable {
             accountName: json["account_name"].stringOr(""),
             brokerageType: json["brokerage_type"].stringOr(""),
             status: json["status"].stringOr(""),
-            alpacaPaper: json["alpaca_paper"].bool
+            alpacaPaper: json["alpaca_paper"].bool,
+            kalshiEnvironment: json["kalshi_environment"].stringOr("")
         )
     }
 
     var isActive: Bool { status.lowercased() == "active" }
+
+    /// A paper (simulated) account: Alpaca paper, or Kalshi's demo
+    /// environment. The portfolio sheet's "Paper" / "Live" subtitle.
+    var isPaper: Bool { alpacaPaper || kalshiEnvironment.lowercased() == "demo" }
+}
+
+/// One entry of `GET /widget/accounts` — the home-screen widget's
+/// self-refresh payload, one per instance. Its value and day P&L are the
+/// instance's brokerage's 1D portfolio history (`_widget_account` in
+/// `backend/api/main.py`), so every instance on one brokerage carries that
+/// brokerage's figures. Only the fields the portfolio sheet reads.
+nonisolated struct DashboardWidgetAccount: Hashable, Sendable {
+    /// The instance id.
+    let id: String
+    let accountValue: Double
+    let dayPnlAbs: Double
+    let dayPnlPct: Double
+
+    init(id: String, accountValue: Double, dayPnlAbs: Double, dayPnlPct: Double) {
+        self.id = id
+        self.accountValue = accountValue
+        self.dayPnlAbs = dayPnlAbs
+        self.dayPnlPct = dayPnlPct
+    }
+
+    init(json: JSON) {
+        self.init(
+            id: json["id"].stringOr(""),
+            accountValue: json["accountValue"].double ?? 0,
+            dayPnlAbs: json["dayPnlAbs"].double ?? 0,
+            dayPnlPct: json["dayPnlPct"].double ?? 0
+        )
+    }
 }
 
 /// Thin data layer for all dashboard endpoints.
@@ -132,6 +177,13 @@ nonisolated struct DashboardRepository: Sendable {
     func brokerages() async throws -> [BrokerageAccount] {
         let data = try await client.get("/brokerages")
         return data["accounts"].objectElements.map(BrokerageAccount.init(json:))
+    }
+
+    /// GET /widget/accounts → {accounts: [...], synced_at} (read-only; the
+    /// portfolio sheet's equity and day change per account).
+    func widgetAccounts() async throws -> [DashboardWidgetAccount] {
+        let data = try await client.get("/widget/accounts")
+        return data["accounts"].objectElements.map(DashboardWidgetAccount.init(json:))
     }
 
     /// GET /brokerages/{id}/portfolio-history?range=

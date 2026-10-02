@@ -221,63 +221,6 @@ struct DashboardNexusStrategyModelTests {
     }
 }
 
-/// sector_3d_chart_golden_test (behaviour): selection, swipe stepping and
-/// the centre readout.
-struct DashboardSectorDonutTests {
-    private let slices = [
-        SectorSlice(sector: "Technology", value: 4000, pct: 40),
-        SectorSlice(sector: "Healthcare", value: 2500, pct: 25),
-        SectorSlice(sector: "Financials", value: 1500, pct: 15),
-        SectorSlice(sector: "Energy", value: 1200, pct: 12),
-        SectorSlice(sector: "Consumer", value: 800, pct: 8),
-    ]
-
-    @Test func startsOnTheLargestSectorWithTheAllocationReadout() {
-        let s = DashboardSectorSelection(slices: slices)
-        #expect(s.selected == 0)
-        #expect(s.caption == "Allocation")
-        #expect(s.sectorName == "Technology")
-        #expect(s.percentText == "40%")
-    }
-
-    @Test func advanceWrapsBothWays() {
-        var s = DashboardSectorSelection(slices: slices)
-        let back = s.advance(-1)
-        #expect(back)
-        #expect(s.selected == 4)
-        let forward = s.advance(2)
-        #expect(forward)
-        #expect(s.selected == 1)
-        let fullTurn = s.advance(5)
-        #expect(!fullTurn)
-    }
-
-    @Test func swipeStepsEvery44Points() {
-        #expect(DashboardSectorSelection.steps(forDrag: 43) == 0)
-        #expect(DashboardSectorSelection.steps(forDrag: 90) == 2)
-        #expect(DashboardSectorSelection.steps(forDrag: -45) == -1)
-    }
-
-    @Test func angleValuesMapToTheirSlice() {
-        let s = DashboardSectorSelection(slices: slices)
-        #expect(s.index(forAngleValue: 10) == 0)
-        #expect(s.index(forAngleValue: 41) == 1)
-        #expect(s.index(forAngleValue: 99) == 4)
-        #expect(DashboardSectorSelection(slices: []).index(forAngleValue: 1) == nil)
-    }
-
-    @Test func selectIgnoresOutOfRangeAndCurrent() {
-        var s = DashboardSectorSelection(slices: slices)
-        let same = s.select(0)
-        let outOfRange = s.select(9)
-        let energy = s.select(3)
-        #expect(!same)
-        #expect(!outOfRange)
-        #expect(energy)
-        #expect(s.sectorName == "Energy")
-    }
-}
-
 /// kalshi_dashboard_card.dart's copy, and the services card parsing.
 struct DashboardCardCopyTests {
     @Test func kalshiCardFormatsWithoutGrouping() {

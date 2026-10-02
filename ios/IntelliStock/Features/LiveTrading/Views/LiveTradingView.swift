@@ -1,8 +1,13 @@
 import SwiftUI
 
 /// The live trading terminal for one instance — `LiveTradingScreen` in
-/// `live_trading_screen.dart`. REAL money on alpaca-main: Halt, Close and
-/// Manual Order keep every Dart guard (typed confirmations, validation).
+/// `live_trading_screen.dart` — as an inset-grouped list (redesign spec
+/// 2026-10-02): the equity hero with its chart, range and chart-style
+/// pickers; the range and account figures as `StatGrid`s; the recent
+/// executions and active positions as rows; the live logs. REAL money on
+/// alpaca-main: Halt (the floating glass button), Close (a position's swipe
+/// action and context menu) and Manual Order (the toolbar) keep every Dart
+/// guard (typed confirmations, validation).
 struct LiveTradingView: View {
     let instanceId: String
 
@@ -36,12 +41,18 @@ private struct LiveTradingContent: View {
 
     var body: some View {
         content
-            .background(DS.Surface.canvas)
+            .listStyle(.insetGrouped)
             .navigationTitle("Live Trading")
             .navigationSubtitle(instanceId)
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                if let s = model.value, !s.notRunning {
+                    ToolbarItem(placement: .primaryAction) {
+                        Button("Manual Order", systemImage: "cart.badge.plus") { showOrder = true }
+                    }
+                }
+            }
             .overlay(alignment: .bottom) { floatingLayer }
-            // The floating chat button would cover the Halt button.
             .hidesChatButton()
             .task { await model.poll(lifecycle: services.lifecycle) }
             .sheet(isPresented: $showHalt) { LiveHaltSheet(model: model) }
@@ -55,11 +66,12 @@ private struct LiveTradingContent: View {
         case .loading:
             LiveTradingSkeleton()
         case .failed:
-            ScrollView {
-                ErrorRow(message: model.state.errorMessage ?? "") {
-                    Task { await model.reload() }
+            List {
+                Section {
+                    ErrorRow(message: model.state.errorMessage ?? "") {
+                        Task { await model.reload() }
+                    }
                 }
-                .padding(24)
             }
         case .loaded(let s):
             loadedBody(s)
@@ -67,205 +79,125 @@ private struct LiveTradingContent: View {
     }
 
     private func loadedBody(_ s: LiveTradingState) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                header(s)
-                if let lookback = s.liveState?.lookback, !s.notRunning {
-                    lookbackBanner(lookback)
+        List {
+            if s.notRunning {
+                Section {
+                    statusLine(s)
                 }
-                if s.notRunning {
+                Section {
                     EmptyState(
                         systemImage: Symbol.named("power_off"),
                         title: "No live session",
                         subtitle: "This instance has no active broker session. Start the instance to begin live trading."
                     )
-                } else if let ls = s.liveState {
-                    heroCard(s, ls)
-                    secondaryStats(ls)
-                    executions(ls.recentTrades)
-                    positions(s)
-                } else {
-                    LiveBodySkeleton()
+                    .listRowBackground(Color.clear)
                 }
-                LiveLogsPanel(instanceId: instanceId)
+            } else if let ls = s.liveState {
+                heroSection(s, ls)
+                if let lookback = ls.lookback {
+                    lookbackSection(lookback)
+                }
+                rangeSection(s, ls)
+                accountSection(ls)
+                executionsSection(ls.recentTrades)
+                positionsSection(s)
+            } else {
+                Section {
+                    statusLine(s)
+                }
+                LiveBodySkeleton()
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 8)
-            .padding(.bottom, 120)
+            Section("Live logs") {
+                LiveLogsPanel(instanceId: instanceId)
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
+            }
+            // Room for the floating Halt button over the last rows.
+            Color.clear
+                .frame(height: 56)
+                .listRowBackground(Color.clear)
+                .accessibilityHidden(true)
         }
+        // The hero starts right under the bar, as in Stocks.
+        .contentMargins(.top, 0, for: .scrollContent)
         .refreshable { await model.refreshNow() }
     }
 
-    // MARK: Header
+    // MARK: Status
 
-    private func header(_ s: LiveTradingState) -> some View {
+    /// The session's state as a dot and a word, then any feed warnings
+    /// (`_buildHeader`'s pill and chips).
+    @ViewBuilder
+    private func statusLine(_ s: LiveTradingState) -> some View {
         let ls = s.liveState
         let status = ls?.status.lowercased() ?? "unknown"
-        let label = s.notRunning ? "NOT RUNNING" : (ls?.status.uppercased() ?? "UNKNOWN")
+        let label = s.notRunning ? "Not running" : (ls?.status.dsSentenceCased ?? "Unknown")
         let color: Color = s.notRunning ? .secondary : (status == "active" ? DS.Palette.success : (status == "halted" ? DS.Palette.warning : .secondary))
         let brokerFailed = ls?.brokerFetchError != nil
         let stale = ls?.containerStale == true
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top, spacing: 12) {
-                IconTile(systemImage: Symbol.named("monitoring"), color: DS.Palette.info, size: 44)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Live Trading Terminal")
-                        .font(.title3.bold())
-                    Text("Real-time positions & executions")
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                }
+        VStack(alignment: .leading, spacing: 4) {
+            StatusDot(label, color: color, pulsing: status == "active", font: .footnote)
+            if brokerFailed {
+                warning("Broker offline", DS.Palette.danger)
             }
-            DashboardFlowLayout(spacing: 8) {
-                StatusBadge(label: label, color: color, pulsing: status == "active")
-                if brokerFailed {
-                    warningChip("Broker offline", DS.Palette.danger)
-                }
-                if stale, !brokerFailed {
-                    warningChip("Container offline", .secondary)
-                }
-                if s.fetchError != nil, ls != nil {
-                    warningChip("Feed error", DS.Palette.danger)
-                }
-                if !s.notRunning {
-                    Button(role: .destructive) {
-                        showHalt = true
-                    } label: {
-                        Label("Halt", systemImage: Symbol.named("block"))
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    Button {
-                        showOrder = true
-                    } label: {
-                        Label("Manual Order", systemImage: Symbol.named("add_shopping_cart"))
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .tint(DS.Palette.info)
-                }
+            if stale, !brokerFailed {
+                warning("Container offline", .secondary)
+            }
+            if s.fetchError != nil, ls != nil {
+                warning("Feed error", DS.Palette.danger)
             }
         }
     }
 
-    private func warningChip(_ label: String, _ color: Color) -> some View {
-        Label(label, systemImage: Symbol.named("error"))
-            .font(.caption2.weight(.semibold))
+    private func warning(_ label: String, _ color: Color) -> some View {
+        Label(label, systemImage: "exclamationmark.triangle.fill")
+            .font(.footnote.weight(.semibold))
             .foregroundStyle(color)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(color.opacity(DS.tintFill), in: .rect(cornerRadius: 6, style: .continuous))
-    }
-
-    // MARK: Lookback
-
-    private func lookbackBanner(_ lb: Lookback) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 6) {
-                Image(systemName: Symbol.named("history"))
-                    .foregroundStyle(DS.Palette.info)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("HISTORIC LOOKBACK TRAINING")
-                        .font(.caption2.weight(.bold))
-                        .tracking(0.8)
-                        .foregroundStyle(DS.Palette.info)
-                    Text("\(lb.specName)  ·  \(lb.startDate) → \(lb.endDate)")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                VStack(alignment: .trailing, spacing: 1) {
-                    HStack(alignment: .firstTextBaseline, spacing: 0) {
-                        Text("\(lb.current)")
-                            .font(.title3.weight(.semibold).monospacedDigit())
-                            .foregroundStyle(DS.Palette.info)
-                        Text("/\(lb.total)")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                    Text("\(dartToStringAsFixed(lb.pct, 0))%  ·  \(lb.currentDate)")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            ProgressView(value: lb.pct / 100)
-                .tint(DS.Palette.info)
-            Text("Trades deferred until warmup completes.")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-        }
-        .padding(14)
-        .background(DS.Palette.info.opacity(DS.tintFill), in: .rect(cornerRadius: DS.Radius.control, style: .continuous))
-        .accessibilityElement(children: .combine)
     }
 
     // MARK: Hero
 
-    private func heroCard(_ s: LiveTradingState, _ ls: LiveState) -> some View {
+    private func heroSection(_ s: LiveTradingState, _ ls: LiveState) -> some View {
         let history = s.equityHistory
         let stats = RangeStats.from(history)
-        let changeColor = stats.isUp ? DS.Palette.up : DS.Palette.down
         var displayEquity = ls.equity
         if let idx = scrubIndex, let history, !history.values.isEmpty {
             displayEquity = history.values[min(max(idx, 0), history.values.count - 1)]
         }
-        return Card(padding: 16) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .top) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("PORTFOLIO EQUITY")
-                            .font(.caption2.weight(.bold))
-                            .tracking(1.0)
-                            .foregroundStyle(.secondary)
-                        Text(fmtMoney(displayEquity))
-                            .font(.title.weight(.bold).monospacedDigit())
-                            .contentTransition(.numericText(value: displayEquity))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.6)
-                        HStack(spacing: 4) {
-                            Image(systemName: Symbol.named(stats.isUp ? "arrow_upward" : "arrow_downward"))
-                                .font(.caption.weight(.bold))
-                                .accessibilityHidden(true)
-                            Text("\(stats.isUp ? "+" : "")\(fmtMoney(stats.dollars))")
-                                .font(.caption.weight(.bold).monospacedDigit())
-                            Text("(\(stats.isUp ? "+" : "")\(dartToStringAsFixed(stats.pct, 2))%)")
-                                .font(.caption.monospacedDigit())
-                                .opacity(0.8)
-                            Text(liveRangeLabel(s.currentRange))
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                        .foregroundStyle(changeColor)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    VStack(alignment: .trailing, spacing: 2) {
-                        Text("UPTIME")
-                            .font(.caption2)
-                            .tracking(0.8)
-                            .foregroundStyle(.secondary)
-                        Text(fmtDuration(ls.uptimeSec))
-                            .font(.subheadline.monospacedDigit())
-                    }
+        return Section {
+            VStack(alignment: .leading, spacing: 0) {
+                HeroValueHeader(
+                    fmtMoney(displayEquity),
+                    numericValue: displayEquity,
+                    valueAnimation: scrubIndex == nil ? .snappy : nil,
+                    change: "\(stats.isUp ? "+" : "")\(fmtMoney(stats.dollars)) (\(stats.isUp ? "+" : "")\(dartToStringAsFixed(stats.pct, 2))%)",
+                    direction: stats.isUp ? .up : .down,
+                    changeLabel: liveRangeLabel(s.currentRange)
+                ) {
+                    statusLine(s)
                 }
 
-                if let history, !history.isEmpty {
-                    LiveEquityChart(history: history, style: chartStyle, range: s.currentRange, height: 240) {
-                        scrubIndex = $0
+                Group {
+                    if let history, !history.isEmpty {
+                        LiveEquityChart(history: history, style: chartStyle, range: s.currentRange, height: 240) {
+                            scrubIndex = $0
+                        }
+                        .id("\(s.currentRange)-\(chartStyle.rawValue)")
+                    } else {
+                        Text("No equity history yet — broker is fetching…")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 240)
                     }
-                    .id("\(s.currentRange)-\(chartStyle.rawValue)")
-                } else {
-                    Text("No equity history yet — broker is fetching…")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 240)
                 }
+                .padding(.top, 16)
 
                 Picker("Range", selection: Binding(get: { s.currentRange }, set: { r in Task { await model.setRange(r) } })) {
                     ForEach(liveRanges, id: \.self) { Text($0).tag($0) }
                 }
                 .pickerStyle(.segmented)
+                .padding(.top, 12)
 
                 Picker("Chart style", selection: $chartStyle) {
                     ForEach(LiveChartStyle.allCases, id: \.self) { style in
@@ -277,120 +209,140 @@ private struct LiveTradingContent: View {
                 .pickerStyle(.segmented)
                 .frame(maxWidth: 160)
                 .frame(maxWidth: .infinity, alignment: .trailing)
+                .padding(.top, 10)
+            }
+            .padding(.vertical, 4)
+            .listRowBackground(Color.clear)
+            .listRowSeparator(.hidden)
+        }
+    }
 
-                if stats.high != nil {
-                    Divider()
-                    HStack(alignment: .top) {
-                        miniStat("RANGE HIGH", fmtMoney(stats.high))
-                        miniStat("RANGE LOW", fmtMoney(stats.low))
-                        miniStat("DAY P&L", fmtPct(ls.dayPnlPct), color: pnlColor(ls.dayPnl))
-                        miniStat("TOTAL P&L", fmtPct(ls.totalPnlPct), color: pnlColor(ls.totalPnl))
+    // MARK: Lookback
+
+    private func lookbackSection(_ lb: Lookback) -> some View {
+        Section {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("\(lb.specName)  ·  \(lb.startDate) → \(lb.endDate)")
+                        .font(.subheadline)
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    HStack(alignment: .firstTextBaseline, spacing: 0) {
+                        Text("\(lb.current)")
+                            .font(.headline.monospacedDigit())
+                        Text("/\(lb.total)")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
                     }
                 }
-            }
-        }
-    }
-
-    private func miniStat(_ label: String, _ value: String, color: Color = .primary) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(label)
-                .font(.caption2)
-                .tracking(0.5)
-                .foregroundStyle(.secondary)
-            Text(value)
-                .font(.caption.weight(.bold).monospacedDigit())
-                .foregroundStyle(color)
-                .lineLimit(1)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityElement(children: .combine)
-    }
-
-    // MARK: Secondary stats, executions, positions
-
-    private func secondaryStats(_ ls: LiveState) -> some View {
-        HStack(spacing: 8) {
-            statCard("CASH", fmtMoney(ls.cash))
-            statCard("BUYING POWER", fmtMoney(ls.buyingPower))
-            statCard("TOTAL P&L", fmtMoney(ls.totalPnl), color: pnlColor(ls.totalPnl))
-        }
-    }
-
-    private func statCard(_ label: String, _ value: String, color: Color = .primary) -> some View {
-        Card(padding: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(label)
-                    .font(.caption2)
-                    .tracking(0.8)
+                ProgressView(value: lb.pct / 100)
+                    .tint(DS.Palette.info)
+                Text("\(dartToStringAsFixed(lb.pct, 0))%  ·  \(lb.currentDate)")
+                    .font(.footnote.monospacedDigit())
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .dsMinimumScaleFactor(0.8, textStyle: .caption2)
-                Text(value)
-                    .font(.subheadline.weight(.semibold).monospacedDigit())
-                    .foregroundStyle(color)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
+            }
+            .padding(.vertical, 4)
+            .accessibilityElement(children: .combine)
+        } header: {
+            Text("Historic lookback training")
+        } footer: {
+            Text("Trades deferred until warmup completes.")
+        }
+    }
+
+    // MARK: Figures
+
+    @ViewBuilder
+    private func rangeSection(_ s: LiveTradingState, _ ls: LiveState) -> some View {
+        let stats = RangeStats.from(s.equityHistory)
+        if stats.high != nil {
+            Section("Performance") {
+                StatGrid(columns: 2) {
+                    StatCell(label: "Range high", value: fmtMoney(stats.high))
+                    StatCell(label: "Range low", value: fmtMoney(stats.low))
+                    StatCell(label: "Day P&L", value: fmtPct(ls.dayPnlPct), valueColor: pnlColor(ls.dayPnl))
+                    StatCell(label: "Total P&L", value: fmtPct(ls.totalPnlPct), valueColor: pnlColor(ls.totalPnl))
+                }
+                .padding(.vertical, 4)
             }
         }
-        .accessibilityElement(children: .combine)
     }
 
-    private func sectionHeader(_ title: String, _ count: Int) -> some View {
-        HStack {
-            Text(title)
-                .font(.caption2.weight(.bold))
-                .tracking(1.0)
-                .foregroundStyle(.secondary)
-                .accessibilityAddTraits(.isHeader)
-            Spacer()
-            Text("\(count)")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
+    private func accountSection(_ ls: LiveState) -> some View {
+        Section("Account") {
+            StatGrid(columns: 2) {
+                StatCell(label: "Cash", value: fmtMoney(ls.cash))
+                StatCell(label: "Buying power", value: fmtMoney(ls.buyingPower))
+                StatCell(label: "Total P&L", value: fmtMoney(ls.totalPnl), valueColor: pnlColor(ls.totalPnl))
+                StatCell(label: "Uptime", value: fmtDuration(ls.uptimeSec))
+            }
+            .padding(.vertical, 4)
         }
     }
 
-    private func executions(_ trades: [Trade]) -> some View {
-        Card(padding: 14) {
-            VStack(alignment: .leading, spacing: 8) {
-                sectionHeader("RECENT EXECUTIONS", trades.count)
-                if trades.isEmpty {
-                    Text("No executions recorded yet.")
-                        .font(.caption)
-                        .italic()
-                        .foregroundStyle(.secondary)
-                        .padding(.vertical, 16)
-                } else {
-                    ForEach(Array(trades.enumerated()), id: \.offset) { _, t in
-                        LiveTradeRow(trade: t)
-                    }
+    // MARK: Executions and positions
+
+    private func executionsSection(_ trades: [Trade]) -> some View {
+        Section {
+            if trades.isEmpty {
+                Text("No executions recorded yet.")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(Array(trades.enumerated()), id: \.offset) { _, t in
+                    LiveTradeRow(trade: t)
                 }
             }
+        } header: {
+            DSSectionHeader("Recent executions") {
+                Text("\(trades.count)")
+            }
         }
     }
 
-    private func positions(_ s: LiveTradingState) -> some View {
+    private func positionsSection(_ s: LiveTradingState) -> some View {
         let list = s.liveState?.positions ?? []
-        return Card(padding: 14) {
-            VStack(alignment: .leading, spacing: 8) {
-                sectionHeader("ACTIVE POSITIONS", list.count)
-                if list.isEmpty {
-                    Text("No open positions.")
-                        .font(.caption)
-                        .italic()
-                        .foregroundStyle(.secondary)
-                        .padding(.vertical, 16)
-                } else {
-                    ForEach(Array(list.enumerated()), id: \.offset) { _, p in
-                        LivePositionCard(
-                            position: p,
-                            chartStyle: chartStyle,
-                            range: s.currentRange,
-                            historicals: s.positionHistoricals[p.symbol] ?? [],
-                            closeDisabled: closeRunning,
-                            onClose: { confirmClose(p.symbol) }
-                        )
+        return Section {
+            if list.isEmpty {
+                Text("No open positions.")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(Array(list.enumerated()), id: \.offset) { _, p in
+                    LivePositionRow(
+                        position: p,
+                        chartStyle: chartStyle,
+                        range: s.currentRange,
+                        historicals: s.positionHistoricals[p.symbol] ?? []
+                    )
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        if p.canClose {
+                            Button("Close", systemImage: Symbol.named("logout"), role: .destructive) {
+                                confirmClose(p.symbol)
+                            }
+                            .disabled(closeRunning)
+                        }
+                    }
+                    .contextMenu {
+                        if p.canClose {
+                            Button("Close", systemImage: Symbol.named("logout"), role: .destructive) {
+                                confirmClose(p.symbol)
+                            }
+                            .disabled(closeRunning)
+                        }
+                    }
+                    .accessibilityActions {
+                        if p.canClose, !closeRunning {
+                            Button("Close") { confirmClose(p.symbol) }
+                        }
                     }
                 }
+            }
+        } header: {
+            DSSectionHeader("Active positions") {
+                Text("\(list.count)")
+            }
+        } footer: {
+            if list.contains(where: \.canClose) {
+                Text("Swipe a position left, or touch and hold it, to close it.")
             }
         }
     }
@@ -410,7 +362,8 @@ private struct LiveTradingContent: View {
     // MARK: Floating layer
 
     /// The command toast and the sticky Halt button (Liquid Glass: the
-    /// floating functional layer only).
+    /// floating functional layer only), laid out against the bottom safe
+    /// area, so they sit above the tab bar's chat accessory.
     @ViewBuilder
     private var floatingLayer: some View {
         let s = model.value
@@ -442,7 +395,8 @@ private struct LiveTradingContent: View {
 }
 
 /// A command's progress (`_buildCommandToast`): pending spinner, completed
-/// check or failed mark; `TYPE · STATUS`; the error or the result map.
+/// check or failed mark; the command and its status; the error or the
+/// result map.
 private struct LiveCommandToastView: View {
     let toast: CommandToast
     let onDismiss: () -> Void
@@ -460,16 +414,15 @@ private struct LiveCommandToastView: View {
             }
             .frame(width: 20)
             VStack(alignment: .leading, spacing: 1) {
-                Text("\(toast.type.uppercased()) · \(toast.status.uppercased())")
-                    .font(.caption2.weight(.bold))
-                    .tracking(0.5)
+                Text("\(liveCommandWords(toast.type)) · \(liveCommandWords(toast.status))")
+                    .font(.footnote.weight(.semibold))
                 if let error = toast.error {
                     Text(error)
-                        .font(.caption2)
+                        .font(.caption)
                         .foregroundStyle(DS.Palette.danger)
                 } else if let result = toast.result, !result.isEmpty {
                     Text(JSON.object(result).dartDescription)
-                        .font(.caption2)
+                        .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
@@ -490,24 +443,23 @@ private struct LiveCommandToastView: View {
     }
 }
 
+/// A command or status id in words: `close_position` → `Close position`.
+nonisolated func liveCommandWords(_ raw: String) -> String {
+    raw.replacingOccurrences(of: "_", with: " ").lowercased().dsSentenceCased
+}
+
 /// The first-load skeleton.
 private struct LiveTradingSkeleton: View {
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 12) {
-                    Skeleton.circle(44)
-                    VStack(alignment: .leading, spacing: 6) {
-                        Skeleton(height: 22, radius: 7)
-                        Skeleton(width: 200, height: 12, radius: 5)
-                    }
-                }
-                Skeleton(width: 260, height: 30, radius: 8)
-                LiveBodySkeleton()
+        List {
+            Section {
+                HeroValueHeader("$00,000.00", change: "+$000.00 (+0.00%)", status: "Active")
+                    .listRowBackground(Color.clear)
             }
-            .padding(16)
+            LiveBodySkeleton()
         }
-        .scrollDisabled(true)
+        .redacted(reason: .placeholder)
+        .disabled(true)
         .accessibilityLabel("Loading")
     }
 }
@@ -515,10 +467,16 @@ private struct LiveTradingSkeleton: View {
 /// The body skeleton while the live state has not arrived.
 private struct LiveBodySkeleton: View {
     var body: some View {
-        VStack(spacing: 12) {
-            Skeleton(height: 360, radius: DS.Radius.card)
-            Skeleton(height: 150, radius: DS.Radius.control)
-            Skeleton(height: 150, radius: DS.Radius.control)
+        Section {
+            Skeleton(height: 240, radius: 12)
+                .listRowBackground(Color.clear)
+        }
+        Section("Account") {
+            StatGrid(columns: 2) {
+                StatCell(label: "Cash", value: "$00,000.00")
+                StatCell(label: "Buying power", value: "$00,000.00")
+            }
+            .redacted(reason: .placeholder)
         }
         .accessibilityHidden(true)
     }

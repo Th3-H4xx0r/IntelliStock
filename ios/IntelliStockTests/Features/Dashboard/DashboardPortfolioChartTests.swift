@@ -133,7 +133,7 @@ struct DashboardChartGeometryTests {
 
     @Test func oneDayLabelsAreTheFixedHourTicks() {
         let h = PortfolioHistory(timestamps: [Date()], values: [1])
-        #expect(DashboardChartGeometry.labels(h, range: "1D") == ["12AM", "6AM", "12PM", "6PM", "12AM"])
+        #expect(DashboardChartGeometry.labels(h, range: "1D") == ["12AM", "8AM", "4PM", "12AM"])
     }
 
     @Test func longerRangesLabelFourEvenlySpacedPoints() {

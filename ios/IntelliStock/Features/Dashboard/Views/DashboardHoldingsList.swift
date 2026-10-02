@@ -1,14 +1,14 @@
 import SwiftUI
 
 /// The selected account's uninvested cash and holdings under the hero chart
-/// — `_HoldingsList` in `dashboard_screen.dart`. Hidden while it has no
-/// data, so it never shows a blank box. Rows sit in one card, as in Stocks.
-struct DashboardHoldingsList: View {
+/// — `_HoldingsList` in `dashboard_screen.dart` — as a "Holdings" list
+/// section with the Total / Daily switch in its header. Hidden while it has
+/// no data, so it never shows an empty section. Each holding row opens the
+/// stock screen with the position.
+struct DashboardHoldingsSection: View {
     let holdings: AccountHoldingsModel
     @Bindable var feed: DashboardFeedModel
     let brokerageId: String
-
-    @Environment(AppServices.self) private var services
 
     var body: some View {
         if let data = holdings.holdings.value, !data.isEmpty {
@@ -23,12 +23,29 @@ struct DashboardHoldingsList: View {
         let sparksLoading = sparks == nil
         // Total account value → each row's ring shows its share of the portfolio.
         let total = (data.cash ?? 0) + positions.reduce(0) { $0 + $1.marketValue }
-        return VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Holdings")
-                    .font(.headline)
-                    .accessibilityAddTraits(.isHeader)
-                Spacer()
+        return Section {
+            if let cash = data.cash {
+                DashboardCashRow(cash: cash, total: total)
+            }
+            ForEach(Array(positions.enumerated()), id: \.offset) { _, p in
+                NavigationLink(value: Route.stock(StockRoute(
+                    symbol: p.symbol,
+                    position: p,
+                    brokerageId: brokerageId,
+                    portfolioTotal: total
+                ))) {
+                    DashboardHoldingRow(
+                        position: p,
+                        total: total,
+                        spark: sparks?[p.symbol],
+                        sparkLoading: sparksLoading,
+                        mode: feed.pnlMode
+                    )
+                }
+                .accessibilityHint("Opens \(p.symbol)")
+            }
+        } header: {
+            DashboardGroupHeader(group: "Holdings") {
                 Picker("P&L", selection: $feed.pnlMode) {
                     Text(HoldingsPnlMode.total.label).tag(HoldingsPnlMode.total)
                     Text(HoldingsPnlMode.daily.label).tag(HoldingsPnlMode.daily)
@@ -37,41 +54,7 @@ struct DashboardHoldingsList: View {
                 .fixedSize()
                 .controlSize(.small)
             }
-            .padding(.horizontal, 2)
-
-            VStack(spacing: 0) {
-                if let cash = data.cash {
-                    DashboardCashRow(cash: cash, total: total)
-                    if !positions.isEmpty { DashboardHoldingDivider() }
-                }
-                ForEach(Array(positions.enumerated()), id: \.offset) { i, p in
-                    if i > 0 { DashboardHoldingDivider() }
-                    DashboardHoldingRow(
-                        position: p,
-                        total: total,
-                        spark: sparks?[p.symbol],
-                        sparkLoading: sparksLoading,
-                        mode: feed.pnlMode
-                    ) {
-                        services.router.push(.stock(StockRoute(
-                            symbol: p.symbol,
-                            position: p,
-                            brokerageId: brokerageId,
-                            portfolioTotal: total
-                        )))
-                    }
-                }
-            }
-            .padding(.vertical, 4)
-            .background(DS.Surface.panel, in: .rect(cornerRadius: DS.Radius.card, style: .continuous))
         }
-        .padding(.top, 24)
-    }
-}
-
-private struct DashboardHoldingDivider: View {
-    var body: some View {
-        Divider().padding(.leading, 70).padding(.trailing, 14)
     }
 }
 
@@ -81,84 +64,44 @@ private struct DashboardCashRow: View {
     let total: Double
 
     var body: some View {
-        HStack(spacing: 12) {
-            DashboardAllocationRing(fraction: total > 0 ? cash / total : 0, color: DS.Palette.teal)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Cash")
-                    .font(.subheadline.weight(.bold))
-                Text("Available to invest")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            Text(fmtMoney(cash))
-                .font(.subheadline.weight(.semibold).monospacedDigit())
+        EntityRow("Cash", subtitle: "Available to invest") {
+            MiniAllocationRing(fraction: total > 0 ? cash / total : 0, color: DS.Palette.teal)
+        } trailing: {
+            EntityRowValue(fmtMoney(cash))
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 11)
-        .accessibilityElement(children: .combine)
     }
 }
 
-/// `_HoldingRow`: ring, symbol + quantity, sparkline, value + P&L for the
-/// current mode. Tapping opens the stock screen with the position.
+/// `_HoldingRow`: ring, symbol and quantity, a 60 × 24 sparkline, then the
+/// value with the P&L for the current mode under it in green or red.
 private struct DashboardHoldingRow: View {
     let position: AccountPosition
     let total: Double
     let spark: [Double]?
     let sparkLoading: Bool
     let mode: HoldingsPnlMode
-    let onTap: () -> Void
 
     var body: some View {
         let p = position
         let pnl = HoldingRowPnl(position: p, spark: spark, mode: mode)
-        let color: Color = !pnl.hasPnl ? .secondary : (pnl.up ? DS.Palette.success : DS.Palette.danger)
-        Button(action: onTap) {
-            HStack(spacing: 0) {
-                DashboardAllocationRing(fraction: total > 0 ? p.marketValue / total : 0, color: color)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(p.symbol)
-                        .font(.subheadline.weight(.bold))
-                        .foregroundStyle(color)
-                    Text(DashboardFormat.qtyLabel(p.qty))
-                        .font(.caption)
-                        .foregroundStyle(color.opacity(0.7))
-                }
-                .lineLimit(1)
-                .frame(width: 64, alignment: .leading)
-                .padding(.leading, 12)
-
+        let color: Color = !pnl.hasPnl ? .secondary : (pnl.up ? DS.Palette.up : DS.Palette.down)
+        EntityRow(p.symbol, subtitle: DashboardFormat.qtyShort(p.qty)) {
+            MiniAllocationRing(fraction: total > 0 ? p.marketValue / total : 0, color: DS.Palette.accent)
+        } trailing: {
+            HStack(spacing: 12) {
                 Group {
                     if sparkLoading {
-                        Skeleton(height: 28, radius: 6)
+                        Skeleton(height: 18, radius: 5)
                     } else if let spark {
-                        DashboardMiniSpark(values: spark)
+                        Sparkline(values: spark, height: 24)
                             .id("\(p.symbol)-\(mode.rawValue)")
                     } else {
-                        Color.clear.frame(height: 28)
+                        Color.clear
                     }
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.leading, 10)
-                .padding(.trailing, 16)
-
-                VStack(alignment: .trailing, spacing: 3) {
-                    Text(fmtMoney(p.marketValue))
-                        .font(.subheadline.weight(.semibold).monospacedDigit())
-                        .foregroundStyle(color)
-                    Text(pnl.label)
-                        .font(.caption.weight(.bold).monospacedDigit())
-                        .foregroundStyle(color)
-                }
-                .lineLimit(1)
+                .frame(width: 60, height: 24)
+                EntityRowValue(fmtMoney(p.marketValue), detail: pnl.label, detailColor: color)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 11)
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .accessibilityElement(children: .combine)
-        .accessibilityHint("Opens \(p.symbol)")
     }
 }

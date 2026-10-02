@@ -134,7 +134,11 @@ struct Sector3DChart: View {
             }
             .contentShape(Rectangle())
             .onTapGesture(coordinateSpace: .local) { tap($0) }
-            .simultaneousGesture(drag)
+            // A UIKit pan that begins only for a sideways drag, so a vertical
+            // swipe over the ring still scrolls the list around it. (A
+            // simultaneous `DragGesture` held the list's pan in an
+            // inset-grouped `List` on iOS 26.)
+            .gesture(Sector3DHorizontalPan(onChanged: panChanged, onEnded: panEnded))
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(Sector3DGeometry.accessibilityLabel(slices[sel]))
             .accessibilityValue("\(sel + 1) of \(slices.count)")
@@ -289,30 +293,70 @@ struct Sector3DChart: View {
     }
 
     /// A horizontal drag, past the touch slop: it steps the highlight flat,
-    /// and turns the ring drilled.
-    private var drag: some Gesture {
-        DragGesture(minimumDistance: Sector3DGeometry.touchSlop, coordinateSpace: .local)
-            .onChanged { g in
-                let now = Self.now
-                guard let horizontal = dragIsHorizontal else {
-                    let horizontal = abs(g.translation.width) > abs(g.translation.height)
-                    dragIsHorizontal = horizontal
-                    if horizontal {
-                        // The slop is not part of the drag, as in Flutter.
-                        lastDragX = g.translation.width
-                        interaction.dragBegan(at: now, reduceMotion: reduceMotion)
-                    }
-                    return
-                }
-                guard horizontal else { return }
-                let dx = g.translation.width - lastDragX
-                lastDragX = g.translation.width
-                interaction.dragMoved(by: dx, slices, at: now)
+    /// and turns the ring drilled. `translation` is the pan's total since it
+    /// began; nothing happens until it passes the touch slop, as
+    /// `DragGesture(minimumDistance:)` behaved.
+    private func panChanged(_ translation: CGSize) {
+        let now = Self.now
+        guard let horizontal = dragIsHorizontal else {
+            guard hypot(translation.width, translation.height) >= Sector3DGeometry.touchSlop else { return }
+            let horizontal = abs(translation.width) > abs(translation.height)
+            dragIsHorizontal = horizontal
+            if horizontal {
+                // The slop is not part of the drag, as in Flutter.
+                lastDragX = translation.width
+                interaction.dragBegan(at: now, reduceMotion: reduceMotion)
             }
-            .onEnded { _ in
-                if dragIsHorizontal == true { interaction.dragEnded(slices, at: Self.now) }
-                dragIsHorizontal = nil
-            }
+            return
+        }
+        guard horizontal else { return }
+        let dx = translation.width - lastDragX
+        lastDragX = translation.width
+        interaction.dragMoved(by: dx, slices, at: now)
+    }
+
+    private func panEnded() {
+        if dragIsHorizontal == true { interaction.dragEnded(slices, at: Self.now) }
+        dragIsHorizontal = nil
+    }
+}
+
+/// The chart's sideways pan. It begins only when the finger moves more
+/// across than up or down; otherwise it fails at once and the enclosing
+/// scroll view takes the vertical pan.
+private struct Sector3DHorizontalPan: UIGestureRecognizerRepresentable {
+    /// The total translation since the pan began.
+    let onChanged: (CGSize) -> Void
+    let onEnded: () -> Void
+
+    func makeUIGestureRecognizer(context: Context) -> UIPanGestureRecognizer {
+        let pan = UIPanGestureRecognizer()
+        pan.delegate = context.coordinator
+        return pan
+    }
+
+    func handleUIGestureRecognizerAction(_ recognizer: UIPanGestureRecognizer, context: Context) {
+        switch recognizer.state {
+        case .began, .changed:
+            let t = recognizer.translation(in: recognizer.view)
+            onChanged(CGSize(width: t.x, height: t.y))
+        case .ended, .cancelled, .failed:
+            onEnded()
+        default:
+            break
+        }
+    }
+
+    func makeCoordinator(converter: CoordinateSpaceConverter) -> Coordinator {
+        Coordinator()
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
+            guard let pan = recognizer as? UIPanGestureRecognizer else { return true }
+            let v = pan.velocity(in: pan.view)
+            return abs(v.x) > abs(v.y)
+        }
     }
 }
 
