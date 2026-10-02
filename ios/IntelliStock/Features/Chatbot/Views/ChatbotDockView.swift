@@ -1,68 +1,16 @@
 import SwiftUI
 
-/// The global chat entry — `ChatbotDock` in `chatbot_dock.dart`.
-///
-/// Native form: the collapsed violet pulsing FAB is a floating Liquid Glass
-/// button (bottom-trailing, above the tab bar, no glow), and the expanded panel
-/// is a sheet with medium and large detents, presented from the root so it
-/// survives tab switches. `ChatEntrySlot` renders this only while signed in.
-struct ChatbotDockView: View {
-    @Environment(AppServices.self) private var services
-    @State private var model: ChatbotModel?
-
-    var body: some View {
-        ZStack(alignment: .bottomTrailing) {
-            // Something to appear (an empty Group never does); never takes a touch.
-            Color.clear
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
-            if let model, !model.state.isOpen {
-                ChatbotFloatingButton { model.open() }
-                    .padding(.trailing, 16)
-                    .padding(.bottom, 72)
-                    .transition(.scale.combined(with: .opacity))
-            }
-        }
-        .animation(.snappy(duration: 0.2), value: model?.state.isOpen)
-        .sheet(isPresented: sheetBinding) {
-            if let model {
-                ChatbotPanel(model: model, onNavigate: navigate)
-            }
-        }
-        .onChange(of: model?.state.messages ?? []) {
-            guard let model else { return }
-            if let route = model.takeNavigations().last { navigate(route) }
-        }
-        .onAppear {
-            let model = ChatbotSession.model(for: services)
-            self.model = model
-            Task { await model.bootstrap() }
-        }
-        .onDisappear {
-            // Signed out: the Dart provider reset to a blank state.
-            if !services.session.isAuthenticated { ChatbotSession.end() }
-        }
-    }
-
-    private var sheetBinding: Binding<Bool> {
-        Binding(
-            get: { model?.state.isOpen ?? false },
-            set: { open in
-                if !open { model?.minimise() }
-            }
-        )
-    }
-
-    /// A navigate directive: close the chat and go there.
-    private func navigate(_ route: String) {
-        model?.minimise()
-        services.router.open(route)
-    }
-}
+// The chat — `ChatbotDock` in `chatbot_dock.dart`, minus its entry point.
+//
+// The collapsed FAB is gone (spec 2026-10-02, G1): the entry is the tab bar's
+// bottom accessory, `ChatAccessoryView`, and `chatbotPresenter()` hosts the
+// model, the sheet (medium and large detents, presented from the tab view so
+// it survives tab switches) and the navigate directives. This file keeps the
+// session model and the expanded panel, unchanged.
 
 /// The one chatbot model for the signed-in session — the keepAlive
-/// `chatbotProvider`. Held here so the dock's view can come and go (the lock
-/// tears it down) without losing the conversation.
+/// `chatbotProvider`. Held here so the shell's views can come and go (the lock
+/// tears them down) without losing the conversation.
 @MainActor
 enum ChatbotSession {
     private static var current: ChatbotModel?
@@ -81,24 +29,6 @@ enum ChatbotSession {
     static func end() {
         current = nil
         owner = nil
-    }
-}
-
-/// The floating chat button — `_CollapsedFab` as a glass control.
-private struct ChatbotFloatingButton: View {
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: Symbol.named("smart_toy"))
-                .font(.title2.weight(.semibold))
-                .frame(width: 34, height: 34)
-        }
-        .dsGlassProminentButton()
-        .buttonBorderShape(.circle)
-        .controlSize(.large)
-        .accessibilityLabel("Assistant")
-        .accessibilityHint("Opens the chat")
     }
 }
 
