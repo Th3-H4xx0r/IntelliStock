@@ -15,7 +15,9 @@ struct InstancesView: View {
 private struct InstancesContent: View {
     let services: AppServices
 
-    @State private var model: InstancesModel
+    /// The shared list (`services.instances`): Instance detail's Delete
+    /// Instance runs through it too.
+    private var model: InstancesModel { services.instances }
     @State private var pinned = PinnedInstancesModel()
     @State private var showCreate = false
     @State private var addStockFor: InstanceSheetTarget?
@@ -26,7 +28,6 @@ private struct InstancesContent: View {
 
     init(services: AppServices) {
         self.services = services
-        _model = State(initialValue: InstancesModel(repository: { [unowned services] in services.instanceRepository }))
     }
 
     var body: some View {
@@ -178,15 +179,31 @@ private struct InstancesContent: View {
     }
 
     private func confirmDelete(_ inst: Instance) {
-        confirm = ConfirmRequest(
-            title: "Delete Instance",
-            body: "Delete \"\(inst.name.isEmpty ? inst.id : inst.name)\"? This cannot be undone.",
-            confirmLabel: "Delete",
-            role: .destructive,
-            onConfirm: { await model.delete(inst.id) },
+        confirm = instanceDeleteRequest(
+            inst,
+            // A failure shows on the list (errorMessage), as before.
+            onConfirm: { _ = await model.delete(inst.id) },
             onError: { toast = Toast(swingErrorText($0), style: .error) }
         )
     }
+}
+
+/// The Delete Instance confirmation, shared by the list's swipe and context
+/// menu and Instance detail's toolbar menu. `onConfirm` runs the delete
+/// (`InstancesModel.delete`).
+func instanceDeleteRequest(
+    _ inst: Instance,
+    onConfirm: @escaping () async throws -> Void,
+    onError: @escaping (any Error) -> Void
+) -> ConfirmRequest {
+    ConfirmRequest(
+        title: "Delete Instance",
+        body: "Delete \"\(inst.name.isEmpty ? inst.id : inst.name)\"? This cannot be undone.",
+        confirmLabel: "Delete",
+        role: .destructive,
+        onConfirm: onConfirm,
+        onError: onError
+    )
 }
 
 /// An instance row's subtitle: who made it (AI only; a user instance is the

@@ -146,9 +146,33 @@ private struct InstanceDetailContent: View {
                                 .disabled(confirmRunning)
                         }
                     }
+                    Section {
+                        Button("Delete Instance", systemImage: "trash", role: .destructive) { confirmDelete(inst) }
+                            .disabled(confirmRunning || services.instances.isBusy(inst.id))
+                    }
                 }
             }
         }
+    }
+
+    /// The list's own confirmation and delete (`instanceDeleteRequest`,
+    /// `InstancesModel.delete` on the shared list). Once the instance is
+    /// gone, back to the list, which the delete has already refetched; a
+    /// failure stays here as an error toast.
+    private func confirmDelete(_ inst: Instance) {
+        confirm = instanceDeleteRequest(
+            inst,
+            onConfirm: {
+                if case .failure(let error) = await services.instances.delete(inst.id) { throw error }
+                let router = services.router
+                if router.stack(for: router.tab).last == .instance(inst.id) {
+                    router.pop()
+                } else {
+                    router.go("/instances")
+                }
+            },
+            onError: { toast = Toast(swingErrorText($0), style: .error) }
+        )
     }
 
     // MARK: Content
