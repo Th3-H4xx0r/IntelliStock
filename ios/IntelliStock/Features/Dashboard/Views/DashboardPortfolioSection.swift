@@ -1,106 +1,130 @@
 import Charts
 import SwiftUI
 
-/// The portfolio hero for the selected account — `_PortfolioSection` and
+/// Sizes the portfolio hero shares with its skeleton.
+nonisolated enum DashboardPortfolioMetrics {
+    static let chartHeight: CGFloat = 224
+}
+
+/// The portfolio for the selected account — `_PortfolioSection` and
 /// `PortfolioChart(hero: true)` in `dashboard_screen.dart` /
-/// `portfolio_chart.dart`: the account switcher, the live balance, the
-/// market-hours chip, the range control, the scrubbable chart, the freshness
-/// line and the holdings list.
-struct DashboardPortfolioSection: View {
+/// `portfolio_chart.dart`, as two list sections:
+///
+/// 1. the hero, on the plain grouped background: the account label (which
+///    opens the "Portfolios" sheet), the balance, its change, the market
+///    status, the scrubbable chart, the range picker and the freshness line;
+/// 2. the holdings (`DashboardHoldingsSection`).
+///
+/// The polls that drive them run from `DashboardView`'s list.
+struct DashboardPortfolioSections: View {
     let accounts: [BrokerageAccount]
     let selected: BrokerageAccount
     let scope: DashboardAccountScope
     let feed: DashboardFeedModel
+    let onSwitchAccount: () -> Void
+
+    var body: some View {
+        Section {
+            DashboardPortfolioHero(
+                accounts: accounts,
+                selected: selected,
+                chart: scope.chart,
+                onSwitchAccount: onSwitchAccount
+            )
+            .listRowBackground(Color.clear)
+            .listRowSeparator(.hidden)
+        }
+        DashboardHoldingsSection(holdings: scope.holdings, feed: feed, brokerageId: selected.id)
+    }
+}
+
+/// The hero: account label, balance, change, status, chart, range.
+private struct DashboardPortfolioHero: View {
+    let accounts: [BrokerageAccount]
+    let selected: BrokerageAccount
+    let chart: DashboardPortfolioChartModel
+    let onSwitchAccount: () -> Void
 
     @Environment(AppServices.self) private var services
 
     var body: some View {
-        let chart = scope.chart
         VStack(alignment: .leading, spacing: 0) {
-            accountSelector
-                .padding(.bottom, 8)
-            valueRow(chart)
-            DashboardLiveStatusChip()
-                .padding(.top, 8)
+            accountLabel
+                .padding(.bottom, 4)
+            value
+            DashboardPortfolioChartArea(chart: chart)
+                .padding(.top, 20)
             Picker("Range", selection: Binding(get: { chart.range }, set: { chart.setRange($0) })) {
                 ForEach(dashboardChartRanges, id: \.self) { Text($0).tag($0) }
             }
             .pickerStyle(.segmented)
-            .padding(.top, 16)
-            DashboardPortfolioChartArea(chart: chart)
-                .padding(.top, 22)
+            .padding(.top, 12)
             freshness
-            DashboardHoldingsList(holdings: scope.holdings, feed: feed, brokerageId: selected.id)
         }
-        // The chart keeps itself live at the range's cadence; restart on a range switch.
-        .task(id: chart.range) { await chart.poll(lifecycle: services.lifecycle) }
-        .task(id: scope.brokerageId) { await scope.holdings.poll(lifecycle: services.lifecycle) }
-        .task(id: feed.pnlMode) { await scope.holdings.showSparks(feed.pnlMode.sparkRange) }
+        .padding(.vertical, 4)
     }
 
-    // MARK: Account switcher
+    // MARK: Account label
 
-    /// The hero's account identity: logo + upper-case label, with a chevron
-    /// and a menu of every account when there is more than one.
+    /// The brokerage logo, the account's name and, with more than one
+    /// account, a chevron: tapping it opens the "Portfolios" sheet.
     @ViewBuilder
-    private var accountSelector: some View {
-        let label = HStack(spacing: 6) {
-            BrokerageLogo(brokerageType: selected.brokerageType, size: 16)
-            Text(DashboardFormat.accountLabel(selected).uppercased())
-                .font(.caption2.weight(.bold))
-                .tracking(1.0)
-                .foregroundStyle(.secondary)
-            if accounts.count > 1 {
-                Image(systemName: Symbol.named("expand_more"))
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-            }
-        }
-        if accounts.count > 1 {
-            Menu {
-                Picker("Account", selection: Binding(
-                    get: { selected.id },
-                    set: { services.selectedAccount.select($0) }
-                )) {
-                    ForEach(accounts) { a in
-                        Label {
-                            Text(DashboardFormat.accountLabel(a))
-                        } icon: {
-                            let type = a.brokerageType.lowercased()
-                            if BrokerageLogo.assetTypes.contains(type) {
-                                Image("Brand/\(type)").renderingMode(.template)
-                            } else {
-                                Image(systemName: BrokerageLogo.fallbackSymbol(type))
-                            }
-                        }
-                        .tag(a.id)
-                    }
+    private var accountLabel: some View {
+        let switchable = accounts.count > 1
+        let name = DashboardFormat.accountName(selected)
+        Button(action: onSwitchAccount) {
+            HStack(spacing: 6) {
+                BrokerageLogo(brokerageType: selected.brokerageType, size: 16)
+                Text(name)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                if switchable {
+                    Image(systemName: "chevron.down")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
                 }
-            } label: {
-                label.contentShape(Rectangle())
             }
-            .accessibilityLabel("Account, \(DashboardFormat.accountLabel(selected))")
-            .accessibilityHint("Switches the account shown")
-        } else {
-            label
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .disabled(!switchable)
+        .accessibilityLabel("Account, \(name)")
+        .accessibilityHint(switchable ? "Shows your portfolios" : "")
     }
 
     // MARK: Value
 
     @ViewBuilder
-    private func valueRow(_ chart: DashboardPortfolioChartModel) -> some View {
+    private var value: some View {
         if let history = chart.valueHistory {
-            DashboardValueRow(history: history, scrubIndex: chart.scrubIndex)
+            let values = history.values
+            let scrub = chart.scrubIndex
+            let active: Double = {
+                if let scrub, scrub >= 0, scrub < values.count { return values[scrub] }
+                return history.currentValue ?? values.last ?? 0
+            }()
+            let change = computeChange(history, scrubIndex: scrub)
+            HeroValueHeader(
+                fmtMoney(active),
+                numericValue: active,
+                valueAnimation: scrub == nil ? .easeOut(duration: 0.5) : nil,
+                change: "\(fmtPnl(change.abs)) (\(fmtPct(change.pct)))",
+                // A missing change reads green, as in Dart (`abs ?? 0 >= 0`).
+                direction: ChangeDirection(change.abs ?? 0)
+            ) {
+                DashboardLiveStatusChip()
+            }
         } else if case .failed = chart.state {
             Text(chart.state.errorMessage ?? "")
-                .font(.caption)
+                .font(.footnote)
                 .foregroundStyle(DS.Palette.danger)
         } else {
-            VStack(alignment: .leading, spacing: 6) {
-                Skeleton(width: 200, height: 40, radius: 6)
-                Skeleton(width: 120, height: 13, radius: 5)
-            }
+            HeroValueHeader("$0,000.00", change: "+$00.00 (+0.00%)", status: "Markets Open")
+                .redacted(reason: .placeholder)
+                .accessibilityLabel("Loading")
         }
     }
 
@@ -114,64 +138,25 @@ struct DashboardPortfolioSection: View {
                 Text("Updated ")
                 RelativeTimeText(timestamp: updatedAt)
             }
-            .font(.caption2)
-            .foregroundStyle(.tertiary)
-            .padding(.top, 6)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.top, 10)
         }
-    }
-}
-
-/// The balance and its change vs the baseline (`_ValueRow`, hero style):
-/// the value rolls between figures like an odometer.
-struct DashboardValueRow: View {
-    let history: PortfolioHistory
-    let scrubIndex: Int?
-
-    var body: some View {
-        let values = history.values
-        let active: Double = {
-            if let scrubIndex, scrubIndex >= 0, scrubIndex < values.count { return values[scrubIndex] }
-            return history.currentValue ?? values.last ?? 0
-        }()
-        let change = computeChange(history, scrubIndex: scrubIndex)
-        let positive = (change.abs ?? 0) >= 0
-        let color = positive ? DS.Palette.success : DS.Palette.danger
-        VStack(alignment: .leading, spacing: 6) {
-            Text(fmtMoney(active))
-                .dsValueHero()
-                .contentTransition(.numericText(value: active))
-                .animation(.easeOut(duration: 0.5), value: active)
-                .lineLimit(1)
-                .minimumScaleFactor(0.6)
-            HStack(spacing: 4) {
-                Image(systemName: Symbol.named(positive ? "trending_up" : "trending_down"))
-                    .accessibilityHidden(true)
-                Text("\(fmtPnl(change.abs)) (\(fmtPct(change.pct)))")
-                    .contentTransition(.numericText())
-            }
-            .font(.subheadline.weight(.semibold))
-            .foregroundStyle(color)
-        }
-        .accessibilityElement(children: .combine)
     }
 }
 
 /// "Markets Open" / "Markets Closed" — re-evaluated every 30 s so it flips
-/// at the open/close boundary (`_LiveStatusChip`).
+/// at the open/close boundary (`_LiveStatusChip`). The hero's status line: a
+/// dot and a word.
 struct DashboardLiveStatusChip: View {
     var body: some View {
         TimelineView(.periodic(from: .now, by: 30)) { context in
             let open = isMarketOpenAtEt(etFromUtc(context.date))
-            let color = open ? DS.Palette.success : Color.secondary
-            HStack(spacing: 5) {
-                Circle()
-                    .fill(color)
-                    .frame(width: 6, height: 6)
-                    .accessibilityHidden(true)
-                Text(open ? "Markets Open" : "Markets Closed")
-                    .font(.caption2.weight(.bold))
-                    .foregroundStyle(color)
-            }
+            StatusDot(
+                open ? "Markets Open" : "Markets Closed",
+                color: open ? DS.Palette.success : Color.secondary,
+                font: .footnote
+            )
         }
     }
 }
@@ -189,8 +174,7 @@ struct DashboardPortfolioChartArea: View {
                 DashboardChartPlot(chart: chart, history: held, range: chart.lastLoadedRange, animate: false)
                     .id(chart.lastLoadedRange)
             } else {
-                Skeleton(height: 224, radius: 8)
-                    .padding(.horizontal, 4)
+                Skeleton(height: DashboardPortfolioMetrics.chartHeight, radius: 8)
                     .padding(.bottom, 12)
             }
         case .failed:
@@ -217,18 +201,19 @@ private struct DashboardChartEmpty: View {
                 .font(.title)
                 .foregroundStyle(.tertiary)
             Text(message)
-                .font(.caption)
+                .font(.footnote)
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)
-        .frame(height: 224)
+        .frame(height: DashboardPortfolioMetrics.chartHeight)
     }
 }
 
-/// The plot itself: a monotone line over a flat area fill, a fixed
-/// [0, 1440]-minute axis on 1D (the line fills only the elapsed part of the
-/// day) and an index axis otherwise (gapless), a scrub hairline and dot, and
-/// a pulsing dot on the latest value while not scrubbing.
+/// The plot itself: a monotone line over a flat area fill, Stocks' dotted
+/// baseline at the period's opening value, a fixed [0, 1440]-minute axis on
+/// 1D (the line fills only the elapsed part of the day) and an index axis
+/// otherwise (gapless), a scrub hairline and dot, and a pulsing dot on the
+/// latest value while not scrubbing.
 private struct DashboardChartPlot: View {
     let chart: DashboardPortfolioChartModel
     let history: PortfolioHistory
@@ -239,13 +224,12 @@ private struct DashboardChartPlot: View {
     @State private var revealed = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private static let plotHeight: CGFloat = 224
-
     var body: some View {
         let values = history.values
         let n = values.count
         let xs = DashboardChartGeometry.xs(history, range: range)
-        let bounds = paddedBounds(values)
+        let baseline = history.openValue ?? values[0]
+        let bounds = paddedBounds(values + [baseline])
         let change = computeChange(history)
         let lineColor = (change.abs ?? 0) >= 0 ? DS.Palette.success : DS.Palette.danger
         let showValues = revealed || !animate || reduceMotion
@@ -253,6 +237,9 @@ private struct DashboardChartPlot: View {
 
         VStack(spacing: 0) {
             Chart {
+                RuleMark(y: .value("Open", baseline))
+                    .foregroundStyle(Color.secondary.opacity(0.5))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: DS.baselineDash))
                 ForEach(0..<n, id: \.self) { i in
                     let v = showValues ? values[i] : bounds.min
                     AreaMark(
@@ -284,15 +271,13 @@ private struct DashboardChartPlot: View {
             .chartYAxis(.hidden)
             .chartLegend(.hidden)
             .chartXSelection(value: $selectedX)
-            .frame(height: Self.plotHeight)
+            .frame(height: DashboardPortfolioMetrics.chartHeight)
             .accessibilityElement()
             .accessibilityLabel("Portfolio chart")
             .accessibilityValue("\(fmtMoney(values.last)), \(fmtPct(change.pct))")
 
             ChartDateLabels(labels: DashboardChartGeometry.labels(history, range: range))
         }
-        .padding(.horizontal, 4)
-        .padding(.bottom, 8)
         .onChange(of: selectedX) { _, x in
             guard let x else {
                 chart.scrubIndex = nil
@@ -321,7 +306,7 @@ private struct DashboardScrubDot: View {
         Circle()
             .fill(color)
             .frame(width: 9, height: 9)
-            .overlay(Circle().stroke(Color(uiColor: .systemBackground), lineWidth: 2))
+            .overlay(Circle().stroke(Color(uiColor: .systemGroupedBackground), lineWidth: 2))
     }
 }
 
@@ -346,7 +331,7 @@ private struct DashboardEndDot: View {
             Circle()
                 .fill(color)
                 .frame(width: 8, height: 8)
-                .overlay(Circle().stroke(Color(uiColor: .systemBackground), lineWidth: 1.5))
+                .overlay(Circle().stroke(Color(uiColor: .systemGroupedBackground), lineWidth: 1.5))
         }
         .frame(width: 32, height: 32)
     }

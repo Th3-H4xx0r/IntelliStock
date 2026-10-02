@@ -73,7 +73,7 @@ nonisolated enum DashboardChartGeometry {
 
     /// The labels under the plot.
     static func labels(_ history: PortfolioHistory, range: String) -> [String] {
-        if range == "1D" { return [0, 6, 12, 18, 24].map(hourAmPm) }
+        if range == "1D" { return [0, 8, 16, 24].map(hourAmPm) }
         let n = history.values.count
         return evenlySpacedLabelIndices(n, 4).compactMap { i in
             i < history.timestamps.count ? formatChartDate(history.timestamps[i], range) : nil

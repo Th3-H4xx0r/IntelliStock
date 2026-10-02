@@ -1,16 +1,59 @@
+import Observation
 import SwiftUI
 
-/// Compact Kalshi glance card for the dashboard — `KalshiDashboardCard` in
-/// `kalshi_dashboard_card.dart`. Hidden when no Kalshi account is linked;
-/// "Open" and the card select the Kalshi tab.
+/// Compact Kalshi glance for the dashboard — `KalshiDashboardCard` in
+/// `kalshi_dashboard_card.dart` — as a "Kalshi" list section with one row:
+/// the account's name and open positions, its value and day change. The
+/// row (the Dart card and its "Open" button alike) selects the Kalshi tab.
+/// The dashboard shows it only when a Kalshi account is linked, and runs
+/// the fetch (`KalshiDashboardCardModel.load`).
 struct KalshiDashboardCard: View {
+    let account: BrokerageAccount
+    let model: KalshiDashboardCardModel
+
     @Environment(AppServices.self) private var services
 
     var body: some View {
-        let accounts = services.dashboard.brokeragesValue ?? []
-        if let kalshi = accounts.first(where: { $0.brokerageType == "kalshi" }) {
-            KalshiDashboardCardContent(account: kalshi)
-                .id(kalshi.id)
+        Section {
+            Button {
+                services.router.go("/kalshi")
+            } label: {
+                HStack(spacing: 12) {
+                    EntityRow(
+                        account.accountName,
+                        subtitle: KalshiDashboardCard.positionsText(model.positions ?? 0)
+                    ) {
+                        value
+                    }
+                    Image(systemName: "chevron.forward")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                        .accessibilityHidden(true)
+                }
+                .foregroundStyle(Color.primary)
+                .contentShape(Rectangle())
+            }
+            .accessibilityHint("Opens the Kalshi tab")
+        } header: {
+            DashboardGroupHeader(group: "Kalshi")
+        }
+    }
+
+    @ViewBuilder
+    private var value: some View {
+        switch model.portfolio {
+        case .loading:
+            EntityRowValue("$000.00", detail: "+$0.00")
+                .redacted(reason: .placeholder)
+                .accessibilityLabel("Loading…")
+        case .failed:
+            EntityRowValue("—", color: .secondary)
+        case .loaded(let p):
+            EntityRowValue(
+                KalshiDashboardCard.valueText(p.value),
+                detail: KalshiDashboardCard.dayChangeText(p.dayChange),
+                detailColor: ChangeDirection(p.dayChange).color
+            )
         }
     }
 
@@ -30,97 +73,34 @@ struct KalshiDashboardCard: View {
     }
 }
 
-private struct KalshiDashboardCardContent: View {
-    let account: BrokerageAccount
+/// The Kalshi glance's data: the account's portfolio and its open-position
+/// count, fetched once per account (the Dart providers kept their data alive
+/// after a successful fetch). A new account starts over.
+@Observable
+final class KalshiDashboardCardModel {
+    private(set) var accountId: String?
+    private(set) var portfolio: Loadable<KalshiPortfolio> = .loading
+    private(set) var positions: Int?
 
-    @Environment(AppServices.self) private var services
-    @State private var portfolio: Loadable<KalshiPortfolio> = .loading
-    @State private var positions: Int?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                Image(systemName: Symbol.named("sports_soccer"))
-                    .font(.title3)
-                    .foregroundStyle(.tint)
-                    .accessibilityHidden(true)
-                Text("Kalshi")
-                    .font(.title3.bold())
-                    .accessibilityAddTraits(.isHeader)
-                Spacer()
-                Button {
-                    services.router.go("/kalshi")
-                } label: {
-                    HStack(spacing: 2) {
-                        Text("Open")
-                        Image(systemName: Symbol.named("arrow_forward"))
-                    }
-                    .font(.footnote.weight(.semibold))
-                }
-                .buttonStyle(.borderless)
-            }
-
-            Button {
-                services.router.go("/kalshi")
-            } label: {
-                Card(padding: 16) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(account.accountName.uppercased())
-                            .font(.footnote.weight(.bold))
-                            .tracking(1.2)
-                            .foregroundStyle(.tint)
-                        value
-                        Text(KalshiDashboardCard.positionsText(positions ?? 0))
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-            .buttonStyle(.plain)
-            .accessibilityHint("Opens the Kalshi tab")
+    /// Fetches what `accountId` is missing; a failed portfolio is retried on
+    /// the next call.
+    func load(_ accountId: String, repository repo: KalshiRepository) async {
+        if self.accountId != accountId {
+            self.accountId = accountId
+            portfolio = .loading
+            positions = nil
         }
-        .task {
-            // Fetched once per card (the Dart providers kept their data alive
-            // after a successful fetch).
-            let repo = services.kalshiRepository
-            let bid = account.id
-            if portfolio.value == nil {
-                do {
-                    portfolio = .loaded(try await repo.portfolio(bid))
-                } catch {
-                    if !error.isCancellationOrTaskCancelled { portfolio = .failed(error) }
-                }
-            }
-            if positions == nil, let list = try? await repo.positions(bid) {
-                positions = list.count
+        if portfolio.value == nil {
+            do {
+                let p = try await repo.portfolio(accountId)
+                guard self.accountId == accountId else { return }
+                portfolio = .loaded(p)
+            } catch {
+                if !error.isCancellationOrTaskCancelled, self.accountId == accountId { portfolio = .failed(error) }
             }
         }
-    }
-
-    @ViewBuilder
-    private var value: some View {
-        switch portfolio {
-        case .loading:
-            Text("Loading…")
-                .foregroundStyle(.secondary)
-        case .failed:
-            Text("—")
-                .font(.title2.monospacedDigit())
-                .foregroundStyle(.secondary)
-        case .loaded(let p):
-            let positive = p.dayChange >= 0
-            let color = positive ? DS.Palette.success : DS.Palette.danger
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(KalshiDashboardCard.valueText(p.value))
-                    .font(.title2.weight(.semibold).monospacedDigit())
-                HStack(spacing: 2) {
-                    Image(systemName: Symbol.named(positive ? "trending_up" : "trending_down"))
-                        .accessibilityHidden(true)
-                    Text(KalshiDashboardCard.dayChangeText(p.dayChange))
-                }
-                .font(.footnote.weight(.bold))
-                .foregroundStyle(color)
-            }
+        if positions == nil, let list = try? await repo.positions(accountId), self.accountId == accountId {
+            positions = list.count
         }
     }
 }

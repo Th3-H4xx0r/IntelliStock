@@ -311,6 +311,17 @@ nonisolated enum DashboardFormat {
         "\(qtyNumber(q)) \(q == 1 ? "share" : "shares")"
     }
 
+    /// The holdings row's short quantity, so the full count always fits:
+    /// `22.4 sh`, `5.29 sh`, `5 sh` (redesign spec 2026-10-02).
+    static func qtyShort(_ q: Double) -> String {
+        var s = qtyNumber(q)
+        if s.contains(".") {
+            while s.hasSuffix("0") { s.removeLast() }
+            if s.hasSuffix(".") { s.removeLast() }
+        }
+        return "\(s) sh"
+    }
+
     /// Whole quantities without decimals, else 2 dp.
     static func qtyNumber(_ q: Double) -> String {
         q == q.rounded() ? String(Int(q)) : dartToStringAsFixed(q, 2)
@@ -328,6 +339,15 @@ nonisolated enum DashboardFormat {
             return a.alpacaPaper ? "Alpaca · Paper" : "Alpaca"
         }
         return a.accountName.isEmpty ? a.brokerageType : a.accountName
+    }
+
+    /// The account's own name (`Swing Trade Paper`), for the hero's account
+    /// label and the portfolio sheet; `accountLabel` when it has none. Three
+    /// Alpaca paper accounts all read "Alpaca · Paper" in `accountLabel`, so
+    /// a list of them needs the names; Live or Paper is the sheet's subtitle.
+    static func accountName(_ a: BrokerageAccount) -> String {
+        let name = a.accountName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? accountLabel(a) : name
     }
 
     /// The selected account: the stored id when it is in the list, else the

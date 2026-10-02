@@ -10,47 +10,6 @@ func dashboardSymbol(_ material: String, fallback: String) -> String {
     return sf == Symbol.fallback ? fallback : sf
 }
 
-/// The small upper-case card eyebrow (`_tileLabel` / `_label`).
-struct DashboardEyebrow: View {
-    let text: String
-
-    init(_ text: String) {
-        self.text = text
-    }
-
-    var body: some View {
-        Text(text)
-            .font(.caption2.weight(.bold))
-            .tracking(0.8)
-            .foregroundStyle(.secondary)
-            .accessibilityAddTraits(.isHeader)
-    }
-}
-
-/// A card header: a tinted glyph and an eyebrow, with optional trailing text.
-struct DashboardCardHeader: View {
-    let symbol: String
-    let tint: Color
-    let title: String
-    var trailing: String?
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: symbol)
-                .font(.footnote)
-                .foregroundStyle(tint)
-                .accessibilityHidden(true)
-            DashboardEyebrow(title)
-            if let trailing {
-                Spacer(minLength: 8)
-                Text(trailing)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-}
-
 /// The allocation ring (`_AllocationRing`, `_DiversityGauge`) now lives in the
 /// design system as `AllocationRing`; the name stays so call sites compile.
 /// New code uses `AllocationRing`, or `MiniAllocationRing` in a row.
@@ -59,24 +18,6 @@ typealias DashboardAllocationRing = AllocationRing
 /// The mini price line (`_MiniSpark`) now lives in the design system as
 /// `Sparkline`; the name stays so call sites compile.
 typealias DashboardMiniSpark = Sparkline
-
-/// A coloured tag on a 15 % tint of its colour (side chips, event types).
-struct DashboardTintTag: View {
-    let text: String
-    let color: Color
-    var weight: Font.Weight = .heavy
-
-    @Environment(\.colorScheme) private var colorScheme
-
-    var body: some View {
-        Text(text)
-            .font(.caption2.weight(weight))
-            .foregroundStyle(DS.Palette.onTint(color, in: colorScheme))
-            .padding(.horizontal, 7)
-            .padding(.vertical, 3)
-            .background(color.opacity(DS.tintFill), in: .rect(cornerRadius: 5, style: .continuous))
-    }
-}
 
 /// A flat horizontal bar on a faint track (`LinearProgressIndicator`).
 struct DashboardBar: View {
