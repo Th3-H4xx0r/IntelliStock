@@ -25,6 +25,13 @@
 			remoteGlobalIDString = D65D0E89BDAF140BCDE4AD55;
 			remoteInfo = PortfolioWidget;
 		};
+		AD417461EE4D2D8734B4E793 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = CA5A310B1360AF2918280501 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 5D8251703DBB5DE3723798FF;
+			remoteInfo = IntelliStock;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -42,6 +49,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		631BD9997398CC67C5AA9B02 /* IntelliStockUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = IntelliStockUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		B9266B629E2B05BA18D15B8D /* PortfolioWidget.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = PortfolioWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		CDABB9704EA2C5B344063848 /* IntelliStockTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = IntelliStockTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		F685CB8D0440C71F7E1675D5 /* IntelliStock.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = IntelliStock.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -66,6 +74,15 @@
 			path = PortfolioWidget;
 			sourceTree = "<group>";
 		};
+		8FD74E0591670EB20E887368 /* IntelliStockUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			explicitFileTypes = {
+			};
+			explicitFolders = (
+			);
+			path = IntelliStockUITests;
+			sourceTree = "<group>";
+		};
 		9A846885D34A9AA720DE2E8A /* IntelliStock */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			explicitFileTypes = {
@@ -83,6 +100,7 @@
 			children = (
 				F685CB8D0440C71F7E1675D5 /* IntelliStock.app */,
 				CDABB9704EA2C5B344063848 /* IntelliStockTests.xctest */,
+				631BD9997398CC67C5AA9B02 /* IntelliStockUITests.xctest */,
 				B9266B629E2B05BA18D15B8D /* PortfolioWidget.appex */,
 			);
 			name = Products;
@@ -93,6 +111,7 @@
 			children = (
 				9A846885D34A9AA720DE2E8A /* IntelliStock */,
 				5AF5B8AF74C26CBDB237376B /* IntelliStockTests */,
+				8FD74E0591670EB20E887368 /* IntelliStockUITests */,
 				7F8C28589DEA3E9F2B6FE634 /* PortfolioWidget */,
 				632BC34E9E0E32E73E40D50A /* Products */,
 			);
@@ -167,6 +186,28 @@
 			productReference = B9266B629E2B05BA18D15B8D /* PortfolioWidget.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
+		FC5CE5879700D57779CFE4BA /* IntelliStockUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 65E1E9883492AC8BACB8CED5 /* Build configuration list for PBXNativeTarget "IntelliStockUITests" */;
+			buildPhases = (
+				1BBDDE9563854C82225138C9 /* Sources */,
+				A48A251105719E4575C91EB7 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				C4F59A37A9F4F9C3422AAB4E /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				8FD74E0591670EB20E887368 /* IntelliStockUITests */,
+			);
+			name = IntelliStockUITests;
+			packageProductDependencies = (
+			);
+			productName = IntelliStockUITests;
+			productReference = 631BD9997398CC67C5AA9B02 /* IntelliStockUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -188,6 +229,11 @@
 						DevelopmentTeam = VY5CNF8734;
 						ProvisioningStyle = Automatic;
 					};
+					FC5CE5879700D57779CFE4BA = {
+						DevelopmentTeam = VY5CNF8734;
+						ProvisioningStyle = Automatic;
+						TestTargetID = 5D8251703DBB5DE3723798FF;
+					};
 				};
 			};
 			buildConfigurationList = 1EF6059E201F815630DBDB01 /* Build configuration list for PBXProject "IntelliStock" */;
@@ -207,6 +253,7 @@
 				5D8251703DBB5DE3723798FF /* IntelliStock */,
 				D65D0E89BDAF140BCDE4AD55 /* PortfolioWidget */,
 				C9B54648B7F6E1625D1E0606 /* IntelliStockTests */,
+				FC5CE5879700D57779CFE4BA /* IntelliStockUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -226,6 +273,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A48A251105719E4575C91EB7 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		D507DEA8557602697736C9AA /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -237,6 +291,13 @@
 
 /* Begin PBXSourcesBuildPhase section */
 		08BBE1DDE85DD3CE6D6C8CB3 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		1BBDDE9563854C82225138C9 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -270,6 +331,11 @@
 			target = 5D8251703DBB5DE3723798FF /* IntelliStock */;
 			targetProxy = 25CFD0E7460B467B3C0C9ACC /* PBXContainerItemProxy */;
 		};
+		C4F59A37A9F4F9C3422AAB4E /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 5D8251703DBB5DE3723798FF /* IntelliStock */;
+			targetProxy = AD417461EE4D2D8734B4E793 /* PBXContainerItemProxy */;
+		};
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
@@ -287,6 +353,25 @@
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/IntelliStock.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/IntelliStock";
+			};
+			name = Debug;
+		};
+		18508A5D014616D3312337DE /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.pkrishna.intellistockMobile.UITests;
+				SDKROOT = iphoneos;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = IntelliStock;
 			};
 			name = Debug;
 		};
@@ -438,6 +523,25 @@
 			};
 			name = Debug;
 		};
+		9232CAD717B2EC01184B0E90 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.pkrishna.intellistockMobile.UITests;
+				SDKROOT = iphoneos;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = IntelliStock;
+			};
+			name = Release;
+		};
 		CDE2178794A240E5BF2A0822 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -528,6 +632,15 @@
 			buildConfigurations = (
 				8915555B01F5F3FBA494FCD3 /* Debug */,
 				CDE2178794A240E5BF2A0822 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		65E1E9883492AC8BACB8CED5 /* Build configuration list for PBXNativeTarget "IntelliStockUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				18508A5D014616D3312337DE /* Debug */,
+				9232CAD717B2EC01184B0E90 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

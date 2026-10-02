@@ -191,7 +191,18 @@ nonisolated struct TokenUsageRepository: Sendable {
     /// Fetch all 6 endpoints in parallel; partial failure populates
     /// `partialError` ("N of 6 requests failed: <first error, in request
     /// order>").
+    ///
+    /// Cancellation is not a failure: a cancelled call reads as no data
+    /// with no `partialError`. A model that writes the result into its
+    /// state should use `fetchAllUnlessCancelled(_:)`, which throws
+    /// `CancellationError` instead, and leave its state alone on it.
     func fetchAll(_ range: String) async -> TokenUsageData {
+        (try? await fetchAllUnlessCancelled(range)) ?? TokenUsageData()
+    }
+
+    /// `fetchAll(_:)` that throws `CancellationError` when the caller was
+    /// cancelled, rather than reporting "6 of 6 requests failed".
+    func fetchAllUnlessCancelled(_ range: String) async throws -> TokenUsageData {
         let bucket = range == "24h" ? "hour" : "day"
         async let s = Result { try await summary(range) }
         async let t = Result { try await timeseries(range, bucket) }
@@ -200,6 +211,16 @@ nonisolated struct TokenUsageRepository: Sendable {
         async let b = Result { try await byBacktest(range, 50) }
         async let r = Result { try await calls(50, "now") }
         let results = await (s, t, m, c, b, r)
+
+        // A cancelled caller cancels every child request: report the
+        // cancellation, never "N of 6 requests failed".
+        let errors: [any Error] = [
+            results.0.failure, results.1.failure, results.2.failure,
+            results.3.failure, results.4.failure, results.5.failure,
+        ].compactMap { $0 }
+        if Task.isCancelled || errors.contains(where: \.isCancellation) {
+            throw CancellationError()
+        }
 
         var failures = 0
         var firstError: String?
@@ -229,6 +250,14 @@ nonisolated struct TokenUsageRepository: Sendable {
 /// Dart `e.toString()`: an `ApiError` prints its message.
 nonisolated private func tokenUsageErrorText(_ error: any Error) -> String {
     (error as? ApiError)?.message ?? String(describing: error)
+}
+
+nonisolated private extension Result {
+    /// The error of a failed result, or nil.
+    var failure: Failure? {
+        if case .failure(let error) = self { return error }
+        return nil
+    }
 }
 
 nonisolated private extension Result where Failure == any Error {

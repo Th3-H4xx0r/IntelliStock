@@ -36,6 +36,12 @@ final class AppServices {
     /// meanwhile rather than Connect.
     private(set) var isStorageReady = true
 
+    /// True when the keychain still could not be read with the app in the
+    /// foreground (a foreground scene means the device is unlocked, so this
+    /// is a real keychain error, e.g. -34018). `RootView` then offers a
+    /// retry instead of the blank waiting screen.
+    private(set) var isStorageUnavailable = false
+
     @ObservationIgnored let biometrics: any BiometricAuthenticating
     @ObservationIgnored private let storage: any SecureStorage
     @ObservationIgnored private var protectedDataObserver: (any NSObjectProtocol)?
@@ -128,17 +134,32 @@ final class AppServices {
 
     /// Loads what the keychain refused at launch, once it can be read: the
     /// URL (rebuilding the client), the session, the lock seed and the
-    /// selected account. Called when protected data becomes available.
+    /// selected account. Idempotent: does nothing once loaded.
+    ///
+    /// Called when protected data becomes available (the background fast
+    /// path) and on every `.active` scene phase — a suspended process is not
+    /// guaranteed the notification, and the items are `WhenUnlocked`, so the
+    /// read fails whenever the device is locked, not only before first
+    /// unlock.
     func reloadStorage() {
         guard !isStorageReady else { return }
         guard urlStore.load(), session.load() else { return }
         lock.state = AppLock.seed(storage: storage, isAuthenticated: session.isAuthenticated)
         selectedAccount.reload()
         isStorageReady = true
+        isStorageUnavailable = false
         if let protectedDataObserver {
             notificationCenter.removeObserver(protectedDataObserver)
             self.protectedDataObserver = nil
         }
+    }
+
+    /// The Retry button on the "keychain unavailable" screen, and the
+    /// foreground attempt: reload, and flag a failure that persists while
+    /// active.
+    func retryStorageLoad() {
+        reloadStorage()
+        isStorageUnavailable = !isStorageReady
     }
 
     /// A services graph over an in-memory store, for previews and tests that
@@ -162,9 +183,13 @@ final class AppServices {
 
     // MARK: Lifecycle
 
-    /// Every `scenePhase` change: pollers pause in the background and the lock
-    /// counts the absence.
+    /// Every `scenePhase` change: a deferred keychain load is retried on
+    /// `.active`, pollers pause in the background, and the lock counts the
+    /// absence.
     func scenePhaseChanged(_ phase: ScenePhase) {
+        if phase == .active, !isStorageReady {
+            retryStorageLoad()
+        }
         lifecycle.handle(phase)
         lock.handle(phase)
     }
