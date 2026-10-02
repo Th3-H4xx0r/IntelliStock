@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 /// The key-value secret store the session, server URL and lock settings
 /// persist through — `FlutterSecureStorage` in the Flutter app.
@@ -6,9 +7,18 @@ import Foundation
 /// `KeychainStore` is the production implementation; `InMemorySecureStorage`
 /// backs tests and previews.
 nonisolated protocol SecureStorage: Sendable {
+    /// The value, or nil for "not stored" and for any failure.
     func read(_ key: String) -> String?
+    /// The value, nil only when nothing is stored; throws when the store is
+    /// unavailable (e.g. the keychain before first unlock).
+    func readChecked(_ key: String) throws -> String?
     func write(_ key: String, _ value: String) throws
     func delete(_ key: String)
+}
+
+nonisolated extension SecureStorage {
+    /// Stores that cannot fail to read answer `read`.
+    func readChecked(_ key: String) throws -> String? { read(key) }
 }
 
 extension KeychainStore: SecureStorage {}
@@ -23,13 +33,27 @@ nonisolated final class InMemorySecureStorage: SecureStorage, @unchecked Sendabl
         set { lock.withLock { _writeError = newValue } }
     }
     private var _writeError: (any Error)?
+    /// When set, every `readChecked` throws it and `read` returns nil — a
+    /// keychain that is not available yet.
+    var readError: (any Error)? {
+        get { lock.withLock { _readError } }
+        set { lock.withLock { _readError = newValue } }
+    }
+    private var _readError: (any Error)?
 
     init(_ initial: [String: String] = [:]) {
         values = initial
     }
 
     func read(_ key: String) -> String? {
-        lock.withLock { values[key] }
+        (try? readChecked(key)) ?? nil
+    }
+
+    func readChecked(_ key: String) throws -> String? {
+        try lock.withLock {
+            if let _readError { throw _readError }
+            return values[key]
+        }
     }
 
     func write(_ key: String, _ value: String) throws {
@@ -45,4 +69,9 @@ nonisolated final class InMemorySecureStorage: SecureStorage, @unchecked Sendabl
 
     /// Everything stored, for assertions.
     var snapshot: [String: String] { lock.withLock { values } }
+}
+
+nonisolated extension KeychainError {
+    /// The keychain is locked (before first unlock after a reboot).
+    static let interactionNotAllowed = KeychainError(status: errSecInteractionNotAllowed)
 }

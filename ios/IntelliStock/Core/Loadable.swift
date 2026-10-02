@@ -36,12 +36,41 @@ nonisolated enum Loadable<Value> {
     }
 
     /// `AsyncValue.guard`: runs `body`, capturing success or failure.
+    ///
+    /// A cancelled `body` (its view went away mid-request) is not a failure:
+    /// it comes back as `.loading`, never as an error. To leave a model's
+    /// current state untouched instead, use `refreshing(_:)`.
     static func capture(_ body: () async throws -> Value) async -> Loadable<Value> {
+        await capture(keeping: .loading, body)
+    }
+
+    /// Like `capture(_:)`, but a cancelled `body` returns `current`
+    /// unchanged.
+    static func capture(keeping current: Loadable<Value>, _ body: () async throws -> Value) async -> Loadable<Value> {
         do {
             return .loaded(try await body())
+        } catch where error.isCancellation {
+            return current
         } catch {
             return .failed(error)
         }
+    }
+
+    /// Runs `body` as a reload of this value: `state = await state.refreshing { … }`.
+    /// Success replaces it, failure becomes `.failed`, cancellation leaves it
+    /// exactly as it was.
+    func refreshing(_ body: () async throws -> Value) async -> Loadable<Value> {
+        await Loadable.capture(keeping: self, body)
+    }
+}
+
+nonisolated extension Error {
+    /// The calling task was cancelled (`CancellationError`, or a URLSession
+    /// task cancelled with it). Never show it as an error.
+    var isCancellation: Bool {
+        if self is CancellationError { return true }
+        if let url = self as? URLError, url.code == .cancelled { return true }
+        return false
     }
 }
 

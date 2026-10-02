@@ -47,23 +47,31 @@ final class PushService {
 
     private let repository: () -> PushRepository
     private let registrar: any PushRegistering
+    private let shouldRegister: () -> Bool
 
     /// `repository` is read per call, so a server change is picked up.
+    /// `shouldRegister` gates every registration — `AppServices` passes
+    /// "signed in and not locked", since Dart sent nothing from behind the
+    /// lock screen.
     init(
         repository: @escaping () -> PushRepository,
         registrar: any PushRegistering = SystemPushRegistrar(),
         env: String = PushService.defaultEnv,
-        appVersion: String? = PushService.bundleVersion
+        appVersion: String? = PushService.bundleVersion,
+        shouldRegister: @escaping () -> Bool = { true }
     ) {
         self.repository = repository
         self.registrar = registrar
         self.env = env
         self.appVersion = appVersion
+        self.shouldRegister = shouldRegister
     }
 
     /// Asks iOS to register for push. Safe to call on every sign-in: once the
-    /// person has answered, the system does not prompt again.
+    /// person has answered, the system does not prompt again. Does nothing
+    /// while `shouldRegister` is false.
     func enable() async {
+        guard shouldRegister() else { return }
         guard await registrar.requestAuthorization() else { return }
         registrar.registerForRemoteNotifications()
     }
@@ -74,7 +82,7 @@ final class PushService {
     }
 
     func register(token: String) async {
-        guard !token.isEmpty else { return }
+        guard !token.isEmpty, shouldRegister() else { return }
         try? await repository().registerToken(token, env: env, appVersion: appVersion)
     }
 

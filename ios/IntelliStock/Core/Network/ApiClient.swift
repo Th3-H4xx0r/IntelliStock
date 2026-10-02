@@ -11,15 +11,36 @@ protocol ApiTokenSource: AnyObject, Sendable {
     func clear() async
 }
 
+extension ApiTokenSource {
+    /// A 401 ends the session only if the session still holds the token the
+    /// request was sent with: a late 401 for a signed-out or replaced token
+    /// must not clear a newer session.
+    func clear(ifCurrent sentToken: String?) async {
+        guard token == sentToken else { return }
+        await clear()
+    }
+
+    /// Accepts a renewed token only for the session it was issued to: a late
+    /// response after Sign Out or a server change must not write the old
+    /// session back.
+    func setToken(_ fresh: String, replacing sentToken: String?) async {
+        guard let sentToken, !sentToken.isEmpty, token == sentToken else { return }
+        await setToken(fresh)
+    }
+}
+
 /// The typed HTTP client every repository uses, ported from `api_client.dart`
 /// (Dio + `AuthInterceptor`).
 ///
 /// - Sends `Accept: application/json`, `Authorization: Bearer <token>` when a
 ///   token exists, and `Content-Type: application/json` on POST/PUT/PATCH.
 /// - A successful response carrying `x-refreshed-token` updates the session
-///   without waiting.
-/// - A 401 clears the session.
-/// - Failures throw `ApiError`.
+///   without waiting — if the session still holds the token the request was
+///   sent with.
+/// - A 401 clears the session — under the same condition.
+/// - Failures throw `ApiError`; a cancelled request (the calling task was
+///   cancelled, e.g. its view went away) throws `CancellationError`, which
+///   callers leave out of their state.
 ///
 /// Requests run off the main actor; only the token read and the session
 /// callbacks hop to it.
@@ -85,8 +106,11 @@ nonisolated final class ApiClient: Sendable {
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        if let token = await tokens?.token, !token.isEmpty {
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        // The token this request carries; the 401 and refreshed-token
+        // handling below only act while the session still holds it.
+        let sentToken = await tokens?.token
+        if let sentToken, !sentToken.isEmpty {
+            request.setValue("Bearer \(sentToken)", forHTTPHeaderField: "Authorization")
         }
         if method == "POST" || method == "PUT" || method == "PATCH" {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -99,8 +123,12 @@ nonisolated final class ApiClient: Sendable {
         let response: URLResponse
         do {
             (data, response) = try await session.data(for: request)
+        } catch let error as URLError where error.code == .cancelled {
+            throw CancellationError()
         } catch let error as URLError {
             throw ApiError.from(status: nil, body: nil, transport: error)
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             throw ApiError(message: "Something went wrong.")
         }
@@ -110,14 +138,14 @@ nonisolated final class ApiClient: Sendable {
         }
         guard (200..<300).contains(http.statusCode) else {
             if http.statusCode == 401, let tokens {
-                await tokens.clear()
+                await tokens.clear(ifCurrent: sentToken)
             }
             throw ApiError.from(status: http.statusCode, body: data, transport: nil)
         }
 
         if let fresh = Self.refreshedToken(from: http), let tokens {
             // Fire-and-forget, as the Dio interceptor did.
-            Task { @MainActor in await tokens.setToken(fresh) }
+            Task { @MainActor in await tokens.setToken(fresh, replacing: sentToken) }
         }
         return Self.decode(data)
     }

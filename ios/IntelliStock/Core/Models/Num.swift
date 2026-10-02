@@ -38,12 +38,12 @@ nonisolated enum Num: Sendable, CustomStringConvertible {
         }
     }
 
-    /// Dart `toInt()`: truncates toward zero. Non-finite doubles read as 0
-    /// (Dart threw).
+    /// Dart `toInt()`: truncates toward zero, saturating beyond the 64-bit
+    /// range as the Dart VM does. Non-finite doubles read as 0 (Dart threw).
     var int: Int {
         switch self {
         case .int(let i): i
-        case .double(let d): d.isFinite ? Int(d) : 0
+        case .double(let d): Int(dartTruncating: d) ?? 0
         }
     }
 
