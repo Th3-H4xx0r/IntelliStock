@@ -173,6 +173,8 @@ struct InlineActionRow: View {
             .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
             .contentShape(Rectangle())
         }
+        // A destructive row's glyph is red too, not just its text.
+        .tint(role == .destructive ? DS.Palette.danger : DS.Palette.accent)
         .disabled(isBusy)
     }
 }

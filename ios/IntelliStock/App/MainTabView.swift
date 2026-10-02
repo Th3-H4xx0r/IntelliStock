@@ -32,7 +32,9 @@ struct MainTabView: View {
                 TabStack(tab: .more) { MoreTabView() }
             }
         }
-        .tabViewBottomAccessory { ChatAccessoryView() }
+        // No chat bar over a pushed Onboarding, which hides the tab bar and
+        // covers the shell as the Dart route did.
+        .modifier(ShellChatAccessory(isEnabled: services.router.stack(for: services.router.tab).last != .onboarding))
         .chatbotPresenter()
         // Inside the authenticated shell: register for push once per sign-in.
         .task { await services.push.enable() }
@@ -54,6 +56,20 @@ private struct TabStack<Root: View>: View {
         )) {
             root()
                 .navigationDestination(for: Route.self) { RouteDestination(route: $0) }
+        }
+    }
+}
+
+/// The "Ask IntelliStock" tab-bar accessory. `isEnabled:` is iOS 26.1+; on
+/// 26.0 the accessory always shows.
+private struct ShellChatAccessory: ViewModifier {
+    let isEnabled: Bool
+
+    func body(content: Content) -> some View {
+        if #available(iOS 26.1, *) {
+            content.tabViewBottomAccessory(isEnabled: isEnabled) { ChatAccessoryView() }
+        } else {
+            content.tabViewBottomAccessory { ChatAccessoryView() }
         }
     }
 }
