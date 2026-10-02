@@ -78,8 +78,8 @@ struct KalshiInstanceSheet: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
                 }
+                ToolbarItem(placement: .confirmationAction) { submitButton }
             }
-            .safeAreaInset(edge: .bottom) { submitBar }
         }
         .task { await model.start() }
         .presentationDetents([.large])
@@ -229,7 +229,10 @@ struct KalshiInstanceSheet: View {
         }
     }
 
-    private var submitBar: some View {
+    /// The form's confirm action, in the toolbar (Form rule: confirm and
+    /// Cancel go in the toolbar). Same labels and in-flight guard as the
+    /// Dart bottom button.
+    private var submitButton: some View {
         Button {
             Task {
                 if let bid = await model.submit() {
@@ -239,14 +242,7 @@ struct KalshiInstanceSheet: View {
             }
         } label: {
             Text(model.creating ? "Saving…" : (model.isEdit ? "Save Changes" : "Create Instance"))
-                .fontWeight(.bold)
-                .frame(maxWidth: .infinity)
         }
-        .dsProminentButton()
-        .controlSize(.large)
         .disabled(model.creating)
-        .padding(.horizontal, 20)
-        .padding(.vertical, 8)
-        .background(.bar)
     }
 }

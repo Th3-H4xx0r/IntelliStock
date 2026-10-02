@@ -34,7 +34,7 @@ struct BacktestPlaybackView: View {
                 VStack(spacing: 0) {
                     HStack(spacing: 6) {
                         Text("Backtest Playback").font(.headline)
-                        MarketsTag(text: "LIVE", color: DS.Palette.warning, mono: true)
+                        MarketsTag(text: "Live", color: DS.Palette.warning)
                     }
                     Text("Backtest #\(id)").font(.caption2).foregroundStyle(.secondary)
                 }

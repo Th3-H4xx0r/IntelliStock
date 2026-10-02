@@ -2,7 +2,9 @@ import SwiftUI
 
 /// The Kalshi backtest launcher — `KalshiBacktestScreen`: settings seeded
 /// from the instance config, a risk preset, dates, leagues, and the list of
-/// this brokerage's backtests (refreshed every 3 s).
+/// this brokerage's backtests (refreshed every 3 s). A native `Form`; each
+/// backtest row opens its results, with Stop and Delete on swipe and in the
+/// context menu.
 struct KalshiBacktestView: View {
     let instanceId: String
 
@@ -146,6 +148,9 @@ struct KalshiBacktestView: View {
         }
     }
 
+    /// One backtest: the dates over the short id, the P&L over the status.
+    /// The row opens the results; Stop (while active) and Delete are swipe
+    /// actions and context-menu items, where the Dart had icon buttons.
     private func backtestRow(_ model: KalshiBacktestModel, _ b: JSONObject) -> some View {
         let id = KalshiPregame.str(b["id"])
         let status = b["status"].flatMap { $0.isNull ? nil : $0.dartDescription }
@@ -154,50 +159,64 @@ struct KalshiBacktestView: View {
         let active = status == "running" || status == "pending"
         let progress = Int((b["progress"]?.double ?? 0).rounded())
         let pnlValue = (pnl?.isNull ?? true) ? nil : pnl?.double
+        let stop: () -> Void = {
+            Task { showError(await model.stopBacktest(id)) }
+        }
+        let delete: () -> Void = {
+            Task { showError(await model.deleteBacktest(id)) }
+        }
 
-        return HStack(spacing: 6) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(String(id.prefix(8)))
-                    .font(.footnote.monospaced())
-                Text("\((b["start_date"] ?? .null).dartDescription) → \((b["end_date"] ?? .null).dartDescription)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+        return NavigationLink(value: Route.kalshiBacktestResult(id)) {
+            EntityRow(
+                "\((b["start_date"] ?? .null).dartDescription) → \((b["end_date"] ?? .null).dartDescription)",
+                subtitle: String(id.prefix(8))
+            ) {
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text(pnlValue.map { KalshiFormat.money(cents: $0) } ?? "—")
+                        .monospacedDigit()
+                        .foregroundStyle((pnlValue ?? 0) >= 0 ? DS.Palette.success : DS.Palette.danger)
+                    StatusDot(active ? "\(status ?? "") \(progress)%" : (status ?? ""), color: statusColor(status), pulsing: active, font: .footnote)
+                }
             }
-            Spacer(minLength: 4)
-            VStack(alignment: .trailing, spacing: 2) {
-                Text(active ? "\(status ?? "") \(progress)%" : (status ?? ""))
-                    .font(.footnote)
-                    .foregroundStyle(statusColor(status))
-                Text(pnlValue.map { KalshiFormat.money(cents: $0) } ?? "—")
-                    .font(.footnote.monospacedDigit())
-                    .foregroundStyle((pnlValue ?? 0) >= 0 ? DS.Palette.success : DS.Palette.danger)
+        }
+        // The Dart icon button deleted at once (no confirmation), so no full
+        // swipe: the button has to be tapped, as before.
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button {
+                delete()
+            } label: {
+                Label("Delete Backtest", systemImage: Symbol.named("delete"))
             }
+            .tint(DS.Palette.danger)
+            if active {
+                Button {
+                    stop()
+                } label: {
+                    Label("Stop Backtest", systemImage: Symbol.named("stop_circle"))
+                }
+                .tint(DS.Palette.warning)
+            }
+        }
+        .contextMenu {
             Button {
                 services.router.push(.kalshiBacktestResult(id))
             } label: {
-                Image(systemName: Symbol.named("visibility"))
+                Label("View Results", systemImage: Symbol.named("visibility"))
             }
-            .tint(DS.Palette.accent)
-            .accessibilityLabel("View results")
             if active {
                 Button {
-                    Task { showError(await model.stopBacktest(id)) }
+                    stop()
                 } label: {
-                    Image(systemName: Symbol.named("stop_circle"))
+                    Label("Stop Backtest", systemImage: Symbol.named("stop_circle"))
                 }
-                .tint(DS.Palette.warning)
-                .accessibilityLabel("Stop backtest")
             }
-            Button {
-                Task { showError(await model.deleteBacktest(id)) }
+            Divider()
+            Button(role: .destructive) {
+                delete()
             } label: {
-                Image(systemName: Symbol.named("delete"))
+                Label("Delete Backtest", systemImage: Symbol.named("delete"))
             }
-            .tint(.secondary)
-            .accessibilityLabel("Delete backtest")
         }
-        .buttonStyle(.borderless)
-        .imageScale(.large)
     }
 
     /// A failed stop / delete's toast.
