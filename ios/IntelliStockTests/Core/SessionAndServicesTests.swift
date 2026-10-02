@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import Testing
+import UIKit
 @testable import IntelliStock
 
 /// Ported from test/core/network/api_base_url_test.dart.
@@ -189,91 +190,118 @@ struct SessionStoreTests {
 }
 
 /// `AppServices`: first-frame reads, client rebuild on a server change
-/// (Review Focus 5), 401 handling (Review Focus 3) and the router redirect.
-@Suite(.serialized)
+/// (Review Focus 5), 401 handling (Review Focus 3), the router redirect, and
+/// fix round 1 (lock release, session-scoped models, deferred keychain).
 @MainActor
 struct AppServicesTests {
-    init() { StubURLProtocol.reset() }
+    private let stub = DataStub()
 
-    private func make(_ initial: [String: String], probe: WidgetSyncProbe = WidgetSyncProbe()) -> AppServices {
+    private func make(
+        _ initial: [String: String],
+        probe: WidgetSyncProbe = WidgetSyncProbe(),
+        storage: InMemorySecureStorage? = nil,
+        registrar: FakePushRegistrar = FakePushRegistrar(grant: false),
+        notificationCenter: NotificationCenter = NotificationCenter()
+    ) -> AppServices {
         AppServices(
-            storage: InMemorySecureStorage(initial),
+            storage: storage ?? InMemorySecureStorage(initial),
             biometrics: FakeBiometrics(available: true, authResult: true),
             widgetSync: probe.sync,
-            urlSession: StubURLProtocol.session,
-            pushRegistrar: FakePushRegistrar(grant: false)
+            urlSession: DataStubProtocol.session,
+            pushRegistrar: registrar,
+            notificationCenter: notificationCenter
         )
     }
 
-    private static let signedIn: [String: String] = [
-        ApiBaseUrlStore.storageKey: "https://old.example.test",
-        SessionStore.tokenKey: "jwt",
-        SessionStore.userKey: #"{"username": "pk", "has_completed_onboarding": true}"#,
-    ]
+    private var signedIn: [String: String] {
+        [
+            ApiBaseUrlStore.storageKey: stub.baseURL,
+            SessionStore.tokenKey: "jwt",
+            SessionStore.userKey: #"{"username": "pk", "has_completed_onboarding": true}"#,
+        ]
+    }
 
     @Test func readsUrlSessionAndLockSynchronously() {
-        var initial = Self.signedIn
+        var initial = signedIn
         initial[AppLock.enabledKey] = "true"
         initial[AppLock.timeoutKey] = "60"
         let services = make(initial)
-        #expect(services.urlStore.baseUrl == "https://old.example.test")
+        #expect(services.isStorageReady)
+        #expect(services.urlStore.baseUrl == stub.baseURL)
         #expect(services.session.isAuthenticated)
         #expect(services.lock.locked)
         #expect(services.lock.timeout == .oneMinute)
-        #expect(services.apiClient.baseURL == "https://old.example.test")
+        #expect(services.apiClient.baseURL == stub.baseURL)
     }
 
     @Test func theWidgetMirrorsTheUrlLoadedFirst() {
         let probe = WidgetSyncProbe()
-        _ = make(Self.signedIn, probe: probe)
-        #expect(probe.defaults.string(forKey: WidgetSync.Key.apiBase) == "https://old.example.test")
+        _ = make(signedIn, probe: probe)
+        #expect(probe.defaults.string(forKey: WidgetSync.Key.apiBase) == stub.baseURL)
     }
 
     @Test func changingTheServerRebuildsTheClientAgainstTheNewOrigin() async throws {
-        StubURLProtocol.respond(json: #"{"ok": true}"#)
-        let services = make(Self.signedIn)
+        let newServer = DataStub(json: #"{"ok": true}"#)
+        let services = make(signedIn)
         let old = services.apiClient
-        try services.urlStore.set("https://new.example.test/api/")
+        try services.urlStore.set(newServer.baseURL + "/api/")
         #expect(services.apiClient !== old)
-        #expect(services.apiClient.baseURL == "https://new.example.test")
+        #expect(services.apiClient.baseURL == newServer.baseURL)
 
         _ = try await services.apiClient.get("/health")
-        let hosts = StubURLProtocol.requests.compactMap { $0.url?.host() }
-        #expect(hosts == ["new.example.test"])
-        #expect(StubURLProtocol.requests.first?.value(forHTTPHeaderField: "Authorization") == "Bearer jwt")
+        #expect(newServer.requests.count == 1)
+        #expect(stub.requests.isEmpty)
+        #expect(newServer.requests.first?.value(forHTTPHeaderField: "Authorization") == "Bearer jwt")
     }
 
     @Test func anUnchangedUrlKeepsTheClient() throws {
-        let services = make(Self.signedIn)
+        let services = make(signedIn)
         let old = services.apiClient
-        try services.urlStore.set("https://old.example.test/")
+        try services.urlStore.set(stub.baseURL + "/")
         #expect(services.apiClient === old)
     }
 
     @Test func a401ClearsTheSession() async {
-        StubURLProtocol.respond(status: 401, json: #"{"detail": "expired"}"#)
-        let services = make(Self.signedIn)
+        stub.respond(status: 401, json: #"{"detail": "expired"}"#)
+        let services = make(signedIn)
         _ = try? await services.apiClient.get("/instances")
         #expect(!services.session.isAuthenticated)
     }
 
     @Test func aRefreshedTokenPersists() async throws {
-        StubURLProtocol.respond(json: "{}", headers: ["X-Refreshed-Token": "slid.jwt"])
-        let storage = InMemorySecureStorage(Self.signedIn)
-        let services = AppServices(
-            storage: storage,
-            biometrics: FakeBiometrics(available: true, authResult: true),
-            widgetSync: WidgetSyncProbe().sync,
-            urlSession: StubURLProtocol.session,
-            pushRegistrar: FakePushRegistrar(grant: false)
-        )
+        stub.respond(json: "{}", headers: ["X-Refreshed-Token": "slid.jwt"])
+        let storage = InMemorySecureStorage(signedIn)
+        let services = make([:], storage: storage)
         _ = try await services.apiClient.get("/instances")
         #expect(await eventually { services.session.token == "slid.jwt" })
         #expect(storage.read(SessionStore.tokenKey) == "slid.jwt")
     }
 
+    /// I5 end to end: a renewal that lands after Sign Out writes nothing back.
+    @Test func aRefreshAfterSignOutDoesNotResurrectTheSession() async throws {
+        let storage = InMemorySecureStorage(signedIn)
+        let probe = WidgetSyncProbe()
+        let services = make([:], probe: probe, storage: storage)
+        stub.headers = ["X-Refreshed-Token": "slid.jwt"]
+        stub.handler = { _ in
+            DispatchQueue.main.sync {
+                MainActor.assumeIsolated {
+                    let session = services.session
+                    Task { await session.clear() }
+                }
+            }
+            return (200, "{}")
+        }
+        _ = try await services.apiClient.get("/instances")
+        #expect(await eventually { !services.session.isAuthenticated })
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(services.session.token == nil)
+        #expect(storage.read(SessionStore.tokenKey) == nil)
+        #expect(probe.defaults.string(forKey: WidgetSync.Key.token) == "")
+    }
+
     @Test func scenePhasesReachTheLockAndTheLifecycle() {
-        var initial = Self.signedIn
+        var initial = signedIn
         initial[AppLock.enabledKey] = "true"
         let services = make(initial)
         services.lock.releaseLock()
@@ -284,10 +312,132 @@ struct AppServicesTests {
         #expect(services.lock.locked)
     }
 
+    // MARK: Lock and push (fix round 1, I1)
+
+    /// A 401 or Sign Out while locked must not leave Login behind Face ID,
+    /// nor demand Face ID again after the password sign-in.
+    @Test func signOutReleasesTheLockAndKeepsThePreference() async {
+        var initial = signedIn
+        initial[AppLock.enabledKey] = "true"
+        let services = make(initial)
+        #expect(services.lock.locked)
+        await services.session.clear()
+        services.didSignOut()
+        #expect(!services.lock.locked)
+        #expect(services.lock.enabled)
+    }
+
+    @Test func pushDoesNotRegisterWhileLocked() async {
+        var initial = signedIn
+        initial[AppLock.enabledKey] = "true"
+        let registrar = FakePushRegistrar(grant: true)
+        let services = make(initial, registrar: registrar)
+        #expect(services.lock.locked)
+        await services.push.enable()
+        #expect(registrar.authorizationRequests == 0)
+
+        services.lock.releaseLock()
+        await services.push.enable()
+        #expect(registrar.authorizationRequests == 1)
+        #expect(registrar.registrations == 1)
+    }
+
+    @Test func pushDoesNotRegisterWhenSignedOut() async {
+        let registrar = FakePushRegistrar(grant: true)
+        let services = make([ApiBaseUrlStore.storageKey: stub.baseURL], registrar: registrar)
+        await services.push.enable()
+        #expect(registrar.authorizationRequests == 0)
+    }
+
+    // MARK: Session-scoped shared models (fix round 1, I3)
+
+    private nonisolated static let brokerageA = #"{"accounts": [{"id": "acct-A", "name": "Server A", "brokerage_type": "alpaca", "status": "active"}]}"#
+
+    @Test func signOutResetsTheSharedDashboard() async {
+        stub.respond(json: Self.brokerageA)
+        let services = make(signedIn)
+        await services.dashboard.loadBrokerages()
+        #expect(services.dashboard.brokeragesValue?.first?.id == "acct-A")
+        services.dashboard.portfolioUpdatedAt = Date()
+
+        services.didSignOut()
+        #expect(services.dashboard.brokeragesValue == nil)
+        #expect(services.dashboard.brokerages.isLoading)
+        #expect(services.dashboard.services.isLoading)
+        #expect(services.dashboard.portfolioUpdatedAt == nil)
+    }
+
+    /// Server A's accounts must never show on server B, nor be sent to it.
+    @Test func aServerChangeResetsTheSharedDashboard() async throws {
+        stub.respond(json: Self.brokerageA)
+        let services = make(signedIn)
+        await services.dashboard.loadBrokerages()
+        #expect(services.dashboard.brokeragesValue != nil)
+
+        let serverB = DataStub(status: 500, json: #"{"detail": "down"}"#)
+        try services.urlStore.set(serverB.baseURL)
+        #expect(services.dashboard.brokeragesValue == nil)
+        await services.dashboard.loadBrokerages()
+        #expect(services.dashboard.brokeragesValue == nil)
+        #expect(services.dashboard.brokerages.error != nil)
+    }
+
+    /// A response that lands after the reset is dropped.
+    @Test func aLateBrokerageResponseAfterResetIsDropped() async {
+        let services = make(signedIn)
+        stub.handler = { _ in
+            DispatchQueue.main.sync { MainActor.assumeIsolated { services.dashboard.reset() } }
+            return (200, Self.brokerageA)
+        }
+        await services.dashboard.loadBrokerages()
+        #expect(services.dashboard.brokeragesValue == nil)
+        #expect(services.dashboard.brokerages.isLoading)
+    }
+
+    // MARK: Keychain before first unlock (fix round 1, I6)
+
+    @Test func anUnreadableKeychainDefersLoadingAndKeepsTheWidgetCredentials() {
+        var initial = signedIn
+        initial[AppLock.enabledKey] = "true"
+        let storage = InMemorySecureStorage(initial)
+        storage.readError = KeychainError.interactionNotAllowed
+        let probe = WidgetSyncProbe()
+        probe.defaults.set("https://kept.example.test", forKey: WidgetSync.Key.apiBase)
+        probe.defaults.set("kept.jwt", forKey: WidgetSync.Key.token)
+        let center = NotificationCenter()
+
+        let services = make([:], probe: probe, storage: storage, notificationCenter: center)
+        #expect(!services.isStorageReady)
+        #expect(!services.urlStore.isConfigured)
+        #expect(!services.session.isAuthenticated)
+        #expect(probe.defaults.string(forKey: WidgetSync.Key.token) == "kept.jwt")
+        #expect(probe.defaults.string(forKey: WidgetSync.Key.apiBase) == "https://kept.example.test")
+        #expect(RootScreen.resolve(
+            storageReady: services.isStorageReady,
+            isConfigured: services.urlStore.isConfigured,
+            isAuthenticated: services.session.isAuthenticated,
+            hasCompletedOnboarding: services.session.hasCompletedOnboarding,
+            locked: services.lock.locked
+        ) == .waiting)
+
+        // Still locked: a notification changes nothing.
+        center.post(name: UIApplication.protectedDataDidBecomeAvailableNotification, object: nil)
+        #expect(!services.isStorageReady)
+
+        storage.readError = nil
+        center.post(name: UIApplication.protectedDataDidBecomeAvailableNotification, object: nil)
+        #expect(services.isStorageReady)
+        #expect(services.urlStore.baseUrl == stub.baseURL)
+        #expect(services.apiClient.baseURL == stub.baseURL)
+        #expect(services.session.isAuthenticated)
+        #expect(services.lock.locked)
+        #expect(probe.defaults.string(forKey: WidgetSync.Key.token) == "jwt")
+    }
+
     // MARK: Redirect
 
     @Test func signOutRemembersTheLocationAndResetsTheShell() {
-        let services = make(Self.signedIn)
+        let services = make(signedIn)
         services.router.tab = .instances
         services.router.push(.instance("abc"))
         services.didSignOut()
@@ -297,7 +447,7 @@ struct AppServicesTests {
     }
 
     @Test func signInHonoursASafeRedirectInItsTab() {
-        let services = make(Self.signedIn)
+        let services = make(signedIn)
         services.router.tab = .more
         services.router.push(.settings)
         services.didSignOut()
@@ -308,7 +458,7 @@ struct AppServicesTests {
     }
 
     @Test func signInToATabRootSelectsIt() {
-        let services = make(Self.signedIn)
+        let services = make(signedIn)
         services.router.tab = .strategies
         services.didSignOut()
         #expect(services.loginRedirect == "/strategies")
@@ -317,7 +467,7 @@ struct AppServicesTests {
     }
 
     @Test func signInWithOnboardingIncompleteDropsTheRedirect() async throws {
-        let services = make(Self.signedIn)
+        let services = make(signedIn)
         services.loginRedirect = "/instances/abc"
         try await services.session.setUser(["username": "pk", "has_completed_onboarding": false])
         services.didSignIn()
@@ -327,7 +477,7 @@ struct AppServicesTests {
 
     @Test func unsafeRedirectsAreIgnored() {
         for unsafe in ["//evil.example", "https://evil.example", "/a@b", "relative"] {
-            let services = make(Self.signedIn)
+            let services = make(signedIn)
             services.loginRedirect = unsafe
             services.didSignIn()
             #expect(services.router.stack(for: .dashboard).isEmpty)
@@ -336,15 +486,48 @@ struct AppServicesTests {
     }
 
     @Test func deepLinksOpenWhenSignedInAndWaitWhenSignedOut() {
-        let services = make(Self.signedIn)
+        let services = make(signedIn)
         services.openDeepLink(URL(string: "intellistock://instances/abc/live")!)
         #expect(services.router.stack(for: .dashboard) == [.liveTrading("abc")])
 
-        let signedOut = make([ApiBaseUrlStore.storageKey: "https://old.example.test"])
+        let signedOut = make([ApiBaseUrlStore.storageKey: stub.baseURL])
         signedOut.openDeepLink(URL(string: "intellistock://kalshi")!)
         #expect(signedOut.loginRedirect == "/kalshi")
         signedOut.openDeepLink(URL(string: "https://example.com/instances/x")!)
         #expect(signedOut.loginRedirect == "/kalshi")
+    }
+}
+
+/// The root decision (fix round 1, C1): while locked and signed in, the lock
+/// replaces the app — none of its content (tabs, sheets, alerts, chat) is on
+/// screen.
+struct RootScreenTests {
+    private func screen(ready: Bool = true, configured: Bool = true, authed: Bool = true, onboarded: Bool = true, locked: Bool = false) -> RootScreen {
+        RootScreen.resolve(storageReady: ready, isConfigured: configured, isAuthenticated: authed, hasCompletedOnboarding: onboarded, locked: locked)
+    }
+
+    @Test func lockedAndSignedInShowsOnlyTheLock() {
+        let s = screen(locked: true)
+        #expect(s == .lock)
+        #expect(!s.showsAppContent)
+        #expect(screen(onboarded: false, locked: true) == .lock)
+    }
+
+    @Test func theLockNeverCoversASignedOutApp() {
+        #expect(screen(authed: false, locked: true) == .app(.login))
+        #expect(screen(configured: false, authed: false, locked: true) == .app(.connect))
+    }
+
+    @Test func unlockedFollowsTheGates() {
+        #expect(screen() == .app(.main))
+        #expect(screen().showsAppContent)
+        #expect(screen(onboarded: false) == .app(.onboarding))
+    }
+
+    @Test func anUnreadableKeychainWaits() {
+        #expect(screen(ready: false) == .waiting)
+        #expect(screen(ready: false, locked: true) == .waiting)
+        #expect(!screen(ready: false).showsAppContent)
     }
 }
 

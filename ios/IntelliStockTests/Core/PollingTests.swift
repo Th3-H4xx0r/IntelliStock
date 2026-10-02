@@ -163,29 +163,30 @@ struct ParseLogLineTests {
     }
 }
 
-/// `LogTailer` against a stubbed `live-logs` endpoint.
-@Suite(.serialized)
+/// `LogTailer` against a stubbed `live-logs` endpoint (its own `DataStub`
+/// host, so it runs in parallel with other suites).
 @MainActor
 struct LogTailerTests {
-    init() { StubURLProtocol.reset() }
+    private let stub = DataStub()
 
     private func tailer(_ clock: ManualClock) -> LogTailer {
-        let client = ApiClient(baseURL: "https://api.example.test", tokens: nil, session: StubURLProtocol.session)
-        return LogTailer(
-            client: client,
+        LogTailer(
+            client: stub.client,
             pathBuilder: { "/instances/i1/live-logs?since_line=\($0)" },
             sleep: clock.sleep
         )
     }
 
-    private nonisolated static func body(_ json: JSON) -> Data { (try? json.data()) ?? Data() }
+    private nonisolated static func body(_ json: JSON) -> String {
+        String(decoding: (try? json.data()) ?? Data(), as: UTF8.self)
+    }
 
     /// Answers by cursor: `pages[since_line]`, else an empty running page.
     private func serve(_ pages: [Int: JSON], status: Int = 200) {
-        StubURLProtocol.handler = { request in
+        stub.handler = { request in
             let since = Int(request.queryItems["since_line"] ?? "") ?? -1
             let page = pages[since] ?? ["logs": [], "next_line": .int(since), "final_status": "running"]
-            return (status, ["Content-Type": "application/json"], Self.body(page))
+            return (status, Self.body(page))
         }
     }
 
@@ -208,8 +209,8 @@ struct LogTailerTests {
         await clock.advance(by: .seconds(5))
         #expect(await eventually { t.state.lines.count == 3 })
         #expect(t.state.nextLine == 3)
-        #expect(StubURLProtocol.requests.map { $0.url?.path } == ["/instances/i1/live-logs", "/instances/i1/live-logs"])
-        #expect(StubURLProtocol.requests.last?.queryItems["since_line"] == "2")
+        #expect(stub.requests.map { $0.url?.path } == ["/instances/i1/live-logs", "/instances/i1/live-logs"])
+        #expect(stub.requests.last?.queryItems["since_line"] == "2")
         t.dispose()
     }
 
@@ -238,7 +239,7 @@ struct LogTailerTests {
     }
 
     @Test func errorsBackOffTwoFiveTenThirty() async {
-        StubURLProtocol.respond(status: 500, json: #"{"detail": "nope"}"#)
+        stub.respond(status: 500, json: #"{"detail": "nope"}"#)
         let clock = ManualClock()
         let t = tailer(clock)
         t.start()
@@ -255,7 +256,7 @@ struct LogTailerTests {
     }
 
     @Test func successClearsTheErrorAndResetsTheBackoff() async {
-        StubURLProtocol.respond(status: 503)
+        stub.respond(status: 503)
         let clock = ManualClock()
         let t = tailer(clock)
         t.start()
@@ -303,12 +304,12 @@ struct LogTailerTests {
         let clock = ManualClock()
         let t = tailer(clock)
         t.start()
-        #expect(await eventually { StubURLProtocol.requests.count == 1 })
+        #expect(await eventually { stub.requests.count == 1 })
         t.pause()
         await clock.advance(by: .seconds(60))
-        #expect(StubURLProtocol.requests.count == 1)
+        #expect(stub.requests.count == 1)
         t.resume()
-        #expect(await eventually { StubURLProtocol.requests.count == 2 })
+        #expect(await eventually { stub.requests.count == 2 })
         t.dispose()
     }
 
