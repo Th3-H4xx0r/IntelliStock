@@ -25,6 +25,15 @@ nonisolated func computeChange(_ history: PortfolioHistory, scrubIndex: Int? = n
     return (abs, (abs / baseline) * 100)
 }
 
+/// The figure the hero shows: the scrubbed point when `scrubIndex` is in
+/// range, else `currentValue`, else the last point, else 0. The portfolio
+/// sheet reads its balances through the same function.
+nonisolated func dashboardHeroValue(_ history: PortfolioHistory, scrubIndex: Int? = nil) -> Double {
+    let values = history.values
+    if let scrubIndex, scrubIndex >= 0, scrubIndex < values.count { return values[scrubIndex] }
+    return history.currentValue ?? values.last ?? 0
+}
+
 /// The nearest data-point index by timestamp for a fraction across [0, 1]
 /// (not clamped, as in Dart). 0 for an empty or single-point list.
 nonisolated func nearestIndex(_ timestamps: [Date], _ fraction: Double) -> Int {
@@ -143,6 +152,13 @@ final class DashboardPortfolioChartModel {
 
     /// The history the value row reads: fresh, else the held one.
     var valueHistory: PortfolioHistory? { state.value ?? lastHistory }
+
+    /// The hero's own figures while it shows 1D, for this account's row in
+    /// the portfolio sheet; nil on any other range.
+    var daySummary: DashboardAccountSummary? {
+        guard lastLoadedRange == "1D", let lastHistory else { return nil }
+        return DashboardAccountSummary(history: lastHistory)
+    }
 
     /// Poll cadence: the 1D curve grows continuously; longer ranges barely move.
     var interval: Duration { range == "1D" ? .seconds(5) : .seconds(30) }
