@@ -52,6 +52,10 @@ struct SwingOrderReviewSheet: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var phase: Phase = .review
+    /// The card's vertical drag; negative is up.
+    @State private var drag: CGFloat = 0
+    /// The card has flown off the top.
+    @State private var launched = false
 
     enum Phase: Equatable {
         case review
@@ -97,62 +101,42 @@ struct SwingOrderReviewSheet: View {
 
     // MARK: Review
 
+    /// The order card and the swipe hint under it. The whole card follows
+    /// the finger up; past the threshold it flies off the top and the order
+    /// sends. A drag down only stretches a little.
     private var reviewContent: some View {
-        let s = review.signal
+        let lift = drag < 0 ? drag : drag * 0.2
+        let progress = min(max(0, -drag) / SwipeUpHint.threshold, 1)
         return VStack(spacing: 0) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    if review.demo {
-                        Label("Demo · nothing is sent", systemImage: "play.circle")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(DS.Palette.info)
-                    }
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(review.decision == "approve_half" ? "Review order · half size" : "Review order")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                        Text(s.symbol)
-                            .font(.largeTitle.weight(.bold))
-                        Text(swingLaneLabel(s))
-                            .font(.body)
-                            .foregroundStyle(.secondary)
-                    }
-                    .accessibilityElement(children: .combine)
-
-                    VStack(spacing: 0) {
-                        ForEach(Array(rows(s).enumerated()), id: \.offset) { i, row in
-                            if i > 0 { Divider() }
-                            HStack(alignment: .firstTextBaseline) {
-                                Text(row.label)
-                                    .foregroundStyle(.secondary)
-                                Spacer(minLength: 12)
-                                Text(row.value)
-                                    .fontWeight(i < 2 && s.isWheel ? .semibold : .regular)
-                                    .monospacedDigit()
-                                    .multilineTextAlignment(.trailing)
-                            }
-                            .font(.body)
-                            .padding(.vertical, 12)
-                            .accessibilityElement(children: .combine)
-                        }
-                    }
-
-                    if let warning = swingCollateralWarning(s, cash: cash) {
-                        Label(warning, systemImage: "banknote")
-                            .font(.subheadline)
-                            .foregroundStyle(DS.Palette.warning)
-                    }
-
-                    Text(decisionConfirmBody(s, review.decision))
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .padding(.horizontal, 20)
-                .padding(.top, 8)
-                .padding(.bottom, 24)
+            ViewThatFits(in: .vertical) {
+                card
+                ScrollView { card }
             }
-
+            Spacer(minLength: 0)
+            SwipeUpHint(label: "Swipe up to send", progress: progress, onSend: launch)
+        }
+        .padding(.bottom, 12)
+        .offset(y: launched ? -1400 : lift)
+        .opacity(launched ? 0 : 1)
+        .scaleEffect(launched ? 0.92 : 1, anchor: .top)
+        .contentShape(Rectangle())
+        .gesture(
+            DragGesture(minimumDistance: 8)
+                .onChanged { value in
+                    guard phase == .review, !launched else { return }
+                    drag = value.translation.height
+                }
+                .onEnded { value in
+                    guard phase == .review, !launched else { return }
+                    if SwipeUpHint.commits(translation: value.translation.height, predicted: value.predictedEndTranslation.height) {
+                        launch()
+                    } else {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) { drag = 0 }
+                    }
+                }
+        )
+        .sensoryFeedback(.impact(weight: .medium), trigger: progress >= 1)
+        .overlay {
             if phase == .sending {
                 VStack(spacing: 10) {
                     ProgressView()
@@ -160,13 +144,65 @@ struct SwingOrderReviewSheet: View {
                         .font(.headline)
                         .foregroundStyle(.secondary)
                 }
-                .frame(maxWidth: .infinity, minHeight: SwipeUpToSend.height)
-                .padding(.bottom, 12)
-            } else {
-                SwipeUpToSend(label: "Swipe up to send", onSend: send)
-                    .padding(.bottom, 12)
+                .transition(.opacity)
             }
         }
+    }
+
+    /// The order itself, on a raised card.
+    private var card: some View {
+        let s = review.signal
+        return VStack(alignment: .leading, spacing: 18) {
+            if review.demo {
+                Label("Demo · nothing is sent", systemImage: "play.circle")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(DS.Palette.info)
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text(review.decision == "approve_half" ? "Review order · half size" : "Review order")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text(s.symbol)
+                    .font(.largeTitle.weight(.bold))
+                Text(swingLaneLabel(s))
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+            }
+            .accessibilityElement(children: .combine)
+
+            VStack(spacing: 0) {
+                ForEach(Array(rows(s).enumerated()), id: \.offset) { i, row in
+                    if i > 0 { Divider() }
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(row.label)
+                            .foregroundStyle(.secondary)
+                        Spacer(minLength: 12)
+                        Text(row.value)
+                            .fontWeight(i < 2 && s.isWheel ? .semibold : .regular)
+                            .monospacedDigit()
+                            .multilineTextAlignment(.trailing)
+                    }
+                    .font(.body)
+                    .padding(.vertical, 11)
+                    .accessibilityElement(children: .combine)
+                }
+            }
+
+            if let warning = swingCollateralWarning(s, cash: cash) {
+                Label(warning, systemImage: "banknote")
+                    .font(.subheadline)
+                    .foregroundStyle(DS.Palette.warning)
+            }
+
+            Text(decisionConfirmBody(s, review.decision))
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(20)
+        .background(DS.Surface.panel, in: .rect(cornerRadius: DS.Radius.card, style: .continuous))
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
     }
 
     /// Premium and collateral lead for a put seller; a swing order shows its
@@ -184,13 +220,19 @@ struct SwingOrderReviewSheet: View {
 
     // MARK: Actions
 
-    private func send() {
-        guard phase == .review else { return }
-        phase = .sending
+    /// The card flies off the top, then the order sends.
+    private func launch() {
+        guard phase == .review, !launched else { return }
+        withAnimation(.easeIn(duration: 0.3)) { launched = true }
+        withAnimation(.easeIn(duration: 0.2).delay(0.15)) { phase = .sending }
         Task {
             let result = await review.send()
             if result.outcome == .ignored {
-                phase = .review
+                withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                    phase = .review
+                    launched = false
+                    drag = 0
+                }
                 return
             }
             withAnimation(.snappy) { phase = .done(result) }
@@ -207,17 +249,18 @@ struct SwingOrderReviewSheet: View {
     }
 }
 
-/// "Swipe up to send": drag the chevron up past the threshold (or flick it)
-/// to send. VoiceOver and Switch Control send with the default action.
-struct SwipeUpToSend: View {
+/// The hint under the order card: a chevron and "Swipe up to send" that
+/// brighten as the card nears the threshold. The card's drag does the
+/// sending; VoiceOver and Switch Control send with the default action.
+struct SwipeUpHint: View {
     let label: String
+    /// 0 at rest, 1 at the threshold.
+    let progress: CGFloat
     let onSend: () -> Void
 
-    nonisolated static let height: CGFloat = 96
-    nonisolated static let threshold: CGFloat = 80
+    nonisolated static let threshold: CGFloat = 120
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var drag: CGFloat = 0
 
     /// A drag up of `threshold`, or a flick predicted to travel twice that,
     /// sends.
@@ -226,30 +269,16 @@ struct SwipeUpToSend: View {
     }
 
     var body: some View {
-        let lift = min(max(0, -drag), Self.threshold * 1.25)
-        let progress = lift / Self.threshold
         VStack(spacing: 8) {
             Image(systemName: "chevron.up")
                 .font(.title.weight(.bold))
-                .symbolEffect(.wiggle.up, options: .repeat(.periodic(delay: 1.4)), isActive: !reduceMotion && drag == 0)
-            Text(label)
+                .symbolEffect(.wiggle.up, options: .repeat(.periodic(delay: 1.4)), isActive: !reduceMotion && progress == 0)
+            Text(progress >= 1 ? "Release to send" : label)
                 .font(.headline)
         }
         .foregroundStyle(DS.Palette.accent)
-        .frame(maxWidth: .infinity, minHeight: Self.height)
-        .contentShape(Rectangle())
-        .offset(y: -lift)
-        .opacity(1 - min(progress, 1) * 0.4)
-        .gesture(
-            DragGesture(minimumDistance: 4)
-                .onChanged { drag = $0.translation.height }
-                .onEnded { value in
-                    let commit = Self.commits(translation: value.translation.height, predicted: value.predictedEndTranslation.height)
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) { drag = 0 }
-                    if commit { onSend() }
-                }
-        )
-        .sensoryFeedback(.impact(weight: .medium), trigger: progress >= 1)
+        .opacity(0.7 + 0.3 * progress)
+        .frame(maxWidth: .infinity, minHeight: 88)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(label)
         .accessibilityAddTraits(.isButton)
