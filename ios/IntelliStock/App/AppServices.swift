@@ -18,6 +18,8 @@ final class AppServices {
     let lock: AppLock
     let lifecycle: AppLifecycle
     let widgetSync: WidgetSync
+    /// Screens that hide the floating chat button while on screen.
+    let chatDock = ChatDockChrome()
 
     /// The client every repository uses. Rebuilt against the new origin
     /// whenever the server URL changes (Dart's `dioProvider` watched the URL

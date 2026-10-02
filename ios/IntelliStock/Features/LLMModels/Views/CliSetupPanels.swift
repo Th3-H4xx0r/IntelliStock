@@ -365,7 +365,8 @@ private struct CliPanelHeader: View {
                 Group {
                     if loading { ProgressView() } else { Image(systemName: Symbol.named("refresh")) }
                 }
-                .frame(width: 32, height: 32)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.borderless)
             .disabled(loading)
@@ -444,7 +445,8 @@ private struct CliCopyButton: View {
         } label: {
             Image(systemName: Symbol.named("copy"))
                 .font(.caption)
-                .frame(width: 32, height: 32)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.borderless)
         .tint(.secondary)

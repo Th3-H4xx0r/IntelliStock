@@ -152,17 +152,18 @@ private struct ModelCardSection: View {
                                     Image(systemName: Symbol.named("cable"))
                                 }
                             }
-                            .frame(width: 36, height: 36)
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
                         }
                         .disabled(test?.testing == true)
                         .accessibilityLabel("Test CLI connection")
                     }
                     Button(action: onEdit) {
-                        Image(systemName: Symbol.named("edit")).frame(width: 36, height: 36)
+                        Image(systemName: Symbol.named("edit")).frame(width: 44, height: 44).contentShape(Rectangle())
                     }
                     .accessibilityLabel("Edit")
                     Button(role: .destructive, action: onDelete) {
-                        Image(systemName: Symbol.named("delete_outline")).frame(width: 36, height: 36)
+                        Image(systemName: Symbol.named("delete_outline")).frame(width: 44, height: 44).contentShape(Rectangle())
                     }
                     .accessibilityLabel("Delete")
                 }

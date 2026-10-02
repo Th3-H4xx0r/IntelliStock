@@ -10,6 +10,7 @@ import SwiftUI
 /// greeting and three feature tiles.
 struct OnboardingWelcomeStep: View {
     @Environment(AppServices.self) private var services
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var pulse = false
 
     var body: some View {
@@ -24,6 +25,8 @@ struct OnboardingWelcomeStep: View {
                 .frame(width: 104, height: 104)
                 .padding(.top, 16)
                 .onAppear {
+                    // Reduce Motion: the ring stays still.
+                    guard !reduceMotion else { return }
                     withAnimation(.easeInOut(duration: 2).repeatForever(autoreverses: true)) { pulse = true }
                 }
 
@@ -683,7 +686,7 @@ private struct OnboardingCountTile: View {
                     .tracking(1)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                    .minimumScaleFactor(0.8)
+                    .dsMinimumScaleFactor(0.8, textStyle: .caption2)
             }
             .frame(maxWidth: .infinity)
         }

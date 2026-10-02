@@ -196,7 +196,8 @@ private struct AgentRunsControls: View {
                 Group {
                     if state.busy { ProgressView() } else { Image(systemName: Symbol.named("refresh")) }
                 }
-                .frame(width: 32, height: 32)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.borderless)
             .accessibilityLabel("Refresh")
@@ -484,9 +485,11 @@ private struct AgentRunsPager: View {
         Button(action: action) {
             Text(label)
                 .font(.footnote.weight(active ? .semibold : .regular))
-                .frame(minWidth: 32, minHeight: 32)
+                .frame(minWidth: 44, minHeight: 44)
         }
         .buttonStyle(.bordered)
+        // A 44 pt hit target with the bordered padding kept minimal.
+        .controlSize(.mini)
         .tint(active ? DS.Palette.accent : .secondary)
         .disabled(!enabled)
     }

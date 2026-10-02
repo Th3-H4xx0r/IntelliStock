@@ -452,11 +452,11 @@ struct ChatComposer: View {
                             .symbolRenderingMode(.hierarchical)
                     }
                 }
-                .frame(width: 36, height: 36)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
             }
             .disabled(busy || disabled || !hasText)
-            .padding(.trailing, 6)
-            .padding(.bottom, 4)
+            .padding(.trailing, 2)
             .accessibilityLabel("Send")
         }
         .glassEffect(.regular, in: .rect(cornerRadius: 22, style: .continuous))

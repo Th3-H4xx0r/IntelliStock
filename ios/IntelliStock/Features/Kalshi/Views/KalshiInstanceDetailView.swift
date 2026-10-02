@@ -670,9 +670,11 @@ struct KalshiInstanceDetailView: View {
     private func pageButton(_ icon: String, label: String, enabled: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: Symbol.named(icon))
-                .frame(width: 30, height: 30)
+                .frame(width: 44, height: 44)
         }
         .buttonStyle(.bordered)
+        // A 44 pt hit target with the bordered padding kept minimal.
+        .controlSize(.mini)
         .disabled(!enabled)
         .accessibilityLabel(label)
     }

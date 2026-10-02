@@ -16,7 +16,9 @@ struct ChatbotDockView: View {
             Color.clear
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)
-            if let model, !model.state.isOpen {
+            // Hidden while a screen floats its own bottom controls (Live
+            // Trading's Halt button), which it would cover.
+            if let model, !model.state.isOpen, !services.chatDock.hidesButton {
                 ChatbotFloatingButton { model.open() }
                     .padding(.trailing, 16)
                     .padding(.bottom, 72)

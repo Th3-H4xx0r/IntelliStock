@@ -41,6 +41,8 @@ private struct LiveTradingContent: View {
             .navigationSubtitle(instanceId)
             .navigationBarTitleDisplayMode(.inline)
             .overlay(alignment: .bottom) { floatingLayer }
+            // The floating chat button would cover the Halt button.
+            .hidesChatButton()
             .task { await model.poll(lifecycle: services.lifecycle) }
             .sheet(isPresented: $showHalt) { LiveHaltSheet(model: model) }
             .sheet(isPresented: $showOrder) { LiveManualOrderSheet(model: model) }
@@ -322,7 +324,7 @@ private struct LiveTradingContent: View {
                     .tracking(0.8)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                    .minimumScaleFactor(0.8)
+                    .dsMinimumScaleFactor(0.8, textStyle: .caption2)
                 Text(value)
                     .font(.subheadline.weight(.semibold).monospacedDigit())
                     .foregroundStyle(color)
