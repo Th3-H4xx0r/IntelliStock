@@ -81,14 +81,13 @@ struct LiveLogsPanel: View {
             PulsingDot(color: statusColor(state), size: 8, pulsing: isRunning(state))
 
             VStack(alignment: .leading, spacing: 2) {
-                Text("instance-\(shortId(state)).log")
-                    .font(.caption.monospaced())
+                Text("Live logs")
+                    .font(.subheadline.weight(.semibold))
+                Text(headerDetail(state))
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
                     .lineLimit(1)
-                if let status = state.finalStatus, status != "none" {
-                    Text(friendlyStatus(state) + (state.lines.isEmpty ? "" : " · \(state.lines.count) lines"))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
+                    .truncationMode(.middle)
                 if state.source == "db" {
                     Text("(last 500 — log file not available)")
                         .font(.caption2)
@@ -117,20 +116,23 @@ struct LiveLogsPanel: View {
                 .accessibilityLabel("Copy")
             }
 
-            Button(action: toggleOpen) {
-                Label(
-                    open ? "Hide Logs" : "View Live Logs",
-                    systemImage: open ? Symbol.named("visibility_off") : Symbol.named("terminal")
-                )
-                .font(.caption.weight(.semibold))
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .tint(open ? DS.Palette.info : .secondary)
+            Button(open ? "Hide Logs" : "View Live Logs", action: toggleOpen)
+                .font(.subheadline)
+                .buttonStyle(.borderless)
+                .frame(minHeight: 44)
         }
         .padding(.leading, 14)
         .padding(.trailing, 10)
         .padding(.vertical, 6)
+    }
+
+    /// "Running · 120 lines · instance-ab12.log" — status first, the file last.
+    private func headerDetail(_ state: LogTailerState) -> String {
+        var parts: [String] = []
+        if let status = state.finalStatus, status != "none" { parts.append(friendlyStatus(state)) }
+        if !state.lines.isEmpty { parts.append("\(state.lines.count) lines") }
+        parts.append("instance-\(shortId(state)).log")
+        return parts.joined(separator: " · ")
     }
 
     private var searchField: some View {
