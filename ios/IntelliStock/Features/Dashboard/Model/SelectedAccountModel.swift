@@ -20,6 +20,12 @@ final class SelectedAccountModel {
     /// selection is in place before the first frame.
     init(store: any SecureStorage = KeychainStore()) {
         self.store = store
+        reload()
+    }
+
+    /// Re-reads the stored selection — at launch, and again once the
+    /// keychain becomes readable if the app launched before first unlock.
+    func reload() {
         if let raw = store.read(Self.storageKey), !raw.isEmpty {
             selectedId = raw
         }

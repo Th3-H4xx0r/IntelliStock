@@ -12,15 +12,35 @@ import Observation
 /// - `portfolioUpdatedAt` ← `portfolioUpdatedAtProvider`.
 ///
 /// The brokerage list is read by the dashboard, Kalshi and insights sections,
-/// so one instance lives in `AppServices` for the whole app.
+/// so one instance lives in `AppServices`. It is session-scoped:
+/// `AppServices` calls `reset()` on sign-out and on a server change, so one
+/// server's accounts and engines never show (or get sent) to another.
+///
+/// A cancelled request (its view went away) never changes the state; a
+/// response that arrives after `reset()` is dropped.
 @Observable
 final class DashboardModel {
     /// Re-read on every call, so a client rebuilt for a new server URL is
     /// used without rebuilding the model.
     @ObservationIgnored private let repository: () -> DashboardRepository
 
+    /// Bumped by `reset()`; a fetch that started under an older generation
+    /// discards its result.
+    @ObservationIgnored private var generation = 0
+
     init(repository: @escaping () -> DashboardRepository) {
         self.repository = repository
+    }
+
+    /// Back to the freshly-built state: loading, nothing busy, no cached
+    /// brokerages. In-flight fetches are ignored when they land.
+    func reset() {
+        generation += 1
+        services = .loading
+        busy = []
+        brokerages = .loading
+        brokeragesValue = nil
+        portfolioUpdatedAt = nil
     }
 
     // MARK: Services (DashboardServicesNotifier)
@@ -32,24 +52,35 @@ final class DashboardModel {
 
     /// Force a refresh now (pull-to-refresh / manual button). A successful
     /// fetch replaces the snapshot; the previous one stays visible meanwhile.
+    /// A cancelled fetch, or one overtaken by `reset()`, changes nothing.
     func refreshNow() async {
-        // `DashboardRepository.services()` maps every endpoint failure to an
-        // empty map, so the Dart `_refresh` catch never fires; nothing to
-        // catch here either.
-        services = .loaded(await repository().services())
+        // `fetchServices()` maps every endpoint failure to an empty map, so the
+        // Dart `_refresh` catch never fires; it throws only on cancellation.
+        let started = generation
+        guard let snapshot = try? await repository().fetchServices(), started == generation else { return }
+        services = .loaded(snapshot)
     }
 
-    /// Fetches now, then every `servicesInterval`, until the calling task is
-    /// cancelled. Run it from the dashboard's `.task` keyed on the scene
-    /// phase, so it pauses in the background and resumes on foreground, as
-    /// `IntervalPoller` did. A fetch never stops the loop.
-    func pollServices() async {
+    /// Fetches now, then every `servicesInterval` until the calling task is
+    /// cancelled, pausing while `lifecycle` reports the background and
+    /// resuming on foreground (`PollingNotifier` + `IntervalPoller`). Run it
+    /// once from the dashboard's `.task`:
+    ///
+    ///     .task { await services.dashboard.pollServices(lifecycle: services.lifecycle) }
+    ///
+    /// Do not key the task on the scene phase — the loop already follows it.
+    func pollServices(lifecycle: AppLifecycle?, sleep: @escaping PollingSleep = realPollingSleep) async {
         await refreshNow()
-        while !Task.isCancelled {
-            try? await Task.sleep(for: Self.servicesInterval)
-            if Task.isCancelled { break }
-            await refreshNow()
+        let loop = PollingLoop(interval: { Self.servicesInterval }, sleep: sleep) { [weak self] in
+            await self?.refreshNow()
         }
+        await loop.run(lifecycle: lifecycle)
+    }
+
+    /// `pollServices(lifecycle:)` without lifecycle pausing, kept for source
+    /// compatibility. Prefer passing `services.lifecycle`.
+    func pollServices() async {
+        await pollServices(lifecycle: nil)
     }
 
     // MARK: Busy / in-flight tracking per engine (EngineBusyNotifier)
@@ -87,11 +118,16 @@ final class DashboardModel {
     /// retry or pull-to-refresh (`ref.invalidate(brokeragesProvider)`).
     /// Loaded data stays visible while the refetch runs.
     func loadBrokerages() async {
+        let started = generation
         do {
             let list = try await repository().brokerages()
+            guard started == generation else { return }
             brokeragesValue = list
             brokerages = .loaded(list)
+        } catch where error.isCancellation {
+            // The caller went away; keep what is showing.
         } catch {
+            guard started == generation else { return }
             brokerages = .failed(error)
         }
     }
