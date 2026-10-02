@@ -94,16 +94,28 @@ nonisolated struct PortfolioHistory: Hashable, Sendable {
         )
     }
 
+    /// Dart's `DateTime` range is ±8.64e15 ms; it threw beyond it, so those
+    /// samples read as no date rather than trapping.
+    private static func validDate(_ ms: Int) -> Date? {
+        abs(ms) <= 8_640_000_000_000_000 ? DartDateTime.fromMillisecondsSinceEpoch(ms) : nil
+    }
+
     /// Epoch seconds or milliseconds (above 1e12), or an ISO string.
     static func toDate(_ v: JSON) -> Date? {
         switch v {
         case .int(let i):
-            let ms = i > 1_000_000_000_000 ? i : i * 1000
-            return DartDateTime.fromMillisecondsSinceEpoch(ms)
+            let ms: Int
+            if i > 1_000_000_000_000 {
+                ms = i
+            } else {
+                let (product, overflow) = i.multipliedReportingOverflow(by: 1000)
+                if overflow { return nil }
+                ms = product
+            }
+            return validDate(ms)
         case .double(let d):
-            guard d.isFinite else { return nil }
-            let ms = d > 1_000_000_000_000 ? Int(d) : Int(d * 1000)
-            return DartDateTime.fromMillisecondsSinceEpoch(ms)
+            guard let ms = Int(dartTruncating: d > 1_000_000_000_000 ? d : d * 1000) else { return nil }
+            return validDate(ms)
         case .string(let s):
             return DartDateTime.tryParse(s)
         default:

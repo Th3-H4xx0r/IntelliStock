@@ -16,14 +16,25 @@ nonisolated struct KeychainStore: Sendable {
         self.service = service
     }
 
+    /// The value, or nil — for any failure. Use `readChecked` where "the
+    /// keychain is unavailable" must not read as "nothing stored".
     func read(_ key: String) -> String? {
+        (try? readChecked(key)) ?? nil
+    }
+
+    /// The value, nil only when the item does not exist; any other keychain
+    /// status throws (as `flutter_secure_storage` did). Before the first
+    /// unlock after a reboot — when iOS may prewarm the app — the keychain
+    /// answers `errSecInteractionNotAllowed`, which is not "signed out".
+    func readChecked(_ key: String) throws -> String? {
         var query = baseQuery(key)
         query[kSecReturnData] = true
         query[kSecMatchLimit] = kSecMatchLimitOne
         var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data
-        else { return nil }
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess else { throw KeychainError(status: status) }
+        guard let data = result as? Data else { return nil }
         return String(data: data, encoding: .utf8)
     }
 

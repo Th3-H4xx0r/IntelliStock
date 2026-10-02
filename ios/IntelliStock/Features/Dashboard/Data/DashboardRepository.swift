@@ -89,13 +89,16 @@ nonisolated struct DashboardRepository: Sendable {
     let client: ApiClient
 
     /// Fetches all four service-status endpoints in parallel. Each failure
-    /// reads as an empty map, and an empty map as "absent".
-    func services() async -> ServicesSnapshot {
+    /// reads as an empty map, and an empty map as "absent" — but a
+    /// cancellation (the caller went away) throws `CancellationError`
+    /// instead of reading as every engine "stopped".
+    func fetchServices() async throws -> ServicesSnapshot {
         async let status = objectOrEmpty("/status")
         async let agent = objectOrEmpty("/agent/control")
         async let digest = objectOrEmpty("/digest/control")
         async let nexus = objectOrEmpty("/nexus/status")
-        let (statusData, agentData, digestData, nexusData) = await (status, agent, digest, nexus)
+        let (statusData, agentData, digestData, nexusData) = try await (status, agent, digest, nexus)
+        try Task.checkCancellation()
 
         let engines = JSON.object(statusData)["engines"].objectElements.map(EngineStatus.init(json:))
         return ServicesSnapshot(
@@ -106,9 +109,23 @@ nonisolated struct DashboardRepository: Sendable {
         )
     }
 
-    /// Dart `.catchError((_) => <String, dynamic>{})`.
-    private func objectOrEmpty(_ path: String) async -> JSONObject {
-        (try? await client.get(path))?.orderedObject ?? JSONObject()
+    /// The non-throwing form, kept for source compatibility. It cannot
+    /// express cancellation, so a cancelled fetch reads as an empty snapshot;
+    /// anything that writes shared state uses `fetchServices()`.
+    func services() async -> ServicesSnapshot {
+        (try? await fetchServices()) ?? ServicesSnapshot(engines: [])
+    }
+
+    /// Dart `.catchError((_) => <String, dynamic>{})`, except cancellation,
+    /// which propagates.
+    private func objectOrEmpty(_ path: String) async throws -> JSONObject {
+        do {
+            return try await client.get(path).orderedObject ?? JSONObject()
+        } catch where error.isCancellation {
+            throw CancellationError()
+        } catch {
+            return JSONObject()
+        }
     }
 
     /// GET /brokerages → {accounts: [...]}

@@ -3,26 +3,27 @@ import Testing
 @testable import IntelliStock
 
 /// The behaviour of connect_screen.dart (and its widget test), on the model.
-@Suite(.serialized)
 @MainActor
 struct ConnectModelTests {
-    init() { StubURLProtocol.reset() }
+    private let stub = DataStub()
 
     private func services(_ initial: [String: String]) -> AppServices {
         AppServices(
             storage: InMemorySecureStorage(initial),
             biometrics: FakeBiometrics(available: false, authResult: false),
             widgetSync: WidgetSyncProbe().sync,
-            urlSession: StubURLProtocol.session,
+            urlSession: DataStubProtocol.session,
             pushRegistrar: FakePushRegistrar(grant: false)
         )
     }
 
-    private static let signedIn: [String: String] = [
-        ApiBaseUrlStore.storageKey: "https://old.example.test",
-        SessionStore.tokenKey: "jwt",
-        SessionStore.userKey: #"{"has_completed_onboarding": true}"#,
-    ]
+    private var signedIn: [String: String] {
+        [
+            ApiBaseUrlStore.storageKey: stub.baseURL,
+            SessionStore.tokenKey: "jwt",
+            SessionStore.userKey: #"{"has_completed_onboarding": true}"#,
+        ]
+    }
 
     /// connect_screen_test.dart: an invalid URL shows an inline error and
     /// does not save.
@@ -80,10 +81,10 @@ struct ConnectModelTests {
     }
 
     @Test func editingWithTheSameServerKeepsTheSession() async {
-        let services = services(Self.signedIn)
+        let services = services(signedIn)
         let model = ConnectModel(services: services, probe: { _ in true })
         #expect(model.isEditing)
-        #expect(model.url == "https://old.example.test")
+        #expect(model.url == stub.baseURL)
         #expect(await model.submit() == .unchanged)
         #expect(services.session.isAuthenticated)
     }
@@ -91,7 +92,7 @@ struct ConnectModelTests {
     /// Review Focus 5: a new server clears the session, resets the shell and
     /// points the client at the new origin.
     @Test func editingToANewServerSignsOutOnAFreshShell() async {
-        let services = services(Self.signedIn)
+        let services = services(signedIn)
         services.router.tab = .more
         services.router.push(.settings)
         services.router.push(.connect)
@@ -105,17 +106,17 @@ struct ConnectModelTests {
     }
 
     @Test func healthProbeRequiresA200() async throws {
-        let probe = ConnectModel.makeHealthProbe(session: StubURLProtocol.session)
-        StubURLProtocol.respond(status: 200, json: #"{"status": "ok"}"#)
-        #expect(await probe("https://api.example.test"))
-        let req = try #require(StubURLProtocol.requests.first)
-        #expect(req.url?.absoluteString == "https://api.example.test/health")
+        let probe = ConnectModel.makeHealthProbe(session: DataStubProtocol.session)
+        stub.respond(status: 200, json: #"{"status": "ok"}"#)
+        #expect(await probe(stub.baseURL))
+        let req = try #require(stub.requests.first)
+        #expect(req.url?.absoluteString == "\(stub.baseURL)/health")
         #expect(req.value(forHTTPHeaderField: "Accept") == "application/json")
         #expect(req.value(forHTTPHeaderField: "Authorization") == nil)
 
-        StubURLProtocol.respond(status: 503)
-        #expect(await !probe("https://api.example.test"))
-        StubURLProtocol.fail(.cannotConnectToHost)
-        #expect(await !probe("https://api.example.test"))
+        stub.respond(status: 503)
+        #expect(await !probe(stub.baseURL))
+        stub.fail(.cannotConnectToHost)
+        #expect(await !probe(stub.baseURL))
     }
 }

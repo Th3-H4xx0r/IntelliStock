@@ -32,22 +32,15 @@ nonisolated extension Route {
         }
     }
 
-    /// Dart `Uri.encodeComponent`: letters, digits and `-_.!~*'()` pass
-    /// through; everything else is percent-encoded UTF-8.
+    /// A location without its `?query` or `#fragment`.
+    static func pathOnly(_ location: String) -> Substring {
+        let end = location.firstIndex { $0 == "?" || $0 == "#" } ?? location.endIndex
+        return location[..<end]
+    }
+
+    /// Dart `Uri.encodeComponent` — forwards to `dartEncodeComponent`.
     static func encodeComponent(_ s: String) -> String {
-        var out = ""
-        for byte in s.utf8 {
-            switch byte {
-            case UInt8(ascii: "a")...UInt8(ascii: "z"), UInt8(ascii: "A")...UInt8(ascii: "Z"),
-                 UInt8(ascii: "0")...UInt8(ascii: "9"),
-                 UInt8(ascii: "-"), UInt8(ascii: "_"), UInt8(ascii: "."), UInt8(ascii: "!"),
-                 UInt8(ascii: "~"), UInt8(ascii: "*"), UInt8(ascii: "'"), UInt8(ascii: "("), UInt8(ascii: ")"):
-                out.unicodeScalars.append(Unicode.Scalar(byte))
-            default:
-                out += String(format: "%%%02X", byte)
-            }
-        }
-        return out
+        dartEncodeComponent(s)
     }
 }
 

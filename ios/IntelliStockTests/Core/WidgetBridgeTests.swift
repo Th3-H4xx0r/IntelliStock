@@ -84,13 +84,12 @@ struct WidgetSyncTests {
 }
 
 /// `WidgetDataSyncer` against stubbed instance endpoints.
-@Suite(.serialized)
 @MainActor
 struct WidgetDataSyncerTests {
-    init() { StubURLProtocol.reset() }
+    private let stub = DataStub()
 
     @Test func buildsOnePortfolioPerInstanceWithHistory() async throws {
-        StubURLProtocol.handler = { request in
+        stub.handler = { request in
             let body: String
             switch request.url?.path ?? "" {
             case "/instances":
@@ -102,12 +101,12 @@ struct WidgetDataSyncerTests {
             case "/instances/i2/portfolio-history":
                 body = #"{"timestamps": [], "values": []}"#
             default:
-                return (404, [:], Data("{}".utf8))
+                return (404, "{}")
             }
-            return (200, ["Content-Type": "application/json"], Data(body.utf8))
+            return (200, body)
         }
         let probe = WidgetSyncProbe()
-        let client = ApiClient(baseURL: "https://api.example.test", tokens: nil, session: StubURLProtocol.session)
+        let client = stub.client
         await WidgetDataSyncer(client: { client }, widgetSync: probe.sync).run()
 
         let accounts = try #require(probe.json(WidgetSync.Key.accounts)?.array)
@@ -121,14 +120,14 @@ struct WidgetDataSyncerTests {
         #expect(accounts[0]["positions"][0]["symbol"].string == "SPY")
         #expect(accounts[0]["positions"][0]["marketValue"].double == 500)
 
-        let history = StubURLProtocol.requests.first { $0.url?.path == "/instances/i1/portfolio-history" }
+        let history = stub.requests.first { $0.url?.path == "/instances/i1/portfolio-history" }
         #expect(history?.queryItems == ["range": "1D"])
     }
 
     @Test func nothingIsWrittenWhenNoInstanceHasHistory() async {
-        StubURLProtocol.respond(json: #"{"instances": []}"#)
+        stub.respond(json: #"{"instances": []}"#)
         let probe = WidgetSyncProbe()
-        let client = ApiClient(baseURL: "https://api.example.test", tokens: nil, session: StubURLProtocol.session)
+        let client = stub.client
         await WidgetDataSyncer(client: { client }, widgetSync: probe.sync).run()
         #expect(probe.defaults.string(forKey: WidgetSync.Key.accounts) == nil)
         #expect(probe.reloads.isEmpty)
