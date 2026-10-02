@@ -192,7 +192,7 @@ private struct SwingSignalCard: View {
         let long = s.reasoning.count > swingReasoningCollapseChars
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                SwingCardHeader(signal: s)
+                SwingCardHeader(signal: s).fixedSize()
                 Spacer(minLength: 8)
                 Text(swingSessionText(s))
                     .font(.caption2)
