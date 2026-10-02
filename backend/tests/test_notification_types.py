@@ -53,9 +53,11 @@ def test_default_routing_discord_on_push_off_except_critical():
     # instance_crash, plus the swing-trader port's reviews, entries, exits and
     # position alerts (spec §10), an approved swing/wheel order the broker
     # refused (plan C final review), and a wheel assignment (fix wave item 4:
-    # the shares now held are money at risk, and ST pushed it at priority 1)
+    # the shares now held are money at risk, and ST pushed it at priority 1),
+    # and a silent watchdog, which refuses every new order (2026-10-02)
     assert _PUSH_ON_BY_DEFAULT == {
-        "instance_crash", "swing_entry", "swing_pending_review", "swing_exit",
+        "instance_crash", "watchdog_down",
+        "swing_entry", "swing_pending_review", "swing_exit",
         "wheel_put_placed", "wheel_pending_review", "wheel_position_alert",
         "wheel_assignment", "swing_approval_failed"}
     assert r["instance_crash"]["push"] is True
