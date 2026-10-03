@@ -429,20 +429,24 @@ private struct SwingOrderCard: View, Equatable {
 /// The underlying's price over a chosen range. For a put, the strike is one
 /// labelled dashed line over a faint red assignment zone. Scrub to read a
 /// price; read-only, nothing is sent.
-private struct SwingOrderChart: View {
+struct SwingOrderChart: View {
     let symbol: String
     let strike: Double?
+    /// Where the assignment zone lies: below the strike for a sold put,
+    /// above it for a sold call; nil draws only the strike line.
+    var riskBelow: Bool? = true
 
     @Environment(AppServices.self) private var services
 
     var body: some View {
-        SwingOrderChartContent(symbol: symbol, strike: strike, services: services)
+        SwingOrderChartContent(symbol: symbol, strike: strike, riskBelow: riskBelow, services: services)
             .id(symbol)
     }
 }
 
 private struct SwingOrderChartContent: View {
     let strike: Double?
+    let riskBelow: Bool?
     let services: AppServices
 
     @State private var model: StockModel
@@ -450,8 +454,9 @@ private struct SwingOrderChartContent: View {
     static let ranges = ["1D", "1W", "1M", "3M", "1Y"]
     static let height: CGFloat = 160
 
-    init(symbol: String, strike: Double?, services: AppServices) {
+    init(symbol: String, strike: Double?, riskBelow: Bool?, services: AppServices) {
         self.strike = strike
+        self.riskBelow = riskBelow
         self.services = services
         _model = State(initialValue: StockModel(symbol: symbol, brokerageId: nil, client: { services.apiClient }))
     }
@@ -460,7 +465,7 @@ private struct SwingOrderChartContent: View {
         VStack(alignment: .leading, spacing: 8) {
             // Separate views: a scrub re-renders only the price, never the plot.
             SwingOrderPriceLine(model: model, strike: strike)
-            SwingOrderPlot(model: model, strike: strike, height: Self.height)
+            SwingOrderPlot(model: model, strike: strike, riskBelow: riskBelow, height: Self.height)
             Picker("Range", selection: Binding(get: { model.range }, set: { model.setRange($0) })) {
                 ForEach(Self.ranges, id: \.self) { Text($0).tag($0) }
             }
@@ -510,7 +515,15 @@ private struct SwingOrderPriceLine: View {
 private struct SwingOrderPlot: View {
     let model: StockModel
     let strike: Double?
+    let riskBelow: Bool?
     let height: CGFloat
+
+    private var band: ScrubbableChartBand? {
+        guard let strike, let riskBelow else { return nil }
+        return riskBelow
+            ? ScrubbableChartBand(low: nil, high: strike, color: DS.Palette.danger)
+            : ScrubbableChartBand(low: strike, high: nil, color: DS.Palette.danger)
+    }
 
     var body: some View {
         if let series = model.series, series.vals.count >= 2 {
@@ -527,7 +540,7 @@ private struct SwingOrderPlot: View {
                 indexed: true,
                 showsBaseline: strike == nil,
                 levels: strike.map { [ScrubbableChartLevel(value: $0, label: "Strike \(fmtMoney($0))", color: .secondary)] } ?? [],
-                bands: strike.map { [ScrubbableChartBand(low: nil, high: $0, color: DS.Palette.danger)] } ?? []
+                bands: band.map { [$0] } ?? []
             )
             .id(model.range)
         } else if model.historyLoading {

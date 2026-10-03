@@ -397,6 +397,8 @@ struct DashboardGroupHeader<Accessory: View>: View {
             }
         }
         .textCase(nil)
+        // A group heading lines up with its card's edge, not the text inside it.
+        .listRowInsets(.horizontal, group != nil ? 0 : nil)
     }
 }
 

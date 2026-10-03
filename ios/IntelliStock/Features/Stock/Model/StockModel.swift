@@ -154,6 +154,31 @@ nonisolated func stockPositionLine(symbol: String, qty: Double, avg: Double?) ->
     return "\(count) \(unit)\(side) · avg \(fmtMoney(avg))"
 }
 
+/// What an option position means, in one or two sentences, from its side
+/// (`qty` < 0 is sold) and premium per share. nil `qty`: no position, so the
+/// contract's terms only.
+nonisolated func stockOptionPlanText(_ symbol: String, qty: Double?, premium: Double?) -> String? {
+    guard let o = parseOccSymbol(symbol) else { return nil }
+    let k = fmtMoney(o.strike)
+    let by = stockExpiryText(o.expiry)
+    let put = o.optionType.lowercased() == "put"
+    let n = Int((abs(qty ?? 1) * Double(kOptionMultiplier)).rounded())
+    guard let qty, qty != 0 else {
+        return "\(o.underlying) \(k) \(put ? "put" : "call"), expiring \(by). The dashed line is the strike."
+    }
+    let total = premium.map { fmtMoney($0 * Double(n)) }
+    if qty < 0 {
+        let keep = total.map { "Keep the \($0) premium" } ?? "Keep the premium"
+        return put
+            ? "\(keep) if \(o.underlying) stays above \(k) by \(by). Below \(k) you buy \(n) shares at \(k)."
+            : "\(keep) if \(o.underlying) stays below \(k) by \(by). Above \(k) your \(n) shares are sold at \(k)."
+    }
+    let be = premium.map { fmtMoney(put ? o.strike - $0 : o.strike + $0) }
+    return put
+        ? "Gains if \(o.underlying) falls below \(be ?? k) by \(by)."
+        : "Gains if \(o.underlying) rises above \(be ?? k) by \(by)."
+}
+
 /// "2026-10-09" → "Oct 9, 2026"; anything else as given.
 nonisolated func stockExpiryText(_ ymd: String) -> String {
     let parts = ymd.split(separator: "-").compactMap { Int($0) }
