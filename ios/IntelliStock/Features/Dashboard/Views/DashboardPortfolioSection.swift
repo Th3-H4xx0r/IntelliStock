@@ -8,7 +8,7 @@ nonisolated enum DashboardPortfolioMetrics {
     /// which sit in a full-width section of their own. A constant, never a
     /// measurement: a measured inset fed back into the layout looped forever
     /// on Back from a stock screen.
-    static let chartMargin: CGFloat = 10
+    static let chartMargin: CGFloat = 14
 }
 
 /// The portfolio for the selected account — `_PortfolioSection` and

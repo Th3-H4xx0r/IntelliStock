@@ -68,6 +68,9 @@ private struct StockContent: View {
             if let position = route.position {
                 positionSection(position)
             }
+            if let option = parseOccSymbol(route.symbol) {
+                underlyingSection(option)
+            }
             botSection
             if infoLoading {
                 statsSkeleton
@@ -175,6 +178,29 @@ private struct StockContent: View {
             Text(stockPositionLine(symbol: route.symbol, qty: p.qty, avg: p.avgEntryPrice))
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    // MARK: Underlying (options)
+
+    /// For an option: the underlying's chart with the strike dashed across it
+    /// and, for a sold option, the assignment zone in red; above it, what the
+    /// position means.
+    private func underlyingSection(_ option: OccContract) -> some View {
+        let qty = route.position?.qty
+        let put = option.optionType.lowercased() == "put"
+        let riskBelow: Bool? = (qty ?? 0) < 0 ? put : nil
+        return Section(option.underlying) {
+            VStack(alignment: .leading, spacing: 12) {
+                if let text = stockOptionPlanText(route.symbol, qty: qty, premium: route.position?.avgEntryPrice) {
+                    Text(text)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                SwingOrderChart(symbol: option.underlying, strike: option.strike, riskBelow: riskBelow)
+            }
+            .padding(.vertical, 6)
         }
     }
 

@@ -132,6 +132,17 @@ struct StockModelTests {
         #expect(stockPositionLine(symbol: "ABNB", qty: -5, avg: 160) == "5 shares short · avg $160.00")
     }
 
+    @Test func anOptionPositionExplainsItself() {
+        let put = "QCOM261009P00177500"
+        #expect(stockOptionPlanText(put, qty: -1, premium: 1.31)
+                == "Keep the $131.00 premium if QCOM stays above $177.50 by Oct 9, 2026. Below $177.50 you buy 100 shares at $177.50.")
+        #expect(stockOptionPlanText(put, qty: 1, premium: 1.31) == "Gains if QCOM falls below $176.19 by Oct 9, 2026.")
+        #expect(stockOptionPlanText("AAPL261016C00250000", qty: -1, premium: 2)
+                == "Keep the $200.00 premium if AAPL stays below $250.00 by Oct 16, 2026. Above $250.00 your 100 shares are sold at $250.00.")
+        #expect(stockOptionPlanText(put, qty: nil, premium: nil) == "QCOM $177.50 put, expiring Oct 9, 2026. The dashed line is the strike.")
+        #expect(stockOptionPlanText("SPY", qty: 1, premium: 1) == nil)
+    }
+
     @Test func optionStatsAreTheContractNotTheFiftyTwoWeekRange() {
         let info: JSONObject = ["previousClose": 2.64, "fiftyTwoWeekHigh": 1.78, "fiftyTwoWeekLow": 1.05, "volume": 400]
         let cells = stockStatCells(info: info, series: StockSeries(ts: [Date(), Date()], vals: [1.12, 1.43]), range: "1D",
