@@ -8,11 +8,14 @@ nonisolated struct DashboardAccountSummary: Hashable, Sendable {
     let dayChange: Double?
     /// nil when the baseline is 0, as in `computeChange`.
     let dayChangePct: Double?
+    /// Today's equity curve, for a row's sparkline. Empty for Kalshi.
+    let spark: [Double]
 
-    init(equity: Double, dayChange: Double?, dayChangePct: Double?) {
+    init(equity: Double, dayChange: Double?, dayChangePct: Double?, spark: [Double] = []) {
         self.equity = equity
         self.dayChange = dayChange
         self.dayChangePct = dayChangePct
+        self.spark = spark
     }
 
     /// The hero's figures for a 1D history: the value it shows
@@ -20,7 +23,12 @@ nonisolated struct DashboardAccountSummary: Hashable, Sendable {
     /// sheet and the hero never disagree.
     init(history: PortfolioHistory) {
         let change = computeChange(history)
-        self.init(equity: dashboardHeroValue(history), dayChange: change.abs, dayChangePct: change.pct)
+        self.init(
+            equity: dashboardHeroValue(history),
+            dayChange: change.abs,
+            dayChangePct: change.pct,
+            spark: history.values
+        )
     }
 
     /// A Kalshi account, as the Kalshi tab's "Portfolio value" reads it: the

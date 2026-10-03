@@ -89,6 +89,19 @@ final class AppServices {
         repository: { [unowned self] in self.instanceRepository }
     )
 
+    /// What the Instances rows and the instance hero add to the list: each
+    /// instance's detail and each linked account's equity, cached for the
+    /// session.
+    @ObservationIgnored private(set) lazy var instanceRows = InstanceRowsModel(
+        detailFetcher: { [unowned self] in
+            let repository = self.instanceRepository
+            return { try await repository.getInstance($0) }
+        },
+        accountFetcher: { [unowned self] in
+            DashboardPortfolios.fetcher(dashboard: self.dashboardRepository, kalshi: self.kalshiRepository)
+        }
+    )
+
     /// The one chatbot model for the signed-in session — the keepAlive
     /// `chatbotProvider`. Held here so the dock's view can come and go (the
     /// lock tears it down) without losing the conversation; a sign-out or a
@@ -225,6 +238,7 @@ final class AppServices {
     private func resetSessionModels() {
         dashboard.reset()
         instances.reset()
+        instanceRows.reset()
         chatbot = Self.makeChatbot(self)
     }
 
