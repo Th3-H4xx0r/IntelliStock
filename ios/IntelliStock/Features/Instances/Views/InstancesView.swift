@@ -41,6 +41,12 @@ private struct InstancesContent: View {
                 }
             }
             .task { await model.poll(lifecycle: services.lifecycle) }
+            // The rows' extra figures: on appear and whenever the list's
+            // instances or links change. Rows fill in as answers land.
+            .task(id: rowsKey) {
+                guard let list = model.value?.instances, !list.isEmpty else { return }
+                services.instanceRows.refreshDetached(list, brokerages: services.dashboard.brokeragesValue)
+            }
             .sheet(isPresented: $showCreate) {
                 InstanceCreateSheet(model: model)
             }
@@ -51,6 +57,11 @@ private struct InstancesContent: View {
             }
             .confirmAlert($confirm, isRunning: $confirmRunning)
             .toast($toast)
+    }
+
+    /// What the rows' figures depend on: each instance and its links.
+    private var rowsKey: [String] {
+        (model.value?.instances ?? []).map { "\($0.id)|\($0.strategyId ?? "")|\($0.brokerageId ?? "")|\($0.runCommand)" }
     }
 
     @ViewBuilder
@@ -115,26 +126,36 @@ private struct InstancesContent: View {
                 Section { ErrorRow(message: message) }
             }
         }
-        .refreshable { await model.refreshNow() }
+        .refreshable {
+            await model.refreshNow()
+            if let list = model.value?.instances {
+                services.instanceRows.refreshDetached(list, brokerages: services.dashboard.brokeragesValue, force: true)
+            }
+        }
     }
 
     // MARK: Row
 
     private func row(_ inst: Instance, busy: Bool) -> some View {
         let isPinned = pinned.isPinned(inst.id)
+        let rows = services.instanceRows
+        let brokerages = services.dashboard.brokeragesValue
+        let shown = rows.merged(inst)
+        let accountId = inst.brokerageId.flatMap { $0.isEmpty ? nil : $0 }
         return NavigationLink(value: Route.instance(inst.id)) {
-            EntityRow(
-                inst.name.isEmpty ? inst.id : inst.name,
-                subtitle: instanceRowSubtitle(inst, brokerages: services.dashboard.brokeragesValue),
-                subtitleLineLimit: 2,
-                isPinned: isPinned
-            ) {
-                if busy {
-                    ProgressView()
-                } else {
-                    InstanceStatusDot(inst: inst)
-                }
-            }
+            InstanceRow(
+                inst: shown,
+                subtitle: instanceRowSubtitle(shown, brokerages: brokerages),
+                meta: instanceRowMeta(
+                    uptime: rows.uptime(inst),
+                    kind: instanceKindLabel(shown, detailLoaded: rows.details[inst.id] != nil)
+                ),
+                isPaper: instanceIsPaper(shown, brokerages: brokerages),
+                isPinned: isPinned,
+                busy: busy,
+                summary: accountId.flatMap { rows.accounts.summary($0) },
+                summaryPending: accountId.map { rows.accounts.isPending($0) } ?? false
+            )
         }
         .swipeActions(edge: .leading) {
             Button(isPinned ? "Unpin" : "Pin", systemImage: isPinned ? "pin.slash" : "pin") {
@@ -249,11 +270,116 @@ struct InstanceSheetTarget: Identifiable, Hashable {
 /// pulsing) or `Stopped`.
 struct InstanceStatusDot: View {
     let inst: Instance
+    var font: Font = .subheadline
+    /// Said after the state in the same style: "Running · Up 6h 12m".
+    var detail: String = ""
 
     var body: some View {
         let label = inst.crashed ? "Crashed" : (inst.runCommand ? "Running" : "Stopped")
         let color: Color = inst.crashed ? DS.Palette.danger : (inst.runCommand ? DS.Palette.success : .secondary)
-        StatusDot(label, color: color, pulsing: inst.runCommand && !inst.crashed)
+        StatusDot(detail.isEmpty ? label : "\(label) · \(detail)", color: color,
+                  pulsing: inst.runCommand && !inst.crashed, font: font)
+    }
+}
+
+/// One instance in the list, in the manner of the Dashboard's holdings rows:
+///
+///     Swing trader (paper)                              Paper
+///     Swing trader paper ·          ╱╲╱   $17,966.98
+///     Swing Trade Paper                   +$12.34 · +0.07%
+///     ● Running · 6h 12m · Swing
+///
+/// The name across the row with the Paper / Live flag; under it the
+/// strategy and account over a quiet line with the run state, uptime and
+/// kind, and on the right the account's 1D curve, equity and today's change
+/// when a brokerage is linked. At accessibility sizes the figures move under
+/// the text.
+private struct InstanceRow: View {
+    let inst: Instance
+    let subtitle: String
+    let meta: String
+    let isPaper: Bool?
+    let isPinned: Bool
+    let busy: Bool
+    let summary: DashboardAccountSummary?
+    let summaryPending: Bool
+
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    var body: some View {
+        let stacked = dynamicTypeSize.isAccessibilitySize
+        let top = stacked
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 6))
+            : AnyLayout(HStackLayout(alignment: .center, spacing: 12))
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(inst.name.isEmpty ? inst.id : inst.name)
+                    .font(.headline)
+                    .lineLimit(stacked ? nil : 1)
+                if isPinned {
+                    Image(systemName: "pin.fill")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("Pinned")
+                }
+                Spacer(minLength: 8)
+                if let isPaper {
+                    StatusBadge(label: isPaper ? "Paper" : "Live", color: isPaper ? DS.Palette.info : DS.Palette.danger)
+                }
+            }
+            top {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(subtitle)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(stacked ? nil : 2)
+                    if busy {
+                        HStack(spacing: 6) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Working…")
+                                .foregroundStyle(.secondary)
+                        }
+                        .font(.footnote)
+                    } else {
+                        InstanceStatusDot(inst: inst, font: .footnote, detail: meta)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                figures
+                    .layoutPriority(1)
+            }
+        }
+        .padding(.vertical, 2)
+        .accessibilityElement(children: .combine)
+    }
+
+    /// The account's figures, a redacted placeholder while its first fetch
+    /// runs, or nothing (no brokerage, or no history for its type).
+    @ViewBuilder
+    private var figures: some View {
+        if let summary {
+            HStack(spacing: 12) {
+                if summary.spark.count > 1 {
+                    Sparkline(values: summary.spark, height: 24)
+                        .frame(width: 60, height: 24)
+                        .accessibilityHidden(true)
+                }
+                EntityRowValue(
+                    fmtMoney(summary.equity),
+                    detail: instanceRowChangeText(summary),
+                    detailColor: summary.dayChange == nil ? nil : summary.direction.color
+                )
+            }
+        } else if summaryPending {
+            HStack(spacing: 12) {
+                Skeleton(height: 18, radius: 5)
+                    .frame(width: 60, height: 24)
+                EntityRowValue("$00,000.00", detail: "+$00.00 · +0.00%")
+                    .redacted(reason: .placeholder)
+            }
+            .accessibilityHidden(true)
+        }
     }
 }
 

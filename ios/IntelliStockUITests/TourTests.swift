@@ -130,6 +130,28 @@ final class TourTests: XCTestCase {
         }
     }
 
+    /// The Instances tab and the swing-paper instance's detail, for a quick
+    /// before / after of those two screens. Navigation only.
+    func testInstancesScreens() throws {
+        let url = try XCTUnwrap(env["IS_URL"], "set TEST_RUNNER_IS_URL")
+        let user = try XCTUnwrap(env["IS_USER"], "set TEST_RUNNER_IS_USER")
+        let pass = try XCTUnwrap(env["IS_PASS"], "set TEST_RUNNER_IS_PASS")
+        app.launch()
+        signIn(url: url, user: user, pass: pass)
+        tapTab("Instances")
+        settle(8)
+        shot("instances-list")
+        tapTab("Dashboard")
+        openDeepLink("/instances/\(env["IS_INSTANCE"] ?? "swing-paper")")
+        settle(8)
+        shot("instance-detail")
+        for page in 1...3 {
+            app.swipeUp()
+            settle(1)
+            shot("instance-detail-scroll\(page)")
+        }
+    }
+
     private func signIn(url: String, user: String, pass: String) {
         // Connect: the only text field on screen. Its button reads "Test & Connect".
         if app.staticTexts["Connect to your instance"].waitForExistence(timeout: 8) {

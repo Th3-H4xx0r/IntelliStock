@@ -542,14 +542,25 @@ private struct SwingUncertainRow: View {
 }
 
 /// The wheel lane's open cash-secured puts and latest scans (`WheelCard`),
-/// as two list sections. Read-only: a red ITM figure means the 15:45 ET
-/// monitor will buy that put back on its next pass. The screen runs the load.
+/// as two list sections. Each put is a row in the manner of the Dashboard's
+/// holdings and opens the option's page; a "Buyback due" badge means the
+/// 15:45 ET monitor will buy that put back on its next pass. The scans show
+/// the latest three, with the rest behind Show All. The screen runs the load.
 struct WheelSections: View {
     let model: WheelModel
     /// The ids in the live pending queue.
     var pendingIds: Set<String> = []
+    /// The account the puts are in, for the option's page.
+    var brokerageId: String?
+    /// The account's equity, for the option page's share of the portfolio.
+    var portfolioTotal: Double?
     /// Scrolls to a pending signal's card.
     var onReview: (String) -> Void = { _ in }
+
+    /// Scans shown before Show All.
+    static let scanPreview = 3
+
+    @State private var showAllScans = false
 
     var body: some View {
         Section {
@@ -561,17 +572,11 @@ struct WheelSections: View {
                     Task { await model.retry() }
                 }
             case .loaded(let w):
-                StatGrid(columns: 3) {
-                    StatCell(label: "Open puts", value: "\(w.openPuts.count)")
-                    StatCell(label: "Collateral", value: fmtMoney(w.collateralTotal))
-                    StatCell(label: "Cash", value: fmtMoney(w.cash))
-                }
-                .padding(.vertical, 4)
                 if w.openPuts.isEmpty {
                     SwingQuietRow(title: "No open puts.", systemImage: "shield")
                 } else {
                     ForEach(Array(w.openPuts.enumerated()), id: \.offset) { _, put in
-                        WheelPutRow(put: put)
+                        putRow(put)
                     }
                 }
             }
@@ -581,23 +586,27 @@ struct WheelSections: View {
                     Text(fmtAsOf(at))
                 }
             }
+        } footer: {
+            if let w = model.state.value, !w.openPuts.isEmpty {
+                Text(wheelBookFooter(puts: w.openPuts.count, collateral: w.collateralTotal))
+            }
         }
         if let w = model.state.value {
             Section {
                 if w.recentScans.isEmpty {
                     SwingQuietRow(title: "No scans recorded yet.", systemImage: "magnifyingglass")
                 } else {
-                    ForEach(Array(w.recentScans.prefix(5).enumerated()), id: \.offset) { _, scan in
-                        let signal = wheelScanSignal(scan, in: model.signals)
-                        let status = wheelScanStatus(scan, signal: signal, pendingIds: pendingIds)
-                        if status.reviewable, let signal {
-                            Button { onReview(signal.id) } label: {
-                                WheelScanRow(scan: scan, status: status, showsChevron: true)
+                    ForEach(Array(w.recentScans.prefix(Self.scanPreview).enumerated()), id: \.offset) { _, scan in
+                        scanRow(scan)
+                    }
+                    if w.recentScans.count > Self.scanPreview {
+                        DisclosureGroup(isExpanded: $showAllScans) {
+                            ForEach(Array(w.recentScans.dropFirst(Self.scanPreview).enumerated()), id: \.offset) { _, scan in
+                                scanRow(scan)
                             }
-                            .buttonStyle(.plain)
-                            .accessibilityHint("Shows its pending signal, where you approve or reject it")
-                        } else {
-                            WheelScanRow(scan: scan, status: status, showsChevron: false)
+                        } label: {
+                            Text(showAllScans ? "Show Less" : "Show All (\(w.recentScans.count))")
+                                .foregroundStyle(DS.Palette.accent)
                         }
                     }
                 }
@@ -608,6 +617,42 @@ struct WheelSections: View {
                     Text("A scan is a log entry. Approve or reject a put on its pending signal above; tap a pending scan to jump to it.")
                 }
             }
+        }
+    }
+
+    /// A put that opens its option page with the position, as a holding does.
+    @ViewBuilder
+    private func putRow(_ put: WheelPut) -> some View {
+        if let position = wheelPutPosition(put) {
+            NavigationLink(value: Route.stock(StockRoute(
+                symbol: put.contract,
+                position: position,
+                brokerageId: brokerageId,
+                portfolioTotal: portfolioTotal
+            ))) {
+                WheelPutRow(put: put)
+            }
+            .accessibilityHint("Opens the option")
+            .contextMenu {
+                Button("Copy Contract", systemImage: "doc.on.doc") { UIPasteboard.general.string = put.contract }
+            }
+        } else {
+            WheelPutRow(put: put)
+        }
+    }
+
+    @ViewBuilder
+    private func scanRow(_ scan: WheelScan) -> some View {
+        let signal = wheelScanSignal(scan, in: model.signals)
+        let status = wheelScanStatus(scan, signal: signal, pendingIds: pendingIds)
+        if status.reviewable, let signal {
+            Button { onReview(signal.id) } label: {
+                WheelScanRow(scan: scan, status: status, showsChevron: true)
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint("Shows its pending signal, where you approve or reject it")
+        } else {
+            WheelScanRow(scan: scan, status: status, showsChevron: false)
         }
     }
 }
@@ -629,40 +674,32 @@ private struct SwingQuietRow: View {
     }
 }
 
+/// One open put, as a holding row: "QCOM $177.50 Put" over "7 days left ·
+/// 4.1% above strike", the P&L on the right over the contract count, or a
+/// "Buyback due" badge when the monitor will close it. The OCC code is read
+/// to VoiceOver only.
 private struct WheelPutRow: View {
     let put: WheelPut
 
-    private var itmColor: Color {
-        guard let itm = put.itmPct else { return .secondary }
-        if put.monitorWillBuyBack { return DS.Palette.danger }
-        return itm > 0 ? DS.Palette.warning : DS.Palette.success
-    }
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("\(put.underlying) \(fmtMoney(put.strike)) P · \(put.expiry)")
-                    .font(.headline)
-                Text(put.contract)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+        let pl = put.unrealizedPl
+        EntityRow(wheelPutTitle(put), subtitle: wheelPutSubtitle(put)) {
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(fmtPnl(pl))
+                    .font(.body)
+                    .foregroundStyle(pl == nil ? Color.secondary : pnlColor(pl))
+                if put.monitorWillBuyBack {
+                    StatusBadge(label: "Buyback due", color: DS.Palette.danger)
+                } else if let qty = put.qty {
+                    Text(qty == 1 ? "1 contract" : "\(qty) contracts")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             }
-            StatGrid(columns: 3) {
-                StatCell(label: "Qty", value: put.qty.map(String.init) ?? "—")
-                StatCell(label: "Entry", value: fmtMoney(put.avgEntryPrice))
-                StatCell(label: "Mark", value: fmtMoney(put.currentPrice))
-                StatCell(label: "ITM", value: fmtItm(put.itmPct), valueColor: itmColor)
-                StatCell(label: "DTE", value: put.dte.map(String.init) ?? "—")
-                StatCell(
-                    label: "P&L",
-                    value: fmtPnl(put.unrealizedPl),
-                    valueColor: put.unrealizedPl == nil ? .secondary : pnlColor(put.unrealizedPl)
-                )
-            }
+            .monospacedDigit()
+            .lineLimit(1)
         }
-        .padding(.vertical, 4)
+        .accessibilityValue("Contract \(put.contract)")
     }
 }
 

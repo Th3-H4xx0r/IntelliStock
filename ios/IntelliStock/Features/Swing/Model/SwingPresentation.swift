@@ -198,6 +198,61 @@ nonisolated func fmtItm(_ itmPct: Double?) -> String {
         : "\(dartToStringAsFixed(abs(itmPct), 1))% OTM"
 }
 
+// MARK: Wheel put rows
+
+/// "QCOM $177.50 Put", from the row's fields or, failing those, its OCC code.
+nonisolated func wheelPutTitle(_ put: WheelPut) -> String {
+    let occ = parseOccSymbol(put.contract)
+    let underlying = put.underlying.isEmpty ? (occ?.underlying ?? put.contract) : put.underlying
+    return "\(underlying) \(fmtMoney(put.strike ?? occ?.strike)) Put"
+}
+
+/// "7 days left · 4.1% above strike": the time left, then where the stock
+/// sits against the strike (`itmPct` > 0 is below it, in the money).
+nonisolated func wheelPutSubtitle(_ put: WheelPut) -> String {
+    var parts: [String] = []
+    switch put.dte {
+    case .some(let d) where d <= 0: parts.append("Expires today")
+    case .some(1): parts.append("1 day left")
+    case .some(let d): parts.append("\(d) days left")
+    case .none: if !put.expiry.isEmpty { parts.append("Expires \(put.expiry)") }
+    }
+    if let itm = put.itmPct {
+        let pct = dartToStringAsFixed(abs(itm), 1)
+        if pct == "0.0" {
+            parts.append("At the strike")
+        } else {
+            parts.append(itm > 0 ? "\(pct)% below strike" : "\(pct)% above strike")
+        }
+    }
+    return parts.joined(separator: " · ")
+}
+
+/// The put as the stock page's position: short (`qty` < 0) and valued at
+/// the mark. nil without a contract count.
+nonisolated func wheelPutPosition(_ put: WheelPut) -> AccountPosition? {
+    guard let n = put.qty, n > 0, !put.contract.isEmpty else { return nil }
+    let shares = Double(n * kOptionMultiplier)
+    let pl = put.unrealizedPl ?? 0
+    let cost = (put.avgEntryPrice ?? 0) * shares
+    return AccountPosition(
+        symbol: put.contract,
+        qty: -Double(n),
+        marketValue: -(put.currentPrice ?? 0) * shares,
+        unrealizedPnl: pl,
+        unrealizedPnlPct: cost > 0 ? pl / cost * 100 : 0,
+        lastPrice: put.currentPrice,
+        avgEntryPrice: put.avgEntryPrice
+    )
+}
+
+/// The Wheel section's footer: "1 open put · $17,750.00 held as collateral."
+nonisolated func wheelBookFooter(puts: Int, collateral: Double?) -> String {
+    let count = puts == 1 ? "1 open put" : "\(puts) open puts"
+    guard let collateral else { return "\(count)." }
+    return "\(count) · \(fmtMoney(collateral)) held as collateral."
+}
+
 /// "as of 14:02", local 24-hour time; empty without a time.
 nonisolated func fmtAsOf(_ at: Date?, calendar: Calendar = DartDateTime.localCalendar) -> String {
     guard let at else { return "" }

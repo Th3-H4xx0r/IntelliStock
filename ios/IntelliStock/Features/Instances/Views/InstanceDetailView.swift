@@ -66,6 +66,12 @@ private struct InstanceDetailContent: View {
     private var instance: Instance? { model.value?.instance }
     private var lanes: SwingLanes { swingLanesOf(instance?.strategy) }
 
+    /// The linked account, for the hero's equity (the list's shared cache).
+    private var account: BrokerageAccount? {
+        guard let inst = instance else { return nil }
+        return instanceRowAccounts([inst], brokerages: services.dashboard.brokeragesValue).first
+    }
+
     var body: some View {
         @Bindable var signalActions = signalActions
         content
@@ -82,6 +88,9 @@ private struct InstanceDetailContent: View {
             }
             .task(id: lanes.wheel) {
                 if lanes.wheel, wheel.state.value == nil { await wheel.load() }
+            }
+            .task(id: account?.id) {
+                if let account { await services.instanceRows.refreshAccounts([account]) }
             }
             .sheet(item: $sheet) { sheetView($0) }
             .confirmAlert($confirm, isRunning: $confirmRunning)
@@ -223,7 +232,12 @@ private struct InstanceDetailContent: View {
                 )
             }
             if lanes.wheel {
-                WheelSections(model: wheel, pendingIds: pendingIds) { id in
+                WheelSections(
+                    model: wheel,
+                    pendingIds: pendingIds,
+                    brokerageId: inst.brokerageId,
+                    portfolioTotal: inst.brokerageId.flatMap { services.instanceRows.accounts.summary($0)?.equity }
+                ) { id in
                     withAnimation { proxy.scrollTo(swingSignalAnchor(id), anchor: .top) }
                 }
             }
@@ -246,6 +260,7 @@ private struct InstanceDetailContent: View {
         }
         .refreshable {
             await model.refreshInstance()
+            if let account { await services.instanceRows.refreshAccounts([account], force: true) }
             if lanes.any { await signals.build() }
             if lanes.wheel { await wheel.load() }
         }
@@ -253,50 +268,58 @@ private struct InstanceDetailContent: View {
 
     // MARK: Hero
 
-    /// The header: the run state with its uptime, the strategy and the
-    /// brokerage, then the account's cash when the wheel book has it.
+    /// The hero: the linked account's equity with today's change, one quiet
+    /// line with the run state, uptime and Paper / Live, then the wheel
+    /// book's cash as a secondary figure. Without an account figure the
+    /// quiet line stands alone.
     private func heroSection(_ inst: Instance, _ state: InstanceDetailState) -> some View {
-        let strategy = (inst.strategy?["name"]).flatMap { $0.isNull ? nil : $0.dartDescription } ?? inst.strategyId
-        let brokerage = (inst.brokerage?["account_name"] ?? .null).string
-            ?? inst.brokerageId.map { instanceBrokerageName($0, nested: nil, brokerages: services.dashboard.brokeragesValue) }
-        let subtitle = [strategy, brokerage].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
-        let book = wheel.state.value
+        let accounts = services.instanceRows.accounts
+        let summary = inst.brokerageId.flatMap { accounts.summary($0) }
+        let pending = summary == nil && (inst.brokerageId.map { accounts.isPending($0) } ?? false)
+        let cash = wheel.state.value?.cash
         return Section {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 10) {
-                    InstanceStatusDot(inst: inst)
-                    if inst.runCommand, state.liveUptimeSecs > 0 {
-                        Text("Up \(instanceUptimeLabel(state.liveUptimeSecs))")
-                            .font(.subheadline.monospacedDigit())
-                            .foregroundStyle(.secondary)
+            Group {
+                if let summary {
+                    HeroValueHeader(
+                        fmtMoney(summary.equity),
+                        numericValue: summary.equity,
+                        change: summary.dayChange == nil ? nil : summary.changeText,
+                        direction: summary.direction,
+                        changeLabel: "Today"
+                    ) {
+                        heroStatusLine(inst, state)
                     }
-                    Spacer(minLength: 0)
-                    if case .bool(let paper)? = inst.brokerage?["alpaca_paper"] {
-                        StatusBadge(label: paper ? "Paper" : "Live", color: paper ? DS.Palette.info : DS.Palette.danger)
+                } else if pending {
+                    HeroValueHeader("$00,000.00", change: "+$00.00 (+0.00%)", changeLabel: "Today") {
+                        heroStatusLine(inst, state)
                     }
-                }
-                if !subtitle.isEmpty {
-                    Text(subtitle)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-                if let cash = book?.cash {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(fmtMoney(cash))
-                            .font(.largeTitle.weight(.bold))
-                            .monospacedDigit()
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.6)
-                        Text("Cash available")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(.top, 2)
-                    .accessibilityElement(children: .combine)
+                    .redacted(reason: .placeholder)
+                } else {
+                    heroStatusLine(inst, state)
                 }
             }
             .padding(.vertical, 6)
+            if let cash {
+                LabeledContent("Cash available") {
+                    Text(fmtMoney(cash)).monospacedDigit()
+                }
+            }
         }
+    }
+
+    /// "● Running · Up 6h 12m · Paper": a Live account keeps its red badge.
+    private func heroStatusLine(_ inst: Instance, _ state: InstanceDetailState) -> some View {
+        let paper = instanceIsPaper(inst, brokerages: services.dashboard.brokeragesValue)
+        var parts: [String] = []
+        if inst.runCommand, state.liveUptimeSecs > 0 { parts.append("Up \(instanceUptimeShort(state.liveUptimeSecs))") }
+        if paper == true { parts.append("Paper") }
+        return HStack(spacing: 8) {
+            InstanceStatusDot(inst: inst, font: .footnote, detail: parts.joined(separator: " · "))
+            if paper == false {
+                StatusBadge(label: "Live", color: DS.Palette.danger)
+            }
+        }
+        .accessibilityElement(children: .combine)
     }
 
     // MARK: Status
