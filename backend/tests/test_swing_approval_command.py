@@ -597,7 +597,9 @@ def test_a_transient_read_failure_returns_the_signal_to_pending(
     (("quote.stale",), True),
     (("dependency.quote.unknown",), True),
     (("positions.stale",), False),
-    (("dependency.cash.stale", "dependency.watchdog.unhealthy"), False),
+    # A watchdog code no longer says "approve again" (2026-10-02): see
+    # test_a_watchdog_refusal_says_restart_the_instance_not_approve_again.
+    (("dependency.cash.stale", "dependency.risk_state.unhealthy"), False),
     (("dependency.positions.unhealthy", "quote.stale", "positions.stale"), True),
     # T15 fix round 1b: a market-hours refusal is "not now", like a quote.
     (("market.closed",), True),
@@ -638,6 +640,83 @@ def test_a_gate_refusal_with_any_lasting_code_stays_failed(swing, codes):
     assert swing.updates == [("sig-1", {"status": "failed",
                                         "order_client_id": intent.idempotency_key})]
     assert swing.notices[0]["reason"] == error
+
+
+# 2026-10-02: swing-paper's watchdog was silent from 2026-10-01 05:48:52 UTC.
+# Ten approvals came back "order gate blocked:
+# dependency.watchdog.unhealthy,dependency.watchdog.stale — approve again" and
+# looped, since no approval can clear a dead health monitor.
+WATCHDOG_REPORT = datetime_module.datetime(2026, 10, 1, 5, 48, 52,
+                                           tzinfo=datetime_module.timezone.utc)
+
+
+def _watchdog_controls(adapter, *, instance_key, now_utc=None):
+    return dict(FRESH_CONTROLS, watchdog="unhealthy", watchdog_at=WATCHDOG_REPORT)
+
+
+def _watchdog_extra(alerts):
+    def alert(instance_id, codes, last_report, *, log=None):
+        alerts.append((instance_id, tuple(codes), last_report))
+        return True
+
+    return {"_approval_control_overlay": _watchdog_controls,
+            "_alert_watchdog_gate_refusal": alert}
+
+
+@pytest.mark.parametrize("codes", [
+    ("dependency.watchdog.unhealthy", "dependency.watchdog.stale"),
+    ("dependency.watchdog.unknown", "dependency.watchdog.stale"),
+    ("dependency.watchdog.unhealthy",),
+    ("dependency.cash.stale", "dependency.watchdog.unhealthy"),
+    ("dependency.quote.unknown", "dependency.watchdog.stale"),
+])
+def test_a_watchdog_refusal_says_restart_the_instance_not_approve_again(
+        swing, codes):
+    swing.rows["sig-1"] = _signal()
+    alerts, logs = [], []
+    _service, (ok, error, result) = _run(
+        swing, _Service("deny", swing, codes), extra=_watchdog_extra(alerts),
+        logs=logs)
+    assert ok is False
+    assert error.startswith("order gate blocked: " + ",".join(codes) + " — ")
+    assert "health monitor" in error and "restart" in error
+    assert "approve again" not in error
+    # The status semantics are unchanged: back to pending, decision cleared.
+    assert swing.updates == [("sig-1", _PENDING)]
+    assert swing.notices[0]["reason"] == error
+    assert result["reason_codes"] == list(codes)
+    assert alerts == [("instance-1", codes, WATCHDOG_REPORT)]
+    assert any(color == "red" and "health monitor" in message
+               for color, message in logs)
+
+
+def test_a_silent_watchdog_names_its_last_report(swing):
+    swing.rows["sig-1"] = _signal()
+    codes = ("dependency.watchdog.unhealthy", "dependency.watchdog.stale")
+    _service, (_ok, error, _result) = _run(
+        swing, _Service("deny", swing, codes), extra=_watchdog_extra([]))
+    assert "is down: no report since 2026-10-01 05:48:52 UTC" in error
+
+
+def test_a_lasting_refusal_with_a_watchdog_code_still_fails_and_alerts(swing):
+    codes = ("exposure.max_order_notional", "dependency.watchdog.stale")
+    swing.rows["sig-1"] = _signal()
+    alerts = []
+    service, (ok, error, _result) = _run(
+        swing, _Service("deny", swing, codes), extra=_watchdog_extra(alerts))
+    (intent,) = service.intents
+    assert ok is False and error == "order gate blocked: " + ",".join(codes)
+    assert swing.updates == [("sig-1", {"status": "failed",
+                                        "order_client_id": intent.idempotency_key})]
+    assert alerts == [("instance-1", codes, WATCHDOG_REPORT)]
+
+
+def test_a_refusal_without_watchdog_codes_sends_no_watchdog_alert(swing):
+    swing.rows["sig-1"] = _signal()
+    alerts = []
+    _run(swing, _Service("deny", swing, ("dependency.cash.stale",)),
+         extra=_watchdog_extra(alerts))
+    assert alerts == []
 
 
 def test_the_book_unreadable_reason_is_unchanged(swing):

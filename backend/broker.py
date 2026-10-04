@@ -11010,6 +11010,53 @@ def _approval_control_overlay(adapter, *, instance_key, now_utc=None):
     }
 
 
+_WATCHDOG_OUTAGE_LATCH = None
+
+
+def _alert_watchdog_gate_refusal(instance_id, codes, last_report=None, *,
+                                 from_loop_state=False, log=None, now=None):
+    """Alert once per watchdog outage when the order gate refuses on
+    dependency.watchdog.* (2026-10-02).
+
+    From 2026-10-01 05:48:52 UTC the watchdog sidecar was silent, and every
+    opening order was refused on dependency.watchdog.unhealthy,stale for 37
+    hours with nothing but a log line. The outage is keyed by the last
+    report's observed_at (live_orders.watchdog_notice), so a refusal every
+    tick or every approval sends one alert. ``last_report`` is that
+    observed_at; the tick passes ``from_loop_state=True`` to read the stamp
+    its own gate saw. Best-effort: never raises, returns True only when an
+    alert went out. Gate decisions are untouched."""
+    global _WATCHDOG_OUTAGE_LATCH
+    try:
+        from live_orders.watchdog_notice import (
+            WatchdogOutageLatch, refusal_advice, watchdog_codes)
+
+        codes = tuple(str(code) for code in (codes or ()))
+        if not watchdog_codes(codes):
+            return False
+        if from_loop_state:
+            with _live_order_dependency_lock:
+                last_report = _live_order_dependency_state.get("watchdog_at")
+        if _WATCHDOG_OUTAGE_LATCH is None:
+            _WATCHDOG_OUTAGE_LATCH = WatchdogOutageLatch()
+        now = now or datetime.datetime.now(datetime.timezone.utc)
+        if not _WATCHDOG_OUTAGE_LATCH.should_alert(
+                str(instance_id), codes, last_report, now=now):
+            return False
+        from live_alerts import alert_watchdog_down
+        alert_watchdog_down(instance_id=str(instance_id), codes=codes,
+                            last_report=last_report)
+        if log is not None:
+            try:
+                log(f"[watchdog] {refusal_advice(codes, last_report)} (alert "
+                    f"sent; the order gate refused on {','.join(codes)})", "red")
+            except Exception:
+                pass
+        return True
+    except Exception:
+        return False
+
+
 def _execute_swing_approval(adapter, payload, order_service, *,
                             cached_strategies=None, now_utc=None, log=None,
                             sleep=None):
@@ -11040,7 +11087,10 @@ def _execute_swing_approval(adapter, payload, order_service, *,
       refusal returns before the service creates a lifecycle record, so the
       re-approval takes the normal path and places exactly one order. Its
       notice ("... — approve again") goes out only when the reset was
-      written (M-1);
+      written (M-1). A refusal carrying dependency.watchdog.* is put back
+      to pending the same way, but its notice says the health monitor is
+      down and the instance needs a restart, since approving again cannot
+      clear it, and one alert goes out per watchdog outage (2026-10-02);
     - any other definite failure (unknown or disabled lane, rebuild error,
       bracket refused, risk-cap, duplicate or broker refusal): failed; and
       every failure the operator did not cause is sent as
@@ -11056,6 +11106,7 @@ def _execute_swing_approval(adapter, payload, order_service, *,
     import time as _time
     from zoneinfo import ZoneInfo
     from live_orders import OrderSource
+    from live_orders.watchdog_notice import refusal_advice, watchdog_codes
 
     class _Retryable(Exception):
         """A transient failure: the signal goes back to pending (I-1)."""
@@ -11238,15 +11289,20 @@ def _execute_swing_approval(adapter, payload, order_service, *,
             tell(reason)
             return (False, error, result or {})
 
-        def back_to_pending(why, *, quote=False, detail="", result=None, again=""):
+        def back_to_pending(why, *, quote=False, detail="", result=None, again="",
+                            advice=""):
             """I-1: a transient failure. Nothing reached the broker, so the
             decision is undone and the operator may approve again (`again`
-            says when, if not after the open)."""
-            reason = f"{why} — approve again" + (" after the open" if quote else again)
+            says when, if not after the open). `advice` replaces "approve
+            again" when approving again cannot help (a watchdog refusal)."""
+            reason = (f"{why} — {advice}" if advice else
+                      f"{why} — approve again" + (" after the open" if quote else again))
             if write({"status": "pending", "decided_by": None, "decided_at": None,
                       "decision_reason": None}):
                 say(f"{label} put back to pending: {why}"
-                    + (f" ({detail})" if detail else ""), "yellow")
+                    + (f" ({detail})" if detail else "")
+                    + (f"; {advice}" if advice else ""),
+                    "red" if advice else "yellow")
                 tell(reason)
             else:
                 # M-1: never "approve again" when the reset did not land -- in
@@ -11399,6 +11455,20 @@ def _execute_swing_approval(adapter, payload, order_service, *,
         }
         if not submission.decision.allowed:
             error = "order gate blocked: " + ",".join(codes)
+            # 2026-10-02: a watchdog refusal cannot clear by approving again;
+            # swing-paper looped on it for a day. One alert per outage.
+            watchdog_refusal = bool(watchdog_codes(codes))
+            watchdog_at = dict(controls or {}).get("watchdog_at")
+            if watchdog_refusal:
+                alert = globals().get("_alert_watchdog_gate_refusal")
+                if alert is not None:
+                    try:
+                        alert(owner, codes, watchdog_at, log=log)
+                    except Exception:
+                        pass
+            if all_transient(codes) and watchdog_refusal:
+                return back_to_pending(error, result=result,
+                                       advice=refusal_advice(codes, watchdog_at))
             if all_transient(codes):
                 # The gate refused before the service created a lifecycle row, so
                 # a re-approval builds the same identity afresh: one order.
@@ -21192,6 +21262,15 @@ while not shutdown_requested:
                                                     _cached_strategies),
                                                 adapter=live_adapter,
                                                 outcome="uncertain",
+                                            )
+                                        if not _submission.decision.allowed:
+                                            # 2026-10-02: one alert per watchdog
+                                            # outage, never per tick. Never raises.
+                                            _alert_watchdog_gate_refusal(
+                                                instance_id,
+                                                _submission.decision.reason_codes,
+                                                from_loop_state=True,
+                                                log=_log,
                                             )
                                     else:
                                         # Non-equity compatibility paths are

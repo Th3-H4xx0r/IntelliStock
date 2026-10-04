@@ -74,6 +74,10 @@ NOTIFICATION_TYPES = [
      "desc": "An instance process died (not an operator Stop) and was held open so its "
              "logs stay viewable", "channel": "notifications",
      "discord": True, "push": True, "prefixes": ["INSTANCE CRASH ["]},
+    {"key": "watchdog_down", "group": "Risk & Halts", "label": "Health monitor down",
+     "desc": "An instance's watchdog stopped reporting, so the order gate refuses "
+             "new orders until it is restarted", "channel": "notifications",
+     "discord": True, "push": True, "prefixes": ["WATCHDOG DOWN ["]},
 
     # --- Broker Health ---
     {"key": "broker_boot", "group": "Broker Health", "label": "Broker boot",
@@ -204,6 +208,8 @@ def type_for_key(key):
 # the operator can still toggle it off per-channel in the settings screen.
 _PUSH_ON_BY_DEFAULT = {
     "instance_crash",
+    # A silent watchdog makes the order gate refuse every new order (2026-10-02).
+    "watchdog_down",
     # swing-trader port (spec §10): pending reviews, entries, exits, position
     # alerts, assignments, and an approved order the broker refused
     "swing_entry", "swing_pending_review", "swing_exit",
