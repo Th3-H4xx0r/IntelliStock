@@ -56,6 +56,15 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
+		1DDB67CB3672F2A8772F91BF /* WidgetShared */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			explicitFileTypes = {
+			};
+			explicitFolders = (
+			);
+			path = WidgetShared;
+			sourceTree = "<group>";
+		};
 		5AF5B8AF74C26CBDB237376B /* IntelliStockTests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			explicitFileTypes = {
@@ -113,6 +122,7 @@
 				5AF5B8AF74C26CBDB237376B /* IntelliStockTests */,
 				8FD74E0591670EB20E887368 /* IntelliStockUITests */,
 				7F8C28589DEA3E9F2B6FE634 /* PortfolioWidget */,
+				1DDB67CB3672F2A8772F91BF /* WidgetShared */,
 				632BC34E9E0E32E73E40D50A /* Products */,
 			);
 			sourceTree = "<group>";
@@ -157,6 +167,7 @@
 			);
 			fileSystemSynchronizedGroups = (
 				5AF5B8AF74C26CBDB237376B /* IntelliStockTests */,
+				1DDB67CB3672F2A8772F91BF /* WidgetShared */,
 			);
 			name = IntelliStockTests;
 			packageProductDependencies = (
@@ -178,6 +189,7 @@
 			);
 			fileSystemSynchronizedGroups = (
 				7F8C28589DEA3E9F2B6FE634 /* PortfolioWidget */,
+				1DDB67CB3672F2A8772F91BF /* WidgetShared */,
 			);
 			name = PortfolioWidget;
 			packageProductDependencies = (
