@@ -77,6 +77,9 @@ targets:
     sources:
       - path: PortfolioWidget
         type: syncedFolder
+      # The widget's views and pure helpers; the unit tests compile them too.
+      - path: WidgetShared
+        type: syncedFolder
     settings:
       base:
         PRODUCT_NAME: PortfolioWidget
@@ -105,6 +108,10 @@ targets:
     platform: iOS
     sources:
       - path: IntelliStockTests
+        type: syncedFolder
+      # Rendered and unit-tested in place: the widget extension can't be a
+      # test host, so its shared views are compiled into this bundle.
+      - path: WidgetShared
         type: syncedFolder
     dependencies:
       - target: IntelliStock
