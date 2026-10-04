@@ -57,7 +57,7 @@ struct PortfolioWidgetContent: View {
 
     private func name(_ s: PortfolioSnapshot) -> some View {
         Text(PortfolioFormat.displayName(s.name))
-            .font(.subheadline.weight(.semibold))
+            .font(.footnote.weight(.semibold))
             .foregroundStyle(.secondary)
             .lineLimit(1)
     }
@@ -105,23 +105,25 @@ struct PortfolioWidgetContent: View {
     private func holdingRow(_ h: HoldingItem, showValue: Bool) -> some View {
         HStack(spacing: 8) {
             Text(h.symbol)
-                .font(.subheadline.weight(.semibold))
+                .font(.footnote.weight(.semibold))
                 .foregroundStyle(.primary)
+                .truncationMode(.tail)
             Spacer(minLength: 4)
             if showValue {
                 Text(PortfolioFormat.money(h.marketValue))
-                    .font(.subheadline)
+                    .font(.footnote)
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
             }
+            // The percentage never truncates; a long symbol gives way.
             Text(PortfolioFormat.signedPercent(h.pnlPct))
-                .font(.subheadline.weight(.medium))
+                .font(.footnote.weight(.medium))
                 .monospacedDigit()
                 .foregroundStyle(trend(h.pnlPct >= 0))
-                .frame(minWidth: showValue ? 70 : 0, alignment: .trailing)
+                .fixedSize()
+                .frame(minWidth: showValue ? 64 : 0, alignment: .trailing)
         }
         .lineLimit(1)
-        .minimumScaleFactor(0.8)
     }
 
     // MARK: Families
@@ -129,8 +131,8 @@ struct PortfolioWidgetContent: View {
     private func small(_ s: PortfolioSnapshot) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             name(s)
-            value(s, font: .title)
-            change(s, PortfolioFormat.signedPercent(s.changePct), font: .caption)
+            value(s, font: .title3)
+            change(s, PortfolioFormat.signedPercent(s.changePct), font: .caption.weight(.medium))
             Spacer(minLength: 6)
             chart(s, lineWidth: 1.75)
                 .frame(maxHeight: 40)
@@ -143,18 +145,18 @@ struct PortfolioWidgetContent: View {
         HStack(alignment: .top, spacing: 16) {
             VStack(alignment: .leading, spacing: 2) {
                 name(s)
-                value(s, font: .title)
-                change(s, PortfolioFormat.change(abs: s.changeAbs, pct: s.changePct), font: .subheadline)
+                value(s, font: .title3)
+                change(s, PortfolioFormat.change(abs: s.changeAbs, pct: s.changePct), font: .caption.weight(.medium))
                 Spacer(minLength: 8)
                 chart(s, lineWidth: 2)
                     .frame(maxHeight: 44)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
-            VStack(alignment: .trailing, spacing: 7) {
+            VStack(alignment: .trailing, spacing: 6) {
                 if s.holdings.isEmpty {
                     Text("No positions")
-                        .font(.subheadline)
+                        .font(.footnote)
                         .foregroundStyle(.secondary)
                 } else {
                     ForEach(Array(s.holdings.prefix(3).enumerated()), id: \.offset) { _, h in
@@ -172,8 +174,8 @@ struct PortfolioWidgetContent: View {
     private func large(_ s: PortfolioSnapshot) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             name(s)
-            value(s, font: .largeTitle)
-            change(s, PortfolioFormat.change(abs: s.changeAbs, pct: s.changePct), font: .subheadline)
+            value(s, font: .title2)
+            change(s, PortfolioFormat.change(abs: s.changeAbs, pct: s.changePct), font: .caption.weight(.medium))
             chart(s, lineWidth: 2)
                 .frame(minHeight: 60, maxHeight: .infinity)
                 .padding(.top, 10)
@@ -181,10 +183,10 @@ struct PortfolioWidgetContent: View {
                 .padding(.vertical, 10)
             if s.holdings.isEmpty {
                 Text("No positions")
-                    .font(.subheadline)
+                    .font(.footnote)
                     .foregroundStyle(.secondary)
             } else {
-                VStack(spacing: 7) {
+                VStack(spacing: 6) {
                     ForEach(Array(s.holdings.prefix(5).enumerated()), id: \.offset) { _, h in
                         holdingRow(h, showValue: true)
                     }
@@ -273,10 +275,14 @@ struct PortfolioSparkline: View {
            let t0 = points.first?.t, let t1 = points.last?.t, t1 > t0 {
             Chart {
                 ForEach(Array(points.enumerated()), id: \.offset) { _, p in
-                    AreaMark(x: .value("Time", p.t),
-                             yStart: .value("Floor", y.lowerBound),
-                             yEnd: .value("Value", p.v))
-                        .foregroundStyle(color.opacity(fullColor ? 0.14 : 0.25))
+                    // Tinted home screens get the line alone: a tinted fill
+                    // renders as a solid block.
+                    if fullColor {
+                        AreaMark(x: .value("Time", p.t),
+                                 yStart: .value("Floor", y.lowerBound),
+                                 yEnd: .value("Value", p.v))
+                            .foregroundStyle(color.opacity(0.14))
+                    }
                     LineMark(x: .value("Time", p.t), y: .value("Value", p.v))
                         .foregroundStyle(color)
                         .lineStyle(StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round))
