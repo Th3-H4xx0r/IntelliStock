@@ -11540,18 +11540,20 @@ def _live_order_dependency_snapshot(adapter, intent):
         if position_limit is not None and quote_price > 0:
             max_position_quantity = position_limit / quote_price
 
-    # The refresh writes `unhealthy` at every rung below normal; this symbol's
-    # rung decides whether it still opens (soft: unlevered and BIL; hard/kill:
-    # BIL only). `unknown` - no row - is not a rung and stays a block.
+    # The refresh writes `unhealthy` at every rung below normal; on a document
+    # with an enabled strategy_eb lane this symbol's rung decides whether it
+    # still opens (soft: unlevered and BIL; hard/kill: BIL only). Any other
+    # document keeps the single flag: every buy blocked from soft up. `unknown`
+    # - no row - is not a rung and stays a block.
     risk_health = Health(state.get("risk_state", "unknown"))
     if risk_health is Health.UNHEALTHY and _live_risk_state is not None:
-        from live_risk_state import buy_allowed_at_level
+        risk_off = _live_risk_off_symbols(globals().get("_cached_strategies"))
+        if risk_off:
+            from live_risk_state import buy_allowed_at_level
 
-        if buy_allowed_at_level(
-                _live_risk_state.level, symbol,
-                risk_off_symbols=_live_risk_off_symbols(
-                    globals().get("_cached_strategies"))):
-            risk_health = Health.HEALTHY
+            if buy_allowed_at_level(_live_risk_state.level, symbol,
+                                    risk_off_symbols=risk_off):
+                risk_health = Health.HEALTHY
 
     return DependencySnapshot(
         account_id=account_id,

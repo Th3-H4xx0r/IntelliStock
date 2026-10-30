@@ -12,6 +12,8 @@ The approved ladder (operator, 2026-10-30):
 - hard: block every buy except the strategy's risk-off symbol (BIL).
 - kill: as hard; the transition still cancels working buys and pages.
 - At every level a buy of the risk-off symbol is allowed.
+Scoped to documents with an enabled strategy_eb lane. Every other document
+keeps the single flag: any level from soft up blocks every buy.
 
 Everything here is built from the real producers: the risk row comes from
 `initialize_risk_state` + `evaluate_drawdown` through broker.py's own
@@ -277,11 +279,48 @@ def test_a_missing_risk_row_still_blocks_every_buy(monkeypatch):
     assert "dependency.risk_state.unknown" in decision.reason_codes
 
 
-def test_a_document_without_eb_has_no_risk_off_exemption(monkeypatch):
-    ns, adapter, _r, _p = _world("0.36", monkeypatch,
-                                 strategies=[{"strategy": "strategy_swing",
-                                              "config": {"strategy_swing_enabled": True}}])
-    assert not _decide(ns, adapter, _buy(ns, "BIL")).allowed
+NON_EB_DOCS = [
+    [{"strategy": "strategy_swing", "config": {"strategy_swing_enabled": True}}],
+    [{"strategy": "strategy_eb", "config": {"strategy_eb_enabled": False,
+                                            "risk_off_symbol": "BIL"}}],
+    [],
+    None,
+]
+
+
+@pytest.mark.parametrize("strategies", NON_EB_DOCS)
+@pytest.mark.parametrize("drawdown", ["0.26", "0.36", "0.46"])
+def test_a_document_without_eb_keeps_the_single_flag(drawdown, strategies,
+                                                     monkeypatch):
+    """The graduated ladder is scoped to an enabled strategy_eb lane. Every
+    other document (or none loaded) blocks every buy from soft up, exactly as
+    before: unlevered names and BIL included."""
+    ns, adapter, refreshed, _p = _world(drawdown, monkeypatch,
+                                        strategies=strategies)
+    assert refreshed.level != "normal"
+    for symbol in PRICES:
+        decision = _decide(ns, adapter, _buy(ns, symbol))
+        assert not decision.allowed, (drawdown, symbol)
+        assert decision.reason_codes == ("dependency.risk_state.unhealthy",), \
+            (drawdown, symbol, decision.reason_codes)
+
+
+@pytest.mark.parametrize("strategies", NON_EB_DOCS)
+def test_a_document_without_eb_buys_freely_at_normal(strategies, monkeypatch):
+    ns, adapter, _r, _p = _world("0.12", monkeypatch, strategies=strategies)
+    for symbol in PRICES:
+        assert _decide(ns, adapter, _buy(ns, symbol)).allowed, symbol
+
+
+def test_an_eb_lane_that_blanks_its_risk_off_symbols_keeps_the_single_flag(
+        monkeypatch):
+    """No risk-off symbol resolves, so no relaxation: the tighter direction."""
+    blank = [{"strategy": "strategy_eb",
+              "config": {"strategy_eb_enabled": True, "risk_off_symbol": "",
+                         "cash_symbol": ""}}]
+    ns, adapter, _r, _p = _world("0.26", monkeypatch, strategies=blank)
+    assert ns["_live_risk_off_symbols"](blank) == frozenset()
+    assert not _decide(ns, adapter, _buy(ns, "GLD")).allowed
 
 
 def test_a_disabled_eb_lane_contributes_no_risk_off_symbol(monkeypatch):
