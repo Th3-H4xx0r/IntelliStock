@@ -450,11 +450,20 @@ class StrategyEb:
             state_note += (f" | vts r={_vts_ratio:.3f} n={_vts_pairs} fired={_vts_fired}"
                            if _vts_ratio is not None
                            else f" | vts unmeasurable n={_vts_pairs}")
-        _log(f"StrategyEb {session_id} | core {core} target {weight:.0%} "
-             f"(held {held:.0%} -> {effective_weight:.0%}){state_note}"
-             " | targets="
-             + ", ".join(f"{s} {w:.1%}" for s, w in sorted(targets.items()))
-             + f" | orders={len(decisions)} | nav=${nav:,.0f}", "cyan")
+        # Once per DECISION, not once per tick. A decision that sends nothing
+        # does not consume the session, so it is re-evaluated on every tick
+        # and used to print the same plan ~20 times (alpaca-main, 2026-10-29)
+        # into a live log capped at 5000 lines. The key is the plan itself,
+        # so a plan that changes mid-session still reaches the log; `nav` and
+        # `held` move with every quote and are left out of it.
+        plan_key = (f"{session_id}|{weight!r}|{effective_weight!r}|{state_note}"
+                    f"|{sorted(targets.items())!r}|{sorted(decisions.items())!r}")
+        _log_once(cache, "plan", plan_key,
+                  f"StrategyEb {session_id} | core {core} target {weight:.0%} "
+                  f"(held {held:.0%} -> {effective_weight:.0%}){state_note}"
+                  " | targets="
+                  + ", ".join(f"{s} {w:.1%}" for s, w in sorted(targets.items()))
+                  + f" | orders={len(decisions)} | nav=${nav:,.0f}", "cyan")
 
         # A2. THE CACHE RECORDS EXECUTION, NOT INTENT. Written before this
         # point, a decision that produced no orders still consumed the session:
@@ -466,7 +475,17 @@ class StrategyEb:
         # on. Nothing came out, so nothing is recorded, and the next tick of
         # the same session tries again.
         if not decisions:
-            if exiting:
+            if exiting and float(positions.get(core) or 0.0) <= 0.0:
+                # Nothing to exit. With remainder books configured a zero core
+                # on a decision day is a pure-book rebalance (`eb_should_trade`
+                # rule 2); a book already inside its bands sends nothing.
+                # There is no core to sell, so this is not a failed exit and
+                # does not get the red alarm below.
+                _log_once(cache, "exit-already-flat", session_id,
+                          f"StrategyEb {session_id} | core {core} already "
+                          "flat — exit is a no-op; the book plan sent no "
+                          "orders.", "white")
+            elif exiting:
                 _log_once(cache, "exit-no-orders", session_id,
                           f"StrategyEb {session_id} | EXIT PRODUCED NO ORDER "
                           f"for {core} — not recording it as issued; the next "
