@@ -78,6 +78,8 @@ def _ns(strategies):
         "live_broker_type": "alpaca", "live_brokerage_id": "acct-1",
         "_cached_strategies": strategies,
         "_lane_enabled": helpers["_lane_enabled"],
+        # Read only below the normal rung; `_live_risk_state` is None here.
+        "_live_risk_off_symbols": lambda strategies: frozenset(),
     }
     ns = extract(("_live_option_dependency_snapshot",
                   "_pending_sell_to_open_collateral",
