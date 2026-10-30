@@ -25,6 +25,7 @@ import copy
 from dataclasses import replace
 import concurrent.futures
 import hashlib
+import math
 import os
 import re
 import threading
@@ -2174,6 +2175,27 @@ class AlpacaAdapter(BrokerAdapter):
             buying_power=bp,
             daytrading_buying_power=float(getattr(acct, "daytrading_buying_power", 0) or 0.0),
         )
+
+    def margin_funding_facts(self) -> dict:
+        """A fresh read of the two facts same-session funding needs.
+
+        ``multiplier`` is Alpaca's: "1" for a cash account (and for a margin
+        account under $2,000, which Alpaca restricts to 1x), "2"/"4" for a
+        margin account. ``cash`` is Alpaca's cash balance, which carries a
+        filled sale's proceeds from the fill on, settled or not. Neither is
+        cached: Strategy EB spends against this read, so it must reflect every
+        fill Alpaca has confirmed, not the last tick's refresh.
+
+        Read-only — the adapter's cached state is untouched. Raises when the
+        account cannot be read or either fact is missing or not finite; there
+        is no default that would be safe to spend against.
+        """
+        acct = self._client.get_account()
+        multiplier = float(acct.multiplier)
+        cash = float(acct.cash)
+        if not (math.isfinite(multiplier) and math.isfinite(cash)):
+            raise ValueError("account multiplier/cash is not finite")
+        return {"multiplier": multiplier, "cash": cash}
 
     def refresh_account(self) -> AccountDTO:
         """One-shot fetch of everything the LiveState UI needs from Alpaca
