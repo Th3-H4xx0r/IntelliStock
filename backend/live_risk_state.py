@@ -514,9 +514,39 @@ def evaluate_drawdown(
         observed_at=observed,
         drawdown=drawdown,
         level=level,
+        # UNRESTRICTED new exposure. Below normal some buys still open; which
+        # ones is `buy_allowed_at_level`'s call, per symbol.
         new_exposure_allowed=(level == "normal"),
         **caps,
     )
+
+
+def buy_allowed_at_level(level, symbol, *,
+                         leveraged_symbols=DEFAULT_LEVERAGED_SYMBOLS,
+                         risk_off_symbols=()) -> bool:
+    """Whether a new BUY of ``symbol`` may open at drawdown ``level``.
+
+    soft blocks leveraged symbols only; hard and kill block everything but the
+    strategy's risk-off symbol (EB's BIL), which is buyable at every level. A
+    single "no new exposure" flag from soft up refused that BIL buy too, so a
+    trend-off exit taken in a drawdown sold into cash and stayed there with no
+    rung that ever let it out.
+
+    A risk-off symbol that is itself leveraged is never exempt, and a level
+    this ladder does not know blocks everything but the risk-off symbol.
+    """
+    sym = str(symbol or "").strip().upper()
+    leveraged = {str(value).strip().upper() for value in leveraged_symbols}
+    risk_off = {str(value).strip().upper() for value in risk_off_symbols
+                if str(value or "").strip()} - leveraged
+    if sym in risk_off:
+        return True
+    rung = str(level or "").strip().lower()
+    if rung == "normal":
+        return True
+    if rung == "soft":
+        return sym not in leveraged
+    return False
 
 
 #: The drawdown ladder, in increasing severity.
@@ -643,10 +673,14 @@ def apply_risk_level_transition(previous_level, state, *, instance_id="",
     drawdown = getattr(state, "drawdown", Decimal("0"))
     equity = getattr(state, "last_equity", Decimal("0"))
     peak = getattr(state, "high_water_equity", Decimal("0"))
+    blocked = {
+        "normal": "new exposure allowed",
+        "soft": "leveraged buys BLOCKED",
+    }.get(now, "every buy but the risk-off symbol BLOCKED")
     headline = (
         f"risk ladder {was or 'unknown'} -> {now.upper()}: drawdown "
         f"{float(drawdown):.2%} (equity {equity} against a high-water {peak}); "
-        f"new exposure {'BLOCKED' if now != 'normal' else 'allowed'}."
+        f"{blocked}."
     )
     if not escalation:
         _say(headline + " Recovered; no action taken.", "green")
