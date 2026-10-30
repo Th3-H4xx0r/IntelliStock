@@ -23,9 +23,7 @@ from strategy_eb import (  # noqa: E402
     _state,
     drain_config_fallbacks,
     eb_core_weight,
-    eb_remainder_targets,
     eb_should_trade,
-    eb_state_book,
     eb_targets,
     eb_trend_enabled,
     eb_trend_state,
@@ -409,7 +407,8 @@ class StrategyEb:
             # the core plan failed to spend.
             return self._sweep(cfg, cache, session_id, universe, eff, book_nav,
                                positions, portfolio_emulator, held,
-                               trend_state, cash_hold=cash_hold)
+                               trend_state, cash_hold=cash_hold,
+                               closes=closes)
 
         # An exit already issued in THIS session is in flight, not ignored. No
         # sweep here either: the core sell has not settled, so the cash it will
@@ -489,20 +488,32 @@ class StrategyEb:
         return _emit(decisions, sizes, universe)
 
     def _sweep(self, cfg, cache, session_id, universe, prices, nav, positions,
-               emulator, held, trend_state="ON", cash_hold=0.0) -> dict:
-        """Re-offer an idle cash balance to the REMAINDER legs.
+               emulator, held, trend_state="ON", cash_hold=0.0,
+               closes=None) -> dict:
+        """Re-offer an idle cash balance to the full target book. BUYS ONLY.
 
         `targets_to_orders` sizes buys off SETTLED cash, and equity fills are
-        next-bar, so the tick that sells the core cannot also fund the SPY leg
-        that was meant to replace it — that buy is clipped to whatever cash had
+        next-bar, so the tick that sells one leg cannot also fund the leg that
+        was meant to replace it — that buy is clipped to whatever cash had
         already settled. Nothing else ever revisits it: on later sessions the
         band sees no breach, and after a full exit the cadence rule returns
         (False, 0.0). Measured over a backtest that is a book drifting to cash,
         which is not the strategy at all.
 
-        The core is outside both the targets and the `owned` scope, so a sweep
-        can neither trim the core to fund the remainder nor top it up outside
-        the weekly cadence. It only ever spends money that is already idle.
+        The book it deploys toward:
+          - the last EXECUTED plan's targets, core included, with the remainder
+            re-derived for the current trend state when the filter is on;
+          - with no executed plan (a cold start, or a lost cache), the target
+            set a decision session would compute from `closes`: the trend
+            state (the persisted one if a decision session ever wrote it,
+            otherwise measured now from no prior state), the vol-targeted core
+            weight for that state, and that state's book. No `closes`, or a
+            core weight that cannot be measured, buys nothing.
+
+        So the sweep CAN buy the core outside the weekly cadence — up to the
+        weight the last plan (or the cold-start plan) set, never past it. Every
+        sell is dropped: a sweep never trims anything, the core included, and
+        only ever spends money that is already idle.
         """
         # A session that already sent a core plan has its remainder legs in
         # that plan, and those buys have NOT settled yet — cash still reads
@@ -521,6 +532,7 @@ class StrategyEb:
             return {}
 
         pending = cache.get(_PENDING_TARGETS_KEY)
+        plan = ""
         if isinstance(pending, dict) and pending:
             # Deploy toward the last decided book, core included. BUYS ONLY:
             # the sweep spends idle cash; it never trims anything.
@@ -535,12 +547,25 @@ class StrategyEb:
                                      cfg, trend_state)
             owned = set(universe)
         else:
-            targets = eb_remainder_targets(held, cfg, trend_state)
-            owned = {_s(cfg, "off_symbol"), _s(cfg, "cash_symbol")}
-            if eb_trend_enabled(cfg):
-                owned.add(_s(cfg, "risk_off_symbol"))
-            owned |= set(eb_state_book(cfg, trend_state))
-            owned.discard(_s(cfg, "core_symbol"))
+            # NO EXECUTED PLAN: a cold start or a lost cache. A cold start must
+            # never buy before it has real targets — on 2026-09-16 (alpaca-main)
+            # this branch planned the remainder around a zero core in the
+            # never-measured default "ON" state and put 100% of NAV into the
+            # trend-ON book while the rule said OFF. Plan what a decision
+            # session would: the persisted state when one exists (a decision
+            # session or a live VTS ratio wrote it), else the machine evaluated
+            # now from no prior state — exactly a cold decision session's
+            # answer. Measured for this plan only; persisting it stays the
+            # decision session's job.
+            state = trend_state
+            if eb_trend_enabled(cfg) and cache.get(_TREND_STATE_KEY) is None:
+                state = eb_trend_state(closes, None, cfg)
+            weight = eb_core_weight(closes, cfg, state) if closes else None
+            if weight is None:
+                return {}
+            targets = eb_targets(weight, cfg, state)
+            owned = set(universe)
+            plan = f" | cold-start plan, trend {state}"
         owned.discard("")
         if not targets:
             return {}
@@ -559,5 +584,5 @@ class StrategyEb:
         _log(f"StrategyEb {session_id} | SWEEP ${cash:,.0f} idle "
              f"({cash / nav:.0%} of NAV) into "
              + ", ".join(f"{s} {w:.1%}" for s, w in sorted(targets.items()))
-             + f" | orders={len(decisions)}", "cyan")
+             + f" | orders={len(decisions)}{plan}", "cyan")
         return _emit(decisions, sizes, universe)

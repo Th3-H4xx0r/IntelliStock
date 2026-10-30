@@ -281,11 +281,20 @@ def sweep_data(pct=0.01):
 
 
 def test_the_session_after_a_full_exit_puts_the_freed_cash_back_to_work():
-    cache = {}
-    out = StrategyEb().run_once(["TQQQ"], PRICES, SKIPS, cfg(), {},
-                                data=sweep_data(),
-                                portfolio_emulator=FakeEmulator(cash=10000.0),
-                                strategy_cache=cache)
+    # The cache is the one the exit decision itself writes — its plan is the
+    # book the freed cash belongs to. An EMPTY cache is a cold start, which
+    # plans the core too (test_strategy_eb_cold_start.py).
+    strat, cache = StrategyEb(), {}
+    exit_plan = strat.run_once(
+        ["TQQQ"], PRICES, DECIDES, cfg(), {},
+        data=data_for(alternating(0.10)),
+        portfolio_emulator=FakeEmulator(cash=0.0, positions={"TQQQ": 125.0}),
+        strategy_cache=cache)
+    assert exit_plan.get("TQQQ") == -1
+    out = strat.run_once(["TQQQ"], PRICES, SKIPS, cfg(), {},
+                         data=sweep_data(),
+                         portfolio_emulator=FakeEmulator(cash=10000.0),
+                         strategy_cache=cache)
     assert out.get("SPY") == 1
     assert "TQQQ" not in out
     assert out["_nexus_position_sizes"]["SPY"]["buy_cash"] > 9000
@@ -347,9 +356,8 @@ def test_an_in_flight_exit_tick_does_not_sweep_either():
 
 
 def test_the_sweep_never_buys_or_sells_the_core():
-    """The core is outside both the sweep's targets and its `owned` scope, so
-    it can be neither trimmed to fund the remainder nor topped up outside the
-    weekly cadence."""
+    """A sweep drops every sell, so the core is never trimmed to fund the
+    remainder; held at 62% against a 40% target, it is not bought either."""
     emu = FakeEmulator(cash=5000.0, positions={"TQQQ": 100.0})
     out = StrategyEb().run_once(["TQQQ"], PRICES, SKIPS, cfg(), {},
                                 data=sweep_data(),
