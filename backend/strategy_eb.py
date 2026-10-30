@@ -251,6 +251,15 @@ DEFAULTS = {
     # non-Alpaca adapter — refuses every buy while this is on, so leave it off
     # there rather than run a strategy that can only sell.
     "pending_buy_guard_enabled": False,
+    # ── same-session funding (live, margin accounts only) ──
+    # Once every order of a session's plan has resolved, a MARGIN account's
+    # filled sale proceeds (Alpaca cash, settled or not) fund the plan's buys
+    # that session instead of the next one. Cash only, never buying power, so
+    # the account never borrows. A cash account (Alpaca multiplier 1), the
+    # backtest emulator, or any doubt keeps the next-session sweep. The kill
+    # switch: false restores that everywhere. See strategies/strategy_eb.py
+    # `_same_session_funding_cash`.
+    "live_same_session_funding_enabled": True,
 }
 
 

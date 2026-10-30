@@ -1,4 +1,4 @@
-# INTELLISTOCK_SCHEMA: {"strategy": "strategy_eb", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_eb_enabled": false, "core_symbol": "TQQQ", "core_leverage": 3.0, "reference_symbol": "QQQ", "off_symbol": "SPY", "cash_symbol": "BIL", "target_vol": 0.2, "core_max_weight": 0.65, "weight_step": 0.05, "vol_fast_bars": 10, "vol_slow_bars": 40, "min_history_bars": 70, "core_rebalance_band": 0.1, "rebalance_weekdays": [2], "remainder_bil_fraction": 0.0, "trend_filter_bars": 25, "trend_off_enter_pct": 0.01, "trend_on_exit_pct": 0.02, "risk_off_symbol": "BIL", "core_off_damp": 0.0, "trend_on_book": {"GLD": 0.5, "GDX": 0.25, "XLE": 0.25}, "trend_off_book": {"GLD": 0.375, "GDX": 0.1875, "XLE": 0.1875}, "cash_sweep_min_pct": 0.02, "reserve_for_other_lanes_pct": 0.0, "vts_enabled": false, "vts_short_symbol": "VIXY", "vts_mid_symbol": "VIXM", "vts_median_bars": 250, "vts_threshold": 1.0, "core_band_pct": 0.03, "min_order_usd": 25.0, "cost_haircut_pct": 0.005, "broker_max_single_position_pct": 0.95, "honour_single_position_cap": true, "live_max_order_fraction": 0.7, "live_max_symbol_fraction": 0.7, "live_max_leveraged_fraction": 0.7, "live_soft_drawdown": 0.25, "live_hard_drawdown": 0.35, "live_kill_drawdown": 0.45, "pending_buy_guard_enabled": false}}
+# INTELLISTOCK_SCHEMA: {"strategy": "strategy_eb", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_eb_enabled": false, "core_symbol": "TQQQ", "core_leverage": 3.0, "reference_symbol": "QQQ", "off_symbol": "SPY", "cash_symbol": "BIL", "target_vol": 0.2, "core_max_weight": 0.65, "weight_step": 0.05, "vol_fast_bars": 10, "vol_slow_bars": 40, "min_history_bars": 70, "core_rebalance_band": 0.1, "rebalance_weekdays": [2], "remainder_bil_fraction": 0.0, "trend_filter_bars": 25, "trend_off_enter_pct": 0.01, "trend_on_exit_pct": 0.02, "risk_off_symbol": "BIL", "core_off_damp": 0.0, "trend_on_book": {"GLD": 0.5, "GDX": 0.25, "XLE": 0.25}, "trend_off_book": {"GLD": 0.375, "GDX": 0.1875, "XLE": 0.1875}, "cash_sweep_min_pct": 0.02, "reserve_for_other_lanes_pct": 0.0, "vts_enabled": false, "vts_short_symbol": "VIXY", "vts_mid_symbol": "VIXM", "vts_median_bars": 250, "vts_threshold": 1.0, "core_band_pct": 0.03, "min_order_usd": 25.0, "cost_haircut_pct": 0.005, "broker_max_single_position_pct": 0.95, "honour_single_position_cap": true, "live_max_order_fraction": 0.7, "live_max_symbol_fraction": 0.7, "live_max_leveraged_fraction": 0.7, "live_soft_drawdown": 0.25, "live_hard_drawdown": 0.35, "live_kill_drawdown": 0.45, "pending_buy_guard_enabled": false, "live_same_session_funding_enabled": true}}
 # INTELLISTOCK_DESCRIPTION: Efficient beta — a volatility-targeted leveraged Nasdaq core with the remainder in a GLD/GDX/XLE book, a 25-session trend damp that steps the core out in downtrends, and a BIL floor that takes 25% of the risk-off remainder so de-risking never concentrates fully into the gold complex. Rebalanced weekly, every weight quantized and banded so it trades rarely. A risk transform, not an alpha.
 """Strategy EB wrapper: cache state, order emission, broker contract.
 
@@ -7,6 +7,7 @@ owns only what needs the broker: the emulator, the cache, and the decision row.
 
 Design: docs/superpowers/specs/2026-08-27-strategy-eb-design.md
 """
+import math
 import os
 import sys
 
@@ -88,6 +89,12 @@ _SWEEP_ISSUED_KEY = "_strategy_eb_sweep_session"
 #: alone, which just bought SPY back.
 _PENDING_TARGETS_KEY = "_strategy_eb_pending_targets"
 
+#: {"session": <EB session>, "symbols": [...]} — what the session's plan SOLD.
+#: A same-session funded sweep never buys these back: that would be a round
+#: trip on the plan's own sell. Absent or for another session, the funded
+#: sweep does not run at all (fail closed to the next-session sweep).
+_PLAN_SELLS_KEY = "_strategy_eb_plan_sells"
+
 #: The trend machine's persisted state. It MUST survive across ticks and
 #: across restarts: re-deriving it from a cold start reads the initial "ON"
 #: rather than the state the book is actually holding, and the whole remainder
@@ -133,6 +140,52 @@ def _spendable(emulator, prices) -> float:
     if bp is None:
         return float(emulator.get_cash() or 0.0)
     return float(bp or 0.0)
+
+
+def _same_session_funding_cash(emulator, cfg):
+    """Cash a MARGIN account may spend in the session its plan sold, or None.
+
+    Live, the plan tick sizes its buys off the cash held BEFORE its own sells
+    fill, so a rotation's buys are clipped to nothing and land a session late
+    (alpaca-main: 09-24 -> 09-25, 10-08 -> 10-09, 10-22 -> 10-23). A margin
+    account may trade on unsettled sale proceeds without a good-faith
+    violation, so once the plan's sells have FILLED their proceeds can fund
+    the plan's buys the same session. A cash account may not: None keeps it on
+    the next-session sweep, as before.
+
+    Every condition must be AFFIRMATIVELY established; any doubt answers None:
+      * the kill switch `live_same_session_funding_enabled` is on;
+      * the emulator can report account facts — only the live Alpaca adapter
+        can, so a backtest PortfolioEmulator is untouched;
+      * the account's whole working-order book is EMPTY. A working or
+        partially filled sell has not confirmed its proceeds, and a working
+        buy will consume cash this read still shows;
+      * Alpaca's multiplier says margin (>= 2). "1" is a cash account, or a
+        margin account Alpaca restricts to 1x;
+    and the amount is Alpaca's CASH, fresh, floored at 0 — never buying
+    power, so the account never borrows.
+    """
+    if not _truthy(cfg.get("live_same_session_funding_enabled", True)):
+        return None
+    read_facts = getattr(emulator, "margin_funding_facts", None)
+    if not callable(read_facts):
+        return None
+    try:
+        pending = emulator.pending_execution_symbols()
+        if not isinstance(pending, (tuple, list, set, frozenset)) or pending:
+            return None
+        # Read AFTER the order book: a fill between the two reads only makes
+        # the cash more current, and nothing was working when the book was read.
+        facts = read_facts()
+        multiplier = float(facts["multiplier"])
+        cash = float(facts["cash"])
+    except Exception:
+        return None
+    if not (math.isfinite(multiplier) and math.isfinite(cash)):
+        return None
+    if multiplier < 2.0:
+        return None
+    return max(0.0, cash)
 
 
 def _emit(decisions, sizes, universe) -> dict:
@@ -474,6 +527,14 @@ class StrategyEb:
             return {}
         cache[LAST_REBALANCE_KEY] = session_id
         cache[_PENDING_TARGETS_KEY] = dict(targets)
+        # What this session's plans SOLD, accumulated across a re-armed
+        # re-plan, so a same-session funded sweep never buys any of it back.
+        sold = {s for s, d in decisions.items() if d == -1}
+        prior = cache.get(_PLAN_SELLS_KEY)
+        if isinstance(prior, dict) and prior.get("session") == session_id:
+            sold |= {str(s).upper() for s in (prior.get("symbols") or ())}
+        cache[_PLAN_SELLS_KEY] = {"session": session_id,
+                                  "symbols": sorted(sold)}
         if eb_trend_enabled(cfg):
             # The state this book was BUILT in. `eb_should_trade` compares the
             # live state against it, which is the only thing that can force a
@@ -508,14 +569,32 @@ class StrategyEb:
         # that plan, and those buys have NOT settled yet — cash still reads
         # full on every remaining tick. Sweeping on top of it spends the same
         # dollars twice. The sweep is for cash the core plan has finished with,
-        # which means the NEXT session at the earliest.
-        if cache.get(LAST_REBALANCE_KEY) == session_id:
-            return {}
+        # which means the NEXT session at the earliest — EXCEPT on a margin
+        # account whose working-order book is empty: there every order of
+        # the plan has resolved, Alpaca's cash already reflects each fill, and
+        # the sold proceeds may fund the plan's buys today
+        # (`_same_session_funding_cash`). Checked after the sweep latch so a
+        # session that already swept makes no account reads.
         if cache.get(_SWEEP_ISSUED_KEY) == session_id:
             return {}
+        funded = None
+        sold_today = set()
+        if cache.get(LAST_REBALANCE_KEY) == session_id:
+            record = cache.get(_PLAN_SELLS_KEY)
+            if not (isinstance(record, dict)
+                    and record.get("session") == session_id):
+                return {}
+            funded = _same_session_funding_cash(emulator, cfg)
+            if funded is None:
+                return {}
+            sold_today = {str(s).upper() for s in (record.get("symbols") or ())}
         # `nav` here is the BOOK's NAV and `cash_hold` the sibling lane's
-        # undeployed share (run_once computes both; 0 for a sole lane).
-        cash = max(0.0, _spendable(emulator, prices) - float(cash_hold or 0.0))
+        # undeployed share (run_once computes both; 0 for a sole lane). A
+        # same-session sweep spends Alpaca's fresh CASH only, never buying
+        # power: it never borrows.
+        available = funded if funded is not None else _spendable(emulator,
+                                                                 prices)
+        cash = max(0.0, available - float(cash_hold or 0.0))
         if nav <= 0 or cash <= 0 or (cash / nav) <= _f(cfg,
                                                        "cash_sweep_min_pct"):
             return {}
@@ -542,6 +621,11 @@ class StrategyEb:
             owned |= set(eb_state_book(cfg, trend_state))
             owned.discard(_s(cfg, "core_symbol"))
         owned.discard("")
+        # Dropped from the TARGETS, not from the orders afterwards: buys are
+        # funded largest weight first, so a leg filtered out after sizing
+        # would still have consumed the cash the others needed. Its implied
+        # trim is discarded by the buys-only filter below.
+        targets = {s: w for s, w in targets.items() if s not in sold_today}
         if not targets:
             return {}
 
@@ -556,7 +640,10 @@ class StrategyEb:
             return {}
 
         cache[_SWEEP_ISSUED_KEY] = session_id
-        _log(f"StrategyEb {session_id} | SWEEP ${cash:,.0f} idle "
+        _log(f"StrategyEb {session_id} | "
+             + ("SAME-SESSION FUNDED (margin, every order resolved) "
+                if funded is not None else "")
+             + f"SWEEP ${cash:,.0f} idle "
              f"({cash / nav:.0%} of NAV) into "
              + ", ".join(f"{s} {w:.1%}" for s, w in sorted(targets.items()))
              + f" | orders={len(decisions)}", "cyan")
