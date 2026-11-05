@@ -360,3 +360,86 @@ def test_update_peaks():
     out = book.update_peaks(out, {"NVDA": 120.0}, ["NVDA", "AMD"])
     assert out == {"NVDA": 120.0, "AMD": 40.0}                   # AMD: no close, keep peak
     assert peaks == {"NVDA": 100.0, "SOLD": 50.0}                # input not mutated
+
+
+# --- review fix round 1 -----------------------------------------------------
+
+
+def _twelve_held():
+    held_syms = ["HA" + chr(65 + i) for i in range(12)]           # HAA..HAL, HAA weakest
+    notes = [note(s, 7.0 if s == "HAA" else 8.0) for s in held_syms]
+    return held_syms, notes, {s: 1.0 / 12 for s in held_syms}
+
+
+def test_new_pick_at_zero_weight_is_not_a_buy():
+    held_syms, notes, held = _twelve_held()
+    notes.append(note("NEWCO", 10.0))
+    r = row(notes=notes, picks=[pick("NEWCO", 10.0, 0.0)])
+    weights, log = book.target_book(r, held=held, has_bars=all_bars, cfg={})
+    assert "NEWCO" not in weights
+    assert set(non_bil(weights)) == set(held_syms)                 # HAA not swapped out
+    assert not any("swap" in line for line in log)
+    assert "skip NEWCO: proposal weight 0" in log
+
+
+def test_held_pick_at_zero_weight_exits():
+    held_syms, notes, held = _twelve_held()
+    r = row(notes=notes, picks=[pick("HAB", 8.0, 0.0)])
+    weights, log = book.target_book(r, held=held, has_bars=all_bars, cfg={})
+    assert "HAB" not in weights
+    assert set(non_bil(weights)) == set(held_syms) - {"HAB"}
+    assert "exit HAB: proposal weight 0" in log
+
+
+def test_held_defensive_pick_at_zero_weight_exits():
+    r = picks_row([("TLT", 6.0, 0.0, "defensive"), ("XLU", 6.0, 0.10, "defensive")],
+                  defensive_share=0.30)
+    weights, log = book.target_book(r, held={"TLT": 0.1}, has_bars=all_bars, cfg={})
+    assert "TLT" not in weights
+    assert weights["XLU"] == pytest.approx(0.25)
+    assert "exit TLT: proposal weight 0" in log
+
+
+def test_nan_close_does_not_disable_stop():
+    nan = float("nan")
+    peaks = book.update_peaks({}, {"X": nan}, ["X"])               # bad first print
+    assert peaks == {}
+    peaks = book.update_peaks(peaks, {"X": 100.0}, ["X"])
+    assert peaks == {"X": 100.0}
+    peaks = book.update_peaks(peaks, {"X": nan}, ["X"])            # bad print later
+    assert peaks == {"X": 100.0}
+    assert book.trailing_stop_hits(peaks, {"X": nan}) == []
+    assert book.trailing_stop_hits(peaks, {"X": 80.0}) == ["X"]
+    # A peak already poisoned by NaN is replaced by the next finite close.
+    peaks = book.update_peaks({"X": nan}, {"X": 50.0}, ["X"])
+    assert peaks == {"X": 50.0}
+    assert book.trailing_stop_hits(peaks, {"X": 40.0}) == ["X"]
+    assert book.trailing_stop_hits({"X": nan}, {"X": 1.0}) == []
+    assert book.update_peaks({}, {"X": float("inf")}, ["X"]) == {}
+
+
+def test_defensive_picks_take_slots_in_full_book():
+    held_syms, notes, held = _twelve_held()
+    notes.append(note("TLT", 6.0))
+    r = row(notes=notes, picks=[pick("TLT", 6.0, 0.20, "defensive")], defensive_share=0.20)
+    weights, log = book.target_book(r, held=held, has_bars=all_bars, cfg={})
+    assert "TLT" in weights
+    assert "HAA" not in weights                                    # weakest forced out
+    assert len(non_bil(weights)) == 12
+    assert "exit HAA: no slot left (conviction 7.0)" in log
+
+
+def test_defensive_share_zero_held_defensive_pick_log():
+    r = picks_row([("TLT", 6.0, 0.10, "defensive"), ("XLU", 6.0, 0.10, "defensive")])
+    weights, log = book.target_book(r, held={"TLT": 0.1}, has_bars=all_bars, cfg={})
+    assert "TLT" in weights                                        # kept as a holding
+    assert "XLU" not in weights
+    assert "TLT: defensive_share 0, judged as a holding" in log
+    assert "skip XLU: defensive pick with defensive_share 0" in log
+    assert not any(line.startswith("skip TLT") for line in log)
+
+
+def test_absent_exit_log_names_all_three_sources():
+    r = picks_row([("AMD", 7.0, 0.10)])
+    _, log = book.target_book(r, held={"NVDA": 0.1}, has_bars=all_bars, cfg={})
+    assert "exit NVDA: absent from notes, recommended and picks" in log

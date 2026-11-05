@@ -11,8 +11,9 @@ Rules, in the order ``target_book`` applies them:
 1. Every symbol is normalized; one that will not parse, is an ETF outside the
    allowed sets, or has no bars at the decision date is dropped with a reason.
 2. A holding is kept unless its latest note says ``thesis_status ==
-   "broken"`` or it is absent from the row's notes, recommended names and
-   picks.
+   "broken"``, it is absent from the row's notes, recommended names and
+   picks, or the proposal picks it at weight 0. A new pick at weight 0 is not
+   a buy candidate.
 3. Slots (``max_positions``, clamped to 8-12) go first to the proposal's
    defensive picks when ``defensive_share > 0``, then to kept holdings, then
    to new picks by conviction. A new pick displaces the weakest holding only
@@ -27,6 +28,7 @@ Rules, in the order ``target_book`` applies them:
 """
 from __future__ import annotations
 
+import math
 import re
 from typing import Callable, Iterable
 
@@ -253,12 +255,27 @@ def target_book(row: dict, *, held: dict[str, float],
             return default_weight
         return max(0.0, _num(p.get("target_weight"), default_weight))
 
+    def zero_weight(sym: str) -> bool:
+        """The proposal picks ``sym`` but at weight 0 (or below): not a buy."""
+        p = picks.get(sym)
+        return (p is not None and p.get("target_weight") is not None
+                and target_weight(sym) <= 0.0)
+
+    held_syms = {normalize_symbol(h) for h in (held or {})}
+
     # Defensive picks take slots first, when the regime call wants a defensive share.
     defensive = [s for s, p in picks.items() if p.get("role") == "defensive"]
     if defensive_share <= 0.0:
         for s in defensive:
-            log.append("skip %s: defensive pick with defensive_share 0" % s)
+            if s in held_syms:
+                log.append("%s: defensive_share 0, judged as a holding" % s)
+            else:
+                log.append("skip %s: defensive pick with defensive_share 0" % s)
         defensive = []
+    for s in [s for s in defensive if zero_weight(s)]:
+        defensive.remove(s)
+        if s not in held_syms:                  # a held one exits below, with its own line
+            log.append("skip %s: proposal weight 0" % s)
     defensive_names = sorted((s for s in defensive if s != BIL),
                              key=lambda s: -conviction(s))[:max_pos]
     slots = max_pos - len(defensive_names)
@@ -272,7 +289,9 @@ def target_book(row: dict, *, held: dict[str, float],
         if broken(sym):
             log.append("exit %s: thesis broken" % sym)
         elif sym not in notes and sym not in recommended and sym not in picks:
-            log.append("exit %s: absent from notes and recommended" % sym)
+            log.append("exit %s: absent from notes, recommended and picks" % sym)
+        elif zero_weight(sym):
+            log.append("exit %s: proposal weight 0" % sym)
         else:
             kept.append(sym)
     kept.sort(key=lambda s: (-conviction(s), s))
@@ -287,6 +306,8 @@ def target_book(row: dict, *, held: dict[str, float],
     for s in new:
         if broken(s):
             log.append("skip %s: thesis broken" % s)
+        elif zero_weight(s):
+            log.append("skip %s: proposal weight 0" % s)
         else:
             candidates.append(s)
     candidates.sort(key=lambda s: -conviction(s))
@@ -359,18 +380,29 @@ def target_book(row: dict, *, held: dict[str, float],
 # --- trailing stop ------------------------------------------------------------
 
 
+def _finite(value) -> float | None:
+    """``value`` as a float, or None if it is missing, non-numeric, NaN or
+    infinite -- a bad print must never become a peak or a stop decision."""
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
 def update_peaks(peaks: dict[str, float], closes: dict[str, float],
                  held: Iterable[str]) -> dict[str, float]:
     """Highest close since purchase for every held name (a new dict).
 
     A name no longer held is forgotten, so a re-buy starts a fresh peak. A
-    held name with no close today keeps its peak; a newly held one starts at
-    today's close.
+    held name with no usable close today (missing, NaN, infinite) keeps its
+    peak; a newly held one, or one whose stored peak is not finite, starts at
+    the next usable close.
     """
     out: dict[str, float] = {}
     for sym in held:
-        close = closes.get(sym)
-        prev = peaks.get(sym)
+        close = _finite(closes.get(sym))
+        prev = _finite(peaks.get(sym))
         if close is None:
             if prev is not None:
                 out[sym] = prev
@@ -387,8 +419,8 @@ def trailing_stop_hits(peaks: dict[str, float], closes: dict[str, float], *,
         raise ValueError("stop_pct must be in (0, 1): %r" % (stop_pct,))
     hits = []
     for sym, peak in peaks.items():
-        close = closes.get(sym)
-        if sym == BIL or close is None or not peak or peak <= 0:
+        close, peak = _finite(closes.get(sym)), _finite(peak)
+        if sym == BIL or close is None or peak is None or peak <= 0:
             continue
         if close <= peak * (1.0 - stop_pct) * (1.0 + _EPS):
             hits.append(sym)
