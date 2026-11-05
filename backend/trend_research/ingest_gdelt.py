@@ -16,14 +16,16 @@ Two phases, both resumable through TrendIngestProgress markers (ruling R14):
    reports -- GDELT may not have published later days yet, and rows are
    write-once -- and is refetched on the next run.
 
-2. Titles (rulings R1, R12). Per theme and week: ``artlist`` sorted by
-   relevance, at most ``ARTICLES_PER_THEME_WEEK``, over the 7 days ending at
-   that week's decision time (``week_decision_time``: 09:00 ET on the week's
-   first NYSE session). Each article is a TrendNewsPIT row, ``source =
-   "gdelt"``, ``source_id = sha256(url)[:16]``, and is available at the
-   window end -- not at its ``seendate`` -- because GDELT ranks the window as
-   a whole, so the selection is only known once the window has closed. An
-   article seen at or after the window end is dropped. A (theme, week) is
+2. Titles (rulings R1, R12, R12b). Per theme and week: ``artlist`` sorted
+   by relevance, at most ``ARTICLES_PER_THEME_WEEK``, over the window from
+   the previous week's decision time (exclusive) to this week's
+   (inclusive), where ``week_decision_time`` is 09:00 ET on the week's first
+   NYSE session. Consecutive windows therefore tile time exactly -- no gap
+   and no overlap, Monday holidays included. Each article is a TrendNewsPIT
+   row, ``source = "gdelt"``, ``source_id = sha256(url)[:16]``, and is
+   available at the window end -- not at its ``seendate`` -- because GDELT
+   ranks the window as a whole, so the selection is only known once the
+   window has closed. An article seen outside the window is dropped. A (theme, week) is
    marked done (``gdelt_titles|theme|monday``) even when it returned nothing,
    so empty weeks are not refetched. ``articles_start`` limits the titles to
    the weeks that matter (the honest window plus warm-up) while timelines
@@ -71,7 +73,6 @@ BACKOFF_BASE = 20.0
 BACKOFF_CAP = 300.0
 REQUEST_TIMEOUT = 60
 ARTICLES_PER_THEME_WEEK = 75
-TITLE_WINDOW = timedelta(days=7)
 DECISION_TIME_ET = (9, 0)        # titles close before the 09:30 ET decision tick
 ET = ZoneInfo("America/New_York")
 FINAL_LAG = timedelta(days=2)
@@ -379,13 +380,13 @@ def normalize_article(item, theme: str, window_start: datetime,
                       window_end: datetime) -> dict | None:
     """One artlist item as a TrendNewsPIT row (rulings R1, R12), available at
     ``window_end``; None without a url, or unless its ``seendate`` falls in
-    ``[window_start, window_end)``."""
+    ``(window_start, window_end]``."""
     if not isinstance(item, dict):
         return None
     url = item.get("url")
     url = url.strip() if isinstance(url, str) else ""
     seen = _parse_gdelt_stamp(item.get("seendate"))
-    if not url or seen is None or not (window_start <= seen < window_end):
+    if not url or seen is None or not (window_start < seen <= window_end):
         return None
     sid = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
     at = _iso(window_end)
@@ -420,7 +421,7 @@ def _title_weeks(first_day: date, last_day: date, now: datetime) -> list:
     monday = first_day - timedelta(days=first_day.weekday())
     while True:
         end = week_decision_time(monday)
-        start = end - TITLE_WINDOW
+        start = week_decision_time(monday - timedelta(days=7))
         if start >= hi or end > now:
             break
         if end > lo:
@@ -441,8 +442,8 @@ def _backfill_titles(client, st, themes: list, weeks: list) -> int:
                 "query": "%s %s" % (THEME_QUERIES[theme], ARTLIST_FILTER),
                 "mode": "artlist", "format": "json", "sort": ARTLIST_SORT,
                 "maxrecords": ARTICLES_PER_THEME_WEEK,
-                "startdatetime": w_start.strftime("%Y%m%d%H%M%S"),
-                "enddatetime": (w_end - timedelta(seconds=1)).strftime("%Y%m%d%H%M%S")})
+                "startdatetime": (w_start + timedelta(seconds=1)).strftime("%Y%m%d%H%M%S"),
+                "enddatetime": w_end.strftime("%Y%m%d%H%M%S")})
             items = payload.get("articles") or []
             rows = [r for r in (normalize_article(i, theme, w_start, w_end)
                                 for i in items[:ARTICLES_PER_THEME_WEEK]) if r]

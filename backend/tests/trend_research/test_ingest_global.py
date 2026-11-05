@@ -145,9 +145,10 @@ def calls_of(http, mode):
 
 
 # Week of Mon 2022-06-20, an NYSE holiday (Juneteenth observed): the decision is
-# Tue 09:00 ET, so the titles window is [2022-06-14 13:00Z, 2022-06-21 13:00Z).
+# Tue 09:00 ET; the previous week's was Mon 06-13 09:00 ET, so the titles
+# window is (2022-06-13 13:00Z, 2022-06-21 13:00Z] (ruling R12b).
 W_END = utc(2022, 6, 21, 13, 0)
-W_START = W_END - timedelta(days=7)
+W_START = utc(2022, 6, 13, 13, 0)
 
 
 def test_gdelt_spacing(store):
@@ -252,7 +253,7 @@ def test_titles_are_weekly_and_available_at_window_end(store):
     url = "https://news.example/fed-hikes-75"
     seen = utc(2022, 6, 15, 18, 15)
     many = [("https://news.example/%d" % i, "title %d" % i, seen) for i in range(100)]
-    late = ("https://news.example/late", "after the window", W_END)
+    late = ("https://news.example/late", "after the window", W_END + timedelta(minutes=15))
     http = FakeGdelt(clock, volume={D2: 1}, tone={D2: 0.0},
                      articles={D2: [(url, "  Fed hikes 75bp  ", seen)] + many,
                                date(2022, 6, 21): [late]})
@@ -261,7 +262,7 @@ def test_titles_are_weekly_and_available_at_window_end(store):
     assert len(art) == 1
     p = art[0]["params"]
     assert int(p["maxrecords"]) == gd.ARTICLES_PER_THEME_WEEK == 75
-    assert p["startdatetime"] == "20220614130000" and p["enddatetime"] == "20220621125959"
+    assert p["startdatetime"] == "20220613130001" and p["enddatetime"] == "20220621130000"
     rows = news_rows(store)
     assert len(rows) == 75
     assert all(r["available_at"] == "2022-06-21T13:00:00Z" for r in rows)
@@ -274,17 +275,46 @@ def test_titles_are_weekly_and_available_at_window_end(store):
     assert row["headline"] == "Fed hikes 75bp"
     assert row["domain"] == "example.com" and row["theme"] == "inflation"
     assert row["symbols"] == []
-    assert row["window_start"] == "2022-06-14T13:00:00Z"
+    assert row["window_start"] == "2022-06-13T13:00:00Z"
 
 
-def test_title_seen_at_or_after_window_end_is_dropped(store):
+def test_title_window_is_open_at_start_and_closed_at_end(store):
     clock = FakeClock()
     http = FakeGdelt(clock, volume={D2: 1}, tone={D2: 0.0},
-                     articles={date(2022, 6, 21): [("https://x.example/late", "late", W_END),
-                                                   ("https://x.example/ok", "ok",
-                                                    W_END - timedelta(minutes=15))]})
+                     articles={date(2022, 6, 13): [("https://x.example/start", "start", W_START)],
+                               date(2022, 6, 21): [("https://x.example/end", "end", W_END),
+                                                   ("https://x.example/late", "late",
+                                                    W_END + timedelta(minutes=15))]})
     run_gdelt(store, http, clock, D2, D2)
-    assert [r["url"] for r in news_rows(store)] == ["https://x.example/ok"]
+    assert [r["url"] for r in news_rows(store)] == ["https://x.example/end"]
+
+
+def test_title_windows_tile_a_holiday_week_with_no_gap_or_overlap(store):
+    # Mondays 06-13, 06-20 (Juneteenth -> Tue 06-21) and 06-27, 2022.
+    clock = FakeClock()
+    boundary = W_END                                   # the holiday week's decision
+    old_gap = utc(2022, 6, 14, 10, 0)                  # a fixed 7-day window missed this
+    after = utc(2022, 6, 22, 10, 0)                    # a fixed 7-day window saw this twice
+    arts = {date(2022, 6, 14): [("https://t.example/gap", "gap", old_gap)],
+            date(2022, 6, 21): [("https://t.example/edge", "edge", boundary)],
+            date(2022, 6, 22): [("https://t.example/after", "after", after)]}
+    http = FakeGdelt(clock, volume={D2: 1}, tone={D2: 0.0}, articles=arts)
+    run_gdelt(store, http, clock, date(2022, 6, 13), date(2022, 6, 27))
+    windows = sorted((c["params"]["startdatetime"], c["params"]["enddatetime"])
+                     for c in calls_of(http, "artlist"))
+    for (s1, e1), (s2, e2) in zip(windows, windows[1:]):
+        prev_end = datetime.strptime(e1, "%Y%m%d%H%M%S")
+        next_start = datetime.strptime(s2, "%Y%m%d%H%M%S")
+        assert next_start - prev_end == timedelta(seconds=1)        # tiles exactly
+    assert ("20220613130001", "20220621130000") in windows
+    assert ("20220621130001", "20220627130000") in windows
+    rows = news_rows(store)
+    by_url = {}
+    for r in rows:
+        by_url.setdefault(r["url"], []).append(r["available_at"])
+    assert by_url == {"https://t.example/gap": ["2022-06-21T13:00:00Z"],
+                      "https://t.example/edge": ["2022-06-21T13:00:00Z"],
+                      "https://t.example/after": ["2022-06-27T13:00:00Z"]}
 
 
 def test_week_decision_time_moves_to_first_session_after_a_monday_holiday():
@@ -339,7 +369,7 @@ def test_articles_start_limits_titles_not_timelines(store):
     run_gdelt(store, http, clock, date(2021, 3, 1), D2, articles_start=D2)
     assert [c["params"]["startdatetime"][:4] for c in calls_of(http, "timelinevolraw")] == \
         ["2021", "2022"]
-    assert [c["params"]["enddatetime"] for c in calls_of(http, "artlist")] == ["20220621125959"]
+    assert [c["params"]["enddatetime"] for c in calls_of(http, "artlist")] == ["20220621130000"]
 
 
 def test_unknown_theme_and_inverted_range_rejected(store):
