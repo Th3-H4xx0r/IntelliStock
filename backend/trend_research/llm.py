@@ -12,9 +12,12 @@ one of three outcomes the ledger builder (Task 7) acts on:
   from CC's "resets 11:30am (UTC)" wording or a ``retry-after`` seconds
   value; None when the text gives neither (the builder then waits a default
   interval). The builder discards the week and retries it after the reset.
-* ``BudgetExceeded`` -- ``max_calls`` already made (spec C13). Every
-  attempt counts, a failed or quota-hit one included, so a loop of failures
-  cannot outrun the cap.
+* ``BudgetExceeded`` -- ``max_calls`` already made (spec C13). A slot is
+  reserved before each call, so the cap holds under concurrent callers and
+  no real call starts once it is reached. Every real attempt counts, a
+  failed or quota-hit one included; a reply served from the prompt cache
+  (llm_utils flags ``prompt_cache_hit``) gives its slot back, so a resumed
+  week's replayed stages cost nothing.
 * ``StageFailed`` -- no valid result after llm_utils' own retries, or a
   reply that does not validate against ``output_type``.
 """
@@ -22,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -47,14 +51,17 @@ OUTPUT_RETRIES = 2
 
 _ERR_CHARS = 300
 
-# Phrases only a quota or rate-limit failure produces.
-_QUOTA_NEEDLES = ("subscription quota", "quota hit", "quota exceeded", "session limit",
-                  "usage limit", "usage_limit", "hit your limit", "hit my limit",
-                  "rate limit", "rate_limit", "rate-limit", "too many requests",
-                  "subscription limit")
-# A bare "quota" is a quota failure unless the text is a validation error,
-# which can quote the model's own reply ("... export quotas ...").
-_VALIDATION_HINTS = ("validat", "schema", "did not match")
+# Phrases only claude-cli's own quota failures produce. They are trusted
+# even inside a validation error.
+_CC_QUOTA_PHRASES = ("subscription quota", "hit your limit", "session limit")
+# Phrases a provider's quota or rate-limit failure produces, but which a
+# model's reply can also contain ("$429 million", "export quotas", "the rate
+# limit on ..."). They count only when the text is not a validation error.
+_QUOTA_NEEDLES = ("quota", "usage limit", "usage_limit", "hit my limit", "rate limit",
+                  "rate_limit", "rate-limit", "too many requests", "subscription limit")
+# Signs that the text is a validation error, which can quote the reply.
+_VALIDATION_HINTS = ("validat", "schema", "did not match", "pydantic", "not valid json",
+                     "payload_preview", "json_invalid")
 _HTTP_429 = re.compile(r"\b429\b")
 _RESET = re.compile(
     r"resets?\s+(?:at\s+)?"
@@ -93,9 +100,11 @@ def is_quota_error(text: str, exc: BaseException | None = None) -> bool:
                                for c in type(exc).__mro__):
         return True
     lower = (text or "").lower()
-    if any(n in lower for n in _QUOTA_NEEDLES) or _HTTP_429.search(lower):
+    if any(n in lower for n in _CC_QUOTA_PHRASES):
         return True
-    return "quota" in lower and not any(h in lower for h in _VALIDATION_HINTS)
+    if any(h in lower for h in _VALIDATION_HINTS):
+        return False
+    return any(n in lower for n in _QUOTA_NEEDLES) or bool(_HTTP_429.search(lower))
 
 
 def _zone(name: str | None):
@@ -110,7 +119,12 @@ def _zone(name: str | None):
 def parse_reset_at(text: str, now: datetime) -> datetime | None:
     """When the quota resets, in UTC: CC's "resets 11:30am (UTC)" (the next
     such wall-clock time after ``now``; UTC when no zone is given), else
-    ``now`` + a ``retry-after`` seconds value, else None."""
+    ``now`` + a ``retry-after`` seconds value, else None.
+
+    CC prints the reset time in the host's local zone and names the zone in
+    parentheses; a bare time is read as UTC because the backend hosts run
+    on UTC. On a host with another local zone and no zone in the text, the
+    reset would be off by the UTC offset."""
     m = _RESET.search(text or "")
     if m:
         hour, minute = int(m.group("h")), int(m.group("m") or 0)
@@ -171,15 +185,30 @@ class StageCaller:
         self.provider_config = provider_config
         self.timeout_sec = timeout_sec
         self._now = now
-        self.calls_used = 0
+        self._lock = threading.Lock()
+        self._calls_used = 0
+
+    @property
+    def calls_used(self) -> int:
+        """Real (non-cached) LLM calls made so far."""
+        with self._lock:
+            return self._calls_used
+
+    def _reserve(self) -> None:
+        with self._lock:
+            if self._calls_used >= self.max_calls:
+                raise BudgetExceeded("LLM call budget of %d reached" % self.max_calls)
+            self._calls_used += 1
+
+    def _refund(self) -> None:
+        with self._lock:
+            self._calls_used -= 1
 
     def call(self, prompt: str, output_type: type[BaseModel], *,
              max_output_tokens: int) -> BaseModel:
         """A validated ``output_type`` for ``prompt``, or raise
         ``QuotaExhausted`` / ``BudgetExceeded`` / ``StageFailed``."""
-        if self.calls_used >= self.max_calls:
-            raise BudgetExceeded("LLM call budget of %d reached" % self.max_calls)
-        self.calls_used += 1
+        self._reserve()
         _clear_last_call_metadata()
         try:
             result = llm_utils.call_structured_llm_by_provider(
@@ -188,6 +217,8 @@ class StageCaller:
                 max_output_tokens=max_output_tokens, timeout_sec=self.timeout_sec,
                 retries=1, output_retries=OUTPUT_RETRIES, temperature=TEMPERATURE,
                 provider_config=self.provider_config, use_prompt_cache=True)
+        except (TypeError, AttributeError, NameError):
+            raise                                   # a bug in the caller, not a stage failure
         except Exception as exc:
             text = "%s: %s" % (type(exc).__name__, exc)
             if is_quota_error(text, exc):
@@ -200,6 +231,9 @@ class StageCaller:
             if is_quota_error(text):
                 raise self._quota(text)
             raise StageFailed((text or "no structured result")[:_ERR_CHARS])
+
+        if (llm_utils.get_last_structured_llm_call_metadata() or {}).get("prompt_cache_hit"):
+            self._refund()
 
         if isinstance(result, output_type):
             return result

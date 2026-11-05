@@ -11,6 +11,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from pydantic import ValidationError
 
 _backend = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _backend not in sys.path:
@@ -176,13 +177,13 @@ def test_prompts_are_deterministic():
 # -- schemas ---------------------------------------------------------------------
 
 def test_schemas_enforce_ranges():
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         schemas.ResearchNote(symbol="X", conviction=11, thesis="", breaks_if=[],
                              priced_in="partly", thesis_status="new", risks="")
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         schemas.BookProposal(picks=[{"symbol": "X", "conviction": 5, "target_weight": 0.3,
                                      "role": "core"}], defensive_share=0.1, notes="")
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         schemas.Trend(name="x", category="sports", state="emerging", confidence=0.5,
                       evidence_ids=[], beneficiaries=[], losers=[], summary="")
 
@@ -335,6 +336,68 @@ def test_validation_error_quoting_quota_is_not_a_quota_hit(fake):
         _caller().call("p", schemas.ResearchNote, max_output_tokens=10)
     assert llm.is_quota_error("Anthropic API: quota exceeded for this key")
     assert not llm.is_quota_error("request id 14290 failed")
+
+
+def test_validation_error_quoting_429_and_quotas_is_StageFailed(fake):
+    def invalid():
+        llm_utils._LAST_STRUCTURED_LLM_CALL.data = {
+            "ok": False,
+            "error": "Pydantic validation failed: 1 validation error for ResearchNote; "
+                     "payload_preview={'thesis': 'a $429 million order as export quotas "
+                     "tighten; the rate limit on shipments eases'}"}
+        return None
+    fake(invalid)
+    with pytest.raises(llm.StageFailed):
+        _caller().call("p", schemas.ResearchNote, max_output_tokens=10)
+    assert not llm.is_quota_error("not valid JSON: '$429 million'")
+    # claude-cli's own phrases are trusted even next to a validation hint.
+    assert llm.is_quota_error("schema retry aborted: You've hit your limit · resets 3pm")
+
+
+def _cache_hit_result():
+    llm_utils._LAST_STRUCTURED_LLM_CALL.data = {"ok": True, "prompt_cache_hit": True}
+    return schemas.ResearchNote(symbol="NVDA", conviction=7, thesis="t", breaks_if=[],
+                                priced_in="partly", thesis_status="new", risks="")
+
+
+def test_prompt_cache_hits_do_not_consume_the_budget(fake):
+    f = fake(*([_cache_hit_result] * 5))
+    c = _caller(max_calls=2)
+    for _ in range(5):
+        c.call("p", schemas.ResearchNote, max_output_tokens=10)
+    assert c.calls_used == 0 and len(f.calls) == 5
+    c.call("real 1", schemas.ResearchNote, max_output_tokens=10)
+    c.call("real 2", schemas.ResearchNote, max_output_tokens=10)
+    assert c.calls_used == 2
+    with pytest.raises(llm.BudgetExceeded):            # stops before a real call
+        c.call("real 3", schemas.ResearchNote, max_output_tokens=10)
+    assert len(f.calls) == 7
+
+
+def test_budget_is_thread_safe(fake):
+    import threading
+    f = fake()
+    c = _caller(max_calls=40)
+    errors = []
+
+    def worker():
+        for _ in range(10):
+            try:
+                c.call("p", schemas.ResearchNote, max_output_tokens=10)
+            except llm.BudgetExceeded:
+                errors.append(1)
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert c.calls_used == 40 and len(f.calls) == 40 and len(errors) == 40
+
+
+def test_programming_errors_propagate(fake):
+    fake(TypeError("bad argument"))
+    with pytest.raises(TypeError):
+        _caller().call("p", schemas.ResearchNote, max_output_tokens=10)
 
 
 def test_budget_exceeded_after_max_calls(fake):
