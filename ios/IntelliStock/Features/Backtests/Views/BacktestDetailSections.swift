@@ -682,3 +682,212 @@ struct BacktestRoundTripStats: View {
         }
     }
 }
+
+// MARK: - TR scorecard
+
+/// The TR scorecard's labels and number formats, shared with the web page
+/// (frontend/src/utils/trScorecard.js): one decimal, a dash for null.
+nonisolated enum TrScorecardFormat {
+    struct PeriodRow: Hashable, Identifiable {
+        let id: String
+        let label: String
+        let period: TrScorecardPeriod
+    }
+
+    static let title = "vs S&P 500 by market type"
+
+    /// Whole test, then honest, then optimistic.
+    static func periods(_ card: TrScorecard) -> [PeriodRow] {
+        [
+            PeriodRow(id: "overall", label: "Whole test", period: card.overall),
+            PeriodRow(id: "honest", label: "Honest period (after AI training cutoff)", period: card.honest),
+            PeriodRow(id: "optimistic", label: "Optimistic period (AI may remember)", period: card.optimistic),
+        ]
+    }
+
+    static func errorNote(_ error: String) -> String { "Scorecard unavailable: \(error)" }
+
+    static func verdictLabel(_ v: TrVerdict) -> String {
+        switch v {
+        case .pass: "Pass"
+        case .fail: "Fail"
+        case .untested: "Not tested yet"
+        }
+    }
+
+    static func verdictColor(_ v: TrVerdict) -> Color {
+        switch v {
+        case .pass: DS.Palette.success
+        case .fail: DS.Palette.danger
+        case .untested: .secondary
+        }
+    }
+
+    /// "+12.3%" / "-4.0%" / "0.0%".
+    static func signedPct(_ v: Double?) -> String {
+        guard let v, v.isFinite else { return "—" }
+        return "\(v > 0 ? "+" : "")\(dartToStringAsFixed(v, 1))%"
+    }
+
+    /// "-12.3%": drawdowns and percentiles, no forced sign.
+    static func pct(_ v: Double?) -> String {
+        guard let v, v.isFinite else { return "—" }
+        return "\(dartToStringAsFixed(v, 1))%"
+    }
+
+    /// Percentage points a year: "+4.8 pts".
+    static func points(_ v: Double?) -> String {
+        guard let v, v.isFinite else { return "—" }
+        return "\(v > 0 ? "+" : "")\(dartToStringAsFixed(v, 1)) pts"
+    }
+
+    static func marketType(_ kind: String) -> String {
+        switch kind {
+        case "bull": "Bull"
+        case "chop": "Choppy"
+        case "bear": "Bear"
+        default: kind
+        }
+    }
+
+    static func beatLabel(_ beat: Bool?) -> String {
+        switch beat {
+        case true?: "Yes"
+        case false?: "No"
+        case nil: "—"
+        }
+    }
+
+    static func dates(_ start: String?, _ end: String?) -> String? {
+        guard let start, let end else { return nil }
+        return "\(start) – \(end)"
+    }
+
+    static func randomLines(candidates: Double?, universe: Double?) -> [String] {
+        var lines: [String] = []
+        if let c = candidates, c.isFinite {
+            lines.append("Better than \(pct(c)) of random picks from the AI's own shortlist")
+        }
+        if let u = universe, u.isFinite {
+            lines.append("Better than \(pct(u)) of random picks from all names it considered")
+        }
+        return lines
+    }
+}
+
+/// "vs S&P 500 by market type": each period's return a year, drawdown and
+/// pass flags against SPY, then each tested period's market-type windows.
+/// Shown only when the summary carries a TR scorecard.
+struct BacktestTrScorecardSection: View {
+    let card: TrScorecard
+
+    var body: some View {
+        if let error = card.error {
+            Section(TrScorecardFormat.title) {
+                Text(TrScorecardFormat.errorNote(error))
+                    .foregroundStyle(.secondary)
+            }
+        } else {
+            let rows = TrScorecardFormat.periods(card)
+            Section {
+                ForEach(rows) { periodSummary($0) }
+            } header: {
+                Text(TrScorecardFormat.title)
+            } footer: {
+                if let cutoff = card.cutoff {
+                    Text("AI training cutoff: \(cutoff)")
+                }
+            }
+            ForEach(rows.filter { !$0.period.untested }) { row in
+                windowsSection(row)
+            }
+            if !card.notes.isEmpty {
+                Section("Scorecard notes") {
+                    ForEach(Array(card.notes.enumerated()), id: \.offset) { _, note in
+                        Text(note).font(.footnote).foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
+    private func periodSummary(_ row: TrScorecardFormat.PeriodRow) -> some View {
+        let p = row.period
+        return VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(row.label).font(.headline)
+                if let dates = TrScorecardFormat.dates(p.start, p.end) {
+                    Text(dates).font(.footnote.monospacedDigit()).foregroundStyle(.secondary)
+                }
+            }
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
+                figure("Return/yr", TrScorecardFormat.signedPct(p.cagr))
+                figure("S&P/yr", TrScorecardFormat.signedPct(p.spyCagr))
+                figure("Difference", TrScorecardFormat.points(p.excessPp), color: pnlColor(p.excessPp))
+                figure("Worst drop", TrScorecardFormat.pct(p.maxDd))
+                figure("S&P worst drop", TrScorecardFormat.pct(p.spyMaxDd))
+                verdict("Beat S&P in all market types", p.passAllRegimes)
+                verdict("+5 pts/yr target", p.passPlus5)
+            }
+            .font(.subheadline)
+        }
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func figure(_ label: String, _ value: String, color: Color = .primary) -> some View {
+        GridRow {
+            Text(label).foregroundStyle(.secondary)
+            Text(value)
+                .monospacedDigit()
+                .foregroundStyle(color)
+                .gridColumnAlignment(.trailing)
+        }
+    }
+
+    private func verdict(_ label: String, _ v: TrVerdict) -> some View {
+        GridRow {
+            Text(label).foregroundStyle(.secondary)
+            AppBadge(label: TrScorecardFormat.verdictLabel(v), color: TrScorecardFormat.verdictColor(v))
+                .gridColumnAlignment(.trailing)
+        }
+    }
+
+    private func windowsSection(_ row: TrScorecardFormat.PeriodRow) -> some View {
+        let p = row.period
+        let random = TrScorecardFormat.randomLines(candidates: p.randomPctileCandidates, universe: p.randomPctileUniverse)
+        return Section(row.label) {
+            ForEach(random, id: \.self) { line in
+                Text(line).font(.subheadline)
+            }
+            if p.windows.isEmpty {
+                Text("No market-type windows fall inside this period.")
+                    .foregroundStyle(.secondary)
+            } else {
+                ScrollView(.horizontal) {
+                    Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 8) {
+                        GridRow {
+                            ForEach(["Market type", "Dates", "Strategy", "S&P", "Beat?"], id: \.self) { h in
+                                Text(h).font(.caption).foregroundStyle(.secondary)
+                                    .gridColumnAlignment(h == "Market type" || h == "Dates" ? .leading : .trailing)
+                            }
+                        }
+                        ForEach(Array(p.windows.enumerated()), id: \.offset) { _, w in
+                            GridRow {
+                                Text(TrScorecardFormat.marketType(w.kind))
+                                Text(TrScorecardFormat.dates(w.start, w.end) ?? "—")
+                                    .foregroundStyle(.secondary)
+                                Text(TrScorecardFormat.signedPct(w.ret))
+                                Text(TrScorecardFormat.signedPct(w.spyRet))
+                                    .foregroundStyle(.secondary)
+                                Text(TrScorecardFormat.beatLabel(w.beat))
+                            }
+                            .font(.caption.monospacedDigit())
+                        }
+                    }
+                    .padding(.vertical, 12)
+                }
+            }
+        }
+    }
+}

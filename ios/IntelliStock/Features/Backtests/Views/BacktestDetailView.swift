@@ -141,6 +141,9 @@ struct BacktestDetailView: View {
                 BacktestNexusLookbackBanner(lookback: lookback)
             }
             BacktestStatGrid(summary: summary, elapsed: model.elapsedSeconds)
+            if let card = summary.trScorecard {
+                BacktestTrScorecardSection(card: card)
+            }
             BacktestLlmCostCard(
                 llmCost: model.llmCost,
                 loading: model.llmCostLoading,

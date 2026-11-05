@@ -6221,6 +6221,10 @@ def action_summarize_backtest(conn, backtest_id):
         # audit verdicts only — never prompts, model responses or credentials.
         # Absent on ordinary backtests, so existing consumers are unaffected.
         "evidence": _evidence_summary_projection(doc),
+        # The TR regime scorecard (trend_research/scorecard.py), verbatim:
+        # absent on runs without a strategy_trend_research lane, {"error": ...}
+        # when scoring failed. The web and iOS backtest pages render it.
+        "tr_scorecard": doc.get("tr_scorecard"),
     }
 
 

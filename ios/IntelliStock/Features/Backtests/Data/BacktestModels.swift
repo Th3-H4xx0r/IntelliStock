@@ -118,6 +118,8 @@ nonisolated struct BacktestSummary: Hashable, Sendable {
     let totalRoundTripPnl: Num?
     let avgWinningRoundTrip: Num?
     let avgLosingRoundTrip: Num?
+    /// The TR regime scorecard; nil when the run has none.
+    let trScorecard: TrScorecard?
 
     init(json j: JSON) {
         id = j["id"].string
@@ -162,6 +164,114 @@ nonisolated struct BacktestSummary: Hashable, Sendable {
         totalRoundTripPnl = j["total_round_trip_pnl"].lenientNum
         avgWinningRoundTrip = j["avg_winning_round_trip"].lenientNum
         avgLosingRoundTrip = j["avg_losing_round_trip"].lenientNum
+        trScorecard = j["tr_scorecard"].isObject ? TrScorecard(json: j["tr_scorecard"]) : nil
+    }
+}
+
+// MARK: - TR scorecard
+
+/// `tr_scorecard` (backend trend_research/scorecard.py): either `{error}` or
+/// the overall / honest / optimistic periods. Figures are already percent
+/// (`excess_pp` is points a year) and any of them may be null.
+nonisolated struct TrScorecard: Hashable, Sendable {
+    /// Set when scoring failed; the periods are then all untested.
+    let error: String?
+    let overall: TrScorecardPeriod
+    let honest: TrScorecardPeriod
+    let optimistic: TrScorecardPeriod
+    /// The model's research cutoff (ISO date), when configured.
+    let cutoff: String?
+    let notes: [String]
+
+    init(json j: JSON) {
+        let e = j["error"].string
+        error = (e?.isEmpty ?? true) ? nil : e
+        overall = TrScorecardPeriod(json: j["overall"])
+        honest = TrScorecardPeriod(json: j["honest"])
+        optimistic = TrScorecardPeriod(json: j["optimistic"])
+        cutoff = j["meta"]["cutoff"].string
+        notes = j["meta"]["notes"].stringElements
+    }
+}
+
+/// A pass flag: true, false or "untested" on the wire.
+nonisolated enum TrVerdict: Hashable, Sendable {
+    case pass, fail, untested
+
+    init(json j: JSON) {
+        switch j.boolValue {
+        case true?: self = .pass
+        case false?: self = .fail
+        case nil: self = .untested
+        }
+    }
+}
+
+nonisolated struct TrScorecardPeriod: Hashable, Sendable {
+    /// No session fell in the period (or the server sent none).
+    let untested: Bool
+    let start: String?
+    let end: String?
+    let cagr: Double?
+    let spyCagr: Double?
+    let excessPp: Double?
+    let maxDd: Double?
+    let spyMaxDd: Double?
+    let windows: [TrScorecardWindow]
+    let randomPctileCandidates: Double?
+    let randomPctileUniverse: Double?
+    let passAllRegimes: TrVerdict
+    let passPlus5: TrVerdict
+
+    init(json j: JSON) {
+        untested = !j.isObject || j["untested"].bool
+        start = j["start"].string
+        end = j["end"].string
+        cagr = j["cagr"].double
+        spyCagr = j["spy_cagr"].double
+        excessPp = j["excess_pp"].double
+        maxDd = j["max_dd"].double
+        spyMaxDd = j["spy_max_dd"].double
+        windows = j["windows"].objectElements.map(TrScorecardWindow.init(json:))
+        randomPctileCandidates = j["random_pctile_candidates"].double
+        randomPctileUniverse = j["random_pctile_universe"].double
+        passAllRegimes = TrVerdict(json: j["pass_all_regimes"])
+        passPlus5 = TrVerdict(json: j["pass_plus5"])
+    }
+}
+
+/// One market-type window: the strategy's and SPY's return over it.
+nonisolated struct TrScorecardWindow: Hashable, Sendable {
+    let tag: String
+    /// "bull" | "chop" | "bear".
+    let kind: String
+    let start: String?
+    let end: String?
+    let ret: Double?
+    let spyRet: Double?
+    /// nil when either return is missing.
+    let beat: Bool?
+
+    init(tag: String, kind: String, start: String?, end: String?, ret: Double?, spyRet: Double?, beat: Bool?) {
+        self.tag = tag
+        self.kind = kind
+        self.start = start
+        self.end = end
+        self.ret = ret
+        self.spyRet = spyRet
+        self.beat = beat
+    }
+
+    init(json j: JSON) {
+        self.init(
+            tag: j["tag"].stringOr(""),
+            kind: j["kind"].stringOr(""),
+            start: j["start"].string,
+            end: j["end"].string,
+            ret: j["ret"].double,
+            spyRet: j["spy_ret"].double,
+            beat: j["beat"].boolValue
+        )
     }
 }
 
