@@ -4777,6 +4777,43 @@ def _strategy_hx_universe_symbols(cached_strategies):
     return out
 
 
+def _trend_research_universe_symbols(cached_strategies, start=None, end=None):
+    """Symbols strategy_trend_research needs bars for: its fixed ETF set plus
+    every pick and recommended name in the configured chain's ledger rows for
+    the run window (read once, through the store).
+
+    Same contract as `_strategy_hx_universe_symbols`: the lane trades names the
+    watchlist never lists, so without them here `price_history` has no bars,
+    every pick reads "no bars at the decision date", and the book sits in BIL
+    in silence. Returns [] when the lane is absent or disabled, so this is a
+    no-op for every other document. BACKTEST-ONLY: it is called at the
+    backtest bar fetch alone, and the lane is deliberately absent from
+    `_LANE_ENABLE_FLAGS` (it refuses live ticks).
+    """
+    try:
+        from strategies.strategy_trend_research import (
+            DEFAULTS as _TR_DEFAULTS, trend_research_universe)
+    except Exception:
+        return []
+    out = []
+    try:
+        for spec in (cached_strategies or []):
+            if not isinstance(spec, dict):
+                continue
+            name = str(spec.get("strategy") or "").strip().lower()
+            if name not in {"strategy_trend_research", "strategytrendresearch"}:
+                continue
+            merged = {**_TR_DEFAULTS, **_merged_strategy_settings(spec)}
+            if not _truthy(merged.get("strategy_trend_research_enabled", False)):
+                continue
+            for sym in trend_research_universe(merged, start=start, end=end):
+                if sym and sym not in out:
+                    out.append(sym)
+    except Exception:
+        return []
+    return out
+
+
 def _strategy_x_prepare(data, prices, current_time, cached_strategies,
                         key=None, secret=None):
     """Make strategy_x's own symbols priceable this bar.
@@ -12832,6 +12869,18 @@ if mode == MODE_BACKTEST:
         if _hx_sym not in symbols_for_fetch:
             symbols_for_fetch.append(_hx_sym)
             _log(f"Adding {_hx_sym} to bar data for strategy_hx", "cyan")
+    # 2026-11-05: strategy_trend_research (TR) trades its fixed ETF set plus
+    # every name its research ledger picks or recommends in this window. Like
+    # HX its wrapper prices unlisted names from the last visible close, so this
+    # fetch site is the only wiring point. Empty unless the lane is enabled.
+    _tr_added = 0
+    for _tr_sym in _trend_research_universe_symbols(
+            _cached_strategies, start=start_dt, end=end_date):
+        if _tr_sym not in symbols_for_fetch:
+            symbols_for_fetch.append(_tr_sym)
+            _tr_added += 1
+    if _tr_added:
+        _log(f"Adding {_tr_added} symbol(s) to bar data for strategy_trend_research", "cyan")
     symbols_for_data = symbols_for_fetch
     # Convert time_increment to Alpaca timeframe format
     alpaca_timeframe = _time_increment_to_alpaca_timeframe(time_increment)
