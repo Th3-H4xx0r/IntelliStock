@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+from db.errors import StoreError
+
 PIT_TABLES = ("TrendNewsPIT", "TrendThemesPIT", "TrendMacroPIT",
               "TrendFilingsPIT", "TrendResearchLedger")
 
@@ -56,7 +58,9 @@ def put_rows(table: str, rows: list, *, store=None) -> int:
     a non-empty string ``id`` and an ISO UTC ``available_at`` (ValueError
     otherwise). An id already stored -- or repeated in the batch -- keeps the
     version with the earliest ``available_at``; on a tie the stored (first
-    seen) version wins.
+    seen) version wins. Raises ``StoreError`` if the store rejects any row.
+
+    Assumes a single writer per table: the read-compare-write is not atomic.
     """
     _check_table(table)
     st = _store(store)
@@ -94,7 +98,15 @@ def put_rows(table: str, rows: list, *, store=None) -> int:
     if not to_write:
         return 0
     result = st.insert(table, to_write, conflict="replace")
-    return result.inserted + result.replaced
+    written = result.inserted + result.replaced
+    if result.errors:
+        # store.insert is partial-success (a savepoint per row): a server-side
+        # rejection is counted, not raised. A dropped row must not pass as a
+        # smaller count.
+        raise StoreError("%s: %d of %d rows rejected on write (%d written): %s"
+                         % (table, result.errors, len(to_write), written,
+                            result.first_error))
+    return written
 
 
 def read_available(table: str, *, lo_id: str, hi_id: str,

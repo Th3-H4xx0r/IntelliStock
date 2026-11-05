@@ -18,6 +18,9 @@ if _backend not in sys.path:
     sys.path.insert(0, _backend)
 
 from db import schema  # noqa: E402
+from db.errors import StoreError  # noqa: E402
+from db.fake import FakeStore  # noqa: E402
+from db.store import InsertResult  # noqa: E402
 from trend_research import pit_store  # noqa: E402
 
 T = datetime(2026, 3, 2, 14, 25, tzinfo=timezone.utc)   # a Monday, 09:25 ET
@@ -127,6 +130,32 @@ def test_read_available_ignores_updated_at(store):
     assert got == [original]
     assert "updated_at" not in got[0]
     assert store.get("TrendNewsPIT", original["id"])["available_at"] == original["available_at"]
+
+
+def test_a_row_carrying_a_later_updated_at_is_returned_unchanged(store):
+    """updated_at plays no part in the gate: availability alone decides."""
+    row = news(T - timedelta(hours=1), "upd", summary="as stored",
+               updated_at=iso(T + timedelta(hours=1)))
+    assert pit_store.put_rows("TrendNewsPIT", [row], store=store) == 1
+    assert read_week(store) == [row]
+
+
+class _RejectingStore(FakeStore):
+    """A store double whose insert reports one server-side rejection, the way
+    db.store.insert counts (not raises) a row that fails its savepoint."""
+
+    def insert(self, table, doc_or_docs, *, conflict="error", durability="hard"):
+        docs = list(doc_or_docs)
+        ok = super().insert(table, docs[:-1], conflict=conflict)
+        return InsertResult(inserted=ok.inserted, replaced=ok.replaced,
+                            errors=1, first_error="value too long for type")
+
+
+def test_put_raises_when_the_store_rejects_a_row():
+    st = _RejectingStore()
+    rows = [news(T - timedelta(hours=1), "a"), news(T - timedelta(hours=2), "b")]
+    with pytest.raises(StoreError, match="1 of 2 rows rejected.*value too long"):
+        pit_store.put_rows("TrendNewsPIT", rows, store=st)
 
 
 def test_an_earlier_availability_stamp_replaces_the_stored_row(store):
