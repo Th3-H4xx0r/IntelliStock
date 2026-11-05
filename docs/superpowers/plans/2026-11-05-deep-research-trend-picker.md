@@ -221,10 +221,29 @@
 - [ ] **Step 1: Failing tests.** **Step 2: Run** → FAIL. **Step 3: Implement.** **Step 4: Run** → PASS.
 - [ ] **Step 5: Commit** `feat(tr): lab setup, backtest runner and research journal scripts`.
 
+### Task 13: Server job runner for ingest and ledger builds
+
+**Files:**
+- Create: `backend/trend_research/jobs.py`
+- Modify: `backend/api/main.py` (three routes beside the backtest routes, same `get_current_user` auth); `backend/db/schema.py` (table `TrendResearchJobs`, prefix_fields id)
+- Test: `backend/tests/trend_research/test_jobs.py`
+
+**Interfaces:**
+- Consumes: `backfill_news`, `backfill_themes`, `backfill_macro`, `fetch_filings`, `build` (Tasks 2, 3, 4, 7).
+- `jobs.JOB_KINDS = ("ingest_news", "ingest_themes", "ingest_macro", "ingest_filings", "build_ledger")`.
+- `jobs.submit(kind: str, params: dict) -> str` (job id `"tr-job|<utc iso>|<kind>"`; rejects unknown kinds and a second running job of the same kind), `jobs.status(job_id) -> dict` (`{id, kind, params, state: "queued"|"running"|"done"|"failed"|"stopped", progress: dict, started_at, finished_at, error}`), `jobs.stop(job_id)`.
+- Runs on the server: launch the job in the same kind of container the backtest engine launches (`backend/engines/backtest_engine.py`, reusing its image, env and the read-only `~/.claude` mount so claude-cli works), with command `python3 -m trend_research.jobs run <job_id>`. If that is not feasible, run it in a daemon thread in the API process and record that choice in the report. Either way the job is resumable: on start it re-reads `TrendResearchJobs` and the builders skip completed work, so an API restart or redeploy only pauses it.
+- Routes: `POST /trend-research/jobs {kind, params}` → `{id}`; `GET /trend-research/jobs/{id}`; `POST /trend-research/jobs/{id}/stop`. `ingest_filings` params `{symbols: [...] | "ledger", start, end}`; `build_ledger` params `{chain_id, start, end, model_id, max_calls}`.
+- Progress updates at least every 50 items / every week built; no secrets in status rows.
+
+- [ ] **Step 1: Failing tests** — `test_submit_rejects_unknown_kind`; `test_second_running_job_same_kind_rejected`; `test_status_transitions_done` (fake runner); `test_failed_job_records_error_without_secrets` (exception containing "secret=abc" → stored error redacts it); `test_routes_require_auth`.
+- [ ] **Step 2: Run** → FAIL. **Step 3: Implement.** **Step 4: Run** → PASS.
+- [ ] **Step 5: Commit** `feat(tr): server job runner for TR ingest and ledger builds`.
+
 ---
 
 ## Execution notes (for the lead, not a task)
 
-1. Order: 1 → 8 → 2, 3, 4 (independent) → 5 → 6 → 7 → 9 → 10 → 11 → 12.
+1. Order: 1 → 8 → 2, 3, 4 (independent) → 5 → 6 → 7 → 13 → 9 → 10 → 11 → 12.
 2. After all tasks: full suite green, parallel bug sweep (separate reviewers: PIT/lookahead, broker wiring/live safety, LLM/quota/builder, book rules/scorecard math), fix findings, `gitnexus_detect_changes()`, open PR, merge **only outside market hours** (lane ships disabled; live doc 200 untouched).
 3. On the server: verify deploy (`scripts/check_deployed_code.py`), run news/theme/macro/filings backfill for the honest window plus warm-up, build the honest chain with the operator-configurable model (default: the strongest available model whose published cutoff ≤ 2025-07; record `research_model_cutoff`), run `tr_lab_setup.py`, then backtests strictly one at a time, and deep-analyse each finished run.
