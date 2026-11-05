@@ -182,6 +182,27 @@ def test_429_without_retry_after_backs_off_exponentially(store):
     assert backoffs == [2.0, 4.0]
 
 
+class BadJsonResponse(FakeResponse):
+    def json(self):
+        raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+
+def test_malformed_json_on_200_is_retried(store):
+    http = FakeHttp([BadJsonResponse(200),
+                     *pages_of([article(1, created=stamp(1))])])
+    clock = FakeClock()
+    assert run(store, http, clock=clock) == 1
+    assert len(http.calls) == 2
+    assert 2.0 in clock.sleeps
+
+
+def test_malformed_json_retry_is_bounded(store):
+    http = FakeHttp([BadJsonResponse(200) for _ in range(50)])
+    with pytest.raises(RuntimeError, match="malformed JSON"):
+        run(store, http)
+    assert len(http.calls) == ian.MAX_ATTEMPTS
+
+
 def test_gives_up_after_bounded_retries(store):
     http = FakeHttp([FakeResponse(429) for _ in range(50)])
     with pytest.raises(RuntimeError, match="429"):
@@ -281,6 +302,42 @@ def test_articles_with_unprovable_availability_are_skipped(store, bad):
     assert [r["source_id"] for r in stored(store)] == ["1"]
 
 
+def test_content_and_summary_are_capped(store):
+    http = FakeHttp(pages_of([article(1, created=stamp(1), content="c" * 9000,
+                                      summary="s" * 3000)]))
+    run(store, http)
+    (row,) = stored(store)
+    assert row["content"] == "c" * 4000
+    assert row["summary"] == "s" * 1000
+
+
+def test_short_content_and_summary_are_untouched(store):
+    http = FakeHttp(pages_of([article(1, created=stamp(1), content="c" * 4000,
+                                      summary="s" * 1000)]))
+    run(store, http)
+    (row,) = stored(store)
+    assert len(row["content"]) == 4000 and len(row["summary"]) == 1000
+
+
+def test_warns_when_most_of_a_day_is_unparseable(store, caplog):
+    arts = [article(1, created=stamp(1))] + [
+        article(n, created="garbage") for n in range(2, 5)]
+    with caplog.at_level("WARNING", logger=ian.__name__):
+        assert run(store, FakeHttp(pages_of(arts))) == 1
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert any("3 of 4" in r.getMessage() and "2026-03-02" in r.getMessage()
+               for r in warnings)
+
+
+@pytest.mark.parametrize("bad", [1, 2])     # 1 of 3, and exactly half (2 of 4)
+def test_no_warning_at_or_under_half_skipped(store, caplog, bad):
+    arts = [article(n, created=stamp(n)) for n in range(1, 3)] + [
+        article(n, created="garbage") for n in range(10, 10 + bad)]
+    with caplog.at_level("WARNING", logger=ian.__name__):
+        run(store, FakeHttp(pages_of(arts)))
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
 def test_put_rows_failure_propagates(store, monkeypatch):
     def boom(table, rows, **kw):
         raise ian.StoreError("rejected")
@@ -289,43 +346,75 @@ def test_put_rows_failure_propagates(store, monkeypatch):
         run(store, FakeHttp(pages_of([article(1, created=stamp(1))])))
 
 
-# -- resume -----------------------------------------------------------------------
+# -- resume (ruling R10: the newest stored day is refetched whole) ---------------
+
+def alpaca_row(source_id, published, available=None):
+    available = available or published
+    return {"id": "%s|alpaca|%s" % (available, source_id), "source": "alpaca",
+            "source_id": source_id, "published_at": published,
+            "available_at": available}
+
 
 def test_resume_from_latest_stored(store):
-    first = [article(n, created=stamp(n)) for n in range(60)]
-    run(store, FakeHttp(pages_of(first)))
-    newest = max(r["published_at"] for r in stored(store))
-
-    http = FakeHttp(pages_of([article(59, created=stamp(59)),
-                              article(60, created=stamp(60))]))
-    assert run(store, http) == 1          # #59 is already stored; only #60 is new
-    assert http.calls[0]["params"]["start"] == newest
-    assert http.calls[0]["params"]["end"] == "2026-03-03T00:00:00Z"
-    assert len(stored(store)) == 61
+    # Days before the newest stored day are complete; that day restarts at
+    # 00:00Z (no mid-day frontier); later days are fetched normally.
+    ian.put_rows("TrendNewsPIT", [alpaca_row("1", "2026-03-01T15:00:00Z"),
+                                  alpaca_row("2", "2026-03-02T11:00:00Z")], store=store)
+    http = FakeHttp([])
+    run(store, http, start=date(2026, 3, 1), end=date(2026, 3, 3))
+    assert [c["params"]["start"] for c in http.calls] == [
+        "2026-03-02T00:00:00Z", "2026-03-03T00:00:00Z"]
 
 
-def test_resume_ignores_other_days_and_other_sources(store):
-    # Stored rows from the previous day (available on DAY via an edit) and a
-    # GDELT row on DAY must not move DAY's resume point.
+def test_crash_mid_day_rerun_refetches_the_day_from_midnight(store):
+    # Alpaca's asc order may follow updated_at: article #3 was created early
+    # but edited late, so it sits on page 2 behind later-created articles.
+    # A published_at frontier would resume after 12:00 and lose it forever.
+    page1 = [article(n, created="2026-03-02T12:00:%02dZ" % n) for n in range(1, 3)]
+    late_edit = article(3, created="2026-03-02T09:00:00Z", updated="2026-03-02T13:00:00Z")
+    crash = FakeHttp([FakeResponse(200, {"news": page1, "next_page_token": "p2"}),
+                      FakeResponse(400, None, text="boom")])
+    with pytest.raises(RuntimeError):
+        run(store, crash)
+    assert sorted(r["source_id"] for r in stored(store)) == ["1", "2"]
+
+    rerun = FakeHttp([FakeResponse(200, {"news": page1, "next_page_token": "p2"}),
+                      FakeResponse(200, {"news": [late_edit], "next_page_token": None})])
+    assert run(store, rerun) == 1
+    assert rerun.calls[0]["params"]["start"] == "2026-03-02T00:00:00Z"
+    assert "page_token" not in rerun.calls[0]["params"]
+    assert sorted(r["source_id"] for r in stored(store)) == ["1", "2", "3"]
+
+
+def test_nothing_stored_fetches_every_day(store):
+    http = FakeHttp([])
+    run(store, http, start=date(2026, 3, 1), end=date(2026, 3, 2))
+    assert [c["params"]["start"] for c in http.calls] == [
+        "2026-03-01T00:00:00Z", "2026-03-02T00:00:00Z"]
+
+
+def test_resume_ignores_other_sources(store):
     ian.put_rows("TrendNewsPIT", [
-        {"id": "2026-03-02T09:00:00Z|alpaca|1", "source": "alpaca", "source_id": "1",
-         "published_at": "2026-03-01T23:00:00Z", "available_at": "2026-03-02T09:00:00Z"},
-        {"id": "2026-03-02T20:00:00Z|gdelt|abc", "source": "gdelt", "source_id": "abc",
-         "published_at": "2026-03-02T20:00:00Z", "available_at": "2026-03-02T20:00:00Z"},
+        alpaca_row("1", "2026-03-01T15:00:00Z"),
+        {"id": "2026-03-03T20:00:00Z|gdelt|abc", "source": "gdelt", "source_id": "abc",
+         "published_at": "2026-03-03T20:00:00Z", "available_at": "2026-03-03T20:00:00Z"},
     ], store=store)
     http = FakeHttp([])
-    run(store, http)
-    assert http.calls[0]["params"]["start"] == "2026-03-02T00:00:00Z"
+    run(store, http, start=date(2026, 3, 1), end=date(2026, 3, 3))
+    assert http.calls[0]["params"]["start"] == "2026-03-01T00:00:00Z"
+    assert len(http.calls) == 3
 
 
-def test_resume_finds_a_row_whose_edit_moved_it_to_the_next_day(store):
+def test_resume_day_is_the_published_day_not_the_edit_day(store):
+    # Published late on 03-02, edited into 03-03: the interrupted day was
+    # 03-02 (or earlier), never 03-03, so 03-02 is refetched.
     ian.put_rows("TrendNewsPIT", [
-        {"id": "2026-03-03T01:00:00Z|alpaca|5", "source": "alpaca", "source_id": "5",
-         "published_at": "2026-03-02T23:50:00Z", "available_at": "2026-03-03T01:00:00Z"},
+        alpaca_row("5", "2026-03-02T23:50:00Z", available="2026-03-03T01:00:00Z"),
     ], store=store)
     http = FakeHttp([])
-    run(store, http)
-    assert http.calls[0]["params"]["start"] == "2026-03-02T23:50:00Z"
+    run(store, http, start=date(2026, 3, 1), end=date(2026, 3, 3))
+    assert [c["params"]["start"] for c in http.calls] == [
+        "2026-03-02T00:00:00Z", "2026-03-03T00:00:00Z"]
 
 
 # -- credentials -------------------------------------------------------------------

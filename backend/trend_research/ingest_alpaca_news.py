@@ -12,10 +12,13 @@ edit, so it was not visible before that edit. ``published_at`` stays
 fraction UP and ``published_at`` rounds it down, so rounding can only delay
 availability, never advance it. An article whose availability cannot be
 proven (no id, missing or naive or unparseable stamps) is skipped.
+``content`` is capped at 4000 characters and ``summary`` at 1000 (ruling R9).
 
-Resume: a re-run starts each day at the newest ``published_at`` already
-stored for that day (inclusive, because a page boundary can split a second;
-``put_rows`` ignores the re-fetched duplicates).
+Resume (ruling R10): no mid-day frontier is inferred, because Alpaca's
+``asc`` order may follow ``updated_at`` rather than ``created_at``. A re-run
+finds the newest day in the range with any stored alpaca article (by
+``published_at`` date), treats the days before it as complete, and refetches
+that day in full from 00:00Z; ``put_rows`` ignores the duplicates.
 
 Credentials: only a paper brokerage's data keys (instance
 ``alpaca-paper-fwd``). The keys go in request headers and nowhere else --
@@ -60,9 +63,11 @@ BACKOFF_BASE = 2.0
 BACKOFF_CAP = 60.0
 REQUEST_TIMEOUT = 30
 MAX_PAGES_PER_DAY = 1000         # busiest measured day was 25 pages
+CONTENT_CAP = 4000               # characters (ruling R9)
+SUMMARY_CAP = 1000
 # How far past its day the resume scan looks for an article whose edit moved
 # its id (= available_at) forward. Edits measured at <= 22.5 h; one beyond
-# this window only makes the resume point earlier, i.e. a harmless re-fetch.
+# this window can only make the resume day earlier, i.e. a harmless re-fetch.
 RESUME_EDIT_LAG = timedelta(days=1)
 
 _RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
@@ -141,8 +146,8 @@ def normalize_article(item) -> dict | None:
         "published_at": _iso(created.replace(microsecond=0)),
         "available_at": available_at,
         "headline": _text(item.get("headline")),
-        "summary": _text(item.get("summary")),
-        "content": _text(item.get("content")),
+        "summary": _text(item.get("summary"))[:SUMMARY_CAP],
+        "content": _text(item.get("content"))[:CONTENT_CAP],
         "symbols": _symbols(item.get("symbols")),
         "url": _text(item.get("url")),
         "author": _text(item.get("author")),
@@ -199,16 +204,22 @@ class _Client:
             else:
                 status = getattr(resp, "status_code", None)
                 if status == 200:
-                    payload = resp.json()
-                    if not isinstance(payload, dict):
-                        raise RuntimeError("alpaca news: response is not an object")
-                    return payload
-                if status not in _RETRY_STATUSES:
+                    try:
+                        payload = resp.json()
+                    except ValueError:   # truncated/garbled body: retry it
+                        problem = "HTTP 200 with malformed JSON"
+                    else:
+                        if not isinstance(payload, dict):
+                            raise RuntimeError("alpaca news: response is not an object")
+                        return payload
+                    delay = None
+                elif status not in _RETRY_STATUSES:
                     body = _text(getattr(resp, "text", ""))[:200]
                     raise RuntimeError("alpaca news HTTP %s (start=%s): %s"
                                        % (status, params.get("start"), body))
-                problem = "HTTP %s" % status
-                delay = self._retry_after(resp)
+                else:
+                    problem = "HTTP %s" % status
+                    delay = self._retry_after(resp)
             if attempt + 1 == MAX_ATTEMPTS:
                 break
             if delay is None:
@@ -222,19 +233,38 @@ class _Client:
 
 # -- resume -------------------------------------------------------------------------
 
-def _resume_point(st, day_lo: datetime, day_hi: datetime) -> str | None:
-    """The newest stored alpaca ``published_at`` inside ``[day_lo, day_hi)``."""
-    newest = None
+def _has_stored_day(st, d: date) -> bool:
+    """Whether any stored alpaca article has a ``published_at`` on day ``d``.
+
+    Ids are keyed by ``available_at`` (>= ``published_at``), so the scan reads
+    ``[d, d + 1 day + RESUME_EDIT_LAG)``. An article edited later than that is
+    missed, which can only pick an earlier resume day -- a harmless refetch.
+    """
+    day_lo = _day_start(d)
+    day_hi = day_lo + timedelta(days=1)
     sel = st.between(TABLE, _iso(day_lo), _iso(day_hi + RESUME_EDIT_LAG))
     for row in st.iter(sel):
         if row.get("source") != SOURCE:
             continue
         published = _parse_utc(row.get("published_at"))
-        if published is None or not (day_lo <= published < day_hi):
-            continue
-        if newest is None or published > newest:
-            newest = published
-    return _iso(newest) if newest is not None else None
+        if published is not None and day_lo <= published < day_hi:
+            return True
+    return False
+
+
+def _resume_day(st, start: date, end: date) -> date | None:
+    """The newest day in ``start..end`` with any stored alpaca article.
+
+    Every article fetched for day W has ``published_at`` (= created_at) on or
+    before W whichever field Alpaca filters and sorts on, so this day is never
+    later than the day an interrupted run was on.
+    """
+    d = end
+    while d >= start:
+        if _has_stored_day(st, d):
+            return d
+        d -= timedelta(days=1)
+    return None
 
 
 # -- backfill -----------------------------------------------------------------------
@@ -249,8 +279,7 @@ def _store(store):
 def _backfill_day(client, st, d: date) -> tuple:
     day_lo = _day_start(d)
     day_hi = day_lo + timedelta(days=1)
-    start = _resume_point(st, day_lo, day_hi) or _iso(day_lo)
-    params = {"start": start, "end": _iso(day_hi), "sort": "asc",
+    params = {"start": _iso(day_lo), "end": _iso(day_hi), "sort": "asc",
               "limit": PAGE_LIMIT, "include_content": "true"}
     seen_tokens = set()
     fetched = written = skipped = pages = 0
@@ -277,7 +306,10 @@ def _backfill_day(client, st, d: date) -> tuple:
             raise RuntimeError("alpaca news %s: repeated page token" % (d,))
         seen_tokens.add(token)
         params = dict(params, page_token=token)
-    return fetched, written, skipped, pages, start
+    if fetched and skipped * 2 > fetched:
+        log.warning("alpaca news %s: %d of %d articles skipped as unparseable",
+                    d, skipped, fetched)
+    return fetched, written, skipped, pages
 
 
 def backfill_news(start: date, end: date, *, key: str, secret: str, http_get=None,
@@ -294,11 +326,16 @@ def backfill_news(start: date, end: date, *, key: str, secret: str, http_get=Non
     client = _Client(key, secret, http_get or _default_http_get, sleep, clock)
     total = 0
     d = start
+    resume = _resume_day(st, start, end)
+    if resume is not None:
+        log.info("alpaca news: resuming at %s (newest stored day), refetched in full",
+                 resume)
+        d = resume
     while d <= end:
-        fetched, written, skipped, pages, from_ = _backfill_day(client, st, d)
+        fetched, written, skipped, pages = _backfill_day(client, st, d)
         total += written
-        log.info("alpaca news %s: from %s, %d pages, %d fetched, %d written, %d skipped",
-                 d, from_, pages, fetched, written, skipped)
+        log.info("alpaca news %s: %d pages, %d fetched, %d written, %d skipped",
+                 d, pages, fetched, written, skipped)
         d += timedelta(days=1)
     log.info("alpaca news %s..%s: %d rows written in %d requests",
              start, end, total, client.requests)
