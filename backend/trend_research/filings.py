@@ -23,10 +23,17 @@ Two kinds of filing are stored:
 
 Amendments (``10-K/A`` and so on) are not stored.
 
+Issuer records. Every fetch refreshes ``edgar_cik|<CIK>`` in
+TrendIngestProgress with the issuer's SIC code and name. A commodity pool
+(SIC 6221: GLD, USO, the ProShares Trust II leveraged ETPs) files 10-K/10-Q
+like a company, so ``has_operating_filings`` excludes it (ruling R7b).
+
 Fundamentals in the dossier come from ``edgar_factors.factor_set``, gated on
 each fact's ``filed`` DATE. A fact filed on the decision's own (New York) day
 may have been filed after the decision, so the dossier asks for the factors as
-of the day before.
+of the day before. companyfacts is fetched through the same retrying client
+and cached per CIK; ``factors_status`` (ok / no_facts / fetch_failed) tells a
+real "no data" apart from a fetch that kept failing.
 
 EDGAR fair access: a declared User-Agent (``edgar_fundamentals.user_agent``)
 and at most 10 requests/second (``edgar_fundamentals._throttle``).
@@ -42,16 +49,23 @@ import dataclasses
 import html as _html
 import logging
 import re
+import threading
 import time
+from collections import OrderedDict
 from datetime import date, datetime, timedelta, timezone
-from functools import lru_cache
 from zoneinfo import ZoneInfo
 
 import edgar_factors
 import edgar_fundamentals
 from edgar_factors import FactorSet, factor_set
 from edgar_fundamentals import _throttle, user_agent
-from trend_research.pit_store import put_rows, read_available
+from trend_research.pit_store import (
+    PROGRESS_TABLE,
+    mark_done,
+    parse_available_at,
+    put_rows,
+    read_available,
+)
 
 __all__ = ["fetch_filings", "filing_dossier", "has_operating_filings", "html_to_text",
            "extract_excerpt", "FilingsFetchError", "OPERATING_FORMS", "main"]
@@ -69,6 +83,17 @@ OPERATING_FORMS = frozenset({"10-K", "10-Q", "20-F", "40-F", "6-K"})
 _REPORT_FORMS = frozenset({"10-K", "10-Q", "20-F", "40-F"})   # MD&A + risk factors
 _EVENT_FORMS = frozenset({"8-K", "6-K"})                      # item text
 STORED_FORMS = _REPORT_FORMS | _EVENT_FORMS
+
+#: Issuer records (SIC, name) in TrendIngestProgress, id "edgar_cik|<CIK>".
+CIK_SOURCE = "edgar_cik"
+#: SIC "commodity contracts brokers & dealers": commodity pools -- GLD, SLV,
+#: USO, UNG and the ProShares Trust II leveraged ETPs -- file 10-K/10-Q, but
+#: they are not operating companies (ruling R7b).
+COMMODITY_POOL_SICS = frozenset({"6221"})
+
+FACTORS_OK = "ok"
+FACTORS_NO_FACTS = "no_facts"
+FACTORS_FETCH_FAILED = "fetch_failed"
 
 EXCERPT_CAP = 6000
 #: Index rows reach this far before ``start``, so a decision early in the
@@ -212,7 +237,7 @@ _BLOCK_RE = re.compile(r"</?(?:p|div|br|tr|li|ul|ol|h[1-6]|table|thead|tbody|sec
                        r"center|blockquote|pre|hr|page)\b[^>]*>", re.I)
 _CELL_RE = re.compile(r"</t[dh]\s*>", re.I)
 _TAG_RE = re.compile(r"<[^>]*>")
-_SPACE_RE = re.compile(r"[ \t\f\v\xa0   ​]+")
+_SPACE_RE = re.compile(r"[ \t\f\v\u00a0\u2002\u2003\u2009\u200b]+")
 
 
 def html_to_text(doc: str) -> str:
@@ -227,7 +252,7 @@ def html_to_text(doc: str) -> str:
     return "\n".join(line for line in lines if line)
 
 
-_SEP = r"\s*[.:\-–—]?\s*"
+_SEP = r"\s*[.:\-\u2013\u2014]?\s*"
 _MGMT = r"management\S{0,3}\s+discussion"
 
 
@@ -252,7 +277,7 @@ _SECTIONS = {
              ("Risk factors", _line(r"risk\s+factors\b"), None)],
 }
 _EVENT_ITEM_RE = _line(r"item\s*(\d{1,2}\.\d{2})\b")
-_EVENT_END_RE = _line(r"(?:item\s*9\.01\b|signatures?\b)")
+_EVENT_END_RE = _line(r"(?:item\s*9\.01\b|signatures?[ ]*$)")
 _COVER_END_RE = re.compile(r"form\s*40-f", re.I)
 _CHECK_MARK_RE = _line(r"indicate\s+by\s+check\s+mark\b.*$")
 _SIGNED_RE = _line(r".*/s/.*$")
@@ -449,6 +474,7 @@ def fetch_filings(symbol: str, start: date, end: date, *, http_get=None, store=N
     if payload is None:
         log.info("edgar filings %s: CIK %d not found on EDGAR", sym, cik)
         return 0
+    _record_cik(st, cik, payload)
 
     index_lo = start - timedelta(days=INDEX_LOOKBACK_DAYS)
     block = payload.get("filings") or {}
@@ -509,16 +535,54 @@ def _visible_rows(sym: str, decision_time: datetime, store) -> list:
     return [r for r in rows if r.get("symbol") == sym]
 
 
+def _record_cik(st, cik: int, payload: dict) -> None:
+    """Refresh the issuer record (SIC, name) of ``cik``. Today's value, not a
+    point-in-time one: an issuer's SIC code almost never changes."""
+    mark_done(CIK_SOURCE, str(cik), meta={
+        "sic": str(payload.get("sic") or "").strip(),
+        "name": str(payload.get("name") or ""),
+        "fetched_at": _iso(datetime.now(timezone.utc)),
+    }, store=st)
+
+
+def _cik_sic(st, cik) -> str | None:
+    """The stored SIC code of ``cik``; None if no record (a row indexed before
+    issuer records existed, until its symbol is fetched again)."""
+    if cik is None:
+        return None
+    rec = st.get(PROGRESS_TABLE, "%s|%s" % (CIK_SOURCE, cik))
+    if not isinstance(rec, dict):
+        return None
+    return str((rec.get("meta") or {}).get("sic") or "").strip()
+
+
 def has_operating_filings(symbol: str, decision_time: datetime, *, store=None) -> bool:
     """Whether a 10-K, 10-Q, 20-F, 40-F or 6-K of ``symbol`` was accepted
-    before ``decision_time`` (ruling R7: what makes an unlisted symbol a stock).
-    Reads stored index rows only; a symbol never fetched is False."""
+    before ``decision_time`` (ruling R7: what makes an unlisted symbol a
+    stock), by an issuer that is not a commodity pool (R7b: SIC 6221 -- GLD,
+    USO, the ProShares Trust II leveraged ETPs -- files 10-K/10-Q too).
+    Reads stored rows only; a symbol never fetched is False."""
     _check_decision_time(decision_time)
     sym = _norm_symbol(symbol)
     if not sym:
         return False
-    return any(r.get("form") in OPERATING_FORMS
-               for r in _visible_rows(sym, decision_time, store))
+    st = _store(store)
+    sel = st.between(TABLE, sym + "|", sym + "|" + _iso_ceil(decision_time))
+    sic_by_cik: dict = {}
+    for row in st.iter(sel, batch=50):
+        if row.get("symbol") != sym or row.get("form") not in OPERATING_FORMS:
+            continue
+        try:
+            if parse_available_at(row.get("available_at")) >= decision_time:
+                continue
+        except ValueError:
+            continue                        # unprovable availability
+        cik = row.get("cik")
+        if cik not in sic_by_cik:
+            sic_by_cik[cik] = _cik_sic(st, cik)
+        if sic_by_cik[cik] not in COMMODITY_POOL_SICS:
+            return True
+    return False
 
 
 _FACT_TAGS = frozenset(
@@ -527,13 +591,38 @@ _FACT_TAGS = frozenset(
     + edgar_factors._TAG_REVENUE + edgar_factors._TAG_COGS)
 
 
-@lru_cache(maxsize=256)
-def _company_facts(cik: int) -> dict:
-    """companyfacts trimmed to the tags ``factor_set`` reads. Every vintage
-    keeps its ``filed`` date, so one fetch serves every decision date."""
-    facts = edgar_fundamentals._get_json(edgar_factors._FACTS_URL.format(cik=cik))
-    gaap = ((facts or {}).get("facts") or {}).get("us-gaap") or {}
-    return {"facts": {"us-gaap": {t: v for t, v in gaap.items() if t in _FACT_TAGS}}}
+_FACTS_CACHE_SIZE = 256
+_facts_cache: OrderedDict = OrderedDict()
+_facts_lock = threading.Lock()
+
+
+def _company_facts(cik: int, http_get=None, sleep=time.sleep) -> dict | None:
+    """companyfacts trimmed to the tags ``factor_set`` reads, or None when
+    EDGAR has none (404, cached like a hit). Every vintage keeps its ``filed``
+    date, so one fetch serves every decision date. Cached per CIK for the
+    process (LRU); a fetch that fails after retries raises
+    ``FilingsFetchError`` and is not cached."""
+    with _facts_lock:
+        if cik in _facts_cache:
+            _facts_cache.move_to_end(cik)
+            return _facts_cache[cik]
+    client = _Client(http_get or _default_http_get, sleep)
+    facts = client.get_json(edgar_factors._FACTS_URL.format(cik=cik))
+    trimmed = None
+    if facts is not None:
+        gaap = (facts.get("facts") or {}).get("us-gaap") or {}
+        trimmed = {"facts": {"us-gaap": {t: v for t, v in gaap.items() if t in _FACT_TAGS}}}
+    with _facts_lock:
+        _facts_cache[cik] = trimmed
+        _facts_cache.move_to_end(cik)
+        while len(_facts_cache) > _FACTS_CACHE_SIZE:
+            _facts_cache.popitem(last=False)
+    return trimmed
+
+
+def clear_facts_cache() -> None:
+    with _facts_lock:
+        _facts_cache.clear()
 
 
 def _factor_dict(fs: FactorSet) -> dict:
@@ -541,20 +630,31 @@ def _factor_dict(fs: FactorSet) -> dict:
             for k, v in dataclasses.asdict(fs).items()}
 
 
-def _factors(sym: str, decision_time: datetime, resolve, fetch_facts) -> dict:
+def _factors(sym: str, decision_time: datetime, resolve, fetch_facts, http_get,
+             sleep) -> tuple:
+    """``(factors dict, status)``; status is ``ok`` (companyfacts read),
+    ``no_facts`` (no CIK, or EDGAR has no companyfacts) or ``fetch_failed``
+    (EDGAR kept failing: the factors are unknown, not empty)."""
     as_of = decision_time.astimezone(_ET).date() - timedelta(days=1)
-    fs = FactorSet(symbol=sym, as_of=as_of)
-    if _norm_symbol(sym):
-        cik = _cik_for(sym, resolve or edgar_fundamentals.resolve_cik)
-        if cik is not None:
-            try:
-                facts = (fetch_facts or _company_facts)(cik)
-            except Exception as exc:        # noqa: BLE001 -- no factors, not no dossier
-                log.warning("edgar facts %s: %s", sym, type(exc).__name__)
-                facts = None
-            if facts is not None:
-                fs = factor_set(sym, as_of, facts=facts)
-    return _factor_dict(fs)
+    empty = _factor_dict(FactorSet(symbol=sym, as_of=as_of))
+    if not _norm_symbol(sym):
+        return empty, FACTORS_NO_FACTS
+    if resolve is None:
+        def resolve(s):
+            return edgar_fundamentals.resolve_cik(s, _fetch=lambda: _Client(
+                http_get or _default_http_get, sleep).get_json(TICKERS_URL))
+    if fetch_facts is None:
+        def fetch_facts(cik):
+            return _company_facts(cik, http_get, sleep)
+    try:
+        cik = _cik_for(sym, resolve)
+        facts = fetch_facts(cik) if cik is not None else None
+    except Exception as exc:                # noqa: BLE001 -- reported, not raised
+        log.warning("edgar facts %s: %s: %s", sym, type(exc).__name__, exc)
+        return empty, FACTORS_FETCH_FAILED
+    if facts is None:
+        return empty, FACTORS_NO_FACTS
+    return _factor_dict(factor_set(sym, as_of, facts=facts)), FACTORS_OK
 
 
 _DOSSIER_FIELDS = ("form", "accession", "filing_date", "report_date", "available_at",
@@ -562,15 +662,21 @@ _DOSSIER_FIELDS = ("form", "accession", "filing_date", "report_date", "available
 
 
 def filing_dossier(symbol: str, decision_time: datetime, *, max_filings: int = 3,
-                   store=None, resolve=None, fetch_facts=None) -> dict:
-    """``{"factors": FactorSet-as-dict, "filings": [...]}`` for a decision at
-    ``decision_time``: the newest ``max_filings`` excerpted filings accepted
-    strictly before it (newest first), and the fundamentals filed before the
-    decision's New York day. A symbol without a CIK gets empty factors and no
-    filings, never an exception."""
+                   store=None, resolve=None, fetch_facts=None, http_get=None,
+                   sleep=time.sleep) -> dict:
+    """``{"factors": FactorSet-as-dict, "factors_status": ..., "filings": [...]}``
+    for a decision at ``decision_time``: the newest ``max_filings`` excerpted
+    filings accepted strictly before it (newest first), and the fundamentals
+    filed before the decision's New York day.
+
+    ``factors_status`` is ``ok``, ``no_facts`` (no CIK -- a non-US listing --
+    or no companyfacts on EDGAR; never an exception) or ``fetch_failed``
+    (EDGAR kept failing after retries; the caller must not read the all-None
+    factors as "no data")."""
     _check_decision_time(decision_time)
     sym = _norm_symbol(symbol) or str(symbol or "").strip().upper()
-    factors = _factors(sym, decision_time, resolve, fetch_facts)
+    factors, factors_status = _factors(sym, decision_time, resolve, fetch_facts,
+                                       http_get, sleep)
     picked = []
     if _norm_symbol(sym) and max_filings > 0:
         for row in reversed(_visible_rows(sym, decision_time, store)):
@@ -578,7 +684,7 @@ def filing_dossier(symbol: str, decision_time: datetime, *, max_filings: int = 3
                 picked.append({k: row.get(k, "") for k in _DOSSIER_FIELDS})
                 if len(picked) == max_filings:
                     break
-    return {"factors": factors, "filings": picked}
+    return {"factors": factors, "factors_status": factors_status, "filings": picked}
 
 
 # -- CLI ------------------------------------------------------------------------------

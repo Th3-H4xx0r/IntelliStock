@@ -17,16 +17,21 @@ _backend = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 if _backend not in sys.path:
     sys.path.insert(0, _backend)
 
+import edgar_fundamentals  # noqa: E402
 from db.fake import FakeStore  # noqa: E402
 from trend_research import filings  # noqa: E402
 
 CIK = 320193
 SUB_URL = "https://data.sec.gov/submissions/CIK0000320193.json"
+FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json"
 
 
 @pytest.fixture(autouse=True)
 def _no_throttle(monkeypatch):
     monkeypatch.setattr(filings, "_throttle", lambda: None)
+    filings.clear_facts_cache()
+    yield
+    filings.clear_facts_cache()
 
 
 def utc(*a):
@@ -69,7 +74,7 @@ def doc_url(accession, primary, cik=CIK):
         cik, accession.replace("-", ""), primary)
 
 
-def submissions(filings_list, files=()):
+def submissions(filings_list, files=(), sic="3571"):
     """A submissions payload; each filing is (form, accession, acceptance, primary, items)."""
     cols = {k: [] for k in ("accessionNumber", "filingDate", "reportDate",
                             "acceptanceDateTime", "form", "primaryDocument", "items")}
@@ -81,7 +86,7 @@ def submissions(filings_list, files=()):
         cols["form"].append(form)
         cols["primaryDocument"].append(primary)
         cols["items"].append(items)
-    return {"cik": str(CIK), "name": "Test Co",
+    return {"cik": str(CIK), "name": "Test Co", "sic": sic,
             "filings": {"recent": cols, "files": list(files)}}
 
 
@@ -183,6 +188,7 @@ def test_non_us_issuer_without_cik_returns_empty():
     out = filings.filing_dossier("SHEL.L", utc(2023, 6, 5, 13), store=st,
                                  resolve=lambda s: None)
     assert out["filings"] == []
+    assert out["factors_status"] == "no_facts"
     assert out["factors"]["symbol"] == "SHEL.L"
     assert out["factors"]["gp_a"] is None
     assert not filings.has_operating_filings("SHEL.L", utc(2023, 6, 5, 13), store=st)
@@ -309,7 +315,7 @@ def test_html_is_reduced_to_text():
         "<div>Net&nbsp;sales &amp; margin</div><p>Line&#8217;two</p></body></html>")
     assert "color" not in text and "x=1" not in text and "Secret" not in text
     assert "Net sales & margin" in text
-    assert "Line’two" in text
+    assert "Line\u2019two" in text
 
 
 # -- fetch behaviour ---------------------------------------------------------------------
@@ -452,3 +458,102 @@ def test_dossier_keeps_the_newest_excerpted_filings_newest_first():
     out = filings.filing_dossier("AAPL", utc(2023, 5, 26), store=st, max_filings=3,
                                  resolve=lambda s: None)
     assert [f["accession"] for f in out["filings"]] == ["acc-3", "acc-2", "acc-1"]
+
+
+# -- fix round 1 ---------------------------------------------------------------------------
+
+def test_fractional_acceptance_stamp_rounds_up():
+    st, _http, _n = ten_q_store(accepted="2023-05-24T20:05:12.400Z")
+    (row,) = st.run(st.between("TrendFilingsPIT", "AAPL|", "AAPL}"))
+    assert row["available_at"] == "2023-05-24T20:05:13Z"
+    assert row["id"] == "AAPL|2023-05-24T20:05:13Z|0000320193-23-000064"
+    assert not filings.has_operating_filings("AAPL", utc(2023, 5, 24, 20, 5, 12, 500000),
+                                             store=st)
+    assert filings.has_operating_filings("AAPL", utc(2023, 5, 24, 20, 5, 14), store=st)
+
+
+def test_eight_k_only_history_is_not_operating():
+    acc = "0000320193-23-000075"
+    http = FakeHttp({SUB_URL: Resp(payload=submissions(
+        [("8-K", acc, "2023-05-10T20:31:27.000Z", "e.htm", "8.01")]))})
+    st = FakeStore()
+    filings.fetch_filings("SPAC", date(2023, 5, 1), date(2023, 5, 31), http_get=http,
+                          store=st, resolve=lambda s: CIK)
+    assert st.run(st.between("TrendFilingsPIT", "SPAC|", "SPAC}"))   # stored...
+    assert not filings.has_operating_filings("SPAC", utc(2024, 1, 1), store=st)  # ...not operating
+
+
+def test_naive_decision_time_raises():
+    st = FakeStore()
+    with pytest.raises(ValueError):
+        filings.has_operating_filings("AAPL", datetime(2023, 5, 25, 13), store=st)
+    with pytest.raises(ValueError):
+        filings.filing_dossier("AAPL", datetime(2023, 5, 25, 13), store=st,
+                               resolve=lambda s: None)
+
+
+@pytest.mark.parametrize("sic, operating", [("6221", False), ("3571", True)])
+def test_commodity_pool_sic_is_not_operating_after_a_refetch(sic, operating):
+    """R7b: a symbol indexed before issuer records existed is refetched; the
+    refresh alone (no index row rewritten) decides by the issuer's SIC."""
+    acc = "0001222333-23-000010"
+    st = FakeStore()
+    st.insert("TrendFilingsPIT", [{   # an index row as the first version wrote it
+        "id": "GLD|2023-05-01T20:00:00Z|%s" % acc, "symbol": "GLD", "cik": CIK,
+        "form": "10-Q", "accession": acc, "filing_date": "2023-05-01", "report_date": "",
+        "available_at": "2023-05-01T20:00:00Z", "items": "", "primary_document": "q.htm",
+        "excerpt": "", "excerpt_status": "no_sections"}])
+    assert filings.has_operating_filings("GLD", utc(2023, 6, 1), store=st)  # sic unknown
+    http = FakeHttp({SUB_URL: Resp(payload=submissions(
+        [("10-Q", acc, "2023-05-01T20:00:00.000Z", "q.htm", "")], sic=sic))})
+    assert filings.fetch_filings("GLD", date(2023, 5, 1), date(2023, 5, 31), http_get=http,
+                                 store=st, resolve=lambda s: CIK) == 0
+    assert http.calls == [SUB_URL]
+    assert filings.has_operating_filings("GLD", utc(2023, 6, 1), store=st) is operating
+    rec = st.get("TrendIngestProgress", "edgar_cik|%d" % CIK)
+    assert rec["meta"]["sic"] == sic and rec["meta"]["name"] == "Test Co"
+    assert rec["meta"]["fetched_at"].endswith("Z")
+
+
+def _facts_dossier(http, sleeps=None, **kw):
+    return filings.filing_dossier("AAPL", utc(2023, 5, 23, 13, 25), store=FakeStore(),
+                                  resolve=lambda s: CIK, http_get=http,
+                                  sleep=(sleeps.append if sleeps is not None else
+                                         (lambda s: None)), **kw)
+
+
+def test_companyfacts_go_through_the_retrying_client():
+    sleeps = []
+    http = FakeHttp({FACTS_URL: [Resp(503), Resp(payload=FACTS)]})
+    out = _facts_dossier(http, sleeps)
+    assert out["factors_status"] == "ok"
+    assert out["factors"]["gp_a"] == 400 / 1200
+    assert http.calls == [FACTS_URL, FACTS_URL] and len(sleeps) == 1
+
+
+def test_companyfacts_404_is_no_facts_and_cached():
+    http = FakeHttp({})
+    assert _facts_dossier(http)["factors_status"] == "no_facts"
+    assert _facts_dossier(http)["factors_status"] == "no_facts"
+    assert http.calls == [FACTS_URL]                 # the 404 was cached
+
+
+def test_companyfacts_failure_is_fetch_failed_and_not_cached():
+    http = FakeHttp({FACTS_URL: Resp(503)})
+    out = _facts_dossier(http)
+    assert out["factors_status"] == "fetch_failed"
+    assert out["factors"]["gp_a"] is None
+    n = len(http.calls)
+    assert n == filings.MAX_ATTEMPTS
+    http.routes[FACTS_URL] = Resp(payload=FACTS)
+    assert _facts_dossier(http)["factors_status"] == "ok"   # retried, not cached
+    assert len(http.calls) == n + 1
+
+
+def test_ticker_map_failure_is_fetch_failed_not_no_cik(monkeypatch):
+    monkeypatch.setattr(edgar_fundamentals, "_cik_cache", {})
+    http = FakeHttp({filings.TICKERS_URL: Resp(503)})
+    out = filings.filing_dossier("AAPL", utc(2023, 5, 23, 13, 25), store=FakeStore(),
+                                 http_get=http, sleep=lambda s: None)
+    assert out["factors_status"] == "fetch_failed"
+    assert set(http.calls) == {filings.TICKERS_URL}
