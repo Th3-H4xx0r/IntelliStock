@@ -14,11 +14,13 @@ availability, never advance it. An article whose availability cannot be
 proven (no id, missing or naive or unparseable stamps) is skipped.
 ``content`` is capped at 4000 characters and ``summary`` at 1000 (ruling R9).
 
-Resume (ruling R10b): no mid-day frontier is inferred, because Alpaca's
-``asc`` order may follow ``updated_at`` rather than ``created_at``. Each day
-is decided on its own, independent of any earlier run's range: day ``d`` is
-skipped only when both ``d`` and ``d + 1`` already hold stored alpaca
-articles (by ``published_at`` date) -- a run reached the next day, so ``d``
+Resume (rulings R10b, R10c): no mid-day frontier is inferred, because
+Alpaca's window and ``asc`` order may follow ``updated_at`` rather than
+``created_at``. Each day is decided on its own, independent of any earlier
+run's range: day ``d`` is skipped only when both ``d`` and ``d + 1`` hold
+stored alpaca articles whose ``published_at`` AND ``available_at`` both fall
+on that day -- only a fetch of that day's window can have produced such a
+row, whichever field Alpaca filters on, so a run reached ``d + 1`` and ``d``
 finished. The range's last day is always refetched. Anything fetched is
 fetched whole from 00:00Z; ``put_rows`` ignores the duplicates.
 
@@ -67,10 +69,6 @@ REQUEST_TIMEOUT = 30
 MAX_PAGES_PER_DAY = 1000         # busiest measured day was 25 pages
 CONTENT_CAP = 4000               # characters (ruling R9)
 SUMMARY_CAP = 1000
-# How far past its day the resume scan looks for an article whose edit moved
-# its id (= available_at) forward. Edits measured at <= 22.5 h; one beyond
-# this window can only make the resume day earlier, i.e. a harmless re-fetch.
-RESUME_EDIT_LAG = timedelta(days=1)
 
 _RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 
@@ -236,32 +234,35 @@ class _Client:
 # -- resume -------------------------------------------------------------------------
 
 def _has_stored_day(st, d: date) -> bool:
-    """Whether any stored alpaca article has a ``published_at`` on day ``d``.
+    """Whether a stored alpaca article proves day ``d``'s window was fetched:
+    its ``published_at`` and its ``available_at`` (the id prefix) are both
+    on ``d``.
 
-    Ids are keyed by ``available_at`` (>= ``published_at``), so the scan reads
-    ``[d, d + 1 day + RESUME_EDIT_LAG)``. An article edited later than that is
-    missed, which can only pick an earlier resume day -- a harmless refetch.
+    A row with only one of them on ``d`` is an edit spill -- created one day,
+    edited on another -- and may have come from the other day's window if
+    Alpaca filters on ``updated_at``. It is not evidence for either day. A
+    day whose articles were all edited into the next day is simply refetched.
     """
     day_lo = _day_start(d)
     day_hi = day_lo + timedelta(days=1)
-    sel = st.between(TABLE, _iso(day_lo), _iso(day_hi + RESUME_EDIT_LAG))
+    sel = st.between(TABLE, _iso(day_lo), _iso(day_hi))
     # Small batches: the first matching row ends the scan.
     for row in st.iter(sel, batch=50):
         if row.get("source") != SOURCE:
             continue
         published = _parse_utc(row.get("published_at"))
-        if published is not None and day_lo <= published < day_hi:
+        available = _parse_utc(row.get("available_at"))
+        if (published is not None and available is not None
+                and day_lo <= published < day_hi and day_lo <= available < day_hi):
             return True
     return False
 
 
 def _completed_days(st, start: date, end: date) -> set:
-    """Days in ``start..end`` to skip: ``d < end`` whose day and next day
-    both hold stored alpaca articles.
-
-    Every article fetched for day W has ``published_at`` (= created_at) on or
-    before W, whichever field Alpaca filters and sorts on, so articles dated
-    ``d + 1`` mean a run moved past ``d`` after finishing it.
+    """Days in ``start..end`` to skip: ``d < end`` where both ``d`` and
+    ``d + 1`` hold an article that only their own window could have produced
+    (see ``_has_stored_day``) -- days are fetched in order, so a run that
+    reached ``d + 1`` finished ``d``.
     """
     stored = {}
 

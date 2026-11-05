@@ -3,9 +3,11 @@
 Each day is paged ascending, 50 per call, until Alpaca stops returning a
 ``next_page_token``; every article lands in TrendNewsPIT keyed by its
 availability (ruling R5: the later of ``created_at`` and ``updated_at``,
-because the content fetched is the latest edit). A re-run resumes each day
-from the newest article already stored. Credentials come only from a paper
-brokerage.
+because the content fetched is the latest edit). A re-run decides each day
+on its own (rulings R10b, R10c): it skips day d only when d and d+1 both hold
+an article whose published_at and available_at fall on that same day, and
+refetches every other day -- including the range's last day -- whole from
+00:00Z. Credentials come only from a paper brokerage.
 """
 from __future__ import annotations
 
@@ -405,17 +407,50 @@ def test_resume_ignores_other_sources(store):
     assert len(http.calls) == 3
 
 
-def test_resume_day_is_the_published_day_not_the_edit_day(store):
-    # Published late on 03-02, edited into 03-03: it counts for 03-02, not
-    # 03-03, so 03-01 (no rows) and 03-02 (next day empty) are refetched.
+def test_an_edit_spill_row_is_evidence_for_neither_day(store):
+    # Published late on 03-02, edited into 03-03: depending on which field
+    # Alpaca filters on, either day's window may have produced it, so it
+    # proves neither -- so 03-01 has no proven successor and no day is skipped.
     ian.put_rows("TrendNewsPIT", [
         alpaca_row("1", "2026-03-01T15:00:00Z"),
         alpaca_row("5", "2026-03-02T23:50:00Z", available="2026-03-03T01:00:00Z"),
+        alpaca_row("6", "2026-03-04T15:00:00Z"),
     ], store=store)
     http = FakeHttp([])
-    run(store, http, start=date(2026, 3, 1), end=date(2026, 3, 3))
+    run(store, http, start=date(2026, 3, 1), end=date(2026, 3, 4))
     assert [c["params"]["start"] for c in http.calls] == [
-        "2026-03-02T00:00:00Z", "2026-03-03T00:00:00Z"]
+        "2026-03-01T00:00:00Z", "2026-03-02T00:00:00Z", "2026-03-03T00:00:00Z",
+        "2026-03-04T00:00:00Z"]
+
+
+def test_a_day_whose_articles_were_all_edited_into_the_next_day_is_refetched(store):
+    ian.put_rows("TrendNewsPIT", [
+        alpaca_row("1", "2026-03-01T23:00:00Z", available="2026-03-02T00:30:00Z"),
+        alpaca_row("2", "2026-03-02T15:00:00Z"),
+    ], store=store)
+    http = FakeHttp([])
+    run(store, http, start=date(2026, 3, 1), end=date(2026, 3, 2))
+    assert [c["params"]["start"] for c in http.calls] == [
+        "2026-03-01T00:00:00Z", "2026-03-02T00:00:00Z"]
+
+
+def test_spill_from_a_narrow_run_does_not_skip_an_unfetched_day(store):
+    # Reviewer's probe. If Alpaca filters on updated_at, the narrow run's
+    # 03-04 fetch returns #2, created 03-03 and edited 03-04. That must not
+    # make the wider run treat 03-03 -- never fetched -- as complete.
+    pages = [FakeResponse(200, {"news": [article(1, created="2026-03-04T15:00:00Z"),
+                                         article(2, created="2026-03-03T20:00:00Z",
+                                                 updated="2026-03-04T09:00:00Z")],
+                                "next_page_token": None}),
+             FakeResponse(200, {"news": [article(3, created="2026-03-05T15:00:00Z")],
+                                "next_page_token": None})]
+    run(store, FakeHttp(pages), start=date(2026, 3, 4), end=date(2026, 3, 5))
+
+    http = FakeHttp([])
+    run(store, http, start=date(2026, 3, 1), end=date(2026, 3, 5))
+    assert [c["params"]["start"] for c in http.calls] == [
+        "2026-03-01T00:00:00Z", "2026-03-02T00:00:00Z", "2026-03-03T00:00:00Z",
+        "2026-03-05T00:00:00Z"]
 
 
 def test_a_narrow_run_does_not_make_a_wider_run_skip_history(store):
