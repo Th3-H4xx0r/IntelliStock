@@ -1,29 +1,36 @@
 """GDELT DOC 2.0 theme backfill into TrendThemesPIT and TrendNewsPIT (plan Task 3).
 
-Two phases, both resumable:
+Two phases, both resumable through TrendIngestProgress markers (ruling R14):
 
-1. Timelines. Per theme, in chunks of ``CHUNK_DAYS``: ``timelinevolraw``
+1. Timelines. Per theme and calendar year: ``timelinevolraw``
    (matching-article count, plus ``norm`` = every article GDELT monitored)
    and ``timelinetone``. One TrendThemesPIT row per theme per UTC day,
    ``id = "YYYY-MM-DD|theme"``, available one hour after the day ends
    (``AVAILABILITY_LAG``). Points at sub-daily resolution are summed (volume)
-   or volume-weighted (tone) into the day. A chunk whose every complete day is
-   already stored is skipped.
+   or volume-weighted (tone) into the day; a day the timeline skips is zero
+   volume. The whole year is fetched whatever part of it was asked for (one
+   call either way, and a year always comes back at daily resolution).
+   A year is *final* once it ended ``FINAL_LAG`` before ``now``: its days run
+   to 31 December and it is marked done (``gdelt_timeline|theme|YYYY``). A
+   year still in progress is written only through the last day the timeline
+   reports -- GDELT may not have published later days yet, and rows are
+   write-once -- and is refetched on the next run.
 
-2. Article titles (ruling R1). Per UTC day and theme, ``artlist`` sorted by
-   relevance, at most ``ARTICLES_PER_THEME_DAY``. Each article is a
-   TrendNewsPIT row, ``source = "gdelt"``, ``source_id =
-   sha256(url)[:16]``, available at its ``seendate`` (GDELT's crawl time).
-   A day is refetched for any theme with no gdelt row on it yet.
+2. Titles (rulings R1, R12). Per theme and week: ``artlist`` sorted by
+   relevance, at most ``ARTICLES_PER_THEME_WEEK``, over the 7 days ending at
+   that week's decision time (``week_decision_time``: 09:00 ET on the week's
+   first NYSE session). Each article is a TrendNewsPIT row, ``source =
+   "gdelt"``, ``source_id = sha256(url)[:16]``, and is available at the
+   window end -- not at its ``seendate`` -- because GDELT ranks the window as
+   a whole, so the selection is only known once the window has closed. An
+   article seen at or after the window end is dropped. A (theme, week) is
+   marked done (``gdelt_titles|theme|monday``) even when it returned nothing,
+   so empty weeks are not refetched. ``articles_start`` limits the titles to
+   the weeks that matter (the honest window plus warm-up) while timelines
+   cover the full range.
 
-   Caveat for readers: GDELT ranks a day's articles over the whole day, so
-   which morning titles made the top 25 depends on the afternoon. Each row
-   carries ``selection_window_end``; a reader that must exclude even that
-   effect uses titles only from windows ending before the decision.
-
-A day is written only once complete: its availability (day end + 1 h) must
-not be after ``now``. Rows are write-once (``put_rows``), so a partial day
-written early would be frozen.
+A day or window is fetched only once complete: its availability (day end +
+1 h, or the window end) must not be after ``now``.
 
 Rate limit: GDELT 429s at 6 s spacing and is bursty at 15-20 s (recon
 2026-11-04), so requests start at least ``MIN_REQUEST_INTERVAL`` = 15 s
@@ -44,10 +51,12 @@ import re
 import time
 from datetime import date, datetime, timedelta, timezone
 
-from trend_research.pit_store import put_rows, read_available
+from zoneinfo import ZoneInfo
 
-__all__ = ["backfill_themes", "themes_between", "THEMES", "THEME_QUERIES",
-           "normalize_article", "main"]
+from trend_research.pit_store import done_keys, mark_done, put_rows, read_available
+
+__all__ = ["backfill_themes", "themes_between", "week_decision_time", "THEMES",
+           "THEME_QUERIES", "normalize_article", "main"]
 
 log = logging.getLogger(__name__)
 
@@ -61,8 +70,13 @@ MAX_ATTEMPTS = 8
 BACKOFF_BASE = 20.0
 BACKOFF_CAP = 300.0
 REQUEST_TIMEOUT = 60
-CHUNK_DAYS = 365                 # a 1-year timeline came back daily (recon)
-ARTICLES_PER_THEME_DAY = 25
+ARTICLES_PER_THEME_WEEK = 75
+TITLE_WINDOW = timedelta(days=7)
+DECISION_TIME_ET = (9, 0)        # titles close before the 09:30 ET decision tick
+ET = ZoneInfo("America/New_York")
+FINAL_LAG = timedelta(days=2)
+TIMELINE_PROGRESS = "gdelt_timeline"
+TITLES_PROGRESS = "gdelt_titles"
 ARTLIST_SORT = "hybridrel"
 ARTLIST_FILTER = "sourcelang:english"   # titles the research model can read
 AVAILABILITY_LAG = timedelta(hours=1)
@@ -253,14 +267,15 @@ def _number(value):
     return value if isinstance(value, (int, float)) and math.isfinite(value) else None
 
 
-def _theme_rows(theme: str, days: list, vol_points: list, tone_points: list) -> list:
-    """One row per day in ``days`` up to the last day the volume timeline
-    reports; a gap before it is zero volume. Days after it are left out (GDELT
-    may not have published them yet, and rows are write-once), and an empty
-    timeline gives [] -- no data is not the same as zero volume."""
+def _theme_rows(theme: str, days: list, vol_points: list, tone_points: list, *,
+                final: bool) -> list:
+    """One row per day in ``days``; a day the timeline skips is zero volume.
+    Unless ``final``, days after the last one the timeline reports are left
+    out (GDELT may not have published them yet, and rows are write-once). An
+    empty timeline gives [] -- no data is not the same as zero volume."""
     if not vol_points:
         return []
-    last_day = max(at for at, _ in vol_points).date()
+    last_day = days[-1] if final else max(at for at, _ in vol_points).date()
     volume, total = {}, {}
     vol_at = {}
     for at, p in vol_points:
@@ -305,46 +320,75 @@ def _theme_rows(theme: str, days: list, vol_points: list, tone_points: list) -> 
     return rows
 
 
-def _backfill_timelines(client, st, theme: str, days: list) -> int:
+def _year_days(year: int, now: datetime) -> list:
+    """The days of ``year`` complete by ``now``."""
+    out, d = [], date(year, 1, 1)
+    while d.year == year and _theme_available_at(d) <= now:
+        out.append(d)
+        d += timedelta(days=1)
+    return out
+
+
+def _backfill_timelines(client, st, theme: str, years: list, now: datetime) -> int:
+    done = done_keys(TIMELINE_PROGRESS, theme + "|", store=st)
     written = 0
-    for k in range(0, len(days), CHUNK_DAYS):
-        chunk = days[k:k + CHUNK_DAYS]
-        ids = ["%s|%s" % (d.isoformat(), theme) for d in chunk]
-        if len(list(st.get_all(THEMES_TABLE, *ids))) == len(ids):
+    for year in years:
+        key = "%s|%d" % (theme, year)
+        if key in done:
             continue
+        days = _year_days(year, now)
+        if not days:
+            continue
+        final = (days[-1] == date(year, 12, 31)
+                 and _day_start(days[-1]) + timedelta(days=1) + FINAL_LAG <= now)
         base = {"query": THEME_QUERIES[theme], "format": "json",
-                "startdatetime": _gdelt_dt(chunk[0]),
-                "enddatetime": _gdelt_dt(chunk[-1], end_of_day=True)}
-        lo, hi = _day_start(chunk[0]), _day_start(chunk[-1]) + timedelta(days=1)
+                "startdatetime": _gdelt_dt(days[0]),
+                "enddatetime": _gdelt_dt(days[-1], end_of_day=True)}
+        lo, hi = _day_start(days[0]), _day_start(days[-1]) + timedelta(days=1)
         vol = [x for x in _timeline_points(client.get(dict(base, mode="timelinevolraw")))
                if lo <= x[0] < hi]
         tone = [x for x in _timeline_points(client.get(dict(base, mode="timelinetone")))
                 if lo <= x[0] < hi]
-        rows = _theme_rows(theme, chunk, vol, tone)
+        rows = _theme_rows(theme, days, vol, tone, final=final)
         if not rows:
-            log.warning("gdelt %s %s..%s: empty volume timeline, nothing written",
-                        theme, chunk[0], chunk[-1])
+            log.warning("gdelt %s %d: empty volume timeline, nothing written", theme, year)
             continue
         n = put_rows(THEMES_TABLE, rows, store=st)
         written += n
-        log.info("gdelt %s %s..%s: %d theme-days written", theme, chunk[0], chunk[-1], n)
+        if final:
+            mark_done(TIMELINE_PROGRESS, key, {"days": len(rows), "written": n}, store=st)
+        log.info("gdelt %s %d: %d theme-days written%s", theme, year, n,
+                 " (final)" if final else "")
     return written
 
 
 # -- articles ---------------------------------------------------------------------------
 
-def normalize_article(item, theme: str, window_end: datetime) -> dict | None:
-    """One artlist item as a TrendNewsPIT row (ruling R1), or None without a
-    url or a parseable ``seendate``."""
+def week_decision_time(monday: date) -> datetime:
+    """09:00 ET on the first NYSE session of the week starting ``monday``
+    (the Monday itself unless it is a holiday), as UTC."""
+    from swing_trader.clock import trading_days
+    sessions = sorted(trading_days(monday, monday + timedelta(days=4)))
+    first = sessions[0] if sessions else monday
+    hh, mm = DECISION_TIME_ET
+    return datetime(first.year, first.month, first.day, hh, mm,
+                    tzinfo=ET).astimezone(timezone.utc)
+
+
+def normalize_article(item, theme: str, window_start: datetime,
+                      window_end: datetime) -> dict | None:
+    """One artlist item as a TrendNewsPIT row (rulings R1, R12), available at
+    ``window_end``; None without a url, or unless its ``seendate`` falls in
+    ``[window_start, window_end)``."""
     if not isinstance(item, dict):
         return None
     url = item.get("url")
     url = url.strip() if isinstance(url, str) else ""
     seen = _parse_gdelt_stamp(item.get("seendate"))
-    if not url or seen is None:
+    if not url or seen is None or not (window_start <= seen < window_end):
         return None
     sid = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
-    at = _iso(seen)
+    at = _iso(window_end)
 
     def text(key, cap=200):
         v = item.get(key)
@@ -354,7 +398,7 @@ def normalize_article(item, theme: str, window_end: datetime) -> dict | None:
         "id": "%s|%s|%s" % (at, SOURCE, sid),
         "source": SOURCE,
         "source_id": sid,
-        "published_at": at,
+        "published_at": _iso(seen),
         "available_at": at,
         "headline": text("title", TITLE_CAP),
         "url": url,
@@ -363,33 +407,52 @@ def normalize_article(item, theme: str, window_end: datetime) -> dict | None:
         "sourcecountry": text("sourcecountry"),
         "theme": theme,
         "symbols": [],
-        "selection_window_end": _iso(window_end),
+        "window_start": _iso(window_start),
+        "window_end": at,
     }
 
 
-def _themes_with_articles(st, d: date) -> set:
-    lo = _day_start(d)
-    sel = st.between(NEWS_TABLE, _iso(lo), _iso(lo + timedelta(days=1)))
-    return {row.get("theme") for row in st.iter(sel) if row.get("source") == SOURCE}
+def _title_weeks(first_day: date, last_day: date, now: datetime) -> list:
+    """``(monday, window_start, window_end)`` for every week whose title
+    window overlaps the UTC days ``first_day..last_day`` and has closed."""
+    lo, hi = _day_start(first_day), _day_start(last_day) + timedelta(days=1)
+    out = []
+    monday = first_day - timedelta(days=first_day.weekday())
+    while True:
+        end = week_decision_time(monday)
+        start = end - TITLE_WINDOW
+        if start >= hi or end > now:
+            break
+        if end > lo:
+            out.append((monday, start, end))
+        monday += timedelta(days=7)
+    return out
 
 
-def _backfill_articles(client, st, themes: list, d: date) -> int:
-    done = _themes_with_articles(st, d)
-    window_end = _day_start(d) + timedelta(days=1)
+def _backfill_titles(client, st, themes: list, weeks: list) -> int:
     written = 0
     for theme in themes:
-        if theme in done:
-            continue
-        payload = client.get({
-            "query": "%s %s" % (THEME_QUERIES[theme], ARTLIST_FILTER),
-            "mode": "artlist", "format": "json", "sort": ARTLIST_SORT,
-            "maxrecords": ARTICLES_PER_THEME_DAY,
-            "startdatetime": _gdelt_dt(d), "enddatetime": _gdelt_dt(d, end_of_day=True)})
-        items = payload.get("articles") or []
-        rows = [r for r in (normalize_article(i, theme, window_end)
-                            for i in items[:ARTICLES_PER_THEME_DAY]) if r]
-        if rows:
-            written += put_rows(NEWS_TABLE, rows, store=st)
+        done = done_keys(TITLES_PROGRESS, theme + "|", store=st)
+        for monday, w_start, w_end in weeks:
+            key = "%s|%s" % (theme, monday.isoformat())
+            if key in done:
+                continue
+            payload = client.get({
+                "query": "%s %s" % (THEME_QUERIES[theme], ARTLIST_FILTER),
+                "mode": "artlist", "format": "json", "sort": ARTLIST_SORT,
+                "maxrecords": ARTICLES_PER_THEME_WEEK,
+                "startdatetime": w_start.strftime("%Y%m%d%H%M%S"),
+                "enddatetime": (w_end - timedelta(seconds=1)).strftime("%Y%m%d%H%M%S")})
+            items = payload.get("articles") or []
+            rows = [r for r in (normalize_article(i, theme, w_start, w_end)
+                                for i in items[:ARTICLES_PER_THEME_WEEK]) if r]
+            n = put_rows(NEWS_TABLE, rows, store=st) if rows else 0
+            written += n
+            mark_done(TITLES_PROGRESS, key, {"returned": len(items), "kept": len(rows),
+                                             "written": n, "window_end": _iso(w_end)},
+                      store=st)
+            log.info("gdelt titles %s week %s: %d of %d kept", theme, monday,
+                     len(rows), len(items))
     return written
 
 
@@ -404,39 +467,37 @@ def _store(store):
 
 def backfill_themes(start: date, end: date, *, themes=THEMES, http_get=None,
                     sleep=time.sleep, clock=time.monotonic, now=None,
-                    articles: bool = True, store=None) -> int:
-    """Backfill theme-day timelines (and, with ``articles``, top titles) for
-    the UTC days ``start..end`` inclusive; return rows written to both tables.
-    Days not yet complete at ``now`` are left for a later run."""
+                    articles: bool = True, articles_start: date | None = None,
+                    store=None) -> int:
+    """Backfill theme-day timelines for every calendar year touching
+    ``start..end`` and, with ``articles``, weekly titles for the weeks whose
+    window overlaps ``articles_start`` (default ``start``) ``..end``; return
+    rows written to both tables. Anything not complete at ``now`` is left for
+    a later run."""
     if not isinstance(start, date) or not isinstance(end, date):
         raise ValueError("start and end must be dates")
     if end < start:
         raise ValueError("end %s is before start %s" % (end, start))
+    if articles_start is not None and (not isinstance(articles_start, date)
+                                       or articles_start > end):
+        raise ValueError("articles_start must be a date on or before end")
     themes = list(themes)
     unknown = [t for t in themes if t not in THEME_QUERIES]
     if unknown or not themes:
         raise ValueError("unknown GDELT themes: %r (known: %s)"
                          % (unknown, ", ".join(THEMES)))
     now = now or datetime.now(timezone.utc)
-    days = []
-    d = start
-    while d <= end and _theme_available_at(d) <= now:
-        days.append(d)
-        d += timedelta(days=1)
-    if not days:
-        return 0
     st = _store(store)
     client = _Client(http_get or _default_http_get, sleep, clock)
     total = 0
+    years = list(range(start.year, end.year + 1))
     for theme in themes:
-        total += _backfill_timelines(client, st, theme, days)
+        total += _backfill_timelines(client, st, theme, years, now)
     if articles:
-        for d in days:
-            n = _backfill_articles(client, st, themes, d)
-            total += n
-            log.info("gdelt articles %s: %d written", d, n)
-    log.info("gdelt %s..%s: %d rows written in %d requests", days[0], days[-1],
-             total, client.requests)
+        weeks = _title_weeks(articles_start or start, end, now)
+        total += _backfill_titles(client, st, themes, weeks)
+    log.info("gdelt %s..%s: %d rows written in %d requests", start, end, total,
+             client.requests)
     return total
 
 
@@ -458,11 +519,14 @@ def main(argv=None) -> int:
     parser.add_argument("--start", required=True, type=date.fromisoformat)
     parser.add_argument("--end", required=True, type=date.fromisoformat)
     parser.add_argument("--no-articles", action="store_true",
-                        help="timelines only (skip the per-day artlist titles)")
+                        help="timelines only (skip the weekly artlist titles)")
+    parser.add_argument("--articles-start", type=date.fromisoformat, default=None,
+                        help="first day of the weekly titles (default --start)")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    total = backfill_themes(args.start, args.end, articles=not args.no_articles)
+    total = backfill_themes(args.start, args.end, articles=not args.no_articles,
+                            articles_start=args.articles_start)
     print("gdelt backfill %s..%s: %d rows written" % (args.start, args.end, total))
     return 0
 

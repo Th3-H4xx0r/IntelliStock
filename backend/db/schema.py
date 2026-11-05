@@ -117,9 +117,9 @@ ALL_TABLES: tuple = (
     "PointInTimeManifests", "PriceHistory", "PushDevices", "Stocks", "Strategies",
     "SwingDailyBars", "SwingIndexMembership", "SwingIvSnapshots", "SwingMacroDaily",
     "SwingSectorMap", "SwingSignals", "SwingWheelScans",
-    "TickerDayFeatures", "TrendFilingsPIT", "TrendMacroPIT", "TrendNewsPIT",
-    "TrendResearchLedger", "TrendThemesPIT", "Users", "backtest_replay_calls",
-    "backtest_replay_fixture_builds", "backtest_replay_fixtures",
+    "TickerDayFeatures", "TrendFilingsPIT", "TrendIngestProgress", "TrendMacroPIT",
+    "TrendNewsPIT", "TrendResearchLedger", "TrendThemesPIT", "Users",
+    "backtest_replay_calls", "backtest_replay_fixture_builds", "backtest_replay_fixtures",
     "backtest_replay_matrices", "backtest_replay_receipts", "h2h_history",
     "kalshi_capital_plan", "kalshi_clv_log", "kalshi_decisions", "kalshi_edge_history",
     "kalshi_edges", "kalshi_fills", "kalshi_live", "kalshi_market_listings",
@@ -309,6 +309,11 @@ _SPECS = [
     TableSpec("TrendFilingsPIT", prefix_fields=("id",)),
     TableSpec("TrendResearchLedger", indexed_fields=("chain_id",),
               prefix_fields=("id",)),
+    # TR ingest completion markers, id "source|key" (e.g. "alfred|PAYEMS|
+    # 2022-05-29"): which chunks a backfill has finished, so a re-run over a
+    # wider or shifted range fetches exactly the missing ones. Bookkeeping,
+    # not research input: no available_at, never read by a prompt.
+    TableSpec("TrendIngestProgress", prefix_fields=("id",)),
     TableSpec("LiveBootAudit", indexed_fields=("instance_id",), prefix_fields=("id",)),
     # r.now() wrote a native time on these; the ported writer stores an
     # ISO-8601 string and time_fields decodes it back to a tz-aware datetime,

@@ -9,21 +9,31 @@ Sources, read 2026-11-05: federalreserve.gov ``fomccalendars.htm`` (2021-2026;
 2020 from the Fed's 2020 calendar), and the BLS release archives
 ``bls.gov/bls/news-release/cpi.htm`` / ``empsit.htm`` plus the 2026 schedules.
 
-What is deliberately left out:
-- Unscheduled FOMC actions (2020-03-03, 2020-03-15, the 2025-08-22 notation
-  vote) and the 2020-03-17/18 meeting cancelled in their place: none was on a
-  calendar 30 days ahead.
-- October 2025 CPI and jobs, never published (2025 appropriations lapse).
+Unscheduled FOMC actions (2020-03-03, 2020-03-15, the 2025-08-22 notation
+vote) are left out: none was on a calendar 30 days ahead.
+
+Cancellations (``CANCELLED``): an event that was on the calendar and then did
+not happen on that date -- the 2020-03-18 FOMC meeting, replaced by the
+2020-03-15 emergency cut, and the original dates of the Sep-Nov 2025 CPI and
+jobs releases the 2025 appropriations lapse moved or cancelled -- stays in the
+table as scheduled, available 30 days ahead like any other, with
+``cancelled: true`` and ``cancelled_available_at``, the time the cancellation
+was public. Read with a ``decision_time``, a cancellation shows only once
+``cancelled_available_at < decision_time``; before that the event reads as
+scheduled. Where the announcement time is not on record, the cancellation is
+stamped the day before the original date (00:00 UTC) -- later than the BLS
+notices, never earlier.
 
 Releases moved by the 2025-26 appropriations lapses were not known 30 days
-ahead, so they are stamped available only the day before (``RESCHEDULED``).
+ahead, so their new dates are stamped available only the day before
+(``RESCHEDULED``).
 """
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 
 __all__ = ["event_calendar", "FOMC_DECISIONS", "CPI_RELEASES", "JOBS_RELEASES",
-           "LEAD_DAYS"]
+           "CANCELLED", "RESCHEDULED", "LEAD_DAYS"]
 
 LEAD_DAYS = 30
 
@@ -117,6 +127,17 @@ RESCHEDULED = frozenset({
     ("2025-11-20", "jobs"), ("2025-12-16", "jobs"), ("2026-02-11", "jobs"),
 })
 
+# (original date, kind, reference month or None) -> when the cancellation was public.
+CANCELLED = {
+    ("2020-03-18", "fomc", None): "2020-03-15T21:00:00Z",   # Sunday 17:00 ET emergency cut
+    ("2025-10-03", "jobs", "2025-09"): "2025-10-02T00:00:00Z",
+    ("2025-10-15", "cpi", "2025-09"): "2025-10-14T00:00:00Z",
+    ("2025-11-07", "jobs", "2025-10"): "2025-11-06T00:00:00Z",
+    ("2025-11-13", "cpi", "2025-10"): "2025-11-12T00:00:00Z",
+    ("2025-12-05", "jobs", "2025-11"): "2025-12-04T00:00:00Z",
+    ("2025-12-10", "cpi", "2025-11"): "2025-12-09T00:00:00Z",
+}
+
 _LABELS = {"fomc": "FOMC rate decision (14:00 ET)",
            "cpi": "CPI release for %s (08:30 ET)",
            "jobs": "Employment Situation (jobs report) for %s (08:30 ET)"}
@@ -142,6 +163,11 @@ def _all_events() -> list:
     events = [_event(d, "fomc", None) for d in FOMC_DECISIONS]
     events += [_event(d, "cpi", m) for d, m in CPI_RELEASES]
     events += [_event(d, "jobs", m) for d, m in JOBS_RELEASES]
+    for (day, kind, ref_month), public_at in CANCELLED.items():
+        ev = _event(day, kind, ref_month)
+        ev["cancelled"] = True
+        ev["cancelled_available_at"] = public_at
+        events.append(ev)
     events.sort(key=lambda e: (e["date"], e["kind"]))
     return events
 
@@ -149,13 +175,38 @@ def _all_events() -> list:
 _EVENTS = tuple(_all_events())
 
 
-def event_calendar(start: date, end: date) -> list:
+def _parse_utc(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def event_calendar(start: date, end: date, decision_time: datetime | None = None) -> list:
     """Scheduled events dated ``start..end`` (inclusive), oldest first; each
-    ``{date, kind, label, available_at[, ref_month]}``. Callers gate on
-    ``available_at < decision_time`` like every other TR record."""
+    ``{date, kind, label, available_at[, ref_month][, cancelled,
+    cancelled_available_at]}``.
+
+    With ``decision_time`` (what a prompt must use): only events with
+    ``available_at < decision_time``, and a cancellation only once
+    ``cancelled_available_at < decision_time`` -- before that a cancelled
+    event reads as scheduled. Without it, the raw table, cancellations
+    included."""
     if not isinstance(start, date) or not isinstance(end, date):
         raise ValueError("start and end must be dates")
     if end < start:
         raise ValueError("end %s is before start %s" % (end, start))
+    if decision_time is not None and (not isinstance(decision_time, datetime)
+                                      or decision_time.utcoffset() is None):
+        raise ValueError("decision_time must be a tz-aware datetime")
     lo, hi = start.isoformat(), end.isoformat()
-    return [dict(e) for e in _EVENTS if lo <= e["date"] <= hi]
+    out = []
+    for e in _EVENTS:
+        if not lo <= e["date"] <= hi:
+            continue
+        ev = dict(e)
+        if decision_time is not None:
+            if not _parse_utc(ev["available_at"]) < decision_time:
+                continue
+            if ev.get("cancelled") and not (
+                    _parse_utc(ev["cancelled_available_at"]) < decision_time):
+                del ev["cancelled"], ev["cancelled_available_at"]
+        out.append(ev)
+    return out

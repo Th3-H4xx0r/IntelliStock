@@ -13,7 +13,7 @@ Tables are registered in ``db/schema.py``; this module never writes DDL.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from db.errors import StoreError
 
@@ -130,3 +130,49 @@ def read_available(table: str, *, lo_id: str, hi_id: str,
             out.append((at, row["id"], row))
     out.sort(key=lambda t: (t[0], t[1].encode("utf-8")))
     return [row for _, _, row in out]
+
+
+# -- ingest completion markers ----------------------------------------------------
+#
+# TrendIngestProgress rows are bookkeeping, not research input: they carry no
+# available_at and never reach a prompt, so they are written here directly
+# rather than through put_rows. id = "source|key".
+
+PROGRESS_TABLE = "TrendIngestProgress"
+_KEY_END = "￿"            # above every ASCII key byte under COLLATE "C"
+
+
+def _progress_id(source: str, key: str) -> str:
+    if not isinstance(source, str) or not source or "|" in source:
+        raise ValueError("progress source must be a non-empty string without '|': %r"
+                         % (source,))
+    if not isinstance(key, str) or not key:
+        raise ValueError("progress key must be a non-empty string: %r" % (key,))
+    return "%s|%s" % (source, key)
+
+
+def mark_done(source: str, key: str, meta=None, *, store=None) -> None:
+    """Record that ``key`` of ``source`` is complete (replacing any earlier
+    marker). Raises ``StoreError`` if the store rejects the row."""
+    rid = _progress_id(source, key)
+    st = _store(store)
+    row = {"id": rid, "source": source, "key": key, "meta": dict(meta or {}),
+           "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+    result = st.insert(PROGRESS_TABLE, [row], conflict="replace")
+    if result.errors:
+        raise StoreError("%s %s: marker rejected: %s"
+                         % (PROGRESS_TABLE, rid, result.first_error))
+
+
+def is_done(source: str, key: str, *, store=None) -> bool:
+    return _store(store).get(PROGRESS_TABLE, _progress_id(source, key)) is not None
+
+
+def done_keys(source: str, prefix: str = "", *, store=None) -> set:
+    """Every completed key of ``source`` that starts with ``prefix``."""
+    _progress_id(source, "-")                  # validates source
+    lo = "%s|%s" % (source, prefix or "")
+    st = _store(store)
+    head = len(source) + 1
+    return {row["id"][head:] for row in st.iter(st.between(PROGRESS_TABLE, lo,
+                                                            lo + _KEY_END))}

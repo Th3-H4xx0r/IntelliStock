@@ -201,3 +201,43 @@ def test_read_available_requires_an_aware_decision_time(store):
         pit_store.read_available("TrendNewsPIT", lo_id="a", hi_id="b",
                                  decision_time=datetime(2026, 3, 2, 14, 25),
                                  store=store)
+
+
+# -- ingest completion markers (ruling R14) -------------------------------------
+
+def test_progress_table_is_registered_and_not_a_pit_table():
+    assert "TrendIngestProgress" in schema.ALL_TABLES
+    assert schema.TABLES["TrendIngestProgress"].prefix_fields == ("id",)
+    assert "TrendIngestProgress" not in pit_store.PIT_TABLES
+
+
+def test_mark_done_is_done_and_done_keys(store):
+    assert not pit_store.is_done("alfred", "PAYEMS|2022-05-29", store=store)
+    pit_store.mark_done("alfred", "PAYEMS|2022-05-29", {"rows": 3}, store=store)
+    pit_store.mark_done("alfred", "PAYEMS|2022-06-10", store=store)
+    pit_store.mark_done("alfred", "PAYEMS2|2022-05-29", store=store)
+    pit_store.mark_done("gdelt_titles", "inflation|2022-06-20", store=store)
+    pit_store.mark_done("alfred", "PAYEMS|2022-05-29", {"rows": 4}, store=store)  # replace
+    assert pit_store.is_done("alfred", "PAYEMS|2022-05-29", store=store)
+    assert pit_store.done_keys("alfred", "PAYEMS|", store=store) == {
+        "PAYEMS|2022-05-29", "PAYEMS|2022-06-10"}
+    assert pit_store.done_keys("gdelt_titles", store=store) == {"inflation|2022-06-20"}
+    row = store.get("TrendIngestProgress", "alfred|PAYEMS|2022-05-29")
+    assert row["meta"] == {"rows": 4} and row["source"] == "alfred"
+    assert "available_at" not in row and row["updated_at"].endswith("Z")
+
+
+def test_progress_rejects_bad_source_or_key(store):
+    with pytest.raises(ValueError):
+        pit_store.mark_done("al|fred", "x", store=store)
+    with pytest.raises(ValueError):
+        pit_store.mark_done("alfred", "", store=store)
+    with pytest.raises(ValueError):
+        pit_store.done_keys("", store=store)
+
+
+def test_mark_done_surfaces_a_rejected_write(store, monkeypatch):
+    monkeypatch.setattr(store, "insert", lambda table, rows, **kw: InsertResult(
+        inserted=0, replaced=0, errors=1, first_error="boom"))
+    with pytest.raises(StoreError, match="boom"):
+        pit_store.mark_done("alfred", "PAYEMS|2022-05-29", store=store)
