@@ -199,12 +199,15 @@ def test_failed_window_beats_untested():
 
 
 def test_plus5_is_percentage_points():
-    lo = date(2010, 1, 1)
+    # `lo` (a Monday session) is the close before the run; the run opens on
+    # Tuesday at that close, like the engine's first snapshot.
+    lo = date(2010, 1, 4)
     days = [lo + timedelta(days=i) for i in range(4 * 365 + 1)]
 
     def card(strategy_cagr, spy_cagr):
-        nav = [(datetime.combine(d, time(20, 0)), 100 * (1 + strategy_cagr) **
-                ((d - lo).days / 365.25)) for d in days]
+        opening = datetime.combine(days[1], time(14, 30))
+        nav = [(opening, 100.0)] + [(datetime.combine(d, time(20, 0)), 100 * (1 + strategy_cagr) **
+                                     ((d - lo).days / 365.25)) for d in days[1:]]
         spy = [(d, 100 * (1 + spy_cagr) ** ((d - lo).days / 365.25)) for d in days]
         return sc.scorecard(nav, spy, spy, cutoff=None, candidate_weeks=[])["overall"]
 
@@ -315,6 +318,73 @@ def test_failed_weeks_are_skipped_and_n_follows_holdings():
     assert all(p["n"] == 3 for p in plan)
     assert sc._week_plan([{"week_start": "2025-01-06", "status": "ok",
                            "candidates": ["aaa", "BBB"]}])[0]["n"] == 10
+    # A row without a status is not an ok row.
+    assert sc._week_plan([{"week_start": "2025-01-06", "candidates": ["AAA"]}]) == []
+
+
+def test_universe_pool_is_cumulative():
+    plan = sc._week_plan([
+        {"week_start": "2025-01-13", "status": "ok", "candidates": ["CCC", "AAA"]},
+        {"week_start": "2025-01-06", "status": "ok", "candidates": ["AAA", "BBB"]},
+        {"week_start": "2025-01-20", "status": "ok", "candidates": ["DDD"]}])
+    assert [w["seen"] for w in plan] == [["AAA", "BBB"], ["AAA", "BBB", "CCC"],
+                                         ["AAA", "BBB", "CCC", "DDD"]]
+
+
+def test_universe_never_draws_a_name_before_it_is_named():
+    """CCC soars in weeks 1-2 but is first named in week 3: a flat strategy
+    over flat AAA/BBB ties every draw (pctile 50) only if CCC is never drawn
+    early."""
+    days = sessions(date(2024, 12, 23), date(2025, 1, 31))
+    mondays = [date(2025, 1, 6), date(2025, 1, 13), date(2025, 1, 20), date(2025, 1, 27)]
+    soar_end = date(2025, 1, 17)
+    closes = {"AAA": [(d, 100.0) for d in days], "BBB": [(d, 100.0) for d in days],
+              "CCC": [(d, 100.0 * (1.05 ** len([x for x in days if date(2025, 1, 6) <= x <= min(d, soar_end)])))
+                      for d in days]}
+    weeks = [{"week_start": m.isoformat(), "status": "ok", "n_holdings": 1,
+              "candidates": ["AAA", "BBB"] + (["CCC"] if i >= 2 else [])}
+             for i, m in enumerate(mondays)]
+    run_days = [d for d in days if d >= mondays[0]]
+    nav = nav_at_close(run_days, [100.0] * len(run_days))
+    nav = [(t, 100.0) for t, _ in nav]
+    spy = [(d, 100.0) for d in days]
+    card = sc.scorecard(nav, spy, spy, cutoff=None, candidate_weeks=weeks, closes=closes,
+                        n_random=200)["overall"]
+    assert card["random_pctile_universe"] == 50.0
+    assert card["random_pctile_candidates"] == 50.0
+
+
+def test_day_one_move_counts_for_strategy_and_spy_alike():
+    """Review reproduction: NAV and SPY both +5% on the run's first day, flat
+    after. Both are measured from the close before the first session."""
+    days = sessions(date(2023, 1, 3), date(2023, 12, 29))
+    opening = datetime.combine(days[0], time(14, 30))          # 09:30 ET
+    nav = [(opening, 100.0)] + [(datetime.combine(d, time(20, 45)), 105.0) for d in days]
+    spy = [(date(2022, 12, 30), 100.0)] + [(d, 105.0) for d in days]
+    # The one candidate moves exactly like the NAV: every draw ties.
+    closes = {"AAA": list(spy)}
+    weeks = [{"week_start": m.isoformat(), "status": "ok", "n_holdings": 1,
+              "candidates": ["AAA"]} for m in sorted({clock.week_monday(d) for d in days})]
+    card = sc.scorecard(nav, spy, spy, cutoff=None, candidate_weeks=weeks, closes=closes,
+                        n_random=50)["overall"]
+    assert card["ret"] == pytest.approx(5.0) and card["spy_ret"] == pytest.approx(5.0)
+    assert card["excess_pp"] == pytest.approx(0.0, abs=1e-6)
+    ru1 = next(w for w in card["windows"] if w["tag"] == "ru1")      # starts on day 1
+    assert ru1["ret"] == pytest.approx(5.0) and ru1["spy_ret"] == pytest.approx(5.0)
+    assert card["random_pctile_candidates"] == 50.0
+    assert card["start"] == "2023-01-03"                    # the opening point is not a session
+
+
+def test_window_without_spy_data_is_untested_not_dropped():
+    windows = [{"tag": "ru1", "kind": "bull", "beat": True},
+               {"tag": "nu1", "kind": "bull", "beat": None},
+               {"tag": "nc1", "kind": "chop", "beat": True},
+               {"tag": "rb1", "kind": "bear", "beat": True}]
+    regimes, verdict = sc._regimes(windows)
+    assert regimes == {"bull": "untested", "chop": True, "bear": True}
+    assert verdict == "untested"
+    regimes, verdict = sc._regimes(windows + [{"tag": "x", "kind": "bull", "beat": False}])
+    assert regimes["bull"] is False and verdict is False
 
 
 def test_cagr_overflow_is_none():
@@ -377,7 +447,7 @@ def test_backtest_scorecard_reads_ledger_and_bar_cache():
     assert card["meta"]["cutoff"] == "2025-02-15"
     assert card["overall"]["random_pctile_candidates"] is not None
     assert card["honest"]["start"] >= "2025-02-15"
-    assert any("price-only" in n for n in card["meta"]["notes"])
+    assert any("dividend_yields" in n for n in card["meta"]["notes"])
 
 
 def test_backtest_scorecard_bad_cutoff_is_untested():
@@ -473,9 +543,19 @@ def test_broker_scorecard_failure_logs_and_returns_error(monkeypatch):
 
 
 def test_result_site_wired():
-    source = open(_BROKER).read()
-    assert source.count("_trend_research_scorecard(") == 2       # definition + result site
-    assert "backtest_result['tr_scorecard']" in source
+    tree = ast.parse(open(_BROKER).read())
+    defs = [n for n in tree.body if isinstance(n, ast.FunctionDef)
+            and n.name == "_trend_research_scorecard"]
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Name) and n.func.id == "_trend_research_scorecard"]
+    stores = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)
+              and any(isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name)
+                      and t.value.id == "backtest_result"
+                      and isinstance(t.slice, ast.Constant) and t.slice.value == "tr_scorecard"
+                      for t in n.targets)]
+    assert len(defs) == 1 and len(calls) == 1 and len(stores) == 1
+    kw = {k.arg for k in calls[0].keywords}
+    assert {"start", "end", "fetch_bars", "key", "secret", "feed"} <= kw
 
 
 def test_fingerprint_lists_include_scorecard_files():

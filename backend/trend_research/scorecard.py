@@ -25,7 +25,8 @@ equal weight, held from the last close before the week's first session to
 the last close before the next ledger week's (the lane holds through a
 missing or failed week, so the draw does too). ``random_pctile_candidates``
 draws from that week's candidates; ``random_pctile_universe`` from every
-candidate the run's ledger produced. A name without a close in the 7 days
+candidate named in that week or an earlier one (ruling R24: never a name the
+ledger first names later). A name without a close in the 7 days
 before the week is not drawn. The percentile is the share of random
 portfolios that end below the strategy over the same weeks (ties count half).
 Fixed seed: the same inputs give the same numbers.
@@ -59,14 +60,13 @@ _EPS = 1e-9
 _SEGMENTS = ("overall", "optimistic", "honest")
 
 NOTES = (
-    "Engine NAV is price-only (no dividends) while SPY-TR includes them: the strategy "
-    "starts about 1-2%/yr behind.",
+    "Engine NAV accrues dividends only for symbols listed in dividend_yields (default "
+    "0) while SPY-TR includes all of them: the strategy starts about 1-2%/yr behind.",
     "Before research_model_cutoff the model may remember outcomes; only the honest "
     "period judges the edge.",
     "Random baselines use split-adjusted daily closes from the SwingDailyBars cache, "
     "week close to week close, equal weight, no costs.",
-    "The universe baseline pools every name the ledger produced in the run, including "
-    "names it first named later.",
+    "The universe baseline draws each week from every candidate named up to that week.",
     "Survivorship: delisted names may lack bars and are then not drawn.",
 )
 
@@ -106,9 +106,15 @@ def _positive(value):
 
 
 class _Series:
-    """One value per day, oldest first (the last point of a day wins)."""
+    """One value per day, oldest first (the last point of a day wins).
 
-    def __init__(self, points):
+    ``opening=True`` (the NAV path) keeps the run's earliest point -- the
+    opening NAV, before the first session's move -- as an extra point dated
+    the previous NYSE session, so the strategy, SPY and every name are all
+    measured from the close before the first session. ``first_session`` is
+    the first real day either way."""
+
+    def __init__(self, points, *, opening: bool = False):
         by_day = {}
         keyed = []
         for i, point in enumerate(points or ()):
@@ -123,6 +129,11 @@ class _Series:
         keyed.sort(key=lambda k: k[:3])
         for d, _at, _i, v in keyed:
             by_day[d] = v
+        self.first_session = min(by_day) if by_day else None
+        if opening and keyed:
+            prior = (_sessions_near(self.first_session - timedelta(days=1), forward=False)
+                     or self.first_session - timedelta(days=1))
+            by_day[prior] = keyed[0][3]
         self.days = sorted(by_day)
         self.vals = [by_day[d] for d in self.days]
 
@@ -222,8 +233,13 @@ def _score_windows(windows, nav, spy, lo, hi):
 def _regimes(windows):
     regimes = {}
     for kind in regime_windows.SCORED_KINDS:
-        beats = [w["beat"] for w in windows if w["kind"] == kind and w["beat"] is not None]
-        regimes[kind] = "untested" if not beats else all(beats)
+        beats = [w["beat"] for w in windows if w["kind"] == kind]
+        if any(b is False for b in beats):
+            regimes[kind] = False
+        elif not beats or any(b is None for b in beats):
+            regimes[kind] = "untested"          # no window, or one without SPY data
+        else:
+            regimes[kind] = True
     if any(w["beat"] is False for w in windows):
         verdict = False
     elif any(v == "untested" for v in regimes.values()):
@@ -244,10 +260,12 @@ def _symbol(item):
 
 def _week_plan(candidate_weeks) -> list:
     """The ``ok`` ledger weeks, oldest first, one per Monday:
-    ``[{"week_start", "monday", "symbols", "n"}]``."""
+    ``[{"week_start", "monday", "symbols", "seen", "n"}]``. ``seen`` is every
+    candidate named in this or an earlier ok week (the universe pool, R24).
+    A row without ``status: "ok"`` is skipped."""
     by_monday = {}
     for row in candidate_weeks or ():
-        if not isinstance(row, dict) or row.get("status", "ok") != "ok":
+        if not isinstance(row, dict) or row.get("status") != "ok":
             continue
         try:
             monday = date.fromisoformat(str(row.get("week_start"))[:10])
@@ -266,7 +284,11 @@ def _week_plan(candidate_weeks) -> list:
             n = len(held) or DEFAULT_HOLDINGS
         by_monday[monday] = {"week_start": monday.isoformat(), "monday": monday,
                              "symbols": symbols, "n": n}
-    return [by_monday[m] for m in sorted(by_monday)]
+    plan, seen = [by_monday[m] for m in sorted(by_monday)], set()
+    for week in plan:
+        seen.update(week["symbols"])
+        week["seen"] = sorted(seen)
+    return plan
 
 
 def _periods(plan, in_segment, lo, hi):
@@ -313,7 +335,7 @@ def _random_pctiles(periods, nav, closes, universe, n_random, seed, segment):
     for pool_name in ("candidates", "universe"):
         pools = []
         for week, rets in steps:
-            names = week["symbols"] if pool_name == "candidates" else universe
+            names = week["symbols"] if pool_name == "candidates" else week["seen"]
             pool = [rets[s] for s in names if s in rets]
             pools.append((pool, min(week["n"], len(pool))))
         if not any(k for _, k in pools):
@@ -364,7 +386,7 @@ def _roll12(nav, spy, base, end):
 
 
 def _segment(name, in_segment, nav, spy, qqq, windows, plan, closes, universe, n_random, seed):
-    days = [d for d in nav.days if in_segment(d)]
+    days = [d for d in nav.days if d >= nav.first_session and in_segment(d)] if nav else []
     if not days:
         return _untested()
     lo, hi = days[0], days[-1]
@@ -416,7 +438,7 @@ def scorecard(nav, spy_tr, qqq, *, cutoff, candidate_weeks, n_random: int = 1000
     ``cutoff``: the model's research cutoff (date), or None. ``candidate_weeks``:
     the run's ledger rows. ``closes``: ``{symbol: [(date, close)]}`` daily closes
     for the random baselines; without them both percentiles are None."""
-    nav_s, spy_s, qqq_s = _Series(nav), _Series(spy_tr), _Series(qqq)
+    nav_s, spy_s, qqq_s = _Series(nav, opening=True), _Series(spy_tr), _Series(qqq)
     cutoff = _as_date(cutoff) if cutoff not in (None, "") else None
     windows = _all_windows(spy_s) if spy_s else []
     plan = _week_plan(candidate_weeks)
