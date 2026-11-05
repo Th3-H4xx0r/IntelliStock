@@ -1176,7 +1176,9 @@ _CODE_FINGERPRINT_FILES = (
     "trend_research/market_tape.py",
     "trend_research/pit_store.py",
     "trend_research/prompts.py",
+    "trend_research/regime_windows.py",
     "trend_research/schemas.py",
+    "trend_research/scorecard.py",
 )
 _CODE_FINGERPRINT_CACHE: "dict[str, str] | None" = None
 

@@ -117,7 +117,9 @@ FILES = (
     "backend/trend_research/market_tape.py",
     "backend/trend_research/pit_store.py",
     "backend/trend_research/prompts.py",
+    "backend/trend_research/regime_windows.py",
     "backend/trend_research/schemas.py",
+    "backend/trend_research/scorecard.py",
 )
 
 

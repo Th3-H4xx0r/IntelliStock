@@ -4825,6 +4825,75 @@ def _trend_research_universe_symbols(cached_strategies, start=None, end=None):
     return out
 
 
+def _trend_research_scorecard(cached_strategies, snapshots, *, start, end, fetch_bars,
+                              key, secret, feed):
+    """The TR scorecard (`trend_research.scorecard`) for a finished backtest,
+    or None when the document has no enabled strategy_trend_research lane.
+
+    SPY and QQQ come through `fetch_bars` with adjustment="all" -- the same
+    total-return daily fetch `_fetch_adjusted_spy_benchmark` makes. Never
+    raises: the result dict this feeds IS the persisted backtest, so a failure
+    is logged and returned as {"error": ...} rather than costing the run.
+    """
+    try:
+        specs = [spec for spec in (cached_strategies or [])
+                 if isinstance(spec, dict)
+                 and str(spec.get("strategy") or "").strip().lower()
+                 in {"strategy_trend_research", "strategytrendresearch"}
+                 and _truthy(_merged_strategy_settings(spec).get(
+                     "strategy_trend_research_enabled", False))]
+    except Exception:
+        return None
+    if not specs:
+        return None
+    try:
+        from strategies.strategy_trend_research import DEFAULTS as _TR_DEFAULTS
+        from trend_research import scorecard as _tr_scorecard_mod
+
+        if len(specs) > 1:
+            _log("[strategy_trend_research] scorecard: more than one enabled lane; "
+                 "scoring the first", "yellow")
+        cfg = {**_TR_DEFAULTS, **_merged_strategy_settings(specs[0])}
+
+        from datetime import date as _tr_date, datetime as _tr_datetime
+
+        def _whole_day(d, last):
+            # fetch_bars parses str / datetime only; a bare date reads as "no
+            # range" and silently returns {}.
+            if isinstance(d, _tr_datetime) or not isinstance(d, _tr_date):
+                return d
+            return _tr_datetime(d.year, d.month, d.day, *((23, 59, 59) if last else (0, 0, 0)))
+
+        def _benchmark_bars(symbols, lo, hi):
+            return fetch_bars(list(symbols), _whole_day(lo, False), _whole_day(hi, True),
+                              key=key, secret=secret, timeframe="1Day", db_conn=None,
+                              feed=feed, adjustment="all")
+
+        card = _tr_scorecard_mod.backtest_scorecard(cfg, snapshots, start=start, end=end,
+                                                    benchmark_bars=_benchmark_bars)
+        try:
+            _log("[strategy_trend_research] scorecard: "
+                 + "; ".join(f"{seg} pass={(card.get(seg) or {}).get('pass')} "
+                             f"cagr={(card.get(seg) or {}).get('cagr')} "
+                             f"spy={(card.get(seg) or {}).get('spy_cagr')}"
+                             for seg in ("honest", "optimistic", "overall")),
+                 "cyan")
+        except Exception:
+            pass
+        return card
+    except Exception as _tr_exc:
+        msg = f"{type(_tr_exc).__name__}: {_tr_exc}"
+        for _secret in (key, secret):
+            if _secret and len(str(_secret)) >= 4:
+                msg = msg.replace(str(_secret), "***")
+        try:
+            _log(f"[strategy_trend_research] scorecard failed ({msg}); the backtest "
+                 "result is kept without it", "red")
+        except Exception:
+            pass
+        return {"error": msg}
+
+
 def _strategy_x_prepare(data, prices, current_time, cached_strategies,
                         key=None, secret=None):
     """Make strategy_x's own symbols priceable this bar.
@@ -16499,6 +16568,17 @@ while not shutdown_requested:
                                     backtest_result[_benchmark_field] = (
                                         _bt_summary[_benchmark_field]
                                     )
+                            # 2026-11-05 TR: the honest/optimistic regime
+                            # scorecard, only for a document with an enabled
+                            # strategy_trend_research lane. The helper never
+                            # raises (a failure is {"error": ...}).
+                            _tr_card = _trend_research_scorecard(
+                                _cached_strategies, snapshots,
+                                start=backtest_start_date, end=backtest_end_date,
+                                fetch_bars=fetch_alpaca_historical_bars,
+                                key=key, secret=secret, feed=data_feed)
+                            if _tr_card is not None:
+                                backtest_result['tr_scorecard'] = _tr_card
 
                             # Update existing row if we have id, else insert.
                             # Fail the write closed if any secret material slipped
