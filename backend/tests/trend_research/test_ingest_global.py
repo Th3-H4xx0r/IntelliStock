@@ -372,6 +372,16 @@ def test_articles_start_limits_titles_not_timelines(store):
     assert [c["params"]["enddatetime"] for c in calls_of(http, "artlist")] == ["20220621130000"]
 
 
+def test_timelines_false_fetches_titles_only(store):
+    clock = FakeClock()
+    http = FakeGdelt(clock, volume={D2: 1}, tone={D2: 0.0})
+    run_gdelt(store, http, clock, D2, D2, timelines=False)
+    assert calls_of(http, "timelinevolraw") == [] and calls_of(http, "timelinetone") == []
+    assert calls_of(http, "artlist")
+    assert theme_rows(store) == []
+    assert pit_store.is_done("gdelt_titles", "inflation|2022-06-20", store=store)
+
+
 def test_unknown_theme_and_inverted_range_rejected(store):
     clock = FakeClock()
     with pytest.raises(ValueError):

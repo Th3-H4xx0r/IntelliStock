@@ -20,8 +20,23 @@ the same kind and params again. A ``queued`` or ``running`` job whose
 container is gone (OOM, redeploy, host restart) is reported -- and stored --
 as ``failed`` with an error starting ``lost``; that frees its kind.
 
-Stop. ``stop`` stops the container and marks the row ``stopped``; the
-runner also checks the row between chunks and exits on ``stopped``.
+Stop. ``stop`` stops the container, then marks the row ``stopped`` if it is
+still queued or running (a job that finished meanwhile keeps its state). If
+the container cannot be stopped the row keeps its state, with the failure in
+``error``, so the kind stays locked. The runner also checks the row between
+chunks and exits on ``stopped``.
+
+Pacing. Each ingest's client paces its own requests, but a fresh client per
+chunk would send its first request unpaced; the runners therefore share one
+pacing ``http_get`` per job (GDELT 15 s, ALFRED 1 s, Alpaca 190/min), so the
+source's interval holds across chunk boundaries. EDGAR's throttle is already
+process-wide.
+
+LLM providers. The ledger build supports what ``trend_research.llm``
+supports: ``claude-cli`` (the host's subscription login, mounted read-only)
+and API-key providers (``anthropic``, key from the Models row). The job
+container does not mount ``codex_auth``, so codex-cli models are not
+available to a job.
 
 Secrets. Errors and log lines are redacted (``key=value`` pairs with
 credential-like names, bearer tokens, URL passwords, ``sk-`` keys, and every
@@ -38,6 +53,7 @@ import os
 import re
 import sys
 import threading
+import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Callable
 
@@ -63,6 +79,8 @@ LOG_LINE_CHARS = 300
 THEME_TITLE_WINDOW_DAYS = 91        # ~13 title weeks per progress update
 MACRO_WINDOW_DAYS = 360             # 30 twelve-day ALFRED chunks per update
 STOP_TIMEOUT_SEC = 10
+#: Progress heartbeat interval while the ledger build sleeps out a quota.
+QUOTA_HEARTBEAT_SEC = 60
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -336,20 +354,17 @@ class DockerLauncher:
             return None
 
     @staticmethod
-    def _network(client, me) -> str | None:
-        # Same rule as backtest_engine._get_network.
-        name = (os.environ.get("INSTANCE_DOCKER_NETWORK") or "").strip()
-        if name:
-            try:
-                client.networks.get(name)
-                return name
-            except Exception:
-                pass
-        if me is None:
-            return None
-        networks = (me.attrs.get("NetworkSettings") or {}).get("Networks") or {}
-        names = [n for n in networks if n != "bridge"]
-        return names[0] if names else (next(iter(networks), None))
+    def _network(client) -> str:
+        """The network backtest containers get (``backtest_engine._get_network``:
+        INSTANCE_DOCKER_NETWORK if it exists, else this container's own);
+        RuntimeError when none can be determined -- a guessed network would
+        leave the job unable to reach Postgres."""
+        from engines.backtest_engine import _get_network
+        network = _get_network(client)
+        if not network:
+            raise RuntimeError("no Docker network for the job container: set "
+                               "INSTANCE_DOCKER_NETWORK to the network the api service is on")
+        return network
 
     @staticmethod
     def _claude_volumes(me) -> dict:
@@ -376,6 +391,7 @@ class DockerLauncher:
                  or (me.attrs.get("Image") if me is not None else None)
                  or "intellistock-backend")
         name = container_name(job_id)
+        network = self._network(client)
         try:
             old = client.containers.get(name)
         except Exception:
@@ -390,7 +406,7 @@ class DockerLauncher:
             command=["python3", "-m", "trend_research.jobs", "run", job_id],
             name=name,
             environment=_container_env(),
-            network=self._network(client, me),
+            network=network,
             volumes=volumes,
             labels={"intellistock.tr_job": job_id},
             detach=True,
@@ -532,14 +548,18 @@ def stop(job_id: str, *, store=None, launcher=None, now=None) -> dict:
     row = _get(st, job_id)
     if row.get("state") not in ACTIVE_STATES:
         return _public(row)
-    # Mark first: a runner between chunks then exits on its own even if the
-    # container stop below fails.
-    st.update(TABLE, job_id, {"state": "stopped", "finished_at": _iso((now or _utcnow)())})
     try:
         _launcher(launcher).stop(job_id)
     except Exception as exc:
-        log.warning("TR job %s: container stop failed: %s", job_id, redact(exc))
-        st.update(TABLE, job_id, {"error": redact("container stop failed: %s" % exc)})
+        # The job may still be running: keep its state (and the kind's lock).
+        error = redact("stop failed, job may still be running: %s: %s"
+                       % (type(exc).__name__, exc))
+        log.warning("TR job %s: %s", job_id, error)
+        if _get(st, job_id).get("state") in ACTIVE_STATES:
+            st.update(TABLE, job_id, {"error": error})
+        return _public(_get(st, job_id))
+    if _get(st, job_id).get("state") in ACTIVE_STATES:     # it may have finished meanwhile
+        st.update(TABLE, job_id, {"state": "stopped", "finished_at": _iso((now or _utcnow)())})
     return _public(_get(st, job_id))
 
 
@@ -569,10 +589,14 @@ class _TailHandler(logging.Handler):
 class Job:
     """What a runner sees: its params, progress writes and the stop check."""
 
-    def __init__(self, st, job_id: str, now: Callable[[], datetime]):
+    def __init__(self, st, job_id: str, now: Callable[[], datetime], *,
+                 sleep: Callable[[float], None] = time.sleep,
+                 clock: Callable[[], float] = time.monotonic):
         self.st = st
         self.id = job_id
         self.now = now
+        self.sleep = sleep
+        self.clock = clock
         self.secrets: set = set()
         self.tail = _TailHandler(self)
 
@@ -597,6 +621,24 @@ class Job:
         self.st.update(TABLE, self.id, {"progress": clean})
 
 
+def paced_http_get(http_get: Callable, interval: float, *, sleep: Callable[[float], None],
+                   clock: Callable[[], float]) -> Callable:
+    """``http_get`` with request starts at least ``interval`` seconds apart
+    across every call that shares it."""
+    lock = threading.Lock()
+    last = [None]
+
+    def get(url, **kw):
+        with lock:
+            if last[0] is not None:
+                wait = last[0] + interval - clock()
+                if wait > 0:
+                    sleep(wait)
+            last[0] = clock()
+        return http_get(url, **kw)
+    return get
+
+
 def _d(value: str) -> date:
     return date.fromisoformat(value)
 
@@ -611,15 +653,18 @@ def _windows(start: date, end: date, days: int):
 
 def _run_news(params: dict, job: Job) -> None:
     from trend_research import ingest_alpaca_news as news
-    key, secret = news.resolve_paper_credentials(params["instance"])
+    key, secret = news.resolve_paper_credentials(params["instance"], store=job.st)
     job.add_secrets(key, secret)
+    http_get = paced_http_get(news._default_http_get, news.MIN_REQUEST_INTERVAL,
+                              sleep=job.sleep, clock=job.clock)
     start, end = _d(params["start"]), _d(params["end"])
     total = (end - start).days + 1
     written = 0
     for i in range(total):
         job.check_stop()
         d = start + timedelta(days=i)
-        written += news.backfill_news(d, d, key=key, secret=secret)
+        written += news.backfill_news(d, d, key=key, secret=secret, http_get=http_get,
+                                      sleep=job.sleep, clock=job.clock, store=job.st)
         job.step(phase="days", done=i + 1, total=total, current=d.isoformat(),
                  rows_written=written)
 
@@ -633,18 +678,22 @@ def _run_themes(params: dict, job: Job) -> None:
         windows = list(_windows(_d(params["articles_start"] or params["start"]), end,
                                 THEME_TITLE_WINDOW_DAYS))
     total = len(themes) * (1 + len(windows))
+    http_get = paced_http_get(gd._default_http_get, gd.MIN_REQUEST_INTERVAL,
+                              sleep=job.sleep, clock=job.clock)
+    pace = {"http_get": http_get, "sleep": job.sleep, "clock": job.clock, "store": job.st}
     done = written = 0
     for theme in themes:
         job.check_stop()
-        written += gd.backfill_themes(start, end, themes=[theme], articles=False)
+        written += gd.backfill_themes(start, end, themes=[theme], articles=False, **pace)
         done += 1
         job.step(phase="timelines", done=done, total=total, current=theme,
                  rows_written=written)
     for theme in themes:
         for lo, hi in windows:
             job.check_stop()
+            # timelines were fetched for the whole range above
             written += gd.backfill_themes(lo, hi, themes=[theme], articles=True,
-                                          articles_start=lo)
+                                          articles_start=lo, timelines=False, **pace)
             done += 1
             job.step(phase="titles", done=done, total=total,
                      current="%s %s..%s" % (theme, lo, hi), rows_written=written)
@@ -654,11 +703,14 @@ def _run_macro(params: dict, job: Job) -> None:
     from trend_research import ingest_macro as macro
     windows = list(_windows(_d(params["start"]), _d(params["end"]), MACRO_WINDOW_DAYS))
     total = len(params["series"]) * len(windows)
+    http_get = paced_http_get(macro._default_http_get, macro.MIN_REQUEST_INTERVAL,
+                              sleep=job.sleep, clock=job.clock)
     done = written = 0
     for series in params["series"]:
         for lo, hi in windows:
             job.check_stop()
-            written += macro.backfill_macro(lo, hi, series=(series,))
+            written += macro.backfill_macro(lo, hi, series=(series,), http_get=http_get,
+                                            sleep=job.sleep, clock=job.clock, store=job.st)
             done += 1
             job.step(phase="series", done=done, total=total,
                      current="%s %s..%s" % (series, lo, hi), rows_written=written)
@@ -700,7 +752,7 @@ def _run_filings(params: dict, job: Job) -> None:
     for i, sym in enumerate(symbols):
         job.check_stop()
         try:
-            written += filings.fetch_filings(sym, start, end)
+            written += filings.fetch_filings(sym, start, end, store=job.st)
         except filings.FilingsFetchError as exc:
             log.error("TR job filings %s failed: %s", sym, redact(exc, job.secrets))
             failed.append(sym)
@@ -729,13 +781,27 @@ def _run_ledger(params: dict, job: Job) -> None:
               "built_failed": 0, "skipped_ok": 0, "not_yet_due": 0, "quota_waits": 0,
               "calls_used": 0, "stopped": None}
     job.step(phase="weeks", done=0, total=len(mondays), ledger=totals)
+
+    def quota_sleep(seconds):
+        # The builder sleeps out a quota here; keep updated_at moving (and
+        # honour a stop) instead of going silent for up to hours.
+        until = _iso(job.now() + timedelta(seconds=seconds))
+        remaining = float(seconds)
+        while remaining > 0:
+            job.check_stop()
+            job.step(phase="quota_wait", quota_wait_until=until)
+            chunk = min(float(QUOTA_HEARTBEAT_SEC), remaining)
+            job.sleep(chunk)
+            remaining -= chunk
+        job.step(phase="weeks", quota_wait_until=None)
+
     for i, monday in enumerate(mondays):
         job.check_stop()
         s = bl.build(params["chain_id"], monday, monday, provider=m["provider"],
                      model=m["model"], api_key=m["api_key"], max_calls=params["max_calls"],
                      prompt_version=params["prompt_version"],
                      provider_config=m["provider_config"], caller=caller,
-                     bars_instance=params["instance"])
+                     sleep=quota_sleep, store=job.st, bars_instance=params["instance"])
         for k in ("built_ok", "built_failed", "skipped_ok", "not_yet_due", "quota_waits",
                   "calls_used"):
             totals[k] += int(s.get(k) or 0)
@@ -753,7 +819,7 @@ RUNNERS = {"ingest_news": _run_news, "ingest_themes": _run_themes,
            "build_ledger": _run_ledger}
 
 
-def run(job_id: str, *, store=None, runners=None, now=None) -> str:
+def run(job_id: str, *, store=None, runners=None, now=None, sleep=None, clock=None) -> str:
     """Run a recorded job in this process and return its final state. A job
     already done, failed or stopped is left alone."""
     st = _store(store)
@@ -768,7 +834,7 @@ def run(job_id: str, *, store=None, runners=None, now=None) -> str:
                                   "error": "no runner for kind %r" % row.get("kind")})
         return "failed"
     st.update(TABLE, job_id, {"state": "running", "started_at": _iso(now()), "error": None})
-    job = Job(st, job_id, now)
+    job = Job(st, job_id, now, sleep=sleep or time.sleep, clock=clock or time.monotonic)
     tr_log = logging.getLogger("trend_research")
     tr_log.addHandler(job.tail)
     try:

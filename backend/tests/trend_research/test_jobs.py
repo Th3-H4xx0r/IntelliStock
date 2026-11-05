@@ -279,9 +279,9 @@ def test_news_runner_uses_paper_credentials_day_by_day(st, launcher, monkeypatch
     from trend_research import ingest_alpaca_news as news
     calls = []
     monkeypatch.setattr(news, "resolve_paper_credentials",
-                        lambda instance: ("PKPAPER999", "papersecret999"))
+                        lambda instance, **kw: ("PKPAPER999", "papersecret999"))
     monkeypatch.setattr(news, "backfill_news",
-                        lambda s, e, *, key, secret: calls.append((s, e, key, secret)) or 7)
+                        lambda s, e, *, key, secret, **kw: calls.append((s, e, key, secret)) or 7)
     job_id = submit(st, launcher, kind="ingest_news",
                     params={"start": "2025-08-04", "end": "2025-08-06"})
     assert jobs.run(job_id, store=st, now=_clock()) == "done"
@@ -337,7 +337,8 @@ def test_filings_ledger_symbols_come_from_the_chain_rows(st, launcher, monkeypat
     ])
     seen = []
 
-    def fake_fetch(sym, start, end):
+    def fake_fetch(sym, start, end, **kw):
+        assert kw["store"] is st
         seen.append(sym)
         if sym == "AMD":
             raise filings.FilingsFetchError("EDGAR 403")
@@ -357,17 +358,118 @@ def test_themes_runner_does_timelines_then_title_windows(st, launcher, monkeypat
     from trend_research import ingest_gdelt as gd
     calls = []
     monkeypatch.setattr(gd, "backfill_themes", lambda s, e, **kw: calls.append(
-        (s, e, tuple(kw["themes"]), kw["articles"], kw.get("articles_start"))) or 1)
+        (s, e, tuple(kw["themes"]), kw["articles"], kw.get("articles_start"),
+         kw.get("timelines", True))) or 1)
     theme = gd.THEMES[0]
     job_id = submit(st, launcher, kind="ingest_themes", params={
         "start": "2025-01-01", "end": "2025-08-10", "articles_start": "2025-05-01",
         "themes": [theme]})
     assert jobs.run(job_id, store=st, now=_clock()) == "done"
-    assert calls[0] == (date(2025, 1, 1), date(2025, 8, 10), (theme,), False, None)
+    assert calls[0] == (date(2025, 1, 1), date(2025, 8, 10), (theme,), False, None, True)
     titles = calls[1:]
-    assert titles and all(c[3] for c in titles)
+    assert titles and all(c[3] and c[5] is False for c in titles)   # no timeline re-fetch
     assert titles[0][0] == date(2025, 5, 1) and titles[-1][1] == date(2025, 8, 10)
     assert all(c[0] == c[4] for c in titles)
+
+
+class FakeClock:
+    def __init__(self):
+        self.t = 1000.0
+        self.sleeps = []
+
+    def clock(self):
+        return self.t
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.t += seconds
+
+
+def test_gdelt_pacing_holds_across_chunk_calls(st, launcher):
+    from trend_research import ingest_gdelt as gd
+
+    class Resp:
+        status_code, text, headers = 200, "{}", {}
+
+    clock = FakeClock()
+    starts = []
+
+    def http_get(url, **kw):
+        starts.append(clock.t)
+        return Resp()
+
+    gd_default = gd._default_http_get
+    gd._default_http_get = http_get
+    try:
+        job_id = submit(st, launcher, kind="ingest_themes", params={
+            "start": "2025-01-01", "end": "2025-06-30", "themes": [gd.THEMES[0]]})
+        assert jobs.run(job_id, store=st, now=_clock(), sleep=clock.sleep,
+                        clock=clock.clock) == "done"
+    finally:
+        gd._default_http_get = gd_default
+    p = jobs.status(job_id, store=st, launcher=launcher)["progress"]
+    assert p["total"] >= 3                        # timelines + at least two title windows
+    assert len(starts) > 10
+    gaps = [b - a for a, b in zip(starts, starts[1:])]
+    assert min(gaps) >= gd.MIN_REQUEST_INTERVAL, gaps
+
+
+def test_quota_wait_writes_a_heartbeat(st, launcher, monkeypatch):
+    from trend_research import build_ledger as bl
+    monkeypatch.setattr(bl, "resolve_model_row", lambda model_id: {
+        "provider": "claude-cli", "model": "claude-x", "api_key": None,
+        "provider_config": None})
+    clock = FakeClock()
+    during = []
+
+    def fake_sleep(seconds):
+        row = st.get(jobs.TABLE, job_id)
+        during.append((row["progress"]["phase"], row["progress"]["quota_wait_until"],
+                       row["progress"]["updated_at"]))
+        clock.sleep(seconds)
+
+    def fake_build(chain_id, start, end, **kw):
+        if start == date(2025, 8, 4):
+            kw["sleep"](150)                    # the builder sleeping out a quota
+        return {"built_ok": 1, "calls_used": 1, "stopped": None}
+
+    monkeypatch.setattr(bl, "build", fake_build)
+    job_id = submit(st, launcher, kind="build_ledger", params={
+        "chain_id": "honest-x", "model_id": "m1", "start": "2025-08-04", "end": "2025-08-11"})
+    assert jobs.run(job_id, store=st, now=_clock(), sleep=fake_sleep,
+                    clock=clock.clock) == "done"
+    assert clock.sleeps == [60.0, 60.0, 30.0]
+    assert all(phase == "quota_wait" and until for phase, until, _ in during)
+    stamps = [u for _, _, u in during]
+    assert stamps == sorted(set(stamps))         # updated_at advances on every beat
+    p = jobs.status(job_id, store=st, launcher=launcher)["progress"]
+    assert p["phase"] == "weeks" and p["quota_wait_until"] is None and p["done"] == 2
+
+
+def test_stop_after_the_job_finished_keeps_its_state(st):
+    class FinishingLauncher(FakeLauncher):
+        def stop(self, job_id):            # the runner finishes while we stop it
+            super().stop(job_id)
+            st.update(jobs.TABLE, job_id, {"state": "done", "finished_at": "2026-11-05T12:00:09Z"})
+
+    launcher = FinishingLauncher()
+    job_id = submit(st, launcher)
+    s = jobs.stop(job_id, store=st, launcher=launcher)
+    assert s["state"] == "done" and s["finished_at"] == "2026-11-05T12:00:09Z"
+
+
+def test_failed_container_stop_keeps_the_job_running_and_locked(st, launcher):
+    job_id = submit(st, launcher)
+    st.update(jobs.TABLE, job_id, {"state": "running"})
+
+    class Broken(FakeLauncher):
+        def stop(self, job_id):
+            raise RuntimeError("docker daemon unreachable")
+
+    s = jobs.stop(job_id, store=st, launcher=Broken())
+    assert s["state"] == "running" and "stop failed" in s["error"]
+    with pytest.raises(jobs.JobConflict):
+        submit(st, launcher)
 
 
 # -- the docker launcher ---------------------------------------------------------------
@@ -432,6 +534,25 @@ def test_docker_launcher_runs_a_detached_auto_removed_job_container(monkeypatch)
     # what the job row records carries no environment
     assert "fernet-key-value" not in repr(info)
     assert launcher.is_alive("tr-job|2026-11-05T12:00:00.000001Z|build_ledger") is False
+
+
+def test_docker_launcher_uses_the_configured_network(monkeypatch):
+    monkeypatch.setenv("INSTANCE_DOCKER_NETWORK", "intellistockv4_default")
+    monkeypatch.setenv("HOSTNAME", "self-container")
+    fake = _FakeDocker()
+    jobs.DockerLauncher(client_factory=lambda: fake).launch("tr-job|n|ingest_macro")
+    (_, kw), = fake.containers.runs
+    assert kw["network"] == "intellistockv4_default"
+
+
+def test_docker_launcher_refuses_without_a_network(monkeypatch, st):
+    monkeypatch.delenv("INSTANCE_DOCKER_NETWORK", raising=False)
+    monkeypatch.setenv("HOSTNAME", "not-a-container")     # this process is not in Docker
+    fake = _FakeDocker()
+    launcher = jobs.DockerLauncher(client_factory=lambda: fake)
+    with pytest.raises(jobs.JobLaunchError, match="INSTANCE_DOCKER_NETWORK"):
+        jobs.submit("ingest_macro", dict(DATES), store=st, launcher=launcher, now=_clock())
+    assert fake.containers.runs == []
 
 
 # -- routes -----------------------------------------------------------------------------

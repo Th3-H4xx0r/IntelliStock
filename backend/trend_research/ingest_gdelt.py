@@ -469,12 +469,12 @@ def _store(store):
 def backfill_themes(start: date, end: date, *, themes=THEMES, http_get=None,
                     sleep=time.sleep, clock=time.monotonic, now=None,
                     articles: bool = True, articles_start: date | None = None,
-                    store=None) -> int:
+                    timelines: bool = True, store=None) -> int:
     """Backfill theme-day timelines for every calendar year touching
-    ``start..end`` and, with ``articles``, weekly titles for the weeks whose
-    window overlaps ``articles_start`` (default ``start``) ``..end``; return
-    rows written to both tables. Anything not complete at ``now`` is left for
-    a later run."""
+    ``start..end`` (unless ``timelines`` is False) and, with ``articles``,
+    weekly titles for the weeks whose window overlaps ``articles_start``
+    (default ``start``) ``..end``; return rows written to both tables.
+    Anything not complete at ``now`` is left for a later run."""
     if not isinstance(start, date) or not isinstance(end, date):
         raise ValueError("start and end must be dates")
     if end < start:
@@ -492,8 +492,9 @@ def backfill_themes(start: date, end: date, *, themes=THEMES, http_get=None,
     client = _Client(http_get or _default_http_get, sleep, clock)
     total = 0
     years = list(range(start.year, end.year + 1))
-    for theme in themes:
-        total += _backfill_timelines(client, st, theme, years, now)
+    if timelines:
+        for theme in themes:
+            total += _backfill_timelines(client, st, theme, years, now)
     if articles:
         weeks = _title_weeks(articles_start or start, end, now)
         total += _backfill_titles(client, st, themes, weeks)
