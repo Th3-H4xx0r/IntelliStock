@@ -128,8 +128,8 @@ operator).
 ### 7.1 Point-in-time data store (new)
 One store for everything the research reads, keyed by `published_at` and `available_at` (availability is what gates
 use). Backfilled once for 2020-07 → present, appended weekly afterwards. Reuse the PIT primitives already in the repo
-(`point_in_time_data.filter_available`, the adapter rules in `backend/ticker_research.py`,
-spec `2026-08-05-ticker-research-pipeline-design.md`).
+(the adapter rules in `backend/ticker_research.py`,
+spec `2026-08-05-ticker-research-pipeline-design.md`). Do NOT use `point_in_time_data.filter_available` for gating: it admits records at `as_of` (`<=`); TR gates strictly (`<`).
 
 | Source | Use | Notes from recon |
 |---|---|---|
