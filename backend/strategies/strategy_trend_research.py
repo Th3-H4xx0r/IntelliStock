@@ -26,7 +26,6 @@ the book: no new buys, no liquidation; the daily stop still runs.
 
 Spec: docs/superpowers/specs/2026-11-05-deep-research-trend-picker-design.md §7.3
 """
-import bisect
 import math
 import os
 import sys
@@ -96,11 +95,8 @@ _SWEEP_MIN_PCT = 0.01
 _TAIL_BARS = 400
 _MAX_REASON_LINES = 40
 
-#: Parsed timestamps per bar list (logging-free memo, module level because the
-#: engine serialises the strategy cache on every bar). Keyed by the list's id
-#: and length; the engine's bar lists only ever grow.
-_TS_MEMO: dict = {}
-_TS_MEMO_MAX = 4096
+#: The regular session's close, ET: no order is placed outside 09:30-16:00.
+_CLOSE_ET = dtime(16, 0)
 #: The disabled-lane notice, once per process per instance.
 _DISABLED_LOGGED: set = set()
 _ET = clock.NY
@@ -156,37 +152,43 @@ def _bars_for(data, symbol):
     return entry or []
 
 
-def _epochs(bars) -> list:
-    """Sorted epoch seconds of `bars`, or None when they are not in time
-    order (then the caller reads them whole)."""
-    key = (id(bars), len(bars))
-    hit = _TS_MEMO.get(key)
-    if hit is not None and hit[0] is bars:
-        return hit[1]
-    out = []
-    for bar in bars:
-        ts = _as_utc((bar or {}).get("t") or (bar or {}).get("timestamp")
-                     or (bar or {}).get("date")) if isinstance(bar, dict) else None
-        out.append(ts.timestamp() if ts is not None else float("nan"))
-    if any(e != e for e in out) or any(b < a for a, b in zip(out, out[1:])):
-        out = None
-    if len(_TS_MEMO) >= _TS_MEMO_MAX:
-        _TS_MEMO.clear()
-    _TS_MEMO[key] = (bars, out)
-    return out
+def _bar_ts(bar):
+    if not isinstance(bar, dict):
+        return None
+    return _as_utc(bar.get("t") or bar.get("timestamp") or bar.get("date"))
 
 
 def _visible(bars, current_time):
-    """The tail of `bars` stamped at or before `current_time` -- a superset of
-    what `pit_daily_observations` admits, so cutting first changes nothing
-    but the cost."""
+    """The last `_TAIL_BARS` bars stamped at or before `current_time` -- a
+    superset of what `pit_daily_observations` admits, so cutting first
+    changes nothing but the cost. Nothing is memoised: the engine hands a
+    fresh, causal list per symbol per tick
+    (backtest_price_history.get_price_history_up_to_current), so the common
+    case is O(1) -- the last bar is already at or before now -- and a list
+    that runs past now (a test, or a full-window dict) is bisected with
+    O(log n) timestamp parses. A list whose stamps do not parse, or are out
+    of order, is handed over whole and `pit_daily_observations` cuts it."""
     if not bars:
         return []
-    eps = _epochs(bars)
-    if eps is None:
+    cutoff = current_time.timestamp()
+    last = _bar_ts(bars[-1])
+    if last is not None and last.timestamp() <= cutoff:
+        return bars[-_TAIL_BARS:]
+    lo, hi = 0, len(bars)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        ts = _bar_ts(bars[mid])
+        if ts is None:
+            return bars
+        if ts.timestamp() <= cutoff:
+            lo = mid + 1
+        else:
+            hi = mid
+    tail = bars[max(0, lo - _TAIL_BARS):lo]
+    stamps = [_bar_ts(b) for b in tail]
+    if any(s is None for s in stamps) or any(b < a for a, b in zip(stamps, stamps[1:])):
         return bars
-    i = bisect.bisect_right(eps, current_time.timestamp())
-    return bars[max(0, i - _TAIL_BARS):i]
+    return tail
 
 
 def _prior_closes(data, symbol, session, current_time) -> list:
@@ -342,6 +344,11 @@ class StrategyTrendResearch:
         # carries the previous session's prices and must decide nothing.
         if not clock.is_trading_day(date.fromisoformat(session)):
             return {}
+        # Orders, the stop check and the weekly decision run only inside the
+        # regular session: a pre-open or after-hours tick places nothing.
+        ny_time = now.astimezone(_ET).time()
+        if ny_time < _DECISION_ET or ny_time >= _CLOSE_ET:
+            return {}
         try:
             return self._tick(prices, now, session, cfg, data, portfolio_emulator, cache)
         except Exception as exc:
@@ -397,9 +404,7 @@ class StrategyTrendResearch:
                 cache[_TARGETS_KEY] = dict(targets)
 
         monday = week_monday(session)
-        ny_now = now.astimezone(_ET)
-        if (cache.get(_LAST_WEEK_KEY) != monday
-                and ny_now.time() >= _DECISION_ET):
+        if cache.get(_LAST_WEEK_KEY) != monday:
             out = self._weekly(cache, cfg, data, emu, now, session, monday, positions,
                                held, eff, nav, owned)
             if out is not None:
@@ -408,6 +413,12 @@ class StrategyTrendResearch:
             targets = dict(targets) if isinstance(targets, dict) else None
 
         if targets is None:
+            orphans = sorted(s for s, q in positions.items() if q > 0)
+            if orphans:
+                _log_once(cache, "no-targets", "run",
+                          f"StrategyTrendResearch {session} | no standing target book while "
+                          f"{', '.join(orphans)} are held -- nothing is bought or sold until "
+                          "a ledger week is applied", "yellow")
             return {}
         return self._maintain(cache, cfg, emu, session, monday, positions, held, eff, nav,
                               owned, targets)
@@ -445,6 +456,54 @@ class StrategyTrendResearch:
                              f"{peaks[s]:.2f}" for s in hits)
                  + " -- to BIL until the next weekly decision", "yellow")
         return hits
+
+    @staticmethod
+    def _let_winners_run(weights, held, cfg, reasons) -> dict:
+        """No profit-taking (spec 5.7, C4): a kept holding's target is
+        ``min(max(book target, current weight), max_single_weight)``, so a
+        winner is trimmed only above the single-name cap. Leveraged plus
+        inverse names still fit ``max_levered_inverse_weight`` together (C3).
+        The room the winners take comes out of BIL first, then out of the
+        part of other names' targets that would be NEW money (never below
+        what those names already hold), so nothing else is trimmed to pay
+        for a winner."""
+        cap = _num(cfg.get("max_single_weight"), book.DEFAULTS["max_single_weight"])
+        lev_cap = _num(cfg.get("max_levered_inverse_weight"),
+                       book.DEFAULTS["max_levered_inverse_weight"])
+        out = dict(weights)
+        raised = {}
+        for s in sorted(out):
+            if s == BIL or s not in held:
+                continue
+            new = min(max(out[s], held[s]), cap)
+            if new > out[s] + 1e-12:
+                raised[s] = (out[s], new)
+                out[s] = new
+        if not raised:
+            return weights
+        lev = [s for s in out if s in book.LEVERAGED_ETFS or s in book.INVERSE_ETFS]
+        lev_total = sum(out[s] for s in lev)
+        if lev_total > lev_cap + 1e-12:
+            k = lev_cap / lev_total
+            for s in lev:
+                out[s] *= k
+        names = [s for s in out if s != BIL]
+        if sum(out[s] for s in names) > 1.0 + 1e-12:
+            fixed = sum(out[s] for s in names if s in raised)
+            others = [s for s in names if s not in raised]
+            base = {s: min(out[s], held.get(s, 0.0)) for s in others}
+            extra = {s: out[s] - base[s] for s in others}
+            room = 1.0 - fixed - sum(base.values())
+            total = sum(extra.values())
+            k = max(0.0, min(1.0, room / total)) if total > 0 else 0.0
+            for s in others:
+                out[s] = base[s] + extra[s] * k
+        out = {s: w for s, w in out.items() if s == BIL or w > 0}
+        out[BIL] = max(0.0, 1.0 - sum(w for s, w in out.items() if s != BIL))
+        reasons.append("let winners run (no profit-taking): " + ", ".join(
+            "%s %.1f%% -> %.1f%%" % (s, 100 * a, 100 * out.get(s, 0.0))
+            for s, (a, _b) in sorted(raised.items())))
+        return out
 
     @staticmethod
     def _drop_to_bil(targets, names) -> dict:
@@ -503,6 +562,7 @@ class StrategyTrendResearch:
 
         weights, reasons = book.target_book(row, held=held_for_book, has_bars=has_bars,
                                             cfg=cfg)
+        weights = self._let_winners_run(weights, held_for_book, cfg, reasons)
         if blocked:
             weights = self._drop_to_bil(weights, blocked)
             reasons.append("blocked until next week (stopped today): " + ", ".join(blocked))
@@ -555,7 +615,7 @@ class StrategyTrendResearch:
             decisions[s] = -1
             sizes[s] = {"sell_fraction": 1.0}
         if waiting:
-            _log_once(cache, "exit-unpriced:" + ",".join(waiting), session,
+            _log_once(cache, "exit-unpriced", session + ":" + ",".join(waiting),
                       f"StrategyTrendResearch {session} | exit of {', '.join(waiting)} waits: "
                       "no price this tick; retried next tick", "yellow")
         if decisions:

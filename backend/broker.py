@@ -4791,21 +4791,32 @@ def _trend_research_universe_symbols(cached_strategies, start=None, end=None):
     `_LANE_ENABLE_FLAGS` (it refuses live ticks).
     """
     try:
+        specs = [spec for spec in (cached_strategies or [])
+                 if isinstance(spec, dict)
+                 and str(spec.get("strategy") or "").strip().lower()
+                 in {"strategy_trend_research", "strategytrendresearch"}
+                 and _truthy(_merged_strategy_settings(spec).get(
+                     "strategy_trend_research_enabled", False))]
+    except Exception:
+        return []
+    if not specs:
+        return []
+    try:
         from strategies.strategy_trend_research import (
             DEFAULTS as _TR_DEFAULTS, trend_research_universe)
-    except Exception:
+    except Exception as _tr_exc:
+        # Loud, and only for a document that enabled the lane: the run would
+        # otherwise fetch no bars for its picks and sit in cash in silence.
+        try:
+            _log(f"[strategy_trend_research] universe unavailable, lane module "
+                 f"import failed: {type(_tr_exc).__name__}: {_tr_exc}", "red")
+        except Exception:
+            pass
         return []
     out = []
     try:
-        for spec in (cached_strategies or []):
-            if not isinstance(spec, dict):
-                continue
-            name = str(spec.get("strategy") or "").strip().lower()
-            if name not in {"strategy_trend_research", "strategytrendresearch"}:
-                continue
+        for spec in specs:
             merged = {**_TR_DEFAULTS, **_merged_strategy_settings(spec)}
-            if not _truthy(merged.get("strategy_trend_research_enabled", False)):
-                continue
             for sym in trend_research_universe(merged, start=start, end=end):
                 if sym and sym not in out:
                     out.append(sym)

@@ -99,6 +99,25 @@ FILES = (
     "backend/db/schema.py",
     "backend/notification_types.py",
     "backend/interactive_utils.py",
+    # 2026-11-05 TR (deep-research trend picker): the engine lane and the
+    # package it replays and builds the ledger with.
+    "backend/strategies/strategy_trend_research.py",
+    "backend/trend_research/__init__.py",
+    "backend/trend_research/book.py",
+    "backend/trend_research/build_ledger.py",
+    "backend/trend_research/calendar_data.py",
+    "backend/trend_research/digest.py",
+    "backend/trend_research/filings.py",
+    "backend/trend_research/ingest_alpaca_news.py",
+    "backend/trend_research/ingest_gdelt.py",
+    "backend/trend_research/ingest_macro.py",
+    "backend/trend_research/jobs.py",
+    "backend/trend_research/ledger.py",
+    "backend/trend_research/llm.py",
+    "backend/trend_research/market_tape.py",
+    "backend/trend_research/pit_store.py",
+    "backend/trend_research/prompts.py",
+    "backend/trend_research/schemas.py",
 )
 
 

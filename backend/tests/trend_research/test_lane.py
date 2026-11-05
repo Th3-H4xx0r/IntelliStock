@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import os
 import sys
+import zlib
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -27,6 +28,11 @@ from swing_trader import clock  # noqa: E402
 from trend_research import book, ledger  # noqa: E402
 
 ET = ZoneInfo("America/New_York")
+
+
+def read(path):
+    with open(path) as fh:
+        return fh.read()
 CHAIN, MODEL, PV = "honest", "claude-test", "tr-v1"
 NAMES = ("AAA", "BBB", "CCC", "DDD", "EEE", "FFF", "GGG", "HHH")
 CFG = {"strategy_trend_research_enabled": True, "tr_chain_id": CHAIN, "tr_model": MODEL,
@@ -153,7 +159,15 @@ def logs(monkeypatch):
     return lines
 
 
-def drive(data, ticks, *, cfg=CFG, emu=None, cache=None, strat=None, prices=True):
+def causal_view(data, t):
+    """What the engine hands a tick: a FRESH list per symbol holding only the
+    bars stamped at or before it (backtest_price_history)."""
+    stamp = t.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {s: [b for b in bars if b["t"] <= stamp] for s, bars in data.items()}
+
+
+def drive(data, ticks, *, cfg=CFG, emu=None, cache=None, strat=None, prices=True,
+          causal=False):
     """Run the lane over `ticks`; returns [(tick, payload)] and the emulator."""
     emu = emu or FakeEmu()
     cache = {} if cache is None else cache
@@ -162,7 +176,8 @@ def drive(data, ticks, *, cfg=CFG, emu=None, cache=None, strat=None, prices=True
     for t in ticks:
         px = prices_at(data, t)
         emu.fill(px)
-        payload = strat.run_once([], px if prices else {}, t, dict(cfg), {}, data=data,
+        seen = causal_view(data, t) if causal else data
+        payload = strat.run_once([], px if prices else {}, t, dict(cfg), {}, data=seen,
                                  portfolio_emulator=emu, strategy_cache=cache,
                                  time_increment="900", mode="backtest")
         emu.submit(payload)
@@ -189,7 +204,7 @@ EVEN = [(s, 0.11) for s in NAMES]
 
 
 def test_schema_header_declares_the_lane_and_its_defaults():
-    meta, desc = _parse_header_meta(open(lane.__file__).read())
+    meta, desc = _parse_header_meta(read(lane.__file__))
     assert meta["strategy"] == "strategy_trend_research"
     assert meta["execution_scope"] == "run_once" and meta["decision_phase"] == "pre"
     cfg = meta["config"]
@@ -379,7 +394,7 @@ def test_a_held_name_without_bars_is_sold_when_its_price_returns(st, logs):
 
 def test_replay_deterministic(st, logs):
     def price(s, d, i):
-        return 100.0 + (hash((s, d.isoformat(), i)) % 7) - (15.0 if s == "BBB" and
+        return 100.0 + (zlib.crc32(f"{s}|{d}|{i}".encode()) % 7) - (15.0 if s == "BBB" and
                                                            d >= date(2025, 8, 13) else 0.0)
     data = make_bars(NAMES + ("BIL", "III"), date(2025, 7, 1), date(2025, 8, 29), price)
     put_row(st, W1, EVEN)
@@ -480,7 +495,7 @@ _BROKER = os.path.join(_backend, "broker.py")
 
 def _broker_fn(name):
     """AST-extract a broker function (broker.py argparses at import)."""
-    tree = ast.parse(open(_BROKER).read())
+    tree = ast.parse(read(_BROKER))
     keep = {name, "_truthy", "_merged_strategy_settings"}
     nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in keep]
     assert {n.name for n in nodes} == keep
@@ -502,10 +517,119 @@ def test_broker_helper_declares_the_universe_only_when_enabled(st):
 
 
 def test_fetch_site_wired_and_lane_not_registered_live():
-    source = open(_BROKER).read()
+    source = read(_BROKER)
     assert source.count("_trend_research_universe_symbols(") == 2   # definition + fetch site
     tree = ast.parse(source)
     flags = next(ast.literal_eval(n.value) for n in tree.body if isinstance(n, ast.Assign)
                  and any(isinstance(t, ast.Name) and t.id == "_LANE_ENABLE_FLAGS"
                          for t in n.targets))
     assert not any("trend_research" in k or "trendresearch" in k for k in flags)
+
+
+# -- fix round 1 -------------------------------------------------------------------------
+
+
+def _module_containers():
+    return {k: len(v) for k, v in vars(lane).items()
+            if isinstance(v, (dict, set, list)) and not k.startswith("__")
+            and k not in ("DEFAULTS", "_DISABLED_LOGGED")}
+
+
+def test_fresh_causal_lists_per_tick_match_and_leave_no_memo(st, logs):
+    """The engine hands a fresh list per symbol per tick; the lane must give
+    the same decisions as on one long list and keep nothing per list."""
+    def price(s, d, i):
+        return 100.0 + (zlib.crc32(f"{s}|{d}|{i}".encode()) % 5)
+    data = make_bars(NAMES + ("BIL",), date(2025, 7, 1), date(2025, 8, 22), price)
+    put_row(st, W1, EVEN)
+    put_row(st, W2, EVEN)
+    ticks = week_ticks(W1, W2 + timedelta(days=1))
+    before = _module_containers()
+    fresh, _, _ = drive(data, ticks, causal=True)
+    after = _module_containers()
+    whole, _, _ = drive(data, ticks)
+    assert [p for _, p in fresh] == [p for _, p in whole]
+    assert after == before
+
+
+def test_no_profit_taking_winners_run_to_the_single_cap(st, logs):
+    """AAA doubles in W1: W2's research keeps it at 11%, but the lane keeps
+    AAA's current ~20% (no trim). In the quadrupled case it is above 25% and
+    is trimmed to the cap, never below."""
+    for mult, trimmed in ((2.0, False), (4.0, True)):
+        logs.clear()
+        st.__init__()
+        def price(s, d, i, mult=mult):
+            return 100.0 * mult if (s == "AAA" and d >= date(2025, 8, 13)) else 100.0
+        data = make_bars(NAMES + ("BIL",), date(2025, 7, 1), date(2025, 8, 22), price)
+        put_row(st, W1, EVEN)
+        put_row(st, W2, EVEN)
+        _, emu, cache = drive(data, week_ticks(W1, W1 + timedelta(days=4)))
+        qty = emu.pos["AAA"]
+        out, emu, cache = drive(data, ticks_of(W2)[:3], emu=emu, cache=cache)
+        nav = emu.get_portfolio_value(prices_at(data, ticks_of(W2)[2]))
+        weight = emu.pos["AAA"] * 100.0 * mult / nav
+        if trimmed:
+            assert "AAA" in sells(out[0][1])
+            assert cache["_tr_targets"]["AAA"] == pytest.approx(0.25)
+            assert weight == pytest.approx(0.25, abs=0.01)
+        else:
+            assert all("AAA" not in sells(p) for _, p in out)
+            assert emu.pos["AAA"] == pytest.approx(qty)
+            assert cache["_tr_targets"]["AAA"] > 0.19
+        assert abs(sum(cache["_tr_targets"].values()) - 1.0) < 1e-9
+        assert any("let winners run" in line for line in logs)
+
+
+def test_orders_and_stops_only_inside_the_regular_session(st, logs):
+    def price(s, d, i):
+        if s == "AAA" and d >= date(2025, 8, 13):
+            return 70.0
+        return 100.0
+    data = make_bars(NAMES + ("BIL",), date(2025, 7, 1), date(2025, 8, 22), price)
+    put_row(st, W1, EVEN)
+    ny = lambda d, hh, mm: datetime.combine(d, time(hh, mm), tzinfo=ET).astimezone(
+        timezone.utc)
+    mon_pre = [ny(W1, 4, 0), ny(W1, 9, 0), ny(W1, 9, 29)]
+    out, emu, cache = drive(data, mon_pre + ticks_of(W1)[:2])
+    assert all(p == {} for _, p in out[:3])
+    assert buys(out[3][1])                                  # the decision, at 09:30
+    thu = date(2025, 8, 14)
+    ticks = ([t for d in (date(2025, 8, 12), date(2025, 8, 13)) for t in ticks_of(d)]
+             + [ny(date(2025, 8, 13), 16, 0), ny(date(2025, 8, 13), 18, 30),
+                ny(thu, 8, 0), ny(thu, 9, 15)] + ticks_of(thu)[:2])
+    out, emu, cache = drive(data, ticks, emu=emu, cache=cache)
+    outside = [p for t, p in out if not (time(9, 30) <= t.astimezone(ET).time() < time(16))]
+    assert len(outside) == 4 and all(p == {} for p in outside)
+    stop = [t for t, p in out if "AAA" in sells(p)]
+    assert stop == [ticks_of(thu)[0]]
+
+
+def test_no_ledger_row_at_all_holds(st, logs):
+    data = make_bars(NAMES + ("BIL",), date(2025, 7, 1), date(2025, 8, 15))
+    out, emu, cache = drive(data, ticks_of(W1)[:4])
+    assert all(p == {} for _, p in out) and emu.pos == {}
+    assert cache["_tr_last_week"] == "2025-08-11" and "_tr_targets" not in cache
+    assert sum("newest ok row: none" in line for line in logs) == 1
+
+
+def test_positions_without_a_target_book_are_logged_once(st, logs):
+    data = make_bars(NAMES + ("BIL",), date(2025, 7, 1), date(2025, 8, 15))
+    emu = FakeEmu()
+    emu.pos = {"AAA": 3.0}
+    out, _, _ = drive(data, ticks_of(W1)[:4], emu=emu)
+    assert all(p == {} for _, p in out) and emu.pos == {"AAA": 3.0}
+    assert sum("no standing target book while AAA" in line for line in logs) == 1
+
+
+def test_broker_helper_logs_a_failed_lane_import(monkeypatch):
+    fn = _broker_fn("_trend_research_universe_symbols")
+    seen = []
+    fn.__globals__["_log"] = lambda msg, *a, **k: seen.append(msg)
+    monkeypatch.setitem(sys.modules, "strategies.strategy_trend_research", None)
+    spec = {"strategy": "strategy_trend_research", "config": dict(CFG)}
+    assert fn([spec]) == []
+    assert len(seen) == 1 and "import failed" in seen[0]
+    seen.clear()
+    assert fn([{"strategy": "strategy_eb", "config": {"strategy_eb_enabled": True}}]) == []
+    assert seen == []                                       # other documents stay quiet

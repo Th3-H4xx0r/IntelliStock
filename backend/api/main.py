@@ -1157,6 +1157,26 @@ _CODE_FINGERPRINT_FILES = (
     "db/schema.py",
     "notification_types.py",
     "interactive_utils.py",
+    # 2026-11-05 TR (deep-research trend picker): the engine lane and the
+    # package it replays and builds the ledger with. Must match
+    # scripts/check_deployed_code.py up to the backend/ prefix.
+    "strategies/strategy_trend_research.py",
+    "trend_research/__init__.py",
+    "trend_research/book.py",
+    "trend_research/build_ledger.py",
+    "trend_research/calendar_data.py",
+    "trend_research/digest.py",
+    "trend_research/filings.py",
+    "trend_research/ingest_alpaca_news.py",
+    "trend_research/ingest_gdelt.py",
+    "trend_research/ingest_macro.py",
+    "trend_research/jobs.py",
+    "trend_research/ledger.py",
+    "trend_research/llm.py",
+    "trend_research/market_tape.py",
+    "trend_research/pit_store.py",
+    "trend_research/prompts.py",
+    "trend_research/schemas.py",
 )
 _CODE_FINGERPRINT_CACHE: "dict[str, str] | None" = None
 
