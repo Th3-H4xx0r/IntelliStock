@@ -346,7 +346,7 @@ def test_put_rows_failure_propagates(store, monkeypatch):
         run(store, FakeHttp(pages_of([article(1, created=stamp(1))])))
 
 
-# -- resume (ruling R10: the newest stored day is refetched whole) ---------------
+# -- resume (ruling R10b: per day, whole-day refetch) --------------------------
 
 def alpaca_row(source_id, published, available=None):
     available = available or published
@@ -356,8 +356,8 @@ def alpaca_row(source_id, published, available=None):
 
 
 def test_resume_from_latest_stored(store):
-    # Days before the newest stored day are complete; that day restarts at
-    # 00:00Z (no mid-day frontier); later days are fetched normally.
+    # 03-01 and its next day both hold articles: complete, skipped. 03-02
+    # has no successor rows, so it restarts at 00:00Z (no mid-day frontier).
     ian.put_rows("TrendNewsPIT", [alpaca_row("1", "2026-03-01T15:00:00Z"),
                                   alpaca_row("2", "2026-03-02T11:00:00Z")], store=store)
     http = FakeHttp([])
@@ -406,15 +406,51 @@ def test_resume_ignores_other_sources(store):
 
 
 def test_resume_day_is_the_published_day_not_the_edit_day(store):
-    # Published late on 03-02, edited into 03-03: the interrupted day was
-    # 03-02 (or earlier), never 03-03, so 03-02 is refetched.
+    # Published late on 03-02, edited into 03-03: it counts for 03-02, not
+    # 03-03, so 03-01 (no rows) and 03-02 (next day empty) are refetched.
     ian.put_rows("TrendNewsPIT", [
+        alpaca_row("1", "2026-03-01T15:00:00Z"),
         alpaca_row("5", "2026-03-02T23:50:00Z", available="2026-03-03T01:00:00Z"),
     ], store=store)
     http = FakeHttp([])
     run(store, http, start=date(2026, 3, 1), end=date(2026, 3, 3))
     assert [c["params"]["start"] for c in http.calls] == [
         "2026-03-02T00:00:00Z", "2026-03-03T00:00:00Z"]
+
+
+def test_a_narrow_run_does_not_make_a_wider_run_skip_history(store):
+    # Smoke run over the last days first, then the full range: every earlier
+    # day must still be fetched (the R10 newest-day rule skipped them all).
+    smoke = [FakeResponse(200, {"news": [article(100 + k,
+                                                 created="2026-03-%02dT15:00:00Z" % dd)],
+                                "next_page_token": None})
+             for k, dd in enumerate((4, 5))]
+    run(store, FakeHttp(smoke), start=date(2026, 3, 4), end=date(2026, 3, 5))
+
+    http = FakeHttp([])
+    run(store, http, start=date(2026, 3, 1), end=date(2026, 3, 5))
+    assert [c["params"]["start"] for c in http.calls] == [
+        "2026-03-01T00:00:00Z", "2026-03-02T00:00:00Z", "2026-03-03T00:00:00Z",
+        # 03-04 is skipped: it and 03-05 both hold articles.
+        "2026-03-05T00:00:00Z"]
+
+
+def test_last_day_of_the_range_is_always_refetched(store):
+    ian.put_rows("TrendNewsPIT", [alpaca_row("1", "2026-03-01T15:00:00Z"),
+                                  alpaca_row("2", "2026-03-02T15:00:00Z")], store=store)
+    http = FakeHttp([])
+    run(store, http, start=date(2026, 3, 1), end=date(2026, 3, 2))
+    assert [c["params"]["start"] for c in http.calls] == ["2026-03-02T00:00:00Z"]
+
+
+def test_a_gap_day_is_refetched_even_between_stored_days(store):
+    ian.put_rows("TrendNewsPIT", [alpaca_row("1", "2026-03-01T15:00:00Z"),
+                                  alpaca_row("3", "2026-03-03T15:00:00Z"),
+                                  alpaca_row("4", "2026-03-04T15:00:00Z")], store=store)
+    http = FakeHttp([])
+    run(store, http, start=date(2026, 3, 1), end=date(2026, 3, 4))
+    assert [c["params"]["start"] for c in http.calls] == [
+        "2026-03-01T00:00:00Z", "2026-03-02T00:00:00Z", "2026-03-04T00:00:00Z"]
 
 
 # -- credentials -------------------------------------------------------------------

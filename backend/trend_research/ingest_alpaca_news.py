@@ -14,11 +14,13 @@ availability, never advance it. An article whose availability cannot be
 proven (no id, missing or naive or unparseable stamps) is skipped.
 ``content`` is capped at 4000 characters and ``summary`` at 1000 (ruling R9).
 
-Resume (ruling R10): no mid-day frontier is inferred, because Alpaca's
-``asc`` order may follow ``updated_at`` rather than ``created_at``. A re-run
-finds the newest day in the range with any stored alpaca article (by
-``published_at`` date), treats the days before it as complete, and refetches
-that day in full from 00:00Z; ``put_rows`` ignores the duplicates.
+Resume (ruling R10b): no mid-day frontier is inferred, because Alpaca's
+``asc`` order may follow ``updated_at`` rather than ``created_at``. Each day
+is decided on its own, independent of any earlier run's range: day ``d`` is
+skipped only when both ``d`` and ``d + 1`` already hold stored alpaca
+articles (by ``published_at`` date) -- a run reached the next day, so ``d``
+finished. The range's last day is always refetched. Anything fetched is
+fetched whole from 00:00Z; ``put_rows`` ignores the duplicates.
 
 Credentials: only a paper brokerage's data keys (instance
 ``alpaca-paper-fwd``). The keys go in request headers and nowhere else --
@@ -243,7 +245,8 @@ def _has_stored_day(st, d: date) -> bool:
     day_lo = _day_start(d)
     day_hi = day_lo + timedelta(days=1)
     sel = st.between(TABLE, _iso(day_lo), _iso(day_hi + RESUME_EDIT_LAG))
-    for row in st.iter(sel):
+    # Small batches: the first matching row ends the scan.
+    for row in st.iter(sel, batch=50):
         if row.get("source") != SOURCE:
             continue
         published = _parse_utc(row.get("published_at"))
@@ -252,19 +255,29 @@ def _has_stored_day(st, d: date) -> bool:
     return False
 
 
-def _resume_day(st, start: date, end: date) -> date | None:
-    """The newest day in ``start..end`` with any stored alpaca article.
+def _completed_days(st, start: date, end: date) -> set:
+    """Days in ``start..end`` to skip: ``d < end`` whose day and next day
+    both hold stored alpaca articles.
 
     Every article fetched for day W has ``published_at`` (= created_at) on or
-    before W whichever field Alpaca filters and sorts on, so this day is never
-    later than the day an interrupted run was on.
+    before W, whichever field Alpaca filters and sorts on, so articles dated
+    ``d + 1`` mean a run moved past ``d`` after finishing it.
     """
-    d = end
-    while d >= start:
-        if _has_stored_day(st, d):
-            return d
-        d -= timedelta(days=1)
-    return None
+    stored = {}
+
+    def has(d):
+        if d not in stored:
+            stored[d] = _has_stored_day(st, d)
+        return stored[d]
+
+    done = set()
+    d = start
+    while d < end:
+        nxt = d + timedelta(days=1)
+        if has(d) and has(nxt):
+            done.add(d)
+        d = nxt
+    return done
 
 
 # -- backfill -----------------------------------------------------------------------
@@ -325,13 +338,15 @@ def backfill_news(start: date, end: date, *, key: str, secret: str, http_get=Non
     st = _store(store)
     client = _Client(key, secret, http_get or _default_http_get, sleep, clock)
     total = 0
+    done = _completed_days(st, start, end)
+    if done:
+        log.info("alpaca news %s..%s: %d days already complete, skipped",
+                 start, end, len(done))
     d = start
-    resume = _resume_day(st, start, end)
-    if resume is not None:
-        log.info("alpaca news: resuming at %s (newest stored day), refetched in full",
-                 resume)
-        d = resume
     while d <= end:
+        if d in done:
+            d += timedelta(days=1)
+            continue
         fetched, written, skipped, pages = _backfill_day(client, st, d)
         total += written
         log.info("alpaca news %s: %d pages, %d fetched, %d written, %d skipped",
