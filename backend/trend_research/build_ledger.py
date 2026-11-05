@@ -26,7 +26,9 @@ Failure handling (spec §7.2):
 
 * ``QuotaExhausted`` anywhere in a week: the week is discarded (nothing is
   written), the builder sleeps until ``reset_at`` + 60 s (30 min when the
-  reset time is unknown) and builds the same week again.
+  reset time is unknown) and builds the same week again -- at most
+  ``MAX_QUOTA_WAITS_PER_WEEK`` times in a row; the next hit stops the build
+  cleanly (summary ``stopped="quota_wait_cap"``), like the budget.
 * ``BudgetExceeded``: the build stops; the in-progress week is not written.
 * ``StageFailed`` twice on the scan, candidates or book stage: a
   ``status="failed"`` row records the error (the lane holds its book for
@@ -34,6 +36,18 @@ Failure handling (spec §7.2):
 
 A week whose row is already ``ok`` is skipped without a call; a ``failed``
 week is built again. Weeks whose ``as_of`` is not yet past are not built.
+
+Recommended names are the book's picks with a positive weight that have a
+research note this week (BIL, the cash remainder, never is); any other pick
+is left out with a recorded reason (``dropped``, stage ``recommended``).
+
+Chain continuity across a failed week. A week's prior state is the chain's
+newest ``ok`` row before it, so after a failed week the next week builds on
+the last ok week (two or more weeks back), and a chain whose only earlier
+rows failed starts cold. The row's ``prior_row_id`` names the row it built
+on; a gap shows as a ``prior_row_id`` older than the previous Monday. When a
+failed week is rebuilt later, weeks already built after it keep the state
+they were built on (ok rows are never rewritten).
 
 CLI (run from ``backend/``)::
 
@@ -62,6 +76,8 @@ log = logging.getLogger(__name__)
 MAX_CANDIDATES = 30
 #: Attempts per LLM stage before it counts as failed.
 STAGE_ATTEMPTS = 2
+#: Quota waits in a row for one week before the build stops.
+MAX_QUOTA_WAITS_PER_WEEK = 12
 #: Margin added after a known quota reset, and the wait when it is unknown.
 QUOTA_RESET_MARGIN_SEC = 60
 QUOTA_DEFAULT_WAIT_SEC = 30 * 60
@@ -150,17 +166,18 @@ def _scrub(text, secrets) -> str:
     return out[:ERROR_CHARS]
 
 
-def _stage(caller, stage: str, prompt: str, output_type):
+def _stage(caller, stage: str, prompt: str, output_type, secrets=()):
     """``caller.call`` with ``STAGE_ATTEMPTS`` tries on ``StageFailed``;
-    raise ``_WeekFailed`` after the last. Quota and budget errors pass."""
+    raise ``_WeekFailed`` (error text scrubbed of ``secrets``) after the
+    last. Quota and budget errors pass."""
     last = ""
     for _ in range(STAGE_ATTEMPTS):
         try:
             return caller.call(prompt, output_type,
                                max_output_tokens=llm.MAX_OUTPUT_TOKENS[stage])
         except StageFailed as exc:
-            last = str(exc)
-            log.warning("TR %s stage failed: %s", stage, last[:ERROR_CHARS])
+            last = _scrub(exc, secrets)
+            log.warning("TR %s stage failed: %s", stage, last)
     raise _WeekFailed(stage, last)
 
 
@@ -312,10 +329,10 @@ def build_week(chain_id: str, monday: date, *, caller, provider: str, model: str
     try:
         prior_trends = ((prior or {}).get("scan") or {}).get("trends") or None
         scan = _stage(caller, "scan", prompts.trend_scan_prompt(dig, prior_trends, as_of),
-                      TrendScan)
+                      TrendScan, secrets)
         cand_list = _stage(caller, "candidates",
                            prompts.candidate_prompt(scan, (prior or {}).get("recommended"),
-                                                    as_of), CandidateList)
+                                                    as_of), CandidateList, secrets)
         provenance["candidates_named"] = len(cand_list.candidates)
         provenance["prior_recommended"] = len((prior or {}).get("recommended") or ())
 
@@ -353,7 +370,7 @@ def build_week(chain_id: str, monday: date, *, caller, provider: str, model: str
                             "trend_names": e["trend_names"], "why": e["why"]})
             try:
                 note = _stage(caller, "research", prompts.research_prompt(sym, dossier, as_of),
-                              ResearchNote)
+                              ResearchNote, secrets)
             except _WeekFailed as exc:
                 _drop(dropped, e, "research", "research call failed twice: %s"
                       % _scrub(exc.error, secrets))
@@ -371,7 +388,8 @@ def build_week(chain_id: str, monday: date, *, caller, provider: str, model: str
         provenance.update({"news_items": news_items, "filings": filings_used,
                            "dossier_retries": retried})
 
-        proposal = _stage(caller, "book", prompts.book_prompt(scan, notes, as_of), BookProposal)
+        proposal = _stage(caller, "book", prompts.book_prompt(scan, notes, as_of), BookProposal,
+                          secrets)
     except _WeekFailed as exc:
         row.update({"status": "failed", "failed_stage": exc.stage,
                     "error": _scrub(exc.error, secrets) or "no structured result",
@@ -386,14 +404,21 @@ def build_week(chain_id: str, monday: date, *, caller, provider: str, model: str
     recommended, seen = [], set()
     for p in proposal.picks:
         sym = book.normalize_symbol(p.symbol)
-        if (sym is None or sym in seen or sym == book.BIL or p.target_weight <= 0
-                or not book.is_allowed_symbol(sym, is_etf=book.is_etf_symbol(sym))):
+        if sym == book.BIL or (sym is not None and sym in seen):
+            continue                        # the cash remainder; a repeated pick
+        entry = {"raw": p.symbol, "symbol": sym, "sources": ["book"]}
+        if sym is None:
+            _drop(dropped, entry, "recommended", "book pick is not a US-listed ticker")
             continue
         seen.add(sym)
+        if p.target_weight <= 0:
+            _drop(dropped, entry, "recommended", "book pick at target_weight 0")
+            continue
         n = by_note.get(sym)
-        recommended.append({"symbol": sym,
-                            "conviction": n.conviction if n is not None else p.conviction,
-                            "thesis": n.thesis if n is not None else ""})
+        if n is None:
+            _drop(dropped, entry, "recommended", "book pick has no research note this week")
+            continue
+        recommended.append({"symbol": sym, "conviction": n.conviction, "thesis": n.thesis})
     row.update({"status": "ok", "scan": _dump(scan), "candidates": kept,
                 "dropped": dropped, "notes": [_dump(n) for n in notes],
                 "book": _dump(proposal), "recommended": recommended,
@@ -436,7 +461,8 @@ def build(chain_id: str, start: date, end: date, *, provider: str, model: str,
     secrets = tuple(s for s in (api_key,) if s)
     summary = {"chain_id": chain_id, "model": model, "prompt_version": prompt_version,
                "weeks": 0, "built_ok": 0, "built_failed": 0, "skipped_ok": 0,
-               "not_yet_due": 0, "quota_waits": 0, "calls_used": 0, "stopped": None}
+               "not_yet_due": 0, "quota_waits": 0, "calls_used": 0, "stopped": None,
+               "stopped_week": None}
     calls_at_start = caller.calls_used
     try:
         for monday in _mondays(start, end):
@@ -448,18 +474,31 @@ def build(chain_id: str, start: date, end: date, *, provider: str, model: str,
             if ledger.week_as_of(monday) >= now():
                 summary["not_yet_due"] += 1
                 continue
-            while True:
+            summary["stopped_week"] = monday.isoformat()
+            waits = 0
+            row = None
+            while row is None:
                 try:
                     row = build_week(chain_id, monday, caller=caller, provider=provider,
                                      model=model, prompt_version=prompt_version, deps=deps,
                                      now=now, secrets=secrets)
-                    break
                 except QuotaExhausted as exc:
+                    if waits >= MAX_QUOTA_WAITS_PER_WEEK:
+                        summary["stopped"] = "quota_wait_cap"
+                        log.warning("TR ledger %s week %s: quota hit after %d waits in a "
+                                    "row; stopping (week not written)", chain_id, monday,
+                                    waits)
+                        break
+                    waits += 1
                     delay = quota_delay(exc.reset_at, now())
                     summary["quota_waits"] += 1
                     log.warning("TR ledger %s week %s: quota hit; week discarded, retrying "
-                                "in %.0f s", chain_id, monday, delay)
+                                "in %.0f s (wait %d of %d)", chain_id, monday, delay, waits,
+                                MAX_QUOTA_WAITS_PER_WEEK)
                     sleep(delay)
+            if row is None:
+                break
+            summary["stopped_week"] = None
             ledger.put_week(row, store=st)
             summary["built_ok" if row["status"] == "ok" else "built_failed"] += 1
             log.info("TR ledger %s week %s: %s, %d calls, %d researched, %d dropped",
@@ -524,7 +563,9 @@ def main(argv=None) -> int:
              summary["weeks"], summary["built_ok"], summary["built_failed"],
              summary["skipped_ok"], summary["not_yet_due"], summary["calls_used"],
              summary["quota_waits"],
-             "; stopped at the call budget" if summary["stopped"] == "budget" else ""))
+             {"budget": "; stopped at the call budget",
+              "quota_wait_cap": "; stopped after %d quota waits in a row"
+              % MAX_QUOTA_WAITS_PER_WEEK}.get(summary["stopped"], "")))
     return 0
 
 

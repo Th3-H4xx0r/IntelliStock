@@ -461,3 +461,75 @@ def test_cli_resolves_models_row_and_prints_counts_only(monkeypatch, capsys):
     assert seen["max_calls"] == 2000 and seen["start"] == W1
     out = capsys.readouterr().out
     assert SECRET not in out and "2 built ok, 1 failed" in out and "12 LLM calls" in out
+
+
+# -- fix round 1 ---------------------------------------------------------------------
+
+def test_stage_failure_text_is_scrubbed_in_logs(st, caplog):
+    def hook(n, stage, prompt):
+        if stage in ("scan", "research"):
+            raise StageFailed("api_key=%s rejected" % SECRET)
+
+    with caplog.at_level("DEBUG", logger="trend_research"):
+        run(st, FakeCaller(hook=hook), end=W1)
+    assert "stage failed" in caplog.text
+    assert SECRET not in caplog.text
+    r = row(st, W1)
+    assert r["status"] == "failed" and SECRET not in repr(r)
+
+
+def test_recommended_only_names_with_a_note(st):
+    caller = FakeCaller(picks=(("NVDA", 0.12), ("TLT", 0.10), ("MSFT", 0.0), ("BIL", 0.05),
+                               ("nvda", 0.05)))
+    run(st, caller, end=W1)
+    r = row(st, W1)
+    assert [x["symbol"] for x in r["recommended"]] == ["NVDA"]
+    rec = {d["symbol"]: d["reason"] for d in r["dropped"] if d["stage"] == "recommended"}
+    assert rec == {"TLT": "book pick has no research note this week",
+                   "MSFT": "book pick at target_weight 0"}
+    # The book itself is stored as the model proposed it.
+    assert [p["symbol"] for p in r["book"]["picks"]] == ["NVDA", "TLT", "MSFT", "BIL", "nvda"]
+
+
+def test_quota_wait_cap_stops_cleanly(st, caplog):
+    slept = []
+
+    def hook(n, stage, prompt):
+        raise QuotaExhausted(None, "session limit")
+
+    with caplog.at_level("WARNING", logger="trend_research"):
+        summary = run(st, FakeCaller(hook=hook), sleep=slept.append)
+    assert slept == [1800.0] * bl.MAX_QUOTA_WAITS_PER_WEEK
+    assert summary["stopped"] == "quota_wait_cap" and summary["stopped_week"] == "2025-08-04"
+    assert summary["quota_waits"] == bl.MAX_QUOTA_WAITS_PER_WEEK
+    assert row(st, W1) is None and row(st, W2) is None
+    assert "wait 12 of 12" in caplog.text
+
+
+def test_quota_wait_count_resets_per_week(st):
+    hits = {"n": 0}
+
+    def hook(n, stage, prompt):
+        # Each week's scan hits the quota 12 times before succeeding.
+        if stage == "scan" and hits["n"] < 12:
+            hits["n"] += 1
+            raise QuotaExhausted(None)
+        if stage == "book":
+            hits["n"] = 0
+
+    summary = run(st, FakeCaller(hook=hook), end=W2, sleep=lambda s: None)
+    assert summary["stopped"] is None and summary["built_ok"] == 2
+    assert summary["quota_waits"] == 24 and summary["stopped_week"] is None
+
+
+def test_prior_recommended_researched_first_even_if_not_named(st):
+    run(st, FakeCaller(), end=W1)
+    assert [x["symbol"] for x in row(st, W1)["recommended"]] == ["NVDA", "GLD"]
+    caller = FakeCaller(candidates=("AMD", "MSFT"), picks=(("AMD", 0.1),))
+    run(st, caller, start=W2, end=W2)
+    r2 = row(st, W2)
+    assert [c["symbol"] for c in r2["candidates"]] == ["NVDA", "GLD", "AMD", "MSFT"]
+    assert r2["candidates"][0]["sources"] == ["prior_recommended"]
+    researched = [_SYM_RE.search(p).group(1) for s, p in caller.prompts if s == "research"]
+    assert researched == ["NVDA", "GLD", "AMD", "MSFT"]
+    assert r2["prior_row_id"] == row(st, W1)["id"]
