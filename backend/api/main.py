@@ -3694,6 +3694,49 @@ def api_backtest_logs(backtest_id: int, conn=Depends(conn_dependency), current_u
     return _run(action_backtest_logs, conn, backtest_id)
 
 
+# --- TR (deep-research trend picker) server jobs ---
+#
+# The news/theme/macro/filings backfills and the research-ledger build run in
+# a detached tr-job-* container launched from here (trend_research/jobs.py);
+# the job id is "tr-job|<utc iso>|<kind>" (URL-encode the "|" and ":").
+
+
+class TrendResearchJobBody(BaseModel):
+    kind: str = Field(..., min_length=1)
+    params: Dict[str, Any] = Field(default_factory=dict)
+
+
+@app.post("/trend-research/jobs", response_class=JSONResponse)
+def api_tr_job_submit(body: TrendResearchJobBody, current_user: dict = Depends(get_current_user)):
+    from trend_research import jobs as tr_jobs
+    try:
+        return {"id": tr_jobs.submit(body.kind, body.params)}
+    except tr_jobs.JobConflict as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except tr_jobs.JobLaunchError as e:
+        raise HTTPException(status_code=503, detail={"id": e.job_id, "error": str(e)})
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/trend-research/jobs/{job_id}", response_class=JSONResponse)
+def api_tr_job_status(job_id: str, current_user: dict = Depends(get_current_user)):
+    from trend_research import jobs as tr_jobs
+    try:
+        return tr_jobs.status(job_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="TR job not found")
+
+
+@app.post("/trend-research/jobs/{job_id}/stop", response_class=JSONResponse)
+def api_tr_job_stop(job_id: str, current_user: dict = Depends(get_current_user)):
+    from trend_research import jobs as tr_jobs
+    try:
+        return tr_jobs.stop(job_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="TR job not found")
+
+
 # --- Nexus graph builds (history + log files) ---
 #
 # ROUTE-ORDER GUARD: literal /nexus-graph-builds/latest routes MUST be declared

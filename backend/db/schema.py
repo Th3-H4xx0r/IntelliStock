@@ -118,7 +118,8 @@ ALL_TABLES: tuple = (
     "SwingDailyBars", "SwingIndexMembership", "SwingIvSnapshots", "SwingMacroDaily",
     "SwingSectorMap", "SwingSignals", "SwingWheelScans",
     "TickerDayFeatures", "TrendFilingsPIT", "TrendIngestProgress", "TrendMacroPIT",
-    "TrendNewsPIT", "TrendResearchLedger", "TrendThemesPIT", "Users",
+    "TrendNewsPIT", "TrendResearchJobs", "TrendResearchLedger", "TrendThemesPIT",
+    "Users",
     "backtest_replay_calls", "backtest_replay_fixture_builds", "backtest_replay_fixtures",
     "backtest_replay_matrices", "backtest_replay_receipts", "h2h_history",
     "kalshi_capital_plan", "kalshi_clv_log", "kalshi_decisions", "kalshi_edge_history",
@@ -314,6 +315,10 @@ _SPECS = [
     # wider or shifted range fetches exactly the missing ones. Bookkeeping,
     # not research input: no available_at, never read by a prompt.
     TableSpec("TrendIngestProgress", prefix_fields=("id",)),
+    # TR server jobs (trend_research.jobs), id "tr-job|<utc iso>|<kind>": one
+    # row per submitted ingest or ledger build, its state and progress.
+    # Bookkeeping, never read by a prompt.
+    TableSpec("TrendResearchJobs", prefix_fields=("id",)),
     TableSpec("LiveBootAudit", indexed_fields=("instance_id",), prefix_fields=("id",)),
     # r.now() wrote a native time on these; the ported writer stores an
     # ISO-8601 string and time_fields decodes it back to a tz-aware datetime,
