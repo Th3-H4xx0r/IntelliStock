@@ -460,10 +460,9 @@ def _backfill_titles(client, st, themes: list, weeks: list) -> int:
 # -- backfill ---------------------------------------------------------------------------
 
 def _store(store):
-    if store is not None:
-        return store
-    from db import store as default_store
-    return default_store
+    # The real store gets the TR tables ensured first (pit_store.ensure_tables).
+    from trend_research import pit_store
+    return pit_store._store(store)
 
 
 def backfill_themes(start: date, end: date, *, themes=THEMES, http_get=None,

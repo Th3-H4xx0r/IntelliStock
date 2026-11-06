@@ -24,6 +24,15 @@ row, whichever field Alpaca filters on, so a run reached ``d + 1`` and ``d``
 finished. The range's last day is always refetched. Anything fetched is
 fetched whole from 00:00Z; ``put_rows`` ignores the duplicates.
 
+Completion markers. A day fetched whole after it ended gets
+``alpaca_news|YYYY-MM-DD`` in TrendIngestProgress -- so a day with no
+articles is still known to be complete -- and a marked day is always
+skipped. A day fetched while still in progress gets
+``alpaca_news_partial|YYYY-MM-DD`` with the time it was fetched through
+(meta ``through``). ``covered_through`` answers "was every article
+available before T fetched?" from these markers; the ledger builder checks
+it before a week (build_ledger's input-coverage gate).
+
 Credentials: only a paper brokerage's data keys (instance
 ``alpaca-paper-fwd``). The keys go in request headers and nowhere else --
 never in logs, errors or output.
@@ -45,16 +54,18 @@ from stock_credential_boundary import (
     linked_alpaca_brokerage_id,
     resolve_linked_alpaca_credentials,
 )
-from trend_research.pit_store import put_rows
+from trend_research.pit_store import done_keys, mark_done, put_rows
 
 __all__ = ["backfill_news", "resolve_paper_credentials", "normalize_article",
-           "main", "StoreError"]
+           "covered_through", "missing_days", "main", "StoreError"]
 
 log = logging.getLogger(__name__)
 
 NEWS_URL = "https://data.alpaca.markets/v1beta1/news"
 TABLE = "TrendNewsPIT"
 SOURCE = "alpaca"
+PROGRESS_SOURCE = "alpaca_news"
+PARTIAL_SOURCE = "alpaca_news_partial"
 PAPER_INSTANCE = "alpaca-paper-fwd"
 LIVE_INSTANCES = frozenset({"alpaca-main"})
 
@@ -258,11 +269,26 @@ def _has_stored_day(st, d: date) -> bool:
     return False
 
 
+def _marked_days(st, start: date, end: date) -> set:
+    """Days in ``start..end`` with a completion marker."""
+    keys = done_keys(PROGRESS_SOURCE, "", store=st)
+    out = set()
+    for k in keys:
+        try:
+            d = date.fromisoformat(k)
+        except ValueError:
+            continue
+        if start <= d <= end:
+            out.add(d)
+    return out
+
+
 def _completed_days(st, start: date, end: date) -> set:
-    """Days in ``start..end`` to skip: ``d < end`` where both ``d`` and
-    ``d + 1`` hold an article that only their own window could have produced
-    (see ``_has_stored_day``) -- days are fetched in order, so a run that
-    reached ``d + 1`` finished ``d``.
+    """Days in ``start..end`` to skip: every marked day (see the module
+    docstring), and -- for rows stored before markers existed -- ``d < end``
+    where both ``d`` and ``d + 1`` hold an article that only their own window
+    could have produced (see ``_has_stored_day``): days are fetched in order,
+    so a run that reached ``d + 1`` finished ``d``.
     """
     stored = {}
 
@@ -271,23 +297,46 @@ def _completed_days(st, start: date, end: date) -> set:
             stored[d] = _has_stored_day(st, d)
         return stored[d]
 
-    done = set()
+    done = _marked_days(st, start, end)
     d = start
     while d < end:
         nxt = d + timedelta(days=1)
-        if has(d) and has(nxt):
+        if d not in done and has(d) and has(nxt):
             done.add(d)
         d = nxt
     return done
 
 
+def missing_days(start: date, end: date, *, store=None) -> list:
+    """Days in ``start..end`` with no completion marker, oldest first."""
+    st = _store(store)
+    marked = _marked_days(st, start, end)
+    out, d = [], start
+    while d <= end:
+        if d not in marked:
+            out.append(d)
+        d += timedelta(days=1)
+    return out
+
+
+def covered_through(t: datetime, *, store=None) -> bool:
+    """Whether the day holding ``t`` (UTC) was fetched at least through
+    ``t``: a completion marker, or a partial one whose ``through`` >= ``t``."""
+    st = _store(store)
+    d = t.astimezone(timezone.utc).date()
+    if d in _marked_days(st, d, d):
+        return True
+    row = st.get("TrendIngestProgress", "%s|%s" % (PARTIAL_SOURCE, d.isoformat()))
+    through = _parse_utc(((row or {}).get("meta") or {}).get("through"))
+    return through is not None and through >= t
+
+
 # -- backfill -----------------------------------------------------------------------
 
 def _store(store):
-    if store is not None:
-        return store
-    from db import store as default_store
-    return default_store
+    # The real store gets the TR tables ensured first (pit_store.ensure_tables).
+    from trend_research import pit_store
+    return pit_store._store(store)
 
 
 def _backfill_day(client, st, d: date) -> tuple:
@@ -327,9 +376,14 @@ def _backfill_day(client, st, d: date) -> tuple:
 
 
 def backfill_news(start: date, end: date, *, key: str, secret: str, http_get=None,
-                  sleep=time.sleep, clock=time.monotonic, store=None) -> int:
+                  sleep=time.sleep, clock=time.monotonic, store=None, now=None,
+                  on_day=None) -> int:
     """Mirror every Alpaca news article of the UTC days ``start..end``
-    (inclusive) into TrendNewsPIT; return how many rows were written."""
+    (inclusive) into TrendNewsPIT; return how many rows were written.
+
+    ``on_day(day, rows_written_so_far, skipped)`` is called after each day,
+    fetched or skipped as complete (a job's progress and stop check; an
+    exception it raises ends the run)."""
     if not isinstance(start, date) or not isinstance(end, date):
         raise ValueError("start and end must be dates")
     if end < start:
@@ -337,21 +391,36 @@ def backfill_news(start: date, end: date, *, key: str, secret: str, http_get=Non
     if not key or not secret:
         raise ValueError("alpaca data key and secret are required")
     st = _store(store)
+    now = now or (lambda: datetime.now(timezone.utc))
     client = _Client(key, secret, http_get or _default_http_get, sleep, clock)
     total = 0
     done = _completed_days(st, start, end)
+    marked = _marked_days(st, start, end)
     if done:
         log.info("alpaca news %s..%s: %d days already complete, skipped",
                  start, end, len(done))
     d = start
     while d <= end:
         if d in done:
+            if d not in marked:
+                mark_done(PROGRESS_SOURCE, d.isoformat(), {"inferred": True}, store=st)
+            if on_day is not None:
+                on_day(d, total, True)
             d += timedelta(days=1)
             continue
+        started = now()
         fetched, written, skipped, pages = _backfill_day(client, st, d)
         total += written
+        meta = {"fetched": fetched, "written": written, "pages": pages}
+        if _day_start(d) + timedelta(days=1) <= started:
+            mark_done(PROGRESS_SOURCE, d.isoformat(), meta, store=st)
+        else:                       # the day was still running when fetched
+            mark_done(PARTIAL_SOURCE, d.isoformat(), dict(meta, through=_iso(started)),
+                      store=st)
         log.info("alpaca news %s: %d pages, %d fetched, %d written, %d skipped",
                  d, pages, fetched, written, skipped)
+        if on_day is not None:
+            on_day(d, total, False)
         d += timedelta(days=1)
     log.info("alpaca news %s..%s: %d rows written in %d requests",
              start, end, total, client.requests)

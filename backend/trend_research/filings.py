@@ -99,6 +99,9 @@ EXCERPT_CAP = 6000
 #: Index rows reach this far before ``start``, so a decision early in the
 #: range still sees the issuer's last annual/quarterly report.
 INDEX_LOOKBACK_DAYS = 400
+#: An operating filing must be accepted this many days before a decision for
+#: the symbol to count as a stock (ruling R27).
+OPERATING_FILING_WINDOW_DAYS = 400
 
 MAX_ATTEMPTS = 6
 BACKOFF_BASE = 2.0
@@ -153,10 +156,9 @@ def _check_decision_time(decision_time) -> None:
 
 
 def _store(store):
-    if store is not None:
-        return store
-    from db import store as default_store
-    return default_store
+    # The real store gets the TR tables ensured first (pit_store.ensure_tables).
+    from trend_research import pit_store
+    return pit_store._store(store)
 
 
 def _cik_for(sym: str, resolve) -> int | None:
@@ -557,26 +559,38 @@ def _cik_sic(st, cik) -> str | None:
 
 
 def has_operating_filings(symbol: str, decision_time: datetime, *, store=None) -> bool:
-    """Whether a 10-K, 10-Q, 20-F, 40-F or 6-K of ``symbol`` was accepted
-    before ``decision_time`` (ruling R7: what makes an unlisted symbol a
-    stock), by an issuer that is not a commodity pool (R7b: SIC 6221 -- GLD,
-    USO, the ProShares Trust II leveraged ETPs -- files 10-K/10-Q too).
-    Reads stored rows only; a symbol never fetched is False."""
+    """Whether a 10-K, 10-Q, 20-F, 40-F or 6-K of ``symbol`` was accepted in
+    the ``OPERATING_FILING_WINDOW_DAYS`` before ``decision_time`` (ruling R7:
+    what makes an unlisted symbol a stock), by an issuer that is not a
+    commodity pool (R7b: SIC 6221 -- GLD, USO, the ProShares Trust II
+    leveraged ETPs -- files 10-K/10-Q too).
+
+    The window (ruling R27) filters reassigned tickers: the ticker->CIK map
+    is today's, so a ticker handed to a new issuer maps to that issuer, whose
+    filings either start after the decision or -- for a long-dormant old
+    one -- end long before it. Either way there is no recent operating
+    filing and the symbol is not treated as a stock. A name acquired or
+    delisted since the decision has no CIK today and is dropped the same
+    way (a documented survivorship limit). Reads stored rows only; a symbol
+    never fetched is False."""
     _check_decision_time(decision_time)
     sym = _norm_symbol(symbol)
     if not sym:
         return False
     st = _store(store)
-    sel = st.between(TABLE, sym + "|", sym + "|" + _iso_ceil(decision_time))
+    window_start = decision_time - timedelta(days=OPERATING_FILING_WINDOW_DAYS)
+    sel = st.between(TABLE, sym + "|" + _iso(window_start),
+                     sym + "|" + _iso_ceil(decision_time))
     sic_by_cik: dict = {}
     for row in st.iter(sel, batch=50):
         if row.get("symbol") != sym or row.get("form") not in OPERATING_FORMS:
             continue
         try:
-            if parse_available_at(row.get("available_at")) >= decision_time:
-                continue
+            at = parse_available_at(row.get("available_at"))
         except ValueError:
             continue                        # unprovable availability
+        if not window_start <= at < decision_time:
+            continue
         cik = row.get("cik")
         if cik not in sic_by_cik:
             sic_by_cik[cik] = _cik_sic(st, cik)

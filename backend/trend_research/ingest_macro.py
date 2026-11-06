@@ -13,15 +13,19 @@ So every calendar day is one snapshot, and a row is written only when a
 value differs from the previous day's snapshot -- the first release, then
 each revision: ``id = "series|obs_date|vintage_date"``. Availability (ruling
 R13): release series at the vintage date 08:30 ET, the US release time;
-the daily market series (``DAILY_MARKET_SERIES``: yields, spread, OAS, oil,
-dollar), which FRED posts in the afternoon, at 18:00 ET. Stored as UTC.
+the series FRED posts in the afternoon (``AFTERNOON_SERIES``: the daily
+market series -- yields, spread, OAS, oil, dollar -- and FEDFUNDS, whose
+monthly average comes with the afternoon H.15 release, ruling R30) at
+18:00 ET. Stored as UTC.
 
 Chunks and resume (ruling R14): days are grouped into fixed 12-day chunks
 aligned to ``CHUNK_ANCHOR``, so a chunk is the same whatever range a run was
 asked for. A run fetches every chunk overlapping ``start..end`` that has no
 completion marker in TrendIngestProgress (``alfred|SERIES|chunk_start``), and
 marks a chunk only once all of its days are fetched (a chunk reaching past
-today is refetched next run). A chunk is seeded with the values stored
+today is refetched next run, and meanwhile carries
+``alfred_partial|SERIES|chunk_start`` with the last day it fetched --
+``missing_coverage`` reads both kinds of marker). A chunk is seeded with the values stored
 before it when the previous chunk is marked; otherwise its first day cannot
 be dated, and values already present that day get ``vintage_date`` = that day
 (a late stamp, never an early one) and ``vintage_exact = False``.
@@ -45,7 +49,7 @@ from zoneinfo import ZoneInfo
 
 from trend_research.pit_store import done_keys, mark_done, put_rows, read_available
 
-__all__ = ["backfill_macro", "macro_as_of", "MACRO_SERIES", "main"]
+__all__ = ["backfill_macro", "macro_as_of", "missing_coverage", "MACRO_SERIES", "main"]
 
 log = logging.getLogger(__name__)
 
@@ -56,6 +60,7 @@ ET = ZoneInfo("America/New_York")
 RELEASE_TIME_ET = dtime(8, 30)
 MARKET_TIME_ET = dtime(18, 0)
 PROGRESS_SOURCE = "alfred"
+PARTIAL_SOURCE = "alfred_partial"
 CHUNK_ANCHOR = date(2000, 1, 1)
 
 MACRO_SERIES = (
@@ -79,6 +84,9 @@ MACRO_SERIES = (
 # Posted by FRED in the afternoon of their vintage day (ruling R13).
 DAILY_MARKET_SERIES = frozenset({"DGS10", "DGS2", "T10Y2Y", "BAMLH0A0HYM2",
                                  "DCOILWTICO", "DTWEXBGS"})
+#: Stamped 18:00 ET: the daily market series, and FEDFUNDS (the monthly
+#: average is posted with the H.15 release in the afternoon, ruling R30).
+AFTERNOON_SERIES = DAILY_MARKET_SERIES | {"FEDFUNDS"}
 
 VINTAGES_PER_CALL = 12           # ALFRED drops columns past the 12th
 OBS_LOOKBACK_DAYS = 3 * 365      # revisions older than this are not tracked
@@ -99,7 +107,7 @@ def _check_series(series: str) -> None:
 
 
 def _available_at(series: str, vintage: date) -> str:
-    at = MARKET_TIME_ET if series in DAILY_MARKET_SERIES else RELEASE_TIME_ET
+    at = MARKET_TIME_ET if series in AFTERNOON_SERIES else RELEASE_TIME_ET
     local = datetime.combine(vintage, at, tzinfo=ET)
     return local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -208,10 +216,9 @@ def _parse_snapshots(text: str, series: str, days: list) -> list:
 # -- backfill ----------------------------------------------------------------------
 
 def _store(store):
-    if store is not None:
-        return store
-    from db import store as default_store
-    return default_store
+    # The real store gets the TR tables ensured first (pit_store.ensure_tables).
+    from trend_research import pit_store
+    return pit_store._store(store)
 
 
 def _chunk_start(d: date) -> date:
@@ -283,6 +290,11 @@ def _backfill_series(client, st, series: str, start: date, end: date, today: dat
                                              "rows": n_written, "seeded": seeded},
                       store=st)
             done.add(key)
+        else:
+            mark_done(PARTIAL_SOURCE, key, {"first_day": days[0].isoformat(),
+                                            "last_day": days[-1].isoformat(),
+                                            "rows": n_written, "seeded": seeded},
+                      store=st)
     log.info("alfred %s %s..%s: %d chunks, %d rows written", series, start, end,
              len(chunks), written)
     return written
@@ -313,6 +325,29 @@ def backfill_macro(start: date, end: date, *, series: tuple = MACRO_SERIES,
     log.info("alfred %s..%s: %d rows written in %d requests", start, end, total,
              client.requests)
     return total
+
+
+def missing_coverage(first_day: date, last_day: date, *, series: tuple = MACRO_SERIES,
+                     store=None) -> list:
+    """``["SERIES chunk_start", ...]`` for every 12-day chunk overlapping
+    ``first_day..last_day`` that was not fetched through ``min(chunk end,
+    last_day)`` -- neither marked complete nor partially fetched that far."""
+    st = _store(store)
+    out = []
+    for s_id in series:
+        _check_series(s_id)
+        full = done_keys(PROGRESS_SOURCE, s_id + "|", store=st)
+        c = _chunk_start(first_day)
+        while c <= last_day:
+            key = "%s|%s" % (s_id, c.isoformat())
+            need = min(c + timedelta(days=VINTAGES_PER_CALL - 1), last_day)
+            if key not in full:
+                row = st.get("TrendIngestProgress", "%s|%s" % (PARTIAL_SOURCE, key))
+                got = str(((row or {}).get("meta") or {}).get("last_day") or "")
+                if got < need.isoformat():
+                    out.append("%s %s" % (s_id, c.isoformat()))
+            c += timedelta(days=VINTAGES_PER_CALL)
+    return out
 
 
 def macro_as_of(series: str, decision_time: datetime, *, store=None) -> list:

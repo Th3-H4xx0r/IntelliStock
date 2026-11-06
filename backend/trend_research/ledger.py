@@ -38,10 +38,9 @@ _REQUIRED = ("id", "chain_id", "week_start", "as_of", "available_at", "model", "
 
 
 def _store(store):
-    if store is not None:
-        return store
-    from db import store as default_store
-    return default_store
+    # The real store gets the TR tables ensured first (pit_store.ensure_tables).
+    from trend_research import pit_store
+    return pit_store._store(store)
 
 
 def _part(name: str, value) -> str:

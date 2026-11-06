@@ -112,21 +112,34 @@ def _sma_dist(closes, k):
     return _num(closes[-1] / (sum(closes[-k:]) / k) - 1) if len(closes) >= k else None
 
 
+def _vol(closes, k):
+    """Annualized stdev of the last ``k`` daily log returns (None when short)."""
+    if len(closes) <= k:
+        return None
+    rets = [math.log(closes[i] / closes[i - 1]) for i in range(len(closes) - k, len(closes))]
+    mean = sum(rets) / k
+    return _num(math.sqrt(sum((r - mean) ** 2 for r in rets) / (k - 1) * YEAR))
+
+
 def _stats(series: list) -> dict | None:
+    # No price level (ruling R28): the bars are split-adjusted as of their
+    # fetch, so a level could reveal a later split. Returns, ratios,
+    # drawdowns and volatility are unaffected by the adjustment.
     if not series:
         return None
     closes = [c for _, c in series]
-    return {"last_session": series[-1][0], "last_close": closes[-1],
-            "sessions": len(closes),
+    return {"last_session": series[-1][0], "sessions": len(closes),
             "ret_1w": _ret(closes, WEEK), "ret_1m": _ret(closes, MONTH),
             "ret_3m": _ret(closes, QUARTER),
-            "sma50_dist": _sma_dist(closes, 50), "sma200_dist": _sma_dist(closes, 200)}
+            "sma50_dist": _sma_dist(closes, 50), "sma200_dist": _sma_dist(closes, 200),
+            "vol_3m": _vol(closes, QUARTER)}
 
 
 def market_tape(decision_time: datetime, *, bars_loader=None, store=None) -> dict:
     """``{"as_of_session", "symbols": {sym: stats | None}, "vix"}`` for
-    ``TAPE_SYMBOLS``; stats are 1w/1m/3m returns (5/21/63 sessions) and the
-    distance of the last close from SMA50/SMA200 (None when too short)."""
+    ``TAPE_SYMBOLS``; stats are 1w/1m/3m returns (5/21/63 sessions), the
+    distance of the last close from SMA50/SMA200 and the annualized 3m
+    volatility (None when too short) -- never a price level (ruling R28)."""
     session = _session(decision_time)
     loaded = _load(TAPE_SYMBOLS, session, bars_loader, store)
     symbols = {s: _stats(_closes(loaded, s, session)) for s in TAPE_SYMBOLS}
@@ -139,7 +152,8 @@ def symbol_trend_stats(symbol: str, decision_time: datetime, *, bars_loader=None
     """The tape stats for ``symbol`` plus ``high_52w_dist`` (last close over
     the highest close of the last 252 sessions, minus 1) and
     ``max_drawdown_3m`` (worst close-to-running-peak fall over the last 63
-    sessions, <= 0); None below ``MIN_SESSIONS`` sessions of bars."""
+    sessions, <= 0); None below ``MIN_SESSIONS`` sessions of bars. No price
+    level is returned (ruling R28)."""
     sym = str(symbol or "").strip().upper()
     if not sym:
         return None

@@ -503,6 +503,17 @@ def test_macro_daily_market_series_available_1800_et(store):
     assert "DGS10" in im.DAILY_MARKET_SERIES and "PAYEMS" not in im.DAILY_MARKET_SERIES
 
 
+def test_fedfunds_is_stamped_at_18_et_not_before_a_monday_decision():
+    """Ruling R30: the monthly FEDFUNDS average comes with the afternoon H.15
+    release, so a first-business-day Monday's 09:25 ET ledger decision must
+    not see it."""
+    from trend_research import ledger
+    at = im._available_at("FEDFUNDS", date(2025, 12, 1))      # a Monday, 1st business day
+    assert at == "2025-12-01T23:00:00Z"                        # 18:00 EST
+    assert datetime.fromisoformat(at.replace("Z", "+00:00")) > ledger.week_as_of(date(2025, 12, 1))
+    assert im._available_at("PAYEMS", date(2025, 12, 5)) == "2025-12-05T13:30:00Z"
+
+
 def test_macro_values_present_at_first_snapshot_are_marked_inexact(store):
     run_macro(store, {"PAYEMS": PAYEMS}, date(2022, 6, 1), date(2022, 7, 31))
     rows = macro_ids(store)
@@ -643,3 +654,23 @@ def test_calendar_shows_a_cancellation_only_once_it_was_public():
     assert "2025-10-24" not in cpi                               # new date: known 1 day ahead
     jobs = {e["date"]: e for e in oct25 if e["kind"] == "jobs"}
     assert jobs["2025-10-03"]["cancelled"] is True and jobs["2025-10-03"]["ref_month"] == "2025-09"
+
+
+# -- fix wave A3: macro coverage markers ------------------------------------------------
+
+def test_macro_coverage_reads_full_and_partial_chunk_markers(store):
+    assert im.missing_coverage(date(2022, 6, 1), date(2022, 6, 20), series=("PAYEMS",),
+                               store=store) != []
+    run_macro(store, {"PAYEMS": PAYEMS}, date(2022, 6, 1), date(2022, 6, 30))
+    assert im.missing_coverage(date(2022, 6, 1), date(2022, 6, 20), series=("PAYEMS",),
+                               store=store) == []
+    assert im.missing_coverage(date(2022, 6, 1), date(2022, 6, 20), series=("UNRATE",),
+                               store=store) != []
+    # A chunk that ran past "today" is partial: covered only through its last day.
+    today = datetime(2022, 8, 3, 12, 0, tzinfo=timezone.utc)
+    run_macro(store, {"PAYEMS": PAYEMS}, date(2022, 7, 25), date(2022, 8, 3), now=today)
+    c = im._chunk_start(date(2022, 8, 3))
+    assert pit_store.is_done(im.PARTIAL_SOURCE, "PAYEMS|%s" % c.isoformat(), store=store)
+    assert im.missing_coverage(c, date(2022, 8, 3), series=("PAYEMS",), store=store) == []
+    assert im.missing_coverage(c, date(2022, 8, 4), series=("PAYEMS",), store=store) == [
+        "PAYEMS %s" % c.isoformat()]

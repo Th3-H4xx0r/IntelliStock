@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -557,3 +557,16 @@ def test_ticker_map_failure_is_fetch_failed_not_no_cik(monkeypatch):
                                  http_get=http, sleep=lambda s: None)
     assert out["factors_status"] == "fetch_failed"
     assert set(http.calls) == {filings.TICKERS_URL}
+
+
+def test_has_operating_filings_needs_one_in_the_400_days_before_the_decision():
+    """Ruling R27: a reassigned ticker's new issuer files only after the
+    decision, a dormant one's filings are older than the window."""
+    st, _http, _n = ten_q_store()                       # accepted 2023-05-24 20:05:12Z
+    accepted = utc(2023, 5, 24, 20, 5, 13)
+    window = timedelta(days=filings.OPERATING_FILING_WINDOW_DAYS)
+    assert filings.has_operating_filings("AAPL", accepted + window - timedelta(seconds=1),
+                                         store=st)
+    assert not filings.has_operating_filings("AAPL", accepted + window + timedelta(days=1),
+                                             store=st)
+    assert not filings.has_operating_filings("AAPL", utc(2023, 5, 1), store=st)

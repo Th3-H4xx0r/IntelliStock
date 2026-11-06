@@ -28,7 +28,9 @@ Inputs, as the builder (Task 7) passes them:
 from __future__ import annotations
 
 import dataclasses
+import html
 import json
+import re
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
@@ -116,8 +118,21 @@ def _plain(obj):
     return obj
 
 
+_HTML_DROP = re.compile(r"<!--.*?-->|<(script|style|head)\b.*?</\1\s*>", re.I | re.S)
+_HTML_TAG = re.compile(r"<[^>]*>")
+
+
+def strip_html(text) -> str:
+    """``text`` with markup removed: comments, script/style blocks and tags
+    dropped, entities decoded (Alpaca's Benzinga ``content`` is HTML)."""
+    s = str(text or "")
+    if "<" in s:
+        s = _HTML_TAG.sub(" ", _HTML_DROP.sub(" ", s))
+    return html.unescape(s) if "&" in s else s
+
+
 def _clip(text, limit: int) -> str:
-    s = " ".join(str(text or "").split())
+    s = " ".join(strip_html(text).split())
     return s if len(s) <= limit else s[:limit].rstrip() + " ..."
 
 
@@ -145,7 +160,10 @@ def _section(title: str, body: str) -> str:
 def _stats_line(stats: dict | None) -> str:
     if not stats:
         return "no price history"
-    parts = ["last close %s (%s)" % (_num(stats.get("last_close")), stats.get("last_session")),
+    # Returns, ratios, drawdowns and volatility only -- never a price level
+    # (ruling R28): bars are split-adjusted as of the fetch, so a level would
+    # reveal a split that had not happened yet at the decision.
+    parts = ["as of %s" % stats.get("last_session"),
              "1w %s" % _pct(stats.get("ret_1w")), "1m %s" % _pct(stats.get("ret_1m")),
              "3m %s" % _pct(stats.get("ret_3m")),
              "vs SMA50 %s" % _pct(stats.get("sma50_dist")),
@@ -154,6 +172,8 @@ def _stats_line(stats: dict | None) -> str:
         parts.append("vs 52w high %s" % _pct(stats.get("high_52w_dist")))
     if "max_drawdown_3m" in stats:
         parts.append("3m max drawdown %s" % _pct(stats.get("max_drawdown_3m")))
+    if "vol_3m" in stats:
+        parts.append("3m volatility %s annualized" % _pct(stats.get("vol_3m")))
     return ", ".join(parts)
 
 

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import date
+from datetime import date, datetime, timezone
 
 import pytest
 
@@ -448,9 +448,9 @@ def test_spill_from_a_narrow_run_does_not_skip_an_unfetched_day(store):
 
     http = FakeHttp([])
     run(store, http, start=date(2026, 3, 1), end=date(2026, 3, 5))
+    # 03-04 and 03-05 were fetched whole after they ended: marked, skipped.
     assert [c["params"]["start"] for c in http.calls] == [
-        "2026-03-01T00:00:00Z", "2026-03-02T00:00:00Z", "2026-03-03T00:00:00Z",
-        "2026-03-05T00:00:00Z"]
+        "2026-03-01T00:00:00Z", "2026-03-02T00:00:00Z", "2026-03-03T00:00:00Z"]
 
 
 def test_a_narrow_run_does_not_make_a_wider_run_skip_history(store):
@@ -465,9 +465,8 @@ def test_a_narrow_run_does_not_make_a_wider_run_skip_history(store):
     http = FakeHttp([])
     run(store, http, start=date(2026, 3, 1), end=date(2026, 3, 5))
     assert [c["params"]["start"] for c in http.calls] == [
-        "2026-03-01T00:00:00Z", "2026-03-02T00:00:00Z", "2026-03-03T00:00:00Z",
-        # 03-04 is skipped: it and 03-05 both hold articles.
-        "2026-03-05T00:00:00Z"]
+        "2026-03-01T00:00:00Z", "2026-03-02T00:00:00Z", "2026-03-03T00:00:00Z"]
+    # 03-04 and 03-05 carry completion markers from the smoke run.
 
 
 def test_last_day_of_the_range_is_always_refetched(store):
@@ -564,3 +563,44 @@ def test_cli_resolves_paper_credentials_then_backfills(monkeypatch, capsys):
     assert "KEY-XYZ" not in out.out + out.err
     assert "SECRET-XYZ" not in out.out + out.err
     assert "3" in out.out
+
+
+# -- fix wave A: completion markers (A3 coverage, A5 resume) -----------------------
+
+def test_a_day_with_no_articles_is_marked_complete_and_skipped_next_time(store):
+    run(store, FakeHttp([]), start=date(2026, 3, 1), end=date(2026, 3, 3))
+    assert ian.missing_days(date(2026, 3, 1), date(2026, 3, 3), store=store) == []
+    http = FakeHttp([])
+    run(store, http, start=date(2026, 3, 1), end=date(2026, 3, 3))
+    assert http.calls == []
+
+
+def test_a_day_fetched_while_running_gets_a_partial_marker(store):
+    now = datetime(2026, 3, 2, 13, 0, tzinfo=timezone.utc)
+    ian.backfill_news(date(2026, 3, 1), date(2026, 3, 2), key="K-test", secret="S-test",
+                      http_get=FakeHttp([]), sleep=lambda s: None, clock=lambda: 0.0,
+                      store=store, now=lambda: now)
+    assert ian.missing_days(date(2026, 3, 1), date(2026, 3, 2), store=store) == [
+        date(2026, 3, 2)]
+    assert ian.covered_through(datetime(2026, 3, 2, 12, 59, tzinfo=timezone.utc), store=store)
+    assert not ian.covered_through(datetime(2026, 3, 2, 13, 1, tzinfo=timezone.utc),
+                                   store=store)
+    assert ian.covered_through(datetime(2026, 3, 1, 23, 0, tzinfo=timezone.utc), store=store)
+    assert not ian.covered_through(datetime(2026, 3, 3, 1, 0, tzinfo=timezone.utc), store=store)
+
+
+def test_on_day_reports_every_day_and_can_stop_the_run(store):
+    seen = []
+
+    class Stop(Exception):
+        pass
+
+    def on_day(d, written, skipped):
+        seen.append((d, skipped))
+        if d == date(2026, 3, 2):
+            raise Stop()
+    with pytest.raises(Stop):
+        ian.backfill_news(date(2026, 3, 1), date(2026, 3, 4), key="K-test", secret="S-test",
+                          http_get=FakeHttp([]), sleep=lambda s: None, clock=lambda: 0.0,
+                          store=store, on_day=on_day)
+    assert seen == [(date(2026, 3, 1), False), (date(2026, 3, 2), False)]

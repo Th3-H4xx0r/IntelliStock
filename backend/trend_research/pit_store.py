@@ -10,21 +10,54 @@ carries a strictly EARLIER ``available_at``. Keeping the first-seen content is
 what stops an after-the-fact rewrite from reaching a historical prompt.
 
 Tables are registered in ``db/schema.py``; this module never writes DDL.
+``ensure_tables`` asks the db layer to create them (CREATE ... IF NOT EXISTS,
+once per process) the first time a TR module touches the real store:
+Postgres creates no table on demand, and no boot path ensures these.
 """
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timedelta, timezone
 
 from db.errors import StoreError
 
 PIT_TABLES = ("TrendNewsPIT", "TrendThemesPIT", "TrendMacroPIT",
               "TrendFilingsPIT", "TrendResearchLedger")
+PROGRESS_TABLE = "TrendIngestProgress"
+JOBS_TABLE = "TrendResearchJobs"
+#: Every table a TR module reads or writes.
+TR_TABLES = PIT_TABLES + (PROGRESS_TABLE, JOBS_TABLE)
 
 _READ_BATCH = 2000
 _LOOKUP_CHUNK = 500
 
 
+_ENSURED = False
+_ENSURE_LOCK = threading.Lock()
+
+
+def ensure_tables(store=None) -> None:
+    """Create the TR tables (``TR_TABLES``) through ``db.schema.ensure_schema``,
+    once per process, when ``store`` is the real ``db.store`` (None means
+    it). Idempotent: the DDL is CREATE ... IF NOT EXISTS under the schema's
+    advisory lock. A test's FakeStore needs none and is left alone."""
+    global _ENSURED
+    if _ENSURED:
+        return
+    from db import store as real_store
+    if store is not None and store is not real_store:
+        return
+    with _ENSURE_LOCK:
+        if _ENSURED:
+            return
+        from db import schema
+        schema.ensure_schema(tables=list(TR_TABLES))
+        _ENSURED = True
+
+
 def _store(store):
+    """``store``, or the real ``db.store`` -- with the TR tables ensured."""
+    ensure_tables(store)
     if store is not None:
         return store
     from db import store as default_store
@@ -138,7 +171,6 @@ def read_available(table: str, *, lo_id: str, hi_id: str,
 # available_at and never reach a prompt, so they are written here directly
 # rather than through put_rows. id = "source|key".
 
-PROGRESS_TABLE = "TrendIngestProgress"
 _KEY_END = "￿"            # above every ASCII key byte under COLLATE "C"
 
 

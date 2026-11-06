@@ -161,7 +161,7 @@ def test_tape_uses_prior_sessions_only():
                           store=FakeStore())
     s = tape["symbols"]["SPY"]
     assert s["last_session"] == "2026-01-09"
-    assert s["last_close"] == pytest.approx(spy[-2]["c"])
+    assert "last_close" not in s                          # no price level (ruling R28)
     assert s["ret_1w"] == pytest.approx(spy[-2]["c"] / spy[-7]["c"] - 1, abs=1e-6)
     assert all(end < date(2026, 1, 12) for _syms, _start, end in calls)
     assert tape["symbols"]["QQQ"] is None                 # no bars for it

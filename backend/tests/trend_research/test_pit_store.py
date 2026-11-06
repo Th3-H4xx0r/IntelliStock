@@ -241,3 +241,83 @@ def test_mark_done_surfaces_a_rejected_write(store, monkeypatch):
         inserted=0, replaced=0, errors=1, first_error="boom"))
     with pytest.raises(StoreError, match="boom"):
         pit_store.mark_done("alfred", "PAYEMS|2022-05-29", store=store)
+
+
+# -- fix wave A1: the tables are ensured on the real store -----------------------------
+
+class _Ensured(Exception):
+    pass
+
+
+@pytest.fixture
+def ensure_spy(monkeypatch):
+    """``schema.ensure_schema`` recorded and short-circuited before any SQL:
+    proves the real-store code path asks for the TR tables first."""
+    calls = []
+
+    def fake_ensure_schema(*, tables=None):
+        calls.append(list(tables))
+        raise _Ensured()
+    monkeypatch.setattr(pit_store, "_ENSURED", False)
+    monkeypatch.setattr(schema, "ensure_schema", fake_ensure_schema)
+    return calls
+
+
+def test_ensure_tables_creates_every_tr_table_once(monkeypatch):
+    calls = []
+    monkeypatch.setattr(pit_store, "_ENSURED", False)
+    monkeypatch.setattr(schema, "ensure_schema", lambda *, tables=None: calls.append(tables))
+    pit_store.ensure_tables(FakeStore())                    # a fake needs none
+    assert calls == []
+    pit_store.ensure_tables()
+    pit_store.ensure_tables()
+    from db import store as real_store
+    pit_store.ensure_tables(real_store)
+    assert calls == [list(pit_store.TR_TABLES)]
+    assert set(pit_store.TR_TABLES) == {"TrendNewsPIT", "TrendThemesPIT", "TrendMacroPIT",
+                                        "TrendFilingsPIT", "TrendResearchLedger",
+                                        "TrendIngestProgress", "TrendResearchJobs"}
+    for name in pit_store.TR_TABLES:
+        assert name in schema.ALL_TABLES
+
+
+@pytest.mark.parametrize("entry", [
+    "put_rows", "read_available", "mark_done", "done_keys", "ledger_get_week",
+    "jobs_submit", "jobs_status", "jobs_run", "news_missing_days", "macro_coverage",
+    "has_operating_filings"])
+def test_every_entry_point_ensures_the_tables_before_touching_the_real_store(ensure_spy,
+                                                                             entry):
+    from datetime import date
+    from trend_research import filings, ingest_alpaca_news, ingest_macro, jobs, ledger
+    calls = {
+        "put_rows": lambda: pit_store.put_rows("TrendNewsPIT", [news(T, "1")]),
+        "read_available": lambda: read_week(None),
+        "mark_done": lambda: pit_store.mark_done("alfred", "X|2025-01-01"),
+        "done_keys": lambda: pit_store.done_keys("alfred"),
+        "ledger_get_week": lambda: ledger.get_week("c", date(2025, 8, 4), "m", "tr-v1"),
+        "jobs_submit": lambda: jobs.submit("ingest_macro", {"start": "2025-08-04",
+                                                            "end": "2025-08-10"}),
+        "jobs_status": lambda: jobs.status("tr-job|x|ingest_macro"),
+        "jobs_run": lambda: jobs.run("tr-job|x|ingest_macro"),
+        "news_missing_days": lambda: ingest_alpaca_news.missing_days(date(2025, 8, 4),
+                                                                     date(2025, 8, 5)),
+        "macro_coverage": lambda: ingest_macro.missing_coverage(date(2025, 8, 4),
+                                                                date(2025, 8, 5)),
+        "has_operating_filings": lambda: filings.has_operating_filings("AAPL", T),
+    }
+    with pytest.raises(_Ensured):
+        calls[entry]()
+    assert ensure_spy == [list(pit_store.TR_TABLES)]
+
+
+def test_tr_tables_are_created_on_an_empty_postgres_schema(pg_schema, monkeypatch):
+    """Real Postgres (PG_TEST_DSN): a schema with no tables at all, as in
+    production before the first job -- the first write and read work."""
+    from db import store as real_store
+    from trend_research import jobs
+    monkeypatch.setattr(pit_store, "_ENSURED", False)
+    assert pit_store.put_rows("TrendNewsPIT", [news(T - timedelta(hours=1), "1")]) == 1
+    assert [r["source_id"] for r in read_week(None)] == ["1"]
+    pit_store.mark_done("alfred", "X|2025-01-01")
+    assert jobs._rows(real_store) == []
+    assert real_store.get("TrendResearchLedger", "missing") is None
