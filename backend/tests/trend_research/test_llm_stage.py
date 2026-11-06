@@ -225,6 +225,15 @@ class FakeProvider:
         return item
 
 
+@pytest.fixture(autouse=True)
+def _cli_with_safe_mode(monkeypatch):
+    """No subprocess: the claude CLI's --help lists --safe-mode."""
+    monkeypatch.setattr(llm, "_default_cli_help", lambda path: "  --safe-mode  Start with ...")
+    llm._CLI_HELP_CACHE.clear()
+    yield
+    llm._CLI_HELP_CACHE.clear()
+
+
 @pytest.fixture
 def fake(monkeypatch):
     def install(*script):
@@ -247,22 +256,22 @@ def test_call_passes_contract_to_llm_utils(fake):
     assert isinstance(note, schemas.ResearchNote)
     kw = f.calls[0]
     assert kw["provider"] == "claude-cli" and kw["model"] == "claude-opus-4-1"
-    assert kw["prompt"] == "prompt text" and kw["output_type"] is schemas.ResearchNote
+    tag = llm.prompt_tag(schemas.ResearchNote, prompts.PROMPT_VERSION)
+    assert kw["prompt"] == tag + "\n\nprompt text" and kw["output_type"] is schemas.ResearchNote
     assert kw["tools"] is None and kw["use_prompt_cache"] is True
     assert kw["max_output_tokens"] == 1500 and kw["temperature"] == 0.2
     assert kw["timeout_sec"] == 300
     assert kw["system_prompt"] == prompts.SYSTEM_PROMPT
+    # llm_utils' own retries are off: _stage owns them, and every spawn counts.
+    assert kw["retries"] == 0 and kw["output_retries"] == 0
+    assert kw["provider_config"]["extra_args"] == ["--safe-mode"]
 
 
-def test_anthropic_requires_api_key_and_passes_it(fake):
+def test_anthropic_requires_api_key_and_unknown_providers_are_refused():
     with pytest.raises(ValueError):
         _caller(provider="anthropic", api_key=None)
     with pytest.raises(ValueError):
         _caller(provider="openai", api_key="k")
-    f = fake()
-    _caller(provider="anthropic", api_key="sk-test").call("p", schemas.ResearchNote,
-                                                         max_output_tokens=10)
-    assert f.calls[0]["provider"] == "anthropic" and f.calls[0]["api_key"] == "sk-test"
 
 
 def test_quota_maps_to_QuotaExhausted(fake):
@@ -305,23 +314,24 @@ def test_session_limit_text_without_reset_time(fake):
     assert ei.value.reset_at is None
 
 
-def test_http_429_with_retry_after(fake):
+def test_rate_limit_text_with_retry_after(fake):
     def limited():
         llm_utils._LAST_STRUCTURED_LLM_CALL.data = {
-            "provider": "anthropic", "ok": False,
+            "provider": "claude-cli", "ok": False,
             "error": "status_code: 429, rate_limit_error; retry-after: 120"}
         return None
     fake(limited)
     with pytest.raises(llm.QuotaExhausted) as ei:
-        _caller(provider="anthropic", api_key="k").call("p", schemas.ResearchNote,
-                                                       max_output_tokens=10)
+        _caller().call("p", schemas.ResearchNote, max_output_tokens=10)
     assert ei.value.reset_at == datetime(2025, 8, 4, 10, 2, tzinfo=timezone.utc)
 
 
 def test_stale_metadata_from_an_earlier_call_is_ignored(fake):
     llm_utils._LAST_STRUCTURED_LLM_CALL.data = {"ok": False, "error": "quota hit earlier"}
     fake(lambda: None)
-    with pytest.raises(llm.StageFailed):
+    # No error text at all: nothing says the model answered, so nothing may
+    # be written for the week.
+    with pytest.raises(llm.TransientError):
         _caller().call("p", schemas.ResearchNote, max_output_tokens=10)
 
 
@@ -435,12 +445,322 @@ def test_dict_result_is_validated(fake):
     assert isinstance(out, schemas.ResearchNote) and out.conviction == 7
 
 
-def test_other_provider_exception_raises_StageFailed(fake):
+def test_a_crash_is_transient_not_a_stage_failure(fake):
     fake(RuntimeError("subprocess crashed"))
-    with pytest.raises(llm.StageFailed):
+    with pytest.raises(llm.TransientError):
         _caller().call("p", schemas.ResearchNote, max_output_tokens=10)
 
 
 def test_stage_token_budgets():
-    assert llm.MAX_OUTPUT_TOKENS == {"scan": 4000, "candidates": 2000, "research": 1500,
-                                     "book": 2000}
+    # Anthropic caps (ruling A7): scan >= 6000, candidates >= 4000, book >= 3000,
+    # research >= 2500.
+    assert llm.MAX_OUTPUT_TOKENS["scan"] >= 6000
+    assert llm.MAX_OUTPUT_TOKENS["candidates"] >= 4000
+    assert llm.MAX_OUTPUT_TOKENS["book"] >= 3000
+    assert llm.MAX_OUTPUT_TOKENS["research"] >= 2500
+
+
+# -- fix wave A: failure classes, attempt counting, cache tag (A3, A7) ---------------
+
+@pytest.mark.parametrize("text", [
+    "ClaudeCliTimeoutError: claude timed out after 300s",
+    "ClaudeCliCrashError: claude exited 1 with no stdout",
+    "anthropic HTTP 529 overloaded_error: Overloaded",
+    "ClaudeCliNotLoggedInError: not logged in",
+    "ConnectError: [Errno 111] Connection refused",
+])
+def test_infra_failures_are_transient(fake, text):
+    def failed():
+        llm_utils._LAST_STRUCTURED_LLM_CALL.data = {"ok": False, "error": text}
+        return None
+    fake(failed)
+    with pytest.raises(llm.TransientError):
+        _caller().call("p", schemas.ResearchNote, max_output_tokens=10)
+    assert llm.classify_failure(text) == "transient"
+
+
+def test_overloaded_is_never_a_quota_hit():
+    assert not llm.is_quota_error("anthropic HTTP 529 overloaded_error: Overloaded")
+
+
+@pytest.mark.parametrize("text,reset", [
+    ("5-hour limit reached ∙ resets 3pm", datetime(2025, 8, 4, 15, 0, tzinfo=timezone.utc)),
+    ("Weekly limit reached ∙ resets in 2 days",
+     datetime(2025, 8, 6, 10, 0, tzinfo=timezone.utc)),
+    ("Claude AI usage limit reached|1754400000", None),
+    ("rate_limit_error: Number of request tokens has exceeded your per-minute rate limit",
+     None),
+])
+def test_quota_wordings_are_detected(fake, text, reset):
+    fake(RuntimeError(text))
+    with pytest.raises(llm.QuotaExhausted) as ei:
+        _caller().call("p", schemas.ResearchNote, max_output_tokens=10)
+    assert ei.value.reset_at == reset
+
+
+def test_every_cli_spawn_counts_toward_the_budget(fake):
+    def two_spawns():
+        llm_utils._LAST_STRUCTURED_LLM_CALL.data = {
+            "ok": True, "attempted_models": ["claude-opus-4-1", "claude-opus-4-1"]}
+        return _note()
+    def two_failed_spawns():
+        llm_utils._LAST_STRUCTURED_LLM_CALL.data = {
+            "ok": False, "attempted_models": ["m", "m"],
+            "error": "claude output failed Pydantic validation: bad"}
+        return None
+    fake(two_spawns, two_failed_spawns)
+    c = _caller(max_calls=10)
+    c.call("p", schemas.ResearchNote, max_output_tokens=10)
+    assert c.calls_used == 2
+    with pytest.raises(llm.StageFailed):
+        c.call("p", schemas.ResearchNote, max_output_tokens=10)
+    assert c.calls_used == 4
+
+
+def test_prompt_tag_changes_with_version_schema_and_system_prompt(monkeypatch):
+    a = llm.prompt_tag(schemas.ResearchNote, "tr-v1")
+    assert a.startswith("TR prompt_version=tr-v1 schema=") and " system=" in a
+    assert llm.prompt_tag(schemas.ResearchNote, "tr-v2") != a
+    assert llm.prompt_tag(schemas.BookProposal, "tr-v1") != a
+    monkeypatch.setattr(prompts, "SYSTEM_PROMPT", prompts.SYSTEM_PROMPT + " Be terse.")
+    assert llm.prompt_tag(schemas.ResearchNote, "tr-v1") != a
+
+
+def test_prompt_version_reaches_the_prompt(fake):
+    f = fake()
+    _caller(prompt_version="tr-v9").call("p", schemas.ResearchNote, max_output_tokens=10)
+    assert f.calls[0]["prompt"].startswith("TR prompt_version=tr-v9 ")
+
+
+# -- fix wave A11: claude-cli isolation and no model override ---------------------------
+
+def test_fallback_model_and_other_flags_are_refused():
+    with pytest.raises(ValueError, match="fallback"):
+        _caller(provider_config={"extra_args": "--fallback-model claude-opus-4-5"})
+    with pytest.raises(ValueError):
+        _caller(provider_config={"extra_args": "--model claude-opus-4-5"})
+    with pytest.raises(ValueError):
+        _caller(provider_config={"extra_args": ["--fallback-model", "x"]})
+
+
+def test_model_aliases_are_refused():
+    with pytest.raises(ValueError, match="alias"):
+        llm.StageCaller("claude-cli", "sonnet", None, max_calls=1)
+
+
+def test_effort_is_kept_and_safe_mode_added(fake):
+    f = fake()
+    c = _caller(provider_config={"extra_args": "--effort high", "cli_path": "claude"})
+    c.call("p", schemas.ResearchNote, max_output_tokens=10)
+    assert f.calls[0]["provider_config"]["extra_args"] == ["--effort", "high", "--safe-mode"]
+    assert f.calls[0]["provider_config"]["cli_path"] == "claude"
+
+
+def test_a_cli_without_safe_mode_is_refused_before_any_call(fake, monkeypatch):
+    monkeypatch.setattr(llm, "_default_cli_help", lambda path: "  --bare  Minimal mode")
+    llm._CLI_HELP_CACHE.clear()
+    f = fake()
+    c = _caller()
+    with pytest.raises(llm.TransientError, match="safe-mode"):
+        c.call("p", schemas.ResearchNote, max_output_tokens=10)
+    assert f.calls == [] and c.calls_used == 0
+
+
+# -- fix wave A6: the direct Anthropic path ---------------------------------------------
+
+class FakeResp:
+    def __init__(self, status, payload=None, headers=None):
+        self.status_code = status
+        self._payload = payload if payload is not None else {}
+        self.headers = headers or {}
+
+    def json(self):
+        return self._payload
+
+
+def _tool_reply(payload, stop="tool_use"):
+    return FakeResp(200, {"stop_reason": stop, "content": [
+        {"type": "text", "text": "Here you go."},
+        {"type": "tool_use", "id": "t1", "name": llm.ANTHROPIC_TOOL, "input": payload}]})
+
+
+class FakeHttp:
+    def __init__(self, *script):
+        self.script = list(script)
+        self.calls = []
+
+    def __call__(self, url, *, headers, json, timeout):
+        self.calls.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
+        item = self.script.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+
+KEY = "sk-ant-test-0123456789abcdef"
+
+
+@pytest.fixture
+def no_cache(monkeypatch):
+    stored = {}
+    monkeypatch.setattr(llm, "_cache_get", lambda prompt, key: stored.get((prompt, key)))
+    monkeypatch.setattr(llm, "_cache_put",
+                        lambda prompt, key, raw: stored.__setitem__((prompt, key), raw))
+    monkeypatch.setattr(llm_utils, "call_structured_llm_by_provider",
+                        lambda *a, **k: pytest.fail("anthropic must not go through llm_utils"))
+    return stored
+
+
+def _anthropic(http, sleeps=None, **kw):
+    return llm.StageCaller("anthropic", "claude-sonnet-4-5", KEY, max_calls=kw.pop("max_calls", 20),
+                           http_post=http, sleep=(sleeps.append if sleeps is not None
+                                                  else lambda s: None),
+                           now=lambda: datetime(2025, 8, 4, 10, 0, tzinfo=timezone.utc), **kw)
+
+
+def _scan_payload():
+    return _scan().model_dump()
+
+
+def test_anthropic_forces_one_tool_with_the_output_schema(no_cache):
+    http = FakeHttp(_tool_reply(_scan_payload()))
+    out = _anthropic(http).call("scan prompt", schemas.TrendScan, max_output_tokens=8000)
+    assert isinstance(out, schemas.TrendScan) and out.trends[0].name.startswith("AI")
+    req = http.calls[0]
+    assert req["url"] == "https://api.anthropic.com/v1/messages"
+    assert req["headers"]["x-api-key"] == KEY
+    assert req["headers"]["anthropic-version"] == llm.ANTHROPIC_VERSION
+    body = req["json"]
+    assert body["model"] == "claude-sonnet-4-5" and body["max_tokens"] == 8000
+    assert body["system"] == prompts.SYSTEM_PROMPT
+    assert body["tool_choice"] == {"type": "tool", "name": llm.ANTHROPIC_TOOL}
+    assert len(body["tools"]) == 1
+    schema_text = __import__("json").dumps(body["tools"][0]["input_schema"])
+    assert "$ref" not in schema_text and "$defs" not in schema_text
+    assert body["tools"][0]["input_schema"]["properties"]["trends"]["items"]["properties"][
+        "confidence"]["maximum"] == 1.0
+    assert body["messages"][0]["content"].startswith("TR prompt_version=")
+    assert "tools" in body and "web_search" not in schema_text
+
+
+def test_anthropic_overload_is_retried_with_backoff(no_cache):
+    sleeps = []
+    http = FakeHttp(FakeResp(529, {"error": {"type": "overloaded_error", "message": "Overloaded"}}),
+                    ConnectionError("reset by peer"),
+                    _tool_reply(_note().model_dump()))
+    c = _anthropic(http, sleeps)
+    assert c.call("p", schemas.ResearchNote, max_output_tokens=2500).symbol == "NVDA"
+    assert len(sleeps) == 2 and c.calls_used == 3          # every HTTP attempt counts
+
+
+def test_anthropic_persistent_5xx_is_transient(no_cache):
+    http = FakeHttp(*[FakeResp(500, {"error": {"type": "api_error", "message": "boom"}})]
+                    * llm.ANTHROPIC_ATTEMPTS)
+    with pytest.raises(llm.TransientError):
+        _anthropic(http).call("p", schemas.ResearchNote, max_output_tokens=10)
+    assert len(http.calls) == llm.ANTHROPIC_ATTEMPTS
+
+
+def test_anthropic_429_waits_retry_after_then_is_a_quota_hit(no_cache):
+    sleeps = []
+    r429 = FakeResp(429, {"error": {"type": "rate_limit_error", "message": "slow down"}},
+                    {"retry-after": "30"})
+    http = FakeHttp(*[r429] * llm.ANTHROPIC_ATTEMPTS)
+    with pytest.raises(llm.QuotaExhausted) as ei:
+        _anthropic(http, sleeps).call("p", schemas.ResearchNote, max_output_tokens=10)
+    assert sleeps == [30.0] * (llm.ANTHROPIC_ATTEMPTS - 1)
+    assert ei.value.reset_at == datetime(2025, 8, 4, 10, 0, 30, tzinfo=timezone.utc)
+
+
+def test_anthropic_credit_exhaustion_is_a_quota_hit(no_cache):
+    http = FakeHttp(FakeResp(400, {"error": {
+        "type": "invalid_request_error",
+        "message": "Your credit balance is too low to access the Anthropic API."}}))
+    with pytest.raises(llm.QuotaExhausted) as ei:
+        _anthropic(http).call("p", schemas.ResearchNote, max_output_tokens=10)
+    assert ei.value.reset_at is None and len(http.calls) == 1
+
+
+def test_anthropic_auth_failure_is_transient_and_never_shows_the_key(no_cache, caplog):
+    http = FakeHttp(FakeResp(401, {"error": {"type": "authentication_error",
+                                             "message": "invalid x-api-key %s" % KEY}}))
+    with pytest.raises(llm.TransientError) as ei:
+        _anthropic(http).call("p", schemas.ResearchNote, max_output_tokens=10)
+    assert KEY not in str(ei.value)
+    http = FakeHttp(*[ConnectionError("proxy said %s" % KEY)] * llm.ANTHROPIC_ATTEMPTS)
+    with caplog.at_level("DEBUG"):
+        with pytest.raises(llm.TransientError) as ei:
+            _anthropic(http).call("p", schemas.ResearchNote, max_output_tokens=10)
+    assert KEY not in str(ei.value) and KEY not in caplog.text
+
+
+@pytest.mark.parametrize("resp", [
+    FakeResp(400, {"error": {"type": "invalid_request_error", "message": "prompt is too long"}}),
+    _tool_reply({"symbol": "NVDA"}, stop="max_tokens"),
+    FakeResp(200, {"stop_reason": "refusal", "content": [{"type": "text", "text": "no"}]}),
+    _tool_reply({"symbol": "NVDA", "conviction": 42}),
+])
+def test_anthropic_answers_without_a_valid_result_are_stage_failures(no_cache, resp):
+    with pytest.raises(llm.StageFailed):
+        _anthropic(FakeHttp(resp)).call("p", schemas.ResearchNote, max_output_tokens=10)
+
+
+def test_anthropic_replies_are_cached_and_replayed_free(no_cache):
+    http = FakeHttp(_tool_reply(_note().model_dump()))
+    c = _anthropic(http)
+    c.call("p", schemas.ResearchNote, max_output_tokens=10)
+    assert c.calls_used == 1
+    assert all(key.startswith("anthropic:") for _prompt, key in no_cache)
+    again = c.call("p", schemas.ResearchNote, max_output_tokens=10)   # no HTTP left
+    assert again.symbol == "NVDA" and c.calls_used == 1 and len(http.calls) == 1
+
+
+def test_anthropic_budget_stops_before_a_request(no_cache):
+    http = FakeHttp(FakeResp(529, {"error": {"type": "overloaded_error"}}),
+                    FakeResp(529, {"error": {"type": "overloaded_error"}}))
+    with pytest.raises(llm.BudgetExceeded):
+        _anthropic(http, max_calls=2).call("p", schemas.ResearchNote, max_output_tokens=10)
+    assert len(http.calls) == 2
+
+
+# -- fix wave A8 / A10: what reaches a prompt --------------------------------------------
+
+def test_news_html_is_stripped_and_capped():
+    d = _dossier()
+    d["news"][0]["content"] = ('<p>Shares <a href="https://x.example/q?a=1&amp;b=2">rose</a>'
+                               ' &amp; held.</p><script>var x = 1;</script>' + "y" * 5000)
+    d["news"][0]["summary"] = "<b>Guide</b> raised &mdash; again"
+    text = prompts.research_prompt("NVDA", d, AS_OF)
+    assert "<p>" not in text and "href" not in text and "<script" not in text
+    assert "var x" not in text and "Shares rose & held." in text
+    assert "Guide raised — again" in text
+    line = [ln for ln in text.splitlines() if ln.startswith("[2025-08-01T12:00:00Z|alpaca|101]")][0]
+    assert len(line) < 240 + prompts.NEWS_SUMMARY_CHARS + prompts.NEWS_CONTENT_CHARS + 80
+
+
+def test_no_price_level_reaches_a_prompt():
+    """Ruling R28: split-adjusted levels would reveal a later split."""
+    from datetime import date as _date
+    from trend_research import market_tape
+    days, d = [], _date(2024, 6, 3)
+    while d < _date(2025, 8, 2):
+        if d.weekday() < 5:
+            days.append(d)
+        d += timedelta(days=1)
+    bars = [{"t": "%sT04:00:00Z" % x.isoformat(), "c": 1234.5678 + i * 0.37}
+            for i, x in enumerate(days)]
+    loader = lambda syms, a, b: {s: bars for s in syms}          # noqa: E731
+    stats = market_tape.symbol_trend_stats("NVDA", AS_OF, bars_loader=loader)
+    from db.fake import FakeStore
+    tape = market_tape.market_tape(AS_OF, bars_loader=loader, store=FakeStore())
+    assert stats["vol_3m"] is not None and "last_close" not in stats
+    d = dict(_dossier(), trend_stats=stats)
+    dig = dict(_digest(), tape=tape)
+    texts = [prompts.research_prompt("NVDA", d, AS_OF),
+             prompts.trend_scan_prompt(dig, None, AS_OF)]
+    levels = {"%.4g" % c["c"] for c in bars} | {"%.1f" % c["c"] for c in bars} \
+        | {str(int(c["c"])) for c in bars}
+    for text in texts:
+        found = [lv for lv in levels if lv in text]
+        assert found == [], found[:5]
+    assert "3m volatility" in texts[0]
