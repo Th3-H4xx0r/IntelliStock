@@ -1,4 +1,4 @@
-# INTELLISTOCK_SCHEMA: {"strategy": "strategy_trend_research", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_trend_research_enabled": false, "tr_chain_id": "", "tr_model": "", "tr_prompt_version": "tr-v1", "research_model_cutoff": "", "max_positions": 12, "swap_margin": 2.0, "max_single_weight": 0.25, "max_levered_inverse_weight": 0.2, "stop_pct": 0.2, "max_llm_calls_per_build": 2000, "honour_single_position_cap": true, "broker_max_single_position_pct": 0.25}}
+# INTELLISTOCK_SCHEMA: {"strategy": "strategy_trend_research", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_trend_research_enabled": false, "tr_chain_id": "", "tr_model": "", "tr_prompt_version": "tr-v1", "research_model_cutoff": "", "max_positions": 12, "swap_margin": 2.0, "max_single_weight": 0.25, "max_levered_inverse_weight": 0.2, "stop_pct": 0.2, "core_band_pct": 0.01, "max_llm_calls_per_build": 2000, "honour_single_position_cap": true, "broker_max_single_position_pct": 0.25}}
 # INTELLISTOCK_DESCRIPTION: TR, the deep-research trend picker (backtest only). Once a week, at the first tick of the week's first session, it reads that week's research ledger row (written offline, before 09:30 ET) and holds 8-12 names: stocks plus a small set of commodity, defensive, inverse and leveraged ETFs, at most 25% of the account in one name and 20% in leveraged plus inverse ETFs together, with the rest in BIL. A holding is sold when its thesis breaks, when the research drops it, when a clearly better idea takes its slot, or when it closes 20% below its highest close since purchase; a stopped name stays out until the next weekly decision. A week with no research row keeps the current book. No AI calls during the backtest.
 """Strategy TR wrapper: replays the TR research ledger inside the engine.
 
@@ -19,13 +19,26 @@ Clock (spec §7.3, C5, C7):
   below ``(1 - stop_pct)`` x peak is exited. It stays out until the next weekly
   decision (a name stopped on the decision tick itself sits that week out).
 * Every price the rules read comes from bars of sessions strictly before the
-  decision session (``strategy_x.pit_daily_observations``, then a session cut).
+  decision session (``strategy_x.pit_daily_observations``, then a session cut),
+  and a session's close is its last REGULAR-session bar (the engine's bars run
+  to 20:00 ET; an after-hours print is not the close the stop is defined on).
+* Orders only inside the regular session (``clock.is_rth``: the exchange
+  calendar, so an early close ends the day at 13:00 ET).
+
+Between decisions the lane finishes exits and sweeps idle cash: toward this
+week's BOOK target (never a winner's raised weight, never a name 10% or more
+below its peak since purchase), the rest into BIL. A holding whose bars stop
+(delisted, acquired) is written off after ``_WRITE_OFF_SESSIONS`` sessions
+without one: its sell is no longer re-emitted and it no longer blocks the
+sweep. A week whose stock picks mostly have no engine bars (a ledger week
+built after the backtest fetched its bars) is held like a missing week.
 
 A missing ledger week (no row, a ``failed`` row, or an older week's row) holds
 the book: no new buys, no liquidation; the daily stop still runs.
 
 Spec: docs/superpowers/specs/2026-11-05-deep-research-trend-picker-design.md §7.3
 """
+import functools
 import math
 import os
 import sys
@@ -36,6 +49,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 from db import store  # noqa: E402  (tests monkeypatch this name)
+from strategy_x import DEFAULTS as _SX_DEFAULTS  # noqa: E402
 from strategy_x import _as_utc, pit_daily_observations, targets_to_orders  # noqa: E402
 from swing_trader import clock  # noqa: E402
 from trend_research import book, ledger  # noqa: E402
@@ -60,6 +74,12 @@ DEFAULTS = {
     "research_model_cutoff": "",
     **book.DEFAULTS,
     "stop_pct": 0.20,
+    # The no-trade band `strategy_x.targets_to_orders` applies to a held
+    # name's drift. Undeclared it falls back to Strategy X's 0.05 -- wider
+    # than half of one TR position (~8%), so trims, top-ups and the caps all
+    # stalled and ~7% of NAV sat idle outside BIL. 0.0 churns (176 orders vs
+    # 46 on the sweep harness).
+    "core_band_pct": 0.01,
     "max_llm_calls_per_build": 2000,
     "honour_single_position_cap": True,
     "broker_max_single_position_pct": 0.25,
@@ -81,6 +101,10 @@ _BOOK_WEEK_KEY = "_tr_book_week"        # Monday of the week whose ledger row bu
 _SESSION_KEY = "_tr_last_session"       # session the daily stop last ran in
 _LAST_DECISION_KEY = "_tr_last_decision"
 _LOGGED_KEY = "_tr_logged"
+_BOOK_TARGETS_KEY = "_tr_book_targets"  # this week's book before let-winners-run raises
+_UNPRICED_KEY = "_tr_unpriced"          # {symbol: sessions in a row with no bar}
+_WRITTEN_OFF_KEY = "_tr_written_off"    # held names whose bars stopped (set)
+_NO_BAR_WEEKS_KEY = "_tr_no_bar_weeks"  # weeks held because the picks had no bars
 
 #: The decision clock: the regular-session open, ET.
 _DECISION_ET = dtime(9, 30)
@@ -90,13 +114,21 @@ _DECISION_ET = dtime(9, 30)
 _STALE_DAYS = 7
 #: Idle cash below this share of NAV is not swept into the book.
 _SWEEP_MIN_PCT = 0.01
+#: The sweep does not top up a name this far below its peak since purchase.
+_SWEEP_FALLEN_PCT = 0.10
+#: A held name with no bar for this many sessions in a row is written off.
+_WRITE_OFF_SESSIONS = 5
+#: The emulator's order minimum: a sell leaving less than this behind sells
+#: the whole position, and a holding worth less is dust, never re-sold.
+_MIN_ORDER_USD = 1.0
 #: Bars handed to `pit_daily_observations` per read: the visible tail only, so
 #: the per-tick cost does not grow with the run (26 bars a session at 900 s).
 _TAIL_BARS = 400
 _MAX_REASON_LINES = 40
 
-#: The regular session's close, ET: no order is placed outside 09:30-16:00.
-_CLOSE_ET = dtime(16, 0)
+#: `targets_to_orders`' own floors, read the same way it reads them.
+_SX_MIN_ORDER_USD = float(_SX_DEFAULTS.get("min_order_usd", 50.0))
+_SX_HAIRCUT = float(_SX_DEFAULTS.get("cost_haircut_pct", 0.006))
 #: The disabled-lane notice, once per process per instance.
 _DISABLED_LOGGED: set = set()
 _ET = clock.NY
@@ -191,11 +223,69 @@ def _visible(bars, current_time):
     return tail
 
 
+@functools.lru_cache(maxsize=8192)
+def _session_bounds(day_iso):
+    """(open, close) of the NYSE session `day_iso` as UTC timestamps, early
+    closes included; None when the day is not a session. Memoised per day
+    (bounded: ~30 years of sessions), never per bar list."""
+    out = None
+    try:
+        d = date.fromisoformat(day_iso)
+        if clock.is_trading_day(d):
+            try:
+                cal = clock._calendar()
+                out = (cal.session_open(day_iso).timestamp(),
+                       cal.session_close(day_iso).timestamp())
+            except Exception:
+                out = (datetime.combine(d, _DECISION_ET, tzinfo=_ET).timestamp(),
+                       datetime.combine(d, dtime(16, 0), tzinfo=_ET).timestamp())
+    except ValueError:
+        out = None
+    return out
+
+
+def _regular_session(bars):
+    """The bars stamped inside their day's regular session (open <= t < close).
+    A daily series (stamps a day or more apart) is returned unchanged: its
+    stamp is a date label, not a moment."""
+    stamps = [_bar_ts(b) for b in bars[-3:]]
+    stamps = [t for t in stamps if t is not None]
+    if len(stamps) < 2 or min((b - a).total_seconds()
+                              for a, b in zip(stamps, stamps[1:])) >= 23 * 3600:
+        return bars
+    out = []
+    for bar in bars:
+        ts = _bar_ts(bar)
+        if ts is None:
+            continue
+        bounds = _session_bounds(ts.astimezone(_ET).date().isoformat())
+        if bounds is not None and bounds[0] <= ts.timestamp() < bounds[1]:
+            out.append(bar)
+    return out
+
+
 def _prior_closes(data, symbol, session, current_time) -> list:
-    """(session_id, close) of sessions strictly before `session`, oldest first."""
-    obs = pit_daily_observations(_visible(_bars_for(data, symbol), current_time),
-                                 current_time)
+    """(session_id, regular-session close) of sessions strictly before
+    `session`, oldest first."""
+    bars = _regular_session(_visible(_bars_for(data, symbol), current_time))
+    obs = pit_daily_observations(bars, current_time)
     return [(d, c) for d, c in obs if d < session]
+
+
+def _last_bar_day(data, symbol, current_time):
+    """The NY date (ISO) of the last visible bar of `symbol`, or None."""
+    bars = _visible(_bars_for(data, symbol), current_time)
+    for bar in reversed(bars):
+        ts = _bar_ts(bar)
+        if ts is not None and ts <= current_time:
+            return ts.astimezone(_ET).date().isoformat()
+    return None
+
+
+def _previous_session(session):
+    days = sorted(clock.trading_days(date.fromisoformat(session) - timedelta(days=12),
+                                     date.fromisoformat(session) - timedelta(days=1)))
+    return days[-1].isoformat() if days else None
 
 
 def _last_close(data, symbol, current_time):
@@ -241,9 +331,20 @@ def trend_research_universe(cfg, *, start=None, end=None, store_=None) -> list:
                     or row.get("prompt_version") != pv or row.get("status") != "ok"):
                 continue
             picks = ((row.get("book") or {}).get("picks") or [])
-            for item in list(picks) + list(row.get("recommended") or []):
+            # A pick with no research note is never bought (book.target_book),
+            # so no bars are fetched for it either.
+            noted = {book.normalize_symbol(n.get("symbol")) for n in row.get("notes") or ()
+                     if isinstance(n, dict)}
+            picked = []
+            for item in picks:
                 sym = book.normalize_symbol((item or {}).get("symbol")
                                             if isinstance(item, dict) else None)
+                if sym in book.ALL_ALLOWED_ETFS or sym in noted:
+                    picked.append(sym)
+            for item in row.get("recommended") or []:
+                picked.append(book.normalize_symbol((item or {}).get("symbol")
+                                                    if isinstance(item, dict) else None))
+            for sym in picked:
                 if sym and book.is_allowed_symbol(sym, is_etf=book.is_etf_symbol(sym)):
                     names.add(sym)
     except Exception as exc:
@@ -345,9 +446,9 @@ class StrategyTrendResearch:
         if not clock.is_trading_day(date.fromisoformat(session)):
             return {}
         # Orders, the stop check and the weekly decision run only inside the
-        # regular session: a pre-open or after-hours tick places nothing.
-        ny_time = now.astimezone(_ET).time()
-        if ny_time < _DECISION_ET or ny_time >= _CLOSE_ET:
+        # regular session, by the exchange calendar: a pre-open, after-hours
+        # or after-an-early-close tick places nothing.
+        if not clock.is_rth(now):
             return {}
         try:
             return self._tick(prices, now, session, cfg, data, portfolio_emulator, cache)
@@ -397,6 +498,7 @@ class StrategyTrendResearch:
 
         stopped_now = []
         if cache.get(_SESSION_KEY) != session:
+            self._track_unpriced(cache, data, now, session, held)
             stopped_now = self._daily_stop(cache, cfg, data, now, session, held)
             cache[_SESSION_KEY] = session
             if stopped_now and targets is not None:
@@ -422,6 +524,119 @@ class StrategyTrendResearch:
             return {}
         return self._maintain(cache, cfg, emu, session, monday, positions, held, eff, nav,
                               owned, targets)
+
+    # -- holdings whose bars stopped -------------------------------------------
+
+    @staticmethod
+    def _track_unpriced(cache, data, now, session, held):
+        """Once per session: count, per held name, the sessions in a row whose
+        previous session had no bar. At ``_WRITE_OFF_SESSIONS`` the name is
+        written off -- a delisted or acquired name's sell can never fill (the
+        simulator needs a quote newer than the order), so it is no longer
+        emitted and no longer blocks the sweep. A bar coming back undoes it."""
+        prev = _previous_session(session)
+        counts = dict(cache.get(_UNPRICED_KEY) or {})
+        written = _sym_set(cache.get(_WRITTEN_OFF_KEY))
+        out = {}
+        for s in held:
+            if s == BIL:
+                continue
+            last = _last_bar_day(data, s, now)
+            if prev is not None and last is not None and last >= prev:
+                if s in written:
+                    written.discard(s)
+                    _log(f"StrategyTrendResearch {session} | {s} has bars again -- no "
+                         "longer written off", "yellow")
+                continue
+            out[s] = int(counts.get(s) or 0) + 1
+            if out[s] >= _WRITE_OFF_SESSIONS and s not in written:
+                written.add(s)
+                _log(f"StrategyTrendResearch {session} | unpriced write-off: {s} has had "
+                     f"no bar for {out[s]} sessions (last bar {last or 'never'}) -- its sell "
+                     "is no longer sent and it no longer holds up the cash sweep; it stays "
+                     "in the account at its last mark", "red")
+        cache[_UNPRICED_KEY] = out
+        cache[_WRITTEN_OFF_KEY] = {s for s in written if s in held}
+
+    # -- orders --------------------------------------------------------------------
+
+    @staticmethod
+    def _orders(weights, *, nav, positions, prices, cash, cfg, owned, held, written_off,
+                pending, buys_only=False):
+        """`targets_to_orders` plus the TR rules it does not know about:
+
+        * a held name above ``max_single_weight``, or leveraged + inverse
+          above ``max_levered_inverse_weight`` together, is trimmed to its
+          target whatever the no-trade band (C3);
+        * a sell that would leave less than ``_MIN_ORDER_USD`` behind sells
+          the whole position (float residue otherwise leaves dust the
+          emulator can never sell);
+        * no order for a written-off name, a dust holding, or a symbol that
+          already has an order pending;
+        * settled cash the buys leave over goes to BIL, netted against a BIL
+          trim first (C6: cash is BIL).
+        """
+        decisions, sizes = targets_to_orders(weights, nav=nav, positions=positions,
+                                             prices=prices, cash=cash, config=cfg,
+                                             owned=owned)
+        min_usd = max(0.0, _num(cfg.get("min_order_usd"), _SX_MIN_ORDER_USD))
+        haircut = max(0.0, min(0.5, _num(cfg.get("cost_haircut_pct"), _SX_HAIRCUT)))
+
+        def value(sym):
+            return positions.get(sym, 0.0) * (_price(prices.get(sym)) or 0.0)
+
+        if not buys_only:
+            cap = _num(cfg.get("max_single_weight"), book.DEFAULTS["max_single_weight"])
+            lev_cap = _num(cfg.get("max_levered_inverse_weight"),
+                           book.DEFAULTS["max_levered_inverse_weight"])
+            lev = [s for s in held if s in book.LEVERAGED_ETFS or s in book.INVERSE_ETFS]
+            lev_over = sum(value(s) for s in lev) > lev_cap * nav + min_usd
+            for s in held:
+                if s in decisions or s in written_off or s == BIL:
+                    continue
+                cur, tgt = value(s), weights.get(s, 0.0) * nav
+                if cur <= 0 or cur - tgt < max(min_usd, _MIN_ORDER_USD):
+                    continue
+                if cur > cap * nav or (lev_over and s in lev):
+                    decisions[s] = -1
+                    sizes[s] = {"sell_fraction": max(0.0, min(1.0, (cur - tgt) / cur))}
+        for s in list(decisions):
+            if (s in written_off or s in pending
+                    or (decisions[s] == -1 and value(s) < _MIN_ORDER_USD)):
+                decisions.pop(s)
+                sizes.pop(s, None)
+                continue
+            if decisions[s] == -1:
+                frac = float((sizes.get(s) or {}).get("sell_fraction", 1.0))
+                if value(s) * (1.0 - frac) < _MIN_ORDER_USD:
+                    sizes[s] = {"sell_fraction": 1.0}
+        if buys_only:
+            decisions = {s: d for s, d in decisions.items() if d == 1}
+            sizes = {s: v for s, v in sizes.items() if s in decisions}
+        # Leftover settled cash -> BIL.
+        spent = sum(float((sizes.get(s) or {}).get("buy_cash", 0.0))
+                    for s, d in decisions.items() if d == 1)
+        left = cash * (1.0 - haircut) - spent
+        floor = max(min_usd, _MIN_ORDER_USD)
+        if (left >= floor and _price(prices.get(BIL)) is not None
+                and BIL not in pending and BIL not in written_off):
+            if decisions.get(BIL) == -1:
+                # Selling BIL while cash is left over is a round trip: shrink
+                # the sell by the leftover instead.
+                cur = value(BIL)
+                sell = cur * float((sizes.get(BIL) or {}).get("sell_fraction", 1.0))
+                if left >= sell:
+                    decisions.pop(BIL)
+                    sizes.pop(BIL, None)
+                    left -= sell
+                else:
+                    sizes[BIL] = {"sell_fraction": max(0.0, min(1.0, (sell - left) / cur))}
+                    left = 0.0
+            if left >= floor and decisions.get(BIL) != -1:
+                decisions[BIL] = 1
+                prior = float((sizes.get(BIL) or {}).get("buy_cash", 0.0))
+                sizes[BIL] = {"buy_cash": round(prior + left, 2)}
+        return decisions, sizes
 
     # -- the daily trailing stop ---------------------------------------------
 
@@ -550,8 +765,9 @@ class StrategyTrendResearch:
 
         stop_day = cache.get(_STOP_DAY_KEY) or {}
         blocked = sorted(s for s, d in stop_day.items() if d == session)
+        written_off = _sym_set(cache.get(_WRITTEN_OFF_KEY))
         held_for_book = {s: (positions[s] * eff.get(s, 0.0)) / nav
-                         for s in held if s not in blocked}
+                         for s in held if s not in blocked and s not in written_off}
 
         def has_bars(sym):
             obs = _prior_closes(data, sym, session, now)
@@ -560,27 +776,57 @@ class StrategyTrendResearch:
             last = date.fromisoformat(obs[-1][0])
             return (date.fromisoformat(session) - last).days <= _STALE_DAYS
 
+        stats = {}
         weights, reasons = book.target_book(row, held=held_for_book, has_bars=has_bars,
-                                            cfg=cfg)
+                                            cfg=cfg, stats=stats)
+        stock_picks = stats.get("stock_picks") or []
+        no_bars = stats.get("picks_without_bars") or []
+        if stock_picks and 2 * len(no_bars) > len(stock_picks):
+            # Not one bad ticker: the engine never fetched this week's names
+            # (a ledger week built after the backtest's bar fetch). Liquidating
+            # into BIL would score research the run could not see; hold.
+            cache[_LAST_WEEK_KEY] = monday
+            count = int(cache.get(_NO_BAR_WEEKS_KEY) or 0) + 1
+            cache[_NO_BAR_WEEKS_KEY] = count
+            _log_once(cache, "picks-no-bars", monday,
+                      f"StrategyTrendResearch {session} | WEEK {monday} row {row.get('id')} "
+                      f"HELD: {len(no_bars)} of {len(stock_picks)} stock picks have no engine "
+                      f"bars ({', '.join(no_bars[:12])}) -- the ledger week was probably "
+                      "built after this backtest fetched its bars; rerun the backtest. "
+                      "Holding the book: no buys, no liquidation; the daily stop still runs "
+                      f"({count} week(s) held this way in this run)", "red")
+            return None
+        if no_bars:
+            reasons.append("picks without engine bars (holdings keep their slots): "
+                           + ", ".join(no_bars))
+        book_targets = dict(weights)
         weights = self._let_winners_run(weights, held_for_book, cfg, reasons)
         if blocked:
             weights = self._drop_to_bil(weights, blocked)
+            book_targets = self._drop_to_bil(book_targets, blocked)
             reasons.append("blocked until next week (stopped today): " + ", ".join(blocked))
+        weights = book.snap_weights(weights)
         cache[_STOPPED_KEY] = set(blocked)
         cache[_STOP_DAY_KEY] = {s: d for s, d in stop_day.items() if d == session}
         owned = owned | set(weights) | set(held)
         cache[_OWNED_KEY] = owned
         cache[_TARGETS_KEY] = dict(weights)
+        cache[_BOOK_TARGETS_KEY] = book.snap_weights(book_targets)
         cache[_BOOK_WEEK_KEY] = monday
         cache[_LAST_WEEK_KEY] = monday
 
         cash = max(0.0, _spendable(emu, eff))
-        decisions, sizes = targets_to_orders(weights, nav=nav, positions=positions, prices=eff,
-                                             cash=cash, config=cfg, owned=owned)
-        unpriced = sorted(s for s in held if s not in weights and s not in eff)
+        pending = _pending(emu)
+        decisions, sizes = self._orders(weights, nav=nav, positions=positions, prices=eff,
+                                        cash=cash, cfg=cfg, owned=owned, held=held,
+                                        written_off=written_off, pending=pending)
+        unpriced = sorted(s for s in held if s not in weights and s not in eff
+                          and s not in written_off)
         cutoff = str(cfg.get("research_model_cutoff") or "").strip()
+        # Honest = sessions strictly after the cutoff (the scorecard's rule):
+        # a week starting on or before it is still optimistic.
         period = ("" if not cutoff else
-                  " | optimistic (before model cutoff)" if monday < cutoff else " | honest")
+                  " | optimistic (on/before model cutoff)" if monday <= cutoff else " | honest")
         cache[_LAST_DECISION_KEY] = {"session": session, "week": monday, "row": row.get("id"),
                                      "targets": dict(weights), "orders": len(decisions)}
         _log(f"StrategyTrendResearch {session} | WEEK {monday} row {row.get('id')}{period} | "
@@ -602,15 +848,23 @@ class StrategyTrendResearch:
     def _maintain(self, cache, cfg, emu, session, monday, positions, held, eff, nav, owned,
                   targets):
         pending = _pending(emu)
+        written_off = _sym_set(cache.get(_WRITTEN_OFF_KEY))
         decisions, sizes = {}, {}
         # Exits the book already decided (a name the decision dropped whose
-        # sell had no price, or a stop): sold in full, retried each tick.
+        # sell had no price, or a stop): sold in full, retried each tick. A
+        # written-off name (its bars stopped) and dust under the emulator's
+        # order minimum are never sent: neither can fill. BIL is cash: BIL
+        # above its target (the sweep's leftover) is trimmed only by a
+        # weekly decision that needs the money, never sold back to cash here.
         waiting = []
         for s in held:
-            if targets.get(s, 0.0) > 0 or s in pending:
+            if s == BIL or targets.get(s, 0.0) > 0 or s in pending or s in written_off:
                 continue
-            if _price(eff.get(s)) is None:
+            px = _price(eff.get(s))
+            if px is None:
                 waiting.append(s)
+                continue
+            if positions.get(s, 0.0) * px < _MIN_ORDER_USD:
                 continue
             decisions[s] = -1
             sizes[s] = {"sell_fraction": 1.0}
@@ -621,26 +875,59 @@ class StrategyTrendResearch:
         if decisions:
             _log(f"StrategyTrendResearch {session} | EXIT {', '.join(sorted(decisions))}",
                  "cyan")
-            return _emit(decisions, sizes, owned | set(targets))
 
         # Idle cash (a stop's or a rotation's settled proceeds) goes back into
-        # the book, buys only. A held week buys nothing but BIL.
-        if pending & (owned | set(targets)):
-            return {}
-        cash = max(0.0, _spendable(emu, eff))
+        # the book, buys only, in the same payload as the exits (the buys are
+        # sized from settled cash, which a pending sell does not count). Only
+        # a pending order the sweep could double -- a name it may buy -- holds
+        # it back; a stuck exit of a name the book dropped does not.
+        buys, buy_sizes = self._sweep(cache, cfg, session, monday, positions, held, eff, nav,
+                                      owned, targets, pending, written_off,
+                                      _spendable(emu, eff))
+        decisions.update(buys)
+        sizes.update(buy_sizes)
+        return _emit(decisions, sizes, owned | set(targets))
+
+    def _sweep(self, cache, cfg, session, monday, positions, held, eff, nav, owned, targets,
+               pending, written_off, cash):
+        """Buys for the idle cash: toward this week's BOOK target (a raised
+        winner is not bought back up to its raised weight), never into a name
+        ``_SWEEP_FALLEN_PCT`` or more below its peak since purchase, and the
+        rest into BIL. A held week (no ledger row) buys only BIL."""
+        buyable = {s for s, w in targets.items() if w > 0} | {BIL}
+        if (pending - written_off) & buyable:
+            return {}, {}
+        cash = max(0.0, float(cash or 0.0))
         if cash / nav <= _SWEEP_MIN_PCT:
-            return {}
+            return {}, {}
         stopped = _sym_set(cache.get(_STOPPED_KEY))
+        want = {}
         if cache.get(_BOOK_WEEK_KEY) == monday:
-            want = {s: w for s, w in targets.items() if s not in stopped}
-        else:
-            want = {BIL: targets.get(BIL, 0.0)}
-        decisions, sizes = targets_to_orders(want, nav=nav, positions=positions, prices=eff,
-                                             cash=cash, config=cfg, owned=owned)
-        decisions = {s: d for s, d in decisions.items() if d == 1}
-        sizes = {s: v for s, v in sizes.items() if s in decisions}
+            book_t = cache.get(_BOOK_TARGETS_KEY)
+            book_t = dict(book_t) if isinstance(book_t, dict) else dict(targets)
+            peaks = cache.get(_PEAKS_KEY) or {}
+            fallen = []
+            for s, w in targets.items():
+                if s == BIL or s in stopped or s in written_off or w <= 0:
+                    continue
+                peak, px = _price(peaks.get(s)), _price(eff.get(s))
+                if peak is not None and px is not None and px <= (1 - _SWEEP_FALLEN_PCT) * peak:
+                    fallen.append(s)
+                    continue
+                want[s] = min(w, float(book_t.get(s, 0.0)))
+            if fallen:
+                _log_once(cache, "sweep-fallen", session + ":" + ",".join(sorted(fallen)),
+                          f"StrategyTrendResearch {session} | sweep skips "
+                          f"{', '.join(sorted(fallen))}: {_SWEEP_FALLEN_PCT:.0%} or more below "
+                          "its peak since purchase", "white")
+        want[BIL] = float(targets.get(BIL, 0.0))
+        want = {s: w for s, w in want.items() if w > 0 or s == BIL}
+        decisions, sizes = self._orders(want, nav=nav, positions=positions, prices=eff,
+                                        cash=cash, cfg=cfg, owned=set(want), held=held,
+                                        written_off=written_off, pending=pending,
+                                        buys_only=True)
         if not decisions:
-            return {}
+            return {}, {}
         _log(f"StrategyTrendResearch {session} | SWEEP ${cash:,.0f} idle "
              f"({cash / nav:.0%} of NAV) into {', '.join(sorted(decisions))}", "cyan")
-        return _emit(decisions, sizes, owned | set(targets))
+        return decisions, sizes

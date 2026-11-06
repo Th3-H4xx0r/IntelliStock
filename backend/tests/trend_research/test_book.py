@@ -443,3 +443,61 @@ def test_absent_exit_log_names_all_three_sources():
     r = picks_row([("AMD", 7.0, 0.10)])
     _, log = book.target_book(r, held={"NVDA": 0.1}, has_bars=all_bars, cfg={})
     assert "exit NVDA: absent from notes, recommended and picks" in log
+
+
+# --- fix wave B ------------------------------------------------------------------
+
+
+def test_snap_weights_drops_float_residue_and_keeps_bil():
+    # 1.0 - sum(...) reads ~1e-16 rather than 0: as a target that is a TRIM
+    # (sell_fraction 0.99999...), which leaves dust the emulator never sells.
+    w = book.snap_weights({"AAA": 0.1, "BBB": 0.2, "CCC": 0.7, "DDD": 1e-9,
+                           "BIL": 1.0 - (0.1 + 0.2 + 0.7)})
+    assert w == {"AAA": 0.1, "BBB": 0.2, "CCC": 0.7, "BIL": 0.0}
+    assert book.snap_weights({"AAA": 0.25})["BIL"] == pytest.approx(0.75)
+    assert book.snap_weights({}) == {"BIL": 1.0}
+
+
+def test_target_book_bil_residue_is_exactly_zero():
+    # Ten picks at 0.1 sum to 0.9999999999999999 in floats.
+    specs = [("N%s" % chr(65 + i), 7.0, 0.1) for i in range(10)]
+    w, _ = book.target_book(picks_row(specs), held={}, has_bars=all_bars,
+                            cfg={"max_positions": 10})
+    assert w["BIL"] == 0.0
+    assert all(v >= book.WEIGHT_FLOOR for s, v in w.items() if s != "BIL")
+
+
+def test_unresearched_pick_is_never_bought():
+    """NVDX is a 2x NVDA ETF missing from KNOWN_THEME_ETFS: as a pick with no
+    research note it would be bought as a stock, outside the 20% leveraged
+    cap (final review I5). Dropped with a reason; an allowed ETF pick needs
+    no note."""
+    r = row(notes=[note("NVDA")],
+            picks=[pick("NVDA"), pick("NVDX", 9.0, 0.2), pick("GLD", 5.0, 0.1)])
+    w, log = book.target_book(r, held={}, has_bars=all_bars, cfg={})
+    assert "NVDX" not in w
+    assert w["NVDA"] == pytest.approx(0.10) and w["GLD"] == pytest.approx(0.10)
+    assert "drop NVDX (pick): no research note this week" in log
+
+
+def test_new_pick_without_bars_leaves_its_slot_to_an_absent_holding():
+    """The row swaps OLD out for NEW, but NEW has no bars at the decision:
+    OLD keeps the slot instead of being liquidated into BIL. A broken
+    holding still exits."""
+    held = {s: 0.11 for s in ("HA", "HB", "HC", "OLD", "BRK")}
+    specs = [("HA", 7.0, 0.11), ("HB", 7.0, 0.11), ("HC", 7.0, 0.11), ("NEW", 8.0, 0.11)]
+    r = picks_row(specs)
+    r["notes"].append(note("BRK", status="broken"))
+    stats = {}
+    w, log = book.target_book(r, held=held, has_bars=lambda s: s != "NEW", cfg={},
+                              stats=stats)
+    assert stats == {"stock_picks": ["HA", "HB", "HC", "NEW"], "picks_without_bars": ["NEW"]}
+    assert "NEW" not in w and "BRK" not in w
+    assert w["OLD"] == pytest.approx(1 / 12)                # kept at the default weight
+    assert any(line.startswith("keep OLD") for line in log)
+    assert "exit BRK: thesis broken" in log
+
+    # With bars, the row's swap goes through as before.
+    w, log = book.target_book(r, held=held, has_bars=all_bars, cfg={})
+    assert "OLD" not in w and w["NEW"] == pytest.approx(0.11)
+    assert "exit OLD: absent from notes, recommended and picks" in log

@@ -10,6 +10,11 @@ Rules, in the order ``target_book`` applies them:
 
 1. Every symbol is normalized; one that will not parse, is an ETF outside the
    allowed sets, or has no bars at the decision date is dropped with a reason.
+   A pick that is not an allowed ETF and has no research note this week is
+   dropped too ("no research note"): only the research stage screens names
+   (R7: the EDGAR "is it a stock?" check), so an unresearched pick -- a 2x ETF
+   missing from ``KNOWN_THEME_ETFS``, a hallucinated ticker -- never reaches
+   the book.
 2. A holding is kept unless its latest note says ``thesis_status ==
    "broken"``, it is absent from the row's notes, recommended names and
    picks, or the proposal picks it at weight 0. A new pick at weight 0 is not
@@ -17,14 +22,19 @@ Rules, in the order ``target_book`` applies them:
 3. Slots (``max_positions``, clamped to 8-12) go first to the proposal's
    defensive picks when ``defensive_share > 0``, then to kept holdings, then
    to new picks by conviction. A new pick displaces the weakest holding only
-   when its conviction is at least the holding's plus ``swap_margin``.
+   when its conviction is at least the holding's plus ``swap_margin``. A new
+   pick dropped for having no bars leaves its slot to the holdings: a holding
+   that would otherwise leave only for being absent from the row or for want
+   of a slot is kept instead (one per such pick). A broken thesis or a
+   proposal weight of 0 still sells.
 4. Weights: proposal target weights (a kept holding the proposal did not pick
    gets ``1 / max_positions``), each clipped to ``max_single_weight``; the
    non-defensive names are scaled into ``1 - defensive_share``; that share is
    split across the defensive picks pro-rata to their target weights (BIL if
    there are none); leveraged + inverse names together are scaled down to
    ``max_levered_inverse_weight``. BIL is the remainder, so the weights always
-   sum to 1.0.
+   sum to 1.0. Weights below ``WEIGHT_FLOOR`` are float residue, not targets:
+   they are snapped to 0 (``snap_weights``).
 """
 from __future__ import annotations
 
@@ -96,6 +106,10 @@ DEFAULTS = {
     "max_levered_inverse_weight": 0.20,
 }
 MIN_POSITIONS, MAX_POSITIONS = 8, 12
+#: A target weight below this is float residue (``1.0 - sum(...)`` reads
+#: ~1e-16, not 0). Kept as a target it is a TRIM, not an exit, and leaves
+#: dust the emulator can never sell (its $1 order minimum).
+WEIGHT_FLOOR = 1e-6
 
 # Venue tags the research may append or prepend ("TSM.US", "NASDAQ:NVDA").
 # Single letters are NOT here: ".A"/".B" are share classes.
@@ -168,8 +182,20 @@ def _is_levered_or_inverse(sym: str) -> bool:
     return sym in LEVERAGED_ETFS or sym in INVERSE_ETFS
 
 
+def snap_weights(weights: dict[str, float]) -> dict[str, float]:
+    """``weights`` with every non-BIL weight below ``WEIGHT_FLOOR`` removed
+    and BIL re-set to the remainder (0.0 when that remainder is residue).
+    BIL is always present."""
+    out = {s: float(w) for s, w in (weights or {}).items()
+           if s != BIL and float(w) >= WEIGHT_FLOOR}
+    rest = 1.0 - sum(out.values())
+    out[BIL] = rest if rest >= WEIGHT_FLOOR else 0.0
+    return out
+
+
 def target_book(row: dict, *, held: dict[str, float],
-                has_bars: Callable[[str], bool], cfg: dict
+                has_bars: Callable[[str], bool], cfg: dict,
+                stats: dict | None = None
                 ) -> tuple[dict[str, float], list[str]]:
     """Target weights (always including ``"BIL"``, summing to 1.0) and the
     reason log for one weekly decision.
@@ -177,7 +203,10 @@ def target_book(row: dict, *, held: dict[str, float],
     ``row``: a ledger row (``notes``, ``book``, ``recommended``). ``held``:
     the lane's current holdings, symbol -> weight; only the keys are read.
     ``has_bars(sym)``: whether ``sym`` has bars at the decision date. ``cfg``:
-    the rule parameters (see ``DEFAULTS``).
+    the rule parameters (see ``DEFAULTS``). ``stats``, when given, is filled
+    with ``stock_picks`` (picks that are researched stocks, not ETFs) and
+    ``picks_without_bars`` (those of them with no bars), so the caller can
+    tell one bad ticker from a week whose bars were never fetched.
     """
     cfg = cfg or {}
     log: list[str] = []
@@ -231,12 +260,53 @@ def target_book(row: dict, *, held: dict[str, float],
         if sym:
             recommended.add(sym)
 
+    # Every symbol the research wrote a note for this week, bars or not.
+    researched = {normalize_symbol((n or {}).get("symbol")): (n or {})
+                  for n in row.get("notes") or ()}
+    held_syms = {normalize_symbol(h) for h in (held or {})}
+
     proposal = row.get("book") or {}
     picks: dict[str, dict] = {}                     # first pick per symbol wins
+    stock_picks: list[str] = []
+    no_bar_picks: list[str] = []
     for p in proposal.get("picks") or ():
-        sym = screen((p or {}).get("symbol"), "pick")
-        if sym and sym not in picks:
-            picks[sym] = p
+        raw = (p or {}).get("symbol")
+        sym = normalize_symbol(raw)
+        if (sym is not None and sym not in ALL_ALLOWED_ETFS
+                and is_allowed_symbol(sym, is_etf=is_etf_symbol(sym))
+                and sym not in researched):
+            if ("pick", sym) not in rejected:
+                rejected.add(("pick", sym))
+                log.append("drop %s (pick): no research note this week" % sym)
+            continue
+        if sym is not None and sym not in ALL_ALLOWED_ETFS and sym not in stock_picks \
+                and is_allowed_symbol(sym, is_etf=is_etf_symbol(sym)):
+            stock_picks.append(sym)
+        screened = screen(raw, "pick")
+        if screened is None:
+            if sym in stock_picks and not bars_seen.get(sym, True) \
+                    and sym not in no_bar_picks:
+                no_bar_picks.append(sym)
+            continue
+        if screened not in picks:
+            picks[screened] = p
+    if stats is not None:
+        stats["stock_picks"] = list(stock_picks)
+        stats["picks_without_bars"] = list(no_bar_picks)
+    # A NEW pick that would have been bought but has no bars hands its slot
+    # back to the holdings (a held one is screened out like any holding).
+    first_pick: dict[str, dict] = {}
+    for p in proposal.get("picks") or ():
+        first_pick.setdefault(normalize_symbol((p or {}).get("symbol")), p or {})
+
+    def would_buy(sym: str) -> bool:
+        p = first_pick.get(sym) or {}
+        w = p.get("target_weight")
+        return (sym not in held_syms and p.get("role") != "defensive"
+                and (w is None or _num(w, 1.0) > 0)
+                and researched.get(sym, {}).get("thesis_status") != "broken")
+
+    spare = sum(1 for s in no_bar_picks if would_buy(s))
     defensive_share = min(1.0, max(0.0, _num(proposal.get("defensive_share"), 0.0)))
 
     def conviction(sym: str) -> float:
@@ -261,8 +331,6 @@ def target_book(row: dict, *, held: dict[str, float],
         return (p is not None and p.get("target_weight") is not None
                 and target_weight(sym) <= 0.0)
 
-    held_syms = {normalize_symbol(h) for h in (held or {})}
-
     # Defensive picks take slots first, when the regime call wants a defensive share.
     defensive = [s for s, p in picks.items() if p.get("role") == "defensive"]
     if defensive_share <= 0.0:
@@ -282,6 +350,7 @@ def target_book(row: dict, *, held: dict[str, float],
 
     # Holdings: keep unless broken or absent.
     kept: list[str] = []
+    absent: list[str] = []
     for raw in sorted(held or {}):
         sym = screen(raw, "holding")
         if sym is None or sym == BIL or sym in defensive_names:
@@ -289,7 +358,7 @@ def target_book(row: dict, *, held: dict[str, float],
         if broken(sym):
             log.append("exit %s: thesis broken" % sym)
         elif sym not in notes and sym not in recommended and sym not in picks:
-            log.append("exit %s: absent from notes, recommended and picks" % sym)
+            absent.append(sym)
         elif zero_weight(sym):
             log.append("exit %s: proposal weight 0" % sym)
         else:
@@ -319,6 +388,16 @@ def target_book(row: dict, *, held: dict[str, float],
         s = queue.pop(0)
         chosen.append(s)
         log.append("add %s (conviction %.1f)" % (s, conviction(s)))
+    # A slot left empty because its new pick had no bars keeps a holding the
+    # row left out, rather than liquidating it into BIL.
+    for s in absent:
+        if spare > 0 and len(chosen) < slots:
+            spare -= 1
+            chosen.append(s)
+            holdings.add(s)
+            log.append("keep %s: absent from the row, but a new pick has no bars" % s)
+        else:
+            log.append("exit %s: absent from notes, recommended and picks" % s)
     for s in queue:
         if not holdings:
             break
@@ -372,9 +451,7 @@ def target_book(row: dict, *, held: dict[str, float],
         for s, w in lev.items():
             weights[s] = w * k
 
-    weights = {s: w for s, w in weights.items() if w > 0}
-    weights[BIL] = max(0.0, 1.0 - sum(weights.values()))
-    return weights, log
+    return snap_weights(weights), log
 
 
 # --- trailing stop ------------------------------------------------------------
