@@ -26,7 +26,9 @@ are represented by their earliest article.
 
 Themes: TrendThemesPIT theme-days available in the window (volume, share,
 tone) against the ``BASELINE_WEEKS`` before it, plus the window's gdelt
-titles grouped by theme.
+titles grouped by theme: at most ``TITLES_PER_THEME`` distinct headlines,
+the most prominent first where rows carry ``prominence`` (GKG titles,
+ruling R37), otherwise oldest first.
 
 ``digest_hash`` is sha256 over canonical JSON (sorted keys, no whitespace),
 so one store gives one hash whatever order its rows were written in.
@@ -172,6 +174,11 @@ def _theme_totals(rows: list) -> dict:
     return {"volume": vol, "share": (vol / total) if total else None, "tone": tone}
 
 
+def _prominence(row) -> int:
+    value = row.get("prominence")
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
 def _themes(decision_time, start, end, gdelt_rows, store) -> list:
     base_start = start - timedelta(weeks=BASELINE_WEEKS)
     week, base = {}, {}
@@ -184,7 +191,10 @@ def _themes(decision_time, start, end, gdelt_rows, store) -> list:
         elif base_start < at <= start:
             base.setdefault(theme, []).append(row)
     titles: dict = {}
-    for row in gdelt_rows:                  # oldest first, ties by id
+    # oldest first, ties by id; GKG rows (ruling R37) rank by prominence
+    # first -- a stable sort, so rows without it (the DOC-API path) keep
+    # that order
+    for row in sorted(gdelt_rows, key=lambda r: -_prominence(r)):
         th = titles.setdefault(row.get("theme"), {})
         key = normalize_headline(row.get("headline"))
         if key and key not in th and len(th) < TITLES_PER_THEME:
