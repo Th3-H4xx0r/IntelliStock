@@ -100,17 +100,23 @@ def test_submit_writes_a_queued_row_and_launches(st, launcher):
                       "finished_at", "error"}
 
 
-def test_second_running_job_same_kind_rejected(st, launcher):
+def test_one_tr_job_at_a_time_of_any_kind(st, launcher):
     first = submit(st, launcher)
     with pytest.raises(jobs.JobConflict, match="already"):
         submit(st, launcher)
-    # another kind is independent
-    submit(st, launcher, kind="ingest_news")
-    # once the first is finished, the kind is free again
+    # another kind waits too: one TR job in total (A2), so build_ledger never
+    # runs beside an ingest
+    with pytest.raises(jobs.JobConflict, match="one job at a time"):
+        submit(st, launcher, kind="ingest_news")
+    with pytest.raises(jobs.JobConflict):
+        submit(st, launcher, kind="build_ledger",
+               params=dict(DATES, chain_id="honest-x", model_id="m1"))
+    # once the first is finished, the lock is free again
     jobs.run(first, store=st, runners={"ingest_macro": lambda params, job: None},
              now=_clock())
     launcher.alive.discard(first)
-    assert submit(st, launcher) != first
+    second = submit(st, launcher, kind="ingest_news")
+    assert second != first and st.get(jobs.TABLE, jobs.LOCK_ID)["job_id"] == second
 
 
 @pytest.mark.parametrize("kind,params,msg", [
@@ -137,7 +143,7 @@ def test_build_ledger_params_get_defaults(st, launcher):
     job_id = submit(st, launcher, kind="build_ledger",
                     params=dict(DATES, chain_id="honest-x", model_id="m1"))
     p = jobs.status(job_id, store=st, launcher=launcher)["params"]
-    assert p["max_calls"] == 2000 and p["chain_id"] == "honest-x"
+    assert p["max_calls"] == 4000 and p["chain_id"] == "honest-x"
 
 
 def test_launch_failure_marks_the_job_failed(st):
@@ -275,21 +281,28 @@ def test_cli_run_dispatches(monkeypatch):
 
 # -- the real runners over fake builders -----------------------------------------------
 
-def test_news_runner_uses_paper_credentials_day_by_day(st, launcher, monkeypatch):
+def test_news_runner_backfills_the_whole_range_with_paper_credentials(st, launcher,
+                                                                      monkeypatch):
     from trend_research import ingest_alpaca_news as news
     calls = []
     monkeypatch.setattr(news, "resolve_paper_credentials",
                         lambda instance, **kw: ("PKPAPER999", "papersecret999"))
-    monkeypatch.setattr(news, "backfill_news",
-                        lambda s, e, *, key, secret, **kw: calls.append((s, e, key, secret)) or 7)
+
+    def fake_backfill(s, e, *, key, secret, on_day, **kw):
+        calls.append((s, e, key, secret))
+        for i, d in enumerate((s, s + timedelta(days=1), e)):
+            on_day(d, 7 * (i + 1), i == 0)
+        return 21
+    monkeypatch.setattr(news, "backfill_news", fake_backfill)
     job_id = submit(st, launcher, kind="ingest_news",
                     params={"start": "2025-08-04", "end": "2025-08-06"})
     assert jobs.run(job_id, store=st, now=_clock()) == "done"
-    assert [(s, e) for s, e, _, _ in calls] == [(date(2025, 8, d), date(2025, 8, d))
-                                               for d in (4, 5, 6)]
+    # One call over the range: its per-day resume applies (I4 / A5).
+    assert [(s, e) for s, e, _, _ in calls] == [(date(2025, 8, 4), date(2025, 8, 6))]
     assert all(k == "PKPAPER999" for _, _, k, _ in calls)
     s = jobs.status(job_id, store=st, launcher=launcher)
     assert s["progress"]["done"] == 3 and s["progress"]["rows_written"] == 21
+    assert s["progress"]["days_skipped"] == 1
     assert "papersecret999" not in repr(st.get(jobs.TABLE, job_id))
 
 
@@ -314,11 +327,15 @@ def test_build_ledger_runner_builds_week_by_week_with_one_budget(st, launcher, m
     job_id = submit(st, launcher, kind="build_ledger", params={
         "chain_id": "honest-x", "model_id": "m1", "max_calls": 50,
         "start": "2025-08-04", "end": "2025-09-01"})
-    assert jobs.run(job_id, store=st, now=_clock()) == "done"
+    # A stop ends the job failed with the reason, never "done" (A4).
+    assert jobs.run(job_id, store=st, now=_clock()) == "failed"
     assert weeks == [date(2025, 8, 4), date(2025, 8, 11), date(2025, 8, 18)]
     assert len(callers) == 1                      # one StageCaller = one budget
-    p = jobs.status(job_id, store=st, launcher=launcher)["progress"]
-    assert p["done"] == 3 and p["total"] == 5
+    s = jobs.status(job_id, store=st, launcher=launcher)
+    assert s["state"] == "failed" and "stopped (budget) at week 2025-08-18" in s["error"]
+    assert "resubmit to resume" in s["error"]
+    p = s["progress"]
+    assert p["done"] == 2 and p["total"] == 5
     assert p["ledger"]["built_ok"] == 2 and p["ledger"]["calls_used"] == 36
     assert p["ledger"]["stopped"] == "budget"
 
@@ -526,6 +543,9 @@ def test_docker_launcher_runs_a_detached_auto_removed_job_container(monkeypatch)
     assert kw["name"].startswith("tr-job-") and kw["name"] == info["container"]
     assert kw["detach"] is True and kw["auto_remove"] is True
     assert kw["network"] == "intellistockv4_default"
+    # Bounded next to the live broker; the kernel kills it first (A2).
+    assert kw["mem_limit"] == "2g" and kw["nano_cpus"] == 1_000_000_000
+    assert kw["pids_limit"] == jobs.JOB_PIDS_LIMIT and kw["oom_score_adj"] == 1000
     assert kw["volumes"]["/home/op/.claude"] == {"bind": "/root/.claude", "mode": "ro"}
     assert kw["volumes"]["/home/op/.claude.json"] == {"bind": "/root/.claude.json",
                                                        "mode": "ro"}
@@ -627,3 +647,127 @@ def test_routes_map_job_errors(monkeypatch):
     finally:
         main.app.dependency_overrides.pop(main.get_current_user, None)
         main.app.dependency_overrides.pop(main.conn_dependency, None)
+
+
+# -- fix wave A2/A4/A5 ----------------------------------------------------------------
+
+def test_two_racing_submits_cannot_both_launch(st, launcher):
+    """The lock is a compare-and-swap: a submit whose CAS loses raises and
+    writes nothing, even when both saw the same free lock."""
+    orig = st.replace_if
+    raced = {"done": False}
+
+    def racing(table, rid, *, when, doc, **kw):
+        if not raced["done"]:
+            raced["done"] = True              # the competitor's CAS lands first
+            orig(table, rid, when=when, doc=dict(doc, job_id="tr-job|competitor"), **kw)
+        return orig(table, rid, when=when, doc=doc, **kw)
+
+    st.replace_if = racing
+    with pytest.raises(jobs.JobConflict, match="same time"):
+        submit(st, launcher)
+    assert launcher.launched == [] and st.run(st.between(jobs.TABLE, "tr-job|", "tr-job|~")) == []
+    st.replace_if = orig
+    # The competitor's row never appears: its lock goes stale after the grace.
+    with pytest.raises(jobs.JobConflict, match="in progress"):
+        submit(st, launcher)
+    late = _clock(NOW + timedelta(seconds=jobs.LAUNCH_GRACE_SEC + 5))
+    assert submit(st, launcher, now=late) in launcher.launched
+
+
+def test_a_lost_job_releases_the_lock(st, launcher):
+    first = submit(st, launcher)
+    launcher.alive.discard(first)                 # container gone
+    second = submit(st, launcher, kind="ingest_news")
+    assert jobs.status(first, store=st, launcher=launcher)["state"] == "failed"
+    assert st.get(jobs.TABLE, jobs.LOCK_ID)["job_id"] == second
+
+
+@pytest.mark.parametrize("stopped", ["quota_wait_cap", "inputs_missing", "transient",
+                                     "week_failed"])
+def test_build_ledger_job_ends_failed_on_any_builder_stop(st, launcher, monkeypatch, stopped):
+    from trend_research import build_ledger as bl
+    monkeypatch.setattr(bl, "resolve_model_row", lambda model_id: {
+        "provider": "anthropic", "model": "claude-x", "api_key": "sk-ant-KEY-0000000",
+        "provider_config": None})
+    weeks = []
+
+    def fake_build(chain_id, start, end, **kw):
+        weeks.append(start)
+        hit = len(weeks) == 2
+        return {"weeks": 1, "built_ok": 0 if hit else 1, "built_failed": 0,
+                "skipped_ok": 0, "not_yet_due": 0, "quota_waits": 3 if hit else 0,
+                "calls_used": 5, "stopped": stopped if hit else None,
+                "stop_reason": "why it stopped" if hit else None,
+                "stopped_week": start.isoformat() if hit else None}
+
+    monkeypatch.setattr(bl, "build", fake_build)
+    job_id = submit(st, launcher, kind="build_ledger", params={
+        "chain_id": "honest-x", "model_id": "m1", "start": "2025-08-04", "end": "2025-09-01"})
+    assert jobs.run(job_id, store=st, now=_clock()) == "failed"
+    assert weeks == [date(2025, 8, 4), date(2025, 8, 11)]      # never past the stop
+    s = jobs.status(job_id, store=st, launcher=launcher)
+    assert ("stopped (%s) at week 2025-08-11: why it stopped" % stopped) in s["error"]
+    assert s["progress"]["ledger"]["stopped"] == stopped
+    assert s["progress"]["ledger"]["stop_reason"] == "why it stopped"
+
+
+def test_a_resubmitted_news_job_skips_completed_days(st, launcher, monkeypatch):
+    from trend_research import ingest_alpaca_news as news
+    monkeypatch.setattr(news, "resolve_paper_credentials",
+                        lambda instance, **kw: ("PKPAPER999", "papersecret999"))
+    requests = []
+
+    class Resp:
+        status_code = 200
+        headers = {}
+
+        def json(self):
+            return {"news": [], "next_page_token": None}
+
+    def http_get(url, *, params, headers, timeout):
+        requests.append(params["start"][:10])
+        return Resp()
+
+    monkeypatch.setattr(news, "_default_http_get", http_get)
+    params = {"start": "2025-08-04", "end": "2025-08-06"}
+    first = submit(st, launcher, kind="ingest_news", params=params)
+    assert jobs.run(first, store=st, now=_clock(), sleep=lambda s: None) == "done"
+    assert requests == ["2025-08-04", "2025-08-05", "2025-08-06"]
+    launcher.alive.discard(first)
+    wider = submit(st, launcher, kind="ingest_news",
+                   params={"start": "2025-08-04", "end": "2025-08-07"})
+    assert jobs.run(wider, store=st, now=_clock(), sleep=lambda s: None) == "done"
+    assert requests[3:] == ["2025-08-07"]                     # only the new day
+    p = jobs.status(wider, store=st, launcher=launcher)["progress"]
+    assert p["done"] == 4 and p["days_skipped"] == 3
+
+
+def test_a_stop_between_news_days_ends_the_job_stopped(st, launcher, monkeypatch):
+    from trend_research import ingest_alpaca_news as news
+    monkeypatch.setattr(news, "resolve_paper_credentials", lambda instance, **kw: ("K1", "S1"))
+    job_id = submit(st, launcher, kind="ingest_news", params={"start": "2025-08-04",
+                                                              "end": "2025-08-09"})
+
+    def fake_backfill(s, e, *, on_day, **kw):
+        on_day(s, 0, False)
+        st.update(jobs.TABLE, job_id, {"state": "stopped"})
+        on_day(s + timedelta(days=1), 0, False)
+        pytest.fail("the run should have stopped")
+    monkeypatch.setattr(news, "backfill_news", fake_backfill)
+    assert jobs.run(job_id, store=st, now=_clock()) == "stopped"
+
+
+def test_the_lock_compare_and_swap_on_the_shared_store(store, launcher):
+    """``store`` is real Postgres under PG_TEST_DSN (replace_if's SQL), else
+    the FakeStore."""
+    first = submit(store, launcher)
+    with pytest.raises(jobs.JobConflict):
+        submit(store, launcher, kind="ingest_news")
+    store.update(jobs.TABLE, first, {"state": "done"})
+    second = submit(store, launcher, kind="ingest_news")
+    assert store.get(jobs.TABLE, jobs.LOCK_ID)["job_id"] == second
+    # a stale holder seen by a loser: the CAS on the old holder fails
+    from db.store import P
+    assert store.replace_if(jobs.TABLE, jobs.LOCK_ID, when=P.field("job_id").eq(first),
+                            doc={"id": jobs.LOCK_ID, "job_id": "x", "at": None}) is None

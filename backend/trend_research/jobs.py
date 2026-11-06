@@ -14,11 +14,27 @@ row, marks it ``running``, runs the kind's builder in chunks (a day of news,
 a theme or title window, a macro window, a symbol, a ledger week), writes
 progress after every chunk, and ends ``done`` / ``failed`` / ``stopped``.
 
+One job at a time. At most one TR job -- of any kind -- is queued or
+running. ``submit`` takes the lock row ``tr-job-lock`` with a compare-and-
+swap (``store.replace_if``) before it writes the job row, so two concurrent
+submits cannot both launch; a lock held by a job that has finished, failed
+or been lost is taken over. Jobs therefore never run beside each other: in
+particular ``build_ledger`` never runs while news, themes or macro are still
+being ingested (it would write ``ok`` weeks from half-ingested inputs).
+
+Containers are capped (``JOB_MEM_LIMIT``, ``JOB_NANO_CPUS``,
+``JOB_PIDS_LIMIT``) and given ``oom_score_adj=1000``, so under memory
+pressure the kernel kills a TR job before the live broker beside it.
+
 Resumability. The builders skip work they already finished (ingest progress
 markers, ``ok`` ledger rows), so a job that dies is resumed by submitting
 the same kind and params again. A ``queued`` or ``running`` job whose
 container is gone (OOM, redeploy, host restart) is reported -- and stored --
-as ``failed`` with an error starting ``lost``; that frees its kind.
+as ``failed`` with an error starting ``lost``; that frees the lock.
+
+A ledger build that stops early (budget, quota wait cap, missing inputs, a
+transient failure, a failed week) ends the job ``failed`` with the builder's
+stop reason in ``error``; resubmitting resumes it.
 
 Stop. ``stop`` stops the container, then marks the row ``stopped`` if it is
 still queued or running (a job that finished meanwhile keeps its state). If
@@ -58,7 +74,8 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Callable
 
 __all__ = ["JOB_KINDS", "TABLE", "STATES", "submit", "status", "stop", "run", "main",
-           "redact", "container_name", "DockerLauncher", "JobConflict", "JobLaunchError"]
+           "redact", "container_name", "DockerLauncher", "JobConflict", "JobLaunchError",
+           "LOCK_ID"]
 
 log = logging.getLogger(__name__)
 
@@ -68,9 +85,17 @@ TABLE = "TrendResearchJobs"
 STATES = ("queued", "running", "done", "failed", "stopped")
 ACTIVE_STATES = ("queued", "running")
 ID_PREFIX = "tr-job|"
+#: The one-job-at-a-time lock row. "-" (0x2D) sorts below "|" (0x7C), so the
+#: lock is outside the ``tr-job|`` job-row range.
+LOCK_ID = "tr-job-lock"
 _KEY_END = "\uffff"                 # above every ASCII key byte under COLLATE "C"
 
-DEFAULT_MAX_CALLS = 2000            # config max_llm_calls_per_build default
+DEFAULT_MAX_CALLS = 4000            # config max_llm_calls_per_build default
+#: Job container limits: memory, one CPU, processes.
+JOB_MEM_LIMIT = "2g"
+JOB_NANO_CPUS = 1_000_000_000
+JOB_PIDS_LIMIT = 512
+JOB_OOM_SCORE_ADJ = 1000
 #: A queued row with no launch recorded this long after creation is lost.
 LAUNCH_GRACE_SEC = 300
 ERROR_CHARS = 1000
@@ -86,7 +111,7 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 class JobConflict(ValueError):
-    """A job of the same kind is still queued or running."""
+    """A TR job (of any kind) is still queued or running."""
 
 
 class JobLaunchError(RuntimeError):
@@ -117,10 +142,9 @@ def _parse_iso(value) -> datetime | None:
 
 
 def _store(store):
-    if store is not None:
-        return store
-    from db import store as default_store
-    return default_store
+    # The real store gets the TR tables ensured first (pit_store.ensure_tables).
+    from trend_research import pit_store
+    return pit_store._store(store)
 
 
 # -- redaction ------------------------------------------------------------------------
@@ -411,6 +435,10 @@ class DockerLauncher:
             labels={"intellistock.tr_job": job_id},
             detach=True,
             auto_remove=True,
+            mem_limit=JOB_MEM_LIMIT,
+            nano_cpus=JOB_NANO_CPUS,
+            pids_limit=JOB_PIDS_LIMIT,
+            oom_score_adj=JOB_OOM_SCORE_ADJ,
         )
         return {"mode": self.mode, "container": name, "image": str(image)[:80],
                 "claude_mount": bool(volumes)}
@@ -493,25 +521,60 @@ def _rows(st) -> list:
     return st.run(st.between(TABLE, ID_PREFIX, ID_PREFIX + _KEY_END))
 
 
+def _new_job_id(t: datetime, kind: str) -> str:
+    return "%s%s|%s" % (ID_PREFIX, t.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                        kind)
+
+
+def _acquire_lock(st, job_id: str, launcher, t: datetime) -> None:
+    """Point the lock row at ``job_id``, or raise ``JobConflict`` when another
+    job holds it. Compare-and-swap on the holder seen, so of two concurrent
+    submits exactly one wins."""
+    from db.store import P
+    st.insert(TABLE, {"id": LOCK_ID, "job_id": None, "at": None}, conflict="error")
+    lock = st.get(TABLE, LOCK_ID) or {}
+    holder = lock.get("job_id")
+    if holder:
+        held = st.get(TABLE, holder)
+        if held is None:
+            at = _parse_iso(lock.get("at"))
+            if at is None or (t - at).total_seconds() < LAUNCH_GRACE_SEC:
+                # Its job row is not written yet: a submit is in progress.
+                raise JobConflict("another TR job submit is in progress (%s)" % holder)
+        else:
+            held = _reconcile(st, held, launcher, t)
+            if held.get("state") in ACTIVE_STATES:
+                raise JobConflict("a TR job is already %s: %s (one job at a time)"
+                                  % (held["state"], holder))
+        when = P.field("job_id").eq(holder)
+    else:
+        when = P.field("job_id").is_null()
+    won = st.replace_if(TABLE, LOCK_ID, when=when,
+                        doc={"id": LOCK_ID, "job_id": job_id, "at": _iso(t)})
+    if won is None:
+        raise JobConflict("another TR job was submitted at the same time")
+
+
 def submit(kind: str, params: dict, *, store=None, launcher=None, now=None) -> str:
     """Validate, record and launch a job; return its id.
 
-    ValueError for an unknown kind or bad params, ``JobConflict`` when a job
-    of the same kind is still queued or running, ``JobLaunchError`` (the row
-    is then ``failed``) when the container cannot be started."""
+    ValueError for an unknown kind or bad params, ``JobConflict`` when any TR
+    job is still queued or running (one at a time, see the module docstring),
+    ``JobLaunchError`` (the row is then ``failed``) when the container
+    cannot be started."""
     clean = validate_params(kind, params)
     st = _store(store)
     launcher = _launcher(launcher)
     now = now or _utcnow
     t = now()
     for row in _rows(st):
-        if row.get("kind") == kind and row.get("state") in ACTIVE_STATES:
+        if row.get("state") in ACTIVE_STATES:
             row = _reconcile(st, row, launcher, t)
             if row.get("state") in ACTIVE_STATES:
-                raise JobConflict("a %s job is already %s: %s"
-                                  % (kind, row["state"], row["id"]))
-    job_id = "%s%s|%s" % (ID_PREFIX,
-                          t.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"), kind)
+                raise JobConflict("a TR job is already %s: %s (one job at a time)"
+                                  % (row["state"], row["id"]))
+    job_id = _new_job_id(t, kind)
+    _acquire_lock(st, job_id, launcher, t)
     st.insert(TABLE, {"id": job_id, "kind": kind, "params": clean, "state": "queued",
                       "progress": {}, "created_at": _iso(t), "started_at": None,
                       "finished_at": None, "error": None,
@@ -652,6 +715,8 @@ def _windows(start: date, end: date, days: int):
 
 
 def _run_news(params: dict, job: Job) -> None:
+    # One backfill over the whole range: its per-day resume (completion
+    # markers, ruling R10c) and one pacer cover every day.
     from trend_research import ingest_alpaca_news as news
     key, secret = news.resolve_paper_credentials(params["instance"], store=job.st)
     job.add_secrets(key, secret)
@@ -659,14 +724,19 @@ def _run_news(params: dict, job: Job) -> None:
                               sleep=job.sleep, clock=job.clock)
     start, end = _d(params["start"]), _d(params["end"])
     total = (end - start).days + 1
-    written = 0
-    for i in range(total):
+    counts = {"done": 0, "skipped": 0}
+
+    def on_day(d, written, skipped):
+        counts["done"] += 1
+        counts["skipped"] += int(bool(skipped))
+        job.step(phase="days", done=counts["done"], total=total, current=d.isoformat(),
+                 rows_written=written, days_skipped=counts["skipped"])
         job.check_stop()
-        d = start + timedelta(days=i)
-        written += news.backfill_news(d, d, key=key, secret=secret, http_get=http_get,
-                                      sleep=job.sleep, clock=job.clock, store=job.st)
-        job.step(phase="days", done=i + 1, total=total, current=d.isoformat(),
-                 rows_written=written)
+
+    job.check_stop()
+    news.backfill_news(start, end, key=key, secret=secret, http_get=http_get,
+                       sleep=job.sleep, clock=job.clock, store=job.st, now=job.now,
+                       on_day=on_day)
 
 
 def _run_themes(params: dict, job: Job) -> None:
@@ -740,6 +810,10 @@ class _SymbolsFailed(RuntimeError):
     pass
 
 
+class _LedgerStopped(RuntimeError):
+    """The builder stopped before the last week; the job ends failed."""
+
+
 def _run_filings(params: dict, job: Job) -> None:
     from trend_research import filings
     start, end = _d(params["start"]), _d(params["end"])
@@ -770,7 +844,8 @@ def _run_ledger(params: dict, job: Job) -> None:
     m = bl.resolve_model_row(params["model_id"])
     job.add_secrets(m.get("api_key"))
     caller = StageCaller(m["provider"], m["model"], m["api_key"],
-                         max_calls=params["max_calls"], provider_config=m["provider_config"])
+                         max_calls=params["max_calls"], provider_config=m["provider_config"],
+                         prompt_version=params["prompt_version"])
     mondays = []
     d, last = clock.week_monday(_d(params["start"])), clock.week_monday(_d(params["end"]))
     while d <= last:
@@ -779,7 +854,7 @@ def _run_ledger(params: dict, job: Job) -> None:
     totals = {"model": m["model"], "provider": m["provider"],
               "prompt_version": params["prompt_version"], "built_ok": 0,
               "built_failed": 0, "skipped_ok": 0, "not_yet_due": 0, "quota_waits": 0,
-              "calls_used": 0, "stopped": None}
+              "calls_used": 0, "stopped": None, "stop_reason": None, "stopped_week": None}
     job.step(phase="weeks", done=0, total=len(mondays), ledger=totals)
 
     def quota_sleep(seconds):
@@ -805,13 +880,16 @@ def _run_ledger(params: dict, job: Job) -> None:
         for k in ("built_ok", "built_failed", "skipped_ok", "not_yet_due", "quota_waits",
                   "calls_used"):
             totals[k] += int(s.get(k) or 0)
-        totals["stopped"] = s.get("stopped")
+        if s.get("stopped"):
+            # Any stop ends the job: the next week must not build past it.
+            totals.update(stopped=s["stopped"], stop_reason=s.get("stop_reason"),
+                          stopped_week=s.get("stopped_week") or monday.isoformat())
+            job.step(phase="stopped", done=i, total=len(mondays), current=monday.isoformat(),
+                     ledger=totals)
+            raise _LedgerStopped("ledger build stopped (%s) at week %s: %s; resubmit to resume"
+                                 % (s["stopped"], totals["stopped_week"], s.get("stop_reason")))
         job.step(phase="weeks", done=i + 1, total=len(mondays), current=monday.isoformat(),
                  ledger=totals)
-        if s.get("stopped") == "budget":
-            log.warning("TR job %s: LLM call budget %d reached at week %s", job.id,
-                        params["max_calls"], monday)
-            break
 
 
 RUNNERS = {"ingest_news": _run_news, "ingest_themes": _run_themes,

@@ -9,30 +9,52 @@ One ledger row per week, built forward in time within a chain:
    recommended names first (they are researched again regardless), then the
    model's candidates in rank order. A symbol is kept when it normalizes to a
    US ticker, is an allowed ETF or -- not being a known ETF -- has an
-   operating-company filing before ``as_of`` (rulings R7/R7b; its filings are
-   fetched first), and has at least ``MIN_SESSIONS`` daily bars before the
+   operating-company filing accepted in the 400 days before ``as_of``
+   (rulings R7/R7b/R27; its filings are fetched first), and has at least ``MIN_SESSIONS`` daily bars before the
    session (ruling R16: missing bars are fetched into the SwingDailyBars
    cache first). At most ``MAX_CANDIDATES`` are researched;
 4. research -- 1 call per kept candidate, on a dossier of its SEC filings and
    fundamentals (``filings.filing_dossier``; a ``fetch_failed`` is retried
-   once, then the candidate is dropped), price-trend stats, its last 8 weeks
+   once), price-trend stats (no price levels, ruling R28), its last 8 weeks
    of news (at most 40 items), last week's note on it and why it is a
    candidate;
 5. book -- 1 call; the row is written.
 
 Every dropped candidate is recorded with its reason.
 
-Failure handling (spec §7.2):
+Before a run: the build refuses to start while an ingest job is queued or
+running (``stopped="ingest_running"``) -- a week built on half-ingested news
+would be written ``ok`` and never replaced.
+
+Before each week, an input-coverage gate (``missing_inputs``): every UTC day
+of the digest window (and its dedup lookback) has an Alpaca news completion
+marker (the decision's own day: fetched at least through ``as_of``), every
+GDELT theme has its title-week marker and theme-day rows in the window and
+in the baseline, and every macro series' ALFRED chunks reach ``as_of``.
+Anything missing stops the build (``stopped="inputs_missing"``); nothing is
+written for the week.
+
+Failure handling (spec §7.2). An ``ok`` row is permanent and is the prior
+state of every later week, so nothing transient may shape one, and no week
+may be built past a hole:
 
 * ``QuotaExhausted`` anywhere in a week: the week is discarded (nothing is
   written), the builder sleeps until ``reset_at`` + 60 s (30 min when the
-  reset time is unknown) and builds the same week again -- at most
-  ``MAX_QUOTA_WAITS_PER_WEEK`` times in a row; the next hit stops the build
-  cleanly (summary ``stopped="quota_wait_cap"``), like the budget.
+  reset time is unknown) and builds the same week again, for at most
+  ``MAX_QUOTA_WAIT_SEC_PER_WEEK`` (7 days) of waiting in total; past that the
+  build stops (``stopped="quota_wait_cap"``).
 * ``BudgetExceeded``: the build stops; the in-progress week is not written.
-* ``StageFailed`` twice on the scan, candidates or book stage: a
-  ``status="failed"`` row records the error (the lane holds its book for
-  that week). Twice on one research call: that candidate is dropped.
+* ``TransientError`` (timeout, crash, network, 5xx after retries, auth) on
+  any stage -- retried ``TRANSIENT_ATTEMPTS`` times with backoff -- and any
+  input that could not be fetched (an EDGAR filings or fundamentals fetch
+  that failed twice, a bars fetch that failed or returned nothing, an empty
+  market tape): the week is not written and the build stops
+  (``stopped="transient"`` / ``"inputs_missing"``) with the reason in
+  ``stop_reason``. Resubmitting resumes it; cached stages replay free.
+* ``StageFailed`` (the model answered, but not validly) twice on the scan,
+  candidates or book stage: a ``status="failed"`` row records the error and
+  the build stops (``stopped="week_failed"``), so no later week builds on a
+  stale prior. Twice on one research call: that candidate is dropped.
 
 A week whose row is already ``ok`` is skipped without a call; a ``failed``
 week is built again. Weeks whose ``as_of`` is not yet past are not built.
@@ -41,10 +63,10 @@ Recommended names are the book's picks with a positive weight that have a
 research note this week (BIL, the cash remainder, never is); any other pick
 is left out with a recorded reason (``dropped``, stage ``recommended``).
 
-Chain continuity across a failed week. A week's prior state is the chain's
-newest ``ok`` row before it, so after a failed week the next week builds on
-the last ok week (two or more weeks back), and a chain whose only earlier
-rows failed starts cold. The row's ``prior_row_id`` names the row it built
+Chain continuity. A week's prior state is the chain's newest ``ok`` row
+before it. The build stops at a failed week, so a later week can only build
+past it when a run starts after it (its ``start`` is later); a chain whose
+only earlier rows failed starts cold. The row's ``prior_row_id`` names the row it built
 on; a gap shows as a ``prior_row_id`` older than the previous Monday. When a
 failed week is rebuilt later, weeks already built after it keep the state
 they were built on (ok rows are never rewritten).
@@ -63,21 +85,32 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Callable
 
 from swing_trader import clock
-from trend_research import book, digest, filings, ledger, llm, market_tape, prompts
+from trend_research import book, digest, filings, ingest_alpaca_news, ingest_gdelt
+from trend_research import ingest_macro, ledger, llm, market_tape, pit_store, prompts
 from trend_research.ingest_alpaca_news import PAPER_INSTANCE, resolve_paper_credentials
-from trend_research.llm import BudgetExceeded, QuotaExhausted, StageCaller, StageFailed
+from trend_research.llm import (BudgetExceeded, QuotaExhausted, StageCaller, StageFailed,
+                                TransientError)
 from trend_research.schemas import BookProposal, CandidateList, ResearchNote, TrendScan
 
-__all__ = ["build", "build_week", "paper_bars_fetcher", "quota_delay", "MAX_CANDIDATES",
-           "STAGE_ATTEMPTS", "main"]
+__all__ = ["build", "build_week", "paper_bars_fetcher", "quota_delay", "missing_inputs",
+           "active_ingest_jobs", "InputsUnavailable", "MAX_CANDIDATES", "STAGE_ATTEMPTS",
+           "DEFAULT_MAX_CALLS", "main"]
 
 log = logging.getLogger(__name__)
 
 MAX_CANDIDATES = 30
 #: Attempts per LLM stage before it counts as failed.
 STAGE_ATTEMPTS = 2
-#: Quota waits in a row for one week before the build stops.
-MAX_QUOTA_WAITS_PER_WEEK = 12
+#: Attempts per LLM call on a ``TransientError``, and the backoff between.
+TRANSIENT_ATTEMPTS = 3
+TRANSIENT_BACKOFF_SEC = (60.0, 300.0)
+#: Total quota wait for one week before the build stops (a weekly reset fits).
+MAX_QUOTA_WAIT_SEC_PER_WEEK = 7 * 24 * 3600
+#: Default LLM call budget of one build run (config max_llm_calls_per_build):
+#: ~66 weeks x (MAX_CANDIDATES + 3) calls, plus retries.
+DEFAULT_MAX_CALLS = 4000
+#: The job kinds that feed a week's inputs.
+INGEST_JOB_KINDS = ("ingest_news", "ingest_themes", "ingest_macro", "ingest_filings")
 #: Margin added after a known quota reset, and the wait when it is unknown.
 QUOTA_RESET_MARGIN_SEC = 60
 QUOTA_DEFAULT_WAIT_SEC = 30 * 60
@@ -97,10 +130,9 @@ def _iso(dt: datetime) -> str:
 
 
 def _store(store):
-    if store is not None:
-        return store
-    from db import store as default_store
-    return default_store
+    # The real store gets the TR tables ensured first (pit_store.ensure_tables).
+    from trend_research import pit_store
+    return pit_store._store(store)
 
 
 def _dump(obj):
@@ -128,6 +160,11 @@ def paper_bars_fetcher(instance_id: str = PAPER_INSTANCE, *, store=None) -> Call
     return fetch
 
 
+class InputsUnavailable(Exception):
+    """A week's inputs are missing or could not be fetched; nothing may be
+    written for it."""
+
+
 class _WeekFailed(Exception):
     def __init__(self, stage: str, error: str):
         super().__init__("%s: %s" % (stage, error))
@@ -138,8 +175,10 @@ class _WeekFailed(Exception):
 class _Deps:
     """The week builder's outside world, injectable for tests."""
 
-    def __init__(self, *, store, bars_fetcher, filings_fetcher, dossier_fn, bars_instance):
+    def __init__(self, *, store, bars_fetcher, filings_fetcher, dossier_fn, bars_instance,
+                 sleep=time.sleep):
         self.store = store
+        self.sleep = sleep
         self._bars_fetcher = bars_fetcher
         self._bars_instance = bars_instance
         self.filings_fetcher = filings_fetcher or (
@@ -148,6 +187,8 @@ class _Deps:
             lambda sym, as_of: filings.filing_dossier(sym, as_of, store=store))
         #: (symbol, as_of date) pairs whose filings this run already fetched.
         self.filings_fetched: set = set()
+        #: ``inputs_check(as_of) -> [missing, ...]`` (the coverage gate).
+        self.inputs_check = lambda as_of: missing_inputs(as_of, store=store)
 
     @property
     def bars_fetcher(self) -> Callable:
@@ -166,19 +207,98 @@ def _scrub(text, secrets) -> str:
     return out[:ERROR_CHARS]
 
 
-def _stage(caller, stage: str, prompt: str, output_type, secrets=()):
-    """``caller.call`` with ``STAGE_ATTEMPTS`` tries on ``StageFailed``;
-    raise ``_WeekFailed`` (error text scrubbed of ``secrets``) after the
-    last. Quota and budget errors pass."""
+def _stage(caller, stage: str, prompt: str, output_type, secrets=(), sleep=time.sleep):
+    """``caller.call`` with ``STAGE_ATTEMPTS`` tries on ``StageFailed`` and
+    ``TRANSIENT_ATTEMPTS`` on ``TransientError`` (with backoff); raise
+    ``_WeekFailed`` (error text scrubbed of ``secrets``) after the last
+    StageFailed, and the last TransientError as is. Quota and budget errors
+    pass."""
     last = ""
-    for _ in range(STAGE_ATTEMPTS):
+    failures = transients = 0
+    while True:
         try:
             return caller.call(prompt, output_type,
                                max_output_tokens=llm.MAX_OUTPUT_TOKENS[stage])
         except StageFailed as exc:
             last = _scrub(exc, secrets)
+            failures += 1
             log.warning("TR %s stage failed: %s", stage, last)
-    raise _WeekFailed(stage, last)
+            if failures >= STAGE_ATTEMPTS:
+                raise _WeekFailed(stage, last) from None
+        except TransientError as exc:
+            transients += 1
+            text = _scrub(exc, secrets)
+            if transients >= TRANSIENT_ATTEMPTS:
+                raise TransientError("%s stage: %s" % (stage, text)) from None
+            delay = TRANSIENT_BACKOFF_SEC[min(transients, len(TRANSIENT_BACKOFF_SEC)) - 1]
+            log.warning("TR %s stage: transient failure (%s); retrying in %.0f s",
+                        stage, text, delay)
+            sleep(delay)
+
+
+# -- input coverage --------------------------------------------------------------------
+
+def _utc_days(lo: datetime, hi: datetime):
+    d, last = lo.astimezone(timezone.utc).date(), hi.astimezone(timezone.utc).date()
+    while d <= last:
+        yield d
+        d += timedelta(days=1)
+
+
+def missing_inputs(as_of: datetime, *, store=None) -> list:
+    """What the week deciding at ``as_of`` lacks (empty when complete):
+    Alpaca news days of the digest window and its dedup lookback without a
+    completion marker (``as_of``'s own day: not fetched through ``as_of``);
+    GDELT themes without the week's title marker or without theme-day rows
+    in the window and in its baseline; ALFRED chunks not fetched through
+    ``as_of``'s day. Read from TrendIngestProgress and TrendThemesPIT."""
+    st = _store(store)
+    start, end = digest.digest_window(as_of)
+    out = []
+    lo = start - digest.DEDUP_LOOKBACK
+    last_full = as_of.astimezone(timezone.utc).date() - timedelta(days=1)
+    news = ingest_alpaca_news.missing_days(lo.astimezone(timezone.utc).date(), last_full,
+                                           store=st)
+    if not ingest_alpaca_news.covered_through(as_of, store=st):
+        news.append(as_of.astimezone(timezone.utc).date())
+    if news:
+        out.append("alpaca news days not ingested: %s" % _list_dates(news))
+
+    monday = clock.week_monday(date.fromisoformat(clock.ny_date(as_of)))
+    titled = pit_store.done_keys(ingest_gdelt.TITLES_PROGRESS, "", store=st)
+    no_titles = [t for t in ingest_gdelt.THEMES if "%s|%s" % (t, monday.isoformat()) not in titled]
+    if no_titles:
+        out.append("GDELT title week %s not ingested for %d theme(s): %s"
+                   % (monday, len(no_titles), ", ".join(no_titles[:8])))
+    base_lo = start - timedelta(weeks=digest.BASELINE_WEEKS)
+    in_week, in_base = set(), set()
+    for row in ingest_gdelt.themes_between(base_lo.date(), end.date(), as_of, store=st):
+        day = str(row.get("date") or "")
+        (in_week if day >= start.date().isoformat() else in_base).add(row.get("theme"))
+    no_days = [t for t in ingest_gdelt.THEMES if t not in in_week or t not in in_base]
+    if no_days:
+        out.append("GDELT theme timelines missing in %s..%s for %d theme(s): %s"
+                   % (base_lo.date(), end.date(), len(no_days), ", ".join(no_days[:8])))
+
+    macro = ingest_macro.missing_coverage(start.date(), as_of.astimezone(ingest_macro.ET).date(),
+                                          store=st)
+    if macro:
+        out.append("ALFRED chunks not ingested through %s: %s"
+                   % (as_of.date(), ", ".join(macro[:8]) + (" ..." if len(macro) > 8 else "")))
+    return out
+
+
+def _list_dates(days: list) -> str:
+    text = ", ".join(d.isoformat() for d in days[:6])
+    return text + (" ... (%d days)" % len(days) if len(days) > 6 else "")
+
+
+def active_ingest_jobs(*, store=None) -> list:
+    """Ids of TR ingest jobs whose row is queued or running."""
+    from trend_research import jobs
+    st = _store(store)
+    return [r["id"] for r in jobs._rows(st)
+            if r.get("kind") in INGEST_JOB_KINDS and r.get("state") in jobs.ACTIVE_STATES]
 
 
 # -- candidate screen ----------------------------------------------------------------
@@ -222,6 +342,26 @@ def _drop(dropped: list, entry: dict, stage: str, reason: str) -> None:
                     "reason": reason})
 
 
+NO_RECENT_FILINGS = ("no recent operating filings (ticker may have been reassigned/acquired): "
+                     "no 10-K/10-Q/20-F/40-F/6-K by an operating company in the %d days "
+                     "before the decision" % filings.OPERATING_FILING_WINDOW_DAYS)
+
+
+def _fetch_filings(deps: _Deps, sym: str, as_of: datetime) -> None:
+    """Index ``sym``'s filings, retried once; ``InputsUnavailable`` when both
+    attempts fail (an EDGAR outage must not read as "not a stock")."""
+    error = ""
+    for attempt in range(2):
+        try:
+            deps.filings_fetcher(sym, as_of.date() - timedelta(days=FILINGS_LOOKBACK_DAYS),
+                                 as_of.date())
+            return
+        except Exception as exc:            # noqa: BLE001 -- reported, not swallowed
+            error = "%s: %s" % (type(exc).__name__, str(exc)[:200])
+            log.warning("TR filings fetch %s failed (attempt %d): %s", sym, attempt + 1, error)
+    raise InputsUnavailable("SEC filings fetch for %s failed twice: %s" % (sym, error))
+
+
 def _screen_universe(entries: list, as_of: datetime, deps: _Deps, dropped: list) -> list:
     """Entries allowed by the universe rules (§5.3, R7/R7b)."""
     kept = []
@@ -240,23 +380,12 @@ def _screen_universe(entries: list, as_of: datetime, deps: _Deps, dropped: list)
         if not book.is_allowed_symbol(sym, is_etf=False):
             _drop(dropped, e, "universe", "not an allowed ticker")
             continue
-        fetch_error = None
         key = (sym, as_of.date())
         if key not in deps.filings_fetched:
-            try:
-                deps.filings_fetcher(sym, as_of.date() - timedelta(days=FILINGS_LOOKBACK_DAYS),
-                                     as_of.date())
-            except Exception as exc:        # noqa: BLE001 -- recorded on the row
-                fetch_error = "%s: %s" % (type(exc).__name__, str(exc)[:200])
-                log.warning("TR filings fetch %s failed: %s", sym, fetch_error)
-            else:
-                deps.filings_fetched.add(key)
+            _fetch_filings(deps, sym, as_of)
+            deps.filings_fetched.add(key)
         if not filings.has_operating_filings(sym, as_of, store=deps.store):
-            reason = ("no 10-K/10-Q/20-F/40-F/6-K by an operating company before the "
-                      "decision (not a stock in the universe)")
-            if fetch_error:
-                reason += "; filings fetch failed: %s" % fetch_error
-            _drop(dropped, e, "universe", reason)
+            _drop(dropped, e, "universe", NO_RECENT_FILINGS)
             continue
         e["kind"] = "stock"
         kept.append(e)
@@ -269,10 +398,18 @@ def _screen_bars(entries: list, as_of: datetime, deps: _Deps, dropped: list) -> 
     if not entries:
         return []
     session = date.fromisoformat(clock.ny_date(as_of))
-    fetched = deps.bars_fetcher([e["symbol"] for e in entries],
-                                session - timedelta(days=market_tape.LOOKBACK_DAYS),
-                                session - timedelta(days=1)) or {}
+    try:
+        fetched = deps.bars_fetcher([e["symbol"] for e in entries],
+                                    session - timedelta(days=market_tape.LOOKBACK_DAYS),
+                                    session - timedelta(days=1)) or {}
+    except Exception as exc:                # noqa: BLE001 -- the week is not written
+        raise InputsUnavailable("daily bars fetch failed: %s: %s"
+                                % (type(exc).__name__, str(exc)[:200])) from None
     fetched = {str(k).upper(): v for k, v in fetched.items()}
+    if not any(fetched.get(str(e["symbol"]).upper()) for e in entries):
+        # Every name without bars at once is a data outage, not a screen.
+        raise InputsUnavailable("daily bars fetch returned no bars for any of %d candidates"
+                                % len(entries))
 
     def loader(symbols, _start, _end):
         return {s: fetched.get(str(s).upper()) or [] for s in symbols}
@@ -297,9 +434,10 @@ def build_week(chain_id: str, monday: date, *, caller, provider: str, model: str
                secrets=()) -> dict:
     """Build (and return, unwritten) the row for the week of ``monday``.
 
-    Raises ``QuotaExhausted`` / ``BudgetExceeded`` from the caller unchanged:
-    the week is then discarded. A scan, candidates or book stage that fails
-    twice gives a ``status="failed"`` row."""
+    Raises ``QuotaExhausted`` / ``BudgetExceeded`` / ``TransientError`` from
+    the caller and ``InputsUnavailable`` for missing inputs: the week is then
+    discarded. A scan, candidates or book stage that fails twice gives a
+    ``status="failed"`` row."""
     as_of = ledger.week_as_of(monday)
     started = now()
     calls_before = caller.calls_used
@@ -310,7 +448,18 @@ def build_week(chain_id: str, monday: date, *, caller, provider: str, model: str
            "provider": provider, "prompt_version": prompt_version,
            "prior_row_id": prior["id"] if prior else None}
 
-    dig = digest.weekly_digest(as_of, store=deps.store, bars_loader=deps.bars_fetcher)
+    missing = deps.inputs_check(as_of)
+    if missing:
+        raise InputsUnavailable("inputs missing for week %s: %s" % (monday, "; ".join(missing)))
+    try:
+        dig = digest.weekly_digest(as_of, store=deps.store, bars_loader=deps.bars_fetcher)
+    except (InputsUnavailable, TransientError):
+        raise
+    except Exception as exc:                # noqa: BLE001 -- the tape's bars fetch
+        raise InputsUnavailable("digest for week %s failed: %s: %s"
+                                % (monday, type(exc).__name__, str(exc)[:200])) from None
+    if not any(((dig.get("tape") or {}).get("symbols") or {}).values()):
+        raise InputsUnavailable("market tape for week %s has no bars" % monday)
     row["digest_hash"] = digest.digest_hash(dig)
     provenance = {
         "headlines": len(dig.get("headlines") or ()),
@@ -329,10 +478,10 @@ def build_week(chain_id: str, monday: date, *, caller, provider: str, model: str
     try:
         prior_trends = ((prior or {}).get("scan") or {}).get("trends") or None
         scan = _stage(caller, "scan", prompts.trend_scan_prompt(dig, prior_trends, as_of),
-                      TrendScan, secrets)
+                      TrendScan, secrets, deps.sleep)
         cand_list = _stage(caller, "candidates",
                            prompts.candidate_prompt(scan, (prior or {}).get("recommended"),
-                                                    as_of), CandidateList, secrets)
+                                                    as_of), CandidateList, secrets, deps.sleep)
         provenance["candidates_named"] = len(cand_list.candidates)
         provenance["prior_recommended"] = len((prior or {}).get("recommended") or ())
 
@@ -359,9 +508,8 @@ def build_week(chain_id: str, monday: date, *, caller, provider: str, model: str
                 retried.append(sym)
                 dossier = deps.dossier_fn(sym, as_of)
                 if (dossier or {}).get("factors_status") == filings.FACTORS_FETCH_FAILED:
-                    _drop(dropped, e, "dossier",
-                          "SEC fundamentals fetch failed twice (factors_status=fetch_failed)")
-                    continue
+                    raise InputsUnavailable("SEC fundamentals fetch for %s failed twice "
+                                            "(factors_status=fetch_failed)" % sym)
             news = digest.symbol_news(sym, as_of, weeks=NEWS_WEEKS, limit=NEWS_LIMIT,
                                       store=deps.store, articles=articles)
             dossier = dict(dossier or {})
@@ -370,7 +518,7 @@ def build_week(chain_id: str, monday: date, *, caller, provider: str, model: str
                             "trend_names": e["trend_names"], "why": e["why"]})
             try:
                 note = _stage(caller, "research", prompts.research_prompt(sym, dossier, as_of),
-                              ResearchNote, secrets)
+                              ResearchNote, secrets, deps.sleep)
             except _WeekFailed as exc:
                 _drop(dropped, e, "research", "research call failed twice: %s"
                       % _scrub(exc.error, secrets))
@@ -389,7 +537,7 @@ def build_week(chain_id: str, monday: date, *, caller, provider: str, model: str
                            "dossier_retries": retried})
 
         proposal = _stage(caller, "book", prompts.book_prompt(scan, notes, as_of), BookProposal,
-                          secrets)
+                          secrets, deps.sleep)
     except _WeekFailed as exc:
         row.update({"status": "failed", "failed_stage": exc.stage,
                     "error": _scrub(exc.error, secrets) or "no structured result",
@@ -440,29 +588,51 @@ def build(chain_id: str, start: date, end: date, *, provider: str, model: str,
           api_key: str | None, max_calls: int, prompt_version: str = prompts.PROMPT_VERSION,
           provider_config: dict | None = None, sleep=time.sleep, now=_utcnow, store=None,
           caller=None, bars_fetcher=None, filings_fetcher=None, dossier_fn=None,
-          bars_instance: str = PAPER_INSTANCE) -> dict:
+          bars_instance: str = PAPER_INSTANCE, inputs_check=None) -> dict:
     """Build the chain's weeks from ``start``'s to ``end``'s, oldest first,
     and return a summary of counts (see the module docstring).
+
+    ``summary["stopped"]`` is None when every due week was built ok or
+    skipped; otherwise one of ``ingest_running``, ``inputs_missing``,
+    ``transient``, ``week_failed``, ``quota_wait_cap``, ``budget``, with
+    ``stop_reason`` (scrubbed text) and ``stopped_week``. A stopped build
+    writes nothing for ``stopped_week`` except a ``week_failed`` row.
 
     ``caller``: a ``StageCaller``-like object (``call`` and ``calls_used``);
     by default one over ``provider`` / ``model`` / ``api_key`` with
     ``max_calls``. ``bars_fetcher(symbols, start, end)``,
-    ``filings_fetcher(symbol, start, end)`` and ``dossier_fn(symbol,
-    as_of)`` default to the network-backed paper-credential bars fetch,
-    ``filings.fetch_filings`` and ``filings.filing_dossier``."""
+    ``filings_fetcher(symbol, start, end)``, ``dossier_fn(symbol, as_of)``
+    and ``inputs_check(as_of)`` default to the network-backed paper-credential
+    bars fetch, ``filings.fetch_filings``, ``filings.filing_dossier`` and
+    ``missing_inputs``."""
     if end < start:
         raise ValueError("end %s is before start %s" % (end, start))
     st = _store(store)
-    if caller is None:
-        caller = StageCaller(provider, model, api_key, max_calls=max_calls,
-                             provider_config=provider_config, now=now)
-    deps = _Deps(store=st, bars_fetcher=bars_fetcher, filings_fetcher=filings_fetcher,
-                 dossier_fn=dossier_fn, bars_instance=bars_instance)
     secrets = tuple(s for s in (api_key,) if s)
     summary = {"chain_id": chain_id, "model": model, "prompt_version": prompt_version,
                "weeks": 0, "built_ok": 0, "built_failed": 0, "skipped_ok": 0,
                "not_yet_due": 0, "quota_waits": 0, "calls_used": 0, "stopped": None,
-               "stopped_week": None}
+               "stop_reason": None, "stopped_week": None}
+
+    def stop(kind: str, reason: str) -> None:
+        summary["stopped"] = kind
+        summary["stop_reason"] = _scrub(reason, secrets)
+        log.warning("TR ledger %s: stopped (%s) at week %s: %s", chain_id, kind,
+                    summary["stopped_week"], summary["stop_reason"])
+
+    busy = active_ingest_jobs(store=st)
+    if busy:
+        stop("ingest_running", "ingest job(s) still queued or running: %s; build the ledger "
+                               "after news, themes and macro are ingested" % ", ".join(busy))
+        return summary
+    if caller is None:
+        caller = StageCaller(provider, model, api_key, max_calls=max_calls,
+                             provider_config=provider_config, now=now,
+                             prompt_version=prompt_version, sleep=sleep)
+    deps = _Deps(store=st, bars_fetcher=bars_fetcher, filings_fetcher=filings_fetcher,
+                 dossier_fn=dossier_fn, bars_instance=bars_instance, sleep=sleep)
+    if inputs_check is not None:
+        deps.inputs_check = inputs_check
     calls_at_start = caller.calls_used
     try:
         for monday in _mondays(start, end):
@@ -475,6 +645,7 @@ def build(chain_id: str, start: date, end: date, *, provider: str, model: str,
                 summary["not_yet_due"] += 1
                 continue
             summary["stopped_week"] = monday.isoformat()
+            waited = 0.0
             waits = 0
             row = None
             while row is None:
@@ -483,31 +654,42 @@ def build(chain_id: str, start: date, end: date, *, provider: str, model: str,
                                      model=model, prompt_version=prompt_version, deps=deps,
                                      now=now, secrets=secrets)
                 except QuotaExhausted as exc:
-                    if waits >= MAX_QUOTA_WAITS_PER_WEEK:
-                        summary["stopped"] = "quota_wait_cap"
-                        log.warning("TR ledger %s week %s: quota hit after %d waits in a "
-                                    "row; stopping (week not written)", chain_id, monday,
-                                    waits)
+                    delay = quota_delay(exc.reset_at, now())
+                    if waited + delay > MAX_QUOTA_WAIT_SEC_PER_WEEK:
+                        stop("quota_wait_cap",
+                             "quota still exhausted after %.1f h of waiting on this week "
+                             "(cap %.0f h); week not written: %s"
+                             % (waited / 3600, MAX_QUOTA_WAIT_SEC_PER_WEEK / 3600, exc))
                         break
                     waits += 1
-                    delay = quota_delay(exc.reset_at, now())
+                    waited += delay
                     summary["quota_waits"] += 1
                     log.warning("TR ledger %s week %s: quota hit; week discarded, retrying "
-                                "in %.0f s (wait %d of %d)", chain_id, monday, delay, waits,
-                                MAX_QUOTA_WAITS_PER_WEEK)
+                                "in %.0f s (wait %d, %.1f h of %.0f h)", chain_id, monday,
+                                delay, waits, waited / 3600, MAX_QUOTA_WAIT_SEC_PER_WEEK / 3600)
                     sleep(delay)
+                except InputsUnavailable as exc:
+                    stop("inputs_missing", "%s; week not written" % exc)
+                    break
+                except TransientError as exc:
+                    stop("transient", "%s; week not written" % exc)
+                    break
             if row is None:
                 break
-            summary["stopped_week"] = None
             ledger.put_week(row, store=st)
-            summary["built_ok" if row["status"] == "ok" else "built_failed"] += 1
             log.info("TR ledger %s week %s: %s, %d calls, %d researched, %d dropped",
                      chain_id, monday, row["status"], row["calls_used"],
                      len(row.get("candidates") or ()), len(row.get("dropped") or ()))
+            if row["status"] != "ok":
+                summary["built_failed"] += 1
+                stop("week_failed", "%s stage failed: %s; later weeks were not built on a "
+                                    "stale prior" % (row.get("failed_stage"), row.get("error")))
+                break
+            summary["built_ok"] += 1
+            summary["stopped_week"] = None
     except BudgetExceeded:
-        summary["stopped"] = "budget"
-        log.warning("TR ledger %s: LLM call budget reached; stopping (in-progress week "
-                    "not written)", chain_id)
+        stop("budget", "LLM call budget of %s reached; in-progress week not written"
+             % getattr(caller, "max_calls", max_calls))
     summary["calls_used"] = caller.calls_used - calls_at_start
     return summary
 
@@ -544,8 +726,8 @@ def main(argv=None) -> int:
     parser.add_argument("--end", required=True, type=date.fromisoformat,
                         help="a day in the last week, YYYY-MM-DD")
     parser.add_argument("--model-id", required=True, help="Models row id")
-    parser.add_argument("--max-calls", type=int, default=2000,
-                        help="LLM call budget for this run (default 2000)")
+    parser.add_argument("--max-calls", type=int, default=DEFAULT_MAX_CALLS,
+                        help="LLM call budget for this run (default %d)" % DEFAULT_MAX_CALLS)
     parser.add_argument("--prompt-version", default=prompts.PROMPT_VERSION)
     parser.add_argument("--instance", default=PAPER_INSTANCE,
                         help="paper instance whose Alpaca data credentials fetch bars")
@@ -563,10 +745,10 @@ def main(argv=None) -> int:
              summary["weeks"], summary["built_ok"], summary["built_failed"],
              summary["skipped_ok"], summary["not_yet_due"], summary["calls_used"],
              summary["quota_waits"],
-             {"budget": "; stopped at the call budget",
-              "quota_wait_cap": "; stopped after %d quota waits in a row"
-              % MAX_QUOTA_WAITS_PER_WEEK}.get(summary["stopped"], "")))
-    return 0
+             "; STOPPED (%s) at week %s: %s" % (summary["stopped"], summary.get("stopped_week"),
+                                                summary.get("stop_reason"))
+             if summary["stopped"] else ""))
+    return 1 if summary["stopped"] else 0
 
 
 if __name__ == "__main__":

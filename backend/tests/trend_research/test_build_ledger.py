@@ -21,7 +21,8 @@ if _backend not in sys.path:
 from db.fake import FakeStore  # noqa: E402
 from trend_research import build_ledger as bl  # noqa: E402
 from trend_research import ledger, pit_store  # noqa: E402
-from trend_research.llm import BudgetExceeded, QuotaExhausted, StageFailed  # noqa: E402
+from trend_research.llm import (  # noqa: E402
+    BudgetExceeded, QuotaExhausted, StageFailed, TransientError)
 from trend_research.schemas import (  # noqa: E402
     BookProposal, CandidateList, ResearchNote, TrendScan)
 
@@ -143,11 +144,14 @@ def st():
 
 
 def run(st, caller, *, chain="honest", start=W1, end=W3, env=None, sleep=None, now=NOW,
-        api_key=SECRET):
+        api_key=SECRET, inputs_check=lambda as_of: []):
+    """``inputs_check`` defaults to "everything ingested"; the coverage gate
+    has its own tests below."""
     env = env or Env(st)
     return bl.build(chain, start, end, provider="anthropic", model=MODEL, api_key=api_key,
                     max_calls=caller.max_calls, prompt_version=PV, caller=caller,
-                    sleep=sleep or (lambda s: None), now=lambda: now, **env.kwargs())
+                    sleep=sleep or (lambda s: None), now=lambda: now,
+                    inputs_check=inputs_check, **env.kwargs())
 
 
 def row(st, monday, chain="honest"):
@@ -234,7 +238,8 @@ def test_writes_one_row_per_week(st):
     assert r1["recommended"][0]["thesis"] == "thesis for NVDA"
     reasons = {d["raw"]: d["reason"] for d in r1["dropped"]}
     assert "ETF outside" in reasons["ITA"]
-    assert "operating company" in reasons["NOFIL"]
+    assert reasons["NOFIL"].startswith("no recent operating filings (ticker may have been "
+                                       "reassigned/acquired)")
     assert "sessions of daily bars" in reasons["NOBAR"]
     assert "not a US-listed" in reasons["SAP.DE"]
     for key in ("headlines", "themes", "macro_series", "news_rows_8w", "news_items",
@@ -331,15 +336,18 @@ def test_failed_stage_writes_failed_row(st):
     assert "no structured result" in r["error"] and SECRET not in r["error"]
     assert r["calls_used"] == 2 and r["digest_hash"]
     assert r["recommended"] == [] and r["book"] is None
-    # The next week starts cold: a failed row carries no prior state.
-    r2 = row(st, W2)
-    assert r2["status"] == "ok" and r2["prior_row_id"] is None
-    assert summary["built_failed"] == 1 and summary["built_ok"] == 1
-    # A later run retries the failed week; the lane-visible ok row replaces it.
+    # The build stops at the failed week: W2 must not build on a stale prior.
+    assert summary["stopped"] == "week_failed" and summary["stopped_week"] == "2025-08-04"
+    assert "scan stage failed" in summary["stop_reason"] and SECRET not in summary["stop_reason"]
+    assert row(st, W2) is None
+    assert summary["built_failed"] == 1 and summary["built_ok"] == 0
+    # A later run retries the failed week; the lane-visible ok row replaces it,
+    # and W2 then builds on it.
     again = FakeCaller()
     summary2 = run(st, again, end=W2)
-    assert summary2["built_ok"] == 1 and summary2["skipped_ok"] == 1
+    assert summary2["built_ok"] == 2 and summary2["stopped"] is None
     assert row(st, W1)["status"] == "ok"
+    assert row(st, W2)["prior_row_id"] == row(st, W1)["id"]
 
 
 def test_stage_retried_once_before_failing(st):
@@ -363,15 +371,20 @@ def test_budget_stop(st):
     assert summary["calls_used"] == CALLS_PER_COLD_WEEK + 3
 
 
-def test_dossier_fetch_failed_retried_then_dropped(st):
-    env = Env(st, dossier_status={"NVDA": ["fetch_failed", "ok"],
-                                  "MSFT": ["fetch_failed", "fetch_failed"]})
+def test_dossier_fetch_failed_retried_then_stops_the_build(st):
+    env = Env(st, dossier_status={"NVDA": ["fetch_failed", "ok"]})
     run(st, FakeCaller(), end=W1, env=env)
     r = row(st, W1)
-    assert r["status"] == "ok"
-    assert [c["symbol"] for c in r["candidates"]] == ["NVDA", "GLD"]
-    assert {d["symbol"]: d["stage"] for d in r["dropped"]}["MSFT"] == "dossier"
-    assert r["provenance"]["dossier_retries"] == ["NVDA", "MSFT"]
+    assert r["status"] == "ok" and r["provenance"]["dossier_retries"] == ["NVDA"]
+    assert [c["symbol"] for c in r["candidates"]] == COLD_RESEARCH
+    # Failing twice is an EDGAR outage, not a reason to drop the name from an
+    # ok row: nothing is written and the build stops, resumable.
+    st2 = FakeStore()
+    env = Env(st2, dossier_status={"MSFT": ["fetch_failed", "fetch_failed"]})
+    summary = run(st2, FakeCaller(), env=env)
+    assert summary["stopped"] == "inputs_missing" and summary["stopped_week"] == "2025-08-04"
+    assert "MSFT" in summary["stop_reason"] and "fetch_failed" in summary["stop_reason"]
+    assert row(st2, W1) is None and row(st2, W2) is None
 
 
 def test_research_failure_drops_candidate_not_week(st):
@@ -386,10 +399,13 @@ def test_research_failure_drops_candidate_not_week(st):
     assert {d["symbol"]: d["stage"] for d in r["dropped"]}["MSFT"] == "research"
 
 
-def test_filings_fetch_error_recorded_on_drop(st):
-    run(st, FakeCaller(candidates=("NVDA", "BADFX")), end=W1)
-    reasons = {d["raw"]: d["reason"] for d in row(st, W1)["dropped"]}
-    assert "filings fetch failed: RuntimeError: EDGAR 503" in reasons["BADFX"]
+def test_filings_fetch_error_stops_the_build_without_a_row(st):
+    env = Env(st)
+    summary = run(st, FakeCaller(candidates=("NVDA", "BADFX")), env=env)
+    assert summary["stopped"] == "inputs_missing"
+    assert "BADFX" in summary["stop_reason"] and "EDGAR 503" in summary["stop_reason"]
+    assert [c[0] for c in env.filings_calls].count("BADFX") == 2      # retried once
+    assert row(st, W1) is None and row(st, W2) is None
 
 
 def test_candidate_cap(st):
@@ -458,7 +474,7 @@ def test_cli_resolves_models_row_and_prints_counts_only(monkeypatch, capsys):
                     "--model-id", "row-1"]) == 0
     assert seen["provider"] == "claude-cli" and seen["model"] == "claude-opus"
     assert seen["api_key"] == SECRET and seen["provider_config"] == {"cli_path": "claude"}
-    assert seen["max_calls"] == 2000 and seen["start"] == W1
+    assert seen["max_calls"] == 4000 and seen["start"] == W1
     out = capsys.readouterr().out
     assert SECRET not in out and "2 built ok, 1 failed" in out and "12 LLM calls" in out
 
@@ -491,7 +507,7 @@ def test_recommended_only_names_with_a_note(st):
     assert [p["symbol"] for p in r["book"]["picks"]] == ["NVDA", "TLT", "MSFT", "BIL", "nvda"]
 
 
-def test_quota_wait_cap_stops_cleanly(st, caplog):
+def test_quota_wait_cap_is_total_wait_time_per_week(st, caplog):
     slept = []
 
     def hook(n, stage, prompt):
@@ -499,11 +515,24 @@ def test_quota_wait_cap_stops_cleanly(st, caplog):
 
     with caplog.at_level("WARNING", logger="trend_research"):
         summary = run(st, FakeCaller(hook=hook), sleep=slept.append)
-    assert slept == [1800.0] * bl.MAX_QUOTA_WAITS_PER_WEEK
+    waits = bl.MAX_QUOTA_WAIT_SEC_PER_WEEK // 1800           # 7 days of 30-minute waits
+    assert slept == [1800.0] * waits
     assert summary["stopped"] == "quota_wait_cap" and summary["stopped_week"] == "2025-08-04"
-    assert summary["quota_waits"] == bl.MAX_QUOTA_WAITS_PER_WEEK
+    assert summary["quota_waits"] == waits and "168.0 h" in summary["stop_reason"]
     assert row(st, W1) is None and row(st, W2) is None
-    assert "wait 12 of 12" in caplog.text
+
+
+def test_a_weekly_reset_days_away_is_waited_out(st):
+    slept, state = [], {"hit": False}
+
+    def hook(n, stage, prompt):
+        if not state["hit"]:
+            state["hit"] = True
+            raise QuotaExhausted(NOW + timedelta(days=3), "Weekly limit reached")
+
+    summary = run(st, FakeCaller(hook=hook), end=W1, sleep=slept.append)
+    assert slept == [3 * 86400 + 60] and summary["stopped"] is None
+    assert row(st, W1)["status"] == "ok"
 
 
 def test_quota_wait_count_resets_per_week(st):
@@ -533,3 +562,146 @@ def test_prior_recommended_researched_first_even_if_not_named(st):
     researched = [_SYM_RE.search(p).group(1) for s, p in caller.prompts if s == "research"]
     assert researched == ["NVDA", "GLD", "AMD", "MSFT"]
     assert r2["prior_row_id"] == row(st, W1)["id"]
+
+
+# -- fix wave A3/A9: no permanent bad weeks --------------------------------------------
+
+def test_transient_failure_is_retried_with_backoff_then_stops_without_a_row(st):
+    def hook(n, stage, prompt):
+        if stage == "research" and 'symbol is "MSFT"' in prompt:
+            raise TransientError("ClaudeCliTimeoutError: claude timed out after 300s")
+
+    slept = []
+    caller = FakeCaller(hook=hook)
+    summary = run(st, caller, sleep=slept.append)
+    assert summary["stopped"] == "transient" and summary["stopped_week"] == "2025-08-04"
+    assert "research stage" in summary["stop_reason"] and "timed out" in summary["stop_reason"]
+    assert slept == list(bl.TRANSIENT_BACKOFF_SEC)
+    assert sum(1 for s, p in caller.prompts if 'symbol is "MSFT"' in p) == bl.TRANSIENT_ATTEMPTS
+    assert row(st, W1) is None and row(st, W2) is None       # never an ok row minus MSFT
+
+
+def test_a_transient_blip_is_absorbed(st):
+    state = {"n": 0}
+
+    def hook(n, stage, prompt):
+        if stage == "book" and state["n"] == 0:
+            state["n"] += 1
+            raise TransientError("anthropic HTTP 529 overloaded_error (after 5 attempts)")
+
+    summary = run(st, FakeCaller(hook=hook), end=W1)
+    assert summary["stopped"] is None and row(st, W1)["status"] == "ok"
+
+
+class OutageEnv(Env):
+    def __init__(self, st, mode):
+        super().__init__(st)
+        self.mode = mode
+
+    def bars_fetcher(self, symbols, start, end):
+        if self.mode == "raise":
+            raise RuntimeError("alpaca data 503")
+        if self.mode == "empty":
+            return {}
+        # tape symbols fine, candidates have none
+        if "NVDA" in symbols:
+            return {}
+        return super().bars_fetcher(symbols, start, end)
+
+
+@pytest.mark.parametrize("mode,needle", [("raise", "alpaca data 503"),
+                                         ("empty", "market tape"),
+                                         ("candidates", "no bars for any")])
+def test_a_bars_outage_stops_the_build_without_a_row(st, mode, needle):
+    summary = run(st, FakeCaller(), env=OutageEnv(st, mode))
+    assert summary["stopped"] == "inputs_missing" and needle in summary["stop_reason"]
+    assert row(st, W1) is None
+
+
+def test_build_refuses_to_start_while_an_ingest_job_is_active(st):
+    from trend_research import jobs
+    st.insert(jobs.TABLE, {"id": "tr-job|2026-11-05T10:00:00.000000Z|ingest_news",
+                           "kind": "ingest_news", "state": "running"})
+    caller = FakeCaller()
+    summary = run(st, caller)
+    assert summary["stopped"] == "ingest_running" and "ingest_news" in summary["stop_reason"]
+    assert caller.calls_used == 0 and row(st, W1) is None
+    st.update(jobs.TABLE, "tr-job|2026-11-05T10:00:00.000000Z|ingest_news", {"state": "done"})
+    assert run(st, FakeCaller(), end=W1)["stopped"] is None
+
+
+def _seed_inputs(st, monday):
+    from trend_research import digest, ingest_gdelt, ingest_macro
+    as_of = ledger.week_as_of(monday)
+    start, end = digest.digest_window(as_of)
+    d = (start - digest.DEDUP_LOOKBACK).date()
+    while d <= as_of.date():
+        pit_store.mark_done("alpaca_news", d.isoformat(), store=st)
+        d += timedelta(days=1)
+    rows = []
+    for theme in ingest_gdelt.THEMES:
+        pit_store.mark_done("gdelt_titles", "%s|%s" % (theme, monday.isoformat()), store=st)
+        for day in (start.date() + timedelta(days=1), start.date() - timedelta(days=20)):
+            rows.append({"id": "%s|%s" % (day.isoformat(), theme), "date": day.isoformat(),
+                         "theme": theme, "volume": 10,
+                         "available_at": iso(datetime(day.year, day.month, day.day, 23,
+                                                      tzinfo=timezone.utc))})
+    pit_store.put_rows("TrendThemesPIT", rows, store=st)
+    for series in ingest_macro.MACRO_SERIES:
+        c = ingest_macro._chunk_start(start.date())
+        while c <= as_of.date():
+            pit_store.mark_done("alfred", "%s|%s" % (series, c.isoformat()), store=st)
+            c += timedelta(days=ingest_macro.VINTAGES_PER_CALL)
+
+
+def test_missing_inputs_names_each_gap(st):
+    as_of = ledger.week_as_of(W1)
+    gaps = bl.missing_inputs(as_of, store=st)
+    assert [g.split(" ")[0] for g in gaps] == ["alpaca", "GDELT", "GDELT", "ALFRED"]
+    _seed_inputs(st, W1)
+    assert bl.missing_inputs(as_of, store=st) == []
+    st.delete("TrendIngestProgress", "alpaca_news|2025-08-01")
+    st.delete("TrendIngestProgress", "gdelt_titles|tariffs|2025-08-04")
+    gaps = bl.missing_inputs(as_of, store=st)
+    assert gaps[0] == "alpaca news days not ingested: 2025-08-01"
+    assert "tariffs" in gaps[1] and len(gaps) == 2
+
+
+def test_the_coverage_gate_stops_a_build_before_any_call(st):
+    caller = FakeCaller()
+    summary = bl.build("honest", W1, W2, provider="anthropic", model=MODEL, api_key=SECRET,
+                       max_calls=100, prompt_version=PV, caller=caller, sleep=lambda s: None,
+                       now=lambda: NOW, **Env(st).kwargs())
+    assert summary["stopped"] == "inputs_missing" and "alpaca news" in summary["stop_reason"]
+    assert caller.calls_used == 0 and row(st, W1) is None
+    _seed_inputs(st, W1)
+    summary = bl.build("honest", W1, W2, provider="anthropic", model=MODEL, api_key=SECRET,
+                       max_calls=100, prompt_version=PV, caller=FakeCaller(),
+                       sleep=lambda s: None, now=lambda: NOW, **Env(st).kwargs())
+    assert row(st, W1)["status"] == "ok"
+    assert summary["stopped"] == "inputs_missing" and summary["stopped_week"] == "2025-08-11"
+
+
+class ReassignedEnv(Env):
+    """PARA maps (today) to an issuer whose first filing is after the decision;
+    OLDCO's only filing is 2 years old."""
+
+    def filings_fetcher(self, sym, start, end):
+        if sym in ("PARA", "OLDCO"):
+            at = "2026-02-10T21:00:00Z" if sym == "PARA" else "2023-05-01T20:00:00Z"
+            pit_store.put_rows("TrendFilingsPIT", [{
+                "id": "%s|%s|0000000002-26-000001" % (sym, at), "symbol": sym, "cik": 2,
+                "form": "10-Q", "accession": "0000000002-26-000001", "available_at": at}],
+                store=self.st)
+            return 1
+        return super().filings_fetcher(sym, start, end)
+
+
+def test_a_reassigned_or_dormant_ticker_is_not_a_stock(st):
+    run(st, FakeCaller(candidates=("NVDA", "PARA", "OLDCO")), end=W1, env=ReassignedEnv(st))
+    r = row(st, W1)
+    assert [c["symbol"] for c in r["candidates"]] == ["NVDA"]
+    reasons = {d["raw"]: d["reason"] for d in r["dropped"]}
+    for sym in ("PARA", "OLDCO"):
+        assert reasons[sym].startswith("no recent operating filings (ticker may have been "
+                                       "reassigned/acquired)")
