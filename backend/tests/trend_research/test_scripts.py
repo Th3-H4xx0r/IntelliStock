@@ -208,14 +208,22 @@ def test_lab_setup_rejects_a_bad_cutoff():
 # -- tr_backtest ------------------------------------------------------------------------
 
 
-def backtest_api(listing, statuses=("running", "finished"), card=None):
+def backtest_api(listing, statuses=("running", "finished"), card=None, lab_listing=None):
     seq = list(statuses)
 
     def status(_body):
         return {"id": 9, "status": seq.pop(0) if len(seq) > 1 else seq[0], "progress": 50}
 
+    lab_rows = [r for r in listing if r.get("instance") == "strategy-tr-lab"]
     return FakeAPI({
         ("GET", "/backtests?per_page=100"): {"backtests": listing},
+        ("GET", "/backtests?instance_id=strategy-tr-lab&per_page=100"):
+            {"backtests": lab_rows if lab_listing is None else lab_listing},
+        ("GET", "/instances/strategy-tr-lab"): {"id": "strategy-tr-lab", "strategy_id": 77},
+        ("GET", "/strategies/77"): {"id": 77, "name": "TR lab", "strategies": [
+            {"strategy": "strategy_trend_research",
+             "config": {"strategy_trend_research_enabled": True, "tr_chain_id": "c1",
+                        "tr_model": "claude-test", "tr_prompt_version": "tr-v1"}}]},
         ("POST", "/backtests"): {"id": 9, "instance": "strategy-tr-lab"},
         ("GET", "/backtests/9/status"): status,
         ("GET", "/backtests/9/summary"): {"id": 9, "tr_scorecard": card},
@@ -233,27 +241,44 @@ CARD["meta"] = {"notes": ["a note"]}
 RUN_ARGS = ["--start", "2025-01-06", "--end", "2025-06-30", "--poll-seconds", "0"]
 
 
+def ledger_store(mondays=("2025-01-13", "2025-03-03", "2025-06-23"), *, chain="c1"):
+    """A FakeStore holding the lab chain's ok weeks (plus noise the window
+    must ignore: a failed week, another model)."""
+    st = FakeStore()
+    rows = [{"id": f"{chain}|{m}|claude-test|tr-v1", "chain_id": chain, "week_start": m,
+             "model": "claude-test", "prompt_version": "tr-v1", "status": "ok"}
+            for m in mondays]
+    rows.append({"id": f"{chain}|2024-06-03|claude-test|tr-v1", "chain_id": chain,
+                 "week_start": "2024-06-03", "model": "claude-test",
+                 "prompt_version": "tr-v1", "status": "failed"})
+    rows.append({"id": f"{chain}|2024-01-08|other|tr-v1", "chain_id": chain,
+                 "week_start": "2024-01-08", "model": "other", "prompt_version": "tr-v1",
+                 "status": "ok"})
+    st.insert(ledger.TABLE, rows)
+    return st
+
+
 @pytest.mark.parametrize("status", ["pending", "queued", "running", "paused",
                                     "paused_llm_critical"])
 def test_backtest_refuses_while_the_lab_has_a_run_in_flight(status):
     api = backtest_api([{"id": 5, "instance": "strategy-tr-lab", "status": status},
                         {"id": 4, "instance": "strategy-tr-lab", "status": "finished"}])
     with pytest.raises(SystemExit, match="strategy-tr-lab already has a backtest in flight"):
-        runner.main(RUN_ARGS, call=api, sleep=lambda s: None)
+        runner.main(RUN_ARGS, call=api, sleep=lambda s: None, store=ledger_store())
     assert api.writes() == []
 
 
 def test_backtest_refuses_while_another_instance_runs():
     api = backtest_api([{"id": 6, "instance": "strategy-eb-lab", "status": "running"}])
     with pytest.raises(SystemExit, match="the engine already has a backtest in flight"):
-        runner.main(RUN_ARGS, call=api, sleep=lambda s: None)
+        runner.main(RUN_ARGS, call=api, sleep=lambda s: None, store=ledger_store())
     assert api.writes() == []
 
 
 def test_backtest_posts_one_run_polls_and_prints_the_scorecard(capsys):
     api = backtest_api([{"id": 4, "instance": "strategy-tr-lab", "status": "finished"}],
                        statuses=("pending", "running", "finished"), card=CARD)
-    assert runner.main(RUN_ARGS, call=api, sleep=lambda s: None) == 0
+    assert runner.main(RUN_ARGS, call=api, sleep=lambda s: None, store=ledger_store()) == 0
     assert api.writes() == [("POST", "/backtests", {
         "instance_id": "strategy-tr-lab", "stocks": sorted(book.ALL_ALLOWED_ETFS),
         "start_date": "2025-01-06", "end_date": "2025-06-30", "granularity": "900",
@@ -266,7 +291,8 @@ def test_backtest_posts_one_run_polls_and_prints_the_scorecard(capsys):
 
 def test_backtest_sends_cost_flags_only_when_asked():
     api = backtest_api([], card=CARD)
-    runner.main(RUN_ARGS + ["--cost-tiers", "etf-liquid"], call=api, sleep=lambda s: None)
+    runner.main(RUN_ARGS + ["--cost-tiers", "etf-liquid"], call=api, sleep=lambda s: None,
+                store=ledger_store())
     body = api.writes()[0][2]
     assert body["equity_cost_tiers"] == "etf-liquid" and "equity_total_cost_bps" not in body
 
@@ -275,7 +301,7 @@ def test_backtest_times_out_without_stopping_the_run(capsys):
     api = backtest_api([], statuses=("running",))
     ticks = iter(range(0, 10 ** 6, 1000))
     code = runner.main(RUN_ARGS + ["--max-wait-hours", "1"], call=api,
-                       sleep=lambda s: None, clock=lambda: next(ticks))
+                       sleep=lambda s: None, clock=lambda: next(ticks), store=ledger_store())
     assert code == 2
     assert "TIMEOUT" in capsys.readouterr().out
     assert [c[:2] for c in api.writes()] == [("POST", "/backtests")]   # never stopped
@@ -283,14 +309,97 @@ def test_backtest_times_out_without_stopping_the_run(capsys):
 
 def test_backtest_reports_a_missing_scorecard(capsys):
     api = backtest_api([], card=None)
-    assert runner.main(RUN_ARGS, call=api, sleep=lambda s: None) == 0
+    assert runner.main(RUN_ARGS, call=api, sleep=lambda s: None, store=ledger_store()) == 0
     assert "no tr_scorecard" in capsys.readouterr().out
 
 
 def test_backtest_failed_run_exits_nonzero():
     api = backtest_api([], statuses=("error",), card={"error": "ValueError: boom"})
-    assert runner.main(RUN_ARGS, call=api, sleep=lambda s: None) == 1
+    assert runner.main(RUN_ARGS, call=api, sleep=lambda s: None, store=ledger_store()) == 1
 
+
+
+# -- fix wave B: the ledger window, paused_llm_critical, granularity ---------------------------
+
+
+def _posted(api):
+    return [b for m, p, b in api.writes() if (m, p) == ("POST", "/backtests")]
+
+
+def test_backtest_window_defaults_to_the_ledger():
+    """final I6: no flags -> a week of warm-up before the first ok week
+    through the end of the last ok week (failed rows and other models are
+    not the chain's window)."""
+    api = backtest_api([], card=CARD)
+    assert runner.main(["--poll-seconds", "0"], call=api, sleep=lambda s: None,
+                       store=ledger_store()) == 0
+    body = _posted(api)[0]
+    assert (body["start_date"], body["end_date"]) == ("2025-01-06", "2025-06-29")
+    assert body["granularity"] == "900"
+    # The selector came from the lab's linked document.
+    assert ("GET", "/strategies/77", None) in api.calls
+
+
+def test_backtest_refuses_a_long_cash_lead_in():
+    api = backtest_api([], card=CARD)
+    with pytest.raises(SystemExit, match="REFUSING: --start 2021-07-05 is"):
+        runner.main(["--start", "2021-07-05", "--end", "2025-06-30", "--poll-seconds", "0"],
+                    call=api, sleep=lambda s: None, store=ledger_store())
+    assert _posted(api) == []
+    # Two weeks of lead-in is fine; more needs the flag.
+    api = backtest_api([], card=CARD)
+    runner.main(["--start", "2024-12-30", "--poll-seconds", "0"], call=api,
+                sleep=lambda s: None, store=ledger_store())
+    assert _posted(api)[0]["start_date"] == "2024-12-30"
+    api = backtest_api([], card=CARD)
+    runner.main(["--start", "2021-07-05", "--end", "2025-06-30", "--allow-cash-lead",
+                 "--poll-seconds", "0"], call=api, sleep=lambda s: None, store=ledger_store())
+    assert _posted(api)[0]["start_date"] == "2021-07-05"
+
+
+def test_backtest_refuses_before_the_ledger_is_built():
+    api = backtest_api([], card=CARD)
+    with pytest.raises(SystemExit, match="no ok ledger weeks yet"):
+        runner.main(["--poll-seconds", "0"], call=api, sleep=lambda s: None,
+                    store=ledger_store(mondays=()))
+    assert _posted(api) == []
+
+
+def test_backtest_sees_a_paused_llm_critical_run_off_page_one():
+    """The global listing pins only running/queued/pending/paused rows to page
+    1; the lab's own rows are read with the instance filter."""
+    api = backtest_api([{"id": 4, "instance": "strategy-tr-lab", "status": "finished"}],
+                       lab_listing=[{"id": 3, "instance": "strategy-tr-lab",
+                                     "status": "paused_llm_critical"}])
+    with pytest.raises(SystemExit, match="strategy-tr-lab already has a backtest in flight"):
+        runner.main(RUN_ARGS, call=api, sleep=lambda s: None, store=ledger_store())
+    assert api.writes() == []
+
+
+def test_lab_setup_corrects_an_existing_instance_granularity():
+    api = lab_api(docs=[{"id": 88, "name": "TR lab"}],
+                  lab_instance={"id": "strategy-tr-lab", "brokerage_id": PAPER,
+                                "granularity_time_increment": 60})
+    inst = api.routes[("GET", "/instances/strategy-tr-lab")]
+
+    def patch(body):
+        state = inst(None)
+        state["granularity_time_increment"] = int(body["granularity"])
+        return state
+
+    api.routes[("PATCH", "/instances/strategy-tr-lab")] = patch
+    assert lab.main(LAB_ARGS, call=api) == 0
+    patches = [b for m, p, b in api.writes() if m == "PATCH"]
+    assert patches == [{"granularity": "900"}]
+
+
+def test_lab_setup_refuses_when_the_granularity_will_not_change(capsys):
+    api = lab_api(docs=[{"id": 88, "name": "TR lab"}],
+                  lab_instance={"id": "strategy-tr-lab", "brokerage_id": PAPER,
+                                "granularity_time_increment": "60"})
+    api.routes[("PATCH", "/instances/strategy-tr-lab")] = {}
+    with pytest.raises(SystemExit, match="REFUSING to leave strategy-tr-lab at granularity"):
+        lab.main(LAB_ARGS, call=api)
 
 # -- tr_journal -------------------------------------------------------------------------
 

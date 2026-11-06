@@ -20,7 +20,8 @@ account that is not ``alpaca-main``'s, checked BEFORE anything is written,
 or the script refuses.
 
 Idempotent: a rerun finds the doc by name and PUTs the lane, and re-links an
-existing instance. Docs 200 and 201 are REFUSED in every spelling, and the
+existing instance; an existing instance at another granularity is PATCHed to
+"900" (the backtest step), and the script refuses if the API does not take it. Docs 200 and 201 are REFUSED in every spelling, and the
 only instance this script writes is ``strategy-tr-lab``; ``alpaca-main`` and
 ``strategy-eb`` are only read. Nothing is started here.
 """
@@ -234,13 +235,36 @@ def main(argv=None, *, call=None) -> int:
 
     _, check = call("GET", f"/instances/{INSTANCE_ID}")
     check = check or {}
+    if not _granularity_ok(check):
+        # PATCH /instances/{id} takes `granularity` (EditInstanceBody) and
+        # stores it as granularity_time_increment seconds.
+        print(f"granularity is {check.get('granularity_time_increment')!r}, not "
+              f"{GRANULARITY}: correcting it")
+        call("PATCH", f"/instances/{INSTANCE_ID}", {"granularity": GRANULARITY})
+        _, check = call("GET", f"/instances/{INSTANCE_ID}")
+        check = check or {}
+        if not _granularity_ok(check):
+            raise SystemExit(
+                f"REFUSING to leave {INSTANCE_ID} at granularity "
+                f"{check.get('granularity_time_increment')!r}: the PATCH did not take. Set "
+                f"it by hand (python3 scripts/_api.py PATCH /instances/{INSTANCE_ID} "
+                f"'{{\"granularity\": \"{GRANULARITY}\"}}', or the Instances page) and "
+                "rerun this script.")
     print("instance:", json.dumps({k: check.get(k) for k in (
         "id", "strategy_id", "runCommand", "granularity_time_increment", "brokerage_id")}))
-    if str(check.get("granularity_time_increment") or "") not in ("", GRANULARITY):
-        print(f"WARNING: granularity is {check.get('granularity_time_increment')}, not "
-              f"{GRANULARITY}; tr_backtest.py passes 900 per POST regardless.")
     print("NOT started. Backtest with scripts/tr_backtest.py (one run at a time).")
     return 0
+
+
+def _granularity_ok(instance: dict) -> bool:
+    """True at 900 s, or when the API does not report a granularity."""
+    value = instance.get("granularity_time_increment")
+    if value in (None, ""):
+        return True
+    try:
+        return int(float(value)) == int(GRANULARITY)
+    except (TypeError, ValueError):
+        return False
 
 
 if __name__ == "__main__":

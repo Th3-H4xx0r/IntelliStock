@@ -7,6 +7,22 @@ All API calls go through `scripts/_api.py` (auth from the primary `.env`).
 Run each step to completion before the next. Engine backtests run **one at a
 time**.
 
+Order matters, and each step must be **finished** (job `state: done`) before
+the next starts:
+
+1. `ingest_news`, then `ingest_themes`, then `ingest_macro` (step 1). A week
+   built while its news, themes or macro are still loading reads a thin
+   digest, and an `ok` ledger row is never rewritten.
+2. `build_ledger` (step 2).
+3. The backtest (step 5). The broker reads the ledger's symbols **once, when
+   the backtest starts**, to fetch their bars: a week built after that has no
+   bars in the run (the lane holds that week and logs it red). Rerun the
+   backtest after building more weeks.
+
+Model note: Claude Sonnet 4.5 is retired on **2026-11-30**. A chain built on it
+cannot be extended or rebuilt after that date (a rerun on another model is a
+new chain, with every LLM call paid again); finish its weeks before then.
+
 ## 0. Deploy check
 
 ```bash
@@ -18,7 +34,9 @@ Exit 1: redeploy first. A job or backtest on stale code proves nothing.
 ## 1. Ingest jobs
 
 One job per kind may be active at a time (a second gets HTTP 409). Dates are
-`YYYY-MM-DD`; cover the ledger window plus its lead-in.
+`YYYY-MM-DD`; cover the ledger window plus its lead-in. Submit them one after
+another, news first, and wait for each to read `done`
+(step 3) before the next.
 
 ```bash
 python3 scripts/_api.py POST /trend-research/jobs \
@@ -36,6 +54,8 @@ for the whole range and article titles only from `articles_start` (default:
 `{"id": "tr-job|<utc iso>|<kind>"}`.
 
 ## 2. Build the ledger
+
+Only after all three ingests read `done`:
 
 ```bash
 python3 scripts/_api.py POST /trend-research/jobs \
@@ -81,19 +101,36 @@ python3 scripts/tr_lab_setup.py --chain honest-1 --model <ledger model string> \
 ```
 
 Creates or updates doc "TR lab" and instance `strategy-tr-lab` (granularity
-900, brokerage cloned from `strategy-eb`). It refuses docs 200/201 and any
+900, brokerage cloned from `strategy-eb`; an existing instance at another
+granularity is corrected to 900, or the script refuses with instructions). It refuses docs 200/201 and any
 brokerage that is not a paper Alpaca account other than `alpaca-main`'s,
 before writing anything. It never starts the instance.
 
 ## 5. Backtest (one at a time)
 
+Build the ledger first (step 2): the broker fetches the ledger's symbols when
+the backtest starts.
+
 ```bash
-python3 scripts/tr_backtest.py --start 2021-07-05 --end 2026-10-30
+python3 scripts/tr_backtest.py                                # the ledger's window
+python3 scripts/tr_backtest.py --start 2025-02-24 --end 2026-11-01
 python3 scripts/tr_backtest.py --scorecard <backtest id>      # reprint
 ```
 
-Posts granularity "900" and $5,500, refuses while any backtest is in flight,
-polls, then prints `tr_scorecard` (honest / optimistic / overall). Cost
+With no `--start`/`--end` the window is the ledger's: one warm-up week before
+the chain's first `ok` week through the end of its last `ok` week (for the
+step-2 chain, `2025-02-24..2026-11-01`). The chain is read from the lab
+instance's document and the ledger rows read-only from Postgres (the same
+credentials as `tr_journal.py`). A `--start` more than two weeks before the
+first `ok` week is refused unless `--allow-cash-lead`: before the ledger the
+lane holds no book, so the account sits in uninvested cash, the bar fetch
+grows by years and the scorecard is diluted.
+
+Posts granularity "900" and $5,500, refuses while any backtest is in flight
+(including a lab run in `paused_llm_critical`), polls, then prints
+`tr_scorecard` (honest / optimistic / overall). The honest period is the
+sessions strictly after `research_model_cutoff`; the scorecard warns when the
+chain's first `ok` week is on or before the cutoff (not a cold start). Cost
 flags (`--cost-tiers etf-liquid`, `--cost-bps 25|50`) are sent only when
 given. On `TIMEOUT` the run is left alone: a status can be stale, so check
 its logs (`GET /backtests/<id>/logs`) and stop it with
