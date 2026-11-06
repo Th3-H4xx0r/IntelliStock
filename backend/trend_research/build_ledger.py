@@ -103,6 +103,8 @@ MAX_CANDIDATES = 30
 #: Research calls in flight at once. Sequential research made a claude-cli week
 #: ~40 min (2026-11-06); notes are assembled in candidate order either way.
 RESEARCH_CONCURRENCY = 4
+#: The most a run may ask for (``build(research_concurrency=...)``, the job param).
+MAX_RESEARCH_CONCURRENCY = 8
 #: Attempts per LLM stage before it counts as failed.
 STAGE_ATTEMPTS = 2
 #: Attempts per LLM call on a ``TransientError``, and the backoff between.
@@ -194,6 +196,8 @@ class _Deps:
         self.filings_fetched: set = set()
         #: ``inputs_check(as_of) -> [missing, ...]`` (the coverage gate).
         self.inputs_check = lambda as_of: missing_inputs(as_of, store=store)
+        #: Research calls in flight at once (``build``'s ``research_concurrency``).
+        self.research_concurrency = RESEARCH_CONCURRENCY
 
     @property
     def bars_fetcher(self) -> Callable:
@@ -432,9 +436,10 @@ def _screen_bars(entries: list, as_of: datetime, deps: _Deps, dropped: list) -> 
     return kept
 
 
-def _research_wave(caller, research_prompts: list, secrets, sleep) -> list:
+def _research_wave(caller, research_prompts: list, secrets, sleep,
+                   concurrency: int = RESEARCH_CONCURRENCY) -> list:
     """One ``ResearchNote`` -- or the ``_WeekFailed`` that dropped it -- per
-    prompt, in order, with up to ``RESEARCH_CONCURRENCY`` calls in flight.
+    prompt, in order, with up to ``concurrency`` calls in flight.
     Quota, budget and transient errors propagate: the week is discarded."""
     def one(prompt):
         try:
@@ -442,7 +447,7 @@ def _research_wave(caller, research_prompts: list, secrets, sleep) -> list:
         except _WeekFailed as exc:
             return exc
 
-    workers = min(RESEARCH_CONCURRENCY, len(research_prompts))
+    workers = min(concurrency, len(research_prompts))
     if workers <= 1:
         return [one(p) for p in research_prompts]
     pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="tr-research")
@@ -547,7 +552,8 @@ def build_week(chain_id: str, monday: date, *, caller, provider: str, model: str
                                 "prior_note": prior_notes.get(sym),
                                 "trend_names": e["trend_names"], "why": e["why"]})
                 wave.append((e, dossier, news, prompts.research_prompt(sym, dossier, as_of)))
-            outcomes = _research_wave(caller, [w[3] for w in wave], secrets, deps.sleep)
+            outcomes = _research_wave(caller, [w[3] for w in wave], secrets, deps.sleep,
+                                      deps.research_concurrency)
             for (e, dossier, news, _), note in zip(wave, outcomes):
                 sym = e["symbol"]
                 if isinstance(note, _WeekFailed):
@@ -621,7 +627,8 @@ def build(chain_id: str, start: date, end: date, *, provider: str, model: str,
           api_key: str | None, max_calls: int, prompt_version: str = prompts.PROMPT_VERSION,
           provider_config: dict | None = None, sleep=time.sleep, now=_utcnow, store=None,
           caller=None, bars_fetcher=None, filings_fetcher=None, dossier_fn=None,
-          bars_instance: str = PAPER_INSTANCE, inputs_check=None) -> dict:
+          bars_instance: str = PAPER_INSTANCE, inputs_check=None,
+          research_concurrency: int | None = None) -> dict:
     """Build the chain's weeks from ``start``'s to ``end``'s, oldest first,
     and return a summary of counts (see the module docstring).
 
@@ -666,6 +673,10 @@ def build(chain_id: str, start: date, end: date, *, provider: str, model: str,
                  dossier_fn=dossier_fn, bars_instance=bars_instance, sleep=sleep)
     if inputs_check is not None:
         deps.inputs_check = inputs_check
+    if research_concurrency is not None:
+        if not 1 <= int(research_concurrency) <= MAX_RESEARCH_CONCURRENCY:
+            raise ValueError("research_concurrency must be 1..%d" % MAX_RESEARCH_CONCURRENCY)
+        deps.research_concurrency = int(research_concurrency)
     calls_at_start = caller.calls_used
     try:
         for monday in _mondays(start, end):

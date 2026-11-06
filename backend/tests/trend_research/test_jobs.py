@@ -146,6 +146,21 @@ def test_build_ledger_params_get_defaults(st, launcher):
     assert p["max_calls"] == 4000 and p["chain_id"] == "honest-x"
 
 
+def test_build_ledger_research_concurrency_param(st, launcher):
+    from trend_research import build_ledger as bl
+    job_id = submit(st, launcher, kind="build_ledger",
+                    params=dict(DATES, chain_id="honest-x", model_id="m1"))
+    p = jobs.status(job_id, store=st, launcher=launcher)["params"]
+    assert p["research_concurrency"] == bl.RESEARCH_CONCURRENCY
+    ok = jobs.validate_params("build_ledger", dict(DATES, chain_id="c", model_id="m",
+                                                   research_concurrency=8))
+    assert ok["research_concurrency"] == 8
+    for bad in (0, 9, "8", True, 2.5):
+        with pytest.raises(ValueError, match="research_concurrency"):
+            jobs.validate_params("build_ledger", dict(DATES, chain_id="c", model_id="m",
+                                                      research_concurrency=bad))
+
+
 def test_launch_failure_marks_the_job_failed(st):
     bad = FakeLauncher(fail="docker down; password=hunter22")
     with pytest.raises(jobs.JobLaunchError) as ei:
@@ -318,6 +333,7 @@ def test_build_ledger_runner_builds_week_by_week_with_one_budget(st, launcher, m
         weeks.append(start)
         callers.add(id(kw["caller"]))
         assert kw["max_calls"] == 50 and kw["api_key"] == "sk-ant-KEY-0000000"
+        assert kw["research_concurrency"] == 6
         stopped = "budget" if len(weeks) == 3 else None
         return {"weeks": 1, "built_ok": 0 if stopped else 1, "built_failed": 0,
                 "skipped_ok": 0, "not_yet_due": 0, "quota_waits": 0,
@@ -325,7 +341,7 @@ def test_build_ledger_runner_builds_week_by_week_with_one_budget(st, launcher, m
 
     monkeypatch.setattr(bl, "build", fake_build)
     job_id = submit(st, launcher, kind="build_ledger", params={
-        "chain_id": "honest-x", "model_id": "m1", "max_calls": 50,
+        "chain_id": "honest-x", "model_id": "m1", "max_calls": 50, "research_concurrency": 6,
         "start": "2025-08-04", "end": "2025-09-01"})
     # A stop ends the job failed with the reason, never "done" (A4).
     assert jobs.run(job_id, store=st, now=_clock()) == "failed"

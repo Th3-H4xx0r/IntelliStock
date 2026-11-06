@@ -144,14 +144,14 @@ def st():
 
 
 def run(st, caller, *, chain="honest", start=W1, end=W3, env=None, sleep=None, now=NOW,
-        api_key=SECRET, inputs_check=lambda as_of: []):
+        api_key=SECRET, inputs_check=lambda as_of: [], **extra):
     """``inputs_check`` defaults to "everything ingested"; the coverage gate
     has its own tests below."""
     env = env or Env(st)
     return bl.build(chain, start, end, provider="anthropic", model=MODEL, api_key=api_key,
                     max_calls=caller.max_calls, prompt_version=PV, caller=caller,
                     sleep=sleep or (lambda s: None), now=lambda: now,
-                    inputs_check=inputs_check, **env.kwargs())
+                    inputs_check=inputs_check, **env.kwargs(), **extra)
 
 
 def row(st, monday, chain="honest"):
@@ -440,10 +440,21 @@ def test_research_calls_run_concurrently(st):
         with lock:
             active[0] -= 1
 
-    names = ["S%s" % chr(65 + i) for i in range(10)]
+    names = ["S%s" % chr(65 + i) for i in range(12)]
     run(st, FakeCaller(candidates=names, hook=hook), end=W1)
     assert row(st, W1)["status"] == "ok"
     assert peak[0] == bl.RESEARCH_CONCURRENCY
+    active[0] = peak[0] = 0
+    run(st, FakeCaller(candidates=names, hook=hook), start=W2, end=W2,
+        research_concurrency=bl.MAX_RESEARCH_CONCURRENCY)
+    assert row(st, W2)["status"] == "ok"
+    assert peak[0] == bl.MAX_RESEARCH_CONCURRENCY
+
+
+def test_research_concurrency_out_of_range_is_refused(st):
+    for bad in (0, bl.MAX_RESEARCH_CONCURRENCY + 1):
+        with pytest.raises(ValueError, match="research_concurrency"):
+            run(st, FakeCaller(), end=W1, research_concurrency=bad)
 
 
 def test_concurrent_research_writes_the_sequential_row(monkeypatch):
