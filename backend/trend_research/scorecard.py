@@ -581,6 +581,10 @@ def backtest_scorecard(cfg, snapshots, *, start, end, benchmark_bars, store=None
     if start is None or end is None:
         return scorecard([], [], [], cutoff=None, candidate_weeks=[], n_random=n_random,
                          seed=seed)
+    # The ledger reads below go straight to the store: on the real store the
+    # TR tables are ensured first (idempotent, once per process).
+    from trend_research import pit_store
+    pit_store.ensure_tables(st)
     rows = _ledger_rows(cfg, start, end, st)
     plan = _week_plan(rows)
     symbols = sorted({s for w in plan for s in w["symbols"]})

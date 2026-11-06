@@ -549,3 +549,43 @@ def test_a_week_whose_picks_have_no_bars_is_held(st, logs):
     held = [line for line in logs if "HELD: 5 of 6 stock picks have no engine bars" in line]
     assert len(held) == 1 and "1 week(s) held this way" in held[0]
     assert cache["_tr_no_bar_weeks"] == 1 and cache["_tr_book_week"] == W1.isoformat()
+
+
+# -- the TR tables are ensured before any ledger read -----------------------------------------
+
+
+def test_every_ledger_read_ensures_the_tr_tables(st, logs, monkeypatch):
+    """The lane's weekly read (ledger.latest_row), the broker's bar-fetch
+    universe and the scorecard all read TrendResearchLedger; on a fresh
+    database each must create the TR tables first (pit_store.ensure_tables,
+    idempotent)."""
+    from trend_research import pit_store, scorecard as sc
+    seen = []
+    monkeypatch.setattr(pit_store, "ensure_tables", lambda store=None: seen.append(store))
+    put_row(st, W1, EVEN)
+
+    lane.trend_research_universe(CFG, store_=st)
+    assert seen and seen[-1] is st
+    seen.clear()
+
+    data = make_bars(NAMES + ("BIL",), date(2025, 7, 1), date(2025, 8, 15))
+    drive(data, rth_ticks(W1, n=1))
+    assert seen and all(s is st for s in seen)
+    seen.clear()
+
+    days = sessions(W1, W1 + timedelta(days=4))
+    snaps = [{"timestamp": utc(d, 15, 45), "value": 5500.0} for d in days]
+    sc.backtest_scorecard(CFG, snaps, start=days[0], end=days[-1],
+                          benchmark_bars=lambda *a: {}, store=st, daily_bars=lambda *a: {},
+                          n_random=5)
+    assert seen and seen[0] is st
+
+
+def test_the_universe_survives_a_failed_table_ensure(st, logs, monkeypatch):
+    from trend_research import book, pit_store
+
+    def boom(store=None):
+        raise RuntimeError("db down")
+    monkeypatch.setattr(pit_store, "ensure_tables", boom)
+    assert lane.trend_research_universe(CFG, store_=st) == sorted(book.ALL_ALLOWED_ETFS)
+    assert any("ledger unreadable" in line for line in logs)

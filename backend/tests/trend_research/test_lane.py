@@ -209,7 +209,7 @@ def test_schema_header_declares_the_lane_and_its_defaults():
     assert meta["execution_scope"] == "run_once" and meta["decision_phase"] == "pre"
     cfg = meta["config"]
     assert cfg["strategy_trend_research_enabled"] is False
-    assert cfg["tr_prompt_version"] == "tr-v1" and cfg["max_llm_calls_per_build"] == 2000
+    assert cfg["tr_prompt_version"] == "tr-v1" and cfg["max_llm_calls_per_build"] == 4000
     assert cfg["honour_single_position_cap"] is True
     assert cfg["broker_max_single_position_pct"] == 0.25
     assert {k: cfg[k] for k in cfg} == {k: lane.DEFAULTS[k] for k in cfg}

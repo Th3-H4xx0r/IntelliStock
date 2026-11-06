@@ -1,4 +1,4 @@
-# INTELLISTOCK_SCHEMA: {"strategy": "strategy_trend_research", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_trend_research_enabled": false, "tr_chain_id": "", "tr_model": "", "tr_prompt_version": "tr-v1", "research_model_cutoff": "", "max_positions": 12, "swap_margin": 2.0, "max_single_weight": 0.25, "max_levered_inverse_weight": 0.2, "stop_pct": 0.2, "core_band_pct": 0.01, "max_llm_calls_per_build": 2000, "honour_single_position_cap": true, "broker_max_single_position_pct": 0.25}}
+# INTELLISTOCK_SCHEMA: {"strategy": "strategy_trend_research", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_trend_research_enabled": false, "tr_chain_id": "", "tr_model": "", "tr_prompt_version": "tr-v1", "research_model_cutoff": "", "max_positions": 12, "swap_margin": 2.0, "max_single_weight": 0.25, "max_levered_inverse_weight": 0.2, "stop_pct": 0.2, "core_band_pct": 0.01, "max_llm_calls_per_build": 4000, "honour_single_position_cap": true, "broker_max_single_position_pct": 0.25}}
 # INTELLISTOCK_DESCRIPTION: TR, the deep-research trend picker (backtest only). Once a week, at the first tick of the week's first session, it reads that week's research ledger row (written offline, before 09:30 ET) and holds 8-12 names: stocks plus a small set of commodity, defensive, inverse and leveraged ETFs, at most 25% of the account in one name and 20% in leveraged plus inverse ETFs together, with the rest in BIL. A holding is sold when its thesis breaks, when the research drops it, when a clearly better idea takes its slot, or when it closes 20% below its highest close since purchase; a stopped name stays out until the next weekly decision. A week with no research row keeps the current book. No AI calls during the backtest.
 """Strategy TR wrapper: replays the TR research ledger inside the engine.
 
@@ -52,7 +52,7 @@ from db import store  # noqa: E402  (tests monkeypatch this name)
 from strategy_x import DEFAULTS as _SX_DEFAULTS  # noqa: E402
 from strategy_x import _as_utc, pit_daily_observations, targets_to_orders  # noqa: E402
 from swing_trader import clock  # noqa: E402
-from trend_research import book, ledger  # noqa: E402
+from trend_research import book, ledger, pit_store  # noqa: E402
 
 # Route through intellistock_logger: the backtest engine discards container
 # stdout on success, and BacktestResults.logs is the log an operator reads.
@@ -80,7 +80,7 @@ DEFAULTS = {
     # stalled and ~7% of NAV sat idle outside BIL. 0.0 churns (176 orders vs
     # 46 on the sweep harness).
     "core_band_pct": 0.01,
-    "max_llm_calls_per_build": 2000,
+    "max_llm_calls_per_build": 4000,
     "honour_single_position_cap": True,
     "broker_max_single_position_pct": 0.25,
 }
@@ -326,6 +326,9 @@ def trend_research_universe(cfg, *, start=None, end=None, store_=None) -> list:
     st = store_ if store_ is not None else store
     names = set()
     try:
+        # The real store gets the TR tables created first (idempotent, once
+        # per process); a fresh database must not fail the bar fetch.
+        pit_store.ensure_tables(st)
         for row in st.iter(st.between(ledger.TABLE, lo, hi)):
             if (row.get("chain_id") != chain or row.get("model") != model
                     or row.get("prompt_version") != pv or row.get("status") != "ok"):

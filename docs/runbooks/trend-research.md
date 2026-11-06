@@ -59,7 +59,7 @@ Only after all three ingests read `done`:
 
 ```bash
 python3 scripts/_api.py POST /trend-research/jobs \
-  '{"kind": "build_ledger", "params": {"model_id": "<Models row id>", "chain_id": "honest-1", "start": "2025-03-03", "end": "2026-10-26", "max_calls": 2000}}'
+  '{"kind": "build_ledger", "params": {"model_id": "<Models row id>", "chain_id": "honest-1", "start": "2025-03-03", "end": "2026-10-26", "max_calls": 4000}}'
 ```
 
 - `start`/`end`: the honest window (weeks on or after the model's
