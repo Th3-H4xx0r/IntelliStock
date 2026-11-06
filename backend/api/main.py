@@ -1082,6 +1082,7 @@ _CODE_FINGERPRINT_FILES = (
     # omitted them once reported "all match" while an unshipped llm_utils fix
     # was the thing being verified.
     "llm_utils.py",
+    "chatbot/claude_cli_provider.py",
     "model_resolver.py",
     "api/main.py",
     # Strategy X decides the whole book on the instances that run it — the core

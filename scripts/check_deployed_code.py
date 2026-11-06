@@ -32,6 +32,10 @@ FILES = (
     "backend/strategies/graph_nexus_analysis.py",
     "backend/core_sleeve.py",
     "backend/llm_utils.py",
+    # 2026-11-06: every claude-cli spawn builds its env here (long-lived
+    # subscription token); a push that changes only this file must not read
+    # as deployed.
+    "backend/chatbot/claude_cli_provider.py",
     "backend/model_resolver.py",
     "backend/api/main.py",
     "backend/strategy_x.py",

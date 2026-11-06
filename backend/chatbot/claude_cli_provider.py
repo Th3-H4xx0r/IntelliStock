@@ -376,12 +376,36 @@ _SUBSCRIPTION_CONFLICTING_ENV = (
 )
 
 
+# A long-lived subscription token (``claude setup-token``) for servers. Every
+# container mounts the operator's ``~/.claude`` read-only, so the ~8 h OAuth
+# access token is refreshed in a throwaway copy and the rotated refresh token
+# is never saved: on server7 the stored login died on 2026-07-21 and every
+# claude-cli call reported "Not logged in" from then on. A token in
+# ``~/.claude/oauth_token`` reaches every spawn through the same mount; an
+# explicit ``CLAUDE_CODE_OAUTH_TOKEN`` in the environment wins over the file.
+_OAUTH_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
+_OAUTH_TOKEN_FILE = os.path.join(".claude", "oauth_token")
+
+
+def _oauth_token_from_file() -> str:
+    try:
+        with open(os.path.join(_operator_home(), _OAUTH_TOKEN_FILE)) as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
 def _strip_api_key_env(env: Dict[str, str]) -> Dict[str, str]:
     """Remove API-key/token env vars so ``claude`` uses the subscription
-    OAuth, not an inherited key. Mutates and returns *env* for chaining:
+    OAuth, not an inherited key, and supply the long-lived subscription token
+    when one is stored. Mutates and returns *env* for chaining:
     ``child_env = _strip_api_key_env(os.environ.copy())``."""
     for key in _SUBSCRIPTION_CONFLICTING_ENV:
         env.pop(key, None)
+    if not (env.get(_OAUTH_TOKEN_ENV) or "").strip():
+        token = _oauth_token_from_file()
+        if token:
+            env[_OAUTH_TOKEN_ENV] = token
     return env
 
 
