@@ -77,7 +77,7 @@ def submit(st, launcher, kind="ingest_macro", params=None, now=None):
 # -- submit ---------------------------------------------------------------------------
 
 def test_job_kinds_are_the_contract():
-    assert jobs.JOB_KINDS == ("ingest_news", "ingest_themes", "ingest_macro",
+    assert jobs.JOB_KINDS == ("ingest_news", "ingest_themes", "ingest_gkg", "ingest_macro",
                               "ingest_filings", "build_ledger")
 
 
@@ -563,6 +563,58 @@ def test_docker_launcher_uses_the_configured_network(monkeypatch):
     jobs.DockerLauncher(client_factory=lambda: fake).launch("tr-job|n|ingest_macro")
     (_, kw), = fake.containers.runs
     assert kw["network"] == "intellistockv4_default"
+
+
+class _DokployApi:
+    """The API container as Dokploy runs it on server7 (2026-11-06): Traefik's
+    ingress network listed first, the compose project's network -- the only
+    one Postgres is on -- second."""
+    def __init__(self, labels=True):
+        self.attrs = {"Image": "sha256:deadbeef", "Mounts": [],
+                      "Config": {"Labels": ({"com.docker.compose.project": "intellistockv4-fullstack-nnhtty"}
+                                            if labels else {})},
+                      "NetworkSettings": {"Networks": {
+                          "dokploy-network": {}, "intellistockv4-fullstack-nnhtty_default": {}}}}
+
+
+def _self_is(me):
+    def get(name):
+        if name == "self-container":
+            return me
+        raise NotFound("no such container")
+    return get
+
+
+@pytest.mark.parametrize("labels", [True, False])
+def test_docker_launcher_joins_the_app_network_not_the_platform_ingress(monkeypatch, labels):
+    # Live failure: the job joined dokploy-network, could not resolve
+    # "postgres", and exited 1 after ~90 s before marking itself running.
+    monkeypatch.delenv("INSTANCE_DOCKER_NETWORK", raising=False)
+    monkeypatch.setenv("HOSTNAME", "self-container")
+    fake = _FakeDocker()
+    fake.containers.get = _self_is(_DokployApi(labels))
+    jobs.DockerLauncher(client_factory=lambda: fake).launch("tr-job|n|ingest_news")
+    (_, kw), = fake.containers.runs
+    assert kw["network"] == "intellistockv4-fullstack-nnhtty_default"
+
+
+def test_docker_launcher_skips_a_configured_network_that_does_not_exist(monkeypatch):
+    # The backtest engine's INSTANCE_DOCKER_NETWORK=intellistockv4_default does
+    # not exist on server7; the job must fall through to the app network.
+    monkeypatch.setenv("INSTANCE_DOCKER_NETWORK", "intellistockv4_default")
+    monkeypatch.setenv("HOSTNAME", "self-container")
+    fake = _FakeDocker()
+    fake.containers.get = _self_is(_DokployApi())
+
+    class networks:
+        @staticmethod
+        def get(name):
+            raise NotFound(name)
+
+    fake.networks = networks
+    jobs.DockerLauncher(client_factory=lambda: fake).launch("tr-job|n|ingest_news")
+    (_, kw), = fake.containers.runs
+    assert kw["network"] == "intellistockv4-fullstack-nnhtty_default"
 
 
 def test_docker_launcher_refuses_without_a_network(monkeypatch, st):

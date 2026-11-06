@@ -46,7 +46,9 @@ Pacing. Each ingest's client paces its own requests, but a fresh client per
 chunk would send its first request unpaced; the runners therefore share one
 pacing ``http_get`` per job (GDELT 15 s, ALFRED 1 s, Alpaca 190/min), so the
 source's interval holds across chunk boundaries. EDGAR's throttle is already
-process-wide.
+process-wide. ``ingest_gkg`` (GDELT themes from the raw GKG files, ruling
+R35 -- the default for GDELT now that the DOC API refuses most requests)
+reads static files and is not paced.
 
 LLM providers. The ledger build supports what ``trend_research.llm``
 supports: ``claude-cli`` (the host's subscription login, mounted read-only)
@@ -79,8 +81,8 @@ __all__ = ["JOB_KINDS", "TABLE", "STATES", "submit", "status", "stop", "run", "m
 
 log = logging.getLogger(__name__)
 
-JOB_KINDS = ("ingest_news", "ingest_themes", "ingest_macro", "ingest_filings",
-             "build_ledger")
+JOB_KINDS = ("ingest_news", "ingest_themes", "ingest_gkg", "ingest_macro",
+             "ingest_filings", "build_ledger")
 TABLE = "TrendResearchJobs"
 STATES = ("queued", "running", "done", "failed", "stopped")
 ACTIVE_STATES = ("queued", "running")
@@ -221,6 +223,7 @@ def _str_list_param(params: dict, name: str) -> list | None:
 _ALLOWED = {
     "ingest_news": {"start", "end", "instance"},
     "ingest_themes": {"start", "end", "articles", "articles_start", "themes"},
+    "ingest_gkg": {"start", "end", "articles_start", "sample_every", "themes"},
     "ingest_macro": {"start", "end", "series"},
     "ingest_filings": {"start", "end", "symbols", "chain_id"},
     "build_ledger": {"start", "end", "chain_id", "model_id", "max_calls", "prompt_version",
@@ -251,12 +254,20 @@ def validate_params(kind: str, params) -> dict:
         if out["instance"] in LIVE_INSTANCES:
             raise ValueError("instance %s refused: news ingest uses paper data credentials "
                              "only" % out["instance"])
-    elif kind == "ingest_themes":
+    elif kind in ("ingest_themes", "ingest_gkg"):
         from trend_research.ingest_gdelt import THEME_QUERIES, THEMES
-        articles = params.get("articles", True)
-        if not isinstance(articles, bool):
-            raise ValueError("param 'articles' must be true or false")
-        out["articles"] = articles
+        if kind == "ingest_themes":
+            articles = params.get("articles", True)
+            if not isinstance(articles, bool):
+                raise ValueError("param 'articles' must be true or false")
+            out["articles"] = articles
+        else:
+            from trend_research.ingest_gkg import SAMPLE_EVERY_CHOICES
+            sample_every = params.get("sample_every", 4)
+            if isinstance(sample_every, bool) or sample_every not in SAMPLE_EVERY_CHOICES:
+                raise ValueError("param sample_every must be one of %s"
+                                 % ", ".join(str(n) for n in SAMPLE_EVERY_CHOICES))
+            out["sample_every"] = int(sample_every)
         out["articles_start"] = _date_param(params, "articles_start", required=False)
         if out["articles_start"] and out["articles_start"] > out["end"]:
             raise ValueError("articles_start must be on or before end")
@@ -349,6 +360,12 @@ def _container_env() -> dict:
     return env
 
 
+#: Networks Docker or the deploy platform attaches beside the app's own; none
+#: of them carries Postgres.
+_PLATFORM_NETWORKS = ("bridge", "host", "none", "ingress", "docker_gwbridge",
+                      "dokploy-network")
+
+
 class DockerLauncher:
     """Runs a job in a detached ``tr-job-*`` container on the host's Docker."""
 
@@ -379,16 +396,32 @@ class DockerLauncher:
 
     @staticmethod
     def _network(client) -> str:
-        """The network backtest containers get (``backtest_engine._get_network``:
-        INSTANCE_DOCKER_NETWORK if it exists, else this container's own);
-        RuntimeError when none can be determined -- a guessed network would
-        leave the job unable to reach Postgres."""
-        from engines.backtest_engine import _get_network
-        network = _get_network(client)
-        if not network:
+        """INSTANCE_DOCKER_NETWORK if it exists, else the app network this
+        container is on: its compose project's ``<project>_default``, else the
+        first network that is not a platform one. Not
+        ``backtest_engine._get_network``'s first network: Dokploy attaches the
+        API to ``dokploy-network`` (Traefik ingress) ahead of the app network,
+        and a job there cannot resolve Postgres -- it exited 1 before marking
+        itself running (2026-11-06). RuntimeError when none can be determined."""
+        configured = (os.environ.get("INSTANCE_DOCKER_NETWORK") or "").strip()
+        if configured:
+            try:
+                client.networks.get(configured)
+                return configured
+            except Exception:
+                pass
+        me = DockerLauncher._self_container(client)
+        attrs = (me.attrs if me is not None else None) or {}
+        names = list((attrs.get("NetworkSettings") or {}).get("Networks") or {})
+        project = ((attrs.get("Config") or {}).get("Labels") or {}).get(
+            "com.docker.compose.project")
+        if project and "%s_default" % project in names:
+            return "%s_default" % project
+        app = [n for n in names if n not in _PLATFORM_NETWORKS]
+        if not app:
             raise RuntimeError("no Docker network for the job container: set "
                                "INSTANCE_DOCKER_NETWORK to the network the api service is on")
-        return network
+        return app[0]
 
     @staticmethod
     def _claude_volumes(me) -> dict:
@@ -769,6 +802,23 @@ def _run_themes(params: dict, job: Job) -> None:
                      current="%s %s..%s" % (theme, lo, hi), rows_written=written)
 
 
+def _run_gkg(params: dict, job: Job) -> None:
+    # One pass over the GKG files: timelines and titles together, resumable
+    # by its day and title-week markers. No pacing -- GKG files are static.
+    from trend_research import ingest_gkg as gkg
+
+    def on_progress(**progress):
+        job.step(**progress)
+        job.check_stop()
+
+    job.check_stop()
+    gkg.backfill_gkg(_d(params["start"]), _d(params["end"]),
+                     articles_start=(_d(params["articles_start"])
+                                     if params.get("articles_start") else None),
+                     sample_every=params["sample_every"], themes=params["themes"],
+                     sleep=job.sleep, now=job.now(), store=job.st, progress=on_progress)
+
+
 def _run_macro(params: dict, job: Job) -> None:
     from trend_research import ingest_macro as macro
     windows = list(_windows(_d(params["start"]), _d(params["end"]), MACRO_WINDOW_DAYS))
@@ -892,7 +942,7 @@ def _run_ledger(params: dict, job: Job) -> None:
                  ledger=totals)
 
 
-RUNNERS = {"ingest_news": _run_news, "ingest_themes": _run_themes,
+RUNNERS = {"ingest_news": _run_news, "ingest_themes": _run_themes, "ingest_gkg": _run_gkg,
            "ingest_macro": _run_macro, "ingest_filings": _run_filings,
            "build_ledger": _run_ledger}
 

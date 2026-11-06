@@ -464,6 +464,15 @@ def macro_ids(store, series="PAYEMS"):
     return {r["id"]: r for r in store.iter(store.between("TrendMacroPIT", series + "|", series + "}"))}
 
 
+def test_macro_user_agent_is_one_alfred_serves():
+    # 2026-11-06: ALFRED's edge drops a bare "IntelliStock research" User-Agent
+    # (read timeout on every request; the job gave up on its first chunk) but
+    # serves a product/version token at once.
+    ua = im.HEADERS["User-Agent"]
+    assert ua != "IntelliStock research"
+    assert ua.startswith("IntelliStock/")
+
+
 def test_macro_uses_first_release(store):
     run_macro(store, {"PAYEMS": PAYEMS}, date(2022, 6, 1), date(2022, 7, 31))
 

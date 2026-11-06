@@ -292,6 +292,30 @@ def test_themes_macro_calendar_sections():
     assert d["tape"]["vix"] == 16.25
 
 
+def test_gkg_titles_rank_by_prominence_before_the_per_theme_cap():
+    # Ruling R37: GKG rows carry ``prominence``; the digest takes the most
+    # prominent first, then caps at TITLES_PER_THEME. Rows without it (the
+    # DOC-API path) keep their oldest-first, id order.
+    st = FakeStore()
+    rows = []
+    for i in range(dg.TITLES_PER_THEME + 5):
+        r = gdelt(WINDOW_END, "p%02d" % i, "Inflation story %d" % i, "inflation")
+        r["prominence"] = 1 if i < dg.TITLES_PER_THEME else 10 + i   # the last 5 matter most
+        rows.append(r)
+    doc = [gdelt(WINDOW_END - timedelta(hours=k), "d%02d" % k, "Tariff story %d" % k,
+                 "tariffs") for k in range(3)]
+    seed(st, {"TrendNewsPIT": rows + doc})
+    d = dg.weekly_digest(DECISION, store=st, bars_loader=loader_for({}))
+    themes = {th["theme"]: th for th in d["themes"]}
+    got = [x["headline"] for x in themes["inflation"]["titles"]]
+    n = dg.TITLES_PER_THEME
+    assert len(got) == n
+    assert got[:5] == ["Inflation story %d" % i for i in (n + 4, n + 3, n + 2, n + 1, n)]
+    assert got[5:] == ["Inflation story %d" % i for i in range(n - 5)]   # ties keep id order
+    assert [x["headline"] for x in themes["tariffs"]["titles"]] == [
+        "Tariff story 2", "Tariff story 1", "Tariff story 0"]              # oldest first
+
+
 # -- symbol_news -------------------------------------------------------------------------
 
 def test_symbol_news_filters_symbol_source_and_time(store):
