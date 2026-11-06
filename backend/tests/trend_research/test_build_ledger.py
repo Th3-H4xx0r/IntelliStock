@@ -418,6 +418,75 @@ def test_candidate_cap(st):
     assert sum(1 for d in r["dropped"] if d["stage"] == "cap") == len(names) - bl.MAX_CANDIDATES
 
 
+def _strip_timing(r):
+    r = dict(r)
+    r.pop("built_at", None)
+    return r
+
+
+def test_research_calls_run_concurrently(st):
+    # 2026-11-06: one-at-a-time research made a week ~40 min on claude-cli.
+    import threading
+    import time as _time
+    lock, active, peak = threading.Lock(), [0], [0]
+
+    def hook(n, stage, prompt):
+        if stage != "research":
+            return
+        with lock:
+            active[0] += 1
+            peak[0] = max(peak[0], active[0])
+        _time.sleep(0.05)
+        with lock:
+            active[0] -= 1
+
+    names = ["S%s" % chr(65 + i) for i in range(10)]
+    run(st, FakeCaller(candidates=names, hook=hook), end=W1)
+    assert row(st, W1)["status"] == "ok"
+    assert peak[0] == bl.RESEARCH_CONCURRENCY
+
+
+def test_concurrent_research_writes_the_sequential_row(monkeypatch):
+    # Same kept/dropped/notes in the same order as one-at-a-time, including a
+    # failed research call freeing its slot for the next name past the cap.
+    from db.fake import FakeStore
+    names = ["S%s" % chr(65 + i) + chr(65 + j) for i in range(3) for j in range(12)]
+
+    def hook(n, stage, prompt):
+        if stage == "research" and any('symbol is "%s"' % s in prompt
+                                       for s in ("SAB", "SAH", "SBC")):
+            raise StageFailed("bad json")
+
+    rows = []
+    for conc in (1, bl.RESEARCH_CONCURRENCY):
+        store = FakeStore()
+        monkeypatch.setattr(bl, "RESEARCH_CONCURRENCY", conc)
+        run(store, FakeCaller(candidates=names, hook=hook), end=W1)
+        rows.append(_strip_timing(row(store, W1)))
+    assert rows[0] == rows[1]
+    assert len(rows[1]["candidates"]) == bl.MAX_CANDIDATES
+    assert {d["symbol"] for d in rows[1]["dropped"] if d["stage"] == "research"} == {
+        "SAB", "SAH", "SBC"}
+
+
+def test_quota_in_a_concurrent_research_call_retries_the_whole_week(st):
+    import threading
+    fired, lock = [], threading.Lock()
+
+    def hook(n, stage, prompt):
+        if stage == "research" and 'symbol is "SC"' in prompt:
+            with lock:
+                if not fired:
+                    fired.append(n)
+                    raise QuotaExhausted(None, "session limit")
+
+    names = ["S%s" % chr(65 + i) for i in range(8)]
+    summary = run(st, FakeCaller(candidates=names, hook=hook), end=W1, sleep=lambda s: None)
+    r = row(st, W1)
+    assert fired and summary["quota_waits"] >= 1
+    assert r["status"] == "ok" and [c["symbol"] for c in r["candidates"]] == names
+
+
 def test_symbol_news_capped_and_strictly_before(st):
     as_of = ledger.week_as_of(W1)
     rows = []
@@ -559,8 +628,11 @@ def test_prior_recommended_researched_first_even_if_not_named(st):
     r2 = row(st, W2)
     assert [c["symbol"] for c in r2["candidates"]] == ["NVDA", "GLD", "AMD", "MSFT"]
     assert r2["candidates"][0]["sources"] == ["prior_recommended"]
+    # Research runs concurrently (RESEARCH_CONCURRENCY), so the calls' issue
+    # order is not fixed; the row's order above is.
     researched = [_SYM_RE.search(p).group(1) for s, p in caller.prompts if s == "research"]
-    assert researched == ["NVDA", "GLD", "AMD", "MSFT"]
+    assert sorted(researched) == ["AMD", "GLD", "MSFT", "NVDA"]
+    assert [n["symbol"] for n in r2["notes"]] == ["NVDA", "GLD", "AMD", "MSFT"]
     assert r2["prior_row_id"] == row(st, W1)["id"]
 
 
