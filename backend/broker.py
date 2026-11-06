@@ -4869,8 +4869,17 @@ def _trend_research_scorecard(cached_strategies, snapshots, *, start, end, fetch
                               key=key, secret=secret, timeframe="1Day", db_conn=None,
                               feed=feed, adjustment="all")
 
+        def _daily_bars(symbols, lo, hi):
+            # The random baselines' closes: the lane's daily-bar loader through
+            # the SwingDailyBars cache, fetching what it lacks, through `end`
+            # (the ledger builder cached each candidate only up to its week).
+            from swing_trader import backtest_bars as _tr_backtest_bars
+            return _tr_backtest_bars.fetch_daily_bars(list(symbols), lo, hi, key=key,
+                                                      secret=secret, feed=feed)
+
         card = _tr_scorecard_mod.backtest_scorecard(cfg, snapshots, start=start, end=end,
-                                                    benchmark_bars=_benchmark_bars)
+                                                    benchmark_bars=_benchmark_bars,
+                                                    daily_bars=_daily_bars)
         try:
             _log("[strategy_trend_research] scorecard: "
                  + "; ".join(f"{seg} pass={(card.get(seg) or {}).get('pass')} "

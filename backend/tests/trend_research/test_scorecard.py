@@ -564,3 +564,130 @@ def test_fingerprint_lists_include_scorecard_files():
     for f in ("trend_research/scorecard.py", "trend_research/regime_windows.py"):
         assert f'"{f}"' in main_src
         assert f'"backend/{f}"' in check_src
+
+
+# -- fix wave B: random-baseline coverage, the honest boundary ---------------------------------
+
+
+def test_a_name_week_without_closes_is_excluded_not_scored_zero():
+    """final I2 / sweep-pit #2: the ledger builder caches a candidate's bars
+    only up to its week's start, so the old reader scored the week 0%. A
+    name-week needs a close inside the week near its end."""
+    days = sessions(date(2025, 1, 6), date(2025, 1, 31))
+    series = sc._Series([(d, 100.0 + i) for i, d in enumerate(days)])
+    w2, w3 = date(2025, 1, 13), date(2025, 1, 20)
+    assert sc._name_ret(series, w2, w3) == pytest.approx(
+        series.vals[series.before(w3)] / series.vals[series.before(w2)] - 1)
+    stale = sc._Series([(d, 100.0) for d in days if d < w2])      # cache stops at w2
+    assert sc._name_ret(stale, w2, w3) is None
+    gappy = sc._Series([(d, 100.0) for d in days if d < w2 or d == date(2025, 1, 13)])
+    assert sc._name_ret(gappy, w2, date(2025, 1, 27)) is None      # last close 2 weeks old
+
+    # A rising universe whose closes stop at each week's start: every draw
+    # would be 0% and a flat strategy would sit at the 50th percentile. Now
+    # nothing is drawable and the count says why.
+    weeks = _weeks(days)
+    full = _closes(sessions(date(2024, 12, 20), date(2025, 1, 31)))
+    cut = {s: [(d, c) for d, c in v if d < date(2025, 1, 6)] for s, v in full.items()}
+    nav = nav_at_close(days, [100.0] * len(days))
+    spy = [(d, 100.0) for d in sessions(date(2024, 9, 1), days[-1])]
+    card = sc.scorecard(nav, spy, spy, cutoff=None, candidate_weeks=weeks, closes=cut,
+                        n_random=50)
+    assert card["overall"]["random_pctile_candidates"] is None
+    assert card["overall"]["random_excluded_name_weeks"] > 0
+    assert card["meta"]["random_excluded_name_weeks"] == \
+        card["overall"]["random_excluded_name_weeks"]
+    full_card = sc.scorecard(nav, spy, spy, cutoff=None, candidate_weeks=weeks, closes=full,
+                             n_random=50)
+    assert full_card["overall"]["random_excluded_name_weeks"] == 0
+    assert full_card["overall"]["random_pctile_universe"] is not None
+
+
+def test_backtest_scorecard_loads_closes_through_the_end_date():
+    st = FakeStore()
+    days = sessions(date(2025, 1, 6), date(2025, 3, 28))
+    mondays = sorted({clock.week_monday(d) for d in days})
+    for m in mondays:
+        _ledger_row(st, m, NAMES[:6], NAMES[:2])
+    closes = _closes(sessions(date(2024, 12, 15), date(2025, 3, 28)))
+    asked = []
+
+    def daily_bars(symbols, lo, hi):
+        asked.append((tuple(symbols), lo, hi))
+        return {s: [{"t": f"{d.isoformat()}T05:00:00Z", "c": c} for d, c in closes[s]]
+                for s in symbols}
+
+    snaps = [{"timestamp": ts, "value": v} for ts, v in nav_at_close(days, [100.0] * len(days))]
+    cfg = {"tr_chain_id": CHAIN, "tr_model": MODEL, "tr_prompt_version": PV}
+    card = sc.backtest_scorecard(cfg, snaps, start=days[0], end=days[-1],
+                                 benchmark_bars=lambda s, a, b: {}, store=st,
+                                 daily_bars=daily_bars, n_random=50)
+    assert asked == [(tuple(NAMES[:6]), days[0] - timedelta(days=14), days[-1])]
+    assert card["overall"]["random_pctile_candidates"] is not None
+    assert card["meta"]["random_excluded_name_weeks"] == 0
+    assert not any("cache only" in n for n in card["meta"]["notes"])
+
+    def broken(*a):
+        raise TimeoutError("alpaca down")
+
+    card = sc.backtest_scorecard(cfg, snaps, start=days[0], end=days[-1],
+                                 benchmark_bars=lambda s, a, b: {}, store=st,
+                                 daily_bars=broken, n_random=50)
+    assert any("daily-bar loader failed (TimeoutError)" in n for n in card["meta"]["notes"])
+
+
+def test_honest_is_strictly_after_the_cutoff_and_warns_on_a_warm_chain():
+    """R30 / sweep-pit #5: the cutoff session is optimistic (the model may know
+    it), and a chain whose first ok week starts on or before the cutoff is
+    not a cold honest start."""
+    days = sessions(date(2025, 1, 6), date(2025, 3, 28))
+    cutoff = date(2025, 2, 3)                          # a Monday session
+    nav = nav_at_close(days, [100.0 * (1.10 if d >= cutoff else 1.0) for d in days])
+    spy = [(d, 100.0) for d in sessions(date(2024, 9, 1), days[-1])]
+    card = sc.scorecard(nav, spy, spy, cutoff=cutoff, candidate_weeks=[],
+                        chain_first_week=date(2025, 1, 6))
+    assert card["optimistic"]["end"] == "2025-02-03"
+    assert card["honest"]["start"] == "2025-02-04"
+    assert card["optimistic"]["ret"] > 9.9                        # the cutoff day's +10%
+    assert card["honest"]["ret"] == pytest.approx(0.0)
+    assert card["meta"]["honest_chain_cold"] is False
+    assert any("not a cold start" in n for n in card["meta"]["notes"])
+    cold = sc.scorecard(nav, spy, spy, cutoff=cutoff, candidate_weeks=[],
+                        chain_first_week=date(2025, 2, 10))
+    assert cold["meta"]["honest_chain_cold"] is True
+    assert not any("not a cold start" in n for n in cold["meta"]["notes"])
+
+
+def test_backtest_scorecard_reads_the_chain_start_outside_the_window():
+    st = FakeStore()
+    for m in (date(2025, 1, 6), date(2025, 2, 10)):
+        _ledger_row(st, m, NAMES[:3], NAMES[:1])
+    days = sessions(date(2025, 2, 10), date(2025, 2, 28))
+    snaps = [{"timestamp": ts, "value": v} for ts, v in nav_at_close(days, [100.0] * len(days))]
+    card = sc.backtest_scorecard({"tr_chain_id": CHAIN, "tr_model": MODEL,
+                                  "research_model_cutoff": "2025-02-01"}, snaps,
+                                 start=days[0], end=days[-1], benchmark_bars=lambda *a: {},
+                                 store=st, daily_bars=lambda *a: {}, n_random=10)
+    assert card["meta"]["chain_first_week"] == "2025-01-06"
+    assert card["meta"]["honest_chain_cold"] is False
+
+
+def test_broker_scorecard_passes_the_lane_daily_bar_loader(monkeypatch):
+    fn, _ = _broker_fn("_trend_research_scorecard")
+    got = {}
+
+    def fetch_daily_bars(symbols, start, end, **kw):
+        got.update(kw, symbols=symbols, start=start, end=end)
+        return {"AAA": []}
+
+    monkeypatch.setattr(backtest_bars, "fetch_daily_bars", fetch_daily_bars)
+
+    def fake(cfg, snaps, *, daily_bars, **kw):
+        return {"bars": daily_bars(["AAA"], date(2025, 1, 1), date(2025, 2, 28))}
+
+    monkeypatch.setattr(sc, "backtest_scorecard", fake)
+    out = fn([SPEC], [], start=date(2025, 1, 6), end=date(2025, 2, 28), fetch_bars=None,
+             key="k", secret="s", feed="iex")
+    assert out == {"bars": {"AAA": []}}
+    assert got == {"key": "k", "secret": "s", "feed": "iex", "symbols": ["AAA"],
+                   "start": date(2025, 1, 1), "end": date(2025, 2, 28)}

@@ -1,10 +1,14 @@
 """The TR scorecard: one long run's NAV path against SPY total return, by
 period and by market regime (spec §3, §7.4, C8, C12; plan Task 10).
 
-Periods. ``overall`` is the whole run; ``optimistic`` is every session before
-``research_model_cutoff`` (the model may remember those outcomes); ``honest``
-is every session on or after it. Without a cutoff the whole run is optimistic
-and the honest period is ``untested``. A period's returns start from the
+Periods. ``overall`` is the whole run; ``optimistic`` is every session on or
+before ``research_model_cutoff`` (the model may remember those outcomes, the
+cutoff day included); ``honest`` is every session strictly after it. Without a
+cutoff the whole run is optimistic and the honest period is ``untested``. The
+honest period is only honest if the research chain started cold after the
+cutoff: when the chain's first ``ok`` week starts on or before it, the honest
+weeks inherit trends and theses written with hindsight, and ``meta`` says so
+(``honest_chain_cold`` False plus a note). A period's returns start from the
 last close before its first session (the run's opening NAV for the first
 period), so ``(1 + optimistic) * (1 + honest) == 1 + overall``.
 
@@ -26,8 +30,12 @@ the last close before the next ledger week's (the lane holds through a
 missing or failed week, so the draw does too). ``random_pctile_candidates``
 draws from that week's candidates; ``random_pctile_universe`` from every
 candidate named in that week or an earlier one (ruling R24: never a name the
-ledger first names later). A name without a close in the 7 days
-before the week is not drawn. The percentile is the share of random
+ledger first names later). A name is drawn in a week only with a close in the
+7 days before the week AND a close inside the week within 7 days of its end;
+a name-week without one is excluded (never scored as a 0% week) and counted
+in ``random_excluded_name_weeks``. The closes run through the scorecard's end
+date (fetched for every candidate, not only what the ledger builder cached),
+so whether a draw has data never depends on later ledger weeks. The percentile is the share of random
 portfolios that end below the strategy over the same weeks (ties count half).
 Fixed seed: the same inputs give the same numbers.
 
@@ -64,8 +72,9 @@ NOTES = (
     "0) while SPY-TR includes all of them: the strategy starts about 1-2%/yr behind.",
     "Before research_model_cutoff the model may remember outcomes; only the honest "
     "period judges the edge.",
-    "Random baselines use split-adjusted daily closes from the SwingDailyBars cache, "
-    "week close to week close, equal weight, no costs.",
+    "Random baselines use split-adjusted daily closes (the lane's daily-bar loader, "
+    "through the scorecard end), week close to week close, equal weight, no costs; a "
+    "name-week without closes is excluded, not scored 0%.",
     "The universe baseline draws each week from every candidate named up to that week.",
     "Survivorship: delisted names may lack bars and are then not drawn.",
 )
@@ -307,14 +316,22 @@ def _periods(plan, in_segment, lo, hi):
 
 
 def _name_ret(series, start, stop):
+    """The name's return held from the close before ``start`` to the close
+    before ``stop``; None (excluded, not 0%) unless both closes are fresh --
+    one within ``_FRESH_DAYS`` before ``start``, one inside the week within
+    ``_FRESH_DAYS`` of ``stop``."""
     i = series.before(start)
     if i is None or (start - series.days[i]).days > _FRESH_DAYS:
         return None
-    return _ret(series, i, series.before(stop))
+    j = series.before(stop)
+    if (j is None or j <= i or series.days[j] < start
+            or (stop - series.days[j]).days > _FRESH_DAYS):
+        return None
+    return _ret(series, i, j)
 
 
 def _random_pctiles(periods, nav, closes, universe, n_random, seed, segment):
-    out = {"candidates": None, "universe": None}
+    out = {"candidates": None, "universe": None, "excluded": None}
     if not periods or not closes or n_random <= 0:
         return out
     strat, steps = 1.0, []
@@ -332,6 +349,7 @@ def _random_pctiles(periods, nav, closes, universe, n_random, seed, segment):
         steps.append((week, rets))
     if not steps:
         return out
+    out["excluded"] = sum(1 for week, rets in steps for s in week["seen"] if s not in rets)
     for pool_name in ("candidates", "universe"):
         pools = []
         for week, rets in steps:
@@ -365,6 +383,7 @@ def _untested():
             "max_dd": None, "spy_max_dd": None, "roll12_beat_pct": None,
             "windows": [], "regimes": {k: "untested" for k in regime_windows.SCORED_KINDS},
             "random_pctile_candidates": None, "random_pctile_universe": None,
+            "random_excluded_name_weeks": None,
             "pass_all_regimes": "untested", "pass_plus5": "untested", "pass": "untested"}
 
 
@@ -426,18 +445,22 @@ def _segment(name, in_segment, nav, spy, qqq, windows, plan, closes, universe, n
             "windows": scored, "regimes": regimes,
             "random_pctile_candidates": pctiles["candidates"],
             "random_pctile_universe": pctiles["universe"],
+            "random_excluded_name_weeks": pctiles["excluded"],
             "pass_all_regimes": all_regimes, "pass_plus5": plus5, "pass": verdict}
 
 
 def scorecard(nav, spy_tr, qqq, *, cutoff, candidate_weeks, n_random: int = 1000,
-              seed: int = 7, closes: dict | None = None) -> dict:
+              seed: int = 7, closes: dict | None = None,
+              chain_first_week=None) -> dict:
     """``{"overall", "optimistic", "honest", "meta"}`` (see the module docstring).
 
     ``nav``: ``[(timestamp, value)]``, any number of points a day (the last
     wins). ``spy_tr`` / ``qqq``: ``[(date, close)]`` total-return closes.
     ``cutoff``: the model's research cutoff (date), or None. ``candidate_weeks``:
     the run's ledger rows. ``closes``: ``{symbol: [(date, close)]}`` daily closes
-    for the random baselines; without them both percentiles are None."""
+    for the random baselines; without them both percentiles are None.
+    ``chain_first_week``: the Monday of the chain's first ``ok`` row (any
+    window), to say whether the honest chain started cold after the cutoff."""
     nav_s, spy_s, qqq_s = _Series(nav, opening=True), _Series(spy_tr), _Series(qqq)
     cutoff = _as_date(cutoff) if cutoff not in (None, "") else None
     windows = _all_windows(spy_s) if spy_s else []
@@ -445,8 +468,8 @@ def scorecard(nav, spy_tr, qqq, *, cutoff, candidate_weeks, n_random: int = 1000
     universe = sorted({s for w in plan for s in w["symbols"]})
     close_s = {str(k).upper(): _Series(v) for k, v in (closes or {}).items()}
     preds = {"overall": lambda d: True,
-             "optimistic": (lambda d: True) if cutoff is None else (lambda d: d < cutoff),
-             "honest": (lambda d: False) if cutoff is None else (lambda d: d >= cutoff)}
+             "optimistic": (lambda d: True) if cutoff is None else (lambda d: d <= cutoff),
+             "honest": (lambda d: False) if cutoff is None else (lambda d: d > cutoff)}
     out = {name: _segment(name, preds[name], nav_s, spy_s, qqq_s, windows, plan, close_s,
                           universe, n_random, seed) for name in _SEGMENTS}
     out["meta"] = {"cutoff": cutoff.isoformat() if cutoff else None,
@@ -459,7 +482,19 @@ def scorecard(nav, spy_tr, qqq, *, cutoff, candidate_weeks, n_random: int = 1000
                               100 * regime_windows.BULL_ABOVE, 100 * regime_windows.BEAR_BELOW,
                               regime_windows.MIN_WINDOW_SESSIONS),
                    "plus_pp": PLUS_PP, "n_random": n_random, "seed": seed,
+                   "random_excluded_name_weeks": out["overall"]["random_excluded_name_weeks"],
+                   "honest_chain_cold": None,
                    "notes": list(NOTES)}
+    first = _as_date(chain_first_week) if chain_first_week not in (None, "") else None
+    if cutoff is not None and first is not None:
+        out["meta"]["chain_first_week"] = first.isoformat()
+        out["meta"]["honest_chain_cold"] = first > cutoff
+        if first <= cutoff:
+            out["meta"]["notes"].append(
+                "WARNING: the research chain's first ok week (%s) starts on or before the "
+                "model cutoff (%s): the honest weeks build on trends and theses written "
+                "with hindsight, so the honest period is not a cold start (spec C10/C11)."
+                % (first.isoformat(), cutoff.isoformat()))
     return out
 
 
@@ -501,16 +536,38 @@ def _ledger_rows(cfg, start, end, st) -> list:
             and row.get("prompt_version") == pv]
 
 
+def _chain_first_ok_week(cfg, st):
+    """The Monday of the configured chain's first ``ok`` row, any window."""
+    from trend_research import ledger
+    chain = str(cfg.get("tr_chain_id") or "").strip()
+    model = str(cfg.get("tr_model") or "").strip()
+    pv = str(cfg.get("tr_prompt_version") or "tr-v1").strip()
+    if not chain or not model or "|" in chain:
+        return None
+    first = None
+    for row in st.iter(st.between(ledger.TABLE, chain + "|", chain + "|~")):
+        if (row.get("chain_id") == chain and row.get("model") == model
+                and row.get("prompt_version") == pv and row.get("status") == "ok"):
+            d = _as_date(row.get("week_start"))
+            if d is not None and (first is None or d < first):
+                first = d
+    return first
+
+
 def backtest_scorecard(cfg, snapshots, *, start, end, benchmark_bars, store=None,
-                       n_random: int = 1000, seed: int = 7) -> dict:
+                       daily_bars=None, n_random: int = 1000, seed: int = 7) -> dict:
     """The scorecard of a finished TR backtest.
 
     ``snapshots``: the engine's NAV path (``{"timestamp", "value"}``).
     ``benchmark_bars(symbols, start, end) -> {symbol: [daily bar]}`` must return
     total-return (``adjustment=all``) bars; SPY and QQQ are asked for from
-    ``BENCHMARK_LOOKBACK_DAYS`` before ``start``. Ledger rows and the random
-    baselines' daily closes come from the store (ruling R2: the lane's own
-    SwingDailyBars cache, no network)."""
+    ``BENCHMARK_LOOKBACK_DAYS`` before ``start``. Ledger rows come from the
+    store. The random baselines' daily closes come from ``daily_bars(symbols,
+    start, end)`` -- the lane's daily-bar loader (ruling R2:
+    ``backtest_bars.fetch_daily_bars`` through the SwingDailyBars cache,
+    fetching what the cache lacks) -- for every candidate through ``end``.
+    Without a loader, or when it fails, the cache alone is read and a note
+    says the baselines may be short."""
     from trend_research import market_tape
     if store is None:
         from db import store as st
@@ -527,9 +584,26 @@ def backtest_scorecard(cfg, snapshots, *, start, end, benchmark_bars, store=None
     rows = _ledger_rows(cfg, start, end, st)
     plan = _week_plan(rows)
     symbols = sorted({s for w in plan for s in w["symbols"]})
-    bars = (market_tape.cached_daily_bars(symbols, start - timedelta(days=2 * _FRESH_DAYS),
-                                          end, store=st) if symbols else {})
+    lo = start - timedelta(days=2 * _FRESH_DAYS)
+    bars, closes_note = {}, None
+    if symbols and daily_bars is not None:
+        try:
+            bars = daily_bars(symbols, lo, end) or {}
+        except Exception as exc:              # never costs the scorecard
+            closes_note = ("daily-bar loader failed (%s); the random baselines read the "
+                           "cache only and may exclude names" % type(exc).__name__)
+            bars = None
+    elif symbols:
+        closes_note = ("no daily-bar loader: the random baselines read the SwingDailyBars "
+                       "cache only and may exclude names")
+        bars = None
+    if bars is None:
+        bars = market_tape.cached_daily_bars(symbols, lo, end, store=st)
     closes = {s: _bars_to_closes(b) for s, b in bars.items()}
+    try:
+        chain_first = _chain_first_ok_week(cfg, st)
+    except Exception:
+        chain_first = None
     bench = benchmark_bars(["SPY", "QQQ"], start - timedelta(days=BENCHMARK_LOOKBACK_DAYS),
                            end) or {}
     cutoff = _as_date(cfg.get("research_model_cutoff")) if cfg.get(
@@ -537,7 +611,9 @@ def backtest_scorecard(cfg, snapshots, *, start, end, benchmark_bars, store=None
     spy = _bars_to_closes(bench.get("SPY"))
     card = scorecard(nav, spy, _bars_to_closes(bench.get("QQQ")),
                      cutoff=cutoff, candidate_weeks=rows, n_random=n_random, seed=seed,
-                     closes=closes)
+                     closes=closes, chain_first_week=chain_first)
+    if closes_note:
+        card["meta"]["notes"].append(closes_note)
     card["meta"].update({
         "chain_id": str(cfg.get("tr_chain_id") or "") or None,
         "model": str(cfg.get("tr_model") or "") or None,
