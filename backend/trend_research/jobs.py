@@ -349,6 +349,12 @@ def _container_env() -> dict:
     return env
 
 
+#: Networks Docker or the deploy platform attaches beside the app's own; none
+#: of them carries Postgres.
+_PLATFORM_NETWORKS = ("bridge", "host", "none", "ingress", "docker_gwbridge",
+                      "dokploy-network")
+
+
 class DockerLauncher:
     """Runs a job in a detached ``tr-job-*`` container on the host's Docker."""
 
@@ -379,16 +385,32 @@ class DockerLauncher:
 
     @staticmethod
     def _network(client) -> str:
-        """The network backtest containers get (``backtest_engine._get_network``:
-        INSTANCE_DOCKER_NETWORK if it exists, else this container's own);
-        RuntimeError when none can be determined -- a guessed network would
-        leave the job unable to reach Postgres."""
-        from engines.backtest_engine import _get_network
-        network = _get_network(client)
-        if not network:
+        """INSTANCE_DOCKER_NETWORK if it exists, else the app network this
+        container is on: its compose project's ``<project>_default``, else the
+        first network that is not a platform one. Not
+        ``backtest_engine._get_network``'s first network: Dokploy attaches the
+        API to ``dokploy-network`` (Traefik ingress) ahead of the app network,
+        and a job there cannot resolve Postgres -- it exited 1 before marking
+        itself running (2026-11-06). RuntimeError when none can be determined."""
+        configured = (os.environ.get("INSTANCE_DOCKER_NETWORK") or "").strip()
+        if configured:
+            try:
+                client.networks.get(configured)
+                return configured
+            except Exception:
+                pass
+        me = DockerLauncher._self_container(client)
+        attrs = (me.attrs if me is not None else None) or {}
+        names = list((attrs.get("NetworkSettings") or {}).get("Networks") or {})
+        project = ((attrs.get("Config") or {}).get("Labels") or {}).get(
+            "com.docker.compose.project")
+        if project and "%s_default" % project in names:
+            return "%s_default" % project
+        app = [n for n in names if n not in _PLATFORM_NETWORKS]
+        if not app:
             raise RuntimeError("no Docker network for the job container: set "
                                "INSTANCE_DOCKER_NETWORK to the network the api service is on")
-        return network
+        return app[0]
 
     @staticmethod
     def _claude_volumes(me) -> dict:
