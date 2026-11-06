@@ -77,7 +77,7 @@ def submit(st, launcher, kind="ingest_macro", params=None, now=None):
 # -- submit ---------------------------------------------------------------------------
 
 def test_job_kinds_are_the_contract():
-    assert jobs.JOB_KINDS == ("ingest_news", "ingest_themes", "ingest_macro",
+    assert jobs.JOB_KINDS == ("ingest_news", "ingest_themes", "ingest_gkg", "ingest_macro",
                               "ingest_filings", "build_ledger")
 
 

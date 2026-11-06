@@ -1169,6 +1169,7 @@ _CODE_FINGERPRINT_FILES = (
     "trend_research/filings.py",
     "trend_research/ingest_alpaca_news.py",
     "trend_research/ingest_gdelt.py",
+    "trend_research/ingest_gkg.py",
     "trend_research/ingest_macro.py",
     "trend_research/jobs.py",
     "trend_research/ledger.py",

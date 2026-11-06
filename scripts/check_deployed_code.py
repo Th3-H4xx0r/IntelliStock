@@ -110,6 +110,7 @@ FILES = (
     "backend/trend_research/filings.py",
     "backend/trend_research/ingest_alpaca_news.py",
     "backend/trend_research/ingest_gdelt.py",
+    "backend/trend_research/ingest_gkg.py",
     "backend/trend_research/ingest_macro.py",
     "backend/trend_research/jobs.py",
     "backend/trend_research/ledger.py",

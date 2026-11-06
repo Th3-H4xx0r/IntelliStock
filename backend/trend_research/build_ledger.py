@@ -110,7 +110,8 @@ MAX_QUOTA_WAIT_SEC_PER_WEEK = 7 * 24 * 3600
 #: ~66 weeks x (MAX_CANDIDATES + 3) calls, plus retries.
 DEFAULT_MAX_CALLS = 4000
 #: The job kinds that feed a week's inputs.
-INGEST_JOB_KINDS = ("ingest_news", "ingest_themes", "ingest_macro", "ingest_filings")
+INGEST_JOB_KINDS = ("ingest_news", "ingest_themes", "ingest_gkg", "ingest_macro",
+                    "ingest_filings")
 #: Margin added after a known quota reset, and the wait when it is unknown.
 QUOTA_RESET_MARGIN_SEC = 60
 QUOTA_DEFAULT_WAIT_SEC = 30 * 60
