@@ -4777,6 +4777,132 @@ def _strategy_hx_universe_symbols(cached_strategies):
     return out
 
 
+def _trend_research_universe_symbols(cached_strategies, start=None, end=None):
+    """Symbols strategy_trend_research needs bars for: its fixed ETF set plus
+    every pick and recommended name in the configured chain's ledger rows for
+    the run window (read once, through the store).
+
+    Same contract as `_strategy_hx_universe_symbols`: the lane trades names the
+    watchlist never lists, so without them here `price_history` has no bars,
+    every pick reads "no bars at the decision date", and the book sits in BIL
+    in silence. Returns [] when the lane is absent or disabled, so this is a
+    no-op for every other document. BACKTEST-ONLY: it is called at the
+    backtest bar fetch alone, and the lane is deliberately absent from
+    `_LANE_ENABLE_FLAGS` (it refuses live ticks).
+    """
+    try:
+        specs = [spec for spec in (cached_strategies or [])
+                 if isinstance(spec, dict)
+                 and str(spec.get("strategy") or "").strip().lower()
+                 in {"strategy_trend_research", "strategytrendresearch"}
+                 and _truthy(_merged_strategy_settings(spec).get(
+                     "strategy_trend_research_enabled", False))]
+    except Exception:
+        return []
+    if not specs:
+        return []
+    try:
+        from strategies.strategy_trend_research import (
+            DEFAULTS as _TR_DEFAULTS, trend_research_universe)
+    except Exception as _tr_exc:
+        # Loud, and only for a document that enabled the lane: the run would
+        # otherwise fetch no bars for its picks and sit in cash in silence.
+        try:
+            _log(f"[strategy_trend_research] universe unavailable, lane module "
+                 f"import failed: {type(_tr_exc).__name__}: {_tr_exc}", "red")
+        except Exception:
+            pass
+        return []
+    out = []
+    try:
+        for spec in specs:
+            merged = {**_TR_DEFAULTS, **_merged_strategy_settings(spec)}
+            for sym in trend_research_universe(merged, start=start, end=end):
+                if sym and sym not in out:
+                    out.append(sym)
+    except Exception:
+        return []
+    return out
+
+
+def _trend_research_scorecard(cached_strategies, snapshots, *, start, end, fetch_bars,
+                              key, secret, feed):
+    """The TR scorecard (`trend_research.scorecard`) for a finished backtest,
+    or None when the document has no enabled strategy_trend_research lane.
+
+    SPY and QQQ come through `fetch_bars` with adjustment="all" -- the same
+    total-return daily fetch `_fetch_adjusted_spy_benchmark` makes. Never
+    raises: the result dict this feeds IS the persisted backtest, so a failure
+    is logged and returned as {"error": ...} rather than costing the run.
+    """
+    try:
+        specs = [spec for spec in (cached_strategies or [])
+                 if isinstance(spec, dict)
+                 and str(spec.get("strategy") or "").strip().lower()
+                 in {"strategy_trend_research", "strategytrendresearch"}
+                 and _truthy(_merged_strategy_settings(spec).get(
+                     "strategy_trend_research_enabled", False))]
+    except Exception:
+        return None
+    if not specs:
+        return None
+    try:
+        from strategies.strategy_trend_research import DEFAULTS as _TR_DEFAULTS
+        from trend_research import scorecard as _tr_scorecard_mod
+
+        if len(specs) > 1:
+            _log("[strategy_trend_research] scorecard: more than one enabled lane; "
+                 "scoring the first", "yellow")
+        cfg = {**_TR_DEFAULTS, **_merged_strategy_settings(specs[0])}
+
+        from datetime import date as _tr_date, datetime as _tr_datetime
+
+        def _whole_day(d, last):
+            # fetch_bars parses str / datetime only; a bare date reads as "no
+            # range" and silently returns {}.
+            if isinstance(d, _tr_datetime) or not isinstance(d, _tr_date):
+                return d
+            return _tr_datetime(d.year, d.month, d.day, *((23, 59, 59) if last else (0, 0, 0)))
+
+        def _benchmark_bars(symbols, lo, hi):
+            return fetch_bars(list(symbols), _whole_day(lo, False), _whole_day(hi, True),
+                              key=key, secret=secret, timeframe="1Day", db_conn=None,
+                              feed=feed, adjustment="all")
+
+        def _daily_bars(symbols, lo, hi):
+            # The random baselines' closes: the lane's daily-bar loader through
+            # the SwingDailyBars cache, fetching what it lacks, through `end`
+            # (the ledger builder cached each candidate only up to its week).
+            from swing_trader import backtest_bars as _tr_backtest_bars
+            return _tr_backtest_bars.fetch_daily_bars(list(symbols), lo, hi, key=key,
+                                                      secret=secret, feed=feed)
+
+        card = _tr_scorecard_mod.backtest_scorecard(cfg, snapshots, start=start, end=end,
+                                                    benchmark_bars=_benchmark_bars,
+                                                    daily_bars=_daily_bars)
+        try:
+            _log("[strategy_trend_research] scorecard: "
+                 + "; ".join(f"{seg} pass={(card.get(seg) or {}).get('pass')} "
+                             f"cagr={(card.get(seg) or {}).get('cagr')} "
+                             f"spy={(card.get(seg) or {}).get('spy_cagr')}"
+                             for seg in ("honest", "optimistic", "overall")),
+                 "cyan")
+        except Exception:
+            pass
+        return card
+    except Exception as _tr_exc:
+        msg = f"{type(_tr_exc).__name__}: {_tr_exc}"
+        for _secret in (key, secret):
+            if _secret and len(str(_secret)) >= 4:
+                msg = msg.replace(str(_secret), "***")
+        try:
+            _log(f"[strategy_trend_research] scorecard failed ({msg}); the backtest "
+                 "result is kept without it", "red")
+        except Exception:
+            pass
+        return {"error": msg}
+
+
 def _strategy_x_prepare(data, prices, current_time, cached_strategies,
                         key=None, secret=None):
     """Make strategy_x's own symbols priceable this bar.
@@ -12832,6 +12958,18 @@ if mode == MODE_BACKTEST:
         if _hx_sym not in symbols_for_fetch:
             symbols_for_fetch.append(_hx_sym)
             _log(f"Adding {_hx_sym} to bar data for strategy_hx", "cyan")
+    # 2026-11-05: strategy_trend_research (TR) trades its fixed ETF set plus
+    # every name its research ledger picks or recommends in this window. Like
+    # HX its wrapper prices unlisted names from the last visible close, so this
+    # fetch site is the only wiring point. Empty unless the lane is enabled.
+    _tr_added = 0
+    for _tr_sym in _trend_research_universe_symbols(
+            _cached_strategies, start=start_dt, end=end_date):
+        if _tr_sym not in symbols_for_fetch:
+            symbols_for_fetch.append(_tr_sym)
+            _tr_added += 1
+    if _tr_added:
+        _log(f"Adding {_tr_added} symbol(s) to bar data for strategy_trend_research", "cyan")
     symbols_for_data = symbols_for_fetch
     # Convert time_increment to Alpaca timeframe format
     alpaca_timeframe = _time_increment_to_alpaca_timeframe(time_increment)
@@ -16439,6 +16577,17 @@ while not shutdown_requested:
                                     backtest_result[_benchmark_field] = (
                                         _bt_summary[_benchmark_field]
                                     )
+                            # 2026-11-05 TR: the honest/optimistic regime
+                            # scorecard, only for a document with an enabled
+                            # strategy_trend_research lane. The helper never
+                            # raises (a failure is {"error": ...}).
+                            _tr_card = _trend_research_scorecard(
+                                _cached_strategies, snapshots,
+                                start=backtest_start_date, end=backtest_end_date,
+                                fetch_bars=fetch_alpaca_historical_bars,
+                                key=key, secret=secret, feed=data_feed)
+                            if _tr_card is not None:
+                                backtest_result['tr_scorecard'] = _tr_card
 
                             # Update existing row if we have id, else insert.
                             # Fail the write closed if any secret material slipped

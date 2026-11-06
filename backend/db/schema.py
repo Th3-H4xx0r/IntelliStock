@@ -117,8 +117,10 @@ ALL_TABLES: tuple = (
     "PointInTimeManifests", "PriceHistory", "PushDevices", "Stocks", "Strategies",
     "SwingDailyBars", "SwingIndexMembership", "SwingIvSnapshots", "SwingMacroDaily",
     "SwingSectorMap", "SwingSignals", "SwingWheelScans",
-    "TickerDayFeatures", "Users", "backtest_replay_calls",
-    "backtest_replay_fixture_builds", "backtest_replay_fixtures",
+    "TickerDayFeatures", "TrendFilingsPIT", "TrendIngestProgress", "TrendMacroPIT",
+    "TrendNewsPIT", "TrendResearchJobs", "TrendResearchLedger", "TrendThemesPIT",
+    "Users",
+    "backtest_replay_calls", "backtest_replay_fixture_builds", "backtest_replay_fixtures",
     "backtest_replay_matrices", "backtest_replay_receipts", "h2h_history",
     "kalshi_capital_plan", "kalshi_clv_log", "kalshi_decisions", "kalshi_edge_history",
     "kalshi_edges", "kalshi_fills", "kalshi_live", "kalshi_market_listings",
@@ -293,6 +295,30 @@ _SPECS = [
     # id = "SYMBOL|YYYY": one row per symbol per calendar year of daily bars
     # (swing_trader.backtest_bars), read in batches by id.
     TableSpec("SwingDailyBars", prefix_fields=("id",)),
+    # Deep-research trend picker, TR (docs/superpowers/specs/
+    # 2026-11-05-deep-research-trend-picker-design.md §7.1). Every row carries
+    # an ISO-UTC available_at and is read through trend_research.pit_store,
+    # which gates on available_at < decision_time. Ids lead with the scan key:
+    #   TrendNewsPIT        "YYYY-MM-DDTHH:MM:SSZ|source|source_id"
+    #   TrendThemesPIT      "YYYY-MM-DD|theme"
+    #   TrendMacroPIT       "series|obs_date|vintage_date"
+    #   TrendFilingsPIT     "SYMBOL|acceptance_iso|accession"
+    #   TrendResearchLedger "chain_id|YYYY-MM-DD|model|prompt_version"
+    TableSpec("TrendNewsPIT", prefix_fields=("id",)),
+    TableSpec("TrendThemesPIT", prefix_fields=("id",)),
+    TableSpec("TrendMacroPIT", prefix_fields=("id",)),
+    TableSpec("TrendFilingsPIT", prefix_fields=("id",)),
+    TableSpec("TrendResearchLedger", indexed_fields=("chain_id",),
+              prefix_fields=("id",)),
+    # TR ingest completion markers, id "source|key" (e.g. "alfred|PAYEMS|
+    # 2022-05-29"): which chunks a backfill has finished, so a re-run over a
+    # wider or shifted range fetches exactly the missing ones. Bookkeeping,
+    # not research input: no available_at, never read by a prompt.
+    TableSpec("TrendIngestProgress", prefix_fields=("id",)),
+    # TR server jobs (trend_research.jobs), id "tr-job|<utc iso>|<kind>": one
+    # row per submitted ingest or ledger build, its state and progress.
+    # Bookkeeping, never read by a prompt.
+    TableSpec("TrendResearchJobs", prefix_fields=("id",)),
     TableSpec("LiveBootAudit", indexed_fields=("instance_id",), prefix_fields=("id",)),
     # r.now() wrote a native time on these; the ported writer stores an
     # ISO-8601 string and time_fields decodes it back to a tz-aware datetime,

@@ -1157,6 +1157,28 @@ _CODE_FINGERPRINT_FILES = (
     "db/schema.py",
     "notification_types.py",
     "interactive_utils.py",
+    # 2026-11-05 TR (deep-research trend picker): the engine lane and the
+    # package it replays and builds the ledger with. Must match
+    # scripts/check_deployed_code.py up to the backend/ prefix.
+    "strategies/strategy_trend_research.py",
+    "trend_research/__init__.py",
+    "trend_research/book.py",
+    "trend_research/build_ledger.py",
+    "trend_research/calendar_data.py",
+    "trend_research/digest.py",
+    "trend_research/filings.py",
+    "trend_research/ingest_alpaca_news.py",
+    "trend_research/ingest_gdelt.py",
+    "trend_research/ingest_macro.py",
+    "trend_research/jobs.py",
+    "trend_research/ledger.py",
+    "trend_research/llm.py",
+    "trend_research/market_tape.py",
+    "trend_research/pit_store.py",
+    "trend_research/prompts.py",
+    "trend_research/regime_windows.py",
+    "trend_research/schemas.py",
+    "trend_research/scorecard.py",
 )
 _CODE_FINGERPRINT_CACHE: "dict[str, str] | None" = None
 
@@ -3692,6 +3714,49 @@ def api_summarize_backtest(backtest_id: int, conn=Depends(conn_dependency), curr
 @app.get("/backtests/{backtest_id}/logs", response_class=JSONResponse)
 def api_backtest_logs(backtest_id: int, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     return _run(action_backtest_logs, conn, backtest_id)
+
+
+# --- TR (deep-research trend picker) server jobs ---
+#
+# The news/theme/macro/filings backfills and the research-ledger build run in
+# a detached tr-job-* container launched from here (trend_research/jobs.py);
+# the job id is "tr-job|<utc iso>|<kind>" (URL-encode the "|" and ":").
+
+
+class TrendResearchJobBody(BaseModel):
+    kind: str = Field(..., min_length=1)
+    params: Dict[str, Any] = Field(default_factory=dict)
+
+
+@app.post("/trend-research/jobs", response_class=JSONResponse)
+def api_tr_job_submit(body: TrendResearchJobBody, current_user: dict = Depends(get_current_user)):
+    from trend_research import jobs as tr_jobs
+    try:
+        return {"id": tr_jobs.submit(body.kind, body.params)}
+    except tr_jobs.JobConflict as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except tr_jobs.JobLaunchError as e:
+        raise HTTPException(status_code=503, detail={"id": e.job_id, "error": str(e)})
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/trend-research/jobs/{job_id}", response_class=JSONResponse)
+def api_tr_job_status(job_id: str, current_user: dict = Depends(get_current_user)):
+    from trend_research import jobs as tr_jobs
+    try:
+        return tr_jobs.status(job_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="TR job not found")
+
+
+@app.post("/trend-research/jobs/{job_id}/stop", response_class=JSONResponse)
+def api_tr_job_stop(job_id: str, current_user: dict = Depends(get_current_user)):
+    from trend_research import jobs as tr_jobs
+    try:
+        return tr_jobs.stop(job_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="TR job not found")
 
 
 # --- Nexus graph builds (history + log files) ---

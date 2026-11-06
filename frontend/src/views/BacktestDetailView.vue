@@ -5,6 +5,7 @@ import AppShell from '../layouts/AppShell.vue'
 import VueApexCharts from 'vue3-apexcharts'
 import BacktestLLMPauseBanner from '../components/BacktestLLMPauseBanner.vue'
 import { getToken } from '../utils/auth.js'
+import { trScorecardView } from '../utils/trScorecard.js'
 
 const route   = useRoute()
 const router  = useRouter()
@@ -62,6 +63,9 @@ const feeRows = computed(() => {
     }
   })
 })
+// TR scorecard ("vs S&P 500 by market type"): null renders nothing.
+const trScorecard = computed(() => trScorecardView(summary.value?.tr_scorecard))
+const TR_TONE = { pos: 'text-emerald-400', neg: 'text-red-400', muted: 'text-slate-500' }
 const graphData = shallowRef(null)
 const loading   = ref(true)
 const error     = ref('')
@@ -958,6 +962,83 @@ function onLogScroll(e) {
             <p class="text-[10px] text-slate-500">Low: <span class="font-mono text-red-400">{{ fmtMoney(summary.portfolio_value_low) }}</span></p>
           </div>
         </div>
+
+        <!-- ── TR scorecard: vs S&P 500 by market type ───────────────────────── -->
+        <section v-if="trScorecard" class="glass-card rounded-2xl overflow-hidden mb-6 border border-border-subtle">
+          <div class="px-5 py-4 border-b border-border-subtle flex items-center gap-3">
+            <div class="size-9 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center shrink-0">
+              <span class="material-symbols-outlined text-primary text-lg">query_stats</span>
+            </div>
+            <div class="min-w-0 flex-1">
+              <p class="text-sm font-semibold text-slate-200">vs S&amp;P 500 by market type</p>
+              <p v-if="trScorecard.cutoff" class="text-[11px] text-slate-500">AI training cutoff: {{ trScorecard.cutoff }}</p>
+            </div>
+          </div>
+          <p v-if="trScorecard.error" class="px-5 py-4 text-sm text-amber-400">{{ trScorecard.error }}</p>
+          <template v-else>
+            <div class="overflow-x-auto">
+              <table class="w-full text-xs">
+                <thead>
+                  <tr class="border-b border-border-subtle text-left">
+                    <th class="px-4 py-3 text-slate-500 font-semibold">Period</th>
+                    <th class="px-4 py-3 text-slate-500 font-semibold text-right">Return/yr</th>
+                    <th class="px-4 py-3 text-slate-500 font-semibold text-right">S&amp;P/yr</th>
+                    <th class="px-4 py-3 text-slate-500 font-semibold text-right">Difference</th>
+                    <th class="px-4 py-3 text-slate-500 font-semibold text-right">Worst drop</th>
+                    <th class="px-4 py-3 text-slate-500 font-semibold text-right">S&amp;P worst drop</th>
+                    <th class="px-4 py-3 text-slate-500 font-semibold text-right">Beat S&amp;P in all market types</th>
+                    <th class="px-4 py-3 text-slate-500 font-semibold text-right">+5 pts/yr target</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="p in trScorecard.periods" :key="p.key" class="border-b border-border-subtle/50">
+                    <td class="px-4 py-3 text-slate-200">
+                      <p class="font-semibold">{{ p.label }}</p>
+                      <p v-if="p.dates" class="text-[10px] text-slate-500 font-mono">{{ p.dates }}</p>
+                    </td>
+                    <td class="px-4 py-3 text-right font-mono text-slate-200">{{ p.cells.cagr }}</td>
+                    <td class="px-4 py-3 text-right font-mono text-slate-400">{{ p.cells.spyCagr }}</td>
+                    <td class="px-4 py-3 text-right font-mono font-semibold" :class="TR_TONE[p.diffTone]">{{ p.cells.diff }}</td>
+                    <td class="px-4 py-3 text-right font-mono text-slate-200">{{ p.cells.maxDd }}</td>
+                    <td class="px-4 py-3 text-right font-mono text-slate-400">{{ p.cells.spyMaxDd }}</td>
+                    <td class="px-4 py-3 text-right font-semibold" :class="TR_TONE[p.allRegimes.tone]">{{ p.allRegimes.label }}</td>
+                    <td class="px-4 py-3 text-right font-semibold" :class="TR_TONE[p.plus5.tone]">{{ p.plus5.label }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div v-for="p in trScorecard.periods" v-show="!p.untested" :key="`w-${p.key}`" class="px-5 py-4 border-t border-border-subtle">
+              <p class="text-sm font-semibold text-slate-200 mb-2">{{ p.label }}</p>
+              <p v-for="(line, i) in p.random" :key="`r-${i}`" class="text-[11px] text-slate-400">{{ line }}</p>
+              <div v-if="p.windows.length" class="overflow-x-auto mt-2">
+                <table class="w-full text-xs">
+                  <thead>
+                    <tr class="border-b border-border-subtle text-left">
+                      <th class="px-3 py-2 text-slate-500 font-semibold">Market type</th>
+                      <th class="px-3 py-2 text-slate-500 font-semibold">Dates</th>
+                      <th class="px-3 py-2 text-slate-500 font-semibold text-right">Strategy</th>
+                      <th class="px-3 py-2 text-slate-500 font-semibold text-right">S&amp;P</th>
+                      <th class="px-3 py-2 text-slate-500 font-semibold text-right">Beat?</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="(w, i) in p.windows" :key="`${i}-${w.key}`" class="border-b border-border-subtle/50">
+                      <td class="px-3 py-2 text-slate-200">{{ w.kind }}</td>
+                      <td class="px-3 py-2 font-mono text-slate-400">{{ w.dates }}</td>
+                      <td class="px-3 py-2 text-right font-mono text-slate-200">{{ w.strategy }}</td>
+                      <td class="px-3 py-2 text-right font-mono text-slate-400">{{ w.spy }}</td>
+                      <td class="px-3 py-2 text-right font-semibold" :class="TR_TONE[w.tone]">{{ w.beat }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p v-else class="text-[11px] text-slate-500 mt-1">No market-type windows fall inside this period.</p>
+            </div>
+            <ul v-if="trScorecard.notes.length" class="px-5 py-3 border-t border-border-subtle space-y-1">
+              <li v-for="(note, i) in trScorecard.notes" :key="`n-${i}`" class="text-[11px] text-slate-600 leading-snug">{{ note }}</li>
+            </ul>
+          </template>
+        </section>
 
         <!-- ── Fees (crypto backtests only) ──────────────────────────────────── -->
         <section v-if="feeRows.length" class="glass-card rounded-2xl overflow-hidden mb-6 border border-border-subtle">
