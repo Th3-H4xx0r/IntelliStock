@@ -104,7 +104,7 @@ MAX_CANDIDATES = 30
 #: ~40 min (2026-11-06); notes are assembled in candidate order either way.
 RESEARCH_CONCURRENCY = 4
 #: The most a run may ask for (``build(research_concurrency=...)``, the job param).
-MAX_RESEARCH_CONCURRENCY = 8
+MAX_RESEARCH_CONCURRENCY = 16
 #: Attempts per LLM stage before it counts as failed.
 STAGE_ATTEMPTS = 2
 #: Attempts per LLM call on a ``TransientError``, and the backoff between.

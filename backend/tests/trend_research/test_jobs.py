@@ -153,9 +153,9 @@ def test_build_ledger_research_concurrency_param(st, launcher):
     p = jobs.status(job_id, store=st, launcher=launcher)["params"]
     assert p["research_concurrency"] == bl.RESEARCH_CONCURRENCY
     ok = jobs.validate_params("build_ledger", dict(DATES, chain_id="c", model_id="m",
-                                                   research_concurrency=8))
-    assert ok["research_concurrency"] == 8
-    for bad in (0, 9, "8", True, 2.5):
+                                                   research_concurrency=16))
+    assert ok["research_concurrency"] == 16
+    for bad in (0, 17, "8", True, 2.5):
         with pytest.raises(ValueError, match="research_concurrency"):
             jobs.validate_params("build_ledger", dict(DATES, chain_id="c", model_id="m",
                                                       research_concurrency=bad))

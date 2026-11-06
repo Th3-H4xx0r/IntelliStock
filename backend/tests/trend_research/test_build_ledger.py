@@ -440,7 +440,7 @@ def test_research_calls_run_concurrently(st):
         with lock:
             active[0] -= 1
 
-    names = ["S%s" % chr(65 + i) for i in range(12)]
+    names = ["S%s" % chr(65 + i) for i in range(20)]
     run(st, FakeCaller(candidates=names, hook=hook), end=W1)
     assert row(st, W1)["status"] == "ok"
     assert peak[0] == bl.RESEARCH_CONCURRENCY
