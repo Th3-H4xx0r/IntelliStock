@@ -143,3 +143,15 @@ test('a period missing from the card reads as untested', () => {
   assert.equal(view.cutoff, '2025-01-01')
   assert.deepEqual(view.notes, [])
 })
+
+test('the TR scorecard view keys repeated text by index, not by the text', async () => {
+  // Two identical notes or random lines share a text: keyed by the text, Vue
+  // warns about duplicate keys and patches the wrong node.
+  const { readFile } = await import('node:fs/promises')
+  const vue = await readFile(new URL('../src/views/BacktestDetailView.vue', import.meta.url), 'utf8')
+  assert.ok(!vue.includes(':key="note"'))
+  assert.ok(!vue.includes(':key="line"'))
+  assert.ok(!vue.includes(':key="w.key"'))
+  assert.ok(vue.includes('v-for="(note, i) in trScorecard.notes" :key="`n-${i}`"'))
+  assert.ok(vue.includes('v-for="(line, i) in p.random" :key="`r-${i}`"'))
+})

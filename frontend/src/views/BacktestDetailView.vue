@@ -1009,7 +1009,7 @@ function onLogScroll(e) {
             </div>
             <div v-for="p in trScorecard.periods" v-show="!p.untested" :key="`w-${p.key}`" class="px-5 py-4 border-t border-border-subtle">
               <p class="text-sm font-semibold text-slate-200 mb-2">{{ p.label }}</p>
-              <p v-for="line in p.random" :key="line" class="text-[11px] text-slate-400">{{ line }}</p>
+              <p v-for="(line, i) in p.random" :key="`r-${i}`" class="text-[11px] text-slate-400">{{ line }}</p>
               <div v-if="p.windows.length" class="overflow-x-auto mt-2">
                 <table class="w-full text-xs">
                   <thead>
@@ -1022,7 +1022,7 @@ function onLogScroll(e) {
                     </tr>
                   </thead>
                   <tbody>
-                    <tr v-for="w in p.windows" :key="w.key" class="border-b border-border-subtle/50">
+                    <tr v-for="(w, i) in p.windows" :key="`${i}-${w.key}`" class="border-b border-border-subtle/50">
                       <td class="px-3 py-2 text-slate-200">{{ w.kind }}</td>
                       <td class="px-3 py-2 font-mono text-slate-400">{{ w.dates }}</td>
                       <td class="px-3 py-2 text-right font-mono text-slate-200">{{ w.strategy }}</td>
@@ -1035,7 +1035,7 @@ function onLogScroll(e) {
               <p v-else class="text-[11px] text-slate-500 mt-1">No market-type windows fall inside this period.</p>
             </div>
             <ul v-if="trScorecard.notes.length" class="px-5 py-3 border-t border-border-subtle space-y-1">
-              <li v-for="note in trScorecard.notes" :key="note" class="text-[11px] text-slate-600 leading-snug">{{ note }}</li>
+              <li v-for="(note, i) in trScorecard.notes" :key="`n-${i}`" class="text-[11px] text-slate-600 leading-snug">{{ note }}</li>
             </ul>
           </template>
         </section>
