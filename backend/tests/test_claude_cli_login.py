@@ -246,6 +246,39 @@ def test_strip_api_key_env_noop_when_absent():
     assert provider._strip_api_key_env(env) == {"PATH": "/usr/bin"}
 
 
+def _token_home(tmp_path, monkeypatch, text):
+    (tmp_path / ".claude").mkdir()
+    if text is not None:
+        (tmp_path / ".claude" / "oauth_token").write_text(text)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+
+
+def test_strip_api_key_env_supplies_the_long_lived_token(tmp_path, monkeypatch):
+    # 2026-11-06: the mounted ~/.claude login expired in July and every
+    # container mounts it read-only, so a refreshed token was never saved.
+    # A `claude setup-token` token in ~/.claude/oauth_token reaches every
+    # spawn instead.
+    _token_home(tmp_path, monkeypatch, "sk-ant-oat01-example\n")
+    env = {"PATH": "/usr/bin", "HOME": "/tmp/cc-home-x", "ANTHROPIC_API_KEY": "sk-ant-stale"}
+    out = provider._strip_api_key_env(env)
+    assert out["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat01-example"
+    assert "ANTHROPIC_API_KEY" not in out
+    assert out["HOME"] == "/tmp/cc-home-x"
+
+
+def test_strip_api_key_env_keeps_an_explicit_token(tmp_path, monkeypatch):
+    _token_home(tmp_path, monkeypatch, "from-file")
+    env = {"CLAUDE_CODE_OAUTH_TOKEN": "from-env"}
+    assert provider._strip_api_key_env(env)["CLAUDE_CODE_OAUTH_TOKEN"] == "from-env"
+
+
+@pytest.mark.parametrize("text", [None, "", "  \n"])
+def test_strip_api_key_env_without_a_token_file_adds_nothing(tmp_path, monkeypatch, text):
+    _token_home(tmp_path, monkeypatch, text)
+    assert provider._strip_api_key_env({"PATH": "/usr/bin"}) == {"PATH": "/usr/bin"}
+
+
 def test_neutralize_api_key_config_removes_all_sources(tmp_path):
     import json as _json
     home = tmp_path
