@@ -95,7 +95,9 @@ MAX_ATTEMPTS = 6
 BACKOFF_BASE = 2.0
 BACKOFF_CAP = 60.0
 REQUEST_TIMEOUT = 60
-HEADERS = {"User-Agent": "IntelliStock research"}
+# ALFRED's edge silently drops a bare "IntelliStock research" User-Agent
+# (every request read-times-out); a product/version token is served.
+HEADERS = {"User-Agent": "IntelliStock/1.0 (research; +https://github.com/Th3-H4xx0r/IntelliStock)"}
 
 _RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 _SERIES_RE = re.compile(r"^[A-Z0-9_]+$")
