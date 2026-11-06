@@ -81,6 +81,7 @@ from __future__ import annotations
 import argparse
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from typing import Callable
 
@@ -99,6 +100,9 @@ __all__ = ["build", "build_week", "paper_bars_fetcher", "quota_delay", "missing_
 log = logging.getLogger(__name__)
 
 MAX_CANDIDATES = 30
+#: Research calls in flight at once. Sequential research made a claude-cli week
+#: ~40 min (2026-11-06); notes are assembled in candidate order either way.
+RESEARCH_CONCURRENCY = 4
 #: Attempts per LLM stage before it counts as failed.
 STAGE_ATTEMPTS = 2
 #: Attempts per LLM call on a ``TransientError``, and the backoff between.
@@ -428,6 +432,27 @@ def _screen_bars(entries: list, as_of: datetime, deps: _Deps, dropped: list) -> 
     return kept
 
 
+def _research_wave(caller, research_prompts: list, secrets, sleep) -> list:
+    """One ``ResearchNote`` -- or the ``_WeekFailed`` that dropped it -- per
+    prompt, in order, with up to ``RESEARCH_CONCURRENCY`` calls in flight.
+    Quota, budget and transient errors propagate: the week is discarded."""
+    def one(prompt):
+        try:
+            return _stage(caller, "research", prompt, ResearchNote, secrets, sleep)
+        except _WeekFailed as exc:
+            return exc
+
+    workers = min(RESEARCH_CONCURRENCY, len(research_prompts))
+    if workers <= 1:
+        return [one(p) for p in research_prompts]
+    pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="tr-research")
+    try:
+        futures = [pool.submit(one, p) for p in research_prompts]
+        return [f.result() for f in futures]
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+
+
 # -- one week ------------------------------------------------------------------------
 
 def build_week(chain_id: str, monday: date, *, caller, provider: str, model: str,
@@ -499,41 +524,48 @@ def build_week(chain_id: str, monday: date, *, caller, provider: str, model: str
                 prior_notes[sym] = n
         news_items = filings_used = 0
         retried = []
-        for e in screened:
-            sym = e["symbol"]
-            if len(kept) >= MAX_CANDIDATES:
-                _drop(dropped, e, "cap", "over the %d-candidate cap" % MAX_CANDIDATES)
-                continue
-            dossier = deps.dossier_fn(sym, as_of)
-            if (dossier or {}).get("factors_status") == filings.FACTORS_FETCH_FAILED:
-                retried.append(sym)
+        pending = list(screened)
+        # Waves of the open slots: dossiers in candidate order, then their
+        # research calls concurrently. A failed call frees its slot for the
+        # next name, so the kept set and its order match a sequential run.
+        while pending and len(kept) < MAX_CANDIDATES:
+            wave = []
+            while pending and len(wave) < MAX_CANDIDATES - len(kept):
+                e = pending.pop(0)
+                sym = e["symbol"]
                 dossier = deps.dossier_fn(sym, as_of)
                 if (dossier or {}).get("factors_status") == filings.FACTORS_FETCH_FAILED:
-                    raise InputsUnavailable("SEC fundamentals fetch for %s failed twice "
-                                            "(factors_status=fetch_failed)" % sym)
-            news = digest.symbol_news(sym, as_of, weeks=NEWS_WEEKS, limit=NEWS_LIMIT,
-                                      store=deps.store, articles=articles)
-            dossier = dict(dossier or {})
-            dossier.update({"trend_stats": e.get("trend_stats"), "news": news,
-                            "prior_note": prior_notes.get(sym),
-                            "trend_names": e["trend_names"], "why": e["why"]})
-            try:
-                note = _stage(caller, "research", prompts.research_prompt(sym, dossier, as_of),
-                              ResearchNote, secrets, deps.sleep)
-            except _WeekFailed as exc:
-                _drop(dropped, e, "research", "research call failed twice: %s"
-                      % _scrub(exc.error, secrets))
-                continue
-            if book.normalize_symbol(note.symbol) != sym:
-                note = note.model_copy(update={"symbol": sym})
-            notes.append(note)
-            news_items += len(news)
-            filings_used += len(dossier.get("filings") or ())
-            kept.append({"symbol": sym, "kind": e["kind"], "sources": e["sources"],
-                         "trend_names": e["trend_names"], "why": e["why"],
-                         "factors_status": dossier.get("factors_status"),
-                         "filings": len(dossier.get("filings") or ()),
-                         "news_items": len(news)})
+                    retried.append(sym)
+                    dossier = deps.dossier_fn(sym, as_of)
+                    if (dossier or {}).get("factors_status") == filings.FACTORS_FETCH_FAILED:
+                        raise InputsUnavailable("SEC fundamentals fetch for %s failed twice "
+                                                "(factors_status=fetch_failed)" % sym)
+                news = digest.symbol_news(sym, as_of, weeks=NEWS_WEEKS, limit=NEWS_LIMIT,
+                                          store=deps.store, articles=articles)
+                dossier = dict(dossier or {})
+                dossier.update({"trend_stats": e.get("trend_stats"), "news": news,
+                                "prior_note": prior_notes.get(sym),
+                                "trend_names": e["trend_names"], "why": e["why"]})
+                wave.append((e, dossier, news, prompts.research_prompt(sym, dossier, as_of)))
+            outcomes = _research_wave(caller, [w[3] for w in wave], secrets, deps.sleep)
+            for (e, dossier, news, _), note in zip(wave, outcomes):
+                sym = e["symbol"]
+                if isinstance(note, _WeekFailed):
+                    _drop(dropped, e, "research", "research call failed twice: %s"
+                          % _scrub(note.error, secrets))
+                    continue
+                if book.normalize_symbol(note.symbol) != sym:
+                    note = note.model_copy(update={"symbol": sym})
+                notes.append(note)
+                news_items += len(news)
+                filings_used += len(dossier.get("filings") or ())
+                kept.append({"symbol": sym, "kind": e["kind"], "sources": e["sources"],
+                             "trend_names": e["trend_names"], "why": e["why"],
+                             "factors_status": dossier.get("factors_status"),
+                             "filings": len(dossier.get("filings") or ()),
+                             "news_items": len(news)})
+        for e in pending:
+            _drop(dropped, e, "cap", "over the %d-candidate cap" % MAX_CANDIDATES)
         provenance.update({"news_items": news_items, "filings": filings_used,
                            "dossier_retries": retried})
 
