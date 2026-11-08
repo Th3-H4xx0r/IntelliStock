@@ -281,3 +281,11 @@ scripts/local_backtest_bear_baseline.json
 
 # Migration verify mismatches (whole documents, dumped for reading, never source)
 .migration-mismatches/
+
+# Generated research output (engine runs, backtest dumps) — never source
+output/
+docs/superpowers/research/**/orch/
+docs/superpowers/research/**/newstrat_results/
+
+# Local watchdog pid files
+*.pid

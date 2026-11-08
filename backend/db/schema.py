@@ -91,7 +91,7 @@ ALL_TABLES: tuple = (
     "BacktestResults", "BacktestSteps", "BotTradeDecisions", "BrokerageAccounts",
     "ChatbotConversations", "Config",
     "DiscordMessageIds", "DiscordOutbox", "DiscoverPriceCache", "DiscoverStocks",
-    "EarningsLLMCache", "EarningsLLMPromptCache", "EngineControl", "GoogleNewsCache",
+    "EarningsLLMCache", "EarningsLLMPromptCache", "EngineControl", "ForwardMirrorLedger", "GoogleNewsCache",
     "GraphNexusActiveEventHistory", "GraphNexusActiveEventMaintenance",
     "GraphNexusActiveEvents", "GraphNexusAnalystPanel", "GraphNexusBenzingaCache",
     "GraphNexusDiscoveredStocks", "GraphNexusDiscoverySnapshots",
@@ -319,6 +319,11 @@ _SPECS = [
     # row per submitted ingest or ledger build, its state and progress.
     # Bookkeeping, never read by a prompt.
     TableSpec("TrendResearchJobs", prefix_fields=("id",)),
+    # Forward-test paper mirror (forward_mirror.py), ids "f14-paper|YYYY-MM-DD|act",
+    # "f14-paper|YYYY-MM-DD|close", "f14-paper|boot|<utc iso>" and the state
+    # row "f14-paper|state": what the mirror traded and how the account tracks
+    # the frozen rule. Bookkeeping, never read by a prompt.
+    TableSpec("ForwardMirrorLedger", indexed_fields=("mirror",), prefix_fields=("id",)),
     TableSpec("LiveBootAudit", indexed_fields=("instance_id",), prefix_fields=("id",)),
     # r.now() wrote a native time on these; the ported writer stores an
     # ISO-8601 string and time_fields decodes it back to a tz-aware datetime,

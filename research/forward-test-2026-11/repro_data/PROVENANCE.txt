@@ -1,0 +1,17 @@
+f13_sleeves_2009.csv.gz: the 11 ex-equity TSMOM sleeves F13_D trades (US bonds 2/10/20y, six FX carry-adjusted
+spot series, GSCI, gold), copied from the strategy hunt's data/F13_*.csv (built by hunt/f13/build_sleeves.py),
+rows from 2009-01-01 only (the overlay's EWMA vol has a 60-row centre of mass; 2009-2012 gives >900 rows of
+warm-up before VAL starts). Used ONLY by repro_check.py, to show that the frozen copy of the F13 engine
+reproduces F13_D's logged VAL row. The live strategies never read it.
+Source files (sha256 of the full original CSVs):
+  F13_BD_2.csv  sha256 4b0b965586753ec6d0fce6d9a99520d076e62c9d552f65d50013d35862fb3fda
+  F13_BD_10.csv  sha256 42c9a729432f9de8eaac00eb2be2780aabb5a749399632afa457a093187d4e6e
+  F13_BD_20.csv  sha256 bfca0cbb9ce858e4e257778a683e966e789339946bfa4a35e975adab1593b61b
+  F13_FX_JPY.csv  sha256 3c413d22d8260084e55b531d432e9c9c0985f2fdc6d77cb14f103f93f2a88a78
+  F13_FX_GBP.csv  sha256 873507309b4d3edc8b2be82212adda6843f1a3378bc6c166428967cb63250ba8
+  F13_FX_CHF.csv  sha256 579cb99f8e264ec06edfdb4da2c967eda56cd3b252380141b92b3781e37e6ae4
+  F13_FX_CAD.csv  sha256 abc2ee14cbd4032b137a8405adea5083b26fe9f37a5f7191855cb5ce7fad1f0e
+  F13_FX_AUD.csv  sha256 9706ab29b51780a747cca08f943a4ccd8b263f555c3aacf1013b2ea39b3cb19b
+  F13_FX_EUR.csv  sha256 b5e1619182cfadbfe5f81936619be0b82f06ac8fdf9483b6d1a10d418096f318
+  F13_CM_GSCI.csv  sha256 ac156c40703a931569c68aa809f5dfcb7d983d45f0b337e532c52555dabcb82e
+  F13_CM_GOLD.csv  sha256 46349f6d6748b18bc25460d7e305422ab121e20f997f3c85638b07e9408fff49

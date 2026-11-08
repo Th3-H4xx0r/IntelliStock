@@ -402,6 +402,41 @@ services:
   # Graph Nexus is no longer a separate service. The server (backend) starts/stops it via NexusControl in RethinkDB.
   # Use CLI: nexus start | nexus stop | nexus status. Or API: GET/POST /nexus/control, GET /nexus/status. Or Discord: !nexus start|stop|status.
 
+  f14-mirror:
+    # Forward-test paper mirror (backend/forward_mirror.py): trades the frozen
+    # F14_F rule on the idle "Alpaca Crypto Paper" account, never any other.
+    # It refuses to trade unless every file in the read-only frozen dir matches
+    # FROZEN.md's SHA-256 block and repro_check.py PASSes in this image.
+    # Off switch: F14_MIRROR_ENABLED=0. Runbook: docs/runbooks/f14-paper-mirror.md
+    image: intellistock-backend
+    container_name: intellistock-f14-mirror
+    command: ["python", "forward_mirror.py"]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./research/forward-test-2026-11:/frozen:ro
+      - f14_mirror_data:/data
+    env_file:
+      - .env
+    environment:
+      - RETHINKDB_HOST=rethinkdb
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-IntelliStock}
+      - POSTGRES_USER=${POSTGRES_USER:-intellistock}
+      - RETHINKDB_PORT=28015
+      - F14_MIRROR_ENABLED=${F14_MIRROR_ENABLED:-1}
+      - F14_MIRROR_DRY_RUN=${F14_MIRROR_DRY_RUN:-0}
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G
+    # Lose this before the live broker under memory pressure.
+    oom_score_adj: 1000
+
   postgres:
     build:
       context: ./docker/postgres        # FROM postgres:17 + postgresql-17-partman
@@ -491,5 +526,6 @@ volumes:
     name: nexus_graph_logs  # Must match NEXUS_GRAPH_LOG_VOLUME; plain name for Docker SDK
   live_trading_logs: # Per-instance broker log files; mounted on backend + api + per-instance broker containers
     name: live_trading_logs  # Must match LIVE_TRADING_LOG_VOLUME; plain name for Docker SDK
+  f14_mirror_data: # forward_mirror.py's yfinance/FRED cache
   codex_auth: # OpenAI Codex CLI OAuth state (~/.codex/auth.json) — RW shared by api/backend/backtest-engine
     name: codex_auth  # Plain name so spawned broker containers can mount it directly via Docker SDK
