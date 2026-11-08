@@ -1,0 +1,77 @@
+data: snapshot 2003-01-02..2026-11-06 (6001 sessions)
+
+## 1. F14_F_live (DBMF) vs REPORT_F14 / f14/dbmf_check.log
+
+| book | span | CAGR / SPY % | excess pp | maxDD / SPY % | win 3m/6m/12m % | win 3y/5y % | worst 12m rel % (end) | yrs below rel high | turnover %/yr |
+|---|---|---|---|---|---|---|---|---|---|
+| F14_F_live @5 | 2019-05-10..2026-11-06 | 21.63 / 15.06 | +6.57 | -30.0 / -33.7 | 63/69/72 | 84/100 | -12.0 (2023-11-03) | 3.6 | 384 |
+| F14_F_live @23 | 2019-05-10..2026-11-06 | 20.01 / 15.06 | +4.95 | -30.2 / -33.7 | 60/64/68 | 79/100 | -12.6 (2023-11-03) | 3.6 | 383 |
+| REFERENCE @5 (23) | 2019-05-10..2026-11-06 | 21.63 / 15.06 | +6.57 (+4.95) | -30.0 / -33.7 | 63/69/72 | 84/- | -12.0 (2023-11-03) | 3.6 | 384 |
+
+mean DBMF weight at decisions 0.42 (ref 0.42); max gross 2.00 (cap 2.00)
+
+| check | excess pp/yr got vs ref | maxDD got vs ref | result |
+|---|---|---|---|
+| F14_F_live 5 bps | +6.57 vs +6.57 (diff -0.00) | -30.0 vs -30.0 (diff -0.0) | PASS |
+| F14_F_live 23 bps | +4.95 vs +4.95 (diff +0.00) | -30.2 vs -30.0 (diff -0.2) | PASS |
+
+## 2. F4r2_stress_xs VAL vs f4/tables.md (hunt round 2b; its table is at 23 bps)
+
+| book | span | CAGR / SPY % | excess pp | maxDD / SPY % | win 3m/6m/12m % | win 3y/5y % | worst 12m rel % (end) | yrs below rel high | turnover %/yr |
+|---|---|---|---|---|---|---|---|---|---|
+| F4r2_stress_xs @23 | 2013-01-02..2026-11-06 | 17.72 / 14.50 | +3.23 | -29.9 / -33.7 | 67/69/69 | 96/100 | -10.3 (2016-04-26) | 2.6 | 106 |
+| F4r2_stress_xs @5 | 2013-01-02..2026-11-06 | 18.15 / 14.50 | +3.65 | -29.8 / -33.7 | 68/71/72 | 99/100 | -9.6 (2016-04-26) | 2.6 | 106 |
+| REFERENCE @23 | 2013-01-02..2026-11-06 | 17.72 / 14.50 | +3.23 (@5 +3.65) | -29.9 / -33.7 | 67/69/69 | 96/100 | -10.3 (2016-04-26) | 2.6 | 106 |
+
+| check | excess pp/yr got vs ref | maxDD got vs ref | result |
+|---|---|---|---|
+| F4r2_stress_xs 23 bps | +3.23 vs +3.23 (diff -0.00) | -29.9 vs -29.9 (diff -0.0) | PASS |
+| F4r2_stress_xs 5 bps | +3.65 vs +3.65 (diff +0.00) | -29.8 vs -29.9 (diff +0.1) | PASS |
+
+## 3. F13_D_f4core_exeq_s04 VAL with the archived synthetic sleeves vs f13/tables.md
+
+| book | span | CAGR / SPY % | excess pp | maxDD / SPY % | win 3m/6m/12m % | win 3y/5y % | worst 12m rel % (end) | yrs below rel high | turnover ov / core %/yr |
+|---|---|---|---|---|---|---|---|---|---|
+| F13_D synthetic @5 | 2013-01-02..2026-11-06 | 18.54 / 14.50 | +4.04 | -25.3 / -33.7 | 59/67/75 | 85/98 | -11.9 (2019-01-31) | 2.9 | 598 / 87 |
+| F13_D synthetic @23 | 2013-01-02..2026-11-06 | 15.73 / 14.50 | +1.23 | -25.5 / -33.7 | 53/58/62 | 55/72 | -13.6 (2016-03-18) | 6.2 | 597 / 87 |
+| REFERENCE @5 (23) | 2013-01-02..2026-11-06 | 18.54 / 14.50 | +4.04 (+1.23) | -25.3 / -33.7 (@23 -25.5) | 59/67/75 | 85/98 | -11.9 (2019-01-31) | 2.9 | 598 / 87 |
+
+| check | excess pp/yr got vs ref | maxDD got vs ref | result |
+|---|---|---|---|
+| F13_D engine 5 bps | +4.04 vs +4.04 (diff +0.00) | -25.3 vs -25.3 (diff +0.0) | PASS |
+| F13_D engine 23 bps | +1.23 vs +1.23 (diff +0.00) | -25.5 vs -25.5 (diff -0.0) | PASS |
+
+## 4. Every frozen book on the common DBMF window 2019-05-10..2026-11-06 (F13_D_live: new, no reference)
+
+| book | span | CAGR / SPY % | excess pp | maxDD / SPY % | win 3m/6m/12m % | win 3y/5y % | worst 12m rel % (end) | yrs below rel high | turnover %/yr |
+|---|---|---|---|---|---|---|---|---|---|
+| F14_F_live @5 | 2019-05-10..2026-11-06 | 21.63 / 15.06 | +6.57 | -30.0 / -33.7 | 63/69/72 | 84/100 | -12.0 (2023-11-03) | 3.6 | 384 |
+| F14_F_live @23 | 2019-05-10..2026-11-06 | 20.01 / 15.06 | +4.95 | -30.2 / -33.7 | 60/64/68 | 79/100 | -12.6 (2023-11-03) | 3.6 | 383 |
+| F13_D_live @5 | 2019-05-10..2026-11-06 | 21.29 / 15.06 | +6.23 | -34.0 / -33.7 | 66/71/75 | 88/100 | -11.4 (2025-07-16) | 1.7 | 105 |
+| F13_D_live @23 | 2019-05-10..2026-11-06 | 20.87 / 15.06 | +5.81 | -34.1 / -33.7 | 65/70/74 | 87/100 | -11.8 (2025-07-16) | 1.7 | 105 |
+| F4r2_stress_xs (slice of the 2013 run) @5 | 2019-05-10..2026-11-06 | 18.66 / 15.06 | +3.60 | -29.8 / -33.7 | 68/67/71 | 98/100 | -7.4 (2025-07-16) | 1.9 | 106 |
+| F4r2_stress_xs (slice of the 2013 run) @23 | 2019-05-10..2026-11-06 | 18.25 / 15.06 | +3.19 | -29.9 / -33.7 | 67/65/69 | 94/99 | -7.9 (2025-07-16) | 2.1 | 106 |
+
+F13_D_live DBMF weight E = 0.4167 (F13 engine: 1.25 x 0.04 / 0.12)
+
+## 5. Truncation consistency (run on data cut at t == run on all data, through t)
+
+- cut 2024-03-26 F14_F_live: NAV identical, decisions identical; next-session action on the cut data: TRADE
+- cut 2024-03-26 F13_D_live: NAV identical, decisions identical; next-session action on the cut data: HOLD
+- cut 2024-03-26 F4r2_stress_xs: NAV identical, decisions identical; next-session action on the cut data: HOLD
+- cut 2025-06-27 F14_F_live: NAV identical, decisions identical; next-session action on the cut data: HOLD
+- cut 2025-06-27 F13_D_live: NAV identical, decisions identical; next-session action on the cut data: HOLD
+- cut 2025-06-27 F4r2_stress_xs: NAV identical, decisions identical; next-session action on the cut data: HOLD
+- cut 2025-10-29 F14_F_live: NAV identical, decisions identical; next-session action on the cut data: TRADE
+- cut 2025-10-29 F13_D_live: NAV identical, decisions identical; next-session action on the cut data: TRADE
+- cut 2025-10-29 F4r2_stress_xs: NAV identical, decisions identical; next-session action on the cut data: TRADE
+- cut 2026-08-05 F14_F_live: NAV identical, decisions identical; next-session action on the cut data: HOLD
+- cut 2026-08-05 F13_D_live: NAV identical, decisions identical; next-session action on the cut data: TRADE
+- cut 2026-08-05 F4r2_stress_xs: NAV identical, decisions identical; next-session action on the cut data: TRADE
+
+## 6. NYSE holiday calendar vs SPY sessions 2010-01-01..2026-11-06
+
+generated 4242, actual 4238; generated-but-closed: ['2012-10-29', '2012-10-30', '2018-12-05', '2025-01-09']; open-but-not-generated: []
+(expected generated-but-closed: unscheduled closures only -- 2012-10-29/30 Sandy, 2018-12-05 Bush, 2025-01-09 Carter)
+
+OVERALL: PASS
