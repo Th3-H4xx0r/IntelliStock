@@ -33,8 +33,11 @@ trading days the data feed misses.
        weight is more than 5 pts off the model's, it repairs back to it. A
        drifted book above 2.0x gross is scaled down to 2.0x for a sync or
        repair. A TRADE target above the cap is refused.
-     - **Unsynced account:** after a leg is rejected or misses its fill, the
-       next session re-syncs to the model's book.
+     - A leg that is rejected or misses its fill is left to that 5-pt drift
+       band. Once any rebalance has gone through, the account counts as synced
+       for good, so one leg that keeps failing can't trigger a full-book
+       rebalance every day. A first sync that sent nothing is retried the next
+       session.
 
   A stale frame (yesterday's close missing) is retried every 5 minutes until
   the window shuts; then that session is skipped. Until the session acts, its
@@ -87,6 +90,7 @@ Read-only Postgres (or `store`): table `ForwardMirrorLedger`, filtered on
 | `f14-paper\|YYYY-MM-DD\|act` | `action`, `reason` (`trade`/`initial_sync`/`drift_repair`/`hold`), `orders` with statuses, `model_target`, `account_weights` |
 | `f14-paper\|YYYY-MM-DD\|close` | `equity`, `account_weights`, `model_current`, `deviation`, `next_action` |
 | `f14-paper\|YYYY-MM-DD\|error` | a failure after the session acted |
+| `f14-paper\|YYYY-MM-DD\|dry` | a dry run's plan (never overwrites `act`) |
 | `f14-paper\|boot\|…`, `f14-paper\|refused\|…` | boot results (incl. `multiplier` and per-ETF `tradable`/`fractionable`/`marginable`) and refusals |
 
 Positions are also visible via `GET /brokerages/b0d7dc67-f12b-4959-83db-0d324c6bc517/positions`.

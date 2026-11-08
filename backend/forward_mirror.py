@@ -13,8 +13,8 @@ the frozen data. The frozen fetcher drops today's unsettled row, so the frame
 ends at the previous close. It then runs ``strategies.run_f14_live`` and:
 
   * TRADE: rebalances the account to the decision's target weights;
-  * HOLD: leaves the drifted book alone. The exceptions are an unsynced
-    account (first run, or a leg that did not fill) or a weight more than
+  * HOLD: leaves the drifted book alone. The exceptions are a never-synced
+    account (first run) or a weight more than
     ``DRIFT_BAND`` off the model's drifted book. Then it rebalances to the
     model's current book.
 
@@ -322,6 +322,7 @@ class Mirror:
         self._fresh = None              # (session, frame last close, next info) of the last good fetch
         # A dry run spends its own session key, so turning it off trades the same day.
         self._session_key = "last_dry_session" if dry_run else "last_act_session"
+        self._act_kind = "dry" if dry_run else "act"     # ...and its own row, never the live act row
 
     # -- ledger ----------------------------------------------------------
     def state(self) -> dict:
@@ -344,11 +345,12 @@ class Mirror:
         """Leave a persistent failure in the ledger, not only on stdout. Before the
         session acts, the error sits in its pending ``act`` row; after, in an ``error`` row."""
         acted = self.state().get(self._session_key) == session.isoformat()
-        row_id = f"{MIRROR}|{session.isoformat()}|{'error' if acted else 'act'}"
+        kind = "error" if acted else self._act_kind
+        row_id = f"{MIRROR}|{session.isoformat()}|{kind}"
         prev = self.store.get(TABLE, row_id) or {}
         attempts = int(prev.get("attempts") or 0) + 1
         try:
-            self.record(row_id, "error" if acted else "act", session=session.isoformat(), status="pending",
+            self.record(row_id, kind, session=session.isoformat(), status="pending",
                         error=str(err)[:1000], attempts=attempts)
         except Exception as e:      # the ledger itself is down: stdout is all there is
             _log(f"could not record error for {session}: {e}")
@@ -425,7 +427,14 @@ class Mirror:
                 and st.get("last_close_session") != today.isoformat()):
             sessions = self.sessions(today)
             if sessions and sessions[-1] == today:
-                self.snapshot(today)
+                try:
+                    self.snapshot(today)
+                except MirrorRefused:
+                    raise
+                except Exception as e:
+                    self.record(f"{MIRROR}|{today.isoformat()}|close", "close", session=today.isoformat(),
+                                status="pending", error=f"{type(e).__name__}: {str(e)[:900]}")
+                    raise
 
     def _fetch(self, session: dt.date, want_last: dt.date, deadline: Optional[dt.datetime]):
         """(frame last close, next info) once the frame ends at ``want_last``, else None.
@@ -482,7 +491,7 @@ class Mirror:
                     reason=reason, equity=equity, account_weights=acct_w,
                     model_current=model_weights(nxt.get("current") or {}),
                     model_target=model_weights(nxt["target"]) if nxt.get("target") else None)
-        row_id = f"{MIRROR}|{session.isoformat()}|act"
+        row_id = f"{MIRROR}|{session.isoformat()}|{self._act_kind}"
         if target is None:
             self.save_state(**{self._session_key: session.isoformat()})
             self.record(row_id, "act", status="done", orders=[], **base)
@@ -513,9 +522,12 @@ class Mirror:
             else:
                 self.submit(orders, session, deadline, sent)
         finally:
-            ok = bool(sent) and all(o.get("status") not in ("rejected", "error", "skipped_deadline") for o in sent)
-            if not self.dry_run:
-                self.save_state(synced=ok or not orders)
+            # Synced is sticky: once a rebalance got any leg through, the drift band
+            # (not a full re-sync) repairs a leg that failed, so one leg that keeps
+            # failing cannot turn the mirror into a daily full-book trader.
+            went = any(o.get("status") not in ("rejected", "error", "skipped_deadline") for o in sent)
+            if not self.dry_run and (went or not orders):
+                self.save_state(synced=True)
             self.record(row_id, "act", status="done", orders=sent, target=target, prices=prices, **base)
 
     def submit(self, orders: list, session: dt.date, deadline: Optional[dt.datetime], out: list) -> list:
@@ -525,12 +537,16 @@ class Mirror:
         from alpaca.trading.requests import MarketOrderRequest
         sells = [o for o in orders if o.side == "sell"]
         buys = [o for o in orders if o.side == "buy"]
+        late = False
         for group in (sells, buys):
-            if group and group is buys and sells and not self.open_before(deadline):
-                out.extend(dict(asdict(o), status="skipped_deadline") for o in group)
-                continue
             ids = []
             for n, o in enumerate(group):
+                # The clock is re-read before every order: a slow API must not
+                # carry a leg past the deadline and into the next open.
+                if late or not self.open_before(deadline):
+                    late = True
+                    out.append(dict(asdict(o), status="skipped_deadline"))
+                    continue
                 cid = f"{ORDER_PREFIX}{session.isoformat()}-{o.side}-{o.symbol}-{n}"
                 kw = dict(symbol=o.symbol, side=OrderSide.BUY if o.side == "buy" else OrderSide.SELL,
                           time_in_force=TimeInForce.DAY, client_order_id=cid)
@@ -600,8 +616,6 @@ class Mirror:
             return
         last_date, nxt = got
         all_filled = self.refresh_fills(session)
-        if all_filled is False:
-            self.save_state(synced=False)     # the next session re-syncs to the model's book
         acct, equity, qty, mv, px = self._account_book()
         acct_w = account_weights(equity, mv)
         model = model_weights(nxt.get("current") or {})

@@ -236,8 +236,8 @@ def _at(h, m):
     return [dt.datetime(2026, 11, 9, h, m, tzinfo=UTC)]
 
 
-def _act_row(store, day="2026-11-09"):
-    return store.get(fm.TABLE, f"f14-paper|{day}|act")
+def _act_row(store, day="2026-11-09", kind="act"):
+    return store.get(fm.TABLE, f"f14-paper|{day}|{kind}")
 
 
 def test_first_session_syncs_the_empty_account_once(store):
@@ -287,7 +287,30 @@ def test_a_submit_timeout_that_landed_is_recorded_by_client_id(store):
     by_sym = {o["symbol"]: o for o in _act_row(store)["orders"]}
     assert by_sym["SPY"]["id"] == "landed1" and by_sym["SPY"]["status"] == "accepted"
     assert by_sym["DBMF"]["status"] == "error"
-    assert store.get(fm.TABLE, fm.STATE_ID)["synced"] is False
+    assert store.get(fm.TABLE, fm.STATE_ID)["synced"] is True     # a leg got through: the drift band repairs the rest
+
+
+def test_a_sync_that_sends_nothing_stays_unsynced(store):
+    clock = _at(20, 45)
+    client = FakeClient(lambda: clock[0], fail_submit={"SPY", "DBMF", "IWD", "MTUM"})
+    _mirror(store, client, clock).step()
+    assert {o["status"] for o in _act_row(store)["orders"]} == {"error"}
+    assert not store.get(fm.TABLE, fm.STATE_ID).get("synced")
+
+
+def test_the_deadline_is_checked_before_every_order(store):
+    clock = _at(20, 56)                                     # deadline 20:57
+    client = FakeClient(lambda: clock[0])
+    orig = client.submit_order
+
+    def slow_submit(req):
+        clock[0] += dt.timedelta(seconds=40)
+        return orig(req)
+
+    client.submit_order = slow_submit
+    _mirror(store, client, clock).step()
+    statuses = [o["status"] for o in _act_row(store)["orders"]]
+    assert len(client.submitted) == 2 and statuses.count("skipped_deadline") == 2
 
 
 def test_no_order_after_the_deadline_even_when_the_fetch_runs_long(store):
@@ -330,8 +353,9 @@ def test_dry_run_records_the_plan_and_spends_only_its_own_session(store):
     client = FakeClient(lambda: clock[0])
     _mirror(store, client, clock, dry_run=True).step()
     assert client.submitted == []
-    row = _act_row(store)
+    row = _act_row(store, kind="dry")
     assert row["dry_run"] is True and {o["status"] for o in row["orders"]} == {"dry_run"}
+    assert _act_row(store) is None                          # never the live act row
     st = store.get(fm.TABLE, fm.STATE_ID)
     assert st["last_dry_session"] == "2026-11-09" and not st.get("last_act_session") and not st.get("synced")
     _mirror(store, client, clock).step()                    # dry run off, same day: it trades
@@ -405,4 +429,23 @@ def test_close_snapshot_records_fills_and_resyncs_after_a_rejection(store):
     assert row["next_action"] == "HOLD" and row["acted"] is True and row["all_filled"] is False
     assert {o["status"] for o in _act_row(store)["orders"]} == {"rejected"}
     st = store.get(fm.TABLE, fm.STATE_ID)
-    assert st["last_close_session"] == "2026-11-09" and st["synced"] is False
+    assert st["last_close_session"] == "2026-11-09" and st["synced"] is True
+
+
+def test_after_a_rejected_leg_a_hold_inside_the_band_does_not_rebalance_the_book(store):
+    clock = _at(20, 45)
+    client = FakeClient(lambda: clock[0], final_status="rejected")
+    m = _mirror(store, client, clock)
+    m.step()
+    n = len(client.submitted)
+    # Next session: the account sits within the band of the model's book.
+    clock[0] = dt.datetime(2026, 11, 10, 20, 45, tzinfo=UTC)
+    SESSIONS.append(dt.date(2026, 11, 10))
+    try:
+        client.positions = _pos({"SPY": 0.5, "MTUM": 0.15, "IWD": 0.33, "DBMF": 0.42})
+        m2 = _mirror(store, client, clock, last=dt.date(2026, 11, 9))
+        m2.step()
+    finally:
+        SESSIONS.pop()
+    assert len(client.submitted) == n
+    assert _act_row(store, day="2026-11-10")["reason"] == "hold"
