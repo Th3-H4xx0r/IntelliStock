@@ -31,7 +31,8 @@ def test_all_tables_has_the_127_live_tables_plus_the_two_split_tables():
     # TrendMacroPIT, TrendFilingsPIT, TrendResearchLedger).
     # 2026-11-05: +1 for TR ingest completion markers (TrendIngestProgress).
     # 2026-11-05: +1 for TR server jobs (TrendResearchJobs).
-    assert len(schema.ALL_TABLES) == 143 + len(_LAZILY_CREATED)
+    # 2026-11-07: +1 for the forward-test paper mirror (ForwardMirrorLedger).
+    assert len(schema.ALL_TABLES) == 144 + len(_LAZILY_CREATED)
     assert len(set(schema.ALL_TABLES)) == len(schema.ALL_TABLES)
     for name in ("BacktestResults", "PriceHistory", "GraphNexusTradeContexts",
                  "kalshi_decisions", "sports_fixtures", "Users",
