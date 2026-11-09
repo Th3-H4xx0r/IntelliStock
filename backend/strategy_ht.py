@@ -85,6 +85,18 @@ DEFAULTS = {
     # spends a bar with 25-50% of NAV in cash: the engine's gridded run had cash
     # above 20% of NAV on 89 of 512 sessions.
     "backtest_credit_pending_sell_proceeds": True,
+    # ── live risk envelope (read by broker._strategy_eb_risk_limits) ──
+    # The lane is a single levered ETF position by design, so order, symbol
+    # and leveraged fractions are 100%. The drawdown rungs are the paper
+    # test's own kill rule: the engine's worst drawdown for the TQQQ stepped
+    # profile was -42% (2021-11..2026-08), so soft at -35% (buys freeze), hard
+    # at -50%, kill at -60% (book flattened). A real-money run must tighten these.
+    "live_max_order_fraction": 1.0,
+    "live_max_symbol_fraction": 1.0,
+    "live_max_leveraged_fraction": 1.0,
+    "live_soft_drawdown": 0.35,
+    "live_hard_drawdown": 0.50,
+    "live_kill_drawdown": 0.60,
 }
 
 
