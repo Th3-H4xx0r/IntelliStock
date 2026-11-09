@@ -137,6 +137,28 @@ def test_the_exposure_grid_only_moves_on_regime_changes():
     assert in_exposure(closes_with_vol(0.004), DEFAULTS)[0] == 2.0
 
 
+def test_grid_hysteresis_holds_the_level_until_the_raw_value_clears_the_margin():
+    from strategy_ht import in_exposure, realised_vol
+    def closes_with_vol(daily_move):
+        out = [100.0]
+        for i in range(60):
+            out.append(out[-1] * (1.0 + (daily_move if i % 2 else -daily_move)))
+        return out
+    # raw = 0.20 / vol; pick a vol so raw sits just past the 1.5/2.0 midpoint (1.75) but inside the margin
+    c = closes_with_vol(0.0068)                                 # ~10.8% annualised -> raw ~1.85
+    raw = 0.20 / realised_vol(c, 21)
+    assert 1.75 < raw < 1.75 + 0.15, raw
+    assert in_exposure(c, DEFAULTS)[0] == 2.0                    # no previous level: nearest
+    assert in_exposure(c, DEFAULTS, prev_level=1.5)[0] == 1.5    # held: inside the margin
+    assert in_exposure(c, DEFAULTS, prev_level=2.0)[0] == 2.0    # held from above too
+    assert in_exposure(c, cfg(exp_hyst=0.0), prev_level=1.5)[0] == 2.0   # no margin -> moves
+    # a big jump moves several notches, one at a time, all the way
+    assert in_exposure(closes_with_vol(0.030), DEFAULTS, prev_level=2.0)[0] == 0.5
+    # junk previous level falls back to nearest
+    assert in_exposure(c, DEFAULTS, prev_level="x")[0] == 2.0
+    assert in_exposure(c, DEFAULTS, prev_level=7.0)[0] == 2.0
+
+
 def test_in_exposure_fails_toward_less_and_can_be_switched_off():
     from strategy_ht import in_exposure
     e, why = in_exposure([100.0] * 10, DEFAULTS)                          # not enough history for vol(21)

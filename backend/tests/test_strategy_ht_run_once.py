@@ -31,20 +31,25 @@ def downtrend():    # was in, then a decisive break below the -3% band
 
 
 class FakeEmulator:
-    def __init__(self, cash=10000.0, positions=None, prices=None):
+    def __init__(self, cash=10000.0, positions=None, prices=None, pending_credit=0.0):
         self._cash = cash
         self._positions = dict(positions or {})
         self._prices = dict(prices or PRICES)
+        self._pending_credit = pending_credit
 
     def get_cash(self):
         return self._cash
+
+    def get_buying_power(self, reserved=0.0, *, prices=None):
+        return self._cash + self._pending_credit
 
     def get_positions(self):
         return dict(self._positions)
 
     def get_portfolio_value(self, prices=None):
+        # like the real emulator, NAV counts unsettled/pending proceeds as cash
         px = prices or self._prices
-        return self._cash + sum(q * float(px.get(s, 0.0)) for s, q in self._positions.items())
+        return self._cash + self._pending_credit + sum(q * float(px.get(s, 0.0)) for s, q in self._positions.items())
 
 
 def cfg(**overrides):
@@ -151,6 +156,36 @@ def test_idle_cash_above_the_drift_band_is_deployed():
                                 portfolio_emulator=emu, strategy_cache={})
     assert out.get("SSO") == 1
     assert 800.0 < out["_nexus_position_sizes"]["SSO"]["buy_cash"] <= 900.0
+
+
+def test_buys_are_sized_off_buying_power_when_the_emulator_credits_pending_sells():
+    # no settled cash, but $9,500 of pending-sell credit: the SSO buy is sized against it
+    emu = FakeEmulator(cash=0.0, positions={}, pending_credit=9500.0)
+    out = StrategyHt().run_once(["SSO"], PRICES, NOW, cfg(), {}, data=data_for(uptrend()),
+                                portfolio_emulator=emu, strategy_cache={})
+    assert out.get("SSO") == 1
+    assert 9000.0 < out["_nexus_position_sizes"]["SSO"]["buy_cash"] <= 9500.0
+    assert DEFAULTS["backtest_credit_pending_sell_proceeds"] is True
+
+
+def test_the_previous_grid_level_is_carried_through_the_cache_while_in_market():
+    # in-state, vol just past the 1.5/2.0 midpoint: nearest is 2.0, but a cached 1.5 is held
+    closes = [300.0] * 200 + [420.0] * 30
+    for i in range(30):
+        closes.append(closes[-1] * (1.0068 if i % 2 else 1 / 1.0068))   # ~10.8% vol -> raw ~1.85
+    fresh = {}
+    out = StrategyHt().run_once(["SSO"], PRICES, NOW, cfg(), {}, data=data_for(bars(closes)),
+                                portfolio_emulator=FakeEmulator(cash=10000.0), strategy_cache=fresh)
+    assert fresh["_strategy_ht_last"]["exposure"] == 2.0
+    carried = {"_strategy_ht_last": {"in_market": True, "exposure": 1.5}}
+    out = StrategyHt().run_once(["SSO"], PRICES, NOW, cfg(), {}, data=data_for(bars(closes)),
+                                portfolio_emulator=FakeEmulator(cash=10000.0), strategy_cache=carried)
+    assert carried["_strategy_ht_last"]["exposure"] == 1.5
+    assert out.get("SSO") == 1 and out.get("SPY") == 1          # 1.5x = 50% SSO + 50% SPY
+    parked_before = {"_strategy_ht_last": {"in_market": False, "exposure": 1.5}}
+    StrategyHt().run_once(["SSO"], PRICES, NOW, cfg(), {}, data=data_for(bars(closes)),
+                          portfolio_emulator=FakeEmulator(cash=10000.0), strategy_cache=parked_before)
+    assert parked_before["_strategy_ht_last"]["exposure"] == 2.0   # a fresh entry rounds to nearest
 
 
 def test_idle_cash_below_the_band_is_left_alone():
