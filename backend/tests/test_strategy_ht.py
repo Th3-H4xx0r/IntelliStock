@@ -117,8 +117,24 @@ def test_in_exposure_vol_target_scales_down_in_violent_markets():
     for i in range(60):
         mid.append(mid[-1] * (1.0 + (0.0126 if i % 2 else -0.0126)))     # ~20% annualised
     e, _ = in_exposure(mid, DEFAULTS)
-    assert 0.9 < e < 1.1
+    assert e == 1.0                                                      # ~1.0 raw, on the 0.5 grid
+    e, _ = in_exposure(mid, cfg(exp_grid=0))
+    assert 0.9 < e < 1.1 and e != 1.0                                    # continuous when the grid is off
     assert realised_vol([100.0] * 10, 21) is None                       # too short
+
+
+def test_the_exposure_grid_only_moves_on_regime_changes():
+    from strategy_ht import in_exposure
+    def closes_with_vol(daily_move):
+        out = [100.0]
+        for i in range(60):
+            out.append(out[-1] * (1.0 + (daily_move if i % 2 else -daily_move)))
+        return out
+    # 0.20 / vol: ~0.9% daily (~14% ann) -> 1.4 raw -> 1.5 on the grid; ~1.6% (~25%) -> 0.8 -> 1.0
+    assert in_exposure(closes_with_vol(0.009), DEFAULTS)[0] == 1.5
+    assert in_exposure(closes_with_vol(0.016), DEFAULTS)[0] == 1.0
+    assert in_exposure(closes_with_vol(0.030), DEFAULTS)[0] == 0.5
+    assert in_exposure(closes_with_vol(0.004), DEFAULTS)[0] == 2.0
 
 
 def test_in_exposure_fails_toward_less_and_can_be_switched_off():

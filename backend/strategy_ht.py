@@ -43,6 +43,13 @@ DEFAULTS = {
     "vol_bars": 21,
     "exp_min": 0.5,
     "exp_max": 2.0,
+    # Exposure is quantised to this grid (0.5 -> 0.5x/1x/1.5x/2x), so the book
+    # only trades when realised vol moves a regime, not every day. Measured on
+    # the engine: the continuous version rebalanced on 320 of 512 sessions,
+    # left ~9% of NAV idle in cash on average and returned +38% where the
+    # offline model said +84%; the 0.5 grid trades ~16 days/yr offline with
+    # the same CAGR (ht_variants_lowturn.txt). 0 = continuous.
+    "exp_grid": 0.5,
     # Reflex bounce: the day after a close <= bounce_drop, hold exp_max
     # regardless of state (up 23 of 30 times since 1950). 0 disables it.
     "bounce_drop": -0.05,
@@ -232,6 +239,9 @@ def in_exposure(closes, config) -> tuple:
     if vol <= 0:
         return hi, f"zero realised vol -> {hi:.2f}x"
     raw = target / vol
+    grid = _f(cfg, "exp_grid")
+    if grid > 0:
+        raw = round(raw / grid) * grid
     exp = round(max(lo, min(hi, raw)), 4)
     return exp, f"vol {100 * vol:.1f}% vs target {100 * target:.0f}% -> {exp:.2f}x"
 

@@ -140,6 +140,22 @@ def test_holding_the_target_already_emits_no_churn():
     assert out == {}
 
 
+def test_idle_cash_above_the_drift_band_is_deployed():
+    # 91% SSO + 9% cash: the 5% drift band would otherwise leave the cash idle forever
+    emu = FakeEmulator(cash=900.0, positions={"SSO": 91.0})
+    out = StrategyHt().run_once(["SSO"], PRICES, NOW, cfg(), {}, data=data_for(uptrend()),
+                                portfolio_emulator=emu, strategy_cache={})
+    assert out.get("SSO") == 1
+    assert 800.0 < out["_nexus_position_sizes"]["SSO"]["buy_cash"] <= 900.0
+
+
+def test_idle_cash_below_the_band_is_left_alone():
+    emu = FakeEmulator(cash=300.0, positions={"SSO": 97.0})     # 3% cash
+    out = StrategyHt().run_once(["SSO"], PRICES, NOW, cfg(), {}, data=data_for(uptrend()),
+                                portfolio_emulator=emu, strategy_cache={})
+    assert out == {}
+
+
 def test_missing_broker_prices_fall_back_to_the_visible_close():
     out = StrategyHt().run_once(["SSO"], {"SPY": 500.0}, NOW, cfg(), {}, data=data_for(uptrend()),
                                 portfolio_emulator=FakeEmulator(cash=10000.0, prices={"SPY": 500.0}),
