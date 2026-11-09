@@ -28,11 +28,29 @@ DEFAULTS = {
     # ── the filter ──
     "filter_symbol": "SPY",
     "ma_bars": 200,
-    "enter_band": 0.03,
-    "exit_band": 0.03,
-    # ── the two books ──
-    "in_symbol": "SSO",
-    "in_weight": 1.0,
+    # Asymmetric bands (Balanced profile, 2026-11-08): re-enter quickly, exit late.
+    # Measured on real ETFs 2006-2026 vs the symmetric 3%/3% base: +2pp CAGR,
+    # because the 1% re-entry gets back in months earlier after a bottom.
+    "enter_band": 0.01,
+    "exit_band": 0.05,
+    # ── in-state sizing ──
+    # Volatility target on the in-state exposure: exposure = clip(vol_target /
+    # realised vol(vol_bars), exp_min, exp_max). 0 disables it (always exp_max).
+    # 20% cut the worst year from -31% to -18% and maxDD -45% -> -39% on real
+    # ETFs, for ~2.5pp of CAGR. Exposure e is held as SSO (e-1) + SPY (2-e)
+    # when e >= 1, and SPY e + BIL (1-e) when e < 1.
+    "vol_target": 0.20,
+    "vol_bars": 21,
+    "exp_min": 0.5,
+    "exp_max": 2.0,
+    # Reflex bounce: the day after a close <= bounce_drop, hold exp_max
+    # regardless of state (up 23 of 30 times since 1950). 0 disables it.
+    "bounce_drop": -0.05,
+    # ── the legs ──
+    "in_symbol": "SSO",          # the 2x fund
+    "one_x_symbol": "SPY",       # the 1x leg used to dial exposure between 0.5x and 2x
+    "cash_symbol": "BIL",
+    "in_weight": 1.0,            # legacy cap on the in-state book (1.0 = full)
     "out_symbols": {"SPY": 0.5, "BIL": 0.5},
     # ── order plumbing (read by strategy_x.targets_to_orders) ──
     "core_band_pct": 0.05,          # no-churn drift band around a held target
@@ -102,7 +120,8 @@ def out_book(cfg) -> dict:
 
 def strategy_ht_universe(cfg) -> list:
     """Every symbol the lane needs bars and prices for, sorted."""
-    syms = {_s(cfg, "filter_symbol"), _s(cfg, "in_symbol")} | set(out_book(cfg))
+    syms = ({_s(cfg, "filter_symbol"), _s(cfg, "in_symbol"), _s(cfg, "one_x_symbol"),
+             _s(cfg, "cash_symbol")} | set(out_book(cfg)))
     return sorted(s for s in syms if s)
 
 
@@ -178,14 +197,77 @@ def trend_state(closes, config) -> TrendState:
                       last_price, last_ma, True, crossings)
 
 
-def ht_targets(in_market: bool, config) -> tuple:
-    """Target weight per symbol as a fraction of NAV, plus why."""
+def realised_vol(closes, bars: int) -> float | None:
+    """Annualised standard deviation of the last `bars` daily returns, or None."""
+    px = _finite(closes)
+    if px is None or len(px) < bars + 1:
+        return None
+    rets = [px[i] / px[i - 1] - 1.0 for i in range(len(px) - bars, len(px))]
+    mean = sum(rets) / len(rets)
+    var = sum((x - mean) ** 2 for x in rets) / (len(rets) - 1) if len(rets) > 1 else 0.0
+    return math.sqrt(var) * math.sqrt(252.0)
+
+
+def in_exposure(closes, config) -> tuple:
+    """In-state exposure in units of the index (0.5 .. 2.0), plus why.
+
+    vol_target / realised vol, clipped to [exp_min, exp_max]. Fails toward
+    exp_max only when the target is off or the vol is zero/unknown with enough
+    history; too little history for the vol window falls to exp_min (less).
+    The bounce overlay returns exp_max the day after a close <= bounce_drop.
+    """
+    cfg = config or {}
+    lo = max(0.0, _f(cfg, "exp_min")); hi = max(lo, _f(cfg, "exp_max"))
+    px = _finite(closes) or []
+    drop = _f(cfg, "bounce_drop")
+    if drop < 0 and len(px) >= 2 and px[-1] / px[-2] - 1.0 <= drop:
+        return hi, f"bounce: last day {100 * (px[-1] / px[-2] - 1.0):+.1f}% <= {100 * drop:.0f}% -> {hi:.2f}x"
+    target = _f(cfg, "vol_target")
+    if target <= 0:
+        return hi, f"vol target off -> {hi:.2f}x"
+    bars = max(2, _i(cfg, "vol_bars"))
+    vol = realised_vol(px, bars)
+    if vol is None:
+        return lo, f"insufficient history for vol({bars}) -> {lo:.2f}x (fail-closed)"
+    if vol <= 0:
+        return hi, f"zero realised vol -> {hi:.2f}x"
+    raw = target / vol
+    exp = round(max(lo, min(hi, raw)), 4)
+    return exp, f"vol {100 * vol:.1f}% vs target {100 * target:.0f}% -> {exp:.2f}x"
+
+
+def exposure_targets(exposure: float, config) -> dict:
+    """Weights that deliver `exposure` with a 2x fund, a 1x leg and cash."""
+    cfg = config or {}
+    e = max(0.0, min(2.0, float(exposure)))
+    two_x, one_x, cash = _s(cfg, "in_symbol"), _s(cfg, "one_x_symbol"), _s(cfg, "cash_symbol")
+    targets: dict = {}
+    if e >= 1.0:
+        if e - 1.0 > 0:
+            targets[two_x] = round(e - 1.0, Q)
+        if 2.0 - e > 0:
+            targets[one_x] = round(targets.get(one_x, 0.0) + (2.0 - e), Q)
+    else:
+        if e > 0:
+            targets[one_x] = round(e, Q)
+        targets[cash] = round(targets.get(cash, 0.0) + (1.0 - e), Q)
+    return targets
+
+
+def ht_targets(in_market: bool, config, exposure: float | None = None) -> tuple:
+    """Target weight per symbol as a fraction of NAV, plus why.
+
+    `exposure` is the in-state exposure from `in_exposure`; None means exp_max
+    (the pure 2x book). `in_weight` < 1 scales the in-state book toward cash.
+    """
     cfg = config or {}
     if in_market:
+        hi = max(0.0, _f(cfg, "exp_max"))
+        e = hi if exposure is None else max(0.0, min(hi, float(exposure)))
         weight = max(0.0, min(1.0, _f(cfg, "in_weight")))
-        sym = _s(cfg, "in_symbol")
-        targets = {sym: round(weight, Q)}
-        notes = [f"in-market: {weight:.0%} {sym}"]
+        targets = {s: round(w * weight, Q) for s, w in exposure_targets(e, cfg).items()}
+        targets = {s: w for s, w in targets.items() if w > 0}
+        notes = [f"in-market {e:.2f}x: " + ", ".join(f"{w:.0%} {s}" for s, w in sorted(targets.items()))]
         return targets, notes
     book = out_book(cfg)
     notes = ["parked: " + ", ".join(f"{w:.0%} {s}" for s, w in sorted(book.items()))]

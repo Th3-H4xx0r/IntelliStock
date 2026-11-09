@@ -1,5 +1,5 @@
-# INTELLISTOCK_SCHEMA: {"strategy": "strategy_ht", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_ht_enabled": false, "filter_symbol": "SPY", "ma_bars": 200, "enter_band": 0.03, "exit_band": 0.03, "in_symbol": "SSO", "in_weight": 1.0, "out_symbols": {"SPY": 0.5, "BIL": 0.5}, "core_band_pct": 0.05, "min_order_usd": 50.0, "cost_haircut_pct": 0.006, "broker_max_single_position_pct": 1.0, "honour_single_position_cap": true}}
-# INTELLISTOCK_DESCRIPTION: Hysteresis trend — 100% SSO (2x S&P) while SPY holds above its 200-day average by 3%, parked in 50% SPY / 50% BIL once SPY closes 3% below it; about one switch a year.
+# INTELLISTOCK_SCHEMA: {"strategy": "strategy_ht", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_ht_enabled": false, "filter_symbol": "SPY", "ma_bars": 200, "enter_band": 0.01, "exit_band": 0.05, "vol_target": 0.20, "vol_bars": 21, "exp_min": 0.5, "exp_max": 2.0, "bounce_drop": -0.05, "in_symbol": "SSO", "one_x_symbol": "SPY", "cash_symbol": "BIL", "in_weight": 1.0, "out_symbols": {"SPY": 0.5, "BIL": 0.5}, "core_band_pct": 0.05, "min_order_usd": 50.0, "cost_haircut_pct": 0.006, "broker_max_single_position_pct": 1.0, "honour_single_position_cap": true}}
+# INTELLISTOCK_DESCRIPTION: Hysteresis trend, Balanced profile — up to 2x S&P (SSO) while SPY holds above its 200-day average (re-enter 1% above, exit 5% below), with the exposure scaled down toward 0.5x when 21-day realised vol exceeds a 20% target, 2x for one day after any -5% close, and parked in 50% SPY / 50% BIL when the trend breaks.
 """Strategy HT wrapper: broker contract, order emission, cache row.
 
 Everything testable lives in `backend/strategy_ht.py`, which is pure. This
@@ -16,6 +16,7 @@ if _BACKEND not in sys.path:
 from strategy_ht import (  # noqa: E402
     DEFAULTS,
     ht_targets,
+    in_exposure,
     strategy_ht_universe,
     trend_state,
 )
@@ -73,7 +74,11 @@ class StrategyHt:
             return {}
 
         state = trend_state(closes, cfg)
-        targets, notes = ht_targets(state.in_market, cfg)
+        exposure, why_exp = in_exposure(closes, cfg)
+        # The bounce overlay holds exp_max for a day regardless of trend state.
+        bounced = why_exp.startswith("bounce")
+        targets, notes = ht_targets(state.in_market or bounced, cfg, exposure)
+        notes.append(why_exp)
 
         eff ={str(s).strip().upper(): v for s, v in prices.items()}
         for symbol in universe:
@@ -93,9 +98,10 @@ class StrategyHt:
         cache["_strategy_ht_last"] = {
             "in_market": bool(state.in_market), "decided": bool(state.decided),
             "reason": state.reason, "crossings": int(state.crossings),
+            "exposure": float(exposure), "bounce": bool(bounced),
             "targets": dict(targets), "notes": list(notes),
         }
-        _log(f"StrategyHt {'IN' if state.in_market else 'OUT'} | {state.reason} | targets="
+        _log(f"StrategyHt {'IN' if state.in_market else 'OUT'}{' +BOUNCE' if bounced else ''} | {state.reason} | {why_exp} | targets="
              + ", ".join(f"{s} {w:.0%}" for s, w in sorted(targets.items()))
              + f" | orders={len(decisions)} | nav=${nav:,.0f}", "cyan")
 
