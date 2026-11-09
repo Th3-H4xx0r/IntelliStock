@@ -4441,6 +4441,11 @@ _LANE_ENABLE_FLAGS = {
     # in `_strategy_eb_risk_limits`' defaults_by_lane (D5).
     "strategy_swing": "strategy_swing_enabled", "strategyswing": "strategy_swing_enabled",
     "strategy_wheel": "strategy_wheel_enabled", "strategywheel": "strategy_wheel_enabled",
+    # 2026-11-09: Strategy HT (hysteresis trend, levered ETF core) for its paper
+    # run. It declares every live_* key (100% order/symbol/leveraged, drawdown
+    # rungs 35/50/60) and honours its 1.0 single-position cap live; its
+    # defaults_by_lane row is `_HT_DEFAULTS` in `_strategy_eb_risk_limits`.
+    "strategy_ht": "strategy_ht_enabled", "strategyht": "strategy_ht_enabled",
 }
 
 
@@ -4542,6 +4547,10 @@ def _strategy_eb_risk_limits(cached_strategies):
         from strategy_hx import DEFAULTS as _HX_DEFAULTS
     except Exception:
         _HX_DEFAULTS = {}
+    try:
+        from strategy_ht import DEFAULTS as _HT_DEFAULTS
+    except Exception:
+        _HT_DEFAULTS = {}
     # D5 (2026-09-11): `.get(name, {})`, not a bare subscript. This lookup sits
     # OUTSIDE the per-lane except, so a lane registered in `_LANE_ENABLE_FLAGS`
     # without a row here used to KeyError into the outer handler and return
@@ -4565,6 +4574,7 @@ def _strategy_eb_risk_limits(cached_strategies):
                         "outlier_sleeve": _OS_DEFAULTS, "outliersleeve": _OS_DEFAULTS,
                         "strategy_hx": _HX_DEFAULTS, "strategyhx": _HX_DEFAULTS,
                         "strategy_swing": _SW_DEFAULTS, "strategyswing": _SW_DEFAULTS,
+                        "strategy_ht": _HT_DEFAULTS, "strategyht": _HT_DEFAULTS,
                         "strategy_wheel": {}, "strategywheel": {}}
     # The WIDEST envelope across the enabled lanes: a document that carries
     # the outlier sleeve beside strategy_eb must let a sleeve winner grow.
