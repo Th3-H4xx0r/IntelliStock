@@ -88,6 +88,31 @@ def test_an_uptrend_buys_the_levered_leg_sized_off_nav():
     assert out["_nexus_discovered"] == ["BIL", "SPY", "SSO"]
 
 
+def test_a_violent_uptrend_dials_exposure_down_into_the_one_x_leg():
+    # in-state (far above the MA) but the last 21 days swing +-4%: vol target -> 0.5x
+    closes = [300.0] * 200 + [420.0] * 30
+    for i in range(30):
+        closes.append(closes[-1] * (1.04 if i % 2 else 0.96))
+    out = StrategyHt().run_once(["SSO"], PRICES, NOW, cfg(), {}, data=data_for(bars(closes)),
+                                portfolio_emulator=FakeEmulator(cash=10000.0), strategy_cache={})
+    assert out.get("SSO") is None
+    assert out.get("SPY") == 1 and out.get("BIL") == 1
+    assert 4000.0 < out["_nexus_position_sizes"]["SPY"]["buy_cash"] < 5100.0
+
+
+def test_a_crash_day_triggers_the_bounce_even_when_parked():
+    closes = [400.0] * 200 + [420.0] * 30 + [380.0] * 29 + [380.0 * 0.94]   # parked, then a -6% close
+    cache = {}
+    # A daily bar's close is knowable only once its day is over, so the -6% bar
+    # must be dated BEFORE the decision day to be visible (the engine sees the
+    # crash close at the next session's decision, which is the bounce day).
+    crash_bars = bars(closes, end_day=datetime(2026, 5, 31, tzinfo=timezone.utc))
+    out = StrategyHt().run_once(["SSO"], PRICES, NOW, cfg(), {}, data=data_for(crash_bars),
+                                portfolio_emulator=FakeEmulator(cash=10000.0), strategy_cache=cache)
+    assert out.get("SSO") == 1 and "SPY" not in out
+    assert cache["_strategy_ht_last"]["bounce"] is True and cache["_strategy_ht_last"]["in_market"] is False
+
+
 def test_a_downtrend_parks_in_the_out_book():
     out = StrategyHt().run_once(["SSO"], PRICES, NOW, cfg(), {}, data=data_for(downtrend()),
                                 portfolio_emulator=FakeEmulator(cash=10000.0), strategy_cache={})
