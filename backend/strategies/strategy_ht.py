@@ -1,4 +1,4 @@
-# INTELLISTOCK_SCHEMA: {"strategy": "strategy_ht", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_ht_enabled": false, "filter_symbol": "SPY", "ma_bars": 200, "enter_band": 0.01, "exit_band": 0.03, "vol_target": 0.20, "vol_bars": 21, "exp_min": 0.5, "exp_max": 2.0, "exp_grid": 0.5, "bounce_drop": 0.0, "in_symbol": "SSO", "one_x_symbol": "SPY", "cash_symbol": "BIL", "in_weight": 1.0, "out_symbols": {"SPY": 0.5, "BIL": 0.5}, "core_band_pct": 0.05, "min_order_usd": 50.0, "cost_haircut_pct": 0.006, "broker_max_single_position_pct": 1.0, "honour_single_position_cap": true}}
+# INTELLISTOCK_SCHEMA: {"strategy": "strategy_ht", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_ht_enabled": false, "filter_symbol": "SPY", "ma_bars": 200, "enter_band": 0.01, "exit_band": 0.03, "vol_target": 0.20, "vol_bars": 21, "exp_min": 0.5, "exp_max": 2.0, "exp_grid": 0.5, "exp_hyst": 0.15, "bounce_drop": 0.0, "in_symbol": "SSO", "one_x_symbol": "SPY", "cash_symbol": "BIL", "in_weight": 1.0, "out_symbols": {"SPY": 0.5, "BIL": 0.5}, "core_band_pct": 0.05, "min_order_usd": 50.0, "cost_haircut_pct": 0.006, "broker_max_single_position_pct": 1.0, "honour_single_position_cap": true, "backtest_credit_pending_sell_proceeds": true}}
 # INTELLISTOCK_DESCRIPTION: Hysteresis trend, Balanced profile — up to 2x S&P (SSO) while SPY holds above its 200-day average (re-enter 1% above, exit 3% below), with the exposure stepped down (2x / 1.5x / 1x / 0.5x) when 21-day realised vol exceeds a 20% target, and parked in 50% SPY / 50% BIL when the trend breaks.
 """Strategy HT wrapper: broker contract, order emission, cache row.
 
@@ -74,7 +74,11 @@ class StrategyHt:
             return {}
 
         state = trend_state(closes, cfg)
-        exposure, why_exp = in_exposure(closes, cfg)
+        last = cache.get("_strategy_ht_last") if isinstance(cache.get("_strategy_ht_last"), dict) else {}
+        # The previous grid level only carries over while the book was in the
+        # market; a fresh entry rounds to the nearest level.
+        prev_level = last.get("exposure") if last.get("in_market") else None
+        exposure, why_exp = in_exposure(closes, cfg, prev_level)
         # The bounce overlay holds exp_max for a day regardless of trend state.
         bounced = why_exp.startswith("bounce")
         targets, notes = ht_targets(state.in_market or bounced, cfg, exposure)
@@ -91,6 +95,16 @@ class StrategyHt:
         nav = float(portfolio_emulator.get_portfolio_value(eff) or 0.0)
         positions = portfolio_emulator.get_positions() or {}
         cash = float(portfolio_emulator.get_cash() or 0.0)
+        # Size buys off buying power when the emulator offers it: with the lane's
+        # `backtest_credit_pending_sell_proceeds`, that counts this bar's own
+        # funding sell (haircut), so a level change does not spend a session
+        # with a quarter of NAV in cash (strategy_eb._spendable does the same).
+        try:
+            bp = portfolio_emulator.get_buying_power(prices=eff)
+            if bp is not None:
+                cash = max(cash, float(bp))
+        except (AttributeError, TypeError):
+            pass
         # `targets_to_orders` skips a top-up smaller than the drift band when the
         # position already exists, so the cash left over after a flip (sells fill
         # a bar before buys are sized) stayed idle: ~9% of NAV on average over

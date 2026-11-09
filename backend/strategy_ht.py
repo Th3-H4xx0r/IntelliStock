@@ -51,6 +51,13 @@ DEFAULTS = {
     # offline model said +84%; the 0.5 grid trades ~16 days/yr offline with
     # the same CAGR (ht_variants_lowturn.txt). 0 = continuous.
     "exp_grid": 0.5,
+    # Hysteresis on the grid: the level moves only when the raw exposure gets
+    # past the midpoint to the neighbouring level by this margin. Without it the
+    # engine's first gridded run still changed level 135 times in 512 sessions
+    # (vol hovering at a boundary); offline the margin cuts level changes from
+    # ~15/yr to ~8/yr at the same CAGR (ht_variants_gridhyst.txt). Needs the
+    # previous level, which the wrapper carries in the strategy cache.
+    "exp_hyst": 0.15,
     # Reflex bounce: the day after a close <= bounce_drop, hold exp_max
     # regardless of state (up 23 of 30 times since 1950). OFF by default: the
     # engine sees the crash close only at the next session's decision and fills
@@ -73,6 +80,11 @@ DEFAULTS = {
     # a wider cap only for lanes that opt in with BOTH keys.
     "broker_max_single_position_pct": 1.0,
     "honour_single_position_cap": True,
+    # Let a buy be sized against this bar's own funding sell (the emulator's
+    # pending-sell credit, same 0.95 haircut). Without it every level change
+    # spends a bar with 25-50% of NAV in cash: the engine's gridded run had cash
+    # above 20% of NAV on 89 of 512 sessions.
+    "backtest_credit_pending_sell_proceeds": True,
 }
 
 
@@ -220,13 +232,16 @@ def realised_vol(closes, bars: int) -> float | None:
     return math.sqrt(var) * math.sqrt(252.0)
 
 
-def in_exposure(closes, config) -> tuple:
+def in_exposure(closes, config, prev_level=None) -> tuple:
     """In-state exposure in units of the index (0.5 .. 2.0), plus why.
 
     vol_target / realised vol, clipped to [exp_min, exp_max]. Fails toward
     exp_max only when the target is off or the vol is zero/unknown with enough
     history; too little history for the vol window falls to exp_min (less).
     The bounce overlay returns exp_max the day after a close <= bounce_drop.
+    With a grid and a known `prev_level`, the level moves one notch at a time
+    and only when the raw value is past the midpoint by `exp_hyst`; without a
+    previous level (first bar, cache lost) it rounds to the nearest level.
     """
     cfg = config or {}
     lo = max(0.0, _f(cfg, "exp_min")); hi = max(lo, _f(cfg, "exp_max"))
@@ -246,7 +261,26 @@ def in_exposure(closes, config) -> tuple:
     raw = target / vol
     grid = _f(cfg, "exp_grid")
     if grid > 0:
-        raw = round(raw / grid) * grid
+        level = None
+        try:
+            level = float(prev_level) if prev_level is not None else None
+        except (TypeError, ValueError):
+            level = None
+        if level is not None and math.isfinite(level) and lo <= level <= hi:
+            margin = max(0.0, _f(cfg, "exp_hyst"))
+            level = round(level / grid) * grid
+            # step toward the raw value one notch at a time, each notch needing
+            # the raw value past the midpoint by the margin
+            for _ in range(int((hi - lo) / grid) + 2):
+                if raw > level + grid / 2 + margin and level + grid <= hi + 1e-9:
+                    level = level + grid
+                elif raw < level - grid / 2 - margin and level - grid >= lo - 1e-9:
+                    level = level - grid
+                else:
+                    break
+            raw = level
+        else:
+            raw = round(raw / grid) * grid
     exp = round(max(lo, min(hi, raw)), 4)
     return exp, f"vol {100 * vol:.1f}% vs target {100 * target:.0f}% -> {exp:.2f}x"
 
