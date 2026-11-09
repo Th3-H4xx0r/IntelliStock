@@ -236,6 +236,15 @@ def test_an_eb_only_document_has_no_other_lanes():
     assert other_enabled_run_once_lanes([spec("strategy_eb"),
                                          spec("StrategyEb")]) == []
     assert other_enabled_run_once_lanes([]) == []
+
+
+def test_an_ht_only_document_has_no_other_lanes():
+    """strategy_ht reads daily bars like EB; it must not block its own bars."""
+    assert other_enabled_run_once_lanes([spec("strategy_ht")]) == []
+    assert other_enabled_run_once_lanes([spec("StrategyHt")]) == []
+    assert other_enabled_run_once_lanes([spec("strategy_eb"), spec("strategy_ht")]) == []
+    assert other_enabled_run_once_lanes([spec("strategy_ht"),
+                                         spec("graph_nexus_analysis")]) == ["graph_nexus_analysis"]
     assert other_enabled_run_once_lanes(None) == []
 
 

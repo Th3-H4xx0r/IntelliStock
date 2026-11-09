@@ -39,6 +39,46 @@ def test_the_ht_lane_is_registered_under_both_spellings():
     assert flags["strategy_ht"] == flags["strategyht"] == "strategy_ht_enabled"
 
 
+def _universe_fns():
+    return extract(("_strategy_ht_universe_symbols", "_strategy_ht_required_symbols",
+                    "_truthy", "_merged_strategy_settings"))
+
+
+PAPER = {"strategy": "strategy_ht", "weight": 1.0,
+         "config": {**DEFAULTS, "strategy_ht_enabled": True, "filter_symbol": "QQQ",
+                    "one_x_symbol": "QQQ", "in_symbol": "TQQQ", "out_symbols": {"BIL": 1.0}}}
+
+
+def test_the_declared_ht_universe_is_fetched():
+    """Missing the fetch site is SILENT: with no filter bars the lane refuses
+    with 'insufficient history' on every tick and the document holds forever
+    (observed on strategy-ht-paper's first live tick, 2026-11-09)."""
+    ns = _universe_fns()
+    assert ns["_strategy_ht_universe_symbols"]([PAPER]) == ["BIL", "QQQ", "TQQQ"]
+    assert ns["_strategy_ht_universe_symbols"]([HT]) == ["BIL", "SPY", "SSO"]
+    assert ns["_strategy_ht_required_symbols"]([PAPER]) == ["QQQ", "TQQQ"]
+
+
+def test_a_disabled_or_absent_ht_lane_declares_no_symbols():
+    ns = _universe_fns()
+    for fn in ("_strategy_ht_universe_symbols", "_strategy_ht_required_symbols"):
+        assert ns[fn]([HT_OFF]) == []
+        assert ns[fn]([{"strategy": "strategy_ht", "config": {"strategy_ht_enabled": "false"}}]) == []
+        assert ns[fn]([{"strategy": "graph_nexus_analysis", "config": {}}]) == []
+        for junk in (None, [], [None], ["strategy_ht"], [{"strategy": None}]):
+            assert ns[fn](junk) == [], junk
+
+
+def test_both_wiring_points_reference_the_ht_universe():
+    """The backtest fetch loop and the live equity-bars block must both call the
+    fetch site, and the live block must add HT's required series."""
+    from swing_broker_harness import source
+    src = source()
+    assert "for _ht_sym in _strategy_ht_universe_symbols(_cached_strategies)" in src
+    assert "_ht_syms = _strategy_ht_universe_symbols(" in src
+    assert "_strategy_ht_required_symbols(" in src.split("required=list(dict.fromkeys(", 1)[1][:400]
+
+
 def test_the_ht_lane_declares_its_live_envelope():
     limits = _limits()["_strategy_eb_risk_limits"]([HT])
     assert limits == RiskLimits(max_order_fraction=1.0, max_symbol_fraction=1.0,
