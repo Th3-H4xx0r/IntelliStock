@@ -11573,6 +11573,35 @@ def _execute_swing_approval(adapter, payload, order_service, *,
         in_flight.discard(signal_id)
 
 
+def _live_risk_off_symbols(cached_strategies):
+    """The enabled strategy_eb lane's risk-off / cash symbols (doc 200: BIL).
+
+    The drawdown ladder lets these be bought at every level, so a trend-off
+    exit taken in a drawdown can still park in BIL. Keys the lane omits fall
+    back to strategy_eb's own DEFAULTS, the values the strategy itself trades.
+    Every other lane, and a document that is not loaded, contributes nothing:
+    no exemption, which is the tighter direction.
+    """
+    symbols = set()
+    for spec in (cached_strategies or []):
+        try:
+            name = str((spec or {}).get("strategy", "")).strip().lower()
+            if _LANE_ENABLE_FLAGS.get(name) != "strategy_eb_enabled":
+                continue
+            from strategy_eb import DEFAULTS as _EB_DEFAULTS
+
+            cfg = {**_EB_DEFAULTS, **_merged_strategy_settings(spec)}
+            if not _truthy(cfg.get("strategy_eb_enabled", False)):
+                continue
+            for key in ("risk_off_symbol", "cash_symbol"):
+                value = str(cfg.get(key) or "").strip().upper()
+                if value:
+                    symbols.add(value)
+        except Exception:
+            continue
+    return frozenset(symbols)
+
+
 def _live_order_dependency_snapshot(adapter, intent):
     """Build a cache-only dependency view for the pure stock order gate."""
     # swing-port: an option intent gets the options view (collateral, regular
@@ -11647,6 +11676,21 @@ def _live_order_dependency_snapshot(adapter, intent):
         if position_limit is not None and quote_price > 0:
             max_position_quantity = position_limit / quote_price
 
+    # The refresh writes `unhealthy` at every rung below normal; on a document
+    # with an enabled strategy_eb lane this symbol's rung decides whether it
+    # still opens (soft: unlevered and BIL; hard/kill: BIL only). Any other
+    # document keeps the single flag: every buy blocked from soft up. `unknown`
+    # - no row - is not a rung and stays a block.
+    risk_health = Health(state.get("risk_state", "unknown"))
+    if risk_health is Health.UNHEALTHY and _live_risk_state is not None:
+        risk_off = _live_risk_off_symbols(globals().get("_cached_strategies"))
+        if risk_off:
+            from live_risk_state import buy_allowed_at_level
+
+            if buy_allowed_at_level(_live_risk_state.level, symbol,
+                                    risk_off_symbols=risk_off):
+                risk_health = Health.HEALTHY
+
     return DependencySnapshot(
         account_id=account_id,
         instance_id=instance_identity,
@@ -11662,7 +11706,7 @@ def _live_order_dependency_snapshot(adapter, intent):
         positions=Health(positions_health),
         calendar=Health(state.get("calendar", "unknown")),
         persistence=Health(state.get("persistence", "unknown")),
-        risk_state=Health(state.get("risk_state", "unknown")),
+        risk_state=risk_health,
         watchdog=Health(state.get("watchdog", "unknown")),
         quote_symbol=symbol,
         quote_price=quote_price,
