@@ -227,6 +227,7 @@ _ALLOWED = {
     "ingest_macro": {"start", "end", "series"},
     "ingest_filings": {"start", "end", "symbols", "chain_id"},
     "build_ledger": {"start", "end", "chain_id", "model_id", "max_calls", "prompt_version",
+                     "research_concurrency",
                      "instance"},
 }
 
@@ -312,6 +313,13 @@ def validate_params(kind: str, params) -> dict:
         if out["instance"] in LIVE_INSTANCES:
             raise ValueError("instance %s refused: bars use paper data credentials only"
                              % out["instance"])
+        from trend_research import build_ledger as bl
+        conc = params.get("research_concurrency", bl.RESEARCH_CONCURRENCY)
+        if (isinstance(conc, bool) or not isinstance(conc, int)
+                or not 1 <= conc <= bl.MAX_RESEARCH_CONCURRENCY):
+            raise ValueError("param research_concurrency must be an integer 1..%d"
+                             % bl.MAX_RESEARCH_CONCURRENCY)
+        out["research_concurrency"] = conc
     return out
 
 
@@ -926,7 +934,8 @@ def _run_ledger(params: dict, job: Job) -> None:
                      model=m["model"], api_key=m["api_key"], max_calls=params["max_calls"],
                      prompt_version=params["prompt_version"],
                      provider_config=m["provider_config"], caller=caller,
-                     sleep=quota_sleep, store=job.st, bars_instance=params["instance"])
+                     sleep=quota_sleep, store=job.st, bars_instance=params["instance"],
+                     research_concurrency=params.get("research_concurrency"))
         for k in ("built_ok", "built_failed", "skipped_ok", "not_yet_due", "quota_waits",
                   "calls_used"):
             totals[k] += int(s.get(k) or 0)
