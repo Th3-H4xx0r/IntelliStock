@@ -28,11 +28,12 @@ DEFAULTS = {
     # ── the filter ──
     "filter_symbol": "SPY",
     "ma_bars": 200,
-    # Asymmetric bands (Balanced profile, 2026-11-08): re-enter quickly, exit late.
-    # Measured on real ETFs 2006-2026 vs the symmetric 3%/3% base: +2pp CAGR,
-    # because the 1% re-entry gets back in months earlier after a bottom.
+    # Asymmetric bands: re-enter at +1% (months earlier after a bottom: engine
+    # 2022 -30.5% vs -35.5%, 2026 +9% vs -6%), but exit at -3%, not -5%. The
+    # engine isolated the 5% exit as the cause of 2025 -4.6% vs +24.6%: it held
+    # 2x through the April tariff crash (isolate_run.log, bands15_nobounce).
     "enter_band": 0.01,
-    "exit_band": 0.05,
+    "exit_band": 0.03,
     # ── in-state sizing ──
     # Volatility target on the in-state exposure: exposure = clip(vol_target /
     # realised vol(vol_bars), exp_min, exp_max). 0 disables it (always exp_max).
@@ -43,9 +44,20 @@ DEFAULTS = {
     "vol_bars": 21,
     "exp_min": 0.5,
     "exp_max": 2.0,
+    # Exposure is quantised to this grid (0.5 -> 0.5x/1x/1.5x/2x), so the book
+    # only trades when realised vol moves a regime, not every day. Measured on
+    # the engine: the continuous version rebalanced on 320 of 512 sessions,
+    # left ~9% of NAV idle in cash on average and returned +38% where the
+    # offline model said +84%; the 0.5 grid trades ~16 days/yr offline with
+    # the same CAGR (ht_variants_lowturn.txt). 0 = continuous.
+    "exp_grid": 0.5,
     # Reflex bounce: the day after a close <= bounce_drop, hold exp_max
-    # regardless of state (up 23 of 30 times since 1950). 0 disables it.
-    "bounce_drop": -0.05,
+    # regardless of state (up 23 of 30 times since 1950). OFF by default: the
+    # engine sees the crash close only at the next session's decision and fills
+    # a bar later still, so the 2x lands on the day AFTER the bounce; measured
+    # 3/3+bounce vs 3/3: cyc +59.5% vs +63.0%, 2025 +21.9% vs +24.6%. It would
+    # need a same-day (15:55) execution path to work. -0.05 to enable.
+    "bounce_drop": 0.0,
     # ── the legs ──
     "in_symbol": "SSO",          # the 2x fund
     "one_x_symbol": "SPY",       # the 1x leg used to dial exposure between 0.5x and 2x
@@ -232,6 +244,9 @@ def in_exposure(closes, config) -> tuple:
     if vol <= 0:
         return hi, f"zero realised vol -> {hi:.2f}x"
     raw = target / vol
+    grid = _f(cfg, "exp_grid")
+    if grid > 0:
+        raw = round(raw / grid) * grid
     exp = round(max(lo, min(hi, raw)), 4)
     return exp, f"vol {100 * vol:.1f}% vs target {100 * target:.0f}% -> {exp:.2f}x"
 

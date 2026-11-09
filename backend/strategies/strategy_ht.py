@@ -1,5 +1,5 @@
-# INTELLISTOCK_SCHEMA: {"strategy": "strategy_ht", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_ht_enabled": false, "filter_symbol": "SPY", "ma_bars": 200, "enter_band": 0.01, "exit_band": 0.05, "vol_target": 0.20, "vol_bars": 21, "exp_min": 0.5, "exp_max": 2.0, "bounce_drop": -0.05, "in_symbol": "SSO", "one_x_symbol": "SPY", "cash_symbol": "BIL", "in_weight": 1.0, "out_symbols": {"SPY": 0.5, "BIL": 0.5}, "core_band_pct": 0.05, "min_order_usd": 50.0, "cost_haircut_pct": 0.006, "broker_max_single_position_pct": 1.0, "honour_single_position_cap": true}}
-# INTELLISTOCK_DESCRIPTION: Hysteresis trend, Balanced profile — up to 2x S&P (SSO) while SPY holds above its 200-day average (re-enter 1% above, exit 5% below), with the exposure scaled down toward 0.5x when 21-day realised vol exceeds a 20% target, 2x for one day after any -5% close, and parked in 50% SPY / 50% BIL when the trend breaks.
+# INTELLISTOCK_SCHEMA: {"strategy": "strategy_ht", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_ht_enabled": false, "filter_symbol": "SPY", "ma_bars": 200, "enter_band": 0.01, "exit_band": 0.03, "vol_target": 0.20, "vol_bars": 21, "exp_min": 0.5, "exp_max": 2.0, "exp_grid": 0.5, "bounce_drop": 0.0, "in_symbol": "SSO", "one_x_symbol": "SPY", "cash_symbol": "BIL", "in_weight": 1.0, "out_symbols": {"SPY": 0.5, "BIL": 0.5}, "core_band_pct": 0.05, "min_order_usd": 50.0, "cost_haircut_pct": 0.006, "broker_max_single_position_pct": 1.0, "honour_single_position_cap": true}}
+# INTELLISTOCK_DESCRIPTION: Hysteresis trend, Balanced profile — up to 2x S&P (SSO) while SPY holds above its 200-day average (re-enter 1% above, exit 3% below), with the exposure stepped down (2x / 1.5x / 1x / 0.5x) when 21-day realised vol exceeds a 20% target, and parked in 50% SPY / 50% BIL when the trend breaks.
 """Strategy HT wrapper: broker contract, order emission, cache row.
 
 Everything testable lives in `backend/strategy_ht.py`, which is pure. This
@@ -91,9 +91,18 @@ class StrategyHt:
         nav = float(portfolio_emulator.get_portfolio_value(eff) or 0.0)
         positions = portfolio_emulator.get_positions() or {}
         cash = float(portfolio_emulator.get_cash() or 0.0)
+        # `targets_to_orders` skips a top-up smaller than the drift band when the
+        # position already exists, so the cash left over after a flip (sells fill
+        # a bar before buys are sized) stayed idle: ~9% of NAV on average over
+        # the engine's full-cycle run. Once idle cash exceeds the band, trade
+        # the whole book to target with no band, once.
+        order_cfg = cfg
+        band = float(cfg.get("core_band_pct", 0.05) or 0.0)
+        if nav > 0 and cash / nav > band:
+            order_cfg = {**cfg, "core_band_pct": 0.0}
         decisions, sizes = targets_to_orders(
             targets, nav=nav, positions=positions, prices=eff, cash=cash,
-            config=cfg, owned=set(universe))
+            config=order_cfg, owned=set(universe))
 
         cache["_strategy_ht_last"] = {
             "in_market": bool(state.in_market), "decided": bool(state.decided),

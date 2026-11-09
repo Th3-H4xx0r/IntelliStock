@@ -107,10 +107,14 @@ def test_a_crash_day_triggers_the_bounce_even_when_parked():
     # must be dated BEFORE the decision day to be visible (the engine sees the
     # crash close at the next session's decision, which is the bounce day).
     crash_bars = bars(closes, end_day=datetime(2026, 5, 31, tzinfo=timezone.utc))
-    out = StrategyHt().run_once(["SSO"], PRICES, NOW, cfg(), {}, data=data_for(crash_bars),
+    out = StrategyHt().run_once(["SSO"], PRICES, NOW, cfg(bounce_drop=-0.05), {}, data=data_for(crash_bars),
                                 portfolio_emulator=FakeEmulator(cash=10000.0), strategy_cache=cache)
     assert out.get("SSO") == 1 and "SPY" not in out
     assert cache["_strategy_ht_last"]["bounce"] is True and cache["_strategy_ht_last"]["in_market"] is False
+    # off by default: the same crash day just parks
+    out = StrategyHt().run_once(["SSO"], PRICES, NOW, cfg(), {}, data=data_for(crash_bars),
+                                portfolio_emulator=FakeEmulator(cash=10000.0), strategy_cache={})
+    assert out.get("SSO") is None and out.get("SPY") == 1
 
 
 def test_a_downtrend_parks_in_the_out_book():
@@ -135,6 +139,22 @@ def test_a_flip_to_parked_sells_the_whole_levered_leg_with_the_etf_intent():
 
 def test_holding_the_target_already_emits_no_churn():
     emu = FakeEmulator(cash=50.0, positions={"SSO": 99.5})
+    out = StrategyHt().run_once(["SSO"], PRICES, NOW, cfg(), {}, data=data_for(uptrend()),
+                                portfolio_emulator=emu, strategy_cache={})
+    assert out == {}
+
+
+def test_idle_cash_above_the_drift_band_is_deployed():
+    # 91% SSO + 9% cash: the 5% drift band would otherwise leave the cash idle forever
+    emu = FakeEmulator(cash=900.0, positions={"SSO": 91.0})
+    out = StrategyHt().run_once(["SSO"], PRICES, NOW, cfg(), {}, data=data_for(uptrend()),
+                                portfolio_emulator=emu, strategy_cache={})
+    assert out.get("SSO") == 1
+    assert 800.0 < out["_nexus_position_sizes"]["SSO"]["buy_cash"] <= 900.0
+
+
+def test_idle_cash_below_the_band_is_left_alone():
+    emu = FakeEmulator(cash=300.0, positions={"SSO": 97.0})     # 3% cash
     out = StrategyHt().run_once(["SSO"], PRICES, NOW, cfg(), {}, data=data_for(uptrend()),
                                 portfolio_emulator=emu, strategy_cache={})
     assert out == {}

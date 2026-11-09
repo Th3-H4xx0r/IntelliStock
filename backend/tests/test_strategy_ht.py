@@ -37,16 +37,16 @@ def test_a_bad_close_is_parked():
 
 
 def test_no_decisive_crossing_is_parked_and_undecided():
-    # +0.5% and -4%: inside the default +1% / -5% bands
-    st = trend_state(series(tail=[100.5, 99.0, 96.0]), DEFAULTS)
+    # +0.5% and -2.5%: inside the default +1% / -3% bands
+    st = trend_state(series(tail=[100.5, 99.0, 97.5]), DEFAULTS)
     assert st.in_market is False and st.decided is False
 
 
-def test_the_default_bands_are_asymmetric_enter_1_exit_5():
-    assert DEFAULTS["enter_band"] == 0.01 and DEFAULTS["exit_band"] == 0.05
+def test_the_default_bands_are_asymmetric_enter_1_exit_3():
+    assert DEFAULTS["enter_band"] == 0.01 and DEFAULTS["exit_band"] == 0.03
     assert trend_state(series(tail=[101.5]), DEFAULTS).in_market is True
-    assert trend_state(series(tail=[101.5, 95.5]), DEFAULTS).in_market is True    # -4.5% keeps
-    assert trend_state(series(tail=[101.5, 94.5]), DEFAULTS).in_market is False   # -5.5% exits
+    assert trend_state(series(tail=[101.5, 97.5]), DEFAULTS).in_market is True    # -2.5% keeps
+    assert trend_state(series(tail=[101.5, 96.5]), DEFAULTS).in_market is False   # -3.5% exits
 
 
 def test_enter_above_the_upper_band_and_keep_through_the_middle():
@@ -117,8 +117,24 @@ def test_in_exposure_vol_target_scales_down_in_violent_markets():
     for i in range(60):
         mid.append(mid[-1] * (1.0 + (0.0126 if i % 2 else -0.0126)))     # ~20% annualised
     e, _ = in_exposure(mid, DEFAULTS)
-    assert 0.9 < e < 1.1
+    assert e == 1.0                                                      # ~1.0 raw, on the 0.5 grid
+    e, _ = in_exposure(mid, cfg(exp_grid=0))
+    assert 0.9 < e < 1.1 and e != 1.0                                    # continuous when the grid is off
     assert realised_vol([100.0] * 10, 21) is None                       # too short
+
+
+def test_the_exposure_grid_only_moves_on_regime_changes():
+    from strategy_ht import in_exposure
+    def closes_with_vol(daily_move):
+        out = [100.0]
+        for i in range(60):
+            out.append(out[-1] * (1.0 + (daily_move if i % 2 else -daily_move)))
+        return out
+    # 0.20 / vol: ~0.9% daily (~14% ann) -> 1.4 raw -> 1.5 on the grid; ~1.6% (~25%) -> 0.8 -> 1.0
+    assert in_exposure(closes_with_vol(0.009), DEFAULTS)[0] == 1.5
+    assert in_exposure(closes_with_vol(0.016), DEFAULTS)[0] == 1.0
+    assert in_exposure(closes_with_vol(0.030), DEFAULTS)[0] == 0.5
+    assert in_exposure(closes_with_vol(0.004), DEFAULTS)[0] == 2.0
 
 
 def test_in_exposure_fails_toward_less_and_can_be_switched_off():
@@ -135,9 +151,10 @@ def test_bounce_overlay_forces_full_exposure_for_one_day():
     from strategy_ht import in_exposure
     closes = [100.0 * (1.0 + (0.03 if i % 2 else -0.03)) ** i for i in range(59)] + [50.0]
     closes[-1] = closes[-2] * 0.94                                       # a -6% close
-    e, why = in_exposure(closes, DEFAULTS)
+    e, why = in_exposure(closes, cfg(bounce_drop=-0.05))                  # overlay enabled
     assert e == 2.0 and why.startswith("bounce")
-    e, why = in_exposure(closes, cfg(bounce_drop=0))                      # overlay off -> vol target rules
+    e, why = in_exposure(closes, DEFAULTS)                                # OFF by default -> vol target rules
+    assert DEFAULTS["bounce_drop"] == 0.0
     assert e == 0.5 and not why.startswith("bounce")
 
 
