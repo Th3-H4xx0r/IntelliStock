@@ -4787,6 +4787,67 @@ def _strategy_hx_universe_symbols(cached_strategies):
     return out
 
 
+def _strategy_ht_universe_symbols(cached_strategies):
+    """Symbols strategy_ht needs bars for, from its own config.
+
+    Same contract as `_strategy_hx_universe_symbols`: the filter index, the
+    levered fund, the 1x leg, cash and the out-state book. HT prices unlisted
+    legs itself from the last visible close, so this is the only FETCH site;
+    missing it is silent (the lane refuses with "insufficient history" and the
+    document holds forever). Returns [] when strategy_ht is absent or disabled.
+    """
+    try:
+        from strategy_ht import DEFAULTS as _HT_DEFAULTS, strategy_ht_universe
+    except Exception:
+        return []
+    out = []
+    try:
+        for spec in (cached_strategies or []):
+            if not isinstance(spec, dict):
+                continue
+            name = str(spec.get("strategy") or "").strip().lower()
+            if name not in {"strategy_ht", "strategyht"}:
+                continue
+            merged = {**_HT_DEFAULTS, **_merged_strategy_settings(spec)}
+            if not _truthy(merged.get("strategy_ht_enabled", False)):
+                continue
+            for sym in strategy_ht_universe(merged):
+                if sym and sym not in out:
+                    out.append(sym)
+    except Exception:
+        return []
+    return out
+
+
+def _strategy_ht_required_symbols(cached_strategies):
+    """The two series a live HT tick cannot run blind on: the filter index
+    (its SMA200 and realised vol) and the levered fund it sizes. Same reasoning
+    as `_strategy_eb_required_symbols`; the cash and 1x legs are deliberately
+    not here."""
+    try:
+        from strategy_ht import DEFAULTS as _HT_DEFAULTS
+    except Exception:
+        return []
+    out = []
+    try:
+        for spec in (cached_strategies or []):
+            if not isinstance(spec, dict):
+                continue
+            name = str(spec.get("strategy") or "").strip().lower()
+            if name not in {"strategy_ht", "strategyht"}:
+                continue
+            merged = {**_HT_DEFAULTS, **_merged_strategy_settings(spec)}
+            if not _truthy(merged.get("strategy_ht_enabled", False)):
+                continue
+            for key in ("filter_symbol", "in_symbol"):
+                symbol = str(merged.get(key) or "").strip().upper()
+                if symbol and symbol not in out:
+                    out.append(symbol)
+    except Exception:
+        return []
+    return out
+
+
 def _trend_research_universe_symbols(cached_strategies, start=None, end=None):
     """Symbols strategy_trend_research needs bars for: its fixed ETF set plus
     every pick and recommended name in the configured chain's ledger rows for
@@ -12968,6 +13029,13 @@ if mode == MODE_BACKTEST:
         if _hx_sym not in symbols_for_fetch:
             symbols_for_fetch.append(_hx_sym)
             _log(f"Adding {_hx_sym} to bar data for strategy_hx", "cyan")
+    # 2026-11-09: strategy_ht declares its own universe the same way (filter
+    # index, levered fund, 1x leg, cash, out-state book). Same single wiring
+    # point as HX; missing it is silent.
+    for _ht_sym in _strategy_ht_universe_symbols(_cached_strategies):
+        if _ht_sym not in symbols_for_fetch:
+            symbols_for_fetch.append(_ht_sym)
+            _log(f"Adding {_ht_sym} to bar data for strategy_ht", "cyan")
     # 2026-11-05: strategy_trend_research (TR) trades its fixed ETF set plus
     # every name its research ledger picks or recommends in this window. Like
     # HX its wrapper prices unlisted names from the last visible close, so this
@@ -17610,6 +17678,20 @@ while not shutdown_requested:
                                             _cached_strategies)
                                     except Exception:
                                         _eb_syms = []
+                                    # 2026-11-09: strategy_ht (hysteresis trend)
+                                    # reads daily bars exactly like EB and was
+                                    # inert live for the same reason EB once
+                                    # was (data=None -> "insufficient history").
+                                    # Its legs join the same fetch; its two
+                                    # required series join `required`.
+                                    try:
+                                        _ht_syms = _strategy_ht_universe_symbols(
+                                            _cached_strategies)
+                                    except Exception:
+                                        _ht_syms = []
+                                    for _ht_sym in _ht_syms:
+                                        if _ht_sym not in _eb_syms:
+                                            _eb_syms.append(_ht_sym)
                                     if _eb_syms:
                                         try:
                                             from live_equity_bars import (
@@ -17680,8 +17762,11 @@ while not shutdown_requested:
                                                     last_good=globals().get(
                                                         "_live_equity_bars_last_good"),
                                                     log=_log,
-                                                    required=_strategy_eb_required_symbols(
-                                                        _cached_strategies),
+                                                    required=list(dict.fromkeys(
+                                                        list(_strategy_eb_required_symbols(
+                                                            _cached_strategies))
+                                                        + list(_strategy_ht_required_symbols(
+                                                            _cached_strategies)))),
                                                 )
                                                 if _rr_data:
                                                     globals()["_live_equity_bars_last_good"] = _rr_data
