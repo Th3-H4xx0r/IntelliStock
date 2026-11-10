@@ -131,6 +131,15 @@ class StrategyHt:
         if not decisions:
             return {}
         out = dict(decisions)
+        sizes = dict(sizes)
+        # The broker's buy gate reserves `_cash_reserve_floor_pct` (default
+        # 0.10) of the STARTING value as an untouchable cash floor, sized for
+        # a many-name discovery book. On this 1-2 leg ETF book it left 10% of
+        # NAV idle on every OUT and IN buy (strategy-ht-paper tick #19,
+        # 2026-11-10: $1,000 of $9,936 never reached BIL). The vol target is
+        # the risk control here, as on EB/HX/X; the floor is zeroed the same
+        # way those lanes do.
+        sizes["_cash_reserve_floor_pct"] = 0.0
         out["_nexus_position_sizes"] = sizes
         out["_nexus_discovered"] = list(universe)
         out["_nexus_executable_buys"] = [s for s, d in decisions.items() if d == 1]
