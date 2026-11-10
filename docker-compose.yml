@@ -404,7 +404,7 @@ services:
 
   f14-mirror:
     # Forward-test paper mirror (backend/forward_mirror.py): trades the frozen
-    # F14_F rule on the "Swing Trade Paper" account, never any other.
+    # F14_F rule on the "TMasters Swing" paper account (PA3TRLBV6ZNZ), never any other.
     # It refuses to trade unless every file in the read-only frozen dir matches
     # FROZEN.md's SHA-256 block and repro_check.py PASSes in this image.
     # Off switch: F14_MIRROR_ENABLED=0. Runbook: docs/runbooks/f14-paper-mirror.md
