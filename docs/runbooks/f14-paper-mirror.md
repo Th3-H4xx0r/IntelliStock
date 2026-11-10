@@ -2,9 +2,10 @@
 
 The `f14-mirror` compose service (`backend/forward_mirror.py`) trades the frozen
 forward-test rule F14_F_live (`research/forward-test-2026-11/`) on one Alpaca
-**paper** account: "Swing Trade Paper" (brokerage `1169c5e6…`, account
-`PA37JPXGU196`; the swing-trader port's former paper account, handed over
-2026-11-08 once the "Alpaca Crypto Paper" row's keys turned out revoked).
+**paper** account: "TMasters Swing", `PA3TRLBV6ZNZ`, stored as the "Alpaca Crypto
+Paper" brokerage (`b0d7dc67…`). PA37JPXGU196 ("Swing Trade Paper") is OFF LIMITS by
+operator ruling (2026-11-09). The mirror refuses with `unauthorized` until the
+`b0d7dc67…` row's API keys are regenerated in Alpaca and saved in the web UI.
 
 The scored forward test is `score_forward.py`, which needs no broker. The mirror
 measures what the scorecard cannot: real fills, DBMF liquidity, margin, and the
@@ -62,7 +63,7 @@ The mirror refuses (`MirrorRefused`, a `refused` or boot row) if any of these
 holds:
 
 - the brokerage row is not `alpaca_paper: true`;
-- the account number isn't the pinned `PA37JPXGU196`
+- the account number isn't the pinned `PA3TRLBV6ZNZ`
   (`F14_MIRROR_ACCOUNT_NUMBER`);
 - the account has an open order whose client id doesn't start with `f14m-`;
 - the account holds anything outside SPY/IEF/MTUM/IWD/DBMF;
@@ -94,7 +95,7 @@ Read-only Postgres (or `store`): table `ForwardMirrorLedger`, filtered on
 | `f14-paper\|YYYY-MM-DD\|dry` | a dry run's plan (never overwrites `act`) |
 | `f14-paper\|boot\|…`, `f14-paper\|refused\|…` | boot results (incl. `multiplier` and per-ETF `tradable`/`fractionable`/`marginable`) and refusals |
 
-Positions are also visible via `GET /brokerages/1169c5e6-3308-438b-a6ed-406b55328d51/positions`.
+Positions are also visible via `GET /brokerages/b0d7dc67-f12b-4959-83db-0d324c6bc517/positions`.
 
 ## Switches
 

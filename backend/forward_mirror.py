@@ -57,12 +57,15 @@ MIRROR = "f14-paper"
 TABLE = "ForwardMirrorLedger"
 STATE_ID = f"{MIRROR}|state"
 
-# The "Swing Trade Paper" account (the tmasters swing-trader port's paper
-# account, handed to the mirror 2026-11-08 after the "Alpaca Crypto Paper"
-# row's keys were found revoked). The shared "Alpaca Paper" row is the EB
-# forward paper's and must never be traded from here.
-DEFAULT_BROKERAGE_ID = "1169c5e6-3308-438b-a6ed-406b55328d51"
-DEFAULT_ACCOUNT_NUMBER = "PA37JPXGU196"
+# The "TMasters Swing" paper account PA3TRLBV6ZNZ (stored in IntelliStock as
+# the "Alpaca Crypto Paper" brokerage). 2026-11-09: the operator ruled that
+# PA37JPXGU196 ("Swing Trade Paper", 1169c5e6...) must not be touched, so the
+# mirror is pinned back here; it refuses with `unauthorized` until this row's
+# API keys are regenerated in Alpaca and saved in the web UI. The shared
+# "Alpaca Paper" row (PA3IBY5S84PG) hosts strategy-ht-paper and must never be
+# traded from here.
+DEFAULT_BROKERAGE_ID = "b0d7dc67-f12b-4959-83db-0d324c6bc517"
+DEFAULT_ACCOUNT_NUMBER = "PA3TRLBV6ZNZ"
 ORDER_PREFIX = "f14m-"
 
 #: Frozen book key -> ETF. ``tbill`` is the residual cash (negative = margin).
