@@ -200,3 +200,11 @@ def test_missing_broker_prices_fall_back_to_the_visible_close():
                                 portfolio_emulator=FakeEmulator(cash=10000.0, prices={"SPY": 500.0}),
                                 strategy_cache={})
     assert out.get("SSO") == 1
+
+
+def test_the_broker_cash_floor_is_zeroed_so_the_whole_book_deploys():
+    """Without this the buy gate holds back 10% of starting value on every
+    buy (observed live: $1,000 of $9,936 idle on the first OUT tick)."""
+    out = StrategyHt().run_once(["SSO"], PRICES, NOW, cfg(), {}, data=data_for(uptrend()),
+                                portfolio_emulator=FakeEmulator(cash=10000.0), strategy_cache={})
+    assert out["_nexus_position_sizes"]["_cash_reserve_floor_pct"] == 0.0
