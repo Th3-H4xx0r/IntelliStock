@@ -1,8 +1,13 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted, defineComponent, h } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, defineComponent, h } from 'vue'
 import AppShell from '../layouts/AppShell.vue'
 import PortfolioChart from '../components/PortfolioChart.vue'
 import KalshiDashboardCard from '../components/KalshiDashboardCard.vue'
+import DashboardHoldings from '../components/dashboard/DashboardHoldings.vue'
+import DashboardInsights from '../components/dashboard/DashboardInsights.vue'
+import DashboardMarket from '../components/dashboard/DashboardMarket.vue'
+import { useAccountHoldings } from '../composables/useDashboardData.js'
+import { isMarketOpen } from '../utils/dashboardAnalytics.js'
 import { getToken } from '../utils/auth.js'
 
 // Status as a dot plus a word. Green only for things that are actually
@@ -128,6 +133,27 @@ function changeClass(row) {
 
 const todayLabel = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })
 
+// US regular session status for the header, rechecked every 30 s.
+const marketOpen = ref(isMarketOpen())
+let marketTimer = null
+
+// Holdings and insights follow the selected account when it is a stock
+// account. Kalshi has its own section, so it gets none.
+const stockAccountId = computed(() => {
+  const a = selectedAccount.value
+  return a && !isKalshi(a) ? a.id : null
+})
+// The movers screener and Nexus momentum need a stock account: the selected
+// one, else the first linked stock account.
+const marketAccountId = computed(() =>
+  stockAccountId.value ?? accounts.value.find(a => !isKalshi(a))?.id ?? null)
+
+const pnlMode = ref('daily')
+const { holdings, sparks, loadTotalSparks } = useAccountHoldings(stockAccountId)
+// Total-mode lines are a heavier fetch (one history batch per holding age),
+// so they load the first time Total is shown for an account.
+watch([pnlMode, holdings], ([mode]) => { if (mode === 'total' && holdings.value) loadTotalSparks() })
+
 // ── Services ──────────────────────────────────────────────────────────────────
 const engines     = ref([])   // from GET /status
 const agentStatus = ref(null) // from GET /agent/control
@@ -248,9 +274,11 @@ onMounted(() => {
   fetchAccounts()
   fetchServices()
   svcPollTimer = setInterval(fetchServices, 10000)
+  marketTimer = setInterval(() => { marketOpen.value = isMarketOpen() }, 30_000)
 })
 onUnmounted(() => {
   if (svcPollTimer) clearInterval(svcPollTimer)
+  if (marketTimer) clearInterval(marketTimer)
 })
 </script>
 
@@ -259,10 +287,20 @@ onUnmounted(() => {
     <main class="dash flex-1 w-full max-w-[1440px] px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
 
       <!-- Page header -->
-      <header class="flex items-end justify-between gap-4">
-        <div>
+      <header class="flex flex-wrap items-end justify-between gap-x-4 gap-y-2">
+        <div class="min-w-0">
           <h1 class="text-2xl font-medium text-slate-100 leading-tight">Dashboard</h1>
-          <p class="text-sm text-slate-500 mt-1 whitespace-nowrap">{{ todayLabel }}</p>
+          <p class="text-sm text-slate-500 mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
+            {{ todayLabel }}
+            <span class="text-slate-600" aria-hidden="true">·</span>
+            <span class="inline-flex items-center gap-1.5" :class="marketOpen ? 'text-slate-300' : ''">
+              <span
+                class="size-1.5 rounded-full"
+                :class="marketOpen ? 'bg-gain shadow-[0_0_0_3px_rgba(76,195,138,0.15)]' : 'bg-slate-600'"
+              ></span>
+              {{ marketOpen ? 'Market open' : 'Market closed' }}
+            </span>
+          </p>
         </div>
         <RouterLink
           to="/brokerages"
@@ -277,7 +315,7 @@ onUnmounted(() => {
       <section class="mt-8" aria-label="Portfolio">
 
         <!-- Loading -->
-        <div v-if="bkLoading" class="grid gap-8 lg:grid-cols-[minmax(0,1fr)_340px]">
+        <div v-if="bkLoading" class="grid grid-cols-1 gap-8 lg:grid-cols-[minmax(0,1fr)_340px]">
           <div class="space-y-3">
             <div class="h-4 w-32 rounded bg-raised"></div>
             <div class="h-11 w-64 rounded-md bg-raised"></div>
@@ -306,7 +344,7 @@ onUnmounted(() => {
         </div>
 
         <!-- Headline chart + account list -->
-        <div v-else class="grid gap-8 lg:grid-cols-[minmax(0,1fr)_340px] items-start">
+        <div v-else class="grid grid-cols-1 gap-8 lg:grid-cols-[minmax(0,1fr)_340px] items-start">
           <PortfolioChart
             v-if="selectedAccount"
             :key="selectedAccount.id"
@@ -345,6 +383,24 @@ onUnmounted(() => {
           </div>
         </div>
       </section>
+
+      <!-- ── Holdings + insights (stock accounts) ───────────────────────── -->
+      <section
+        v-if="stockAccountId && holdings && (holdings.positions.length || holdings.cash != null)"
+        class="mt-12 grid grid-cols-1 gap-8 lg:grid-cols-[minmax(0,1fr)_340px] items-start"
+      >
+        <DashboardHoldings v-model:mode="pnlMode" class="min-w-0" :holdings="holdings" :sparks="sparks" />
+        <DashboardInsights
+          class="min-w-0"
+          :brokerage-id="stockAccountId"
+          :holdings="holdings"
+          :daily-sparks="sparks.daily"
+          :today="summaries[stockAccountId] || null"
+        />
+      </section>
+
+      <!-- ── Market ─────────────────────────────────────────────────────── -->
+      <DashboardMarket v-if="!bkLoading" class="mt-12" :brokerage-id="marketAccountId" />
 
       <!-- ── Kalshi ─────────────────────────────────────────────────────── -->
       <!-- Self-hides (renders its own <section>) when no Kalshi account is linked. -->
