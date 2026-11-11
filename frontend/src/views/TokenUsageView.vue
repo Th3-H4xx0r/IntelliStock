@@ -566,7 +566,7 @@ onUnmounted(() => {
                 <td class="px-5 py-3">
                   <span
                     class="inline-flex rounded px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
-                    :class="row.kind === 'live' ? 'bg-emerald-900/40 text-emerald-200' : 'bg-indigo-900/40 text-indigo-200'"
+                    :class="row.kind === 'live' ? 'bg-emerald-900/40 text-emerald-200' : 'bg-zinc-900/40 text-zinc-200'"
                   >{{ row.kind || 'backtest' }}</span>
                 </td>
                 <td class="px-5 py-3 text-xs text-slate-400">{{ row.instance_id || '—' }}</td>
@@ -641,7 +641,7 @@ onUnmounted(() => {
         class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
         @click.self="selectedCall = null"
       >
-        <div class="w-full max-w-3xl overflow-hidden rounded-2xl border border-border-subtle bg-[#0f1318] shadow-2xl">
+        <div class="w-full max-w-3xl overflow-hidden rounded-2xl border border-border-subtle bg-surface shadow-2xl">
           <div class="flex items-center justify-between gap-3 border-b border-border-subtle px-6 py-4">
             <div>
               <p class="text-xs font-bold uppercase tracking-widest text-slate-500">Recent call</p>
@@ -655,7 +655,7 @@ onUnmounted(() => {
             </button>
           </div>
           <div class="px-6 py-5">
-            <pre class="overflow-x-auto rounded-2xl border border-border-subtle bg-[#04040c] p-4 text-xs leading-6 text-slate-300">{{ selectedCallJson }}</pre>
+            <pre class="overflow-x-auto rounded-2xl border border-border-subtle bg-background-dark p-4 text-xs leading-6 text-slate-300">{{ selectedCallJson }}</pre>
           </div>
         </div>
       </div>

@@ -341,7 +341,7 @@ function fmt(n) { return `$${Number(n).toLocaleString(undefined, { maximumFracti
             </div>
             <span class="text-xs text-slate-300 font-semibold tabular-nums">{{ usagePct }}% · {{ fmt(effectiveBankroll) }}</span>
           </div>
-          <input v-if="hasBalance" v-model.number="usagePct" type="range" min="5" max="100" step="5" class="w-full accent-[var(--accent,#a78bfa)]" style="accent-color:#a78bfa" />
+          <input v-if="hasBalance" v-model.number="usagePct" type="range" min="5" max="100" step="5" class="w-full accent-[var(--accent,#ededed)]" style="accent-color:#ededed" />
           <div v-else>
             <input v-model.number="manualBankroll" type="number" step="50" placeholder="Bankroll ($)" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
             <p class="text-[11px] text-amber-400/70 mt-1">{{ balanceErr || 'Live balance unavailable — enter a bankroll manually.' }}</p>

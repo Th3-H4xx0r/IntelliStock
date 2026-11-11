@@ -1435,7 +1435,7 @@ async function submitCreateBacktest() {
                 <span
                   class="text-[10px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wider"
                   :class="(inst.created_by || 'user') === 'ai'
-                    ? 'bg-violet-500/15 text-violet-400 border border-violet-500/20'
+                    ? 'bg-zinc-500/15 text-zinc-300 border border-zinc-500/20'
                     : 'bg-slate-500/10 text-slate-500 border border-slate-700'"
                 >{{ (inst.created_by || 'user') === 'ai' ? 'AI' : 'User' }}</span>
               </div>
@@ -1875,7 +1875,7 @@ async function submitCreateBacktest() {
                       <!-- Inline controls based on status -->
                       <template v-if="['running','queued','pending'].includes((btProgress[bt.id]?.status || bt.status || '').toLowerCase())">
                         <button @click="openBtConfirm(bt, 'pause')" title="Pause"
-                          class="p-1 rounded-md text-violet-400 hover:bg-violet-500/10 transition-colors">
+                          class="p-1 rounded-md text-zinc-300 hover:bg-zinc-500/10 transition-colors">
                           <span class="material-symbols-outlined text-[16px]">pause_circle</span>
                         </button>
                       </template>
@@ -1958,7 +1958,7 @@ async function submitCreateBacktest() {
         class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
         @click.self="closeEditInfo"
       >
-        <div class="relative w-full max-w-md bg-[#0f1318] border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
+        <div class="relative w-full max-w-md bg-surface border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
           <div class="flex items-center justify-between px-6 py-5 border-b border-border-subtle">
             <div class="flex items-center gap-3">
               <div class="size-9 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center shrink-0">
@@ -2094,7 +2094,7 @@ async function submitCreateBacktest() {
         class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
         @click.self="closeLinkBrokerage"
       >
-        <div class="relative w-full max-w-md bg-[#0f1318] border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
+        <div class="relative w-full max-w-md bg-surface border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
           <div class="flex items-center justify-between px-6 py-5 border-b border-border-subtle">
             <div class="flex items-center gap-3">
               <div class="size-9 rounded-xl bg-primary/10 border border-primary/20 flex items-center justify-center shrink-0">
@@ -2119,7 +2119,7 @@ async function submitCreateBacktest() {
                     v-for="account in brokerageOptions"
                     :key="account.id"
                     :value="String(account.id)"
-                    class="bg-[#0f1318]"
+                    class="bg-surface"
                   >
                     {{ account.account_name }} ({{ account.brokerage_type }})
                   </option>
@@ -2182,7 +2182,7 @@ async function submitCreateBacktest() {
         class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
         @click.self="closeLinkDataBrokerage"
       >
-        <div class="relative w-full max-w-md bg-[#0f1318] border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
+        <div class="relative w-full max-w-md bg-surface border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
           <div class="flex items-center justify-between px-6 py-5 border-b border-border-subtle">
             <div class="flex items-center gap-3">
               <div class="size-9 rounded-xl bg-primary/10 border border-primary/20 flex items-center justify-center shrink-0">
@@ -2210,7 +2210,7 @@ async function submitCreateBacktest() {
                     v-for="account in dataBrokerageOptions"
                     :key="account.id"
                     :value="String(account.id)"
-                    class="bg-[#0f1318]"
+                    class="bg-surface"
                   >
                     {{ account.account_name }} ({{ account.alpaca_paper ? 'Paper' : 'Live' }})
                   </option>
@@ -2275,7 +2275,7 @@ async function submitCreateBacktest() {
         class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
         @click.self="closeEditStrategy"
       >
-        <div class="relative w-full max-w-2xl bg-[#0f1318] border border-border-subtle rounded-2xl shadow-2xl flex flex-col max-h-[90vh]">
+        <div class="relative w-full max-w-2xl bg-surface border border-border-subtle rounded-2xl shadow-2xl flex flex-col max-h-[90vh]">
 
           <div class="flex items-center justify-between px-6 py-5 border-b border-border-subtle shrink-0">
             <div class="flex items-center gap-3 min-w-0">
@@ -2361,12 +2361,12 @@ async function submitCreateBacktest() {
                       <div>
                         <label class="block text-[11px] font-medium text-slate-500 mb-1">Weight</label>
                         <input v-model.number="sub.weight" type="number" min="0" max="1" step="0.05"
-                          class="w-full bg-[#0f1318] border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono" />
+                          class="w-full bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono" />
                       </div>
                       <div>
                         <label class="block text-[11px] font-medium text-slate-500 mb-1">Exec Position</label>
                         <input v-model.number="sub.execution_position" type="number" step="1"
-                          class="w-full bg-[#0f1318] border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono" />
+                          class="w-full bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono" />
                       </div>
                       <div>
                         <label class="block text-[11px] font-medium text-slate-500 mb-1">Phase</label>
@@ -2394,7 +2394,7 @@ async function submitCreateBacktest() {
                         <div
                           v-for="group in llmConfigGroups(sub)"
                           :key="group.label"
-                          class="rounded-lg border border-border-subtle bg-[#0f1318] px-3 py-3 space-y-2"
+                          class="rounded-lg border border-border-subtle bg-surface px-3 py-3 space-y-2"
                         >
                           <div class="flex items-start justify-between gap-3">
                             <div class="min-w-0">
@@ -2420,7 +2420,7 @@ async function submitCreateBacktest() {
                         <div
                           v-for="group in lookbackLlmConfigGroups(sub)"
                           :key="group.label"
-                          class="rounded-lg border border-violet-500/20 bg-[#0f1318] px-3 py-3 space-y-2"
+                          class="rounded-lg border border-zinc-500/20 bg-surface px-3 py-3 space-y-2"
                         >
                           <div class="flex items-start justify-between gap-3">
                             <div class="min-w-0">
@@ -2430,7 +2430,7 @@ async function submitCreateBacktest() {
                             <button
                               type="button"
                               @click="openLlmConfigModal(sub, group)"
-                              class="shrink-0 rounded-md border border-violet-500/20 px-2.5 py-1 text-[11px] font-semibold text-violet-400 hover:bg-violet-500/10 transition-colors"
+                              class="shrink-0 rounded-md border border-zinc-500/20 px-2.5 py-1 text-[11px] font-semibold text-zinc-300 hover:bg-zinc-500/10 transition-colors"
                             >
                               Edit
                             </button>
@@ -2447,14 +2447,14 @@ async function submitCreateBacktest() {
                           <template v-if="getConfigType(getRefConfig(sub.strategy)[key] ?? val) === 'boolean'">
                             <button type="button" @click="sub.config[key] = !sub.config[key]"
                               class="relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 transition-colors"
-                              :class="sub.config[key] ? 'bg-primary border-primary' : 'bg-[#0f1318] border-border-subtle'">
+                              :class="sub.config[key] ? 'bg-primary border-primary' : 'bg-surface border-border-subtle'">
                               <span class="inline-block size-3.5 rounded-full bg-white shadow transition-transform"
                                 :class="sub.config[key] ? 'translate-x-4' : 'translate-x-0.5'"></span>
                             </button>
                           </template>
                           <template v-else-if="getConfigType(getRefConfig(sub.strategy)[key] ?? val) === 'number'">
                             <input :value="sub.config[key]" @input="updateConfigField(sub, key, $event.target.value, 'number')" type="number"
-                              class="w-full bg-[#0f1318] border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono" />
+                              class="w-full bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono" />
                           </template>
                           <template v-else-if="getConfigType(getRefConfig(sub.strategy)[key] ?? val) === 'json'">
                             <textarea
@@ -2463,13 +2463,13 @@ async function submitCreateBacktest() {
                               @blur="syncConfigJsonDraft(sub, key, val)"
                               rows="4"
                               spellcheck="false"
-                              class="w-full bg-[#0f1318] border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono resize-y"
+                              class="w-full bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono resize-y"
                               :class="getConfigFieldError(sub, key) ? 'border-red-500/60 focus:border-red-400' : ''"
                             ></textarea>
                           </template>
                           <template v-else>
                             <input v-model="sub.config[key]" type="text"
-                              class="w-full bg-[#0f1318] border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono" />
+                              class="w-full bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono" />
                           </template>
                           <p v-if="getConfigFieldError(sub, key)" class="mt-1 text-[10px] leading-relaxed text-red-400">
                             Invalid JSON: {{ getConfigFieldError(sub, key) }}
@@ -2529,10 +2529,10 @@ async function submitCreateBacktest() {
         class="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
         @click.self="cancelPreserveHistory"
       >
-        <div class="relative w-full max-w-lg bg-[#0f1318] border border-border-subtle rounded-2xl shadow-2xl flex flex-col">
+        <div class="relative w-full max-w-lg bg-surface border border-border-subtle rounded-2xl shadow-2xl flex flex-col">
           <div class="flex items-center gap-3 px-6 py-5 border-b border-border-subtle">
-            <div class="size-9 rounded-xl bg-violet-500/10 border border-violet-500/20 flex items-center justify-center shrink-0">
-              <span class="material-symbols-outlined text-violet-400 text-lg">history</span>
+            <div class="size-9 rounded-xl bg-zinc-500/10 border border-zinc-500/20 flex items-center justify-center shrink-0">
+              <span class="material-symbols-outlined text-zinc-300 text-lg">history</span>
             </div>
             <h2 class="text-base font-bold">Analysis model changed</h2>
           </div>
@@ -2551,7 +2551,7 @@ async function submitCreateBacktest() {
           </div>
           <div class="px-6 pb-6 pt-2 flex flex-col gap-2">
             <button @click="doSaveStrategy(true)"
-              class="w-full py-2.5 rounded-lg bg-violet-500 text-white text-sm font-bold hover:bg-violet-400 transition-all">
+              class="w-full py-2.5 rounded-lg bg-zinc-500 text-white text-sm font-bold hover:bg-zinc-400 transition-all">
               Preserve &amp; apply forward
             </button>
             <button @click="doSaveStrategy(false)"
@@ -2574,7 +2574,7 @@ async function submitCreateBacktest() {
       <div v-if="showClearState"
            class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
            @click.self="closeClearState">
-        <div class="relative w-full max-w-2xl bg-[#0f1318] border border-red-500/30 rounded-2xl shadow-2xl overflow-hidden">
+        <div class="relative w-full max-w-2xl bg-surface border border-red-500/30 rounded-2xl shadow-2xl overflow-hidden">
           <div class="flex items-center justify-between px-6 py-5 border-b border-red-500/20">
             <div class="flex items-center gap-3">
               <div class="size-9 rounded-xl bg-red-500/15 border border-red-500/30 flex items-center justify-center shrink-0">
@@ -2720,7 +2720,7 @@ async function submitCreateBacktest() {
         v-if="showLlmConfigModal"
         class="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
       >
-        <div class="relative w-full max-w-lg bg-[#0f1318] border border-border-subtle rounded-2xl shadow-2xl flex flex-col max-h-[90vh]">
+        <div class="relative w-full max-w-lg bg-surface border border-border-subtle rounded-2xl shadow-2xl flex flex-col max-h-[90vh]">
           <div class="flex items-center justify-between px-6 py-5 border-b border-border-subtle shrink-0">
             <div>
               <h2 class="text-base font-bold">{{ llmConfigTarget?.group?.label || 'LLM Config' }}</h2>
@@ -2795,7 +2795,7 @@ async function submitCreateBacktest() {
         class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
         @click.self="showBenzingaTestModal = false"
       >
-        <div class="relative w-full max-w-md bg-[#0f1318] border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
+        <div class="relative w-full max-w-md bg-surface border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
           <div class="flex items-center justify-between px-6 py-4 border-b border-border-subtle">
             <h3 class="text-sm font-semibold text-slate-100">Benzinga API Access Test</h3>
             <button @click="showBenzingaTestModal = false" class="text-slate-500 hover:text-slate-300 transition-colors text-lg">&times;</button>
@@ -2842,19 +2842,19 @@ async function submitCreateBacktest() {
         class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
         @click.self="closeBtConfirm"
       >
-        <div class="relative w-full max-w-sm bg-[#0f1318] border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
+        <div class="relative w-full max-w-sm bg-surface border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
           <div class="flex items-center justify-between px-6 py-5 border-b border-border-subtle">
             <div class="flex items-center gap-3">
               <div class="size-9 rounded-xl flex items-center justify-center shrink-0"
                 :class="{
                   'bg-red-500/10 border border-red-500/20':       btConfirmAction === 'stop',
-                  'bg-violet-500/10 border border-violet-500/20': btConfirmAction === 'pause',
+                  'bg-zinc-500/10 border border-zinc-500/20': btConfirmAction === 'pause',
                   'bg-sky-500/10 border border-sky-500/20':       btConfirmAction === 'resume',
                 }">
                 <span class="material-symbols-outlined text-lg"
                   :class="{
                     'text-red-400':    btConfirmAction === 'stop',
-                    'text-violet-400': btConfirmAction === 'pause',
+                    'text-zinc-300': btConfirmAction === 'pause',
                     'text-sky-400':    btConfirmAction === 'resume',
                   }">{{ btConfirmMeta.icon }}</span>
               </div>
@@ -2891,7 +2891,7 @@ async function submitCreateBacktest() {
               class="flex-1 py-2.5 rounded-lg text-sm font-bold transition-all disabled:opacity-50 flex items-center justify-center gap-2"
               :class="{
                 'bg-red-500/80 hover:bg-red-500 text-white':    btConfirmAction === 'stop',
-                'bg-violet-600 hover:bg-violet-500 text-white': btConfirmAction === 'pause',
+                'bg-zinc-600 hover:bg-zinc-500 text-white': btConfirmAction === 'pause',
                 'bg-primary hover:brightness-110 text-white':   btConfirmAction === 'resume',
               }">
               <span v-if="btConfirmBusy" class="material-symbols-outlined text-base animate-spin">progress_activity</span>
@@ -2912,7 +2912,7 @@ async function submitCreateBacktest() {
         class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
         @click.self="closeCreateBacktest"
       >
-        <div class="relative w-full max-w-md bg-[#0f0a1c] border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
+        <div class="relative w-full max-w-md bg-surface border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
 
           <div class="flex items-center justify-between px-6 py-5 border-b border-border-subtle">
             <div class="flex items-center gap-3">
@@ -3053,11 +3053,11 @@ async function submitCreateBacktest() {
         class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
         @click.self="closeLinkStrategy"
       >
-        <div class="w-full max-w-sm bg-[#0f1318] border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
+        <div class="w-full max-w-sm bg-surface border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
           <div class="flex items-center justify-between px-6 py-5 border-b border-border-subtle">
             <div class="flex items-center gap-3">
-              <div class="size-9 rounded-xl bg-violet-500/10 border border-violet-500/20 flex items-center justify-center shrink-0">
-                <span class="material-symbols-outlined text-violet-400 text-lg">link</span>
+              <div class="size-9 rounded-xl bg-zinc-500/10 border border-zinc-500/20 flex items-center justify-center shrink-0">
+                <span class="material-symbols-outlined text-zinc-300 text-lg">link</span>
               </div>
               <h2 class="text-base font-bold">Link Strategy</h2>
             </div>
@@ -3092,7 +3092,7 @@ async function submitCreateBacktest() {
               Cancel
             </button>
             <button @click="submitLinkStrategy" :disabled="linkStrategyBusy || !linkStrategyId"
-              class="flex-1 py-2.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-sm font-bold transition-all disabled:opacity-50 flex items-center justify-center gap-2">
+              class="flex-1 py-2.5 rounded-lg bg-zinc-600 hover:bg-zinc-500 text-white text-sm font-bold transition-all disabled:opacity-50 flex items-center justify-center gap-2">
               <span v-if="linkStrategyBusy" class="material-symbols-outlined text-base animate-spin">progress_activity</span>
               {{ linkStrategyBusy ? 'Linking...' : 'Link Strategy' }}
             </button>
@@ -3178,7 +3178,7 @@ async function submitCreateBacktest() {
         class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
         @click.self="closeAddStock"
       >
-        <div class="relative w-full max-w-xs bg-[#0f1318] border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
+        <div class="relative w-full max-w-xs bg-surface border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
           <div class="flex items-center justify-between px-6 py-5 border-b border-border-subtle">
             <h2 class="text-base font-bold">Add Stock</h2>
             <button @click="closeAddStock" class="text-slate-500 hover:text-slate-300 transition-colors">

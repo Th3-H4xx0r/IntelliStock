@@ -2,7 +2,7 @@
   <section class="bg-surface/30" style="padding: 80px 0;">
     <div class="max-w-7xl mx-auto px-6">
       <div class="text-center max-w-3xl mx-auto space-y-6 mb-14 md:mb-16">
-        <p v-reveal class="reveal text-primary text-xs font-bold uppercase tracking-widest">Graph Nexus</p>
+        <p v-reveal class="reveal text-brand text-xs font-bold uppercase tracking-widest">Graph Nexus</p>
         <h2 v-reveal class="reveal delay-100 text-4xl md:text-5xl font-bold tracking-tight">
           Every relationship between<br class="hidden md:block"> every public company.
         </h2>
@@ -18,7 +18,7 @@
         <div
           v-for="edge in edges"
           :key="edge.type"
-          class="card-hover bg-background-dark border border-border-subtle rounded-2xl p-5 space-y-3"
+          class="mk-card-hover bg-background-dark border border-border-subtle rounded-2xl p-5 space-y-3"
         >
           <div class="size-10 rounded-lg flex items-center justify-center" :class="edge.bg">
             <span class="material-symbols-outlined text-xl" :class="edge.color">{{ edge.icon }}</span>
@@ -66,8 +66,8 @@
           </svg>
 
           <div class="relative size-64">
-            <div class="absolute inset-0 rounded-full border border-primary/20 animate-[spin_20s_linear_infinite]"></div>
-            <div class="absolute inset-[-40px] rounded-full border border-primary/10 animate-[spin_30s_linear_infinite_reverse]"></div>
+            <div class="absolute inset-0 rounded-full border border-brand/20 animate-[spin_20s_linear_infinite]"></div>
+            <div class="absolute inset-[-40px] rounded-full border border-brand/10 animate-[spin_30s_linear_infinite_reverse]"></div>
 
             <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 size-14 bg-[radial-gradient(circle_at_30%_30%,_#f5e1ff_0%,_#ca86ff_36%,_#8139e8_100%)] rounded-full shadow-[0_0_55px_rgba(191,122,255,0.72)] flex items-center justify-center z-10">
               <span class="material-symbols-outlined text-[#080511] font-bold text-2xl">hub</span>
@@ -79,8 +79,8 @@
             <div class="absolute right-0 top-1/2 -translate-y-1/2 size-4 bg-[#1a1232] rounded-full border border-violet-300/70 shadow-[0_0_14px_rgba(191,122,255,0.45)]"></div>
           </div>
 
-          <div v-reveal class="reveal delay-400 absolute bottom-8 left-8 glass-card p-5 rounded-xl text-left border border-white/10 max-w-[260px]">
-            <p class="text-[10px] font-bold text-primary mb-2 uppercase tracking-widest">Live Edge Detected</p>
+          <div v-reveal class="reveal delay-400 absolute bottom-8 left-8 mk-glass-card p-5 rounded-xl text-left border border-white/10 max-w-[260px]">
+            <p class="text-[10px] font-bold text-brand mb-2 uppercase tracking-widest">Live Edge Detected</p>
             <h4 class="text-sm font-bold mb-1">Supply Chain Shock</h4>
             <p class="text-xs text-slate-400">TSMC to NVDA <span class="text-slate-300 font-medium">SUPPLIER_OF</span> sentiment: <span class="text-emerald-400 font-bold">Bullish +0.82</span></p>
           </div>
@@ -91,7 +91,7 @@
             v-reveal
             v-for="(stat, i) in stats"
             :key="stat.label"
-            class="reveal from-right glass-card rounded-2xl p-6 flex items-center gap-5"
+            class="reveal from-right mk-glass-card rounded-2xl p-6 flex items-center gap-5"
             :class="`delay-${(i + 1) * 100}`"
           >
             <div class="size-12 rounded-xl flex items-center justify-center shrink-0" :class="stat.bg">
@@ -103,7 +103,7 @@
             </div>
           </div>
 
-          <div v-reveal class="reveal from-right delay-500 glass-card rounded-2xl p-6">
+          <div v-reveal class="reveal from-right delay-500 mk-glass-card rounded-2xl p-6">
             <p class="text-xs font-bold uppercase tracking-widest text-slate-500 mb-4">Data Sources</p>
             <div class="flex flex-wrap gap-2">
               <span
@@ -152,8 +152,8 @@ const edges = [
     title: 'Gov. Contracts',
     desc: 'USASpending.gov federal awards - LLM-validated per recipient.',
     icon: 'account_balance',
-    color: 'text-primary',
-    bg: 'bg-primary/10',
+    color: 'text-brand',
+    bg: 'bg-brand/10',
   },
   {
     type: 'CONTROLS',
@@ -190,7 +190,7 @@ const edges = [
 ]
 
 const stats = [
-  { value: '12', label: 'Data ingestion phases', icon: 'database', color: 'text-primary', bg: 'bg-primary/10' },
+  { value: '12', label: 'Data ingestion phases', icon: 'database', color: 'text-brand', bg: 'bg-brand/10' },
   { value: '85K+', label: 'COMPETES_WITH edges', icon: 'compare_arrows', color: 'text-rose-400', bg: 'bg-rose-400/10' },
   { value: '500+', label: 'S&P 500 companies mapped', icon: 'domain', color: 'text-emerald-400', bg: 'bg-emerald-400/10' },
   { value: 'LLM', label: 'Validation on every edge', icon: 'verified', color: 'text-violet-400', bg: 'bg-violet-400/10' },

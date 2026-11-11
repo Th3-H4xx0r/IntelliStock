@@ -536,7 +536,7 @@ onMounted(fetchAccounts)
         class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
         @click.self="closeModal"
       >
-        <div class="relative w-full max-w-md bg-[#0f1318] border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
+        <div class="relative w-full max-w-md bg-surface border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
 
           <!-- Modal header -->
           <div class="flex items-center justify-between px-6 py-5 border-b border-border-subtle">
@@ -772,7 +772,7 @@ onMounted(fetchAccounts)
         <Transition name="slide-up" appear>
           <div
             v-if="showTestPopup"
-            class="relative w-full max-w-lg max-h-[85vh] overflow-y-auto bg-[#0f1318] border border-border-subtle rounded-2xl shadow-2xl"
+            class="relative w-full max-w-lg max-h-[85vh] overflow-y-auto bg-surface border border-border-subtle rounded-2xl shadow-2xl"
           >
             <div class="px-6 py-4 border-b border-border-subtle flex items-center justify-between">
               <div class="flex items-center gap-2">

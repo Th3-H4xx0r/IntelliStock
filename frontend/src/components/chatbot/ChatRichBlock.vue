@@ -38,7 +38,7 @@ const chartDefaults = {
   },
   yaxis: { labels: { style: { colors: '#64748b' } } },
   tooltip: { theme: 'dark' },
-  colors: ['#a78bfa', '#d8b4fe', '#34d399', '#f59e0b', '#f87171'],
+  colors: ['#ededed', '#85858b', '#4cc38a', '#f59e0b', '#e5484d'],
 }
 
 const chartOptions = computed(() => {
@@ -248,7 +248,7 @@ const priceOptions = computed(() => {
       animations: { enabled: true, easing: 'easeinout', speed: 400 },
       fontFamily: 'Inter, ui-sans-serif, system-ui, sans-serif',
     },
-    colors: isSingle ? [lineColor] : ['#a78bfa', '#d8b4fe', '#34d399', '#f59e0b', '#f87171'],
+    colors: isSingle ? [lineColor] : ['#ededed', '#85858b', '#4cc38a', '#f59e0b', '#e5484d'],
     // Straight curve — same as LiveTradingView's equity + per-position
     // charts. Smoothing on sparse intraday bars produces fake sine-wave
     // artifacts when there are stretches with no real ticks (overnight,
@@ -594,12 +594,12 @@ const trendIcon = computed(() => {
 .chat-md :deep(p:last-child) { margin-bottom: 0; }
 .chat-md :deep(strong) { color: #f1f5f9; font-weight: 600; }
 .chat-md :deep(em) { color: #cbd5e1; }
-.chat-md :deep(code) { background: rgba(188, 154, 255, 0.10); padding: 1px 5px; border-radius: 4px; color: #d8b4fe; font-size: 0.85em; word-break: break-all; }
-.chat-md :deep(pre) { background: #0a0716; border: 1px solid #231a3d; padding: 10px 12px; border-radius: 8px; overflow-x: auto; margin: 0.4em 0 0.6em; max-width: 100%; }
+.chat-md :deep(code) { background: rgba(237, 237, 237, 0.08); padding: 1px 5px; border-radius: 4px; color: #ededed; font-size: 0.85em; word-break: break-all; }
+.chat-md :deep(pre) { background: #0f0f10; border: 1px solid #232326; padding: 10px 12px; border-radius: 8px; overflow-x: auto; margin: 0.4em 0 0.6em; max-width: 100%; }
 .chat-md :deep(pre code) { background: transparent; padding: 0; color: #cbd5e1; word-break: normal; white-space: pre; }
 .chat-md :deep(ul), .chat-md :deep(ol) { padding-left: 1.25em; margin: 0.3em 0 0.6em; }
 .chat-md :deep(li) { margin: 0.15em 0; }
-.chat-md :deep(a) { color: #c98fff; text-decoration: underline; text-underline-offset: 2px; word-break: break-all; }
+.chat-md :deep(a) { color: #ededed; text-decoration: underline; text-underline-offset: 2px; word-break: break-all; }
 .chat-md :deep(table) { border-collapse: collapse; margin: 0.4em 0 0.6em; font-size: 0.85em; max-width: 100%; display: block; overflow-x: auto; }
 .chat-md :deep(th), .chat-md :deep(td) { border-bottom: 1px solid #233136; padding: 4px 8px; }
 .chat-md :deep(blockquote) { border-left: 2px solid #233136; padding-left: 0.75em; color: #94a3b8; margin: 0.3em 0; }

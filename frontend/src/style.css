@@ -12,18 +12,38 @@ html {
 body {
   font-family: 'Inter', sans-serif;
   -webkit-font-smoothing: antialiased;
+  font-feature-settings: 'cv11', 'ss01';
+}
+
+.tabular-nums,
+.font-mono {
+  font-variant-numeric: tabular-nums;
 }
 
 /* ─────────────────────────────────────────
-   Custom Utilities
+   Custom Utilities — app surfaces
+   One graphite ramp. Depth comes from a
+   surface step plus a hairline, never a
+   glow, blur or coloured gradient.
 ───────────────────────────────────────── */
 .glass-card {
+  background: #161617;
+  border: 1px solid rgba(237, 237, 237, 0.07);
+}
+
+.gradient-text {
+  color: #ededed;
+}
+
+/* Marketing-only (landing page) — the violet glass look lives here so the
+   app chrome stays neutral. Do not use inside authenticated pages. */
+.mk-glass-card {
   background: linear-gradient(180deg, rgba(23, 14, 45, 0.78) 0%, rgba(11, 8, 24, 0.7) 100%);
   backdrop-filter: blur(14px);
   border: 1px solid rgba(188, 154, 255, 0.12);
 }
 
-.gradient-text {
+.mk-gradient-text {
   background: linear-gradient(135deg, #fbf5ff 0%, #d9abff 42%, #9850ff 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
@@ -157,15 +177,38 @@ body {
 }
 
 /* ─────────────────────────────────────────
-   Card glow on hover
+   Card hover — a hairline step, no lift
 ───────────────────────────────────────── */
 .card-hover {
-  transition: border-color 0.3s, box-shadow 0.3s, transform 0.3s;
+  transition: border-color 160ms cubic-bezier(0.22, 1, 0.36, 1), background-color 160ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 .card-hover:hover {
+  border-color: rgba(237, 237, 237, 0.14) !important;
+  background-color: #1a1a1c;
+}
+
+/* Marketing-only hover lift. */
+.mk-card-hover {
+  transition: border-color 0.3s, box-shadow 0.3s, transform 0.3s;
+}
+.mk-card-hover:hover {
   border-color: rgba(212, 176, 255, 0.4) !important;
   box-shadow: 0 24px 48px rgba(19, 10, 45, 0.34), 0 0 0 1px rgba(215, 180, 255, 0.06);
   transform: translateY(-3px);
+}
+
+/* ─────────────────────────────────────────
+   Icons — Material Symbols drawn as light
+   line icons so they sit like one set.
+───────────────────────────────────────── */
+.material-symbols-outlined {
+  font-variation-settings: 'FILL' 0, 'wght' 300, 'GRAD' 0, 'opsz' 20;
+}
+
+/* Visible focus for keyboard users, inside the palette. */
+:focus-visible {
+  outline: 2px solid rgba(237, 237, 237, 0.55);
+  outline-offset: 2px;
 }
 
 /* ─────────────────────────────────────────
@@ -187,17 +230,7 @@ body {
 }
 
 .onboarding-progress-fill {
-  background: linear-gradient(90deg, rgba(167, 139, 250, 0.55) 0%, #a78bfa 50%, rgba(216, 180, 254, 0.85) 100%);
-  box-shadow: 0 0 12px rgba(167, 139, 250, 0.55), 0 0 24px rgba(167, 139, 250, 0.25);
-  position: relative;
-  overflow: hidden;
-}
-.onboarding-progress-fill::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(90deg, transparent 0%, rgba(255, 255, 255, 0.55) 50%, transparent 100%);
-  animation: progress-shimmer 2.4s ease-in-out infinite;
+  background: #ededed;
 }
 
 @keyframes onboarding-letter-in {
@@ -221,7 +254,7 @@ span.onboarding-letter {
    the page!", which is exactly what we don't want a
    professional onboarding to scream. */
 .onboarding-cta {
-  box-shadow: 0 0 0 1px rgba(167, 139, 250, 0.32), 0 6px 18px rgba(91, 37, 200, 0.28);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
 }
 
 @keyframes onboarding-ray {
@@ -239,7 +272,7 @@ span.onboarding-letter {
   margin-left: -2px;
   margin-top: -110px;
   transform-origin: 50% 100%;
-  background: linear-gradient(180deg, rgba(167, 139, 250, 0.95) 0%, transparent 100%);
+  background: linear-gradient(180deg, rgba(237, 237, 237, 0.7) 0%, transparent 100%);
   animation: onboarding-ray 1.6s ease-out forwards;
 }
 

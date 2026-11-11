@@ -4,7 +4,7 @@
 
       <!-- Section header -->
       <div class="max-w-2xl mb-14 md:mb-16">
-        <p v-reveal class="reveal text-primary text-xs font-bold uppercase tracking-widest mb-4">Strategy Engine</p>
+        <p v-reveal class="reveal text-brand text-xs font-bold uppercase tracking-widest mb-4">Strategy Engine</p>
         <h2 v-reveal class="reveal delay-100 text-4xl md:text-5xl font-bold leading-tight">
           Build strategies from<br class="hidden md:block"> real market signals.
         </h2>
@@ -20,8 +20,8 @@
         <!-- Feature list -->
         <ul class="space-y-8">
           <li v-reveal class="reveal delay-100 flex items-start gap-5">
-            <div class="shrink-0 size-11 bg-primary/10 border border-primary/20 rounded-xl flex items-center justify-center mt-0.5">
-              <span class="material-symbols-outlined text-primary text-xl">hub</span>
+            <div class="shrink-0 size-11 bg-brand/10 border border-brand/20 rounded-xl flex items-center justify-center mt-0.5">
+              <span class="material-symbols-outlined text-brand text-xl">hub</span>
             </div>
             <div>
               <h4 class="font-bold text-lg mb-1">Graph Nexus Analysis</h4>
@@ -34,8 +34,8 @@
           </li>
 
           <li v-reveal class="reveal delay-200 flex items-start gap-5">
-            <div class="shrink-0 size-11 bg-primary/10 border border-primary/20 rounded-xl flex items-center justify-center mt-0.5">
-              <span class="material-symbols-outlined text-primary text-xl">news</span>
+            <div class="shrink-0 size-11 bg-brand/10 border border-brand/20 rounded-xl flex items-center justify-center mt-0.5">
+              <span class="material-symbols-outlined text-brand text-xl">news</span>
             </div>
             <div>
               <h4 class="font-bold text-lg mb-1">Benzinga Real-Time Events</h4>
@@ -48,8 +48,8 @@
           </li>
 
           <li v-reveal class="reveal delay-300 flex items-start gap-5">
-            <div class="shrink-0 size-11 bg-primary/10 border border-primary/20 rounded-xl flex items-center justify-center mt-0.5">
-              <span class="material-symbols-outlined text-primary text-xl">psychology</span>
+            <div class="shrink-0 size-11 bg-brand/10 border border-brand/20 rounded-xl flex items-center justify-center mt-0.5">
+              <span class="material-symbols-outlined text-brand text-xl">psychology</span>
             </div>
             <div>
               <h4 class="font-bold text-lg mb-1">LLM Sentiment Engine</h4>
@@ -62,8 +62,8 @@
           </li>
 
           <li v-reveal class="reveal delay-400 flex items-start gap-5">
-            <div class="shrink-0 size-11 bg-primary/10 border border-primary/20 rounded-xl flex items-center justify-center mt-0.5">
-              <span class="material-symbols-outlined text-primary text-xl">school</span>
+            <div class="shrink-0 size-11 bg-brand/10 border border-brand/20 rounded-xl flex items-center justify-center mt-0.5">
+              <span class="material-symbols-outlined text-brand text-xl">school</span>
             </div>
             <div>
               <h4 class="font-bold text-lg mb-1">Adaptive Learning</h4>
@@ -80,9 +80,9 @@
         <div v-reveal class="reveal from-right delay-150 space-y-4">
 
           <!-- Signal pipeline card -->
-          <div class="glass-card rounded-2xl p-7 space-y-5">
+          <div class="mk-glass-card rounded-2xl p-7 space-y-5">
             <div class="flex items-center justify-between">
-              <p class="text-xs font-bold uppercase tracking-widest text-primary">Signal Pipeline</p>
+              <p class="text-xs font-bold uppercase tracking-widest text-brand">Signal Pipeline</p>
               <div class="px-2 py-0.5 bg-emerald-500/10 border border-emerald-500/20 rounded-full text-emerald-400 text-[10px] font-bold uppercase">Live</div>
             </div>
 
@@ -100,8 +100,8 @@
           <!-- Data sources row -->
           <div class="grid grid-cols-3 gap-3">
             <div v-for="src in sources" :key="src.label"
-              class="card-hover bg-surface border border-border-subtle rounded-xl p-4 flex flex-col items-center gap-2 text-center">
-              <span class="material-symbols-outlined text-primary text-xl">{{ src.icon }}</span>
+              class="mk-card-hover bg-surface border border-border-subtle rounded-xl p-4 flex flex-col items-center gap-2 text-center">
+              <span class="material-symbols-outlined text-brand text-xl">{{ src.icon }}</span>
               <span class="text-[11px] font-medium text-slate-300">{{ src.label }}</span>
             </div>
           </div>
@@ -115,7 +115,7 @@
 
 <script setup>
 const pipeline = [
-  { label: 'Graph Nexus relationships',    source: 'Neo4j',       color: 'bg-primary' },
+  { label: 'Graph Nexus relationships',    source: 'Neo4j',       color: 'bg-brand' },
   { label: 'Benzinga event calendar',      source: 'Benzinga',    color: 'bg-violet-400' },
   { label: 'Institutional ownership data', source: 'SEC 13F',     color: 'bg-amber-400' },
   { label: 'LLM sentiment + confidence',   source: 'GPT-4o / Gemini', color: 'bg-emerald-400' },

@@ -665,7 +665,7 @@ onUnmounted(() => {
         </p>
       </div>
 
-      <details class="rounded-lg border border-border-subtle bg-[#0f1318] px-3 py-2">
+      <details class="rounded-lg border border-border-subtle bg-surface px-3 py-2">
         <summary class="cursor-pointer text-[11px] text-slate-400">Advanced</summary>
         <div class="mt-2">
           <label class="block text-xs font-medium text-slate-400 mb-1.5">Keep Alive</label>
@@ -979,7 +979,7 @@ onUnmounted(() => {
       </div>
     </template>
 
-    <div class="rounded-lg border border-border-subtle bg-[#0f1318] px-3 py-3 text-[11px] leading-relaxed text-slate-500">
+    <div class="rounded-lg border border-border-subtle bg-surface px-3 py-3 text-[11px] leading-relaxed text-slate-500">
       Current provider: <span class="text-slate-300">{{ getLlmProviderLabel(draft.provider) }}</span>
     </div>
   </div>

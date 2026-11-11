@@ -274,7 +274,7 @@ onUnmounted(() => {
                 v-for="opt in PER_PAGE_OPTIONS"
                 :key="opt"
                 :value="opt"
-                class="bg-[#0f1318]"
+                class="bg-surface"
               >{{ opt }}</option>
             </select>
           </div>
@@ -397,12 +397,12 @@ onUnmounted(() => {
                     <!-- Nexus lookback training indicator -->
                     <div v-if="btProgress[bt.id]?.nexus_lookback" class="w-24 mt-1">
                       <div class="flex items-center gap-1 mb-0.5">
-                        <span class="material-symbols-outlined text-violet-400 text-[11px] animate-pulse">hub</span>
-                        <span class="text-[10px] text-violet-400 font-semibold">Lookback</span>
+                        <span class="material-symbols-outlined text-zinc-300 text-[11px] animate-pulse">hub</span>
+                        <span class="text-[10px] text-zinc-300 font-semibold">Lookback</span>
                       </div>
                       <div class="h-1.5 bg-surface rounded-full overflow-hidden">
                         <div
-                          class="h-full bg-violet-500 rounded-full transition-all duration-500"
+                          class="h-full bg-zinc-500 rounded-full transition-all duration-500"
                           :style="{ width: (btProgress[bt.id].nexus_lookback.total > 0 ? Math.round(btProgress[bt.id].nexus_lookback.current / btProgress[bt.id].nexus_lookback.total * 100) : 0) + '%' }"
                         ></div>
                       </div>
@@ -431,7 +431,7 @@ onUnmounted(() => {
                   <div class="flex items-center gap-1.5 justify-end">
                     <template v-if="['running','queued','pending'].includes((btProgress[bt.id]?.status || bt.status || '').toLowerCase())">
                       <button @click="openBtConfirm(bt, 'pause')" title="Pause"
-                        class="p-1 rounded-md text-violet-400 hover:bg-violet-500/10 transition-colors">
+                        class="p-1 rounded-md text-zinc-300 hover:bg-zinc-500/10 transition-colors">
                         <span class="material-symbols-outlined text-[16px]">pause_circle</span>
                       </button>
                     </template>
@@ -515,20 +515,20 @@ onUnmounted(() => {
         class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
         @click.self="closeBtConfirm"
       >
-        <div class="relative w-full max-w-sm bg-[#0f1318] border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
+        <div class="relative w-full max-w-sm bg-surface border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
           <div class="flex items-center justify-between px-6 py-5 border-b border-border-subtle">
             <div class="flex items-center gap-3">
               <div class="size-9 rounded-xl flex items-center justify-center shrink-0"
                 :class="{
                   'bg-red-500/10 border border-red-500/20':    btConfirmAction === 'stop',
-                  'bg-violet-500/10 border border-violet-500/20': btConfirmAction === 'pause',
+                  'bg-zinc-500/10 border border-zinc-500/20': btConfirmAction === 'pause',
                   'bg-sky-500/10 border border-sky-500/20':    btConfirmAction === 'resume',
                 }"
               >
                 <span class="material-symbols-outlined text-lg"
                   :class="{
                     'text-red-400':    btConfirmAction === 'stop',
-                    'text-violet-400': btConfirmAction === 'pause',
+                    'text-zinc-300': btConfirmAction === 'pause',
                     'text-sky-400':    btConfirmAction === 'resume',
                   }"
                 >{{ ACTION_META[btConfirmAction]?.icon || 'help' }}</span>
@@ -570,7 +570,7 @@ onUnmounted(() => {
               class="flex-1 py-2.5 rounded-lg text-sm font-bold transition-all disabled:opacity-50 flex items-center justify-center gap-2"
               :class="{
                 'bg-red-500 hover:bg-red-400 text-white':         btConfirmAction === 'stop',
-                'bg-violet-500 hover:bg-violet-400 text-white':   btConfirmAction === 'pause',
+                'bg-zinc-500 hover:bg-zinc-400 text-white':   btConfirmAction === 'pause',
                 'bg-primary hover:brightness-110 text-white':     btConfirmAction === 'resume',
               }"
             >

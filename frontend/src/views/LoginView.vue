@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { login, createFirstAccount, isAuthenticated } from '../utils/auth.js'
 
@@ -84,84 +84,11 @@ async function createAccount() {
     loading.value = false
   }
 }
-
-// ── Canvas particle background (same as HeroSection, lightweight version) ───
-const canvasRef = ref(null)
-let animId = null
-
-onMounted(() => {
-  const canvas = canvasRef.value
-  if (!canvas) return
-  const ctx = canvas.getContext('2d')
-
-  function resize() {
-    canvas.width  = canvas.offsetWidth
-    canvas.height = canvas.offsetHeight
-  }
-  resize()
-  window.addEventListener('resize', resize)
-
-  const COUNT = 48
-  const particles = Array.from({ length: COUNT }, () => ({
-    x:  Math.random() * canvas.width,
-    y:  Math.random() * canvas.height,
-    vx: (Math.random() - 0.5) * 0.35,
-    vy: (Math.random() - 0.5) * 0.35,
-    r:  Math.random() * 1.5 + 0.5,
-  }))
-
-  function draw() {
-    ctx.clearRect(0, 0, canvas.width, canvas.height)
-    for (const p of particles) {
-      p.x += p.vx; p.y += p.vy
-      if (p.x < 0) p.x = canvas.width
-      if (p.x > canvas.width) p.x = 0
-      if (p.y < 0) p.y = canvas.height
-      if (p.y > canvas.height) p.y = 0
-
-      ctx.beginPath()
-      ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2)
-      ctx.fillStyle = 'rgba(167,139,250,0.28)'
-      ctx.fill()
-    }
-    for (let i = 0; i < COUNT; i++) {
-      for (let j = i + 1; j < COUNT; j++) {
-        const dx = particles[i].x - particles[j].x
-        const dy = particles[i].y - particles[j].y
-        const d  = Math.sqrt(dx * dx + dy * dy)
-        if (d < 110) {
-          ctx.beginPath()
-          ctx.moveTo(particles[i].x, particles[i].y)
-          ctx.lineTo(particles[j].x, particles[j].y)
-          ctx.strokeStyle = `rgba(167,139,250,${(1 - d / 110) * 0.10})`
-          ctx.lineWidth = 0.6
-          ctx.stroke()
-        }
-      }
-    }
-    animId = requestAnimationFrame(draw)
-  }
-  draw()
-
-  onUnmounted(() => {
-    cancelAnimationFrame(animId)
-    window.removeEventListener('resize', resize)
-  })
-})
 </script>
 
 <template>
   <div class="login-root min-h-screen text-slate-100 flex flex-col">
 
-    <!-- Canvas background -->
-    <canvas ref="canvasRef" class="absolute inset-0 w-full h-full pointer-events-none opacity-60"></canvas>
-
-    <!-- Soft purple ambient glows — mirrors LandingView.vue's `.page` -->
-    <div class="absolute inset-0 pointer-events-none"
-         style="background:
-                radial-gradient(circle at 16% 18%, rgba(118, 55, 242, 0.16), transparent 24%),
-                radial-gradient(circle at 84% 82%, rgba(210, 78, 255, 0.12), transparent 22%);">
-    </div>
 
     <!-- Top-left brand -->
     <div class="relative z-10 p-8">
@@ -315,11 +242,9 @@ onMounted(() => {
 </template>
 
 <style scoped>
-/* Mirrors LandingView.vue + AppShell — deep near-black gradient base
-   so the canvas particles + radial glow read on top of the same
-   surface as the rest of the product. */
+/* Same graphite page as the app shell. */
 .login-root {
-  background: linear-gradient(180deg, #010107 0%, #02030a 46%, #04040c 100%);
+  background: #0f0f10;
 }
 
 .fade-down-enter-active,

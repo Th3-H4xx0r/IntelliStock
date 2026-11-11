@@ -248,7 +248,7 @@ const statusColors = {
   finished:             'text-emerald-400 bg-emerald-500/10 border-emerald-500/20',
   running:              'text-sky-400 bg-sky-500/10 border-sky-500/20',
   queued:               'text-amber-400 bg-amber-500/10 border-amber-500/20',
-  paused:               'text-violet-400 bg-violet-500/10 border-violet-500/20',
+  paused:               'text-zinc-300 bg-zinc-500/10 border-zinc-500/20',
   paused_llm_critical:  'text-amber-400 bg-amber-500/10 border-amber-500/20',
   aborted_llm_failure:  'text-red-400 bg-red-500/10 border-red-500/20',
   stopped:              'text-red-400 bg-red-500/10 border-red-500/20',
@@ -829,7 +829,7 @@ function onLogScroll(e) {
             <button
               v-if="currentStatus.toLowerCase() === 'running'"
               @click="openConfirm('pause')"
-              class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-violet-400 hover:bg-violet-500/10 border border-violet-500/20 transition-colors"
+              class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-zinc-300 hover:bg-zinc-500/10 border border-zinc-500/20 transition-colors"
             >
               <span class="material-symbols-outlined text-[15px]">pause_circle</span>
               Pause
@@ -902,24 +902,24 @@ function onLogScroll(e) {
         <!-- ── Nexus Lookback Training Banner ───────────────────────────────── -->
         <div
           v-if="nexusLookback"
-          class="mb-6 rounded-2xl border border-violet-500/30 bg-violet-500/5 px-5 py-4"
+          class="mb-6 rounded-2xl border border-zinc-500/30 bg-zinc-500/5 px-5 py-4"
         >
           <div class="flex items-center gap-2 mb-3">
-            <span class="material-symbols-outlined text-violet-400 text-xl animate-pulse">hub</span>
-            <span class="font-semibold text-violet-300 text-sm">Nexus Lookback Training</span>
+            <span class="material-symbols-outlined text-zinc-300 text-xl animate-pulse">hub</span>
+            <span class="font-semibold text-zinc-200 text-sm">Nexus Lookback Training</span>
             <span class="ml-auto font-mono text-xs text-slate-400">
               Day {{ nexusLookback.current }} / {{ nexusLookback.total }}
             </span>
           </div>
           <div class="h-2 bg-surface rounded-full overflow-hidden mb-2">
             <div
-              class="h-full bg-violet-500 rounded-full transition-all duration-700"
+              class="h-full bg-zinc-500 rounded-full transition-all duration-700"
               :style="{ width: (nexusLookback.total > 0 ? Math.round(nexusLookback.current / nexusLookback.total * 100) : 0) + '%' }"
             ></div>
           </div>
           <div class="flex items-center justify-between text-[11px] text-slate-500 font-mono">
             <span>{{ nexusLookback.start_date }}</span>
-            <span class="text-violet-400 font-semibold">▶ {{ nexusLookback.current_date }}</span>
+            <span class="text-zinc-300 font-semibold">▶ {{ nexusLookback.current_date }}</span>
             <span>{{ nexusLookback.end_date }}</span>
           </div>
           <p class="mt-2 text-[11px] text-slate-500">Building historical event context before trading begins. This runs once per scope.</p>
@@ -1248,7 +1248,7 @@ function onLogScroll(e) {
                   <div
                     v-for="(val, key) in { ...(sub.conditions || {}), ...(sub.config || {}) }"
                     :key="key"
-                    class="rounded-lg bg-[#04040c] border border-border-subtle px-3 py-2"
+                    class="rounded-lg bg-background-dark border border-border-subtle px-3 py-2"
                   >
                     <p class="text-[10px] text-slate-600 mb-0.5 truncate">{{ key }}</p>
                     <p class="text-xs font-mono text-slate-300 truncate">{{ val === null ? 'null' : String(val) }}</p>
@@ -1593,7 +1593,7 @@ function onLogScroll(e) {
                           <span v-if="d.override_applied" class="px-2 py-0.5 rounded border border-amber-500/20 bg-amber-500/10 text-[10px] font-bold uppercase text-amber-400">
                             Override
                           </span>
-                          <span v-if="d.primary_strategy" class="px-2 py-0.5 rounded border border-border-subtle bg-[#04040c] text-[10px] font-mono text-slate-300">
+                          <span v-if="d.primary_strategy" class="px-2 py-0.5 rounded border border-border-subtle bg-background-dark text-[10px] font-mono text-slate-300">
                             {{ d.primary_strategy }}
                           </span>
                           <span v-if="d.primary_action_intent" class="px-2 py-0.5 rounded border border-sky-500/20 bg-sky-500/10 text-[10px] font-mono text-sky-300">
@@ -1632,7 +1632,7 @@ function onLogScroll(e) {
                       <div
                         v-for="(s, strategyIdx) in d.strategies"
                         :key="`${sym}-strategy-${i}-${strategyIdx}`"
-                        class="rounded-lg border border-border-subtle bg-[#04040c] px-3 py-2.5"
+                        class="rounded-lg border border-border-subtle bg-background-dark px-3 py-2.5"
                       >
                         <div class="flex items-center justify-between gap-2 mb-1.5">
                           <p class="text-xs font-semibold text-slate-200 truncate">{{ s.strategy || 'strategy' }}</p>
@@ -1650,7 +1650,7 @@ function onLogScroll(e) {
                       </div>
                     </div>
 
-                    <details class="mt-3 rounded-lg border border-border-subtle bg-[#04040c]">
+                    <details class="mt-3 rounded-lg border border-border-subtle bg-background-dark">
                       <summary class="cursor-pointer select-none px-3 py-2 text-[11px] font-semibold text-slate-400">
                         Structured JSON
                       </summary>
@@ -1725,7 +1725,7 @@ function onLogScroll(e) {
         class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
         @click.self="closeConfirm"
       >
-        <div class="relative w-full max-w-sm bg-[#0f1318] border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
+        <div class="relative w-full max-w-sm bg-surface border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
 
           <div class="flex items-center justify-between px-6 py-5 border-b border-border-subtle">
             <div class="flex items-center gap-3">
@@ -1733,7 +1733,7 @@ function onLogScroll(e) {
                 class="size-9 rounded-xl flex items-center justify-center shrink-0"
                 :class="{
                   'bg-red-500/10 border border-red-500/20':         confirmAction === 'stop' || confirmAction === 'delete',
-                  'bg-violet-500/10 border border-violet-500/20':   confirmAction === 'pause',
+                  'bg-zinc-500/10 border border-zinc-500/20':   confirmAction === 'pause',
                   'bg-sky-500/10 border border-sky-500/20':         confirmAction === 'resume',
                   'bg-emerald-500/10 border border-emerald-500/20': confirmAction === 'rerun',
                 }"
@@ -1742,7 +1742,7 @@ function onLogScroll(e) {
                   class="material-symbols-outlined text-lg"
                   :class="{
                     'text-red-400':     confirmAction === 'stop' || confirmAction === 'delete',
-                    'text-violet-400':  confirmAction === 'pause',
+                    'text-zinc-300':  confirmAction === 'pause',
                     'text-sky-400':     confirmAction === 'resume',
                     'text-emerald-400': confirmAction === 'rerun',
                   }"
@@ -1785,7 +1785,7 @@ function onLogScroll(e) {
               class="flex-1 py-2.5 rounded-lg text-sm font-bold transition-all disabled:opacity-50 flex items-center justify-center gap-2"
               :class="{
                 'bg-red-500/80 hover:bg-red-500 text-white':          confirmAction === 'stop' || confirmAction === 'delete',
-                'bg-violet-600 hover:bg-violet-500 text-white':       confirmAction === 'pause',
+                'bg-zinc-600 hover:bg-zinc-500 text-white':       confirmAction === 'pause',
                 'bg-primary hover:brightness-110 text-white':         confirmAction === 'resume',
                 'bg-emerald-600 hover:bg-emerald-500 text-white':     confirmAction === 'rerun',
               }"

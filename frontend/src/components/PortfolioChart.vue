@@ -5,7 +5,11 @@ import { getToken } from '../utils/auth.js'
 
 const props = defineProps({
   account: { type: Object, required: true }, // {id, account_name, brokerage_type, status, ...}
+  // 'card' — bordered tile (Kalshi pages, chat). 'hero' — the dashboard's
+  // headline figure and large chart, drawn straight on the page.
+  variant: { type: String, default: 'card' },
 })
+const isHero = computed(() => props.variant === 'hero')
 
 const API_BASE = import.meta.env.DEV
   ? '/api'
@@ -13,7 +17,8 @@ const API_BASE = import.meta.env.DEV
 
 // ── State ─────────────────────────────────────────────────────────────────────
 const RANGES = ['1D', '1W', '1M', '3M', 'YTD', '1Y', 'ALL']
-const activeRange = ref('1M')
+// The dashboard hero opens on today, like the account list beside it.
+const activeRange = ref(props.variant === 'hero' ? '1D' : '1M')
 const loading     = ref(false)
 const error       = ref('')
 const scrubIndex  = ref(null)
@@ -139,28 +144,43 @@ const chartIsPositive = computed(() => (portfolioData.value?.change_abs ?? 0) >=
 const changeAbsFormatted = computed(() => {
   const v = changeAbs.value
   if (v == null) return '—'
-  const sign = v >= 0 ? '+' : ''
-  return sign + new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 }).format(v)
+  const sign = v >= 0 ? '+' : '−'
+  return sign + new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 }).format(Math.abs(v))
 })
 
 const changePctFormatted = computed(() => {
   const v = changePct.value
   if (v == null) return ''
-  const sign = v >= 0 ? '+' : ''
-  return `(${sign}${v.toFixed(2)}%)`
+  const sign = v >= 0 ? '+' : '−'
+  return `(${sign}${Math.abs(v).toFixed(2)}%)`
 })
 
-const brokerageIcon = computed(() =>
-  props.account.brokerage_type === 'alpaca' ? 'show_chart' : 'savings'
-)
+// What the change is measured against. Kalshi's endpoint only reports the
+// day change, so it is always "Today".
+const RANGE_CAPTIONS = {
+  '1D': 'Today', '1W': 'Past week', '1M': 'Past month', '3M': 'Past 3 months',
+  YTD: 'Year to date', '1Y': 'Past year', ALL: 'All time',
+}
+const changeCaption = computed(() => {
+  if (activeDataIndex.value != null) {
+    const t = normalizedTimestamps.value[activeDataIndex.value]
+    if (!Number.isFinite(t)) return ''
+    const withTime = activeRange.value === '1D' || activeRange.value === '1W' || isKalshi.value
+    return new Date(t).toLocaleString('en-US', withTime
+      ? { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }
+      : { month: 'short', day: 'numeric', year: 'numeric' })
+  }
+  return isKalshi.value ? 'Today' : RANGE_CAPTIONS[activeRange.value] || ''
+})
 
 const brokerageLabel = computed(() => {
-  const t = props.account.brokerage_type === 'alpaca'
-    ? 'Alpaca'
-    : String(props.account.brokerage_type || 'Brokerage')
-  const paper = props.account.brokerage_type === 'alpaca' && props.account.alpaca_paper
-  return paper ? `${t} · Paper` : t
+  const type = String(props.account.brokerage_type || '').toLowerCase()
+  const name = type === 'alpaca' ? 'Alpaca' : type === 'kalshi' ? 'Kalshi' : (props.account.brokerage_type || 'Brokerage')
+  const paper = type === 'alpaca' ? props.account.alpaca_paper : /paper|demo/i.test(props.account.account_name || '')
+  return `${name} · ${paper ? 'Paper' : 'Live'}`
 })
+
+const lineColor = computed(() => (chartIsPositive.value ? '#4cc38a' : '#e5484d'))
 
 // ── ApexCharts config ─────────────────────────────────────────────────────────
 const chartSeries = computed(() => {
@@ -276,94 +296,95 @@ function onScrubPointerLeave() {
   scrubLinePercent.value = null
 }
 
-const chartOptions = computed(() => {
-  const positive = chartIsPositive.value
-  const lineColor = positive ? '#34d399' : '#f87171'
+// The hero has no axis, so fit the line (and the opening baseline) to the
+// plot instead of leaving Apex's rounded headroom as a dead band.
+const heroRange = computed(() => {
+  if (!isHero.value) return {}
+  const vals = (portfolioData.value?.values || []).map(Number).filter(Number.isFinite)
+  if (!vals.length) return {}
+  const base = Number(portfolioData.value?.open_value ?? vals[0])
+  let lo = vals[0], hi = vals[0]
+  for (const v of vals) { if (v < lo) lo = v; if (v > hi) hi = v }
+  if (Number.isFinite(base)) { lo = Math.min(lo, base); hi = Math.max(hi, base) }
+  const pad = (hi - lo) * 0.08 || Math.abs(hi) * 0.002 || 1
+  return { min: lo - pad, max: hi + pad, forceNiceScale: false }
+})
 
-  // Determine x-axis format based on range
+const usd = (n, digits = 2) => new Intl.NumberFormat('en-US', {
+  style: 'currency', currency: 'USD', minimumFractionDigits: digits, maximumFractionDigits: digits,
+}).format(n)
+
+const chartOptions = computed(() => {
+  const color = lineColor.value
+  const hero = isHero.value
   const range = activeRange.value
   const xFmt = (range === '1D')
     ? 'HH:mm'
     : (range === '1W' || range === '1M')
       ? 'MMM dd'
       : 'MMM yyyy'
+  const base = portfolioData.value?.open_value ?? portfolioData.value?.values?.[0]
+  const axisLabel = { colors: '#85858b', fontSize: '11px', fontFamily: 'inherit' }
 
   return {
     chart: {
       type: 'area',
       background: 'transparent',
+      fontFamily: 'Inter, sans-serif',
       toolbar: { show: false },
       zoom: { enabled: false },
       sparkline: { enabled: false },
-      animations: {
-        enabled: true,
-        easing: 'easeinout',
-        speed: 400,
-      },
+      animations: { enabled: true, easing: 'easeout', speed: 300 },
+      parentHeightOffset: 0,
     },
-    colors: [lineColor],
+    colors: [color],
     fill: {
       type: 'gradient',
       gradient: {
-        shadeIntensity: 1,
-        opacityFrom: 0.45,
-        opacityTo: 0.02,
-        stops: [0, 95],
         colorStops: [
-          { offset: 0,   color: lineColor, opacity: 0.35 },
-          { offset: 100, color: lineColor, opacity: 0.0  },
+          { offset: 0,   color, opacity: hero ? 0.12 : 0.10 },
+          { offset: 100, color, opacity: 0 },
         ],
       },
     },
-    stroke: {
-      curve: 'smooth',
-      width: 2,
-    },
+    stroke: { curve: 'smooth', width: hero ? 2 : 1.5 },
     dataLabels: { enabled: false },
     grid: {
       borderColor: 'rgba(255,255,255,0.05)',
-      strokeDashArray: 4,
+      strokeDashArray: 0,
       xaxis: { lines: { show: false } },
-      yaxis: { lines: { show: true } },
-      padding: { left: 0, right: 8 },
+      yaxis: { lines: { show: !hero } },
+      padding: { left: hero ? 0 : 4, right: hero ? 0 : 8, top: 0, bottom: 0 },
     },
+    // Dotted line at the period's opening value — above it is a gain,
+    // below it a loss.
+    annotations: Number.isFinite(base) ? {
+      yaxis: [{ y: base, borderColor: 'rgba(237,237,237,0.28)', strokeDashArray: 2, borderWidth: 1 }],
+    } : {},
     xaxis: {
       type: 'datetime',
-      labels: {
-        style: { colors: '#64748b', fontSize: '11px', fontFamily: 'inherit' },
-        datetimeUTC: false,
-        format: xFmt,
-      },
+      labels: { show: !hero, style: axisLabel, datetimeUTC: false, format: xFmt },
       axisBorder: { show: false },
       axisTicks: { show: false },
-      crosshairs: {
-        stroke: { color: 'rgba(255,255,255,0.15)', width: 1, dashArray: 4 },
-      },
+      crosshairs: { show: false },
       tooltip: { enabled: false },
     },
     yaxis: {
+      show: !hero,
+      opposite: true,
+      ...heroRange.value,
       labels: {
-        style: { colors: '#64748b', fontSize: '11px', fontFamily: 'inherit' },
-        offsetX: -20,
-        minWidth: 64,
+        style: axisLabel,
         formatter: (v) => {
           const n = Number(v)
-          if (!Number.isFinite(n)) return '$0.00'
-          return new Intl.NumberFormat('en-US', {
-            style: 'currency',
-            currency: 'USD',
-            minimumFractionDigits: 0,
-            maximumFractionDigits: 2,
-          }).format(n)
+          if (!Number.isFinite(n)) return ''
+          return usd(n, Math.abs(n) >= 1000 ? 0 : 2)
         },
       },
-      tickAmount: 4,
+      tickAmount: 3,
     },
     tooltip: { enabled: false },
-    markers: {
-      size: 0,
-      hover: { size: 4, strokeColors: lineColor, strokeWidth: 2 },
-    },
+    markers: { size: 0, hover: { size: 0 } },
     theme: { mode: 'dark' },
   }
 })
@@ -372,71 +393,52 @@ onMounted(() => loadHistory(activeRange.value))
 </script>
 
 <template>
-  <div class="glass-card rounded-2xl overflow-hidden flex flex-col">
-
-    <!-- Card header: brokerage info + value + change -->
-    <div class="px-4 sm:px-6 pt-4 sm:pt-5 pb-4">
-      <!-- Top row: brokerage label + status -->
-      <div class="flex items-start justify-between gap-2 mb-3">
-        <div class="flex items-center gap-2">
-          <span class="material-symbols-outlined text-primary text-[18px]">{{ brokerageIcon }}</span>
-          <span class="text-[11px] sm:text-xs font-semibold text-slate-400 uppercase tracking-widest">{{ brokerageLabel }}</span>
-        </div>
-        <div
-          class="flex items-center gap-1.5 text-[11px] sm:text-xs font-medium"
-          :class="account.status === 'active' ? 'text-emerald-400' : 'text-red-400'"
-        >
-          <div class="size-1.5 rounded-full" :class="account.status === 'active' ? 'bg-emerald-400' : 'bg-red-400'"></div>
-          {{ account.status }}
-        </div>
+  <div
+    class="flex flex-col min-w-0"
+    :class="isHero ? '' : 'rounded-xl border border-white/[0.07] bg-surface overflow-hidden'"
+  >
+    <!-- Header: account, value, change -->
+    <div :class="isHero ? 'pb-4' : 'px-5 pt-5 pb-3'">
+      <div class="flex items-baseline justify-between gap-3">
+        <p class="min-w-0 truncate" :class="isHero ? 'text-sm text-slate-400' : 'text-sm font-medium text-slate-200'">
+          <span v-if="isHero" class="text-slate-200 font-medium">{{ account.account_name }}</span>
+          <template v-else>{{ account.account_name }}</template>
+        </p>
+        <span v-if="account.status && account.status !== 'active'" class="shrink-0 text-xs text-loss">{{ account.status }}</span>
       </div>
+      <p class="text-xs text-slate-500 mt-1">{{ brokerageLabel }}</p>
 
-      <!-- Account name -->
-      <p class="text-sm font-medium text-slate-300 mb-3">{{ account.account_name }}</p>
-
-      <!-- Value + change -->
-      <div v-if="portfolioData && !loading" class="flex flex-wrap items-end gap-2 sm:gap-3">
-        <span class="text-xl sm:text-2xl font-bold text-slate-100 tabular-nums break-all">{{ currentValue }}</span>
-        <div
-          class="flex items-center gap-1 text-xs sm:text-sm font-semibold mb-0.5"
-          :class="isPositive ? 'text-emerald-400' : 'text-red-400'"
-        >
-          <span class="material-symbols-outlined text-[16px]">{{ isPositive ? 'trending_up' : 'trending_down' }}</span>
-          <span>{{ changeAbsFormatted }} {{ changePctFormatted }}</span>
-        </div>
+      <div v-if="portfolioData && !loading" :class="isHero ? 'mt-4' : 'mt-3'">
+        <p
+          class="font-medium text-slate-100 tabular-nums leading-none"
+          :class="isHero ? 'text-[44px] tracking-[-0.02em]' : 'text-2xl'"
+        >{{ currentValue }}</p>
+        <p class="mt-2 text-sm tabular-nums">
+          <span :class="isPositive ? 'text-gain' : 'text-loss'">{{ changeAbsFormatted }} {{ changePctFormatted }}</span>
+          <span class="text-slate-500 ml-1.5">{{ changeCaption }}</span>
+        </p>
       </div>
-      <div v-else-if="loading" class="h-8 w-40 rounded-lg bg-surface animate-pulse"></div>
-      <div v-else-if="error" class="text-xs text-red-400">{{ error }}</div>
-
-      <!-- Range tabs. Hidden for Kalshi: its portfolio endpoint returns one
-           fixed snapshot series and takes no range, so the buttons would offer
-           a filter that does nothing. -->
-      <div v-if="!isKalshi" class="flex flex-wrap items-center gap-1 mt-4">
-        <button
-          v-for="r in RANGES"
-          :key="r"
-          @click="setRange(r)"
-          class="px-2 py-1 sm:px-2.5 rounded-md text-[11px] sm:text-xs font-semibold transition-all"
-          :class="activeRange === r
-            ? 'bg-primary/15 text-primary'
-            : 'text-slate-500 hover:text-slate-300'"
-        >
-          {{ r }}
-        </button>
+      <div v-else-if="loading" :class="isHero ? 'mt-4 space-y-3' : 'mt-3 space-y-2'">
+        <div class="rounded-md bg-raised" :class="isHero ? 'h-11 w-64' : 'h-6 w-36'"></div>
+        <div class="h-4 w-40 rounded bg-raised"></div>
       </div>
+      <p v-else-if="error" class="mt-3 text-sm text-loss">{{ error }}</p>
     </div>
 
-    <!-- Chart area -->
-    <div class="relative flex-1 min-h-[170px] sm:min-h-[180px] px-1 sm:px-2 pb-3">
+    <!-- Chart -->
+    <div
+      class="relative"
+      :class="isHero ? 'h-[300px]' : 'h-[180px] px-1'"
+    >
       <div
         v-if="activeDataIndex != null"
-        class="absolute top-2 bottom-3 w-px bg-primary/40 pointer-events-none z-20"
+        class="absolute top-0 bottom-0 w-px bg-white/30 pointer-events-none z-20"
         :style="{ left: `${scrubLineLeft}%` }"
       ></div>
 
       <div
         v-if="portfolioData && portfolioData.timestamps?.length && !loading"
-        class="absolute inset-0 z-10 cursor-ew-resize touch-none"
+        class="absolute inset-0 z-10 cursor-crosshair touch-none"
         @pointerdown="onScrubPointerDown"
         @pointermove="onScrubPointerMove"
         @pointerup="onScrubPointerUp"
@@ -444,28 +446,39 @@ onMounted(() => loadHistory(activeRange.value))
         @pointerleave="onScrubPointerLeave"
       ></div>
 
-      <!-- Loading skeleton -->
-      <div v-if="loading" class="absolute inset-0 flex items-center justify-center">
-        <span class="material-symbols-outlined animate-spin text-slate-600 text-3xl">progress_activity</span>
-      </div>
+      <div v-if="loading" class="absolute inset-0"></div>
 
-      <!-- No data -->
       <div v-else-if="!portfolioData || !portfolioData.timestamps?.length" class="absolute inset-0 flex items-center justify-center">
-        <div class="text-center">
-          <span class="material-symbols-outlined text-3xl text-slate-700">bar_chart_4_bars</span>
-          <p class="text-xs text-slate-600 mt-2">{{ error || 'No data for this range' }}</p>
-        </div>
+        <p class="text-sm text-slate-500">{{ error || 'No data for this range' }}</p>
       </div>
 
-      <!-- Chart -->
       <VueApexCharts
         v-else
         type="area"
-        height="180"
+        :height="isHero ? 300 : 180"
         :options="chartOptions"
         :series="chartSeries"
       />
     </div>
 
+    <!-- Range. Hidden for Kalshi: its portfolio endpoint returns one fixed
+         snapshot series and takes no range, so the buttons would offer a
+         filter that does nothing. -->
+    <div
+      v-if="!isKalshi"
+      class="flex items-center gap-1"
+      :class="isHero ? 'mt-4 pb-4 border-b border-white/[0.06]' : 'px-4 py-3 border-t border-white/[0.05]'"
+    >
+      <button
+        v-for="r in RANGES"
+        :key="r"
+        @click="setRange(r)"
+        class="h-8 px-3 rounded-md text-xs font-medium tabular-nums transition-colors"
+        :class="activeRange === r ? 'bg-white/[0.06]' : 'text-slate-500 hover:text-slate-200'"
+        :style="activeRange === r ? { color: lineColor } : null"
+      >
+        {{ r }}
+      </button>
+    </div>
   </div>
 </template>

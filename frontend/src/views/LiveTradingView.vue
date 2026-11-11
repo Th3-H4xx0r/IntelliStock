@@ -1184,7 +1184,7 @@ watch(
                       <span class="text-base font-black text-slate-100 tracking-wide">{{ t.symbol || '' }}</span>
                       <span
                         v-if="isOptionRow(t)"
-                        class="px-1.5 py-0.5 rounded text-[9px] font-bold border uppercase tracking-wider text-violet-300 bg-violet-500/10 border-violet-500/20"
+                        class="px-1.5 py-0.5 rounded text-[9px] font-bold border uppercase tracking-wider text-zinc-200 bg-zinc-500/10 border-zinc-500/20"
                       >Option</span>
                     </div>
                     <div v-if="isOptionRow(t)" class="text-[10px] text-slate-500 mt-0.5">{{ describeOption(t) }}</div>
@@ -1238,7 +1238,7 @@ watch(
                       <span class="text-base font-black text-slate-100 tracking-wide">{{ p.symbol }}</span>
                       <span
                         v-if="isOptionRow(p)"
-                        class="px-1.5 py-0.5 rounded text-[9px] font-bold border uppercase tracking-wider text-violet-300 bg-violet-500/10 border-violet-500/20"
+                        class="px-1.5 py-0.5 rounded text-[9px] font-bold border uppercase tracking-wider text-zinc-200 bg-zinc-500/10 border-zinc-500/20"
                       >Option</span>
                       <span
                         v-if="isOptionRow(p) && isShortPosition(p)"

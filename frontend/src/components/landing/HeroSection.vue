@@ -266,18 +266,18 @@ onUnmounted(() => {
           <!-- Badge -->
           <div class="mb-7">
             <div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full
-                        bg-primary/10 border border-primary/20 text-primary
+                        bg-brand/10 border border-brand/20 text-brand
                         text-[11px] font-bold uppercase tracking-widest">
               <span class="relative flex h-2 w-2">
-                <span class="animate-ping absolute inset-0 rounded-full bg-primary opacity-75"></span>
-                <span class="relative rounded-full h-2 w-2 bg-primary"></span>
+                <span class="animate-ping absolute inset-0 rounded-full bg-brand opacity-75"></span>
+                <span class="relative rounded-full h-2 w-2 bg-brand"></span>
               </span>
               Integrated with Alpaca
             </div>
           </div>
 
           <!-- Headline -->
-          <h1 class="gradient-text font-black tracking-tight leading-[1.08] mx-auto"
+          <h1 class="mk-gradient-text font-black tracking-tight leading-[1.08] mx-auto"
               style="font-size: clamp(2.5rem, 6.6vw, 5.2rem); max-width: 840px;">
             The Intelligent Layer<br />for Quantitative Trading.
           </h1>
@@ -299,7 +299,7 @@ onUnmounted(() => {
 
           <!-- CTAs -->
           <div class="mt-8 flex flex-col sm:flex-row items-center justify-center gap-4">
-            <button class="px-8 py-4 bg-primary text-background-dark font-bold rounded-xl
+            <button class="px-8 py-4 bg-brand text-background-dark font-bold rounded-xl
                            flex items-center gap-2 group
                            transition-all hover:shadow-[0_0_32px_rgba(0,225,255,0.4)]
                            hover:scale-[1.02] active:scale-[0.98]">
@@ -307,7 +307,7 @@ onUnmounted(() => {
               <span class="material-symbols-outlined group-hover:translate-x-1 transition-transform">arrow_forward</span>
             </button>
             <button class="px-8 py-4 border border-border-subtle rounded-xl text-slate-400
-                           font-semibold hover:border-primary/40 hover:text-slate-200 transition-all">
+                           font-semibold hover:border-brand/40 hover:text-slate-200 transition-all">
               View Demo
             </button>
           </div>
@@ -319,7 +319,7 @@ onUnmounted(() => {
            class="absolute bottom-9 left-1/2 -translate-x-1/2 z-20
                   flex flex-col items-center gap-2 pointer-events-none">
         <span class="text-[9px] font-bold uppercase tracking-widest text-slate-600">Scroll</span>
-        <div class="w-px h-8 bg-gradient-to-b from-primary/40 to-transparent animate-pulse"></div>
+        <div class="w-px h-8 bg-gradient-to-b from-brand/40 to-transparent animate-pulse"></div>
       </div>
 
       <!-- ── Spotlight carousel stack ─────────────────────────────────────── -->
