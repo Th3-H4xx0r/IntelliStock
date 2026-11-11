@@ -449,3 +449,150 @@ def test_after_a_rejected_leg_a_hold_inside_the_band_does_not_rebalance_the_book
         SESSIONS.pop()
     assert len(client.submitted) == n
     assert _act_row(store, day="2026-11-10")["reason"] == "hold"
+
+
+# ------------------------------------------------------------- roles
+
+def _executor(store, client, clock, **kw):
+    """An executor has no rule of its own: no ``next_fn`` is injected."""
+    return fm.Mirror(store=store, client=client, prices_fn=lambda syms: {s: 100.0 for s in syms},
+                     brokerage_id=fm.DEFAULT_BROKERAGE_ID, frozen_dir="/nope", data_dir="/nope",
+                     now_fn=lambda: clock[0], sleep_fn=lambda s: None, role="executor",
+                     own_instance_id="f14-paper", **kw)
+
+
+def _signal_row(store, day="2026-11-09"):
+    return store.get(fm.TABLE, f"f14-paper|{day}|signal")
+
+
+def test_the_signal_role_publishes_once_per_session_and_never_orders(store):
+    clock = _at(15, 0)                                      # 10:00 ET, market open
+    client = FakeClient(lambda: clock[0])
+    m = _mirror(store, client, clock, role="signal", own_instance_id="f14-paper")
+    assert m.step() == "signal_published"
+    row = _signal_row(store)
+    assert row["frame_last_close"] == "2026-11-06" and row["next"] == HOLD and row["action"] == "HOLD"
+    clock[0] = dt.datetime(2026, 11, 9, 20, 45, tzinfo=UTC)  # inside the act window
+    assert m.step() == "signal_published"
+    assert client.submitted == [] and len(m.next_calls) == 1
+    assert _act_row(store) is None and not (store.get(fm.TABLE, fm.STATE_ID) or {}).get("last_act_session")
+
+
+def test_a_restarted_signal_service_does_not_rerun_the_rule(store):
+    clock = _at(15, 0)
+    client = FakeClient(lambda: clock[0])
+    _mirror(store, client, clock, role="signal").step()
+    again = _mirror(store, client, clock, role="signal")
+    assert again.step() == "signal_published" and again.next_calls == []
+
+
+def test_the_signal_role_does_not_publish_a_stale_frame(store):
+    clock = _at(15, 0)
+    client = FakeClient(lambda: clock[0])
+    m = _mirror(store, client, clock, role="signal", last=dt.date(2026, 11, 5))
+    assert m.step() == "signal_stale"
+    assert _signal_row(store) is None
+
+
+def test_the_signal_role_tolerates_its_own_instance_but_no_other(store):
+    store.insert("Instances", {"id": "f14-paper", "brokerage_id": fm.DEFAULT_BROKERAGE_ID, "runCommand": True})
+    clock = _at(15, 0)
+    client = FakeClient(lambda: clock[0])
+    _mirror(store, client, clock, role="signal", own_instance_id="f14-paper").check_account()
+    store.insert("Instances", {"id": "test", "brokerage_id": fm.DEFAULT_BROKERAGE_ID, "runCommand": True})
+    with pytest.raises(fm.MirrorRefused, match=r"running instance.*\['test'\]"):
+        _mirror(store, client, clock, role="signal", own_instance_id="f14-paper").check_account()
+
+
+def test_the_full_role_still_refuses_the_lane_instance(store):
+    """Two traders on one account: `full` must not run beside the instance."""
+    store.insert("Instances", {"id": "f14-paper", "brokerage_id": fm.DEFAULT_BROKERAGE_ID, "runCommand": True})
+    clock = _at(20, 45)
+    client = FakeClient(lambda: clock[0])
+    with pytest.raises(fm.MirrorRefused, match="running instance"):
+        _mirror(store, client, clock, own_instance_id="f14-paper").step()
+
+
+def test_the_executor_trades_from_the_signal_row(store):
+    store.insert("Instances", {"id": "f14-paper", "brokerage_id": fm.DEFAULT_BROKERAGE_ID, "runCommand": True})
+    clock = _at(15, 0)
+    client = FakeClient(lambda: clock[0], positions=_pos({"SPY": 0.9, "MTUM": 0.3, "IWD": 0.3, "DBMF": 0.418}))
+    store.insert(fm.TABLE, {"id": fm.STATE_ID, "mirror": fm.MIRROR, "synced": True})
+    _mirror(store, client, clock, nxt=TRADE, role="signal", own_instance_id="f14-paper").step()
+    ex = _executor(store, client, clock)
+    assert ex.step() == "waiting" and client.submitted == []
+    clock[0] = dt.datetime(2026, 11, 9, 20, 40, 2, tzinfo=UTC)
+    assert ex.step() == "acted"
+    assert [(r.symbol, r.side.value) for r in client.submitted] == [("MTUM", "sell"), ("SPY", "sell"), ("IWD", "buy")]
+    row = _act_row(store)
+    assert row["reason"] == "trade" and row["role"] == "executor"
+    clock[0] += dt.timedelta(minutes=5)
+    assert ex.step() == "already_acted" and len(client.submitted) == 3
+
+
+def test_the_executor_without_a_signal_row_trades_nothing_and_says_why(store):
+    clock = _at(20, 45)
+    client = FakeClient(lambda: clock[0])
+    ex = _executor(store, client, clock)
+    assert ex.step() == "not_acted"
+    assert client.submitted == []
+    row = _act_row(store)
+    assert row["status"] == "pending" and "no signal row" in row["error"]
+    # The signal lands a minute later: no cooldown stands between the row and the trade.
+    store.insert(fm.TABLE, {"id": "f14-paper|2026-11-09|signal", "frame_last_close": "2026-11-06", "next": HOLD})
+    clock[0] += dt.timedelta(minutes=1)
+    assert ex.step() == "acted" and len(client.submitted) == 4
+
+
+def test_the_executor_refuses_yesterdays_signal(store):
+    store.insert(fm.TABLE, {"id": "f14-paper|2026-11-09|signal", "frame_last_close": "2026-11-05", "next": TRADE})
+    clock = _at(20, 45)
+    client = FakeClient(lambda: clock[0])
+    assert _executor(store, client, clock).step() == "not_acted"
+    assert client.submitted == [] and "stale frame" in _act_row(store)["error"]
+
+
+def test_the_executor_window_is_wider_only_when_asked(store):
+    store.insert(fm.TABLE, {"id": "f14-paper|2026-11-09|signal", "frame_last_close": "2026-11-06", "next": HOLD})
+    clock = _at(20, 37)                                     # 23 minutes before the close
+    client = FakeClient(lambda: clock[0])
+    assert _executor(store, client, clock).step() == "waiting"
+    assert _executor(store, client, clock, act_minutes=25).step() == "acted"
+
+
+def test_the_executor_boots_without_a_frozen_dir_and_writes_no_close_row(store):
+    clock = _at(23, 45)                                     # 18:45 ET, after the snapshot time
+    client = FakeClient(lambda: clock[0])
+    ex = _executor(store, client, clock)
+    ex.boot()                                               # frozen_dir="/nope": not read
+    assert ex.step() == "closed"
+    assert _act_row(store, kind="close") is None
+
+
+def test_the_executor_and_a_full_mirror_share_the_at_most_once_state(store):
+    store.insert(fm.TABLE, {"id": "f14-paper|2026-11-09|signal", "frame_last_close": "2026-11-06", "next": HOLD})
+    clock = _at(20, 45)
+    client = FakeClient(lambda: clock[0])
+    _mirror(store, client, clock).step()                    # the old service synced today
+    assert len(client.submitted) == 4
+    assert _executor(store, client, clock).step() == "already_acted"
+    assert len(client.submitted) == 4
+
+
+@pytest.mark.parametrize("kw", [dict(account_number="PA37JPXGU196"),
+                                dict(brokerage_id="1169c5e6-3308-438b-a6ed-406b55328d51")])
+def test_the_off_limits_account_cannot_be_configured(store, kw):
+    args = dict(store=store, client=None, prices_fn=None, brokerage_id=fm.DEFAULT_BROKERAGE_ID,
+                frozen_dir="/nope", data_dir="/nope")
+    with pytest.raises(fm.MirrorRefused, match="off limits"):
+        fm.Mirror(**{**args, **kw})
+
+
+def test_the_service_role_comes_from_the_environment(monkeypatch):
+    monkeypatch.delenv("F14_MIRROR_ROLE", raising=False)
+    assert fm.env_role() == "full"
+    monkeypatch.setenv("F14_MIRROR_ROLE", " Signal ")
+    assert fm.env_role() == "signal"
+    monkeypatch.setenv("F14_MIRROR_ROLE", "executor")       # only the lane executes
+    with pytest.raises(fm.MirrorRefused):
+        fm.env_role()

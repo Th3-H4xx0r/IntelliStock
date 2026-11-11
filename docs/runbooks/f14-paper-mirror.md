@@ -11,6 +11,43 @@ The scored forward test is `score_forward.py`, which needs no broker. The mirror
 measures what the scorecard cannot: real fills, DBMF liquidity, margin, and the
 trading days the data feed misses.
 
+## Two halves since 2026-11-11
+
+The mirror is now an IntelliStock strategy with its own instance.
+
+| half | where | job |
+|---|---|---|
+| **signal** | `f14-mirror` compose service, `F14_MIRROR_ROLE=signal` (the default) | Verifies the frozen dir, runs the frozen rule once per session after the open, publishes `f14-paper\|YYYY-MM-DD\|signal`, writes the `close` rows. Never orders. |
+| **executor** | instance `f14-paper`, strategy lane `strategy_f14` (`backend/strategies/strategy_f14.py`) | On the scheduler tick 20 minutes before the close it reads the signal row and rebalances. Start/Stop on the Instances tab is the trading switch. |
+
+Why two: the frozen rule lives in `research/`, outside the backend image, so an
+instance container cannot run it; and the engine's own order gates refuse every
+opening order on negative cash, so a 1.4-2.0x book cannot go through them. The
+lane therefore always returns no decisions to the broker and sends its orders
+through `forward_mirror.Mirror` (role `executor`): the same order code, safety
+checks, `f14m-` client ids and ledger as before. The instance's own order
+counters stay at zero; the ledger and the brokerage positions are the record.
+
+Both halves share the `f14-paper|state` row, so "at most once per session"
+holds across a role change.
+
+- Create or repair the doc and instance: `python3 scripts/f14_instance_setup.py [--start]`.
+- The lane has no backtest. A backtest tick passes no scheduler mode and the
+  lane returns nothing. The scored test is `score_forward.py`.
+- The executor acts on ONE tick a day (12:40 PT; 09:40 PT on a half day). If
+  the instance is down then, or the signal row is missing, that session is
+  skipped and the next session's 5-pt drift check repairs it.
+- The signal service tolerates exactly one running instance on the brokerage:
+  `f14-paper` (`F14_MIRROR_INSTANCE_ID`). Any other still refuses.
+- **Rollback to the single service:** stop the `f14-paper` instance, set
+  `F14_MIRROR_ROLE=full`, redeploy. `full` refuses while any instance runs on
+  the brokerage, so the two can never trade together.
+
+The sections below describe the trading logic, which is unchanged. Read
+"the mirror" as "the executor" for orders and "the signal service" for the
+frozen checks and close rows. The executor's window opens 25 minutes before the
+close (`act_minutes`), not 20, so the 12:40 tick is inside it.
+
 ## What it does
 
 - **Boot.** It refuses to trade until three checks pass:
@@ -57,6 +94,20 @@ done before its first order goes out, so a crash never re-sends an order; the
 next session's drift check repairs it instead. Gross is 1.4–1.9x, financed on
 the paper account's margin.
 
+### What the engine can still do on the instance
+
+The lane returns no decisions, so the engine never buys, sells or trims. It can
+still **cancel** open orders it did not place, `f14m-` ones included:
+
+- the risk ladder's kill rung (default 12% below the equity high-water mark,
+  about an 8% market fall at this gross) cancels open BUY orders once, on the
+  transition. A cancelled leg is repaired by the next session's drift check;
+- a `halt` command from the UI or chatbot cancels every open order;
+- the alpha watchdog sidecar, if `alpha_watchdog_enabled` is ever set on the
+  instance. Leave it off.
+
+Keep the strategy document to this one lane, with no sleeve or LLM keys.
+
 ## Safety
 
 The mirror refuses (`MirrorRefused`, a `refused` or boot row) if any of these
@@ -90,6 +141,7 @@ Read-only Postgres (or `store`): table `ForwardMirrorLedger`, filtered on
 |---|---|
 | `f14-paper\|state` | `synced`, `last_act_session`, `last_close_session` |
 | `f14-paper\|YYYY-MM-DD\|act` | `action`, `reason` (`trade`/`initial_sync`/`drift_repair`/`hold`), `orders` with statuses, `model_target`, `account_weights` |
+| `f14-paper\|YYYY-MM-DD\|signal` | the frozen rule's answer for that session: `frame_last_close`, `action`, `next` (what the executor trades from) |
 | `f14-paper\|YYYY-MM-DD\|close` | `equity`, `account_weights`, `model_current`, `deviation`, `next_action` |
 | `f14-paper\|YYYY-MM-DD\|error` | a failure after the session acted |
 | `f14-paper\|YYYY-MM-DD\|dry` | a dry run's plan (never overwrites `act`) |
@@ -105,6 +157,10 @@ Set these in the deployment's environment, then redeploy:
 - `F14_MIRROR_DRY_RUN=1`: log the plan in `act` rows, send nothing. A dry run
   spends its own `last_dry_session` key, so switching it off trades the same
   day.
+- `F14_MIRROR_ROLE`: `signal` (default) or `full`; see "Two halves".
+- Lane config (strategy doc, not environment): `strategy_f14_enabled`,
+  `dry_run`, `act_minutes`, and the pinned `brokerage_id` / `account_number` /
+  `instance_id`.
 - `F14_MIRROR_BROKERAGE_ID`: a different paper brokerage row. It must still
   pass every safety check.
 
