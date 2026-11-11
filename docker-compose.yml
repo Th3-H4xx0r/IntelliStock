@@ -403,8 +403,10 @@ services:
   # Use CLI: nexus start | nexus stop | nexus status. Or API: GET/POST /nexus/control, GET /nexus/status. Or Discord: !nexus start|stop|status.
 
   f14-mirror:
-    # Forward-test paper mirror (backend/forward_mirror.py): trades the frozen
-    # F14_F rule on the "TMasters Swing" paper account (PA3TRLBV6ZNZ), never any other.
+    # Forward-test paper mirror (backend/forward_mirror.py): runs the frozen
+    # F14_F rule for the "TMasters Swing" paper account (PA3TRLBV6ZNZ), never any other.
+    # Since 2026-11-11 it only publishes the daily signal; the f14-paper
+    # instance's strategy_f14 lane places the orders (see F14_MIRROR_ROLE).
     # It refuses to trade unless every file in the read-only frozen dir matches
     # FROZEN.md's SHA-256 block and repro_check.py PASSes in this image.
     # Off switch: F14_MIRROR_ENABLED=0. Runbook: docs/runbooks/f14-paper-mirror.md
@@ -429,6 +431,11 @@ services:
       - RETHINKDB_PORT=28015
       - F14_MIRROR_ENABLED=${F14_MIRROR_ENABLED:-1}
       - F14_MIRROR_DRY_RUN=${F14_MIRROR_DRY_RUN:-0}
+      # signal: run the frozen rule and publish it; the f14-paper instance
+      # (strategy_f14 lane) does the trading. full: this service trades by
+      # itself, as before 2026-11-11 (stop the instance first).
+      - F14_MIRROR_ROLE=${F14_MIRROR_ROLE:-signal}
+      - F14_MIRROR_INSTANCE_ID=${F14_MIRROR_INSTANCE_ID:-f14-paper}
     deploy:
       resources:
         limits:

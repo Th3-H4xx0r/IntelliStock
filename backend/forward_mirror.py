@@ -35,6 +35,18 @@ Ledger: table ``ForwardMirrorLedger``. Row ids:
 after the session acted), ``f14-paper|boot|<utc iso>``, and the state row
 ``f14-paper|state``.
 
+Roles (``F14_MIRROR_ROLE``). ``full`` is everything above in one process.
+The other two split it so an IntelliStock instance can own the trading:
+
+  * ``signal`` (the compose service, which has the frozen mount): verifies the
+    frozen dir, runs the rule once per session and publishes the result as
+    ``f14-paper|<YYYY-MM-DD>|signal``, writes the close rows, never orders;
+  * ``executor`` (the ``strategy_f14`` lane inside an instance container, which
+    has no frozen mount): reads that row in place of running the rule and does
+    the trading. It never runs a rule of its own.
+
+Both use the same state row, so the at-most-once guarantee spans a role change.
+
 Runbook: docs/runbooks/f14-paper-mirror.md
 """
 from __future__ import annotations
@@ -66,6 +78,12 @@ STATE_ID = f"{MIRROR}|state"
 # traded from here.
 DEFAULT_BROKERAGE_ID = "b0d7dc67-f12b-4959-83db-0d324c6bc517"
 DEFAULT_ACCOUNT_NUMBER = "PA3TRLBV6ZNZ"
+#: Operator ruling 2026-11-09: never bind anything to this account, whatever the config says.
+FORBIDDEN_ACCOUNT_NUMBERS = frozenset({"PA37JPXGU196"})
+FORBIDDEN_BROKERAGE_IDS = frozenset({"1169c5e6-3308-438b-a6ed-406b55328d51"})
+#: The instance that hosts the ``strategy_f14`` lane (scripts/f14_instance_setup.py).
+DEFAULT_INSTANCE_ID = "f14-paper"
+ROLES = ("full", "signal", "executor")
 ORDER_PREFIX = "f14m-"
 
 #: Frozen book key -> ETF. ``tbill`` is the residual cash (negative = margin).
@@ -278,11 +296,12 @@ def plan_orders(target: dict, equity: float, positions: dict, prices: dict, frac
     return sells + buys
 
 
-def in_act_window(is_open: bool, now: dt.datetime, next_close: dt.datetime) -> bool:
+def in_act_window(is_open: bool, now: dt.datetime, next_close: dt.datetime,
+                  act_minutes: float = ACT_MINUTES) -> bool:
     if not is_open:
         return False
     minutes = (next_close - now).total_seconds() / 60.0
-    return LATEST_ACT_MINUTES <= minutes <= ACT_MINUTES
+    return LATEST_ACT_MINUTES <= minutes <= act_minutes
 
 
 # ---------------------------------------------------------------- the runner
@@ -291,8 +310,21 @@ def _utc_iso(t: Optional[dt.datetime] = None) -> str:
     return (t or dt.datetime.now(dt.timezone.utc)).astimezone(dt.timezone.utc).isoformat(timespec="seconds")
 
 
-def _log(msg: str) -> None:
+def _print_log(msg: str) -> None:
     print(f"[f14-mirror] {_utc_iso()} {msg}", flush=True)
+
+
+_log_sink: Callable = _print_log
+
+
+def set_log_sink(fn: Optional[Callable]) -> None:
+    """Send the mirror's log lines somewhere else (the lane uses the instance log)."""
+    global _log_sink
+    _log_sink = fn or _print_log
+
+
+def _log(msg: str) -> None:
+    _log_sink(msg)
 
 
 def _order_fields(o) -> dict:
@@ -311,7 +343,19 @@ class Mirror:
     def __init__(self, *, store, client, prices_fn: Callable, brokerage_id: str, frozen_dir: str,
                  data_dir: str, account_number: str = DEFAULT_ACCOUNT_NUMBER, dry_run: bool = False,
                  next_fn: Optional[Callable] = None,
-                 now_fn: Callable = lambda: dt.datetime.now(dt.timezone.utc), sleep_fn: Callable = time.sleep):
+                 now_fn: Callable = lambda: dt.datetime.now(dt.timezone.utc), sleep_fn: Callable = time.sleep,
+                 role: str = "full", own_instance_id: Optional[str] = None,
+                 act_minutes: float = ACT_MINUTES):
+        if role not in ROLES:
+            raise ValueError(f"unknown mirror role {role!r}")
+        if account_number in FORBIDDEN_ACCOUNT_NUMBERS or brokerage_id in FORBIDDEN_BROKERAGE_IDS:
+            raise MirrorRefused("that account is off limits")
+        self.role = role
+        # The one instance allowed to run on this brokerage: the lane's own host.
+        # ``full`` trades by itself, so it tolerates none.
+        self.own_instance_id = own_instance_id if role != "full" else None
+        self.act_minutes = act_minutes
+        self._signal_session = None     # the session whose signal row is known to exist
         self.store = store
         self.client = client
         self.prices_fn = prices_fn
@@ -320,7 +364,10 @@ class Mirror:
         self.data_dir = data_dir
         self.account_number = account_number
         self.dry_run = dry_run
-        self.next_fn = next_fn or functools.partial(frozen_next, frozen_dir, os.path.join(data_dir, "cache"))
+        if next_fn is None:
+            next_fn = (self._signal_next if role == "executor"
+                       else functools.partial(frozen_next, frozen_dir, os.path.join(data_dir, "cache")))
+        self.next_fn = next_fn
         self.now = now_fn
         self.sleep = sleep_fn
         self._last_fetch_attempt = None
@@ -371,7 +418,7 @@ class Mirror:
         if getattr(acct, "trading_blocked", False) or getattr(acct, "account_blocked", False):
             raise MirrorRefused("account is blocked")
         bound = [i.get("id") for i in self.store.run(self.store.filter("Instances", {"brokerage_id": self.brokerage_id}))
-                 if i.get("runCommand")]
+                 if i.get("runCommand") and i.get("id") != self.own_instance_id]
         if bound:
             raise MirrorRefused(f"running instance(s) bound to this brokerage: {bound}")
         from alpaca.trading.enums import QueryOrderStatus
@@ -383,18 +430,20 @@ class Mirror:
         return acct
 
     def boot(self) -> None:
-        problems = verify_frozen(self.frozen_dir)
-        if problems:
-            raise MirrorRefused("frozen dir: " + "; ".join(problems[:5]))
-        ok, tail = run_repro(self.frozen_dir)
-        if not ok:
-            raise MirrorRefused("repro_check did not PASS in this image: " + tail)
+        tail = "not run: the signal role verifies the frozen dir"
+        if self.role != "executor":     # the executor has no frozen mount and runs no rule
+            problems = verify_frozen(self.frozen_dir)
+            if problems:
+                raise MirrorRefused("frozen dir: " + "; ".join(problems[:5]))
+            ok, tail = run_repro(self.frozen_dir)
+            if not ok:
+                raise MirrorRefused("repro_check did not PASS in this image: " + tail)
         acct = self.check_account()
         assets = {}
         for s in sorted(UNIVERSE):
             a = self.client.get_asset(s)
             assets[s] = {k: bool(getattr(a, k, False)) for k in ("tradable", "fractionable", "marginable")}
-        self.record(f"{MIRROR}|boot|{_utc_iso(self.now())}", "boot", ok=True, repro=tail,
+        self.record(f"{MIRROR}|boot|{_utc_iso(self.now())}", "boot", ok=True, repro=tail, role=self.role,
                     equity=float(acct.equity), multiplier=float(getattr(acct, "multiplier", 1) or 1),
                     assets=assets)
 
@@ -412,22 +461,31 @@ class Mirror:
         return bool(clock.is_open) and clock.timestamp < deadline
 
     # -- one loop iteration -------------------------------------------------
-    def step(self) -> None:
+    def step(self) -> str:
+        """One iteration. Returns a short word for what it did, for the caller's log."""
         now = self.now()
         today = now.astimezone(ET).date()
         clock = self.client.get_clock()
         st = self.state()
-        if in_act_window(clock.is_open, clock.timestamp, clock.next_close):
-            if st.get(self._session_key) != today.isoformat():
-                deadline = clock.next_close - dt.timedelta(minutes=LATEST_ACT_MINUTES)
-                try:
-                    self.act(today, deadline)
-                except MirrorRefused:
-                    raise
-                except Exception as e:
-                    self.note_error(today, f"{type(e).__name__}: {e}")
-                    raise
-            return
+        if self.role == "signal":
+            if clock.is_open:
+                return self.publish_signal(today)
+        elif in_act_window(clock.is_open, clock.timestamp, clock.next_close, self.act_minutes):
+            if st.get(self._session_key) == today.isoformat():
+                return "already_acted"
+            deadline = clock.next_close - dt.timedelta(minutes=LATEST_ACT_MINUTES)
+            try:
+                self.act(today, deadline)
+            except MirrorRefused:
+                raise
+            except Exception as e:
+                self.note_error(today, f"{type(e).__name__}: {e}")
+                raise
+            return "acted" if self.state().get(self._session_key) == today.isoformat() else "not_acted"
+        if self.role == "executor":     # the close rows belong to the signal service
+            if st.get(self._session_key) == today.isoformat():
+                return "already_acted"
+            return "waiting" if clock.is_open else "closed"
         if (not clock.is_open and now.astimezone(ET).time() >= SNAPSHOT_AFTER_ET
                 and st.get("last_close_session") != today.isoformat()):
             sessions = self.sessions(today)
@@ -440,6 +498,41 @@ class Mirror:
                     self.record(f"{MIRROR}|{today.isoformat()}|close", "close", session=today.isoformat(),
                                 status="pending", error=f"{type(e).__name__}: {str(e)[:900]}")
                     raise
+                return "snapshot"
+        return "idle"
+
+    # -- the signal row: the frozen rule's answer, handed to the executor ----
+    def publish_signal(self, session: dt.date) -> str:
+        """Run the frozen rule for ``session`` once and store its answer."""
+        if self._signal_session == session:
+            return "signal_published"
+        row_id = f"{MIRROR}|{session.isoformat()}|signal"
+        if (self.store.get(TABLE, row_id) or {}).get("next"):
+            self._signal_session = session
+            return "signal_published"
+        prior = [d for d in self.sessions(session) if d < session]
+        if not prior:
+            raise RuntimeError(f"no session before {session} in Alpaca's calendar")
+        try:
+            got = self._fetch(session, prior[-1], None)
+        except _Stale as e:
+            _log(f"signal for {session}: {e}; retrying")
+            return "signal_stale"
+        if got is None:
+            return "signal_pending"
+        last_date, nxt = got
+        self.record(row_id, "signal", session=session.isoformat(), frame_last_close=last_date.isoformat(),
+                    action=nxt.get("action"), next=nxt)
+        self._signal_session = session
+        return "signal_published"
+
+    def _signal_next(self, timeout=None) -> tuple:
+        """The executor's stand-in for the frozen rule: today's published signal row."""
+        session = self.now().astimezone(ET).date()
+        row = self.store.get(TABLE, f"{MIRROR}|{session.isoformat()}|signal") or {}
+        if not row.get("next") or not row.get("frame_last_close"):
+            raise _Stale(f"no signal row for {session} (is the f14-mirror service running in the signal role?)")
+        return dt.date.fromisoformat(row["frame_last_close"]), row["next"]
 
     def _fetch(self, session: dt.date, want_last: dt.date, deadline: Optional[dt.datetime]):
         """(frame last close, next info) once the frame ends at ``want_last``, else None.
@@ -451,7 +544,8 @@ class Mirror:
         if self._fresh and self._fresh[0] == session and self._fresh[1] == want_last:
             return self._fresh[1], self._fresh[2]
         now = self.now()
-        if self._last_fetch_attempt and (now - self._last_fetch_attempt).total_seconds() < FETCH_RETRY_SECONDS:
+        if (self.role != "executor" and self._last_fetch_attempt
+                and (now - self._last_fetch_attempt).total_seconds() < FETCH_RETRY_SECONDS):
             return None
         timeout = FETCH_TIMEOUT_SECONDS
         if deadline is not None:
@@ -493,7 +587,7 @@ class Mirror:
         acct_w = account_weights(equity, mv)
         target, reason = choose_target(nxt, acct_w, bool(self.state().get("synced")))
         base = dict(session=session.isoformat(), frame_last_close=last_date.isoformat(), action=nxt.get("action"),
-                    reason=reason, equity=equity, account_weights=acct_w,
+                    reason=reason, equity=equity, account_weights=acct_w, role=self.role,
                     model_current=model_weights(nxt.get("current") or {}),
                     model_target=model_weights(nxt["target"]) if nxt.get("target") else None)
         row_id = f"{MIRROR}|{session.isoformat()}|{self._act_kind}"
@@ -672,7 +766,10 @@ def _with_timeout(client, seconds: int = 30):
     return client
 
 
-def from_env() -> Mirror:
+def build(*, brokerage_id: str, account_number: str, role: str = "full", dry_run: bool = False,
+          own_instance_id: Optional[str] = None, frozen_dir: str = "/frozen", data_dir: str = "/data",
+          act_minutes: float = ACT_MINUTES) -> Mirror:
+    """A mirror over the real store and the brokerage row's own Alpaca paper keys."""
     from db import store
     from stock_credential_boundary import resolve_alpaca_brokerage_credentials
     from alpaca.data.enums import DataFeed
@@ -680,7 +777,9 @@ def from_env() -> Mirror:
     from alpaca.data.requests import StockLatestTradeRequest
     from alpaca.trading.client import TradingClient
 
-    bid = os.environ.get("F14_MIRROR_BROKERAGE_ID") or DEFAULT_BROKERAGE_ID
+    bid = brokerage_id
+    if account_number in FORBIDDEN_ACCOUNT_NUMBERS or bid in FORBIDDEN_BROKERAGE_IDS:
+        raise MirrorRefused("that account is off limits")
     creds = resolve_alpaca_brokerage_credentials(store.get("BrokerageAccounts", bid), expected_brokerage_id=bid)
     if creds.paper is not True:
         raise MirrorRefused("brokerage row is not paper")
@@ -695,11 +794,25 @@ def from_env() -> Mirror:
             raise RuntimeError(f"no latest trade for {missing} on the {creds.data_feed} feed")
         return {s: float(res[s].price) for s in symbols}
 
-    return Mirror(store=store, client=client, prices_fn=prices, brokerage_id=bid,
-                  frozen_dir=os.environ.get("F14_MIRROR_FROZEN_DIR") or "/frozen",
-                  data_dir=os.environ.get("F14_MIRROR_DATA_DIR") or "/data",
-                  account_number=os.environ.get("F14_MIRROR_ACCOUNT_NUMBER") or DEFAULT_ACCOUNT_NUMBER,
-                  dry_run=_truthy(os.environ.get("F14_MIRROR_DRY_RUN")))
+    return Mirror(store=store, client=client, prices_fn=prices, brokerage_id=bid, frozen_dir=frozen_dir,
+                  data_dir=data_dir, account_number=account_number, dry_run=dry_run, role=role,
+                  own_instance_id=own_instance_id, act_minutes=act_minutes)
+
+
+def env_role() -> str:
+    role = (os.environ.get("F14_MIRROR_ROLE") or "full").strip().lower()
+    if role not in ("full", "signal"):
+        raise MirrorRefused(f"F14_MIRROR_ROLE={role!r}: the service runs as 'full' or 'signal'")
+    return role
+
+
+def from_env() -> Mirror:
+    return build(brokerage_id=os.environ.get("F14_MIRROR_BROKERAGE_ID") or DEFAULT_BROKERAGE_ID,
+                 account_number=os.environ.get("F14_MIRROR_ACCOUNT_NUMBER") or DEFAULT_ACCOUNT_NUMBER,
+                 role=env_role(), dry_run=_truthy(os.environ.get("F14_MIRROR_DRY_RUN")),
+                 own_instance_id=os.environ.get("F14_MIRROR_INSTANCE_ID") or DEFAULT_INSTANCE_ID,
+                 frozen_dir=os.environ.get("F14_MIRROR_FROZEN_DIR") or "/frozen",
+                 data_dir=os.environ.get("F14_MIRROR_DATA_DIR") or "/data")
 
 
 def _boot_row(ok: bool, error: str) -> None:
@@ -731,7 +844,7 @@ def main() -> None:
             _log(f"boot failed: {type(e).__name__}: {str(e)[:300]}")
             _boot_row(False, f"{type(e).__name__}: {e}")
             time.sleep(300)
-    _log(f"armed (dry_run={m.dry_run})")
+    _log(f"armed (role={m.role}, dry_run={m.dry_run})")
     while True:
         try:
             m.step()
