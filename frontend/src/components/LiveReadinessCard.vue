@@ -148,7 +148,7 @@
         class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
         @click.self="closeRevoke"
       >
-        <div class="relative w-full max-w-md bg-[#0f1318] border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
+        <div class="relative w-full max-w-md bg-surface border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
           <div class="px-6 py-5 border-b border-border-subtle">
             <h2 class="text-base font-bold">Revoke the standing waiver</h2>
             <p class="text-[11px] text-slate-500 truncate mt-0.5">
@@ -189,7 +189,7 @@
         class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
         @click.self="closeWaiver"
       >
-        <div class="relative w-full max-w-lg bg-[#0f1318] border border-red-500/40 rounded-2xl shadow-2xl overflow-hidden">
+        <div class="relative w-full max-w-lg bg-surface border border-red-500/40 rounded-2xl shadow-2xl overflow-hidden">
           <div class="flex items-center justify-between px-6 py-5 border-b border-red-500/25">
             <div class="flex items-center gap-3 min-w-0">
               <div class="size-9 rounded-xl bg-red-500/15 border border-red-500/30 flex items-center justify-center shrink-0">

@@ -291,7 +291,7 @@ const chartOptions = computed(() => ({
         
         <!-- MAIN SECTION: Vertical Stepper -->
         <div class="flex-[2] flex flex-col min-w-0 min-h-0 bg-[#0d1117]/50 rounded-3xl border border-border-subtle overflow-hidden relative backdrop-blur-sm">
-          <div class="p-4 border-b border-border-subtle bg-[#04040c] shrink-0">
+          <div class="p-4 border-b border-border-subtle bg-background-dark shrink-0">
             <h2 class="text-sm font-semibold text-slate-200">Execution Log</h2>
           </div>
           <div class="flex-1 overflow-y-auto p-6 scroll-smooth" ref="eventsContainerRef">
@@ -311,13 +311,13 @@ const chartOptions = computed(() => ({
                 <!-- Strategy Executed -->
                 <div v-else-if="ev.type === 'strategy'" class="flex gap-4 animate-fade-in-up">
                   <div class="flex flex-col items-center">
-                    <div class="size-8 rounded-full border border-indigo-500/30 bg-indigo-500/10 flex items-center justify-center shrink-0 z-10 text-indigo-400 shadow-[0_0_10px_-2px_rgba(99,102,241,0.4)]">
+                    <div class="size-8 rounded-full border border-zinc-500/30 bg-zinc-500/10 flex items-center justify-center shrink-0 z-10 text-zinc-300 shadow-[0_0_10px_-2px_rgba(99,102,241,0.4)]">
                       <span class="material-symbols-outlined text-[16px]">psychology</span>
                     </div>
                     <div class="w-px flex-1 bg-border-subtle mt-2 mb-[-12px]" v-if="i < visibleEvents.length - 1"></div>
                   </div>
                   <div class="flex-1 pb-2">
-                    <div class="glass-card rounded-2xl p-4 border-indigo-500/20 hover:border-indigo-500/40 transition-colors">
+                    <div class="glass-card rounded-2xl p-4 border-zinc-500/20 hover:border-zinc-500/40 transition-colors">
                       <div class="flex items-start justify-between mb-2">
                         <div>
                           <div v-if="ev.desc.includes(' → ')" class="flex items-center gap-2 mb-1.5">
@@ -331,7 +331,7 @@ const chartOptions = computed(() => ({
                               {{ ev.desc.split(' → ')[1] }}
                             </span>
                           </div>
-                          <p v-else class="text-[10px] uppercase font-bold text-indigo-400 tracking-wider mb-1.5">{{ ev.desc }}</p>
+                          <p v-else class="text-[10px] uppercase font-bold text-zinc-300 tracking-wider mb-1.5">{{ ev.desc }}</p>
                           <p class="text-sm font-bold text-slate-100">{{ ev.name }}</p>
                         </div>
                       </div>
@@ -456,7 +456,7 @@ const chartOptions = computed(() => ({
                 <div v-if="currentPortfolioEvent.holdings.length === 0" class="col-span-2 text-xs text-slate-500 italic flex items-center justify-center py-6">
                   No active positions.
                 </div>
-                <div v-else v-for="h in currentPortfolioEvent.holdings" :key="h.ticker" class="bg-[#04040c] px-3 py-2 rounded-xl border border-border-subtle hover:border-slate-600 transition-colors">
+                <div v-else v-for="h in currentPortfolioEvent.holdings" :key="h.ticker" class="bg-background-dark px-3 py-2 rounded-xl border border-border-subtle hover:border-slate-600 transition-colors">
                   <div class="flex items-center justify-between mb-1">
                     <span class="font-bold font-mono text-[13px] text-slate-200">{{ h.ticker }}</span>
                     <span class="font-mono text-[10px] text-slate-400 bg-surface px-1.5 py-0.5 rounded">{{ fmtQty(h.qty) }} sh</span>

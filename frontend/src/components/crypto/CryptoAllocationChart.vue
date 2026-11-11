@@ -20,7 +20,7 @@ const hovered = ref(null) // slice index, or null (→ show Dynamic in center)
 const slices = computed(() => {
   const out = props.allocations
     .filter((a) => Number(a.pct) > 0)
-    .map((a) => ({ label: a.symbol, value: Number(a.pct), color: a.color || '#a78bfa', dynamic: false }))
+    .map((a) => ({ label: a.symbol, value: Number(a.pct), color: a.color || '#a1a1a6', dynamic: false }))
   const dyn = Number(props.dynamicPct) || 0
   if (dyn > 0) out.push({ label: 'Dynamic', value: dyn, color: DYNAMIC_COLOR, dynamic: true })
   return out
@@ -58,7 +58,7 @@ const chartOptions = computed(() => ({
   theme: { mode: 'dark' },
   labels: slices.value.map((s) => s.label),
   colors: colors.value,
-  stroke: { width: 2, colors: ['#0f0a1c'] },
+  stroke: { width: 2, colors: ['#161617'] },
   dataLabels: { enabled: false },
   legend: { show: false },
   fill: {
@@ -106,7 +106,7 @@ const centerSub = computed(() => {
   if (!s) return 'auto-discovered'
   return s.dynamic ? 'auto-discovered' : 'fixed weight'
 })
-const centerColor = computed(() => centerSlice.value ? centerSlice.value.color : '#a78bfa')
+const centerColor = computed(() => centerSlice.value ? centerSlice.value.color : '#a1a1a6')
 </script>
 
 <template>

@@ -104,7 +104,7 @@ const chartOptions = computed(() => ({
   dataLabels: { enabled: false },
   stroke: { curve: 'smooth', width: 2.5 },
   fill: { type: 'gradient', gradient: { shadeIntensity: 1, opacityFrom: 0.3, opacityTo: 0 } },
-  grid: { borderColor: 'rgba(188,154,255,0.08)', strokeDashArray: 4, padding: { left: 8, right: 8 } },
+  grid: { borderColor: 'rgba(255,255,255,0.06)', strokeDashArray: 4, padding: { left: 8, right: 8 } },
   xaxis: { type: 'numeric', labels: { show: false }, axisBorder: { show: false }, axisTicks: { show: false }, tooltip: { enabled: false } },
   yaxis: { labels: { formatter: (v) => `$${Math.round(v)}`, style: { colors: '#64748b', fontSize: '11px' } } },
   tooltip: { theme: 'dark', x: { show: false } },

@@ -652,7 +652,7 @@ onMounted(fetchModels)
         class="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
         @click.self="closeModal"
       >
-        <div class="relative w-full max-w-lg bg-[#0f1318] border border-border-subtle rounded-2xl shadow-2xl flex flex-col max-h-[90vh]">
+        <div class="relative w-full max-w-lg bg-surface border border-border-subtle rounded-2xl shadow-2xl flex flex-col max-h-[90vh]">
           <div class="flex items-center justify-between px-6 py-5 border-b border-border-subtle shrink-0">
             <div>
               <h2 class="text-base font-bold">{{ editMode ? 'Edit Model' : 'Add Model' }}</h2>

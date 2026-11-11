@@ -3,25 +3,28 @@ import { ref, computed, onMounted, onUnmounted, defineComponent, h } from 'vue'
 import AppShell from '../layouts/AppShell.vue'
 import PortfolioChart from '../components/PortfolioChart.vue'
 import KalshiDashboardCard from '../components/KalshiDashboardCard.vue'
-import { getUser, getToken } from '../utils/auth.js'
+import { getToken } from '../utils/auth.js'
 
-const STATUS_COLORS = {
-  running: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20',
-  paused:  'text-violet-400 bg-violet-500/10 border-violet-500/20',
-  stopped: 'text-slate-500 bg-slate-500/10 border-slate-700',
+// Status as a dot plus a word. Green only for things that are actually
+// running — the one live signal on the page.
+const STATUS_STYLES = {
+  running: { dot: 'bg-gain shadow-[0_0_0_3px_rgba(76,195,138,0.15)]', text: 'text-slate-200', label: 'Running' },
+  paused:  { dot: 'bg-amber-400', text: 'text-slate-300', label: 'Paused' },
+  stopped: { dot: 'bg-slate-600', text: 'text-slate-500', label: 'Stopped' },
 }
 const StatusBadge = defineComponent({
   props: { status: String },
   setup(props) {
     return () => {
       const key = (props.status || 'stopped').toLowerCase().replace(/\s*\(.*\)/, '').trim()
-      const cls = STATUS_COLORS[key] || STATUS_COLORS.stopped
-      return h('span', { class: `shrink-0 text-[10px] font-bold px-2 py-0.5 rounded-full border uppercase tracking-wide ${cls}` }, props.status || 'Stopped')
+      const st = STATUS_STYLES[key] || { ...STATUS_STYLES.stopped, label: props.status || 'Stopped' }
+      return h('span', { class: `inline-flex items-center gap-2 text-sm ${st.text}` }, [
+        h('span', { class: `size-1.5 rounded-full shrink-0 ${st.dot}` }),
+        st.label,
+      ])
     }
   },
 })
-
-const user = computed(() => getUser())
 
 const API_BASE = import.meta.env.DEV
   ? '/api'
@@ -44,13 +47,86 @@ async function fetchAccounts() {
     const res = await fetch(`${API_BASE}/brokerages`, { headers: authHeaders() })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const data = await res.json()
-    accounts.value = data.accounts || []
+    // Live money first, then paper; API order within each group.
+    const list = data.accounts || []
+    accounts.value = [...list.filter(a => !isPaper(a)), ...list.filter(a => isPaper(a))]
+    pickInitialAccount()
+    fetchSummaries()
   } catch (e) {
     bkError.value = e.message
   } finally {
     bkLoading.value = false
   }
 }
+
+function isKalshi(a) { return String(a?.brokerage_type || '').toLowerCase() === 'kalshi' }
+function isPaper(a) {
+  return String(a?.brokerage_type || '').toLowerCase() === 'alpaca'
+    ? !!a.alpaca_paper
+    : /paper|demo/i.test(a?.account_name || '')
+}
+function accountKind(a) {
+  const type = String(a?.brokerage_type || '').toLowerCase()
+  const name = type === 'alpaca' ? 'Alpaca' : type === 'kalshi' ? 'Kalshi' : (a?.brokerage_type || 'Brokerage')
+  return `${name} · ${isPaper(a) ? 'Paper' : 'Live'}`
+}
+
+// The selected account fills the headline chart. Remembered per browser.
+const SELECTED_KEY = 'intellistock_dashboard_account'
+const selectedId = ref(null)
+const selectedAccount = computed(() => accounts.value.find(a => a.id === selectedId.value) || accounts.value[0] || null)
+function pickInitialAccount() {
+  let saved = null
+  try { saved = localStorage.getItem(SELECTED_KEY) } catch { /* storage blocked */ }
+  const ids = accounts.value.map(a => String(a.id))
+  selectedId.value = saved && ids.includes(saved)
+    ? accounts.value[ids.indexOf(saved)].id
+    : accounts.value[0]?.id ?? null
+}
+function selectAccount(a) {
+  selectedId.value = a.id
+  try { localStorage.setItem(SELECTED_KEY, String(a.id)) } catch { /* storage blocked */ }
+}
+
+// Today's value and change for every account, for the list beside the chart.
+const summaries = ref({}) // { [id]: { value, change_abs, change_pct } }
+async function fetchSummary(a) {
+  const url = isKalshi(a)
+    ? `${API_BASE}/brokerages/${a.id}/kalshi/portfolio`
+    : `${API_BASE}/brokerages/${a.id}/portfolio-history?range=1D`
+  try {
+    const res = await fetch(url, { headers: authHeaders() })
+    if (!res.ok) return
+    const d = await res.json()
+    let row
+    if (isKalshi(a)) {
+      const series = Array.isArray(d?.series) ? d.series : []
+      const open = series.length ? Number(series[0].value) || 0 : 0
+      const change = Number(d?.day_change) || 0
+      row = { value: Number(d?.value) || 0, change_abs: change, change_pct: open ? (change / open) * 100 : 0 }
+    } else {
+      row = { value: d.current_value, change_abs: d.change_abs, change_pct: d.change_pct }
+    }
+    summaries.value = { ...summaries.value, [a.id]: row }
+  } catch { /* row stays blank */ }
+}
+function fetchSummaries() { accounts.value.forEach(fetchSummary) }
+
+const usd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 })
+function fmtUsd(v) { return v == null || !Number.isFinite(Number(v)) ? '—' : usd.format(Number(v)) }
+function fmtPct(v) {
+  if (v == null || !Number.isFinite(Number(v))) return ''
+  const n = Number(v)
+  if (Math.abs(n) < 0.005) return '0.00%'
+  return `${n > 0 ? '+' : '−'}${Math.abs(n).toFixed(2)}%`
+}
+function changeClass(row) {
+  const n = Number(row?.change_pct)
+  if (!Number.isFinite(n) || Math.abs(n) < 0.005) return 'text-slate-500'
+  return n > 0 ? 'text-gain' : 'text-loss'
+}
+
+const todayLabel = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })
 
 // ── Services ──────────────────────────────────────────────────────────────────
 const engines     = ref([])   // from GET /status
@@ -180,406 +256,280 @@ onUnmounted(() => {
 
 <template>
   <AppShell>
-    <main class="flex-1 px-4 py-6 sm:px-6 sm:py-8 lg:px-8 lg:py-10 space-y-8 sm:space-y-10 lg:space-y-12">
+    <main class="dash flex-1 w-full max-w-[1440px] px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
 
-      <!-- Welcome row -->
-      <div>
-        <p class="text-primary text-xs font-bold uppercase tracking-widest mb-2">Dashboard</p>
-        <h1 class="text-2xl sm:text-3xl font-bold leading-tight">
-          Welcome back, <span class="text-primary">{{ user?.username }}</span>.
-        </h1>
-        <p class="text-slate-400 mt-2 text-sm">Your workspace is ready.</p>
-      </div>
-
-      <!-- ── Portfolio Section ─────────────────────────────────────────────── -->
-      <section>
-        <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-5">
-          <div>
-            <h2 class="text-lg font-bold text-slate-100">Portfolio</h2>
-            <p class="text-slate-500 text-xs mt-0.5">Live equity history from your linked brokerages.</p>
-          </div>
-          <RouterLink
-            to="/brokerages"
-            class="flex items-center gap-1.5 text-xs font-medium text-primary hover:brightness-110 transition-all"
-          >
-            Manage brokerages
-            <span class="material-symbols-outlined text-[14px]">arrow_forward</span>
-          </RouterLink>
+      <!-- Page header -->
+      <header class="flex items-end justify-between gap-4">
+        <div>
+          <h1 class="text-2xl font-medium text-slate-100 leading-tight">Dashboard</h1>
+          <p class="text-sm text-slate-500 mt-1 whitespace-nowrap">{{ todayLabel }}</p>
         </div>
+        <RouterLink
+          to="/brokerages"
+          class="shrink-0 whitespace-nowrap inline-flex items-center gap-1.5 h-8 px-3 -mr-3 rounded-md text-sm text-slate-400 hover:text-slate-100 hover:bg-raised transition-colors"
+        >
+          Manage brokerages
+          <span class="material-symbols-outlined text-[16px]">arrow_forward</span>
+        </RouterLink>
+      </header>
+
+      <!-- ── Portfolio ──────────────────────────────────────────────────── -->
+      <section class="mt-8" aria-label="Portfolio">
 
         <!-- Loading -->
-        <div v-if="bkLoading" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
-          <div v-for="n in 2" :key="n" class="glass-card rounded-2xl h-[320px] animate-pulse"></div>
+        <div v-if="bkLoading" class="grid gap-8 lg:grid-cols-[minmax(0,1fr)_340px]">
+          <div class="space-y-3">
+            <div class="h-4 w-32 rounded bg-raised"></div>
+            <div class="h-11 w-64 rounded-md bg-raised"></div>
+            <div class="h-[300px] rounded-lg bg-surface mt-6"></div>
+          </div>
+          <div class="h-[420px] rounded-xl bg-surface"></div>
         </div>
 
         <!-- Error -->
-        <div v-else-if="bkError" class="rounded-xl bg-red-500/10 border border-red-500/20 px-5 py-4 text-red-400 text-sm">
-          {{ bkError }}
+        <div v-else-if="bkError" class="rounded-xl border border-loss/20 bg-loss/5 px-5 py-4 text-sm text-loss">
+          Couldn't load brokerages: {{ bkError }}
         </div>
 
         <!-- No brokerages -->
         <div
           v-else-if="accounts.length === 0"
-          class="rounded-2xl border border-border-subtle bg-surface/20 px-8 py-12 flex flex-col items-center gap-3 text-center"
+          class="rounded-xl border border-white/[0.07] bg-surface px-6 py-12 flex flex-col items-center gap-4 text-center"
         >
-          <span class="material-symbols-outlined text-4xl text-slate-700">account_balance</span>
-          <p class="text-slate-400 text-sm font-medium">No brokerages linked.</p>
+          <p class="text-sm text-slate-400">No brokerage linked yet. Link one to see its equity here.</p>
           <RouterLink
             to="/brokerages"
-            class="px-4 py-2 rounded-lg bg-primary text-background-dark text-xs font-bold hover:brightness-110 transition-all"
+            class="h-9 px-4 inline-flex items-center rounded-lg bg-primary text-background-dark text-sm font-medium hover:bg-white transition-colors"
           >
             Link a brokerage
           </RouterLink>
         </div>
 
-        <!-- Charts grid -->
-        <div v-else class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
+        <!-- Headline chart + account list -->
+        <div v-else class="grid gap-8 lg:grid-cols-[minmax(0,1fr)_340px] items-start">
           <PortfolioChart
-            v-for="acct in accounts"
-            :key="acct.id"
-            :account="acct"
+            v-if="selectedAccount"
+            :key="selectedAccount.id"
+            :account="selectedAccount"
+            variant="hero"
           />
+
+          <div class="rounded-xl border border-white/[0.07] bg-surface overflow-hidden">
+            <div class="h-12 px-4 flex items-center justify-between border-b border-white/[0.06]">
+              <h2 class="text-sm font-medium text-slate-200">Accounts</h2>
+              <span class="text-xs text-slate-500">Today</span>
+            </div>
+            <ul class="p-1.5">
+              <li v-for="acct in accounts" :key="acct.id">
+                <button
+                  type="button"
+                  @click="selectAccount(acct)"
+                  class="w-full h-14 px-3 rounded-lg flex items-center justify-between gap-3 text-left transition-colors"
+                  :class="selectedAccount?.id === acct.id ? 'bg-raised shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]' : 'hover:bg-white/[0.03]'"
+                  :aria-pressed="selectedAccount?.id === acct.id"
+                >
+                  <span class="min-w-0">
+                    <span class="block text-sm text-slate-100 truncate">{{ acct.account_name }}</span>
+                    <span class="block text-xs text-slate-500 mt-0.5">{{ accountKind(acct) }}</span>
+                  </span>
+                  <span class="text-right shrink-0 tabular-nums">
+                    <span class="block text-sm text-slate-100">{{ fmtUsd(summaries[acct.id]?.value) }}</span>
+                    <span
+                      class="block text-xs mt-0.5"
+                      :class="changeClass(summaries[acct.id])"
+                    >{{ fmtPct(summaries[acct.id]?.change_pct) || '\u00a0' }}</span>
+                  </span>
+                </button>
+              </li>
+            </ul>
+          </div>
         </div>
       </section>
 
-      <!-- ── Kalshi ───────────────────────────────────────────────────────── -->
+      <!-- ── Kalshi ─────────────────────────────────────────────────────── -->
       <!-- Self-hides (renders its own <section>) when no Kalshi account is linked. -->
-      <KalshiDashboardCard />
+      <KalshiDashboardCard class="mt-12" />
 
-      <!-- ── Services ─────────────────────────────────────────────────────── -->
-      <section>
-        <div class="flex items-center justify-between mb-5">
+      <!-- ── Services ───────────────────────────────────────────────────── -->
+      <section class="mt-12">
+        <div class="flex items-center justify-between mb-3">
           <div>
-            <h2 class="text-lg font-bold text-slate-100">Services</h2>
-            <p class="text-slate-500 text-xs mt-0.5">Status and controls for all IntelliStock background services.</p>
+            <h2 class="text-base font-medium text-slate-100">Services</h2>
+            <p class="text-sm text-slate-500 mt-0.5">Background engines that feed the bots</p>
           </div>
           <button
             @click="fetchServices"
-            class="p-1.5 rounded-lg border border-border-subtle text-slate-400 hover:text-slate-200 hover:bg-surface transition-all"
+            class="size-8 inline-flex items-center justify-center rounded-md text-slate-500 hover:text-slate-200 hover:bg-raised transition-colors"
             title="Refresh"
+            aria-label="Refresh services"
           >
-            <span class="material-symbols-outlined text-[16px]" :class="svcLoading ? 'animate-spin' : ''">refresh</span>
+            <span class="material-symbols-outlined text-[18px]">refresh</span>
           </button>
         </div>
 
-        <!-- Loading skeleton -->
-        <div v-if="svcLoading" class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
-          <div v-for="n in 5" :key="n" class="glass-card rounded-2xl h-36 animate-pulse"></div>
-        </div>
+        <div class="rounded-xl border border-white/[0.07] bg-surface overflow-hidden">
+          <!-- Column labels -->
+          <div class="hidden md:grid svc-grid h-10 px-5 items-center text-xs text-slate-500 border-b border-white/[0.06]">
+            <span>Service</span><span>Status</span><span>Activity</span><span></span>
+          </div>
 
-        <div v-else class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+          <div v-if="svcLoading" class="divide-y divide-white/[0.05]">
+            <div v-for="n in 5" :key="n" class="h-[68px] px-5 flex items-center">
+              <div class="h-4 w-40 rounded bg-raised"></div>
+            </div>
+          </div>
 
-          <!-- ── Price Engine ───────────────────────────────────────────────── -->
-          <div class="glass-card rounded-2xl p-5 flex flex-col gap-4">
-            <div class="flex items-start justify-between gap-3">
-              <div class="flex items-center gap-3 min-w-0">
-                <div class="size-10 rounded-xl bg-sky-500/10 border border-sky-500/20 flex items-center justify-center shrink-0">
-                  <span class="material-symbols-outlined text-sky-400 text-xl">trending_up</span>
-                </div>
-                <div class="min-w-0">
-                  <p class="text-sm font-semibold text-slate-100 truncate">Price Engine</p>
-                  <p class="text-[11px] text-slate-500 mt-0.5">Live market data</p>
-                </div>
+          <div v-else class="divide-y divide-white/[0.05]">
+
+            <!-- Price engine -->
+            <div class="svc-row">
+              <div class="min-w-0">
+                <p class="text-sm text-slate-100">Price engine</p>
+                <p class="text-xs text-slate-500 mt-0.5">Live market data</p>
               </div>
               <StatusBadge :status="engineById('price_engine').status" />
+              <p class="svc-meta">{{ engineById('price_engine').details || '—' }}</p>
+              <div class="svc-actions">
+                <button v-if="isRunning('price_engine')" @click="terminatePrice" :disabled="svcBusy['price_engine']" class="svc-btn text-loss">Terminate</button>
+                <button v-else @click="togglePrice" :disabled="svcBusy['price_engine']" class="svc-btn">Start broker</button>
+              </div>
             </div>
-            <div class="text-xs text-slate-500">
-              <span v-if="engineById('price_engine').details" class="font-mono">{{ engineById('price_engine').details }}</span>
-              <span v-else class="italic">No extra details</span>
-            </div>
-            <div class="flex items-center gap-2 mt-auto">
-              <button
-                v-if="isRunning('price_engine')"
-                @click="terminatePrice"
-                :disabled="svcBusy['price_engine']"
-                class="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-xs font-semibold border border-red-500/20 text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-40"
-              >
-                <span class="material-symbols-outlined text-[13px]">stop_circle</span> Terminate
-              </button>
-              <button
-                v-else
-                @click="togglePrice"
-                :disabled="svcBusy['price_engine']"
-                class="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-xs font-semibold border border-emerald-500/20 text-emerald-400 hover:bg-emerald-500/10 transition-colors disabled:opacity-40"
-              >
-                <span class="material-symbols-outlined text-[13px]">play_circle</span> Start Broker
-              </button>
-            </div>
-          </div>
 
-          <!-- ── Discover Engine ────────────────────────────────────────────── -->
-          <div class="glass-card rounded-2xl p-5 flex flex-col gap-4">
-            <div class="flex items-start justify-between gap-3">
-              <div class="flex items-center gap-3 min-w-0">
-                <div class="size-10 rounded-xl bg-violet-500/10 border border-violet-500/20 flex items-center justify-center shrink-0">
-                  <span class="material-symbols-outlined text-violet-400 text-xl">search</span>
-                </div>
-                <div class="min-w-0">
-                  <p class="text-sm font-semibold text-slate-100 truncate">Discover Engine</p>
-                  <p class="text-[11px] text-slate-500 mt-0.5">Opportunity discovery</p>
-                </div>
+            <!-- Discover engine -->
+            <div class="svc-row">
+              <div class="min-w-0">
+                <p class="text-sm text-slate-100">Discover engine</p>
+                <p class="text-xs text-slate-500 mt-0.5">Opportunity discovery</p>
               </div>
               <StatusBadge :status="engineById('discover_engine').status" />
+              <p class="svc-meta">{{ engineById('discover_engine').details || '—' }}</p>
+              <div class="svc-actions">
+                <button @click="toggleDiscover" :disabled="svcBusy['discover_engine']" class="svc-btn" :class="isRunning('discover_engine') ? 'text-loss' : ''">
+                  {{ isRunning('discover_engine') ? 'Stop' : 'Start' }}
+                </button>
+              </div>
             </div>
-            <div class="text-xs text-slate-500 flex-1">
-              <span v-if="engineById('discover_engine').details" class="font-mono">{{ engineById('discover_engine').details }}</span>
-              <span v-else class="italic">No extra details</span>
-            </div>
-            <div class="flex items-center gap-2 mt-auto">
-              <button
-                v-if="isRunning('discover_engine')"
-                @click="toggleDiscover"
-                :disabled="svcBusy['discover_engine']"
-                class="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-xs font-semibold border border-red-500/20 text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-40"
-              >
-                <span class="material-symbols-outlined text-[13px]">stop_circle</span> Stop
-              </button>
-              <button
-                v-else
-                @click="toggleDiscover"
-                :disabled="svcBusy['discover_engine']"
-                class="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-xs font-semibold border border-emerald-500/20 text-emerald-400 hover:bg-emerald-500/10 transition-colors disabled:opacity-40"
-              >
-                <span class="material-symbols-outlined text-[13px]">play_circle</span> Start
-              </button>
-            </div>
-          </div>
 
-          <!-- ── AI Backtest Agent ───────────────────────────────────────────── -->
-          <div class="glass-card rounded-2xl p-5 flex flex-col gap-4">
-            <div class="flex items-start justify-between gap-3">
-              <div class="flex items-center gap-3 min-w-0">
-                <div class="size-10 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center shrink-0">
-                  <span class="material-symbols-outlined text-amber-400 text-xl">smart_toy</span>
-                </div>
-                <div class="min-w-0">
-                  <p class="text-sm font-semibold text-slate-100 truncate">AI Backtest Agent</p>
-                  <p class="text-[11px] text-slate-500 mt-0.5">Automated strategy search</p>
-                </div>
+            <!-- AI backtest agent -->
+            <div class="svc-row">
+              <div class="min-w-0">
+                <p class="text-sm text-slate-100">AI backtest agent</p>
+                <p class="text-xs text-slate-500 mt-0.5">Automated strategy search</p>
               </div>
               <StatusBadge :status="engineById('ai_backtest_engine').status" />
-            </div>
-            <!-- Stats -->
-            <div class="grid grid-cols-2 gap-2 text-xs">
-              <div class="rounded-lg bg-surface/50 px-3 py-2">
-                <p class="text-slate-600 mb-0.5">Backtests today</p>
-                <p class="font-mono font-semibold text-slate-200">{{ agentStatus?.count_today ?? '—' }}</p>
+              <p class="svc-meta">
+                {{ agentStatus?.count_today ?? 0 }} backtests today
+                <span class="text-slate-600">·</span> last run {{ agentStatus?.last_run_date || '—' }}
+                <template v-if="agentStatus?.resume_at"><span class="text-slate-600">·</span> resumes {{ agentStatus.resume_at }}</template>
+              </p>
+              <div class="svc-actions">
+                <button v-if="isPaused('ai_backtest_engine')" @click="resumeAgent" :disabled="svcBusy['ai_backtest_engine']" class="svc-btn">Resume</button>
+                <button v-else-if="isRunning('ai_backtest_engine')" @click="pauseAgent" :disabled="svcBusy['ai_backtest_engine']" class="svc-btn">Pause</button>
+                <button
+                  @click="toggleAgent"
+                  :disabled="svcBusy['ai_backtest_engine']"
+                  class="svc-btn"
+                  :class="isRunning('ai_backtest_engine') || isPaused('ai_backtest_engine') ? 'text-loss' : ''"
+                >{{ isRunning('ai_backtest_engine') || isPaused('ai_backtest_engine') ? 'Stop' : 'Start' }}</button>
               </div>
-              <div class="rounded-lg bg-surface/50 px-3 py-2">
-                <p class="text-slate-600 mb-0.5">Last run</p>
-                <p class="font-mono text-slate-300 truncate">{{ agentStatus?.last_run_date || '—' }}</p>
-              </div>
-              <div v-if="agentStatus?.resume_at" class="col-span-2 rounded-lg bg-amber-500/5 border border-amber-500/15 px-3 py-2">
-                <p class="text-slate-600 mb-0.5">Resume at</p>
-                <p class="font-mono text-amber-400 text-[11px]">{{ agentStatus.resume_at }}</p>
-              </div>
             </div>
-            <!-- Controls -->
-            <div class="flex items-center gap-2 mt-auto flex-wrap">
-              <button
-                v-if="isPaused('ai_backtest_engine')"
-                @click="resumeAgent"
-                :disabled="svcBusy['ai_backtest_engine']"
-                class="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-xs font-semibold border border-sky-500/20 text-sky-400 hover:bg-sky-500/10 transition-colors disabled:opacity-40"
-              >
-                <span class="material-symbols-outlined text-[13px]">play_circle</span> Resume
-              </button>
-              <button
-                v-else-if="isRunning('ai_backtest_engine')"
-                @click="pauseAgent"
-                :disabled="svcBusy['ai_backtest_engine']"
-                class="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-xs font-semibold border border-violet-500/20 text-violet-400 hover:bg-violet-500/10 transition-colors disabled:opacity-40"
-              >
-                <span class="material-symbols-outlined text-[13px]">pause_circle</span> Pause
-              </button>
-              <button
-                @click="toggleAgent"
-                :disabled="svcBusy['ai_backtest_engine']"
-                class="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-xs font-semibold border transition-colors disabled:opacity-40"
-                :class="isRunning('ai_backtest_engine') || isPaused('ai_backtest_engine')
-                  ? 'border-red-500/20 text-red-400 hover:bg-red-500/10'
-                  : 'border-emerald-500/20 text-emerald-400 hover:bg-emerald-500/10'"
-              >
-                <span class="material-symbols-outlined text-[13px]">{{ isRunning('ai_backtest_engine') || isPaused('ai_backtest_engine') ? 'stop_circle' : 'play_circle' }}</span>
-                {{ isRunning('ai_backtest_engine') || isPaused('ai_backtest_engine') ? 'Stop' : 'Start' }}
-              </button>
-            </div>
-          </div>
 
-          <!-- ── Daily Digest Engine ────────────────────────────────────────── -->
-          <div class="glass-card rounded-2xl p-5 flex flex-col gap-4">
-            <div class="flex items-start justify-between gap-3">
-              <div class="flex items-center gap-3 min-w-0">
-                <div class="size-10 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center shrink-0">
-                  <span class="material-symbols-outlined text-emerald-400 text-xl">newspaper</span>
-                </div>
-                <div class="min-w-0">
-                  <p class="text-sm font-semibold text-slate-100 truncate">Daily Digest</p>
-                  <p class="text-[11px] text-slate-500 mt-0.5">Discord market summaries</p>
-                </div>
+            <!-- Daily digest -->
+            <div class="svc-row">
+              <div class="min-w-0">
+                <p class="text-sm text-slate-100">Daily digest</p>
+                <p class="text-xs text-slate-500 mt-0.5">Discord market summaries</p>
               </div>
               <StatusBadge :status="digestStatus?.running ? 'Running' : 'Stopped'" />
-            </div>
-            <!-- Stats -->
-            <div class="grid grid-cols-2 gap-2 text-xs">
-              <div class="rounded-lg bg-surface/50 px-3 py-2">
-                <p class="text-slate-600 mb-0.5">Last morning</p>
-                <p class="font-mono text-slate-300 text-[11px]">{{ fmtDateTime(digestStatus?.last_morning_at) || '—' }}</p>
+              <p class="svc-meta">
+                Morning {{ fmtDateTime(digestStatus?.last_morning_at) || '—' }}
+                <span class="text-slate-600">·</span> evening {{ fmtDateTime(digestStatus?.last_evening_at) || '—' }}
+              </p>
+              <div class="svc-actions">
+                <button @click="sendDigestNow" :disabled="svcBusy['daily_digest_engine']" class="svc-btn">Send now</button>
+                <button @click="toggleDigest" :disabled="svcBusy['daily_digest_engine']" class="svc-btn" :class="digestStatus?.running ? 'text-loss' : ''">
+                  {{ digestStatus?.running ? 'Stop' : 'Start' }}
+                </button>
               </div>
-              <div class="rounded-lg bg-surface/50 px-3 py-2">
-                <p class="text-slate-600 mb-0.5">Last evening</p>
-                <p class="font-mono text-slate-300 text-[11px]">{{ fmtDateTime(digestStatus?.last_evening_at) || '—' }}</p>
-              </div>
             </div>
-            <!-- Controls -->
-            <div class="flex items-center gap-2 mt-auto">
-              <button
-                @click="toggleDigest"
-                :disabled="svcBusy['daily_digest_engine']"
-                class="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-xs font-semibold border transition-colors disabled:opacity-40"
-                :class="digestStatus?.running
-                  ? 'border-red-500/20 text-red-400 hover:bg-red-500/10'
-                  : 'border-emerald-500/20 text-emerald-400 hover:bg-emerald-500/10'"
-              >
-                <span class="material-symbols-outlined text-[13px]">{{ digestStatus?.running ? 'stop_circle' : 'play_circle' }}</span>
-                {{ digestStatus?.running ? 'Stop' : 'Start' }}
-              </button>
-              <button
-                @click="sendDigestNow"
-                :disabled="svcBusy['daily_digest_engine']"
-                class="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-xs font-semibold border border-primary/20 text-primary hover:bg-primary/10 transition-colors disabled:opacity-40"
-              >
-                <span class="material-symbols-outlined text-[13px]">send</span> Send Now
-              </button>
-            </div>
-          </div>
 
-          <!-- ── Nexus Graph Engine ──────────────────────────────────────────── -->
-          <div class="glass-card rounded-2xl p-5 flex flex-col gap-4">
-            <div class="flex items-start justify-between gap-3">
-              <div class="flex items-center gap-3 min-w-0">
-                <div class="size-10 rounded-xl bg-primary/10 border border-primary/20 flex items-center justify-center shrink-0">
-                  <span class="material-symbols-outlined text-primary text-xl">hub</span>
-                </div>
-                <div class="min-w-0">
-                  <p class="text-sm font-semibold text-slate-100 truncate">Nexus Graph Engine</p>
-                  <p class="text-[11px] text-slate-500 mt-0.5">Knowledge graph builder</p>
-                </div>
+            <!-- Nexus graph engine -->
+            <div class="svc-row">
+              <div class="min-w-0">
+                <p class="text-sm text-slate-100">Nexus graph engine</p>
+                <p class="text-xs text-slate-500 mt-0.5">Knowledge graph builder</p>
               </div>
               <StatusBadge :status="engineById('nexus_graph_engine').status" />
-            </div>
-            <!-- Progress -->
-            <div class="space-y-2 text-xs">
-              <div v-if="nexusProgress() != null">
-                <div class="flex items-center justify-between text-slate-500 mb-1">
-                  <span>Build progress</span>
-                  <span class="font-mono font-semibold text-slate-300">{{ nexusProgress() }}%</span>
+              <div class="min-w-0">
+                <div v-if="nexusProgress() != null" class="flex items-center gap-3">
+                  <div class="h-1 w-24 rounded-full bg-raised overflow-hidden shrink-0">
+                    <div class="h-full rounded-full bg-slate-300 progress-fill" :style="{ transform: `scaleX(${nexusProgress() / 100})` }"></div>
+                  </div>
+                  <span class="text-xs text-slate-300 tabular-nums">{{ nexusProgress() }}%</span>
                 </div>
-                <div class="h-1.5 bg-surface rounded-full overflow-hidden">
-                  <div
-                    class="h-full bg-primary rounded-full transition-all duration-700"
-                    :style="{ width: nexusProgress() + '%' }"
-                  ></div>
-                </div>
+                <p class="svc-meta mt-1 truncate" :title="nexusPhase() || ''">{{ nexusPhase() || (nexusProgress() == null ? 'No build in progress' : '') }}</p>
               </div>
-              <p v-if="nexusPhase()" class="text-slate-500 truncate font-mono">{{ nexusPhase() }}</p>
-              <p v-else-if="nexusProgress() == null" class="text-slate-600 italic">No build in progress</p>
+              <div class="svc-actions">
+                <button @click="toggleNexus" :disabled="svcBusy['nexus_graph_engine']" class="svc-btn" :class="isRunning('nexus_graph_engine') ? 'text-loss' : ''">
+                  {{ isRunning('nexus_graph_engine') ? 'Stop' : 'Start' }}
+                </button>
+              </div>
             </div>
-            <!-- Controls -->
-            <div class="flex items-center gap-2 mt-auto">
-              <button
-                @click="toggleNexus"
-                :disabled="svcBusy['nexus_graph_engine']"
-                class="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-xs font-semibold border transition-colors disabled:opacity-40"
-                :class="isRunning('nexus_graph_engine')
-                  ? 'border-red-500/20 text-red-400 hover:bg-red-500/10'
-                  : 'border-emerald-500/20 text-emerald-400 hover:bg-emerald-500/10'"
-              >
-                <span class="material-symbols-outlined text-[13px]">{{ isRunning('nexus_graph_engine') ? 'stop_circle' : 'play_circle' }}</span>
-                {{ isRunning('nexus_graph_engine') ? 'Stop' : 'Start' }}
-              </button>
-            </div>
-          </div>
 
+          </div>
         </div>
       </section>
 
-      <!-- ── Re-run onboarding ──────────────────────────────────────────────── -->
-      <section class="pt-2">
-        <div class="rounded-2xl border border-border-subtle bg-surface/30 px-5 py-4 sm:px-6 sm:py-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-          <div class="min-w-0">
-            <p class="text-sm font-semibold text-slate-200 flex items-center gap-2">
-              <span class="material-symbols-outlined text-primary text-[18px]">replay</span>
-              Re-run onboarding
-            </p>
-            <p class="text-xs text-slate-500 mt-1 leading-relaxed">
-              Walk through the welcome flow again to add another model, link a brokerage, or spin up a new instance.
-            </p>
-          </div>
-          <RouterLink
-            to="/onboarding"
-            class="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg border border-primary/40 text-primary text-xs font-bold hover:bg-primary/10 transition-all shrink-0"
-          >
-            Open onboarding
-            <span class="material-symbols-outlined text-[14px]">arrow_forward</span>
-          </RouterLink>
+      <!-- ── Re-run onboarding ──────────────────────────────────────────── -->
+      <section class="mt-12 pt-6 border-t border-white/[0.06] flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div class="min-w-0">
+          <p class="text-sm text-slate-200">Re-run onboarding</p>
+          <p class="text-sm text-slate-500 mt-0.5">Add another model, link a brokerage, or spin up a new instance</p>
         </div>
+        <RouterLink to="/onboarding" class="svc-btn shrink-0 self-start sm:self-auto">Open onboarding</RouterLink>
       </section>
 
     </main>
   </AppShell>
 
-  <!-- ── Start Agent Modal ──────────────────────────────────────────────────── -->
+  <!-- ── Start agent modal ──────────────────────────────────────────────── -->
   <Teleport to="body">
     <Transition name="fade">
       <div
         v-if="showStartAgentModal"
-        class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+        class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60"
         @click.self="closeStartAgent"
       >
-        <div class="w-full max-w-md bg-[#0f1318] border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
-          <!-- Header -->
-          <div class="flex items-center gap-3 px-6 py-5 border-b border-border-subtle">
-            <div class="size-9 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center shrink-0">
-              <span class="material-symbols-outlined text-amber-400 text-lg">smart_toy</span>
-            </div>
+        <div class="modal-panel w-full max-w-md bg-surface border border-white/[0.08] rounded-2xl shadow-[0_24px_48px_rgba(0,0,0,0.5)] overflow-hidden">
+          <div class="flex items-start gap-3 px-6 pt-5 pb-4">
             <div class="min-w-0">
-              <h2 class="text-base font-bold text-slate-100">Start AI Backtest Agent</h2>
-              <p class="text-[11px] text-slate-500 mt-0.5">Optionally provide a special request for this run.</p>
+              <h2 class="text-base font-medium text-slate-100">Start AI backtest agent</h2>
+              <p class="text-sm text-slate-500 mt-1">Optionally give this run a special request</p>
             </div>
-            <button @click="closeStartAgent" class="ml-auto text-slate-500 hover:text-slate-300 transition-colors shrink-0">
-              <span class="material-symbols-outlined text-lg">close</span>
+            <button @click="closeStartAgent" class="ml-auto size-8 inline-flex items-center justify-center rounded-md text-slate-500 hover:text-slate-200 hover:bg-raised transition-colors shrink-0" aria-label="Close">
+              <span class="material-symbols-outlined text-[18px]">close</span>
             </button>
           </div>
 
-          <!-- Body -->
-          <div class="px-6 py-5 space-y-4">
-            <div>
-              <label class="block text-xs font-semibold text-slate-400 mb-2">Special Request <span class="text-slate-600 font-normal">(optional)</span></label>
-              <textarea
-                v-model="startAgentRequest"
-                rows="3"
-                placeholder="e.g. Include nexus graph analysis in each strategy, focus on high-volatility stocks..."
-                class="w-full bg-surface border border-border-subtle rounded-xl px-3 py-2.5 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-primary/40 resize-none"
-                @keydown.ctrl.enter="confirmStartAgent"
-              ></textarea>
-              <p class="text-[10px] text-slate-600 mt-1.5">This instruction will be passed to the agent's strategy generation LLM each cycle.</p>
-            </div>
+          <div class="px-6 pb-5">
+            <label for="agent-request" class="block text-sm text-slate-300 mb-2">Special request <span class="text-slate-500">(optional)</span></label>
+            <textarea
+              id="agent-request"
+              v-model="startAgentRequest"
+              rows="3"
+              placeholder="e.g. Include Nexus graph analysis, focus on high-volatility stocks"
+              class="w-full bg-background-dark border border-white/[0.08] rounded-lg px-3 py-2.5 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-white/25 transition-colors resize-none"
+              @keydown.ctrl.enter="confirmStartAgent"
+            ></textarea>
+            <p class="text-xs text-slate-500 mt-2">Passed to the agent's strategy-generation model every cycle</p>
           </div>
 
-          <!-- Footer -->
-          <div class="px-6 pb-5 flex items-center gap-3">
-            <button
-              @click="closeStartAgent"
-              class="flex-1 py-2.5 rounded-xl border border-border-subtle text-sm font-medium text-slate-400 hover:text-slate-200 transition-colors"
-            >Cancel</button>
+          <div class="px-6 py-4 flex items-center justify-end gap-2 border-t border-white/[0.06]">
+            <button @click="closeStartAgent" class="h-9 px-4 rounded-lg text-sm text-slate-400 hover:text-slate-100 hover:bg-raised transition-colors">Cancel</button>
             <button
               @click="confirmStartAgent"
-              class="flex-1 py-2.5 rounded-xl border border-emerald-500/30 bg-emerald-500/10 text-sm font-semibold text-emerald-400 hover:bg-emerald-500/20 transition-colors"
-            >
-              <span class="material-symbols-outlined text-[14px] mr-1" style="vertical-align: middle">play_circle</span>
-              Start Agent
-            </button>
+              class="h-9 px-4 rounded-lg bg-primary text-background-dark text-sm font-medium hover:bg-white transition-colors shadow-[inset_0_1px_0_rgba(255,255,255,0.4)]"
+            >Start agent</button>
           </div>
         </div>
       </div>
@@ -588,6 +538,78 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.fade-enter-active, .fade-leave-active { transition: opacity 0.2s ease; }
-.fade-enter-from, .fade-leave-to       { opacity: 0; }
+.svc-grid,
+.svc-row {
+  grid-template-columns: minmax(0, 1.1fr) 112px minmax(0, 1.7fr) 176px;
+  column-gap: 16px;
+}
+.svc-row {
+  display: grid;
+  align-items: center;
+  min-height: 68px;
+  padding: 12px 20px;
+}
+.svc-meta {
+  font-size: 12px;
+  line-height: 16px;
+  color: #85858b;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.svc-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.svc-btn {
+  height: 32px;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #ededed;
+  background: #1e1e20;
+  border: 1px solid rgba(237, 237, 237, 0.07);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  white-space: nowrap;
+  transition: background-color 140ms cubic-bezier(0.22, 1, 0.36, 1), transform 120ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.svc-btn:hover:not(:disabled) { background: #26262a; }
+.svc-btn:active:not(:disabled) { transform: scale(0.98); }
+.svc-btn:disabled { opacity: 0.4; cursor: default; }
+.svc-btn.text-loss { color: #e5484d; }
+
+.progress-fill {
+  transform-origin: left center;
+  transition: transform 500ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Small screens: name and status on one line, activity below, actions last. */
+@media (max-width: 767px) {
+  .svc-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    row-gap: 8px;
+  }
+  .svc-row > :nth-child(3) { grid-column: 1 / -1; }
+  .svc-row > :nth-child(4) { grid-column: 1 / -1; justify-content: flex-start; }
+}
+
+/* One short entrance for the page content. */
+.dash > * { animation: dash-in 360ms cubic-bezier(0.22, 1, 0.36, 1) both; }
+.dash > :nth-child(2) { animation-delay: 40ms; }
+.dash > :nth-child(3) { animation-delay: 80ms; }
+.dash > :nth-child(4) { animation-delay: 120ms; }
+@keyframes dash-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .dash > * { animation: none; } }
+
+.fade-enter-active, .fade-leave-active { transition: opacity 180ms cubic-bezier(0.22, 1, 0.36, 1); }
+.fade-enter-active .modal-panel, .fade-leave-active .modal-panel { transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1); }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
+.fade-enter-from .modal-panel, .fade-leave-to .modal-panel { transform: translateY(6px); }
 </style>

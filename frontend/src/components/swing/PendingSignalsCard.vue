@@ -362,7 +362,7 @@ const noticeClass = computed(() => ({
 
 function laneClass(lane) {
   return lane === 'wheel'
-    ? 'text-violet-300 bg-violet-500/10 border-violet-500/20'
+    ? 'text-zinc-200 bg-zinc-500/10 border-zinc-500/20'
     : 'text-sky-400 bg-sky-500/10 border-sky-500/20'
 }
 

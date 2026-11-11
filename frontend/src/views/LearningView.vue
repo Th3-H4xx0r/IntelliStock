@@ -796,8 +796,8 @@ onUnmounted(stopPolling)
                   <p class="text-xs text-slate-400 mt-1">{{ f.detail }}</p>
                 </div>
                 <span v-if="busyFor(f.id)"
-                      class="shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border text-violet-300 bg-violet-500/10 border-violet-500/30">
-                  <span class="size-1.5 rounded-full bg-violet-400 animate-pulse"></span>
+                      class="shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border text-zinc-200 bg-zinc-500/10 border-zinc-500/30">
+                  <span class="size-1.5 rounded-full bg-zinc-400 animate-pulse"></span>
                   {{ busyRole(f.id) }} thinking…
                 </span>
                 <span class="material-symbols-outlined text-slate-600 text-[18px] shrink-0">
@@ -822,16 +822,16 @@ onUnmounted(stopPolling)
                 <li v-for="rung in LADDER" :key="rung.key" class="ml-4 pb-4">
                   <span class="absolute -left-[5px] mt-1 size-2.5 rounded-full"
                         :class="busyStep(f.id, rung.key)
-                          ? 'bg-violet-400 animate-pulse'
+                          ? 'bg-zinc-400 animate-pulse'
                           : 'bg-slate-700'"></span>
                   <div class="text-xs font-semibold"
-                       :class="busyStep(f.id, rung.key) ? 'text-violet-300' : 'text-slate-500'">
+                       :class="busyStep(f.id, rung.key) ? 'text-zinc-200' : 'text-slate-500'">
                     {{ rung.label }}
                   </div>
                   <div class="text-[11px] text-slate-600">{{ rung.hint }}</div>
                   <div v-if="busyStep(f.id, rung.key)"
-                       class="text-[10px] text-violet-300 mt-0.5 flex items-center gap-1">
-                    <span class="size-1.5 rounded-full bg-violet-400 animate-pulse"></span>
+                       class="text-[10px] text-zinc-200 mt-0.5 flex items-center gap-1">
+                    <span class="size-1.5 rounded-full bg-zinc-400 animate-pulse"></span>
                     {{ busyRole(f.id) }} working on this step…
                   </div>
                   <div v-else class="text-[10px] text-slate-700 mt-0.5">not reached yet</div>

@@ -134,7 +134,7 @@ function setBtSort(col) {
 
 function viewBacktest(bid) { if (bid != null) router.push(`/backtests/${bid}`) }
 
-const PHASE_COLOR = { pre: 'text-sky-400 bg-sky-500/10 border-sky-500/20', post: 'text-purple-400 bg-purple-500/10 border-purple-500/20', entry: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20', exit: 'text-red-400 bg-red-500/10 border-red-500/20' }
+const PHASE_COLOR = { pre: 'text-sky-400 bg-sky-500/10 border-sky-500/20', post: 'text-zinc-300 bg-zinc-500/10 border-zinc-500/20', entry: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20', exit: 'text-red-400 bg-red-500/10 border-red-500/20' }
 function phaseClass(p) { return PHASE_COLOR[p] || 'text-slate-400 bg-slate-500/10 border-slate-600' }
 
 // ── Backtest this strategy modal ───────────────────────────────────────────────

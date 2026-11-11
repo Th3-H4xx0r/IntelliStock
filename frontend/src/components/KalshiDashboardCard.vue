@@ -33,40 +33,49 @@ async function load() {
 }
 
 const positive = computed(() => dayChange.value >= 0)
-const fmtValue = computed(() => `$${value.value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`)
+const usd = (n) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n)
+const fmtValue = computed(() => usd(value.value))
+const fmtChange = computed(() => `${positive.value ? '+' : '−'}${usd(Math.abs(dayChange.value))}`)
 onMounted(load)
 </script>
 
 <template>
   <section v-if="ready && account">
-    <div class="flex items-center justify-between mb-5">
+    <div class="flex items-center justify-between mb-3">
       <div>
-        <h2 class="text-lg font-bold text-slate-100 flex items-center gap-2">
-          <span class="material-symbols-outlined text-primary text-[20px]">sports_soccer</span> Kalshi
-        </h2>
-        <p class="text-slate-500 text-xs mt-0.5">Prediction-markets portfolio.</p>
+        <h2 class="text-base font-medium text-slate-100">Prediction markets</h2>
+        <p class="text-sm text-slate-500 mt-0.5">Kalshi event contracts</p>
       </div>
-      <RouterLink to="/kalshi" class="flex items-center gap-1.5 text-xs font-medium text-primary hover:brightness-110 transition-all">
+      <RouterLink
+        to="/kalshi"
+        class="shrink-0 whitespace-nowrap inline-flex items-center gap-1.5 h-8 px-3 -mr-3 rounded-md text-sm text-slate-400 hover:text-slate-100 hover:bg-raised transition-colors"
+      >
         Open Kalshi
-        <span class="material-symbols-outlined text-[14px]">arrow_forward</span>
+        <span class="material-symbols-outlined text-[16px]">arrow_forward</span>
       </RouterLink>
     </div>
 
-    <div @click="router.push('/kalshi')"
-         class="glass-card card-hover rounded-2xl p-4 sm:p-5 cursor-pointer">
-      <div class="flex items-center gap-2 mb-3">
-        <span class="material-symbols-outlined text-primary text-[18px]">account_balance_wallet</span>
-        <span class="text-[11px] sm:text-xs font-semibold text-slate-400 uppercase tracking-widest">{{ account.account_name }}</span>
-      </div>
-      <div class="flex flex-wrap items-end gap-2 sm:gap-3">
-        <span class="text-xl sm:text-2xl font-bold text-slate-100 tabular-nums break-all">{{ fmtValue }}</span>
-        <span class="flex items-center gap-1 text-xs sm:text-sm font-semibold mb-0.5"
-              :class="positive ? 'text-emerald-400' : 'text-red-400'">
-          <span class="material-symbols-outlined text-[16px]">{{ positive ? 'trending_up' : 'trending_down' }}</span>
-          {{ positive ? '+' : '-' }}${{ Math.abs(dayChange).toFixed(2) }}
-        </span>
-      </div>
-      <p class="text-xs text-slate-500 mt-3">{{ positions }} open position{{ positions === 1 ? '' : 's' }}</p>
-    </div>
+    <button
+      type="button"
+      @click="router.push('/kalshi')"
+      class="card-hover w-full rounded-xl border border-white/[0.07] bg-surface px-5 py-4 grid grid-cols-2 sm:grid-cols-[minmax(0,1fr)_auto_auto_auto] items-center gap-x-8 gap-y-3 text-left"
+    >
+      <span class="min-w-0 col-span-2 sm:col-span-1">
+        <span class="block text-sm text-slate-100 truncate">{{ account.account_name }}</span>
+        <span class="block text-xs text-slate-500 mt-0.5">Kalshi</span>
+      </span>
+      <span>
+        <span class="block text-xs text-slate-500">Balance</span>
+        <span class="block text-sm text-slate-100 tabular-nums mt-0.5">{{ fmtValue }}</span>
+      </span>
+      <span>
+        <span class="block text-xs text-slate-500">Today</span>
+        <span class="block text-sm tabular-nums mt-0.5" :class="positive ? 'text-gain' : 'text-loss'">{{ fmtChange }}</span>
+      </span>
+      <span>
+        <span class="block text-xs text-slate-500">Open positions</span>
+        <span class="block text-sm text-slate-100 tabular-nums mt-0.5">{{ positions }}</span>
+      </span>
+    </button>
   </section>
 </template>

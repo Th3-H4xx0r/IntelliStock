@@ -191,7 +191,7 @@ defineExpose({ open: openChatbot, close: closeChatbot, toggle: toggleChatbot })
       <button
         v-if="!expanded"
         @click="openChatbot"
-        class="fixed z-[45] right-4 bottom-[max(1rem,env(safe-area-inset-bottom))] sm:right-6 sm:bottom-6 size-14 rounded-full bg-primary text-background-dark shadow-2xl flex items-center justify-center hover:brightness-110 transition-all chatbot-bubble"
+        class="fixed z-[45] right-4 bottom-[max(1rem,env(safe-area-inset-bottom))] sm:right-6 sm:bottom-6 size-12 rounded-full bg-primary text-background-dark flex items-center justify-center hover:bg-white chatbot-bubble"
         aria-label="Open assistant"
       >
         <span class="material-symbols-outlined text-[26px]">smart_toy</span>
@@ -214,7 +214,7 @@ defineExpose({ open: openChatbot, close: closeChatbot, toggle: toggleChatbot })
             : 'right-4 sm:right-6 bottom-[max(1rem,env(safe-area-inset-bottom))] sm:bottom-6 w-[420px] max-w-[calc(100vw-2rem)] h-[640px] max-h-[calc(100vh-3rem)] rounded-2xl border border-border-subtle',
         ]"
       >
-        <div class="relative h-full flex flex-col bg-[#0a0716]/95 backdrop-blur-xl rounded-[inherit] overflow-hidden shadow-2xl">
+        <div class="relative h-full flex flex-col bg-surface/95 backdrop-blur-xl rounded-[inherit] overflow-hidden shadow-2xl">
 
           <ChatHeader
             :title="title"
@@ -250,7 +250,7 @@ defineExpose({ open: openChatbot, close: closeChatbot, toggle: toggleChatbot })
           </div>
           <div
             v-if="conversationListOpen"
-            class="border-b border-border-subtle px-2 py-2 max-h-40 overflow-y-auto bg-[#0a0716]/95"
+            class="border-b border-border-subtle px-2 py-2 max-h-40 overflow-y-auto bg-surface/95"
           >
             <button
               v-for="c in conversations"
@@ -374,18 +374,16 @@ defineExpose({ open: openChatbot, close: closeChatbot, toggle: toggleChatbot })
 
 <style scoped>
 .chatbot-bubble {
-  animation: chatbot-bubble-glow 3s ease-in-out infinite;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5), 0 8px 24px rgba(0, 0, 0, 0.45);
+  transition: background-color 160ms cubic-bezier(0.22, 1, 0.36, 1), transform 120ms cubic-bezier(0.22, 1, 0.36, 1);
 }
-@keyframes chatbot-bubble-glow {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(140, 66, 255, 0.55), 0 12px 32px rgba(0,0,0,0.45); }
-  50%      { box-shadow: 0 0 0 14px rgba(140, 66, 255, 0), 0 12px 32px rgba(0,0,0,0.45); }
-}
+.chatbot-bubble:active { transform: scale(0.97); }
 .chatbot-dot {
   display: inline-block;
   width: 6px;
   height: 6px;
   border-radius: 999px;
-  background: #c98fff;
+  background: #a1a1a6;
   animation: chatbot-dot 1.1s ease-in-out infinite both;
 }
 @keyframes chatbot-dot {

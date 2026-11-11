@@ -9,11 +9,11 @@ let   typed        = false
 const LINES = [
   { text: '$ intellistock deploy --strategy graph_nexus_alpha', cls: 'text-emerald-400' },
   { text: 'Verifying credentials...',                           cls: 'text-slate-500'   },
-  { text: '> Connected to Alpaca (Paper Trading)',              cls: 'text-primary'     },
+  { text: '> Connected to Alpaca (Paper Trading)',              cls: 'text-brand'     },
   { text: 'Loading Graph Nexus — 85,412 edges OK',             cls: 'text-slate-500'   },
   { text: 'Spinning up strategy containers...',                 cls: 'text-slate-500'   },
-  { text: '> Benzinga event stream: active',                    cls: 'text-primary'     },
-  { text: '> LLM sentiment engine: ready (GPT-4o)',             cls: 'text-primary'     },
+  { text: '> Benzinga event stream: active',                    cls: 'text-brand'     },
+  { text: '> LLM sentiment engine: ready (GPT-4o)',             cls: 'text-brand'     },
   { text: 'SUCCESS: Live trading active.',                      cls: 'text-emerald-400' },
 ]
 
@@ -46,12 +46,12 @@ onMounted(() => {
 <template>
   <section class="bg-gradient-to-b from-background-dark to-surface" style="padding: 80px 0;">
     <div class="max-w-7xl mx-auto px-6">
-      <div v-reveal class="reveal glass-card rounded-[2rem] p-8 md:p-12 flex flex-col xl:flex-row items-start justify-between gap-10 md:gap-12">
+      <div v-reveal class="reveal mk-glass-card rounded-[2rem] p-8 md:p-12 flex flex-col xl:flex-row items-start justify-between gap-10 md:gap-12">
 
         <!-- Copy -->
         <div class="max-w-lg space-y-6 md:space-y-8">
           <div class="space-y-4">
-            <p v-reveal class="reveal text-primary text-xs font-bold uppercase tracking-widest">Deployment</p>
+            <p v-reveal class="reveal text-brand text-xs font-bold uppercase tracking-widest">Deployment</p>
             <h2 v-reveal class="reveal delay-100 text-4xl font-bold leading-tight">
               From idea to live<br> trading in seconds.
             </h2>
@@ -65,7 +65,7 @@ onMounted(() => {
           <!-- Feature list -->
           <ul v-reveal class="reveal delay-300 space-y-4">
             <li v-for="feat in features" :key="feat.label" class="flex items-start gap-3">
-              <span class="material-symbols-outlined text-primary text-base mt-0.5 shrink-0">{{ feat.icon }}</span>
+              <span class="material-symbols-outlined text-brand text-base mt-0.5 shrink-0">{{ feat.icon }}</span>
               <div>
                 <span class="font-semibold text-sm">{{ feat.label }}</span>
                 <span class="text-slate-400 text-sm"> — {{ feat.desc }}</span>
@@ -108,7 +108,7 @@ onMounted(() => {
                 :class="line.cls"
                 style="animation: heroFadeUp 0.3s ease both;"
               >{{ line.text }}</p>
-              <span v-if="showCursor" class="cursor-blink text-primary"></span>
+              <span v-if="showCursor" class="cursor-blink text-brand"></span>
             </code>
           </div>
         </div>

@@ -1034,7 +1034,7 @@ onMounted(async () => {
               <span
                 class="text-[10px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wider"
                 :class="(inst.created_by || 'user') === 'ai'
-                  ? 'bg-violet-500/15 text-violet-400 border border-violet-500/20'
+                  ? 'bg-zinc-500/15 text-zinc-300 border border-zinc-500/20'
                   : 'bg-slate-500/10 text-slate-500 border border-slate-700'"
               >
                 {{ (inst.created_by || 'user') === 'ai' ? 'AI' : 'User' }}
@@ -1142,7 +1142,7 @@ onMounted(async () => {
               v-if="!inst.strategy_id"
               @click="openLinkStrategy(inst.id)"
               :disabled="busy[inst.id]"
-              class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-violet-400 hover:bg-violet-500/10 border border-violet-500/20 transition-colors disabled:opacity-40"
+              class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-zinc-300 hover:bg-zinc-500/10 border border-zinc-500/20 transition-colors disabled:opacity-40"
             >
               <span class="material-symbols-outlined text-[14px]">link</span>
               Link Strategy
@@ -1213,7 +1213,7 @@ onMounted(async () => {
         class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
         @click.self="closeDelete"
       >
-        <div class="relative w-full max-w-sm bg-[#0f1318] border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
+        <div class="relative w-full max-w-sm bg-surface border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
 
           <div class="flex items-center justify-between px-6 py-5 border-b border-border-subtle">
             <div class="flex items-center gap-3">
@@ -1290,11 +1290,11 @@ onMounted(async () => {
         class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
         @click.self="closeLinkStrategy"
       >
-        <div class="relative w-full max-w-sm bg-[#0f1318] border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
+        <div class="relative w-full max-w-sm bg-surface border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
           <div class="flex items-center justify-between px-6 py-5 border-b border-border-subtle">
             <div class="flex items-center gap-3">
-              <div class="size-9 rounded-xl bg-violet-500/10 border border-violet-500/20 flex items-center justify-center shrink-0">
-                <span class="material-symbols-outlined text-violet-400 text-lg">link</span>
+              <div class="size-9 rounded-xl bg-zinc-500/10 border border-zinc-500/20 flex items-center justify-center shrink-0">
+                <span class="material-symbols-outlined text-zinc-300 text-lg">link</span>
               </div>
               <h2 class="text-base font-bold">Link Strategy</h2>
             </div>
@@ -1329,7 +1329,7 @@ onMounted(async () => {
               Cancel
             </button>
             <button @click="submitLinkStrategy" :disabled="linkStrategyBusy || !linkStrategyId"
-              class="flex-1 py-2.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-sm font-bold transition-all disabled:opacity-50 flex items-center justify-center gap-2">
+              class="flex-1 py-2.5 rounded-lg bg-zinc-600 hover:bg-zinc-500 text-white text-sm font-bold transition-all disabled:opacity-50 flex items-center justify-center gap-2">
               <span v-if="linkStrategyBusy" class="material-symbols-outlined text-base animate-spin">progress_activity</span>
               {{ linkStrategyBusy ? 'Linking...' : 'Link Strategy' }}
             </button>
@@ -1347,7 +1347,7 @@ onMounted(async () => {
         class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
         @click.self="closeChangeBrokerage"
       >
-        <div class="relative w-full max-w-sm bg-[#0f0a1c] border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
+        <div class="relative w-full max-w-sm bg-surface border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
           <div class="flex items-center justify-between px-6 py-5 border-b border-border-subtle">
             <div class="flex items-center gap-3">
               <div class="size-9 rounded-xl bg-primary/10 border border-primary/20 flex items-center justify-center shrink-0">
@@ -1404,7 +1404,7 @@ onMounted(async () => {
         class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
         @click.self="closeCreate"
       >
-        <div class="relative w-full max-w-sm bg-[#0f1318] border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
+        <div class="relative w-full max-w-sm bg-surface border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
 
           <div class="flex items-center justify-between px-6 py-5 border-b border-border-subtle">
             <h2 class="text-base font-bold">New Instance</h2>
@@ -1508,7 +1508,7 @@ onMounted(async () => {
                 <button
                   type="button"
                   @click="openCreateStrategy"
-                  class="shrink-0 flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold text-violet-400 hover:bg-violet-500/10 border border-violet-500/20 transition-colors"
+                  class="shrink-0 flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold text-zinc-300 hover:bg-zinc-500/10 border border-zinc-500/20 transition-colors"
                   title="Create new strategy"
                 >
                   <span class="material-symbols-outlined text-[14px]">add</span>
@@ -1561,7 +1561,7 @@ onMounted(async () => {
         class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
         @click.self="closeEditStrategy"
       >
-        <div class="relative w-full max-w-2xl bg-[#0f1318] border border-border-subtle rounded-2xl shadow-2xl flex flex-col max-h-[90vh]">
+        <div class="relative w-full max-w-2xl bg-surface border border-border-subtle rounded-2xl shadow-2xl flex flex-col max-h-[90vh]">
 
           <!-- Header -->
           <div class="flex items-center justify-between px-6 py-5 border-b border-border-subtle shrink-0">
@@ -1661,7 +1661,7 @@ onMounted(async () => {
                         <input
                           v-model.number="sub.weight"
                           type="number" min="0" max="1" step="0.05"
-                          class="w-full bg-[#0f1318] border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono"
+                          class="w-full bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono"
                         />
                       </div>
                       <!-- Execution Position -->
@@ -1670,7 +1670,7 @@ onMounted(async () => {
                         <input
                           v-model.number="sub.execution_position"
                           type="number" step="1"
-                          class="w-full bg-[#0f1318] border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono"
+                          class="w-full bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono"
                         />
                       </div>
                       <!-- Decision Phase -->
@@ -1710,7 +1710,7 @@ onMounted(async () => {
                         <div
                           v-for="group in llmConfigGroups(sub)"
                           :key="group.label"
-                          class="rounded-lg border border-border-subtle bg-[#0f1318] px-3 py-3 space-y-2"
+                          class="rounded-lg border border-border-subtle bg-surface px-3 py-3 space-y-2"
                         >
                           <div class="flex items-start justify-between gap-3">
                             <div class="min-w-0">
@@ -1741,7 +1741,7 @@ onMounted(async () => {
                             type="button"
                             @click="sub.config[key] = !sub.config[key]"
                               class="relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 transition-colors"
-                              :class="sub.config[key] ? 'bg-primary border-primary' : 'bg-[#0f1318] border-border-subtle'"
+                              :class="sub.config[key] ? 'bg-primary border-primary' : 'bg-surface border-border-subtle'"
                             >
                               <span
                                 class="inline-block size-3.5 rounded-full bg-white shadow transition-transform"
@@ -1755,7 +1755,7 @@ onMounted(async () => {
                               :value="sub.config[key]"
                               @input="updateConfigField(sub, key, $event.target.value, 'number')"
                               type="number"
-                              class="w-full bg-[#0f1318] border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono"
+                              class="w-full bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono"
                             />
                           </template>
                           <!-- String / fallback -->
@@ -1766,7 +1766,7 @@ onMounted(async () => {
                               @blur="syncConfigJsonDraft(sub, key, val)"
                               rows="4"
                               spellcheck="false"
-                              class="w-full bg-[#0f1318] border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono resize-y"
+                              class="w-full bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono resize-y"
                               :class="getConfigFieldError(sub, key) ? 'border-red-500/60 focus:border-red-400' : ''"
                             ></textarea>
                           </template>
@@ -1774,7 +1774,7 @@ onMounted(async () => {
                             <input
                               v-model="sub.config[key]"
                               type="text"
-                              class="w-full bg-[#0f1318] border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono"
+                              class="w-full bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono"
                             />
                           </template>
                           <p v-if="getConfigFieldError(sub, key)" class="mt-1 text-[10px] leading-relaxed text-red-400">
@@ -1838,7 +1838,7 @@ onMounted(async () => {
         class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
         @click.self="closeCreateBacktest"
       >
-        <div class="relative w-full max-w-md bg-[#0f0a1c] border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
+        <div class="relative w-full max-w-md bg-surface border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
 
           <div class="flex items-center justify-between px-6 py-5 border-b border-border-subtle">
             <div class="flex items-center gap-3">
@@ -1960,13 +1960,13 @@ onMounted(async () => {
         v-if="showCreateStrategy"
         class="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
       >
-        <div class="relative w-full max-w-2xl bg-[#0f1318] border border-border-subtle rounded-2xl shadow-2xl flex flex-col max-h-[90vh]">
+        <div class="relative w-full max-w-2xl bg-surface border border-border-subtle rounded-2xl shadow-2xl flex flex-col max-h-[90vh]">
 
           <!-- Header -->
           <div class="flex items-center justify-between px-6 py-5 border-b border-border-subtle shrink-0">
             <div class="flex items-center gap-3 min-w-0">
-              <div class="size-9 rounded-xl bg-violet-500/10 border border-violet-500/20 flex items-center justify-center shrink-0">
-                <span class="material-symbols-outlined text-violet-400 text-lg">add_circle</span>
+              <div class="size-9 rounded-xl bg-zinc-500/10 border border-zinc-500/20 flex items-center justify-center shrink-0">
+                <span class="material-symbols-outlined text-zinc-300 text-lg">add_circle</span>
               </div>
               <h2 class="text-base font-bold">New Strategy</h2>
             </div>
@@ -2050,12 +2050,12 @@ onMounted(async () => {
                     <div>
                       <label class="block text-[11px] font-medium text-slate-500 mb-1">Weight</label>
                       <input v-model.number="sub.weight" type="number" min="0" max="1" step="0.05"
-                        class="w-full bg-[#0f1318] border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono" />
+                        class="w-full bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono" />
                     </div>
                     <div>
                       <label class="block text-[11px] font-medium text-slate-500 mb-1">Exec Position</label>
                       <input v-model.number="sub.execution_position" type="number" step="1"
-                        class="w-full bg-[#0f1318] border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono" />
+                        class="w-full bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono" />
                     </div>
                     <div>
                       <label class="block text-[11px] font-medium text-slate-500 mb-1">Phase</label>
@@ -2086,7 +2086,7 @@ onMounted(async () => {
                       <div
                         v-for="group in llmConfigGroups(sub)"
                         :key="group.label"
-                        class="rounded-lg border border-border-subtle bg-[#0f1318] px-3 py-3 space-y-2"
+                        class="rounded-lg border border-border-subtle bg-surface px-3 py-3 space-y-2"
                       >
                         <div class="flex items-start justify-between gap-3">
                           <div class="min-w-0">
@@ -2114,14 +2114,14 @@ onMounted(async () => {
                         <template v-if="getConfigType(getRefConfig(sub.strategy)[key] ?? val) === 'boolean'">
                           <button type="button" @click="sub.config[key] = !sub.config[key]"
                             class="relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 transition-colors"
-                            :class="sub.config[key] ? 'bg-primary border-primary' : 'bg-[#0f1318] border-border-subtle'">
+                            :class="sub.config[key] ? 'bg-primary border-primary' : 'bg-surface border-border-subtle'">
                             <span class="inline-block size-3.5 rounded-full bg-white shadow transition-transform"
                               :class="sub.config[key] ? 'translate-x-4' : 'translate-x-0.5'"></span>
                           </button>
                         </template>
                         <template v-else-if="getConfigType(getRefConfig(sub.strategy)[key] ?? val) === 'number'">
                           <input :value="sub.config[key]" @input="updateConfigField(sub, key, $event.target.value, 'number')"
-                            type="number" class="w-full bg-[#0f1318] border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono" />
+                            type="number" class="w-full bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono" />
                         </template>
                         <template v-else-if="getConfigType(getRefConfig(sub.strategy)[key] ?? val) === 'json'">
                           <textarea
@@ -2130,13 +2130,13 @@ onMounted(async () => {
                             @blur="syncConfigJsonDraft(sub, key, val)"
                             rows="4"
                             spellcheck="false"
-                            class="w-full bg-[#0f1318] border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono resize-y"
+                            class="w-full bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono resize-y"
                             :class="getConfigFieldError(sub, key) ? 'border-red-500/60 focus:border-red-400' : ''"
                           ></textarea>
                         </template>
                         <template v-else>
                           <input v-model="sub.config[key]" type="text"
-                            class="w-full bg-[#0f1318] border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono" />
+                            class="w-full bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono" />
                         </template>
                         <p v-if="getConfigFieldError(sub, key)" class="mt-1 text-[10px] leading-relaxed text-red-400">
                           Invalid JSON: {{ getConfigFieldError(sub, key) }}
@@ -2177,7 +2177,7 @@ onMounted(async () => {
               Cancel
             </button>
             <button @click="submitCreateStrategy" :disabled="creatingStrategy"
-              class="flex-1 py-2.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-sm font-bold transition-all disabled:opacity-50 flex items-center justify-center gap-2">
+              class="flex-1 py-2.5 rounded-lg bg-zinc-600 hover:bg-zinc-500 text-white text-sm font-bold transition-all disabled:opacity-50 flex items-center justify-center gap-2">
               <span v-if="creatingStrategy" class="material-symbols-outlined text-base animate-spin">progress_activity</span>
               {{ creatingStrategy ? 'Creating...' : 'Create Strategy' }}
             </button>
@@ -2194,7 +2194,7 @@ onMounted(async () => {
         v-if="showLlmConfigModal"
         class="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
       >
-        <div class="relative w-full max-w-lg bg-[#0f1318] border border-border-subtle rounded-2xl shadow-2xl flex flex-col max-h-[90vh]">
+        <div class="relative w-full max-w-lg bg-surface border border-border-subtle rounded-2xl shadow-2xl flex flex-col max-h-[90vh]">
           <div class="flex items-center justify-between px-6 py-5 border-b border-border-subtle shrink-0">
             <div>
               <h2 class="text-base font-bold">{{ llmConfigTarget?.group?.label || 'LLM Config' }}</h2>
@@ -2269,7 +2269,7 @@ onMounted(async () => {
         class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
         @click.self="closeAddStock"
       >
-        <div class="relative w-full max-w-xs bg-[#0f1318] border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
+        <div class="relative w-full max-w-xs bg-surface border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
           <div class="flex items-center justify-between px-6 py-5 border-b border-border-subtle">
             <h2 class="text-base font-bold">Add Stock</h2>
             <button @click="closeAddStock" class="text-slate-500 hover:text-slate-300 transition-colors">

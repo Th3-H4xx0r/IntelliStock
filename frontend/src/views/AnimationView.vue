@@ -1250,39 +1250,39 @@ onUnmounted(() => {
   z-index: 1;
 }
 
-.rest :deep(.text-primary) {
+.rest :deep(.text-brand) {
   color: #c98fff !important;
 }
 
-.rest :deep(.bg-primary) {
+.rest :deep(.bg-brand) {
   background: linear-gradient(180deg, #d2a8ff 0%, #8c42ff 100%) !important;
 }
 
-.rest :deep(.bg-primary\/10) {
+.rest :deep(.bg-brand\/10) {
   background: rgba(173, 105, 255, 0.12) !important;
 }
 
-.rest :deep(.bg-primary\/5) {
+.rest :deep(.bg-brand\/5) {
   background: rgba(173, 105, 255, 0.08) !important;
 }
 
-.rest :deep(.border-primary\/20) {
+.rest :deep(.border-brand\/20) {
   border-color: rgba(173, 105, 255, 0.24) !important;
 }
 
-.rest :deep(.border-primary\/10) {
+.rest :deep(.border-brand\/10) {
   border-color: rgba(173, 105, 255, 0.16) !important;
 }
 
 .rest :deep(.bg-surface),
-.rest :deep(.card-hover),
-.rest :deep(.glass-card) {
+.rest :deep(.mk-card-hover),
+.rest :deep(.mk-glass-card) {
   background: linear-gradient(180deg, rgba(23, 14, 45, 0.9) 0%, rgba(11, 8, 24, 0.82) 100%) !important;
   border-color: rgba(188, 154, 255, 0.12) !important;
   box-shadow: 0 22px 44px rgba(5, 2, 12, 0.3);
 }
 
-.rest :deep(.glass-card) {
+.rest :deep(.mk-glass-card) {
   backdrop-filter: blur(18px);
 }
 
@@ -1328,7 +1328,7 @@ onUnmounted(() => {
   color: rgba(144, 138, 167, 0.68) !important;
 }
 
-.rest :deep(.card-hover:hover) {
+.rest :deep(.mk-card-hover:hover) {
   border-color: rgba(212, 176, 255, 0.2) !important;
   box-shadow: 0 24px 48px rgba(19, 10, 45, 0.34), 0 0 0 1px rgba(215, 180, 255, 0.06) !important;
 }
