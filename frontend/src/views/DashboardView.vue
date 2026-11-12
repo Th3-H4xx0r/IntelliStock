@@ -154,6 +154,25 @@ const { holdings, sparks, loadTotalSparks } = useAccountHoldings(stockAccountId)
 // so they load the first time Total is shown for an account.
 watch([pnlMode, holdings], ([mode]) => { if (mode === 'total' && holdings.value) loadTotalSparks() })
 
+const hasHoldings = computed(() =>
+  !!(stockAccountId.value && holdings.value && (holdings.value.positions.length || holdings.value.cash != null)))
+
+// ── Account switcher ──────────────────────────────────────────────────────────
+// A condensed control in the header. Opening it draws the full list over the
+// page; picking an account, clicking elsewhere or Escape closes it.
+const accountsOpen = ref(false)
+const switcherEl = ref(null)
+function pickAccount(a) {
+  selectAccount(a)
+  accountsOpen.value = false
+}
+function onDocPointer(e) {
+  if (accountsOpen.value && switcherEl.value && !switcherEl.value.contains(e.target)) accountsOpen.value = false
+}
+function onDocKey(e) {
+  if (e.key === 'Escape' && accountsOpen.value) accountsOpen.value = false
+}
+
 // ── Services ──────────────────────────────────────────────────────────────────
 const engines     = ref([])   // from GET /status
 const agentStatus = ref(null) // from GET /agent/control
@@ -275,10 +294,14 @@ onMounted(() => {
   fetchServices()
   svcPollTimer = setInterval(fetchServices, 10000)
   marketTimer = setInterval(() => { marketOpen.value = isMarketOpen() }, 30_000)
+  document.addEventListener('pointerdown', onDocPointer)
+  document.addEventListener('keydown', onDocKey)
 })
 onUnmounted(() => {
   if (svcPollTimer) clearInterval(svcPollTimer)
   if (marketTimer) clearInterval(marketTimer)
+  document.removeEventListener('pointerdown', onDocPointer)
+  document.removeEventListener('keydown', onDocKey)
 })
 </script>
 
@@ -287,7 +310,7 @@ onUnmounted(() => {
     <main class="dash flex-1 w-full max-w-[1440px] px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
 
       <!-- Page header -->
-      <header class="flex flex-wrap items-end justify-between gap-x-4 gap-y-2">
+      <header class="relative z-30 flex items-start justify-between gap-4">
         <div class="min-w-0">
           <h1 class="text-2xl font-medium text-slate-100 leading-tight">Dashboard</h1>
           <p class="text-sm text-slate-500 mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -302,13 +325,76 @@ onUnmounted(() => {
             </span>
           </p>
         </div>
-        <RouterLink
-          to="/brokerages"
-          class="shrink-0 whitespace-nowrap inline-flex items-center gap-1.5 h-8 px-3 -mr-3 rounded-md text-sm text-slate-400 hover:text-slate-100 hover:bg-raised transition-colors"
-        >
-          Manage brokerages
-          <span class="material-symbols-outlined text-[16px]">arrow_forward</span>
-        </RouterLink>
+        <!-- Account switcher: condensed, expands over the page -->
+        <div v-if="bkLoading" class="shrink-0 h-11 w-48 rounded-lg bg-surface"></div>
+        <div v-else-if="accounts.length" ref="switcherEl" class="relative shrink-0">
+          <button
+            type="button"
+            @click="accountsOpen = !accountsOpen"
+            class="h-11 max-w-[220px] sm:max-w-[280px] pl-3 pr-2 rounded-lg border border-white/[0.08] bg-surface flex items-center gap-3 text-left transition-colors hover:bg-raised focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25"
+            :class="accountsOpen ? 'bg-raised' : ''"
+            :aria-expanded="accountsOpen"
+            aria-haspopup="true"
+            aria-controls="account-switcher-panel"
+          >
+            <span class="min-w-0">
+              <span class="block text-[11px] leading-4 text-slate-500">Account</span>
+              <span class="block text-sm leading-5 text-slate-100 truncate">{{ selectedAccount?.account_name }}</span>
+            </span>
+            <span
+              class="text-xs tabular-nums shrink-0"
+              :class="changeClass(summaries[selectedAccount?.id])"
+            >{{ fmtPct(summaries[selectedAccount?.id]?.change_pct) }}</span>
+            <span
+              class="material-symbols-outlined text-[18px] text-slate-500 shrink-0 transition-transform"
+              :class="accountsOpen ? 'rotate-180' : ''"
+              aria-hidden="true"
+            >expand_more</span>
+          </button>
+
+          <Transition name="pop">
+            <div
+              v-if="accountsOpen"
+              id="account-switcher-panel"
+              class="absolute right-0 top-full mt-2 w-[min(340px,calc(100vw-32px))] rounded-xl border border-white/[0.08] bg-surface shadow-[0_16px_40px_rgba(0,0,0,0.5)] overflow-hidden"
+            >
+              <div class="h-12 px-4 flex items-center justify-between border-b border-white/[0.06]">
+                <h2 class="text-sm font-medium text-slate-200">Accounts</h2>
+                <span class="text-xs text-slate-500">Today</span>
+              </div>
+              <ul class="p-1.5 max-h-[60vh] overflow-y-auto">
+                <li v-for="acct in accounts" :key="acct.id">
+                  <button
+                    type="button"
+                    @click="pickAccount(acct)"
+                    class="w-full h-14 px-3 rounded-lg flex items-center justify-between gap-3 text-left transition-colors"
+                    :class="selectedAccount?.id === acct.id ? 'bg-raised shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]' : 'hover:bg-white/[0.03]'"
+                    :aria-pressed="selectedAccount?.id === acct.id"
+                  >
+                    <span class="min-w-0">
+                      <span class="block text-sm text-slate-100 truncate">{{ acct.account_name }}</span>
+                      <span class="block text-xs text-slate-500 mt-0.5">{{ accountKind(acct) }}</span>
+                    </span>
+                    <span class="text-right shrink-0 tabular-nums">
+                      <span class="block text-sm text-slate-100">{{ fmtUsd(summaries[acct.id]?.value) }}</span>
+                      <span
+                        class="block text-xs mt-0.5"
+                        :class="changeClass(summaries[acct.id])"
+                      >{{ fmtPct(summaries[acct.id]?.change_pct) || ' ' }}</span>
+                    </span>
+                  </button>
+                </li>
+              </ul>
+              <RouterLink
+                to="/brokerages"
+                class="h-11 px-4 flex items-center justify-between text-sm text-slate-400 border-t border-white/[0.06] hover:text-slate-100 hover:bg-white/[0.03] transition-colors"
+              >
+                Manage brokerages
+                <span class="material-symbols-outlined text-[16px]">arrow_forward</span>
+              </RouterLink>
+            </div>
+          </Transition>
+        </div>
       </header>
 
       <!-- ── Portfolio ──────────────────────────────────────────────────── -->
@@ -343,60 +429,45 @@ onUnmounted(() => {
           </RouterLink>
         </div>
 
-        <!-- Headline chart + account list -->
-        <div v-else class="grid grid-cols-1 gap-8 lg:grid-cols-[minmax(0,1fr)_340px] items-start">
-          <PortfolioChart
-            v-if="selectedAccount"
-            :key="selectedAccount.id"
-            :account="selectedAccount"
-            variant="hero"
-          />
-
-          <div class="rounded-xl border border-white/[0.07] bg-surface overflow-hidden">
-            <div class="h-12 px-4 flex items-center justify-between border-b border-white/[0.06]">
-              <h2 class="text-sm font-medium text-slate-200">Accounts</h2>
-              <span class="text-xs text-slate-500">Today</span>
-            </div>
-            <ul class="p-1.5">
-              <li v-for="acct in accounts" :key="acct.id">
-                <button
-                  type="button"
-                  @click="selectAccount(acct)"
-                  class="w-full h-14 px-3 rounded-lg flex items-center justify-between gap-3 text-left transition-colors"
-                  :class="selectedAccount?.id === acct.id ? 'bg-raised shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]' : 'hover:bg-white/[0.03]'"
-                  :aria-pressed="selectedAccount?.id === acct.id"
-                >
-                  <span class="min-w-0">
-                    <span class="block text-sm text-slate-100 truncate">{{ acct.account_name }}</span>
-                    <span class="block text-xs text-slate-500 mt-0.5">{{ accountKind(acct) }}</span>
-                  </span>
-                  <span class="text-right shrink-0 tabular-nums">
-                    <span class="block text-sm text-slate-100">{{ fmtUsd(summaries[acct.id]?.value) }}</span>
-                    <span
-                      class="block text-xs mt-0.5"
-                      :class="changeClass(summaries[acct.id])"
-                    >{{ fmtPct(summaries[acct.id]?.change_pct) || '\u00a0' }}</span>
-                  </span>
-                </button>
-              </li>
-            </ul>
+        <!-- Headline chart + holdings on the left, insights on the right.
+             Kalshi accounts have no holdings or insights, so the chart runs
+             full width for them. -->
+        <div
+          v-else
+          class="grid grid-cols-1 gap-x-8 gap-y-12 items-start"
+          :class="stockAccountId ? 'lg:grid-cols-[minmax(0,1fr)_340px]' : ''"
+        >
+          <div class="min-w-0 flex flex-col gap-12">
+            <PortfolioChart
+              v-if="selectedAccount"
+              :key="selectedAccount.id"
+              :account="selectedAccount"
+              variant="hero"
+            />
+            <DashboardHoldings
+              v-if="hasHoldings"
+              v-model:mode="pnlMode"
+              class="min-w-0"
+              :holdings="holdings"
+              :sparks="sparks"
+            />
           </div>
-        </div>
-      </section>
 
-      <!-- ── Holdings + insights (stock accounts) ───────────────────────── -->
-      <section
-        v-if="stockAccountId && holdings && (holdings.positions.length || holdings.cash != null)"
-        class="mt-12 grid grid-cols-1 gap-8 lg:grid-cols-[minmax(0,1fr)_340px] items-start"
-      >
-        <DashboardHoldings v-model:mode="pnlMode" class="min-w-0" :holdings="holdings" :sparks="sparks" />
-        <DashboardInsights
-          class="min-w-0"
-          :brokerage-id="stockAccountId"
-          :holdings="holdings"
-          :daily-sparks="sparks.daily"
-          :today="summaries[stockAccountId] || null"
-        />
+          <template v-if="stockAccountId">
+            <DashboardInsights
+              v-if="hasHoldings"
+              class="min-w-0"
+              :brokerage-id="stockAccountId"
+              :holdings="holdings"
+              :daily-sparks="sparks.daily"
+              :today="summaries[stockAccountId] || null"
+            />
+            <div v-else-if="!holdings" class="space-y-3" aria-hidden="true">
+              <div class="h-4 w-24 rounded bg-raised"></div>
+              <div class="h-[420px] rounded-xl bg-surface"></div>
+            </div>
+          </template>
+        </div>
       </section>
 
       <!-- ── Market ─────────────────────────────────────────────────────── -->
@@ -668,4 +739,7 @@ onUnmounted(() => {
 .fade-enter-active .modal-panel, .fade-leave-active .modal-panel { transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1); }
 .fade-enter-from, .fade-leave-to { opacity: 0; }
 .fade-enter-from .modal-panel, .fade-leave-to .modal-panel { transform: translateY(6px); }
+.pop-enter-active, .pop-leave-active { transition: opacity 140ms ease, transform 160ms cubic-bezier(0.22, 1, 0.36, 1); transform-origin: top right; }
+.pop-enter-from, .pop-leave-to { opacity: 0; transform: translateY(-4px) scale(0.98); }
+@media (prefers-reduced-motion: reduce) { .pop-enter-active, .pop-leave-active { transition: none; } }
 </style>
