@@ -119,6 +119,18 @@ nonisolated func appVersionString(_ info: [String: Any]? = Bundle.main.infoDicti
     return version + (build.isEmpty ? "" : "+\(build)")
 }
 
+/// The Check for Updates row's subtitle: what the last check found.
+nonisolated func appUpdateSubtitle(_ status: AppUpdateCheckStatus) -> String {
+    switch status {
+    case .idle: "Install new builds from your server"
+    case .checking: "Checking…"
+    case .upToDate: "IntelliStock is up to date"
+    case .available(let build): "Build \(String(build)) is available"
+    case .unavailable(let why): why
+    case .failed(let message): "Couldn\u{2019}t check: \(message)"
+    }
+}
+
 /// Dart's `e.toString()` for a caught error (`ApiError.toString()` is its message).
 nonisolated func settingsErrorText(_ error: any Error) -> String {
     (error as? ApiError)?.message ?? error.localizedDescription

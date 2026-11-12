@@ -11,7 +11,10 @@ struct IntelliStockApp: App {
         WindowGroup {
             RootView()
                 .environment(services)
-                .onAppear { appDelegate.attach(push: services.push) }
+                .onAppear {
+                    appDelegate.attach(push: services.push)
+                    appDelegate.attach(updates: services.appUpdates)
+                }
         }
     }
 }

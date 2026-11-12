@@ -289,3 +289,6 @@ docs/superpowers/research/**/newstrat_results/
 
 # Local watchdog pid files
 *.pid
+
+# iOS over-the-air update builds (APP_UPDATES_DIR default for local runs)
+backend/app_updates/

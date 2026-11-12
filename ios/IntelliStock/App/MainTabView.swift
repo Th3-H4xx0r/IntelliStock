@@ -11,6 +11,7 @@ import SwiftUI
 /// shell, and none while locked (`LockView` replaces the shell).
 struct MainTabView: View {
     @Environment(AppServices.self) private var services
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         @Bindable var router = services.router
@@ -38,6 +39,14 @@ struct MainTabView: View {
         .chatbotPresenter()
         // Inside the authenticated shell: register for push once per sign-in.
         .task { await services.push.enable() }
+        // "Update Available" when a newer build is published: checked as the
+        // shell appears (launch, sign-in, unlock) and on every return to the
+        // foreground.
+        .appUpdatePresenter(services.appUpdates)
+        .onChange(of: scenePhase, initial: true) { _, phase in
+            services.appUpdates.scenePhaseChanged(to: phase)
+        }
+        .onDisappear { services.appUpdates.shellDisappeared() }
     }
 }
 

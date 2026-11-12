@@ -2308,6 +2308,12 @@ def api_test_notification(body: TestNotificationBody, conn=Depends(conn_dependen
     raise HTTPException(status_code=400, detail=f"unknown channel: {body.channel}")
 
 
+# --- iOS app over-the-air updates (/app-updates/*, public signed /ota/* links) ---
+from api import app_updates  # noqa: E402
+
+app.include_router(app_updates.build_router(get_current_user))
+
+
 @app.get("/tickers", response_class=JSONResponse)
 def api_tickers(conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
     return _run(action_tickers, conn)

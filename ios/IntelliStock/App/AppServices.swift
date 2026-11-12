@@ -62,6 +62,14 @@ final class AppServices {
         shouldRegister: { [unowned self] in self.session.isAuthenticated && !self.lock.locked }
     )
 
+    /// Over-the-air updates: asks `/app-updates/latest` and drives the
+    /// "Update Available" sheet the signed-in shell presents. Checks only
+    /// while signed in and unlocked, against the current server.
+    @ObservationIgnored private(set) lazy var appUpdates = AppUpdateCenter(
+        repository: { [unowned self] in AppUpdateRepository(client: self.apiClient) },
+        canCheck: { [unowned self] in self.session.isAuthenticated && !self.lock.locked }
+    )
+
     @ObservationIgnored private(set) lazy var widgetDataSyncer = WidgetDataSyncer(
         client: { [unowned self] in self.apiClient },
         widgetSync: widgetSync

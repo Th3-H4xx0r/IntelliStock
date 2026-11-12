@@ -20,6 +20,31 @@ IOS_DEVICE_ID=<udid> ios/scripts/deploy.sh
 - The bundle ID matches the Flutter build, so the session, server URL, lock settings and home-screen
   widget carry over.
 
+## Ship an update
+
+```sh
+ios/scripts/release.sh --notes "• Order history on the dashboard
+• Faster charts"
+ios/scripts/release.sh --no-publish              # archive + export the IPA only
+scripts/publish-app-update.sh --rollback         # the previous build becomes current again
+```
+
+- `release.sh` stamps the build number (UTC `yyDDDHHMM`; `BUILD_NUMBER=N` overrides it), archives a
+  development-signed IPA into `ios/build/release/export/`, and uploads it to the API over HTTPS
+  (`INTELLISTOCK_API_URL` and the account in the repo `.env`, as `scripts/_api.py` uses).
+- The app asks the server at launch and on every return to the foreground. A newer build brings up
+  "Update Available" with the notes, Install Now and Later. Later hides that build until the app is
+  next opened. Settings › Check for Updates brings it back. Every registered iPhone also gets a push.
+- The server keeps the current build and the one before it. Rollback stops phones still on the older
+  build from being offered the bad one. A phone that already installed the bad build needs a newer
+  build to move off it.
+- First install: the build that first contains the updater must go on by cable with
+  `ios/scripts/deploy.sh`. After that, releases arrive over the air.
+- `deploy.sh` and Xcode builds are build 2 (`project.yml`), so they are offered whatever is
+  published. Tap Later, or release instead.
+- The install links are signed and expire after 10 minutes. iOS needs them on https, so open the app
+  against the API's public https address, or set `APP_UPDATES_PUBLIC_URL` on the `api` service.
+
 ## Build and test
 
 ```sh
