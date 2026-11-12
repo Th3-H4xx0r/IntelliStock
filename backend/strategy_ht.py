@@ -85,6 +85,13 @@ DEFAULTS = {
     # spends a bar with 25-50% of NAV in cash: the engine's gridded run had cash
     # above 20% of NAV on 89 of 512 sessions.
     "backtest_credit_pending_sell_proceeds": True,
+    # LIVE only. The live broker has no pending-sell credit, and it allows one
+    # buy per symbol per day. On a flip the buy used to go out in the same tick
+    # as its funding sell, sized from the few dollars of cash on hand: a stub
+    # that then blocked the real buy until the next day (strategy-ht-paper,
+    # 2026-11-12: $84 of QQQ, $9,852 idle). While a sell is going out, a buy
+    # funded below this fraction of what it wants is held for a later tick.
+    "live_min_buy_fill_fraction": 0.9,
     # ── live risk envelope (read by broker._strategy_eb_risk_limits) ──
     # The lane is a single levered ETF position by design, so order, symbol
     # and leveraged fractions are 100%. The drawdown rungs are the paper

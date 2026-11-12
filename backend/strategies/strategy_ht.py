@@ -1,4 +1,4 @@
-# INTELLISTOCK_SCHEMA: {"strategy": "strategy_ht", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_ht_enabled": false, "filter_symbol": "SPY", "ma_bars": 200, "enter_band": 0.01, "exit_band": 0.03, "vol_target": 0.20, "vol_bars": 21, "exp_min": 0.5, "exp_max": 2.0, "exp_grid": 0.5, "exp_hyst": 0.15, "bounce_drop": 0.0, "in_symbol": "SSO", "one_x_symbol": "SPY", "cash_symbol": "BIL", "in_weight": 1.0, "out_symbols": {"SPY": 0.5, "BIL": 0.5}, "core_band_pct": 0.05, "min_order_usd": 50.0, "cost_haircut_pct": 0.006, "broker_max_single_position_pct": 1.0, "honour_single_position_cap": true, "backtest_credit_pending_sell_proceeds": true, "live_max_order_fraction": 1.0, "live_max_symbol_fraction": 1.0, "live_max_leveraged_fraction": 1.0, "live_soft_drawdown": 0.35, "live_hard_drawdown": 0.50, "live_kill_drawdown": 0.60}}
+# INTELLISTOCK_SCHEMA: {"strategy": "strategy_ht", "weight": 1.0, "execution_position": 10, "decision_phase": "pre", "execution_scope": "run_once", "conditions": {}, "config": {"strategy_ht_enabled": false, "filter_symbol": "SPY", "ma_bars": 200, "enter_band": 0.01, "exit_band": 0.03, "vol_target": 0.20, "vol_bars": 21, "exp_min": 0.5, "exp_max": 2.0, "exp_grid": 0.5, "exp_hyst": 0.15, "bounce_drop": 0.0, "in_symbol": "SSO", "one_x_symbol": "SPY", "cash_symbol": "BIL", "in_weight": 1.0, "out_symbols": {"SPY": 0.5, "BIL": 0.5}, "core_band_pct": 0.05, "min_order_usd": 50.0, "cost_haircut_pct": 0.006, "broker_max_single_position_pct": 1.0, "honour_single_position_cap": true, "backtest_credit_pending_sell_proceeds": true, "live_min_buy_fill_fraction": 0.9, "live_max_order_fraction": 1.0, "live_max_symbol_fraction": 1.0, "live_max_leveraged_fraction": 1.0, "live_soft_drawdown": 0.35, "live_hard_drawdown": 0.50, "live_kill_drawdown": 0.60}}
 # INTELLISTOCK_DESCRIPTION: Hysteresis trend, Balanced profile — up to 2x S&P (SSO) while SPY holds above its 200-day average (re-enter 1% above, exit 3% below), with the exposure stepped down (2x / 1.5x / 1x / 0.5x) when 21-day realised vol exceeds a 20% target, and parked in 50% SPY / 50% BIL when the trend breaks.
 """Strategy HT wrapper: broker contract, order emission, cache row.
 
@@ -45,6 +45,32 @@ def _bars_for(data, symbol):
     if isinstance(entry, dict):
         return entry.get("bars") or []
     return entry or []
+
+
+def _hold_starved_buys(decisions, sizes, targets, *, nav, positions, prices, min_fill):
+    """Live only: while a funding sell is going out, drop any buy that the cash
+    on hand covers less than `min_fill` of.
+
+    The live broker sends one buy per symbol per day ("already ordered today"),
+    so a buy sized from pre-sale cash is not topped up when the proceeds land;
+    it pins the book in cash until the next session. Holding the buy costs one
+    scheduler tick. With no sell in the tick nothing is held, so a book that is
+    simply short of cash still trades.
+    """
+    if min_fill <= 0 or not any(d == -1 for d in decisions.values()):
+        return decisions, sizes
+    held = {str(s).strip().upper(): float(q or 0.0) for s, q in (positions or {}).items()}
+    decisions, sizes = dict(decisions), dict(sizes)
+    for sym in [s for s, d in decisions.items() if d == 1]:
+        px = float((prices or {}).get(sym) or 0.0)
+        wanted = float(targets.get(sym, 0.0)) * nav - held.get(sym, 0.0) * px
+        funded = float((sizes.get(sym) or {}).get("buy_cash") or 0.0)
+        if wanted > 0 and funded < min_fill * wanted:
+            del decisions[sym]
+            sizes.pop(sym, None)
+            _log(f"StrategyHt: holding BUY {sym} — ${funded:,.0f} of ${wanted:,.0f} "
+                 f"funded; waiting for this tick's sell to settle.", "yellow")
+    return decisions, sizes
 
 
 class StrategyHt:
@@ -117,6 +143,11 @@ class StrategyHt:
         decisions, sizes = targets_to_orders(
             targets, nav=nav, positions=positions, prices=eff, cash=cash,
             config=order_cfg, owned=set(universe))
+        # Live = the broker's marker, or a scheduler mode (a backtest tick passes none).
+        if _truthy(cfg.get("_nexus_is_live_mode", False)) or mode is not None:
+            decisions, sizes = _hold_starved_buys(
+                decisions, sizes, targets, nav=nav, positions=positions,
+                prices=eff, min_fill=float(cfg.get("live_min_buy_fill_fraction", 0.9) or 0.0))
 
         cache["_strategy_ht_last"] = {
             "in_market": bool(state.in_market), "decided": bool(state.decided),
