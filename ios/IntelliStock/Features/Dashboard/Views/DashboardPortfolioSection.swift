@@ -18,7 +18,8 @@ nonisolated enum DashboardPortfolioMetrics {
 /// 1. the hero, on the plain grouped background: the account label (which
 ///    opens the "Portfolios" sheet), the balance, its change, the market
 ///    status, the scrubbable chart, the range picker and the freshness line;
-/// 2. the holdings (`DashboardHoldingsSection`).
+/// 2. the holdings (`DashboardHoldingsSection`);
+/// 3. for a stock account, its orders (`DashboardOrdersSection`).
 ///
 /// The polls that drive them run from `DashboardView`'s list.
 struct DashboardPortfolioSections: View {
@@ -62,6 +63,9 @@ struct DashboardPortfolioSections: View {
         }
         .listSectionMargins(.horizontal, 0)
         DashboardHoldingsSection(holdings: scope.holdings, feed: feed, brokerageId: selected.id)
+        if selected.hasOrderBook {
+            DashboardOrdersSection(orders: scope.orders)
+        }
     }
 }
 

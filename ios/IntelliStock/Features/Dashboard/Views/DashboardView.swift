@@ -2,7 +2,8 @@ import SwiftUI
 
 /// The Dashboard tab root — `DashboardScreen` in `dashboard_screen.dart`.
 ///
-/// Sections in Dart's order: Portfolio (hero, chart, holdings) · Insights ·
+/// Sections in Dart's order: Portfolio (hero, chart, holdings, then a stock
+/// account's orders) · Insights ·
 /// Market · Strategy · Kalshi · Services · Re-run onboarding, as one
 /// inset-grouped `List` (redesign spec 2026-10-02). There is no visible
 /// title: the balance is the first and biggest thing on screen, as in Stocks,
@@ -117,6 +118,13 @@ private struct DashboardContent: View {
         return liveScope
     }
 
+    /// The portfolio scope when the selected account is a stock account,
+    /// whose orders show under its holdings. Kalshi has no order book.
+    private var ordersScope: DashboardAccountScope? {
+        guard selected?.hasOrderBook == true else { return nil }
+        return portfolioScope
+    }
+
     private var kalshiAccount: BrokerageAccount? {
         (services.dashboard.brokeragesValue ?? []).first { $0.brokerageType == "kalshi" }
     }
@@ -186,6 +194,11 @@ private struct DashboardContent: View {
         .task(id: portfolioScope.map { "\($0.brokerageId)|\(feed.pnlMode.rawValue)" }) {
             guard let scope = portfolioScope else { return }
             await scope.holdings.showSparks(feed.pnlMode.sparkRange)
+        }
+        // Orders: every 30 s for a stock account; restarts on an account switch.
+        .task(id: ordersScope?.brokerageId) {
+            guard let scope = ordersScope else { return }
+            await scope.orders.poll(lifecycle: services.lifecycle)
         }
         // Insights + Market.
         .task(id: liveScope?.brokerageId) {
@@ -319,10 +332,17 @@ private struct DashboardContent: View {
         async let holdings: Void = scope.holdings.reload()
         async let chart: Void = scope.chart.refresh()
         async let strategyReload: Void = strategy.reload(id)
-        _ = await (svc, holdings, chart, strategyReload)
+        async let ordersReload: Void = reloadOrders(scope)
+        _ = await (svc, holdings, chart, strategyReload, ordersReload)
         async let insights: Void = scope.insights.load(holdings: scope.holdings, force: true)
         async let feedReload: Void = feed.refreshAll(id, holdings: { try await scope.holdings.currentHoldings() })
         _ = await (insights, feedReload)
+    }
+
+    /// Orders reload only for a stock account.
+    private func reloadOrders(_ scope: DashboardAccountScope) async {
+        guard selected?.id == scope.brokerageId, selected?.hasOrderBook == true else { return }
+        await scope.orders.reload()
     }
 }
 
