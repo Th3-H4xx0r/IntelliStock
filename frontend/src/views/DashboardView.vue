@@ -310,7 +310,7 @@ onUnmounted(() => {
     <main class="dash flex-1 w-full max-w-[1440px] px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
 
       <!-- Page header -->
-      <header class="relative z-30 flex items-start justify-between gap-4">
+      <header class="relative z-30 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between lg:grid lg:grid-cols-[minmax(0,1fr)_340px] lg:gap-8">
         <div class="min-w-0">
           <h1 class="text-2xl font-medium text-slate-100 leading-tight">Dashboard</h1>
           <p class="text-sm text-slate-500 mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -326,25 +326,29 @@ onUnmounted(() => {
           </p>
         </div>
         <!-- Account switcher: condensed, expands over the page -->
-        <div v-if="bkLoading" class="shrink-0 h-11 w-48 rounded-lg bg-surface"></div>
-        <div v-else-if="accounts.length" ref="switcherEl" class="relative shrink-0">
+        <div v-if="bkLoading" class="shrink-0 h-14 w-full sm:w-[300px] lg:w-full rounded-xl bg-surface"></div>
+        <div v-else-if="accounts.length" ref="switcherEl" class="relative shrink-0 w-full sm:w-[300px] lg:w-full">
           <button
             type="button"
             @click="accountsOpen = !accountsOpen"
-            class="h-11 max-w-[220px] sm:max-w-[280px] pl-3 pr-2 rounded-lg border border-white/[0.08] bg-surface flex items-center gap-3 text-left transition-colors hover:bg-raised focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25"
+            class="w-full h-14 pl-4 pr-3 rounded-xl border border-white/[0.08] bg-surface flex items-center gap-3 text-left transition-colors hover:bg-raised focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25"
             :class="accountsOpen ? 'bg-raised' : ''"
             :aria-expanded="accountsOpen"
             aria-haspopup="true"
             aria-controls="account-switcher-panel"
           >
-            <span class="min-w-0">
-              <span class="block text-[11px] leading-4 text-slate-500">Account</span>
-              <span class="block text-sm leading-5 text-slate-100 truncate">{{ selectedAccount?.account_name }}</span>
+            <!-- Same two-line layout as the rows in the list it opens -->
+            <span class="min-w-0 flex-1">
+              <span class="block text-sm text-slate-100 truncate">{{ selectedAccount?.account_name }}</span>
+              <span class="block text-xs text-slate-500 mt-0.5">{{ accountKind(selectedAccount) }}</span>
             </span>
-            <span
-              class="text-xs tabular-nums shrink-0"
-              :class="changeClass(summaries[selectedAccount?.id])"
-            >{{ fmtPct(summaries[selectedAccount?.id]?.change_pct) }}</span>
+            <span class="text-right shrink-0 tabular-nums">
+              <span class="block text-sm text-slate-100">{{ fmtUsd(summaries[selectedAccount?.id]?.value) }}</span>
+              <span
+                class="block text-xs mt-0.5"
+                :class="changeClass(summaries[selectedAccount?.id])"
+              >{{ fmtPct(summaries[selectedAccount?.id]?.change_pct) || '\u00a0' }}</span>
+            </span>
             <span
               class="material-symbols-outlined text-[18px] text-slate-500 shrink-0 transition-transform"
               :class="accountsOpen ? 'rotate-180' : ''"
@@ -356,7 +360,7 @@ onUnmounted(() => {
             <div
               v-if="accountsOpen"
               id="account-switcher-panel"
-              class="absolute right-0 top-full mt-2 w-[min(340px,calc(100vw-32px))] rounded-xl border border-white/[0.08] bg-surface shadow-[0_16px_40px_rgba(0,0,0,0.5)] overflow-hidden"
+              class="absolute left-0 right-0 sm:left-auto sm:w-[340px] lg:w-full top-full mt-2 rounded-xl border border-white/[0.08] bg-surface shadow-[0_16px_40px_rgba(0,0,0,0.5)] overflow-hidden"
             >
               <div class="h-12 px-4 flex items-center justify-between border-b border-white/[0.06]">
                 <h2 class="text-sm font-medium text-slate-200">Accounts</h2>
