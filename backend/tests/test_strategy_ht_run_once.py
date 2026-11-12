@@ -208,3 +208,68 @@ def test_the_broker_cash_floor_is_zeroed_so_the_whole_book_deploys():
     out = StrategyHt().run_once(["SSO"], PRICES, NOW, cfg(), {}, data=data_for(uptrend()),
                                 portfolio_emulator=FakeEmulator(cash=10000.0), strategy_cache={})
     assert out["_nexus_position_sizes"]["_cash_reserve_floor_pct"] == 0.0
+
+
+# ── live: a flip must not send a stub buy beside its funding sell ──
+# strategy-ht-paper, 2026-11-12: OUT (BIL) -> IN. The BIL sell and the buy went
+# out one second apart; the buy was sized from $84 of cash, and the broker's
+# one-buy-per-symbol-per-day guard then refused the real buy all day.
+
+def _live(**overrides):
+    return cfg(_nexus_is_live_mode=True, **overrides)
+
+
+def test_live_flip_sends_the_sell_and_holds_the_starved_buy():
+    emu = FakeEmulator(cash=84.0, positions={"BIL": 109.0})      # ~$9.9k BIL
+    out = StrategyHt().run_once(["SSO"], PRICES, NOW, _live(), {}, data=data_for(uptrend()),
+                                portfolio_emulator=emu, strategy_cache={})
+    assert out.get("BIL") == -1
+    assert "SSO" not in out
+    assert "SSO" not in out["_nexus_position_sizes"]
+    assert out["_nexus_executable_buys"] == []
+
+
+def test_live_buy_goes_out_in_full_once_the_sale_cash_has_arrived():
+    emu = FakeEmulator(cash=10000.0, positions={})
+    out = StrategyHt().run_once(["SSO"], PRICES, NOW, _live(), {}, data=data_for(uptrend()),
+                                portfolio_emulator=emu, strategy_cache={})
+    assert out.get("SSO") == 1
+    assert out["_nexus_position_sizes"]["SSO"]["buy_cash"] > 9000.0
+
+
+def test_live_a_leftover_stub_is_topped_up_when_no_sell_is_pending():
+    emu = FakeEmulator(cash=9850.0, positions={"SSO": 0.85})     # the 11-12 book
+    out = StrategyHt().run_once(["SSO"], PRICES, NOW, _live(), {}, data=data_for(uptrend()),
+                                portfolio_emulator=emu, strategy_cache={})
+    assert out.get("SSO") == 1
+    assert out["_nexus_position_sizes"]["SSO"]["buy_cash"] > 9000.0
+
+
+def test_live_short_cash_with_no_sell_still_buys():
+    # nothing to wait for: holding here would deadlock the book
+    emu = FakeEmulator(cash=3000.0, positions={})
+    emu.get_portfolio_value = lambda prices=None: 10000.0
+    out = StrategyHt().run_once(["SSO"], PRICES, NOW, _live(), {}, data=data_for(uptrend()),
+                                portfolio_emulator=emu, strategy_cache={})
+    assert out.get("SSO") == 1
+
+
+def test_live_hold_can_be_switched_off():
+    emu = FakeEmulator(cash=84.0, positions={"BIL": 109.0})
+    out = StrategyHt().run_once(["SSO"], PRICES, NOW, _live(live_min_buy_fill_fraction=0.0), {},
+                                data=data_for(uptrend()), portfolio_emulator=emu, strategy_cache={})
+    assert out.get("BIL") == -1 and out.get("SSO") == 1
+
+
+def test_backtest_flip_is_unchanged_by_the_live_hold():
+    emu = FakeEmulator(cash=84.0, positions={"BIL": 109.0})
+    out = StrategyHt().run_once(["SSO"], PRICES, NOW, cfg(), {}, data=data_for(uptrend()),
+                                portfolio_emulator=emu, strategy_cache={})
+    assert out.get("BIL") == -1 and out.get("SSO") == 1
+
+
+def test_a_scheduler_mode_alone_marks_the_tick_live():
+    emu = FakeEmulator(cash=84.0, positions={"BIL": 109.0})
+    out = StrategyHt().run_once(["SSO"], PRICES, NOW, cfg(), {}, data=data_for(uptrend()),
+                                portfolio_emulator=emu, strategy_cache={}, mode="full")
+    assert out.get("BIL") == -1 and "SSO" not in out
