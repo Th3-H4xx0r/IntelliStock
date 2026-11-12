@@ -17,6 +17,7 @@ from .reconcile import (
     BrokerPositionSnapshot,
     ReconciliationResult,
     StartupReconciler,
+    reconcile_lookup_kwargs,
 )
 from .store import (
     AppendResult,
@@ -70,4 +71,5 @@ __all__ = [
     "StartupReconciler",
     "definite_broker_rejection",
     "new_retry_intent",
+    "reconcile_lookup_kwargs",
 ]

@@ -1647,12 +1647,68 @@ class AlpacaAdapter(BrokerAdapter):
             "red",
         )
 
+    _RECONCILE_LOOKUP_CAP = 50
+
+    def _lookup_orders_outside_window(self, raw_orders, client_order_ids) -> list:
+        """Fetch, one by one, the orders the two walks could not return.
+
+        The history walk is bounded by `submitted_at`. A GTC order (a bracket
+        leg) that is cancelled or filled more than `history_days` after it was
+        submitted, while this instance is not watching, is in neither walk:
+        not open, and too old for the history. Its lifecycle row then stays
+        non-terminal forever, every reconcile raises
+        `local_order_missing_broker`, and the gate blocks every order, risk
+        exits included (swing-paper, 2026-11-12: six legs from 09-28..10-09).
+
+        The caller names the client order ids it still holds open. Any the
+        walks missed is read directly, so the reconciler sees its real status.
+        A lookup that fails or finds nothing adds nothing: the issue stands and
+        the reconcile still fails closed.
+        """
+        # Each item is a client order id, or (client order id, broker order id).
+        wanted: list[tuple[str, str]] = []
+        for item in client_order_ids or ():
+            if isinstance(item, (tuple, list)):
+                cid, oid = (str(item[0] or ""), str(item[1] or "")) if len(item) > 1 else (str(item[0] or ""), "")
+            else:
+                cid, oid = str(item or ""), ""
+            if cid:
+                wanted.append((cid, oid))
+        if not wanted:
+            return []
+        seen = {str(getattr(raw, "client_order_id", "") or "") for raw in raw_orders}
+        found = []
+        missing = [pair for pair in wanted if pair[0] not in seen]
+        for cid, oid in missing[: self._RECONCILE_LOOKUP_CAP]:
+            reads = [lambda: self._client.get_order_by_client_id(cid)]
+            if oid:
+                reads.append(lambda: self._client.get_order_by_id(oid))
+            for read in reads:
+                try:
+                    raw = read()
+                except Exception:
+                    continue
+                # Only an order that answers to this exact client id counts.
+                if raw is not None and str(getattr(raw, "client_order_id", "") or "") == cid:
+                    found.append(raw)
+                    seen.add(cid)
+                    break
+        if found:
+            _alog(
+                "BROKER",
+                f"reconcile snapshot: read {len(found)} order(s) outside the "
+                "history window by client id",
+                "yellow",
+            )
+        return found
+
     def capture_reconciliation_snapshot(
         self,
         *,
         account_id: str,
         order_limit: int = 500,
         history_days: int = 30,
+        lookup_client_order_ids=(),
     ):
         """Read one fail-closed account/position/order snapshot.
 
@@ -1726,6 +1782,11 @@ class AlpacaAdapter(BrokerAdapter):
                     by_id.setdefault(key, raw)
                 raw_orders = list(by_id.values())
                 orders_complete = bool(open_complete and history_complete)
+                raw_orders.extend(
+                    self._lookup_orders_outside_window(
+                        raw_orders, lookup_client_order_ids
+                    )
+                )
             except ImportError:
                 raw_orders = list(self._client.get_orders() or [])
             second_positions = _positions(self._client.get_all_positions())
