@@ -98,6 +98,11 @@ nonisolated struct BrokerageAccount: Hashable, Sendable, Identifiable {
     /// A paper (simulated) account: Alpaca paper, or Kalshi's demo
     /// environment. The portfolio sheet's "Paper" / "Live" subtitle.
     var isPaper: Bool { alpacaPaper || kalshiEnvironment.lowercased() == "demo" }
+
+    /// A stock account with an order book: Alpaca. The server answers
+    /// `supported: false` for every other type, so Kalshi (and crypto) never
+    /// ask.
+    var hasOrderBook: Bool { brokerageType.lowercased() == "alpaca" }
 }
 
 /// Thin data layer for all dashboard endpoints.
@@ -166,6 +171,22 @@ nonisolated struct DashboardRepository: Sendable {
             cash: data["cash"].double,
             positions: data["positions"].objectElements.map(AccountPosition.init(json:))
         )
+    }
+
+    /// GET /brokerages/{id}/order-book?recent_limit= → the account's working
+    /// orders and its newest closed ones (read-only). A 404, from a server
+    /// that predates the endpoint, reads as unsupported, so the dashboard
+    /// hides the section instead of showing an error.
+    func orderBook(_ id: String, recentLimit: Int = 25) async throws -> OrderBook {
+        do {
+            let data = try await client.get(
+                "/brokerages/\(id)/order-book",
+                query: ["recent_limit": .string("\(recentLimit)")]
+            )
+            return OrderBook(json: data)
+        } catch let error as ApiError where error.statusCode == 404 {
+            return .unsupported
+        }
     }
 
     // MARK: Nexus strategy telemetry (read-only)

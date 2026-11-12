@@ -231,3 +231,44 @@ export function useMarketData(brokerageId) {
 
   return { indices, sectors, news, movers, momentum }
 }
+
+/**
+ * Open orders and recent order history for the selected stock account,
+ * straight from the broker (GET /brokerages/{id}/order-book). Polls every
+ * 30s; a failed poll keeps the last good book.
+ */
+export function useOrderBook(brokerageId) {
+  const book = ref(null)   // { supported, open, recent } | null while loading
+  const error = ref('')
+  let generation = 0
+
+  async function load() {
+    const id = brokerageId.value
+    if (!id) { book.value = null; return }
+    const gen = generation
+    try {
+      const d = await apiGet(`/brokerages/${encodeURIComponent(id)}/order-book?recent_limit=25`)
+      if (gen !== generation) return
+      book.value = {
+        supported: d?.supported !== false,
+        open: Array.isArray(d?.open) ? d.open : [],
+        recent: Array.isArray(d?.recent) ? d.recent : [],
+      }
+      error.value = ''
+    } catch {
+      if (gen === generation && book.value == null) error.value = "Couldn't load orders"
+    }
+  }
+
+  function reload() {
+    generation += 1
+    book.value = null
+    error.value = ''
+    load()
+  }
+
+  watch(brokerageId, reload, { immediate: true })
+  poll(load, 30_000)
+
+  return { book, error, reload }
+}

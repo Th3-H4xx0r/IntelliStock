@@ -5227,6 +5227,117 @@ def api_brokerage_orders(
     return {"brokerage_id": brokerage_id, "symbol": want or None, "orders": out[:lim]}
 
 
+def normalize_alpaca_orders(raw_orders) -> list[dict]:
+    """Map Alpaca's /v2/orders payload to the dashboard order contract.
+
+    Numbers arrive as strings; qty is null for notional (dollar) orders.
+    """
+    def number(value):
+        if value is None or value == "":
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    out = []
+    for o in (raw_orders or []):
+        if not isinstance(o, dict) or not o.get("id"):
+            continue
+        out.append({
+            "id": str(o.get("id")),
+            "symbol": str(o.get("symbol") or "").upper(),
+            "side": str(o.get("side") or "").lower(),
+            "type": str(o.get("type") or o.get("order_type") or "").lower(),
+            "status": str(o.get("status") or "").lower(),
+            "qty": number(o.get("qty")),
+            "notional": number(o.get("notional")),
+            "filled_qty": number(o.get("filled_qty")) or 0.0,
+            "filled_avg_price": number(o.get("filled_avg_price")),
+            "limit_price": number(o.get("limit_price")),
+            "stop_price": number(o.get("stop_price")),
+            "time_in_force": str(o.get("time_in_force") or "").lower() or None,
+            "submitted_at": o.get("submitted_at") or o.get("created_at"),
+            "filled_at": o.get("filled_at"),
+            "canceled_at": o.get("canceled_at"),
+            "asset_class": o.get("asset_class"),
+        })
+    return out
+
+
+# The dashboard polls this from web and iOS; a short cache keeps several open
+# clients from multiplying the Alpaca calls.
+_ORDER_BOOK_CACHE: dict = {}
+_ORDER_BOOK_TTL = 10.0  # seconds
+
+
+def _fetch_alpaca_order_book(row: dict, recent_limit: int) -> tuple[list[dict], list[dict]]:
+    """Open orders and the most recent closed orders, straight from Alpaca.
+
+    Read-only: two GETs on /v2/orders. "replaced" orders are dropped from the
+    history because their replacement appears as its own order.
+    """
+    from stock_credential_boundary import resolve_alpaca_brokerage_credentials
+    import requests as _requests
+
+    brokerage_id = str(row.get("id") or "")
+    creds = resolve_alpaca_brokerage_credentials(row, expected_brokerage_id=brokerage_id)
+    base_url = str(row.get("alpaca_base_url") or "https://paper-api.alpaca.markets").rstrip("/")
+    headers = {"APCA-API-KEY-ID": creds.key, "APCA-API-SECRET-KEY": creds.secret}
+    open_res = _requests.get(
+        f"{base_url}/v2/orders", headers=headers, timeout=10,
+        params={"status": "open", "limit": 100, "direction": "desc"},
+    )
+    closed_res = _requests.get(
+        f"{base_url}/v2/orders", headers=headers, timeout=10,
+        params={"status": "closed", "limit": min(500, recent_limit + 20), "direction": "desc"},
+    )
+    open_res.raise_for_status()
+    closed_res.raise_for_status()
+    open_orders = normalize_alpaca_orders(open_res.json())
+    recent = [o for o in normalize_alpaca_orders(closed_res.json()) if o["status"] != "replaced"]
+    return open_orders, recent[:recent_limit]
+
+
+@app.get("/brokerages/{brokerage_id}/order-book", response_class=JSONResponse)
+def api_brokerage_order_book(
+    brokerage_id: str,
+    recent_limit: int = 25,
+    current_user: dict = Depends(get_current_user),
+):
+    """Open orders and recent order history for a linked brokerage account.
+
+    Read straight from the broker, so it covers every order on the account —
+    the bot's and manual ones — whether or not an instance is running. Only
+    Alpaca is supported; other brokerages answer `supported: false`.
+    """
+    try:
+        lim = max(1, min(100, int(recent_limit)))
+    except (TypeError, ValueError):
+        lim = 25
+    row = db_store.get("BrokerageAccounts", str(brokerage_id))
+    if not row:
+        raise HTTPException(status_code=404, detail="Brokerage not found")
+    if str(row.get("brokerage_type") or "").strip().lower() != "alpaca":
+        return {"brokerage_id": brokerage_id, "supported": False, "open": [], "recent": []}
+
+    key = (str(brokerage_id), lim)
+    now = time.time()
+    hit = _ORDER_BOOK_CACHE.get(key)
+    if hit and hit[0] > now:
+        return hit[1]
+    try:
+        open_orders, recent = _fetch_alpaca_order_book(row, lim)
+    except Exception as e:
+        import logging
+        logging.getLogger("uvicorn.error").warning(
+            "order-book: Alpaca read failed for %s: %s", brokerage_id, type(e).__name__)
+        raise HTTPException(status_code=502, detail="Couldn't load orders from Alpaca")
+    body = {"brokerage_id": brokerage_id, "supported": True, "open": open_orders, "recent": recent}
+    _ORDER_BOOK_CACHE[key] = (now + _ORDER_BOOK_TTL, body)
+    return body
+
+
 @app.get("/brokerages/{brokerage_id}/bot-activity", response_class=JSONResponse)
 def api_brokerage_bot_activity(
     brokerage_id: str,

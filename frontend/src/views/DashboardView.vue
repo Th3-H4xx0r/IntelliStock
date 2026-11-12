@@ -6,6 +6,7 @@ import KalshiDashboardCard from '../components/KalshiDashboardCard.vue'
 import DashboardHoldings from '../components/dashboard/DashboardHoldings.vue'
 import DashboardInsights from '../components/dashboard/DashboardInsights.vue'
 import DashboardMarket from '../components/dashboard/DashboardMarket.vue'
+import DashboardOrders from '../components/dashboard/DashboardOrders.vue'
 import { useAccountHoldings } from '../composables/useDashboardData.js'
 import { isMarketOpen } from '../utils/dashboardAnalytics.js'
 import { getToken } from '../utils/auth.js'
@@ -455,6 +456,7 @@ onUnmounted(() => {
               :holdings="holdings"
               :sparks="sparks"
             />
+            <DashboardOrders v-if="stockAccountId" class="min-w-0" :brokerage-id="stockAccountId" />
           </div>
 
           <template v-if="stockAccountId">
