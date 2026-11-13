@@ -151,10 +151,32 @@ def public_base(request: Optional[Request]) -> str:
         return ""
     headers = request.headers
     proto = (headers.get("x-forwarded-proto") or request.url.scheme or "").split(",")[0].strip().lower()
+    if proto != "https" and _visitor_used_https(headers):
+        proto = "https"
     host = (headers.get("x-forwarded-host") or headers.get("host") or "").split(",")[0].strip()
     if proto != "https" or not host or not _HOST_RE.match(host):
         return ""
     return f"https://{host}".lower()
+
+
+def _visitor_used_https(headers) -> bool:
+    """Whether a proxy in front says the visitor came in over https when the
+    hop to us was plain http: Cloudflare's `CF-Visitor: {"scheme":"https"}`
+    (Cloudflare terminates TLS and the proxy behind it reports http), or an
+    RFC 7239 `Forwarded: proto=https`."""
+    visitor = headers.get("cf-visitor") or ""
+    if visitor:
+        try:
+            if str(json.loads(visitor).get("scheme", "")).lower() == "https":
+                return True
+        except (ValueError, AttributeError):
+            pass
+    forwarded = (headers.get("forwarded") or "").split(",")[0]
+    for part in forwarded.split(";"):
+        key, _, value = part.strip().partition("=")
+        if key.lower() == "proto" and value.strip('"').lower() == "https":
+            return True
+    return False
 
 
 def install_url(platform: str, build: int, base: str) -> str:
