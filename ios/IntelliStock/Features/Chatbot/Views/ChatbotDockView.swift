@@ -25,7 +25,7 @@ enum ChatbotSession {
 // MARK: - Panel
 
 /// The expanded chat — `_ExpandedPanel`: header, conversation switcher, body
-/// and composer.
+/// and composer, on the web dock's surface colour.
 struct ChatbotPanel: View {
     let model: ChatbotModel
     let onNavigate: (String) -> Void
@@ -48,14 +48,15 @@ struct ChatbotPanel: View {
                     ChatComposer(
                         busy: st.busy,
                         disabled: st.needsModel,
-                        placeholder: st.needsModel ? "Pick a model first…" : "Ask me anything…"
+                        placeholder: st.needsModel ? "Pick a model first…" : "Ask a question"
                     ) { text in
                         Task { await model.send(text) }
                     }
                 }
-                .background(DS.Surface.canvas)
+                .background(DS.Surface.card)
         }
         .presentationDetents([.medium, .large], selection: $detent)
+        .presentationBackground(DS.Surface.card)
         .presentationDragIndicator(.visible)
         .sheet(isPresented: $settingsOpen, onDismiss: {
             if let pendingConfirm {
@@ -108,7 +109,7 @@ struct ChatbotPanel: View {
         // Settings and Clear share one menu (Clear last, destructive, still
         // confirmed); Minimise stays its own button.
         ToolbarItem(placement: .topBarTrailing) {
-            ToolbarMenu("Chat Options") {
+            ToolbarMenu("Chat options") {
                 Button("Settings", systemImage: Symbol.named("settings")) {
                     settingsOpen = true
                 }
@@ -160,7 +161,8 @@ private struct ChatbotBody: View {
     }
 }
 
-/// `_EmptyBody`: what to ask, with three suggestions.
+/// `_EmptyBody`: what to ask, with three suggestions as secondary buttons
+/// (the web dock's empty state).
 private struct ChatEmptyBody: View {
     let onSuggestion: (String) -> Void
 
@@ -172,26 +174,24 @@ private struct ChatEmptyBody: View {
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 0) {
-                IconTile(systemImage: Symbol.named("smart_toy"), size: 48)
+            VStack(spacing: 8) {
                 Text("How can I help?")
-                    .font(.headline)
-                    .padding(.top, 12)
-                Text("Ask about your portfolio, run a backtest, link a brokerage, or just say hi. I can show charts, tables, and run actions on your behalf with your approval.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .font(DS.Font.bodyMedium)
+                    .foregroundStyle(DS.Text.soft)
+                    .accessibilityAddTraits(.isHeader)
+                Text("Ask about your portfolio, run a backtest or link a brokerage. I can show charts and tables, and run actions for you with your approval.")
+                    .font(DS.Font.body)
+                    .foregroundStyle(DS.Text.muted)
+                    .lineSpacing(3)
                     .multilineTextAlignment(.center)
-                    .padding(.top, 6)
-                ChatFlowLayout(spacing: 8, centered: true) {
+                    .frame(maxWidth: 320)
+                VStack(spacing: 8) {
                     ForEach(Self.suggestions, id: \.self) { suggestion in
                         Button(suggestion) { onSuggestion(suggestion) }
-                            .font(.footnote)
-                            .buttonStyle(.bordered)
-                            .buttonBorderShape(.capsule)
-                            .tint(.secondary)
+                            .buttonStyle(.dsSecondary(size: .medium))
                     }
                 }
-                .padding(.top, 16)
+                .padding(.top, 12)
             }
             .padding(24)
             .frame(maxWidth: .infinity)
@@ -209,7 +209,7 @@ private struct ChatMessageList: View {
         let st = model.state
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(spacing: 12) {
+                LazyVStack(spacing: 16) {
                     ForEach(st.messages) { message in
                         if message.isPendingConfirmation {
                             ChatToolCallCard(
@@ -228,13 +228,13 @@ private struct ChatMessageList: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     if let error = st.error {
-                        ErrorRow(message: error) { model.clearError() }
+                        ChatErrorBox(message: error) { model.clearError() }
                             .padding(.top, 8)
                     }
                     Color.clear.frame(height: 1).id(ChatMessageList.bottomID)
                 }
-                .padding(.horizontal, 12)
-                .padding(.top, 12)
+                .padding(.horizontal, DS.pageGutter)
+                .padding(.top, 16)
                 .padding(.bottom, 8)
             }
             .defaultScrollAnchor(.bottom)
@@ -256,36 +256,61 @@ private struct ChatMessageList: View {
     }
 }
 
-/// `_ThinkingIndicator`: three dots pulsing in turn, then `Thinking…`.
+/// The chat's error (the web dock's): loss text on a faint loss tint, with
+/// an icon button that dismisses it.
+private struct ChatErrorBox: View {
+    let message: String
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text(message)
+                .font(DS.Font.caption)
+                .foregroundStyle(DS.Palette.loss)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.vertical, 8)
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(.dsIcon)
+            .accessibilityLabel("Dismiss error")
+        }
+        .padding(.leading, 12)
+        .padding(.trailing, 2)
+        .dsErrorSurface(radius: DS.Radius.control)
+    }
+}
+
+/// `_ThinkingIndicator`: three zinc dots pulsing in turn, then `Thinking…`
+/// (held still under Reduce Motion).
 private struct ChatThinkingRow: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        HStack(spacing: 3) {
+        HStack(spacing: 4) {
             TimelineView(.animation(paused: reduceMotion)) { context in
                 let t = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.1) / 1.1
-                HStack(spacing: 3) {
+                HStack(spacing: 4) {
                     ForEach(0..<3, id: \.self) { i in
                         let phase = ((t - Double(i) * 0.15).truncatingRemainder(dividingBy: 1) + 1)
                             .truncatingRemainder(dividingBy: 1)
                         let wave = 1 - abs(2 * phase - 1)
                         Circle()
-                            .fill(DS.Palette.accent)
-                            .frame(width: 6, height: 6)
-                            .scaleEffect(0.55 + 0.45 * wave)
-                            .opacity(0.4 + 0.6 * wave)
+                            .fill(DS.Text.muted)
+                            .frame(width: 5, height: 5)
+                            .opacity(0.35 + 0.65 * wave)
                     }
                 }
             }
             Text("Thinking…")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.leading, 5)
+                .font(DS.Font.caption)
+                .foregroundStyle(DS.Text.muted)
+                .padding(.leading, 4)
         }
-        .padding(.vertical, 8)
+        .padding(.vertical, 4)
         .padding(.horizontal, 4)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Thinking…")
     }
 }
-

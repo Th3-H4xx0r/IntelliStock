@@ -89,24 +89,25 @@ final class NexusModel {
 // MARK: - Screen helpers (ported 1:1)
 
 nonisolated enum NexusFormat {
-    /// `_stageColor`.
+    /// A stage's glyph colour (the web's `STAGE_META`): zinc-200 while it
+    /// runs, zinc-400 once completed or stopped, zinc-600 pending or
+    /// skipped, loss when it failed.
     static func stageColor(_ status: String) -> Color {
         switch status.lowercased() {
-        case "running": DS.Palette.info
-        case "completed", "skipped": DS.Palette.success
-        case "stopped": DS.Palette.warning
-        case "failed": DS.Palette.danger
-        default: Color(uiColor: .tertiaryLabel)
+        case "running": DS.Text.soft
+        case "completed", "stopped": DS.Text.secondary
+        case "failed": DS.Palette.loss
+        default: DS.Text.faint
         }
     }
 
-    /// `_stageIcon` (material names).
+    /// A stage's glyph (the web's outlined Material icons).
     static func stageIcon(_ status: String) -> String {
         switch status.lowercased() {
-        case "completed": "checkmark.circle.fill"
-        case "skipped": "minus.circle.fill"
-        case "stopped": "pause.circle.fill"
-        case "failed": "xmark.circle.fill"
+        case "completed": "checkmark.circle"
+        case "skipped": "minus.circle"
+        case "stopped": "pause.circle"
+        case "failed": "xmark.circle"
         default: "circle"
         }
     }
@@ -163,15 +164,18 @@ nonisolated enum NexusFormat {
 
     static func fmtNum(_ v: Int?) -> String { fmtNum(v.map { JSON.int($0) }) }
 
-    /// Bootstrap badge text and colour.
-    static func bootstrapPill(_ s: String) -> (text: String, color: Color) {
+    /// The bootstrap's status as the web words it (`bootstrapPillText`) and
+    /// its dot (`BOOTSTRAP_META`): live while it runs, amber when partial,
+    /// a light dot once ready, else off.
+    static func bootstrapPill(_ s: String) -> (text: String, tone: DSStatusTone) {
         switch s {
-        case "completed": ("Bootstrap Ready", DS.Palette.success)
-        case "running": ("Bootstrap Running", DS.Palette.info)
-        case "never_built": ("Never Built", .secondary)
-        case "disabled": ("Disabled", .secondary)
-        case "partial": ("Bootstrap Partial", DS.Palette.warning)
-        default: ("Bootstrap Pending", .secondary)
+        case "completed": ("Bootstrap ready", .neutral)
+        case "running": ("Bootstrap running", .live)
+        case "never_built": ("Bootstrap not built", .off)
+        case "disabled": ("Disabled", .off)
+        case "enabled_never_run": ("Enabled — never run", .off)
+        case "partial": ("Bootstrap partial", .warn)
+        default: ("Bootstrap pending", .off)
         }
     }
 

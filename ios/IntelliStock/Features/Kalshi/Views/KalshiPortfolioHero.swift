@@ -1,47 +1,42 @@
 import SwiftUI
 
-/// The portfolio hero — `KalshiPortfolioHero` in kalshi_portfolio_hero.dart:
-/// value (or paper P&L) with a rolling number, the day change, and a
-/// scrubbable equity chart. A list `Section` (Stocks style: the hero, then the
-/// chart, no card) shared by the Kalshi tab and the instance detail. The
-/// section header names it ("Portfolio value", or "Paper P&L · progress"
-/// with a Mock badge).
+/// The portfolio hero — `KalshiPortfolioHero` in kalshi_portfolio_hero.dart,
+/// drawn as the web's portfolio card (`KalshiPortfolioChart.vue`): the
+/// headline ("Portfolio value", or "Paper P&L · progress" with Mock), the
+/// value with a rolling number, the change and its caption, then the
+/// scrubbable equity chart. A one-row card section shared by the Kalshi tab
+/// and the instance detail.
 struct KalshiPortfolioHero: View {
     let title: String
     let state: Loadable<KalshiPortfolio>?
     let onRetry: () -> Void
 
     @State private var scrubIdx: Int?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        Section {
-            content
-        } header: {
-            header
-        }
-    }
-
-    private var header: some View {
-        let paper = state?.value?.isPaper ?? false
-        return HStack(spacing: 8) {
-            Text(paper ? "Paper P&L · progress" : title)
-            if paper {
-                MarketsTag(text: "Mock", color: DS.Palette.warning)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var content: some View {
         switch state {
         case .failed(let e):
-            ErrorRow(message: KalshiFormat.errorText(e), onRetry: onRetry)
-                .listRowInsets(EdgeInsets())
-                .listRowBackground(Color.clear)
+            Section {
+                ErrorRow(message: KalshiFormat.errorText(e), onRetry: onRetry)
+                    .dsClearRow()
+            }
         case .loaded(let p):
-            loaded(p)
+            DSSection {
+                loaded(p)
+            }
         case .loading, .none:
-            LoadingState().frame(height: 110)
+            DSSection {
+                VStack(alignment: .leading, spacing: 12) {
+                    Skeleton(width: 110, height: 14)
+                    Skeleton(width: 150, height: 24)
+                    Skeleton(width: 90, height: 14)
+                    Skeleton(height: 160)
+                        .padding(.top, 8)
+                }
+                .padding(.vertical, 12)
+                .accessibilityLabel("Loading portfolio")
+            }
         }
     }
 
@@ -58,22 +53,47 @@ struct KalshiPortfolioHero: View {
         let v = scrubbing ? vals[scrubIdx!] : headline
         let change = scrubbing ? v - baseline : dayChg
         let positive = change >= 0
+        // Paper P&L can be negative: the sign goes before the $.
+        let valueText = "\(v < 0 ? "-" : "")$\(dartToStringAsFixed(abs(v), 2))"
+        let changeText = "\(positive ? "+" : "-")$\(dartToStringAsFixed(abs(change), 2))"
 
-        return VStack(alignment: .leading, spacing: DS.cardGroupSpacing) {
-            // Paper P&L can be negative: the sign goes before the $.
-            HeroValueHeader(
-                "\(v < 0 ? "-" : "")$\(dartToStringAsFixed(abs(v), 2))",
-                numericValue: v,
-                valueAnimation: scrubbing ? nil : .easeOut(duration: 0.5),
-                change: "\(positive ? "+" : "-")$\(dartToStringAsFixed(abs(change), 2))",
-                direction: positive ? .up : .down,
-                status: hasSeries ? nil : "Equity curve appears once the engine records snapshots."
-            )
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 12) {
+                Text(p.isPaper ? "Paper P&L · progress" : title)
+                    .font(DS.Font.bodyMedium)
+                    .foregroundStyle(DS.Text.soft)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                if p.isPaper {
+                    Text("Mock")
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.muted)
+                }
+            }
+            Text(valueText)
+                .font(DS.Font.figureLarge)
+                .foregroundStyle(p.isPaper ? (v >= 0 ? DS.Palette.gain : DS.Palette.loss) : DS.Text.primary)
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+                .contentTransition(.numericText(value: v))
+                .animation(reduceMotion || scrubbing ? nil : DSMotion.ease(0.5), value: v)
+                .padding(.top, 12)
+            HStack(spacing: 6) {
+                Text(changeText)
+                    .foregroundStyle(positive ? DS.Palette.gain : DS.Palette.loss)
+                Text(scrubbing || p.isPaper ? "Since start" : "Today")
+                    .foregroundStyle(DS.Text.muted)
+            }
+            .font(DS.Font.body)
+            .monospacedDigit()
+            .padding(.top, 8)
+            .accessibilityElement(children: .combine)
             if hasSeries {
                 ScrubbableAreaChart(
                     timestamps: tss,
                     values: vals,
-                    lineColor: dayChg >= 0 ? DS.Palette.success : DS.Palette.danger,
+                    lineColor: dayChg >= 0 ? DS.Palette.gain : DS.Palette.loss,
                     height: 180,
                     baseline: baseline,
                     onScrub: { scrubIdx = $0 },
@@ -82,15 +102,22 @@ struct KalshiPortfolioHero: View {
                     indexed: true,
                     pulsingEndDot: true
                 )
+                .padding(.top, 16)
+            } else {
+                Text("No snapshots yet. The equity curve appears once the engine records them.")
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.muted)
+                    .padding(.top, 12)
             }
         }
-        .padding(.vertical, 6)
+        .padding(.vertical, 12)
     }
 }
 
-/// A Kalshi open position as a list row — `kalshiPositionTile`: the crest and
-/// match, "Yes · pick", the current value with unrealized P&L, then the
-/// contracts, buy odds and max payout as a footnote.
+/// A Kalshi open position as a row — `kalshiPositionTile`, as the web's
+/// position row: the crest, the match over "Yes · pick" and the contracts,
+/// buy odds and max payout, with the current value and unrealized P&L
+/// trailing.
 struct KalshiPositionRow: View {
     let position: KalshiPosition
 
@@ -101,50 +128,85 @@ struct KalshiPositionRow: View {
         // unrealized_cents arrives in cents → dollars.
         let u = p.unrealizedCents.map { $0 / 100 }
         let positive = (u ?? 0) >= 0
-        let pnlColor: Color = u == nil ? .secondary : (positive ? DS.Palette.success : DS.Palette.danger)
 
         HStack(alignment: .center, spacing: 12) {
             MarketsCrest(url: p.pickLogo, initials: KalshiFormat.initials(pick))
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.headline)
+                    .font(DS.Font.body)
+                    .foregroundStyle(DS.Text.primary)
                     .lineLimit(1)
                 Text("Yes · \(pick)")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.muted)
                     .lineLimit(1)
-                Text("\(p.contracts)× · Buy \(p.oddsPct.map { "\(dartToStringAsFixed($0, 0))%" } ?? "—") · $\(dartToStringAsFixed(p.maxPayout, 0)) max payout")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                Text("\(p.contracts)× · bought at \(p.oddsPct.map { "\(dartToStringAsFixed($0, 0))%" } ?? "—") · $\(dartToStringAsFixed(p.maxPayout, 0)) max payout")
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.muted)
+                    .monospacedDigit()
                     .lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             EntityRowValue(
                 p.currentValue.map { "$\(dartToStringAsFixed($0, 2))" } ?? "—",
-                detail: u.map { "\(positive ? "+" : "")$\(dartToStringAsFixed($0, 2))" } ?? "",
-                detailColor: pnlColor
+                detail: u.map { "\(positive ? "+" : "-")$\(dartToStringAsFixed(abs($0), 2))" } ?? "",
+                detailColor: u == nil ? DS.Text.muted : (positive ? DS.Palette.gain : DS.Palette.loss)
             )
         }
         .accessibilityElement(children: .combine)
     }
 }
 
-/// The leagues multi-select: a row showing the selection that pushes a
-/// checkmark list (the Dart chip `Wrap`). Order follows the taps, as the
-/// Dart set / list did.
+/// The leagues multi-select: an input showing the selection that pushes a
+/// checkmark list (the web's league dropdown). Order follows the taps, as
+/// the Dart set / list did. `asRow` draws it as a list row instead ("Leagues"
+/// and the selection, the list's own chevron), for a `List`, where a link
+/// must be the whole row.
 struct KalshiLeaguePicker: View {
     @Binding var selected: [String]
+    var asRow = false
 
     var body: some View {
+        if asRow {
+            NavigationLink {
+                KalshiLeagueList(selected: $selected)
+            } label: {
+                HStack(spacing: 16) {
+                    Text("Leagues")
+                        .foregroundStyle(DS.Text.label)
+                    Spacer(minLength: 8)
+                    Text(selected.isEmpty ? "None" : selected.joined(separator: ", "))
+                        .foregroundStyle(DS.Text.secondary)
+                        .lineLimit(1)
+                }
+                .font(DS.Font.body)
+            }
+            .accessibilityValue(selected.isEmpty ? "None" : selected.joined(separator: ", "))
+        } else {
+            field
+        }
+    }
+
+    private var field: some View {
         NavigationLink {
             KalshiLeagueList(selected: $selected)
         } label: {
-            LabeledContent("Leagues") {
-                Text(selected.isEmpty ? "None" : selected.joined(separator: ", "))
-                    .lineLimit(2)
-                    .multilineTextAlignment(.trailing)
+            HStack(spacing: 8) {
+                Text(selected.isEmpty ? "Select leagues" : selected.joined(separator: ", "))
+                    .foregroundStyle(selected.isEmpty ? DS.Text.faint : DS.Text.soft)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Image(systemName: "chevron.forward")
+                    .font(.system(size: 12))
+                    .foregroundStyle(DS.Text.muted)
+                    .accessibilityHidden(true)
             }
+            .contentShape(Rectangle())
+            .dsInput()
         }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Leagues")
+        .accessibilityValue(selected.isEmpty ? "None" : selected.joined(separator: ", "))
     }
 }
 
@@ -153,29 +215,35 @@ private struct KalshiLeagueList: View {
 
     var body: some View {
         List {
-            ForEach(kalshiLeagues, id: \.self) { league in
-                let on = selected.contains(league)
-                Button {
-                    if let i = selected.firstIndex(of: league) {
-                        selected.remove(at: i)
-                    } else {
-                        selected.append(league)
-                    }
-                } label: {
-                    HStack {
-                        Text(league).foregroundStyle(.primary)
-                        Spacer()
-                        if on {
-                            Image(systemName: Symbol.named("check"))
-                                .foregroundStyle(DS.Palette.accent)
-                                .fontWeight(.semibold)
+            DSSection("", subtitle: "\(selected.count) selected", rowMinHeight: 48) {
+                ForEach(kalshiLeagues, id: \.self) { league in
+                    let on = selected.contains(league)
+                    Button {
+                        if let i = selected.firstIndex(of: league) {
+                            selected.remove(at: i)
+                        } else {
+                            selected.append(league)
                         }
+                    } label: {
+                        HStack {
+                            Text(league)
+                                .font(DS.Font.body)
+                                .foregroundStyle(DS.Text.primary)
+                            Spacer()
+                            if on {
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 14))
+                                    .foregroundStyle(DS.Text.primary)
+                            }
+                        }
+                        .contentShape(Rectangle())
                     }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(on ? .isSelected : [])
                 }
-                .tint(.primary)
-                .accessibilityAddTraits(on ? .isSelected : [])
             }
         }
+        .dsList()
         .navigationTitle("Leagues")
         .navigationBarTitleDisplayMode(.inline)
     }

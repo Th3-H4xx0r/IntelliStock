@@ -38,12 +38,13 @@ struct ScrubbableChartMarker: Identifiable, Hashable {
 /// The equity/value chart in the app's one chart style (spec 2026-10-02) —
 /// `ScrubbableAreaChart` in `scrubbable_area_chart.dart`, on Swift Charts.
 ///
-/// - A 2 pt monotone line over a flat `DS.chartAreaOpacity` fill (never a
-///   gradient), with hidden axes.
-/// - One gridline only: Stocks' dotted baseline at the start value, or at
-///   `baseline` when given (the starting equity, zero P&L). Set
-///   `showsBaseline: false` to drop it.
-/// - At most four date labels under the plot, in `.caption2` `.secondary`.
+/// - A 2 pt line over a very faint same-hue fade (12% at the top to nothing
+///   at the floor), the web hero's treatment for a P&L line.
+/// - The dotted opening-value line (off-white 28%, `2 3` dashes) at the start
+///   value, or at `baseline` when given. `showsBaseline: false` drops it.
+/// - `showsYAxis` adds the web stock chart's three price gridlines (white
+///   5%) with 11 pt zinc-500 labels at the trailing edge.
+/// - At most four date labels under the plot, 11 pt zinc-500, monospaced.
 /// - A scrub: drag across it for a hairline and a dot on the line, with a
 ///   selection haptic each time the snapped point changes. `onScrub` reports
 ///   the index, then nil when the finger lifts.
@@ -81,6 +82,8 @@ struct ScrubbableAreaChart: View {
     /// and its outcomes). Both widen the y range to stay in view.
     var levels: [ScrubbableChartLevel] = []
     var bands: [ScrubbableChartBand] = []
+    /// Price gridlines and labels at the trailing edge (the web stock chart).
+    var showsYAxis = false
 
     @State private var selectedX: Double?
     @State private var scrub = ScrubController(onTick: {})
@@ -115,11 +118,11 @@ struct ScrubbableAreaChart: View {
                         yStart: .value("Low", band.low ?? bounds.min),
                         yEnd: .value("High", band.high ?? bounds.max)
                     )
-                    .foregroundStyle(band.color.opacity(0.10))
+                    .foregroundStyle(band.color.opacity(0.08))
                     .annotation(position: .overlay, alignment: band.high == nil ? .topLeading : .bottomLeading) {
                         if let label = band.label {
                             Text(label)
-                                .font(.caption2.weight(.semibold))
+                                .font(DS.Font.inter(11, .medium, relativeTo: .caption2))
                                 .foregroundStyle(band.color)
                                 .padding(4)
                         }
@@ -131,14 +134,14 @@ struct ScrubbableAreaChart: View {
                         .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
                         .annotation(position: .top, alignment: .trailing, spacing: 2) {
                             Text(level.label)
-                                .font(.caption2.weight(.semibold))
+                                .font(DS.Font.inter(11, .medium, relativeTo: .caption2))
                                 .foregroundStyle(level.color)
                         }
                 }
-                // Behind the line: the one gridline, Stocks' dotted start value.
+                // Behind the line: the dotted opening value.
                 if showsBaseline {
                     RuleMark(y: .value("Baseline", baseline ?? values[0]))
-                        .foregroundStyle(Color(uiColor: .tertiaryLabel))
+                        .foregroundStyle(DS.Chart.baseline)
                         .lineStyle(StrokeStyle(lineWidth: 1, dash: DS.baselineDash))
                 }
 
@@ -148,7 +151,12 @@ struct ScrubbableAreaChart: View {
                         yStart: .value("Floor", bounds.min),
                         yEnd: .value("Value", values[i])
                     )
-                    .foregroundStyle(lineColor.opacity(DS.chartAreaOpacity))
+                    // The faint same-hue fade under the line (web hero).
+                    .foregroundStyle(LinearGradient(
+                        colors: [lineColor.opacity(DS.Chart.areaTopOpacity), lineColor.opacity(0)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    ))
                     .interpolationMethod(.monotone)
 
                     LineMark(x: .value("Time", x(i)), y: .value("Value", values[i]))
@@ -168,8 +176,8 @@ struct ScrubbableAreaChart: View {
 
                 if let sample {
                     RuleMark(x: .value("Time", x(sample.index)))
-                        .foregroundStyle(lineColor.opacity(0.55))
-                        .lineStyle(StrokeStyle(lineWidth: 1.2))
+                        .foregroundStyle(DS.Chart.scrubLine)
+                        .lineStyle(StrokeStyle(lineWidth: 1))
                     PointMark(x: .value("Time", x(sample.index)), y: .value("Value", values[sample.index]))
                         .symbol { ScrubDot(color: lineColor) }
                 } else if pulsingEndDot {
@@ -180,7 +188,22 @@ struct ScrubbableAreaChart: View {
             .chartXScale(domain: xDomain(count: n))
             .chartYScale(domain: bounds.min...bounds.max)
             .chartXAxis(.hidden)
-            .chartYAxis(.hidden)
+            .chartYAxis {
+                if showsYAxis {
+                    AxisMarks(position: .trailing, values: .automatic(desiredCount: 3)) { value in
+                        AxisGridLine(stroke: StrokeStyle(lineWidth: 1))
+                            .foregroundStyle(DS.Chart.grid)
+                        AxisValueLabel {
+                            if let price = value.as(Double.self) {
+                                Text(fmtMoney(price))
+                                    .font(DS.Font.micro)
+                                    .monospacedDigit()
+                                    .foregroundStyle(DS.Text.muted)
+                            }
+                        }
+                    }
+                }
+            }
             .chartLegend(.hidden)
             .chartXSelection(value: $selectedX)
             .frame(height: plotHeight)
@@ -244,16 +267,16 @@ struct ScrubbableAreaChart: View {
     }
 }
 
-/// The scrub dot: solid, ringed in the background colour so it reads on the
-/// line in both appearances. No glow.
+/// The scrub dot: solid, ringed in the page colour (r 3.5, 2 pt ring, as the
+/// web draws it). No glow.
 private struct ScrubDot: View {
     let color: Color
 
     var body: some View {
         Circle()
             .fill(color)
-            .frame(width: 9, height: 9)
-            .overlay(Circle().stroke(Color(uiColor: .systemBackground), lineWidth: 2))
+            .frame(width: 7, height: 7)
+            .overlay(Circle().stroke(DS.Surface.page, lineWidth: 2))
     }
 }
 
@@ -278,7 +301,7 @@ private struct LiveEndDot: View {
             Circle()
                 .fill(color)
                 .frame(width: 8, height: 8)
-                .overlay(Circle().stroke(Color(uiColor: .systemBackground), lineWidth: 1.5))
+                .overlay(Circle().stroke(DS.Surface.page, lineWidth: 1.5))
         }
         .frame(width: 32, height: 32)
     }
@@ -298,9 +321,9 @@ struct ChartDateLabels: View {
                         .lineLimit(1)
                 }
             }
-            .font(.caption2)
+            .font(DS.Font.micro)
             .monospacedDigit()
-            .foregroundStyle(.secondary)
+            .foregroundStyle(DS.Text.muted)
             .padding(.top, 6)
             .accessibilityHidden(true)
         }
@@ -324,5 +347,6 @@ struct ChartDateLabels: View {
         }
         .padding()
     }
-    .background(DS.Surface.canvas)
+    .background(DS.Surface.page)
+    .dsAppearance()
 }

@@ -30,14 +30,14 @@ struct LiveLogsPanel: View {
         VStack(alignment: .leading, spacing: 0) {
             header(state)
             if open {
-                Divider()
+                DSDivider()
                 if !state.lines.isEmpty {
                     searchField
                 }
                 logArea(state)
             }
         }
-        .background(DS.Surface.panel, in: .rect(cornerRadius: DS.Radius.card, style: .continuous))
+        .dsCardSurface()
         .toast($toast)
         .task(id: instanceId) {
             let current: LogTailer
@@ -78,52 +78,49 @@ struct LiveLogsPanel: View {
 
     private func header(_ state: LogTailerState) -> some View {
         HStack(spacing: 8) {
-            PulsingDot(color: statusColor(state), size: 8, pulsing: isRunning(state))
+            DSStatusDot(statusTone(state), pinging: isRunning(state))
 
             VStack(alignment: .leading, spacing: 2) {
                 Text("Live logs")
-                    .font(.subheadline.weight(.semibold))
+                    .font(DS.Font.bodyMedium)
+                    .foregroundStyle(DS.Text.soft)
                 Text(headerDetail(state))
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.muted)
+                    .monospacedDigit()
                     .lineLimit(1)
                     .truncationMode(.middle)
                 if state.source == "db" {
-                    Text("(last 500 — log file not available)")
-                        .font(.caption2)
-                        .foregroundStyle(DS.Palette.warning)
+                    HStack(spacing: 6) {
+                        DSStatusDot(.warn)
+                        Text("Last 500 lines — log file not available")
+                            .font(DS.Font.caption)
+                            .foregroundStyle(DS.Text.label)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
             if open, !state.lines.isEmpty {
                 Button(action: { togglePause(state) }) {
-                    Image(systemName: userPaused ? Symbol.named("play_arrow") : Symbol.named("pause"))
-                        .foregroundStyle(userPaused ? DS.Palette.warning : Color.secondary)
-                        .frame(width: 44, height: 44)
-                        .contentShape(Rectangle())
+                    Image(systemName: userPaused ? "play" : "pause")
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.dsIcon)
                 .accessibilityLabel(userPaused ? "Resume" : "Pause")
 
                 Button(action: { copy(state) }) {
                     Image(systemName: Symbol.named("content_copy"))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 44, height: 44)
-                        .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.dsIcon)
                 .accessibilityLabel("Copy")
             }
 
-            Button(open ? "Hide Logs" : "View Live Logs", action: toggleOpen)
-                .font(.subheadline)
-                .buttonStyle(.borderless)
-                .frame(minHeight: 44)
+            Button(open ? "Hide logs" : "View live logs", action: toggleOpen)
+                .buttonStyle(.dsSecondary)
         }
-        .padding(.leading, 14)
-        .padding(.trailing, 10)
-        .padding(.vertical, 6)
+        .padding(.leading, DS.rowPadding)
+        .padding(.trailing, 12)
+        .padding(.vertical, 12)
     }
 
     /// "Running · 120 lines · instance-ab12.log" — status first, the file last.
@@ -136,20 +133,18 @@ struct LiveLogsPanel: View {
     }
 
     private var searchField: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 8) {
             Image(systemName: Symbol.named("search"))
-                .foregroundStyle(.secondary)
+                .font(.system(size: 14))
+                .foregroundStyle(DS.Text.muted)
                 .accessibilityHidden(true)
-            TextField("Search logs...", text: $search)
-                .font(.caption.monospaced())
+            TextField(text: $search, prompt: Text("Search logs").foregroundStyle(DS.Text.faint)) { Text("Search logs") }
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(DS.Surface.inset, in: .rect(cornerRadius: DS.Radius.small, style: .continuous))
+        .dsInput()
         .padding(.horizontal, 12)
-        .padding(.top, 10)
+        .padding(.top, 12)
         .padding(.bottom, 4)
     }
 
@@ -162,15 +157,14 @@ struct LiveLogsPanel: View {
                 ProgressView()
                     .controlSize(.small)
                 Text("Loading logs…")
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
+                    .font(DS.Font.mono)
+                    .foregroundStyle(DS.Text.muted)
             }
             .padding(20)
         } else if state.lines.isEmpty {
             Text(emptyMessage(state))
-                .font(.caption.monospaced())
-                .italic()
-                .foregroundStyle(.secondary)
+                .font(DS.Font.mono)
+                .foregroundStyle(DS.Text.muted)
                 .padding(20)
         } else {
             logList(filteredLines(state))
@@ -209,11 +203,9 @@ struct LiveLogsPanel: View {
                         showJump = false
                         if let last = lines.last?.id { proxy.scrollTo(last, anchor: .bottom) }
                     } label: {
-                        Label("Jump to Latest", systemImage: Symbol.named("arrow_downward"))
-                            .font(.caption.weight(.semibold))
+                        Label("Jump to latest", systemImage: Symbol.named("arrow_downward"))
                     }
-                    .buttonStyle(.glass)
-                    .controlSize(.small)
+                    .buttonStyle(.dsSecondary)
                     .padding(10)
                 }
             }
@@ -257,11 +249,14 @@ struct LiveLogsPanel: View {
         (state.finalStatus ?? "").lowercased() == "running"
     }
 
-    private func statusColor(_ state: LogTailerState) -> Color {
+    /// The web's log status dot: live while running, done when completed,
+    /// red when failed, grey otherwise.
+    private func statusTone(_ state: LogTailerState) -> DSStatusTone {
         switch (state.finalStatus ?? "").lowercased() {
-        case "running": DS.Palette.info
-        case "failed": DS.Palette.danger
-        default: Color(uiColor: .tertiaryLabel)
+        case "running": .live
+        case "completed": .off
+        case "failed": .error
+        default: .off
         }
     }
 
@@ -301,7 +296,7 @@ private struct LiveLogRow: View {
         HStack(alignment: .firstTextBaseline, spacing: 0) {
             if let ts = line.ts {
                 Text(Self.timestamp(ts))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(DS.Text.faint)
                     .fixedSize()
                     .padding(.leading, 12)
             } else {
@@ -312,7 +307,7 @@ private struct LiveLogRow: View {
                 .padding(.horizontal, 8)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .font(.caption2.monospaced())
+        .font(DS.Font.monoSmall)
         .padding(.vertical, 2)
     }
 

@@ -6,6 +6,8 @@ defineProps({
 </script>
 
 <template>
+  <!-- Static stepper: done steps carry a check, the current one is lit,
+       the rest wait in grey. Nothing animates. -->
   <div
     class="flex items-center gap-2 sm:gap-3"
     role="progressbar"
@@ -17,31 +19,27 @@ defineProps({
   >
     <template v-for="(step, idx) in steps" :key="step.id">
       <div class="flex items-center gap-2 min-w-0">
-        <div
-          class="size-7 rounded-full border flex items-center justify-center shrink-0 transition-all duration-500"
-          :class="idx < current
-            ? 'bg-primary/15 border-primary/60 text-primary'
-            : idx === current
-              ? 'border-primary text-primary onboarding-cta'
-              : 'border-border-subtle text-slate-600'"
-        >
-          <span v-if="idx < current" class="material-symbols-outlined text-[16px]">check</span>
-          <span v-else class="text-[11px] font-bold">{{ idx + 1 }}</span>
-        </div>
         <span
-          class="text-[11px] sm:text-xs font-medium uppercase tracking-wider truncate hidden md:inline"
-          :class="idx === current ? 'text-slate-200' : idx < current ? 'text-primary/80' : 'text-slate-600'"
+          class="size-6 rounded-full flex items-center justify-center shrink-0 text-xs tabular-nums"
+          :class="idx < current
+            ? 'bg-raised text-slate-300'
+            : idx === current
+              ? 'bg-primary text-background-dark font-medium'
+              : 'border border-white/[0.1] text-slate-500'"
+        >
+          <span v-if="idx < current" class="material-symbols-outlined text-[14px]">check</span>
+          <span v-else>{{ idx + 1 }}</span>
+        </span>
+        <span
+          class="text-sm truncate hidden md:inline"
+          :class="idx === current ? 'text-slate-100' : idx < current ? 'text-slate-400' : 'text-slate-500'"
         >{{ step.label }}</span>
       </div>
-      <div
+      <span
         v-if="idx < steps.length - 1"
-        class="flex-1 h-px bg-border-subtle relative overflow-hidden rounded-full min-w-[12px]"
-      >
-        <div
-          class="absolute inset-y-0 left-0 onboarding-progress-fill rounded-full transition-all duration-700"
-          :style="{ width: idx < current ? '100%' : (idx === current ? '50%' : '0%') }"
-        ></div>
-      </div>
+        class="flex-1 h-px min-w-[12px]"
+        :class="idx < current ? 'bg-slate-500' : 'bg-white/[0.08]'"
+      ></span>
     </template>
   </div>
 </template>

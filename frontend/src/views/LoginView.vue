@@ -87,86 +87,68 @@ async function createAccount() {
 </script>
 
 <template>
-  <div class="login-root min-h-screen text-slate-100 flex flex-col">
-
+  <div class="min-h-screen bg-background-dark text-slate-100 flex flex-col">
 
     <!-- Top-left brand -->
-    <div class="relative z-10 p-8">
-      <RouterLink to="/" class="inline-flex items-center group" aria-label="IntelliStock home">
+    <div class="px-4 py-5 sm:px-8 sm:py-6">
+      <RouterLink to="/" class="inline-flex items-center rounded-md" aria-label="IntelliStock home">
         <img
           src="/new-logo.png"
           alt="IntelliStock"
           width="1200"
           height="240"
-          class="block h-10 w-auto max-w-full object-contain object-left transition-opacity group-hover:opacity-90"
+          class="block h-8 w-auto max-w-full object-contain object-left"
           draggable="false"
         />
       </RouterLink>
     </div>
 
-    <!-- Centered card -->
-    <div class="relative z-10 flex-1 flex items-center justify-center px-4 pb-16">
-      <div class="w-full max-w-sm space-y-8">
+    <!-- Centered form -->
+    <div class="flex-1 flex items-center justify-center px-4 pb-16">
+      <div class="w-full max-w-sm">
 
-        <!-- Private access badge -->
-        <div class="flex flex-col items-center text-center space-y-5">
-          <div class="inline-flex items-center gap-2 px-4 py-1.5 rounded-full border border-border-subtle bg-surface/60 backdrop-blur-sm">
-            <span class="material-symbols-outlined text-primary text-base">lock</span>
-            <span class="text-[11px] font-bold uppercase tracking-widest text-slate-400">Private Access Only</span>
-          </div>
-          <div v-if="firstRun">
-            <h1 class="text-3xl font-bold tracking-tight">Set up your account.</h1>
-            <p class="text-slate-400 text-sm mt-2">
-              This deployment has no accounts yet. Create the first one — it
-              gets full access, and it can create the rest from the Users tab.
-            </p>
-          </div>
-          <div v-else>
-            <h1 class="text-3xl font-bold tracking-tight">Welcome back.</h1>
-            <p class="text-slate-400 text-sm mt-2">
-              IntelliStock is invite-only. Sign in with your credentials.
-            </p>
-          </div>
+        <div v-if="firstRun">
+          <h1 class="text-2xl font-medium text-slate-100 leading-tight">Set up your account</h1>
+          <p class="mt-2 text-sm leading-6 text-slate-400">
+            This deployment has no accounts yet. Create the first one. It
+            gets full access, and it can create the rest from the Users tab.
+          </p>
+        </div>
+        <div v-else>
+          <h1 class="text-2xl font-medium text-slate-100 leading-tight">Sign in to IntelliStock</h1>
+          <p class="mt-2 text-sm leading-6 text-slate-400">
+            IntelliStock is invite-only. Sign in with your credentials.
+          </p>
         </div>
 
         <!-- Form card -->
-        <div class="glass-card rounded-2xl p-8 space-y-5">
+        <div class="ui-card mt-8 p-6">
 
           <!-- Error message -->
           <Transition name="fade-down">
-            <div v-if="error"
-              class="flex items-start gap-3 p-4 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-sm">
-              <span class="material-symbols-outlined text-base shrink-0 mt-0.5">error</span>
-              <span>{{ error }}</span>
-            </div>
+            <div v-if="error" class="ui-error mb-5 px-4 py-3" role="alert">{{ error }}</div>
           </Transition>
 
-          <form @submit.prevent="firstRun ? createAccount() : submit()" class="space-y-4" novalidate>
+          <form @submit.prevent="firstRun ? createAccount() : submit()" class="space-y-5" novalidate>
 
             <!-- Username field -->
-            <div class="space-y-1.5">
-              <label for="username" class="text-xs font-semibold uppercase tracking-widest text-slate-400">Username</label>
-              <div class="relative">
-                <span class="material-symbols-outlined absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-600 text-lg pointer-events-none">person</span>
-                <input
-                  id="username"
-                  v-model="username"
-                  type="text"
-                  autocomplete="username"
-                  placeholder="your username"
-                  :disabled="loading"
-                  class="w-full bg-background-dark border border-border-subtle rounded-xl pl-10 pr-4 py-3 text-sm text-slate-100 placeholder-slate-600
-                         focus:outline-none focus:border-primary/60 focus:ring-1 focus:ring-primary/30
-                         disabled:opacity-50 transition-colors"
-                />
-              </div>
+            <div>
+              <label for="username" class="ui-field-label">Username</label>
+              <input
+                id="username"
+                v-model="username"
+                type="text"
+                autocomplete="username"
+                placeholder="your username"
+                :disabled="loading"
+                class="ui-input h-10"
+              />
             </div>
 
             <!-- Password field -->
-            <div class="space-y-1.5">
-              <label for="password" class="text-xs font-semibold uppercase tracking-widest text-slate-400">Password</label>
+            <div>
+              <label for="password" class="ui-field-label">Password</label>
               <div class="relative">
-                <span class="material-symbols-outlined absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-600 text-lg pointer-events-none">lock</span>
                 <input
                   id="password"
                   v-model="password"
@@ -174,65 +156,56 @@ async function createAccount() {
                   :autocomplete="firstRun ? 'new-password' : 'current-password'"
                   :placeholder="firstRun ? 'at least 8 characters' : '••••••••'"
                   :disabled="loading"
-                  class="w-full bg-background-dark border border-border-subtle rounded-xl pl-10 pr-11 py-3 text-sm text-slate-100 placeholder-slate-600
-                         focus:outline-none focus:border-primary/60 focus:ring-1 focus:ring-primary/30
-                         disabled:opacity-50 transition-colors"
+                  class="ui-input h-10 pr-11"
                 />
                 <button
                   type="button"
                   tabindex="-1"
                   @click="showPw = !showPw"
-                  class="absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-600 hover:text-slate-300 transition-colors"
+                  class="ui-icon-btn absolute right-1 top-1/2 -translate-y-1/2"
+                  :aria-label="showPw ? 'Hide password' : 'Show password'"
                 >
-                  <span class="material-symbols-outlined text-lg">{{ showPw ? 'visibility_off' : 'visibility' }}</span>
+                  <span class="material-symbols-outlined text-[18px]">{{ showPw ? 'visibility_off' : 'visibility' }}</span>
                 </button>
               </div>
             </div>
 
             <!-- Confirm password — first run only -->
-            <div v-if="firstRun" class="space-y-1.5">
-              <label for="confirm-password" class="text-xs font-semibold uppercase tracking-widest text-slate-400">Confirm password</label>
-              <div class="relative">
-                <span class="material-symbols-outlined absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-600 text-lg pointer-events-none">lock</span>
-                <input
-                  id="confirm-password"
-                  v-model="confirmPassword"
-                  :type="showPw ? 'text' : 'password'"
-                  autocomplete="new-password"
-                  placeholder="••••••••"
-                  :disabled="loading"
-                  class="w-full bg-background-dark border border-border-subtle rounded-xl pl-10 pr-4 py-3 text-sm text-slate-100 placeholder-slate-600
-                         focus:outline-none focus:border-primary/60 focus:ring-1 focus:ring-primary/30
-                         disabled:opacity-50 transition-colors"
-                />
-              </div>
+            <div v-if="firstRun">
+              <label for="confirm-password" class="ui-field-label">Confirm password</label>
+              <input
+                id="confirm-password"
+                v-model="confirmPassword"
+                :type="showPw ? 'text' : 'password'"
+                autocomplete="new-password"
+                placeholder="••••••••"
+                :disabled="loading"
+                class="ui-input h-10"
+              />
             </div>
 
             <!-- Submit -->
             <button
               type="submit"
               :disabled="loading"
-              class="w-full mt-2 flex items-center justify-center gap-2.5 py-3 rounded-xl font-semibold text-sm
-                     bg-primary text-background-dark hover:brightness-110 active:brightness-95
-                     disabled:opacity-60 disabled:cursor-not-allowed transition-all"
+              class="ui-btn-primary w-full h-10"
             >
-              <svg v-if="loading" class="size-4 animate-spin" viewBox="0 0 24 24" fill="none">
+              <svg v-if="loading" class="size-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                 <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" stroke-dasharray="31.4" stroke-dashoffset="10" stroke-linecap="round"/>
               </svg>
               <span>{{ loading
                 ? (firstRun ? 'Creating…' : 'Signing in…')
-                : (firstRun ? 'Create the first account' : 'Sign In') }}</span>
-              <span v-if="!loading" class="material-symbols-outlined text-lg">arrow_forward</span>
+                : (firstRun ? 'Create the first account' : 'Sign in') }}</span>
             </button>
           </form>
 
         </div>
 
         <!-- Footer note -->
-        <p v-if="firstRun" class="text-center text-xs text-slate-600">
+        <p v-if="firstRun" class="mt-6 text-xs leading-5 text-slate-500">
           This offer appears only while the deployment has no accounts at all.
         </p>
-        <p v-else class="text-center text-xs text-slate-600">
+        <p v-else class="mt-6 text-xs leading-5 text-slate-500">
           Access is by invitation only. Ask someone with an account to create one for you.
         </p>
 
@@ -242,13 +215,8 @@ async function createAccount() {
 </template>
 
 <style scoped>
-/* Same graphite page as the app shell. */
-.login-root {
-  background: #0f0f10;
-}
-
 .fade-down-enter-active,
-.fade-down-leave-active { transition: opacity 0.2s, transform 0.2s; }
-.fade-down-enter-from   { opacity: 0; transform: translateY(-6px); }
-.fade-down-leave-to     { opacity: 0; transform: translateY(-6px); }
+.fade-down-leave-active { transition: opacity 160ms cubic-bezier(0.22, 1, 0.36, 1), transform 160ms cubic-bezier(0.22, 1, 0.36, 1); }
+.fade-down-enter-from,
+.fade-down-leave-to { opacity: 0; transform: translateY(-4px); }
 </style>

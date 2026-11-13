@@ -1,9 +1,10 @@
 import SwiftUI
 
 /// Per-category notification routing — `NotificationSettingsScreen` in
-/// `notification_settings_screen.dart`: test delivery, registered devices,
-/// then one section per group with independent Discord and iOS-push switches.
-/// SnackBars become toasts.
+/// `notification_settings_screen.dart`, laid out as the web's preferences
+/// page: test delivery, registered devices, then one card per alert group
+/// whose rows carry independent Discord and iOS push switches. SnackBars
+/// become toasts.
 struct NotificationSettingsView: View {
     @Environment(AppServices.self) private var services
     @State private var model: NotificationPrefsModel?
@@ -15,20 +16,17 @@ struct NotificationSettingsView: View {
         Group {
             switch model?.prefs ?? .loading {
             case .loading:
-                ProgressView()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                NotificationSettingsSkeleton()
             case .failed(let error):
-                Text("Failed to load preferences\n\(settingsErrorText(error))")
-                    .font(.body)
-                    .foregroundStyle(DS.Palette.danger)
-                    .multilineTextAlignment(.center)
-                    .padding(32)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                ErrorRow(message: "Couldn't load preferences: \(settingsErrorText(error))")
+                    .padding(.horizontal, DS.pageGutter)
+                    .padding(.top, 16)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             case .loaded(let prefs):
                 content(prefs)
             }
         }
-        .background(DS.Surface.canvas)
+        .background(DS.Surface.page)
         .navigationTitle("Notifications")
         .navigationBarTitleDisplayMode(.inline)
         .toast($toast)
@@ -49,40 +47,51 @@ struct NotificationSettingsView: View {
 
     private func content(_ prefs: NotificationPrefs) -> some View {
         List {
-            Section {
-                NotificationTestButton(icon: "discord", label: "Test Discord") { await sendTest(.discord) }
-                NotificationTestButton(icon: "notifications", label: "Test iOS Push") { await sendTest(.push) }
-            } header: {
-                Text("Test delivery")
-            } footer: {
-                Text("Send a sample notification to confirm a channel works.")
+            // Test delivery: the web's one-card row with its two buttons.
+            DSSection(rowMinHeight: 68) {
+                VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Test delivery")
+                            .font(DS.Font.body)
+                            .foregroundStyle(DS.Text.soft)
+                        Text("Send a sample notification to confirm a channel works")
+                            .font(DS.Font.caption)
+                            .foregroundStyle(DS.Text.muted)
+                    }
+                    HStack(spacing: 8) {
+                        NotificationTestButton(label: "Test Discord") { await sendTest(.discord) }
+                        NotificationTestButton(label: "Test iOS push") { await sendTest(.push) }
+                    }
+                }
+                .padding(.vertical, 6)
             }
 
-            Section("Registered devices") {
+            DSSection("Registered devices") {
                 switch devices?.devices ?? .loading {
                 case .loading:
                     HStack(spacing: 10) {
                         ProgressView()
+                            .controlSize(.small)
                         Text("Checking registered devices…")
-                            .foregroundStyle(.secondary)
+                            .font(DS.Font.body)
+                            .foregroundStyle(DS.Text.muted)
                     }
                 case .failed(let error):
-                    Text("Could not load devices: \(settingsErrorText(error))")
-                        .font(.footnote)
-                        .foregroundStyle(DS.Palette.danger)
+                    Text("Couldn't load devices: \(settingsErrorText(error))")
+                        .font(DS.Font.body)
+                        .foregroundStyle(DS.Palette.loss)
                 case .loaded(let list):
                     if list.isEmpty {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("No devices registered yet.")
-                            Text("Tap \"Enable push on this device\" and allow notifications. Requires a physical device with the app installed (push doesn't work in the simulator).")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                        }
+                        Text("No device registered yet. Tap Enable push on this device and allow notifications. Push needs a physical device; it doesn't work in the simulator.")
+                            .font(DS.Font.body)
+                            .foregroundStyle(DS.Text.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.vertical, 6)
                     } else {
                         ForEach(list) { device in
                             let busy = removing.contains(device.deviceToken)
-                            EntityRow(device.tokenSuffix, subtitle: pushDeviceSubtitle(device), systemImage: Symbol.named("notifications")) {
-                                if busy { ProgressView() }
+                            EntityRow(device.tokenSuffix, subtitle: pushDeviceSubtitle(device)) {
+                                if busy { ProgressView().controlSize(.small) }
                             }
                             // Swipe (or long-press) to remove; there was no
                             // confirmation before, and there is none now.
@@ -101,35 +110,49 @@ struct NotificationSettingsView: View {
                         }
                     }
                 }
-                InlineActionRow("Enable Push on This Device", systemImage: Symbol.named("notifications")) {
+                InlineActionRow("Enable push on this device", systemImage: Symbol.named("notifications")) {
                     Task { await enableOnThisDevice() }
                 }
             }
 
-            // One section per alert type, titled with the type, holding its
-            // two channel switches. The first type of a group carries the
-            // group's name above its own.
+            // One card per alert group (the web's routing table): each type
+            // with its description, then its Discord and iOS push switches.
             ForEach(NotificationPrefsModel.groupedTypes(prefs), id: \.group) { group in
-                ForEach(Array(group.types.enumerated()), id: \.element.key) { index, type in
-                    let route = prefs.routeFor(type.key)
-                    Section {
-                        Toggle("Discord", isOn: Binding(
-                            get: { route.discord },
-                            set: { value in Task { await toggle(type.key, .discord, value) } }
-                        ))
-                        Toggle("iOS push", isOn: Binding(
-                            get: { route.push },
-                            set: { value in Task { await toggle(type.key, .push, value) } }
-                        ))
-                    } header: {
-                        NotificationTypeHeader(group: index == 0 ? group.group : nil, label: type.label)
-                    } footer: {
-                        Text(type.desc)
+                DSSection(group.group) {
+                    ForEach(group.types, id: \.key) { type in
+                        let route = prefs.routeFor(type.key)
+                        VStack(alignment: .leading, spacing: 10) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(type.label)
+                                    .font(DS.Font.body)
+                                    .foregroundStyle(DS.Text.primary)
+                                if !type.desc.isEmpty {
+                                    Text(type.desc)
+                                        .font(DS.Font.caption)
+                                        .foregroundStyle(DS.Text.muted)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                            HStack(spacing: 24) {
+                                NotificationChannelSwitch(label: "Discord", isOn: Binding(
+                                    get: { route.discord },
+                                    set: { value in Task { await toggle(type.key, .discord, value) } }
+                                ))
+                                .accessibilityLabel("\(type.label): Discord")
+                                NotificationChannelSwitch(label: "iOS push", isOn: Binding(
+                                    get: { route.push },
+                                    set: { value in Task { await toggle(type.key, .push, value) } }
+                                ))
+                                .accessibilityLabel("\(type.label): iOS push")
+                                Spacer(minLength: 0)
+                            }
+                        }
+                        .padding(.vertical, 6)
                     }
                 }
             }
         }
-        .listStyle(.insetGrouped)
+        .dsList()
         .refreshable {
             async let prefs: Void = model?.load() ?? ()
             async let list: Void = devices?.refresh() ?? ()
@@ -182,45 +205,72 @@ struct NotificationSettingsView: View {
     }
 }
 
-/// A type's section header: the group's name over the first type of each
-/// group, then the type's label.
-private struct NotificationTypeHeader: View {
-    let group: String?
+/// One channel's switch in a type's row: a 12 pt zinc-500 label, then the
+/// web switch.
+private struct NotificationChannelSwitch: View {
     let label: String
+    @Binding var isOn: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if let group {
-                // Color.primary, not the hierarchical .primary, which the
-                // header resolves to its own secondary grey.
-                Text(group)
-                    .font(.title3.bold())
-                    .foregroundStyle(Color.primary)
-                    .padding(.top, 8)
-                    .accessibilityAddTraits(.isHeader)
-            }
+        Toggle(isOn: $isOn) {
             Text(label)
+                .font(DS.Font.caption)
+                .foregroundStyle(DS.Text.muted)
         }
-        .textCase(nil)
+        .fixedSize()
     }
 }
 
-/// A test-send action as a list row — `_TestButton`, with a spinner while
-/// the send runs.
+/// A test send — `_TestButton`, as the web's secondary button: "Sending…"
+/// with a spinner while the send runs.
 private struct NotificationTestButton: View {
-    let icon: String
     let label: String
     let action: () async -> Void
 
     @State private var running = false
 
     var body: some View {
-        InlineActionRow(label, systemImage: Symbol.named(icon), isBusy: running) {
+        Button {
             running = true
             Task {
                 await action()
                 running = false
             }
+        } label: {
+            HStack(spacing: 6) {
+                if running { ProgressView().controlSize(.mini) }
+                Text(running ? "Sending…" : label)
+            }
         }
+        .buttonStyle(.dsSecondary)
+        .disabled(running)
+    }
+}
+
+/// The first load: the test card and a group's rows as static blocks.
+private struct NotificationSettingsSkeleton: View {
+    var body: some View {
+        List {
+            DSSection(rowMinHeight: 68) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Skeleton(width: 120, height: 14)
+                    Skeleton(width: 220, height: 12)
+                }
+            }
+            DSSection("Registered devices") {
+                Skeleton(width: 180, height: 14)
+            }
+            DSSection {
+                ForEach(0..<4, id: \.self) { _ in
+                    VStack(alignment: .leading, spacing: 8) {
+                        Skeleton(width: 140, height: 14)
+                        Skeleton(width: 200, height: 12)
+                    }
+                }
+            }
+        }
+        .dsList()
+        .allowsHitTesting(false)
+        .accessibilityLabel("Loading preferences")
     }
 }

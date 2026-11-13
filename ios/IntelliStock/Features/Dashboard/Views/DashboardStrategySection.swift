@@ -1,7 +1,8 @@
 import SwiftUI
 
 /// The bot strategy's live telemetry as the dashboard's "Strategy" group —
-/// `StrategySection` in `strategy_section.dart` — one list section per card.
+/// `StrategySection` in `strategy_section.dart` — one card section per card
+/// (`DSSection`); the first carries the "Strategy" title over its own.
 /// Each card hides until it has data, and the group (heading included)
 /// renders only once at least one card has data; the heading sits over the
 /// first card shown. The dashboard starts the fetches 900 ms after it appears
@@ -71,36 +72,32 @@ struct DashboardStrategySections: View {
 
     private func trendsSection(_ group: String?) -> some View {
         let active = model.trends[brokerageId]?.active ?? []
-        return Section {
+        return DSSection(group ?? "Market trends", subtitle: group == nil ? nil : "Market trends") {
             ForEach(Array(active.enumerated()), id: \.offset) { _, t in
                 DashboardTrendRow(trend: t, brokerageId: brokerageId)
             }
-        } header: {
-            DashboardGroupHeader(group: group, title: "Market trends")
         }
     }
 
     private func recentlyEndedSection(_ group: String?) -> some View {
         let ended = model.trends[brokerageId]?.recentlyEnded ?? []
-        return Section {
+        return DSSection(group ?? "Recently ended", subtitle: group == nil ? nil : "Recently ended") {
             ForEach(Array(ended.enumerated()), id: \.offset) { _, t in
                 HStack(spacing: 8) {
                     Image(systemName: Symbol.named("check"))
-                        .font(.footnote)
-                        .foregroundStyle(.tertiary)
+                        .font(.system(size: 13))
+                        .foregroundStyle(DS.Text.muted)
                         .accessibilityHidden(true)
                     Text(t.name)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(DS.Text.secondary)
                         .lineLimit(1)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     Text(DashboardFormat.endedAgo(t.endedAt))
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.muted)
                 }
                 .accessibilityElement(children: .combine)
             }
-        } header: {
-            DashboardGroupHeader(group: group, title: "Recently ended")
         }
     }
 
@@ -108,17 +105,19 @@ struct DashboardStrategySections: View {
 
     private func reversalSection(_ group: String?) -> some View {
         let items = model.trends[brokerageId]?.reversalWatch ?? []
-        return Section {
+        return DSSection(group ?? "Reversal watch", subtitle: group == nil ? nil : "Reversal watch") {
             ForEach(Array(items.enumerated()), id: \.offset) { _, t in
                 LabeledContent {
-                    Text("\(t.reversalCount) signal\(t.reversalCount == 1 ? "" : "s")")
-                        .foregroundStyle(DS.Palette.warning)
+                    HStack(spacing: 6) {
+                        DSStatusDot(.warn)
+                        Text("\(t.reversalCount) signal\(t.reversalCount == 1 ? "" : "s")")
+                            .foregroundStyle(DS.Text.label)
+                    }
                 } label: {
-                    Text(t.name).lineLimit(1)
+                    Text(t.name).lineLimit(1).foregroundStyle(DS.Text.primary)
                 }
+                .font(DS.Font.body)
             }
-        } header: {
-            DashboardGroupHeader(group: group, title: "Reversal watch")
         }
     }
 
@@ -126,30 +125,31 @@ struct DashboardStrategySections: View {
 
     private func backfillSection(_ group: String?) -> some View {
         let items = model.backfill[brokerageId] ?? []
-        return Section {
+        return DSSection(group ?? "Backfill queue", subtitle: group == nil ? nil : "Backfill queue") {
             ForEach(Array(items.prefix(12).enumerated()), id: \.offset) { _, q in
                 stockLink(q.ticker) {
                     EntityRow(q.ticker, subtitle: q.source) {
                         HStack(spacing: 6) {
                             if q.priority {
                                 Image(systemName: Symbol.named("push_pin"))
-                                    .font(.footnote)
-                                    .foregroundStyle(DS.Palette.warning)
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(DS.Text.secondary)
                                     .accessibilityLabel("Priority")
                             }
                             if q.nPaths > 0 {
                                 Text("\(q.nPaths) paths")
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
+                                    .font(DS.Font.caption)
+                                    .foregroundStyle(DS.Text.muted)
                             }
                         }
                     }
                 }
             }
-        } header: {
-            DashboardGroupHeader(group: group, title: "Backfill queue") {
-                Text("\(items.count) pending")
-            }
+        } accessory: {
+            Text("\(items.count) pending")
+                .font(DS.Font.caption)
+                .foregroundStyle(DS.Text.muted)
+                .monospacedDigit()
         }
     }
 
@@ -157,14 +157,12 @@ struct DashboardStrategySections: View {
 
     private func discoveredSection(_ group: String?) -> some View {
         let items = model.discovered[brokerageId] ?? []
-        return Section {
+        return DSSection(group ?? "Discovered", subtitle: group == nil ? nil : "Discovered") {
             ForEach(Array(items.prefix(12).enumerated()), id: \.offset) { _, d in
                 stockLink(d.ticker) {
                     EntityRow(d.ticker, subtitle: discoveredSource(d))
                 }
             }
-        } header: {
-            DashboardGroupHeader(group: group, title: "Discovered")
         }
     }
 
@@ -177,13 +175,14 @@ struct DashboardStrategySections: View {
 
     private func rationaleSection(_ group: String?) -> some View {
         let items = model.contexts[brokerageId] ?? []
-        return Section {
+        return DSSection(group ?? "Bot rationale", subtitle: group == nil ? nil : "Bot rationale") {
             ForEach(Array(items.prefix(8).enumerated()), id: \.offset) { _, r in
                 stockLink(r.symbol) {
                     VStack(alignment: .leading, spacing: 3) {
                         HStack(spacing: 8) {
                             Text(r.symbol)
-                                .font(.headline)
+                                .font(DS.Font.bodyMedium)
+                                .foregroundStyle(DS.Text.primary)
                             if !r.eventType.isEmpty {
                                 Text(r.eventType)
                                     .dsBadge(DS.Palette.accent)
@@ -191,8 +190,8 @@ struct DashboardStrategySections: View {
                         }
                         if !r.reason.isEmpty {
                             Text(r.reason)
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
+                                .font(DS.Font.caption)
+                                .foregroundStyle(DS.Text.secondary)
                                 .lineLimit(2)
                                 .multilineTextAlignment(.leading)
                         }
@@ -201,8 +200,6 @@ struct DashboardStrategySections: View {
                     .accessibilityElement(children: .combine)
                 }
             }
-        } header: {
-            DashboardGroupHeader(group: group, title: "Bot rationale")
         }
     }
 
@@ -211,39 +208,41 @@ struct DashboardStrategySections: View {
     @ViewBuilder
     private func outcomesSection(_ group: String?) -> some View {
         if let s = model.outcomes[brokerageId] {
-            Section {
+            DSSection(group ?? "Outcome scorecard", subtitle: group == nil ? nil : "Outcome scorecard") {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text("\(Int((s.hitRate * 100).rounded()))%")
-                        .font(.title2.weight(.semibold).monospacedDigit())
-                        .foregroundStyle(s.hitRate >= 0.5 ? DS.Palette.success : DS.Palette.danger)
+                        .font(DS.Font.figure)
+                        .monospacedDigit()
+                        .foregroundStyle(s.hitRate >= 0.5 ? DS.Palette.gain : DS.Palette.loss)
                     Text("hit rate · \(s.nCorrect)/\(s.n) signals")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                        .font(DS.Font.body)
+                        .foregroundStyle(DS.Text.muted)
+                        .monospacedDigit()
                 }
                 .accessibilityElement(children: .combine)
                 ForEach(Array(s.recent.enumerated()), id: \.offset) { _, o in
                     HStack(spacing: 8) {
                         Image(systemName: Symbol.named(o.correct ? "check" : "close"))
-                            .font(.footnote.weight(.bold))
-                            .foregroundStyle(o.correct ? DS.Palette.success : DS.Palette.danger)
+                            .font(.system(size: 13))
+                            .foregroundStyle(o.correct ? DS.Palette.gain : DS.Palette.loss)
                             .frame(width: 18)
                             .accessibilityLabel(o.correct ? "Correct" : "Wrong")
                         Text(o.symbol)
-                            .font(.headline)
+                            .font(DS.Font.bodyMedium)
+                            .foregroundStyle(DS.Text.primary)
                             .frame(width: 64, alignment: .leading)
                         Text(o.eventType)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
+                            .font(DS.Font.caption)
+                            .foregroundStyle(DS.Text.muted)
                             .lineLimit(1)
                             .frame(maxWidth: .infinity, alignment: .leading)
                         Text("\(o.latestReturn >= 0 ? "+" : "")\(dartToStringAsFixed(o.latestReturn, 1))%")
-                            .font(.subheadline.monospacedDigit())
-                            .foregroundStyle(o.latestReturn >= 0 ? DS.Palette.success : DS.Palette.danger)
+                            .font(DS.Font.body)
+                            .monospacedDigit()
+                            .foregroundStyle(o.latestReturn >= 0 ? DS.Palette.gain : DS.Palette.loss)
                     }
                     .accessibilityElement(children: .combine)
                 }
-            } header: {
-                DashboardGroupHeader(group: group, title: "Outcome scorecard")
             }
         }
     }
@@ -253,7 +252,7 @@ struct DashboardStrategySections: View {
     @ViewBuilder
     private func watchlistSection(_ group: String?) -> some View {
         if let w = model.watchlist[brokerageId] {
-            Section {
+            DSSection(group ?? "Momentum watchlist", subtitle: group == nil ? nil : "Momentum watchlist") {
                 DashboardFlowLayout(spacing: 8) {
                     ForEach(Array(w.newest.enumerated()), id: \.offset) { _, e in
                         DashboardTickerTag(
@@ -264,10 +263,11 @@ struct DashboardStrategySections: View {
                     }
                 }
                 .padding(.vertical, 4)
-            } header: {
-                DashboardGroupHeader(group: group, title: "Momentum watchlist") {
-                    Text("monitoring \(w.count)")
-                }
+            } accessory: {
+                Text("Monitoring \(w.count)")
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.muted)
+                    .monospacedDigit()
             }
         }
     }
@@ -283,19 +283,21 @@ private struct DashboardTrendRow: View {
 
     var body: some View {
         let t = trend
-        let color = t.bullish ? DS.Palette.up : DS.Palette.down
+        let color = t.bullish ? DS.Palette.gain : DS.Palette.loss
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 Image(systemName: Symbol.named(t.bullish ? "arrow_upward" : "arrow_downward"))
-                    .font(.footnote.weight(.bold))
+                    .font(.system(size: 13))
                     .foregroundStyle(color)
                     .accessibilityLabel(t.bullish ? "Bullish" : "Bearish")
                 Text(t.name)
-                    .font(.headline)
+                    .font(DS.Font.body)
+                    .foregroundStyle(DS.Text.primary)
                     .lineLimit(1)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Text("\(Int((t.strength * 100).rounded()))%")
-                    .font(.subheadline.monospacedDigit())
+                    .font(DS.Font.body)
+                    .monospacedDigit()
                     .foregroundStyle(color)
             }
             DashboardBar(fraction: t.strength, color: color, height: 4)
@@ -306,13 +308,14 @@ private struct DashboardTrendRow: View {
                             guard !s.isEmpty else { return }
                             services.router.push(.stock(StockRoute(symbol: s, brokerageId: brokerageId)))
                         }
-                        .font(.footnote.weight(.semibold))
+                        .font(DS.Font.captionMedium)
+                        .foregroundStyle(DS.Text.label)
                         .buttonStyle(.borderless)
                     }
                     if t.tickers.count > 5 {
                         Text("+\(t.tickers.count - 5)")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
+                            .font(DS.Font.caption)
+                            .foregroundStyle(DS.Text.muted)
                     }
                 }
             }
@@ -321,8 +324,8 @@ private struct DashboardTrendRow: View {
     }
 }
 
-/// A small neutral ticker tag that opens its stock screen (the momentum
-/// watchlist).
+/// A ticker that opens its stock screen (the momentum watchlist), as a
+/// secondary button: "XLE @$95".
 private struct DashboardTickerTag: View {
     let symbol: String
     let detail: String?
@@ -337,19 +340,13 @@ private struct DashboardTickerTag: View {
         } label: {
             HStack(spacing: 4) {
                 Text(symbol)
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(.primary)
                 if let detail {
                     Text(detail)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(DS.Text.muted)
+                        .monospacedDigit()
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(Color(uiColor: .tertiarySystemFill), in: .rect(cornerRadius: 8, style: .continuous))
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.borderless)
+        .buttonStyle(.dsSecondary)
     }
 }

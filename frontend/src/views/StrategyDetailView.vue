@@ -108,7 +108,7 @@ function fmtPct(v) {
 }
 function pnlColor(v) {
   if (v == null) return 'text-slate-500'
-  return parseFloat(v) >= 0 ? 'text-emerald-400' : 'text-red-400'
+  return parseFloat(v) >= 0 ? 'text-gain' : 'text-loss'
 }
 function fmtDateTime(v) {
   if (!v) return '—'
@@ -133,9 +133,6 @@ function setBtSort(col) {
 }
 
 function viewBacktest(bid) { if (bid != null) router.push(`/backtests/${bid}`) }
-
-const PHASE_COLOR = { pre: 'text-sky-400 bg-sky-500/10 border-sky-500/20', post: 'text-zinc-300 bg-zinc-500/10 border-zinc-500/20', entry: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20', exit: 'text-red-400 bg-red-500/10 border-red-500/20' }
-function phaseClass(p) { return PHASE_COLOR[p] || 'text-slate-400 bg-slate-500/10 border-slate-600' }
 
 // ── Backtest this strategy modal ───────────────────────────────────────────────
 const showBtModal     = ref(false)
@@ -251,7 +248,7 @@ async function submitBtModal() {
 
     btModalOk.value  = true
     const btId = bd.id ?? bd.backtest_id
-    btModalMsg.value = `Backtest #${btId} queued!`
+    btModalMsg.value = `Backtest #${btId} queued`
     setTimeout(() => {
       showBtModal.value = false
       router.push(`/backtests/${btId}`)
@@ -269,259 +266,235 @@ onMounted(fetchAll)
 
 <template>
   <AppShell>
-    <main class="flex-1 px-4 py-6 sm:px-6 sm:py-8 lg:px-8 lg:py-10">
+    <main class="ui-page">
 
       <!-- Top nav row -->
-      <div class="flex items-center justify-between mb-6">
+      <div class="flex items-center justify-between gap-4 mb-4">
         <button
           @click="router.push('/strategies')"
-          class="inline-flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-200 transition-colors"
+          class="ui-btn-ghost -ml-3"
         >
           <span class="material-symbols-outlined text-[16px]">arrow_back</span>
-          All Strategies
+          All strategies
         </button>
         <button
           v-if="strategy"
           @click="openBtModal"
-          class="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-semibold border border-sky-500/30 bg-sky-500/10 text-sky-400 hover:bg-sky-500/20 transition-colors"
+          class="ui-btn-primary"
         >
-          <span class="material-symbols-outlined text-[15px]">play_circle</span>
           Backtest this strategy
         </button>
       </div>
 
       <!-- Loading -->
-      <div v-if="loading" class="space-y-4">
-        <div v-for="n in 3" :key="n" class="glass-card rounded-2xl animate-pulse" :style="{ height: n === 1 ? '96px' : '180px' }"></div>
+      <div v-if="loading" aria-hidden="true">
+        <div class="ui-skel h-7 w-64"></div>
+        <div class="ui-skel h-4 w-80 mt-3"></div>
+        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 mt-12">
+          <div v-for="n in 3" :key="n" class="h-[180px] rounded-xl bg-surface"></div>
+        </div>
       </div>
 
       <template v-else-if="strategy">
 
         <!-- ── Strategy header ─────────────────────────────────────────────── -->
-        <div
-          class="glass-card rounded-2xl p-5 mb-6 border overflow-hidden"
-          :class="isAgentBest ? 'border-amber-500/30 bg-amber-500/5' : 'border-border-subtle'"
-        >
-          <div v-if="isAgentBest" class="h-0.5 w-full bg-gradient-to-r from-amber-500/60 via-amber-400 to-amber-500/60 -mx-5 -mt-5 mb-5" style="width: calc(100% + 40px)"></div>
-          <div class="flex items-start justify-between gap-4 flex-wrap">
-            <div class="flex items-center gap-3 min-w-0">
-              <div
-                class="size-12 rounded-2xl flex items-center justify-center shrink-0"
-                :class="isAgentBest ? 'bg-amber-500/15 border border-amber-500/30' : 'bg-surface border border-border-subtle'"
-              >
-                <span class="material-symbols-outlined text-xl" :class="isAgentBest ? 'text-amber-400' : 'text-slate-400'">
-                  {{ isAgentBest ? 'star' : 'schema' }}
-                </span>
-              </div>
-              <div class="min-w-0">
-                <div class="flex items-center gap-2 flex-wrap">
-                  <h1 class="text-xl font-bold" :class="isAgentBest ? 'text-amber-300' : 'text-slate-100'">
-                    {{ strategy.name }}
-                  </h1>
-                  <span
-                    v-if="isAgentBest"
-                    class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400 border border-amber-500/30 uppercase tracking-wide"
-                  >Agent Best</span>
-                </div>
-                <p class="text-sm text-slate-500 mt-0.5">
-                  Strategy ID {{ strategy.id }} · {{ (strategy.strategies || []).length }} sub-strategies · {{ strategyBacktests.length }} backtests
-                </p>
-              </div>
+        <header class="flex flex-wrap items-end justify-between gap-x-8 gap-y-5">
+          <div class="min-w-0">
+            <div class="flex items-center gap-x-3 gap-y-1 flex-wrap">
+              <h1 class="ui-page-title">{{ strategy.name }}</h1>
+              <span v-if="isAgentBest" class="inline-flex items-center gap-1 text-xs text-slate-400">
+                <span class="material-symbols-outlined text-[16px] text-slate-500">star</span>
+                Agent best
+              </span>
             </div>
-
-            <!-- Best backtest summary -->
-            <div v-if="bestPnlBacktest" class="flex items-center gap-4 flex-wrap">
-              <div class="text-right">
-                <p class="text-[10px] text-slate-600 uppercase tracking-widest mb-0.5">Best P&amp;L</p>
-                <p class="text-lg font-bold font-mono" :class="pnlColor(bestPnlBacktest.overall_profit)">
-                  {{ fmtPnl(bestPnlBacktest.overall_profit) }}
-                </p>
-              </div>
-              <div class="text-right">
-                <p class="text-[10px] text-slate-600 uppercase tracking-widest mb-0.5">Best P&amp;L%</p>
-                <p class="text-lg font-bold font-mono" :class="pnlColor(bestPnlBacktest.pnl_percent)">
-                  {{ fmtPct(bestPnlBacktest.pnl_percent) }}
-                </p>
-              </div>
-              <button
-                @click="viewBacktest(bestPnlBacktest.backtest_id)"
-                class="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20 transition-colors"
-              >
-                <span class="material-symbols-outlined text-[13px]">analytics</span>
-                View Best Backtest
-              </button>
-            </div>
+            <p class="ui-page-sub tabular-nums">
+              Strategy ID {{ strategy.id }} <span class="text-slate-600">·</span> {{ (strategy.strategies || []).length }} sub-strategies <span class="text-slate-600">·</span> {{ strategyBacktests.length }} backtests
+            </p>
           </div>
-        </div>
+
+          <!-- Best backtest summary -->
+          <div v-if="bestPnlBacktest" class="flex items-end gap-8 flex-wrap">
+            <div>
+              <p class="ui-label">Best P&amp;L</p>
+              <p class="mt-2 text-2xl leading-none font-medium tabular-nums" :class="pnlColor(bestPnlBacktest.overall_profit)">
+                {{ fmtPnl(bestPnlBacktest.overall_profit) }}
+              </p>
+            </div>
+            <div>
+              <p class="ui-label">Best P&amp;L %</p>
+              <p class="mt-2 text-2xl leading-none font-medium tabular-nums" :class="pnlColor(bestPnlBacktest.pnl_percent)">
+                {{ fmtPct(bestPnlBacktest.pnl_percent) }}
+              </p>
+            </div>
+            <button
+              @click="viewBacktest(bestPnlBacktest.backtest_id)"
+              class="ui-btn"
+            >
+              View best backtest
+            </button>
+          </div>
+        </header>
 
         <!-- ── Sub-strategies ──────────────────────────────────────────────── -->
-        <div class="mb-8">
-          <h2 class="text-xs font-semibold text-slate-400 uppercase tracking-widest mb-4">Sub-strategies ({{ (strategy.strategies || []).length }})</h2>
+        <section class="mt-12" aria-labelledby="subs-title">
+          <h2 id="subs-title" class="ui-section-title mb-3">
+            Sub-strategies <span class="ml-1 font-normal text-slate-500 tabular-nums">{{ (strategy.strategies || []).length }}</span>
+          </h2>
           <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-            <div
+            <article
               v-for="(sub, si) in strategy.strategies"
               :key="si"
-              class="glass-card rounded-2xl p-4 border border-border-subtle flex flex-col gap-3"
+              class="ui-card p-5 flex flex-col gap-4"
             >
               <!-- Sub-strategy header -->
-              <div class="flex items-start justify-between gap-2">
-                <div>
-                  <p class="text-sm font-semibold text-slate-100 font-mono">{{ sub.strategy }}</p>
-                  <p class="text-[10px] text-slate-600 mt-0.5">position {{ sub.execution_position ?? si }}</p>
+              <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0">
+                  <p class="text-sm font-medium text-slate-100 truncate">{{ sub.strategy }}</p>
+                  <p class="text-xs text-slate-500 mt-0.5 tabular-nums">Position {{ sub.execution_position ?? si }}</p>
                 </div>
-                <span
-                  class="shrink-0 text-[10px] font-bold px-1.5 py-0.5 rounded border uppercase tracking-wide"
-                  :class="phaseClass(sub.decision_phase)"
-                >{{ sub.decision_phase || 'pre' }}</span>
+                <span class="shrink-0 text-xs text-slate-400">{{ sub.decision_phase || 'pre' }}</span>
               </div>
 
               <!-- Core fields -->
-              <div class="grid grid-cols-2 gap-x-3 gap-y-1.5 text-[11px]">
+              <dl class="grid grid-cols-2 gap-x-4">
                 <div>
-                  <span class="text-slate-600">Weight</span>
-                  <p class="text-slate-300 font-mono">{{ sub.weight ?? '—' }}</p>
+                  <dt class="text-xs text-slate-500">Weight</dt>
+                  <dd class="mt-1 text-sm text-slate-200 tabular-nums">{{ sub.weight ?? '—' }}</dd>
                 </div>
                 <div>
-                  <span class="text-slate-600">Scope</span>
-                  <p class="text-slate-300 font-mono">{{ sub.execution_scope || '—' }}</p>
+                  <dt class="text-xs text-slate-500">Scope</dt>
+                  <dd class="mt-1 text-sm text-slate-200">{{ sub.execution_scope || '—' }}</dd>
                 </div>
-              </div>
+              </dl>
 
               <!-- Config -->
-              <div v-if="schemaFields(sub).length" class="border-t border-border-subtle pt-3 space-y-1.5">
-                <p class="text-[10px] text-slate-600 uppercase tracking-widest mb-2">Config</p>
-                <div v-for="f in schemaFields(sub)" :key="f.key" class="flex items-start justify-between gap-2">
-                  <div class="flex items-center gap-1 min-w-0">
-                    <span class="text-[11px] text-slate-500 font-mono truncate">{{ f.key }}</span>
+              <div v-if="schemaFields(sub).length" class="border-t border-white/[0.06] pt-4">
+                <p class="text-xs text-slate-500 mb-2">Config</p>
+                <dl class="space-y-1.5">
+                  <div v-for="f in schemaFields(sub)" :key="f.key" class="flex items-baseline justify-between gap-3">
+                    <dt class="text-xs text-slate-400 truncate min-w-0">{{ f.key }}</dt>
+                    <dd class="text-xs text-slate-200 tabular-nums text-right shrink-0 max-w-[140px] truncate" :title="fmtVal(f.val)">{{ fmtVal(f.val) }}</dd>
                   </div>
-                  <span class="text-[11px] text-slate-300 font-mono text-right shrink-0 max-w-[120px] truncate" :title="fmtVal(f.val)">{{ fmtVal(f.val) }}</span>
-                </div>
+                </dl>
               </div>
-              <div v-else class="text-[11px] text-slate-700 italic">No config</div>
-            </div>
+              <p v-else class="text-xs text-slate-500">No config</p>
+            </article>
 
-            <div v-if="!(strategy.strategies || []).length" class="col-span-full py-10 text-center">
-              <p class="text-slate-600 text-sm">No sub-strategies defined.</p>
+            <div v-if="!(strategy.strategies || []).length" class="col-span-full ui-card ui-empty">
+              <p>No sub-strategies defined</p>
             </div>
           </div>
-        </div>
+        </section>
 
         <!-- ── Backtests table ─────────────────────────────────────────────── -->
-        <div>
-          <h2 class="text-xs font-semibold text-slate-400 uppercase tracking-widest mb-4">
-            Backtests ({{ strategyBacktests.length }})
+        <section class="mt-12" aria-labelledby="sd-backtests-title">
+          <h2 id="sd-backtests-title" class="ui-section-title mb-3">
+            Backtests <span class="ml-1 font-normal text-slate-500 tabular-nums">{{ strategyBacktests.length }}</span>
           </h2>
 
-          <div v-if="!strategyBacktests.length" class="glass-card rounded-2xl border border-border-subtle p-12 text-center">
-            <span class="material-symbols-outlined text-slate-700 text-4xl">analytics</span>
-            <p class="text-slate-500 text-sm mt-3">No backtests recorded for this strategy yet.</p>
+          <div v-if="!strategyBacktests.length" class="ui-card ui-empty">
+            <p>No backtests recorded for this strategy yet</p>
           </div>
 
-          <div v-else class="glass-card rounded-2xl border border-border-subtle overflow-hidden">
+          <div v-else class="ui-card overflow-hidden">
             <div class="overflow-x-auto">
-              <table class="w-full min-w-[640px] text-sm">
+              <table class="w-full min-w-[680px] text-sm">
                 <thead>
-                  <tr class="border-b border-border-subtle bg-surface/50">
+                  <tr class="border-b border-white/[0.06] text-xs text-slate-500">
                     <th
-                      class="px-4 py-3 text-left text-[11px] font-semibold text-slate-500 uppercase tracking-widest cursor-pointer hover:text-slate-300 transition-colors select-none"
+                      class="h-10 pl-5 pr-3 text-left font-normal cursor-pointer select-none hover:text-slate-200 transition-colors duration-150 ease-out"
+                      :class="btSortBy === 'created_at' ? 'text-slate-300' : ''"
                       @click="setBtSort('created_at')"
                     >
-                      <span class="flex items-center gap-1">
+                      <span class="inline-flex items-center gap-1">
                         Date
-                        <span v-if="btSortBy === 'created_at'" class="material-symbols-outlined text-[12px] text-primary">
+                        <span v-if="btSortBy === 'created_at'" class="material-symbols-outlined text-[14px]">
                           {{ btSortOrder === 'desc' ? 'arrow_downward' : 'arrow_upward' }}
                         </span>
                       </span>
                     </th>
-                    <th class="px-4 py-3 text-left text-[11px] font-semibold text-slate-500 uppercase tracking-widest">Stocks</th>
-                    <th class="px-4 py-3 text-left text-[11px] font-semibold text-slate-500 uppercase tracking-widest">Period</th>
+                    <th class="h-10 px-3 text-left font-normal">Stocks</th>
+                    <th class="h-10 px-3 text-left font-normal">Period</th>
                     <th
-                      class="px-4 py-3 text-right text-[11px] font-semibold text-slate-500 uppercase tracking-widest cursor-pointer hover:text-slate-300 transition-colors select-none"
+                      class="h-10 px-3 text-right font-normal cursor-pointer select-none hover:text-slate-200 transition-colors duration-150 ease-out"
+                      :class="btSortBy === 'pnl' ? 'text-slate-300' : ''"
                       @click="setBtSort('pnl')"
                     >
-                      <span class="flex items-center justify-end gap-1">
+                      <span class="inline-flex items-center justify-end gap-1">
                         P&amp;L
-                        <span v-if="btSortBy === 'pnl'" class="material-symbols-outlined text-[12px] text-primary">
+                        <span v-if="btSortBy === 'pnl'" class="material-symbols-outlined text-[14px]">
                           {{ btSortOrder === 'desc' ? 'arrow_downward' : 'arrow_upward' }}
                         </span>
                       </span>
                     </th>
                     <th
-                      class="px-4 py-3 text-right text-[11px] font-semibold text-slate-500 uppercase tracking-widest cursor-pointer hover:text-slate-300 transition-colors select-none"
+                      class="h-10 px-3 text-right font-normal cursor-pointer select-none hover:text-slate-200 transition-colors duration-150 ease-out"
+                      :class="btSortBy === 'pct' ? 'text-slate-300' : ''"
                       @click="setBtSort('pct')"
                     >
-                      <span class="flex items-center justify-end gap-1">
-                        P&amp;L%
-                        <span v-if="btSortBy === 'pct'" class="material-symbols-outlined text-[12px] text-primary">
+                      <span class="inline-flex items-center justify-end gap-1">
+                        P&amp;L %
+                        <span v-if="btSortBy === 'pct'" class="material-symbols-outlined text-[14px]">
                           {{ btSortOrder === 'desc' ? 'arrow_downward' : 'arrow_upward' }}
                         </span>
                       </span>
                     </th>
-                    <th class="px-4 py-3 text-right text-[11px] font-semibold text-slate-500 uppercase tracking-widest"></th>
+                    <th class="h-10 pl-3 pr-5 font-normal"><span class="sr-only">Actions</span></th>
                   </tr>
                 </thead>
-                <tbody class="divide-y divide-border-subtle">
+                <tbody class="divide-y divide-white/[0.05]">
                   <tr
                     v-for="bt in sortedBacktests"
                     :key="bt.id"
-                    class="hover:bg-surface/40 transition-colors"
-                    :class="bt.backtest_id === bestPnlBacktest?.backtest_id ? 'bg-emerald-500/5' : ''"
+                    class="hover:bg-white/[0.03] transition-colors duration-150 ease-out"
                   >
-                    <td class="px-4 py-3">
+                    <td class="h-14 pl-5 pr-3">
                       <div class="flex items-center gap-2">
+                        <span class="text-slate-300 tabular-nums whitespace-nowrap">{{ fmtDateTime(bt.created_at) }}</span>
                         <span
                           v-if="bt.backtest_id === bestPnlBacktest?.backtest_id"
-                          class="material-symbols-outlined text-[14px] text-amber-400 shrink-0"
+                          class="material-symbols-outlined text-[16px] text-slate-400 shrink-0"
                           title="Best backtest"
                         >star</span>
-                        <span class="text-xs text-slate-400">{{ fmtDateTime(bt.created_at) }}</span>
                       </div>
                     </td>
-                    <td class="px-4 py-3">
-                      <p class="text-xs text-slate-300 font-mono truncate max-w-[160px]" :title="(bt.stocks_used || []).join(', ')">
-                        {{ (bt.stocks_used || []).slice(0, 4).join(', ') }}{{ (bt.stocks_used || []).length > 4 ? ` +${bt.stocks_used.length - 4}` : '' }}
+                    <td class="h-14 px-3">
+                      <p class="text-slate-200 truncate max-w-[200px]" :title="(bt.stocks_used || []).join(', ')">
+                        {{ (bt.stocks_used || []).slice(0, 4).join(', ') }}<span v-if="(bt.stocks_used || []).length > 4" class="text-xs text-slate-500 tabular-nums">{{ ` +${bt.stocks_used.length - 4}` }}</span>
                       </p>
                     </td>
-                    <td class="px-4 py-3">
-                      <p class="text-xs text-slate-500 font-mono whitespace-nowrap">
+                    <td class="h-14 px-3">
+                      <p class="text-slate-400 tabular-nums whitespace-nowrap">
                         {{ fmtDate(bt.start_date) }} – {{ fmtDate(bt.end_date) }}
                       </p>
                     </td>
-                    <td class="px-4 py-3 text-right">
-                      <span class="text-sm font-mono font-semibold" :class="pnlColor(bt.overall_profit)">
-                        {{ fmtPnl(bt.overall_profit) }}
-                      </span>
+                    <td class="h-14 px-3 text-right tabular-nums" :class="pnlColor(bt.overall_profit)">
+                      {{ fmtPnl(bt.overall_profit) }}
                     </td>
-                    <td class="px-4 py-3 text-right">
-                      <span class="text-sm font-mono font-semibold" :class="pnlColor(bt.pnl_percent)">
-                        {{ fmtPct(bt.pnl_percent) }}
-                      </span>
+                    <td class="h-14 px-3 text-right tabular-nums" :class="pnlColor(bt.pnl_percent)">
+                      {{ fmtPct(bt.pnl_percent) }}
                     </td>
-                    <td class="px-4 py-3 text-right">
+                    <td class="h-14 pl-3 pr-5 text-right">
                       <button
                         v-if="bt.backtest_id"
                         @click="viewBacktest(bt.backtest_id)"
-                        class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-semibold border border-border-subtle text-slate-400 hover:text-primary hover:border-primary/30 hover:bg-primary/5 transition-colors"
-                      >
-                        <span class="material-symbols-outlined text-[12px]">analytics</span>
-                        View
-                      </button>
+                        class="ui-btn-ghost px-2.5"
+                      >View</button>
                     </td>
                   </tr>
                 </tbody>
               </table>
             </div>
           </div>
-        </div>
+        </section>
 
       </template>
 
       <!-- Not found -->
-      <div v-else class="flex flex-col items-center justify-center py-24 text-center">
-        <span class="material-symbols-outlined text-slate-700 text-5xl mb-4">schema</span>
-        <p class="text-slate-400 font-medium">Strategy not found</p>
-        <button @click="router.push('/strategies')" class="mt-4 px-4 py-2 rounded-lg border border-border-subtle text-sm text-slate-400 hover:text-slate-200 transition-colors">
-          Back to Strategies
+      <div v-else class="ui-card ui-empty">
+        <p class="text-slate-200">Strategy not found</p>
+        <button @click="router.push('/strategies')" class="ui-btn">
+          Back to strategies
         </button>
       </div>
 
@@ -532,74 +505,71 @@ onMounted(fetchAll)
       <Transition name="modal-fade">
         <div
           v-if="showBtModal"
-          class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+          class="ui-overlay"
           @click.self="closeBtModal"
         >
-          <div class="w-full max-w-lg bg-[#0d1117] border border-border-subtle rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+          <div class="modal-panel ui-modal max-w-lg flex flex-col max-h-[90vh]">
             <!-- Header -->
-            <div class="flex items-center gap-3 px-6 py-4 border-b border-border-subtle shrink-0">
-              <div class="size-9 rounded-xl bg-sky-500/10 border border-sky-500/20 flex items-center justify-center shrink-0">
-                <span class="material-symbols-outlined text-sky-400 text-base">play_circle</span>
-              </div>
+            <div class="ui-modal-head shrink-0">
               <div class="flex-1 min-w-0">
-                <p class="text-sm font-semibold text-slate-100">Backtest this strategy</p>
-                <p class="text-[11px] text-slate-500 truncate mt-0.5">{{ strategy?.name }}</p>
+                <h2 class="text-base font-medium text-slate-100">Backtest this strategy</h2>
+                <p class="text-sm text-slate-500 truncate mt-1">{{ strategy?.name }}</p>
               </div>
-              <button @click="closeBtModal" class="text-slate-600 hover:text-slate-400 transition-colors">
+              <button @click="closeBtModal" class="ui-icon-btn shrink-0" aria-label="Close">
                 <span class="material-symbols-outlined text-[18px]">close</span>
               </button>
             </div>
 
             <!-- Body -->
-            <div class="overflow-y-auto flex-1 px-6 py-5 space-y-5">
+            <div class="overflow-y-auto flex-1 px-6 pb-6 space-y-6">
               <div v-if="btModalLoading" class="flex items-center justify-center py-8 text-slate-500 gap-2 text-sm">
-                <span class="material-symbols-outlined animate-spin text-lg">progress_activity</span>
-                Loading instances...
+                <span class="material-symbols-outlined animate-spin text-[18px]">progress_activity</span>
+                Loading instances…
               </div>
               <template v-else>
 
                 <!-- Instance selector -->
                 <div>
-                  <p class="text-[11px] font-semibold text-slate-500 uppercase tracking-widest mb-3">Select Instance</p>
+                  <p class="ui-field-label">Instance</p>
 
-                  <!-- Already-linked instances (highlighted) -->
-                  <div v-if="linkedInstances.length" class="mb-2">
-                    <p class="text-[10px] text-emerald-500/70 uppercase tracking-widest font-semibold mb-1.5 px-1">Already linked to this strategy</p>
+                  <!-- Already-linked instances -->
+                  <div v-if="linkedInstances.length" class="mb-3">
+                    <p class="text-xs text-slate-500 mb-2">Already linked to this strategy</p>
                     <div class="space-y-1.5">
                       <label
                         v-for="inst in linkedInstances"
                         :key="inst.id"
-                        class="flex items-center gap-3 px-3 py-2.5 rounded-xl border cursor-pointer transition-colors"
+                        class="flex items-center gap-3 px-3 min-h-12 py-2 rounded-lg border cursor-pointer transition-colors duration-150 ease-out"
                         :class="selectedInstId === String(inst.id)
-                          ? 'border-emerald-500/40 bg-emerald-500/10'
-                          : 'border-emerald-500/20 bg-emerald-500/5 hover:border-emerald-500/30'"
+                          ? 'border-white/20 bg-raised shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]'
+                          : 'border-white/[0.07] hover:bg-white/[0.03]'"
                       >
-                        <input type="radio" :value="String(inst.id)" v-model="selectedInstId" class="accent-emerald-500 shrink-0" />
+                        <input type="radio" :value="String(inst.id)" v-model="selectedInstId" class="accent-[#ededed] shrink-0" />
                         <div class="min-w-0 flex-1">
-                          <p class="text-sm font-semibold text-emerald-300 truncate">{{ inst.name || inst.id }}</p>
-                          <p class="text-[10px] text-emerald-600 font-mono">{{ inst.id }}</p>
+                          <p class="text-sm text-slate-100 truncate">{{ inst.name || inst.id }}</p>
+                          <p class="text-xs text-slate-500 mt-0.5">{{ inst.id }}</p>
                         </div>
-                        <span class="shrink-0 text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/20">Linked</span>
+                        <span class="shrink-0 text-xs text-slate-400">Linked</span>
                       </label>
                     </div>
                   </div>
 
                   <!-- Free instances -->
-                  <div v-if="freeInstances.length" class="mb-2">
-                    <p v-if="linkedInstances.length" class="text-[10px] text-slate-600 uppercase tracking-widest font-semibold mb-1.5 px-1 mt-3">Available instances (no strategy)</p>
+                  <div v-if="freeInstances.length" class="mb-3">
+                    <p v-if="linkedInstances.length" class="text-xs text-slate-500 mb-2">Available instances (no strategy)</p>
                     <div class="space-y-1.5">
                       <label
                         v-for="inst in freeInstances"
                         :key="inst.id"
-                        class="flex items-center gap-3 px-3 py-2.5 rounded-xl border cursor-pointer transition-colors"
+                        class="flex items-center gap-3 px-3 min-h-12 py-2 rounded-lg border cursor-pointer transition-colors duration-150 ease-out"
                         :class="selectedInstId === String(inst.id)
-                          ? 'border-primary/40 bg-primary/10'
-                          : 'border-border-subtle hover:border-primary/20 hover:bg-surface'"
+                          ? 'border-white/20 bg-raised shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]'
+                          : 'border-white/[0.07] hover:bg-white/[0.03]'"
                       >
-                        <input type="radio" :value="String(inst.id)" v-model="selectedInstId" class="accent-sky-500 shrink-0" />
+                        <input type="radio" :value="String(inst.id)" v-model="selectedInstId" class="accent-[#ededed] shrink-0" />
                         <div class="min-w-0">
-                          <p class="text-sm text-slate-200 truncate">{{ inst.name || inst.id }}</p>
-                          <p class="text-[10px] text-slate-600 font-mono">{{ inst.id }}</p>
+                          <p class="text-sm text-slate-100 truncate">{{ inst.name || inst.id }}</p>
+                          <p class="text-xs text-slate-500 mt-0.5">{{ inst.id }}</p>
                         </div>
                       </label>
                     </div>
@@ -607,81 +577,86 @@ onMounted(fetchAll)
 
                   <!-- Create new -->
                   <label
-                    class="flex items-center gap-3 px-3 py-2.5 rounded-xl border cursor-pointer transition-colors mt-2"
+                    class="flex items-center gap-3 px-3 min-h-12 py-2 rounded-lg border cursor-pointer transition-colors duration-150 ease-out"
                     :class="selectedInstId === ''
-                      ? 'border-primary/40 bg-primary/10'
-                      : 'border-border-subtle hover:border-primary/20 hover:bg-surface'"
+                      ? 'border-white/20 bg-raised shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]'
+                      : 'border-white/[0.07] hover:bg-white/[0.03]'"
                   >
-                    <input type="radio" value="" v-model="selectedInstId" class="accent-sky-500 shrink-0" />
-                    <span class="material-symbols-outlined text-[16px] text-slate-400">add_circle</span>
-                    <span class="text-sm text-slate-300 font-medium">Create new instance</span>
+                    <input type="radio" value="" v-model="selectedInstId" class="accent-[#ededed] shrink-0" />
+                    <span class="text-sm text-slate-200">Create new instance</span>
                   </label>
 
                   <!-- New instance name field -->
-                  <div v-if="selectedInstId === ''" class="mt-3">
-                    <label class="block text-[11px] font-semibold text-slate-500 uppercase tracking-widest mb-1.5">New Instance Name</label>
+                  <div v-if="selectedInstId === ''" class="mt-4">
+                    <label for="sd-new-inst" class="ui-field-label">New instance name</label>
                     <input
+                      id="sd-new-inst"
                       v-model="newInstName"
                       type="text"
-                      placeholder="e.g. My Strategy Test"
-                      class="w-full px-3 py-2 rounded-lg bg-surface border border-border-subtle text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-primary/50 transition-colors"
+                      placeholder="e.g. My strategy test"
+                      class="ui-input"
                     />
                   </div>
                 </div>
 
-                <div class="border-t border-border-subtle"></div>
+                <div class="border-t border-white/[0.06]"></div>
 
                 <!-- Backtest parameters -->
                 <div class="space-y-4">
-                  <p class="text-[11px] font-semibold text-slate-500 uppercase tracking-widest">Backtest Parameters</p>
+                  <p class="text-sm font-medium text-slate-100">Backtest parameters</p>
 
                   <div>
-                    <label class="block text-[11px] font-semibold text-slate-500 uppercase tracking-widest mb-1.5">Stocks <span class="text-slate-600 normal-case">(comma-separated)</span></label>
+                    <label for="sd-stocks" class="ui-field-label">Stocks <span class="text-slate-500">(comma-separated)</span></label>
                     <input
+                      id="sd-stocks"
                       v-model="btForm.stocks"
                       type="text"
                       placeholder="AAPL, MSFT, NVDA"
-                      class="w-full px-3 py-2 rounded-lg bg-surface border border-border-subtle text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-primary/50 transition-colors font-mono"
+                      class="ui-input"
                     />
                   </div>
 
                   <div class="grid grid-cols-2 gap-3">
                     <div>
-                      <label class="block text-[11px] font-semibold text-slate-500 uppercase tracking-widest mb-1.5">Start Date</label>
+                      <label for="sd-start" class="ui-field-label">Start date</label>
                       <input
+                        id="sd-start"
                         v-model="btForm.start_date"
                         type="date"
-                        class="w-full px-3 py-2 rounded-lg bg-surface border border-border-subtle text-sm text-slate-200 focus:outline-none focus:border-primary/50 transition-colors"
+                        class="ui-input tabular-nums"
                       />
                     </div>
                     <div>
-                      <label class="block text-[11px] font-semibold text-slate-500 uppercase tracking-widest mb-1.5">End Date</label>
+                      <label for="sd-end" class="ui-field-label">End date</label>
                       <input
+                        id="sd-end"
                         v-model="btForm.end_date"
                         type="date"
-                        class="w-full px-3 py-2 rounded-lg bg-surface border border-border-subtle text-sm text-slate-200 focus:outline-none focus:border-primary/50 transition-colors"
+                        class="ui-input tabular-nums"
                       />
                     </div>
                   </div>
 
                   <div class="grid grid-cols-2 gap-3">
                     <div>
-                      <label class="block text-[11px] font-semibold text-slate-500 uppercase tracking-widest mb-1.5">Granularity</label>
+                      <label for="sd-gran" class="ui-field-label">Granularity</label>
                       <select
+                        id="sd-gran"
                         v-model="btForm.granularity"
-                        class="w-full px-3 py-2 rounded-lg bg-surface border border-border-subtle text-sm text-slate-200 focus:outline-none focus:border-primary/50 transition-colors"
+                        class="ui-input"
                       >
                         <option v-for="g in GRANULARITIES" :key="g.value" :value="g.value">{{ g.label }}</option>
                       </select>
                     </div>
                     <div>
-                      <label class="block text-[11px] font-semibold text-slate-500 uppercase tracking-widest mb-1.5">Initial Cash ($)</label>
+                      <label for="sd-cash" class="ui-field-label">Initial cash ($)</label>
                       <input
+                        id="sd-cash"
                         v-model="btForm.initial_cash"
                         type="number"
                         min="1"
                         step="1000"
-                        class="w-full px-3 py-2 rounded-lg bg-surface border border-border-subtle text-sm text-slate-200 focus:outline-none focus:border-primary/50 transition-colors font-mono"
+                        class="ui-input tabular-nums"
                       />
                     </div>
                   </div>
@@ -691,25 +666,28 @@ onMounted(fetchAll)
             </div>
 
             <!-- Footer -->
-            <div class="px-6 py-4 border-t border-border-subtle shrink-0">
-              <div v-if="btModalMsg" class="mb-3 flex items-center gap-2 text-xs px-3 py-2 rounded-lg" :class="btModalOk ? 'bg-emerald-500/10 text-emerald-400' : 'bg-red-500/10 text-red-400'">
-                <span class="material-symbols-outlined text-[14px]">{{ btModalOk ? 'check_circle' : 'error' }}</span>
+            <div class="px-6 py-4 border-t border-white/[0.06] shrink-0">
+              <p
+                v-if="btModalMsg"
+                class="mb-3 flex items-center gap-2 text-sm"
+                :class="btModalBusy ? 'text-slate-400' : btModalOk ? 'text-gain' : 'text-loss'"
+              >
+                <span v-if="!btModalBusy" class="material-symbols-outlined text-[16px]">{{ btModalOk ? 'check_circle' : 'error' }}</span>
                 {{ btModalMsg }}
-              </div>
+              </p>
               <div class="flex items-center justify-end gap-2">
                 <button
                   @click="closeBtModal"
                   :disabled="btModalBusy"
-                  class="px-4 py-2 rounded-lg text-sm font-medium text-slate-400 hover:text-slate-200 hover:bg-surface border border-transparent hover:border-border-subtle transition-colors disabled:opacity-40"
+                  class="ui-btn-ghost h-9 px-4"
                 >Cancel</button>
                 <button
                   @click="submitBtModal"
                   :disabled="btModalBusy || btModalLoading"
-                  class="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-semibold bg-primary hover:brightness-110 text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  class="ui-btn-primary"
                 >
-                  <span v-if="btModalBusy" class="material-symbols-outlined text-[14px] animate-spin">progress_activity</span>
-                  <span v-else class="material-symbols-outlined text-[14px]">play_circle</span>
-                  Run Backtest
+                  <span v-if="btModalBusy" class="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
+                  Run backtest
                 </button>
               </div>
             </div>
@@ -722,6 +700,8 @@ onMounted(fetchAll)
 </template>
 
 <style scoped>
-.modal-fade-enter-active, .modal-fade-leave-active { transition: opacity 0.2s ease; }
+.modal-fade-enter-active, .modal-fade-leave-active { transition: opacity 180ms cubic-bezier(0.22, 1, 0.36, 1); }
+.modal-fade-enter-active .modal-panel, .modal-fade-leave-active .modal-panel { transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1); }
 .modal-fade-enter-from, .modal-fade-leave-to { opacity: 0; }
+.modal-fade-enter-from .modal-panel, .modal-fade-leave-to .modal-panel { transform: translateY(6px); }
 </style>

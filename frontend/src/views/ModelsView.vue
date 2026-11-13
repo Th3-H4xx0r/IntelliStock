@@ -496,7 +496,7 @@ async function testCliConnection(id) {
         [id]: {
           loading: false,
           ok: true,
-          message: `✓ v${data.version || '?'}, ${loggedIn}${responseSegment}`,
+          message: `Connected · v${data.version || '?'}, ${loggedIn}${responseSegment}`,
         },
       }
     } else {
@@ -535,113 +535,118 @@ onMounted(fetchModels)
 
 <template>
   <AppShell>
-    <div class="max-w-5xl mx-auto p-6">
+    <main class="ui-page">
       <!-- Header -->
-      <div class="flex items-center justify-between mb-6">
-        <div>
-          <h1 class="text-xl font-bold text-slate-100">Models</h1>
-          <p class="text-xs text-slate-500 mt-1">Centralized LLM model configurations. Strategies can reference these instead of storing credentials inline.</p>
+      <header class="flex flex-wrap items-end justify-between gap-x-4 gap-y-3">
+        <div class="min-w-0">
+          <h1 class="ui-page-title">Models</h1>
+          <p class="ui-page-sub">Saved LLM configurations. Strategies reference these instead of storing credentials inline</p>
         </div>
-        <button
-          @click="openCreateModal"
-          class="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-primary text-background-dark text-sm font-bold hover:brightness-110 transition-all"
-        >
-          <span class="material-symbols-outlined text-base">add</span>
-          Add Model
-        </button>
-      </div>
+        <button @click="openCreateModal" class="ui-btn-primary">Add model</button>
+      </header>
 
-      <!-- Loading / Error -->
-      <div v-if="loading" class="text-sm text-slate-500">Loading models...</div>
-      <div v-else-if="loadError" class="text-sm text-red-400">{{ loadError }}</div>
+      <section class="mt-8">
+        <!-- Loading -->
+        <div v-if="loading" class="ui-card overflow-hidden" aria-label="Loading models">
+          <div class="h-10 border-b border-white/[0.06]"></div>
+          <div class="ui-rows">
+            <div v-for="n in 4" :key="n" class="h-14 px-5 flex items-center gap-8">
+              <div class="ui-skel h-4 w-36"></div>
+              <div class="ui-skel h-4 w-24"></div>
+              <div class="ui-skel h-4 w-40"></div>
+            </div>
+          </div>
+        </div>
 
-      <!-- Empty State -->
-      <div
-        v-else-if="models.length === 0"
-        class="text-center py-16 border border-border-subtle rounded-2xl bg-surface"
-      >
-        <span class="material-symbols-outlined text-4xl text-slate-600 mb-3 block">psychology</span>
-        <p class="text-sm text-slate-400 mb-1">No models saved yet.</p>
-        <p class="text-xs text-slate-600">Add a model to start using centralized LLM configurations.</p>
-      </div>
+        <!-- Error -->
+        <div v-else-if="loadError" class="ui-error">{{ loadError }}</div>
 
-      <!-- Models Table -->
-      <div v-else class="border border-border-subtle rounded-2xl bg-surface overflow-hidden">
-        <table class="w-full text-sm">
-          <thead>
-            <tr class="border-b border-border-subtle text-left text-xs text-slate-500 uppercase tracking-wider">
-              <th class="px-5 py-3 font-medium">Name</th>
-              <th class="px-5 py-3 font-medium">Provider</th>
-              <th class="px-5 py-3 font-medium">Model</th>
-              <th class="px-5 py-3 font-medium">Effort</th>
-              <th class="px-5 py-3 font-medium">API Key</th>
-              <th class="px-5 py-3 font-medium">Created</th>
-              <th class="px-5 py-3 font-medium text-right">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="m in models"
-              :key="m.id"
-              class="border-b border-border-subtle last:border-0 hover:bg-white/[0.02] transition-colors"
-            >
-              <td class="px-5 py-3.5 font-medium text-slate-200">{{ m.name }}</td>
-              <td class="px-5 py-3.5 text-slate-400">{{ getLlmProviderLabel(m.provider) }}</td>
-              <td class="px-5 py-3.5 text-slate-400 font-mono text-xs">{{ m.model }}</td>
-              <td class="px-5 py-3.5 text-slate-400 text-xs">{{ _reasoningCell(m) }}</td>
-              <td class="px-5 py-3.5 text-slate-500 font-mono text-xs">
-                <template v-if="m.provider === 'claude-cli'">{{ m.cli_path || 'claude' }}</template>
-                <template v-else-if="m.provider === 'codex-cli'">{{ m.cli_path || 'codex' }}</template>
-                <template v-else>{{ m.api_key || '—' }}</template>
-              </td>
-              <td class="px-5 py-3.5 text-slate-500 text-xs">{{ fmtDate(m.created_at) }}</td>
-              <td class="px-5 py-3.5 text-right align-top">
-                <div class="flex flex-col items-end gap-2">
-                  <div class="flex items-center justify-end whitespace-nowrap">
-                    <button
-                      v-if="m.provider === 'claude-cli'"
-                      @click="testCliConnection(m.id)"
-                      :disabled="testCliStates[m.id]?.loading"
-                      class="text-slate-500 hover:text-primary transition-colors mr-2 disabled:opacity-40"
-                      title="Test connection"
-                    >
-                      <span class="material-symbols-outlined text-base" :class="{ 'animate-spin': testCliStates[m.id]?.loading }">
-                        {{ testCliStates[m.id]?.loading ? 'progress_activity' : 'cable' }}
-                      </span>
-                    </button>
-                    <button
-                      @click="openEditModal(m)"
-                      class="text-slate-500 hover:text-primary transition-colors mr-2"
-                      title="Edit"
-                    >
-                      <span class="material-symbols-outlined text-base">edit</span>
-                    </button>
-                    <button
-                      @click="deleteModel(m.id, m.name)"
-                      class="text-slate-500 hover:text-red-400 transition-colors"
-                      title="Delete"
-                    >
-                      <span class="material-symbols-outlined text-base">delete</span>
-                    </button>
-                  </div>
-                  <Transition name="fade">
-                    <div
-                      v-if="testCliStates[m.id]?.message && !testCliStates[m.id]?.loading"
-                      class="max-w-[240px] text-left whitespace-normal break-words rounded-md px-2 py-1.5 text-[11px] leading-relaxed border"
-                      :class="testCliStates[m.id]?.ok
-                        ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-300'
-                        : 'border-red-500/20 bg-red-500/10 text-red-300'"
-                    >
-                      {{ testCliStates[m.id].message }}
+        <!-- Empty State -->
+        <div v-else-if="models.length === 0" class="ui-card">
+          <div class="ui-empty">
+            <p>No models saved yet. Add one to share an LLM configuration across strategies.</p>
+          </div>
+        </div>
+
+        <!-- Models Table -->
+        <div v-else class="ui-card overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="text-left text-xs text-slate-500 border-b border-white/[0.06]">
+                <th class="h-10 px-5 font-normal">Name</th>
+                <th class="h-10 px-5 font-normal">Provider</th>
+                <th class="h-10 px-5 font-normal">Model</th>
+                <th class="h-10 px-5 font-normal">Effort</th>
+                <th class="h-10 px-5 font-normal">API key</th>
+                <th class="h-10 px-5 font-normal">Created</th>
+                <th class="h-10 px-5 font-normal"><span class="sr-only">Actions</span></th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-white/[0.05]">
+              <tr
+                v-for="m in models"
+                :key="m.id"
+                class="transition-colors duration-150 ease-out hover:bg-white/[0.02]"
+              >
+                <td class="h-14 px-5 py-2 text-slate-100 whitespace-nowrap">{{ m.name }}</td>
+                <td class="h-14 px-5 py-2 text-slate-400 whitespace-nowrap">{{ getLlmProviderLabel(m.provider) }}</td>
+                <td class="h-14 px-5 py-2 text-slate-300 font-mono text-xs whitespace-nowrap">{{ m.model }}</td>
+                <td class="h-14 px-5 py-2 text-slate-400 whitespace-nowrap">{{ _reasoningCell(m) }}</td>
+                <td class="h-14 px-5 py-2 text-slate-500 font-mono text-xs whitespace-nowrap">
+                  <template v-if="m.provider === 'claude-cli'">{{ m.cli_path || 'claude' }}</template>
+                  <template v-else-if="m.provider === 'codex-cli'">{{ m.cli_path || 'codex' }}</template>
+                  <template v-else>{{ m.api_key || '—' }}</template>
+                </td>
+                <td class="h-14 px-5 py-2 text-slate-500 whitespace-nowrap tabular-nums">{{ fmtDate(m.created_at) }}</td>
+                <td class="h-14 px-5 py-2 text-right">
+                  <div class="flex flex-col items-end gap-1.5">
+                    <div class="flex items-center justify-end gap-0.5 whitespace-nowrap">
+                      <button
+                        v-if="m.provider === 'claude-cli'"
+                        @click="testCliConnection(m.id)"
+                        :disabled="testCliStates[m.id]?.loading"
+                        class="ui-icon-btn disabled:opacity-40"
+                        title="Test connection"
+                        aria-label="Test connection"
+                      >
+                        <span class="material-symbols-outlined text-[18px]" :class="{ 'animate-spin': testCliStates[m.id]?.loading }">
+                          {{ testCliStates[m.id]?.loading ? 'progress_activity' : 'cable' }}
+                        </span>
+                      </button>
+                      <button
+                        @click="openEditModal(m)"
+                        class="ui-icon-btn"
+                        title="Edit"
+                        aria-label="Edit"
+                      >
+                        <span class="material-symbols-outlined text-[18px]">edit</span>
+                      </button>
+                      <button
+                        @click="deleteModel(m.id, m.name)"
+                        class="ui-icon-btn hover:text-loss"
+                        title="Delete"
+                        aria-label="Delete"
+                      >
+                        <span class="material-symbols-outlined text-[18px]">delete</span>
+                      </button>
                     </div>
-                  </Transition>
-                </div>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
+                    <Transition name="fade">
+                      <p
+                        v-if="testCliStates[m.id]?.message && !testCliStates[m.id]?.loading"
+                        class="max-w-60 text-left whitespace-normal break-words text-xs leading-relaxed"
+                        :class="testCliStates[m.id]?.ok ? 'text-gain' : 'text-loss'"
+                      >
+                        {{ testCliStates[m.id].message }}
+                      </p>
+                    </Transition>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
   </AppShell>
 
   <!-- ── Add / Edit Model Modal ──────────────────────────────────────────── -->
@@ -649,31 +654,31 @@ onMounted(fetchModels)
     <Transition name="fade">
       <div
         v-if="showModal"
-        class="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+        class="ui-overlay z-[70] bg-black/70"
         @click.self="closeModal"
       >
-        <div class="relative w-full max-w-lg bg-surface border border-border-subtle rounded-2xl shadow-2xl flex flex-col max-h-[90vh]">
-          <div class="flex items-center justify-between px-6 py-5 border-b border-border-subtle shrink-0">
-            <div>
-              <h2 class="text-base font-bold">{{ editMode ? 'Edit Model' : 'Add Model' }}</h2>
-              <p class="text-[11px] text-slate-500 mt-0.5">Save a reusable LLM configuration that strategies can reference.</p>
+        <div class="modal-panel ui-modal max-w-lg flex flex-col max-h-[90vh]">
+          <div class="ui-modal-head shrink-0">
+            <div class="min-w-0">
+              <h2 class="text-base font-medium text-slate-100">{{ editMode ? 'Edit model' : 'Add model' }}</h2>
+              <p class="text-sm text-slate-500 mt-1">A reusable LLM configuration that strategies can reference</p>
             </div>
-            <button @click="closeModal" class="text-slate-500 hover:text-slate-300 transition-colors">
-              <span class="material-symbols-outlined">close</span>
+            <button @click="closeModal" class="ui-icon-btn ml-auto shrink-0" aria-label="Close">
+              <span class="material-symbols-outlined text-[18px]">close</span>
             </button>
           </div>
 
-          <div class="flex-1 overflow-y-auto px-6 py-5 space-y-4">
+          <div class="ui-modal-body flex-1 overflow-y-auto space-y-5">
             <!-- Name field (unique to Models) -->
             <div>
-              <label class="block text-xs font-medium text-slate-400 mb-1.5">Name</label>
+              <label class="ui-field-label">Name</label>
               <input
                 v-model="formDraft.name"
                 type="text"
                 placeholder="e.g. Gemini Flash — Main"
-                class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors"
+                class="ui-input"
               />
-              <p class="mt-1 text-[11px] text-slate-600">A human-readable label shown in strategy dropdowns.</p>
+              <p class="ui-help">Shown in strategy dropdowns</p>
             </div>
 
             <!-- Shared LLM config form -->
@@ -688,62 +693,65 @@ onMounted(fetchModels)
                  telemetry's cost computation will use them instead of
                  backend/llm_pricing.yaml. Leaving them blank keeps the
                  YAML defaults. -->
-            <details class="border border-border-subtle rounded-lg bg-surface px-3 py-2">
-              <summary class="cursor-pointer text-xs font-medium text-slate-300">
-                Pricing override (optional)
+            <details class="group rounded-lg border border-white/[0.07]">
+              <summary class="h-10 px-4 flex items-center justify-between gap-3 cursor-pointer list-none text-sm text-slate-300 [&::-webkit-details-marker]:hidden">
+                <span>Pricing override <span class="text-slate-500">(optional)</span></span>
+                <span class="material-symbols-outlined text-[18px] text-slate-500 transition-transform duration-150 ease-out group-open:rotate-180" aria-hidden="true">expand_more</span>
               </summary>
-              <p class="text-[11px] text-slate-500 mt-2 mb-3 leading-relaxed">
-                Leave blank to use the backend <span class="font-mono">llm_pricing.yaml</span> defaults.
-                Values are dollars per 1M tokens.
-              </p>
-              <div class="space-y-3">
-                <div>
-                  <label class="block text-xs font-medium text-slate-400 mb-1.5">Input cost ($/1M tokens)</label>
-                  <input
-                    v-model.number="formDraft.inputCostPer1m"
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    :disabled="submitting"
-                    placeholder="e.g. 3.00"
-                    class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono disabled:opacity-50"
-                  />
-                </div>
-                <div>
-                  <label class="block text-xs font-medium text-slate-400 mb-1.5">Output cost ($/1M tokens)</label>
-                  <input
-                    v-model.number="formDraft.outputCostPer1m"
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    :disabled="submitting"
-                    placeholder="e.g. 15.00"
-                    class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono disabled:opacity-50"
-                  />
-                </div>
-                <div>
-                  <label class="block text-xs font-medium text-slate-400 mb-1.5">Cache creation cost ($/1M tokens)</label>
-                  <input
-                    v-model.number="formDraft.cacheCreationCostPer1m"
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    :disabled="submitting"
-                    placeholder="e.g. 3.75"
-                    class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono disabled:opacity-50"
-                  />
-                </div>
-                <div>
-                  <label class="block text-xs font-medium text-slate-400 mb-1.5">Cache read cost ($/1M tokens)</label>
-                  <input
-                    v-model.number="formDraft.cacheReadCostPer1m"
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    :disabled="submitting"
-                    placeholder="e.g. 0.30"
-                    class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono disabled:opacity-50"
-                  />
+              <div class="px-4 pb-4">
+                <p class="text-xs text-slate-500 mb-4 leading-relaxed">
+                  Leave blank to use the backend <span class="font-mono">llm_pricing.yaml</span> defaults.
+                  Values are dollars per 1M tokens.
+                </p>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-4">
+                  <div>
+                    <label class="ui-field-label">Input cost <span class="text-slate-500">($/1M tokens)</span></label>
+                    <input
+                      v-model.number="formDraft.inputCostPer1m"
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      :disabled="submitting"
+                      placeholder="e.g. 3.00"
+                      class="ui-input tabular-nums"
+                    />
+                  </div>
+                  <div>
+                    <label class="ui-field-label">Output cost <span class="text-slate-500">($/1M tokens)</span></label>
+                    <input
+                      v-model.number="formDraft.outputCostPer1m"
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      :disabled="submitting"
+                      placeholder="e.g. 15.00"
+                      class="ui-input tabular-nums"
+                    />
+                  </div>
+                  <div>
+                    <label class="ui-field-label">Cache creation cost <span class="text-slate-500">($/1M tokens)</span></label>
+                    <input
+                      v-model.number="formDraft.cacheCreationCostPer1m"
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      :disabled="submitting"
+                      placeholder="e.g. 3.75"
+                      class="ui-input tabular-nums"
+                    />
+                  </div>
+                  <div>
+                    <label class="ui-field-label">Cache read cost <span class="text-slate-500">($/1M tokens)</span></label>
+                    <input
+                      v-model.number="formDraft.cacheReadCostPer1m"
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      :disabled="submitting"
+                      placeholder="e.g. 0.30"
+                      class="ui-input tabular-nums"
+                    />
+                  </div>
                 </div>
               </div>
             </details>
@@ -751,10 +759,8 @@ onMounted(fetchModels)
             <!-- Status message -->
             <div
               v-if="submitMsg"
-              class="rounded-lg px-3 py-3 text-[11px] leading-relaxed border"
-              :class="submitOk
-                ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-300'
-                : 'border-red-500/20 bg-red-500/10 text-red-300'"
+              class="msg"
+              :class="submitting ? 'msg-busy' : submitOk ? 'msg-ok' : 'msg-err'"
             >
               {{ submitMsg }}
             </div>
@@ -766,84 +772,92 @@ onMounted(fetchModels)
                  model + any provider_meta the backend returned. -->
             <div
               v-if="testResult"
-              class="rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-3 py-3 text-[11px] leading-relaxed text-emerald-200/90 space-y-1.5"
+              class="rounded-lg border border-white/[0.07] px-4 py-4 text-xs leading-relaxed text-slate-400 space-y-4"
             >
-              <div class="font-semibold text-emerald-200">LLM connectivity test response</div>
-              <div class="flex flex-wrap gap-x-4 gap-y-1 text-emerald-300/80">
-                <span>provider: <span class="font-mono text-emerald-200">{{ testResult.provider }}</span></span>
-                <span>model: <span class="font-mono text-emerald-200">{{ testResult.model }}</span></span>
-                <span v-if="testResult.effective_model && testResult.effective_model !== testResult.model">
-                  effective: <span class="font-mono text-emerald-200">{{ testResult.effective_model }}</span>
-                </span>
-                <span v-if="testResult.latency_ms != null">latency: <span class="font-mono text-emerald-200">{{ testResult.latency_ms }}ms</span></span>
+              <div class="flex items-center gap-2 text-sm text-slate-200">
+                <span class="ui-dot bg-gain"></span>
+                LLM connectivity test response
               </div>
-              <div v-if="testResult.result" class="mt-1">
-                <div class="text-emerald-300/70 mb-0.5">structured connectivity probe (parsed response):</div>
-                <pre class="font-mono text-[10px] text-emerald-100 bg-black/30 rounded px-2 py-1 overflow-x-auto whitespace-pre-wrap break-all">{{ _prettyJson(testResult.result) }}</pre>
+              <dl class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5">
+                <dt class="text-slate-500">Provider</dt>
+                <dd class="font-mono text-slate-200 break-all">{{ testResult.provider }}</dd>
+                <dt class="text-slate-500">Model</dt>
+                <dd class="font-mono text-slate-200 break-all">{{ testResult.model }}</dd>
+                <template v-if="testResult.effective_model && testResult.effective_model !== testResult.model">
+                  <dt class="text-slate-500">Effective</dt>
+                  <dd class="font-mono text-slate-200 break-all">{{ testResult.effective_model }}</dd>
+                </template>
+                <template v-if="testResult.latency_ms != null">
+                  <dt class="text-slate-500">Latency</dt>
+                  <dd class="text-slate-200 tabular-nums">{{ testResult.latency_ms }} ms</dd>
+                </template>
+              </dl>
+              <div v-if="testResult.result">
+                <div class="text-slate-500 mb-1.5">Structured connectivity probe (parsed response)</div>
+                <pre class="test-pre break-all">{{ _prettyJson(testResult.result) }}</pre>
               </div>
-              <div v-if="testResult.smoke_prompt || testResult.smoke_response || testResult.smoke_thinking || testResult.smoke_error" class="mt-1">
-                <div class="text-emerald-300/70 mb-0.5">
-                  real-generation smoke
-                  <span v-if="testResult.smoke_latency_ms != null" class="text-emerald-300/60">({{ testResult.smoke_latency_ms }}ms)</span>
-                  <span v-if="testResult.smoke_content_chars != null || testResult.smoke_thinking_chars != null" class="text-emerald-300/60">
+              <div v-if="testResult.smoke_prompt || testResult.smoke_response || testResult.smoke_thinking || testResult.smoke_error" class="space-y-1.5">
+                <div class="text-slate-500">
+                  Real-generation smoke
+                  <span v-if="testResult.smoke_latency_ms != null" class="tabular-nums">· {{ testResult.smoke_latency_ms }} ms</span>
+                  <span v-if="testResult.smoke_content_chars != null || testResult.smoke_thinking_chars != null" class="tabular-nums">
                     · content {{ testResult.smoke_content_chars ?? 0 }} chars
                     · reasoning {{ testResult.smoke_thinking_chars ?? 0 }} chars
                   </span>
                 </div>
-                <div v-if="testResult.smoke_prompt" class="text-emerald-300/60 text-[10px] mb-0.5">
-                  prompt: <span class="text-emerald-200/90">{{ testResult.smoke_prompt }}</span>
+                <div v-if="testResult.smoke_prompt" class="text-slate-500">
+                  Prompt: <span class="text-slate-300">{{ testResult.smoke_prompt }}</span>
                 </div>
 
                 <!-- Visible answer (content) — prefer this when populated. -->
                 <template v-if="testResult.smoke_response && (testResult.smoke_content_chars == null || testResult.smoke_content_chars > 0)">
-                  <div class="text-emerald-300/60 text-[10px] mb-0.5">content (visible answer):</div>
-                  <pre class="font-mono text-[11px] text-emerald-100 bg-black/30 rounded px-2 py-1 overflow-x-auto whitespace-pre-wrap break-words">{{ testResult.smoke_response }}</pre>
+                  <div class="text-slate-500">Content (visible answer)</div>
+                  <pre class="test-pre break-words">{{ testResult.smoke_response }}</pre>
                 </template>
 
                 <!-- Reasoning / thinking — for Ollama reasoning models. -->
-                <details v-if="testResult.smoke_thinking" class="mt-1">
-                  <summary class="cursor-pointer text-emerald-300/60 text-[10px]">reasoning ({{ testResult.smoke_thinking_chars ?? testResult.smoke_thinking.length }} chars) — click to expand</summary>
-                  <pre class="font-mono text-[11px] text-emerald-200/70 bg-black/40 rounded px-2 py-1 overflow-x-auto whitespace-pre-wrap break-words mt-1">{{ testResult.smoke_thinking }}</pre>
+                <details v-if="testResult.smoke_thinking">
+                  <summary class="cursor-pointer text-slate-500 hover:text-slate-300 transition-colors duration-150 ease-out">
+                    Reasoning (<span class="tabular-nums">{{ testResult.smoke_thinking_chars ?? testResult.smoke_thinking.length }}</span> chars)
+                  </summary>
+                  <pre class="test-pre break-words mt-1.5 text-slate-400">{{ testResult.smoke_thinking }}</pre>
                 </details>
 
                 <!-- Empty-content fallback: only thinking was returned. -->
                 <div
                   v-if="!testResult.smoke_response && !testResult.smoke_thinking && testResult.smoke_error"
-                  class="font-mono text-[10px] text-red-300 bg-red-900/20 rounded px-2 py-1 overflow-x-auto whitespace-pre-wrap break-words">
-                  smoke generation failed: {{ testResult.smoke_error }}
+                  class="text-loss whitespace-pre-wrap break-words">
+                  Smoke generation failed: {{ testResult.smoke_error }}
                 </div>
                 <div
                   v-else-if="!testResult.smoke_response && !testResult.smoke_thinking"
-                  class="font-mono text-[10px] text-amber-300 bg-amber-900/20 rounded px-2 py-1">
-                  smoke generation returned empty — structured check passed but the
-                  model did not produce free-form text. Strategy use may still fail.
+                  class="flex items-start gap-2 text-slate-300">
+                  <span class="ui-dot ui-dot-warn mt-1.5"></span>
+                  <span>Smoke generation returned empty — the structured check passed but the
+                  model produced no free-form text. Strategy use may still fail.</span>
                 </div>
                 <div
                   v-else-if="testResult.smoke_content_chars === 0 && testResult.smoke_thinking_chars > 0"
-                  class="font-mono text-[10px] text-amber-300 bg-amber-900/20 rounded px-2 py-1 mt-1">
-                  Model produced only reasoning tokens — no visible answer. Try the Thinking/Effort dropdown to set "Off" or "Low", or raise the smoke max_output_tokens budget.
+                  class="flex items-start gap-2 text-slate-300">
+                  <span class="ui-dot ui-dot-warn mt-1.5"></span>
+                  <span>Model produced only reasoning tokens — no visible answer. Set Thinking/Effort to Off or Low, or raise the smoke max_output_tokens budget.</span>
                 </div>
               </div>
-              <div v-if="testResult.provider_meta && Object.keys(testResult.provider_meta).length" class="mt-1">
-                <div class="text-emerald-300/70 mb-0.5">provider meta:</div>
-                <pre class="font-mono text-[10px] text-emerald-100 bg-black/30 rounded px-2 py-1 overflow-x-auto whitespace-pre-wrap break-all">{{ _prettyJson(testResult.provider_meta) }}</pre>
+              <div v-if="testResult.provider_meta && Object.keys(testResult.provider_meta).length">
+                <div class="text-slate-500 mb-1.5">Provider meta</div>
+                <pre class="test-pre break-all">{{ _prettyJson(testResult.provider_meta) }}</pre>
               </div>
             </div>
 
-            <div
-              v-if="editMode"
-              class="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-3 text-[11px] leading-relaxed text-amber-300/80"
-            >
-              Leave API Key empty to keep the existing key unchanged.
-            </div>
+            <p v-if="editMode" class="ui-help">
+              Leave the API key empty to keep the existing key
+            </p>
           </div>
 
-          <div class="px-6 pb-6 pt-4 border-t border-border-subtle flex gap-3 shrink-0">
+          <div class="ui-modal-foot shrink-0">
             <button @click="closeModal"
               :disabled="submitting"
-              :class="saved
-                ? 'flex-1 py-2.5 rounded-lg bg-emerald-500/20 border border-emerald-500/30 text-sm font-semibold text-emerald-200 hover:bg-emerald-500/30 transition-colors'
-                : 'flex-1 py-2.5 rounded-lg border border-border-subtle text-sm font-medium text-slate-400 hover:text-slate-200 transition-colors'">
+              :class="saved ? 'ui-btn-primary' : 'ui-btn-ghost h-9 px-4 rounded-lg'">
               {{ saved ? 'Close' : 'Cancel' }}
             </button>
             <!-- Test-only button: hits /llm/test against the current
@@ -857,19 +871,19 @@ onMounted(fetchModels)
             <button v-if="!saved && formDraft.provider !== 'claude-cli'"
               @click="testOnly"
               :disabled="submitting"
-              class="flex-1 py-2.5 rounded-lg border border-primary/40 text-sm font-semibold text-primary hover:bg-primary/10 transition-colors disabled:opacity-60 disabled:cursor-not-allowed">
+              class="ui-btn h-9 px-4">
               <template v-if="submitting">Testing...</template>
               <template v-else>Test only</template>
             </button>
             <button v-if="!saved"
               @click="submitModel"
               :disabled="submitting"
-              class="flex-1 py-2.5 rounded-lg bg-primary text-background-dark text-sm font-bold hover:brightness-110 transition-all disabled:opacity-60 disabled:cursor-not-allowed">
+              class="ui-btn-primary">
               <template v-if="submitting">
                 {{ formDraft.provider === 'claude-cli' ? (editMode ? 'Updating...' : 'Saving...') : 'Testing...' }}
               </template>
               <template v-else>
-                {{ editMode ? 'Test & Update' : 'Test & Save' }}
+                {{ editMode ? 'Test & update' : 'Test & save' }}
               </template>
             </button>
           </div>
@@ -878,3 +892,22 @@ onMounted(fetchModels)
     </Transition>
   </Teleport>
 </template>
+
+<style scoped>
+/* Modal status line: busy is neutral, success gain, failure loss. */
+.msg { @apply rounded-lg border px-4 py-3 text-sm break-words; }
+.msg-busy { @apply border-white/[0.07] bg-raised text-slate-300; }
+.msg-ok { @apply border-gain/20 bg-gain/5 text-gain; }
+.msg-err { @apply border-loss/20 bg-loss/5 text-loss; }
+
+.test-pre { @apply font-mono text-[11px] leading-relaxed text-slate-300 bg-background-dark rounded-md px-3 py-2 overflow-x-auto whitespace-pre-wrap; }
+
+.fade-enter-active, .fade-leave-active { transition: opacity 180ms cubic-bezier(0.22, 1, 0.36, 1); }
+.fade-enter-from, .fade-leave-to       { opacity: 0; }
+.fade-enter-active .modal-panel, .fade-leave-active .modal-panel { transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1); }
+.fade-enter-from .modal-panel, .fade-leave-to .modal-panel { transform: translateY(6px); }
+@media (prefers-reduced-motion: reduce) {
+  .fade-enter-active, .fade-leave-active,
+  .fade-enter-active .modal-panel, .fade-leave-active .modal-panel { transition: none; }
+}
+</style>

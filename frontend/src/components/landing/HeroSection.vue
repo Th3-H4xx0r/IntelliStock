@@ -1,382 +1,325 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+// Landing hero: the headline, the page's actions (passed in by the view, so
+// each view keeps its own CTA logic) and a preview of the real dashboard.
+// The preview is built from the app's own patterns with made-up data — one
+// account's trading day — so the first thing a visitor sees is the product.
+import Sparkline from '../dashboard/Sparkline.vue'
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  HELPERS
-// ═══════════════════════════════════════════════════════════════════════════════
-const easeOut = (t) => 1 - Math.pow(1 - t, 3)
-const clamp01 = (v) => Math.max(0, Math.min(1, v))
-
-// ═══════════════════════════════════════════════════════════════════════════════
-//  CANVAS — ambient particle-network background
-// ═══════════════════════════════════════════════════════════════════════════════
-const canvasRef = ref(null)
-let ctx = null, canvasRaf = null
-const pts = []
-
-function initPts(w, h) {
-  pts.length = 0
-  for (let i = 0; i < 72; i++) pts.push({
-    x: Math.random() * w, y: Math.random() * h,
-    vx: (Math.random() - 0.5) * 0.22, vy: (Math.random() - 0.5) * 0.22,
-    r: Math.random() * 1.4 + 0.7, op: Math.random() * 0.35 + 0.18,
-    hub: Math.random() < 0.11,
+// Deterministic random walk pinned to open at `from` and close at `to`.
+function walk(n, from, to, vol, seed) {
+  let s = seed
+  const rnd = () => ((s = (s * 16807) % 2147483647) / 2147483647) - 0.5
+  const raw = [0]
+  for (let i = 1; i < n; i++) raw.push(raw[i - 1] + rnd() * vol)
+  const end = raw[n - 1]
+  return raw.map((v, i) => {
+    const t = i / (n - 1)
+    return from + (to - from) * t + v - end * t
   })
 }
 
-function drawCanvas() {
-  const cv = canvasRef.value; if (!cv) return
-  const w = cv.width, h = cv.height
-  ctx.clearRect(0, 0, w, h)
-  for (const p of pts) {
-    p.x += p.vx; p.y += p.vy
-    if (p.x < 0) { p.x = 0; p.vx *= -1 } if (p.x > w) { p.x = w; p.vx *= -1 }
-    if (p.y < 0) { p.y = 0; p.vy *= -1 } if (p.y > h) { p.y = h; p.vy *= -1 }
-  }
-  for (let i = 0; i < pts.length; i++) for (let j = i + 1; j < pts.length; j++) {
-    const dx = pts[i].x - pts[j].x, dy = pts[i].y - pts[j].y
-    const d = Math.sqrt(dx*dx + dy*dy)
-    if (d < 125) {
-      ctx.beginPath(); ctx.moveTo(pts[i].x, pts[i].y); ctx.lineTo(pts[j].x, pts[j].y)
-      ctx.strokeStyle = `rgba(0,225,255,${((1-d/125)*0.15).toFixed(3)})`
-      ctx.lineWidth = 0.55; ctx.stroke()
-    }
-  }
-  for (const p of pts) {
-    const r = p.hub ? p.r * 2.2 : p.r, op = p.hub ? Math.min(p.op*2, 0.8) : p.op
-    if (p.hub) {
-      ctx.beginPath(); ctx.arc(p.x, p.y, r*4, 0, Math.PI*2)
-      ctx.fillStyle = 'rgba(0,225,255,0.04)'; ctx.fill()
-    }
-    ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI*2)
-    ctx.fillStyle = `rgba(0,225,255,${op})`; ctx.fill()
-  }
-  canvasRaf = requestAnimationFrame(drawCanvas)
-}
+const usd = (n) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n)
+const signedUsd = (n) => (n >= 0 ? '+' : '−') + usd(Math.abs(n))
+const signedPct = (n) => (n >= 0 ? '+' : '−') + Math.abs(n).toFixed(2) + '%'
+const signClass = (n) => (n >= 0 ? 'text-gain' : 'text-loss')
 
-function resizeCanvas() {
-  const cv = canvasRef.value; if (!cv) return
-  cv.width = window.innerWidth; cv.height = window.innerHeight
-  initPts(cv.width, cv.height)
-}
+// One account, one day. Holdings + cash add up to the headline value and the
+// holdings' day P&L adds up to the headline change.
+const account = { name: 'Alpaca live', kind: 'Alpaca · Live', open: 24542.15, value: 24860.42 }
+const change = account.value - account.open
+const changePct = (change / account.open) * 100
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  SCROLL PROGRESS  (section is 550vh; 450vh of scrollable runway)
-// ═══════════════════════════════════════════════════════════════════════════════
-const sectionRef = ref(null)
-const progress   = ref(0)
-let   raf_scroll = false
-
-function updateProgress() {
-  if (!sectionRef.value) return
-  const el = sectionRef.value
-  const scrolled   = -el.getBoundingClientRect().top
-  const scrollable = el.offsetHeight - window.innerHeight
-  progress.value   = clamp01(scrolled / scrollable)
-  raf_scroll = false
-}
-function onScroll() {
-  if (!raf_scroll) { raf_scroll = true; requestAnimationFrame(updateProgress) }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-//  CAROUSEL LOGIC
-//
-//  5 frames enter one at a time in sequence.  Each gets a "spotlight" where it
-//  is flat and full-size.  As the next frame enters, the current one recedes
-//  into the back-of-stack.
-//
-//  STARTS = when each frame's spotlight begins (after its enter transition)
-//  T_IN   = duration of the enter / exit transition
-//
-//  slot(i) = continuous position in the stack:
-//    -1  = hidden below (not yet entered)
-//     0  = spotlight  (full size, flat)
-//    1+  = back-of-stack (peek upward, scaled down)
-//
-//  slot(i) = -(1 - enterProgress(i))
-//           + Σ_{k>i} enterProgress(k)   ← each later frame pushes i one back
-// ═══════════════════════════════════════════════════════════════════════════════
-
-const FRAME_COUNT = 5
-//                   Dashboard  Instances  AgentRuns  Strategies  Backtest
-const STARTS      = [0.12,      0.28,      0.44,      0.60,       0.76]
-const T_IN        = 0.07   // transition time per frame (enter/exit)
-
-function getSlot(i, p) {
-  // Not started entering yet
-  if (p < STARTS[i] - T_IN) return -1
-
-  // Enter transition: moves slot from -1 → 0
-  const enterP = easeOut(clamp01((p - (STARTS[i] - T_IN)) / T_IN))
-  let slot = -(1 - enterP)
-
-  // Each subsequent frame entering pushes this frame one slot back
-  for (let k = i + 1; k < FRAME_COUNT; k++) {
-    if (p >= STARTS[k] - T_IN) {
-      slot += easeOut(clamp01((p - (STARTS[k] - T_IN)) / T_IN))
-    }
-  }
-  return slot
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-//  SCROLL-DRIVEN STYLES
-// ═══════════════════════════════════════════════════════════════════════════════
-
-// ── 1. Headline + all text: fades out as first frame slides in ────────────────
-const textGroupStyle = computed(() => {
-  const fadeP = easeOut(clamp01(progress.value / 0.18))
-  return {
-    position: 'absolute', left: '50%', top: '50%',
-    width: '100%', padding: '0 1.5rem',
-    transform: `translateX(-50%) translateY(calc(-50% - ${(fadeP * 28).toFixed(1)}px))`,
-    opacity: (1 - fadeP).toFixed(4),
-    zIndex: 20,
-    willChange: 'transform, opacity',
-    pointerEvents: fadeP > 0.95 ? 'none' : 'auto',
-  }
-})
-
-// ── 2. Scroll hint vanishes immediately ──────────────────────────────────────
-const scrollHintStyle = computed(() => ({
-  opacity: Math.max(0, 1 - progress.value * 10).toFixed(3),
+const cash = 1201.02
+const holdings = [
+  { symbol: 'QQQ',  qty: 14, value: 7173.60, pnl: 84.12,  pct: 1.19 },
+  { symbol: 'TQQQ', qty: 60, value: 4692.00, pnl: 205.55, pct: 4.58 },
+  { symbol: 'GLD',  qty: 18, value: 4339.80, pnl: -21.60, pct: -0.50 },
+  { symbol: 'MSFT', qty: 9,  value: 3762.00, pnl: 37.80,  pct: 1.01 },
+  { symbol: 'XLE',  qty: 40, value: 3692.00, pnl: 12.40,  pct: 0.34 },
+].map((h, i) => ({
+  ...h,
+  weight: (h.value / account.value) * 100,
+  spark: walk(26, 100, 100 * (1 + h.pct / 100), 0.9, 7 + i * 13),
 }))
 
-// ── 3. Stack container — slides up from bottom as first frame enters ──────────
-const stackContainerStyle = computed(() => {
-  const p = easeOut(clamp01((progress.value - 0.06) / 0.09))
-  return {
-    position: 'absolute', bottom: '0', left: '50%',
-    width: '92%', maxWidth: '1100px',
-    transform: `translateX(-50%) translateY(${((1 - p) * 55).toFixed(1)}%)`,
-    opacity: Math.min(p * 2.5, 1).toFixed(4),
-    zIndex: 10,
-    perspective: '1400px',
-    perspectiveOrigin: '50% 100%',
-  }
-})
+// Equity line, 5-minute bars from the open to now.
+const W = 600
+const H = 180
+const series = walk(79, account.open, account.value, 58, 41)
+const lo = Math.min(...series, account.open)
+const hi = Math.max(...series, account.open)
+const pad = (hi - lo) * 0.12
+const yOf = (v) => H - ((v - (lo - pad)) / (hi - lo + pad * 2)) * H
+const pts = series.map((v, i) => [(i / (series.length - 1)) * W, yOf(v)])
 
-// ── 4. Stage — flat container (no tilt; depth comes from scale + offset) ─────
-const stageStyle = {
-  position: 'relative',
-  height: '500px',
-}
+// Catmull-Rom through the points, as cubic Béziers, for a smooth line.
+const linePath = pts.reduce((d, p, i) => {
+  if (i === 0) return `M${p[0].toFixed(1)},${p[1].toFixed(1)}`
+  const p0 = pts[i - 2] || pts[i - 1]
+  const p1 = pts[i - 1]
+  const p3 = pts[i + 1] || p
+  const c1 = [p1[0] + (p[0] - p0[0]) / 6, p1[1] + (p[1] - p0[1]) / 6]
+  const c2 = [p[0] - (p3[0] - p1[0]) / 6, p[1] - (p3[1] - p1[1]) / 6]
+  return `${d} C${c1[0].toFixed(1)},${c1[1].toFixed(1)} ${c2[0].toFixed(1)},${c2[1].toFixed(1)} ${p[0].toFixed(1)},${p[1].toFixed(1)}`
+}, '')
+const areaPath = `${linePath} L${W},${H} L0,${H} Z`
+const openY = yOf(account.open)
 
-// ── 5. Per-frame style ────────────────────────────────────────────────────────
-function frameStyle(i) {
-  const slot = getSlot(i, progress.value)
+const ranges = ['1D', '1W', '1M', '3M', 'YTD', '1Y', 'ALL']
 
-  // Completely hidden — not yet approaching
-  if (slot <= -0.99) {
-    return {
-      position: 'absolute', top: '0', left: '0', right: '0', height: '500px',
-      opacity: '0', pointerEvents: 'none', zIndex: 0,
-    }
-  }
+const nav = [
+  { label: 'Trading', items: [
+    { label: 'Dashboard', icon: 'dashboard', active: true },
+    { label: 'Brokerages', icon: 'account_balance' },
+    { label: 'Instances', icon: 'memory' },
+  ] },
+  { label: 'Research', items: [
+    { label: 'Backtests', icon: 'analytics' },
+    { label: 'Nexus graph', icon: 'hub' },
+    { label: 'Strategies', icon: 'schema' },
+  ] },
+]
 
-  let ty, scale, opacity, zIndex, boxShadow
+const instances = [
+  { name: 'Momentum live', sub: 'Alpaca · Live', status: 'Running', dot: 'ui-dot-live', text: 'text-slate-200' },
+  { name: 'Swing paper', sub: 'Alpaca · Paper', status: 'Paused', dot: 'ui-dot-warn', text: 'text-slate-300' },
+  { name: 'Nexus lab', sub: 'Alpaca · Paper', status: 'Stopped', dot: 'ui-dot-off', text: 'text-slate-500' },
+]
 
-  if (slot < 0) {
-    // Entering from below — slot -1 → 0
-    const t = -slot                        // 1 = far below, 0 = spotlight
-    ty      = t * 80                       // slides up 80px into position
-    scale   = 1 - t * 0.08
-    opacity = Math.max(0, 1 - t)
-    zIndex  = 15
-    boxShadow = '0 0 0 1px rgba(0,225,255,0.20), 0 -24px 80px rgba(0,0,0,0.65), 0 0 60px rgba(0,225,255,0.08)'
-  } else {
-    // In stack — slot 0 = spotlight, slot 1+ = increasingly behind
-    ty      = -(slot * 36)                 // peek upward; 36px per slot
-    scale   = 1 - slot * 0.042            // shrink slightly going back
-    opacity = Math.max(0.2, 1 - slot * 0.14)
-    zIndex  = Math.max(1, Math.round(14 - slot * 2))
-    boxShadow = slot < 0.25
-      ? '0 0 0 1px rgba(0,225,255,0.20), 0 -24px 80px rgba(0,0,0,0.65), 0 0 60px rgba(0,225,255,0.08)'
-      : '0 0 0 1px rgba(255,255,255,0.07), 0 8px 32px rgba(0,0,0,0.55)'
-  }
-
-  return {
-    position: 'absolute',
-    top: '0', left: '0', right: '0', height: '500px',
-    transform: `translateY(${ty.toFixed(2)}px) scale(${scale.toFixed(4)})`,
-    transformOrigin: 'center bottom',
-    opacity: opacity.toFixed(4),
-    zIndex,
-    borderRadius: '14px', overflow: 'hidden',
-    willChange: 'transform, opacity',
-    boxShadow,
-  }
-}
-
-// ── 6. Label: visible only when frame is in the back stack ───────────────────
-function labelStyle(i) {
-  const slot = getSlot(i, progress.value)
-  const opacity = slot > 0.4 ? Math.min(1, (slot - 0.4) * 5) : 0
-  return { opacity: opacity.toFixed(4) }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-//  LIFECYCLE
-// ═══════════════════════════════════════════════════════════════════════════════
-onMounted(async () => {
-  resizeCanvas()
-  ctx = canvasRef.value.getContext('2d')
-  drawCanvas()
-  window.addEventListener('scroll', onScroll, { passive: true })
-  window.addEventListener('resize', resizeCanvas)
-})
-onUnmounted(() => {
-  cancelAnimationFrame(canvasRaf)
-  window.removeEventListener('scroll', onScroll)
-  window.removeEventListener('resize', resizeCanvas)
-})
+const orders = [
+  { side: 'Buy', qty: 4, symbol: 'TQQQ', price: 78.20, time: '10:42', instance: 'Momentum live' },
+  { side: 'Sell', qty: 6, symbol: 'GLD', price: 241.10, time: '10:15', instance: 'Momentum live' },
+  { side: 'Buy', qty: 2, symbol: 'QQQ', price: 512.40, time: '9:48', instance: 'Momentum live' },
+  { side: 'Buy', qty: 3, symbol: 'MSFT', price: 418.00, time: '9:41', instance: 'Momentum live' },
+]
 </script>
 
 <template>
-  <!--
-    550vh outer section = 450vh of scrollable runway.
-    Phases:
-      0.00 – 0.18  → text visible + fades out
-      0.06 – 0.15  → stack container slides up from below
-      0.12 – 0.19  → Dashboard enters spotlight
-      0.19 – 0.21  → Dashboard in spotlight
-      0.21 – 0.28  → Dashboard recedes, Instances enters
-      ... and so on for each of the 5 frames
-  -->
-  <section ref="sectionRef" class="relative" style="min-height: 550vh;">
-    <div class="sticky top-0 h-screen overflow-hidden" style="background: #080b0f;">
+  <section class="pt-16" aria-labelledby="hero-title">
+    <div class="mx-auto w-full max-w-[1200px] px-4 sm:px-6 lg:px-8">
 
-      <!-- ── Background ───────────────────────────────────────────────────── -->
-      <canvas ref="canvasRef" class="absolute inset-0 z-0" />
-      <div class="absolute inset-0 z-0 pointer-events-none"
-        style="background: radial-gradient(60% 55% at 50% 36%, rgba(0,225,255,0.07) 0%, transparent 100%);"></div>
-      <div class="absolute inset-0 z-0 pointer-events-none" style="
-        background-image:
-          linear-gradient(rgba(0,225,255,0.026) 1px, transparent 1px),
-          linear-gradient(90deg, rgba(0,225,255,0.026) 1px, transparent 1px);
-        background-size: 56px 56px;"></div>
-      <div class="absolute inset-0 z-0 pointer-events-none"
-        style="background: radial-gradient(ellipse 80% 80% at 50% 50%, transparent 38%, rgba(8,11,15,0.75) 100%);"></div>
-
-      <!-- ── Centred headline + copy (fades out as frames appear) ────────── -->
-      <div :style="textGroupStyle">
-        <div class="text-center">
-
-          <!-- Badge -->
-          <div class="mb-7">
-            <div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full
-                        bg-brand/10 border border-brand/20 text-brand
-                        text-[11px] font-bold uppercase tracking-widest">
-              <span class="relative flex h-2 w-2">
-                <span class="animate-ping absolute inset-0 rounded-full bg-brand opacity-75"></span>
-                <span class="relative rounded-full h-2 w-2 bg-brand"></span>
-              </span>
-              Integrated with Alpaca
-            </div>
-          </div>
-
-          <!-- Headline -->
-          <h1 class="mk-gradient-text font-black tracking-tight leading-[1.08] mx-auto"
-              style="font-size: clamp(2.5rem, 6.6vw, 5.2rem); max-width: 840px;">
-            The Intelligent Layer<br />for Quantitative Trading.
-          </h1>
-
-          <!-- Stat pills -->
-          <div class="mt-6 flex items-center justify-center gap-4 flex-wrap">
-            <span class="px-3 py-1 rounded-full bg-surface/60 border border-border-subtle text-xs text-slate-400 font-medium">500+ AI Signals</span>
-            <span class="px-3 py-1 rounded-full bg-surface/60 border border-border-subtle text-xs text-slate-400 font-medium">S&amp;P 500 Universe</span>
-            <span class="px-3 py-1 rounded-full bg-surface/60 border border-border-subtle text-xs text-slate-400 font-medium">13 Data Phases</span>
-          </div>
-
-          <!-- Subtitle -->
-          <div class="mt-6">
-            <p class="text-base md:text-lg text-slate-400 leading-relaxed max-w-xl mx-auto">
-              Build, validate, and deploy institutional-grade strategies
-              using modular AI signals. No boilerplate — just performance.
-            </p>
-          </div>
-
-          <!-- CTAs -->
-          <div class="mt-8 flex flex-col sm:flex-row items-center justify-center gap-4">
-            <button class="px-8 py-4 bg-brand text-background-dark font-bold rounded-xl
-                           flex items-center gap-2 group
-                           transition-all hover:shadow-[0_0_32px_rgba(0,225,255,0.4)]
-                           hover:scale-[1.02] active:scale-[0.98]">
-              Start Building Now
-              <span class="material-symbols-outlined group-hover:translate-x-1 transition-transform">arrow_forward</span>
-            </button>
-            <button class="px-8 py-4 border border-border-subtle rounded-xl text-slate-400
-                           font-semibold hover:border-brand/40 hover:text-slate-200 transition-all">
-              View Demo
-            </button>
+      <!-- Headline left, the case and the actions right -->
+      <div class="pt-14 sm:pt-20 lg:pt-24 grid gap-x-16 gap-y-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,26rem)] lg:items-end">
+        <h1
+          id="hero-title"
+          class="max-w-[14ch] text-[40px] leading-[1.06] sm:text-[56px] lg:text-[64px] lg:leading-[1.02] font-medium tracking-[-0.03em] text-slate-100"
+        >
+          An AI trading desk you run yourself
+        </h1>
+        <div>
+          <p class="text-base leading-7 sm:text-lg sm:leading-8 text-slate-400">
+            IntelliStock combines a company-relationship graph, real-time market data and automated
+            execution. Backtest a strategy, then let it trade a paper or live Alpaca account.
+          </p>
+          <div class="mt-6 flex flex-wrap items-center gap-3">
+            <slot name="actions" />
           </div>
         </div>
       </div>
 
-      <!-- ── Scroll hint ──────────────────────────────────────────────────── -->
-      <div :style="scrollHintStyle"
-           class="absolute bottom-9 left-1/2 -translate-x-1/2 z-20
-                  flex flex-col items-center gap-2 pointer-events-none">
-        <span class="text-[9px] font-bold uppercase tracking-widest text-slate-600">Scroll</span>
-        <div class="w-px h-8 bg-gradient-to-b from-brand/40 to-transparent animate-pulse"></div>
-      </div>
+      <!-- Product preview: the dashboard, with made-up data -->
+      <div
+        class="mt-12 sm:mt-16 rounded-2xl border border-white/[0.08] bg-background-dark overflow-hidden shadow-[0_24px_48px_rgba(0,0,0,0.5)] select-none"
+        role="img"
+        aria-label="IntelliStock dashboard: an Alpaca live account up 1.30% today, its holdings, running instances and recent orders"
+      >
+        <div class="flex" aria-hidden="true">
 
-      <!-- ── Spotlight carousel stack ─────────────────────────────────────── -->
-      <div :style="stackContainerStyle">
-        <div :style="stageStyle">
-
-          <!-- Frame 0: Dashboard (enters first, goes furthest back) -->
-          <div :style="frameStyle(0)">
-            <div class="absolute top-0 inset-x-0 z-10 flex items-center px-4 py-1.5"
-                 style="background: linear-gradient(to bottom, rgba(8,11,15,0.9) 0%, transparent 100%);">
-              <span :style="labelStyle(0)" class="text-[8px] font-bold text-slate-500 uppercase tracking-widest">Dashboard</span>
+          <!-- Sidebar -->
+          <aside class="hidden lg:flex w-52 shrink-0 flex-col bg-sidebar border-r border-white/[0.06]">
+            <div class="h-14 px-4 flex items-center">
+              <img src="/new-logo.png" alt="" width="1200" height="240" class="block h-6 w-auto object-contain object-left" draggable="false" />
             </div>
-            <img src="/mockups/dashboard.svg" class="w-full h-full object-cover object-top select-none" draggable="false" alt="Dashboard"/>
-          </div>
-
-          <!-- Frame 1: Instances -->
-          <div :style="frameStyle(1)">
-            <div class="absolute top-0 inset-x-0 z-10 flex items-center px-4 py-1.5"
-                 style="background: linear-gradient(to bottom, rgba(8,11,15,0.9) 0%, transparent 100%);">
-              <span :style="labelStyle(1)" class="text-[8px] font-bold text-slate-500 uppercase tracking-widest">Instances</span>
+            <div class="px-3 pb-5">
+              <div v-for="(group, gi) in nav" :key="group.label" :class="gi === 0 ? 'pt-1' : 'pt-5'">
+                <p class="px-3 pb-2 text-xs text-slate-500">{{ group.label }}</p>
+                <div class="space-y-0.5">
+                  <div
+                    v-for="item in group.items"
+                    :key="item.label"
+                    class="h-8 px-3 flex items-center gap-3 rounded-lg text-[13px]"
+                    :class="item.active ? 'bg-raised text-slate-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]' : 'text-slate-400'"
+                  >
+                    <span class="material-symbols-outlined w-[18px] text-[18px]" :class="item.active ? 'text-slate-200' : 'text-slate-500'">{{ item.icon }}</span>
+                    {{ item.label }}
+                  </div>
+                </div>
+              </div>
             </div>
-            <img src="/mockups/instances.svg" class="w-full h-full object-cover object-top select-none" draggable="false" alt="Instances"/>
-          </div>
+          </aside>
 
-          <!-- Frame 2: Agent Runs -->
-          <div :style="frameStyle(2)">
-            <div class="absolute top-0 inset-x-0 z-10 flex items-center px-4 py-1.5"
-                 style="background: linear-gradient(to bottom, rgba(8,11,15,0.9) 0%, transparent 100%);">
-              <span :style="labelStyle(2)" class="text-[8px] font-bold text-slate-500 uppercase tracking-widest">Agent Runs</span>
+          <!-- Main -->
+          <div class="flex-1 min-w-0 p-5 sm:p-6 lg:p-7">
+            <div>
+              <p class="text-xl font-medium text-slate-100 leading-tight">Dashboard</p>
+              <p class="mt-1 text-sm text-slate-500 flex items-center gap-2">
+                Thursday, November 12
+                <span class="text-slate-600">·</span>
+                <span class="inline-flex items-center gap-1.5 text-slate-300">
+                  <span class="ui-dot ui-dot-live"></span>
+                  Market open
+                </span>
+              </p>
             </div>
-            <img src="/mockups/agent-runs.svg" class="w-full h-full object-cover object-top select-none" draggable="false" alt="Agent Runs"/>
-          </div>
 
-          <!-- Frame 3: Strategies -->
-          <div :style="frameStyle(3)">
-            <div class="absolute top-0 inset-x-0 z-10 flex items-center px-4 py-1.5"
-                 style="background: linear-gradient(to bottom, rgba(8,11,15,0.9) 0%, transparent 100%);">
-              <span :style="labelStyle(3)" class="text-[8px] font-bold text-slate-500 uppercase tracking-widest">Strategies</span>
+            <div class="mt-6 grid gap-x-7 gap-y-8 lg:grid-cols-[minmax(0,1fr)_248px] items-start">
+
+              <!-- Equity + holdings -->
+              <div class="min-w-0">
+                <p class="text-sm text-slate-400"><span class="font-medium text-slate-200">{{ account.name }}</span></p>
+                <p class="mt-1 text-xs text-slate-500">{{ account.kind }}</p>
+                <p class="mt-4 text-[32px] sm:text-[40px] leading-none font-medium tracking-[-0.02em] text-slate-100 tabular-nums">{{ usd(account.value) }}</p>
+                <p class="mt-2 text-sm tabular-nums">
+                  <span class="text-gain">{{ signedUsd(change) }} ({{ signedPct(changePct) }})</span>
+                  <span class="ml-1.5 text-slate-500">Today</span>
+                </p>
+
+                <svg class="mt-5 block w-full h-[140px] sm:h-[180px]" :viewBox="`0 0 ${W} ${H}`" preserveAspectRatio="none">
+                  <defs>
+                    <linearGradient id="hero-area" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0" stop-color="#4cc38a" stop-opacity="0.12" />
+                      <stop offset="1" stop-color="#4cc38a" stop-opacity="0" />
+                    </linearGradient>
+                  </defs>
+                  <line x1="0" :y1="openY" :x2="W" :y2="openY" stroke="rgba(237,237,237,0.28)" stroke-width="1" stroke-dasharray="2 3" vector-effect="non-scaling-stroke" />
+                  <path :d="areaPath" fill="url(#hero-area)" />
+                  <path :d="linePath" fill="none" stroke="#4cc38a" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke" />
+                </svg>
+
+                <div class="mt-4 pb-4 flex items-center gap-1 border-b border-white/[0.06]">
+                  <span
+                    v-for="r in ranges"
+                    :key="r"
+                    class="h-8 px-2.5 sm:px-3 inline-flex items-center rounded-md text-xs font-medium tabular-nums"
+                    :class="r === '1D' ? 'bg-white/[0.06] text-gain' : 'text-slate-500'"
+                  >{{ r }}</span>
+                </div>
+
+                <div class="mt-8 mb-3 flex items-end justify-between gap-4">
+                  <div>
+                    <p class="text-base font-medium text-slate-100">Holdings</p>
+                    <p class="mt-0.5 text-sm text-slate-500 tabular-nums">{{ holdings.length }} positions</p>
+                  </div>
+                  <div class="ui-seg">
+                    <span class="ui-seg-btn ui-seg-btn-active inline-flex items-center">Daily</span>
+                    <span class="ui-seg-btn inline-flex items-center">Total</span>
+                  </div>
+                </div>
+
+                <div class="ui-card overflow-hidden">
+                  <div class="hero-hold ui-th hidden sm:grid">
+                    <span>Symbol</span>
+                    <span class="hidden md:block">Weight</span>
+                    <span>Today</span>
+                    <span class="text-right">Value</span>
+                    <span class="text-right">Day P&amp;L</span>
+                  </div>
+                  <div class="ui-rows">
+                    <div v-for="h in holdings" :key="h.symbol" class="hero-hold grid items-center min-h-12 px-4 sm:px-5 py-2">
+                      <span class="min-w-0">
+                        <span class="block text-sm font-medium text-slate-100">{{ h.symbol }}</span>
+                        <span class="block mt-0.5 text-xs text-slate-500 tabular-nums">{{ h.qty }} shares</span>
+                      </span>
+                      <span class="hidden md:flex items-center gap-2">
+                        <span class="hero-track"><span class="hero-fill" :style="{ transform: `scaleX(${h.weight / 100})` }"></span></span>
+                        <span class="w-8 text-xs text-slate-400 tabular-nums">{{ h.weight.toFixed(0) }}%</span>
+                      </span>
+                      <span class="hidden sm:flex items-center">
+                        <Sparkline :values="h.spark" :width="72" :height="20" />
+                      </span>
+                      <span class="text-right text-sm text-slate-100 tabular-nums">{{ usd(h.value) }}</span>
+                      <span class="text-right tabular-nums">
+                        <span class="block text-sm" :class="signClass(h.pnl)">{{ signedUsd(h.pnl) }}</span>
+                        <span class="block mt-0.5 text-xs" :class="signClass(h.pct)">{{ signedPct(h.pct) }}</span>
+                      </span>
+                    </div>
+                    <div class="hero-hold grid items-center min-h-12 px-4 sm:px-5 py-2">
+                      <span class="min-w-0">
+                        <span class="block text-sm text-slate-100">Cash</span>
+                        <span class="block mt-0.5 text-xs text-slate-500 truncate">Available to invest</span>
+                      </span>
+                      <span class="hidden md:flex items-center gap-2">
+                        <span class="hero-track"><span class="hero-fill hero-fill-cash" :style="{ transform: `scaleX(${cash / account.value})` }"></span></span>
+                        <span class="w-8 text-xs text-slate-400 tabular-nums">{{ ((cash / account.value) * 100).toFixed(0) }}%</span>
+                      </span>
+                      <span class="hidden sm:block"></span>
+                      <span class="text-right text-sm text-slate-100 tabular-nums">{{ usd(cash) }}</span>
+                      <span class="text-right text-sm text-slate-600">—</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Instances + orders: what the strategies are doing -->
+              <div class="hidden lg:flex flex-col gap-8 min-w-0">
+                <div>
+                  <p class="mb-3 text-base font-medium text-slate-100">Instances</p>
+                  <div class="ui-card ui-rows">
+                    <div v-for="inst in instances" :key="inst.name" class="min-h-14 px-4 py-2 flex items-center justify-between gap-3">
+                      <span class="min-w-0">
+                        <span class="block text-sm text-slate-100 truncate">{{ inst.name }}</span>
+                        <span class="block mt-0.5 text-xs text-slate-500">{{ inst.sub }}</span>
+                      </span>
+                      <span class="inline-flex items-center gap-2 text-xs shrink-0" :class="inst.text">
+                        <span class="ui-dot" :class="inst.dot"></span>{{ inst.status }}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <p class="mb-3 text-base font-medium text-slate-100">Recent orders</p>
+                  <div class="ui-card ui-rows">
+                    <div v-for="o in orders" :key="o.time" class="min-h-14 px-4 py-2 flex items-center justify-between gap-3">
+                      <span class="min-w-0">
+                        <span class="block text-sm text-slate-100 tabular-nums">{{ o.side }} {{ o.qty }} {{ o.symbol }}</span>
+                        <span class="block mt-0.5 text-xs text-slate-500 tabular-nums">{{ o.instance }} · {{ o.time }}</span>
+                      </span>
+                      <span class="text-sm text-slate-300 tabular-nums shrink-0">{{ usd(o.price) }}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
             </div>
-            <img src="/mockups/strategies.svg" class="w-full h-full object-cover object-top select-none" draggable="false" alt="Strategies"/>
           </div>
-
-          <!-- Frame 4: Backtest Detail (enters last, stays in front) -->
-          <div :style="frameStyle(4)">
-            <div class="absolute top-0 inset-x-0 z-10 flex items-center px-4 py-1.5"
-                 style="background: linear-gradient(to bottom, rgba(8,11,15,0.9) 0%, transparent 100%);">
-              <span :style="labelStyle(4)" class="text-[8px] font-bold text-slate-500 uppercase tracking-widest">Backtest Detail</span>
-            </div>
-            <img src="/mockups/backtest.svg" class="w-full h-full object-cover object-top select-none" draggable="false" alt="Backtest Detail"/>
-          </div>
-
         </div>
       </div>
 
-      <!-- Bottom gradient -->
-      <div class="absolute bottom-0 left-0 right-0 h-40 z-30 pointer-events-none"
-           style="background: linear-gradient(to bottom, transparent, #080b0f);"></div>
     </div>
   </section>
 </template>
+
+<style scoped>
+/* Same column logic as the dashboard holdings table:
+   phone  symbol · value · P&L
+   sm     symbol · line · value · P&L
+   md+    symbol · weight · line · value · P&L */
+.hero-hold {
+  grid-template-columns: minmax(0, 1fr) 96px 96px;
+  column-gap: 12px;
+}
+@media (min-width: 640px) {
+  .hero-hold { grid-template-columns: minmax(0, 1fr) 72px 104px 96px; column-gap: 16px; }
+}
+@media (min-width: 768px) {
+  .hero-hold { grid-template-columns: minmax(0, 1fr) 104px 72px 104px 96px; }
+}
+.hero-track {
+  position: relative;
+  display: block;
+  height: 4px;
+  width: 56px;
+  border-radius: 999px;
+  background: #1e1e20;
+  overflow: hidden;
+}
+.hero-fill {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: #d4d4d8;
+  transform-origin: left center;
+}
+.hero-fill-cash { background: #71717a; }
+</style>

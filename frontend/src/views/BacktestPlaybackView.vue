@@ -171,7 +171,9 @@ const currentDate = computed(() => {
 // --- Formatting ---
 function fmtMoney(v) {
   if (v == null) return '—'
-  return '$' + Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  const n = Number(v)
+  // Sign before the currency symbol: -$1,234.56, never $-1,234.56.
+  return (n < 0 ? '-$' : '$') + Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
 function fmtQty(v) {
@@ -180,29 +182,48 @@ function fmtQty(v) {
   return n % 1 === 0 ? n.toString() : n.toFixed(4)
 }
 
-// Chart Options
+// Chart options: the equity line is the money, so it carries gain/loss
+// against the starting cash, over a hairline grid with muted axis labels.
+const AXIS_LABEL = { colors: '#71717a', fontSize: '11px', fontFamily: 'inherit' }
+const lineColor = computed(() =>
+  (Number(currentPortfolioEvent.value?.value ?? initialCash.value) >= initialCash.value ? '#4cc38a' : '#e5484d'))
+
 const chartOptions = computed(() => ({
   theme: { mode: 'dark' },
   chart: {
     background: 'transparent',
+    fontFamily: 'Inter, sans-serif',
     toolbar: { show: false },
+    parentHeightOffset: 0,
     animations: { enabled: true, easing: 'linear', dynamicAnimation: { speed: 500 } }
   },
-  grid: { borderColor: '#1e2535', strokeDashArray: 3 },
-  stroke: { curve: 'smooth', width: 2.5 },
-  fill: { type: 'gradient', gradient: { shadeIntensity: 1, opacityFrom: 0.3, opacityTo: 0.03 } },
-  colors: ['#38bdf8'],
+  grid: { borderColor: 'rgba(255,255,255,0.05)', strokeDashArray: 0, xaxis: { lines: { show: false } }, padding: { left: 4, right: 8, top: 0, bottom: 0 } },
+  stroke: { curve: 'smooth', width: 2 },
+  fill: {
+    type: 'gradient',
+    gradient: {
+      colorStops: [
+        { offset: 0,   color: lineColor.value, opacity: 0.12 },
+        { offset: 100, color: lineColor.value, opacity: 0 },
+      ],
+    },
+  },
+  colors: [lineColor.value],
+  markers: { size: 0, strokeWidth: 0, hover: { size: 4 } },
   xaxis: {
     type: 'datetime',
     min: xMin.value,
     max: xMax.value,
-    labels: { style: { colors: '#64748b' } },
-    crosshairs: { show: true, stroke: { color: '#38bdf8', width: 1, dashArray: 3 } },
+    labels: { style: AXIS_LABEL },
+    axisBorder: { show: false },
+    axisTicks: { show: false },
+    crosshairs: { show: true, stroke: { color: 'rgba(237,237,237,0.28)', width: 1, dashArray: 3 } },
+    tooltip: { enabled: false },
   },
   yaxis: {
     labels: {
       formatter: v => '$' + Number(v).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 }),
-      style: { colors: '#64748b' },
+      style: AXIS_LABEL,
     },
   },
   dataLabels: { enabled: false },
@@ -214,230 +235,202 @@ const chartOptions = computed(() => ({
 }))
 </script>
 
-
 <template>
   <AppShell>
-    <main class="flex flex-col h-screen overflow-hidden py-6 px-4 sm:px-6 lg:px-8 max-w-[1600px] mx-auto w-full">
-      
+    <main class="ui-page flex flex-col lg:h-screen lg:overflow-hidden">
+
       <!-- Loading State -->
-      <div v-if="loading" class="flex-1 flex items-center justify-center">
-        <div class="text-center">
-          <div class="animate-spin rounded-full h-10 w-10 border-2 border-sky-500 border-t-transparent mx-auto mb-4"></div>
-          <p class="text-sm text-slate-400">Loading playback data…</p>
+      <div v-if="loading" class="flex-1 flex flex-col min-h-0" aria-hidden="true">
+        <div class="ui-skel h-7 w-56"></div>
+        <div class="ui-skel h-4 w-28 mt-3"></div>
+        <div class="mt-6 flex-1 min-h-[420px] flex flex-col lg:flex-row gap-5">
+          <div class="lg:flex-[2] min-h-[320px] rounded-xl bg-surface"></div>
+          <div class="lg:flex-1 min-h-[320px] rounded-xl bg-surface"></div>
         </div>
       </div>
 
       <!-- Error State -->
-      <div v-else-if="error" class="flex-1 flex items-center justify-center">
-        <div class="text-center max-w-md">
-          <span class="material-symbols-outlined text-4xl text-red-400 mb-3 block">error</span>
-          <p class="text-sm text-slate-300 font-semibold mb-1">Failed to load playback</p>
-          <p class="text-xs text-slate-500 mb-4">{{ error }}</p>
-          <button @click="router.push(`/backtests/${btId}`)" class="px-4 py-2 rounded-lg bg-surface border border-border-subtle text-sm text-slate-300 hover:text-white transition-colors">
-            ← Back to Backtest
-          </button>
+      <div v-else-if="error" class="ui-card ui-empty">
+        <div>
+          <p class="text-slate-200">Failed to load playback</p>
+          <p class="mt-1 text-xs text-slate-500">{{ error }}</p>
         </div>
+        <button @click="router.push(`/backtests/${btId}`)" class="ui-btn">
+          Back to backtest
+        </button>
       </div>
 
       <!-- Empty State -->
-      <div v-else-if="events.length === 0" class="flex-1 flex items-center justify-center">
-        <div class="text-center max-w-md">
-          <span class="material-symbols-outlined text-4xl text-slate-500 mb-3 block">play_disabled</span>
-          <p class="text-sm text-slate-300 font-semibold mb-1">No playback data</p>
-          <p class="text-xs text-slate-500 mb-4">This backtest has no portfolio snapshots or trades to replay.</p>
-          <button @click="router.push(`/backtests/${btId}`)" class="px-4 py-2 rounded-lg bg-surface border border-border-subtle text-sm text-slate-300 hover:text-white transition-colors">
-            ← Back to Backtest
-          </button>
+      <div v-else-if="events.length === 0" class="ui-card ui-empty">
+        <div>
+          <p class="text-slate-200">No playback data</p>
+          <p class="mt-1 text-xs text-slate-500">This backtest has no portfolio snapshots or trades to replay</p>
         </div>
+        <button @click="router.push(`/backtests/${btId}`)" class="ui-btn">
+          Back to backtest
+        </button>
       </div>
 
       <!-- Main Playback UI -->
       <template v-else>
       <!-- Top header -->
-      <div class="shrink-0 flex items-center justify-between mb-4">
-        <div class="flex items-center gap-2.5">
-          <button @click="router.push(`/backtests/${btId}`)" class="p-1.5 rounded-lg bg-surface border border-border-subtle text-slate-400 hover:text-slate-200 hover:bg-white/5 transition-colors">
-            <span class="material-symbols-outlined text-[16px]">arrow_back</span>
-          </button>
-          <div>
-            <h1 class="text-lg font-bold text-slate-100 flex items-center gap-1.5">
-              Backtest Playback <span class="px-1.5 py-px rounded text-[9px] font-mono leading-none bg-amber-500/10 text-amber-400 border border-amber-500/20">LIVE</span>
-            </h1>
-            <p class="text-[11px] text-slate-500 mt-0.5">Backtest #{{ btId }}</p>
-          </div>
+      <nav class="shrink-0 -ml-3 mb-4" aria-label="Breadcrumb">
+        <button @click="router.push(`/backtests/${btId}`)" class="ui-btn-ghost px-3" title="Back to backtest">
+          <span class="material-symbols-outlined text-[16px]">arrow_back</span>
+          Back
+        </button>
+      </nav>
+      <header class="shrink-0 flex flex-wrap items-end justify-between gap-x-4 gap-y-3">
+        <div class="min-w-0">
+          <h1 class="ui-page-title">Backtest playback</h1>
+          <p class="ui-page-sub tabular-nums">Backtest #{{ btId }}</p>
         </div>
 
         <!-- Current Date + Controls -->
-        <div class="flex items-center gap-2">
-          <div class="flex items-center gap-2 p-1.5 rounded-xl bg-[#0d1117] border border-border-subtle shadow-xl">
-            <span class="material-symbols-outlined text-[14px] text-sky-400 ml-1">calendar_today</span>
-            <span class="text-xs font-mono font-semibold text-slate-200 mr-1">{{ currentDate }}</span>
-          </div>
-          <div class="flex items-center p-1.5 rounded-xl bg-[#0d1117] border border-border-subtle shadow-xl z-20 gap-1.5">
-            <button @click="togglePlay" class="flex items-center justify-center size-8 rounded-lg transition-colors" :class="isPlaying ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'">
-              <span class="material-symbols-outlined text-lg">{{ isPlaying ? 'pause' : 'play_arrow' }}</span>
+        <div class="flex items-center gap-4">
+          <p class="text-sm text-slate-300 tabular-nums">{{ currentDate }}</p>
+          <div class="flex items-center gap-1.5">
+            <button @click="togglePlay" class="ui-btn-primary w-9 px-0" :aria-label="isPlaying ? 'Pause' : 'Play'" :title="isPlaying ? 'Pause' : 'Play'">
+              <span class="material-symbols-outlined text-[20px]">{{ isPlaying ? 'pause' : 'play_arrow' }}</span>
             </button>
-            <button @click="resetPlayback" class="flex items-center justify-center size-8 rounded-lg bg-surface border border-border-subtle text-slate-400 hover:text-slate-200 transition-colors" title="Reset">
-              <span class="material-symbols-outlined text-[16px]">replay</span>
+            <button @click="resetPlayback" class="ui-btn h-9 w-9 px-0" title="Reset" aria-label="Reset">
+              <span class="material-symbols-outlined text-[18px]">replay</span>
             </button>
-            <button @click="setSpeed" class="flex items-center justify-center px-3 h-8 rounded-lg bg-surface border border-border-subtle text-slate-300 hover:text-white transition-colors text-[11px] font-mono font-bold">
+            <button @click="setSpeed" class="ui-btn h-9 min-w-12 tabular-nums" title="Playback speed">
               {{ speeds[currentSpeedIndex] }}x
             </button>
           </div>
         </div>
-      </div>
+      </header>
 
-      <div class="flex-1 min-h-0 flex gap-5 relative">
-        
+      <div class="mt-6 flex-1 min-h-0 flex flex-col lg:flex-row gap-5">
+
         <!-- MAIN SECTION: Vertical Stepper -->
-        <div class="flex-[2] flex flex-col min-w-0 min-h-0 bg-[#0d1117]/50 rounded-3xl border border-border-subtle overflow-hidden relative backdrop-blur-sm">
-          <div class="p-4 border-b border-border-subtle bg-background-dark shrink-0">
-            <h2 class="text-sm font-semibold text-slate-200">Execution Log</h2>
+        <section class="lg:flex-[2] flex flex-col min-w-0 min-h-0 ui-card overflow-hidden" aria-labelledby="exec-log-title">
+          <div class="h-12 px-5 flex items-center border-b border-white/[0.06] shrink-0">
+            <h2 id="exec-log-title" class="text-sm font-medium text-slate-100">Execution log</h2>
           </div>
-          <div class="flex-1 overflow-y-auto p-6 scroll-smooth" ref="eventsContainerRef">
-            <div class="flex flex-col gap-6">
-              
+          <div class="flex-1 overflow-y-auto px-5 py-5 scroll-smooth max-h-[70vh] lg:max-h-none" ref="eventsContainerRef">
+            <div class="flex flex-col gap-4">
+
               <template v-for="(ev, i) in visibleEvents" :key="ev.id">
-                
+
                 <!-- Date / Granularity Marker -->
-                <div v-if="ev.type === 'date'" class="relative flex items-center gap-4 animate-fade-in-up">
-                  <div class="h-px flex-1 bg-border-subtle"></div>
-                  <div class="px-3 py-1.5 rounded-full border border-primary/30 bg-primary/10 text-primary text-xs font-bold uppercase tracking-wider shadow-[0_0_15px_-3px_rgba(56,189,248,0.3)]">
-                    {{ ev.label }} — {{ ev.time }}
-                  </div>
-                  <div class="h-px flex-1 bg-border-subtle"></div>
+                <div v-if="ev.type === 'date'" class="ev-in flex items-center gap-3 py-1">
+                  <div class="h-px flex-1 bg-white/[0.06]"></div>
+                  <p class="text-xs text-slate-400 tabular-nums">{{ ev.label }} — {{ ev.time }}</p>
+                  <div class="h-px flex-1 bg-white/[0.06]"></div>
                 </div>
 
                 <!-- Strategy Executed -->
-                <div v-else-if="ev.type === 'strategy'" class="flex gap-4 animate-fade-in-up">
-                  <div class="flex flex-col items-center">
-                    <div class="size-8 rounded-full border border-zinc-500/30 bg-zinc-500/10 flex items-center justify-center shrink-0 z-10 text-zinc-300 shadow-[0_0_10px_-2px_rgba(99,102,241,0.4)]">
-                      <span class="material-symbols-outlined text-[16px]">psychology</span>
-                    </div>
-                    <div class="w-px flex-1 bg-border-subtle mt-2 mb-[-12px]" v-if="i < visibleEvents.length - 1"></div>
+                <div v-else-if="ev.type === 'strategy'" class="ev-in flex gap-4">
+                  <div class="w-3 shrink-0 flex flex-col items-center pt-5">
+                    <span class="size-2 rounded-full bg-slate-400 shrink-0"></span>
+                    <div class="w-px flex-1 bg-white/[0.06] mt-2 -mb-4" v-if="i < visibleEvents.length - 1"></div>
                   </div>
-                  <div class="flex-1 pb-2">
-                    <div class="glass-card rounded-2xl p-4 border-zinc-500/20 hover:border-zinc-500/40 transition-colors">
-                      <div class="flex items-start justify-between mb-2">
-                        <div>
-                          <div v-if="ev.desc.includes(' → ')" class="flex items-center gap-2 mb-1.5">
-                            <span class="text-xs font-bold text-slate-300 font-mono">{{ ev.desc.split(' → ')[0] }}</span>
-                            <span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider"
-                                  :class="{
-                                    'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30': ev.desc.split(' → ')[1] === 'BUY',
-                                    'bg-red-500/20 text-red-400 border border-red-500/30': ev.desc.split(' → ')[1] === 'SELL',
-                                    'bg-slate-500/20 text-slate-400 border border-slate-500/30': ev.desc.split(' → ')[1] === 'HOLD'
-                                  }">
-                              {{ ev.desc.split(' → ')[1] }}
-                            </span>
-                          </div>
-                          <p v-else class="text-[10px] uppercase font-bold text-zinc-300 tracking-wider mb-1.5">{{ ev.desc }}</p>
-                          <p class="text-sm font-bold text-slate-100">{{ ev.name }}</p>
-                        </div>
-                      </div>
-                      <p class="text-xs text-slate-400 mb-2"><span class="text-slate-500 font-semibold uppercase text-[10px] mr-1">Rsn:</span> {{ ev.reason }}</p>
-                      
-                      <div v-if="ev.decision" class="text-xs font-mono text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-3 py-1.5 rounded-lg inline-block">
-                        -> {{ ev.decision }}
-                      </div>
-                      
-                      <div v-if="ev.tickers" class="flex flex-wrap gap-1.5 mt-2">
-                        <span class="text-[10px] uppercase font-bold text-slate-500 self-center mr-1">Scanning:</span>
-                        <span v-for="t in ev.tickers" :key="t" class="px-2 py-0.5 rounded bg-surface border border-border-subtle text-[11px] font-mono font-semibold text-slate-300">
-                          {{ t }}
-                        </span>
-                      </div>
+                  <div class="flex-1 min-w-0 rounded-lg border border-white/[0.06] p-4">
+                    <div v-if="ev.desc.includes(' → ')" class="flex items-center gap-2 mb-1.5">
+                      <span class="text-xs text-slate-400">{{ ev.desc.split(' → ')[0] }}</span>
+                      <span class="inline-flex items-center gap-1.5 text-xs text-slate-200">
+                        <span
+                          class="size-1.5 rounded-full shrink-0"
+                          :class="{
+                            'bg-gain': ev.desc.split(' → ')[1] === 'BUY',
+                            'bg-loss': ev.desc.split(' → ')[1] === 'SELL',
+                            'bg-slate-600': ev.desc.split(' → ')[1] === 'HOLD'
+                          }"
+                        ></span>
+                        <span class="inline-block lowercase first-letter:uppercase">{{ ev.desc.split(' → ')[1] }}</span>
+                      </span>
+                    </div>
+                    <p v-else class="text-xs text-slate-500 mb-1.5">{{ ev.desc }}</p>
+                    <p class="text-sm font-medium text-slate-100">{{ ev.name }}</p>
+                    <p class="mt-2 text-sm text-slate-400"><span class="text-xs text-slate-500 mr-1.5">Reason</span>{{ ev.reason }}</p>
+
+                    <p v-if="ev.decision" class="mt-2 text-sm text-slate-200">
+                      → {{ ev.decision }}
+                    </p>
+
+                    <div v-if="ev.tickers" class="mt-2 flex flex-wrap items-baseline gap-x-2 gap-y-1 text-sm">
+                      <span class="text-xs text-slate-500 mr-1">Scanning</span>
+                      <span v-for="t in ev.tickers" :key="t" class="text-slate-300">{{ t }}</span>
                     </div>
                   </div>
                 </div>
 
                 <!-- Strategy Outcome -->
-                <div v-else-if="ev.type === 'outcome'" class="flex gap-4 animate-fade-in-up">
-                  <div class="flex flex-col items-center">
-                    <div class="size-8 rounded-full border border-sky-500/30 bg-sky-500/10 flex items-center justify-center shrink-0 z-10 text-sky-400 shadow-[0_0_10px_-2px_rgba(56,189,248,0.4)]">
-                      <span class="material-symbols-outlined text-[16px]">score</span>
-                    </div>
-                    <div class="w-px flex-1 bg-border-subtle mt-2 mb-[-12px]" v-if="i < visibleEvents.length - 1"></div>
+                <div v-else-if="ev.type === 'outcome'" class="ev-in flex gap-4">
+                  <div class="w-3 shrink-0 flex flex-col items-center pt-1.5">
+                    <span class="size-2 rounded-full border border-slate-500 shrink-0"></span>
+                    <div class="w-px flex-1 bg-white/[0.06] mt-2 -mb-4" v-if="i < visibleEvents.length - 1"></div>
                   </div>
-                  <div class="flex-1 pb-2">
-                    <div class="p-3 border-l-2 border-sky-500/50 bg-gradient-to-r from-sky-500/5 to-transparent rounded-r-xl">
-                      <p class="text-xs font-semibold text-sky-400 mb-1">{{ ev.name }}</p>
-                      <p class="text-[11px] font-mono text-slate-400 break-words">{{ ev.details }}</p>
-                    </div>
+                  <div class="flex-1 min-w-0">
+                    <p class="text-xs font-medium text-slate-300">{{ ev.name }}</p>
+                    <p class="mt-1 text-xs text-slate-500 tabular-nums break-words">{{ ev.details }}</p>
                   </div>
                 </div>
 
                 <!-- Final Decisions (Buys / Sells) -->
-                <div v-else-if="ev.type === 'decision'" class="flex gap-4 animate-fade-in-up">
-                  <div class="flex flex-col items-center">
-                    <div class="size-8 rounded-full border border-amber-500/30 bg-amber-500/10 flex items-center justify-center shrink-0 z-10 text-amber-400 shadow-[0_0_10px_-2px_rgba(245,158,11,0.4)]">
-                      <span class="material-symbols-outlined text-[16px]">gavel</span>
-                    </div>
-                    <div class="w-px flex-1 bg-border-subtle mt-2 mb-[-12px]" v-if="i < visibleEvents.length - 1"></div>
+                <div v-else-if="ev.type === 'decision'" class="ev-in flex gap-4">
+                  <div class="w-3 shrink-0 flex flex-col items-center pt-5">
+                    <span class="size-2 rounded-full bg-slate-200 shrink-0"></span>
+                    <div class="w-px flex-1 bg-white/[0.06] mt-2 -mb-4" v-if="i < visibleEvents.length - 1"></div>
                   </div>
-                  <div class="flex-1 pb-2">
-                    <div class="glass-card rounded-2xl p-4 border-amber-500/20">
-                      <p class="text-[10px] uppercase font-bold text-amber-500 tracking-wider mb-3">Execution Decisions</p>
-                      
-                      <div v-if="ev.buys.length === 0 && ev.sells.length === 0" class="text-xs text-slate-500 italic">
-                        No actions taken.
+                  <div class="flex-1 min-w-0 rounded-lg border border-white/[0.06] p-4">
+                    <p class="text-xs text-slate-500 mb-2">Execution decisions</p>
+
+                    <p v-if="ev.buys.length === 0 && ev.sells.length === 0" class="text-sm text-slate-500">
+                      No actions taken
+                    </p>
+
+                    <div class="divide-y divide-white/[0.05]">
+                      <div v-for="b in ev.buys" :key="b.ticker" class="py-2 first:pt-0 last:pb-0 flex flex-col sm:flex-row sm:items-center justify-between gap-1 sm:gap-4">
+                        <div class="flex items-center gap-2 text-sm min-w-0">
+                          <span class="size-1.5 rounded-full bg-gain shrink-0"></span>
+                          <span class="text-slate-300">Buy</span>
+                          <span class="font-medium text-slate-100">{{ b.ticker }}</span>
+                          <span class="text-slate-400 tabular-nums">{{ fmtQty(b.qty) }} shares @ {{ fmtMoney(b.price) }}</span>
+                        </div>
+                        <p class="text-xs text-slate-500 sm:text-right" v-if="b.reason">{{ b.reason }}</p>
                       </div>
 
-                      <div class="space-y-2">
-                        <div v-for="b in ev.buys" :key="b.ticker" class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-2 rounded-xl bg-emerald-500/5 border border-emerald-500/20">
-                          <div class="flex items-center gap-2">
-                            <span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-emerald-500/20 text-emerald-400">Buy</span>
-                            <span class="text-sm font-bold font-mono text-slate-200">{{ b.ticker }}</span>
-                            <span class="text-xs text-slate-400">{{ fmtQty(b.qty) }} shares @ {{ fmtMoney(b.price) }}</span>
-                          </div>
-                          <p class="text-[10px] text-slate-500 italic sm:text-right" v-if="b.reason">{{ b.reason }}</p>
+                      <div v-for="s in ev.sells" :key="s.ticker" class="py-2 first:pt-0 last:pb-0 flex flex-col sm:flex-row sm:items-center justify-between gap-1 sm:gap-4">
+                        <div class="flex items-center gap-2 text-sm min-w-0">
+                          <span class="size-1.5 rounded-full bg-loss shrink-0"></span>
+                          <span class="text-slate-300">Sell</span>
+                          <span class="font-medium text-slate-100">{{ s.ticker }}</span>
+                          <span class="text-slate-400 tabular-nums">{{ fmtQty(s.qty) }} shares @ {{ fmtMoney(s.price) }}</span>
                         </div>
-                        
-                        <div v-for="s in ev.sells" :key="s.ticker" class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-2 rounded-xl bg-red-500/5 border border-red-500/20">
-                          <div class="flex items-center gap-2">
-                            <span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-red-500/20 text-red-400">Sell</span>
-                            <span class="text-sm font-bold font-mono text-slate-200">{{ s.ticker }}</span>
-                            <span class="text-xs text-slate-400">{{ fmtQty(s.qty) }} shares @ {{ fmtMoney(s.price) }}</span>
-                          </div>
-                          <p class="text-[10px] text-slate-500 italic sm:text-right" v-if="s.reason">{{ s.reason }}</p>
-                        </div>
+                        <p class="text-xs text-slate-500 sm:text-right" v-if="s.reason">{{ s.reason }}</p>
                       </div>
                     </div>
                   </div>
                 </div>
 
                 <!-- Skip Portfolio internally for left pane -->
-                <div v-else-if="ev.type === 'portfolio'"></div>
+                <div v-else-if="ev.type === 'portfolio'" class="hidden"></div>
 
               </template>
-              
-              <div v-if="isPlaying" class="flex gap-4 animate-pulse pt-2">
-                <div class="size-8 rounded-full border border-slate-700 bg-surface flex items-center justify-center shrink-0 z-10 text-slate-500">
-                  <span class="material-symbols-outlined text-[16px]">more_horiz</span>
+
+              <div v-if="isPlaying" class="flex gap-4" aria-hidden="true">
+                <div class="w-3 shrink-0 flex justify-center pt-1">
+                  <span class="size-2 rounded-full bg-slate-700"></span>
                 </div>
-                <div class="flex-1 pb-4">
-                  <div class="h-8 glass-card rounded-2xl border-slate-700 w-1/3"></div>
-                </div>
+                <div class="ui-skel h-4 w-1/3"></div>
               </div>
 
             </div>
           </div>
-        </div>
+        </section>
 
         <!-- RIGHT SIDEBAR: Chart & Holdings -->
-        <div class="flex-1 flex flex-col gap-4 min-w-[300px] min-h-0 overflow-y-auto">
-          
+        <div class="lg:flex-1 flex flex-col gap-5 lg:min-w-[300px] min-h-0 lg:overflow-y-auto">
+
           <!-- Portfolio Graph -->
-          <div class="glass-card rounded-3xl p-5 border shadow-xl flex flex-col h-[350px] shrink-0">
-            <div class="flex items-start justify-between mb-2">
-              <div>
-                <p class="text-xs font-semibold text-slate-400 uppercase tracking-widest mb-1">Portfolio Value</p>
-                <div class="flex items-baseline gap-2">
-                  <h3 class="text-3xl font-bold font-mono text-slate-100 transition-all duration-300">{{ fmtMoney(currentPortfolioEvent.value) }}</h3>
-                </div>
-              </div>
-            </div>
-            <div class="flex-1 min-h-0 relative -ml-3 -mr-2 mt-4">
+          <section class="ui-card p-5 flex flex-col h-[350px] shrink-0" aria-labelledby="pb-value-title">
+            <p id="pb-value-title" class="ui-label">Portfolio value</p>
+            <p class="mt-2 text-[32px] leading-none font-medium text-slate-100 tabular-nums">{{ fmtMoney(currentPortfolioEvent.value) }}</p>
+            <div class="chart flex-1 min-h-0 relative -ml-2 -mr-1 mt-4">
               <VueApexCharts
                 type="area"
                 height="100%"
@@ -445,35 +438,34 @@ const chartOptions = computed(() => ({
                 :series="graphSeries"
               />
             </div>
-          </div>
+          </section>
 
           <!-- Current Holdings -->
-          <div class="glass-card rounded-3xl p-5 border shadow-xl flex flex-col flex-1 min-h-0">
-            <h3 class="text-xs font-semibold text-slate-400 uppercase tracking-widest mb-3 shrink-0">Current Holdings</h3>
-            
+          <section class="ui-card flex flex-col lg:flex-1 min-h-0 overflow-hidden" aria-labelledby="pb-holdings-title">
+            <div class="h-12 px-5 flex items-center border-b border-white/[0.06] shrink-0">
+              <h2 id="pb-holdings-title" class="text-sm font-medium text-slate-100">Current holdings</h2>
+            </div>
+
             <div class="flex-1 overflow-y-auto">
-              <div class="grid grid-cols-2 gap-2">
-                <div v-if="currentPortfolioEvent.holdings.length === 0" class="col-span-2 text-xs text-slate-500 italic flex items-center justify-center py-6">
-                  No active positions.
-                </div>
-                <div v-else v-for="h in currentPortfolioEvent.holdings" :key="h.ticker" class="bg-background-dark px-3 py-2 rounded-xl border border-border-subtle hover:border-slate-600 transition-colors">
-                  <div class="flex items-center justify-between mb-1">
-                    <span class="font-bold font-mono text-[13px] text-slate-200">{{ h.ticker }}</span>
-                    <span class="font-mono text-[10px] text-slate-400 bg-surface px-1.5 py-0.5 rounded">{{ fmtQty(h.qty) }} sh</span>
-                  </div>
-                  <div class="flex items-center justify-between text-[10px] font-mono text-slate-500">
-                    <span>{{ fmtMoney(h.avg) }}</span>
-                    <span v-if="h.curr" class="font-semibold" :class="(h.curr > h.avg) ? 'text-emerald-400' : (h.curr < h.avg ? 'text-red-400' : 'text-slate-400')">
+              <p v-if="currentPortfolioEvent.holdings.length === 0" class="px-5 py-8 text-center text-sm text-slate-500">
+                No active positions
+              </p>
+              <ul v-else class="ui-rows">
+                <li v-for="h in currentPortfolioEvent.holdings" :key="h.ticker" class="min-h-14 px-5 py-2 flex items-center justify-between gap-3">
+                  <span class="min-w-0">
+                    <span class="block text-sm font-medium text-slate-100">{{ h.ticker }}</span>
+                    <span class="block text-xs text-slate-500 mt-0.5 tabular-nums">{{ fmtQty(h.qty) }} sh</span>
+                  </span>
+                  <span class="text-right tabular-nums">
+                    <span v-if="h.curr" class="block text-sm" :class="(h.curr > h.avg) ? 'text-gain' : (h.curr < h.avg ? 'text-loss' : 'text-slate-300')">
                       {{ fmtMoney(h.curr) }}
                     </span>
-                  </div>
-                  <div v-if="h.curr" class="mt-1.5 h-[3px] w-full bg-slate-800 rounded-full overflow-hidden">
-                    <div class="h-full rounded-full transition-all duration-500" :class="h.curr >= h.avg ? 'bg-emerald-500' : 'bg-red-500'" :style="{ width: Math.min(100, 40 + Math.abs((h.curr - h.avg)/h.avg)*200) + '%' }"></div>
-                  </div>
-                </div>
-              </div>
+                    <span class="block text-xs text-slate-500" :class="h.curr ? 'mt-0.5' : ''">avg {{ fmtMoney(h.avg) }}</span>
+                  </span>
+                </li>
+              </ul>
             </div>
-          </div>
+          </section>
 
         </div>
       </div>
@@ -483,25 +475,19 @@ const chartOptions = computed(() => ({
 </template>
 
 <style scoped>
-.animate-fade-in-up {
-  animation: fadeInUp 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+/* New steps fade in where they appear: the one motion that explains the replay. */
+.ev-in {
+  animation: ev-in 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
-@keyframes textShimmer {
-  0% { background-position: -200% center; }
-  100% { background-position: 200% center; }
+@keyframes ev-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: none; }
 }
 
-@keyframes fadeInUp {
-  from {
-    opacity: 0;
-    transform: translateY(15px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+@media (prefers-reduced-motion: reduce) {
+  .ev-in { animation: none; }
 }
+
+.chart :deep(.apexcharts-text) { font-variant-numeric: tabular-nums; }
 </style>
-
-

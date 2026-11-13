@@ -1,13 +1,14 @@
 import SwiftUI
 
 /// The live trading terminal for one instance — `LiveTradingScreen` in
-/// `live_trading_screen.dart` — as an inset-grouped list (redesign spec
-/// 2026-10-02): the equity hero with its chart, range and chart-style
-/// pickers; the range and account figures as `StatGrid`s; the recent
-/// executions and active positions as rows; the live logs. REAL money on
-/// alpaca-main: Halt (the floating glass button), Close (a position's swipe
-/// action and context menu) and Manual Order (the toolbar) keep every Dart
-/// guard (typed confirmations, validation).
+/// `live_trading_screen.dart`, styled as the web's `LiveTradingView.vue`: the
+/// session's status line; the historic lookback card while warming up; the
+/// equity card (portfolio equity and uptime, the chart, the range and
+/// chart-style controls, the range figures); cash, buying power and total
+/// P&L; the recent executions and active positions as card rows; the live
+/// logs. REAL money on alpaca-main: Halt (the floating button), Close (a
+/// position's swipe action and context menu) and Manual order (the toolbar)
+/// keep every Dart guard (typed confirmations, validation).
 struct LiveTradingView: View {
     let instanceId: String
 
@@ -41,14 +42,13 @@ private struct LiveTradingContent: View {
 
     var body: some View {
         content
-            .listStyle(.insetGrouped)
-            .navigationTitle("Live Trading")
+            .navigationTitle("Live trading")
             .navigationSubtitle(instanceId)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 if let s = model.value, !s.notRunning {
                     ToolbarItem(placement: .primaryAction) {
-                        Button("Manual Order", systemImage: "cart.badge.plus") { showOrder = true }
+                        Button("Manual order", systemImage: "cart.badge.plus") { showOrder = true }
                     }
                 }
             }
@@ -67,12 +67,14 @@ private struct LiveTradingContent: View {
             LiveTradingSkeleton()
         case .failed:
             List {
-                Section {
+                DSSection(style: .plain) {
                     ErrorRow(message: model.state.errorMessage ?? "") {
                         Task { await model.reload() }
                     }
+                    .dsClearRow(top: 8)
                 }
             }
+            .dsList()
         case .loaded(let s):
             loadedBody(s)
         }
@@ -80,83 +82,77 @@ private struct LiveTradingContent: View {
 
     private func loadedBody(_ s: LiveTradingState) -> some View {
         List {
+            Section {
+                statusLine(s)
+                    .dsClearRow(top: 4)
+            }
+            .listSectionSpacing(16)
             if s.notRunning {
-                Section {
-                    statusLine(s)
-                }
-                Section {
+                DSSection {
                     EmptyState(
-                        systemImage: Symbol.named("power_off"),
                         title: "No live session",
-                        subtitle: "This instance has no active broker session. Start the instance to begin live trading."
+                        subtitle: "This instance has never booted a broker, or its broker is already shut down. Start the instance to begin a live session"
                     )
-                    .listRowBackground(Color.clear)
                 }
             } else if let ls = s.liveState {
-                heroSection(s, ls)
                 if let lookback = ls.lookback {
                     lookbackSection(lookback)
                 }
-                rangeSection(s, ls)
+                heroSection(s, ls)
                 accountSection(ls)
                 executionsSection(ls.recentTrades)
                 positionsSection(s)
             } else {
-                Section {
-                    statusLine(s)
-                }
                 LiveBodySkeleton()
             }
-            Section("Live logs") {
+            DSSection("Live logs", style: .plain) {
                 LiveLogsPanel(instanceId: instanceId)
-                    .listRowInsets(EdgeInsets())
-                    .listRowBackground(Color.clear)
+                    .dsClearRow()
             }
             // Room for the floating Halt button over the last rows.
             Color.clear
                 .frame(height: 56)
-                .listRowBackground(Color.clear)
+                .dsClearRow()
                 .accessibilityHidden(true)
         }
-        // The hero starts right under the bar, as in Stocks.
-        .contentMargins(.top, 0, for: .scrollContent)
+        .dsList()
+        // The status line starts right under the bar, as the web's header does.
+        .contentMargins(.top, 8, for: .scrollContent)
         .refreshable { await model.refreshNow() }
     }
 
     // MARK: Status
 
-    /// The session's state as a dot and a word, then any feed warnings
-    /// (`_buildHeader`'s pill and chips).
+    /// The session's state as a dot and a word, then any feed warnings, each
+    /// a dot and a word too (`_buildHeader`'s pill and chips; the web's header).
     @ViewBuilder
     private func statusLine(_ s: LiveTradingState) -> some View {
         let ls = s.liveState
         let status = ls?.status.lowercased() ?? "unknown"
-        let label = s.notRunning ? "Not running" : (ls?.status.dsSentenceCased ?? "Unknown")
-        let color: Color = s.notRunning ? .secondary : (status == "active" ? DS.Palette.success : (status == "halted" ? DS.Palette.warning : .secondary))
+        let label = s.notRunning ? "Not running" : (ls?.status.lowercased().dsSentenceCased ?? "Unknown")
+        let tone: DSStatusTone = s.notRunning ? .off : (status == "active" ? .live : (status == "halted" ? .warn : .off))
         let brokerFailed = ls?.brokerFetchError != nil
         let stale = ls?.containerStale == true
-        VStack(alignment: .leading, spacing: 4) {
-            StatusDot(label, color: color, pulsing: status == "active", font: .footnote)
+        FlowLayout(spacing: 16, runSpacing: 6) {
+            StatusDot(label, tone: tone, pulsing: status == "active")
             if brokerFailed {
-                warning("Broker offline", DS.Palette.danger)
+                StatusDot("Broker offline", tone: .error, font: DS.Font.caption)
             }
             if stale, !brokerFailed {
-                warning("Container offline", .secondary)
+                StatusDot("Container offline", tone: .off, font: DS.Font.caption)
             }
             if s.fetchError != nil, ls != nil {
-                warning("Feed error", DS.Palette.danger)
+                StatusDot("Feed error", tone: .error, font: DS.Font.caption)
             }
         }
-    }
-
-    private func warning(_ label: String, _ color: Color) -> some View {
-        Label(label, systemImage: "exclamationmark.triangle.fill")
-            .font(.footnote.weight(.semibold))
-            .foregroundStyle(color)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: Hero
 
+    /// The equity card: "Portfolio equity" with the figure and the range's
+    /// change, uptime on the right, the chart, the range and chart-style
+    /// controls, then the range high, low, day and total P&L under a divider.
     private func heroSection(_ s: LiveTradingState, _ ls: LiveState) -> some View {
         let history = s.equityHistory
         let stats = RangeStats.from(history)
@@ -165,150 +161,207 @@ private struct LiveTradingContent: View {
             displayEquity = history.values[min(max(idx, 0), history.values.count - 1)]
         }
         return Section {
-            VStack(alignment: .leading, spacing: 0) {
-                HeroValueHeader(
-                    fmtMoney(displayEquity),
-                    numericValue: displayEquity,
-                    valueAnimation: scrubIndex == nil ? .snappy : nil,
-                    change: "\(stats.isUp ? "+" : "")\(fmtMoney(stats.dollars)) (\(stats.isUp ? "+" : "")\(dartToStringAsFixed(stats.pct, 2))%)",
-                    direction: stats.isUp ? .up : .down,
-                    changeLabel: liveRangeLabel(s.currentRange)
-                ) {
-                    statusLine(s)
-                }
-
-                Group {
-                    if let history, !history.isEmpty {
-                        // The range the history belongs to, which lags the
-                        // picker while a switch loads: the chart remounts and
-                        // draws in when the new range's data lands.
-                        let chartRange = s.equityHistoryRange ?? s.currentRange
-                        LiveEquityChart(history: history, style: chartStyle, range: chartRange, height: 240) {
-                            scrubIndex = $0
+            Card {
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack(alignment: .top, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Portfolio equity")
+                                .font(DS.Font.body)
+                                .foregroundStyle(DS.Text.secondary)
+                            HeroValueHeader(
+                                fmtMoney(displayEquity),
+                                numericValue: displayEquity,
+                                valueAnimation: scrubIndex == nil ? DSMotion.ease(0.3) : nil,
+                                change: "\(stats.isUp ? "+" : "")\(fmtMoney(stats.dollars)) (\(stats.isUp ? "+" : "")\(dartToStringAsFixed(stats.pct, 2))%)",
+                                direction: stats.isUp ? .up : .down,
+                                changeLabel: liveRangeLabel(s.currentRange)
+                            ) {
+                                EmptyView()
+                            }
                         }
-                        .id("\(chartRange)-\(chartStyle.rawValue)")
-                    } else {
-                        Text("No equity history yet — broker is fetching…")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 240)
+                        VStack(alignment: .trailing, spacing: 4) {
+                            Text("Uptime")
+                                .font(DS.Font.caption)
+                                .foregroundStyle(DS.Text.muted)
+                            Text(fmtDuration(ls.uptimeSec))
+                                .font(DS.Font.body)
+                                .foregroundStyle(DS.Text.label)
+                                .monospacedDigit()
+                        }
+                        .accessibilityElement(children: .combine)
+                    }
+
+                    Group {
+                        if let history, !history.isEmpty {
+                            // The range the history belongs to, which lags the
+                            // picker while a switch loads: the chart remounts and
+                            // draws in when the new range's data lands.
+                            let chartRange = s.equityHistoryRange ?? s.currentRange
+                            LiveEquityChart(history: history, style: chartStyle, range: chartRange, height: 240) {
+                                scrubIndex = $0
+                            }
+                            .id("\(chartRange)-\(chartStyle.rawValue)")
+                        } else {
+                            Text("No equity history yet — broker is fetching…")
+                                .font(DS.Font.body)
+                                .foregroundStyle(DS.Text.muted)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 240)
+                        }
+                    }
+                    .padding(.top, 16)
+
+                    // The ranges share the card's full width evenly.
+                    DSSegmentedControl(
+                        "Range",
+                        selection: Binding(get: { s.currentRange }, set: { r in Task { await model.setRange(r) } }),
+                        options: liveRanges,
+                        fullWidth: true
+                    ) { $0 }
+                    .padding(.top, 12)
+
+                    LiveChartStyleControl(selection: $chartStyle)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                        .padding(.top, 8)
+
+                    if stats.high != nil {
+                        DSDivider()
+                            .padding(.top, 20)
+                        StatGrid(columns: 2, horizontalSpacing: 16, verticalSpacing: 16) {
+                            StatCell(label: "Range high") { rangeFigure(fmtMoney(stats.high)) }
+                            StatCell(label: "Range low") { rangeFigure(fmtMoney(stats.low)) }
+                            StatCell(label: "Day P&L") { rangeFigure(fmtPct(ls.dayPnlPct), color: pnlColor(ls.dayPnl)) }
+                            StatCell(label: "Total P&L") { rangeFigure(fmtPct(ls.totalPnlPct), color: pnlColor(ls.totalPnl)) }
+                        }
+                        .padding(.top, 20)
                     }
                 }
-                .padding(.top, 16)
-
-                Picker("Range", selection: Binding(get: { s.currentRange }, set: { r in Task { await model.setRange(r) } })) {
-                    ForEach(liveRanges, id: \.self) { Text($0).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .padding(.top, 12)
-
-                Picker("Chart style", selection: $chartStyle) {
-                    ForEach(LiveChartStyle.allCases, id: \.self) { style in
-                        Image(systemName: Symbol.named(style.symbolName))
-                            .accessibilityLabel(style.accessibilityName)
-                            .tag(style)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .frame(maxWidth: 160)
-                .frame(maxWidth: .infinity, alignment: .trailing)
-                .padding(.top, 10)
             }
-            .padding(.vertical, 4)
-            .listRowBackground(Color.clear)
-            .listRowSeparator(.hidden)
+            .dsClearRow()
         }
+    }
+
+    /// A range figure: 14/500 (the web's `text-sm font-medium`).
+    private func rangeFigure(_ text: String, color: Color = DS.Text.soft) -> some View {
+        Text(text)
+            .font(DS.Font.bodyMedium)
+            .foregroundStyle(color)
     }
 
     // MARK: Lookback
 
+    /// The warmup card (the web's lookback banner): what is replaying and
+    /// over which dates, the step count, a thin bar, and the caveat.
     private func lookbackSection(_ lb: Lookback) -> some View {
-        Section {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text("\(lb.specName)  ·  \(lb.startDate) → \(lb.endDate)")
-                        .font(.subheadline)
-                        .lineLimit(1)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    HStack(alignment: .firstTextBaseline, spacing: 0) {
-                        Text("\(lb.current)")
-                            .font(.headline.monospacedDigit())
-                        Text("/\(lb.total)")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
+        let fraction = min(max(lb.pct / 100, 0), 1)
+        return DSSection {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .top, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Historic lookback training")
+                            .font(DS.Font.bodyMedium)
+                            .foregroundStyle(DS.Text.soft)
+                        Text("\(lb.specName) · \(lb.startDate) → \(lb.endDate)")
+                            .font(DS.Font.caption)
+                            .foregroundStyle(DS.Text.muted)
+                            .monospacedDigit()
+                            .lineLimit(1)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    VStack(alignment: .trailing, spacing: 4) {
+                        HStack(alignment: .firstTextBaseline, spacing: 0) {
+                            Text("\(lb.current)")
+                                .font(DS.Font.figure)
+                                .foregroundStyle(DS.Text.primary)
+                            Text("/\(lb.total)")
+                                .font(DS.Font.body)
+                                .foregroundStyle(DS.Text.muted)
+                        }
+                        Text("\(dartToStringAsFixed(lb.pct, 0))% · \(lb.currentDate)")
+                            .font(DS.Font.caption)
+                            .foregroundStyle(DS.Text.muted)
+                    }
+                    .monospacedDigit()
                 }
-                ProgressView(value: lb.pct / 100)
-                    .tint(DS.Palette.info)
-                Text("\(dartToStringAsFixed(lb.pct, 0))%  ·  \(lb.currentDate)")
-                    .font(.footnote.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                Capsule()
+                    .fill(DS.Surface.raised)
+                    .frame(height: 4)
+                    .overlay(alignment: .leading) {
+                        GeometryReader { geo in
+                            Capsule()
+                                .fill(DS.Text.label)
+                                .frame(width: geo.size.width * fraction)
+                        }
+                    }
+                    .accessibilityHidden(true)
+                Text("Trades are deferred until warmup completes. The Nexus strategy needs this context before it can make day-1 decisions.")
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.muted)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(.vertical, 4)
+            .padding(.vertical, 8)
             .accessibilityElement(children: .combine)
-        } header: {
-            Text("Historic lookback training")
-        } footer: {
-            Text("Trades deferred until warmup completes.")
         }
     }
 
     // MARK: Figures
 
-    @ViewBuilder
-    private func rangeSection(_ s: LiveTradingState, _ ls: LiveState) -> some View {
-        let stats = RangeStats.from(s.equityHistory)
-        if stats.high != nil {
-            Section("Performance") {
-                StatGrid(columns: 2) {
-                    StatCell(label: "Range high", value: fmtMoney(stats.high))
-                    StatCell(label: "Range low", value: fmtMoney(stats.low))
-                    StatCell(label: "Day P&L", value: fmtPct(ls.dayPnlPct), valueColor: pnlColor(ls.dayPnl))
-                    StatCell(label: "Total P&L", value: fmtPct(ls.totalPnlPct), valueColor: pnlColor(ls.totalPnl))
+    /// Cash, buying power and total P&L in one card, split by hairlines (the
+    /// web's compact stats).
+    private func accountSection(_ ls: LiveState) -> some View {
+        Section {
+            Card(padding: 0) {
+                HStack(spacing: 0) {
+                    accountCell("Cash", fmtMoney(ls.cash))
+                    DSDivider(vertical: true)
+                    accountCell("Buying power", fmtMoney(ls.buyingPower))
+                    DSDivider(vertical: true)
+                    accountCell("Total P&L", fmtMoney(ls.totalPnl), color: pnlColor(ls.totalPnl))
                 }
-                .padding(.vertical, 4)
+                .fixedSize(horizontal: false, vertical: true)
             }
+            .dsClearRow()
         }
     }
 
-    private func accountSection(_ ls: LiveState) -> some View {
-        Section("Account") {
-            StatGrid(columns: 2) {
-                StatCell(label: "Cash", value: fmtMoney(ls.cash))
-                StatCell(label: "Buying power", value: fmtMoney(ls.buyingPower))
-                StatCell(label: "Total P&L", value: fmtMoney(ls.totalPnl), valueColor: pnlColor(ls.totalPnl))
-                StatCell(label: "Uptime", value: fmtDuration(ls.uptimeSec))
-            }
-            .padding(.vertical, 4)
+    private func accountCell(_ label: String, _ value: String, color: Color = DS.Text.primary) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label)
+                .font(DS.Font.caption)
+                .foregroundStyle(DS.Text.muted)
+                .lineLimit(1)
+            Text(value)
+                .font(DS.Font.baseMedium)
+                .foregroundStyle(color)
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
         }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
     }
 
     // MARK: Executions and positions
 
     private func executionsSection(_ trades: [Trade]) -> some View {
-        Section {
+        DSSection("Recent executions", subtitle: "\(trades.count) recorded") {
             if trades.isEmpty {
-                Text("No executions recorded yet.")
-                    .foregroundStyle(.secondary)
+                EmptyState(title: "No executions recorded yet")
             } else {
                 ForEach(Array(trades.enumerated()), id: \.offset) { _, t in
                     LiveTradeRow(trade: t)
                 }
-            }
-        } header: {
-            DSSectionHeader("Recent executions") {
-                Text("\(trades.count)")
             }
         }
     }
 
     private func positionsSection(_ s: LiveTradingState) -> some View {
         let list = s.liveState?.positions ?? []
-        return Section {
+        return DSSection("Active positions", subtitle: "\(list.count) open") {
             if list.isEmpty {
-                Text("No open positions.")
-                    .foregroundStyle(.secondary)
+                EmptyState(title: "No open positions")
             } else {
                 ForEach(Array(list.enumerated()), id: \.offset) { _, p in
                     LivePositionRow(
@@ -323,6 +376,7 @@ private struct LiveTradingContent: View {
                             Button("Close", systemImage: Symbol.named("logout"), role: .destructive) {
                                 confirmClose(p.symbol)
                             }
+                            .tint(DS.Swipe.destructive)
                             .disabled(closeRunning)
                         }
                     }
@@ -341,10 +395,6 @@ private struct LiveTradingContent: View {
                     }
                 }
             }
-        } header: {
-            DSSectionHeader("Active positions") {
-                Text("\(list.count)")
-            }
         } footer: {
             if list.contains(where: \.canClose) {
                 Text("Swipe a position left, or touch and hold it, to close it.")
@@ -355,10 +405,10 @@ private struct LiveTradingContent: View {
     /// The close-position typed confirmation (`_confirmClosePosition`).
     private func confirmClose(_ symbol: String) {
         closeRequest = TypedConfirmRequest(
-            title: "Close Position",
+            title: "Close position",
             body: "Submit a market sell for the full quantity of \(symbol)",
             phrase: "CLOSE \(symbol)",
-            confirmLabel: "Submit Sell",
+            confirmLabel: "Submit sell",
             role: .destructive,
             onConfirm: { await model.runCommand("close_position", ["symbol": .string(symbol)]) }
         )
@@ -366,9 +416,9 @@ private struct LiveTradingContent: View {
 
     // MARK: Floating layer
 
-    /// The command toast and the sticky Halt button (Liquid Glass: the
-    /// floating functional layer only), laid out against the bottom safe
-    /// area, so they sit above the tab bar's chat accessory.
+    /// The command toast and the sticky Halt button (the web's mobile halt:
+    /// a raised capsule with a loss hairline and loss text), laid out against
+    /// the bottom safe area, so they sit above the tab bar's chat accessory.
     @ViewBuilder
     private var floatingLayer: some View {
         let s = model.value
@@ -382,68 +432,82 @@ private struct LiveTradingContent: View {
                     showHalt = true
                 } label: {
                     Label("Halt", systemImage: Symbol.named("block"))
-                        .font(.subheadline.weight(.bold))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 4)
+                        .font(DS.Font.bodyMedium)
+                        .foregroundStyle(DS.Palette.loss)
+                        .padding(.horizontal, 20)
+                        .frame(height: 48)
+                        .background(DS.Surface.raised, in: Capsule())
+                        .overlay {
+                            Capsule().strokeBorder(DS.Palette.loss.opacity(0.3), lineWidth: DS.Line.width)
+                        }
+                        // A floating control over the list: the one place a shadow stays.
+                        .shadow(color: .black.opacity(0.5), radius: 12, y: 8)
+                        .contentShape(Capsule())
                 }
-                .buttonStyle(.glass)
-                .tint(DS.Palette.danger)
-                .foregroundStyle(DS.Palette.danger)
+                .buttonStyle(.plain)
                 .accessibilityHint("Opens the halt confirmation")
             }
         }
         .padding(.horizontal, 16)
         .padding(.bottom, 16)
         .frame(maxWidth: .infinity, alignment: .trailing)
-        .animation(.snappy, value: s?.commandToast)
+        .animation(DSMotion.ease(0.2), value: s?.commandToast)
     }
 }
 
-/// A command's progress (`_buildCommandToast`): pending spinner, completed
-/// check or failed mark; the command and its status; the error or the
-/// result map.
+/// A command's progress (`_buildCommandToast`), as the web's toast: a
+/// spinner, a gain check or a loss mark; the command with its status; the
+/// error or the result map; on a raised card with a loss hairline when it
+/// failed.
 private struct LiveCommandToastView: View {
     let toast: CommandToast
     let onDismiss: () -> Void
 
     var body: some View {
-        let color: Color = toast.isPending ? DS.Palette.info : (toast.status == "completed" ? DS.Palette.success : DS.Palette.danger)
-        HStack(spacing: 8) {
+        let failed = !toast.isPending && toast.status != "completed"
+        HStack(alignment: .top, spacing: 10) {
             Group {
                 if toast.isPending {
                     ProgressView().controlSize(.small)
                 } else {
                     Image(systemName: Symbol.named(toast.status == "completed" ? "check_circle" : "error"))
-                        .foregroundStyle(color)
+                        .font(.system(size: 16))
+                        .foregroundStyle(failed ? DS.Palette.loss : DS.Palette.gain)
                 }
             }
-            .frame(width: 20)
-            VStack(alignment: .leading, spacing: 1) {
-                Text("\(liveCommandWords(toast.type)) · \(liveCommandWords(toast.status))")
-                    .font(.footnote.weight(.semibold))
+            .frame(width: 20, height: 20)
+            .padding(.top, 12)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 4) {
+                    Text(liveCommandWords(toast.type))
+                        .foregroundStyle(DS.Text.primary)
+                    Text("· \(liveCommandWords(toast.status).lowercased())")
+                        .foregroundStyle(DS.Text.muted)
+                }
+                .font(DS.Font.body)
                 if let error = toast.error {
                     Text(error)
-                        .font(.caption)
-                        .foregroundStyle(DS.Palette.danger)
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Palette.loss)
                 } else if let result = toast.result, !result.isEmpty {
                     Text(JSON.object(result).dartDescription)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .font(DS.Font.mono)
+                        .foregroundStyle(DS.Text.secondary)
                         .lineLimit(1)
                 }
             }
+            .padding(.vertical, 12)
             .frame(maxWidth: .infinity, alignment: .leading)
             Button(action: onDismiss) {
                 Image(systemName: Symbol.named("close"))
-                    .font(.caption.weight(.semibold))
-                    .frame(width: 44, height: 44)
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
+            .buttonStyle(.dsIcon(side: 44))
             .accessibilityLabel("Dismiss")
         }
-        .padding(.leading, 12)
-        .glassEffect(.regular, in: .rect(cornerRadius: DS.Radius.control, style: .continuous))
+        .padding(.leading, 14)
+        .dsCardSurface(fill: DS.Surface.raised, border: failed ? DS.Palette.loss.opacity(0.3) : DS.Line.input)
+        // Floating over the list: the one place a shadow stays.
+        .shadow(color: .black.opacity(0.5), radius: 20, y: 16)
         .accessibilityElement(children: .combine)
     }
 }
@@ -453,35 +517,62 @@ nonisolated func liveCommandWords(_ raw: String) -> String {
     raw.replacingOccurrences(of: "_", with: " ").lowercased().dsSentenceCased
 }
 
-/// The first-load skeleton.
+/// The first-load skeleton: static blocks shaped like the status line and
+/// the equity card.
 private struct LiveTradingSkeleton: View {
     var body: some View {
         List {
             Section {
-                HeroValueHeader("$00,000.00", change: "+$000.00 (+0.00%)", status: "Active")
-                    .listRowBackground(Color.clear)
+                Skeleton.line(width: 72, height: 14)
+                    .dsClearRow(top: 8)
             }
-            LiveBodySkeleton()
+            Section {
+                Card {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Skeleton.line(width: 110, height: 14)
+                        Skeleton(width: 220, height: 40)
+                        Skeleton.line(width: 150, height: 14)
+                        Skeleton(height: 240, radius: DS.Radius.control)
+                            .padding(.top, 8)
+                    }
+                }
+                .dsClearRow()
+            }
+            LiveBodySkeleton(chart: false)
         }
-        .redacted(reason: .placeholder)
+        .dsList()
         .disabled(true)
         .accessibilityLabel("Loading")
     }
 }
 
-/// The body skeleton while the live state has not arrived.
+/// The body skeleton while the live state has not arrived: the chart's
+/// block, then the cash, buying power and P&L figures.
 private struct LiveBodySkeleton: View {
+    var chart = true
+
     var body: some View {
-        Section {
-            Skeleton(height: 240, radius: 12)
-                .listRowBackground(Color.clear)
-        }
-        Section("Account") {
-            StatGrid(columns: 2) {
-                StatCell(label: "Cash", value: "$00,000.00")
-                StatCell(label: "Buying power", value: "$00,000.00")
+        if chart {
+            Section {
+                Card {
+                    Skeleton(height: 240, radius: DS.Radius.control)
+                }
+                .dsClearRow()
             }
-            .redacted(reason: .placeholder)
+            .accessibilityHidden(true)
+        }
+        Section {
+            Card {
+                HStack(alignment: .top, spacing: 24) {
+                    ForEach(0..<3, id: \.self) { _ in
+                        VStack(alignment: .leading, spacing: 8) {
+                            Skeleton.line(width: 56)
+                            Skeleton.line(width: 80, height: 18)
+                        }
+                    }
+                }
+            }
+            .dsClearRow()
         }
         .accessibilityHidden(true)
     }

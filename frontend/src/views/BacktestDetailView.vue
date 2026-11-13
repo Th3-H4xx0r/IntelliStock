@@ -65,7 +65,7 @@ const feeRows = computed(() => {
 })
 // TR scorecard ("vs S&P 500 by market type"): null renders nothing.
 const trScorecard = computed(() => trScorecardView(summary.value?.tr_scorecard))
-const TR_TONE = { pos: 'text-emerald-400', neg: 'text-red-400', muted: 'text-slate-500' }
+const TR_TONE = { pos: 'text-gain', neg: 'text-loss', muted: 'text-slate-500' }
 const graphData = shallowRef(null)
 const loading   = ref(true)
 const error     = ref('')
@@ -208,7 +208,9 @@ function fmtUsdCost(value) {
 }
 function fmtMoney(v) {
   if (v == null) return '—'
-  return '$' + Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  const n = Number(v)
+  // Sign before the currency symbol: -$1,234.56, never $-1,234.56.
+  return (n < 0 ? '-$' : '$') + Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 function fmtPnl(v) {
   if (v == null) return '—'
@@ -240,21 +242,23 @@ function fmtElapsed(seconds) {
 }
 function pnlClass(v) {
   if (v == null) return 'text-slate-500'
-  return Number(v) >= 0 ? 'text-emerald-400' : 'text-red-400'
+  return Number(v) >= 0 ? 'text-gain' : 'text-loss'
 }
 
-const statusColors = {
-  completed:            'text-emerald-400 bg-emerald-500/10 border-emerald-500/20',
-  finished:             'text-emerald-400 bg-emerald-500/10 border-emerald-500/20',
-  running:              'text-sky-400 bg-sky-500/10 border-sky-500/20',
-  queued:               'text-amber-400 bg-amber-500/10 border-amber-500/20',
-  paused:               'text-zinc-300 bg-zinc-500/10 border-zinc-500/20',
-  paused_llm_critical:  'text-amber-400 bg-amber-500/10 border-amber-500/20',
-  aborted_llm_failure:  'text-red-400 bg-red-500/10 border-red-500/20',
-  stopped:              'text-red-400 bg-red-500/10 border-red-500/20',
-  cancelled:            'text-red-400 bg-red-500/10 border-red-500/20',
-  error:                'text-red-400 bg-red-500/10 border-red-500/20',
-  failed:               'text-red-400 bg-red-500/10 border-red-500/20',
+// Status as a dot and a word. Green only for a run that is actually running.
+const STATUS_UI = {
+  running:             { dot: 'ui-dot-live',  label: 'Running' },
+  queued:              { dot: 'ui-dot-off',   label: 'Queued' },
+  pending:             { dot: 'ui-dot-off',   label: 'Pending' },
+  paused:              { dot: 'ui-dot-warn',  label: 'Paused' },
+  paused_llm_critical: { dot: 'ui-dot-warn',  label: 'Paused · LLM failure' },
+  aborted_llm_failure: { dot: 'ui-dot-error', label: 'Aborted · LLM failure' },
+  completed:           { dot: 'bg-slate-400', label: 'Completed' },
+  finished:            { dot: 'bg-slate-400', label: 'Finished' },
+  stopped:             { dot: 'ui-dot-off',   label: 'Stopped' },
+  cancelled:           { dot: 'ui-dot-off',   label: 'Cancelled' },
+  error:               { dot: 'ui-dot-error', label: 'Error' },
+  failed:              { dot: 'ui-dot-error', label: 'Failed' },
 }
 
 // ── Backtest controls (stop / pause / resume / rerun) ─────────────────────────
@@ -269,12 +273,14 @@ const confirmMeta = computed(() => {
   const tickers = s?.tickers?.join(', ') || '—'
   const dates   = s ? `${(s.start_date||'').slice(0,10)} → ${(s.end_date||'').slice(0,10)}` : '—'
   switch (confirmAction.value) {
-    case 'stop':   return { label: 'Stop Backtest',   color: 'red',     icon: 'stop_circle',    desc: 'This will permanently stop the backtest. This cannot be undone.' }
-    case 'pause':  return { label: 'Pause Backtest',  color: 'violet',  icon: 'pause_circle',   desc: 'The backtest will be paused and can be resumed later.' }
-    case 'resume': return { label: 'Resume Backtest', color: 'sky',     icon: 'play_circle',    desc: 'The backtest will continue from where it was paused.' }
-    case 'rerun':  return { label: 'Rerun Backtest',  color: 'emerald', icon: 'replay',         desc: `A new backtest will be created with the same settings — ${tickers} · ${dates} · $${(s?.initial_cash ?? 100000).toLocaleString()} initial cash. You will be redirected to the new backtest.` }
-    case 'delete':          return { label: 'Delete Backtest',  color: 'red',   icon: 'delete_forever', desc: 'This will permanently delete all results and data for this backtest. This cannot be undone.' }
-    case 'delete-strategy': return { label: 'Delete Strategy',  color: 'red',   icon: 'delete_forever', desc: `This will permanently delete the strategy "${strategyData.value?.name || ''}" and all its configuration. This cannot be undone.` }
+    case 'stop':   return { label: 'Stop backtest',   color: 'red',     icon: 'stop_circle',    desc: 'This will permanently stop the backtest. This cannot be undone.' }
+    case 'pause':  return { label: 'Pause backtest',  color: 'violet',  icon: 'pause_circle',   desc: 'The backtest will be paused and can be resumed later.' }
+    case 'resume': return { label: 'Resume backtest', color: 'sky',     icon: 'play_circle',    desc: currentStatus.value.toLowerCase() === 'paused_llm_critical'
+      ? 'The backtest continues from the bar it paused on. If the model provider is still failing, it pauses again.'
+      : 'The backtest will continue from where it was paused.' }
+    case 'rerun':  return { label: 'Rerun backtest',  color: 'emerald', icon: 'replay',         desc: `A new backtest will be created with the same settings — ${tickers} · ${dates} · $${(s?.initial_cash ?? 100000).toLocaleString()} initial cash. You will be redirected to the new backtest.` }
+    case 'delete':          return { label: 'Delete backtest',  color: 'red',   icon: 'delete_forever', desc: 'This will permanently delete all results and data for this backtest. This cannot be undone.' }
+    case 'delete-strategy': return { label: 'Delete strategy',  color: 'red',   icon: 'delete_forever', desc: `This will permanently delete the strategy "${strategyData.value?.name || ''}" and all its configuration. This cannot be undone.` }
     default:                return { label: '', color: 'slate', icon: 'help', desc: '' }
   }
 })
@@ -323,7 +329,7 @@ async function executeAction() {
       }
       const newId = data.id ?? data.backtest_id
       actionOk.value  = true
-      actionMsg.value = `New backtest #${newId} created! Redirecting...`
+      actionMsg.value = `New backtest #${newId} created. Redirecting…`
       setTimeout(() => {
         showConfirm.value = false
         router.push({ name: 'backtest-detail', params: { id: newId }, query: { from: fromPath.value } })
@@ -384,8 +390,12 @@ async function executeAction() {
     actionBusy.value = false
   }
 }
-function statusClass(s) {
-  return statusColors[(s || '').toLowerCase()] || 'text-slate-500 bg-slate-500/10 border-slate-700'
+function statusUi(s) {
+  const raw = String(s || '')
+  const hit = STATUS_UI[raw.toLowerCase()]
+  if (hit) return hit
+  const label = raw.replace(/_/g, ' ')
+  return { dot: 'ui-dot-off', label: label ? label[0].toUpperCase() + label.slice(1) : 'Unknown' }
 }
 
 // ── Computed state ─────────────────────────────────────────────────────────────
@@ -396,14 +406,21 @@ const nexusLookback = computed(() => statusData.value?.nexus_lookback ?? null)
 const tickers       = computed(() => summary.value?.tickers || [])
 
 // ── Chart helpers ─────────────────────────────────────────────────────────────
-const DARK_GRID   = '#1e2535'
-const AXIS_COLOR  = '#64748b'
+// One graphite ramp: hairline grid, muted 11px axis labels. The equity line
+// carries gain/loss; everything else is a zinc step.
+const DARK_GRID   = 'rgba(255,255,255,0.05)'
+const AXIS_COLOR  = '#71717a'
+const AXIS_LABEL  = { colors: AXIS_COLOR, fontSize: '11px', fontFamily: 'inherit' }
+const CROSSHAIR   = { show: true, stroke: { color: 'rgba(237,237,237,0.28)', width: 1, dashArray: 3 } }
+const GAIN_HEX    = '#4cc38a'
+const LOSS_HEX    = '#e5484d'
+const PRICE_HEX   = '#b4b4b8'
 
 const baseChartOpts = {
   theme: { mode: 'dark' },
-  chart: { background: 'transparent', toolbar: { show: false }, animations: { enabled: false } },
-  grid:  { borderColor: DARK_GRID, strokeDashArray: 3 },
-  legend: { labels: { colors: '#94a3b8' } },
+  chart: { background: 'transparent', fontFamily: 'Inter, sans-serif', toolbar: { show: false }, animations: { enabled: false }, parentHeightOffset: 0 },
+  grid:  { borderColor: DARK_GRID, strokeDashArray: 0, xaxis: { lines: { show: false } }, padding: { left: 4, right: 8, top: 0, bottom: 0 } },
+  legend: { labels: { colors: '#a1a1aa' } },
 }
 
 // Scrubbing state for portfolio chart
@@ -430,6 +447,14 @@ const portfolioSeries = computed(() => {
   }]
 })
 
+// The equity line is the money: green when the run is up on its start, red when down.
+const portfolioLineColor = computed(() => {
+  const start = Number(summary.value?.portfolio_start_value)
+  const end   = Number(summary.value?.portfolio_end_value)
+  const up = Number.isFinite(start) && Number.isFinite(end) ? end >= start : Number(summary.value?.pnl ?? 0) >= 0
+  return up ? GAIN_HEX : LOSS_HEX
+})
+
 const portfolioOpts = computed(() => ({
   ...baseChartOpts,
   chart: {
@@ -452,13 +477,26 @@ const portfolioOpts = computed(() => ({
       },
     },
   },
-  stroke:  { curve: 'smooth', width: 2.5 },
-  fill:    { type: 'gradient', gradient: { shadeIntensity: 1, opacityFrom: 0.3, opacityTo: 0.03 } },
-  colors:  ['#38bdf8'],
+  stroke:  { curve: 'smooth', width: 2 },
+  // A faint same-hue fade under the P&L line, as on the dashboard hero.
+  fill:    {
+    type: 'gradient',
+    gradient: {
+      colorStops: [
+        { offset: 0,   color: portfolioLineColor.value, opacity: 0.12 },
+        { offset: 100, color: portfolioLineColor.value, opacity: 0 },
+      ],
+    },
+  },
+  colors:  [portfolioLineColor.value],
+  markers: { size: 0, strokeWidth: 0, hover: { size: 4 } },
   xaxis:   {
     type: 'datetime',
-    labels: { style: { colors: AXIS_COLOR } },
-    crosshairs: { show: true, stroke: { color: '#38bdf8', width: 1, dashArray: 3 } },
+    labels: { style: AXIS_LABEL },
+    axisBorder: { show: false },
+    axisTicks: { show: false },
+    crosshairs: CROSSHAIR,
+    tooltip: { enabled: false },
   },
   yaxis:   {
     // forceNiceScale + decimalsInFloat are CORE options applied on every
@@ -469,7 +507,7 @@ const portfolioOpts = computed(() => ({
     decimalsInFloat: 0,
     labels: {
       formatter: v => '$' + Number(v).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 }),
-      style: { colors: AXIS_COLOR },
+      style: AXIS_LABEL,
     },
   },
   dataLabels: { enabled: false },
@@ -482,9 +520,9 @@ const portfolioOpts = computed(() => ({
   annotations: summary.value?.portfolio_start_value != null ? {
     yaxis: [{
       y: summary.value.portfolio_start_value,
-      borderColor: '#475569',
-      strokeDashArray: 4,
-      label: { text: 'Start', style: { color: '#94a3b8', background: 'transparent' } },
+      borderColor: 'rgba(237,237,237,0.28)',
+      strokeDashArray: 2,
+      label: { text: 'Start', borderWidth: 0, style: { color: AXIS_COLOR, background: 'transparent', fontSize: '11px' } },
     }],
   } : {},
 }))
@@ -523,25 +561,27 @@ function stockOpts(sym) {
       id: 'stock-' + sym,
       zoom: { enabled: true, type: 'x' },
     },
-    // stroke width 0 for Buy/Sell hides the connecting line, leaving only markers
-    stroke:  { width: [2, 0, 0], curve: 'smooth' },
+    // stroke width 0 for Buy/Sell hides the connecting line, leaving only markers.
+    // Price is a plain zinc line (no fill); buys and sells are gain/loss dots
+    // with a ring in the card colour so they sit crisply on the line.
+    stroke:  { width: [1.5, 0, 0], curve: 'smooth' },
     fill:    {
-      type: ['gradient', 'solid', 'solid'],
-      gradient: { shadeIntensity: 1, opacityFrom: 0.18, opacityTo: 0.01 },
-      opacity: [1, 0, 0],
+      type: ['solid', 'solid', 'solid'],
+      opacity: [0, 0, 0],
     },
     markers: {
-      size:         [0, 6, 6],
+      size:         [0, 5, 5],
       shape:        ['circle', 'circle', 'circle'],
-      strokeWidth:  [0, 4, 4],
-      strokeColors: ['transparent', '#34d39940', '#f8717140'],
+      strokeWidth:  [0, 2, 2],
+      strokeColors: ['transparent', '#161617', '#161617'],
       fillOpacity:  1,
-      hover:        { sizeOffset: 2 },
+      hover:        { sizeOffset: 1 },
     },
-    colors:  ['#0ea5e9', '#34d399', '#f87171'],
-    xaxis:   { type: 'datetime', labels: { style: { colors: AXIS_COLOR } },
-               crosshairs: { show: true, stroke: { color: '#475569', width: 1, dashArray: 3 } } },
-    yaxis:   { forceNiceScale: true, decimalsInFloat: 2, labels: { formatter: v => '$' + Number(v).toFixed(2), style: { colors: AXIS_COLOR } } },
+    colors:  [PRICE_HEX, GAIN_HEX, LOSS_HEX],
+    legend:  { show: false },
+    xaxis:   { type: 'datetime', labels: { style: AXIS_LABEL }, axisBorder: { show: false }, axisTicks: { show: false },
+               crosshairs: CROSSHAIR },
+    yaxis:   { forceNiceScale: true, decimalsInFloat: 2, labels: { formatter: v => '$' + Number(v).toFixed(2), style: AXIS_LABEL } },
     tooltip: {
       shared: true,
       intersect: false,
@@ -549,7 +589,7 @@ function stockOpts(sym) {
       y: { formatter: (v, { seriesIndex }) => {
         if (v == null) return undefined
         const labels = ['Price', 'Buy', 'Sell']
-        return `<span style="color:${['#38bdf8','#34d399','#f87171'][seriesIndex]}">${labels[seriesIndex] ?? ''}</span> $${Number(v).toFixed(2)}`
+        return `<span style="color:${[PRICE_HEX, GAIN_HEX, LOSS_HEX][seriesIndex]}">${labels[seriesIndex] ?? ''}</span> $${Number(v).toFixed(2)}`
       }},
     },
   }
@@ -573,11 +613,13 @@ function decisionLabel(decision, action) {
   return ({ 1: 'BUY', 0: 'HOLD', '-1': 'SELL' })[String(decision)] || 'HOLD'
 }
 
+// Decision as a dot and a word: buy and sell are trade directions in
+// gain/loss, hold is a grey step.
 function decisionBadgeClass(decision, action) {
   const label = decisionLabel(decision, action)
-  if (label === 'BUY') return 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-  if (label === 'SELL') return 'bg-red-500/10 text-red-400 border border-red-500/20'
-  return 'bg-slate-500/10 text-slate-300 border border-slate-500/20'
+  if (label === 'BUY') return 'bg-gain'
+  if (label === 'SELL') return 'bg-loss'
+  return 'bg-slate-600'
 }
 
 function fmtWeight(weight) {
@@ -652,11 +694,11 @@ function parseLine(line) {
 
 function logLevelClass(line) {
   const l = line.toLowerCase()
-  if (l.includes('error') || l.includes('fail') || l.includes('exception')) return 'text-red-400'
+  if (l.includes('error') || l.includes('fail') || l.includes('exception')) return 'text-loss'
   if (l.includes('warn') || l.includes('yellow') || l.includes('skip')) return 'text-amber-400'
-  if (l.includes('success') || l.includes('finished') || l.includes('profit') || l.includes('passed')) return 'text-emerald-400'
-  if (l.includes('broker')) return 'text-sky-300'
-  return 'text-slate-300'
+  if (l.includes('success') || l.includes('finished') || l.includes('profit') || l.includes('passed')) return 'text-slate-100'
+  if (l.includes('broker')) return 'text-slate-300'
+  return 'text-slate-400'
 }
 
 function copyLogs() {
@@ -776,410 +818,387 @@ function onLogScroll(e) {
 }
 </script>
 
+
 <template>
   <AppShell>
-    <main class="flex-1 px-4 py-6 sm:px-6 lg:px-8 lg:py-10 max-w-7xl">
+    <main class="ui-page">
 
       <!-- Breadcrumb -->
-      <div class="flex items-center gap-2 text-sm text-slate-500 mb-6">
-        <button @click="router.push(fromPath)" class="hover:text-primary transition-colors flex items-center gap-1">
+      <nav class="flex items-center gap-1 text-sm text-slate-500 -ml-3 mb-4" aria-label="Breadcrumb">
+        <button @click="router.push(fromPath)" class="ui-btn-ghost px-3">
           <span class="material-symbols-outlined text-[16px]">arrow_back</span>
           Back
         </button>
-        <span>/</span>
-        <span class="text-slate-300">Backtest #{{ btId }}</span>
-      </div>
+        <span class="text-slate-600" aria-hidden="true">/</span>
+        <span class="px-2 text-slate-400 tabular-nums">Backtest #{{ btId }}</span>
+      </nav>
 
       <!-- Loading -->
-      <div v-if="loading" class="flex items-center gap-3 text-slate-400 text-sm">
-        <span class="material-symbols-outlined animate-spin text-xl">progress_activity</span>
-        Loading backtest...
+      <div v-if="loading" aria-hidden="true">
+        <div class="ui-skel h-7 w-56"></div>
+        <div class="ui-skel h-4 w-72 mt-3"></div>
+        <div class="h-[132px] rounded-xl bg-surface mt-8"></div>
+        <div class="h-[240px] rounded-xl bg-surface mt-12"></div>
       </div>
 
       <!-- Error -->
-      <div v-else-if="error" class="rounded-xl bg-red-500/10 border border-red-500/20 px-5 py-4 text-red-400 text-sm">
+      <div v-else-if="error" class="ui-error">
         {{ error }}
       </div>
 
       <template v-else-if="summary">
 
         <!-- ── Header ────────────────────────────────────────────────────────── -->
-        <div class="flex flex-wrap items-start justify-between gap-4 mb-8">
-          <div class="flex items-center gap-4 min-w-0">
-            <div class="size-12 rounded-2xl bg-surface border border-border-subtle flex items-center justify-center shrink-0">
-              <span class="material-symbols-outlined text-sky-400 text-2xl">analytics</span>
-            </div>
-            <div class="min-w-0">
-              <div class="flex items-center gap-2 flex-wrap">
-                <h1 class="text-2xl font-bold">Backtest #{{ btId }}</h1>
-                <span class="px-2 py-0.5 rounded border text-xs font-bold uppercase" :class="statusClass(currentStatus)">
-                  {{ currentStatus }}
-                </span>
-              </div>
-              <p class="text-xs text-slate-500 mt-0.5">
-                {{ summary.start_date }} → {{ summary.end_date }}
-                <span v-if="tickers.length" class="ml-2 font-mono">{{ tickers.join(', ') }}</span>
-              </p>
-            </div>
+        <header class="flex flex-wrap items-end justify-between gap-x-6 gap-y-4">
+          <div class="min-w-0">
+            <h1 class="ui-page-title tabular-nums">Backtest #{{ btId }}</h1>
+            <p class="ui-page-sub flex flex-wrap items-center gap-x-2 gap-y-1">
+              <span class="inline-flex items-center gap-1.5 text-slate-300">
+                <span class="ui-dot" :class="statusUi(currentStatus).dot"></span>
+                {{ statusUi(currentStatus).label }}
+              </span>
+              <span class="text-slate-600" aria-hidden="true">·</span>
+              <span class="tabular-nums">{{ summary.start_date }} → {{ summary.end_date }}</span>
+              <template v-if="tickers.length">
+                <span class="text-slate-600" aria-hidden="true">·</span>
+                <span>{{ tickers.join(', ') }}</span>
+              </template>
+            </p>
           </div>
 
           <!-- Action controls -->
-          <div class="flex items-center gap-2 shrink-0 flex-wrap">
+          <div class="flex items-center gap-2 flex-wrap">
             <!-- Pause (only when running) -->
             <button
               v-if="currentStatus.toLowerCase() === 'running'"
               @click="openConfirm('pause')"
-              class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-zinc-300 hover:bg-zinc-500/10 border border-zinc-500/20 transition-colors"
-            >
-              <span class="material-symbols-outlined text-[15px]">pause_circle</span>
-              Pause
-            </button>
-            <!-- Resume (only when paused) -->
+              class="ui-btn"
+            >Pause</button>
+            <!-- Resume (when paused, by hand or by an LLM failure) -->
             <button
-              v-if="currentStatus.toLowerCase() === 'paused'"
+              v-if="['paused','paused_llm_critical'].includes(currentStatus.toLowerCase())"
               @click="openConfirm('resume')"
-              class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-sky-400 hover:bg-sky-500/10 border border-sky-500/20 transition-colors"
-            >
-              <span class="material-symbols-outlined text-[15px]">play_circle</span>
-              Resume
-            </button>
-            <!-- Stop (when running or paused) -->
+              class="ui-btn"
+            >Resume</button>
+            <!-- Stop (when running, paused or waiting), as on the list -->
             <button
-              v-if="['running','paused','queued'].includes(currentStatus.toLowerCase())"
+              v-if="['running','queued','pending','paused','paused_llm_critical'].includes(currentStatus.toLowerCase())"
               @click="openConfirm('stop')"
-              class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-red-400 hover:bg-red-500/10 border border-red-500/20 transition-colors"
-            >
-              <span class="material-symbols-outlined text-[15px]">stop_circle</span>
-              Stop
-            </button>
+              class="ui-btn text-loss"
+            >Stop</button>
             <!-- Rerun -->
             <button
               v-if="summary"
               @click="openConfirm('rerun')"
-              class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-emerald-400 hover:bg-emerald-500/10 border border-emerald-500/20 transition-colors"
-            >
-              <span class="material-symbols-outlined text-[15px]">replay</span>
-              Rerun
-            </button>
-            <!-- Live Playback -->
+              class="ui-btn"
+            >Rerun</button>
+            <!-- Live playback -->
             <button
               v-if="summary"
               @click="router.push({ name: 'backtest-playback', params: { id: btId } })"
-              class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-amber-400 hover:bg-amber-500/10 border border-amber-500/20 transition-colors"
-            >
-              <span class="material-symbols-outlined text-[15px]">movie</span>
-              Live Playback
-            </button>
+              class="ui-btn"
+            >Live playback</button>
             <!-- Delete -->
             <button
               v-if="summary"
               @click="openConfirm('delete')"
-              class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-red-400 hover:bg-red-500/10 border border-red-500/20 transition-colors"
-            >
-              <span class="material-symbols-outlined text-[15px]">delete_forever</span>
-              Delete
-            </button>
+              class="ui-btn text-loss"
+            >Delete</button>
           </div>
 
           <!-- Running: progress bar -->
-          <div v-if="progress != null && ['running','queued','pending'].includes(currentStatus.toLowerCase())" class="shrink-0 w-48">
-            <div class="flex items-center justify-between text-xs text-slate-400 mb-1">
+          <div v-if="progress != null && ['running','queued','pending'].includes(currentStatus.toLowerCase())" class="w-full">
+            <div class="flex items-center justify-between text-xs text-slate-500 mb-2">
               <span>Progress</span>
-              <span class="font-mono font-semibold">{{ Math.round(progress) }}%</span>
+              <span class="text-slate-300 tabular-nums">{{ Math.round(progress) }}%</span>
             </div>
-            <div class="h-2 bg-surface rounded-full overflow-hidden">
-              <div
-                class="h-full bg-sky-400 rounded-full transition-all duration-500"
-                :style="{ width: Math.min(100, Math.max(0, progress)) + '%' }"
-              ></div>
+            <div class="bar-track h-1">
+              <span class="bar-fill bg-slate-300" :style="{ transform: `scaleX(${Math.min(100, Math.max(0, progress)) / 100})` }"></span>
             </div>
           </div>
-        </div>
+        </header>
 
         <!-- ── LLM-critical pause banner ────────────────────────────────────── -->
-        <BacktestLLMPauseBanner :summary="summary" />
+        <BacktestLLMPauseBanner class="mt-8" :summary="summary" />
 
-        <!-- ── Nexus Lookback Training Banner ───────────────────────────────── -->
-        <div
+        <!-- ── Nexus lookback training ───────────────────────────────────────── -->
+        <section
           v-if="nexusLookback"
-          class="mb-6 rounded-2xl border border-zinc-500/30 bg-zinc-500/5 px-5 py-4"
+          class="mt-8 ui-card px-5 py-4"
+          aria-label="Nexus lookback training"
         >
-          <div class="flex items-center gap-2 mb-3">
-            <span class="material-symbols-outlined text-zinc-300 text-xl animate-pulse">hub</span>
-            <span class="font-semibold text-zinc-200 text-sm">Nexus Lookback Training</span>
-            <span class="ml-auto font-mono text-xs text-slate-400">
-              Day {{ nexusLookback.current }} / {{ nexusLookback.total }}
-            </span>
+          <div class="flex items-center justify-between gap-4">
+            <p class="text-sm font-medium text-slate-100">Nexus lookback training</p>
+            <p class="text-xs text-slate-400 tabular-nums">
+              Day {{ nexusLookback.current }} of {{ nexusLookback.total }}
+            </p>
           </div>
-          <div class="h-2 bg-surface rounded-full overflow-hidden mb-2">
-            <div
-              class="h-full bg-zinc-500 rounded-full transition-all duration-700"
-              :style="{ width: (nexusLookback.total > 0 ? Math.round(nexusLookback.current / nexusLookback.total * 100) : 0) + '%' }"
-            ></div>
+          <div class="bar-track h-1 mt-3">
+            <span class="bar-fill bg-slate-300" :style="{ transform: `scaleX(${nexusLookback.total > 0 ? nexusLookback.current / nexusLookback.total : 0})` }"></span>
           </div>
-          <div class="flex items-center justify-between text-[11px] text-slate-500 font-mono">
+          <div class="mt-2 flex items-center justify-between text-xs text-slate-500 tabular-nums">
             <span>{{ nexusLookback.start_date }}</span>
-            <span class="text-zinc-300 font-semibold">▶ {{ nexusLookback.current_date }}</span>
+            <span class="text-slate-300">{{ nexusLookback.current_date }}</span>
             <span>{{ nexusLookback.end_date }}</span>
           </div>
-          <p class="mt-2 text-[11px] text-slate-500">Building historical event context before trading begins. This runs once per scope.</p>
-        </div>
+          <p class="mt-3 text-xs text-slate-500">Building historical event context before trading begins. This runs once per scope.</p>
+        </section>
 
-        <!-- ── Stats grid ─────────────────────────────────────────────────────── -->
-        <div class="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-4 mb-8">
-          <div class="glass-card rounded-2xl p-4">
-            <p class="text-[10px] text-slate-500 uppercase tracking-widest mb-1">Total P&L</p>
-            <p class="text-xl font-bold font-mono" :class="pnlClass(summary.pnl)">{{ fmtPnl(summary.pnl) }}</p>
-          </div>
-          <div class="glass-card rounded-2xl p-4">
-            <p class="text-[10px] text-slate-500 uppercase tracking-widest mb-1">P&L %</p>
-            <p class="text-xl font-bold font-mono" :class="pnlClass(summary.pnl_percent)">{{ fmtPct(summary.pnl_percent) }}</p>
-          </div>
-          <div class="glass-card rounded-2xl p-4">
-            <p class="text-[10px] text-slate-500 uppercase tracking-widest mb-1">Portfolio</p>
-            <p class="text-sm font-mono text-slate-300">{{ fmtMoney(summary.portfolio_start_value) }}</p>
-            <p class="text-[10px] text-slate-500">→ <span class="font-mono" :class="pnlClass((summary.portfolio_end_value || 0) - (summary.portfolio_start_value || 0))">{{ fmtMoney(summary.portfolio_end_value) }}</span></p>
-          </div>
-          <div class="glass-card rounded-2xl p-4">
-            <p class="text-[10px] text-slate-500 uppercase tracking-widest mb-1">Trades</p>
-            <p class="text-xl font-bold text-slate-200">{{ summary.total_trades ?? '—' }}</p>
-            <p class="text-[10px] text-slate-500">{{ summary.total_buys ?? 0 }} buy / {{ summary.total_sells ?? 0 }} sell</p>
-          </div>
-          <div class="glass-card rounded-2xl p-4">
-            <p class="text-[10px] text-slate-500 uppercase tracking-widest mb-1">Elapsed</p>
-            <p class="text-xl font-bold text-slate-200 font-mono">{{ fmtElapsed(elapsedSeconds) }}</p>
-          </div>
-          <div class="glass-card rounded-2xl p-4">
-            <p class="text-[10px] text-slate-500 uppercase tracking-widest mb-1">Win Rate</p>
-            <p class="text-xl font-bold" :class="(summary.win_rate_percent || 0) >= 50 ? 'text-emerald-400' : 'text-red-400'">
-              {{ summary.win_rate_percent != null ? summary.win_rate_percent.toFixed(1) + '%' : '—' }}
+        <!-- ── Results ───────────────────────────────────────────────────────── -->
+        <section class="mt-8 ui-card grid grid-cols-1 lg:grid-cols-[minmax(240px,1fr)_minmax(0,2.6fr)]" aria-label="Results">
+          <div class="px-5 py-5 border-b border-white/[0.06] lg:border-b-0 lg:border-r">
+            <p class="ui-label">Total P&amp;L</p>
+            <p class="mt-3 text-[32px] leading-none font-medium tabular-nums" :class="pnlClass(summary.pnl)">{{ fmtPnl(summary.pnl) }}</p>
+            <p class="mt-3 text-sm tabular-nums">
+              <span :class="pnlClass(summary.pnl_percent)">{{ fmtPct(summary.pnl_percent) }}</span>
+              <span class="text-slate-500 ml-1.5">return</span>
             </p>
-            <p class="text-[10px] text-slate-500">{{ summary.winning_round_trips ?? 0 }}W / {{ summary.losing_round_trips ?? 0 }}L</p>
           </div>
-          <div class="glass-card rounded-2xl p-4">
-            <p class="text-[10px] text-slate-500 uppercase tracking-widest mb-1">Portfolio High</p>
-            <p class="text-sm font-mono text-emerald-400">{{ fmtMoney(summary.portfolio_value_high) }}</p>
-            <p class="text-[10px] text-slate-500">Low: <span class="font-mono text-red-400">{{ fmtMoney(summary.portfolio_value_low) }}</span></p>
-          </div>
-        </div>
+          <dl class="px-5 py-5 grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-5 gap-x-6 gap-y-5">
+            <div>
+              <dt class="stat-label">Portfolio</dt>
+              <dd class="stat-value text-slate-100">{{ fmtMoney(summary.portfolio_end_value) }}</dd>
+              <dd class="stat-sub">from {{ fmtMoney(summary.portfolio_start_value) }}</dd>
+            </div>
+            <div>
+              <dt class="stat-label">Trades</dt>
+              <dd class="stat-value text-slate-100">{{ summary.total_trades ?? '—' }}</dd>
+              <dd class="stat-sub">{{ summary.total_buys ?? 0 }} buy · {{ summary.total_sells ?? 0 }} sell</dd>
+            </div>
+            <div>
+              <dt class="stat-label">Elapsed</dt>
+              <dd class="stat-value text-slate-100">{{ fmtElapsed(elapsedSeconds) }}</dd>
+            </div>
+            <div>
+              <dt class="stat-label">Win rate</dt>
+              <dd class="stat-value text-slate-100">
+                {{ summary.win_rate_percent != null ? summary.win_rate_percent.toFixed(1) + '%' : '—' }}
+              </dd>
+              <dd class="stat-sub">{{ summary.winning_round_trips ?? 0 }}W · {{ summary.losing_round_trips ?? 0 }}L</dd>
+            </div>
+            <div>
+              <dt class="stat-label">Portfolio high</dt>
+              <dd class="stat-value text-slate-100">{{ fmtMoney(summary.portfolio_value_high) }}</dd>
+              <dd class="stat-sub">Low {{ fmtMoney(summary.portfolio_value_low) }}</dd>
+            </div>
+          </dl>
+        </section>
 
         <!-- ── TR scorecard: vs S&P 500 by market type ───────────────────────── -->
-        <section v-if="trScorecard" class="glass-card rounded-2xl overflow-hidden mb-6 border border-border-subtle">
-          <div class="px-5 py-4 border-b border-border-subtle flex items-center gap-3">
-            <div class="size-9 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center shrink-0">
-              <span class="material-symbols-outlined text-primary text-lg">query_stats</span>
-            </div>
-            <div class="min-w-0 flex-1">
-              <p class="text-sm font-semibold text-slate-200">vs S&amp;P 500 by market type</p>
-              <p v-if="trScorecard.cutoff" class="text-[11px] text-slate-500">AI training cutoff: {{ trScorecard.cutoff }}</p>
-            </div>
+        <section v-if="trScorecard" class="mt-12" aria-labelledby="tr-title">
+          <div class="mb-3">
+            <h2 id="tr-title" class="ui-section-title">vs S&amp;P 500 by market type</h2>
+            <p v-if="trScorecard.cutoff" class="ui-section-sub tabular-nums">AI training cutoff: {{ trScorecard.cutoff }}</p>
           </div>
-          <p v-if="trScorecard.error" class="px-5 py-4 text-sm text-amber-400">{{ trScorecard.error }}</p>
-          <template v-else>
-            <div class="overflow-x-auto">
-              <table class="w-full text-xs">
-                <thead>
-                  <tr class="border-b border-border-subtle text-left">
-                    <th class="px-4 py-3 text-slate-500 font-semibold">Period</th>
-                    <th class="px-4 py-3 text-slate-500 font-semibold text-right">Return/yr</th>
-                    <th class="px-4 py-3 text-slate-500 font-semibold text-right">S&amp;P/yr</th>
-                    <th class="px-4 py-3 text-slate-500 font-semibold text-right">Difference</th>
-                    <th class="px-4 py-3 text-slate-500 font-semibold text-right">Worst drop</th>
-                    <th class="px-4 py-3 text-slate-500 font-semibold text-right">S&amp;P worst drop</th>
-                    <th class="px-4 py-3 text-slate-500 font-semibold text-right">Beat S&amp;P in all market types</th>
-                    <th class="px-4 py-3 text-slate-500 font-semibold text-right">+5 pts/yr target</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="p in trScorecard.periods" :key="p.key" class="border-b border-border-subtle/50">
-                    <td class="px-4 py-3 text-slate-200">
-                      <p class="font-semibold">{{ p.label }}</p>
-                      <p v-if="p.dates" class="text-[10px] text-slate-500 font-mono">{{ p.dates }}</p>
-                    </td>
-                    <td class="px-4 py-3 text-right font-mono text-slate-200">{{ p.cells.cagr }}</td>
-                    <td class="px-4 py-3 text-right font-mono text-slate-400">{{ p.cells.spyCagr }}</td>
-                    <td class="px-4 py-3 text-right font-mono font-semibold" :class="TR_TONE[p.diffTone]">{{ p.cells.diff }}</td>
-                    <td class="px-4 py-3 text-right font-mono text-slate-200">{{ p.cells.maxDd }}</td>
-                    <td class="px-4 py-3 text-right font-mono text-slate-400">{{ p.cells.spyMaxDd }}</td>
-                    <td class="px-4 py-3 text-right font-semibold" :class="TR_TONE[p.allRegimes.tone]">{{ p.allRegimes.label }}</td>
-                    <td class="px-4 py-3 text-right font-semibold" :class="TR_TONE[p.plus5.tone]">{{ p.plus5.label }}</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-            <div v-for="p in trScorecard.periods" v-show="!p.untested" :key="`w-${p.key}`" class="px-5 py-4 border-t border-border-subtle">
-              <p class="text-sm font-semibold text-slate-200 mb-2">{{ p.label }}</p>
-              <p v-for="(line, i) in p.random" :key="`r-${i}`" class="text-[11px] text-slate-400">{{ line }}</p>
-              <div v-if="p.windows.length" class="overflow-x-auto mt-2">
-                <table class="w-full text-xs">
+          <div class="ui-card overflow-hidden">
+            <p v-if="trScorecard.error" class="px-5 py-4 text-sm text-slate-400 flex items-center gap-2">
+              <span class="ui-dot ui-dot-warn" aria-hidden="true"></span>{{ trScorecard.error }}
+            </p>
+            <template v-else>
+              <div class="overflow-x-auto">
+                <table class="w-full min-w-[880px] text-sm">
                   <thead>
-                    <tr class="border-b border-border-subtle text-left">
-                      <th class="px-3 py-2 text-slate-500 font-semibold">Market type</th>
-                      <th class="px-3 py-2 text-slate-500 font-semibold">Dates</th>
-                      <th class="px-3 py-2 text-slate-500 font-semibold text-right">Strategy</th>
-                      <th class="px-3 py-2 text-slate-500 font-semibold text-right">S&amp;P</th>
-                      <th class="px-3 py-2 text-slate-500 font-semibold text-right">Beat?</th>
+                    <tr class="border-b border-white/[0.06] text-left text-xs text-slate-500">
+                      <th class="h-10 pl-5 pr-3 font-normal">Period</th>
+                      <th class="h-10 px-3 font-normal text-right">Return/yr</th>
+                      <th class="h-10 px-3 font-normal text-right">S&amp;P/yr</th>
+                      <th class="h-10 px-3 font-normal text-right">Difference</th>
+                      <th class="h-10 px-3 font-normal text-right">Worst drop</th>
+                      <th class="h-10 px-3 font-normal text-right">S&amp;P worst drop</th>
+                      <th class="h-10 px-3 font-normal text-right">Beat S&amp;P in all market types</th>
+                      <th class="h-10 pl-3 pr-5 font-normal text-right">+5 pts/yr target</th>
                     </tr>
                   </thead>
-                  <tbody>
-                    <tr v-for="(w, i) in p.windows" :key="`${i}-${w.key}`" class="border-b border-border-subtle/50">
-                      <td class="px-3 py-2 text-slate-200">{{ w.kind }}</td>
-                      <td class="px-3 py-2 font-mono text-slate-400">{{ w.dates }}</td>
-                      <td class="px-3 py-2 text-right font-mono text-slate-200">{{ w.strategy }}</td>
-                      <td class="px-3 py-2 text-right font-mono text-slate-400">{{ w.spy }}</td>
-                      <td class="px-3 py-2 text-right font-semibold" :class="TR_TONE[w.tone]">{{ w.beat }}</td>
+                  <tbody class="divide-y divide-white/[0.05]">
+                    <tr v-for="p in trScorecard.periods" :key="p.key">
+                      <td class="pl-5 pr-3 py-2.5">
+                        <p class="text-sm text-slate-100">{{ p.label }}</p>
+                        <p v-if="p.dates" class="text-xs text-slate-500 mt-0.5 tabular-nums">{{ p.dates }}</p>
+                      </td>
+                      <td class="px-3 py-2.5 text-right tabular-nums text-slate-200">{{ p.cells.cagr }}</td>
+                      <td class="px-3 py-2.5 text-right tabular-nums text-slate-400">{{ p.cells.spyCagr }}</td>
+                      <td class="px-3 py-2.5 text-right tabular-nums" :class="TR_TONE[p.diffTone]">{{ p.cells.diff }}</td>
+                      <td class="px-3 py-2.5 text-right tabular-nums text-slate-200">{{ p.cells.maxDd }}</td>
+                      <td class="px-3 py-2.5 text-right tabular-nums text-slate-400">{{ p.cells.spyMaxDd }}</td>
+                      <td class="px-3 py-2.5 text-right" :class="TR_TONE[p.allRegimes.tone]">{{ p.allRegimes.label }}</td>
+                      <td class="pl-3 pr-5 py-2.5 text-right" :class="TR_TONE[p.plus5.tone]">{{ p.plus5.label }}</td>
                     </tr>
                   </tbody>
                 </table>
               </div>
-              <p v-else class="text-[11px] text-slate-500 mt-1">No market-type windows fall inside this period.</p>
-            </div>
-            <ul v-if="trScorecard.notes.length" class="px-5 py-3 border-t border-border-subtle space-y-1">
-              <li v-for="(note, i) in trScorecard.notes" :key="`n-${i}`" class="text-[11px] text-slate-600 leading-snug">{{ note }}</li>
-            </ul>
-          </template>
+              <div v-for="p in trScorecard.periods" v-show="!p.untested" :key="`w-${p.key}`" class="px-5 py-4 border-t border-white/[0.06]">
+                <p class="text-sm text-slate-100">{{ p.label }}</p>
+                <p v-for="(line, i) in p.random" :key="`r-${i}`" class="text-xs text-slate-400 mt-1 tabular-nums">{{ line }}</p>
+                <div v-if="p.windows.length" class="overflow-x-auto mt-3 rounded-lg border border-white/[0.06]">
+                  <table class="w-full min-w-[560px] text-sm">
+                    <thead>
+                      <tr class="border-b border-white/[0.06] text-left text-xs text-slate-500">
+                        <th class="h-9 pl-4 pr-3 font-normal">Market type</th>
+                        <th class="h-9 px-3 font-normal">Dates</th>
+                        <th class="h-9 px-3 font-normal text-right">Strategy</th>
+                        <th class="h-9 px-3 font-normal text-right">S&amp;P</th>
+                        <th class="h-9 pl-3 pr-4 font-normal text-right">Beat?</th>
+                      </tr>
+                    </thead>
+                    <tbody class="divide-y divide-white/[0.05]">
+                      <tr v-for="(w, i) in p.windows" :key="`${i}-${w.key}`">
+                        <td class="h-10 pl-4 pr-3 text-slate-200">{{ w.kind }}</td>
+                        <td class="h-10 px-3 tabular-nums text-slate-400">{{ w.dates }}</td>
+                        <td class="h-10 px-3 text-right tabular-nums text-slate-200">{{ w.strategy }}</td>
+                        <td class="h-10 px-3 text-right tabular-nums text-slate-400">{{ w.spy }}</td>
+                        <td class="h-10 pl-3 pr-4 text-right" :class="TR_TONE[w.tone]">{{ w.beat }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <p v-else class="text-xs text-slate-500 mt-1">No market-type windows fall inside this period</p>
+              </div>
+              <ul v-if="trScorecard.notes.length" class="px-5 py-3 border-t border-white/[0.06] space-y-1">
+                <li v-for="(note, i) in trScorecard.notes" :key="`n-${i}`" class="text-xs text-slate-500 leading-5">{{ note }}</li>
+              </ul>
+            </template>
+          </div>
         </section>
 
         <!-- ── Fees (crypto backtests only) ──────────────────────────────────── -->
-        <section v-if="feeRows.length" class="glass-card rounded-2xl overflow-hidden mb-6 border border-border-subtle">
-          <div class="px-5 py-4 border-b border-border-subtle flex items-center gap-3">
-            <div class="size-9 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center shrink-0">
-              <span class="material-symbols-outlined text-primary text-lg">receipt_long</span>
+        <section v-if="feeRows.length" class="mt-12" aria-labelledby="fees-title">
+          <div class="mb-3 flex items-end justify-between gap-4">
+            <div>
+              <h2 id="fees-title" class="ui-section-title">Estimated fees per platform</h2>
+              <p class="ui-section-sub">Crypto</p>
             </div>
-            <div class="min-w-0 flex-1">
-              <p class="text-[11px] font-bold uppercase tracking-widest text-slate-500">Fees · crypto</p>
-              <p class="text-sm font-semibold text-slate-200">Estimated fees per platform</p>
-            </div>
-            <span v-if="feeEmulated"
-                  class="shrink-0 text-[10px] uppercase tracking-wide text-amber-400 border border-amber-500/40 bg-amber-500/10 rounded-full px-2 py-0.5"
-                  :title="`Fills were charged ${appliedVenueLabel} fees, not this instance's brokerage.`">
+            <span
+              v-if="feeEmulated"
+              class="shrink-0 inline-flex items-center gap-2 text-xs text-slate-400"
+              :title="`Fills were charged ${appliedVenueLabel} fees, not this instance's brokerage.`"
+            >
+              <span class="ui-dot ui-dot-warn" aria-hidden="true"></span>
               Emulated · {{ appliedVenueLabel }}
             </span>
           </div>
-          <div class="px-5 py-4">
-            <div class="flex items-center justify-between text-sm mb-3 pb-3 border-b border-border-subtle">
+          <div class="ui-card">
+            <div class="h-12 px-5 flex items-center justify-between text-sm border-b border-white/[0.06]">
               <span class="text-slate-400">Crypto volume traded</span>
-              <span class="text-slate-100 font-semibold tabular-nums">{{ fmtMoney(feeVolume) }}</span>
+              <span class="text-slate-100 tabular-nums">{{ fmtMoney(feeVolume) }}</span>
             </div>
-            <div class="space-y-2">
-              <div v-for="row in feeRows" :key="row.name" class="flex items-center gap-3 text-sm">
-                <span class="text-slate-200 flex-1 flex items-center gap-2 min-w-0">
-                  <span class="truncate">{{ row.name }}</span>
-                  <span v-if="row.applied" class="shrink-0 text-[10px] uppercase tracking-wide text-primary border border-primary/40 bg-primary/10 rounded-full px-1.5 py-0.5">applied</span>
+            <ul class="ui-rows">
+              <li v-for="row in feeRows" :key="row.name" class="h-12 px-5 flex items-center gap-4 text-sm">
+                <span class="flex-1 min-w-0 flex items-center gap-2">
+                  <span class="truncate" :class="row.applied ? 'text-slate-100' : 'text-slate-300'">{{ row.name }}</span>
+                  <span v-if="row.applied" class="shrink-0 text-xs text-slate-500">Applied</span>
                 </span>
                 <span class="text-slate-500 tabular-nums w-16 text-right">{{ (row.rate * 100).toFixed(2) }}%</span>
-                <span class="tabular-nums w-24 text-right font-semibold" :class="row.applied ? 'text-slate-100' : 'text-slate-400'">{{ fmtMoney(row.fee) }}</span>
-              </div>
-            </div>
-            <p class="text-[11px] text-slate-600 mt-3 leading-snug">
-              <template v-if="feeEmulated"><span class="text-amber-400">{{ appliedVenueLabel }}</span> fees were <b>emulated</b> here (not your instance's brokerage) — it's the “applied” row.</template>
-              <template v-else><span class="text-slate-400">{{ appliedVenueLabel }}</span> is the fee actually charged in this backtest.</template>
+                <span class="tabular-nums w-24 text-right" :class="row.applied ? 'text-slate-100' : 'text-slate-400'">{{ fmtMoney(row.fee) }}</span>
+              </li>
+            </ul>
+            <p class="px-5 py-3 border-t border-white/[0.06] text-xs text-slate-500 leading-5">
+              <template v-if="feeEmulated"><span class="text-slate-300">{{ appliedVenueLabel }}</span> fees were emulated here (not your instance's brokerage) — it's the “applied” row.</template>
+              <template v-else><span class="text-slate-300">{{ appliedVenueLabel }}</span> is the fee actually charged in this backtest.</template>
               Other venues are estimates at their listed taker rate (volume × rate) — actual tiers vary.
             </p>
           </div>
         </section>
 
         <!-- ── AI credits / LLM cost card ────────────────────────────────────── -->
-        <section class="glass-card rounded-2xl overflow-hidden mb-6 border border-border-subtle">
-          <div class="flex items-center justify-between gap-3 px-5 py-4 border-b border-border-subtle">
-            <div class="flex items-center gap-3 min-w-0">
-              <div class="size-8 rounded-xl bg-primary/10 border border-primary/20 flex items-center justify-center shrink-0">
-                <span class="material-symbols-outlined text-primary text-base">payments</span>
-              </div>
-              <div class="text-left min-w-0">
-                <p class="text-[10px] text-slate-500 uppercase tracking-widest mb-0.5">AI Credits</p>
-                <p class="text-sm font-semibold text-slate-200 truncate">LLM cost for this backtest</p>
-              </div>
+        <section class="mt-12" aria-labelledby="llm-cost-title">
+          <div class="mb-3 flex items-end justify-between gap-4">
+            <div class="min-w-0">
+              <h2 id="llm-cost-title" class="ui-section-title">LLM cost for this backtest</h2>
+              <p class="ui-section-sub">AI credits</p>
             </div>
             <button
               v-if="!llmCostLoading"
               @click="fetchLlmCost"
-              class="inline-flex items-center justify-center rounded-lg border border-border-subtle bg-surface/60 px-2 py-1 text-slate-400 transition-colors hover:bg-surface hover:text-slate-100"
+              class="ui-icon-btn"
               title="Refresh"
+              aria-label="Refresh LLM cost"
             >
-              <span class="material-symbols-outlined text-[16px]">refresh</span>
+              <span class="material-symbols-outlined text-[18px]">refresh</span>
             </button>
-            <span v-else class="material-symbols-outlined text-[18px] text-slate-400 animate-spin">refresh</span>
+            <span v-else class="size-8 inline-flex items-center justify-center text-slate-500" aria-label="Loading">
+              <span class="material-symbols-outlined text-[18px] animate-spin">refresh</span>
+            </span>
           </div>
-          <div v-if="llmCostError" class="px-5 py-4 text-sm text-rose-300">
-            {{ llmCostError }}
-          </div>
-          <div v-else-if="!llmCost && llmCostLoading" class="px-5 py-6 text-sm text-slate-500">
-            Loading…
-          </div>
-          <div v-else-if="!llmCost || !llmCost.total_calls" class="px-5 py-6 text-sm text-slate-500">
-            No LLM calls were attributed to this backtest. (Either the strategy ran with no LLM stages
-            enabled, or the backtest finished before the telemetry sink flushed.)
-          </div>
-          <div v-else>
-            <!-- Headline totals row -->
-            <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 px-5 py-4 border-b border-border-subtle">
-              <div>
-                <p class="text-[10px] text-slate-500 uppercase tracking-widest mb-1">Total cost</p>
-                <p class="text-2xl font-bold text-slate-100 font-mono">{{ fmtUsdCost(llmCost.total_cost_usd) }}</p>
-              </div>
-              <div>
-                <p class="text-[10px] text-slate-500 uppercase tracking-widest mb-1">Calls</p>
-                <p class="text-2xl font-bold text-slate-200 font-mono">{{ llmCost.total_calls }}</p>
-                <p class="text-[10px] text-slate-500">
-                  <span class="text-emerald-400">{{ llmCost.ok_calls }} ok</span>
-                  <span v-if="llmCost.failed_calls > 0"> · <span class="text-amber-300">{{ llmCost.failed_calls }} failed</span></span>
-                </p>
-              </div>
-              <div>
-                <p class="text-[10px] text-slate-500 uppercase tracking-widest mb-1">Input tokens</p>
-                <p class="text-2xl font-bold text-slate-200 font-mono">{{ fmtTokens(llmCost.total_input_tokens) }}</p>
-              </div>
-              <div>
-                <p class="text-[10px] text-slate-500 uppercase tracking-widest mb-1">Output tokens</p>
-                <p class="text-2xl font-bold text-slate-200 font-mono">{{ fmtTokens(llmCost.total_output_tokens) }}</p>
-                <p v-if="llmCost.total_reasoning_tokens > 0" class="text-[10px] text-slate-500">
-                  incl. {{ fmtTokens(llmCost.total_reasoning_tokens) }} reasoning
-                </p>
-              </div>
+          <div class="ui-card overflow-hidden">
+            <div v-if="llmCostError" class="px-5 py-4 text-sm text-loss">
+              {{ llmCostError }}
             </div>
-            <!-- Breakdown tables: model, stage, strategy -->
-            <div class="grid grid-cols-1 lg:grid-cols-3 gap-0 divide-x divide-border-subtle">
-              <div class="px-5 py-4">
-                <p class="text-[10px] text-slate-500 uppercase tracking-widest mb-3">By model</p>
-                <div class="space-y-2">
-                  <div
-                    v-for="row in llmCost.by_model.slice(0, 6)"
-                    :key="`m-${row.key}`"
-                    class="flex items-center justify-between gap-2 text-sm"
-                  >
-                    <span class="font-mono text-xs text-slate-300 truncate min-w-0">{{ row.key }}</span>
-                    <span class="text-slate-100 font-mono shrink-0">{{ fmtUsdCost(row.cost_usd) }}</span>
-                  </div>
-                  <p v-if="!llmCost.by_model.length" class="text-xs text-slate-500">No models recorded.</p>
+            <div v-else-if="!llmCost && llmCostLoading" class="px-5 py-5 grid grid-cols-2 sm:grid-cols-4 gap-6" aria-hidden="true">
+              <div v-for="n in 4" :key="n"><div class="ui-skel h-3 w-16"></div><div class="ui-skel h-6 w-20 mt-3"></div></div>
+            </div>
+            <div v-else-if="!llmCost || !llmCost.total_calls" class="px-5 py-6 text-sm text-slate-500">
+              No LLM calls were attributed to this backtest. (Either the strategy ran with no LLM stages
+              enabled, or the backtest finished before the telemetry sink flushed.)
+            </div>
+            <div v-else>
+              <!-- Headline totals row -->
+              <dl class="grid grid-cols-2 sm:grid-cols-4 gap-x-6 gap-y-5 px-5 py-5 border-b border-white/[0.06]">
+                <div>
+                  <dt class="ui-label">Total cost</dt>
+                  <dd class="mt-2 text-2xl font-medium text-slate-100 tabular-nums leading-none">{{ fmtUsdCost(llmCost.total_cost_usd) }}</dd>
                 </div>
-              </div>
-              <div class="px-5 py-4">
-                <p class="text-[10px] text-slate-500 uppercase tracking-widest mb-3">By call site</p>
-                <div class="space-y-2">
-                  <div
-                    v-for="row in llmCost.by_call_site.slice(0, 6)"
-                    :key="`c-${row.key}`"
-                    class="flex items-center justify-between gap-2 text-sm"
-                  >
-                    <span class="font-mono text-xs text-slate-300 truncate min-w-0">{{ row.key }}</span>
-                    <span class="text-slate-100 font-mono shrink-0">{{ fmtUsdCost(row.cost_usd) }}</span>
-                  </div>
-                  <p v-if="!llmCost.by_call_site.length" class="text-xs text-slate-500">No call sites recorded.</p>
+                <div>
+                  <dt class="ui-label">Calls</dt>
+                  <dd class="mt-2 text-xl font-medium text-slate-100 tabular-nums leading-none">{{ llmCost.total_calls }}</dd>
+                  <dd class="stat-sub">
+                    {{ llmCost.ok_calls }} ok<template v-if="llmCost.failed_calls > 0"> · <span class="text-amber-400">{{ llmCost.failed_calls }} failed</span></template>
+                  </dd>
                 </div>
-              </div>
-              <div class="px-5 py-4">
-                <p class="text-[10px] text-slate-500 uppercase tracking-widest mb-3">By provider</p>
-                <div class="space-y-2">
-                  <div
-                    v-for="row in llmCost.by_provider.slice(0, 6)"
-                    :key="`p-${row.key}`"
-                    class="flex items-center justify-between gap-2 text-sm"
-                  >
-                    <span class="font-mono text-xs text-slate-300 truncate min-w-0">{{ row.key }}</span>
-                    <span class="text-slate-100 font-mono shrink-0">{{ fmtUsdCost(row.cost_usd) }}</span>
-                  </div>
-                  <p v-if="!llmCost.by_provider.length" class="text-xs text-slate-500">No providers recorded.</p>
+                <div>
+                  <dt class="ui-label">Input tokens</dt>
+                  <dd class="mt-2 text-xl font-medium text-slate-100 tabular-nums leading-none">{{ fmtTokens(llmCost.total_input_tokens) }}</dd>
+                </div>
+                <div>
+                  <dt class="ui-label">Output tokens</dt>
+                  <dd class="mt-2 text-xl font-medium text-slate-100 tabular-nums leading-none">{{ fmtTokens(llmCost.total_output_tokens) }}</dd>
+                  <dd v-if="llmCost.total_reasoning_tokens > 0" class="stat-sub">
+                    incl. {{ fmtTokens(llmCost.total_reasoning_tokens) }} reasoning
+                  </dd>
+                </div>
+              </dl>
+              <!-- Breakdown tables: model, stage, strategy -->
+              <div class="grid grid-cols-1 lg:grid-cols-3 divide-y lg:divide-y-0 lg:divide-x divide-white/[0.06]">
+                <div class="px-5 py-4">
+                  <p class="ui-label mb-3">By model</p>
+                  <ul class="space-y-2">
+                    <li
+                      v-for="row in llmCost.by_model.slice(0, 6)"
+                      :key="`m-${row.key}`"
+                      class="flex items-center justify-between gap-3 text-sm"
+                    >
+                      <span class="text-slate-300 truncate min-w-0">{{ row.key }}</span>
+                      <span class="text-slate-100 tabular-nums shrink-0">{{ fmtUsdCost(row.cost_usd) }}</span>
+                    </li>
+                    <li v-if="!llmCost.by_model.length" class="text-xs text-slate-500">No models recorded</li>
+                  </ul>
+                </div>
+                <div class="px-5 py-4">
+                  <p class="ui-label mb-3">By call site</p>
+                  <ul class="space-y-2">
+                    <li
+                      v-for="row in llmCost.by_call_site.slice(0, 6)"
+                      :key="`c-${row.key}`"
+                      class="flex items-center justify-between gap-3 text-sm"
+                    >
+                      <span class="text-slate-300 truncate min-w-0">{{ row.key }}</span>
+                      <span class="text-slate-100 tabular-nums shrink-0">{{ fmtUsdCost(row.cost_usd) }}</span>
+                    </li>
+                    <li v-if="!llmCost.by_call_site.length" class="text-xs text-slate-500">No call sites recorded</li>
+                  </ul>
+                </div>
+                <div class="px-5 py-4">
+                  <p class="ui-label mb-3">By provider</p>
+                  <ul class="space-y-2">
+                    <li
+                      v-for="row in llmCost.by_provider.slice(0, 6)"
+                      :key="`p-${row.key}`"
+                      class="flex items-center justify-between gap-3 text-sm"
+                    >
+                      <span class="text-slate-300 truncate min-w-0">{{ row.key }}</span>
+                      <span class="text-slate-100 tabular-nums shrink-0">{{ fmtUsdCost(row.cost_usd) }}</span>
+                    </li>
+                    <li v-if="!llmCost.by_provider.length" class="text-xs text-slate-500">No providers recorded</li>
+                  </ul>
                 </div>
               </div>
             </div>
@@ -1187,149 +1206,138 @@ function onLogScroll(e) {
         </section>
 
         <!-- ── Strategy info ─────────────────────────────────────────────────── -->
-        <section v-if="strategyData" class="glass-card rounded-2xl overflow-hidden mb-6">
+        <section v-if="strategyData" class="mt-12 ui-card overflow-hidden">
           <!-- Clickable header -->
           <button
-            class="w-full flex items-center justify-between gap-4 px-5 py-4 hover:bg-white/[0.02] transition-colors"
+            class="w-full min-h-14 px-5 py-2 flex items-center justify-between gap-4 text-left hover:bg-white/[0.03] transition-colors duration-150 ease-out"
+            :aria-expanded="strategyOpen"
             @click="strategyOpen = !strategyOpen"
           >
-            <div class="flex items-center gap-3 min-w-0">
-              <div class="size-8 rounded-xl bg-primary/10 border border-primary/20 flex items-center justify-center shrink-0">
-                <span class="material-symbols-outlined text-primary text-base">schema</span>
-              </div>
-              <div class="text-left min-w-0">
-                <p class="text-[10px] text-slate-500 uppercase tracking-widest mb-0.5">Strategy</p>
-                <p class="text-sm font-semibold text-slate-200 truncate">{{ strategyData?.name || '—' }}</p>
-              </div>
-            </div>
-            <span class="material-symbols-outlined text-slate-500 text-[18px] shrink-0 transition-transform" :class="strategyOpen ? 'rotate-180' : ''">
+            <span class="min-w-0">
+              <span class="block text-sm text-slate-100 truncate">{{ strategyData?.name || '—' }}</span>
+              <span class="block text-xs text-slate-500 mt-0.5">Strategy</span>
+            </span>
+            <span class="material-symbols-outlined text-slate-500 text-[18px] shrink-0 transition-transform duration-150 ease-out" :class="strategyOpen ? 'rotate-180' : ''">
               expand_more
             </span>
           </button>
 
           <!-- Collapsible body -->
-          <div v-if="strategyOpen && strategyData" class="border-t border-border-subtle px-5 pb-5 pt-4 space-y-3">
-            <p v-if="strategyData.id" class="text-[10px] text-slate-600 font-mono -mt-1 mb-2">ID: {{ strategyData.id }}</p>
+          <div v-if="strategyOpen && strategyData" class="border-t border-white/[0.06] px-5 pt-4 pb-5">
+            <p v-if="strategyData.id" class="text-xs text-slate-500 tabular-nums mb-4">ID {{ strategyData.id }}</p>
 
-            <p class="text-[10px] font-bold uppercase tracking-widest text-slate-500">Sub-strategies</p>
-            <div
-              v-for="(sub, idx) in (strategyData.strategies || [])"
-              :key="idx"
-              class="rounded-xl border border-border-subtle bg-surface/40 p-4 space-y-3"
-            >
-              <!-- Sub-strategy header -->
-              <div class="flex items-center justify-between gap-3 flex-wrap">
-                <div class="flex items-center gap-2">
-                  <span class="size-5 rounded-md bg-primary/10 text-primary text-[10px] font-bold flex items-center justify-center border border-primary/20">
-                    {{ idx + 1 }}
-                  </span>
-                  <span class="text-sm font-semibold text-slate-100">{{ sub.strategy }}</span>
+            <p class="ui-label mb-2">Sub-strategies</p>
+            <div class="rounded-lg border border-white/[0.06] divide-y divide-white/[0.06]">
+              <div
+                v-for="(sub, idx) in (strategyData.strategies || [])"
+                :key="idx"
+                class="px-4 py-3"
+              >
+                <!-- Sub-strategy header -->
+                <div class="flex items-baseline justify-between gap-3 flex-wrap">
+                  <p class="flex items-baseline gap-3 min-w-0">
+                    <span class="text-xs text-slate-500 tabular-nums w-4">{{ idx + 1 }}</span>
+                    <span class="text-sm font-medium text-slate-100 truncate">{{ sub.strategy }}</span>
+                  </p>
+                  <p class="text-xs text-slate-400 tabular-nums flex flex-wrap items-center gap-x-2">
+                    <span>{{ (sub.weight * 100).toFixed(0) }}%</span>
+                    <template v-if="sub.execution_position != null"><span class="text-slate-600">·</span><span>pos {{ sub.execution_position }}</span></template>
+                    <template v-if="sub.decision_phase"><span class="text-slate-600">·</span><span>{{ sub.decision_phase }}</span></template>
+                    <template v-if="sub.execution_scope"><span class="text-slate-600">·</span><span>{{ sub.execution_scope }}</span></template>
+                  </p>
                 </div>
-                <div class="flex items-center gap-2 flex-wrap">
-                  <span class="px-2 py-0.5 rounded-md bg-surface border border-border-subtle text-xs font-mono text-slate-300">
-                    {{ (sub.weight * 100).toFixed(0) }}%
-                  </span>
-                  <span v-if="sub.execution_position != null" class="px-2 py-0.5 rounded-md bg-surface border border-border-subtle text-xs text-slate-400 font-mono">
-                    pos {{ sub.execution_position }}
-                  </span>
-                  <span v-if="sub.decision_phase" class="px-2 py-0.5 rounded-md bg-surface border border-border-subtle text-xs text-slate-400">
-                    {{ sub.decision_phase }}
-                  </span>
-                  <span v-if="sub.execution_scope" class="px-2 py-0.5 rounded-md bg-surface border border-border-subtle text-xs text-slate-400">
-                    {{ sub.execution_scope }}
-                  </span>
-                </div>
-              </div>
 
-              <!-- Config fields -->
-              <div v-if="Object.keys({ ...(sub.conditions || {}), ...(sub.config || {}) }).length" class="space-y-1.5">
-                <p class="text-[10px] uppercase tracking-wider text-slate-600 font-semibold">Config</p>
-                <div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                  <div
-                    v-for="(val, key) in { ...(sub.conditions || {}), ...(sub.config || {}) }"
-                    :key="key"
-                    class="rounded-lg bg-background-dark border border-border-subtle px-3 py-2"
-                  >
-                    <p class="text-[10px] text-slate-600 mb-0.5 truncate">{{ key }}</p>
-                    <p class="text-xs font-mono text-slate-300 truncate">{{ val === null ? 'null' : String(val) }}</p>
-                  </div>
+                <!-- Config fields -->
+                <div v-if="Object.keys({ ...(sub.conditions || {}), ...(sub.config || {}) }).length" class="mt-3 pl-7">
+                  <p class="text-xs text-slate-500 mb-2">Config</p>
+                  <dl class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-2">
+                    <div
+                      v-for="(val, key) in { ...(sub.conditions || {}), ...(sub.config || {}) }"
+                      :key="key"
+                      class="min-w-0"
+                    >
+                      <dt class="text-xs text-slate-500 truncate">{{ key }}</dt>
+                      <dd class="text-sm text-slate-200 tabular-nums truncate">{{ val === null ? 'null' : String(val) }}</dd>
+                    </div>
+                  </dl>
                 </div>
               </div>
-            </div>
 
-            <div v-if="!(strategyData.strategies || []).length" class="text-xs text-slate-600 italic">
-              No sub-strategies defined
+              <div v-if="!(strategyData.strategies || []).length" class="px-4 py-3 text-sm text-slate-500">
+                No sub-strategies defined
+              </div>
             </div>
           </div>
         </section>
 
         <!-- ── Logs ──────────────────────────────────────────────────────────── -->
-        <div class="glass-card rounded-2xl border border-border-subtle overflow-hidden mb-6">
+        <section class="ui-card overflow-hidden" :class="strategyData ? 'mt-3' : 'mt-12'">
           <!-- Header row (always visible) -->
-          <div class="flex items-center justify-between gap-3 px-4 py-3 bg-[#0d1117]">
-            <div class="flex items-center gap-2">
-              <span class="size-2 rounded-full" :class="logsOpen ? 'bg-emerald-400' : 'bg-slate-600'"></span>
-              <span class="text-xs font-semibold text-slate-300 font-mono">backtest-{{ btId }}.log</span>
-              <span v-if="logsData.length" class="text-[10px] text-slate-600 font-mono">{{ logsData.length }} lines</span>
-              <span v-if="logsSource === 'db'" class="text-[10px] text-amber-500/70 ml-1">(last 500 — no full log file)</span>
+          <div class="min-h-14 px-5 py-2 flex flex-wrap items-center justify-between gap-3">
+            <div class="min-w-0">
+              <p class="text-sm text-slate-100 truncate">backtest-{{ btId }}.log</p>
+              <p v-if="logsData.length || logsSource === 'db'" class="text-xs text-slate-500 mt-0.5 tabular-nums">
+                <template v-if="logsData.length">{{ logsData.length }} lines</template>
+                <template v-if="logsData.length && logsSource === 'db'"> · </template>
+                <template v-if="logsSource === 'db'">last 500 — no full log file</template>
+              </p>
             </div>
             <div class="flex items-center gap-1.5">
               <!-- Search (only when open) -->
               <input
                 v-if="logsOpen && logsData.length"
                 v-model="logsSearch"
-                placeholder="Search logs..."
-                class="w-36 sm:w-48 bg-[#161b22] border border-[#30363d] rounded px-2 py-0.5 text-[11px] text-slate-300 placeholder-slate-600 focus:outline-none focus:border-sky-500/50 font-mono"
+                placeholder="Search logs"
+                aria-label="Search logs"
+                class="ui-input h-8 w-36 sm:w-48 text-[13px]"
               />
               <!-- Copy -->
               <button
                 v-if="logsOpen && logsData.length"
                 @click="copyLogs"
-                class="inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] text-slate-400 hover:text-slate-200 hover:bg-white/5 transition-colors"
+                class="ui-btn-ghost"
                 title="Copy logs"
               >
-                <span class="material-symbols-outlined text-[13px]">content_copy</span>
+                <span class="material-symbols-outlined text-[16px]">content_copy</span>
                 <span class="hidden sm:inline">Copy</span>
               </button>
               <!-- Download -->
               <button
                 v-if="logsOpen && logsData.length"
                 @click="downloadLogs"
-                class="inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] text-slate-400 hover:text-slate-200 hover:bg-white/5 transition-colors"
+                class="ui-btn-ghost"
                 title="Download log file"
               >
-                <span class="material-symbols-outlined text-[13px]">download</span>
+                <span class="material-symbols-outlined text-[16px]">download</span>
                 <span class="hidden sm:inline">Download logs</span>
               </button>
               <!-- Toggle -->
               <button
                 @click="toggleLogs"
-                class="inline-flex items-center gap-1.5 px-3 py-1 rounded text-[11px] font-semibold border transition-colors"
-                :class="logsOpen
-                  ? 'border-sky-500/30 bg-sky-500/10 text-sky-400 hover:bg-sky-500/20'
-                  : 'border-border-subtle text-slate-400 hover:text-slate-200 hover:bg-surface'"
+                class="ui-btn"
+                :aria-expanded="logsOpen"
               >
-                <span class="material-symbols-outlined text-[13px]">{{ logsOpen ? 'visibility_off' : 'terminal' }}</span>
-                {{ logsOpen ? 'Hide Logs' : 'View Logs' }}
+                {{ logsOpen ? 'Hide logs' : 'View logs' }}
               </button>
             </div>
           </div>
 
           <!-- Log terminal body (visible when open) -->
-          <div v-if="logsOpen" class="bg-[#0d1117] border-t border-[#21262d]">
+          <div v-if="logsOpen" class="bg-background-dark border-t border-white/[0.06]">
             <!-- Loading -->
-            <div v-if="logsLoading" class="flex items-center gap-2 px-4 py-6 text-slate-500 text-xs font-mono">
-              <span class="material-symbols-outlined text-[14px] animate-spin">progress_activity</span>
-              Loading logs...
+            <div v-if="logsLoading" class="px-5 py-5 space-y-2" aria-hidden="true">
+              <div class="ui-skel h-3 w-3/5"></div>
+              <div class="ui-skel h-3 w-2/5"></div>
+              <div class="ui-skel h-3 w-1/2"></div>
             </div>
             <!-- Empty -->
-            <div v-else-if="logsData.length === 0" class="px-4 py-6 text-slate-600 text-xs font-mono italic">
-              No logs available for this backtest.
+            <div v-else-if="logsData.length === 0" class="px-5 py-6 text-sm text-slate-500">
+              No logs available for this backtest
             </div>
             <!-- Log lines (virtualized for large outputs) -->
             <div
               v-else
-              class="overflow-y-auto font-mono text-[11px] leading-5"
+              class="overflow-y-auto font-mono text-[11px] leading-5 py-1"
               style="max-height: 480px"
               @scroll="onLogScroll"
             >
@@ -1339,22 +1347,20 @@ function onLogScroll(e) {
                   <div
                     v-for="(line, idx) in virtualLogs.items"
                     :key="virtualLogs.startIdx + idx"
-                    class="flex items-start gap-0 group hover:bg-white/[0.03] border-l-2 border-transparent hover:border-sky-500/40"
+                    class="log-line flex items-start gap-0"
                   >
                     <template v-if="parseLine(line).time">
-                      <span class="shrink-0 w-36 px-3 py-0.5 text-[10px] text-slate-600 select-none whitespace-nowrap">
+                      <span class="shrink-0 w-36 pl-5 pr-3 py-0.5 text-slate-600 select-none whitespace-nowrap tabular-nums">
                         {{ parseLine(line).time.slice(5).replace(' ', ', ') }}
                       </span>
-                      <span class="shrink-0 w-12 px-1 py-0.5">
-                        <span class="inline-block px-1.5 py-px rounded text-[9px] font-bold bg-sky-500/15 text-sky-400 border border-sky-500/20 select-none">info</span>
-                      </span>
+                      <span class="shrink-0 w-12 px-1 py-0.5 text-slate-600 select-none">info</span>
                       <span class="flex-1 px-2 py-0.5 break-all" :class="logLevelClass(line)">
                         {{ parseLine(line).message }}
                       </span>
                     </template>
                     <template v-else>
                       <span class="shrink-0 w-48 select-none"></span>
-                      <span class="flex-1 px-2 py-0.5 break-all text-slate-500 italic">{{ line }}</span>
+                      <span class="flex-1 px-2 py-0.5 break-all text-slate-500">{{ line }}</span>
                     </template>
                   </div>
                 </div>
@@ -1364,84 +1370,80 @@ function onLogScroll(e) {
                 <div
                   v-for="(line, idx) in virtualLogs.items"
                   :key="idx"
-                  class="flex items-start gap-0 group hover:bg-white/[0.03] border-l-2 border-transparent hover:border-sky-500/40"
+                  class="log-line flex items-start gap-0"
                 >
                   <template v-if="parseLine(line).time">
-                    <span class="shrink-0 w-36 px-3 py-0.5 text-[10px] text-slate-600 select-none whitespace-nowrap">
+                    <span class="shrink-0 w-36 pl-5 pr-3 py-0.5 text-slate-600 select-none whitespace-nowrap tabular-nums">
                       {{ parseLine(line).time.slice(5).replace(' ', ', ') }}
                     </span>
-                    <span class="shrink-0 w-12 px-1 py-0.5">
-                      <span class="inline-block px-1.5 py-px rounded text-[9px] font-bold bg-sky-500/15 text-sky-400 border border-sky-500/20 select-none">info</span>
-                    </span>
+                    <span class="shrink-0 w-12 px-1 py-0.5 text-slate-600 select-none">info</span>
                     <span class="flex-1 px-2 py-0.5 break-all" :class="logLevelClass(line)">
                       {{ parseLine(line).message }}
                     </span>
                   </template>
                   <template v-else>
                     <span class="shrink-0 w-48 select-none"></span>
-                    <span class="flex-1 px-2 py-0.5 break-all text-slate-500 italic">{{ line }}</span>
+                    <span class="flex-1 px-2 py-0.5 break-all text-slate-500">{{ line }}</span>
                   </template>
                 </div>
               </template>
               <!-- No results for search -->
-              <div v-if="filteredLogs.length === 0 && logsSearch" class="px-4 py-4 text-slate-600 text-xs italic">
-                No lines match "{{ logsSearch }}"
+              <div v-if="filteredLogs.length === 0 && logsSearch" class="px-5 py-4 font-display text-sm text-slate-500">
+                No lines match “{{ logsSearch }}”
               </div>
             </div>
           </div>
-        </div>
+        </section>
 
 
         <!-- ── Portfolio value chart ─────────────────────────────────────────── -->
-        <section v-if="portfolioSeries[0].data.length" class="glass-card rounded-2xl p-5 mb-6">
+        <section v-if="portfolioSeries[0].data.length" class="mt-12" aria-labelledby="pv-title">
           <!-- Dashboard-style scrubbing header -->
-          <div class="flex items-end justify-between mb-1">
-            <p class="text-xs font-bold uppercase tracking-widest text-slate-500">Portfolio Value Over Time</p>
-            <p v-if="hoveredPortfolioDate" class="text-xs text-slate-500">
+          <div class="flex items-baseline justify-between gap-4">
+            <h2 id="pv-title" class="ui-section-title">Portfolio value over time</h2>
+            <p v-if="hoveredPortfolioDate" class="text-xs text-slate-500 tabular-nums">
               {{ new Date(hoveredPortfolioDate).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) }}
             </p>
           </div>
-          <div class="flex items-baseline gap-3 mb-5">
-            <p class="text-3xl font-bold font-mono text-white transition-all">
-              {{ fmtMoney(displayPortfolioValue) }}
-            </p>
-            <p v-if="displayPortfolioPnl != null" class="text-sm font-semibold font-mono transition-all" :class="pnlClass(displayPortfolioPnl)">
-              {{ fmtPnl(displayPortfolioPnl) }}
-              <span class="text-xs font-normal opacity-70 ml-0.5">vs start</span>
-            </p>
+          <p class="mt-4 text-[40px] leading-none font-medium tracking-[-0.02em] text-slate-100 tabular-nums">
+            {{ fmtMoney(displayPortfolioValue) }}
+          </p>
+          <p v-if="displayPortfolioPnl != null" class="mt-2 text-sm tabular-nums">
+            <span :class="pnlClass(displayPortfolioPnl)">{{ fmtPnl(displayPortfolioPnl) }}</span>
+            <span class="text-slate-500 ml-1.5">vs start</span>
+          </p>
+          <div class="chart mt-6 -ml-2">
+            <VueApexCharts type="area" height="300" :series="portfolioSeries" :options="portfolioOpts" />
           </div>
-          <VueApexCharts type="area" height="240" :series="portfolioSeries" :options="portfolioOpts" />
         </section>
 
         <!-- ── P&L per stock table ─────────────────────────────────────────── -->
-        <section v-if="tickers.length && summary.pnl_per_stock && Object.keys(summary.pnl_per_stock).length" class="glass-card rounded-2xl overflow-hidden mb-6">
-          <div class="px-5 py-4 border-b border-border-subtle">
-            <p class="text-xs font-bold uppercase tracking-widest text-slate-500">P&L per Stock</p>
-          </div>
-          <div class="overflow-x-auto">
-            <table class="w-full text-xs">
+        <section v-if="tickers.length && summary.pnl_per_stock && Object.keys(summary.pnl_per_stock).length" class="mt-12" aria-labelledby="pnl-stock-title">
+          <h2 id="pnl-stock-title" class="ui-section-title mb-3">P&amp;L per stock</h2>
+          <div class="ui-card overflow-x-auto">
+            <table class="w-full min-w-[520px] text-sm">
               <thead>
-                <tr class="border-b border-border-subtle text-left">
-                  <th class="px-4 py-3 text-slate-500 font-semibold uppercase tracking-wider">Stock</th>
-                  <th class="px-4 py-3 text-slate-500 font-semibold uppercase tracking-wider text-right">P&L</th>
-                  <th class="px-4 py-3 text-slate-500 font-semibold uppercase tracking-wider text-right">P&L %</th>
-                  <th class="px-4 py-3 text-slate-500 font-semibold uppercase tracking-wider text-right">Price Change</th>
+                <tr class="border-b border-white/[0.06] text-left text-xs text-slate-500">
+                  <th class="h-10 pl-5 pr-3 font-normal">Stock</th>
+                  <th class="h-10 px-3 font-normal text-right">P&amp;L</th>
+                  <th class="h-10 px-3 font-normal text-right">P&amp;L %</th>
+                  <th class="h-10 pl-3 pr-5 font-normal text-right">Price change</th>
                 </tr>
               </thead>
-              <tbody>
+              <tbody class="divide-y divide-white/[0.05]">
                 <tr
                   v-for="sym in tickers"
                   :key="sym"
-                  class="border-b border-border-subtle/50 hover:bg-surface/30 transition-colors"
+                  class="hover:bg-white/[0.03] transition-colors duration-150 ease-out"
                 >
-                  <td class="px-4 py-3 font-mono font-bold text-slate-200">{{ sym }}</td>
-                  <td class="px-4 py-3 text-right font-mono font-semibold" :class="pnlClass(summary.pnl_per_stock?.[sym])">
+                  <td class="h-14 pl-5 pr-3 font-medium text-slate-100">{{ sym }}</td>
+                  <td class="h-14 px-3 text-right tabular-nums" :class="pnlClass(summary.pnl_per_stock?.[sym])">
                     {{ fmtPnl(summary.pnl_per_stock?.[sym]) }}
                   </td>
-                  <td class="px-4 py-3 text-right font-mono" :class="pnlClass(summary.pnl_percent_per_stock?.[sym])">
+                  <td class="h-14 px-3 text-right tabular-nums" :class="pnlClass(summary.pnl_percent_per_stock?.[sym])">
                     {{ fmtPct(summary.pnl_percent_per_stock?.[sym]) }}
                   </td>
-                  <td class="px-4 py-3 text-right font-mono" :class="pnlClass(priceChangePct(summary.stock_price_change?.[sym]))">
+                  <td class="h-14 pl-3 pr-5 text-right tabular-nums text-slate-400">
                     {{ fmtPct(priceChangePct(summary.stock_price_change?.[sym])) }}
                   </td>
                 </tr>
@@ -1451,348 +1453,315 @@ function onLogScroll(e) {
         </section>
 
         <!-- ── Per-stock price charts + trade tables ─────────────────────────── -->
-        <template v-if="graphData && tickers.length">
+        <section v-if="graphData && tickers.length" class="mt-12" aria-labelledby="stock-charts-title">
           <!-- Expand / Collapse controls -->
-          <div class="flex items-center justify-between gap-3 mb-4">
-            <p class="text-xs font-bold uppercase tracking-widest text-slate-500">
-              Stock Charts &amp; Trades
-              <span class="text-slate-600 font-normal normal-case ml-1">({{ tickers.length }} stocks)</span>
-            </p>
+          <div class="flex items-end justify-between gap-3 mb-3">
+            <div>
+              <h2 id="stock-charts-title" class="ui-section-title">Stock charts and trades</h2>
+              <p class="ui-section-sub tabular-nums">{{ tickers.length }} stocks</p>
+            </div>
             <div class="flex items-center gap-2">
-              <button
-                @click="expandAllStocks"
-                class="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-medium text-slate-400 hover:text-slate-200 hover:bg-surface border border-border-subtle transition-colors"
-              >
-                <span class="material-symbols-outlined text-[13px]">unfold_more</span>
-                Expand All
-              </button>
+              <button @click="expandAllStocks" class="ui-btn">Expand all</button>
               <button
                 v-if="expandedStocks.size > 0"
                 @click="collapseAllStocks"
-                class="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-medium text-slate-400 hover:text-slate-200 hover:bg-surface border border-border-subtle transition-colors"
-              >
-                <span class="material-symbols-outlined text-[13px]">unfold_less</span>
-                Collapse All
-              </button>
+                class="ui-btn"
+              >Collapse all</button>
             </div>
           </div>
 
-          <section
-            v-for="sym in tickers"
-            :key="sym"
-            class="glass-card rounded-2xl overflow-hidden mb-4"
-          >
-            <!-- Clickable header (always visible) -->
-            <button
-              class="w-full px-5 py-4 flex items-center justify-between gap-3 hover:bg-white/[0.02] transition-colors cursor-pointer"
-              @click="toggleStock(sym)"
+          <div class="space-y-3">
+            <article
+              v-for="sym in tickers"
+              :key="sym"
+              class="ui-card overflow-hidden"
             >
-              <div class="flex items-center gap-3 min-w-0">
-                <span class="font-mono font-bold text-slate-100 text-sm">{{ sym }}</span>
-                <span class="text-xs" :class="pnlClass(summary.pnl_per_stock?.[sym])">
-                  {{ fmtPnl(summary.pnl_per_stock?.[sym]) }} ({{ fmtPct(summary.pnl_percent_per_stock?.[sym]) }})
-                </span>
-                <span class="text-[10px] text-slate-600 font-mono">
-                  {{ stockTrades(sym).length }} trades
-                </span>
-              </div>
-              <div class="flex items-center gap-3 shrink-0">
-                <div class="flex items-center gap-3 text-xs text-slate-500">
-                  <span class="flex items-center gap-1"><span class="size-2.5 rounded-full bg-emerald-400 inline-block"></span> Buy</span>
-                  <span class="flex items-center gap-1"><span class="size-2.5 rounded bg-red-400 inline-block"></span> Sell</span>
-                </div>
-                <span
-                  class="material-symbols-outlined text-slate-500 text-[18px] transition-transform duration-200"
-                  :class="expandedStocks.has(sym) ? 'rotate-180' : ''"
-                >expand_more</span>
-              </div>
-            </button>
-
-            <!-- Lazy-loaded content (only when expanded) -->
-            <template v-if="expandedStocks.has(sym)">
-              <!-- Price chart (lazy: waits for IntersectionObserver) -->
-              <div
-                class="px-5 py-4 border-t border-border-subtle"
-                :ref="(el) => onChartRef(el, sym)"
+              <!-- Clickable header (always visible) -->
+              <button
+                class="w-full min-h-14 px-5 py-2 flex items-center justify-between gap-3 text-left hover:bg-white/[0.03] transition-colors duration-150 ease-out"
+                :aria-expanded="expandedStocks.has(sym)"
+                @click="toggleStock(sym)"
               >
-                <template v-if="visibleCharts.has(sym)">
-                  <VueApexCharts
-                    v-if="stockSeries(sym)[0].data.length"
-                    type="line"
-                    height="240"
-                    :series="stockSeries(sym)"
-                    :options="stockOpts(sym)"
-                  />
-                  <p v-else class="text-xs text-slate-600 italic py-4">No price data for {{ sym }}</p>
-                </template>
-                <div v-else class="flex items-center justify-center py-16 text-slate-600 text-xs">
-                  <span class="material-symbols-outlined text-base animate-spin mr-2">progress_activity</span>
-                  Loading chart...
-                </div>
-              </div>
+                <span class="flex items-baseline gap-3 min-w-0">
+                  <span class="text-sm font-medium text-slate-100">{{ sym }}</span>
+                  <span class="text-sm tabular-nums" :class="pnlClass(summary.pnl_per_stock?.[sym])">
+                    {{ fmtPnl(summary.pnl_per_stock?.[sym]) }} ({{ fmtPct(summary.pnl_percent_per_stock?.[sym]) }})
+                  </span>
+                  <span class="text-xs text-slate-500 tabular-nums">
+                    {{ stockTrades(sym).length }} trades
+                  </span>
+                </span>
+                <span class="flex items-center gap-4 shrink-0">
+                  <span class="hidden sm:flex items-center gap-3 text-xs text-slate-500">
+                    <span class="inline-flex items-center gap-1.5"><span class="size-1.5 rounded-full bg-gain"></span>Buy</span>
+                    <span class="inline-flex items-center gap-1.5"><span class="size-1.5 rounded-full bg-loss"></span>Sell</span>
+                  </span>
+                  <span
+                    class="material-symbols-outlined text-slate-500 text-[18px] transition-transform duration-150 ease-out"
+                    :class="expandedStocks.has(sym) ? 'rotate-180' : ''"
+                  >expand_more</span>
+                </span>
+              </button>
 
-              <!-- Trade table -->
-              <div v-if="stockTrades(sym).length" class="border-t border-border-subtle overflow-x-auto">
-                <table class="w-full text-xs">
-                  <thead>
-                    <tr class="border-b border-border-subtle/50 text-left">
-                      <th class="px-4 py-2.5 text-slate-600 font-semibold uppercase tracking-wider">Time</th>
-                      <th class="px-4 py-2.5 text-slate-600 font-semibold uppercase tracking-wider">Action</th>
-                      <th class="px-4 py-2.5 text-slate-600 font-semibold uppercase tracking-wider text-right">Shares</th>
-                      <th class="px-4 py-2.5 text-slate-600 font-semibold uppercase tracking-wider text-right">Price</th>
-                      <th class="px-4 py-2.5 text-slate-600 font-semibold uppercase tracking-wider text-right">Total</th>
-                      <th class="px-4 py-2.5 text-slate-600 font-semibold uppercase tracking-wider text-right">Cash After</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr
-                      v-for="(t, i) in stockTrades(sym)"
-                      :key="i"
-                      class="border-b border-border-subtle/30 hover:bg-surface/20"
-                    >
-                      <td class="px-4 py-2 text-slate-500 whitespace-nowrap">{{ fmtDate(t.timestamp) }}</td>
-                      <td class="px-4 py-2">
-                        <span
-                          class="px-2 py-0.5 rounded font-bold uppercase text-[10px]"
-                          :class="(t.action || '').toLowerCase().includes('buy')
-                            ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                            : 'bg-red-500/10 text-red-400 border border-red-500/20'"
-                        >{{ t.action }}</span>
-                      </td>
-                      <td class="px-4 py-2 text-right font-mono text-slate-300">{{ t.shares != null ? Number(t.shares).toLocaleString(undefined, { maximumFractionDigits: 4 }) : '—' }}</td>
-                      <td class="px-4 py-2 text-right font-mono text-slate-300">{{ t.price != null ? fmtMoney(t.price) : '—' }}</td>
-                      <td class="px-4 py-2 text-right font-mono" :class="(t.action || '').toLowerCase().includes('buy') ? 'text-red-400' : 'text-emerald-400'">
-                        {{ t.total != null ? fmtMoney(Math.abs(t.total)) : '—' }}
-                      </td>
-                      <td class="px-4 py-2 text-right font-mono text-slate-400">{{ t.cash_after != null ? fmtMoney(t.cash_after) : '—' }}</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-
-              <!-- Decision trace (paginated) -->
-              <div v-if="stockDecisions(sym).length" class="border-t border-border-subtle px-5 py-4">
-                <div class="flex items-center justify-between gap-3 mb-4">
-                  <p class="text-xs font-bold uppercase tracking-widest text-slate-500">Decision Trace</p>
-                  <p class="text-[11px] text-slate-500">{{ stockDecisions(sym).length }} evaluations</p>
+              <!-- Lazy-loaded content (only when expanded) -->
+              <template v-if="expandedStocks.has(sym)">
+                <!-- Price chart (lazy: waits for IntersectionObserver) -->
+                <div
+                  class="chart px-3 pt-4 pb-2 border-t border-white/[0.06]"
+                  :ref="(el) => onChartRef(el, sym)"
+                >
+                  <template v-if="visibleCharts.has(sym)">
+                    <VueApexCharts
+                      v-if="stockSeries(sym)[0].data.length"
+                      type="line"
+                      height="240"
+                      :series="stockSeries(sym)"
+                      :options="stockOpts(sym)"
+                    />
+                    <p v-else class="px-2 py-4 text-sm text-slate-500">No price data for {{ sym }}</p>
+                  </template>
+                  <div v-else class="mx-2 mb-2 h-[232px] rounded-lg bg-raised/50" aria-hidden="true"></div>
                 </div>
 
-                <div class="space-y-3 max-h-[36rem] overflow-y-auto pr-1">
-                  <div
-                    v-for="(d, i) in visibleDecisions(sym)"
-                    :key="`${sym}-decision-${i}-${d.timestamp || 'na'}`"
-                    class="rounded-xl border border-border-subtle bg-surface/30 p-4"
-                  >
-                    <div class="flex items-start justify-between gap-4 flex-wrap mb-3">
-                      <div>
-                        <p class="text-xs text-slate-500">{{ fmtDate(d.timestamp) }}</p>
-                        <div class="flex items-center gap-2 flex-wrap mt-1.5">
-                          <span class="px-2 py-0.5 rounded font-bold uppercase text-[10px]" :class="decisionBadgeClass(d.decision, d.action)">
-                            {{ decisionLabel(d.decision, d.action) }}
-                          </span>
-                          <span v-if="d.override_applied" class="px-2 py-0.5 rounded border border-amber-500/20 bg-amber-500/10 text-[10px] font-bold uppercase text-amber-400">
-                            Override
-                          </span>
-                          <span v-if="d.primary_strategy" class="px-2 py-0.5 rounded border border-border-subtle bg-background-dark text-[10px] font-mono text-slate-300">
-                            {{ d.primary_strategy }}
-                          </span>
-                          <span v-if="d.primary_action_intent" class="px-2 py-0.5 rounded border border-sky-500/20 bg-sky-500/10 text-[10px] font-mono text-sky-300">
-                            {{ d.primary_action_intent }}
-                          </span>
-                        </div>
-                      </div>
-                      <div class="text-right">
-                        <p class="text-[10px] uppercase tracking-widest text-slate-600">Weighted Score</p>
-                        <p class="text-sm font-mono text-slate-300">{{ fmtScore(d.normalized_score) }}</p>
-                      </div>
-                    </div>
-
-                    <p v-if="d.override_applied && d.pre_override_action" class="text-[11px] text-amber-300 mb-2">
-                      Final action changed from {{ decisionLabel(d.pre_override_decision, d.pre_override_action) }} to {{ decisionLabel(d.decision, d.action) }}.
-                    </p>
-                    <p v-if="d.final_reason" class="text-sm text-slate-200 whitespace-pre-wrap leading-6 mb-3">
-                      {{ d.final_reason }}
-                    </p>
-
-                    <div v-if="d.post_decision?.length" class="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 mb-3">
-                      <p class="text-[10px] font-bold uppercase tracking-widest text-amber-300 mb-2">Post-Decision Output</p>
-                      <div
-                        v-for="(post, postIdx) in d.post_decision"
-                        :key="`${sym}-post-${i}-${postIdx}`"
-                        class="text-xs text-slate-200"
+                <!-- Trade table -->
+                <div v-if="stockTrades(sym).length" class="border-t border-white/[0.06] overflow-x-auto">
+                  <table class="w-full min-w-[640px] text-sm">
+                    <thead>
+                      <tr class="border-b border-white/[0.06] text-left text-xs text-slate-500">
+                        <th class="h-10 pl-5 pr-3 font-normal">Time</th>
+                        <th class="h-10 px-3 font-normal">Action</th>
+                        <th class="h-10 px-3 font-normal text-right">Shares</th>
+                        <th class="h-10 px-3 font-normal text-right">Price</th>
+                        <th class="h-10 px-3 font-normal text-right">Total</th>
+                        <th class="h-10 pl-3 pr-5 font-normal text-right">Cash after</th>
+                      </tr>
+                    </thead>
+                    <tbody class="divide-y divide-white/[0.05]">
+                      <tr
+                        v-for="(t, i) in stockTrades(sym)"
+                        :key="i"
+                        class="hover:bg-white/[0.03] transition-colors duration-150 ease-out"
                       >
-                        <span class="font-mono text-amber-300">{{ post.strategy || 'post_decision' }}</span>
-                        <span class="text-slate-500"> -> </span>
-                        <span class="font-semibold">{{ decisionLabel(post.decision) }}</span>
-                        <span v-if="post.reason" class="text-slate-400"> | {{ shortReason(post.reason, 220) }}</span>
-                      </div>
-                    </div>
-
-                    <div v-if="d.strategies?.length" class="grid gap-2 sm:grid-cols-2">
-                      <div
-                        v-for="(s, strategyIdx) in d.strategies"
-                        :key="`${sym}-strategy-${i}-${strategyIdx}`"
-                        class="rounded-lg border border-border-subtle bg-background-dark px-3 py-2.5"
-                      >
-                        <div class="flex items-center justify-between gap-2 mb-1.5">
-                          <p class="text-xs font-semibold text-slate-200 truncate">{{ s.strategy || 'strategy' }}</p>
-                          <span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase" :class="decisionBadgeClass(s.decision)">
-                            {{ decisionLabel(s.decision) }}
+                        <td class="h-12 pl-5 pr-3 text-slate-400 tabular-nums whitespace-nowrap">{{ fmtDate(t.timestamp) }}</td>
+                        <td class="h-12 px-3">
+                          <span class="inline-flex items-center gap-2 text-slate-200">
+                            <span
+                              class="size-1.5 rounded-full shrink-0"
+                              :class="(t.action || '').toLowerCase().includes('buy') ? 'bg-gain' : 'bg-loss'"
+                            ></span>
+                            <span class="inline-block lowercase first-letter:uppercase">{{ t.action }}</span>
                           </span>
-                        </div>
-                        <div class="flex items-center gap-2 flex-wrap mb-1.5">
-                          <span class="text-[10px] font-mono text-slate-500">weight {{ fmtWeight(s.weight) }}</span>
-                          <span v-if="s.action_intent" class="text-[10px] font-mono text-sky-300">{{ s.action_intent }}</span>
-                        </div>
-                        <p v-if="s.reason" class="text-[11px] text-slate-400 leading-5 whitespace-pre-wrap">
-                          {{ shortReason(s.reason) }}
-                        </p>
-                      </div>
-                    </div>
+                        </td>
+                        <td class="h-12 px-3 text-right tabular-nums text-slate-300">{{ t.shares != null ? Number(t.shares).toLocaleString(undefined, { maximumFractionDigits: 4 }) : '—' }}</td>
+                        <td class="h-12 px-3 text-right tabular-nums text-slate-300">{{ t.price != null ? fmtMoney(t.price) : '—' }}</td>
+                        <td class="h-12 px-3 text-right tabular-nums" :class="(t.action || '').toLowerCase().includes('buy') ? 'text-loss' : 'text-gain'">
+                          {{ t.total != null ? fmtMoney(Math.abs(t.total)) : '—' }}
+                        </td>
+                        <td class="h-12 pl-3 pr-5 text-right tabular-nums text-slate-400">{{ t.cash_after != null ? fmtMoney(t.cash_after) : '—' }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
 
-                    <details class="mt-3 rounded-lg border border-border-subtle bg-background-dark">
-                      <summary class="cursor-pointer select-none px-3 py-2 text-[11px] font-semibold text-slate-400">
-                        Structured JSON
-                      </summary>
-                      <pre class="overflow-x-auto border-t border-border-subtle px-3 py-3 text-[11px] leading-5 text-slate-300">{{ toPrettyJson(d) }}</pre>
-                    </details>
+                <!-- Decision trace (paginated) -->
+                <div v-if="stockDecisions(sym).length" class="border-t border-white/[0.06] px-5 py-4">
+                  <div class="flex items-baseline justify-between gap-3 mb-3">
+                    <p class="text-sm font-medium text-slate-100">Decision trace</p>
+                    <p class="text-xs text-slate-500 tabular-nums">{{ stockDecisions(sym).length }} evaluations</p>
                   </div>
 
-                  <!-- Show more button -->
-                  <button
-                    v-if="remainingDecisions(sym) > 0"
-                    @click="showMoreDecisions(sym)"
-                    class="w-full py-3 rounded-xl border border-border-subtle bg-surface/30 text-xs font-medium text-slate-400 hover:text-slate-200 hover:bg-surface/60 transition-colors"
-                  >
-                    Show {{ Math.min(DECISIONS_PAGE, remainingDecisions(sym)) }} more
-                    <span class="text-slate-600">({{ remainingDecisions(sym) }} remaining)</span>
-                  </button>
+                  <div class="space-y-3 max-h-[36rem] overflow-y-auto pr-1">
+                    <div
+                      v-for="(d, i) in visibleDecisions(sym)"
+                      :key="`${sym}-decision-${i}-${d.timestamp || 'na'}`"
+                      class="rounded-lg border border-white/[0.06] bg-background-dark p-4"
+                    >
+                      <div class="flex items-start justify-between gap-4 flex-wrap mb-3">
+                        <div class="min-w-0">
+                          <p class="text-xs text-slate-500 tabular-nums">{{ fmtDate(d.timestamp) }}</p>
+                          <p class="flex items-center gap-x-2 gap-y-1 flex-wrap mt-1.5 text-xs text-slate-400">
+                            <span class="inline-flex items-center gap-2 text-sm text-slate-100">
+                              <span class="size-1.5 rounded-full shrink-0" :class="decisionBadgeClass(d.decision, d.action)"></span>
+                              <span class="inline-block lowercase first-letter:uppercase">{{ decisionLabel(d.decision, d.action) }}</span>
+                            </span>
+                            <span v-if="d.override_applied" class="text-amber-400">
+                              Override
+                            </span>
+                            <span v-if="d.primary_strategy">
+                              {{ d.primary_strategy }}
+                            </span>
+                            <span v-if="d.primary_action_intent" class="text-slate-500">
+                              {{ d.primary_action_intent }}
+                            </span>
+                          </p>
+                        </div>
+                        <div class="text-right">
+                          <p class="text-xs text-slate-500">Weighted score</p>
+                          <p class="text-sm text-slate-200 tabular-nums mt-0.5">{{ fmtScore(d.normalized_score) }}</p>
+                        </div>
+                      </div>
+
+                      <p v-if="d.override_applied && d.pre_override_action" class="text-xs text-slate-400 mb-2">
+                        Final action changed from {{ decisionLabel(d.pre_override_decision, d.pre_override_action) }} to {{ decisionLabel(d.decision, d.action) }}.
+                      </p>
+                      <p v-if="d.final_reason" class="text-sm text-slate-200 whitespace-pre-wrap leading-6 mb-3">
+                        {{ d.final_reason }}
+                      </p>
+
+                      <div v-if="d.post_decision?.length" class="rounded-lg border border-white/[0.06] px-3 py-2 mb-3">
+                        <p class="text-xs text-slate-500 mb-1.5">Post-decision output</p>
+                        <div
+                          v-for="(post, postIdx) in d.post_decision"
+                          :key="`${sym}-post-${i}-${postIdx}`"
+                          class="text-xs text-slate-200"
+                        >
+                          <span class="text-slate-300">{{ post.strategy || 'post_decision' }}</span>
+                          <span class="text-slate-600"> → </span>
+                          <span class="font-medium">{{ decisionLabel(post.decision) }}</span>
+                          <span v-if="post.reason" class="text-slate-400"> · {{ shortReason(post.reason, 220) }}</span>
+                        </div>
+                      </div>
+
+                      <div v-if="d.strategies?.length" class="grid gap-2 sm:grid-cols-2">
+                        <div
+                          v-for="(s, strategyIdx) in d.strategies"
+                          :key="`${sym}-strategy-${i}-${strategyIdx}`"
+                          class="rounded-lg border border-white/[0.06] bg-surface px-3 py-2.5"
+                        >
+                          <div class="flex items-center justify-between gap-2 mb-1">
+                            <p class="text-sm text-slate-200 truncate">{{ s.strategy || 'strategy' }}</p>
+                            <span class="inline-flex items-center gap-1.5 text-xs text-slate-300 shrink-0">
+                              <span class="size-1.5 rounded-full" :class="decisionBadgeClass(s.decision)"></span>
+                              <span class="inline-block lowercase first-letter:uppercase">{{ decisionLabel(s.decision) }}</span>
+                            </span>
+                          </div>
+                          <p class="flex items-center gap-x-1.5 flex-wrap mb-1 text-xs text-slate-500 tabular-nums">
+                            <span>Weight {{ fmtWeight(s.weight) }}</span>
+                            <template v-if="s.action_intent"><span class="text-slate-600">·</span><span>{{ s.action_intent }}</span></template>
+                          </p>
+                          <p v-if="s.reason" class="text-xs text-slate-400 leading-5 whitespace-pre-wrap">
+                            {{ shortReason(s.reason) }}
+                          </p>
+                        </div>
+                      </div>
+
+                      <details class="mt-3 rounded-lg border border-white/[0.06]">
+                        <summary class="cursor-pointer select-none px-3 py-2 text-xs text-slate-400 hover:text-slate-200 transition-colors duration-150 ease-out">
+                          Structured JSON
+                        </summary>
+                        <pre class="overflow-x-auto border-t border-white/[0.06] px-3 py-3 text-[11px] leading-5 text-slate-300">{{ toPrettyJson(d) }}</pre>
+                      </details>
+                    </div>
+
+                    <!-- Show more button -->
+                    <button
+                      v-if="remainingDecisions(sym) > 0"
+                      @click="showMoreDecisions(sym)"
+                      class="w-full h-10 rounded-lg border border-white/[0.06] text-sm text-slate-400 hover:text-slate-100 hover:bg-raised transition-colors duration-150 ease-out"
+                    >
+                      Show {{ Math.min(DECISIONS_PAGE, remainingDecisions(sym)) }} more
+                      <span class="text-slate-500 tabular-nums">· {{ remainingDecisions(sym) }} remaining</span>
+                    </button>
+                  </div>
                 </div>
-              </div>
-            </template>
-          </section>
-        </template>
+              </template>
+            </article>
+          </div>
+        </section>
 
         <!-- ── Extra stats ────────────────────────────────────────────────────── -->
-        <section class="glass-card rounded-2xl p-5 mb-6">
-          <p class="text-xs font-bold uppercase tracking-widest text-slate-500 mb-4">Round Trip Statistics</p>
-          <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
+        <section class="mt-12" aria-labelledby="round-trips-title">
+          <h2 id="round-trips-title" class="ui-section-title mb-3">Round trip statistics</h2>
+          <dl class="ui-card px-5 py-5 grid grid-cols-2 sm:grid-cols-4 gap-x-6 gap-y-5">
             <div>
-              <p class="text-[11px] text-slate-500 mb-0.5">Round Trips</p>
-              <p class="font-semibold text-slate-200">{{ summary.round_trips ?? '—' }}</p>
+              <dt class="ui-label">Round trips</dt>
+              <dd class="mt-2 text-xl font-medium text-slate-100 tabular-nums leading-none">{{ summary.round_trips ?? '—' }}</dd>
             </div>
             <div>
-              <p class="text-[11px] text-slate-500 mb-0.5">Total Round Trip P&L</p>
-              <p class="font-semibold font-mono" :class="pnlClass(summary.total_round_trip_pnl)">{{ fmtPnl(summary.total_round_trip_pnl) }}</p>
+              <dt class="ui-label">Total round trip P&amp;L</dt>
+              <dd class="mt-2 text-xl font-medium tabular-nums leading-none" :class="pnlClass(summary.total_round_trip_pnl)">{{ fmtPnl(summary.total_round_trip_pnl) }}</dd>
             </div>
             <div>
-              <p class="text-[11px] text-slate-500 mb-0.5">Avg Winning</p>
-              <p class="font-semibold font-mono text-emerald-400">{{ fmtMoney(summary.avg_winning_round_trip) }}</p>
+              <dt class="ui-label">Avg winning</dt>
+              <dd class="mt-2 text-xl font-medium tabular-nums leading-none text-gain">{{ fmtMoney(summary.avg_winning_round_trip) }}</dd>
             </div>
             <div>
-              <p class="text-[11px] text-slate-500 mb-0.5">Avg Losing</p>
-              <p class="font-semibold font-mono text-red-400">{{ fmtMoney(summary.avg_losing_round_trip) }}</p>
+              <dt class="ui-label">Avg losing</dt>
+              <dd class="mt-2 text-xl font-medium tabular-nums leading-none text-loss">{{ fmtMoney(summary.avg_losing_round_trip) }}</dd>
             </div>
-          </div>
+          </dl>
         </section>
 
       </template>
 
       <!-- Pending/no summary yet -->
-      <div v-else class="flex flex-col items-center gap-3 py-20 text-center">
-        <span class="material-symbols-outlined text-5xl text-slate-600">hourglass_empty</span>
-        <p class="text-slate-400 text-sm">This backtest has not completed yet.</p>
-        <div v-if="progress != null" class="w-48">
-          <div class="flex items-center justify-between text-xs text-slate-500 mb-1">
-            <span>{{ currentStatus }}</span>
-            <span>{{ Math.round(progress) }}%</span>
+      <div v-else class="ui-card ui-empty">
+        <p class="text-slate-300">This backtest has not completed yet</p>
+        <div v-if="progress != null" class="w-56">
+          <div class="flex items-center justify-between text-xs text-slate-500 mb-2">
+            <span>{{ statusUi(currentStatus).label }}</span>
+            <span class="tabular-nums">{{ Math.round(progress) }}%</span>
           </div>
-          <div class="h-2 bg-surface rounded-full overflow-hidden">
-            <div class="h-full bg-sky-400 rounded-full transition-all duration-500" :style="{ width: Math.min(100, progress) + '%' }"></div>
+          <div class="bar-track h-1">
+            <span class="bar-fill bg-slate-300" :style="{ transform: `scaleX(${Math.min(100, progress) / 100})` }"></span>
           </div>
         </div>
-        <p v-else class="text-xs text-slate-600">Status: {{ currentStatus }}</p>
+        <p v-else class="text-xs text-slate-500">Status: {{ statusUi(currentStatus).label }}</p>
       </div>
 
     </main>
   </AppShell>
 
-  <!-- ── Action Confirmation Modal ─────────────────────────────────────────── -->
+  <!-- ── Action confirmation modal ─────────────────────────────────────────── -->
   <Teleport to="body">
     <Transition name="fade">
       <div
         v-if="showConfirm"
-        class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+        class="ui-overlay"
         @click.self="closeConfirm"
       >
-        <div class="relative w-full max-w-sm bg-surface border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
+        <div class="modal-panel ui-modal max-w-sm">
 
-          <div class="flex items-center justify-between px-6 py-5 border-b border-border-subtle">
-            <div class="flex items-center gap-3">
-              <div
-                class="size-9 rounded-xl flex items-center justify-center shrink-0"
-                :class="{
-                  'bg-red-500/10 border border-red-500/20':         confirmAction === 'stop' || confirmAction === 'delete',
-                  'bg-zinc-500/10 border border-zinc-500/20':   confirmAction === 'pause',
-                  'bg-sky-500/10 border border-sky-500/20':         confirmAction === 'resume',
-                  'bg-emerald-500/10 border border-emerald-500/20': confirmAction === 'rerun',
-                }"
-              >
-                <span
-                  class="material-symbols-outlined text-lg"
-                  :class="{
-                    'text-red-400':     confirmAction === 'stop' || confirmAction === 'delete',
-                    'text-zinc-300':  confirmAction === 'pause',
-                    'text-sky-400':     confirmAction === 'resume',
-                    'text-emerald-400': confirmAction === 'rerun',
-                  }"
-                >{{ confirmMeta.icon }}</span>
-              </div>
-              <h2 class="text-base font-bold">{{ confirmMeta.label }}</h2>
+          <div class="ui-modal-head">
+            <div class="min-w-0">
+              <h2 class="text-base font-medium text-slate-100">{{ confirmMeta.label }}</h2>
+              <p class="text-sm text-slate-500 mt-1 tabular-nums">Backtest #{{ btId }}</p>
             </div>
-            <button @click="closeConfirm" :disabled="actionBusy" class="text-slate-500 hover:text-slate-300 transition-colors disabled:opacity-40">
-              <span class="material-symbols-outlined">close</span>
+            <button @click="closeConfirm" :disabled="actionBusy" class="ui-icon-btn ml-auto shrink-0 disabled:opacity-40" aria-label="Close">
+              <span class="material-symbols-outlined text-[18px]">close</span>
             </button>
           </div>
 
-          <div class="px-6 py-5 space-y-4">
-            <p class="text-sm text-slate-300">{{ confirmMeta.desc }}</p>
-            <p class="text-xs text-slate-500 font-mono">Backtest #{{ btId }}</p>
+          <div class="ui-modal-body space-y-4">
+            <p class="text-sm text-slate-400">{{ confirmMeta.desc }}</p>
 
             <Transition name="slide-up">
-              <div
+              <p
                 v-if="actionMsg"
-                class="rounded-lg px-4 py-3 text-sm font-medium"
-                :class="actionOk
-                  ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400'
-                  : 'bg-red-500/10 border border-red-500/20 text-red-400'"
+                :class="actionBusy
+                  ? 'text-sm text-slate-400'
+                  : actionOk ? 'text-sm text-gain' : 'ui-error'"
               >
                 <span v-if="actionBusy" class="inline-flex items-center gap-2">
-                  <span class="material-symbols-outlined text-base animate-spin">progress_activity</span>
+                  <span class="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
                   {{ actionMsg }}
                 </span>
                 <span v-else>{{ actionMsg }}</span>
-              </div>
+              </p>
             </Transition>
           </div>
 
-          <div class="px-6 pb-6 flex gap-3">
-            <button @click="closeConfirm" :disabled="actionBusy"
-              class="flex-1 py-2.5 rounded-lg border border-border-subtle text-sm font-medium text-slate-400 hover:text-slate-200 transition-colors disabled:opacity-40">
+          <div class="ui-modal-foot">
+            <button @click="closeConfirm" :disabled="actionBusy" class="ui-btn-ghost h-9 px-4">
               Cancel
             </button>
-            <button @click="executeAction" :disabled="actionBusy"
-              class="flex-1 py-2.5 rounded-lg text-sm font-bold transition-all disabled:opacity-50 flex items-center justify-center gap-2"
-              :class="{
-                'bg-red-500/80 hover:bg-red-500 text-white':          confirmAction === 'stop' || confirmAction === 'delete',
-                'bg-zinc-600 hover:bg-zinc-500 text-white':       confirmAction === 'pause',
-                'bg-primary hover:brightness-110 text-white':         confirmAction === 'resume',
-                'bg-emerald-600 hover:bg-emerald-500 text-white':     confirmAction === 'rerun',
-              }"
+            <button
+              @click="executeAction"
+              :disabled="actionBusy"
+              :class="['stop', 'delete', 'delete-strategy'].includes(confirmAction) ? 'ui-btn h-9 px-4 text-sm text-loss' : 'ui-btn-primary'"
             >
-              <span v-if="actionBusy" class="material-symbols-outlined text-base animate-spin">progress_activity</span>
-              <span v-else class="material-symbols-outlined text-base">{{ confirmMeta.icon }}</span>
-              {{ actionBusy ? 'Working...' : confirmMeta.label }}
+              <span v-if="actionBusy" class="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
+              {{ actionBusy ? 'Working…' : confirmMeta.label }}
             </button>
           </div>
         </div>
@@ -1802,9 +1771,37 @@ function onLogScroll(e) {
 </template>
 
 <style scoped>
-.fade-enter-active, .fade-leave-active { transition: opacity 0.2s ease; }
-.fade-enter-from, .fade-leave-to       { opacity: 0; }
+/* No colour here: a scoped colour would outrank the gain/loss utilities. */
+.stat-label { font-size: 12px; line-height: 16px; color: #71717a; }
+.stat-value { margin-top: 8px; font-size: 16px; line-height: 20px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.stat-sub { margin-top: 4px; font-size: 12px; line-height: 16px; color: #71717a; font-variant-numeric: tabular-nums; }
 
-.slide-up-enter-active, .slide-up-leave-active { transition: all 0.2s ease; }
-.slide-up-enter-from, .slide-up-leave-to       { opacity: 0; transform: translateY(6px); }
+.bar-track {
+  position: relative;
+  display: block;
+  border-radius: 999px;
+  background: #1e1e20;
+  overflow: hidden;
+}
+.bar-fill {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  transform-origin: left center;
+  transition: transform 500ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.log-line { border-left: 2px solid transparent; }
+.log-line:hover { background: rgba(255, 255, 255, 0.03); border-left-color: rgba(255, 255, 255, 0.16); }
+
+/* Chart axis figures line up like the rest of the page. */
+.chart :deep(.apexcharts-text) { font-variant-numeric: tabular-nums; }
+
+.fade-enter-active, .fade-leave-active { transition: opacity 180ms cubic-bezier(0.22, 1, 0.36, 1); }
+.fade-enter-active .modal-panel, .fade-leave-active .modal-panel { transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1); }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
+.fade-enter-from .modal-panel, .fade-leave-to .modal-panel { transform: translateY(6px); }
+
+.slide-up-enter-active, .slide-up-leave-active { transition: opacity 180ms cubic-bezier(0.22, 1, 0.36, 1), transform 180ms cubic-bezier(0.22, 1, 0.36, 1); }
+.slide-up-enter-from, .slide-up-leave-to       { opacity: 0; transform: translateY(4px); }
 </style>

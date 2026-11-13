@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import VueApexCharts from 'vue3-apexcharts'
+import AppShell from '../layouts/AppShell.vue'
 import { getToken } from '../utils/auth.js'
 
 const API_BASE = import.meta.env.DEV ? '/api' : (import.meta.env.VITE_API_URL || '/api')
@@ -227,19 +228,23 @@ const equityOpts = {
   chart: { type: 'area', toolbar: { show: false }, animations: { enabled: false } },
   dataLabels: { enabled: false },
   stroke: { curve: 'straight', width: 2 },
-  xaxis: { type: 'numeric', title: { text: 'Bet #', style: { color: '#64748b' } }, labels: { style: { colors: '#94a3b8' } } },
-  yaxis: { labels: { style: { colors: '#94a3b8' }, formatter: (v) => `$${Math.round(v)}` } },
-  colors: ['#22d3ee'], grid: { borderColor: '#1e293b' }, tooltip: { theme: 'dark' },
+  xaxis: { type: 'numeric', title: { text: 'Bet #', style: { color: '#71717a' } }, labels: { style: { colors: '#71717a', fontSize: '11px' } } },
+  yaxis: { labels: { style: { colors: '#71717a', fontSize: '11px' }, formatter: (v) => `$${Math.round(v)}` } },
+  colors: ['#ededed'], grid: { borderColor: 'rgba(255,255,255,0.05)' }, tooltip: { theme: 'dark' },
 }
 
 function fmtPct(v) { return v == null ? '—' : `${(v * 100).toFixed(1)}%` }
-function fmtMoney(c) { return c == null ? '—' : `$${(c / 100).toFixed(2)}` }
+function fmtMoney(c) { return c == null ? '—' : `${c < 0 ? '-' : ''}$${Math.abs(c / 100).toFixed(2)}` }
+// Status as a dot and a word: green only while a run is actually running.
 function statusColor(s) {
-  return s === 'finished' ? 'text-emerald-400' : s === 'error' ? 'text-rose-400'
-    : s === 'stopped' ? 'text-slate-400' : 'text-amber-400'
+  return s === 'finished' ? 'text-slate-300' : s === 'error' ? 'text-loss'
+    : s === 'stopped' ? 'text-slate-500' : 'text-slate-200'
+}
+function statusDot(s) {
+  return s === 'running' ? 'ui-dot-live' : s === 'pending' ? 'ui-dot-warn' : s === 'error' ? 'ui-dot-error' : 'ui-dot-off'
 }
 
-const inputCls = 'w-full mt-1 bg-surface border border-border-subtle rounded-lg px-3 py-2 text-sm text-slate-100'
+const inputCls = 'ui-input [color-scheme:dark]'
 
 onMounted(async () => {
   await Promise.all([loadInstance(), loadModels()])
@@ -250,131 +255,159 @@ onBeforeUnmount(() => { if (pollTimer) clearInterval(pollTimer) })
 </script>
 
 <template>
-  <main class="max-w-6xl mx-auto px-4 py-6 space-y-6">
-    <div>
-      <button @click="router.push(`/kalshi/instances/${instanceId}`)" class="text-sm text-slate-400 hover:text-slate-200">← Back to instance</button>
-      <h1 class="text-xl font-semibold text-slate-100 mt-1">Backtest</h1>
-    </div>
-    <p v-if="loadErr" class="text-sm text-amber-400">{{ loadErr }}</p>
+  <AppShell>
+    <main class="ui-page">
+      <button @click="router.push(`/kalshi/instances/${instanceId}`)" class="inline-flex items-center gap-1 h-8 -ml-2 px-2 rounded-md text-sm text-slate-400 hover:text-slate-100 hover:bg-raised transition-colors duration-150 ease-out">
+        <span class="material-symbols-outlined text-[16px]">arrow_back</span> Back to instance
+      </button>
+      <header class="mt-4">
+        <h1 class="ui-page-title">Backtest</h1>
+        <p class="ui-page-sub">Run this instance's settings over past fixtures</p>
+      </header>
+      <p v-if="loadErr" class="mt-6 ui-error">{{ loadErr }}</p>
 
-    <section class="bg-surface border border-border-subtle rounded-xl p-4 space-y-4">
-      <h2 class="text-sm font-semibold text-slate-200">New backtest</h2>
-
-      <!-- Risk tolerance preset -->
-      <div>
-        <span class="text-xs text-slate-400">Risk tolerance</span>
-        <div class="flex gap-2 mt-1">
-          <button v-for="(p, k) in RISK_PRESETS" :key="k" type="button" @click="applyPreset(k)"
-                  class="flex-1 px-3 py-2 rounded-lg text-sm border transition-colors"
-                  :class="tier === k ? 'bg-primary/20 border-primary text-primary' : 'border-border-subtle text-slate-400 hover:text-slate-200'">
-            {{ p.label }}
-          </button>
+      <section class="mt-8" aria-labelledby="kbt-new">
+        <div class="mb-3">
+          <h2 id="kbt-new" class="ui-section-title">New backtest</h2>
+          <p class="ui-section-sub">Prefilled from the instance config</p>
         </div>
-        <p class="text-[11px] text-slate-500 mt-1">{{ PRESET_DESC[tier] }}</p>
-      </div>
+        <div class="ui-card px-5 py-5 space-y-6">
+          <!-- Risk tolerance preset -->
+          <div>
+            <span class="ui-field-label">Risk tolerance</span>
+            <div class="ui-seg w-full sm:w-auto" role="group" aria-label="Risk tolerance">
+              <button v-for="(p, k) in RISK_PRESETS" :key="k" type="button" @click="applyPreset(k)"
+                      class="ui-seg-btn flex-1 sm:flex-none sm:px-5"
+                      :class="tier === k ? 'ui-seg-btn-active' : ''"
+                      :aria-pressed="tier === k">
+                {{ p.label }}
+              </button>
+            </div>
+            <p class="ui-help">{{ PRESET_DESC[tier] }}</p>
+          </div>
 
-      <!-- Analyst LLM model -->
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <label class="block">
-          <span class="text-xs text-slate-400">Analyst LLM model</span>
-          <select v-model="modelId" @change="useLlm = !!modelId" :class="inputCls">
-            <option value="">None (statistical model only)</option>
-            <option v-for="m in models" :key="m.id" :value="m.id">{{ m.name || m.model || m.id }}</option>
-          </select>
-          <label class="flex items-center gap-2 mt-2 text-[11px] text-slate-400">
-            <input type="checkbox" v-model="useLlm" :disabled="!modelId" /> Use LLM analyst in this backtest
+          <!-- Analyst LLM model -->
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <label class="block">
+              <span class="ui-field-label">Analyst LLM model</span>
+              <select v-model="modelId" @change="useLlm = !!modelId" :class="inputCls">
+                <option value="">None (statistical model only)</option>
+                <option v-for="m in models" :key="m.id" :value="m.id">{{ m.name || m.model || m.id }}</option>
+              </select>
+              <label class="flex items-center gap-2 mt-2 text-xs text-slate-400">
+                <input type="checkbox" v-model="useLlm" :disabled="!modelId" class="accent-primary" /> Use LLM analyst in this backtest
+              </label>
+            </label>
+            <div class="grid grid-cols-2 gap-4">
+              <label class="block"><span class="ui-field-label">Bankroll ($)</span>
+                <input v-model.number="bankroll" type="number" min="1" :class="inputCls" /></label>
+              <label class="block"><span class="ui-field-label">Bankroll usage (%)</span>
+                <input v-model.number="usagePct" type="number" step="5" :class="inputCls" /></label>
+            </div>
+          </div>
+
+          <!-- Dates -->
+          <div class="grid grid-cols-2 gap-4">
+            <label class="block"><span class="ui-field-label">Start date</span>
+              <input v-model="startDate" type="date" :class="inputCls" /></label>
+            <label class="block"><span class="ui-field-label">End date</span>
+              <input v-model="endDate" type="date" :class="inputCls" /></label>
+          </div>
+
+          <!-- Leagues -->
+          <div>
+            <span class="ui-field-label">Leagues <span class="text-slate-500 tabular-nums">· {{ leagues.length }} selected</span></span>
+            <div class="flex flex-wrap gap-1.5">
+              <button v-for="l in LEAGUES" :key="l" type="button" @click="toggleLeague(l)"
+                      class="h-8 px-3 rounded-lg text-[13px] border transition-colors duration-150 ease-out"
+                      :class="leagues.includes(l) ? 'bg-raised border-white/[0.12] text-slate-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]' : 'border-white/[0.06] text-slate-500 hover:text-slate-200'"
+                      :aria-pressed="leagues.includes(l)">
+                {{ l }}
+              </button>
+            </div>
+          </div>
+
+          <!-- Tuning grid -->
+          <div class="grid grid-cols-2 md:grid-cols-3 gap-4">
+            <label class="block"><span class="ui-field-label">Edge threshold (%)</span><input v-model.number="edgePct" type="number" step="0.5" :class="inputCls" /></label>
+            <label class="block"><span class="ui-field-label">No-sharp bar (%)</span><input v-model.number="noSharpPct" type="number" step="0.5" :class="inputCls" /></label>
+            <label class="block"><span class="ui-field-label">Kelly fraction</span><input v-model.number="kelly" type="number" step="0.05" :class="inputCls" /></label>
+            <label class="block"><span class="ui-field-label">Max contracts / market</span><input v-model.number="maxContracts" type="number" :class="inputCls" /></label>
+            <label class="block"><span class="ui-field-label">Max open exposure (%)</span><input v-model.number="exposurePct" type="number" :class="inputCls" /></label>
+            <label class="block"><span class="ui-field-label">Per-league cap (%)</span><input v-model.number="leagueCapPct" type="number" :class="inputCls" /></label>
+            <label class="block"><span class="ui-field-label">Min price (¢)</span><input v-model.number="minPrice" type="number" :class="inputCls" /></label>
+            <label class="block"><span class="ui-field-label">Max price (¢)</span><input v-model.number="maxPrice" type="number" :class="inputCls" /></label>
+            <label class="block"><span class="ui-field-label">Draw min edge (%)</span><input v-model.number="drawMinEdge" type="number" step="0.5" :class="inputCls" /></label>
+            <label class="block"><span class="ui-field-label">Order min ($)</span><input v-model.number="orderMin" type="number" :class="inputCls" /></label>
+            <label class="block"><span class="ui-field-label">Order max ($)</span><input v-model.number="orderMax" type="number" :class="inputCls" /></label>
+            <label class="block"><span class="ui-field-label">Sharp weight (%)</span><input v-model.number="sharpWeight" type="number" step="5" :class="inputCls" /></label>
+            <label class="block"><span class="ui-field-label">Daily loss cap (%)</span><input v-model.number="dailyLossPct" type="number" :class="inputCls" /></label>
+            <label class="block"><span class="ui-field-label">Market anchor (%)</span><input v-model.number="marketShrink" type="number" step="5" :class="inputCls" /></label>
+          </div>
+
+          <label class="block">
+            <span class="ui-field-label">OddsPapi API key</span>
+            <input v-model="oddspapiKey" type="text" placeholder="oddspapi apiKey" :class="inputCls" />
+            <span class="ui-help block">Sharp line, free tier. Saved for next time; blank means model only</span>
           </label>
-        </label>
-        <div class="grid grid-cols-2 gap-3">
-          <label class="block"><span class="text-xs text-slate-400">Bankroll ($)</span>
-            <input v-model.number="bankroll" type="number" min="1" :class="inputCls" /></label>
-          <label class="block"><span class="text-xs text-slate-400">Bankroll usage (%)</span>
-            <input v-model.number="usagePct" type="number" step="5" :class="inputCls" /></label>
+
+          <div class="flex items-center gap-3 pt-1">
+            <button @click="submit" :disabled="submitting || !brokerageId" class="ui-btn-primary">
+              {{ submitting ? 'Starting…' : 'Run backtest' }}
+            </button>
+            <span v-if="submitErr" class="text-sm text-loss">{{ submitErr }}</span>
+          </div>
         </div>
-      </div>
+      </section>
 
-      <!-- Dates -->
-      <div class="grid grid-cols-2 gap-4">
-        <label class="block"><span class="text-xs text-slate-400">Start date</span>
-          <input v-model="startDate" type="date" :class="inputCls" /></label>
-        <label class="block"><span class="text-xs text-slate-400">End date</span>
-          <input v-model="endDate" type="date" :class="inputCls" /></label>
-      </div>
-
-      <!-- Leagues -->
-      <div>
-        <span class="text-xs text-slate-400">Leagues</span>
-        <div class="flex flex-wrap gap-2 mt-1">
-          <button v-for="l in LEAGUES" :key="l" type="button" @click="toggleLeague(l)"
-                  class="px-2.5 py-1 rounded-full text-xs border transition-colors"
-                  :class="leagues.includes(l) ? 'bg-primary/20 border-primary text-primary' : 'border-border-subtle text-slate-400 hover:text-slate-200'">
-            {{ l }}
-          </button>
+      <!-- Past backtests -->
+      <section class="mt-12" aria-labelledby="kbt-list">
+        <div class="mb-3">
+          <h2 id="kbt-list" class="ui-section-title">Backtests</h2>
+          <p class="ui-section-sub">For this Kalshi account</p>
         </div>
-      </div>
-
-      <!-- Tuning grid -->
-      <div class="grid grid-cols-2 md:grid-cols-3 gap-3">
-        <label class="block"><span class="text-xs text-slate-400">Edge threshold (%)</span><input v-model.number="edgePct" type="number" step="0.5" :class="inputCls" /></label>
-        <label class="block"><span class="text-xs text-slate-400">No-sharp bar (%)</span><input v-model.number="noSharpPct" type="number" step="0.5" :class="inputCls" /></label>
-        <label class="block"><span class="text-xs text-slate-400">Kelly fraction</span><input v-model.number="kelly" type="number" step="0.05" :class="inputCls" /></label>
-        <label class="block"><span class="text-xs text-slate-400">Max contracts / market</span><input v-model.number="maxContracts" type="number" :class="inputCls" /></label>
-        <label class="block"><span class="text-xs text-slate-400">Max open exposure (%)</span><input v-model.number="exposurePct" type="number" :class="inputCls" /></label>
-        <label class="block"><span class="text-xs text-slate-400">Per-league cap (%)</span><input v-model.number="leagueCapPct" type="number" :class="inputCls" /></label>
-        <label class="block"><span class="text-xs text-slate-400">Min price (¢)</span><input v-model.number="minPrice" type="number" :class="inputCls" /></label>
-        <label class="block"><span class="text-xs text-slate-400">Max price (¢)</span><input v-model.number="maxPrice" type="number" :class="inputCls" /></label>
-        <label class="block"><span class="text-xs text-slate-400">Draw min edge (%)</span><input v-model.number="drawMinEdge" type="number" step="0.5" :class="inputCls" /></label>
-        <label class="block"><span class="text-xs text-slate-400">Order min ($)</span><input v-model.number="orderMin" type="number" :class="inputCls" /></label>
-        <label class="block"><span class="text-xs text-slate-400">Order max ($)</span><input v-model.number="orderMax" type="number" :class="inputCls" /></label>
-        <label class="block"><span class="text-xs text-slate-400">Sharp weight (%)</span><input v-model.number="sharpWeight" type="number" step="5" :class="inputCls" /></label>
-        <label class="block"><span class="text-xs text-slate-400">Daily loss cap (%)</span><input v-model.number="dailyLossPct" type="number" :class="inputCls" /></label>
-        <label class="block"><span class="text-xs text-slate-400">Market anchor (%)</span><input v-model.number="marketShrink" type="number" step="5" :class="inputCls" /></label>
-      </div>
-
-      <label class="block">
-        <span class="text-xs text-slate-400">OddsPapi API key <span class="text-slate-500">(sharp line — free tier; saved for next time; blank = model-only)</span></span>
-        <input v-model="oddspapiKey" type="text" placeholder="oddspapi apiKey" :class="inputCls" />
-      </label>
-
-      <div class="flex items-center gap-3">
-        <button @click="submit" :disabled="submitting || !brokerageId" class="px-4 py-2 rounded-lg bg-primary text-white text-sm font-medium disabled:opacity-50">
-          {{ submitting ? 'Starting…' : 'Run backtest' }}
-        </button>
-        <span v-if="submitErr" class="text-sm text-rose-400">{{ submitErr }}</span>
-      </div>
-    </section>
-
-    <!-- Past backtests -->
-    <section class="bg-surface border border-border-subtle rounded-xl p-4">
-      <h2 class="text-sm font-semibold text-slate-200 mb-3">Backtests</h2>
-      <div v-if="!backtests.length" class="text-sm text-slate-500">No backtests yet.</div>
-      <table v-else class="w-full text-sm">
-        <thead><tr class="text-left text-slate-500 text-xs"><th class="py-1">ID</th><th>Range</th><th>Status</th><th>P&L</th><th></th></tr></thead>
-        <tbody>
-          <tr v-for="b in backtests" :key="b.id" class="border-t border-border-subtle/50">
-            <td class="py-2 text-slate-300 font-mono text-xs">{{ b.id.slice(0, 8) }}</td>
-            <td class="text-slate-400">{{ b.start_date }} → {{ b.end_date }}</td>
-            <td>
-              <div class="flex items-center gap-2">
-                <span :class="statusColor(b.status)">{{ b.status }}</span>
-                <template v-if="b.status === 'running' || b.status === 'pending'">
-                  <div class="w-16 h-1.5 rounded-full bg-slate-700/60 overflow-hidden">
-                    <div class="h-full bg-amber-400 rounded-full transition-all" :style="{ width: Math.max(3, Math.round(b.progress || 0)) + '%' }"></div>
-                  </div>
-                  <span class="text-slate-500 text-[11px]">{{ Math.round(b.progress || 0) }}%</span>
-                </template>
-              </div>
-            </td>
-            <td :class="(b.summary && b.summary.pnl_cents >= 0) ? 'text-emerald-400' : 'text-rose-400'">{{ b.summary ? fmtMoney(b.summary.pnl_cents) : '—' }}</td>
-            <td class="text-right">
-              <button @click="openResults(b.id)" class="text-xs text-primary hover:underline mr-2">View</button>
-              <button v-if="b.status === 'running' || b.status === 'pending'" @click="stopBacktest(b.id)" class="text-xs text-amber-400 hover:underline mr-2">Stop</button>
-              <button @click="delBacktest(b.id)" class="text-xs text-slate-500 hover:text-rose-400">Delete</button>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </section>
-
-  </main>
+        <div class="ui-card overflow-hidden">
+          <p v-if="!backtests.length" class="ui-empty">No backtests yet</p>
+          <div v-else class="overflow-x-auto">
+            <table class="w-full min-w-[640px] text-sm">
+              <thead>
+                <tr class="text-left text-xs text-slate-500 border-b border-white/[0.06]">
+                  <th class="h-10 px-5 font-normal">ID</th>
+                  <th class="h-10 px-5 font-normal">Range</th>
+                  <th class="h-10 px-5 font-normal">Status</th>
+                  <th class="h-10 px-5 font-normal text-right">P&amp;L</th>
+                  <th class="h-10 px-5"></th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-white/[0.05]">
+                <tr v-for="b in backtests" :key="b.id">
+                  <td class="h-14 px-5 text-xs text-slate-400 font-mono">{{ b.id.slice(0, 8) }}</td>
+                  <td class="h-14 px-5 text-slate-300 tabular-nums whitespace-nowrap">{{ b.start_date }} → {{ b.end_date }}</td>
+                  <td class="h-14 px-5">
+                    <div class="flex items-center gap-3">
+                      <span class="inline-flex items-center gap-2 capitalize" :class="statusColor(b.status)"><span class="ui-dot" :class="statusDot(b.status)"></span>{{ b.status }}</span>
+                      <template v-if="b.status === 'running' || b.status === 'pending'">
+                        <div class="w-16 h-1 rounded-full bg-raised overflow-hidden">
+                          <div class="h-full bg-slate-300 rounded-full" :style="{ width: Math.max(3, Math.round(b.progress || 0)) + '%' }"></div>
+                        </div>
+                        <span class="text-slate-500 text-xs tabular-nums">{{ Math.round(b.progress || 0) }}%</span>
+                      </template>
+                    </div>
+                  </td>
+                  <td class="h-14 px-5 text-right tabular-nums" :class="!b.summary ? 'text-slate-500' : (b.summary.pnl_cents >= 0 ? 'text-gain' : 'text-loss')">{{ b.summary ? fmtMoney(b.summary.pnl_cents) : '—' }}</td>
+                  <td class="h-14 px-5">
+                    <div class="flex items-center justify-end gap-1">
+                      <button @click="openResults(b.id)" class="ui-btn-ghost">View</button>
+                      <button v-if="b.status === 'running' || b.status === 'pending'" @click="stopBacktest(b.id)" class="ui-btn-ghost">Stop</button>
+                      <button @click="delBacktest(b.id)" class="ui-btn-ghost hover:text-loss">Delete</button>
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </main>
+  </AppShell>
 </template>

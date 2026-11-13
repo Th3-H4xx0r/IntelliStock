@@ -99,15 +99,11 @@ final class StrategyDetailModel {
         return best
     }
 
-    /// `_phaseColor`.
+    /// A decision phase's colour. The web sets every phase ("pre", "entry",
+    /// "exit", "post") as quiet zinc-400 text: a phase is not a status, so it
+    /// carries no hue.
     static func phaseColor(_ phase: String) -> Color {
-        switch phase.lowercased() {
-        case "pre": DS.Palette.info
-        case "post": Color(red: 0xC0 / 255, green: 0x84 / 255, blue: 0xFC / 255)
-        case "entry": DS.Palette.success
-        case "exit": DS.Palette.danger
-        default: .secondary
-        }
+        DS.Text.secondary
     }
 }
 

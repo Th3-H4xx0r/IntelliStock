@@ -1,5 +1,4 @@
 <script setup>
-import OnboardingParticles from './OnboardingParticles.vue'
 import OnboardingProgress from './OnboardingProgress.vue'
 
 defineProps({
@@ -22,42 +21,36 @@ const emit = defineEmits(['next', 'back', 'skip', 'exit'])
 
 <template>
   <!-- Real flex-column layout so the header / progress / content sizes
-       resolve automatically. The previous `calc(100% - 110px)` magic on
-       the content area was off on mobile (URL bar + dynamic viewport) so
-       the top of the card got pushed offscreen and couldn't be scrolled
-       back into view. Now the outer is `flex flex-col`, the body is
-       `flex-1 min-h-0 overflow-y-auto`, and we use `100dvh` on iOS so
-       the panel respects the dynamic viewport. Top padding honours the
-       iOS safe area so the title bar isn't clipped by the notch. -->
+       resolve automatically: the outer is `flex flex-col`, the body is
+       `flex-1 min-h-0 overflow-y-auto`, and `100dvh` keeps the panel inside
+       the dynamic viewport on iOS. Top padding honours the safe area so the
+       title bar isn't clipped by the notch. -->
   <div
-    class="fixed inset-0 z-50 flex flex-col overflow-hidden bg-[#05080b] text-slate-100"
+    class="fixed inset-0 z-50 flex flex-col overflow-hidden bg-background-dark text-slate-100"
     style="height: 100dvh; padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom);"
   >
-    <!-- Animated background -->
-    <OnboardingParticles />
-
     <!-- Top bar with logo + exit -->
-    <div class="relative z-10 flex items-center justify-between px-4 sm:px-8 py-4 sm:py-5 shrink-0">
-      <div class="flex items-center gap-2.5">
-        <div class="size-8 rounded-lg bg-primary/15 border border-primary/30 flex items-center justify-center">
-          <span class="material-symbols-outlined text-primary text-[18px]">auto_awesome</span>
-        </div>
-        <div class="flex flex-col leading-tight">
-          <span class="text-[10px] uppercase tracking-[0.18em] text-slate-500">IntelliStock</span>
-          <span class="text-xs font-semibold text-slate-200">Welcome flow</span>
-        </div>
+    <div class="flex items-center justify-between gap-4 px-4 sm:px-8 h-16 shrink-0 border-b border-white/[0.06]">
+      <div class="flex items-center gap-3 min-w-0">
+        <img
+          src="/new-logo.png"
+          alt="IntelliStock"
+          width="1200"
+          height="240"
+          class="block h-7 w-auto object-contain object-left"
+          draggable="false"
+        />
+        <span class="hidden sm:block h-4 w-px bg-white/[0.1]" aria-hidden="true"></span>
+        <span class="hidden sm:block text-sm text-slate-500">Setup</span>
       </div>
-      <button
-        @click="emit('exit')"
-        class="text-xs text-slate-500 hover:text-slate-200 transition-colors flex items-center gap-1.5"
-      >
+      <button type="button" @click="emit('exit')" class="ui-btn-ghost -mr-2">
         Exit
-        <span class="material-symbols-outlined text-[14px]">close</span>
+        <span class="material-symbols-outlined text-[16px]">close</span>
       </button>
     </div>
 
-    <!-- Progress bar -->
-    <div v-if="!hideProgress" class="relative z-10 px-4 sm:px-8 pb-4 sm:pb-6 shrink-0">
+    <!-- Progress -->
+    <div v-if="!hideProgress" class="px-4 sm:px-8 py-4 shrink-0 border-b border-white/[0.06]">
       <OnboardingProgress :steps="steps" :current="current" />
     </div>
 
@@ -65,9 +58,9 @@ const emit = defineEmits(['next', 'back', 'skip', 'exit'])
          flex-1 and min-h-0 are needed: flex-1 takes remaining height,
          min-h-0 lets it actually shrink so overflow-y-auto kicks in
          instead of bleeding past the viewport. -->
-    <div class="relative z-10 flex-1 min-h-0 overflow-y-auto flex items-start sm:items-center justify-center px-4 sm:px-6 pb-6">
+    <div class="flex-1 min-h-0 overflow-y-auto flex items-start sm:items-center justify-center px-4 sm:px-6 py-6 sm:py-10">
       <div
-        class="relative w-full max-w-3xl glass-card rounded-2xl border border-primary/15 bg-[#0c1216]/85 px-5 sm:px-10 py-6 sm:py-9 shadow-[0_0_60px_rgba(0,225,255,0.05)] my-auto"
+        class="w-full max-w-3xl rounded-2xl border border-white/[0.07] bg-surface px-5 sm:px-10 py-6 sm:py-8 my-auto"
         :data-direction="direction"
       >
         <Transition name="step" mode="out-in">
@@ -77,32 +70,34 @@ const emit = defineEmits(['next', 'back', 'skip', 'exit'])
         </Transition>
 
         <!-- Footer nav -->
-        <div v-if="showFooter" class="mt-8 pt-5 border-t border-border-subtle/60 flex flex-col-reverse sm:flex-row items-stretch sm:items-center gap-3 sm:justify-between">
+        <div v-if="showFooter" class="mt-8 pt-5 border-t border-white/[0.06] flex flex-col-reverse sm:flex-row items-stretch sm:items-center gap-3 sm:justify-between">
           <button
             v-if="canGoBack"
+            type="button"
             @click="emit('back')"
             :disabled="busy"
-            class="inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg text-sm text-slate-400 hover:text-slate-100 transition-colors disabled:opacity-40"
+            class="ui-btn-ghost h-9 sm:-ml-3"
           >
             <span class="material-symbols-outlined text-[16px]">arrow_back</span>
             {{ backLabel }}
           </button>
           <span v-else class="hidden sm:inline-block"></span>
 
-          <div class="flex items-center gap-3 justify-end">
+          <div class="flex items-center gap-2 justify-end">
             <button
               v-if="showSkip"
+              type="button"
               @click="emit('skip')"
               :disabled="busy"
-              class="text-sm text-slate-500 hover:text-slate-300 transition-colors disabled:opacity-40 px-2 py-2"
+              class="ui-btn-ghost h-9"
             >{{ skipLabel }}</button>
             <button
+              type="button"
               @click="emit('next')"
               :disabled="busy || !canGoNext"
-              class="inline-flex items-center justify-center gap-2 px-5 sm:px-6 py-2.5 rounded-lg bg-primary text-background-dark text-sm font-bold hover:brightness-110 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-              :class="{ 'onboarding-cta': canGoNext && !busy }"
+              class="ui-btn-primary"
             >
-              <span v-if="busy" class="material-symbols-outlined text-base animate-spin">progress_activity</span>
+              <span v-if="busy" class="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
               {{ nextLabel }}
               <span v-if="!busy" class="material-symbols-outlined text-[16px]">arrow_forward</span>
             </button>

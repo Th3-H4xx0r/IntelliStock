@@ -232,7 +232,7 @@ private struct MarkdownBlockView: View {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text(marker ?? "•")
                     .monospacedDigit()
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(DS.Text.muted)
                     .opacity(marker == nil ? 0 : 1)
                     .accessibilityHidden(marker == nil)
                 Text(text)
@@ -240,56 +240,59 @@ private struct MarkdownBlockView: View {
             .padding(.leading, CGFloat(depth) * 16)
         case .quote(let text):
             HStack(spacing: 10) {
-                RoundedRectangle(cornerRadius: 1.5)
-                    .fill(Color(uiColor: .tertiaryLabel))
-                    .frame(width: 3)
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(DS.Line.focus)
+                    .frame(width: 2)
                 Text(text)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(DS.Text.secondary)
             }
             .fixedSize(horizontal: false, vertical: true)
         case .code(_, let text):
             ScrollView(.horizontal, showsIndicators: false) {
                 Text(text)
-                    .font(.system(.footnote, design: .monospaced))
+                    .font(DS.Font.mono)
+                    .foregroundStyle(DS.Text.soft)
                     .textSelection(.enabled)
                     .padding(12)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(DS.Surface.inset, in: .rect(cornerRadius: DS.Radius.small, style: .continuous))
+            .dsCardSurface(fill: DS.Surface.page, radius: DS.Radius.control, border: DS.Line.divider)
         case .table(let table):
             ScrollView(.horizontal, showsIndicators: false) {
                 Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 6) {
                     GridRow {
                         ForEach(table.header.indices, id: \.self) { column in
                             Text(table.header[column])
-                                .font(.subheadline.weight(.semibold))
+                                .font(DS.Font.caption)
+                                .foregroundStyle(DS.Text.muted)
                                 .gridColumnAlignment(alignment(table, column))
                         }
                     }
-                    Divider()
+                    DSDivider()
                     ForEach(table.rows.indices, id: \.self) { row in
                         GridRow {
                             ForEach(table.rows[row].indices, id: \.self) { column in
                                 Text(table.rows[row][column])
-                                    .font(.subheadline)
+                                    .font(DS.Font.body)
+                                    .monospacedDigit()
                             }
                         }
                     }
                 }
                 .padding(12)
             }
-            .background(DS.Surface.inset, in: .rect(cornerRadius: DS.Radius.small, style: .continuous))
+            .dsCardSurface(fill: DS.Surface.page, radius: DS.Radius.control, border: DS.Line.divider)
         case .rule:
-            Divider()
+            DSDivider()
         }
     }
 
     private func headingFont(_ level: Int) -> Font {
         switch level {
-        case 1: .title2.bold()
-        case 2: .title3.bold()
-        case 3: .headline
-        default: .subheadline.weight(.semibold)
+        case 1: DS.Font.large
+        case 2: DS.Font.baseMedium
+        case 3: DS.Font.bodyMedium
+        default: DS.Font.bodyMedium
         }
     }
 

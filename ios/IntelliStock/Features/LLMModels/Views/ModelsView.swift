@@ -1,9 +1,10 @@
 import SwiftUI
 
-/// The saved LLM models — `ModelsScreen` in `models_screen.dart`, as an
-/// inset-grouped list of rows. Tapping a row opens its editor; Edit, Delete
-/// (and Test CLI Connection for Claude Code CLI models) are swipe actions and
-/// context-menu items; `+` adds a model.
+/// The saved LLM models — `ModelsScreen` in `models_screen.dart`, as the
+/// web's Models page: the subtitle, then one card of model rows. Tapping a
+/// row opens its editor; Edit, Delete (and Test CLI connection for Claude
+/// Code CLI models) are swipe actions and context-menu items; `+` adds a
+/// model.
 struct ModelsView: View {
     @Environment(AppServices.self) private var services
     @State private var model: ModelsModel?
@@ -12,52 +13,58 @@ struct ModelsView: View {
     @State private var deleting = false
     @State private var toast: Toast?
 
+    static let subtitle = "Saved LLM configurations. Strategies reference these instead of storing credentials inline"
+
     var body: some View {
         List {
+            Section {
+                Text(Self.subtitle)
+                    .font(DS.Font.pageSub)
+                    .foregroundStyle(DS.Text.muted)
+                    .dsClearRow(top: 0)
+            }
             switch model?.models ?? .loading {
             case .loading:
-                Section {
+                DSSection {
                     ForEach(0..<4, id: \.self) { _ in
-                        ModelListRow(model: Self.placeholder, test: nil)
+                        VStack(alignment: .leading, spacing: 8) {
+                            Skeleton(width: 170, height: 14)
+                            Skeleton(width: 120, height: 12)
+                        }
                     }
                 }
-                .redacted(reason: .placeholder)
                 .allowsHitTesting(false)
+                .accessibilityLabel("Loading models")
             case .failed(let error):
                 Section {
                     ErrorRow(message: llmErrorText(error)) { Task { await model?.refresh() } }
-                        .listRowInsets(EdgeInsets())
-                        .listRowBackground(Color.clear)
+                        .dsClearRow()
                 }
             case .loaded(let models):
                 if models.isEmpty {
-                    Section {
+                    DSSection {
                         EmptyState(
-                            systemImage: Symbol.named("psychology"),
                             title: "No models saved yet",
-                            subtitle: "Add a model to start using centralized LLM configurations.",
-                            actionLabel: "Add Model",
+                            subtitle: "Add one to share an LLM configuration across strategies",
+                            actionLabel: "Add model",
                             onAction: { editor = ModelEditorTarget(model: nil) }
                         )
-                        .listRowBackground(Color.clear)
                     }
                 } else {
-                    Section {
+                    DSSection("", subtitle: "\(models.count) model\(models.count == 1 ? "" : "s")") {
                         ForEach(models) { m in
                             modelRow(m)
                         }
-                    } footer: {
-                        Text("Centralized LLM model configurations. Strategies can reference these instead of storing credentials inline.")
                     }
                 }
             }
         }
-        .listStyle(.insetGrouped)
+        .dsList()
         .navigationTitle("Models")
-        .navigationBarTitleDisplayMode(.inline)
+        .navigationBarTitleDisplayMode(.large)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                ToolbarAddButton("Add Model") {
+                ToolbarAddButton("Add model") {
                     editor = ModelEditorTarget(model: nil)
                 }
             }
@@ -90,28 +97,28 @@ struct ModelsView: View {
         } label: {
             ModelListRow(model: m, test: test)
         }
-        .foregroundStyle(.primary)
+        .buttonStyle(.plain)
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             // Red by tint, not by role: a destructive-role swipe button
             // animates the row away before the confirmation answers.
             Button("Delete", systemImage: Symbol.named("delete_outline")) { confirmDelete(m) }
-                .tint(DS.Palette.danger)
+                .tint(DS.Swipe.destructive)
             Button("Edit", systemImage: Symbol.named("edit")) { editor = ModelEditorTarget(model: m) }
-                .tint(DS.Palette.accent)
+                .tint(DS.Swipe.neutral)
         }
         .swipeActions(edge: .leading) {
             if isCli {
-                Button("Test CLI Connection", systemImage: Symbol.named("cable")) {
+                Button("Test CLI connection", systemImage: Symbol.named("cable")) {
                     Task { await model?.testCli(m.id) }
                 }
-                .tint(DS.Palette.info)
+                .tint(DS.Swipe.neutral)
                 .disabled(testing)
             }
         }
         .contextMenu {
             Button("Edit", systemImage: Symbol.named("edit")) { editor = ModelEditorTarget(model: m) }
             if isCli {
-                Button("Test CLI Connection", systemImage: Symbol.named("cable")) {
+                Button("Test CLI connection", systemImage: Symbol.named("cable")) {
                     Task { await model?.testCli(m.id) }
                 }
                 .disabled(testing)
@@ -131,11 +138,6 @@ struct ModelsView: View {
             onError: { error in toast = Toast("Delete failed: \(llmErrorText(error))", style: .error) }
         )
     }
-
-    private static let placeholder = LlmModel(json: [
-        "id": "placeholder", "name": "Gemini Flash — Main", "provider": "gemini", "model": "gemini-flash",
-        "api_key": "••••", "created_at": "2026-01-01T00:00:00Z",
-    ])
 }
 
 private struct ModelEditorTarget: Identifiable {
@@ -143,7 +145,8 @@ private struct ModelEditorTarget: Identifiable {
     let model: LlmModel?
 }
 
-/// The provider's glyph in a model row.
+/// The provider's glyph (kept for other surfaces; the list rows draw none)
+/// and a model row's subtitle.
 nonisolated enum ModelsProviderGlyph {
     static func symbol(_ provider: String) -> String {
         switch provider {
@@ -169,51 +172,46 @@ nonisolated enum ModelsProviderGlyph {
     }
 }
 
-/// One saved model — `_ModelCard`, as a row in the `EntityRow` style: the
-/// provider glyph, the name (up to two lines, so the effort suffix shows),
-/// and the provider with its date. The model id, effort and masked key are in
-/// the editor. A CLI test's spinner and result show on the row.
+/// One saved model — the web's model row: the name (up to two lines, so the
+/// effort suffix shows) over the provider and its date. The model id,
+/// effort and masked key are in the editor. A CLI test's spinner shows on
+/// the row, and its result as a 12 pt line under it, gain or loss.
 private struct ModelListRow: View {
     let model: LlmModel
     let test: ModelsModel.CliTest?
 
-    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
         let m = model
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 12) {
-                IconTile(systemImage: ModelsProviderGlyph.symbol(m.provider), size: EntityRowMetrics.iconSize)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(m.name)
-                        .font(.headline)
+                        .font(DS.Font.body)
+                        .foregroundStyle(DS.Text.primary)
                         .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
                     Text(ModelsProviderGlyph.subtitle(m))
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.muted)
+                        .monospacedDigit()
                         .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 if test?.testing == true {
                     ProgressView()
+                        .controlSize(.small)
                         .accessibilityLabel("Testing CLI connection")
                 }
             }
             if let message = test?.message {
-                let color = test?.ok == true ? DS.Palette.success : DS.Palette.danger
-                Label {
-                    Text(message)
-                        .foregroundStyle(DS.Palette.onTint(color, in: colorScheme))
-                } icon: {
-                    Image(systemName: test?.ok == true ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
-                        .foregroundStyle(color)
-                }
-                .font(.footnote)
-                .padding(.leading, EntityRowMetrics.iconSize + 12)
+                Text(message)
+                    .font(DS.Font.caption)
+                    .foregroundStyle(test?.ok == true ? DS.Palette.gain : DS.Palette.loss)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(.vertical, 2)
+        .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
     }
 }

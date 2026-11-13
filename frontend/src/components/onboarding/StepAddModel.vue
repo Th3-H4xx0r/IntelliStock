@@ -131,72 +131,63 @@ function maskKey(k) {
 <template>
   <div class="space-y-6">
     <div>
-      <p class="text-primary text-xs font-bold uppercase tracking-widest mb-2 onboarding-letter" style="animation-delay: 0.05s">
-        Step 1 · Add a model
-      </p>
-      <h2 class="onboarding-title text-2xl sm:text-3xl font-bold leading-tight onboarding-letter" style="animation-delay: 0.15s">
-        Pick the brain that powers your trades.
+      <p class="text-sm text-slate-500">Step 1 · Add a model</p>
+      <h2 class="mt-2 text-xl sm:text-2xl font-medium leading-tight text-slate-100">
+        Choose the LLM your strategies call
       </h2>
-      <p class="mt-3 text-slate-400 text-sm onboarding-letter" style="animation-delay: 0.25s">
+      <p class="mt-3 text-sm leading-6 text-slate-400">
         Drop in an API key for any supported LLM provider. Strategies reference models by ID, so you can
-        swap or add more later — Gemini's free tier works great as a starter.
+        swap or add more later. Gemini's free tier works well as a starter.
       </p>
     </div>
 
     <!-- Existing models -->
-    <div v-if="models.length" class="space-y-2 onboarding-letter" style="animation-delay: 0.3s">
-      <p class="text-[11px] font-semibold uppercase tracking-widest text-slate-500">Already configured</p>
-      <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
-        <div
-          v-for="m in models"
-          :key="m.id"
-          class="rounded-lg border border-border-subtle bg-surface/40 px-3 py-2.5 flex items-center gap-3"
-        >
-          <span class="material-symbols-outlined text-primary text-[20px]">memory</span>
-          <div class="min-w-0 flex-1">
-            <p class="text-sm font-medium text-slate-100 truncate">{{ m.name }}</p>
-            <p class="text-[11px] text-slate-500 truncate font-mono">
-              {{ m.provider }} · {{ m.model }}
-              <span v-if="m.provider === 'claude-cli'">· {{ m.cli_path || 'claude' }}</span>
-              <span v-else-if="m.api_key">· {{ maskKey(m.api_key) }}</span>
-            </p>
-          </div>
+    <div v-if="models.length">
+      <p class="ui-label mb-2">Already configured</p>
+      <div class="rounded-xl border border-white/[0.07] ui-rows">
+        <div v-for="m in models" :key="m.id" class="min-h-14 px-4 py-2 flex flex-col justify-center">
+          <p class="text-sm text-slate-100 truncate">{{ m.name }}</p>
+          <p class="mt-0.5 text-xs text-slate-500 truncate font-mono">
+            {{ m.provider }} · {{ m.model }}
+            <span v-if="m.provider === 'claude-cli'">· {{ m.cli_path || 'claude' }}</span>
+            <span v-else-if="m.api_key">· {{ maskKey(m.api_key) }}</span>
+          </p>
         </div>
       </div>
       <button
         v-if="!showForm"
+        type="button"
         @click="showForm = true"
-        class="mt-1 inline-flex items-center gap-1.5 text-xs text-primary hover:brightness-125 transition-all"
+        class="ui-btn-ghost mt-2 -ml-3"
       >
-        <span class="material-symbols-outlined text-[14px]">add</span>
+        <span class="material-symbols-outlined text-[16px]">add</span>
         Add another model
       </button>
     </div>
 
     <!-- Add form -->
-    <div v-if="showForm" class="rounded-xl border border-border-subtle bg-surface/40 p-4 sm:p-5 space-y-4 onboarding-letter" style="animation-delay: 0.35s">
+    <div v-if="showForm" class="rounded-xl border border-white/[0.07] p-4 sm:p-5 space-y-5">
       <div>
-        <label class="block text-xs font-medium text-slate-400 mb-1.5">Model Name <span class="text-red-400">*</span></label>
+        <label class="ui-field-label">Model name <span class="text-slate-500">*</span></label>
         <input
           v-model="draft.name"
           type="text"
           placeholder="e.g. gemini-flash-prod"
-          class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors"
+          class="ui-input"
         />
-        <p class="text-[11px] text-slate-500 mt-1">A label you'll recognize when picking models in strategies.</p>
+        <p class="ui-help">A label you'll recognize when picking models in strategies</p>
       </div>
       <LlmConfigForm :draft="draft" :disabled="submitting" @update:draft="updateDraft" />
 
       <Transition name="step">
         <div
           v-if="submitMsg"
-          class="rounded-lg px-3 py-2.5 text-sm font-medium"
-          :class="submitOk
-            ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400'
-            : 'bg-red-500/10 border border-red-500/20 text-red-400'"
+          class="rounded-xl border px-4 py-3 text-sm"
+          :class="submitOk ? 'border-gain/20 bg-gain/5 text-gain' : 'border-loss/20 bg-loss/5 text-loss'"
+          role="status"
         >
-          <span v-if="submitting" class="inline-flex items-center gap-2">
-            <span class="material-symbols-outlined text-base animate-spin">progress_activity</span>
+          <span v-if="submitting" class="inline-flex items-center gap-2 text-slate-300">
+            <span class="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
             {{ submitMsg }}
           </span>
           <span v-else>{{ submitMsg }}</span>
@@ -206,17 +197,18 @@ function maskKey(k) {
       <div class="flex flex-col-reverse sm:flex-row items-stretch sm:items-center gap-2 sm:justify-end">
         <button
           v-if="models.length"
+          type="button"
           @click="showForm = false"
           :disabled="submitting"
-          class="px-3 py-2 text-sm text-slate-400 hover:text-slate-100 transition-colors disabled:opacity-40"
+          class="ui-btn-ghost h-9"
         >Cancel</button>
         <button
+          type="button"
           @click="testAndSave"
           :disabled="submitting || !canSubmit"
-          class="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-primary/90 text-background-dark text-sm font-bold hover:brightness-110 transition-all disabled:opacity-40"
+          class="ui-btn-primary"
         >
-          <span v-if="submitting" class="material-symbols-outlined text-base animate-spin">progress_activity</span>
-          <span v-else class="material-symbols-outlined text-[16px]">bolt</span>
+          <span v-if="submitting" class="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
           {{ submitting ? 'Working…' : 'Test &amp; save' }}
         </button>
       </div>

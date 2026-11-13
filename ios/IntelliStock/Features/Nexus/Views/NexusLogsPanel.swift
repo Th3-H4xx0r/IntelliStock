@@ -1,11 +1,12 @@
 import SwiftUI
 import UIKit
 
-/// The terminal-style build-log panel for the Nexus graph — `NexusLogsPanel`:
-/// a `LogTailer` on `/nexus-graph-builds/latest/logs?since_line=n` (2 s while
-/// building, 15 s idle), started on first open, with search, pause, copy and
-/// a sticky bottom. It sits in a list row: the header is the row, and the log
-/// opens beneath it.
+/// The build-log panel for the Nexus graph — `NexusLogsPanel`, drawn as the
+/// web's `NexusLiveLogs.vue` card: a `LogTailer` on
+/// `/nexus-graph-builds/latest/logs?since_line=n` (2 s while building, 15 s
+/// idle), started on first open, with search, pause, copy and a sticky
+/// bottom. The header is always shown; the log opens beneath it on the page
+/// colour.
 struct NexusLogsPanel: View {
     @Environment(AppServices.self) private var services
 
@@ -22,11 +23,15 @@ struct NexusLogsPanel: View {
         VStack(alignment: .leading, spacing: 0) {
             header(state)
             if open {
-                Divider()
-                if !state.lines.isEmpty { searchField }
-                logArea(state)
+                VStack(alignment: .leading, spacing: 0) {
+                    if !state.lines.isEmpty { searchField }
+                    logArea(state)
+                }
+                .background(DS.Surface.page)
+                .overlay(alignment: .top) { DSDivider() }
             }
         }
+        .dsCardSurface()
         .toast($toast)
         .task {
             let current: LogTailer
@@ -58,32 +63,46 @@ struct NexusLogsPanel: View {
 
     // MARK: Header
 
-    private func statusColor(_ s: LogTailerState) -> Color {
+    /// The web's log dot: live while running, red when failed, off otherwise.
+    private func statusTone(_ s: LogTailerState) -> DSStatusTone {
         switch (s.finalStatus ?? "").lowercased() {
-        case "running", "building": DS.Palette.info
-        case "failed": DS.Palette.danger
-        case "completed": DS.Palette.success
-        default: Color(uiColor: .tertiaryLabel)
+        case "running", "building": .live
+        case "failed": .error
+        default: .off
         }
     }
 
+    /// "Building · 120 lines": the status first, then the count.
+    private func headerDetail(_ state: LogTailerState) -> String? {
+        var parts: [String] = []
+        if let s = state.finalStatus, s != "none" { parts.append(NexusFormat.friendlyStatus(s)) }
+        if !state.lines.isEmpty { parts.append("\(state.lines.count) lines") }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
     private func header(_ state: LogTailerState) -> some View {
-        let pulsing = ["running", "building"].contains((state.finalStatus ?? "").lowercased())
-        return HStack(spacing: 8) {
-            PulsingDot(color: statusColor(state), size: 8, pulsing: pulsing)
+        HStack(spacing: 8) {
+            DSStatusDot(statusTone(state))
             VStack(alignment: .leading, spacing: 2) {
                 Text(NexusFormat.logFileName(state.buildId))
-                    .font(.caption.monospaced())
+                    .font(DS.Font.body)
+                    .foregroundStyle(DS.Text.primary)
                     .lineLimit(1)
-                if let s = state.finalStatus, s != "none" {
-                    Text(NexusFormat.friendlyStatus(s) + (state.lines.isEmpty ? "" : " · \(state.lines.count) lines"))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                    .truncationMode(.middle)
+                if let detail = headerDetail(state) {
+                    Text(detail)
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.secondary)
+                        .monospacedDigit()
+                        .lineLimit(1)
                 }
                 if state.source == "db" {
-                    Text("(last 500 — log file not available)")
-                        .font(.caption2)
-                        .foregroundStyle(DS.Palette.warning)
+                    HStack(spacing: 6) {
+                        DSStatusDot(.warn)
+                        Text("Last 500 lines — log file not available")
+                            .font(DS.Font.caption)
+                            .foregroundStyle(DS.Text.label)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -91,50 +110,42 @@ struct NexusLogsPanel: View {
                 Button {
                     togglePause(state)
                 } label: {
-                    Image(systemName: Symbol.named(userPaused ? "play_arrow" : "pause"))
-                        .foregroundStyle(userPaused ? DS.Palette.warning : Color.secondary)
-                        .frame(width: 44, height: 44)
+                    Image(systemName: userPaused ? "play" : "pause")
+                        .foregroundStyle(userPaused ? DS.Palette.amber : DS.Text.muted)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.dsIcon)
                 .accessibilityLabel(userPaused ? "Resume" : "Pause")
                 Button {
                     UIPasteboard.general.string = state.lines.map(\.raw).joined(separator: "\n")
                     toast = Toast("Copied", style: .success)
                 } label: {
                     Image(systemName: Symbol.named("content_copy"))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 44, height: 44)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.dsIcon)
                 .accessibilityLabel("Copy")
             }
-            // A plain accent text action, as list rows carry (no capsule).
-            Button(action: toggleOpen) {
-                Text(open ? "Hide Logs" : "View Build Logs")
-                    .font(.subheadline.weight(.semibold))
-                    .frame(minHeight: 44)
-                    .contentShape(.rect)
-            }
-            .buttonStyle(.borderless)
+            Button(open ? "Hide logs" : "View live logs", action: toggleOpen)
+                .buttonStyle(.dsSecondary)
         }
-        .padding(.leading, 16)
-        .padding(.trailing, 16)
-        .padding(.vertical, 4)
+        .padding(.leading, DS.rowPadding)
+        .padding(.trailing, 12)
+        .padding(.vertical, 12)
+        .frame(minHeight: DS.rowMinHeight)
     }
 
     private var searchField: some View {
-        HStack(spacing: 6) {
-            Image(systemName: Symbol.named("search")).foregroundStyle(.secondary).accessibilityHidden(true)
-            TextField("Search logs...", text: $search)
-                .font(.caption.monospaced())
+        HStack(spacing: 8) {
+            Image(systemName: Symbol.named("search"))
+                .font(.system(size: 14))
+                .foregroundStyle(DS.Text.muted)
+                .accessibilityHidden(true)
+            TextField(text: $search, prompt: Text("Search logs").foregroundStyle(DS.Text.faint)) { Text("Search logs") }
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(DS.Surface.inset, in: .rect(cornerRadius: DS.Radius.small, style: .continuous))
+        .dsInput()
         .padding(.horizontal, 12)
-        .padding(.top, 10)
+        .padding(.top, 12)
         .padding(.bottom, 4)
     }
 
@@ -145,15 +156,19 @@ struct NexusLogsPanel: View {
         if state.loading, state.lines.isEmpty {
             HStack(spacing: 10) {
                 ProgressView().controlSize(.small)
-                Text("Loading logs…").font(.caption.monospaced()).foregroundStyle(.secondary)
+                Text("Loading logs…")
+                    .font(DS.Font.body)
+                    .foregroundStyle(DS.Text.muted)
             }
-            .padding(20)
+            .padding(.horizontal, DS.rowPadding)
+            .padding(.vertical, 24)
         } else if state.lines.isEmpty {
             Text(emptyMessage(state))
-                .font(.caption.monospaced())
-                .italic()
-                .foregroundStyle(.secondary)
-                .padding(20)
+                .font(DS.Font.body)
+                .foregroundStyle(DS.Text.muted)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, DS.rowPadding)
+                .padding(.vertical, 24)
         } else {
             logList(filtered(state))
         }
@@ -161,8 +176,8 @@ struct NexusLogsPanel: View {
 
     private func emptyMessage(_ state: LogTailerState) -> String {
         let s = state.finalStatus ?? ""
-        if state.error != nil { return "Can't reach logs endpoint. Retrying…" }
-        if s == "none" || s.isEmpty { return "No active build. Trigger a Nexus build to see live logs." }
+        if state.error != nil { return "Can't reach the logs endpoint. Retrying…" }
+        if s == "none" || s.isEmpty { return "No builds yet. Start the Nexus engine to begin a build" }
         return "Waiting for log output…"
     }
 
@@ -177,22 +192,21 @@ struct NexusLogsPanel: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(lines) { line in
-                        HStack(alignment: .top, spacing: 0) {
+                        HStack(alignment: .firstTextBaseline, spacing: 0) {
                             if let ts = line.ts {
                                 Text(NexusFormat.logStamp(ts))
-                                    .font(.system(.caption2, design: .monospaced))
-                                    .foregroundStyle(.tertiary)
-                                    .frame(width: 92, alignment: .leading)
-                                    .padding(.leading, 10)
+                                    .foregroundStyle(DS.Text.faint)
+                                    .fixedSize()
+                                    .padding(.leading, 12)
                             } else {
-                                Color.clear.frame(width: 10, height: 1)
+                                Color.clear.frame(width: 12, height: 1)
                             }
                             Text(line.message)
-                                .font(.system(.caption2, design: .monospaced))
                                 .foregroundStyle(line.color)
-                                .padding(.horizontal, 6)
+                                .padding(.horizontal, 8)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
+                        .font(DS.Font.monoSmall)
                         .padding(.vertical, 2)
                         .id(line.id)
                     }
@@ -221,11 +235,9 @@ struct NexusLogsPanel: View {
                         showJump = false
                         if let last = lines.last?.id { proxy.scrollTo(last, anchor: .bottom) }
                     } label: {
-                        Label("Jump to Latest", systemImage: Symbol.named("arrow_downward"))
-                            .font(.caption.weight(.semibold))
+                        Label("Jump to latest", systemImage: Symbol.named("arrow_downward"))
                     }
-                    .buttonStyle(.glass)
-                    .controlSize(.small)
+                    .buttonStyle(.dsSecondary)
                     .padding(10)
                 }
             }

@@ -2,12 +2,11 @@ import SwiftUI
 
 /// The Dashboard tab root — `DashboardScreen` in `dashboard_screen.dart`.
 ///
-/// Sections in Dart's order: Portfolio (hero, chart, holdings, then a stock
-/// account's orders) · Insights ·
-/// Market · Strategy · Kalshi · Services · Re-run onboarding, as one
-/// inset-grouped `List` (redesign spec 2026-10-02). There is no visible
-/// title: the balance is the first and biggest thing on screen, as in Stocks,
-/// and only the search button sits in the bar.
+/// The web dashboard's twin (`DashboardView.vue`): the page header (title,
+/// date and market status, search, the account switcher), then Portfolio
+/// (hero, chart, holdings, a stock account's orders) · Insights · Market ·
+/// Strategy · Kalshi · Services · Re-run onboarding, as one `.dsList()`.
+/// The navigation bar stays hidden; the header carries the title.
 ///
 /// A `List` builds its rows lazily, so every load and poll a section used to
 /// start from its own `.task` runs from here, on the list itself: each card
@@ -30,9 +29,8 @@ enum DashboardTopActions {
     static let title = "Dashboard"
 }
 
-/// The dashboard's search button. The Dashboard root hides its navigation
-/// bar, so this sits at the trailing end of the hero instead: the same
-/// glass circle, glyph and label the bar's button had, and a 44 pt target.
+/// The dashboard's search button (`ui-icon-btn`), at the trailing end of
+/// the page header: the Dashboard root hides its navigation bar.
 struct DashboardSearchButton: View {
     @Environment(AppServices.self) private var services
 
@@ -41,30 +39,102 @@ struct DashboardSearchButton: View {
             services.router.push(DashboardTopActions.searchRoute)
         } label: {
             Image(systemName: Symbol.named("search"))
-                .font(.title3.weight(.medium))
-                .foregroundStyle(Color.primary)
-                .frame(width: 44, height: 44)
-                .contentShape(Circle())
         }
-        .buttonStyle(.plain)
-        .glassEffect(.regular.interactive(), in: Circle())
+        .buttonStyle(.dsIcon(side: 40))
         .accessibilityLabel(DashboardTopActions.searchLabel)
     }
 }
 
-/// The search button on its own row, for the states with no hero beside it
-/// (no accounts, or the account list failed to load).
-private struct DashboardSearchRow: View {
+/// The page header (`ui-page-title` + `ui-page-sub`): "Dashboard", today's
+/// date and the market's status as a dot and a word, the search button, and
+/// under them the account switcher once accounts are known.
+private struct DashboardPageHeader<Switcher: View>: View {
+    @ViewBuilder let switcher: () -> Switcher
+
     var body: some View {
-        Section {
-            HStack {
-                Spacer()
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(DashboardTopActions.title)
+                        .font(DS.Font.pageTitle)
+                        .foregroundStyle(DS.Text.primary)
+                        .accessibilityAddTraits(.isHeader)
+                    DashboardLiveStatusChip()
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 DashboardSearchButton()
+                    .padding(.trailing, -8)
             }
-            .listRowBackground(Color.clear)
-            .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+            switcher()
         }
     }
+}
+
+/// "Alpaca · Live", "Kalshi · Paper" — the web's `accountKind`.
+func dashboardAccountKind(_ a: BrokerageAccount) -> String {
+    let type = a.brokerageType.lowercased()
+    let name = type == "alpaca" ? "Alpaca" : type == "kalshi" ? "Kalshi" : (a.brokerageType.isEmpty ? "Brokerage" : a.brokerageType.dsSentenceCased)
+    return "\(name) · \(a.isPaper ? "Paper" : "Live")"
+}
+
+/// The condensed account switcher (the web header's): the account's name
+/// and kind, its value and today's change, and a chevron. It opens the
+/// Portfolios sheet; with one account it is a plain label.
+private struct DashboardAccountSwitcher: View {
+    let account: BrokerageAccount
+    let summary: DashboardAccountSummary?
+    let switchable: Bool
+    let action: () -> Void
+
+    var body: some View {
+        let name = DashboardFormat.accountName(account)
+        Button(action: action) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(name)
+                        .font(DS.Font.body)
+                        .foregroundStyle(DS.Text.primary)
+                        .lineLimit(1)
+                    Text(dashboardAccountKind(account))
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.muted)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text(summary.map { fmtMoney($0.equity) } ?? "—")
+                        .font(DS.Font.body)
+                        .foregroundStyle(DS.Text.primary)
+                    Text(summary?.dayChangePct.map { fmtPct($0) } ?? " ")
+                        .font(DS.Font.caption)
+                        .foregroundStyle(dashboardChangeColor(summary?.dayChangePct))
+                }
+                .monospacedDigit()
+                .lineLimit(1)
+                if switchable {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 14))
+                        .foregroundStyle(DS.Text.muted)
+                        .accessibilityHidden(true)
+                }
+            }
+            .padding(.leading, 16)
+            .padding(.trailing, 12)
+            .frame(height: 56)
+            .dsCardSurface(border: DS.Line.input)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!switchable)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Account, \(name)")
+        .accessibilityHint(switchable ? "Shows your portfolios" : "")
+    }
+}
+
+/// The web's `changeClass`: zinc-500 for no move, else gain or loss.
+func dashboardChangeColor(_ pct: Double?) -> Color {
+    guard let pct, abs(pct) >= 0.005 else { return DS.Text.muted }
+    return pct > 0 ? DS.Palette.gain : DS.Palette.loss
 }
 
 private struct DashboardContent: View {
@@ -131,6 +201,21 @@ private struct DashboardContent: View {
 
     var body: some View {
         List {
+            Section {
+                DashboardPageHeader {
+                    if let accounts, let selected, !accounts.isEmpty {
+                        DashboardAccountSwitcher(
+                            account: selected,
+                            summary: liveScope?.chart.daySummary ?? portfolios.summary(selected.id),
+                            switchable: accounts.count > 1,
+                            action: { showPortfolios = true }
+                        )
+                    } else if services.dashboard.brokerages.value == nil, services.dashboard.brokerages.error == nil {
+                        Skeleton(height: 56, radius: DS.Radius.card)
+                    }
+                }
+                .dsClearRow(top: 8, bottom: 0)
+            }
             portfolio
             if let scope = liveScope, let selected {
                 DashboardInsightsSections(scope: scope, feed: feed) { browserLink = $0 }
@@ -142,17 +227,17 @@ private struct DashboardContent: View {
             DashboardServicesSection { startAgentSheet = true }
             onboardingSection
         }
-        .listStyle(.insetGrouped)
-        // The hero starts right at the top of the safe area, as in Stocks.
+        .dsList()
+        // The header starts right at the top of the safe area.
         .contentMargins(.top, 0, for: .scrollContent)
         .navigationTitle(DashboardTopActions.title)
         .navigationBarTitleDisplayMode(.inline)
-        // No bar: the balance leads the screen and the search button sits at
-        // the hero's trailing end (`DashboardSearchButton`).
+        // No bar: the page header carries the title and the search button.
         .toolbar(.hidden, for: .navigationBar)
-        // Rows scrolled up pass under a plain strip, never under the clock.
+        // Rows scrolled up pass under a strip of the page colour, never
+        // under the clock.
         .overlay(alignment: .top) {
-            Color(uiColor: .systemGroupedBackground)
+            DS.Surface.page
                 .frame(height: 0)
                 .ignoresSafeArea(edges: .top)
                 .allowsHitTesting(false)
@@ -238,6 +323,25 @@ private struct DashboardContent: View {
                 )
             }
         }
+        // An order placed or canceled from a stock screen: reload that
+        // account's holdings and orders when it is the one on screen.
+        .onReceive(NotificationCenter.default.publisher(for: TradeEvents.ordersChanged)) { note in
+            guard let id = note.object as? String, let scope = portfolioScope, scope.brokerageId == id else { return }
+            let reloadsOrders = selected?.hasOrderBook == true
+            Task {
+                await scope.holdings.reload()
+                if reloadsOrders { await scope.orders.reload() }
+            }
+        }
+        // The Orders section's cancel confirm lives on the list, not on a
+        // row that can scroll away.
+        .tradeCancelAlert(Binding(
+            get: { ordersScope?.orders.cancelPrompt },
+            set: { ordersScope?.orders.cancelPrompt = $0 }
+        )) { prompt in
+            guard let orders = ordersScope?.orders, orders.brokerageId == prompt.brokerageId else { return }
+            Task { await orders.cancel(prompt.order.id) }
+        }
         .sheet(isPresented: $showPortfolios) {
             if let accounts, let selected {
                 DashboardPortfolioSheet(
@@ -274,24 +378,19 @@ private struct DashboardContent: View {
         case .loading:
             DashboardPortfolioSkeleton()
         case .failed:
-            DashboardSearchRow()
             Section {
-                ErrorRow(message: services.dashboard.brokerages.errorMessage ?? "") {
+                ErrorRow(message: "Couldn't load brokerages: \(services.dashboard.brokerages.errorMessage ?? "")") {
                     Task { await services.dashboard.loadBrokerages() }
                 }
+                .dsClearRow(top: 24)
             }
         case .loaded(let accounts):
             if accounts.isEmpty {
-                DashboardSearchRow()
                 Section {
-                    EmptyState(
-                        systemImage: Symbol.named("account_balance"),
-                        title: "No brokerages linked.",
-                        subtitle: "Link a brokerage to see your portfolio here.",
-                        actionLabel: "Link a Brokerage",
-                        onAction: { services.router.push(.brokerages) }
-                    )
-                    .listRowBackground(Color.clear)
+                    Card(padding: 0) {
+                        DashboardNoBrokerages { services.router.push(.brokerages) }
+                    }
+                    .dsClearRow(top: 24)
                 }
             } else if let selected, let scope = liveScope {
                 DashboardPortfolioSections(
@@ -309,13 +408,24 @@ private struct DashboardContent: View {
 
     // MARK: Re-run onboarding
 
+    /// The web's closing row: a hairline, the sentence, and "Open onboarding".
     private var onboardingSection: some View {
         Section {
-            NavigationLink(value: Route.onboarding) {
-                Label("Re-run onboarding", systemImage: Symbol.named("replay"))
+            VStack(alignment: .leading, spacing: 12) {
+                DSDivider()
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Re-run onboarding")
+                        .font(DS.Font.body)
+                        .foregroundStyle(DS.Text.soft)
+                    Text("Add another model, link a brokerage, or spin up a new instance")
+                        .font(DS.Font.body)
+                        .foregroundStyle(DS.Text.muted)
+                }
+                .padding(.top, 12)
+                Button("Open onboarding") { services.router.push(.onboarding) }
+                    .buttonStyle(.dsSecondary)
             }
-        } footer: {
-            Text("Walk through the welcome flow again to add another model, link a brokerage, or spin up a new instance.")
+            .dsClearRow(top: 0, bottom: 32)
         }
     }
 
@@ -346,84 +456,40 @@ private struct DashboardContent: View {
     }
 }
 
-/// The portfolio's loading shape: the hero's layout, redacted, with the
-/// live search button already in its place.
+/// The portfolio's loading shape (the web's): static blocks where the
+/// account line, the value and the chart will be.
 struct DashboardPortfolioSkeleton: View {
     var body: some View {
         Section {
             VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .center, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("Alpaca Live")
-                            .font(.subheadline.weight(.semibold))
-                        HeroValueHeader("$0,000.00", change: "+$00.00 (+0.00%)", direction: .flat, status: "Markets Open")
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .redacted(reason: .placeholder)
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel("Loading")
-                    DashboardSearchButton()
-                }
-                Skeleton(height: DashboardPortfolioMetrics.chartHeight, radius: 8)
-                    .redacted(reason: .placeholder)
-                    .accessibilityHidden(true)
+                Skeleton(width: 128, height: 16)
+                Skeleton(width: 256, height: 44, radius: DS.Radius.small)
+                Skeleton(height: DashboardPortfolioMetrics.chartHeight, radius: DS.Radius.control)
+                    .padding(.top, 12)
             }
-            .padding(.bottom, 4)
-            .listRowBackground(Color.clear)
-            .listRowInsets(.top, 0)
+            .padding(.top, 24)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Loading")
+            .dsClearRow()
         }
     }
 }
 
-/// A dashboard group heading over the first section of a group ("Holdings",
-/// "Market", "Strategy", "Services"): `.title3` bold in the primary colour,
-/// the way Health and Fitness head their summary groups. A section that also
-/// has its own title shows it under the group, in the system header style.
-struct DashboardGroupHeader<Accessory: View>: View {
-    let group: String?
-    let title: String?
-    private let accessory: Accessory
-
-    init(group: String?, title: String? = nil, @ViewBuilder accessory: () -> Accessory) {
-        self.group = group
-        self.title = title
-        self.accessory = accessory()
-    }
+/// No brokerage yet: one sentence and the one action (the web's words).
+private struct DashboardNoBrokerages: View {
+    let onLink: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            if let group {
-                HStack(alignment: .center, spacing: 8) {
-                    // `Color.primary`, not `.primary`: a header's base style is
-                    // secondary, and the hierarchical `.primary` would resolve
-                    // to it.
-                    Text(group)
-                        .font(.title3.bold())
-                        .foregroundStyle(Color.primary)
-                        .accessibilityAddTraits(.isHeader)
-                    if title == nil {
-                        Spacer(minLength: 8)
-                        accessory
-                    }
-                }
-            }
-            if let title {
-                HStack(alignment: .center, spacing: 8) {
-                    Text(title)
-                        .accessibilityAddTraits(.isHeader)
-                    Spacer(minLength: 8)
-                    accessory
-                }
-            }
+        VStack(spacing: 16) {
+            Text("No brokerage linked yet. Link one to see its equity here")
+                .font(DS.Font.body)
+                .foregroundStyle(DS.Text.secondary)
+                .multilineTextAlignment(.center)
+            Button("Link a brokerage", action: onLink)
+                .buttonStyle(.dsPrimary)
         }
-        .textCase(nil)
-        // A group heading lines up with its card's edge, not the text inside it.
-        .listRowInsets(.horizontal, group != nil ? 0 : nil)
-    }
-}
-
-extension DashboardGroupHeader where Accessory == EmptyView {
-    init(group: String?, title: String? = nil) {
-        self.init(group: group, title: title) { EmptyView() }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 24)
+        .padding(.vertical, 48)
     }
 }

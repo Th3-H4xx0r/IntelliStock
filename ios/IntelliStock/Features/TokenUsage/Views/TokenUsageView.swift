@@ -1,11 +1,11 @@
 import Charts
 import SwiftUI
 
-/// LLM token usage — `TokenUsageScreen` in `token_usage_screen.dart`: the
-/// range, the KPIs, the stacked spend trend, top spenders, cost by run and
-/// recent calls, refreshed every 10 s. Native form: an inset-grouped list;
-/// the KPIs are a `StatGrid`, the trend a chart row, the tables rows. The nav
-/// bar holds the only title; pull to refresh replaces the refresh button.
+/// LLM token usage — `TokenUsageScreen` in `token_usage_screen.dart`, as the
+/// web's Token usage page: the subtitle and telemetry line, the range, one
+/// summary card (period cost, calls, the Max plan estimate, telemetry
+/// health), the stacked spend trend, top spenders, cost by run and recent
+/// calls, refreshed every 10 s. Pull to refresh replaces the refresh button.
 struct TokenUsageView: View {
     @Environment(AppServices.self) private var services
     @State private var model: TokenUsageModel?
@@ -19,8 +19,8 @@ struct TokenUsageView: View {
                 TokenUsagePlaceholder()
             }
         }
-        .navigationTitle("Token Usage")
-        .navigationBarTitleDisplayMode(.inline)
+        .navigationTitle("Token usage")
+        .navigationBarTitleDisplayMode(.large)
         .sheet(item: Binding(
             get: { selectedCall.map(TokenUsageCallItem.init) },
             set: { selectedCall = $0?.call }
@@ -47,11 +47,10 @@ struct TokenUsageView: View {
             List {
                 Section {
                     ErrorRow(message: llmErrorText(error)) { Task { await model.refreshNow() } }
-                        .listRowInsets(EdgeInsets())
-                        .listRowBackground(Color.clear)
+                        .dsClearRow(top: 8)
                 }
             }
-            .listStyle(.insetGrouped)
+            .dsList()
             .refreshable { await model.refreshNow() }
         case .loaded(let data):
             List {
@@ -63,7 +62,7 @@ struct TokenUsageView: View {
                     loadedRange: model.loadedRange
                 )
             }
-            .listStyle(.insetGrouped)
+            .dsList()
             .refreshable { await model.refreshNow() }
         }
     }
@@ -74,15 +73,30 @@ private struct TokenUsageCallItem: Identifiable {
     var id: String { call.id ?? "\(call.ts ?? 0)-\(call.model ?? "")" }
 }
 
-/// The skeleton — the sections over sample data, redacted.
+/// The first load: the header and the summary card as static blocks.
 private struct TokenUsagePlaceholder: View {
     var body: some View {
         List {
-            TokenUsageSections(data: TokenUsageData(), range: "24h", onRange: { _ in }, onCall: { _ in })
+            Section {
+                VStack(alignment: .leading, spacing: 12) {
+                    Skeleton(width: 280, height: 14)
+                    Skeleton(width: 180, height: 12)
+                }
+                .dsClearRow(top: 0)
+            }
+            DSSection(rowMinHeight: 96) {
+                ForEach(0..<4, id: \.self) { _ in
+                    VStack(alignment: .leading, spacing: 10) {
+                        Skeleton(width: 90, height: 12)
+                        Skeleton(width: 120, height: 24)
+                        Skeleton(width: 200, height: 12)
+                    }
+                }
+            }
         }
-        .listStyle(.insetGrouped)
-        .redacted(reason: .placeholder)
+        .dsList()
         .allowsHitTesting(false)
+        .accessibilityLabel("Loading token usage")
     }
 }
 
@@ -94,83 +108,150 @@ private struct TokenUsageSections: View {
     /// The range `data` belongs to, which names the trend's series.
     var loadedRange: String?
 
+    static let subtitle = "Live telemetry across providers, models and strategy call sites. Recent calls merge the in-process buffer with persisted backtest usage rows"
+
     var body: some View {
         let telemetry = TelemetryState(data.summary?.telemetryHealth)
         let k = TokenUsageKpis(data.summary)
         let health = data.summary?.telemetryHealth
+        let rangeLabel = Self.rangeLabel(range)
 
-        // The range picker, at the top of the list.
+        // The page header: subtitle, the telemetry line and the range.
         Section {
-            Picker("Range", selection: Binding(get: { range }, set: { onRange($0) })) {
-                ForEach(TokenUsageModel.ranges, id: \.self) { Text($0).tag($0) }
+            VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(Self.subtitle)
+                        .font(DS.Font.pageSub)
+                        .foregroundStyle(DS.Text.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: 8) {
+                        StatusDot(telemetry.label, tone: Self.tone(telemetry), font: DS.Font.caption)
+                        Text("·").foregroundStyle(DS.Text.faint)
+                        Text(rangeLabel)
+                        Text("·").foregroundStyle(DS.Text.faint)
+                        Text("Auto refresh 10s")
+                    }
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.muted)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                }
+                DSSegmentedControl("Range", selection: Binding(get: { range }, set: { onRange($0) }), options: TokenUsageModel.ranges) { $0 }
             }
-            .pickerStyle(.segmented)
-            .listRowBackground(Color.clear)
-            .listRowInsets(EdgeInsets())
+            .dsClearRow(top: 0)
             if let partial = data.partialError {
                 ErrorRow(message: partial)
-                    .listRowBackground(Color.clear)
-                    .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 0, trailing: 0))
+                    .dsClearRow(top: 12)
             }
         }
 
-        // The old KPI cards' figures in one grid.
-        Section {
-            StatGrid {
-                StatCell(label: "Period cost", value: fmtUsdCost(k.totalCost),
-                         footnote: "\(fmtTokens(k.totalTokens)) tokens · \(k.totalCalls) calls")
-                StatCell(label: "Period calls", value: "\(k.totalCalls)")
-                StatCell(label: "Avg cost", value: fmtUsdCost(k.avgCost))
-                StatCell(label: "Recent rows", value: "\(data.recentCalls.count)")
-            }
-            .padding(.vertical, 4)
-            if k.topProviders.isEmpty {
-                Text("No provider spend")
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(Array(k.topProviders.enumerated()), id: \.offset) { _, p in
-                    LabeledContent(p.provider) {
-                        Text(fmtUsdCost(p.costUsd)).monospacedDigit()
+        // Summary: one card, a block per figure (the web's four columns,
+        // stacked on a phone).
+        DSSection(rowMinHeight: 88) {
+            VStack(alignment: .leading, spacing: 0) {
+                (Text("Period cost ") + Text("· \(rangeLabel)").foregroundStyle(DS.Text.faint))
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.muted)
+                Text(fmtUsdCost(k.totalCost))
+                    .font(DS.Font.figureLarge)
+                    .foregroundStyle(DS.Text.primary)
+                    .monospacedDigit()
+                    .padding(.top, 8)
+                Text("\(fmtTokens(k.totalTokens)) tokens across \(k.totalCalls) calls")
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.muted)
+                    .monospacedDigit()
+                    .padding(.top, 8)
+                VStack(spacing: 4) {
+                    if k.topProviders.isEmpty {
+                        Text("No provider spend yet")
+                            .foregroundStyle(DS.Text.muted)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        ForEach(Array(k.topProviders.enumerated()), id: \.offset) { _, p in
+                            HStack(spacing: 12) {
+                                Text(p.provider)
+                                    .foregroundStyle(DS.Text.secondary)
+                                    .lineLimit(1)
+                                Spacer(minLength: 8)
+                                Text(fmtUsdCost(p.costUsd))
+                                    .foregroundStyle(DS.Text.label)
+                            }
+                        }
                     }
                 }
+                .font(DS.Font.caption)
+                .monospacedDigit()
+                .padding(.top, 12)
             }
-        }
+            .padding(.vertical, 8)
 
-        Section("Max plan estimate") {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 0) {
+                Text("Period calls")
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.muted)
+                Text("\(k.totalCalls)")
+                    .font(DS.Font.figureLarge)
+                    .foregroundStyle(DS.Text.primary)
+                    .monospacedDigit()
+                    .padding(.top, 8)
+                StatGrid(columns: 2, horizontalSpacing: 16) {
+                    StatCell(label: "Avg cost", value: fmtUsdCost(k.avgCost))
+                    StatCell(label: "Recent rows", value: "\(data.recentCalls.count)")
+                }
+                .statValueStyle(.regular)
+                .padding(.top, 16)
+            }
+            .padding(.vertical, 8)
+
+            VStack(alignment: .leading, spacing: 0) {
+                Text("Max plan estimate")
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.muted)
                 Text(fmtUsdCost(k.maxPlanUsd))
-                    .font(.title2.bold().monospacedDigit())
-                ProgressView(value: k.maxPlanFraction)
-                    .tint(DS.Palette.accent)
+                    .font(DS.Font.figureLarge)
+                    .foregroundStyle(DS.Text.primary)
+                    .monospacedDigit()
+                    .padding(.top, 8)
+                TokenUsageMeter(fraction: k.maxPlanFraction)
+                    .padding(.top, 16)
                 Text(k.maxPlanLabel)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.muted)
+                    .monospacedDigit()
+                    .padding(.top, 8)
             }
-            .padding(.vertical, 4)
-        }
+            .padding(.vertical, 8)
 
-        Section {
-            StatGrid(columns: 3) {
-                StatCell(label: "Buffer", value: health?.bufferDepth.map(String.init) ?? "—")
-                StatCell(label: "Last flush", value: health?.lastFlushAgeS.map { "\($0)s" } ?? "—")
-                StatCell(label: "Errors 24h", value: "\(health?.writeErrors24h ?? 0)")
+            VStack(alignment: .leading, spacing: 16) {
+                HStack {
+                    Text("Telemetry health")
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.muted)
+                    Spacer(minLength: 8)
+                    StatusDot(telemetry.label, tone: Self.tone(telemetry), font: DS.Font.caption)
+                }
+                StatGrid(columns: 3, horizontalSpacing: 16) {
+                    StatCell(label: "Buffer", value: health?.bufferDepth.map(String.init) ?? "—")
+                    StatCell(label: "Last flush", value: health?.lastFlushAgeS.map { "\($0)s" } ?? "—")
+                    StatCell(label: "Errors 24h", value: "\(health?.writeErrors24h ?? 0)")
+                }
+                .statValueStyle(.regular)
             }
-            .padding(.vertical, 4)
-        } header: {
-            DSSectionHeader("Telemetry health") {
-                StatusBadge(label: telemetry.label, color: Self.color(telemetry))
-            }
+            .padding(.vertical, 8)
         }
 
         TokenUsageSpendTrend(rows: data.timeseries, range: loadedRange)
 
-        TokenUsageSpenders(title: "Top spenders by model", rows: data.topByModel, empty: "No model spend recorded yet.")
-        TokenUsageSpenders(title: "Top spenders by call site", rows: data.topByCallSite, empty: "No call-site spend recorded yet.")
+        TokenUsageSpenders(title: "Top spenders by model", rows: data.topByModel, empty: "No model spend recorded yet")
+        TokenUsageSpenders(title: "Top spenders by call site", rows: data.topByCallSite, empty: "No call-site spend recorded yet")
 
-        Section("LLM cost by run") {
+        DSSection("LLM cost by run", subtitle: "Sorted by cost. A backtest row opens that backtest; live rows are summary only", rowMinHeight: 68) {
             if data.byBacktest.isEmpty {
-                Text("No LLM cost data in this range.")
-                    .foregroundStyle(.secondary)
+                Text("No LLM cost data in this range. Backtest or live runs that made LLM calls will appear here")
+                    .font(DS.Font.body)
+                    .foregroundStyle(DS.Text.muted)
+                    .fixedSize(horizontal: false, vertical: true)
             } else {
                 ForEach(Array(data.byBacktest.enumerated()), id: \.offset) { _, row in
                     let isBacktest = (row.kind ?? "backtest") == "backtest"
@@ -185,26 +266,62 @@ private struct TokenUsageSections: View {
             }
         }
 
-        Section("Recent calls") {
+        DSSection("Recent calls", rowMinHeight: 68) {
             if data.recentCalls.isEmpty {
-                Text("No calls recorded yet.")
-                    .foregroundStyle(.secondary)
+                Text("No calls recorded yet")
+                    .font(DS.Font.body)
+                    .foregroundStyle(DS.Text.muted)
             } else {
                 ForEach(Array(data.recentCalls.enumerated()), id: \.offset) { _, call in
                     Button { onCall(call) } label: { TokenUsageCallRow(call: call) }
-                        .foregroundStyle(.primary)
+                        .buttonStyle(.plain)
                 }
             }
+        } accessory: {
+            Text("Latest 50 rows")
+                .font(DS.Font.caption)
+                .foregroundStyle(DS.Text.muted)
         }
     }
 
-    static func color(_ state: TelemetryState) -> Color {
-        switch state {
-        case .awaiting: .secondary
-        case .healthy: DS.Palette.success
-        case .degraded: DS.Palette.danger
-        case .lagging: DS.Palette.warning
+    /// "Last 24 hours" for the range key.
+    static func rangeLabel(_ range: String) -> String {
+        switch range {
+        case "24h": "Last 24 hours"
+        case "7d": "Last 7 days"
+        case "30d": "Last 30 days"
+        default: range
         }
+    }
+
+    /// Green only while telemetry is actually flowing.
+    static func tone(_ state: TelemetryState) -> DSStatusTone {
+        switch state {
+        case .awaiting: .off
+        case .healthy: .live
+        case .degraded: .error
+        case .lagging: .warn
+        }
+    }
+}
+
+/// The Max plan bar (the web's `h-1` track): zinc-300 on the raised track.
+private struct TokenUsageMeter: View {
+    let fraction: Double
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(DS.Surface.raised)
+                Capsule()
+                    .fill(DS.Text.label)
+                    .frame(width: geo.size.width * min(max(fraction, 0), 1))
+            }
+        }
+        .frame(height: 4)
+        .accessibilityElement()
+        .accessibilityLabel("Max plan estimate")
+        .accessibilityValue("\(Int((fraction * 100).rounded()))%")
     }
 }
 
@@ -215,21 +332,17 @@ private struct TokenUsageSpendTrend: View {
     /// The range the rows were fetched for: a new one draws the bars in again.
     let range: String?
 
-    private static let palette: [Color] = [DS.Palette.accent, DS.Palette.info, DS.Palette.success,
-                                           DS.Palette.warning, DS.Palette.teal, DS.Palette.danger]
+    /// The web chart's series colours: off-white, then the zinc steps.
+    private static let palette: [Color] = [DS.Palette.accent] + DS.Chart.series + [DS.Text.secondary, DS.Text.muted]
 
     var body: some View {
         let trend = SpendTrend.points(rows)
-        Section {
+        DSSection("Cost over time", subtitle: "Stacked by provider") {
             if trend.points.isEmpty {
-                VStack(spacing: 4) {
-                    Text("No usage in this window.").font(.subheadline)
-                    Text("Calls will appear here after telemetry flushes.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: .infinity, minHeight: 160)
+                EmptyState(
+                    title: "No usage in this window",
+                    subtitle: "Backtest and chatbot calls will appear here after telemetry flushes"
+                )
             } else {
                 Chart(trend.points, id: \.self) { point in
                     BarMark(
@@ -244,30 +357,48 @@ private struct TokenUsageSpendTrend: View {
                 // Only the plot draws in, left to right; the axes and legend
                 // stay put.
                 .chartPlotStyle { $0.chartDrawIn(trigger: AnyHashable(range)) }
-                .chartLegend(position: .top, alignment: .leading)
-                .chartYAxisLabel("Cost (USD)")
+                .chartLegend(position: .top, alignment: .leading, spacing: 12) {
+                    ChatFlowLayout(spacing: 12, runSpacing: 6) {
+                        ForEach(Array(trend.providers.enumerated()), id: \.offset) { i, provider in
+                            HStack(spacing: 6) {
+                                RoundedRectangle(cornerRadius: 2, style: .continuous)
+                                    .fill(Self.palette[i % Self.palette.count])
+                                    .frame(width: 8, height: 8)
+                                Text(provider)
+                                    .font(DS.Font.caption)
+                                    .foregroundStyle(DS.Text.secondary)
+                            }
+                        }
+                    }
+                }
                 .chartXAxis {
                     AxisMarks(values: .automatic(desiredCount: 4)) { _ in
-                        AxisValueLabel().font(.caption2)
+                        // Hours for a day, days for a week or a month, so
+                        // the labels never run into each other.
+                        AxisValueLabel(format: range == "24h" || range == nil
+                            ? .dateTime.hour(.defaultDigits(amPM: .abbreviated))
+                            : .dateTime.month(.abbreviated).day())
+                            .font(DS.Font.micro.monospacedDigit())
+                            .foregroundStyle(DS.Text.muted)
                     }
                 }
                 .chartYAxis {
                     AxisMarks(values: .automatic(desiredCount: 3)) { value in
-                        AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: DS.baselineDash))
+                        AxisGridLine(stroke: StrokeStyle(lineWidth: DS.Line.width))
+                            .foregroundStyle(DS.Chart.grid)
                         AxisValueLabel {
                             if let v = value.as(Double.self) {
-                                Text(SpendTrend.axisLabel(v)).font(.caption2)
+                                Text(SpendTrend.axisLabel(v))
+                                    .font(DS.Font.micro.monospacedDigit())
+                                    .foregroundStyle(DS.Text.muted)
                             }
                         }
                     }
                 }
                 .frame(height: 220)
-                .padding(.vertical, 8)
+                .padding(.vertical, 12)
+                .accessibilityLabel("Cost over time, stacked by provider")
             }
-        } header: {
-            Text("Cost over time")
-        } footer: {
-            Text("Stacked by provider")
         }
     }
 }
@@ -280,10 +411,11 @@ private struct TokenUsageSpenders: View {
     let empty: String
 
     var body: some View {
-        Section(title) {
+        DSSection(title) {
             if rows.isEmpty {
                 Text(empty)
-                    .foregroundStyle(.secondary)
+                    .font(DS.Font.body)
+                    .foregroundStyle(DS.Text.muted)
             } else {
                 ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
                     EntityRow(row.key, subtitle: "\(row.calls ?? 0) calls · \(fmtTokens(row.tokens)) tokens") {
@@ -291,12 +423,16 @@ private struct TokenUsageSpenders: View {
                     }
                 }
             }
+        } accessory: {
+            Text("Top 10")
+                .font(DS.Font.caption)
+                .foregroundStyle(DS.Text.muted)
         }
     }
 }
 
 /// One run's LLM cost: the label, then kind · instance · when; cost, tokens
-/// and calls, and the ok count, trailing.
+/// and calls, and the ok count (loss red when any call failed), trailing.
 private struct TokenUsageRunRow: View {
     let row: BacktestUsageRow
 
@@ -309,17 +445,19 @@ private struct TokenUsageRunRow: View {
         EntityRow(row.displayLabel ?? "#\(row.backtestId ?? "?")", subtitle: subtitle, subtitleLineLimit: 2) {
             VStack(alignment: .trailing, spacing: 2) {
                 Text(fmtUsdCost(row.costUsd))
-                    .font(.body)
+                    .font(DS.Font.body)
+                    .foregroundStyle(DS.Text.primary)
                 Text("\(fmtTokens(row.tokens)) · \(row.calls ?? 0) calls")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.muted)
                 Text("\(row.okCalls ?? 0)/\(row.calls ?? 0) ok")
-                    .font(.footnote)
-                    .foregroundStyle(failed ? DS.Palette.warning : DS.Palette.success)
+                    .font(DS.Font.caption)
+                    .foregroundStyle(failed ? DS.Palette.loss : DS.Text.secondary)
             }
             .monospacedDigit()
             .lineLimit(1)
         }
+        .contentShape(Rectangle())
     }
 }
 
@@ -334,54 +472,74 @@ private struct TokenUsageCallRow: View {
         EntityRow(call.model ?? "—", subtitle: subtitle, subtitleLineLimit: 2) {
             VStack(alignment: .trailing, spacing: 2) {
                 Text(fmtUsdCost(call.totalCostUsd))
-                    .font(.body)
+                    .font(DS.Font.body)
+                    .foregroundStyle(DS.Text.primary)
                 Text("↑\(fmtTokens(call.inputTokens)) ↓\(fmtTokens(call.outputTokens))")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.muted)
                 if let ts = call.ts {
                     Text(fmtRelative(ts))
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.muted)
                 }
             }
             .monospacedDigit()
             .lineLimit(1)
         }
+        .contentShape(Rectangle())
     }
 }
 
-/// `_CallDetailOverlay` → a sheet with the call's raw JSON.
+/// `_CallDetailOverlay` → a sheet shaped like the web's modal: the model
+/// and "Recent call" in the header, the raw JSON in a bordered block on the
+/// page colour.
 private struct TokenUsageCallDetail: View {
     let call: RecentCall
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        NavigationStack {
+        VStack(spacing: 0) {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(call.model ?? call.provider ?? "Call detail")
+                        .font(DS.Font.sectionTitle)
+                        .foregroundStyle(DS.Text.primary)
+                        .lineLimit(1)
+                        .accessibilityAddTraits(.isHeader)
+                    Text("Recent call")
+                        .font(DS.Font.body)
+                        .foregroundStyle(DS.Text.muted)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.dsIcon)
+                .accessibilityLabel("Close")
+            }
+            .padding(.horizontal, 24)
+            .padding(.top, 20)
+            .padding(.bottom, 16)
+
             ScrollView {
                 Text(verbatim: (try? JSON.object(call.raw).dartEncoded(indent: "  ")) ?? "")
-                    .font(.system(.caption, design: .monospaced))
+                    .font(DS.Font.mono)
+                    .foregroundStyle(DS.Text.label)
+                    .lineSpacing(6)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12)
-                    .background(DS.Surface.panel, in: .rect(cornerRadius: DS.Radius.small, style: .continuous))
                     .padding(16)
-            }
-            .background(DS.Surface.canvas)
-            .navigationTitle(call.model ?? call.provider ?? "Call detail")
-            .navigationSubtitle("Recent call")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        dismiss()
-                    } label: {
-                        Image(systemName: Symbol.named("close"))
+                    .background(DS.Surface.page, in: .rect(cornerRadius: DS.Radius.control, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
+                            .strokeBorder(DS.Line.divider, lineWidth: DS.Line.width)
                     }
-                    .accessibilityLabel("Close")
-                }
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 24)
             }
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
+        .presentationBackground(DS.Surface.card)
     }
 }

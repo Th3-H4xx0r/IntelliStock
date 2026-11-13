@@ -21,8 +21,10 @@ function authHeaders() {
   return t ? { Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' }
 }
 
-// Violet-metallic palette (matches the mockup) assigned to coins as they're added.
-const PALETTE = ['#a78bfa', '#7c9bff', '#5ad1e0', '#5ee6b8', '#f0b354', '#f3799f', '#b98bff']
+// Neutral steps assigned to coins as they're added (shares, not gains or
+// losses, so no hue). DYNAMIC_SWATCH matches CryptoAllocationChart's Dynamic slice.
+const PALETTE = ['#ededed', '#c4c4c8', '#a1a1a6', '#85858b', '#6b6b70', '#55555a']
+const DYNAMIC_SWATCH = '#333336'
 
 // Alpaca crypto pairs. `sym` is the API/Alpaca slash-pair (goes into stocks +
 // crypto_config.allocations); `ticker`/`name` are display-only.
@@ -347,39 +349,34 @@ async function submit() {
 
 <template>
   <div class="fixed inset-0 z-[60] flex items-center justify-center p-4">
-    <div @click="emit('close')" class="absolute inset-0 bg-black/60 backdrop-blur-sm"></div>
-    <div class="relative glass-card rounded-2xl w-full max-w-3xl max-h-[92vh] overflow-y-auto">
+    <div @click="emit('close')" class="absolute inset-0 bg-black/60"></div>
+    <div class="relative ui-modal max-w-3xl max-h-[92vh] overflow-y-auto">
       <!-- Header -->
-      <div class="px-6 pt-5 pb-3 border-b border-border-subtle flex items-center justify-between sticky top-0 bg-surface/80 backdrop-blur z-10">
-        <h3 class="text-base font-bold text-slate-100 flex items-center gap-2">
-          <span class="material-symbols-outlined text-primary text-[20px]">currency_bitcoin</span>
-          {{ isEdit ? 'Edit crypto instance' : 'New crypto instance' }}
-        </h3>
-        <button @click="emit('close')" class="text-slate-500 hover:text-slate-300"><span class="material-symbols-outlined">close</span></button>
+      <div class="ui-modal-head sticky top-0 z-10 bg-surface border-b border-white/[0.06]">
+        <div class="min-w-0">
+          <h2 class="text-base font-medium text-slate-100">{{ isEdit ? 'Edit crypto instance' : 'New crypto instance' }}</h2>
+          <p class="text-sm text-slate-500 mt-1 max-w-2xl">
+            Pin fixed weights for the coins you want and leave the rest Dynamic — auto-discovered and traded for you. Empty means 100% dynamic
+          </p>
+        </div>
+        <button @click="emit('close')" class="ui-icon-btn ml-auto shrink-0" aria-label="Close"><span class="material-symbols-outlined text-[18px]">close</span></button>
       </div>
 
-      <div class="px-6 py-5 space-y-5">
-        <p class="text-[13.5px] text-slate-400 leading-relaxed max-w-2xl">
-          Pin fixed weights for the coins you want, and leave the rest
-          <b class="text-primary">Dynamic</b> — auto-discovered and traded for you. Empty means 100% dynamic.
-        </p>
-
+      <div class="px-6 py-5 space-y-6">
         <!-- Base fields -->
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div v-if="!isEdit">
-            <label class="block text-xs font-medium text-slate-400 mb-1.5">Instance ID</label>
-            <input v-model="instanceId" type="text" placeholder="e.g. crypto-main"
-                   class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary" />
+            <label class="ui-field-label">Instance ID</label>
+            <input v-model="instanceId" type="text" placeholder="e.g. crypto-main" class="ui-input" />
           </div>
           <div>
-            <label class="block text-xs font-medium text-slate-400 mb-1.5">Name</label>
-            <input v-model="name" type="text" placeholder="e.g. Crypto — core allocation"
-                   class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary" />
+            <label class="ui-field-label">Name</label>
+            <input v-model="name" type="text" placeholder="e.g. Crypto — core allocation" class="ui-input" />
           </div>
           <div>
-            <label class="block text-xs font-medium text-slate-400 mb-1.5">Brokerage</label>
+            <label class="ui-field-label">Brokerage</label>
             <div class="relative">
-              <select v-model="brokerageId" class="w-full appearance-none bg-surface border border-border-subtle rounded-lg px-3 pr-9 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary">
+              <select v-model="brokerageId" class="ui-input appearance-none pr-9">
                 <option v-if="!brokerages.length" value="">No Alpaca account linked</option>
                 <option v-for="b in brokerages" :key="b.id" :value="b.id">
                   {{ b.account_name }}<span v-if="b.alpaca_paper"> · Paper</span>
@@ -387,88 +384,83 @@ async function submit() {
               </select>
               <span class="material-symbols-outlined text-slate-500 text-[18px] absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none">expand_more</span>
             </div>
-            <p v-if="isEdit" class="text-[11px] text-slate-500 mt-1">
+            <p v-if="isEdit" class="ui-help leading-snug">
               A brokerage change applies on the next instance (re)start — a running broker keeps its boot-time credentials.
             </p>
           </div>
           <div>
-            <label class="block text-xs font-medium text-slate-400 mb-1.5">Band <span class="text-slate-600 font-normal">· monitor cadence</span></label>
+            <label class="ui-field-label">Band <span class="text-slate-500">· monitor cadence</span></label>
             <div class="relative">
-              <select v-model="band" class="w-full appearance-none bg-surface border border-border-subtle rounded-lg px-3 pr-9 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary">
+              <select v-model="band" class="ui-input appearance-none pr-9">
                 <option v-for="b in BANDS" :key="b.value" :value="b.value">{{ b.label }}</option>
               </select>
               <span class="material-symbols-outlined text-slate-500 text-[18px] absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none">expand_more</span>
             </div>
-            <p class="text-[11px] text-slate-500 mt-1.5 leading-snug">{{ bandBlurb }}</p>
-            <p v-if="!bandMatchesRecommended" class="text-[11px] text-primary mt-1 leading-snug">
-              Recommended <b>{{ recommendedBandLabel }}</b> for this strategy.
-              <button type="button" @click="applyRecommendedBand" class="underline hover:no-underline ml-0.5">Use {{ recommendedBandLabel }}</button>
+            <p class="ui-help leading-snug">{{ bandBlurb }}</p>
+            <p v-if="!bandMatchesRecommended" class="mt-1 text-xs text-slate-300 leading-snug">
+              Recommended {{ recommendedBandLabel }} for this strategy.
+              <button type="button" @click="applyRecommendedBand" class="underline underline-offset-2 hover:text-slate-100 ml-0.5">Use {{ recommendedBandLabel }}</button>
             </p>
           </div>
           <div class="sm:col-span-2">
-            <label class="block text-xs font-medium text-slate-400 mb-1.5">Dynamic strategy <span class="text-slate-600 font-normal">· how the Dynamic portion trades</span></label>
+            <label class="ui-field-label">Dynamic strategy <span class="text-slate-500">· how the Dynamic portion trades</span></label>
             <div class="relative">
-              <select v-model="strategyId" @change="onStrategyChange"
-                      class="w-full appearance-none bg-surface border border-border-subtle rounded-lg px-3 pr-9 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary">
+              <select v-model="strategyId" @change="onStrategyChange" class="ui-input appearance-none pr-9">
                 <option v-for="s in strategies" :key="s.id" :value="s.id">{{ s.name }}</option>
               </select>
               <span class="material-symbols-outlined text-slate-500 text-[18px] absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none">expand_more</span>
             </div>
-            <p class="text-[11px] text-slate-500 mt-1.5 leading-snug">{{ strategyBlurb }}</p>
+            <p class="ui-help leading-snug">{{ strategyBlurb }}</p>
           </div>
         </div>
 
         <!-- Unit toggle + equity -->
         <div class="flex items-center gap-3 flex-wrap">
-          <div class="inline-flex bg-surface border border-border-subtle rounded-lg p-0.5">
-            <button type="button" @click="mode = 'pct'"
-                    class="px-3 py-1.5 rounded-md text-xs font-semibold transition-colors"
-                    :class="mode === 'pct' ? 'bg-primary text-background-dark' : 'text-slate-400 hover:text-slate-200'">%</button>
-            <button type="button" @click="mode = 'usd'"
-                    class="px-3 py-1.5 rounded-md text-xs font-semibold transition-colors"
-                    :class="mode === 'usd' ? 'bg-primary text-background-dark' : 'text-slate-400 hover:text-slate-200'">$</button>
+          <div class="ui-seg" role="group" aria-label="Units">
+            <button type="button" @click="mode = 'pct'" class="ui-seg-btn" :class="mode === 'pct' ? 'ui-seg-btn-active' : ''" :aria-pressed="mode === 'pct'">%</button>
+            <button type="button" @click="mode = 'usd'" class="ui-seg-btn" :class="mode === 'usd' ? 'ui-seg-btn-active' : ''" :aria-pressed="mode === 'usd'">$</button>
           </div>
-          <span class="text-xs text-slate-500">
+          <span class="text-xs text-slate-500 inline-flex items-center gap-2">
             Account equity
             <span v-if="loadingEquity" class="text-slate-400">…</span>
-            <b v-else-if="hasLiveEquity" class="text-slate-300 tabular-nums">{{ fmtUsd(equity) }}</b>
-            <span v-else class="inline-flex items-center gap-1">
-              <input v-model.number="manualEquity" type="number" min="0" step="100" placeholder="enter equity"
-                     class="w-28 bg-surface border border-border-subtle rounded-md px-2 py-1 text-xs text-slate-200 focus:outline-none focus:border-primary" />
-              <span class="text-amber-400/70">manual</span>
+            <span v-else-if="hasLiveEquity" class="text-slate-200 tabular-nums">{{ fmtUsd(equity) }}</span>
+            <span v-else class="inline-flex items-center gap-2">
+              <input v-model.number="manualEquity" type="number" min="0" step="100" placeholder="Enter equity"
+                     class="ui-input h-8 w-28 px-2 text-xs" />
+              <span class="text-slate-500">manual</span>
             </span>
           </span>
         </div>
 
         <!-- Donut + allocation table -->
-        <div class="grid grid-cols-1 md:grid-cols-[300px_1fr] gap-4 items-stretch">
+        <div class="grid grid-cols-1 md:grid-cols-[248px_1fr] gap-4 items-stretch">
           <!-- Donut -->
-          <div class="glass-card rounded-2xl p-4 flex items-center justify-center">
-            <CryptoAllocationChart :allocations="allocationsForChart" :dynamic-pct="dynamicPct" />
+          <div class="rounded-xl border border-white/[0.06] p-4 flex items-center justify-center">
+            <CryptoAllocationChart :allocations="allocationsForChart" :dynamic-pct="dynamicPct" :size="200" />
           </div>
 
           <!-- Table -->
-          <div class="glass-card rounded-2xl p-4 flex flex-col">
+          <div class="rounded-xl border border-white/[0.06] py-2 flex flex-col">
             <!-- head -->
-            <div class="grid grid-cols-[22px_1fr_84px_92px_26px] gap-2 items-center px-1 pb-2 text-[10.5px] uppercase tracking-wider text-slate-600">
-              <span></span><span>Coin</span><span class="text-right">Weight</span><span class="text-right">≈ USD</span><span></span>
+            <div class="grid grid-cols-[16px_1fr_84px_92px_28px] gap-2 items-center px-4 h-9 text-xs text-slate-500">
+              <span></span><span>Coin</span><span class="text-right">Weight %</span><span class="text-right">≈ USD</span><span></span>
             </div>
 
             <!-- coin rows -->
             <div
               v-for="(c, i) in coins" :key="c.sym"
-              class="grid grid-cols-[22px_1fr_84px_92px_26px] gap-2 items-center px-1 py-2 border-t border-border-subtle/70"
+              class="grid grid-cols-[16px_1fr_84px_92px_28px] gap-2 items-center px-4 py-2 border-t border-white/[0.05]"
             >
-              <span class="w-2.5 h-2.5 rounded-[3px] ring-1 ring-white/5" :style="{ background: c.color }"></span>
+              <span class="size-2 rounded-sm" :style="{ background: c.color }"></span>
               <span class="min-w-0">
-                <span class="text-sm font-semibold text-slate-100">{{ c.ticker }}</span>
-                <span class="block text-[11px] text-slate-500 truncate">{{ c.name }}</span>
+                <span class="text-sm font-medium text-slate-100">{{ c.ticker }}</span>
+                <span class="block text-xs text-slate-500 truncate">{{ c.name }}</span>
               </span>
               <input
                 :value="Math.round((Number(c.pct) || 0) * 10) / 10"
                 @input="setPct(i, $event.target.value)"
                 inputmode="decimal"
-                class="w-full bg-surface border border-border-subtle rounded-lg px-2 py-1.5 text-[13.5px] text-right text-slate-100 focus:outline-none focus:border-primary"
+                class="ui-input h-8 px-2 text-right tabular-nums"
                 :class="mode === 'usd' ? 'opacity-60' : ''"
               />
               <input
@@ -477,73 +469,70 @@ async function submit() {
                 :disabled="effectiveEquity <= 0"
                 inputmode="decimal"
                 :placeholder="effectiveEquity <= 0 ? '—' : ''"
-                class="w-full bg-surface border border-border-subtle rounded-lg px-2 py-1.5 text-[13.5px] text-right text-slate-300 focus:outline-none focus:border-primary disabled:opacity-50"
+                class="ui-input h-8 px-2 text-right tabular-nums text-slate-300"
                 :class="mode === 'pct' ? 'opacity-60' : ''"
               />
-              <button type="button" @click="removeCoin(i)" title="Remove"
-                      class="text-slate-600 hover:text-red-400 hover:bg-red-500/10 rounded-md p-1 transition-colors text-base leading-none">×</button>
+              <button type="button" @click="removeCoin(i)" title="Remove" aria-label="Remove coin"
+                      class="ui-icon-btn size-7 hover:text-loss">
+                <span class="material-symbols-outlined text-[16px]">close</span>
+              </button>
             </div>
 
             <!-- dynamic row -->
-            <div class="grid grid-cols-[22px_1fr_84px_92px_26px] gap-2 items-center px-1 py-2 mt-0.5 rounded-lg border-t border-dashed border-primary/40 bg-gradient-to-r from-primary/[0.08] to-transparent">
-              <span class="w-2.5 h-2.5 rounded-[3px] ring-1 ring-primary/40" style="background:#7c5ce6"></span>
+            <div class="grid grid-cols-[16px_1fr_84px_92px_28px] gap-2 items-center px-4 py-2 border-t border-white/[0.05]">
+              <span class="size-2 rounded-sm ring-1 ring-white/[0.12]" :style="{ background: DYNAMIC_SWATCH }"></span>
               <span class="min-w-0">
-                <span class="flex items-center gap-1.5 min-w-0">
-                  <span class="text-sm font-semibold text-slate-100">Dynamic</span>
-                  <span class="shrink-0 text-[9px] font-semibold uppercase tracking-wide text-primary border border-primary/40 bg-primary/10 rounded-full px-1.5 py-[1px] leading-none">auto</span>
-                </span>
-                <span class="block text-[11px] text-primary truncate">auto-discovered</span>
+                <span class="text-sm font-medium text-slate-100">Dynamic</span>
+                <span class="block text-xs text-slate-500 truncate">Auto-discovered</span>
               </span>
-              <span class="text-right text-[13.5px] font-semibold text-primary tabular-nums">{{ Math.round(dynamicPct) }}%</span>
-              <span class="text-right text-[13.5px] text-slate-300 tabular-nums">{{ effectiveEquity > 0 ? fmtUsd(usdFor(dynamicPct)) : '—' }}</span>
+              <span class="text-right text-sm text-slate-100 tabular-nums pr-2">{{ Math.round(dynamicPct) }}%</span>
+              <span class="text-right text-sm text-slate-300 tabular-nums pr-2">{{ effectiveEquity > 0 ? fmtUsd(usdFor(dynamicPct)) : '—' }}</span>
               <span></span>
             </div>
 
             <!-- add bar -->
-            <div class="flex items-center gap-2 mt-3 pt-3 border-t border-border-subtle">
+            <div class="flex items-center gap-2 mt-2 px-4 pt-3 border-t border-white/[0.06]">
               <div class="relative">
-                <select v-model="addPick" :disabled="!availableCatalog.length"
-                        class="appearance-none bg-surface border border-border-subtle rounded-lg pl-3 pr-8 py-2 text-[13px] text-slate-100 focus:outline-none focus:border-primary disabled:opacity-50">
-                  <option value="">{{ availableCatalog.length ? 'Select coin…' : 'All added' }}</option>
+                <select v-model="addPick" :disabled="!availableCatalog.length" class="ui-input h-8 w-auto appearance-none pl-3 pr-8 text-[13px]">
+                  <option value="">{{ availableCatalog.length ? 'Select coin' : 'All added' }}</option>
                   <option v-for="c in availableCatalog" :key="c.sym" :value="c.sym">{{ c.ticker }} · {{ c.name }}</option>
                 </select>
                 <span class="material-symbols-outlined text-slate-500 text-[16px] absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none">expand_more</span>
               </div>
-              <button type="button" @click="addCoin" :disabled="!addPick"
-                      class="ml-auto inline-flex items-center gap-1 bg-primary/[0.14] border border-primary/45 text-primary font-semibold text-[13px] px-3.5 py-2 rounded-lg hover:bg-primary/25 transition-colors disabled:opacity-40">
+              <button type="button" @click="addCoin" :disabled="!addPick" class="ui-btn ml-auto">
                 <span class="material-symbols-outlined text-[16px]">add</span> Add coin
               </button>
             </div>
 
             <!-- meter -->
-            <div class="mt-4">
-              <div class="h-2 rounded-full bg-surface overflow-hidden flex ring-1 ring-inset ring-border-subtle">
+            <div class="mt-4 px-4 pb-2">
+              <div class="h-1.5 rounded-full bg-raised overflow-hidden flex gap-px">
                 <i v-for="c in coins.filter((x) => Number(x.pct) > 0)" :key="c.sym"
                    class="block h-full" :style="{ width: Math.min(Number(c.pct), 100) + '%', background: c.color }"></i>
                 <i v-if="dynamicPct > 0" class="block h-full"
-                   :style="{ width: dynamicPct + '%', background: 'repeating-linear-gradient(45deg,#5a4a86,#5a4a86 4px,#4a3c6e 4px,#4a3c6e 8px)' }"></i>
+                   :style="{ width: dynamicPct + '%', background: DYNAMIC_SWATCH }"></i>
               </div>
-              <div class="flex justify-between mt-2.5 text-xs text-slate-500">
-                <span>Fixed <b class="text-slate-100">{{ Math.round(fixedSum) }}%</b> · Dynamic <b class="text-primary">{{ Math.round(dynamicPct) }}%</b></span>
-                <span v-if="over" class="text-red-400 font-medium">Over-allocated — reduce by {{ Math.round(fixedSum - 100) }}%</span>
+              <div class="flex justify-between gap-3 mt-2.5 text-xs text-slate-500 tabular-nums">
+                <span>Fixed <span class="text-slate-200">{{ Math.round(fixedSum) }}%</span> · Dynamic <span class="text-slate-200">{{ Math.round(dynamicPct) }}%</span></span>
+                <span v-if="over" class="text-loss">Over-allocated — reduce by {{ Math.round(fixedSum - 100) }}%</span>
                 <span v-else-if="effectiveEquity > 0">{{ fmtUsd(usdFor(dynamicPct)) }} flexible</span>
                 <span v-else>{{ Math.round(dynamicPct) }}% flexible</span>
               </div>
-              <p v-if="!over && dynamicPct <= 0" class="mt-2 text-[11px] leading-snug text-amber-400">
-                ⚠ Dynamic 0% — the <b>{{ strategyId }}</b> strategy won't trade (this is buy-and-hold). Lower a fixed weight to give it a dynamic budget to trade.
+              <p v-if="!over && dynamicPct <= 0" class="mt-3 flex gap-2 text-xs leading-snug text-slate-400">
+                <span class="ui-dot ui-dot-warn mt-1.5"></span>
+                <span>Dynamic 0% — the <span class="text-slate-200">{{ strategyId }}</span> strategy won't trade (this is buy-and-hold). Lower a fixed weight to give it a dynamic budget to trade.</span>
               </p>
             </div>
           </div>
         </div>
 
-        <p v-if="err" class="text-xs text-red-400">{{ err }}</p>
+        <p v-if="err" class="text-sm text-loss">{{ err }}</p>
       </div>
 
       <!-- Footer -->
-      <div class="px-6 py-4 border-t border-border-subtle flex gap-3 sticky bottom-0 bg-surface/80 backdrop-blur">
-        <button @click="emit('close')" class="flex-1 py-2.5 rounded-lg border border-border-subtle text-sm font-medium text-slate-400 hover:text-slate-200">Cancel</button>
-        <button @click="submit" :disabled="creating || over"
-                class="flex-1 py-2.5 rounded-lg bg-primary text-background-dark text-sm font-bold hover:brightness-110 disabled:opacity-50">
+      <div class="ui-modal-foot sticky bottom-0 bg-surface">
+        <button @click="emit('close')" class="ui-btn-ghost h-9 px-4">Cancel</button>
+        <button @click="submit" :disabled="creating || over" class="ui-btn-primary">
           {{ creating ? (isEdit ? 'Saving…' : 'Creating…') : (isEdit ? 'Save changes' : 'Create instance') }}
         </button>
       </div>

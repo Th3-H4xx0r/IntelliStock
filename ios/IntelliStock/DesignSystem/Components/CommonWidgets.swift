@@ -10,7 +10,7 @@ import SwiftUI
 struct StatTile: View {
     let label: String
     let value: String
-    var valueColor: Color = .primary
+    var valueColor: Color = DS.Text.primary
     var sub: String?
 
     var body: some View {
@@ -18,10 +18,9 @@ struct StatTile: View {
     }
 }
 
-/// A coloured tag — `AppBadge`, in the app's one badge style (see
-/// `StatusBadge`). Dart upper-cased the label; the native form shows it in
-/// sentence case instead ("real money" → "Real money", "AI" stays "AI"),
-/// because the redesign allows no upper case outside tickers and acronyms.
+/// A tag — `AppBadge`. The web has no pills, so it is quiet 12 pt text
+/// (`dsBadge`: gain, loss or amber keep their colour, anything else is
+/// zinc-400), in sentence case ("real money" → "Real money", "AI" stays "AI").
 struct AppBadge: View {
     let label: String
     let color: Color
@@ -41,40 +40,36 @@ extension String {
     }
 }
 
-/// A tinted square holding a glyph — `IconTile`. The glyph draws at half the
-/// tile size, and the continuous corners scale with it (30 % of the side, so
-/// the 40 pt default keeps its 12 pt radius).
-///
-/// The redesign allows icon tiles only as the leading image of a row in a
-/// navigation list (More, Settings) or an `EntityRow`, never in a card or
-/// section header.
+/// A leading glyph for a row — `IconTile`. The web has no icon tiles, so this
+/// is the bare glyph in zinc-500 (`color` is ignored: icons take their text
+/// role's colour), centred in a `size`-wide column so rows still line up.
+/// The glyph draws at half of `size`, between 14 and 18 pt.
 struct IconTile<Glyph: View>: View {
-    var color: Color = DS.Palette.accent
+    var color: Color = DS.Text.muted
     var size: CGFloat = 40
     private let glyph: Glyph
 
     /// `IconTile.custom`: any glyph (a brand mark, say) at the icon's size.
-    init(color: Color = DS.Palette.accent, size: CGFloat = 40, @ViewBuilder glyph: () -> Glyph) {
+    init(color: Color = DS.Text.muted, size: CGFloat = 40, @ViewBuilder glyph: () -> Glyph) {
         self.color = color
         self.size = size
         self.glyph = glyph()
     }
 
-    var glyphSize: CGFloat { size * 0.5 }
+    var glyphSize: CGFloat { min(max(size * 0.5, 14), 18) }
 
     var body: some View {
         glyph
             .frame(width: glyphSize, height: glyphSize)
-            .foregroundStyle(color)
+            .foregroundStyle(DS.Text.muted)
             .frame(width: size, height: size)
-            .background(color.opacity(DS.tintFill), in: .rect(cornerRadius: size * 0.3, style: .continuous))
             .accessibilityHidden(true)
     }
 }
 
 extension IconTile where Glyph == IconTileSymbol {
     /// A tile around an SF Symbol (`Symbol.named(<material name>)`).
-    init(systemImage: String, color: Color = DS.Palette.accent, size: CGFloat = 40) {
+    init(systemImage: String, color: Color = DS.Text.muted, size: CGFloat = 40) {
         self.init(color: color, size: size) { IconTileSymbol(systemImage: systemImage) }
     }
 }
@@ -90,17 +85,17 @@ struct IconTileSymbol: View {
     }
 }
 
-/// A flat placeholder block for skeleton layouts — `Skeleton` without the
-/// shimmer gradient. Prefer `.redacted(reason: .placeholder)` over sample
-/// content; use this only where there is no content to redact.
+/// A static skeleton block (`ui-skel`): the raised colour, 4 pt corners, no
+/// shimmer and no pulse. Shape the loading state like the content: a 12 pt
+/// line for a label, 20 pt for a figure, the chart's height for a chart.
 struct Skeleton: View {
     var width: CGFloat?
     var height: CGFloat = 14
-    var radius: CGFloat = 8
+    var radius: CGFloat = DS.Radius.tiny
 
     /// A short text line.
     static func line(width: CGFloat? = nil, height: CGFloat = 12) -> Skeleton {
-        Skeleton(width: width, height: height, radius: 6)
+        Skeleton(width: width, height: height, radius: DS.Radius.tiny)
     }
 
     /// A circle (avatar or icon tile).
@@ -110,7 +105,7 @@ struct Skeleton: View {
 
     var body: some View {
         RoundedRectangle(cornerRadius: radius, style: .continuous)
-            .fill(Color(uiColor: .systemFill))
+            .fill(DS.Surface.raised)
             .frame(width: width, height: height)
             .frame(maxWidth: width == nil ? .infinity : nil, alignment: .leading)
             .accessibilityHidden(true)

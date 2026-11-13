@@ -1,116 +1,69 @@
 <script setup>
-import { ref, onMounted } from 'vue'
-
-const terminalRef  = ref(null)
-const visibleLines = ref([])
-const showCursor   = ref(false)
-let   typed        = false
-
+// The deploy log, shown whole (no typewriter).
 const LINES = [
-  { text: '$ intellistock deploy --strategy graph_nexus_alpha', cls: 'text-emerald-400' },
-  { text: 'Verifying credentials...',                           cls: 'text-slate-500'   },
-  { text: '> Connected to Alpaca (Paper Trading)',              cls: 'text-brand'     },
-  { text: 'Loading Graph Nexus — 85,412 edges OK',             cls: 'text-slate-500'   },
-  { text: 'Spinning up strategy containers...',                 cls: 'text-slate-500'   },
-  { text: '> Benzinga event stream: active',                    cls: 'text-brand'     },
-  { text: '> LLM sentiment engine: ready (GPT-4o)',             cls: 'text-brand'     },
-  { text: 'SUCCESS: Live trading active.',                      cls: 'text-emerald-400' },
+  { text: 'Starting instance momentum-paper',     cls: 'text-slate-200' },
+  { text: 'Loading strategy and credentials',     cls: 'text-slate-500' },
+  { text: '> Connected to Alpaca (paper)',        cls: 'text-slate-300' },
+  { text: 'Loading the Graph Nexus',              cls: 'text-slate-500' },
+  { text: 'Starting the instance container',      cls: 'text-slate-500' },
+  { text: '> Benzinga news: connected',           cls: 'text-slate-300' },
+  { text: '> LLM provider: ready',                cls: 'text-slate-300' },
+  { text: 'Running',                              cls: 'text-gain'      },
 ]
 
 const features = [
-  { icon: 'package_2',  label: 'Containerized deployment', desc: 'Each strategy runs in its own isolated container' },
-  { icon: 'sync',       label: 'Live event streaming',     desc: 'Benzinga feeds connect automatically on boot'      },
-  { icon: 'hub',        label: 'Graph Nexus hot-reload',   desc: 'Edge updates propagate to running strategies'      },
-  { icon: 'monitoring', label: 'Real-time P&L tracking',  desc: 'Position dashboards update every tick'             },
-  { icon: 'cloud_done', label: 'Paper & live modes',       desc: 'Switch between paper and live with one flag'       },
+  { label: 'One container per instance', desc: 'Each instance runs isolated, with its own logs'           },
+  { label: 'News while it trades',       desc: 'Benzinga news reaches the strategy as it runs'            },
+  { label: 'Live P&L',                   desc: 'Positions, orders and P&L on the web and on iPhone'       },
+  { label: 'Paper first',                desc: 'Run on a paper account, then point the instance at live'  },
 ]
-
-onMounted(() => {
-  const obs = new IntersectionObserver(([e]) => {
-    if (e.isIntersecting && !typed) {
-      typed = true
-      showCursor.value = true
-      LINES.forEach((line, i) => {
-        setTimeout(() => {
-          visibleLines.value.push(line)
-          if (i === LINES.length - 1) showCursor.value = false
-        }, i * 500 + 300)
-      })
-      obs.disconnect()
-    }
-  }, { threshold: 0.4 })
-  if (terminalRef.value) obs.observe(terminalRef.value)
-})
 </script>
 
 <template>
-  <section class="bg-gradient-to-b from-background-dark to-surface" style="padding: 80px 0;">
-    <div class="max-w-7xl mx-auto px-6">
-      <div v-reveal class="reveal mk-glass-card rounded-[2rem] p-8 md:p-12 flex flex-col xl:flex-row items-start justify-between gap-10 md:gap-12">
+  <section aria-labelledby="deploy-title">
+    <div class="mx-auto w-full max-w-[1200px] px-4 sm:px-6 lg:px-8">
+      <div class="border-t border-white/[0.06] py-20 md:py-28 grid gap-12 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)] xl:gap-16 items-start">
 
         <!-- Copy -->
-        <div class="max-w-lg space-y-6 md:space-y-8">
-          <div class="space-y-4">
-            <p v-reveal class="reveal text-brand text-xs font-bold uppercase tracking-widest">Deployment</p>
-            <h2 v-reveal class="reveal delay-100 text-4xl font-bold leading-tight">
-              From idea to live<br> trading in seconds.
-            </h2>
-            <p v-reveal class="reveal delay-200 text-slate-400 text-lg">
-              IntelliStock containerizes your strategy, wires it to the Graph Nexus,
-              connects the Benzinga event stream, and deploys it to production —
-              with no infrastructure management on your end.
-            </p>
-          </div>
+        <div class="max-w-xl">
+          <p class="text-sm text-slate-500">Deployment</p>
+          <h2 id="deploy-title" class="mt-3 text-3xl leading-[1.15] md:text-[40px] md:leading-[1.1] font-medium tracking-[-0.02em] text-slate-100">
+            From idea to live trading
+          </h2>
+          <p class="mt-5 text-base leading-7 md:text-lg md:leading-8 text-slate-400">
+            An instance pairs a strategy with a brokerage account. Start it and it runs
+            in its own container, connected to the Graph Nexus, Benzinga news and the
+            LLM you chose, until you stop it.
+          </p>
 
-          <!-- Feature list -->
-          <ul v-reveal class="reveal delay-300 space-y-4">
-            <li v-for="feat in features" :key="feat.label" class="flex items-start gap-3">
-              <span class="material-symbols-outlined text-brand text-base mt-0.5 shrink-0">{{ feat.icon }}</span>
-              <div>
-                <span class="font-semibold text-sm">{{ feat.label }}</span>
-                <span class="text-slate-400 text-sm"> — {{ feat.desc }}</span>
-              </div>
+          <ul class="mt-8 divide-y divide-white/[0.06] border-y border-white/[0.06]">
+            <li v-for="feat in features" :key="feat.label" class="py-3 text-sm">
+              <span class="text-slate-100">{{ feat.label }}</span>
+              <span class="text-slate-400"> — {{ feat.desc }}</span>
             </li>
           </ul>
 
-          <!-- Broker logos -->
-          <div v-reveal class="reveal delay-400 space-y-3">
-            <p class="text-xs font-bold uppercase tracking-widest text-slate-500">Supported Brokerages</p>
-            <div class="flex items-center gap-6">
-              <div class="opacity-40 hover:opacity-80 transition-opacity cursor-default">
-                <img
-                  src="https://alpaca.markets/img/newsroom/brand-assets/light-alpaca-logo.png"
-                  alt="Alpaca"
-                  class="h-7 w-auto"
-                  style="filter: grayscale(100%);"
-                />
-              </div>
-            </div>
+          <div class="mt-8">
+            <p class="text-xs text-slate-500">Supported brokerages</p>
+            <img
+              src="https://alpaca.markets/img/newsroom/brand-assets/light-alpaca-logo.png"
+              alt="Alpaca"
+              class="mt-3 h-6 w-auto opacity-50 grayscale"
+            />
           </div>
         </div>
 
         <!-- Terminal -->
-        <div v-reveal class="reveal from-right delay-200 w-full xl:w-auto xl:flex-1">
-          <div ref="terminalRef" class="bg-background-dark p-8 rounded-2xl border border-border-subtle shadow-inner w-full">
-            <!-- Traffic lights -->
-            <div class="flex items-center gap-2 mb-6">
-              <div class="size-3 rounded-full bg-red-500"></div>
-              <div class="size-3 rounded-full bg-amber-500"></div>
-              <div class="size-3 rounded-full bg-emerald-500"></div>
-              <span class="ml-3 text-xs text-slate-600 font-mono">intellistock-cli</span>
-            </div>
-
-            <!-- Typewriter lines -->
-            <code class="text-sm font-mono space-y-2 block min-h-[200px]">
-              <p
-                v-for="(line, i) in visibleLines"
-                :key="i"
-                :class="line.cls"
-                style="animation: heroFadeUp 0.3s ease both;"
-              >{{ line.text }}</p>
-              <span v-if="showCursor" class="cursor-blink text-brand"></span>
-            </code>
+        <div class="rounded-xl border border-white/[0.07] bg-sidebar overflow-hidden">
+          <div class="h-10 px-4 flex items-center gap-2 border-b border-white/[0.06]">
+            <span class="size-2.5 rounded-full bg-white/[0.1]"></span>
+            <span class="size-2.5 rounded-full bg-white/[0.1]"></span>
+            <span class="size-2.5 rounded-full bg-white/[0.1]"></span>
+            <span class="ml-2 font-mono text-xs text-slate-500">Instance log</span>
           </div>
+          <code class="block px-5 py-5 font-mono text-[13px] leading-6 overflow-x-auto">
+            <p v-for="(line, i) in LINES" :key="i" class="whitespace-pre" :class="line.cls">{{ line.text }}</p>
+          </code>
         </div>
 
       </div>

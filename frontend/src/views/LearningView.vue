@@ -97,10 +97,11 @@ const modeLabel = computed(() => {
   return observeOnly.value ? 'Observe only' : String(overview.value.mode || '')
 })
 
+// Severity as a dot beside the word, not a coloured pill.
 function severityClasses(severity) {
-  if (severity === 'high') return 'text-rose-400 bg-rose-500/10 border-rose-500/20'
-  if (severity === 'medium') return 'text-amber-400 bg-amber-500/10 border-amber-500/20'
-  return 'text-slate-400 bg-slate-500/10 border-slate-700'
+  if (severity === 'high') return 'ui-dot-error'
+  if (severity === 'medium') return 'ui-dot-warn'
+  return 'ui-dot-off'
 }
 
 function conversionPct(row) {
@@ -317,396 +318,393 @@ onUnmounted(stopPolling)
 
 <template>
   <AppShell>
-    <main class="flex-1 px-4 py-6 sm:px-6 sm:py-8 lg:px-8 lg:py-10">
+    <main class="ui-page">
 
       <!-- Header -->
-      <div class="mb-6">
-        <div class="flex items-start justify-between gap-3 mb-3">
-          <div class="min-w-0">
-            <h1 class="text-xl sm:text-2xl font-bold text-slate-100">Learning</h1>
-            <p class="text-slate-500 text-xs sm:text-sm mt-1 hidden sm:block">
-              What the system decided, what it declined to do, and what that says about it.
-            </p>
-          </div>
-          <span
-            class="shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold border"
-            :class="observeOnly
-              ? 'text-sky-400 bg-sky-500/10 border-sky-500/20'
-              : 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20'"
-          >
-            <span class="size-1.5 rounded-full" :class="observeOnly ? 'bg-sky-400' : 'bg-emerald-400 animate-pulse'"></span>
-            {{ modeLabel }}
-          </span>
+      <header class="flex flex-wrap items-end justify-between gap-x-4 gap-y-3">
+        <div class="min-w-0">
+          <h1 class="ui-page-title">Learning</h1>
+          <p class="ui-page-sub hidden sm:block">
+            What the system decided, what it declined to do, and what that says about it
+          </p>
+          <p class="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500 tabular-nums">
+            <span class="inline-flex items-center gap-1.5" :class="engineRunning ? 'text-slate-200' : 'text-slate-400'">
+              <span class="ui-dot" :class="engineRunning ? 'ui-dot-live' : 'ui-dot-off'"></span>
+              {{ engineRunning ? 'Engine running' : 'Engine stopped' }}
+            </span>
+            <span class="text-slate-600" aria-hidden="true">·</span>
+            <span :class="observeOnly ? 'text-slate-400' : 'text-slate-200'">{{ modeLabel }}</span>
+            <template v-if="engineStatus && engineStatus.alive">
+              <span class="text-slate-600" aria-hidden="true">·</span>
+              <span>
+                Last turn {{ engineStatus.seconds_since_last_turn }}s ago ·
+                engine build {{ engineStatus.source_fingerprint }}
+              </span>
+            </template>
+          </p>
         </div>
 
         <!-- Controls -->
-        <div class="mb-3 flex items-center gap-2 flex-wrap">
-          <span
-            class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold border"
-            :class="engineRunning
-              ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20'
-              : 'text-slate-500 bg-slate-500/10 border-slate-700'"
-          >
-            <span class="size-1.5 rounded-full"
-                  :class="engineRunning ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'"></span>
-            {{ engineRunning ? 'Engine running' : 'Engine stopped' }}
-          </span>
-
+        <div class="flex items-center gap-2 flex-wrap">
           <button
             @click="toggleEngine" :disabled="busy === 'engine'"
-            class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors disabled:opacity-50"
-            :class="engineRunning
-              ? 'border-rose-500/30 bg-rose-500/10 text-rose-400 hover:bg-rose-500/20'
-              : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20'"
+            class="ui-btn"
+            :class="engineRunning ? 'text-loss' : ''"
           >
-            <span class="material-symbols-outlined text-[14px]">
-              {{ engineRunning ? 'stop' : 'play_arrow' }}
-            </span>
-            <span>{{ busy === 'engine' ? 'Working…' : (engineRunning ? 'Stop engine' : 'Start engine') }}</span>
+            {{ busy === 'engine' ? 'Working…' : (engineRunning ? 'Stop engine' : 'Start engine') }}
           </button>
 
           <button
             @click="showSettings ? (showSettings = false) : openSettings()"
-            class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-800 transition-colors"
+            class="ui-btn"
+            :aria-expanded="showSettings"
           >
-            <span class="material-symbols-outlined text-[14px]">tune</span>
-            <span>{{ showSettings ? 'Close settings' : 'Settings' }}</span>
+            <span class="material-symbols-outlined text-[16px] text-slate-400">tune</span>
+            {{ showSettings ? 'Close settings' : 'Settings' }}
           </button>
         </div>
+      </header>
 
-        <div v-if="engineStatus && engineStatus.flagged_running && !engineStatus.alive"
-             class="mb-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2">
-          <div class="text-xs font-semibold text-amber-300">
-            Engine is flagged running but has not taken a turn
-            <span v-if="engineStatus.seconds_since_last_turn !== null">
-              in {{ Math.round(engineStatus.seconds_since_last_turn / 60) }} min
-            </span>
-          </div>
-          <div class="text-[11px] text-amber-200/70 mt-0.5">
-            {{ engineStatus.diagnosis }}
-          </div>
-        </div>
-        <div v-else-if="engineStatus && engineStatus.alive"
-             class="mb-3 text-[11px] text-slate-600">
-          Last turn {{ engineStatus.seconds_since_last_turn }}s ago ·
-          engine build {{ engineStatus.source_fingerprint }}
-        </div>
+      <div v-if="engineStatus && engineStatus.flagged_running && !engineStatus.alive"
+           class="mt-6 ui-card px-5 py-4">
+        <p class="text-sm text-slate-200 inline-flex items-center gap-2">
+          <span class="ui-dot ui-dot-warn"></span>
+          Engine is flagged running but has not taken a turn
+          <span v-if="engineStatus.seconds_since_last_turn !== null" class="tabular-nums">
+            in {{ Math.round(engineStatus.seconds_since_last_turn / 60) }} min
+          </span>
+        </p>
+        <p class="text-sm text-slate-500 mt-1 pl-3.5">
+          {{ engineStatus.diagnosis }}
+        </p>
+      </div>
 
-        <div v-if="saveError" class="mb-3 rounded-lg border border-rose-500/20 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">
-          {{ saveError }}
-        </div>
-        <div v-if="saveOk" class="mb-3 rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-300">
-          {{ saveOk }}
-        </div>
+      <div v-if="saveError" class="mt-6 ui-error">
+        {{ saveError }}
+      </div>
+      <p v-if="saveOk" class="mt-6 text-sm text-gain">
+        {{ saveOk }}
+      </p>
 
-        <!-- Counters -->
-        <div v-if="overview" class="grid grid-cols-2 sm:grid-cols-4 gap-2">
-          <div class="rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2">
-            <div class="text-[11px] text-slate-500">Open findings</div>
-            <div class="text-lg font-bold text-slate-100">{{ overview.open_findings }}</div>
-          </div>
-          <div class="rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2">
-            <div class="text-[11px] text-slate-500">Runs observed</div>
-            <div class="text-lg font-bold text-slate-100">{{ overview.runs_observed }}</div>
-          </div>
-          <div class="rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2">
-            <div class="text-[11px] text-slate-500">Decisions</div>
-            <div class="text-lg font-bold text-slate-100">{{ overview.decisions_observed }}</div>
-          </div>
-          <div class="rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2">
-            <div class="text-[11px] text-slate-500">Refusals</div>
-            <div class="text-lg font-bold text-slate-100">{{ overview.refusals_observed }}</div>
-          </div>
+      <!-- Counters -->
+      <div v-if="overview" class="mt-8 ui-card px-5 py-4 grid grid-cols-2 gap-4 sm:grid-cols-4">
+        <div>
+          <p class="text-xs text-slate-500">Open findings</p>
+          <p class="mt-1 text-xl font-medium text-slate-100 tabular-nums">{{ overview.open_findings }}</p>
+        </div>
+        <div>
+          <p class="text-xs text-slate-500">Runs observed</p>
+          <p class="mt-1 text-xl font-medium text-slate-100 tabular-nums">{{ overview.runs_observed }}</p>
+        </div>
+        <div>
+          <p class="text-xs text-slate-500">Decisions</p>
+          <p class="mt-1 text-xl font-medium text-slate-100 tabular-nums">{{ overview.decisions_observed }}</p>
+        </div>
+        <div>
+          <p class="text-xs text-slate-500">Refusals</p>
+          <p class="mt-1 text-xl font-medium text-slate-100 tabular-nums">{{ overview.refusals_observed }}</p>
         </div>
       </div>
 
       <!-- Settings -->
-      <section v-if="showSettings" class="mb-8 rounded-lg border border-slate-800 bg-slate-900/40 p-4">
-        <h2 class="text-sm font-semibold text-slate-300 mb-1">Settings</h2>
-        <p class="text-xs text-slate-600 mb-4">
-          Nothing is promotable until a target has a measured noise floor, whatever
-          these say.
-        </p>
-
-        <!-- Mode + enabled -->
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
-          <label class="block">
-            <span class="text-[11px] text-slate-500">Mode</span>
-            <select v-model="draft.mode"
-                    class="mt-1 w-full rounded-lg bg-slate-950/60 border border-slate-700 px-3 py-2 text-sm text-slate-200">
-              <option value="observe">observe — record and report only</option>
-              <option value="propose">propose — ask, never apply</option>
-              <option value="act">act — apply what the permissions allow</option>
-            </select>
-          </label>
-          <label class="flex items-center gap-2 mt-1 sm:mt-6">
-            <input type="checkbox" v-model="draft.enabled"
-                   class="size-4 rounded border-slate-600 bg-slate-950" />
-            <span class="text-sm text-slate-300">Subsystem enabled</span>
-          </label>
-        </div>
-
-        <!-- Numbers -->
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
-          <label v-for="[key, label, hint] in NUMBER_FIELDS" :key="key" class="block">
-            <span class="text-[11px] text-slate-500">{{ label }}</span>
-            <input type="number" step="any" min="0" v-model.number="draft[key]"
-                   class="mt-1 w-full rounded-lg bg-slate-950/60 border border-slate-700 px-3 py-2 text-sm text-slate-200" />
-            <span class="text-[10px] text-slate-600 block mt-0.5">{{ hint }}</span>
-          </label>
-        </div>
-
-        <!-- AI role models -->
-        <h3 class="text-xs font-semibold text-slate-400 mt-5 mb-2">AI role models</h3>
-        <p class="text-[11px] text-slate-600 mb-2">
-          A role with no model is skipped — it never falls back to a default, so
-          the recorded model id is always the model that actually answered.
-        </p>
-        <div class="space-y-3 mb-4">
-          <label v-for="[role, key, hint] in ROLE_KEYS" :key="key" class="block">
-            <span class="text-[11px] text-slate-500 capitalize">{{ role }}</span>
-            <select v-model="draft[key]"
-                    class="mt-1 w-full rounded-lg bg-slate-950/60 border border-slate-700 px-3 py-2 text-sm text-slate-200">
-              <option value="">— not configured —</option>
-              <option v-for="m in models" :key="m.id" :value="m.id">
-                {{ m.name || m.model || m.id }}<span v-if="m.provider"> ({{ m.provider }})</span>
-              </option>
-            </select>
-            <span class="text-[10px] text-slate-600 block mt-0.5">{{ hint }}</span>
-          </label>
-        </div>
-
-        <!-- Document allowlist -->
-        <h3 class="text-xs font-semibold text-slate-400 mt-5 mb-2">
-          Strategy documents the subsystem may write to
-        </h3>
-        <p class="text-[11px] text-slate-600 mb-2">
-          Arming a document is what lets the subsystem change it. Empty means it
-          writes nowhere, whatever the permission matrix says.
-        </p>
-        <div v-if="!targets?.strategies?.length" class="text-xs text-slate-600 mb-4">
-          No strategy documents found.
-        </div>
-        <div v-else class="space-y-1.5 mb-4">
-          <button v-for="doc in targets.strategies" :key="doc.id"
-                  @click="toggleDocument(doc.id)"
-                  class="w-full text-left rounded-lg border px-3 py-2 transition-colors"
-                  :class="draft.document_allowlist?.includes(doc.id)
-                    ? (doc.money === 'live'
-                        ? 'border-rose-500/40 bg-rose-500/10'
-                        : 'border-emerald-500/30 bg-emerald-500/10')
-                    : 'border-slate-800 bg-slate-950/40 hover:bg-slate-900/60'">
-            <div class="flex items-center gap-2">
-              <span class="material-symbols-outlined text-[16px]"
-                    :class="draft.document_allowlist?.includes(doc.id)
-                      ? (doc.money === 'live' ? 'text-rose-400' : 'text-emerald-400')
-                      : 'text-slate-600'">
-                {{ draft.document_allowlist?.includes(doc.id) ? 'check_box' : 'check_box_outline_blank' }}
-              </span>
-              <span class="text-sm text-slate-200 truncate">{{ doc.name }}</span>
-              <span class="text-[10px] text-slate-600 font-mono">#{{ doc.id }}</span>
-              <span v-if="doc.money === 'live'"
-                    class="ml-auto px-1.5 py-0.5 rounded text-[10px] font-bold border text-rose-400 bg-rose-500/10 border-rose-500/30">
-                REAL MONEY
-              </span>
-              <span v-else-if="doc.money === 'unknown'"
-                    class="ml-auto px-1.5 py-0.5 rounded text-[10px] font-semibold border text-amber-400 bg-amber-500/10 border-amber-500/20">
-                unverified
-              </span>
-              <span v-else-if="doc.money === 'paper'"
-                    class="ml-auto px-1.5 py-0.5 rounded text-[10px] font-semibold border text-slate-400 bg-slate-500/10 border-slate-700">
-                paper
-              </span>
-            </div>
-            <div class="text-[10px] text-slate-600 mt-0.5 pl-6">
-              {{ doc.sub_strategies }} sub-strateg{{ doc.sub_strategies === 1 ? 'y' : 'ies' }}
-              <span v-if="doc.instance_names?.length">
-                · used by {{ doc.instance_names.join(', ') }}
-              </span>
-              <span v-else> · not attached to an instance</span>
-            </div>
-          </button>
-        </div>
-
-        <!-- Watched instances -->
-        <h3 class="text-xs font-semibold text-slate-400 mt-5 mb-2">
-          Instances to watch
-        </h3>
-        <p class="text-[11px] text-slate-600 mb-2">
-          Which instances' runs the engine observes. Selecting none watches
-          everything — observing is read-only, so narrowing is the deliberate act.
-        </p>
-        <div v-if="!draft.watched_instances?.length"
-             class="text-[11px] text-sky-400 mb-2">
-          Watching every instance.
-        </div>
-        <div v-if="!targets?.instances?.length" class="text-xs text-slate-600 mb-4">
-          No instances found.
-        </div>
-        <div v-else class="space-y-1.5 mb-4">
-          <button v-for="inst in targets.instances" :key="inst.id"
-                  @click="toggleInstance(inst.id)"
-                  class="w-full text-left rounded-lg border px-3 py-2 transition-colors"
-                  :class="draft.watched_instances?.includes(inst.id)
-                    ? 'border-sky-500/30 bg-sky-500/10'
-                    : 'border-slate-800 bg-slate-950/40 hover:bg-slate-900/60'">
-            <div class="flex items-center gap-2">
-              <span class="material-symbols-outlined text-[16px]"
-                    :class="draft.watched_instances?.includes(inst.id) ? 'text-sky-400' : 'text-slate-600'">
-                {{ draft.watched_instances?.includes(inst.id) ? 'check_box' : 'check_box_outline_blank' }}
-              </span>
-              <span class="text-sm text-slate-200 truncate">{{ inst.name }}</span>
-              <span class="text-[10px] text-slate-600 font-mono">{{ inst.kind }}</span>
-              <span v-if="inst.money === 'live'"
-                    class="ml-auto px-1.5 py-0.5 rounded text-[10px] font-bold border text-rose-400 bg-rose-500/10 border-rose-500/30">
-                REAL MONEY
-              </span>
-              <span v-else-if="inst.money === 'unknown'"
-                    class="ml-auto px-1.5 py-0.5 rounded text-[10px] font-semibold border text-amber-400 bg-amber-500/10 border-amber-500/20">
-                unverified
-              </span>
-              <span v-else-if="inst.money === 'paper'"
-                    class="ml-auto px-1.5 py-0.5 rounded text-[10px] font-semibold border text-slate-400 bg-slate-500/10 border-slate-700">
-                paper
-              </span>
-              <span v-else-if="inst.running"
-                    class="ml-auto px-1.5 py-0.5 rounded text-[10px] font-semibold border text-emerald-400 bg-emerald-500/10 border-emerald-500/20">
-                running
-              </span>
-            </div>
-            <div class="text-[10px] text-slate-600 mt-0.5 pl-6">
-              doc #{{ inst.strategy_id || '—' }}
-            </div>
-          </button>
-        </div>
-
-        <!-- Permission matrix -->
-        <h3 class="text-xs font-semibold text-slate-400 mt-5 mb-2">Permissions</h3>
-        <p class="text-[11px] text-slate-600 mb-2">
-          What may be applied without asking. Reverting is never gated by any of
-          these — a rollback that waits for approval is one that does not happen.
-        </p>
-        <div class="overflow-x-auto rounded-lg border border-slate-800">
-          <table class="w-full text-xs">
-            <thead>
-              <tr class="text-slate-500 border-b border-slate-800">
-                <th class="text-left font-medium px-2 py-2">Action</th>
-                <th v-for="rung in (permissions?.rungs || [])" :key="rung"
-                    class="text-left font-medium px-2 py-2 whitespace-nowrap">{{ rung }}</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="cls in (permissions?.action_classes || [])" :key="cls"
-                  class="border-b border-slate-800/60 last:border-0">
-                <td class="px-2 py-2 text-slate-300 whitespace-nowrap">{{ cls }}</td>
-                <td v-for="rung in (permissions?.rungs || [])" :key="rung" class="px-2 py-1.5">
-                  <select v-if="draft.permission_matrix?.[cls]"
-                          v-model="draft.permission_matrix[cls][rung]"
-                          class="w-full rounded bg-slate-950/60 border border-slate-700 px-1.5 py-1 text-[11px] text-slate-200">
-                    <option value="autonomous">auto</option>
-                    <option value="ask">ask</option>
-                    <option value="blocked">blocked</option>
-                  </select>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-
-        <div class="flex gap-2 mt-5">
-          <button @click="saveSettings" :disabled="busy === 'settings'"
-                  class="px-4 py-2 rounded-lg text-xs font-semibold border border-emerald-500/30 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 disabled:opacity-50">
-            {{ busy === 'settings' ? 'Saving…' : 'Save settings' }}
-          </button>
-          <button @click="resetDraft"
-                  class="px-4 py-2 rounded-lg text-xs font-semibold border border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-800">
-            Revert
-          </button>
-        </div>
-      </section>
-
-      <div v-if="budget || roles" class="mb-6 grid grid-cols-1 sm:grid-cols-2 gap-2">
-        <div v-if="budget" class="rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2">
-          <div class="text-[11px] text-slate-500">Budget remaining</div>
-          <div class="text-lg font-bold"
-               :class="Number(budget.remaining_usd) > 0 ? 'text-slate-100' : 'text-amber-400'">
-            ${{ Number(budget.remaining_usd || 0).toFixed(2) }}
-          </div>
-          <div class="text-[11px] text-slate-600">
-            ${{ Number(budget.spent_today_usd || 0).toFixed(2) }} today ·
-            ${{ Number(budget.reserved_usd || 0).toFixed(2) }} reserved
-            <span v-if="!Number(budget.daily_limit_usd)"> · no ceiling set, so nothing will spend</span>
-          </div>
-        </div>
-        <div v-if="roles" class="rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2">
-          <div class="text-[11px] text-slate-500">AI roles configured</div>
-          <div class="text-lg font-bold text-slate-100">
-            {{ Object.keys(roles.roles || {}).length - (roles.unconfigured || []).length }}
-            / {{ Object.keys(roles.roles || {}).length }}
-          </div>
-          <div class="text-[11px] text-slate-600">
-            <span v-if="(roles.unconfigured || []).length">
-              unconfigured: {{ (roles.unconfigured || []).join(', ') }}
-            </span>
-            <span v-else>every role has a model</span>
-          </div>
-        </div>
-      </div>
-
-      <div v-if="loadError" class="mb-6 rounded-lg border border-rose-500/20 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">
-        {{ loadError }}
-      </div>
-      <div v-if="loading" class="text-slate-500 text-sm">Loading…</div>
-
-      <!-- 1. Pending approvals -->
-      <section class="mb-8">
-        <div class="flex items-center gap-2 mb-2">
-          <h2 class="text-sm font-semibold text-slate-300">Pending approvals</h2>
-          <span v-if="approvals.live_pending_count"
-                class="px-2 py-0.5 rounded-full text-[10px] font-bold border text-rose-400 bg-rose-500/10 border-rose-500/20">
-            {{ approvals.live_pending_count }} LIVE — waits indefinitely
-          </span>
-        </div>
-
-        <div v-if="!approvals.pending?.length"
-             class="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-6 text-center">
-          <p class="text-sm text-slate-400">No approvals waiting.</p>
-          <p class="text-xs text-slate-600 mt-1">
-            {{ observeOnly
-                ? 'The subsystem is in observe mode — it records and reports, and does not propose changes.'
-                : 'Nothing is waiting on you right now.' }}
+      <section v-if="showSettings" class="mt-12">
+        <div class="mb-3">
+          <h2 class="ui-section-title">Settings</h2>
+          <p class="ui-section-sub">
+            Nothing is promotable until a target has a measured noise floor, whatever
+            these say
           </p>
         </div>
 
-        <div class="space-y-2">
-          <div v-for="a in paged(approvals.pending, 'approvals')" :key="a.id"
-               class="rounded-lg border px-4 py-3"
-               :class="a.holds_forever
-                 ? 'border-rose-500/30 bg-rose-500/5'
-                 : 'border-slate-800 bg-slate-900/40'">
-            <div class="flex items-start justify-between gap-3">
-              <div class="min-w-0">
-                <div class="flex items-center gap-2 flex-wrap">
-                  <span class="px-2 py-0.5 rounded-full text-[10px] font-bold border"
-                        :class="a.holds_forever
-                          ? 'text-rose-400 bg-rose-500/10 border-rose-500/20'
-                          : 'text-sky-400 bg-sky-500/10 border-sky-500/20'">{{ a.rung }}</span>
-                  <span class="text-[11px] text-slate-500 font-mono">{{ a.action_class }}</span>
-                  <span class="text-[11px] text-slate-500 font-mono">doc {{ a.document_id || '—' }}</span>
+        <div class="ui-card p-5">
+          <!-- Mode + enabled -->
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <label class="block">
+              <span class="ui-field-label">Mode</span>
+              <select v-model="draft.mode" class="ui-input">
+                <option value="observe">Observe — record and report only</option>
+                <option value="propose">Propose — ask, never apply</option>
+                <option value="act">Act — apply what the permissions allow</option>
+              </select>
+            </label>
+            <label class="flex items-center gap-2 sm:mt-7">
+              <input type="checkbox" v-model="draft.enabled"
+                     class="size-4 rounded accent-slate-200" />
+              <span class="text-sm text-slate-300">Subsystem enabled</span>
+            </label>
+          </div>
+
+          <!-- Numbers -->
+          <div class="mt-6 grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-5">
+            <label v-for="[key, label, hint] in NUMBER_FIELDS" :key="key" class="block">
+              <span class="ui-field-label">{{ label }}</span>
+              <input type="number" step="any" min="0" v-model.number="draft[key]"
+                     class="ui-input tabular-nums" />
+              <span class="ui-help block">{{ hint }}</span>
+            </label>
+          </div>
+
+          <!-- AI role models -->
+          <div class="mt-8 pt-6 border-t border-white/[0.06]">
+            <h3 class="text-sm font-medium text-slate-200">AI role models</h3>
+            <p class="text-xs text-slate-500 mt-1">
+              A role with no model is skipped — it never falls back to a default, so
+              the recorded model id is always the model that actually answered.
+            </p>
+            <div class="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-5">
+              <label v-for="[role, key, hint] in ROLE_KEYS" :key="key" class="block">
+                <span class="ui-field-label capitalize">{{ role }}</span>
+                <select v-model="draft[key]" class="ui-input">
+                  <option value="">Not configured</option>
+                  <option v-for="m in models" :key="m.id" :value="m.id">
+                    {{ m.name || m.model || m.id }}<span v-if="m.provider"> ({{ m.provider }})</span>
+                  </option>
+                </select>
+                <span class="ui-help block">{{ hint }}</span>
+              </label>
+            </div>
+          </div>
+
+          <!-- Document allowlist -->
+          <div class="mt-8 pt-6 border-t border-white/[0.06]">
+            <h3 class="text-sm font-medium text-slate-200">
+              Strategy documents the subsystem may write to
+            </h3>
+            <p class="text-xs text-slate-500 mt-1">
+              Arming a document is what lets the subsystem change it. Empty means it
+              writes nowhere, whatever the permission matrix says.
+            </p>
+            <div v-if="!targets?.strategies?.length" class="mt-3 text-sm text-slate-500">
+              No strategy documents found.
+            </div>
+            <div v-else class="mt-3 rounded-lg border border-white/[0.07] divide-y divide-white/[0.05] overflow-hidden">
+              <button v-for="doc in targets.strategies" :key="doc.id"
+                      @click="toggleDocument(doc.id)"
+                      class="w-full text-left px-3 py-2.5 transition-colors duration-150 ease-out"
+                      :class="draft.document_allowlist?.includes(doc.id)
+                        ? 'bg-raised'
+                        : 'hover:bg-white/[0.03]'"
+                      :aria-pressed="!!draft.document_allowlist?.includes(doc.id)">
+                <div class="flex items-center gap-2">
+                  <span class="material-symbols-outlined text-[16px]"
+                        :class="draft.document_allowlist?.includes(doc.id) ? 'text-slate-200' : 'text-slate-600'">
+                    {{ draft.document_allowlist?.includes(doc.id) ? 'check_box' : 'check_box_outline_blank' }}
+                  </span>
+                  <span class="text-sm text-slate-200 truncate">{{ doc.name }}</span>
+                  <span class="text-xs text-slate-600 tabular-nums">#{{ doc.id }}</span>
+                  <span v-if="doc.money === 'live'"
+                        class="ml-auto shrink-0 inline-flex items-center gap-1.5 text-xs text-slate-200">
+                    <span class="ui-dot ui-dot-warn"></span>
+                    Real money
+                  </span>
+                  <span v-else-if="doc.money === 'unknown'"
+                        class="ml-auto shrink-0 text-xs text-slate-400">
+                    Unverified
+                  </span>
+                  <span v-else-if="doc.money === 'paper'"
+                        class="ml-auto shrink-0 text-xs text-slate-500">
+                    Paper
+                  </span>
                 </div>
-                <p class="text-sm text-slate-200 mt-1">{{ a.summary }}</p>
-                <p class="text-[11px] text-slate-600 mt-1">
+                <div class="text-xs text-slate-500 mt-0.5 pl-6">
+                  {{ doc.sub_strategies }} sub-strateg{{ doc.sub_strategies === 1 ? 'y' : 'ies' }}
+                  <span v-if="doc.instance_names?.length">
+                    · used by {{ doc.instance_names.join(', ') }}
+                  </span>
+                  <span v-else> · not attached to an instance</span>
+                </div>
+              </button>
+            </div>
+          </div>
+
+          <!-- Watched instances -->
+          <div class="mt-8 pt-6 border-t border-white/[0.06]">
+            <h3 class="text-sm font-medium text-slate-200">
+              Instances to watch
+            </h3>
+            <p class="text-xs text-slate-500 mt-1">
+              Which instances' runs the engine observes. Selecting none watches
+              everything — observing is read-only, so narrowing is the deliberate act.
+            </p>
+            <div v-if="!draft.watched_instances?.length"
+                 class="mt-2 text-xs text-slate-400">
+              Watching every instance
+            </div>
+            <div v-if="!targets?.instances?.length" class="mt-3 text-sm text-slate-500">
+              No instances found.
+            </div>
+            <div v-else class="mt-3 rounded-lg border border-white/[0.07] divide-y divide-white/[0.05] overflow-hidden">
+              <button v-for="inst in targets.instances" :key="inst.id"
+                      @click="toggleInstance(inst.id)"
+                      class="w-full text-left px-3 py-2.5 transition-colors duration-150 ease-out"
+                      :class="draft.watched_instances?.includes(inst.id)
+                        ? 'bg-raised'
+                        : 'hover:bg-white/[0.03]'"
+                      :aria-pressed="!!draft.watched_instances?.includes(inst.id)">
+                <div class="flex items-center gap-2">
+                  <span class="material-symbols-outlined text-[16px]"
+                        :class="draft.watched_instances?.includes(inst.id) ? 'text-slate-200' : 'text-slate-600'">
+                    {{ draft.watched_instances?.includes(inst.id) ? 'check_box' : 'check_box_outline_blank' }}
+                  </span>
+                  <span class="text-sm text-slate-200 truncate">{{ inst.name }}</span>
+                  <span class="text-xs text-slate-600">{{ inst.kind }}</span>
+                  <span v-if="inst.money === 'live'"
+                        class="ml-auto shrink-0 inline-flex items-center gap-1.5 text-xs text-slate-200">
+                    <span class="ui-dot ui-dot-warn"></span>
+                    Real money
+                  </span>
+                  <span v-else-if="inst.money === 'unknown'"
+                        class="ml-auto shrink-0 text-xs text-slate-400">
+                    Unverified
+                  </span>
+                  <span v-else-if="inst.money === 'paper'"
+                        class="ml-auto shrink-0 text-xs text-slate-500">
+                    Paper
+                  </span>
+                  <span v-else-if="inst.running"
+                        class="ml-auto shrink-0 inline-flex items-center gap-1.5 text-xs text-slate-300">
+                    <span class="ui-dot ui-dot-live"></span>
+                    Running
+                  </span>
+                </div>
+                <div class="text-xs text-slate-500 mt-0.5 pl-6 tabular-nums">
+                  doc #{{ inst.strategy_id || '—' }}
+                </div>
+              </button>
+            </div>
+          </div>
+
+          <!-- Permission matrix -->
+          <div class="mt-8 pt-6 border-t border-white/[0.06]">
+            <h3 class="text-sm font-medium text-slate-200">Permissions</h3>
+            <p class="text-xs text-slate-500 mt-1">
+              What may be applied without asking. Reverting is never gated by any of
+              these — a rollback that waits for approval is one that does not happen.
+            </p>
+            <div class="mt-3 overflow-x-auto rounded-lg border border-white/[0.07]">
+              <table class="w-full text-sm">
+                <thead>
+                  <tr class="h-10 text-xs text-slate-500 border-b border-white/[0.06]">
+                    <th class="text-left font-normal px-3">Action</th>
+                    <th v-for="rung in (permissions?.rungs || [])" :key="rung"
+                        class="text-left font-normal px-3 whitespace-nowrap">{{ rung }}</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-white/[0.05]">
+                  <tr v-for="cls in (permissions?.action_classes || [])" :key="cls">
+                    <td class="px-3 py-2 text-slate-300 whitespace-nowrap">{{ cls }}</td>
+                    <td v-for="rung in (permissions?.rungs || [])" :key="rung" class="px-3 py-2">
+                      <select v-if="draft.permission_matrix?.[cls]"
+                              v-model="draft.permission_matrix[cls][rung]"
+                              class="ui-input h-8 min-w-[88px] px-2 text-xs">
+                        <option value="autonomous">auto</option>
+                        <option value="ask">ask</option>
+                        <option value="blocked">blocked</option>
+                      </select>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="flex gap-2 mt-6 pt-5 border-t border-white/[0.06]">
+            <button @click="saveSettings" :disabled="busy === 'settings'"
+                    class="ui-btn-primary">
+              {{ busy === 'settings' ? 'Saving…' : 'Save settings' }}
+            </button>
+            <button @click="resetDraft"
+                    class="ui-btn-ghost h-9">
+              Revert
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <div v-if="budget || roles" class="mt-8 ui-card grid grid-cols-1 sm:grid-cols-2 divide-y sm:divide-y-0 sm:divide-x divide-white/[0.06]">
+        <div v-if="budget" class="px-5 py-4">
+          <p class="text-xs text-slate-500">Budget remaining</p>
+          <p class="mt-1 text-xl font-medium text-slate-100 tabular-nums inline-flex items-center gap-2">
+            ${{ Number(budget.remaining_usd || 0).toFixed(2) }}
+            <span v-if="!(Number(budget.remaining_usd) > 0)" class="ui-dot ui-dot-warn" title="No budget left"></span>
+          </p>
+          <p class="mt-1 text-xs text-slate-500 tabular-nums">
+            ${{ Number(budget.spent_today_usd || 0).toFixed(2) }} today ·
+            ${{ Number(budget.reserved_usd || 0).toFixed(2) }} reserved
+            <span v-if="!Number(budget.daily_limit_usd)"> · no ceiling set, so nothing will spend</span>
+          </p>
+        </div>
+        <div v-if="roles" class="px-5 py-4">
+          <p class="text-xs text-slate-500">AI roles configured</p>
+          <p class="mt-1 text-xl font-medium text-slate-100 tabular-nums">
+            {{ Object.keys(roles.roles || {}).length - (roles.unconfigured || []).length }}<span class="text-slate-500">
+            / {{ Object.keys(roles.roles || {}).length }}</span>
+          </p>
+          <p class="mt-1 text-xs text-slate-500">
+            <span v-if="(roles.unconfigured || []).length">
+              Unconfigured: {{ (roles.unconfigured || []).join(', ') }}
+            </span>
+            <span v-else>Every role has a model</span>
+          </p>
+        </div>
+      </div>
+
+      <div v-if="loadError" class="mt-8 ui-error">
+        {{ loadError }}
+      </div>
+      <div v-if="loading" class="mt-12 space-y-3" aria-hidden="true">
+        <div class="ui-skel h-4 w-36"></div>
+        <div class="h-28 rounded-xl bg-surface"></div>
+      </div>
+
+      <!-- 1. Pending approvals -->
+      <section class="mt-12">
+        <div class="mb-3 flex flex-wrap items-end justify-between gap-x-4 gap-y-1">
+          <h2 class="ui-section-title">Pending approvals</h2>
+          <span v-if="approvals.live_pending_count"
+                class="inline-flex items-center gap-1.5 text-xs text-slate-300 tabular-nums">
+            <span class="ui-dot ui-dot-warn"></span>
+            {{ approvals.live_pending_count }} live — waits indefinitely
+          </span>
+        </div>
+
+        <div v-if="!approvals.pending?.length" class="ui-card">
+          <div class="ui-empty gap-1">
+            <p class="text-slate-300">No approvals waiting</p>
+            <p class="text-xs text-slate-500 max-w-md">
+              {{ observeOnly
+                  ? 'The subsystem is in observe mode — it records and reports, and does not propose changes.'
+                  : 'Nothing is waiting on you right now.' }}
+            </p>
+          </div>
+        </div>
+
+        <div v-else class="ui-card overflow-hidden ui-rows">
+          <div v-for="a in paged(approvals.pending, 'approvals')" :key="a.id"
+               class="px-5 py-4">
+            <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div class="min-w-0">
+                <div class="flex items-center gap-x-3 gap-y-1 flex-wrap text-xs">
+                  <span class="inline-flex items-center gap-1.5 text-slate-300">
+                    <span v-if="a.holds_forever" class="ui-dot ui-dot-warn"></span>
+                    {{ a.rung }}
+                  </span>
+                  <span class="text-slate-500">{{ a.action_class }}</span>
+                  <span class="text-slate-500 tabular-nums">doc {{ a.document_id || '—' }}</span>
+                </div>
+                <p class="text-sm text-slate-100 mt-1.5">{{ a.summary }}</p>
+                <p class="text-xs text-slate-500 mt-1">
                   {{ a.target }} · requested {{ fmtWhen(a.requested_at) }}
                   <span v-if="a.holds_forever"> · this one waits until you answer</span>
                 </p>
               </div>
               <div class="flex gap-2 shrink-0">
                 <button @click="decide(a, 'approved')" :disabled="deciding === a.id"
-                        class="px-3 py-1.5 rounded-lg text-xs font-semibold border border-emerald-500/30 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 disabled:opacity-50">
+                        class="ui-btn">
                   Approve
                 </button>
                 <button @click="decide(a, 'rejected')" :disabled="deciding === a.id"
-                        class="px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-800 disabled:opacity-50">
+                        class="ui-btn">
                   Reject
                 </button>
               </div>
@@ -716,48 +714,54 @@ onUnmounted(stopPolling)
 
         <div v-if="pageCount(approvals.pending) > 1" class="flex items-center justify-center gap-3 mt-3">
           <button @click="turnPage('approvals', -1, approvals.pending)" :disabled="page.approvals === 1"
-                  class="px-2.5 py-1 rounded-lg text-xs border border-slate-700 bg-slate-800/60 text-slate-300 disabled:opacity-40">
+                  class="ui-btn">
             Prev
           </button>
-          <span class="text-[11px] text-slate-500">
+          <span class="text-xs text-slate-500 tabular-nums">
             {{ page.approvals }} / {{ pageCount(approvals.pending) }} · {{ (approvals.pending || []).length }} total
           </span>
           <button @click="turnPage('approvals', 1, approvals.pending)" :disabled="page.approvals === pageCount(approvals.pending)"
-                  class="px-2.5 py-1 rounded-lg text-xs border border-slate-700 bg-slate-800/60 text-slate-300 disabled:opacity-40">
+                  class="ui-btn">
             Next
           </button>
         </div>
       </section>
 
       <!-- Noise floors: which targets can be trusted at all -->
-      <section class="mb-8">
-        <h2 class="text-sm font-semibold text-slate-300 mb-2">Measured noise floors</h2>
-        <p class="text-xs text-slate-600 mb-2">
-          A target with no measured floor cannot promote anything — two runs of one
-          window have differed by ~16pp here, so an unmeasured target's results are
-          not attributable.
-        </p>
-        <div v-if="!floors.length"
-             class="rounded-lg border border-amber-500/20 bg-amber-500/5 px-4 py-4">
-          <p class="text-sm text-amber-300">No floor has been measured yet.</p>
-          <p class="text-xs text-slate-500 mt-1">Nothing is promotable until one is.</p>
+      <section class="mt-12">
+        <div class="mb-3">
+          <h2 class="ui-section-title">Measured noise floors</h2>
+          <p class="ui-section-sub max-w-3xl">
+            A target with no measured floor cannot promote anything — two runs of one
+            window have differed by ~16pp here, so an unmeasured target's results are
+            not attributable.
+          </p>
         </div>
-        <div v-else class="rounded-lg border border-slate-800 bg-slate-900/40 overflow-x-auto">
-          <table class="w-full text-xs">
-            <thead><tr class="text-slate-500 border-b border-slate-800">
-              <th class="text-left font-medium px-3 py-2">Target</th>
-              <th class="text-left font-medium px-3 py-2">Window class</th>
-              <th class="text-right font-medium px-3 py-2">Floor</th>
-              <th class="text-right font-medium px-3 py-2">Repeats</th>
-              <th class="text-left font-medium px-3 py-2">Usable</th>
+        <div v-if="!floors.length" class="ui-card">
+          <div class="ui-empty gap-1">
+            <p class="text-slate-300 inline-flex items-center gap-2">
+              <span class="ui-dot ui-dot-warn"></span>
+              No floor has been measured yet
+            </p>
+            <p class="text-xs text-slate-500">Nothing is promotable until one is.</p>
+          </div>
+        </div>
+        <div v-else class="ui-card overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead><tr class="h-10 text-xs text-slate-500 border-b border-white/[0.06]">
+              <th class="text-left font-normal px-5">Target</th>
+              <th class="text-left font-normal px-5">Window class</th>
+              <th class="text-right font-normal px-5">Floor</th>
+              <th class="text-right font-normal px-5">Repeats</th>
+              <th class="text-left font-normal px-5">Usable</th>
             </tr></thead>
-            <tbody>
-              <tr v-for="f in floors" :key="f.id" class="border-b border-slate-800/60 last:border-0">
-                <td class="px-3 py-2 text-slate-300">{{ f.target }}</td>
-                <td class="px-3 py-2 text-slate-500 font-mono">{{ f.window_class }}</td>
-                <td class="px-3 py-2 text-right text-slate-300">{{ Number(f.floor_pp).toFixed(2) }}pp</td>
-                <td class="px-3 py-2 text-right text-slate-300">{{ f.n }}</td>
-                <td class="px-3 py-2" :class="f.measured ? 'text-emerald-400' : 'text-amber-400'">
+            <tbody class="divide-y divide-white/[0.05]">
+              <tr v-for="f in floors" :key="f.id" class="h-14 tabular-nums">
+                <td class="px-5 text-slate-100">{{ f.target }}</td>
+                <td class="px-5 text-slate-500">{{ f.window_class }}</td>
+                <td class="px-5 text-right text-slate-300">{{ Number(f.floor_pp).toFixed(2) }}pp</td>
+                <td class="px-5 text-right text-slate-300">{{ f.n }}</td>
+                <td class="px-5" :class="f.measured ? 'text-slate-300' : 'text-amber-400'">
                   {{ f.measured ? 'yes' : (f.reason || 'not measured') }}
                 </td>
               </tr>
@@ -767,74 +771,81 @@ onUnmounted(stopPolling)
       </section>
 
       <!-- 2. Findings & reports -->
-      <section class="mb-8">
-        <h2 class="text-sm font-semibold text-slate-300 mb-2">Findings &amp; reports</h2>
-
-        <div v-if="!loading && !findings.length && !loadError"
-             class="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-6 text-center">
-          <p class="text-sm text-slate-400">Nothing raised yet.</p>
-          <p class="text-xs text-slate-600 mt-1">
-            {{ overview && !overview.engine_running
-                ? 'The self-learning engine is stopped — start it to begin observing.'
-                : 'Findings appear as completed runs are observed.' }}
-          </p>
+      <section class="mt-12">
+        <div class="mb-3">
+          <h2 class="ui-section-title">Findings &amp; reports</h2>
         </div>
 
-        <div class="space-y-2">
-          <div v-for="f in paged(findings, 'findings')" :key="f.id"
-               class="rounded-lg border border-slate-800 bg-slate-900/40 overflow-hidden">
-            <button class="w-full text-left px-4 py-3 hover:bg-slate-900/70 transition-colors"
+        <div v-if="!loading && !findings.length && !loadError" class="ui-card">
+          <div class="ui-empty gap-1">
+            <p class="text-slate-300">Nothing raised yet</p>
+            <p class="text-xs text-slate-500">
+              {{ overview && !overview.engine_running
+                  ? 'The self-learning engine is stopped — start it to begin observing.'
+                  : 'Findings appear as completed runs are observed.' }}
+            </p>
+          </div>
+        </div>
+
+        <div v-if="findings.length" class="ui-card overflow-hidden ui-rows">
+          <div v-for="f in paged(findings, 'findings')" :key="f.id">
+            <button class="w-full text-left px-5 py-4 transition-colors duration-150 ease-out hover:bg-white/[0.03]"
+                    :class="openThread === f.id ? 'bg-white/[0.02]' : ''"
+                    :aria-expanded="openThread === f.id"
                     @click="toggleThread(f)">
               <div class="flex items-start justify-between gap-3">
                 <div class="min-w-0">
-                  <div class="flex items-center gap-2 flex-wrap">
-                    <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold border"
-                          :class="severityClasses(f.severity)">{{ (f.severity || '').toUpperCase() }}</span>
-                    <span class="text-[11px] text-slate-500 font-mono">{{ f.target }}</span>
+                  <div class="flex items-center gap-x-3 gap-y-1 flex-wrap text-xs">
+                    <span class="inline-flex items-center gap-1.5 text-slate-300 capitalize">
+                      <span class="ui-dot" :class="severityClasses(f.severity)"></span>
+                      {{ f.severity || '' }}
+                    </span>
+                    <span class="text-slate-500">{{ f.target }}</span>
                   </div>
-                  <h3 class="text-sm font-semibold text-slate-100 mt-1">{{ f.title }}</h3>
-                  <p class="text-xs text-slate-400 mt-1">{{ f.detail }}</p>
+                  <h3 class="text-sm text-slate-100 mt-1.5">{{ f.title }}</h3>
+                  <p class="text-xs text-slate-500 mt-1">{{ f.detail }}</p>
                 </div>
-                <span v-if="busyFor(f.id)"
-                      class="shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border text-zinc-200 bg-zinc-500/10 border-zinc-500/30">
-                  <span class="size-1.5 rounded-full bg-zinc-400 animate-pulse"></span>
-                  {{ busyRole(f.id) }} thinking…
-                </span>
-                <span class="material-symbols-outlined text-slate-600 text-[18px] shrink-0">
-                  {{ openThread === f.id ? 'expand_less' : 'expand_more' }}
-                </span>
+                <div class="flex items-center gap-3 shrink-0">
+                  <span v-if="busyFor(f.id)"
+                        class="inline-flex items-center gap-1.5 text-xs text-slate-300">
+                    <span class="ui-dot ui-dot-live"></span>
+                    {{ busyRole(f.id) }} thinking…
+                  </span>
+                  <span class="material-symbols-outlined text-slate-500 text-[18px]">
+                    {{ openThread === f.id ? 'expand_less' : 'expand_more' }}
+                  </span>
+                </div>
               </div>
             </button>
 
             <!-- 3. Thread detail — the ladder stepper -->
-            <div v-if="openThread === f.id" class="border-t border-slate-800 px-4 py-4">
-              <div class="text-[11px] text-slate-500 mb-3">
+            <div v-if="openThread === f.id" class="border-t border-white/[0.06] px-5 py-4">
+              <p class="text-xs text-slate-500 mb-4 tabular-nums">
                 Detected {{ fmtWhen(f.detected_at) }} · run {{ f.run_id || '—' }}
-              </div>
+              </p>
 
-              <ol class="relative border-l border-slate-800 ml-2">
-                <li class="ml-4 pb-4">
-                  <span class="absolute -left-[5px] mt-1 size-2.5 rounded-full bg-rose-400"></span>
-                  <div class="text-xs font-semibold text-slate-200">Detected</div>
-                  <div class="text-[11px] text-slate-500">{{ f.kind }} · {{ f.target }}</div>
-                  <pre class="mt-2 text-[10px] text-slate-400 bg-slate-950/60 rounded p-2 overflow-x-auto">{{ JSON.stringify(f.evidence, null, 2) }}</pre>
+              <ol class="relative border-l border-white/[0.08] ml-1">
+                <li class="ml-5 pb-4">
+                  <span class="absolute -left-[5px] mt-1.5 size-2.5 rounded-full bg-slate-200"></span>
+                  <p class="text-sm text-slate-200">Detected</p>
+                  <p class="text-xs text-slate-500 mt-0.5">{{ f.kind }} · {{ f.target }}</p>
+                  <pre class="mt-2 text-xs text-slate-400 bg-background-dark border border-white/[0.06] rounded-lg p-3 overflow-x-auto tabular-nums">{{ JSON.stringify(f.evidence, null, 2) }}</pre>
                 </li>
-                <li v-for="rung in LADDER" :key="rung.key" class="ml-4 pb-4">
-                  <span class="absolute -left-[5px] mt-1 size-2.5 rounded-full"
+                <li v-for="rung in LADDER" :key="rung.key" class="ml-5 pb-4 last:pb-0">
+                  <span class="absolute -left-[5px] mt-1.5 size-2.5 rounded-full"
                         :class="busyStep(f.id, rung.key)
-                          ? 'bg-zinc-400 animate-pulse'
+                          ? 'bg-gain shadow-[0_0_0_3px_rgba(76,195,138,0.15)]'
                           : 'bg-slate-700'"></span>
-                  <div class="text-xs font-semibold"
-                       :class="busyStep(f.id, rung.key) ? 'text-zinc-200' : 'text-slate-500'">
+                  <p class="text-sm"
+                     :class="busyStep(f.id, rung.key) ? 'text-slate-200' : 'text-slate-500'">
                     {{ rung.label }}
-                  </div>
-                  <div class="text-[11px] text-slate-600">{{ rung.hint }}</div>
-                  <div v-if="busyStep(f.id, rung.key)"
-                       class="text-[10px] text-zinc-200 mt-0.5 flex items-center gap-1">
-                    <span class="size-1.5 rounded-full bg-zinc-400 animate-pulse"></span>
+                  </p>
+                  <p class="text-xs text-slate-600 mt-0.5">{{ rung.hint }}</p>
+                  <p v-if="busyStep(f.id, rung.key)"
+                     class="text-xs text-slate-300 mt-1">
                     {{ busyRole(f.id) }} working on this step…
-                  </div>
-                  <div v-else class="text-[10px] text-slate-700 mt-0.5">not reached yet</div>
+                  </p>
+                  <p v-else class="text-xs text-slate-600 mt-1">Not reached yet</p>
                 </li>
               </ol>
             </div>
@@ -843,116 +854,121 @@ onUnmounted(stopPolling)
 
         <div v-if="pageCount(findings) > 1" class="flex items-center justify-center gap-3 mt-3">
           <button @click="turnPage('findings', -1, findings)" :disabled="page.findings === 1"
-                  class="px-2.5 py-1 rounded-lg text-xs border border-slate-700 bg-slate-800/60 text-slate-300 disabled:opacity-40">
+                  class="ui-btn">
             Prev
           </button>
-          <span class="text-[11px] text-slate-500">
+          <span class="text-xs text-slate-500 tabular-nums">
             {{ page.findings }} / {{ pageCount(findings) }} · {{ (findings || []).length }} total
           </span>
           <button @click="turnPage('findings', 1, findings)" :disabled="page.findings === pageCount(findings)"
-                  class="px-2.5 py-1 rounded-lg text-xs border border-slate-700 bg-slate-800/60 text-slate-300 disabled:opacity-40">
+                  class="ui-btn">
             Next
           </button>
         </div>
       </section>
 
       <!-- LLM usage -->
-      <section v-if="llmUsage" class="mb-8">
-        <h2 class="text-sm font-semibold text-slate-300 mb-2">AI usage &amp; cost</h2>
-        <p class="text-xs text-slate-600 mb-2">
-          The recorded cost of the subsystem's own calls, by role — not an
-          estimate reconstructed from a price list.
-        </p>
-        <div v-if="!llmUsage.available || !llmUsage.totals?.calls"
-             class="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-6 text-center">
-          <p class="text-sm text-slate-400">No AI calls yet.</p>
-          <p class="text-xs text-slate-600 mt-1">
-            Usage appears once the loop asks a role for something.
+      <section v-if="llmUsage" class="mt-12">
+        <div class="mb-3">
+          <h2 class="ui-section-title">AI usage &amp; cost</h2>
+          <p class="ui-section-sub max-w-3xl">
+            The recorded cost of the subsystem's own calls, by role — not an
+            estimate reconstructed from a price list.
           </p>
         </div>
-        <template v-else>
-          <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-2">
-            <div class="rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2">
-              <div class="text-[11px] text-slate-500">Total cost</div>
-              <div class="text-lg font-bold text-slate-100">
+        <div v-if="!llmUsage.available || !llmUsage.totals?.calls" class="ui-card">
+          <div class="ui-empty gap-1">
+            <p class="text-slate-300">No AI calls yet</p>
+            <p class="text-xs text-slate-500">
+              Usage appears once the loop asks a role for something.
+            </p>
+          </div>
+        </div>
+        <div v-else class="ui-card overflow-hidden">
+          <div class="px-5 py-4 grid grid-cols-2 gap-4 sm:grid-cols-4 border-b border-white/[0.06]">
+            <div>
+              <p class="text-xs text-slate-500">Total cost</p>
+              <p class="mt-1 text-xl font-medium text-slate-100 tabular-nums">
                 ${{ Number(llmUsage.totals.cost_usd || 0).toFixed(4) }}
-              </div>
+              </p>
             </div>
-            <div class="rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2">
-              <div class="text-[11px] text-slate-500">Calls</div>
-              <div class="text-lg font-bold text-slate-100">{{ llmUsage.totals.calls }}</div>
+            <div>
+              <p class="text-xs text-slate-500">Calls</p>
+              <p class="mt-1 text-xl font-medium text-slate-100 tabular-nums">{{ llmUsage.totals.calls }}</p>
             </div>
-            <div class="rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2">
-              <div class="text-[11px] text-slate-500">Input tokens</div>
-              <div class="text-lg font-bold text-slate-100">
+            <div>
+              <p class="text-xs text-slate-500">Input tokens</p>
+              <p class="mt-1 text-xl font-medium text-slate-100 tabular-nums">
                 {{ Number(llmUsage.totals.input_tokens || 0).toLocaleString() }}
-              </div>
+              </p>
             </div>
-            <div class="rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2">
-              <div class="text-[11px] text-slate-500">Output tokens</div>
-              <div class="text-lg font-bold text-slate-100">
+            <div>
+              <p class="text-xs text-slate-500">Output tokens</p>
+              <p class="mt-1 text-xl font-medium text-slate-100 tabular-nums">
                 {{ Number(llmUsage.totals.output_tokens || 0).toLocaleString() }}
-              </div>
+              </p>
             </div>
           </div>
-          <div class="rounded-lg border border-slate-800 bg-slate-900/40 overflow-x-auto">
-            <table class="w-full text-xs">
-              <thead><tr class="text-slate-500 border-b border-slate-800">
-                <th class="text-left font-medium px-3 py-2">Role</th>
-                <th class="text-right font-medium px-3 py-2">Calls</th>
-                <th class="text-right font-medium px-3 py-2">In</th>
-                <th class="text-right font-medium px-3 py-2">Out</th>
-                <th class="text-right font-medium px-3 py-2">Cost</th>
-                <th class="text-right font-medium px-3 py-2">Errors</th>
+          <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead><tr class="h-10 text-xs text-slate-500 border-b border-white/[0.06]">
+                <th class="text-left font-normal px-5">Role</th>
+                <th class="text-right font-normal px-5">Calls</th>
+                <th class="text-right font-normal px-5">In</th>
+                <th class="text-right font-normal px-5">Out</th>
+                <th class="text-right font-normal px-5">Cost</th>
+                <th class="text-right font-normal px-5">Errors</th>
               </tr></thead>
-              <tbody>
-                <tr v-for="(u, role) in llmUsage.by_role" :key="role"
-                    class="border-b border-slate-800/60 last:border-0">
-                  <td class="px-3 py-2 text-slate-300 capitalize">{{ role }}</td>
-                  <td class="px-3 py-2 text-right text-slate-300">{{ u.calls }}</td>
-                  <td class="px-3 py-2 text-right text-slate-400">{{ Number(u.input_tokens).toLocaleString() }}</td>
-                  <td class="px-3 py-2 text-right text-slate-400">{{ Number(u.output_tokens).toLocaleString() }}</td>
-                  <td class="px-3 py-2 text-right text-slate-300">${{ Number(u.cost_usd).toFixed(4) }}</td>
-                  <td class="px-3 py-2 text-right"
-                      :class="u.errors ? 'text-rose-400' : 'text-slate-600'">{{ u.errors }}</td>
+              <tbody class="divide-y divide-white/[0.05]">
+                <tr v-for="(u, role) in llmUsage.by_role" :key="role" class="h-14 tabular-nums">
+                  <td class="px-5 text-slate-100 capitalize">{{ role }}</td>
+                  <td class="px-5 text-right text-slate-300">{{ u.calls }}</td>
+                  <td class="px-5 text-right text-slate-400">{{ Number(u.input_tokens).toLocaleString() }}</td>
+                  <td class="px-5 text-right text-slate-400">{{ Number(u.output_tokens).toLocaleString() }}</td>
+                  <td class="px-5 text-right text-slate-100">${{ Number(u.cost_usd).toFixed(4) }}</td>
+                  <td class="px-5 text-right"
+                      :class="u.errors ? 'text-loss' : 'text-slate-600'">{{ u.errors }}</td>
                 </tr>
               </tbody>
             </table>
           </div>
-        </template>
+        </div>
       </section>
 
       <!-- Hypothesis ledger -->
-      <section class="mb-8">
-        <h2 class="text-sm font-semibold text-slate-300 mb-2">Hypothesis ledger</h2>
-        <p class="text-xs text-slate-600 mb-2">
-          Rejections are kept on purpose — they are what stops the generator
-          re-proposing an idea that has already been disproved.
-        </p>
-        <div v-if="!hypotheses.length"
-             class="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-6 text-center">
-          <p class="text-sm text-slate-400">No hypotheses yet.</p>
+      <section class="mt-12">
+        <div class="mb-3">
+          <h2 class="ui-section-title">Hypothesis ledger</h2>
+          <p class="ui-section-sub max-w-3xl">
+            Rejections are kept on purpose — they are what stops the generator
+            re-proposing an idea that has already been disproved.
+          </p>
         </div>
-        <div v-else class="space-y-2">
+        <div v-if="!hypotheses.length" class="ui-card">
+          <div class="ui-empty">
+            <p class="text-slate-300">No hypotheses yet</p>
+          </div>
+        </div>
+        <div v-else class="ui-card overflow-hidden ui-rows">
           <div v-for="h in paged(hypotheses, 'hypotheses')" :key="h.id"
-               class="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-3">
-            <div class="flex items-center gap-2 flex-wrap">
-              <span class="px-2 py-0.5 rounded-full text-[10px] font-bold border"
+               class="px-5 py-4">
+            <div class="flex items-center gap-x-3 gap-y-1 flex-wrap text-xs">
+              <span class="capitalize"
                     :class="h.status === 'confirmed'
-                      ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20'
+                      ? 'text-slate-100'
                       : h.status === 'proposed'
-                        ? 'text-sky-400 bg-sky-500/10 border-sky-500/20'
-                        : 'text-slate-400 bg-slate-500/10 border-slate-700'">
-                {{ (h.status || '').toUpperCase() }}
+                        ? 'text-slate-400'
+                        : 'text-slate-500'">
+                {{ h.status || '' }}
               </span>
-              <span class="text-[11px] text-slate-500 font-mono">{{ h.target }}</span>
-              <span class="text-[11px] text-slate-600">
+              <span class="text-slate-500">{{ h.target }}</span>
+              <span class="text-slate-500 tabular-nums">
                 predicts {{ h.predicted_direction }} {{ h.predicted_min_pp }}–{{ h.predicted_max_pp }}pp
               </span>
             </div>
-            <p class="text-sm text-slate-200 mt-1">{{ h.claim }}</p>
+            <p class="text-sm text-slate-100 mt-1.5">{{ h.claim }}</p>
             <p class="text-xs text-slate-500 mt-1">{{ h.mechanism }}</p>
-            <p v-if="h.status_reason" class="text-[11px] text-slate-600 mt-1">
+            <p v-if="h.status_reason" class="text-xs text-slate-400 mt-1">
               {{ h.status_reason }}
             </p>
           </div>
@@ -960,89 +976,93 @@ onUnmounted(stopPolling)
 
         <div v-if="pageCount(hypotheses) > 1" class="flex items-center justify-center gap-3 mt-3">
           <button @click="turnPage('hypotheses', -1, hypotheses)" :disabled="page.hypotheses === 1"
-                  class="px-2.5 py-1 rounded-lg text-xs border border-slate-700 bg-slate-800/60 text-slate-300 disabled:opacity-40">
+                  class="ui-btn">
             Prev
           </button>
-          <span class="text-[11px] text-slate-500">
+          <span class="text-xs text-slate-500 tabular-nums">
             {{ page.hypotheses }} / {{ pageCount(hypotheses) }} · {{ (hypotheses || []).length }} total
           </span>
           <button @click="turnPage('hypotheses', 1, hypotheses)" :disabled="page.hypotheses === pageCount(hypotheses)"
-                  class="px-2.5 py-1 rounded-lg text-xs border border-slate-700 bg-slate-800/60 text-slate-300 disabled:opacity-40">
+                  class="ui-btn">
             Next
           </button>
         </div>
       </section>
 
       <!-- What the loop decided, and why -->
-      <section class="mb-8">
-        <h2 class="text-sm font-semibold text-slate-300 mb-2">Loop decisions</h2>
-        <p class="text-xs text-slate-600 mb-2">
-          Every turn's intents, blocked ones included — a decision that leaves no
-          trace is as unprovable as a lever that never announced itself.
-        </p>
-        <div v-if="!intents.length"
-             class="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-6 text-center">
-          <p class="text-sm text-slate-400">The loop has not run a turn yet.</p>
+      <section class="mt-12">
+        <div class="mb-3">
+          <h2 class="ui-section-title">Loop decisions</h2>
+          <p class="ui-section-sub max-w-3xl">
+            Every turn's intents, blocked ones included — a decision that leaves no
+            trace is as unprovable as a lever that never announced itself.
+          </p>
         </div>
-        <div v-else class="rounded-lg border border-slate-800 bg-slate-900/40 divide-y divide-slate-800/60">
-          <div v-for="(i, idx) in paged(intents, 'intents')" :key="idx" class="px-4 py-2">
-            <div class="flex items-center gap-2 flex-wrap">
-              <span class="px-2 py-0.5 rounded text-[10px] font-mono border border-slate-700 text-slate-300">
-                {{ i.kind }}
-              </span>
-              <span v-if="i.target" class="text-[11px] text-slate-500">{{ i.target }}</span>
-              <span v-if="i.rung" class="text-[11px] text-slate-500">{{ i.rung }}</span>
-              <span class="text-[11px] text-slate-700 ml-auto">{{ fmtWhen(i.at) }}</span>
+        <div v-if="!intents.length" class="ui-card">
+          <div class="ui-empty">
+            <p class="text-slate-300">The loop has not run a turn yet</p>
+          </div>
+        </div>
+        <div v-else class="ui-card overflow-hidden ui-rows">
+          <div v-for="(i, idx) in paged(intents, 'intents')" :key="idx" class="min-h-14 px-5 py-3">
+            <div class="flex items-center gap-x-3 gap-y-1 flex-wrap text-xs">
+              <span class="text-slate-200">{{ i.kind }}</span>
+              <span v-if="i.target" class="text-slate-500">{{ i.target }}</span>
+              <span v-if="i.rung" class="text-slate-500">{{ i.rung }}</span>
+              <span class="text-slate-600 ml-auto tabular-nums">{{ fmtWhen(i.at) }}</span>
             </div>
-            <p class="text-xs text-slate-400 mt-1">{{ i.reason }}</p>
+            <p class="text-sm text-slate-400 mt-1">{{ i.reason }}</p>
           </div>
         </div>
 
         <div v-if="pageCount(intents) > 1" class="flex items-center justify-center gap-3 mt-3">
           <button @click="turnPage('intents', -1, intents)" :disabled="page.intents === 1"
-                  class="px-2.5 py-1 rounded-lg text-xs border border-slate-700 bg-slate-800/60 text-slate-300 disabled:opacity-40">
+                  class="ui-btn">
             Prev
           </button>
-          <span class="text-[11px] text-slate-500">
+          <span class="text-xs text-slate-500 tabular-nums">
             {{ page.intents }} / {{ pageCount(intents) }} · {{ (intents || []).length }} total
           </span>
           <button @click="turnPage('intents', 1, intents)" :disabled="page.intents === pageCount(intents)"
-                  class="px-2.5 py-1 rounded-lg text-xs border border-slate-700 bg-slate-800/60 text-slate-300 disabled:opacity-40">
+                  class="ui-btn">
             Next
           </button>
         </div>
       </section>
 
       <!-- Observed runs -->
-      <section>
-        <h2 class="text-sm font-semibold text-slate-300 mb-2">Observed runs</h2>
-        <div v-if="!funnels.length"
-             class="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-6 text-center">
-          <p class="text-sm text-slate-400">
-            {{ loading ? 'Loading…' : loadError ? 'Could not load observed runs.' : 'No runs observed yet.' }}
-          </p>
+      <section class="mt-12">
+        <div class="mb-3">
+          <h2 class="ui-section-title">Observed runs</h2>
         </div>
-        <div v-else class="rounded-lg border border-slate-800 bg-slate-900/40 overflow-x-auto">
-          <table class="w-full text-xs">
+        <div v-if="!funnels.length" class="ui-card">
+          <div class="ui-empty">
+            <p class="text-slate-300">
+              {{ loading ? 'Loading…' : loadError ? 'Could not load observed runs.' : 'No runs observed yet.' }}
+            </p>
+          </div>
+        </div>
+        <div v-else class="ui-card overflow-x-auto">
+          <table class="w-full text-sm">
             <thead>
-              <tr class="text-slate-500 border-b border-slate-800">
-                <th class="text-left font-medium px-3 py-2">Run</th>
-                <th class="text-left font-medium px-3 py-2">Target</th>
-                <th class="text-right font-medium px-3 py-2">Decided</th>
-                <th class="text-right font-medium px-3 py-2">Executed</th>
-                <th class="text-right font-medium px-3 py-2">Refused</th>
-                <th class="text-right font-medium px-3 py-2">Buy conv.</th>
+              <tr class="h-10 text-xs text-slate-500 border-b border-white/[0.06]">
+                <th class="text-left font-normal px-5">Run</th>
+                <th class="text-left font-normal px-5">Target</th>
+                <th class="text-right font-normal px-5">Decided</th>
+                <th class="text-right font-normal px-5">Executed</th>
+                <th class="text-right font-normal px-5">Refused</th>
+                <th class="text-right font-normal px-5">Buy conv.</th>
               </tr>
             </thead>
-            <tbody>
-              <tr v-for="row in paged(funnelRows, 'funnels')" :key="row.id" class="border-b border-slate-800/60 last:border-0">
-                <td class="px-3 py-2 font-mono text-slate-300">{{ row.run_id }}</td>
-                <td class="px-3 py-2 text-slate-400">{{ row.target }}</td>
-                <td class="px-3 py-2 text-right text-slate-300">{{ row.decided }}</td>
-                <td class="px-3 py-2 text-right text-slate-300">{{ row.executed }}</td>
-                <td class="px-3 py-2 text-right text-slate-300">{{ row.refused }}</td>
-                <td class="px-3 py-2 text-right"
-                    :class="row.pct !== null && row.pct < 25 ? 'text-rose-400' : 'text-slate-300'">
+            <tbody class="divide-y divide-white/[0.05]">
+              <tr v-for="row in paged(funnelRows, 'funnels')" :key="row.id" class="h-14 tabular-nums">
+                <td class="px-5 text-slate-100 whitespace-nowrap">{{ row.run_id }}</td>
+                <td class="px-5 text-slate-400">{{ row.target }}</td>
+                <td class="px-5 text-right text-slate-300">{{ row.decided }}</td>
+                <td class="px-5 text-right text-slate-300">{{ row.executed }}</td>
+                <td class="px-5 text-right text-slate-300">{{ row.refused }}</td>
+                <td class="px-5 text-right"
+                    :class="row.pct !== null && row.pct < 25 ? 'text-amber-400' : 'text-slate-300'">
                   {{ row.pct === null ? '—' : row.pct.toFixed(1) + '%' }}
                 </td>
               </tr>
@@ -1052,14 +1072,14 @@ onUnmounted(stopPolling)
 
         <div v-if="pageCount(funnelRows) > 1" class="flex items-center justify-center gap-3 mt-3">
           <button @click="turnPage('funnels', -1, funnelRows)" :disabled="page.funnels === 1"
-                  class="px-2.5 py-1 rounded-lg text-xs border border-slate-700 bg-slate-800/60 text-slate-300 disabled:opacity-40">
+                  class="ui-btn">
             Prev
           </button>
-          <span class="text-[11px] text-slate-500">
+          <span class="text-xs text-slate-500 tabular-nums">
             {{ page.funnels }} / {{ pageCount(funnelRows) }} · {{ (funnelRows || []).length }} total
           </span>
           <button @click="turnPage('funnels', 1, funnelRows)" :disabled="page.funnels === pageCount(funnelRows)"
-                  class="px-2.5 py-1 rounded-lg text-xs border border-slate-700 bg-slate-800/60 text-slate-300 disabled:opacity-40">
+                  class="ui-btn">
             Next
           </button>
         </div>

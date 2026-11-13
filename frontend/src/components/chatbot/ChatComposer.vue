@@ -40,9 +40,9 @@ defineExpose({ focus: () => textareaEl.value?.focus() })
 </script>
 
 <template>
-  <div class="border-t border-border-subtle bg-[#0a0f13]/85 px-3 sm:px-4 pt-2.5 pb-[max(0.625rem,env(safe-area-inset-bottom))]">
+  <div class="border-t border-white/[0.06] bg-surface px-3 sm:px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
     <div
-      class="flex items-end gap-2 rounded-xl border border-border-subtle bg-surface/70 px-2.5 py-2 focus-within:border-primary/60 transition-colors"
+      class="flex items-end gap-2 rounded-xl border border-white/[0.08] bg-background-dark pl-3 pr-1.5 py-1.5 focus-within:border-white/25 transition-colors duration-150 ease-out"
     >
       <textarea
         ref="textareaEl"
@@ -53,20 +53,20 @@ defineExpose({ focus: () => textareaEl.value?.focus() })
         :disabled="disabled || busy"
         rows="1"
         aria-label="Message"
-        class="flex-1 bg-transparent resize-none outline-none border-0 text-sm text-slate-100 placeholder-slate-600 leading-snug min-h-[24px] max-h-[200px] disabled:opacity-50"
+        class="flex-1 self-center bg-transparent resize-none outline-none border-0 py-1 text-sm text-slate-100 placeholder-slate-600 leading-snug min-h-[24px] max-h-[200px] disabled:opacity-50"
       ></textarea>
       <button
         @click="send"
         :disabled="busy || disabled || !text.trim()"
-        class="shrink-0 size-9 rounded-lg bg-primary text-background-dark font-bold flex items-center justify-center hover:brightness-110 transition disabled:opacity-40 disabled:bg-surface disabled:text-slate-600 disabled:cursor-not-allowed"
+        class="shrink-0 size-8 rounded-lg bg-primary text-background-dark flex items-center justify-center hover:bg-white transition-colors duration-150 ease-out disabled:bg-raised disabled:text-slate-600 disabled:cursor-default"
         aria-label="Send"
       >
         <span v-if="busy" class="material-symbols-outlined text-[18px] animate-spin">progress_activity</span>
-        <span v-else class="material-symbols-outlined text-[18px]">send</span>
+        <span v-else class="material-symbols-outlined text-[18px]">arrow_upward</span>
       </button>
     </div>
-    <p class="text-[10px] text-slate-600 mt-1 px-1.5 hidden sm:block">
-      <kbd class="font-mono">Enter</kbd> to send · <kbd class="font-mono">Shift+Enter</kbd> for newline
+    <p class="text-xs text-slate-600 mt-1.5 px-1 hidden sm:block">
+      <kbd class="font-sans">Enter</kbd> to send · <kbd class="font-sans">Shift+Enter</kbd> for a new line
     </p>
   </div>
 </template>

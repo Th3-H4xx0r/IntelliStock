@@ -47,7 +47,7 @@ async function linkBrokerage() {
     const data = await res.json().catch(() => ({}))
     if (!res.ok) throw new Error(_normalizeError(data, res.status))
     submitOk.value = true
-    submitMsg.value = 'Linked! Your instance can now place orders through this brokerage.'
+    submitMsg.value = 'Linked. Your instance can now place orders through this brokerage.'
     emit('linked', { instance_id: selectedInstance.value, brokerage_id: selectedBrokerage.value })
   } catch (e) {
     submitOk.value = false
@@ -63,23 +63,21 @@ const canLink = computed(() => props.instances.length > 0 && props.brokerages.le
 <template>
   <div class="space-y-7">
     <div>
-      <p class="text-primary text-xs font-bold uppercase tracking-widest mb-2 onboarding-letter" style="animation-delay: 0.05s">
-        Step 4 · Connect the pieces
-      </p>
-      <h2 class="onboarding-title text-2xl sm:text-3xl font-bold leading-tight onboarding-letter" style="animation-delay: 0.15s">
-        How a trade actually flows.
+      <p class="text-sm text-slate-500">Step 4 · Connect the pieces</p>
+      <h2 class="mt-2 text-xl sm:text-2xl font-medium leading-tight text-slate-100">
+        How a trade actually flows
       </h2>
-      <p class="mt-3 text-slate-400 text-sm onboarding-letter" style="animation-delay: 0.25s">
+      <p class="mt-3 text-sm leading-6 text-slate-400">
         Your instance runs a strategy that asks a model. The model returns a buy/sell call. The instance
-        sends that order through the linked brokerage. Each link is independent — swap any piece without
-        rebuilding the rest.
+        sends that order through the linked brokerage. Each link is independent, so you can swap any piece
+        without rebuilding the rest.
       </p>
     </div>
 
     <!-- Visual flow -->
-    <div class="rounded-xl border border-border-subtle bg-surface/40 p-4 sm:p-5 onboarding-letter" style="animation-delay: 0.3s">
-      <div class="flex items-stretch justify-between gap-2 sm:gap-3 overflow-x-auto">
-        <div
+    <div class="rounded-xl border border-white/[0.07] px-4 py-4 sm:px-5 overflow-x-auto">
+      <div class="flex items-start justify-between gap-2 sm:gap-3 min-w-[480px]">
+        <template
           v-for="(node, idx) in [
             { icon: 'memory',          label: 'Model',     desc: 'Reasons over signals' },
             { icon: 'tune',            label: 'Strategy',  desc: 'Picks tickers + capital' },
@@ -87,44 +85,39 @@ const canLink = computed(() => props.instances.length > 0 && props.brokerages.le
             { icon: 'account_balance', label: 'Brokerage', desc: 'Executes orders' },
           ]"
           :key="node.label"
-          class="flex items-center gap-1 sm:gap-2 min-w-0"
         >
-          <div class="flex flex-col items-center text-center min-w-[88px]">
-            <div class="size-11 rounded-xl bg-primary/10 border border-primary/30 flex items-center justify-center mb-1.5">
-              <span class="material-symbols-outlined text-primary text-[22px]">{{ node.icon }}</span>
-            </div>
-            <p class="text-[11px] font-semibold text-slate-200">{{ node.label }}</p>
-            <p class="text-[10px] text-slate-500 leading-tight">{{ node.desc }}</p>
+          <div class="flex-1 min-w-0">
+            <span class="material-symbols-outlined text-[18px] text-slate-500">{{ node.icon }}</span>
+            <p class="mt-2 text-sm font-medium text-slate-100">{{ node.label }}</p>
+            <p class="mt-0.5 text-xs text-slate-500">{{ node.desc }}</p>
           </div>
-          <span v-if="idx < 3" class="material-symbols-outlined text-primary/60 text-[18px] mt-3">arrow_forward</span>
-        </div>
+          <span v-if="idx < 3" class="material-symbols-outlined text-[16px] text-slate-600 mt-0.5 shrink-0">arrow_forward</span>
+        </template>
       </div>
     </div>
 
     <!-- Live linker -->
-    <div class="rounded-xl border border-border-subtle bg-surface/40 p-4 sm:p-5 space-y-4 onboarding-letter" style="animation-delay: 0.35s">
-      <p class="text-[11px] font-semibold uppercase tracking-widest text-slate-500">Link an instance to a brokerage now</p>
+    <div class="rounded-xl border border-white/[0.07] p-4 sm:p-5 space-y-4">
+      <p class="text-sm font-medium text-slate-200">Link an instance to a brokerage now</p>
 
-      <div v-if="!canLink" class="text-sm text-slate-400 leading-relaxed">
+      <div v-if="!canLink" class="text-sm leading-6 text-slate-400">
         You'll need at least one instance and one brokerage to link them here. You can always do this
         later from the
-        <span class="text-primary font-semibold">Instances</span> page — pick a row, choose a brokerage,
+        <span class="text-slate-200">Instances</span> page: pick a row, choose a brokerage,
         set a max-usage cap, and you're live.
       </div>
 
-      <div v-else class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+      <div v-else class="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div>
-          <label class="block text-xs font-medium text-slate-400 mb-1.5">Instance</label>
-          <select v-model="selectedInstance"
-            class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary transition-colors">
+          <label class="ui-field-label">Instance</label>
+          <select v-model="selectedInstance" class="ui-input">
             <option value="">Pick one…</option>
             <option v-for="i in instances" :key="i.id" :value="i.id">{{ i.name || i.id }}</option>
           </select>
         </div>
         <div>
-          <label class="block text-xs font-medium text-slate-400 mb-1.5">Brokerage</label>
-          <select v-model="selectedBrokerage"
-            class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary transition-colors">
+          <label class="ui-field-label">Brokerage</label>
+          <select v-model="selectedBrokerage" class="ui-input">
             <option value="">Pick one…</option>
             <option v-for="b in brokerages" :key="b.id" :value="b.id">
               {{ b.account_name }} ({{ b.brokerage_type }})
@@ -134,12 +127,11 @@ const canLink = computed(() => props.instances.length > 0 && props.brokerages.le
       </div>
 
       <Transition name="step">
-        <div v-if="submitMsg" class="rounded-lg px-3 py-2.5 text-sm font-medium"
-          :class="submitOk
-            ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400'
-            : 'bg-red-500/10 border border-red-500/20 text-red-400'">
-          <span v-if="submitting" class="inline-flex items-center gap-2">
-            <span class="material-symbols-outlined text-base animate-spin">progress_activity</span>
+        <div v-if="submitMsg" class="rounded-xl border px-4 py-3 text-sm"
+          :class="submitOk ? 'border-gain/20 bg-gain/5 text-gain' : 'border-loss/20 bg-loss/5 text-loss'"
+          role="status">
+          <span v-if="submitting" class="inline-flex items-center gap-2 text-slate-300">
+            <span class="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
             {{ submitMsg }}
           </span>
           <span v-else>{{ submitMsg }}</span>
@@ -147,18 +139,17 @@ const canLink = computed(() => props.instances.length > 0 && props.brokerages.le
       </Transition>
 
       <div v-if="canLink" class="flex justify-end">
-        <button @click="linkBrokerage" :disabled="submitting || !selectedInstance || !selectedBrokerage"
-          class="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-primary/90 text-background-dark text-sm font-bold hover:brightness-110 transition-all disabled:opacity-40">
-          <span v-if="submitting" class="material-symbols-outlined text-base animate-spin">progress_activity</span>
-          <span v-else class="material-symbols-outlined text-[16px]">link</span>
+        <button type="button" @click="linkBrokerage" :disabled="submitting || !selectedInstance || !selectedBrokerage"
+          class="ui-btn-primary">
+          <span v-if="submitting" class="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
           {{ submitting ? 'Linking…' : 'Link brokerage to instance' }}
         </button>
       </div>
     </div>
 
-    <p class="text-[11px] text-slate-500 leading-relaxed onboarding-letter" style="animation-delay: 0.45s">
+    <p class="text-xs leading-5 text-slate-500">
       Tip: instances can also be linked to a strategy and a separate data-only Alpaca brokerage from the Instances page.
-      Strategies are the "brain" — pick from the catalog or build your own.
+      Strategies are the "brain": pick from the catalog or build your own.
     </p>
   </div>
 </template>

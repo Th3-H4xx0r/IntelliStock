@@ -33,6 +33,7 @@ struct TypedConfirmField: View {
 
     @State private var text = ""
     @State private var matcher: TypedConfirmMatcher
+    @FocusState private var focused: Bool
 
     init(phrase: String, label: String? = nil, onMatchChanged: @escaping (Bool) -> Void) {
         self.phrase = phrase
@@ -42,16 +43,12 @@ struct TypedConfirmField: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(label ?? "Type \"\(phrase)\" to confirm")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            TextField(phrase, text: $text)
-                .font(.body.monospaced())
+        DSField(label ?? "Type \"\(phrase)\" to confirm") {
+            TextField(text: $text, prompt: Text(phrase).foregroundStyle(DS.Text.faint)) { Text(phrase) }
+                .focused($focused)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
-                .padding(10)
-                .background(DS.Surface.inset, in: .rect(cornerRadius: DS.Radius.small, style: .continuous))
+                .dsInput(focused: focused)
                 .onChange(of: text) { _, new in
                     if let changed = matcher.update(new) { onMatchChanged(changed) }
                 }
@@ -127,7 +124,6 @@ struct TypedConfirmAlert: ViewModifier {
                 presenting: request
             ) { r in
                 TextField(r.phrase, text: $typed)
-                    .font(.body.monospaced())
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                 Button(r.confirmLabel, role: r.role) {

@@ -177,17 +177,17 @@ final class CryptoInstanceDetailModel {
     }
 
     static func pnlColor(_ n: Double?) -> Color {
-        guard let n, n != 0 else { return .primary }
-        return n > 0 ? DS.Palette.success : DS.Palette.danger
+        guard let n, n != 0 else { return DS.Text.primary }
+        return n > 0 ? DS.Palette.gain : DS.Palette.loss
     }
 
     static func btStatusColor(_ s: String) -> Color {
         switch s.lowercased() {
-        case "finished", "completed", "done": DS.Palette.success
-        case "running", "queued", "pending": DS.Palette.info
-        case "error", "failed": DS.Palette.danger
-        case "paused": DS.Palette.warning
-        default: .secondary
+        case "finished", "completed", "done": DS.Palette.gain
+        case "running", "queued", "pending": DS.Text.secondary
+        case "error", "failed": DS.Palette.loss
+        case "paused": DS.Palette.amber
+        default: DS.Text.muted
         }
     }
 }

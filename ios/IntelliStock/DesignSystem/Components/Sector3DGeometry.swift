@@ -821,14 +821,15 @@ nonisolated struct Sector3DPalette: Equatable, Sendable {
     let edgeSelected: Double
     let edgeSide: Double
 
-    /// Dark: the Dart palette exactly, bright for emphasis. The floor is the
-    /// mean of its radial gradient's two stops.
+    /// Dark (the app is dark only): the zinc ramp, so the ring has no hue —
+    /// the web's charts use one lead colour and zinc steps. Bright for
+    /// emphasis; the floor is the page colour.
     static let dark = Sector3DPalette(
-        hi: Ramp(0x7C5CE6, 0xEBE0FF),
-        mid: Ramp(0x4A2C9E, 0xB79BFF),
-        lo: Ramp(0x24114F, 0x7E55E6),
+        hi: Ramp(0x52525B, 0xF4F4F5),
+        mid: Ramp(0x3F3F46, 0xA1A1AA),
+        lo: Ramp(0x27272A, 0x71717A),
         shadowDepth: 0.55,
-        floor: Sector3DRGB(0x120825),
+        floor: Sector3DRGB(0x0F0F10),
         edge: .white, edgeTop: 0.10, edgeSelected: 0.22, edgeSide: 0.08
     )
 

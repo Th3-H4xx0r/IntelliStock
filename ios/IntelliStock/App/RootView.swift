@@ -74,19 +74,30 @@ struct RootView: View {
         Group {
             switch screen {
             case .waiting:
-                Color(uiColor: .systemGroupedBackground)
+                DS.Surface.page
                     .ignoresSafeArea()
             case .storageUnavailable:
-                ContentUnavailableView {
-                    Label("Can't Read Your Sign-In", systemImage: "lock.trianglebadge.exclamationmark")
-                } description: {
-                    Text("IntelliStock couldn't read its saved server and sign-in from the keychain. Make sure your iPhone is unlocked, then try again.")
-                } actions: {
-                    Button("Try Again") { services.retryStorageLoad() }
-                        .dsProminentButton()
-                    // The escape when the keychain never reads again.
-                    Button("Sign Out", role: .destructive) { services.signOutOfUnavailableStorage() }
+                VStack(spacing: 16) {
+                    VStack(spacing: 8) {
+                        Text("Can't read your sign-in")
+                            .font(DS.Font.sectionTitle)
+                            .foregroundStyle(DS.Text.primary)
+                        Text("IntelliStock couldn't read its saved server and sign-in from the keychain. Make sure your iPhone is unlocked, then try again.")
+                            .font(DS.Font.body)
+                            .foregroundStyle(DS.Text.secondary)
+                    }
+                    .multilineTextAlignment(.center)
+                    HStack(spacing: 8) {
+                        // The escape when the keychain never reads again.
+                        Button("Sign out", role: .destructive) { services.signOutOfUnavailableStorage() }
+                            .buttonStyle(.dsSecondary(size: .medium))
+                        Button("Try again") { services.retryStorageLoad() }
+                            .buttonStyle(.dsPrimary)
+                    }
                 }
+                .padding(32)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(DS.Surface.page)
             case .lock:
                 LockView()
             case .app(let gate):

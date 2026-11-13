@@ -28,9 +28,9 @@ private struct AppUpdatePresenter: ViewModifier {
     }
 }
 
-/// The sheet: the app's mark, the build, what's new, and one prominent action —
-/// in the manner of the system's own update prompts. Separate from the
-/// presenter so it can be drawn without a live center.
+/// The sheet: the app's mark, the build, what's new, and one primary action,
+/// in the web app's style (Inter, graphite, the off-white primary button).
+/// Separate from the presenter so it can be drawn without a live center.
 struct AppUpdateSheet: View {
     let offer: AppUpdateOffer
     var installing = false
@@ -49,8 +49,12 @@ struct AppUpdateSheet: View {
             .scrollBounceBehavior(.basedOnSize)
             AppUpdateSheetActions(installing: installing, error: error, onInstall: onInstall, onLater: onLater)
                 .padding(.horizontal, 24)
+                .padding(.top, 12)
                 .padding(.bottom, 8)
+                .overlay(alignment: .top) { DSDivider() }
         }
+        .background(DS.Surface.card)
+        .presentationBackground(DS.Surface.card)
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
     }
@@ -61,15 +65,17 @@ struct AppUpdateSheetContent: View {
     let offer: AppUpdateOffer
 
     var body: some View {
-        VStack(spacing: 24) {
-            VStack(spacing: 6) {
-                AppLogoView(size: 64)
-                    .padding(.bottom, 8)
-                Text("Update Available")
-                    .font(.title2.bold())
+        VStack(alignment: .leading, spacing: 24) {
+            VStack(spacing: 4) {
+                AppLogoView(size: 56)
+                    .padding(.bottom, 12)
+                Text("Update available")
+                    .font(DS.Font.figure)
+                    .foregroundStyle(DS.Text.primary)
                 Text(offer.subtitle)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .font(DS.Font.body)
+                    .foregroundStyle(DS.Text.muted)
+                    .monospacedDigit()
                     .multilineTextAlignment(.center)
             }
             .frame(maxWidth: .infinity)
@@ -77,27 +83,32 @@ struct AppUpdateSheetContent: View {
 
             let items = offer.noteItems
             if !items.isEmpty {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("What\u{2019}s New")
-                        .font(.headline)
-                    ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                        HStack(alignment: .firstTextBaseline, spacing: 10) {
-                            Text(verbatim: "•")
-                                .foregroundStyle(.secondary)
-                                .accessibilityHidden(true)
-                            Text(verbatim: item)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        .font(.body)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text("What\u{2019}s new")
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.muted)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .overlay(alignment: .bottom) { DSDivider() }
+                    ForEach(Array(items.enumerated()), id: \.offset) { i, item in
+                        Text(verbatim: item)
+                            .font(DS.Font.body)
+                            .foregroundStyle(DS.Text.label)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 10)
+                            .overlay(alignment: .top) { if i > 0 { DSDivider() } }
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .dsCardSurface(fill: DS.Surface.page)
             }
         }
     }
 }
 
-/// Install Now and Later, with the last install error above them.
+/// Install now and Later, with the last install error above them.
 struct AppUpdateSheetActions: View {
     var installing = false
     var error: String?
@@ -107,28 +118,32 @@ struct AppUpdateSheetActions: View {
     var body: some View {
         VStack(spacing: 4) {
             if let error {
-                Label(error, systemImage: "exclamationmark.circle.fill")
-                    .font(.footnote)
-                    .foregroundStyle(DS.Palette.danger)
+                Text(error)
+                    .font(DS.Font.small)
+                    .foregroundStyle(DS.Palette.loss)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+                    .dsErrorSurface(radius: DS.Radius.control)
                     .padding(.bottom, 8)
             }
             Button(action: onInstall) {
                 Group {
                     if installing {
                         ProgressView()
+                            .controlSize(.small)
+                            .tint(DS.Surface.page)
                     } else {
-                        Text("Install Now")
+                        Text("Install now")
                     }
                 }
                 .frame(maxWidth: .infinity)
             }
-            .dsProminentButton()
-            .controlSize(.large)
+            .buttonStyle(.dsPrimary)
             .disabled(installing)
-            .accessibilityLabel(installing ? "Installing" : "Install Now")
+            .accessibilityLabel(installing ? "Installing" : "Install now")
 
             Button("Later", action: onLater)
+                .buttonStyle(.dsGhost)
                 .frame(maxWidth: .infinity, minHeight: 44)
                 .contentShape(Rectangle())
         }
@@ -136,7 +151,7 @@ struct AppUpdateSheetActions: View {
 }
 
 #Preview("Update available") {
-    Color(uiColor: .systemGroupedBackground)
+    DS.Surface.page
         .sheet(isPresented: .constant(true)) {
             AppUpdateSheet(offer: AppUpdateOffer(
                 build: 263161830, version: "1.0.0",

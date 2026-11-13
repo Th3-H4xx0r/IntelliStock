@@ -46,7 +46,7 @@ final class KalshiInstanceDetailModel {
     var brokerageId: String { detailValue?["brokerage_id"].map { $0.isNull ? "" : $0.dartDescription } ?? "" }
     var isLive: Bool { detailValue?["environment"] == .string("live") }
     var title: String {
-        guard let n = detailValue?["name"], !n.isNull else { return "Kalshi Instance" }
+        guard let n = detailValue?["name"], !n.isNull else { return "Kalshi instance" }
         return n.dartDescription
     }
 

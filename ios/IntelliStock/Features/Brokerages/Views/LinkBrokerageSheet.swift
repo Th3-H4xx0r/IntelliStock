@@ -1,10 +1,11 @@
 import SwiftUI
 
 /// Link or edit a brokerage account — `_LinkBrokerageSheet` in
-/// `link_brokerage_sheet.dart`. Native form: a sheet with an inset-grouped
-/// form; the Alpaca / Binance.US tab bar is a segmented control (create mode
-/// only), credentials use secure fields. Close is the leading toolbar item and
-/// Link Account / Save Changes the trailing one; Test and Save Anyway are rows.
+/// `link_brokerage_sheet.dart`, shaped like the web's modal: the Alpaca /
+/// Binance.US switch (create mode only), the credential fields with their
+/// labels above, the save's result, then Cancel, Test (Alpaca) and Link
+/// account / Save changes in the footer. Save anyway appears after a failed
+/// probe.
 struct LinkBrokerageSheet: View {
     let editAccount: Brokerage?
     /// Reloads the account list after a save.
@@ -15,36 +16,13 @@ struct LinkBrokerageSheet: View {
     @State private var form: LinkBrokerageFormModel?
 
     var body: some View {
-        NavigationStack {
-            Group {
-                if let form {
-                    LinkBrokerageForm(form: form, onSubmitted: finish)
-                } else {
-                    Color.clear
-                }
-            }
-            .navigationTitle(editAccount == nil ? "Link Brokerage Account" : "Edit Brokerage Account")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                // The Dart's close X; the Binance form's Cancel did the same
-                // (dismiss, held while a save runs), so it folds in here.
-                ToolbarItem(placement: .cancellationAction) {
-                    Button {
-                        dismiss()
-                    } label: {
-                        Image(systemName: Symbol.named("close"))
-                    }
-                    .disabled(form?.submitting ?? false)
-                    .accessibilityLabel("Close")
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    if let form {
-                        LinkBrokerageSubmitButton(form: form, onSubmitted: finish)
-                    }
-                }
+        Group {
+            if let form {
+                LinkBrokerageForm(form: form, onSubmitted: finish, onClose: { dismiss() })
+            } else {
+                DS.Surface.card
             }
         }
-        .presentationDragIndicator(.visible)
         .interactiveDismissDisabled(form?.submitting ?? false)
         .onAppear {
             if form == nil {
@@ -62,72 +40,82 @@ struct LinkBrokerageSheet: View {
     }
 }
 
-/// Link Account / Save Changes for the form on screen (the edit form, else
-/// the selected tab), with the double-submit lock.
-private struct LinkBrokerageSubmitButton: View {
-    let form: LinkBrokerageFormModel
-    let onSubmitted: () async -> Void
-
-    var body: some View {
-        // The iOS 26 sheet idiom: an X leading, a checkmark trailing. The
-        // label (Link Account / Save Changes) is what VoiceOver reads; as text
-        // it pushed the title into truncation.
-        Button(role: .confirm) {
-            Task {
-                let saved: Bool
-                switch form.isEditing ? form.editForm : form.tab {
-                case .alpaca: saved = await form.submitAlpaca()
-                case .binanceus: saved = await form.submitBinanceus()
-                }
-                if saved { await onSubmitted() }
-            }
-        } label: {
-            if form.submitting {
-                ProgressView()
-            } else {
-                Label(form.isEditing ? "Save Changes" : "Link Account", systemImage: "checkmark")
-            }
-        }
-        .disabled(form.locked)
-        .accessibilityLabel(form.isEditing ? "Save Changes" : "Link Account")
-    }
-}
-
 private struct LinkBrokerageForm: View {
     @Bindable var form: LinkBrokerageFormModel
     let onSubmitted: () async -> Void
+    let onClose: () -> Void
+
+    private var shownTab: LinkBrokerageFormModel.Tab { form.isEditing ? form.editForm : form.tab }
 
     var body: some View {
-        Form {
+        FormSheet(
+            form.isEditing ? "Edit brokerage account" : "Link brokerage account",
+            closeDisabled: form.submitting,
+            onClose: onClose
+        ) {
             if !form.isEditing {
-                Section {
-                    Picker("Brokerage", selection: $form.tab) {
-                        Text("Alpaca").tag(LinkBrokerageFormModel.Tab.alpaca)
-                        Text("Binance.US").tag(LinkBrokerageFormModel.Tab.binanceus)
-                    }
-                    .pickerStyle(.segmented)
-                    .listRowBackground(Color.clear)
-                    .listRowInsets(EdgeInsets())
-                    .disabled(form.submitting)
-                }
-            }
-
-            // The save's result line, at the top where the toolbar's submit
-            // can be seen to answer.
-            if let message = form.submitMsg, !message.isEmpty {
-                Section {
-                    BrokerageNoteRow(message, color: form.submitOk ? DS.Palette.success : DS.Palette.danger)
-                }
+                DSSegmentedControl(
+                    "Brokerage",
+                    selection: $form.tab,
+                    options: LinkBrokerageFormModel.Tab.allCases,
+                    fullWidth: true,
+                    segmentHeight: 32
+                ) { $0 == .alpaca ? "Alpaca" : "Binance.US" }
+                .disabled(form.submitting)
             }
 
             if let account = form.editAccount {
-                BrokerageAccountInfoSection(account: account)
+                BrokerageAccountInfo(account: account)
             }
 
-            switch form.isEditing ? form.editForm : form.tab {
+            switch shownTab {
             case .alpaca: alpaca
             case .binanceus: binance
             }
+
+            // The save's result, beside the footer's buttons.
+            if let message = form.submitMsg, !message.isEmpty {
+                FormMessage(message, tone: form.submitOk ? .ok : .error)
+            }
+            if shownTab == .alpaca, form.showSaveAnyway {
+                Button("Save anyway") {
+                    Task {
+                        if await form.submitAlpaca(bypassTest: true) { await onSubmitted() }
+                    }
+                }
+                .buttonStyle(.dsSecondary)
+                .disabled(form.locked)
+            }
+            if shownTab == .alpaca, form.showTestPanel {
+                AlpacaTestPanel(form: form)
+            }
+        } footer: {
+            FormSheetActions(
+                primary: form.isEditing ? "Save changes" : "Link account",
+                busyLabel: form.isEditing ? "Saving…" : "Linking…",
+                busy: form.submitting,
+                primaryDisabled: form.locked,
+                cancelDisabled: form.submitting,
+                secondary: shownTab == .alpaca ? (form.testRunning ? "Testing…" : "Test") : nil,
+                secondaryBusy: form.testRunning,
+                secondaryDisabled: form.submitting || form.testRunning,
+                onSecondary: { Task { await form.runAlpacaTest() } },
+                onPrimary: submit,
+                onCancel: onClose
+            )
+        }
+    }
+
+    /// Link account / Save changes for the form on screen, with the
+    /// double-submit lock.
+    private func submit() {
+        Task {
+            let saved: Bool
+            switch shownTab {
+            case .alpaca: saved = await form.submitAlpaca()
+            case .binanceus: saved = await form.submitBinanceus()
+            }
+            if saved { await onSubmitted() }
         }
     }
 
@@ -135,58 +123,48 @@ private struct LinkBrokerageForm: View {
 
     @ViewBuilder
     private var alpaca: some View {
-        Section {
-            BrokerageFieldRow(label: "Account Name", placeholder: "e.g. My Paper Trading", text: $form.alpacaName)
-            BrokerageFieldRow(label: "API Key ID", placeholder: "PKXXXXXXXXXXXXXXXXXXXXXXXX", text: $form.alpacaKey, mono: true)
-            BrokerageFieldRow(
-                label: "Secret Key" + (form.isEditing ? " (leave blank to keep existing)" : ""),
-                placeholder: form.isEditing ? "Leave blank to keep existing" : "●●●●●●●●●●●●●●●●●●●●●●●●",
-                text: $form.alpacaSecret,
-                obscure: true,
-                mono: true
-            )
-            Toggle(isOn: $form.alpacaPaper) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Paper trading")
-                    Text(verbatim: form.alpacaPaper ? "(paper-api.alpaca.markets)" : "(api.alpaca.markets)")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            }
+        DSField("Account name") {
+            FormTextField("e.g. My paper trading", text: $form.alpacaName)
         }
-
-        Section {
-            Picker("Market Data Feed", selection: $form.alpacaFeed) {
+        DSField("API key ID") {
+            FormTextField("PKXXXXXXXXXXXXXXXXXXXXXXXX", text: $form.alpacaKey, mono: true)
+        }
+        secretField(text: $form.alpacaSecret)
+        FormToggle(
+            "Paper trading",
+            note: form.alpacaPaper ? "paper-api.alpaca.markets" : "api.alpaca.markets",
+            isOn: $form.alpacaPaper
+        )
+        DSField("Market data feed", help: "Paper accounts have free IEX. Live accounts need a subscription for IEX or SIP.") {
+            FormSelect(
+                "Market data feed",
+                display: LinkBrokerageFormModel.feeds.first { $0.value == form.alpacaFeed }?.label ?? form.alpacaFeed,
+                selection: $form.alpacaFeed
+            ) {
                 ForEach(LinkBrokerageFormModel.feeds, id: \.value) { feed in
                     Text(feed.label).tag(feed.value)
                 }
             }
-            .pickerStyle(.navigationLink)
-        } footer: {
-            Text("Paper accounts have free IEX. Live accounts need a subscription for IEX or SIP.")
         }
+    }
 
-        Section {
-            InlineActionRow(form.testRunning ? "Testing…" : "Test",
-                            systemImage: Symbol.named("network_check"),
-                            isBusy: form.testRunning) {
-                Task { await form.runAlpacaTest() }
-            }
-            .disabled(form.submitting)
-
-            if form.showSaveAnyway {
-                InlineActionRow("Save Anyway", systemImage: Symbol.named("warning")) {
-                    Task {
-                        if await form.submitAlpaca(bypassTest: true) { await onSubmitted() }
-                    }
+    private func secretField(text: Binding<String>) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 4) {
+                Text("Secret key")
+                    .foregroundStyle(DS.Text.label)
+                if form.isEditing {
+                    Text("(leave blank to keep existing)")
+                        .foregroundStyle(DS.Text.muted)
                 }
-                .tint(DS.Palette.warning)
-                .disabled(form.locked)
             }
-        }
-
-        if form.showTestPanel {
-            AlpacaTestPanel(form: form)
+            .font(DS.Font.body)
+            FormTextField(
+                form.isEditing ? "Leave blank to keep existing" : "••••••••••••••••••••••••",
+                text: text,
+                mono: true,
+                secure: true
+            )
         }
     }
 
@@ -194,186 +172,155 @@ private struct LinkBrokerageForm: View {
 
     @ViewBuilder
     private var binance: some View {
-        Section {
-            BrokerageFieldRow(label: "Account Name", placeholder: "e.g. Binance.US Paper", text: $form.binanceName)
-            BrokerageFieldRow(label: "API Key", placeholder: "Binance.US API key", text: $form.binanceKey, mono: true)
-            BrokerageFieldRow(
-                label: "Secret Key" + (form.isEditing ? " (leave blank to keep existing)" : ""),
-                placeholder: form.isEditing ? "Leave blank to keep existing" : "●●●●●●●●●●●●●●●●●●●●●●●●",
-                text: $form.binanceSecret,
-                obscure: true,
-                mono: true
-            )
-            Toggle(isOn: $form.binancePaper) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Paper trading")
-                    Text(form.binancePaper ? "(simulated fills vs. live price)" : "(live signed orders · real money)")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
+        // The fee note leads, as on the web.
+        Text("Spot fees: \(Text("0.00% maker / 0.02% taker").foregroundStyle(DS.Text.soft)) — ~12× cheaper than Alpaca crypto (0.25%), which is what makes high-frequency strategies viable. Create a read+trade API key at binance.us (no withdrawal permission needed).")
+            .font(DS.Font.caption)
+            .foregroundStyle(DS.Text.secondary)
+            .monospacedDigit()
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .overlay {
+                RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
+                    .strokeBorder(DS.Line.card, lineWidth: DS.Line.width)
             }
-        } footer: {
-            Text("Spot fees: \(Text("0.00% maker / 0.02% taker").fontWeight(.bold)) — ~12× cheaper than Alpaca crypto (0.25%), which is what makes high-frequency strategies viable. Create a read+trade API key at binance.us (no withdrawal permission needed).")
+        DSField("Account name") {
+            FormTextField("e.g. Binance.US paper", text: $form.binanceName)
         }
-
+        DSField("API key") {
+            FormTextField("Binance.US API key", text: $form.binanceKey, mono: true)
+        }
+        secretField(text: $form.binanceSecret)
+        FormToggle(
+            "Paper trading",
+            note: form.binancePaper ? "Simulated fills vs. live price" : "Live signed orders · real money",
+            isOn: $form.binancePaper
+        )
         if !form.binancePaper {
-            Section {
-                BrokerageNoteRow("⚠ Live account — instances bound here place real Binance.US MARKET orders with real funds.",
-                                 color: DS.Palette.warning)
-            }
+            FormNote("Live account — instances bound here place real Binance.US market orders with real funds.")
         }
     }
 }
 
 /// Edit mode: the account's read-only details (the list row shows only the
 /// number) — the old card's Account # and Last refreshed lines.
-private struct BrokerageAccountInfoSection: View {
+private struct BrokerageAccountInfo: View {
     let account: Brokerage
 
     var body: some View {
         if account.accountNumber != nil || account.lastRefreshAt != nil || account.lastError != nil {
-            Section("Account") {
+            VStack(alignment: .leading, spacing: 10) {
                 if let number = account.accountNumber {
-                    LabeledContent("Account #") { Text(verbatim: number) }
+                    DSKeyValueRow("Account number", number)
                 }
                 if let refreshed = account.lastRefreshAt {
-                    LabeledContent("Last refreshed", value: BrokeragesModel.refreshedLabel(refreshed))
+                    DSKeyValueRow("Last refreshed", BrokeragesModel.refreshedLabel(refreshed))
                 }
                 if let error = account.lastError {
-                    Text("\(Text("Error: ").fontWeight(.semibold))\(error)")
-                        .font(.footnote)
-                        .foregroundStyle(DS.Palette.danger)
+                    Text("Error: \(error)")
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Palette.loss)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .overlay {
+                RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
+                    .strokeBorder(DS.Line.card, lineWidth: DS.Line.width)
             }
         }
     }
 }
 
-/// The Alpaca probe results — `_buildTestPanel`, as a form section: the
-/// headline (with Hide) in the header, one row per endpoint, then the hints.
+/// The Alpaca probe results — `_buildTestPanel`, as the web's connection
+/// test: the headline as a dot and a word (with Hide), one row per endpoint
+/// in a bordered list, then the hints.
 private struct AlpacaTestPanel: View {
     let form: LinkBrokerageFormModel
 
     var body: some View {
         if form.testRunning {
-            Section {
-                HStack(spacing: 10) {
-                    ProgressView()
-                    Text("Running 5-endpoint probe against Alpaca…")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
+            HStack(spacing: 10) {
+                ProgressView().controlSize(.small)
+                Text("Running 5-endpoint probe against Alpaca…")
+                    .font(DS.Font.body)
+                    .foregroundStyle(DS.Text.secondary)
             }
         } else if let result = form.testResult {
             let summary = LinkBrokerageFormModel.TestSummary(result)
-            let tone = summary.total == 0 ? DS.Palette.warning : (summary.ok ? DS.Palette.success : DS.Palette.danger)
-            Section {
-                ForEach(Array(summary.tests.enumerated()), id: \.offset) { _, test in
-                    let ok = test["ok"].bool
-                    let color = ok ? DS.Palette.success : DS.Palette.danger
-                    HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        Image(systemName: Symbol.named(ok ? "check_circle_outline" : "cancel"))
-                            .foregroundStyle(color)
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack(alignment: .firstTextBaseline) {
-                                Text(verbatim: test["name"].string ?? "")
-                                    .font(.system(.subheadline, design: .monospaced))
-                                Spacer()
-                                if !test["status"].isNull {
-                                    Text("HTTP \(test["status"].dartDescription)")
-                                        .font(.footnote.monospacedDigit())
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                            if let message = test["message"].string, !message.isEmpty {
-                                Text(message)
-                                    .font(.footnote)
-                                    .foregroundStyle(ok ? AnyShapeStyle(.secondary) : AnyShapeStyle(DS.Palette.danger))
-                            }
+            let tone: DSStatusTone = summary.total == 0 ? .warn : (summary.ok ? .positive : .error)
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 8) {
+                    DSStatusDot(tone)
+                    Text(summary.headline.dsTrimmingTitlePeriod)
+                        .font(DS.Font.body)
+                        .foregroundStyle(summary.total == 0 ? DS.Text.soft : (summary.ok ? DS.Palette.gain : DS.Palette.loss))
+                        .monospacedDigit()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Button("Hide") { form.showTestPanel = false }
+                        .buttonStyle(.dsGhost)
+                        .padding(.trailing, -12)
+                        .accessibilityLabel("Hide test results")
+                }
+
+                if !summary.tests.isEmpty {
+                    VStack(spacing: 0) {
+                        ForEach(Array(summary.tests.enumerated()), id: \.offset) { index, test in
+                            if index > 0 { DSDivider(row: true) }
+                            testRow(test)
                         }
                     }
-                    .accessibilityElement(children: .combine)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
+                            .strokeBorder(DS.Line.card, lineWidth: DS.Line.width)
+                    }
                 }
 
                 if !summary.hints.isEmpty {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Label("Hints", systemImage: Symbol.named("lightbulb"))
-                            .font(.footnote.weight(.semibold))
-                            .foregroundStyle(DS.Palette.warning)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Hints")
+                            .font(DS.Font.captionMedium)
+                            .foregroundStyle(DS.Text.label)
                         ForEach(Array(summary.hints.enumerated()), id: \.offset) { _, hint in
-                            Text(hint).font(.footnote)
+                            Text(hint)
+                                .font(DS.Font.caption)
+                                .foregroundStyle(DS.Text.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                 }
-            } header: {
-                HStack(spacing: 6) {
-                    Image(systemName: Symbol.named(summary.total == 0 ? "info_outline" : (summary.ok ? "check_circle_outline" : "error_outline")))
-                        .foregroundStyle(tone)
-                    Text(summary.headline)
-                    Spacer()
-                    Button("Hide") { form.showTestPanel = false }
-                        .accessibilityLabel("Hide test results")
-                }
-                .textCase(nil)
             }
         }
     }
-}
 
-/// A labelled credential field — `_field`.
-private struct BrokerageFieldRow: View {
-    let label: String
-    let placeholder: String
-    @Binding var text: String
-    var obscure = false
-    var mono = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(label)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-            Group {
-                if obscure {
-                    SecureField(label, text: $text, prompt: Text(placeholder))
-                } else {
-                    TextField(label, text: $text, prompt: Text(placeholder))
+    private func testRow(_ test: JSON) -> some View {
+        let ok = test["ok"].bool
+        return VStack(alignment: .leading, spacing: 2) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                DSStatusDot(ok ? .positive : .error)
+                Text(verbatim: test["name"].string ?? "")
+                    .font(DS.Font.mono)
+                    .foregroundStyle(DS.Text.soft)
+                Spacer(minLength: 8)
+                if !test["status"].isNull {
+                    Text("HTTP \(test["status"].dartDescription)")
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.muted)
+                        .monospacedDigit()
                 }
             }
-            .font(mono ? .system(.body, design: .monospaced) : .body)
-            .textContentType(obscure ? .password : nil)
-            .textInputAutocapitalization(.never)
-            .autocorrectionDisabled()
+            if let message = test["message"].string, !message.isEmpty {
+                Text(message)
+                    .font(DS.Font.caption)
+                    .foregroundStyle(ok ? DS.Text.muted : DS.Palette.loss)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 20)
+            }
         }
-        .padding(.vertical, 2)
-    }
-}
-
-/// A status or warning line as a plain form row: a coloured glyph and the
-/// text — `_buildStatusMsg` and `_infoBox`, without the tinted box.
-private struct BrokerageNoteRow: View {
-    let message: String
-    let color: Color
-
-    init(_ message: String, color: Color) {
-        self.message = message
-        self.color = color
-    }
-
-    @Environment(\.colorScheme) private var colorScheme
-
-    var body: some View {
-        let symbol = color == DS.Palette.success ? "checkmark.circle.fill"
-            : (color == DS.Palette.danger ? "exclamationmark.circle.fill" : "exclamationmark.triangle.fill")
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Image(systemName: symbol)
-                .foregroundStyle(color)
-                .accessibilityHidden(true)
-            Text(message)
-                .font(.subheadline)
-                .foregroundStyle(DS.Palette.onTint(color, in: colorScheme))
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
         .accessibilityElement(children: .combine)
     }
 }

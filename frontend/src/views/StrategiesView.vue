@@ -159,7 +159,7 @@ function fmtPct(v) {
 }
 function pnlColor(v) {
   if (v == null) return 'text-slate-500'
-  return parseFloat(v) >= 0 ? 'text-emerald-400' : 'text-red-400'
+  return parseFloat(v) >= 0 ? 'text-gain' : 'text-loss'
 }
 function fmtDate(v) {
   if (!v) return '—'
@@ -170,68 +170,6 @@ function fmtDate(v) {
   } catch { return '—' }
 }
 
-function rankMedal(rank) {
-  if (rank === 1) return '🥇'
-  if (rank === 2) return '🥈'
-  if (rank === 3) return '🥉'
-  return `#${rank}`
-}
-
-function rankBorderClass(rank) {
-  if (rank === 1) return 'border-amber-500/40'
-  if (rank === 2) return 'border-slate-400/40'
-  if (rank === 3) return 'border-orange-600/40'
-  return 'border-primary/30'
-}
-function rankBgClass(rank) {
-  if (rank === 1) return 'bg-amber-500/5'
-  if (rank === 2) return 'bg-slate-400/5'
-  if (rank === 3) return 'bg-orange-600/5'
-  return 'bg-primary/5'
-}
-function rankAccentClass(rank) {
-  if (rank === 1) return 'from-amber-500/60 via-amber-400 to-amber-500/60'
-  if (rank === 2) return 'from-slate-400/60 via-slate-300 to-slate-400/60'
-  if (rank === 3) return 'from-orange-600/60 via-orange-500 to-orange-600/60'
-  return 'from-primary/40 via-primary/60 to-primary/40'
-}
-function rankTextClass(rank) {
-  if (rank === 1) return 'text-amber-300'
-  if (rank === 2) return 'text-slate-300'
-  if (rank === 3) return 'text-orange-400'
-  return 'text-primary'
-}
-function rankIconBg(rank) {
-  if (rank === 1) return 'bg-amber-500/15 border-amber-500/30'
-  if (rank === 2) return 'bg-slate-400/15 border-slate-400/30'
-  if (rank === 3) return 'bg-orange-600/15 border-orange-600/30'
-  return 'bg-primary/10 border-primary/20'
-}
-function rankPillClass(rank) {
-  if (rank === 1) return 'bg-amber-500/20 text-amber-400 border-amber-500/30'
-  if (rank === 2) return 'bg-slate-400/20 text-slate-300 border-slate-400/30'
-  if (rank === 3) return 'bg-orange-600/20 text-orange-400 border-orange-600/30'
-  return 'bg-primary/10 text-primary border-primary/20'
-}
-function rankSubPillClass(rank) {
-  if (rank === 1) return 'bg-amber-500/10 border-amber-500/20 text-amber-300/80'
-  if (rank === 2) return 'bg-slate-400/10 border-slate-400/20 text-slate-300/80'
-  if (rank === 3) return 'bg-orange-600/10 border-orange-600/20 text-orange-300/80'
-  return 'bg-primary/5 border-primary/10 text-primary/70'
-}
-function rankViewBtn(rank) {
-  if (rank === 1) return 'border-amber-500/30 bg-amber-500/10 text-amber-400 hover:bg-amber-500/20'
-  if (rank === 2) return 'border-slate-400/30 bg-slate-400/10 text-slate-300 hover:bg-slate-400/20'
-  if (rank === 3) return 'border-orange-600/30 bg-orange-600/10 text-orange-400 hover:bg-orange-600/20'
-  return 'border-primary/30 bg-primary/10 text-primary hover:bg-primary/20'
-}
-function rankTableRowClass(rank) {
-  if (rank === 1) return 'bg-amber-500/5'
-  if (rank === 2) return 'bg-slate-400/5'
-  if (rank === 3) return 'bg-orange-600/5'
-  return 'bg-primary/5'
-}
-
 function viewStrategy(id)  { router.push(`/strategies/${id}`) }
 function viewBacktest(bid) { if (bid != null) router.push(`/backtests/${bid}`) }
 
@@ -240,344 +178,299 @@ onMounted(fetchAll)
 
 <template>
   <AppShell>
-    <main class="flex-1 px-4 py-6 sm:px-6 sm:py-8 lg:px-8 lg:py-10">
+    <main class="ui-page">
 
       <!-- Header -->
-      <div class="flex items-start justify-between gap-4 mb-8 flex-wrap">
-        <div>
-          <h1 class="text-2xl font-bold text-slate-100">Strategies</h1>
-          <p class="text-slate-500 text-sm mt-1">All trading strategies with their best AI backtest results.</p>
+      <header class="flex flex-wrap items-end justify-between gap-x-4 gap-y-3">
+        <div class="min-w-0">
+          <h1 class="ui-page-title">Strategies</h1>
+          <p class="ui-page-sub">All trading strategies with their best AI backtest results</p>
         </div>
         <div class="flex items-center gap-2 shrink-0">
           <button
             @click="router.push({ path: '/instances', query: { createStrategy: '1' } })"
-            class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-primary/30 bg-primary/10 text-primary text-xs font-semibold hover:bg-primary/20 transition-all"
+            class="ui-btn-primary"
           >
-            <span class="material-symbols-outlined text-[15px]">add_circle</span>
-            Create Strategy
+            Create strategy
           </button>
           <select
             v-model="perPage"
             @change="page = 1"
-            class="bg-surface border border-border-subtle rounded-lg px-2 py-1.5 text-xs text-slate-300 focus:outline-none focus:border-primary/40"
+            aria-label="Strategies per page"
+            class="ui-input w-auto h-8 pl-3 pr-8 text-[13px] tabular-nums cursor-pointer"
           >
-            <option v-for="n in PER_PAGE_OPTIONS" :key="n" :value="n">{{ n }}/page</option>
+            <option v-for="n in PER_PAGE_OPTIONS" :key="n" :value="n">{{ n }} per page</option>
           </select>
           <button
             @click="fetchAll"
-            class="p-1.5 rounded-lg border border-border-subtle text-slate-400 hover:text-slate-200 hover:bg-surface transition-all"
+            class="ui-icon-btn"
             title="Refresh"
+            aria-label="Refresh strategies"
           >
-            <span class="material-symbols-outlined text-[16px]" :class="loading ? 'animate-spin' : ''">refresh</span>
+            <span class="material-symbols-outlined text-[18px]" :class="loading ? 'animate-spin' : ''">refresh</span>
           </button>
         </div>
-      </div>
+      </header>
 
       <!-- Loading -->
-      <div v-if="loading" class="space-y-4">
-        <div v-for="n in 4" :key="n" class="glass-card rounded-2xl h-20 animate-pulse"></div>
+      <div v-if="loading" class="mt-8" aria-hidden="true">
+        <div class="ui-skel h-4 w-32"></div>
+        <div class="ui-card mt-3 ui-rows">
+          <div v-for="n in 5" :key="n" class="h-14 px-5 flex items-center gap-6">
+            <div class="ui-skel h-4 w-44"></div>
+            <div class="ui-skel h-4 w-20 ml-auto"></div>
+          </div>
+        </div>
       </div>
 
       <template v-else>
 
-        <!-- ── Top 5 Best Strategies ──────────────────────────────────────── -->
-        <div v-if="top5.length > 0" class="mb-8">
-          <div class="flex items-center gap-2 mb-4">
-            <span class="material-symbols-outlined text-amber-400 text-[18px]">emoji_events</span>
-            <p class="text-xs font-semibold text-amber-400 uppercase tracking-widest">Top {{ top5.length }} Best Strategies</p>
-            <span class="text-[10px] text-slate-600 ml-1">ranked by P&L%</span>
+        <!-- ── Top 5 best strategies ──────────────────────────────────────── -->
+        <section v-if="top5.length > 0" class="mt-8" aria-labelledby="top5-title">
+          <div class="mb-3">
+            <h2 id="top5-title" class="ui-section-title">Top {{ top5.length }} strategies</h2>
+            <p class="ui-section-sub">Ranked by P&amp;L %</p>
           </div>
 
-          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
-            <div
-              v-for="entry in top5Enriched"
-              :key="entry.strategy_id ?? entry.rank"
-              class="glass-card rounded-2xl border overflow-hidden"
-              :class="[rankBorderClass(entry.rank), rankBgClass(entry.rank)]"
-            >
-              <!-- Rank accent line -->
-              <div class="h-0.5 w-full bg-gradient-to-r" :class="rankAccentClass(entry.rank)"></div>
-              <div class="p-4">
-                <!-- Header row -->
-                <div class="flex items-start justify-between gap-3 mb-3">
-                  <div class="flex items-center gap-2.5 min-w-0">
-                    <!-- Rank icon -->
-                    <div
-                      class="size-9 rounded-xl border flex items-center justify-center shrink-0 text-base leading-none"
-                      :class="rankIconBg(entry.rank)"
-                    >
-                      <span v-if="entry.rank <= 3">{{ rankMedal(entry.rank) }}</span>
-                      <span v-else class="font-bold text-sm" :class="rankTextClass(entry.rank)">#{{ entry.rank }}</span>
-                    </div>
-                    <div class="min-w-0">
-                      <div class="flex items-center gap-1.5 flex-wrap">
-                        <p class="text-sm font-bold truncate" :class="rankTextClass(entry.rank)">
-                          {{ entry.strategy_name || entry.strategy_id || 'Strategy' }}
-                        </p>
-                        <span
-                          class="text-[9px] font-bold px-1.5 py-0.5 rounded border uppercase tracking-wide shrink-0"
-                          :class="rankPillClass(entry.rank)"
-                        >Rank {{ entry.rank }}</span>
-                      </div>
-                      <p class="text-[10px] text-slate-600 mt-0.5">
-                        {{ (entry.sub_strategies || []).length }} sub-strategies
-                      </p>
-                    </div>
-                  </div>
-                </div>
-
-                <!-- P&L stats -->
-                <div class="flex items-center gap-4 mb-3">
-                  <div>
-                    <p class="text-[9px] text-slate-600 uppercase tracking-widest mb-0.5">Best P&L</p>
-                    <p class="text-base font-bold font-mono" :class="pnlColor(entry.overall_profit)">
-                      {{ fmtPnl(entry.overall_profit) }}
-                    </p>
-                  </div>
-                  <div>
-                    <p class="text-[9px] text-slate-600 uppercase tracking-widest mb-0.5">Best P&L%</p>
-                    <p class="text-base font-bold font-mono" :class="pnlColor(entry.pnl_percent)">
-                      {{ fmtPct(entry.pnl_percent) }}
-                    </p>
-                  </div>
-                </div>
-
-                <!-- Sub-strategy pills -->
-                <div v-if="(entry.sub_strategies || []).length" class="flex flex-wrap gap-1 mb-3">
-                  <span
-                    v-for="(sub, i) in (entry.sub_strategies || []).slice(0, 5)"
-                    :key="i"
-                    class="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-mono border"
-                    :class="rankSubPillClass(entry.rank)"
-                  >{{ sub }}</span>
-                  <span
-                    v-if="(entry.sub_strategies || []).length > 5"
-                    class="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] text-slate-600"
-                  >+{{ (entry.sub_strategies || []).length - 5 }} more</span>
-                </div>
-
-                <!-- Actions -->
-                <div class="flex items-center gap-1.5">
+          <div class="ui-card overflow-hidden">
+            <div class="top-grid ui-th hidden md:grid">
+              <span>#</span>
+              <span>Strategy</span>
+              <span class="text-right">Best P&amp;L</span>
+              <span class="text-right">Best P&amp;L %</span>
+              <span></span>
+            </div>
+            <ul class="ui-rows">
+              <li
+                v-for="entry in top5Enriched"
+                :key="entry.strategy_id ?? entry.rank"
+                class="top-grid min-h-14 px-5 py-3"
+              >
+                <span class="text-sm text-slate-500 tabular-nums">{{ entry.rank }}</span>
+                <span class="min-w-0">
+                  <span class="block text-sm text-slate-100 truncate">{{ entry.strategy_name || entry.strategy_id || 'Strategy' }}</span>
+                  <span class="block text-xs text-slate-500 mt-0.5 truncate">
+                    <span class="tabular-nums">{{ (entry.sub_strategies || []).length }}</span> sub-strategies<template v-if="(entry.sub_strategies || []).length"><span class="text-slate-600"> · </span><span
+                      v-for="(sub, i) in (entry.sub_strategies || []).slice(0, 5)"
+                      :key="i"
+                    >{{ sub }}<template v-if="i < Math.min(5, (entry.sub_strategies || []).length) - 1">, </template></span><span
+                      v-if="(entry.sub_strategies || []).length > 5"
+                      class="tabular-nums"
+                    > +{{ (entry.sub_strategies || []).length - 5 }} more</span></template>
+                  </span>
+                </span>
+                <span class="top-pnl text-right text-sm tabular-nums" :class="pnlColor(entry.overall_profit)">
+                  {{ fmtPnl(entry.overall_profit) }}
+                </span>
+                <span class="text-right text-sm tabular-nums" :class="pnlColor(entry.pnl_percent)">
+                  {{ fmtPct(entry.pnl_percent) }}
+                </span>
+                <span class="top-actions flex items-center gap-1">
                   <button
                     v-if="entry.strategy_id"
                     @click="viewStrategy(entry.strategy_id)"
-                    class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition-colors"
-                    :class="rankViewBtn(entry.rank)"
-                  >
-                    <span class="material-symbols-outlined text-[12px]">open_in_new</span>
-                    View Strategy
-                  </button>
+                    class="ui-btn"
+                  >View strategy</button>
                   <button
                     v-if="entry.backtest_id"
                     @click="viewBacktest(entry.backtest_id)"
-                    class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-semibold border border-border-subtle text-slate-400 hover:text-slate-200 hover:bg-surface transition-colors"
-                  >
-                    <span class="material-symbols-outlined text-[12px]">analytics</span>
-                    Backtest
-                  </button>
-                </div>
-              </div>
-            </div>
+                    class="ui-btn-ghost"
+                  >Backtest</button>
+                </span>
+              </li>
+            </ul>
           </div>
-        </div>
+        </section>
 
-        <!-- ── Strategies Table ────────────────────────────────────────────── -->
-        <div class="glass-card rounded-2xl border border-border-subtle overflow-hidden">
-          <!-- Table -->
-          <div class="overflow-x-auto">
-            <table class="w-full min-w-[700px] text-sm">
-              <thead>
-                <tr class="border-b border-border-subtle bg-surface/50">
-                  <th
-                    class="px-4 py-3 text-left text-[11px] font-semibold text-slate-500 uppercase tracking-widest cursor-pointer hover:text-slate-300 transition-colors select-none"
-                    @click="setSort('name')"
-                  >
-                    <span class="flex items-center gap-1">
-                      Name
-                      <span v-if="sortBy === 'name'" class="material-symbols-outlined text-[12px] text-primary">
-                        {{ sortOrder === 'desc' ? 'arrow_downward' : 'arrow_upward' }}
+        <!-- ── Strategies table ────────────────────────────────────────────── -->
+        <section :class="top5.length > 0 ? 'mt-12' : 'mt-8'" aria-labelledby="all-strategies-title">
+          <div class="mb-3">
+            <h2 id="all-strategies-title" class="ui-section-title">All strategies</h2>
+            <p class="ui-section-sub tabular-nums">{{ sortedStrategies.length }} strategies</p>
+          </div>
+          <div class="ui-card overflow-hidden">
+            <!-- Table -->
+            <div class="overflow-x-auto">
+              <table class="w-full min-w-[760px] text-sm">
+                <thead>
+                  <tr class="border-b border-white/[0.06] text-xs text-slate-500">
+                    <th
+                      class="h-10 pl-5 pr-3 text-left font-normal cursor-pointer select-none hover:text-slate-200 transition-colors duration-150 ease-out"
+                      :class="sortBy === 'name' ? 'text-slate-300' : ''"
+                      @click="setSort('name')"
+                    >
+                      <span class="inline-flex items-center gap-1">
+                        Name
+                        <span v-if="sortBy === 'name'" class="material-symbols-outlined text-[14px]">
+                          {{ sortOrder === 'desc' ? 'arrow_downward' : 'arrow_upward' }}
+                        </span>
                       </span>
-                    </span>
-                  </th>
-                  <th class="px-4 py-3 text-center text-[11px] font-semibold text-slate-500 uppercase tracking-widest">Subs</th>
-                  <th class="px-4 py-3 text-center text-[11px] font-semibold text-slate-500 uppercase tracking-widest">Instances</th>
-                  <th
-                    class="px-4 py-3 text-center text-[11px] font-semibold text-slate-500 uppercase tracking-widest cursor-pointer hover:text-slate-300 transition-colors select-none"
-                    @click="setSort('runs')"
-                  >
-                    <span class="flex items-center justify-center gap-1">
-                      Backtests
-                      <span v-if="sortBy === 'runs'" class="material-symbols-outlined text-[12px] text-primary">
-                        {{ sortOrder === 'desc' ? 'arrow_downward' : 'arrow_upward' }}
+                    </th>
+                    <th class="h-10 px-3 text-right font-normal">Subs</th>
+                    <th class="h-10 px-3 text-right font-normal">Instances</th>
+                    <th
+                      class="h-10 px-3 text-right font-normal cursor-pointer select-none hover:text-slate-200 transition-colors duration-150 ease-out"
+                      :class="sortBy === 'runs' ? 'text-slate-300' : ''"
+                      @click="setSort('runs')"
+                    >
+                      <span class="inline-flex items-center justify-end gap-1">
+                        Backtests
+                        <span v-if="sortBy === 'runs'" class="material-symbols-outlined text-[14px]">
+                          {{ sortOrder === 'desc' ? 'arrow_downward' : 'arrow_upward' }}
+                        </span>
                       </span>
-                    </span>
-                  </th>
-                  <th
-                    class="px-4 py-3 text-right text-[11px] font-semibold text-slate-500 uppercase tracking-widest cursor-pointer hover:text-slate-300 transition-colors select-none"
-                    @click="setSort('best_pnl')"
-                  >
-                    <span class="flex items-center justify-end gap-1">
-                      Best P&amp;L
-                      <span v-if="sortBy === 'best_pnl'" class="material-symbols-outlined text-[12px] text-primary">
-                        {{ sortOrder === 'desc' ? 'arrow_downward' : 'arrow_upward' }}
+                    </th>
+                    <th
+                      class="h-10 px-3 text-right font-normal cursor-pointer select-none hover:text-slate-200 transition-colors duration-150 ease-out"
+                      :class="sortBy === 'best_pnl' ? 'text-slate-300' : ''"
+                      @click="setSort('best_pnl')"
+                    >
+                      <span class="inline-flex items-center justify-end gap-1">
+                        Best P&amp;L
+                        <span v-if="sortBy === 'best_pnl'" class="material-symbols-outlined text-[14px]">
+                          {{ sortOrder === 'desc' ? 'arrow_downward' : 'arrow_upward' }}
+                        </span>
                       </span>
-                    </span>
-                  </th>
-                  <th
-                    class="px-4 py-3 text-right text-[11px] font-semibold text-slate-500 uppercase tracking-widest cursor-pointer hover:text-slate-300 transition-colors select-none"
-                    @click="setSort('best_pct')"
-                  >
-                    <span class="flex items-center justify-end gap-1">
-                      Best P&amp;L%
-                      <span v-if="sortBy === 'best_pct'" class="material-symbols-outlined text-[12px] text-primary">
-                        {{ sortOrder === 'desc' ? 'arrow_downward' : 'arrow_upward' }}
+                    </th>
+                    <th
+                      class="h-10 px-3 text-right font-normal cursor-pointer select-none hover:text-slate-200 transition-colors duration-150 ease-out"
+                      :class="sortBy === 'best_pct' ? 'text-slate-300' : ''"
+                      @click="setSort('best_pct')"
+                    >
+                      <span class="inline-flex items-center justify-end gap-1">
+                        Best P&amp;L %
+                        <span v-if="sortBy === 'best_pct'" class="material-symbols-outlined text-[14px]">
+                          {{ sortOrder === 'desc' ? 'arrow_downward' : 'arrow_upward' }}
+                        </span>
                       </span>
-                    </span>
-                  </th>
-                  <th class="px-4 py-3 text-right text-[11px] font-semibold text-slate-500 uppercase tracking-widest">Actions</th>
-                </tr>
-              </thead>
-              <tbody class="divide-y divide-border-subtle">
-                <template v-if="pagedRows.length === 0">
-                  <tr>
-                    <td colspan="7" class="px-4 py-16 text-center">
-                      <div class="flex flex-col items-center gap-3">
-                        <span class="material-symbols-outlined text-slate-700 text-4xl">schema</span>
-                        <p class="text-slate-500 text-sm">No strategies found.</p>
+                    </th>
+                    <th class="h-10 pl-3 pr-5 font-normal"><span class="sr-only">Actions</span></th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-white/[0.05]">
+                  <template v-if="pagedRows.length === 0">
+                    <tr>
+                      <td colspan="7">
+                        <div class="ui-empty">
+                          <p>No strategies found</p>
+                        </div>
+                      </td>
+                    </tr>
+                  </template>
+                  <tr
+                    v-for="row in pagedRows"
+                    :key="row.id"
+                    class="hover:bg-white/[0.03] transition-colors duration-150 ease-out"
+                  >
+                    <!-- Name -->
+                    <td class="pl-5 pr-3 py-2.5">
+                      <p class="text-sm text-slate-100 truncate max-w-[320px]">{{ row.name }}</p>
+                      <p class="text-xs text-slate-500 mt-0.5 tabular-nums">
+                        ID {{ row.id }}<template v-if="row.is_top5"><span class="text-slate-600"> · </span>Rank {{ row.top5_rank }}</template>
+                      </p>
+                    </td>
+
+                    <!-- Subs -->
+                    <td class="px-3 py-2.5 text-right tabular-nums text-slate-300">
+                      {{ (row.strategies || []).length }}
+                    </td>
+
+                    <!-- Instances -->
+                    <td class="px-3 py-2.5 text-right tabular-nums text-slate-400">
+                      {{ (row.instances_using || []).length || '—' }}
+                    </td>
+
+                    <!-- Backtests -->
+                    <td class="px-3 py-2.5 text-right tabular-nums" :class="row.run_count > 0 ? 'text-slate-300' : 'text-slate-600'">
+                      {{ row.run_count || '—' }}
+                    </td>
+
+                    <!-- Best P&L -->
+                    <td class="px-3 py-2.5 text-right tabular-nums" :class="pnlColor(row.best_pnl)">
+                      {{ fmtPnl(row.best_pnl) }}
+                    </td>
+
+                    <!-- Best P&L% -->
+                    <td class="px-3 py-2.5 text-right tabular-nums" :class="pnlColor(row.best_pct)">
+                      {{ fmtPct(row.best_pct) }}
+                    </td>
+
+                    <!-- Actions -->
+                    <td class="pl-3 pr-5 py-2.5">
+                      <div class="flex items-center justify-end gap-1">
+                        <button
+                          @click="viewStrategy(row.id)"
+                          class="ui-btn-ghost px-2.5"
+                        >View</button>
+                        <button
+                          v-if="row.best_pnl_bid"
+                          @click="viewBacktest(row.best_pnl_bid)"
+                          class="ui-btn-ghost px-2.5"
+                          title="View best backtest"
+                        >Backtest</button>
                       </div>
                     </td>
                   </tr>
-                </template>
-                <tr
-                  v-for="row in pagedRows"
-                  :key="row.id"
-                  class="transition-colors hover:bg-surface/40"
-                  :class="row.is_top5 ? rankTableRowClass(row.top5_rank) : ''"
-                >
-                  <!-- Name -->
-                  <td class="px-4 py-3">
-                    <div class="flex items-center gap-2 min-w-0">
-                      <div
-                        class="size-7 rounded-lg flex items-center justify-center shrink-0 text-sm leading-none"
-                        :class="row.is_top5 ? rankIconBg(row.top5_rank) : 'bg-surface border border-border-subtle'"
-                      >
-                        <template v-if="row.is_top5 && row.top5_rank <= 3">
-                          <span>{{ rankMedal(row.top5_rank) }}</span>
-                        </template>
-                        <template v-else-if="row.is_top5">
-                          <span class="text-[11px] font-bold" :class="rankTextClass(row.top5_rank)">#{{ row.top5_rank }}</span>
-                        </template>
-                        <template v-else>
-                          <span class="material-symbols-outlined text-[14px] text-slate-500">schema</span>
-                        </template>
-                      </div>
-                      <div class="min-w-0">
-                        <div class="flex items-center gap-1.5 flex-wrap">
-                          <span
-                            class="text-sm font-semibold truncate"
-                            :class="row.is_top5 ? rankTextClass(row.top5_rank) : 'text-slate-200'"
-                          >{{ row.name }}</span>
-                          <span
-                            v-if="row.is_top5"
-                            class="text-[9px] font-bold px-1.5 py-0.5 rounded border uppercase tracking-wide shrink-0"
-                            :class="rankPillClass(row.top5_rank)"
-                          >Rank {{ row.top5_rank }}</span>
-                        </div>
-                        <p class="text-[10px] text-slate-600 font-mono mt-0.5">ID {{ row.id }}</p>
-                      </div>
-                    </div>
-                  </td>
+                </tbody>
+              </table>
+            </div>
 
-                  <!-- Subs -->
-                  <td class="px-4 py-3 text-center">
-                    <span class="text-sm text-slate-300 font-mono">{{ (row.strategies || []).length }}</span>
-                  </td>
-
-                  <!-- Instances -->
-                  <td class="px-4 py-3 text-center">
-                    <span class="text-sm text-slate-400 font-mono">{{ (row.instances_using || []).length || '—' }}</span>
-                  </td>
-
-                  <!-- Backtests -->
-                  <td class="px-4 py-3 text-center">
-                    <span class="text-sm font-mono" :class="row.run_count > 0 ? 'text-slate-300' : 'text-slate-600'">
-                      {{ row.run_count || '—' }}
-                    </span>
-                  </td>
-
-                  <!-- Best P&L -->
-                  <td class="px-4 py-3 text-right">
-                    <span class="text-sm font-mono font-semibold" :class="pnlColor(row.best_pnl)">
-                      {{ fmtPnl(row.best_pnl) }}
-                    </span>
-                  </td>
-
-                  <!-- Best P&L% -->
-                  <td class="px-4 py-3 text-right">
-                    <span class="text-sm font-mono font-semibold" :class="pnlColor(row.best_pct)">
-                      {{ fmtPct(row.best_pct) }}
-                    </span>
-                  </td>
-
-                  <!-- Actions -->
-                  <td class="px-4 py-3 text-right">
-                    <div class="flex items-center justify-end gap-1.5">
-                      <button
-                        @click="viewStrategy(row.id)"
-                        class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition-colors"
-                        :class="row.is_top5
-                          ? rankViewBtn(row.top5_rank)
-                          : 'border-border-subtle text-slate-400 hover:text-slate-200 hover:bg-surface'"
-                      >
-                        <span class="material-symbols-outlined text-[12px]">open_in_new</span>
-                        View
-                      </button>
-                      <button
-                        v-if="row.best_pnl_bid"
-                        @click="viewBacktest(row.best_pnl_bid)"
-                        class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-semibold border border-border-subtle text-slate-400 hover:text-primary hover:border-primary/30 hover:bg-primary/5 transition-colors"
-                        title="View best backtest"
-                      >
-                        <span class="material-symbols-outlined text-[12px]">analytics</span>
-                        Backtest
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-
-          <!-- Pagination footer -->
-          <div v-if="totalPages > 1" class="flex items-center justify-between gap-4 px-4 py-3 border-t border-border-subtle">
-            <p class="text-xs text-slate-500">{{ sortedStrategies.length }} strategies · page {{ page }} of {{ totalPages }}</p>
-            <div class="flex items-center gap-1">
-              <button
-                @click="page = Math.max(1, page - 1)"
-                :disabled="page <= 1"
-                class="px-2 py-1.5 rounded-lg border border-border-subtle text-xs text-slate-400 hover:text-slate-200 hover:bg-surface transition-colors disabled:opacity-30"
-              >
-                <span class="material-symbols-outlined text-[14px]">chevron_left</span>
-              </button>
-              <template v-for="p in totalPages" :key="p">
+            <!-- Pagination footer -->
+            <div v-if="totalPages > 1" class="h-14 px-5 flex items-center justify-between gap-4 border-t border-white/[0.06]">
+              <p class="text-xs text-slate-500 tabular-nums">{{ sortedStrategies.length }} strategies <span class="text-slate-600">·</span> page {{ page }} of {{ totalPages }}</p>
+              <div class="flex items-center gap-1">
                 <button
-                  @click="page = p"
-                  class="min-w-[28px] px-2 py-1.5 rounded-lg border text-xs transition-colors"
-                  :class="p === page ? 'border-primary/40 bg-primary/10 text-primary font-semibold' : 'border-border-subtle text-slate-400 hover:text-slate-200 hover:bg-surface'"
-                >{{ p }}</button>
-              </template>
-              <button
-                @click="page = Math.min(totalPages, page + 1)"
-                :disabled="page >= totalPages"
-                class="px-2 py-1.5 rounded-lg border border-border-subtle text-xs text-slate-400 hover:text-slate-200 hover:bg-surface transition-colors disabled:opacity-30"
-              >
-                <span class="material-symbols-outlined text-[14px]">chevron_right</span>
-              </button>
+                  @click="page = Math.max(1, page - 1)"
+                  :disabled="page <= 1"
+                  class="ui-icon-btn disabled:opacity-30 disabled:cursor-default"
+                  aria-label="Previous page"
+                >
+                  <span class="material-symbols-outlined text-[18px]">chevron_left</span>
+                </button>
+                <div class="ui-seg">
+                  <template v-for="p in totalPages" :key="p">
+                    <button
+                      @click="page = p"
+                      class="ui-seg-btn min-w-7 px-2 tabular-nums"
+                      :class="p === page ? 'ui-seg-btn-active' : ''"
+                      :aria-current="p === page ? 'page' : undefined"
+                    >{{ p }}</button>
+                  </template>
+                </div>
+                <button
+                  @click="page = Math.min(totalPages, page + 1)"
+                  :disabled="page >= totalPages"
+                  class="ui-icon-btn disabled:opacity-30 disabled:cursor-default"
+                  aria-label="Next page"
+                >
+                  <span class="material-symbols-outlined text-[18px]">chevron_right</span>
+                </button>
+              </div>
             </div>
           </div>
-        </div>
+        </section>
 
       </template>
     </main>
   </AppShell>
 </template>
+
+<style scoped>
+/* Top strategies, one ranked list.
+   phone  rank · strategy · P&L %, actions on their own line
+   md+    rank · strategy · best P&L · best P&L % · actions */
+.top-grid {
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  column-gap: 16px;
+  row-gap: 8px;
+  align-items: center;
+}
+li.top-grid { display: grid; }
+.top-grid > .top-pnl { display: none; }
+.top-grid > .top-actions { grid-column: 2 / -1; justify-content: flex-start; }
+@media (min-width: 768px) {
+  .top-grid { grid-template-columns: 16px minmax(0, 1fr) 120px 96px 200px; }
+  .top-grid > .top-pnl { display: block; }
+  .top-grid > .top-actions { grid-column: auto; justify-content: flex-end; }
+}
+</style>

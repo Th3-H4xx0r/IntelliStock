@@ -14,7 +14,8 @@ struct KalshiDashboardCard: View {
     @Environment(AppServices.self) private var services
 
     var body: some View {
-        Section {
+        // The web dashboard's "Prediction markets" section: a card row.
+        DSSection("Prediction markets", subtitle: "Kalshi event contracts") {
             Button {
                 services.router.go("/kalshi")
             } label: {
@@ -26,16 +27,15 @@ struct KalshiDashboardCard: View {
                         value
                     }
                     Image(systemName: "chevron.forward")
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(.tertiary)
+                        .font(.system(size: 13))
+                        .foregroundStyle(DS.Text.faint)
                         .accessibilityHidden(true)
                 }
-                .foregroundStyle(Color.primary)
+                .foregroundStyle(DS.Text.primary)
                 .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
             .accessibilityHint("Opens the Kalshi tab")
-        } header: {
-            DashboardGroupHeader(group: "Kalshi")
         }
     }
 
@@ -43,11 +43,14 @@ struct KalshiDashboardCard: View {
     private var value: some View {
         switch model.portfolio {
         case .loading:
-            EntityRowValue("$000.00", detail: "+$0.00")
-                .redacted(reason: .placeholder)
-                .accessibilityLabel("Loading…")
+            VStack(alignment: .trailing, spacing: 6) {
+                Skeleton(width: 64, height: 14)
+                Skeleton(width: 44, height: 12)
+            }
+            .accessibilityElement()
+            .accessibilityLabel("Loading…")
         case .failed:
-            EntityRowValue("—", color: .secondary)
+            EntityRowValue("—", color: DS.Text.faint)
         case .loaded(let p):
             EntityRowValue(
                 KalshiDashboardCard.valueText(p.value),

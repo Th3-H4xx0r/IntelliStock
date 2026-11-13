@@ -283,64 +283,66 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="rounded-lg border border-sky-500/20 bg-sky-500/5 px-3 py-3 space-y-3 text-[11px] leading-relaxed text-slate-300">
-    <div class="flex items-center justify-between">
-      <div class="font-semibold text-slate-200">OpenAI Codex CLI setup</div>
+  <div class="rounded-lg border border-white/[0.07] px-4 py-3 space-y-3 text-xs leading-relaxed text-slate-300">
+    <div class="flex items-center justify-between gap-3">
+      <div class="text-sm font-medium text-slate-200">OpenAI Codex CLI setup</div>
       <button
         @click="fetchStatus"
         :disabled="status.loading"
-        class="text-slate-500 hover:text-slate-300 transition-colors disabled:opacity-40"
+        class="ui-icon-btn -mr-2 disabled:opacity-40"
         title="Refresh status"
+        aria-label="Refresh status"
       >
-        <span class="material-symbols-outlined text-base" :class="{ 'animate-spin': status.loading }">refresh</span>
+        <span class="material-symbols-outlined text-[18px]" :class="{ 'animate-spin': status.loading }">refresh</span>
       </button>
     </div>
 
     <!-- Status row -->
     <div v-if="status.loading" class="text-slate-500">Probing codex CLI status...</div>
-    <div v-else-if="status.error" class="text-red-300">Status probe failed: {{ status.error }}</div>
-    <div v-else class="flex flex-wrap gap-x-4 gap-y-1">
-      <span>
-        <span class="text-slate-500">installed:</span>
-        <span :class="status.installed ? 'text-emerald-300' : 'text-amber-300'">
-          {{ status.installed ? '✓ yes' : '✗ no' }}
-        </span>
+    <div v-else-if="status.error" class="text-loss">Status probe failed: {{ status.error }}</div>
+    <div v-else class="flex flex-wrap gap-x-5 gap-y-1">
+      <span class="inline-flex items-center gap-1.5">
+        <span class="text-slate-500">Installed</span>
+        <span class="ui-dot" :class="status.installed ? 'bg-gain' : 'ui-dot-warn'"></span>
+        <span class="text-slate-200">{{ status.installed ? 'Yes' : 'No' }}</span>
       </span>
-      <span v-if="status.installed">
-        <span class="text-slate-500">version:</span>
+      <span v-if="status.installed" class="inline-flex items-center gap-1.5">
+        <span class="text-slate-500">Version</span>
         <span class="font-mono text-slate-200">{{ status.version || 'unknown' }}</span>
       </span>
-      <span v-if="status.installed">
-        <span class="text-slate-500">authenticated:</span>
-        <span :class="status.authenticated ? 'text-emerald-300' : 'text-amber-300'">
-          {{ status.authenticated ? '✓ yes' : '✗ no' }}
-        </span>
+      <span v-if="status.installed" class="inline-flex items-center gap-1.5">
+        <span class="text-slate-500">Authenticated</span>
+        <span class="ui-dot" :class="status.authenticated ? 'bg-gain' : 'ui-dot-warn'"></span>
+        <span class="text-slate-200">{{ status.authenticated ? 'Yes' : 'No' }}</span>
       </span>
-      <span v-else>
-        <span class="text-slate-500">install method:</span>
+      <span v-else class="inline-flex items-center gap-1.5">
+        <span class="text-slate-500">Install method</span>
         <span class="font-mono text-slate-200">{{ status.install_method }}</span>
       </span>
     </div>
 
     <!-- Install panel -->
-    <div v-if="!status.loading && !status.installed && !status.error" class="space-y-2">
+    <div v-if="!status.loading && !status.installed && !status.error" class="space-y-3">
       <p class="text-slate-400">
         Codex CLI is not installed on the server. One-click install uses
-        <span class="font-mono">{{ status.install_method === 'brew' ? 'brew install codex' : 'npm install -g @openai/codex' }}</span>.
+        <span class="font-mono text-slate-300">{{ status.install_method === 'brew' ? 'brew install codex' : 'npm install -g @openai/codex' }}</span>.
       </p>
       <div v-if="status.install_method === 'unknown'" class="space-y-1.5">
-        <p class="text-amber-300">
-          The IntelliStock backend container has neither
-          <span class="font-mono">npm</span> nor <span class="font-mono">brew</span>
-          available — it was likely built with
-          <span class="font-mono">INSTALL_CODEX_CLI=0</span>.
+        <p class="flex items-start gap-2 text-slate-200">
+          <span class="ui-dot ui-dot-warn mt-1.5"></span>
+          <span>
+            The IntelliStock backend container has neither
+            <span class="font-mono">npm</span> nor <span class="font-mono">brew</span>
+            available — it was likely built with
+            <span class="font-mono">INSTALL_CODEX_CLI=0</span>.
+          </span>
         </p>
         <p class="text-slate-400">
           Rebuild the backend image with
           <span class="font-mono">INSTALL_CODEX_CLI=1</span> (the default in
           recent versions). Quick command on the host:
         </p>
-        <pre class="font-mono text-[10px] text-slate-200 bg-black/40 rounded px-2 py-1 whitespace-pre-wrap break-all">docker compose build --build-arg INSTALL_CODEX_CLI=1 backend &amp;&amp; docker compose up -d backend api</pre>
+        <pre class="font-mono text-[11px] text-slate-300 bg-background-dark rounded-md px-3 py-2 whitespace-pre-wrap break-all">docker compose build --build-arg INSTALL_CODEX_CLI=1 backend &amp;&amp; docker compose up -d backend api</pre>
         <p class="text-slate-500">
           Once codex is baked into the image, this panel will skip straight
           to the OpenAI device-code login. Credentials are written to a
@@ -352,37 +354,36 @@ onUnmounted(() => {
         v-else
         @click="startInstall"
         :disabled="installJob.state === 'running'"
-        class="px-3 py-1.5 rounded-md bg-primary text-background-dark text-xs font-bold hover:brightness-110 transition-all disabled:opacity-60"
+        class="ui-btn"
       >
         <template v-if="installJob.state === 'running'">Installing...</template>
         <template v-else>Install Codex CLI</template>
       </button>
-      <div v-if="installJob.state" class="space-y-1">
-        <div class="text-slate-400">
-          Install state:
-          <span :class="installJob.state === 'success' ? 'text-emerald-300' : (installJob.state === 'failed' ? 'text-red-300' : 'text-amber-300')">
-            {{ installJob.state }}
-          </span>
-          <span v-if="installJob.exitCode != null" class="text-slate-500">(exit {{ installJob.exitCode }})</span>
+      <div v-if="installJob.state" class="space-y-1.5">
+        <div class="flex flex-wrap items-center gap-1.5 text-slate-400">
+          Install state
+          <span class="ui-dot" :class="installJob.state === 'success' ? 'bg-gain' : (installJob.state === 'failed' ? 'ui-dot-error' : 'ui-dot-warn')"></span>
+          <span class="text-slate-200">{{ installJob.state }}</span>
+          <span v-if="installJob.exitCode != null" class="text-slate-500 tabular-nums">(exit {{ installJob.exitCode }})</span>
         </div>
         <pre v-if="installJob.log && installJob.log.length"
-          class="font-mono text-[10px] text-slate-200 bg-black/40 rounded px-2 py-1 max-h-40 overflow-auto whitespace-pre-wrap break-all">{{ installJob.log.join('\n') }}</pre>
-        <div v-if="installJob.error" class="text-red-300">{{ installJob.error }}</div>
+          class="font-mono text-[11px] text-slate-300 bg-background-dark rounded-md px-3 py-2 max-h-40 overflow-auto whitespace-pre-wrap break-all">{{ installJob.log.join('\n') }}</pre>
+        <div v-if="installJob.error" class="text-loss">{{ installJob.error }}</div>
       </div>
     </div>
 
     <!-- Login panel -->
-    <div v-if="!status.loading && status.installed && !status.authenticated && !status.error" class="space-y-2">
+    <div v-if="!status.loading && status.installed && !status.authenticated && !status.error" class="space-y-3">
       <p class="text-slate-400">
-        Codex is installed but not authenticated. Click below to start the OpenAI
-        device-code login — you'll be given a pairing URL and code to enter on
+        Codex is installed but not authenticated. Start the OpenAI device-code
+        login below — you'll get a pairing URL and code to enter on
         chatgpt.com to grant this server access to your subscription.
       </p>
       <div class="flex flex-wrap items-center gap-2">
         <button
           @click="startLogin"
           :disabled="['pending', 'parsed'].includes(loginJob.state)"
-          class="px-3 py-1.5 rounded-md bg-primary text-background-dark text-xs font-bold hover:brightness-110 transition-all disabled:opacity-60"
+          class="ui-btn"
         >
           <template v-if="['pending', 'parsed'].includes(loginJob.state)">Waiting for sign-in...</template>
           <template v-else>Sign in with OpenAI</template>
@@ -390,59 +391,60 @@ onUnmounted(() => {
         <button
           v-if="['pending', 'parsed'].includes(loginJob.state)"
           @click="cancelLogin"
-          class="px-2 py-1 rounded-md border border-border-subtle text-slate-400 hover:text-slate-200 text-xs"
+          class="ui-btn-ghost text-[13px]"
         >
           Cancel
         </button>
       </div>
 
-      <div v-if="loginJob.state && loginJob.state !== 'pending'" class="space-y-1.5">
-        <div class="text-slate-400">
-          Login state:
-          <span :class="loginJob.state === 'success' ? 'text-emerald-300' : ['failed', 'expired', 'cancelled'].includes(loginJob.state) ? 'text-red-300' : 'text-amber-300'">
-            {{ loginJob.state }}
-          </span>
+      <div v-if="loginJob.state && loginJob.state !== 'pending'" class="space-y-2">
+        <div class="flex flex-wrap items-center gap-1.5 text-slate-400">
+          Login state
+          <span class="ui-dot" :class="loginJob.state === 'success' ? 'bg-gain' : ['failed', 'expired', 'cancelled'].includes(loginJob.state) ? 'ui-dot-error' : 'ui-dot-warn'"></span>
+          <span class="text-slate-200">{{ loginJob.state }}</span>
         </div>
-        <div v-if="loginJob.pairingUrl" class="space-y-1">
-          <div>
+        <div v-if="loginJob.pairingUrl" class="space-y-1.5">
+          <div class="flex flex-wrap items-center gap-x-1">
             <span class="text-slate-500">Open this URL:</span>
             <a :href="loginJob.pairingUrl" target="_blank" rel="noopener"
-              class="ml-1 font-mono text-sky-300 underline break-all">{{ loginJob.pairingUrl }}</a>
+              class="font-mono text-slate-200 underline decoration-slate-600 underline-offset-2 hover:decoration-slate-300 break-all transition-colors duration-150 ease-out">{{ loginJob.pairingUrl }}</a>
             <button
               @click="copyToClipboard(loginJob.pairingUrl)"
-              class="ml-2 text-slate-500 hover:text-slate-300"
+              class="ui-icon-btn size-7"
               title="Copy URL"
+              aria-label="Copy URL"
             >
-              <span class="material-symbols-outlined text-base align-middle">content_copy</span>
+              <span class="material-symbols-outlined text-[16px]">content_copy</span>
             </button>
           </div>
-          <div v-if="loginJob.pairingCode">
+          <div v-if="loginJob.pairingCode" class="flex flex-wrap items-center gap-x-1">
             <span class="text-slate-500">Enter this code:</span>
-            <span class="ml-1 font-mono text-emerald-300 text-base tracking-widest">{{ loginJob.pairingCode }}</span>
+            <span class="font-mono text-base text-slate-100">{{ loginJob.pairingCode }}</span>
             <button
               @click="copyToClipboard(loginJob.pairingCode)"
-              class="ml-2 text-slate-500 hover:text-slate-300"
+              class="ui-icon-btn size-7"
               title="Copy code"
+              aria-label="Copy code"
             >
-              <span class="material-symbols-outlined text-base align-middle">content_copy</span>
+              <span class="material-symbols-outlined text-[16px]">content_copy</span>
             </button>
           </div>
         </div>
-        <div v-if="loginJob.error" class="text-red-300">{{ loginJob.error }}</div>
+        <div v-if="loginJob.error" class="text-loss">{{ loginJob.error }}</div>
       </div>
     </div>
 
     <!-- Authenticated → logout panel -->
-    <div v-if="!status.loading && status.installed && status.authenticated && !status.error" class="space-y-2">
-      <p class="text-emerald-300">
-        ✓ Codex CLI is installed and authenticated. Strategies can now select <span class="font-mono">codex-cli</span> as their provider.
+    <div v-if="!status.loading && status.installed && status.authenticated && !status.error" class="space-y-3">
+      <p class="text-slate-300">
+        Codex CLI is installed and authenticated. Strategies can now select <span class="font-mono">codex-cli</span> as their provider.
       </p>
       <p v-if="status.auth_message" class="text-slate-500">
         {{ status.auth_message }}
       </p>
       <button
         @click="logout"
-        class="px-3 py-1.5 rounded-md border border-border-subtle text-slate-300 hover:text-red-300 hover:border-red-500/30 text-xs font-medium transition-colors"
+        class="ui-btn"
       >
         Sign out of OpenAI
       </button>
