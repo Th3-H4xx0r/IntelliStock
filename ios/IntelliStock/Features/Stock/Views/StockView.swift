@@ -100,7 +100,7 @@ private struct StockContent: View {
                 .dsClearRow(top: 0)
                 VStack(alignment: .leading, spacing: 0) {
                     chartArea
-                    DSSegmentedControl("Chart range", selection: Binding(get: { model.range }, set: { model.setRange($0) }), options: stockRanges) { $0 }
+                    DSSegmentedControl("Chart range", selection: Binding(get: { model.range }, set: { model.setRange($0) }), options: stockRanges, fullWidth: true) { $0 }
                         .padding(.top, 16)
                     DSDivider()
                         .padding(.top, 16)

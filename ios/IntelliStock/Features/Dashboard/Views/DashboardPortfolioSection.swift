@@ -224,8 +224,9 @@ struct DashboardLiveStatusChip: View {
     }
 }
 
-/// The hero's range row (the web's): 32 pt buttons in 12/500, the active one
-/// on a white-6% fill in the line's colour, the rest zinc-500.
+/// The hero's range row: 32 pt buttons in 12/500 sharing the full width
+/// evenly, the active one on a white-6% fill in the line's colour, the rest
+/// zinc-500.
 struct DashboardRangeBar: View {
     @Binding var selection: String
     var ranges: [String] = dashboardChartRanges
@@ -244,7 +245,9 @@ struct DashboardRangeBar: View {
                         .font(DS.Font.captionMedium)
                         .monospacedDigit()
                         .foregroundStyle(active ? activeColor : DS.Text.muted)
-                        .padding(.horizontal, 12)
+                        .lineLimit(1)
+                        .padding(.horizontal, 4)
+                        .frame(maxWidth: .infinity)
                         .frame(height: 32)
                         .background(active ? Color.white.opacity(0.06) : Color.clear, in: .rect(cornerRadius: DS.Radius.small, style: .continuous))
                         .contentShape(Rectangle())

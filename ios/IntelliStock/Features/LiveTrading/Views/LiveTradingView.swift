@@ -211,18 +211,13 @@ private struct LiveTradingContent: View {
                     }
                     .padding(.top, 16)
 
-                    // Seven ranges fit a phone's card at their natural widths
-                    // ("YTD" truncates when they are forced equal); on a
-                    // narrower phone the control scrolls sideways.
-                    let rangeControl = DSSegmentedControl(
+                    // The ranges share the card's full width evenly.
+                    DSSegmentedControl(
                         "Range",
                         selection: Binding(get: { s.currentRange }, set: { r in Task { await model.setRange(r) } }),
-                        options: liveRanges
+                        options: liveRanges,
+                        fullWidth: true
                     ) { $0 }
-                    ViewThatFits(in: .horizontal) {
-                        rangeControl
-                        ScrollView(.horizontal, showsIndicators: false) { rangeControl }
-                    }
                     .padding(.top, 12)
 
                     LiveChartStyleControl(selection: $chartStyle)

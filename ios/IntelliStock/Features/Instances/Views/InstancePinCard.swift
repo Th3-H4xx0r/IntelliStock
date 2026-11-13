@@ -4,8 +4,8 @@ import SwiftUI
 // `frontend/src/views/InstancesView.vue`).
 //
 // Running is the one place the Instances screen moves:
-// - a soft light orbits the card's border (an angular gradient turned
-//   behind a 1 pt ring) with a blurred glow following it;
+// - a soft light orbits the card's border (an angular gradient rotated
+//   behind a 1 pt ring) with a soft glow band following it;
 // - the border and the top of the card take a faint green tint;
 // - the status dot pings, the uptime ticks, and the 1D line draws in and
 //   ends in a pinging "now" dot;
@@ -61,20 +61,6 @@ nonisolated func instanceUptimeTicking(_ secs: Int) -> String {
 
 /// The web's card motion curve, `cubic-bezier(0.22, 1, 0.36, 1)`.
 nonisolated private let pinEase = UnitCurve.bezier(startControlPoint: UnitPoint(x: 0.22, y: 1), endControlPoint: UnitPoint(x: 0.36, y: 1))
-/// The ping's curve, `cubic-bezier(0, 0, 0.2, 1)`.
-nonisolated private let pinPingEase = UnitCurve.bezier(startControlPoint: UnitPoint(x: 0, y: 0), endControlPoint: UnitPoint(x: 0.2, y: 1))
-
-/// One ring of the web's `pin-ping` at `time` seconds into a 2.4 s loop:
-/// it grows from the dot to 3.2× and fades out over the first 70%, then
-/// rests. Returns the scale and the opacity.
-nonisolated private func pinPing(_ time: Double) -> (scale: Double, opacity: Double) {
-    let loop = 2.4
-    let p = (time.truncatingRemainder(dividingBy: loop) + loop).truncatingRemainder(dividingBy: loop) / loop
-    guard p < 0.7 else { return (3.2, 0) }
-    let u = pinPingEase.value(at: p / 0.7)
-    return (1 + 2.2 * u, 0.6 * (1 - u))
-}
-
 // MARK: - Card
 
 /// One pinned instance as a card, in the web's order: the name with its id,
@@ -363,10 +349,15 @@ struct InstancePinCard<MenuItems: View>: View {
 // MARK: - Border effects
 
 /// The running card's light: a comet orbiting the 1 pt border every 6 s
-/// (an angular gradient behind a ring mask) and a blurred 3 pt copy for the
-/// glow, both fading in on start and out on stop; plus the one-time border
-/// flash on start. Under Reduce Motion the comet is a still green ring and
-/// there is no glow or flash.
+/// with a soft glow band following it, fading in on start and out on stop;
+/// plus the one-time border flash on start. Under Reduce Motion the comet
+/// is a still green ring and there is no glow or flash.
+///
+/// Performance: the comet is an angular gradient drawn once and *rotated*
+/// by a repeating animation, under a static ring mask, so scrolling never
+/// re-runs this view's body or a blur per frame (an earlier version rebuilt
+/// the gradient and a 9 pt blur 60 times a second per card, which made the
+/// Instances list stutter). The glow is layered soft strokes, not a blur.
 private struct InstancePinEffects: View {
     let running: Bool
     let ignite: Int
@@ -375,10 +366,10 @@ private struct InstancePinEffects: View {
 
     /// The comet: a long faint tail brightening to a near-white head
     /// (the web's `pin-orbit` conic gradient).
-    private static let comet = Gradient(stops: [
+    static let comet = Gradient(stops: [
         .init(color: DS.Palette.gain.opacity(0), location: 0),
         .init(color: DS.Palette.gain.opacity(0), location: 0.55),
-        .init(color: DS.Palette.gain.opacity(0.28), location: 0.84),
+        .init(color: DS.Palette.gain.opacity(0.36), location: 0.82),
         .init(color: DS.Palette.gain.opacity(0.9), location: 0.965),
         .init(color: Color(hex: 0xD6FFE9), location: 0.99),
         .init(color: DS.Palette.gain.opacity(0), location: 0.995),
@@ -393,20 +384,20 @@ private struct InstancePinEffects: View {
                     .strokeBorder(DS.Palette.gain.opacity(0.35), lineWidth: DS.Line.width)
                     .opacity(running ? 1 : 0)
             } else {
-                TimelineView(.animation(minimumInterval: 1.0 / 60, paused: !running)) { context in
-                    let turn = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 6) / 6
-                    // CSS conic gradients start at 12 o'clock; SwiftUI's at 3.
-                    let fill = AngularGradient(gradient: Self.comet, center: .center, angle: .degrees(turn * 360 - 90))
-                    ZStack {
-                        shape
-                            .inset(by: -1)
-                            .strokeBorder(fill, lineWidth: 3)
-                            .blur(radius: 9)
-                            .opacity(0.75)
-                        shape.strokeBorder(fill, lineWidth: DS.Line.width)
-                    }
+                if running {
+                    InstancePinOrbit()
+                        .mask {
+                            ZStack {
+                                // The glow: two soft bands just outside and on
+                                // the border, standing in for the web's blur.
+                                shape.inset(by: -3).strokeBorder(lineWidth: 5).opacity(0.14)
+                                shape.inset(by: -1).strokeBorder(lineWidth: 3).opacity(0.3)
+                                // The line itself.
+                                shape.strokeBorder(lineWidth: DS.Line.width)
+                            }
+                        }
+                        .transition(.opacity)
                 }
-                .opacity(running ? 1 : 0)
                 flash(shape)
             }
         }
@@ -415,16 +406,13 @@ private struct InstancePinEffects: View {
         .accessibilityHidden(true)
     }
 
-    /// Start: the whole border lights and settles over 1.5 s.
+    /// Start: the whole border lights and settles over 1.5 s. Soft strokes
+    /// instead of blurs; invisible (opacity 0) between flashes.
     private func flash(_ shape: RoundedRectangle) -> some View {
         ZStack {
-            shape
-                .stroke(DS.Palette.gain.opacity(0.28), lineWidth: 8)
-                .blur(radius: 12)
-            shape
-                .strokeBorder(DS.Palette.gain.opacity(0.1), lineWidth: 16)
-                .blur(radius: 12)
-                .clipShape(shape)
+            shape.inset(by: -4).strokeBorder(DS.Palette.gain.opacity(0.08), lineWidth: 8)
+            shape.inset(by: -2).strokeBorder(DS.Palette.gain.opacity(0.16), lineWidth: 4)
+            shape.strokeBorder(DS.Palette.gain.opacity(0.1), lineWidth: 12)
             shape.strokeBorder(DS.Palette.gain.opacity(0.9), lineWidth: DS.Line.width)
         }
         .keyframeAnimator(initialValue: 0.0, trigger: ignite) { view, opacity in
@@ -434,6 +422,46 @@ private struct InstancePinEffects: View {
             LinearKeyframe(1.0, duration: 0.15, timingCurve: pinEase)
             LinearKeyframe(0.0, duration: 1.35, timingCurve: pinEase)
         }
+    }
+}
+
+/// The comet gradient, drawn once on a square that covers the card at any
+/// angle, turning once every 6 s. Only its transform animates.
+private struct InstancePinOrbit: View {
+    @State private var turned = false
+
+    var body: some View {
+        GeometryReader { geo in
+            let side = (geo.size.width * geo.size.width + geo.size.height * geo.size.height).squareRoot()
+            // CSS conic gradients start at 12 o'clock; SwiftUI's at 3.
+            AngularGradient(gradient: InstancePinEffects.comet, center: .center, angle: .degrees(-90))
+                .frame(width: side, height: side)
+                .rotationEffect(.degrees(turned ? 360 : 0))
+                .animation(.linear(duration: 6).repeatForever(autoreverses: false), value: turned)
+                .position(x: geo.size.width / 2, y: geo.size.height / 2)
+        }
+        .onAppear { turned = true }
+    }
+}
+
+/// One ring of the web's `pin-ping`: grows from the dot to 3.2× and fades
+/// out every 2.4 s, starting `delay` seconds in. A repeating animation of
+/// scale and opacity only, so it costs nothing per frame on the main thread.
+private struct InstancePinPingRing: View {
+    let color: Color
+    let size: CGFloat
+    var delay: Double = 0
+
+    @State private var out = false
+
+    var body: some View {
+        Circle()
+            .fill(color.opacity(0.5))
+            .frame(width: size, height: size)
+            .scaleEffect(out ? 3.2 : 1)
+            .opacity(out ? 0 : 0.6)
+            .animation(.timingCurve(0, 0, 0.2, 1, duration: 2.4).repeatForever(autoreverses: false).delay(delay), value: out)
+            .onAppear { out = true }
     }
 }
 
@@ -453,19 +481,16 @@ struct InstancePinDot: View {
     var body: some View {
         ZStack {
             if state == .running {
-                // `box-shadow: 0 0 8px` at 55%.
+                // `box-shadow: 0 0 8px` at 55%, as a radial fill (no blur).
                 Circle()
-                    .fill(DS.Palette.gain.opacity(0.55))
-                    .frame(width: size + 4, height: size + 4)
-                    .blur(radius: 4)
+                    .fill(RadialGradient(
+                        colors: [DS.Palette.gain.opacity(0.55), DS.Palette.gain.opacity(0)],
+                        center: .center, startRadius: 0, endRadius: (size + 8) / 2
+                    ))
+                    .frame(width: size + 8, height: size + 8)
                 if !reduceMotion {
-                    TimelineView(.animation(minimumInterval: 1.0 / 30)) { context in
-                        let t = context.date.timeIntervalSinceReferenceDate
-                        ZStack {
-                            ring(pinPing(t))
-                            ring(pinPing(t - 1.2))
-                        }
-                    }
+                    InstancePinPingRing(color: DS.Palette.gain, size: size)
+                    InstancePinPingRing(color: DS.Palette.gain, size: size, delay: 1.2)
                 }
             }
             Circle()
@@ -489,14 +514,6 @@ struct InstancePinDot: View {
         case .crashed: DS.Palette.loss
         case .stopped: DS.Text.faint
         }
-    }
-
-    private func ring(_ ping: (scale: Double, opacity: Double)) -> some View {
-        Circle()
-            .fill(DS.Palette.gain.opacity(0.5))
-            .frame(width: size, height: size)
-            .scaleEffect(ping.scale)
-            .opacity(ping.opacity)
     }
 }
 
@@ -608,14 +625,7 @@ private struct InstancePinNowDot: View {
     var body: some View {
         ZStack {
             if live {
-                TimelineView(.animation(minimumInterval: 1.0 / 30)) { context in
-                    let ping = pinPing(context.date.timeIntervalSinceReferenceDate)
-                    Circle()
-                        .fill(color)
-                        .frame(width: 6, height: 6)
-                        .scaleEffect(ping.scale)
-                        .opacity(ping.opacity)
-                }
+                InstancePinPingRing(color: color, size: 6, delay: 0.4)
             }
             Circle()
                 .fill(DS.Surface.card)
