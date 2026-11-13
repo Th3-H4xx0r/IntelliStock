@@ -57,7 +57,9 @@ struct DSSegmentedControl<Value: Hashable>: View {
                         .monospacedDigit()
                         .lineLimit(1)
                         .foregroundStyle(active ? DS.Text.primary : DS.Text.muted)
-                        .padding(.horizontal, 12)
+                        // Full width shares the row evenly, so a tight side
+                        // padding keeps seven chart ranges ("YTD") whole.
+                        .padding(.horizontal, fullWidth ? 4 : 12)
                         .frame(maxWidth: fullWidth ? .infinity : nil)
                         .frame(height: segmentHeight)
                         .background {
