@@ -4,6 +4,7 @@
 // line for the chosen period, price, value and P&L. Daily is today's move;
 // Total is the lifetime unrealized P&L since purchase.
 import { computed } from 'vue'
+import { useRouter } from 'vue-router'
 import Sparkline from './Sparkline.vue'
 import { holdingPnl, fmtUsd, fmtPrice, fmtSignedUsd, fmtPct, fmtQty, signClass } from '../../utils/dashboardAnalytics.js'
 
@@ -19,6 +20,10 @@ const positions = computed(() =>
 const cash = computed(() => props.holdings?.cash ?? null)
 const total = computed(() => (cash.value ?? 0) + positions.value.reduce((a, p) => a + p.marketValue, 0))
 const modeSparks = computed(() => props.sparks?.[props.mode] ?? null)
+
+// A holding row opens that stock's page.
+const router = useRouter()
+function openStock(symbol) { router.push({ name: 'stock', params: { symbol } }) }
 
 function weight(v) { return total.value > 0 ? (v / total.value) * 100 : 0 }
 
@@ -80,7 +85,15 @@ const rows = computed(() => positions.value.map(p => {
           <span class="hidden sm:block text-right text-sm text-slate-600">—</span>
         </li>
 
-        <li v-for="r in rows" :key="r.symbol" class="hold-grid grid min-h-14 px-5 py-2 items-center">
+        <li
+          v-for="r in rows"
+          :key="r.symbol"
+          class="hold-grid grid min-h-14 px-5 py-2 items-center cursor-pointer transition-colors duration-150 ease-out hover:bg-white/[0.03]"
+          role="link"
+          tabindex="0"
+          @click="openStock(r.symbol)"
+          @keydown.enter="openStock(r.symbol)"
+        >
           <span class="min-w-0">
             <span class="block text-sm font-medium text-slate-100 truncate">{{ r.symbol }}</span>
             <span class="block text-xs text-slate-500 mt-0.5 tabular-nums">{{ fmtQty(r.qty) }}</span>

@@ -241,61 +241,66 @@ function fmt(n) { return `$${Number(n).toLocaleString(undefined, { maximumFracti
 
 <template>
   <div class="fixed inset-0 z-[60] flex items-center justify-center p-4">
-    <div @click="emit('close')" class="absolute inset-0 bg-black/60 backdrop-blur-sm"></div>
-    <div class="relative glass-card rounded-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
-      <div class="px-6 pt-5 pb-3 border-b border-border-subtle flex items-center justify-between sticky top-0 bg-surface/80 backdrop-blur z-10">
-        <h3 class="text-base font-bold text-slate-100 flex items-center gap-2"><span class="material-symbols-outlined text-primary text-[20px]">smart_toy</span> {{ isEdit ? 'Edit Kalshi instance' : 'Create Kalshi instance' }}</h3>
-        <button @click="emit('close')" class="text-slate-500 hover:text-slate-300"><span class="material-symbols-outlined">close</span></button>
+    <div @click="emit('close')" class="absolute inset-0 bg-black/60"></div>
+    <div class="relative ui-modal max-w-lg max-h-[90vh] overflow-y-auto">
+      <div class="ui-modal-head sticky top-0 z-10 bg-surface border-b border-white/[0.06]">
+        <div class="min-w-0">
+          <h2 class="text-base font-medium text-slate-100">{{ isEdit ? 'Edit Kalshi instance' : 'Create Kalshi instance' }}</h2>
+          <p class="text-sm text-slate-500 mt-1">Soccer event contracts on a demo or live account</p>
+        </div>
+        <button @click="emit('close')" class="ui-icon-btn ml-auto shrink-0" aria-label="Close"><span class="material-symbols-outlined text-[18px]">close</span></button>
       </div>
 
-      <div class="px-6 py-5 space-y-4">
+      <div class="px-6 py-5 space-y-5">
         <!-- Brokerage selector + details -->
         <div>
-          <div class="flex items-center gap-1.5 mb-1.5">
-            <label class="text-xs font-medium text-slate-400">Kalshi account</label>
+          <div class="flex items-center gap-1 mb-2">
+            <label class="text-sm text-slate-300">Kalshi account</label>
             <InfoTip text="Which Kalshi account this bot trades on. Demo = paper, Live = real money." />
           </div>
           <div class="relative">
-            <select v-model="brokerageId" class="w-full appearance-none bg-surface border border-border-subtle rounded-lg px-3 pr-9 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary">
+            <select v-model="brokerageId" class="ui-input appearance-none pr-9">
               <option v-for="b in brokerages" :key="b.id" :value="b.id">{{ b.account_name }} · {{ b.kalshi_environment || 'demo' }}</option>
             </select>
             <span class="material-symbols-outlined text-slate-500 text-[18px] absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none">expand_more</span>
           </div>
-          <div class="mt-2 flex items-center gap-2 text-xs">
-            <span class="px-2 py-0.5 rounded-md font-medium" :class="isLive ? 'bg-red-500/15 text-red-400' : 'bg-primary/15 text-primary'">{{ isLive ? 'Live · real money' : 'Paper' }}</span>
-            <span class="text-slate-500">
-              Balance:
+          <p class="mt-2 flex flex-wrap items-center gap-x-2 text-xs text-slate-500">
+            <span :class="isLive ? 'text-slate-200' : ''">{{ isLive ? 'Live · real money' : 'Paper' }}</span>
+            <span class="text-slate-600" aria-hidden="true">·</span>
+            <span>
+              Balance
               <span v-if="loadingBalance" class="text-slate-400">…</span>
-              <span v-else-if="hasBalance" class="text-slate-300 font-semibold tabular-nums">{{ fmt(accountBalance) }}</span>
-              <span v-else class="text-amber-400/80">unavailable</span>
+              <span v-else-if="hasBalance" class="text-slate-200 tabular-nums">{{ fmt(accountBalance) }}</span>
+              <span v-else class="text-slate-400">unavailable</span>
             </span>
-          </div>
+          </p>
         </div>
 
         <!-- Risk tolerance preset -->
         <div>
-          <div class="flex items-center gap-1.5 mb-1.5">
-            <label class="text-xs font-medium text-slate-400">Risk tolerance</label>
+          <div class="flex items-center gap-1 mb-2">
+            <label class="text-sm text-slate-300">Risk tolerance</label>
             <InfoTip text="Pick a preset and we'll tune edge, Kelly, exposure, caps, bankroll usage, cadence, and the daily-loss cap. You can still tweak any value after." />
           </div>
-          <div class="grid grid-cols-4 gap-1.5 bg-surface border border-border-subtle rounded-lg p-1">
+          <div class="ui-seg w-full" role="group" aria-label="Risk tolerance">
             <button v-for="(p, k) in RISK_PRESETS" :key="k" type="button" @click="applyPreset(k)"
-                    class="py-1.5 rounded-md text-xs font-semibold transition-all"
-                    :class="risk === k ? 'bg-primary text-background-dark' : 'text-slate-400 hover:text-slate-200'">
+                    class="ui-seg-btn flex-1"
+                    :class="risk === k ? 'ui-seg-btn-active' : ''"
+                    :aria-pressed="risk === k">
               {{ p.label }}
             </button>
           </div>
-          <p class="text-[11px] text-slate-500 mt-1.5 leading-snug">{{ riskBlurb }}</p>
+          <p class="ui-help leading-snug">{{ riskBlurb }}</p>
         </div>
 
         <!-- LLM model (analyst panel) -->
         <div>
-          <div class="flex items-center gap-1.5 mb-1.5">
-            <label class="text-xs font-medium text-slate-400">Analyst LLM model</label>
+          <div class="flex items-center gap-1 mb-2">
+            <label class="text-sm text-slate-300">Analyst LLM model</label>
             <InfoTip text="The model that reads injuries/lineups/form and adjusts probabilities + writes the per-bet rationale. Leave on Default to use the system model." />
           </div>
           <div class="relative">
-            <select v-model="selectedModel" class="w-full appearance-none bg-surface border border-border-subtle rounded-lg px-3 pr-9 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary">
+            <select v-model="selectedModel" class="ui-input appearance-none pr-9">
               <option value="">Default (system model)</option>
               <option v-for="m in models" :key="m.id" :value="m.id">{{ m.name || m.model || m.id }}</option>
             </select>
@@ -305,28 +310,30 @@ function fmt(n) { return `$${Number(n).toLocaleString(undefined, { maximumFracti
 
         <!-- Name -->
         <div>
-          <label class="block text-xs font-medium text-slate-400 mb-1.5">Instance name</label>
-          <input v-model="name" type="text" placeholder="e.g. Soccer edge — demo" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary" />
+          <label class="ui-field-label">Instance name</label>
+          <input v-model="name" type="text" placeholder="e.g. Soccer edge — demo" class="ui-input" />
         </div>
 
         <!-- Leagues multi-select -->
         <div>
-          <div class="flex items-center gap-1.5 mb-1.5">
-            <label class="text-xs font-medium text-slate-400">Leagues</label>
+          <div class="flex items-center gap-1 mb-2">
+            <label class="text-sm text-slate-300">Leagues</label>
             <InfoTip text="Which soccer leagues to scan. Thinner/lower divisions often carry more edge than marquee games." />
           </div>
           <div class="relative">
-            <button @click="leaguesOpen = !leaguesOpen" type="button" class="w-full flex items-center justify-between gap-2 bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-200 hover:border-primary/50 transition-colors">
-              <span class="flex flex-wrap gap-1 items-center min-h-[20px]">
-                <span v-if="!leagues.length" class="text-slate-600">Select leagues…</span>
-                <span v-for="l in leagues" :key="l" class="px-1.5 py-0.5 rounded bg-primary/15 text-primary text-[11px] font-medium">{{ l }}</span>
+            <button @click="leaguesOpen = !leaguesOpen" type="button" class="ui-input flex items-center justify-between gap-2 text-left">
+              <span class="min-w-0 truncate">
+                <span v-if="!leagues.length" class="text-slate-600">Select leagues</span>
+                <template v-else>{{ leagues.join(', ') }}</template>
               </span>
-              <span class="material-symbols-outlined text-slate-500 text-[18px] transition-transform" :class="{ 'rotate-180': leaguesOpen }">expand_more</span>
+              <span class="material-symbols-outlined text-slate-500 text-[18px] shrink-0 transition-transform duration-150 ease-out" :class="{ 'rotate-180': leaguesOpen }">expand_more</span>
             </button>
             <div v-if="leaguesOpen" @click="leaguesOpen = false" class="fixed inset-0 z-40"></div>
-            <div v-if="leaguesOpen" class="absolute left-0 right-0 mt-1.5 z-50 glass-card rounded-xl py-1 max-h-56 overflow-y-auto shadow-xl shadow-black/40">
-              <button v-for="l in LEAGUES" :key="l" type="button" @click="toggleLeague(l)" class="w-full text-left px-3 py-2 text-sm flex items-center gap-2 hover:bg-primary/10 transition-colors" :class="leagues.includes(l) ? 'text-primary' : 'text-slate-300'">
-                <span class="material-symbols-outlined text-[16px]" :class="leagues.includes(l) ? 'text-primary' : 'text-transparent'">check</span>{{ l }}
+            <div v-if="leaguesOpen" class="absolute left-0 right-0 mt-2 z-50 rounded-xl border border-white/[0.08] bg-surface p-1.5 max-h-56 overflow-y-auto shadow-[0_16px_40px_rgba(0,0,0,0.5)]">
+              <button v-for="l in LEAGUES" :key="l" type="button" @click="toggleLeague(l)"
+                      class="w-full h-9 px-3 rounded-lg text-left text-sm flex items-center gap-2 transition-colors duration-150 ease-out hover:bg-white/[0.03]"
+                      :class="leagues.includes(l) ? 'text-slate-100' : 'text-slate-400'">
+                <span class="material-symbols-outlined text-[16px]" :class="leagues.includes(l) ? 'text-slate-300' : 'text-transparent'">check</span>{{ l }}
               </button>
             </div>
           </div>
@@ -334,140 +341,134 @@ function fmt(n) { return `$${Number(n).toLocaleString(undefined, { maximumFracti
 
         <!-- Bankroll usage -->
         <div>
-          <div class="flex items-center justify-between mb-1.5">
-            <div class="flex items-center gap-1.5">
-              <label class="text-xs font-medium text-slate-400">Bankroll usage</label>
+          <div class="flex items-center justify-between mb-2">
+            <div class="flex items-center gap-1">
+              <label class="text-sm text-slate-300">Bankroll usage</label>
               <InfoTip text="How much of this account's balance the bot sizes against. The daily-loss cap scales with this automatically." />
             </div>
-            <span class="text-xs text-slate-300 font-semibold tabular-nums">{{ usagePct }}% · {{ fmt(effectiveBankroll) }}</span>
+            <span class="text-xs text-slate-300 tabular-nums">{{ usagePct }}% · {{ fmt(effectiveBankroll) }}</span>
           </div>
-          <input v-if="hasBalance" v-model.number="usagePct" type="range" min="5" max="100" step="5" class="w-full accent-[var(--accent,#ededed)]" style="accent-color:#ededed" />
+          <input v-if="hasBalance" v-model.number="usagePct" type="range" min="5" max="100" step="5" class="w-full" style="accent-color:#ededed" />
           <div v-else>
-            <input v-model.number="manualBankroll" type="number" step="50" placeholder="Bankroll ($)" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
-            <p class="text-[11px] text-amber-400/70 mt-1">{{ balanceErr || 'Live balance unavailable — enter a bankroll manually.' }}</p>
+            <input v-model.number="manualBankroll" type="number" step="50" placeholder="Bankroll ($)" class="ui-input" />
+            <p class="ui-help">{{ balanceErr || 'Live balance unavailable — enter a bankroll manually.' }}</p>
           </div>
         </div>
 
         <!-- Numeric config grid with info tooltips -->
-        <div class="grid grid-cols-2 gap-x-3 gap-y-3">
+        <div class="grid grid-cols-2 gap-x-4 gap-y-4">
           <label class="block">
-            <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Edge threshold (%) <InfoTip text="Minimum +EV edge (fair − price − fee) needed to place a trade." size="13px" /></span>
-            <input v-model.number="edgePct" type="number" step="0.5" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
+            <span class="ui-field-label flex items-center gap-1">Edge threshold (%) <InfoTip text="Minimum +EV edge (fair − price − fee) needed to place a trade." size="13px" /></span>
+            <input v-model.number="edgePct" type="number" step="0.5" class="ui-input" />
           </label>
           <label class="block">
-            <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Kelly fraction <InfoTip text="Fraction of full Kelly to stake. ¼ (0.25) is conservative; higher = larger bets and more variance." size="13px" /></span>
-            <input v-model.number="kelly" type="number" step="0.05" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
+            <span class="ui-field-label flex items-center gap-1">Kelly fraction <InfoTip text="Fraction of full Kelly to stake. ¼ (0.25) is conservative; higher = larger bets and more variance." size="13px" /></span>
+            <input v-model.number="kelly" type="number" step="0.05" class="ui-input" />
           </label>
           <label class="block">
-            <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Max contracts / market <InfoTip text="Hard cap on contracts bought in any single market." size="13px" /></span>
-            <input v-model.number="maxContracts" type="number" step="5" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
+            <span class="ui-field-label flex items-center gap-1">Max contracts / market <InfoTip text="Hard cap on contracts bought in any single market." size="13px" /></span>
+            <input v-model.number="maxContracts" type="number" step="5" class="ui-input" />
           </label>
           <label class="block">
-            <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Max open exposure (%) <InfoTip text="Cap on total open exposure as a % of bankroll." size="13px" /></span>
-            <input v-model.number="exposurePct" type="number" step="5" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
+            <span class="ui-field-label flex items-center gap-1">Max open exposure (%) <InfoTip text="Cap on total open exposure as a % of bankroll." size="13px" /></span>
+            <input v-model.number="exposurePct" type="number" step="5" class="ui-input" />
           </label>
           <label class="block">
-            <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Per-league cap (%) <InfoTip text="Cap on exposure to any one league — limits correlated risk." size="13px" /></span>
-            <input v-model.number="leagueCapPct" type="number" step="5" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
+            <span class="ui-field-label flex items-center gap-1">Per-league cap (%) <InfoTip text="Cap on exposure to any one league — limits correlated risk." size="13px" /></span>
+            <input v-model.number="leagueCapPct" type="number" step="5" class="ui-input" />
           </label>
           <label class="block">
-            <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Min price (¢) <InfoTip text="Lowest YES price to buy. The 15¢ floor blocks cheap longshots that lost money; lower it to allow cheaper contracts." size="13px" /></span>
-            <input v-model.number="minPrice" type="number" step="1" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
+            <span class="ui-field-label flex items-center gap-1">Min price (¢) <InfoTip text="Lowest YES price to buy. The 15¢ floor blocks cheap longshots that lost money; lower it to allow cheaper contracts." size="13px" /></span>
+            <input v-model.number="minPrice" type="number" step="1" class="ui-input" />
           </label>
           <label class="block">
-            <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Max price (¢) <InfoTip text="Highest YES price to buy. Above ~90¢ fees eat the thin upside." size="13px" /></span>
-            <input v-model.number="maxPrice" type="number" step="1" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
+            <span class="ui-field-label flex items-center gap-1">Max price (¢) <InfoTip text="Highest YES price to buy. Above ~90¢ fees eat the thin upside." size="13px" /></span>
+            <input v-model.number="maxPrice" type="number" step="1" class="ui-input" />
           </label>
           <label class="block">
-            <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Draw min edge (%) <InfoTip text="Draws are model-overconfident; they need at least this much edge to trade." size="13px" /></span>
-            <input v-model.number="drawMinEdge" type="number" step="1" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
+            <span class="ui-field-label flex items-center gap-1">Draw min edge (%) <InfoTip text="Draws are model-overconfident; they need at least this much edge to trade." size="13px" /></span>
+            <input v-model.number="drawMinEdge" type="number" step="1" class="ui-input" />
           </label>
           <label class="block">
-            <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Scan cadence (s) <InfoTip text="How often it polls odds, respecting the OddsPapi monthly budget." size="13px" /></span>
-            <input v-model.number="poll" type="number" step="15" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
+            <span class="ui-field-label flex items-center gap-1">Scan cadence (s) <InfoTip text="How often it polls odds, respecting the OddsPapi monthly budget." size="13px" /></span>
+            <input v-model.number="poll" type="number" step="15" class="ui-input" />
           </label>
           <label class="block">
-            <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">No-sharp edge bar (%) <InfoTip text="Higher edge required to bet a market with no sharp odds (model-only)." size="13px" /></span>
-            <input v-model.number="noSharp" type="number" step="1" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
+            <span class="ui-field-label flex items-center gap-1">No-sharp edge bar (%) <InfoTip text="Higher edge required to bet a market with no sharp odds (model-only)." size="13px" /></span>
+            <input v-model.number="noSharp" type="number" step="1" class="ui-input" />
           </label>
           <label class="block">
-            <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Market anchor (%) <InfoTip text="When there's no sharp line, shrink the model this far toward the de-vigged Kalshi market." size="13px" /></span>
-            <input v-model.number="marketShrink" type="number" step="5" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
+            <span class="ui-field-label flex items-center gap-1">Market anchor (%) <InfoTip text="When there's no sharp line, shrink the model this far toward the de-vigged Kalshi market." size="13px" /></span>
+            <input v-model.number="marketShrink" type="number" step="5" class="ui-input" />
           </label>
           <label class="block col-span-2">
-            <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Order size ($ / trade) <InfoTip text="Target dollar size per trade as a RANGE — the bot sizes within it by edge conviction (stronger edge → bigger trade), so trades stay meaningful even on a small account. Leave both 0 for auto (Kelly-sized)." size="13px" /></span>
+            <span class="ui-field-label flex items-center gap-1">Order size ($ / trade) <InfoTip text="Target dollar size per trade as a RANGE — the bot sizes within it by edge conviction (stronger edge → bigger trade), so trades stay meaningful even on a small account. Leave both 0 for auto (Kelly-sized)." size="13px" /></span>
             <div class="flex items-center gap-2">
-              <input v-model.number="orderSizeMin" type="number" min="0" step="1" placeholder="min $" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary" />
+              <input v-model.number="orderSizeMin" type="number" min="0" step="1" placeholder="min $" class="ui-input" />
               <span class="text-slate-500 text-sm">to</span>
-              <input v-model.number="orderSizeMax" type="number" min="0" step="1" placeholder="max $" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary" />
+              <input v-model.number="orderSizeMax" type="number" min="0" step="1" placeholder="max $" class="ui-input" />
             </div>
           </label>
           <label class="block col-span-2">
-            <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Daily-loss cap ($) <InfoTip text="Bot halts for the day if losses hit this. Auto-scales with your risk preset until you edit it." size="13px" /></span>
-            <input v-model.number="dailyLoss" @input="dailyLossTouched = true" type="number" min="0" step="1" class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
+            <span class="ui-field-label flex items-center gap-1">Daily-loss cap ($) <InfoTip text="Bot halts for the day if losses hit this. Auto-scales with your risk preset until you edit it." size="13px" /></span>
+            <input v-model.number="dailyLoss" @input="dailyLossTouched = true" type="number" min="0" step="1" class="ui-input" />
           </label>
         </div>
 
-        <button type="button" @click="liveMonitoring = !liveMonitoring"
-                class="w-full flex items-center justify-between gap-3 rounded-lg border border-border-subtle bg-surface/50 px-3 py-2.5 text-left hover:border-primary/50 transition-colors">
+        <button type="button" @click="liveMonitoring = !liveMonitoring" :aria-pressed="liveMonitoring"
+                class="w-full flex items-center justify-between gap-3 rounded-lg border border-white/[0.07] px-4 py-3 text-left transition-colors duration-150 ease-out hover:bg-white/[0.03]">
           <span class="min-w-0">
-            <span class="flex items-center gap-1 text-sm font-medium text-slate-200">Live in-match trading
+            <span class="flex items-center gap-1 text-sm text-slate-200">Live in-match trading
               <InfoTip text="While a match is in play, monitor the live Kalshi market, react to material price moves (goals/red cards), re-read news, and trade two-way (open/add/reduce/exit) under tighter in-play caps." size="13px" /></span>
-            <span class="block text-[11px] text-slate-500 mt-0.5">Two-way in-play trading on live matches</span>
+            <span class="block text-xs text-slate-500 mt-0.5">Two-way in-play trading on live matches</span>
           </span>
-          <span class="shrink-0 w-10 h-6 rounded-full transition-colors relative" :class="liveMonitoring ? 'bg-primary' : 'bg-border-subtle'">
-            <span class="absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform" :class="liveMonitoring ? 'translate-x-4' : ''"></span>
-          </span>
+          <span class="ui-switch" :aria-checked="String(liveMonitoring)" aria-hidden="true"><span class="ui-switch-knob"></span></span>
         </button>
 
-        <button type="button" @click="oneBetPerFixture = !oneBetPerFixture"
-                class="w-full flex items-center justify-between gap-3 rounded-lg border border-border-subtle bg-surface/50 px-3 py-2.5 text-left hover:border-primary/50 transition-colors">
+        <button type="button" @click="oneBetPerFixture = !oneBetPerFixture" :aria-pressed="oneBetPerFixture"
+                class="w-full flex items-center justify-between gap-3 rounded-lg border border-white/[0.07] px-4 py-3 text-left transition-colors duration-150 ease-out hover:bg-white/[0.03]">
           <span class="min-w-0">
-            <span class="flex items-center gap-1 text-sm font-medium text-slate-200">One bet per fixture
+            <span class="flex items-center gap-1 text-sm text-slate-200">One bet per fixture
               <InfoTip text="Never hold more than one side of the same match." size="13px" /></span>
-            <span class="block text-[11px] text-slate-500 mt-0.5">Limit to a single open position per match</span>
+            <span class="block text-xs text-slate-500 mt-0.5">Limit to a single open position per match</span>
           </span>
-          <span class="shrink-0 w-10 h-6 rounded-full transition-colors relative" :class="oneBetPerFixture ? 'bg-primary' : 'bg-border-subtle'">
-            <span class="absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform" :class="oneBetPerFixture ? 'translate-x-4' : ''"></span>
-          </span>
+          <span class="ui-switch" :aria-checked="String(oneBetPerFixture)" aria-hidden="true"><span class="ui-switch-knob"></span></span>
         </button>
 
-        <div class="rounded-lg border border-border-subtle bg-surface/50 px-3 py-3 space-y-3">
+        <div class="rounded-lg border border-white/[0.07] px-4 py-4 space-y-4">
           <label class="block">
-            <span class="flex items-center gap-1 text-sm font-medium text-slate-200 mb-1.5">The-Odds-API key (live sharp odds)
+            <span class="ui-field-label flex items-center gap-1">The-Odds-API key (live sharp odds)
               <InfoTip text="Live bookmaker odds for the sharp anchor, e.g. Pinnacle via the-odds-api.com." size="13px" /></span>
-            <input v-model="oddsApiKey" type="password" autocomplete="off" placeholder="the-odds-api.com key (optional)"
-                   class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
+            <input v-model="oddsApiKey" type="password" autocomplete="off" placeholder="the-odds-api.com key (optional)" class="ui-input" />
           </label>
           <label class="block">
-            <span class="flex items-center gap-1 text-sm font-medium text-slate-200 mb-1.5">OddsPapi key (backtest odds)
+            <span class="ui-field-label flex items-center gap-1">OddsPapi key (backtest odds)
               <InfoTip text="Historical odds source used by backtests, from oddspapi.io. Optional; live trading uses the The-Odds-API key above." size="13px" /></span>
-            <input v-model="oddspapiKey" type="password" autocomplete="off" placeholder="oddspapi.io key (optional)"
-                   class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary" />
+            <input v-model="oddspapiKey" type="password" autocomplete="off" placeholder="oddspapi.io key (optional)" class="ui-input" />
           </label>
           <label class="block">
-            <span class="flex items-center gap-1 text-xs font-medium text-slate-400 mb-1.5">Sharp weight ({{ sharpWeight }}%)
+            <span class="ui-field-label flex items-center gap-1">Sharp weight <span class="text-slate-500 tabular-nums">{{ sharpWeight }}%</span>
               <InfoTip text="How much the sharp bookmaker line anchors fair value vs the in-house model. 70% = trust the books; lower leans on the model where books are thin." size="13px" /></span>
             <input v-model.number="sharpWeight" type="range" min="0" max="100" step="5" class="w-full accent-primary" />
           </label>
         </div>
 
         <!-- LIVE account: paper-mode (dry-run) toggle. Default ON = read real prices, place NO real orders. -->
-        <div v-if="isLive" class="rounded-lg border px-3 py-2.5" :class="paperMode ? 'border-primary/20 bg-primary/5' : 'border-red-500/30 bg-red-500/10'">
+        <div v-if="isLive" class="rounded-lg border px-4 py-3" :class="paperMode ? 'border-white/[0.07]' : 'border-loss/30 bg-loss/5'">
           <label class="flex items-center justify-between gap-3 cursor-pointer">
             <span>
-              <span class="text-sm font-semibold" :class="paperMode ? 'text-primary' : 'text-red-400'">{{ paperMode ? 'Paper mode (dry-run)' : 'REAL orders' }}</span>
-              <span class="block text-[11px] text-slate-400 mt-0.5">{{ paperMode ? 'Reads real prices, places NO real orders — safe to test on a funded account.' : '⚠ Places REAL orders with REAL money when started.' }}</span>
+              <span class="text-sm font-medium" :class="paperMode ? 'text-slate-200' : 'text-loss'">{{ paperMode ? 'Paper mode (dry-run)' : 'Real orders' }}</span>
+              <span class="block text-xs text-slate-400 mt-0.5">{{ paperMode ? 'Reads real prices and places no real orders. Safe to test on a funded account' : 'Places real orders with real money when started' }}</span>
             </span>
-            <input type="checkbox" v-model="paperMode" class="size-5 accent-primary shrink-0" />
+            <input type="checkbox" v-model="paperMode" class="size-4 accent-primary shrink-0" />
           </label>
         </div>
-        <p v-if="err" class="text-xs text-red-400">{{ err }}</p>
+        <p v-if="err" class="text-sm text-loss">{{ err }}</p>
       </div>
 
-      <div class="px-6 py-4 border-t border-border-subtle flex gap-3 sticky bottom-0 bg-surface/80 backdrop-blur">
-        <button @click="emit('close')" class="flex-1 py-2.5 rounded-lg border border-border-subtle text-sm font-medium text-slate-400 hover:text-slate-200">Cancel</button>
-        <button @click="submit" :disabled="creating" class="flex-1 py-2.5 rounded-lg bg-primary text-background-dark text-sm font-bold hover:brightness-110 disabled:opacity-50">{{ creating ? (isEdit ? 'Saving…' : 'Creating…') : (isEdit ? 'Save changes' : 'Create instance') }}</button>
+      <div class="ui-modal-foot sticky bottom-0 bg-surface">
+        <button @click="emit('close')" class="ui-btn-ghost h-9 px-4">Cancel</button>
+        <button @click="submit" :disabled="creating" class="ui-btn-primary">{{ creating ? (isEdit ? 'Saving…' : 'Creating…') : (isEdit ? 'Save changes' : 'Create instance') }}</button>
       </div>
     </div>
   </div>

@@ -1,121 +1,94 @@
 <template>
-  <section class="bg-surface/30" style="padding: 80px 0;">
-    <div class="max-w-7xl mx-auto px-6">
-      <div class="text-center max-w-3xl mx-auto space-y-6 mb-14 md:mb-16">
-        <p v-reveal class="reveal text-brand text-xs font-bold uppercase tracking-widest">Graph Nexus</p>
-        <h2 v-reveal class="reveal delay-100 text-4xl md:text-5xl font-bold tracking-tight">
-          Every relationship between<br class="hidden md:block"> every public company.
-        </h2>
-        <p v-reveal class="reveal delay-200 text-slate-400 text-lg">
-          The Graph Nexus is a knowledge graph built from 10 data sources -
-          spanning SEC filings, government contracts, patents, board interlocks,
-          and Wikidata ownership. Each edge is validated, confidence-scored, and
-          queryable in real time from any strategy.
-        </p>
-      </div>
+  <section aria-labelledby="nexus-title">
+    <div class="mx-auto w-full max-w-[1200px] px-4 sm:px-6 lg:px-8">
+      <div class="border-t border-white/[0.06] py-20 md:py-28">
 
-      <div v-reveal class="reveal from-scale delay-100 grid grid-cols-2 md:grid-cols-4 gap-4 mb-14 md:mb-16">
-        <div
-          v-for="edge in edges"
-          :key="edge.type"
-          class="mk-card-hover bg-background-dark border border-border-subtle rounded-2xl p-5 space-y-3"
-        >
-          <div class="size-10 rounded-lg flex items-center justify-center" :class="edge.bg">
-            <span class="material-symbols-outlined text-xl" :class="edge.color">{{ edge.icon }}</span>
-          </div>
-          <div>
-            <p class="text-[10px] font-bold uppercase tracking-widest mb-1" :class="edge.color">{{ edge.type }}</p>
-            <p class="text-sm font-semibold text-slate-200 mb-1">{{ edge.title }}</p>
-            <p class="text-xs text-slate-500 leading-relaxed">{{ edge.desc }}</p>
-          </div>
+        <div class="max-w-3xl">
+          <p class="text-sm text-slate-500">Graph Nexus</p>
+          <h2 id="nexus-title" class="mt-3 text-3xl leading-[1.15] md:text-[40px] md:leading-[1.1] font-medium tracking-[-0.02em] text-slate-100">
+            How public companies are connected
+          </h2>
+          <p class="mt-5 text-base leading-7 md:text-lg md:leading-8 text-slate-400">
+            The Graph Nexus is a knowledge graph of competitors, suppliers, owners,
+            federal contracts, patents and shared board members, built from SEC filings
+            and public data sets. Strategies query it as they trade.
+          </p>
         </div>
-      </div>
 
-      <div class="grid lg:grid-cols-[1fr_340px] gap-8 md:gap-10 items-center">
-        <div
-          v-reveal
-          class="reveal from-scale delay-200 relative h-[460px] bg-[#060511] rounded-3xl border border-border-subtle overflow-hidden flex items-center justify-center"
-        >
-          <div class="absolute inset-0 opacity-40 bg-[radial-gradient(circle_at_center,_rgba(196,124,255,0.42)_0%,_rgba(113,44,226,0.14)_34%,_transparent_74%)]"></div>
-
-          <svg class="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 500 500" preserveAspectRatio="xMidYMid meet">
-            <line x1="250" y1="250" x2="250" y2="122" stroke="#b97aff" stroke-width="0.8" stroke-dasharray="5 4" opacity="0.2">
-              <animate attributeName="stroke-dashoffset" from="18" to="0" dur="2s" repeatCount="indefinite" />
-            </line>
-            <line x1="250" y1="250" x2="250" y2="378" stroke="#b97aff" stroke-width="0.8" stroke-dasharray="5 4" opacity="0.2">
-              <animate attributeName="stroke-dashoffset" from="18" to="0" dur="2.4s" repeatCount="indefinite" />
-            </line>
-            <line x1="250" y1="250" x2="122" y2="250" stroke="#b97aff" stroke-width="0.8" stroke-dasharray="5 4" opacity="0.2">
-              <animate attributeName="stroke-dashoffset" from="18" to="0" dur="2.2s" repeatCount="indefinite" />
-            </line>
-            <line x1="250" y1="250" x2="378" y2="250" stroke="#b97aff" stroke-width="0.8" stroke-dasharray="5 4" opacity="0.2">
-              <animate attributeName="stroke-dashoffset" from="18" to="0" dur="1.9s" repeatCount="indefinite" />
-            </line>
-            <line x1="250" y1="250" x2="152" y2="152" stroke="#d49cff" stroke-width="0.5" stroke-dasharray="4 6" opacity="0.12">
-              <animate attributeName="stroke-dashoffset" from="20" to="0" dur="3s" repeatCount="indefinite" />
-            </line>
-            <line x1="250" y1="250" x2="348" y2="152" stroke="#d49cff" stroke-width="0.5" stroke-dasharray="4 6" opacity="0.12">
-              <animate attributeName="stroke-dashoffset" from="20" to="0" dur="3.5s" repeatCount="indefinite" />
-            </line>
-            <line x1="250" y1="250" x2="152" y2="348" stroke="#d49cff" stroke-width="0.5" stroke-dasharray="4 6" opacity="0.12">
-              <animate attributeName="stroke-dashoffset" from="20" to="0" dur="2.8s" repeatCount="indefinite" />
-            </line>
-            <line x1="250" y1="250" x2="348" y2="348" stroke="#d49cff" stroke-width="0.5" stroke-dasharray="4 6" opacity="0.12">
-              <animate attributeName="stroke-dashoffset" from="20" to="0" dur="3.2s" repeatCount="indefinite" />
-            </line>
-          </svg>
-
-          <div class="relative size-64">
-            <div class="absolute inset-0 rounded-full border border-brand/20 animate-[spin_20s_linear_infinite]"></div>
-            <div class="absolute inset-[-40px] rounded-full border border-brand/10 animate-[spin_30s_linear_infinite_reverse]"></div>
-
-            <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 size-14 bg-[radial-gradient(circle_at_30%_30%,_#f5e1ff_0%,_#ca86ff_36%,_#8139e8_100%)] rounded-full shadow-[0_0_55px_rgba(191,122,255,0.72)] flex items-center justify-center z-10">
-              <span class="material-symbols-outlined text-[#080511] font-bold text-2xl">hub</span>
-            </div>
-
-            <div class="absolute top-0 left-1/2 -translate-x-1/2 size-4 bg-[#1a1232] rounded-full border border-violet-300/70 shadow-[0_0_14px_rgba(191,122,255,0.45)]"></div>
-            <div class="absolute bottom-0 left-1/2 -translate-x-1/2 size-4 bg-[#1a1232] rounded-full border border-violet-300/70 shadow-[0_0_14px_rgba(191,122,255,0.45)]"></div>
-            <div class="absolute left-0 top-1/2 -translate-y-1/2 size-4 bg-[#1a1232] rounded-full border border-violet-300/70 shadow-[0_0_14px_rgba(191,122,255,0.45)]"></div>
-            <div class="absolute right-0 top-1/2 -translate-y-1/2 size-4 bg-[#1a1232] rounded-full border border-violet-300/70 shadow-[0_0_14px_rgba(191,122,255,0.45)]"></div>
-          </div>
-
-          <div v-reveal class="reveal delay-400 absolute bottom-8 left-8 mk-glass-card p-5 rounded-xl text-left border border-white/10 max-w-[260px]">
-            <p class="text-[10px] font-bold text-brand mb-2 uppercase tracking-widest">Live Edge Detected</p>
-            <h4 class="text-sm font-bold mb-1">Supply Chain Shock</h4>
-            <p class="text-xs text-slate-400">TSMC to NVDA <span class="text-slate-300 font-medium">SUPPLIER_OF</span> sentiment: <span class="text-emerald-400 font-bold">Bullish +0.82</span></p>
+        <!-- Edge types: one ledger, hairlines between cells -->
+        <div class="mt-14 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-px rounded-xl overflow-hidden border border-white/[0.07] bg-white/[0.06]">
+          <div v-for="edge in edges" :key="edge.type" class="bg-surface p-5">
+            <p class="font-mono text-xs text-slate-500">{{ edge.type }}</p>
+            <p class="mt-3 text-sm font-medium text-slate-100">{{ edge.title }}</p>
+            <p class="mt-1.5 text-[13px] leading-5 text-slate-400">{{ edge.desc }}</p>
           </div>
         </div>
 
-        <div class="space-y-4">
-          <div
-            v-reveal
-            v-for="(stat, i) in stats"
-            :key="stat.label"
-            class="reveal from-right mk-glass-card rounded-2xl p-6 flex items-center gap-5"
-            :class="`delay-${(i + 1) * 100}`"
-          >
-            <div class="size-12 rounded-xl flex items-center justify-center shrink-0" :class="stat.bg">
-              <span class="material-symbols-outlined" :class="stat.color">{{ stat.icon }}</span>
-            </div>
-            <div>
-              <p class="text-2xl font-bold">{{ stat.value }}</p>
-              <p class="text-sm text-slate-400">{{ stat.label }}</p>
+        <div class="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_340px] items-stretch">
+
+          <!-- A slice of the graph around one company -->
+          <div class="relative flex flex-col rounded-xl border border-white/[0.07] bg-sidebar overflow-hidden">
+            <svg
+              class="block w-full h-[300px] sm:h-[420px]"
+              viewBox="0 0 560 400"
+              preserveAspectRatio="xMidYMid meet"
+              role="img"
+              aria-label="Graph slice around NVDA: TSMC supplies it, AMD and Intel compete with it, Microsoft buys from it, Vanguard holds it"
+            >
+              <g v-for="e in graphEdges" :key="e.to">
+                <line
+                  :x1="center.x" :y1="center.y" :x2="nodeById[e.to].x" :y2="nodeById[e.to].y"
+                  :stroke="e.lead ? '#ededed' : 'rgba(255,255,255,0.14)'"
+                  :stroke-width="e.lead ? 1.5 : 1"
+                />
+                <text
+                  :x="(center.x + nodeById[e.to].x) / 2 + e.dx"
+                  :y="(center.y + nodeById[e.to].y) / 2 + e.dy"
+                  :fill="e.lead ? '#d4d4d8' : '#71717a'"
+                  stroke="#0b0b0c"
+                  stroke-width="6"
+                  paint-order="stroke"
+                  dominant-baseline="middle"
+                  font-size="10"
+                  font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+                  text-anchor="middle"
+                >{{ e.type }}</text>
+              </g>
+              <g v-for="n in nodes" :key="n.id">
+                <circle :cx="n.x" :cy="n.y" r="5" fill="#1e1e20" :stroke="n.lead ? '#ededed' : 'rgba(255,255,255,0.28)'" stroke-width="1" />
+                <text :x="n.x" :y="n.y + n.ly" fill="#a1a1aa" font-size="12" text-anchor="middle">{{ n.label }}</text>
+              </g>
+              <circle :cx="center.x" :cy="center.y" r="9" fill="#ededed" />
+              <text :x="center.x" :y="center.y + 28" fill="#ededed" font-size="13" font-weight="500" text-anchor="middle">NVDA</text>
+            </svg>
+
+            <div class="m-4 sm:m-0 sm:absolute sm:left-6 sm:bottom-6 sm:max-w-[280px] rounded-xl border border-white/[0.08] bg-surface px-4 py-3">
+              <p class="inline-flex items-center gap-2 text-xs text-slate-400">
+                <span class="ui-dot ui-dot-live"></span>Live edge detected
+              </p>
+              <p class="mt-2 text-sm font-medium text-slate-100">Supply chain shock</p>
+              <p class="mt-1 text-xs leading-5 text-slate-400">
+                TSMC to NVDA <span class="font-mono text-slate-300">SUPPLIER_OF</span>
+                sentiment: <span class="text-gain tabular-nums">Bullish +0.82</span>
+              </p>
             </div>
           </div>
 
-          <div v-reveal class="reveal from-right delay-500 mk-glass-card rounded-2xl p-6">
-            <p class="text-xs font-bold uppercase tracking-widest text-slate-500 mb-4">Data Sources</p>
-            <div class="flex flex-wrap gap-2">
-              <span
-                v-for="src in dataSources"
-                :key="src"
-                class="px-2.5 py-1 text-[11px] font-medium bg-surface border border-border-subtle rounded-full text-slate-300"
-              >
-                {{ src }}
-              </span>
+          <!-- Figures + sources -->
+          <div class="ui-card divide-y divide-white/[0.06]">
+            <div v-for="stat in stats" :key="stat.label" class="px-5 py-4">
+              <p class="text-2xl font-medium text-slate-100 tabular-nums">{{ stat.value }}</p>
+              <p class="mt-1 text-sm text-slate-400">{{ stat.label }}</p>
+            </div>
+            <div class="px-5 py-4">
+              <p class="text-xs text-slate-500">Data sources</p>
+              <ul class="mt-2.5 flex flex-wrap gap-x-4 gap-y-1.5">
+                <li v-for="src in dataSources" :key="src" class="text-sm text-slate-300">{{ src }}</li>
+              </ul>
             </div>
           </div>
         </div>
+
       </div>
     </div>
   </section>
@@ -123,81 +96,44 @@
 
 <script setup>
 const edges = [
-  {
-    type: 'COMPETES_WITH',
-    title: 'Competitors',
-    desc: 'Companies in the same SIC industry group - bidirectional, 85K+ edges.',
-    icon: 'compare_arrows',
-    color: 'text-rose-400',
-    bg: 'bg-rose-400/10',
-  },
-  {
-    type: 'SUPPLY_CHAIN',
-    title: 'Suppliers & Customers',
-    desc: '10-K customer/supplier disclosures from SEC EDGAR, confidence-scored.',
-    icon: 'account_tree',
-    color: 'text-amber-400',
-    bg: 'bg-amber-400/10',
-  },
-  {
-    type: 'HELD_BY',
-    title: 'Institutional Ownership',
-    desc: 'SEC 13F-HR quarterly filings: who holds what, in shares and USD value.',
-    icon: 'business_center',
-    color: 'text-violet-400',
-    bg: 'bg-violet-400/10',
-  },
-  {
-    type: 'CONTRACTS_WITH',
-    title: 'Gov. Contracts',
-    desc: 'USASpending.gov federal awards - LLM-validated per recipient.',
-    icon: 'account_balance',
-    color: 'text-brand',
-    bg: 'bg-brand/10',
-  },
-  {
-    type: 'CONTROLS',
-    title: 'Subsidiary Control',
-    desc: 'Wikidata SPARQL ownership + GLEIF LEI legal hierarchy, LLM-validated.',
-    icon: 'corporate_fare',
-    color: 'text-emerald-400',
-    bg: 'bg-emerald-400/10',
-  },
-  {
-    type: 'PATENT_PARTNER',
-    title: 'Patent Co-Filing',
-    desc: 'PatentsView co-assigned patents across S&P 500, resolved via LLM.',
-    icon: 'lightbulb',
-    color: 'text-yellow-400',
-    bg: 'bg-yellow-400/10',
-  },
-  {
-    type: 'BOARD_OVERLAP',
-    title: 'Board Interlocks',
-    desc: 'Shared board members extracted from DEF 14A proxy filings.',
-    icon: 'groups',
-    color: 'text-sky-400',
-    bg: 'bg-sky-400/10',
-  },
-  {
-    type: 'STRATEGIC_PARTNER',
-    title: '8-K Agreements',
-    desc: 'Material agreements from 8-K SEC filings parsed into bilateral edges.',
-    icon: 'handshake',
-    color: 'text-orange-400',
-    bg: 'bg-orange-400/10',
-  },
+  { type: 'COMPETES_WITH', title: 'Competitors', desc: 'Companies in the same SIC industry group, linked both ways.' },
+  { type: 'SUPPLY_CHAIN', title: 'Suppliers & customers', desc: '10-K customer/supplier disclosures from SEC EDGAR, confidence-scored.' },
+  { type: 'HELD_BY', title: 'Institutional ownership', desc: 'SEC 13F-HR quarterly filings: who holds what, in shares and USD value.' },
+  { type: 'CONTRACTS_WITH', title: 'Gov. contracts', desc: 'USASpending.gov federal awards, LLM-validated per recipient.' },
+  { type: 'CONTROLS', title: 'Subsidiary control', desc: 'Wikidata SPARQL ownership + GLEIF LEI legal hierarchy, LLM-validated.' },
+  { type: 'PATENT_PARTNER', title: 'Patent co-filing', desc: 'PatentsView co-assigned patents across S&P 500, resolved via LLM.' },
+  { type: 'BOARD_OVERLAP', title: 'Board interlocks', desc: 'Shared board members extracted from DEF 14A proxy filings.' },
+  { type: 'STRATEGIC_PARTNER', title: '8-K agreements', desc: 'Material agreements from 8-K SEC filings parsed into bilateral edges.' },
 ]
 
-const stats = [
-  { value: '12', label: 'Data ingestion phases', icon: 'database', color: 'text-brand', bg: 'bg-brand/10' },
-  { value: '85K+', label: 'COMPETES_WITH edges', icon: 'compare_arrows', color: 'text-rose-400', bg: 'bg-rose-400/10' },
-  { value: '500+', label: 'S&P 500 companies mapped', icon: 'domain', color: 'text-emerald-400', bg: 'bg-emerald-400/10' },
-  { value: 'LLM', label: 'Validation on every edge', icon: 'verified', color: 'text-violet-400', bg: 'bg-violet-400/10' },
-]
 
 const dataSources = [
   'Polygon.io', 'SEC EDGAR', 'USASpending', 'PatentsView',
   'Wikidata', 'GLEIF LEI', 'DEF 14A', '8-K', 'BEA I-O',
+]
+
+// Counts taken from the lists on this page, so they can't drift from it.
+const stats = [
+  { value: String(edges.length), label: 'Relationship types' },
+  { value: String(dataSources.length), label: 'Data sources' },
+]
+
+// Illustrative slice of the graph. The lead edge is the one the card describes.
+const center = { x: 300, y: 190 }
+const nodes = [
+  { id: 'tsm',  label: 'TSMC',      x: 120, y: 90,  ly: -14, lead: true },
+  { id: 'amd',  label: 'AMD',       x: 480, y: 100, ly: -14 },
+  { id: 'intc', label: 'Intel',     x: 500, y: 270, ly: 22 },
+  { id: 'msft', label: 'Microsoft', x: 330, y: 340, ly: 22 },
+  { id: 'vg',   label: 'Vanguard',  x: 130, y: 280, ly: 22 },
+]
+const nodeById = Object.fromEntries(nodes.map((n) => [n.id, n]))
+// Labels sit on the edge midpoint; the text halo cuts the line behind them.
+const graphEdges = [
+  { to: 'tsm',  type: 'SUPPLIER_OF',   dx: 0, dy: 0, lead: true },
+  { to: 'amd',  type: 'COMPETES_WITH', dx: 0, dy: 0 },
+  { to: 'intc', type: 'COMPETES_WITH', dx: 0, dy: 0 },
+  { to: 'msft', type: 'CUSTOMER_OF',   dx: 0, dy: 0 },
+  { to: 'vg',   type: 'HELD_BY',       dx: 0, dy: 0 },
 ]
 </script>

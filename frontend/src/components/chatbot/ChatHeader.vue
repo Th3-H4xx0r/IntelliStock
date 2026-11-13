@@ -10,17 +10,14 @@ defineEmits(['toggleSettings', 'toggleFullscreen', 'clear', 'minimise', 'close']
 </script>
 
 <template>
-  <div class="flex items-center gap-2 px-3 sm:px-4 py-2.5 sm:py-3 border-b border-border-subtle bg-[#0a0f13]/85 backdrop-blur-md">
-    <div class="size-7 rounded-md bg-primary/15 border border-primary/30 flex items-center justify-center shrink-0">
-      <span class="material-symbols-outlined text-primary text-[16px]">smart_toy</span>
-    </div>
-    <div class="min-w-0 flex-1">
-      <p class="text-sm font-semibold text-slate-100 truncate leading-tight">{{ title }}</p>
-      <p v-if="modelName" class="text-[10px] uppercase tracking-widest text-slate-500 leading-tight font-mono truncate">{{ modelName }}</p>
+  <div class="flex items-center gap-1 pl-4 pr-2 h-14 shrink-0 border-b border-white/[0.06] bg-surface">
+    <div class="min-w-0 flex-1 mr-2">
+      <p class="text-sm font-medium text-slate-100 truncate leading-tight">{{ title }}</p>
+      <p v-if="modelName" class="text-xs text-slate-500 leading-tight truncate mt-0.5">{{ modelName }}</p>
     </div>
     <button
       @click="$emit('toggleFullscreen')"
-      class="size-8 rounded-md flex items-center justify-center text-slate-400 hover:text-slate-100 transition hidden sm:flex"
+      class="ui-icon-btn hidden sm:inline-flex"
       :title="isFullscreen ? 'Exit fullscreen' : 'Fullscreen'"
       :aria-label="isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'"
     >
@@ -28,16 +25,17 @@ defineEmits(['toggleSettings', 'toggleFullscreen', 'clear', 'minimise', 'close']
     </button>
     <button
       @click="$emit('toggleSettings')"
-      :class="showSettings ? 'text-primary bg-primary/10' : 'text-slate-400 hover:text-slate-100'"
-      class="size-8 rounded-md flex items-center justify-center transition"
+      :class="showSettings ? 'bg-raised text-slate-100' : ''"
+      class="ui-icon-btn"
       title="Settings"
       aria-label="Open settings"
+      :aria-pressed="showSettings"
     >
       <span class="material-symbols-outlined text-[18px]">settings</span>
     </button>
     <button
       @click="$emit('clear')"
-      class="size-8 rounded-md flex items-center justify-center text-slate-400 hover:text-red-300 transition"
+      class="ui-icon-btn hover:text-loss"
       title="Clear conversation"
       aria-label="Clear conversation"
     >
@@ -45,7 +43,7 @@ defineEmits(['toggleSettings', 'toggleFullscreen', 'clear', 'minimise', 'close']
     </button>
     <button
       @click="$emit('minimise')"
-      class="size-8 rounded-md flex items-center justify-center text-slate-400 hover:text-slate-100 transition"
+      class="ui-icon-btn"
       title="Minimise"
       aria-label="Minimise chatbot"
     >

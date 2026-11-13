@@ -6,6 +6,8 @@ import KalshiDashboardCard from '../components/KalshiDashboardCard.vue'
 import DashboardHoldings from '../components/dashboard/DashboardHoldings.vue'
 import DashboardInsights from '../components/dashboard/DashboardInsights.vue'
 import DashboardMarket from '../components/dashboard/DashboardMarket.vue'
+import DashboardAccountInstances from '../components/dashboard/DashboardAccountInstances.vue'
+import DashboardBotActivity from '../components/dashboard/DashboardBotActivity.vue'
 import DashboardOrders from '../components/dashboard/DashboardOrders.vue'
 import { useAccountHoldings } from '../composables/useDashboardData.js'
 import { isMarketOpen } from '../utils/dashboardAnalytics.js'
@@ -459,7 +461,8 @@ onUnmounted(() => {
             <DashboardOrders v-if="stockAccountId" class="min-w-0" :brokerage-id="stockAccountId" />
           </div>
 
-          <template v-if="stockAccountId">
+          <!-- Right column: insights, then who trades the account and why -->
+          <div v-if="stockAccountId" class="min-w-0 flex flex-col gap-12">
             <DashboardInsights
               v-if="hasHoldings"
               class="min-w-0"
@@ -472,7 +475,9 @@ onUnmounted(() => {
               <div class="h-4 w-24 rounded bg-raised"></div>
               <div class="h-[420px] rounded-xl bg-surface"></div>
             </div>
-          </template>
+            <DashboardAccountInstances class="min-w-0" :brokerage-id="stockAccountId" />
+            <DashboardBotActivity class="min-w-0" :brokerage-id="stockAccountId" />
+          </div>
         </div>
       </section>
 

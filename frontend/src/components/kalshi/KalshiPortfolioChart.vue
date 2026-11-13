@@ -94,65 +94,62 @@ const positive = computed(() => delta.value >= 0)
 // 'category' axis with [isoString, value] tuples computes the y-range but draws no line.
 // Range filtering already happened in `displayed`; labels are hidden so the index never shows.
 const chartSeries = computed(() => [{ name: isPaper.value ? 'Paper P&L' : 'Value', data: displayed.value.map((p, i) => [i, p[1]]) }])
-// Green when up, red when down — for BOTH the real portfolio value and paper P&L
-// (matches mobile), instead of a static purple for the real line.
-const chartColor = computed(() => (positive.value ? '#34d399' : '#f87171'))
+// Gain/loss colour when up/down — for BOTH the real portfolio value and paper
+// P&L (matches mobile and the dashboard chart).
+const chartColor = computed(() => (positive.value ? '#4cc38a' : '#e5484d'))
+const axisLabel = { colors: '#71717a', fontSize: '11px', fontFamily: 'inherit' }
 const chartOptions = computed(() => ({
-  chart: { type: 'area', height: 180, toolbar: { show: false }, animations: { enabled: false }, background: 'transparent', fontFamily: 'Inter, sans-serif' },
+  chart: { type: 'area', height: 180, toolbar: { show: false }, animations: { enabled: false }, background: 'transparent', fontFamily: 'Inter, sans-serif', parentHeightOffset: 0 },
   theme: { mode: 'dark' },
   colors: [chartColor.value],
   dataLabels: { enabled: false },
-  stroke: { curve: 'smooth', width: 2.5 },
-  fill: { type: 'gradient', gradient: { shadeIntensity: 1, opacityFrom: 0.3, opacityTo: 0 } },
-  grid: { borderColor: 'rgba(255,255,255,0.06)', strokeDashArray: 4, padding: { left: 8, right: 8 } },
+  stroke: { curve: 'smooth', width: 1.5 },
+  // A faint same-hue fade under the line, as on the dashboard.
+  fill: { type: 'gradient', gradient: { colorStops: [{ offset: 0, color: chartColor.value, opacity: 0.1 }, { offset: 100, color: chartColor.value, opacity: 0 }] } },
+  grid: { borderColor: 'rgba(255,255,255,0.05)', strokeDashArray: 0, xaxis: { lines: { show: false } }, padding: { left: 4, right: 8, top: 0, bottom: 0 } },
   xaxis: { type: 'numeric', labels: { show: false }, axisBorder: { show: false }, axisTicks: { show: false }, tooltip: { enabled: false } },
-  yaxis: { labels: { formatter: (v) => `$${Math.round(v)}`, style: { colors: '#64748b', fontSize: '11px' } } },
+  yaxis: { tickAmount: 3, labels: { formatter: (v) => `$${Math.round(v)}`, style: axisLabel } },
   tooltip: { theme: 'dark', x: { show: false } },
 }))
+// What the headline change is measured against.
+const RANGE_CAPTIONS = { '1D': 'Past day', '1W': 'Past week', '1M': 'Past month', ALL: 'All time' }
+const deltaCaption = computed(() => (isPaper.value ? RANGE_CAPTIONS[activeRange.value] : 'Today'))
 </script>
 
 <template>
-  <div class="glass-card rounded-2xl overflow-hidden flex flex-col">
-    <div class="px-4 sm:px-6 pt-4 sm:pt-5 pb-3">
+  <div class="ui-card overflow-hidden flex flex-col min-w-0">
+    <div class="px-5 pt-5 pb-3">
       <!-- Header -->
-      <div class="flex items-center gap-2 mb-3">
-        <span class="material-symbols-outlined text-primary text-[18px]">monitoring</span>
-        <span class="text-[11px] sm:text-xs font-semibold text-slate-400 uppercase tracking-widest">{{ headlineLabel }}</span>
-        <span v-if="isPaper" class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400">MOCK</span>
+      <div class="flex items-center justify-between gap-3">
+        <p class="text-sm font-medium text-slate-200 truncate">{{ headlineLabel }}</p>
+        <span v-if="isPaper" class="shrink-0 text-xs text-slate-500">Mock</span>
       </div>
 
       <!-- Value + delta -->
-      <div class="flex flex-wrap items-end gap-2 sm:gap-3">
-        <span class="text-xl sm:text-2xl font-bold tabular-nums break-all"
-              :class="isPaper ? (headlineValue >= 0 ? 'text-emerald-400' : 'text-red-400') : 'text-slate-100'">{{ fmtValue }}</span>
-        <span class="flex items-center gap-1 text-xs sm:text-sm font-semibold mb-0.5"
-              :class="positive ? 'text-emerald-400' : 'text-red-400'">
-          <span class="material-symbols-outlined text-[16px]">{{ positive ? 'trending_up' : 'trending_down' }}</span>
-          {{ positive ? '+' : '-' }}${{ Math.abs(delta).toFixed(2) }}
-        </span>
-      </div>
-      <div v-if="error" class="text-xs text-red-400 mt-1">{{ error }}</div>
+      <p class="mt-3 text-2xl font-medium leading-none tabular-nums break-all"
+         :class="isPaper ? (headlineValue >= 0 ? 'text-gain' : 'text-loss') : 'text-slate-100'">{{ fmtValue }}</p>
+      <p class="mt-2 text-sm tabular-nums">
+        <span :class="positive ? 'text-gain' : 'text-loss'">{{ positive ? '+' : '-' }}${{ Math.abs(delta).toFixed(2) }}</span>
+        <span class="text-slate-500 ml-1.5">{{ deltaCaption }}</span>
+      </p>
+      <p v-if="error" class="mt-2 text-sm text-loss">{{ error }}</p>
 
       <!-- Range selector -->
-      <div class="flex flex-wrap items-center gap-1 mt-4">
-        <button v-for="r in RANGES" :key="r" @click="activeRange = r"
-                class="px-2 py-1 sm:px-2.5 rounded-md text-[11px] sm:text-xs font-semibold transition-all"
-                :class="activeRange === r ? 'bg-primary/15 text-primary' : 'text-slate-500 hover:text-slate-300'">
+      <div class="ui-seg mt-4" role="group" aria-label="Range">
+        <button v-for="r in RANGES" :key="r" type="button" @click="activeRange = r"
+                class="ui-seg-btn tabular-nums"
+                :class="activeRange === r ? 'ui-seg-btn-active' : ''"
+                :aria-pressed="activeRange === r">
           {{ r }}
         </button>
       </div>
     </div>
 
     <!-- Chart area -->
-    <div class="relative flex-1 min-h-[180px] px-1 sm:px-2 pb-3">
-      <div v-if="loading" class="absolute inset-0 flex items-center justify-center">
-        <span class="material-symbols-outlined animate-spin text-slate-600 text-3xl">progress_activity</span>
-      </div>
+    <div class="relative flex-1 min-h-[180px] px-1 pb-2">
+      <div v-if="loading" class="absolute inset-0"></div>
       <div v-else-if="!displayed.length" class="absolute inset-0 flex items-center justify-center">
-        <div class="text-center">
-          <span class="material-symbols-outlined text-3xl text-slate-700">bar_chart_4_bars</span>
-          <p class="text-xs text-slate-600 mt-2">No snapshots yet</p>
-        </div>
+        <p class="text-sm text-slate-500">No snapshots yet</p>
       </div>
       <VueApexCharts v-else type="area" height="180" :options="chartOptions" :series="chartSeries" />
     </div>

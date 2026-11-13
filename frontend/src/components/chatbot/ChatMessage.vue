@@ -32,20 +32,20 @@ function fmtTime(iso) {
     :class="isUser ? 'justify-end' : 'justify-start'"
   >
     <div
-      class="max-w-[88%] sm:max-w-[80%] min-w-0 flex flex-col gap-2"
-      :class="isUser ? 'items-end' : 'items-start'"
+      class="min-w-0 flex flex-col gap-2"
+      :class="isUser ? 'items-end max-w-[85%] sm:max-w-[80%]' : 'items-start w-full'"
     >
-      <!-- Tool call summary chip (assistant w/ tool_calls but no pending) -->
+      <!-- Tool call summary (assistant w/ tool_calls but no pending) -->
       <div
         v-if="isAssistant && message.tool_calls?.length"
-        class="flex flex-wrap gap-1.5 max-w-full"
+        class="flex flex-wrap gap-x-3 gap-y-1 max-w-full"
       >
         <span
           v-for="tc in message.tool_calls"
           :key="tc.id"
-          class="inline-flex items-center gap-1 rounded-md bg-primary/10 border border-primary/25 px-2 py-0.5 text-[10px] uppercase tracking-wider text-primary max-w-full truncate"
+          class="inline-flex items-center gap-1 text-xs text-slate-500 max-w-full truncate"
         >
-          <span class="material-symbols-outlined text-[11px]">build</span>
+          <span class="material-symbols-outlined text-[14px]">build</span>
           {{ tc.name }}
         </span>
       </div>
@@ -53,13 +53,13 @@ function fmtTime(iso) {
       <!-- Bubble (text content) -->
       <div
         v-if="message.content || (!message.blocks?.length && !message.tool_calls?.length)"
-        class="rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed shadow-sm max-w-full overflow-hidden"
+        class="text-sm leading-relaxed max-w-full overflow-hidden"
         :class="[
           isUser
-            ? 'bg-primary text-background-dark font-medium rounded-br-sm'
+            ? 'rounded-xl px-3.5 py-2.5 bg-raised border border-white/[0.07] text-slate-100'
             : isTool
-              ? 'bg-surface/40 border border-border-subtle text-slate-400 font-mono text-[11px] rounded-bl-sm'
-              : 'bg-surface/70 border border-border-subtle text-slate-100 rounded-bl-sm'
+              ? 'rounded-lg px-3 py-2 bg-background-dark/60 border border-white/[0.06] text-slate-500 font-mono text-xs'
+              : 'text-slate-200'
         ]"
       >
         <template v-if="isAssistant">
@@ -71,7 +71,7 @@ function fmtTime(iso) {
                line-clamp; the LLM still sees the full payload, this view is
                just an at-a-glance audit trail. -->
           <p class="break-all chatbot-tool-clamp">
-            <span class="text-slate-500">{{ message.name }} →</span>
+            <span class="text-slate-400">{{ message.name }} →</span>
             {{ message.content?.slice(0, 200) }}<span v-if="(message.content || '').length > 200">…</span>
           </p>
         </template>
@@ -93,7 +93,8 @@ function fmtTime(iso) {
 
       <p
         v-if="message.created_at && !isTool"
-        class="text-[10px] text-slate-600 px-1"
+        class="text-xs text-slate-600 tabular-nums"
+        :class="isUser ? 'pr-1' : ''"
       >{{ fmtTime(message.created_at) }}</p>
     </div>
   </div>

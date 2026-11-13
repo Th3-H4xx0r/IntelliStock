@@ -21,137 +21,129 @@ body {
 }
 
 /* ─────────────────────────────────────────
-   Custom Utilities — app surfaces
-   One graphite ramp. Depth comes from a
-   surface step plus a hairline, never a
-   glow, blur or coloured gradient.
+   App components — the dashboard's patterns,
+   shared so every page reads as one product.
+   Values match DashboardView / DashboardHoldings.
+   Utilities still override these (components layer).
+───────────────────────────────────────── */
+@layer components {
+  /* Page frame and headings */
+  .ui-page { @apply flex-1 w-full max-w-[1440px] px-4 py-6 sm:px-6 sm:py-8 lg:px-8; }
+  .ui-page-title { @apply text-2xl font-medium text-slate-100 leading-tight; }
+  .ui-page-sub { @apply text-sm text-slate-500 mt-1; }
+  .ui-section-title { @apply text-base font-medium text-slate-100; }
+  .ui-section-sub { @apply text-sm text-slate-500 mt-0.5; }
+  .ui-label { @apply text-xs text-slate-500; }
+
+  /* Surfaces */
+  .ui-card { @apply rounded-xl border border-white/[0.07] bg-surface; }
+  .ui-th { @apply h-10 px-5 items-center text-xs text-slate-500 border-b border-white/[0.06]; }
+  .ui-rows { @apply divide-y divide-white/[0.05]; }
+  .ui-row { @apply min-h-14 px-5 py-2; }
+
+  /* Buttons: primary is off-white on graphite; secondary is a raised step;
+     ghost is text. Destructive = ui-btn + text-loss. */
+  .ui-btn-primary {
+    @apply h-9 px-4 inline-flex items-center justify-center gap-2 rounded-lg bg-primary text-background-dark text-sm font-medium whitespace-nowrap
+      shadow-[inset_0_1px_0_rgba(255,255,255,0.4)] transition-colors duration-150 ease-out hover:bg-white
+      disabled:opacity-40 disabled:cursor-default focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40;
+  }
+  .ui-btn {
+    @apply h-8 px-3 inline-flex items-center justify-center gap-1.5 rounded-lg text-[13px] font-medium text-slate-100 whitespace-nowrap
+      bg-raised border border-white/[0.07] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]
+      transition-[background-color,transform] duration-150 ease-out hover:bg-[#26262a] active:scale-[0.98]
+      disabled:opacity-40 disabled:cursor-default disabled:active:scale-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25;
+  }
+  .ui-btn-ghost {
+    @apply h-8 px-3 inline-flex items-center justify-center gap-1.5 rounded-md text-sm text-slate-400 whitespace-nowrap
+      transition-colors duration-150 ease-out hover:text-slate-100 hover:bg-raised
+      disabled:opacity-40 disabled:cursor-default focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25;
+  }
+  .ui-icon-btn {
+    @apply size-8 inline-flex items-center justify-center rounded-md text-slate-500
+      transition-colors duration-150 ease-out hover:text-slate-200 hover:bg-raised
+      focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25;
+  }
+
+  /* Segmented control (Daily / Total on the dashboard) */
+  .ui-seg { @apply inline-flex p-0.5 rounded-lg bg-surface border border-white/[0.07]; }
+  .ui-seg-btn { @apply h-7 px-3 rounded-md text-xs font-medium text-slate-500 transition-colors duration-150 ease-out hover:text-slate-200; }
+  .ui-seg-btn-active { @apply bg-raised text-slate-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] hover:text-slate-100; }
+
+  /* Form fields */
+  .ui-input {
+    @apply w-full h-9 bg-background-dark border border-white/[0.08] rounded-lg px-3 text-sm text-slate-200 placeholder-slate-600
+      transition-colors duration-150 ease-out focus:outline-none focus:border-white/25 disabled:opacity-50;
+  }
+  textarea.ui-input { @apply h-auto py-2.5; }
+  .ui-field-label { @apply block text-sm text-slate-300 mb-2; }
+  .ui-help { @apply text-xs text-slate-500 mt-2; }
+
+  /* Status: a dot and a word. Green only for things actually running/live. */
+  .ui-dot { @apply size-1.5 rounded-full shrink-0; }
+  .ui-dot-live { @apply bg-gain shadow-[0_0_0_3px_rgba(76,195,138,0.15)]; }
+  .ui-dot-warn { @apply bg-amber-400; }
+  .ui-dot-off { @apply bg-slate-600; }
+  .ui-dot-error { @apply bg-loss; }
+
+  /* Messages */
+  .ui-error { @apply rounded-xl border border-loss/20 bg-loss/5 px-5 py-4 text-sm text-loss; }
+  .ui-empty { @apply px-6 py-12 flex flex-col items-center gap-4 text-center text-sm text-slate-400; }
+
+  /* Modal */
+  .ui-overlay { @apply fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60; }
+  .ui-modal { @apply w-full bg-surface border border-white/[0.08] rounded-2xl shadow-[0_24px_48px_rgba(0,0,0,0.5)] overflow-hidden; }
+  .ui-modal-head { @apply flex items-start gap-3 px-6 pt-5 pb-4; }
+  .ui-modal-body { @apply px-6 pb-5; }
+  .ui-modal-foot { @apply px-6 py-4 flex items-center justify-end gap-2 border-t border-white/[0.06]; }
+
+  /* Overflow menu (the "⋯" on a row): same surface as the dashboard's
+     account switcher. Position the wrapper `relative`, the menu absolute. */
+  .ui-menu {
+    @apply absolute right-0 top-full mt-1 z-30 min-w-[176px] p-1 rounded-xl border border-white/[0.08] bg-surface
+      shadow-[0_16px_40px_rgba(0,0,0,0.5)];
+  }
+  .ui-menu-item {
+    @apply w-full h-9 px-3 flex items-center gap-2.5 rounded-lg text-left text-sm text-slate-200 whitespace-nowrap
+      transition-colors duration-150 ease-out hover:bg-white/[0.04] disabled:opacity-40 disabled:cursor-default;
+  }
+  .ui-menu-sep { @apply my-1 h-px bg-white/[0.06]; }
+
+  /* Switch (a boolean setting) */
+  .ui-switch { @apply relative inline-flex h-5 w-9 shrink-0 items-center rounded-full bg-raised border border-white/[0.08] transition-colors duration-150 ease-out; }
+  .ui-switch[aria-checked="true"] { @apply bg-primary border-transparent; }
+  .ui-switch-knob { @apply size-3.5 rounded-full bg-slate-400 translate-x-[3px] transition-transform duration-150 ease-out; }
+  .ui-switch[aria-checked="true"] .ui-switch-knob { @apply bg-background-dark translate-x-[19px]; }
+
+  /* Skeleton block (static, no shimmer) */
+  .ui-skel { @apply rounded bg-raised; }
+}
+
+/* ─────────────────────────────────────────
+   Legacy surface helpers, still used by app
+   pages. One graphite ramp: a surface step
+   plus a hairline, never a glow or blur.
 ───────────────────────────────────────── */
 .glass-card {
   background: #161617;
   border: 1px solid rgba(237, 237, 237, 0.07);
 }
 
-.gradient-text {
-  color: #ededed;
+/* Card hover: a hairline step, no lift */
+.card-hover {
+  transition: border-color 160ms cubic-bezier(0.22, 1, 0.36, 1), background-color 160ms cubic-bezier(0.22, 1, 0.36, 1);
 }
-
-/* Marketing-only (landing page) — the violet glass look lives here so the
-   app chrome stays neutral. Do not use inside authenticated pages. */
-.mk-glass-card {
-  background: linear-gradient(180deg, rgba(23, 14, 45, 0.78) 0%, rgba(11, 8, 24, 0.7) 100%);
-  backdrop-filter: blur(14px);
-  border: 1px solid rgba(188, 154, 255, 0.12);
-}
-
-.mk-gradient-text {
-  background: linear-gradient(135deg, #fbf5ff 0%, #d9abff 42%, #9850ff 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
+.card-hover:hover {
+  border-color: rgba(237, 237, 237, 0.14) !important;
+  background-color: #1a1a1c;
 }
 
 /* ─────────────────────────────────────────
-   Chart animations (SVG)
-───────────────────────────────────────── */
-.chart-line {
-  stroke-dasharray: 1000;
-  stroke-dashoffset: 1000;
-  animation: draw 4s ease-out forwards;
-}
-
-@keyframes draw {
-  to { stroke-dashoffset: 0; }
-}
-
-.pulse-dot {
-  animation: pulse-dot 2s infinite;
-  transform-origin: center;
-}
-
-@keyframes pulse-dot {
-  0%   { transform: scale(1);   opacity: 1;   }
-  50%  { transform: scale(1.5); opacity: 0.5; }
-  100% { transform: scale(1);   opacity: 1;   }
-}
-
-/* ─────────────────────────────────────────
-   Hero — load-in stagger (above-the-fold)
-   Uses animation-fill-mode: both so elements
-   start invisible before the delay fires.
-───────────────────────────────────────── */
-@keyframes heroFadeUp {
-  from { opacity: 0; transform: translateY(22px); }
-  to   { opacity: 1; transform: translateY(0);    }
-}
-
-.hero-item {
-  animation: heroFadeUp 0.9s cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-.hero-item-1 { animation-delay: 0.05s; }
-.hero-item-2 { animation-delay: 0.2s;  }
-.hero-item-3 { animation-delay: 0.35s; }
-.hero-item-4 { animation-delay: 0.5s;  }
-.hero-item-5 { animation-delay: 0.7s;  }
-
-/* ─────────────────────────────────────────
-   Scroll Reveal  (v-reveal directive)
-   Uses CSS custom properties so direction
-   variants just override the vars — no
-   duplication of transition rules.
-───────────────────────────────────────── */
-.reveal {
-  --rv-x: 0px;
-  --rv-y: 28px;
-  --rv-s: 1;
-  opacity: 0;
-  transform: translate(var(--rv-x), var(--rv-y)) scale(var(--rv-s));
-  transition:
-    opacity  0.8s cubic-bezier(0.16, 1, 0.3, 1),
-    transform 0.8s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.reveal.from-left  { --rv-x: -40px; --rv-y: 0px; }
-.reveal.from-right { --rv-x:  40px; --rv-y: 0px; }
-.reveal.from-scale { --rv-s: 0.94;  --rv-y: 12px; }
-
-.reveal.is-visible {
-  opacity: 1;
-  --rv-x: 0px;
-  --rv-y: 0px;
-  --rv-s: 1;
-}
-
-/* Stagger helpers */
-.delay-100 { transition-delay: 100ms; }
-.delay-150 { transition-delay: 150ms; }
-.delay-200 { transition-delay: 200ms; }
-.delay-300 { transition-delay: 300ms; }
-.delay-400 { transition-delay: 400ms; }
-.delay-500 { transition-delay: 500ms; }
-
-/* ─────────────────────────────────────────
-   Typewriter cursor blink
-───────────────────────────────────────── */
-@keyframes blink {
-  0%, 100% { opacity: 1; }
-  50%       { opacity: 0; }
-}
-
-.cursor-blink {
-  display: inline-block;
-  width: 7px;
-  height: 1em;
-  background: currentColor;
-  animation: blink 1s step-end infinite;
-  vertical-align: text-bottom;
-  margin-left: 2px;
-}
-
-/* ─────────────────────────────────────────
-   Custom Scrollbars
+   Scrollbars (zinc, to match the ramp)
 ───────────────────────────────────────── */
 * {
   scrollbar-width: thin;
-  scrollbar-color: rgba(100, 116, 139, 0.3) transparent;
+  scrollbar-color: rgba(161, 161, 170, 0.25) transparent;
 }
 
 *::-webkit-scrollbar {
@@ -164,37 +156,16 @@ body {
 }
 
 *::-webkit-scrollbar-thumb {
-  background: rgba(100, 116, 139, 0.3);
+  background: rgba(161, 161, 170, 0.25);
   border-radius: 999px;
 }
 
 *::-webkit-scrollbar-thumb:hover {
-  background: rgba(100, 116, 139, 0.55);
+  background: rgba(161, 161, 170, 0.45);
 }
 
 *::-webkit-scrollbar-corner {
   background: transparent;
-}
-
-/* ─────────────────────────────────────────
-   Card hover — a hairline step, no lift
-───────────────────────────────────────── */
-.card-hover {
-  transition: border-color 160ms cubic-bezier(0.22, 1, 0.36, 1), background-color 160ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-.card-hover:hover {
-  border-color: rgba(237, 237, 237, 0.14) !important;
-  background-color: #1a1a1c;
-}
-
-/* Marketing-only hover lift. */
-.mk-card-hover {
-  transition: border-color 0.3s, box-shadow 0.3s, transform 0.3s;
-}
-.mk-card-hover:hover {
-  border-color: rgba(212, 176, 255, 0.4) !important;
-  box-shadow: 0 24px 48px rgba(19, 10, 45, 0.34), 0 0 0 1px rgba(215, 180, 255, 0.06);
-  transform: translateY(-3px);
 }
 
 /* ─────────────────────────────────────────
@@ -212,98 +183,22 @@ body {
 }
 
 /* ─────────────────────────────────────────
-   Onboarding — restrained step transitions,
-   progress shimmer, and a single completion
-   ray burst. No animated gradient sweeps,
-   no aurora — fintech-restrained, not neon.
+   Step change (onboarding wizard and its
+   inline messages): a short fade, nothing
+   slides, scales or blurs.
 ───────────────────────────────────────── */
-.onboarding-title {
-  /* Pure white. The previous animated multi-stop gradient
-     read as "sci-fi"; a flat heading lets the content do
-     the talking and matches Linear / Stripe onboarding. */
-  color: #f8fafc;
-}
-
-@keyframes progress-shimmer {
-  0%   { transform: translateX(-120%); }
-  100% { transform: translateX( 220%); }
-}
-
-.onboarding-progress-fill {
-  background: #ededed;
-}
-
-@keyframes onboarding-letter-in {
-  0%   { opacity: 0; transform: translateY(12px); }
-  100% { opacity: 1; transform: translateY(0);    }
-}
-
-.onboarding-letter {
-  animation: onboarding-letter-in 0.55s cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-
-/* Per-character spans in StepWelcome need inline-block so transforms apply.
-   Block elements (p / h2 / div) using the same class keep their natural
-   display so they stack normally instead of flowing inline beside each other. */
-span.onboarding-letter {
-  display: inline-block;
-}
-
-/* CTA gets a soft, static halo — no infinite pulse.
-   The pulsing ring read as "this is the only button on
-   the page!", which is exactly what we don't want a
-   professional onboarding to scream. */
-.onboarding-cta {
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
-}
-
-@keyframes onboarding-ray {
-  0%   { transform: rotate(var(--ray-rot)) scaleY(0); opacity: 0; }
-  60%  { opacity: 1; }
-  100% { transform: rotate(var(--ray-rot)) scaleY(1); opacity: 0; }
-}
-
-.onboarding-ray {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 4px;
-  height: 220px;
-  margin-left: -2px;
-  margin-top: -110px;
-  transform-origin: 50% 100%;
-  background: linear-gradient(180deg, rgba(237, 237, 237, 0.7) 0%, transparent 100%);
-  animation: onboarding-ray 1.6s ease-out forwards;
-}
-
-@keyframes onboarding-checkmark-pop {
-  0%   { transform: scale(0.4); opacity: 0; }
-  50%  { transform: scale(1.18); opacity: 1; }
-  100% { transform: scale(1);    opacity: 1; }
-}
-
-.onboarding-checkmark {
-  animation: onboarding-checkmark-pop 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) both;
-}
-
-/* Step transition: directional slide + fade + slight scale.
-   The orchestrator toggles `data-direction="forward|back"` on the wrapper
-   so the same names work in both directions. */
 .step-enter-active,
 .step-leave-active {
-  transition: opacity 0.45s cubic-bezier(0.16, 1, 0.3, 1),
-              transform 0.55s cubic-bezier(0.16, 1, 0.3, 1),
-              filter 0.45s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: opacity 180ms cubic-bezier(0.22, 1, 0.36, 1), transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 .step-enter-from {
   opacity: 0;
-  transform: translateX(60px) scale(0.985);
-  filter: blur(8px);
+  transform: translateY(6px);
 }
 .step-leave-to {
   opacity: 0;
-  transform: translateX(-60px) scale(0.985);
-  filter: blur(8px);
 }
-[data-direction="back"] .step-enter-from { transform: translateX(-60px) scale(0.985); }
-[data-direction="back"] .step-leave-to   { transform: translateX( 60px) scale(0.985); }
+@media (prefers-reduced-motion: reduce) {
+  .step-enter-active,
+  .step-leave-active { transition: none; }
+}

@@ -190,7 +190,7 @@ async function submitLink(opts = {}) {
           hints: [_normalizeErrorDetail(data, r.status)],
         }
         showTestPopup.value = true
-        submitMsg.value = 'Credential test failed — review the popup. Click "Save Anyway" to bypass.'
+        submitMsg.value = 'Credential test failed — review the results. Click "Save anyway" to bypass.'
         submitOk.value = false
         submitting.value = false
         return
@@ -280,14 +280,14 @@ async function submitLink(opts = {}) {
       // 2026-04-23: surface data-access test result on success
       const _da = data?.data_access
       if (_da?.ok) {
-        submitMsg.value = `Account updated! Data access verified (feed=${_da.feed}, ${_da.bars ?? 0} bar(s) fetched).`
+        submitMsg.value = `Account updated. Data access verified (feed=${_da.feed}, ${_da.bars ?? 0} bar(s) fetched).`
         submitOk.value = true
       } else if (_da?.warning) {
         submitMsg.value = `Account updated. Data access could not be verified (${_da.warning}); will retry at broker boot.`
         submitOk.value = true
       }
       submitOk.value  = true
-      submitMsg.value = `Account "${data.account?.account_name}" updated successfully!`
+      submitMsg.value = `Account "${data.account?.account_name}" updated.`
       await fetchAccounts()
       setTimeout(() => { showModal.value = false }, 1500)
       return
@@ -309,7 +309,7 @@ async function submitLink(opts = {}) {
     let _suffix = ''
     if (_da?.ok) _suffix = ` Data access verified (feed=${_da.feed}, ${_da.bars ?? 0} bar(s) fetched).`
     else if (_da?.warning) _suffix = ` Data access deferred: ${_da.warning}.`
-    submitMsg.value = `Account "${data.account?.account_name}" linked successfully!${_suffix}`
+    submitMsg.value = `Account "${data.account?.account_name}" linked.${_suffix}`
     await fetchAccounts()
     setTimeout(() => { showModal.value = false }, 1500)
 
@@ -394,16 +394,18 @@ async function runAlpacaTestSuite() {
 }
 
 // ── Status helpers ────────────────────────────────────────────────────────────
+// Status is a dot plus a word: green for a live connection, red for expired
+// credentials, amber for anything still settling.
 function statusColor(status) {
-  if (status === 'active')  return 'text-emerald-400'
-  if (status === 'expired') return 'text-red-400'
-  return 'text-yellow-400'
+  if (status === 'active')  return 'text-slate-200'
+  if (status === 'expired') return 'text-slate-200'
+  return 'text-slate-300'
 }
 
 function statusDot(status) {
-  if (status === 'active')  return 'bg-emerald-400'
-  if (status === 'expired') return 'bg-red-400'
-  return 'bg-yellow-400'
+  if (status === 'active')  return 'ui-dot-live'
+  if (status === 'expired') return 'ui-dot-error'
+  return 'ui-dot-warn'
 }
 
 onMounted(fetchAccounts)
@@ -411,119 +413,113 @@ onMounted(fetchAccounts)
 
 <template>
   <AppShell>
-    <main class="flex-1 px-4 py-6 sm:px-6 sm:py-8 lg:px-8 lg:py-10">
+    <main class="ui-page">
 
       <!-- Header -->
-      <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between mb-6 sm:mb-8">
-        <div>
-          <p class="text-primary text-xs font-bold uppercase tracking-widest mb-1">Brokerages</p>
-          <h1 class="text-2xl sm:text-3xl font-bold leading-tight">Linked Accounts</h1>
-          <p class="text-slate-400 text-sm mt-1 max-w-md">Manage your brokerage connections.</p>
+      <header class="flex flex-wrap items-end justify-between gap-x-4 gap-y-3">
+        <div class="min-w-0">
+          <h1 class="ui-page-title">Brokerages</h1>
+          <p class="ui-page-sub">Linked accounts the instances trade through</p>
         </div>
-        <button
-          @click="openModal"
-          class="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-primary text-background-dark font-semibold text-sm hover:brightness-110 transition-all shrink-0"
-        >
-          <span class="material-symbols-outlined text-[18px]">add</span>
-          Link Brokerage
-        </button>
-      </div>
+        <button @click="openModal" class="ui-btn-primary">Link brokerage</button>
+      </header>
 
-      <!-- Loading -->
-      <div v-if="loading" class="flex items-center gap-3 text-slate-400 text-sm">
-        <span class="material-symbols-outlined animate-spin text-xl">progress_activity</span>
-        Loading accounts...
-      </div>
+      <section class="mt-8">
+        <!-- Loading -->
+        <div v-if="loading" class="ui-card overflow-hidden" aria-label="Loading accounts">
+          <div class="hidden xl:block h-10 border-b border-white/[0.06]"></div>
+          <div class="ui-rows">
+            <div v-for="n in 3" :key="n" class="h-16 px-5 flex flex-col justify-center gap-2">
+              <div class="ui-skel h-4 w-40"></div>
+              <div class="ui-skel h-3 w-24"></div>
+            </div>
+          </div>
+        </div>
 
-      <!-- Error -->
-      <div v-else-if="loadError" class="rounded-xl bg-red-500/10 border border-red-500/20 px-5 py-4 text-red-400 text-sm">
-        {{ loadError }}
-      </div>
+        <!-- Error -->
+        <div v-else-if="loadError" class="ui-error">
+          {{ loadError }}
+        </div>
 
-      <!-- Empty state -->
-      <div
-        v-else-if="accounts.length === 0"
-        class="rounded-2xl border border-border-subtle bg-surface/30 px-8 py-16 flex flex-col items-center gap-4 text-center"
-      >
-        <span class="material-symbols-outlined text-5xl text-slate-600">account_balance</span>
-        <p class="text-slate-300 font-semibold">No brokerages linked yet</p>
-        <p class="text-slate-500 text-sm max-w-xs">Link an Alpaca account to start stock trading.</p>
-        <button
-          @click="openModal"
-          class="mt-2 px-5 py-2 rounded-lg bg-primary text-background-dark font-semibold text-sm hover:brightness-110 transition-all"
-        >
-          Link your first brokerage
-        </button>
-      </div>
+        <!-- Empty state -->
+        <div v-else-if="accounts.length === 0" class="ui-card">
+          <div class="ui-empty">
+            <p>No brokerage linked yet. Link an Alpaca account to start stock trading.</p>
+            <button @click="openModal" class="ui-btn-primary">Link brokerage</button>
+          </div>
+        </div>
 
-      <!-- Account cards -->
-      <div v-else class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
-        <div
-          v-for="acct in accounts"
-          :key="acct.id"
-          class="glass-card rounded-2xl p-5 sm:p-6 flex flex-col gap-4"
-        >
-          <!-- Card header -->
-          <div class="flex items-start justify-between gap-3 min-w-0">
-            <div class="flex items-center gap-3 min-w-0">
-              <div class="size-10 rounded-xl bg-surface border border-border-subtle flex items-center justify-center shrink-0">
-                <span class="material-symbols-outlined text-primary text-xl">
-                  {{ acct.brokerage_type === 'alpaca' ? 'show_chart' : 'savings' }}
-                </span>
-              </div>
-              <div class="min-w-0">
-                <p class="font-semibold text-slate-100 leading-tight truncate" :title="acct.account_name">{{ acct.account_name }}</p>
-                <p class="text-xs text-slate-500 uppercase tracking-widest mt-0.5">
-                  {{ acct.brokerage_type === 'binanceus' ? 'Binance.US' : acct.brokerage_type }}
-                  <span v-if="(acct.brokerage_type === 'alpaca' || acct.brokerage_type === 'binanceus') && acct.alpaca_paper" class="text-primary">&nbsp;· Paper</span>
-                  <span v-if="(acct.brokerage_type === 'alpaca' || acct.brokerage_type === 'binanceus') && !acct.alpaca_paper" class="text-yellow-400">&nbsp;· Live</span>
+        <!-- Account list -->
+        <div v-else class="ui-card overflow-hidden">
+          <div class="bk-head hidden xl:grid ui-th">
+            <span>Account</span>
+            <span>Status</span>
+            <span>Key</span>
+            <span>Account number</span>
+            <span>Last refreshed</span>
+            <span></span>
+          </div>
+
+          <ul class="ui-rows">
+            <li
+              v-for="acct in accounts"
+              :key="acct.id"
+              class="bk-row px-5 py-3 min-h-16 transition-colors duration-150 ease-out hover:bg-white/[0.02]"
+            >
+              <!-- Name and kind -->
+              <div class="bk-name min-w-0">
+                <p class="text-sm text-slate-100 truncate" :title="acct.account_name">{{ acct.account_name }}</p>
+                <p class="text-xs text-slate-500 mt-0.5">
+                  {{ acct.brokerage_type === 'binanceus' ? 'Binance.US' : fmtType(acct.brokerage_type) }}
+                  <span v-if="(acct.brokerage_type === 'alpaca' || acct.brokerage_type === 'binanceus') && acct.alpaca_paper"> · Paper</span>
+                  <span v-if="(acct.brokerage_type === 'alpaca' || acct.brokerage_type === 'binanceus') && !acct.alpaca_paper"> · Live</span>
                 </p>
               </div>
-            </div>
-            <div class="flex items-center gap-1.5 shrink-0">
-              <div class="size-2 rounded-full" :class="statusDot(acct.status)"></div>
-              <span class="text-xs font-medium" :class="statusColor(acct.status)">{{ acct.status }}</span>
-            </div>
-          </div>
 
-          <!-- Details -->
-          <div class="space-y-1.5 text-xs text-slate-500">
-            <div v-if="acct.brokerage_type === 'alpaca'">
-              <span class="text-slate-400">Key: </span>{{ acct.alpaca_key }}
-            </div>
-            <div v-if="acct.brokerage_type === 'binanceus' && acct.binanceus_key">
-              <span class="text-slate-400">Key: </span>{{ acct.binanceus_key }}
-            </div>
-            <div v-if="acct.brokerage_type === 'alpaca' && acct.alpaca_account_number">
-              <span class="text-slate-400">Account #: </span>{{ acct.alpaca_account_number }}
-            </div>
-            <div v-if="acct.last_refresh_at">
-              <span class="text-slate-400">Last refreshed: </span>{{ new Date(acct.last_refresh_at).toLocaleString() }}
-            </div>
-            <div v-if="acct.last_error" class="text-red-400 break-words">
-              <span class="text-red-400 font-medium">Error: </span>{{ acct.last_error }}
-            </div>
-          </div>
+              <!-- Status -->
+              <span class="bk-status inline-flex items-center gap-2 text-sm" :class="statusColor(acct.status)">
+                <span class="ui-dot" :class="statusDot(acct.status)"></span>
+                {{ fmtType(acct.status) }}
+              </span>
 
-          <!-- Actions -->
-          <div class="flex flex-wrap items-center gap-2 pt-1 mt-auto">
-            <button
-              @click="openEditModal(acct)"
-              class="w-full sm:w-auto inline-flex items-center justify-center gap-1 px-3 py-1.5 rounded-lg text-xs font-medium text-slate-300 hover:text-primary hover:bg-surface border border-border-subtle transition-colors"
-            >
-              <span class="material-symbols-outlined text-[14px]">edit</span>
-              Edit
-            </button>
-            <button
-              @click="deleteAccount(acct.id, acct.account_name)"
-              class="w-full sm:w-auto inline-flex items-center justify-center gap-1 px-3 py-1.5 rounded-lg text-xs font-medium text-slate-500 hover:text-red-400 hover:bg-red-500/5 border border-border-subtle transition-colors sm:ml-auto"
-            >
-              <span class="material-symbols-outlined text-[14px]">delete</span>
-              Remove
-            </button>
-          </div>
+              <!-- Details: a line under the name on small screens, columns on wide ones -->
+              <div class="bk-details">
+                <span class="bk-key" :class="(acct.brokerage_type === 'alpaca' || (acct.brokerage_type === 'binanceus' && acct.binanceus_key)) ? '' : 'bk-empty'">
+                  <span class="xl:hidden text-slate-500">Key </span>
+                  <span class="font-mono text-slate-400">
+                    <template v-if="acct.brokerage_type === 'alpaca'">{{ acct.alpaca_key }}</template>
+                    <template v-else-if="acct.brokerage_type === 'binanceus' && acct.binanceus_key">{{ acct.binanceus_key }}</template>
+                    <template v-else>—</template>
+                  </span>
+                </span>
+                <span class="bk-acct" :class="acct.brokerage_type === 'alpaca' && acct.alpaca_account_number ? '' : 'bk-empty'">
+                  <span class="xl:hidden text-slate-500">Account </span>
+                  <span class="text-slate-400 tabular-nums">{{ (acct.brokerage_type === 'alpaca' && acct.alpaca_account_number) || '—' }}</span>
+                </span>
+                <span class="bk-refresh" :class="acct.last_refresh_at ? '' : 'bk-empty'">
+                  <span class="xl:hidden text-slate-500">Refreshed </span>
+                  <span class="text-slate-500 tabular-nums">{{ acct.last_refresh_at ? new Date(acct.last_refresh_at).toLocaleString() : '—' }}</span>
+                </span>
+              </div>
+
+              <!-- Actions -->
+              <div class="bk-actions flex items-center gap-1">
+                <button @click="openEditModal(acct)" class="ui-btn">Edit</button>
+                <button
+                  @click="deleteAccount(acct.id, acct.account_name)"
+                  class="ui-btn-ghost hover:text-loss"
+                >
+                  Remove
+                </button>
+              </div>
+
+              <p v-if="acct.last_error" class="bk-error text-xs text-loss break-words">
+                Error: {{ acct.last_error }}
+              </p>
+            </li>
+          </ul>
         </div>
-      </div>
+      </section>
 
     </main>
   </AppShell>
@@ -533,81 +529,72 @@ onMounted(fetchAccounts)
     <Transition name="fade">
       <div
         v-if="showModal"
-        class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+        class="ui-overlay"
         @click.self="closeModal"
       >
-        <div class="relative w-full max-w-md bg-surface border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
+        <div class="modal-panel ui-modal max-w-md flex flex-col max-h-[90vh]">
 
           <!-- Modal header -->
-          <div class="flex items-center justify-between px-6 py-5 border-b border-border-subtle">
-            <div>
-              <h2 class="text-base font-bold">{{ editMode ? 'Edit Brokerage Account' : 'Link Brokerage Account' }}</h2>
-            </div>
-            <button @click="closeModal" class="text-slate-500 hover:text-slate-300 transition-colors">
-              <span class="material-symbols-outlined">close</span>
+          <div class="ui-modal-head shrink-0">
+            <h2 class="text-base font-medium text-slate-100">{{ editMode ? 'Edit brokerage account' : 'Link brokerage account' }}</h2>
+            <button @click="closeModal" class="ui-icon-btn ml-auto shrink-0" aria-label="Close">
+              <span class="material-symbols-outlined text-[18px]">close</span>
             </button>
           </div>
 
-          <!-- Brokerage selector -->
-          <div v-if="!editMode" class="px-6 pt-5">
-            <div class="flex rounded-lg bg-surface border border-border-subtle p-1 gap-1">
+          <div class="ui-modal-body flex-1 overflow-y-auto space-y-5">
+
+            <!-- Brokerage selector -->
+            <div v-if="!editMode" class="ui-seg w-full" role="group" aria-label="Brokerage">
               <button
                 @click="setTab('alpaca')"
-                class="flex-1 py-2 rounded-md text-sm font-semibold transition-all"
-                :class="activeTab === 'alpaca'
-                  ? 'bg-primary text-background-dark'
-                  : 'text-slate-400 hover:text-slate-200'"
+                class="ui-seg-btn flex-1 h-8 text-sm"
+                :class="activeTab === 'alpaca' ? 'ui-seg-btn-active' : ''"
               >
                 Alpaca
               </button>
               <button
                 @click="setTab('kalshi')"
-                class="flex-1 py-2 rounded-md text-sm font-semibold transition-all"
-                :class="activeTab === 'kalshi'
-                  ? 'bg-primary text-background-dark'
-                  : 'text-slate-400 hover:text-slate-200'"
+                class="ui-seg-btn flex-1 h-8 text-sm"
+                :class="activeTab === 'kalshi' ? 'ui-seg-btn-active' : ''"
               >
                 Kalshi
               </button>
               <button
                 @click="setTab('binanceus')"
-                class="flex-1 py-2 rounded-md text-sm font-semibold transition-all"
-                :class="activeTab === 'binanceus'
-                  ? 'bg-primary text-background-dark'
-                  : 'text-slate-400 hover:text-slate-200'"
+                class="ui-seg-btn flex-1 h-8 text-sm"
+                :class="activeTab === 'binanceus' ? 'ui-seg-btn-active' : ''"
               >
                 Binance.US
               </button>
             </div>
-          </div>
-
-          <!-- Form body -->
-          <div class="px-6 py-5 space-y-4">
 
             <!-- ── Alpaca fields ── -->
             <template v-if="activeTab === 'alpaca'">
               <div>
-                <label class="block text-xs font-medium text-slate-400 mb-1.5">Account Name</label>
-                <input v-model="alpacaForm.account_name" type="text" placeholder="e.g. My Paper Trading"
-                  class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors" />
+                <label class="ui-field-label">Account name</label>
+                <input v-model="alpacaForm.account_name" type="text" placeholder="e.g. My paper trading"
+                  class="ui-input" />
               </div>
               <div>
-                <label class="block text-xs font-medium text-slate-400 mb-1.5">API Key ID</label>
+                <label class="ui-field-label">API key ID</label>
                 <input v-model="alpacaForm.key" type="text" placeholder="PKXXXXXXXXXXXXXXXXXXXXXXXX"
-                  class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono" />
+                  class="ui-input font-mono" />
               </div>
               <div>
-                <label class="block text-xs font-medium text-slate-400 mb-1.5">Secret Key<span v-if="editMode" class="text-slate-600 ml-1">(leave blank to keep existing)</span></label>
+                <label class="ui-field-label">Secret key<span v-if="editMode" class="text-slate-500 ml-1">(leave blank to keep existing)</span></label>
                 <input v-model="alpacaForm.secret" type="password"
                   :placeholder="editMode ? 'Leave blank to keep existing secret' : '••••••••••••••••••••••••••••••••••••••••'"
-                  class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono" />
+                  class="ui-input font-mono" />
               </div>
               <div class="flex items-center gap-3">
                 <button type="button" @click="alpacaForm.paper = !alpacaForm.paper"
-                  class="relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 transition-colors"
-                  :class="alpacaForm.paper ? 'bg-primary border-primary' : 'bg-surface border-border-subtle'">
-                  <span class="inline-block size-3.5 rounded-full bg-white shadow transition-transform"
-                    :class="alpacaForm.paper ? 'translate-x-4' : 'translate-x-0.5'"></span>
+                  class="switch"
+                  :class="alpacaForm.paper ? 'switch-on' : ''"
+                  role="switch"
+                  :aria-checked="alpacaForm.paper"
+                  aria-label="Paper trading">
+                  <span class="switch-knob"></span>
                 </button>
                 <span class="text-sm text-slate-300">
                   Paper trading
@@ -615,16 +602,15 @@ onMounted(fetchAccounts)
                 </span>
               </div>
               <div>
-                <label class="block text-xs font-medium text-slate-400 mb-1.5">
-                  Market Data Feed
-                  <span class="text-slate-600 ml-1">(validated on save via data.alpaca.markets)</span>
+                <label class="ui-field-label">
+                  Market data feed
+                  <span class="text-slate-500 ml-1">(validated on save via data.alpaca.markets)</span>
                 </label>
-                <select v-model="alpacaForm.data_feed"
-                  class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary transition-colors">
+                <select v-model="alpacaForm.data_feed" class="ui-input">
                   <option value="iex">IEX (free — Basic Market Data)</option>
                   <option value="sip">SIP (paid — Algo Trader Plus)</option>
                 </select>
-                <p class="text-[11px] text-slate-500 mt-1.5 leading-relaxed">
+                <p class="ui-help leading-relaxed">
                   Paper accounts have free IEX access. Live (funded) accounts must explicitly
                   subscribe to "Basic Market Data" on the Alpaca dashboard for IEX, or
                   "Algo Trader Plus" ($99/mo) for SIP. Save fails with a clear error if the
@@ -636,69 +622,74 @@ onMounted(fetchAccounts)
             <!-- ── Kalshi fields ── -->
             <template v-else-if="activeTab === 'kalshi'">
               <div>
-                <label class="block text-xs font-medium text-slate-400 mb-1.5">Account Name</label>
-                <input v-model="kalshiForm.account_name" type="text" placeholder="e.g. Kalshi Live"
-                  class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors" />
+                <label class="ui-field-label">Account name</label>
+                <input v-model="kalshiForm.account_name" type="text" placeholder="e.g. Kalshi live"
+                  class="ui-input" />
               </div>
               <div>
-                <label class="block text-xs font-medium text-slate-400 mb-1.5">API Key ID</label>
+                <label class="ui-field-label">API key ID</label>
                 <input v-model="kalshiForm.key_id" type="text" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-                  class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono" />
+                  class="ui-input font-mono" />
               </div>
               <div>
-                <label class="block text-xs font-medium text-slate-400 mb-1.5">RSA Private Key (PEM)</label>
+                <label class="ui-field-label">RSA private key (PEM)</label>
                 <textarea v-model="kalshiForm.private_key" rows="5" placeholder="-----BEGIN PRIVATE KEY-----&#10;...&#10;-----END PRIVATE KEY-----"
-                  class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-xs text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono"></textarea>
-                <p class="text-[11px] text-slate-500 mt-1">Stored encrypted at rest. Used only for RSA-PSS request signing.</p>
+                  class="ui-input text-xs font-mono"></textarea>
+                <p class="ui-help">Stored encrypted at rest. Used only for RSA-PSS request signing.</p>
               </div>
               <div>
-                <label class="block text-xs font-medium text-slate-400 mb-1.5">Environment</label>
-                <select v-model="kalshiForm.environment"
-                  class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary transition-colors">
+                <label class="ui-field-label">Environment</label>
+                <select v-model="kalshiForm.environment" class="ui-input">
                   <option value="demo">Demo (paper · demo-api.kalshi.co)</option>
                   <option value="live">Live (real money)</option>
                 </select>
-                <p v-if="kalshiForm.environment === 'live'" class="text-[11px] text-yellow-400 mt-1">⚠ Live account — instances bound here trade real money.</p>
+                <p v-if="kalshiForm.environment === 'live'" class="mt-2 flex items-start gap-2 text-xs text-slate-300">
+                  <span class="ui-dot ui-dot-warn mt-1.5"></span>
+                  <span>Live account — instances bound here trade real money.</span>
+                </p>
               </div>
             </template>
 
             <!-- ── Binance.US fields ── -->
             <template v-else-if="activeTab === 'binanceus'">
-              <div class="rounded-lg bg-primary/10 border border-primary/20 px-4 py-3 text-[11px] text-primary/90 leading-relaxed">
-                Spot fees: <strong>0.00% maker / 0.02% taker</strong> — ~12× cheaper than
+              <div class="rounded-lg border border-white/[0.07] px-4 py-3 text-xs text-slate-400 leading-relaxed">
+                Spot fees: <span class="text-slate-200 tabular-nums">0.00% maker / 0.02% taker</span> — ~12× cheaper than
                 Alpaca crypto (0.25%), which is what makes high-frequency strategies viable.
                 Create a read+trade API key at binance.us (no withdrawal permission needed).
               </div>
               <div>
-                <label class="block text-xs font-medium text-slate-400 mb-1.5">Account Name</label>
-                <input v-model="binanceusForm.account_name" type="text" placeholder="e.g. Binance.US Paper"
-                  class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors" />
+                <label class="ui-field-label">Account name</label>
+                <input v-model="binanceusForm.account_name" type="text" placeholder="e.g. Binance.US paper"
+                  class="ui-input" />
               </div>
               <div>
-                <label class="block text-xs font-medium text-slate-400 mb-1.5">API Key</label>
+                <label class="ui-field-label">API key</label>
                 <input v-model="binanceusForm.key" type="text" placeholder="Binance.US API key"
-                  class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono" />
+                  class="ui-input font-mono" />
               </div>
               <div>
-                <label class="block text-xs font-medium text-slate-400 mb-1.5">Secret Key<span v-if="editMode" class="text-slate-600 ml-1">(leave blank to keep existing)</span></label>
+                <label class="ui-field-label">Secret key<span v-if="editMode" class="text-slate-500 ml-1">(leave blank to keep existing)</span></label>
                 <input v-model="binanceusForm.secret" type="password"
                   :placeholder="editMode ? 'Leave blank to keep existing secret' : '••••••••••••••••••••••••••••••••••••••••'"
-                  class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono" />
+                  class="ui-input font-mono" />
               </div>
               <div class="flex items-center gap-3">
                 <button type="button" @click="binanceusForm.paper = !binanceusForm.paper"
-                  class="relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 transition-colors"
-                  :class="binanceusForm.paper ? 'bg-primary border-primary' : 'bg-surface border-border-subtle'">
-                  <span class="inline-block size-3.5 rounded-full bg-white shadow transition-transform"
-                    :class="binanceusForm.paper ? 'translate-x-4' : 'translate-x-0.5'"></span>
+                  class="switch"
+                  :class="binanceusForm.paper ? 'switch-on' : ''"
+                  role="switch"
+                  :aria-checked="binanceusForm.paper"
+                  aria-label="Paper trading">
+                  <span class="switch-knob"></span>
                 </button>
                 <span class="text-sm text-slate-300">
                   Paper trading
                   <span class="text-slate-500 text-xs ml-1">({{ binanceusForm.paper ? 'simulated fills vs. live price' : 'live signed orders · real money' }})</span>
                 </span>
               </div>
-              <p v-if="!binanceusForm.paper" class="text-[11px] text-yellow-400 leading-relaxed">
-                ⚠ Live account — instances bound here place real Binance.US MARKET orders with real funds.
+              <p v-if="!binanceusForm.paper" class="flex items-start gap-2 text-xs text-slate-300 leading-relaxed">
+                <span class="ui-dot ui-dot-warn mt-1.5"></span>
+                <span>Live account — instances bound here place real Binance.US MARKET orders with real funds.</span>
               </p>
             </template>
 
@@ -706,13 +697,11 @@ onMounted(fetchAccounts)
             <Transition name="slide-up">
               <div
                 v-if="submitMsg"
-                class="rounded-lg px-4 py-3 text-sm font-medium"
-                :class="submitOk
-                  ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400'
-                  : 'bg-red-500/10 border border-red-500/20 text-red-400'"
+                class="msg"
+                :class="submitting && !submitOk ? 'msg-busy' : submitOk ? 'msg-ok' : 'msg-err'"
               >
                 <span v-if="submitting && !submitOk" class="inline-flex items-center gap-2">
-                  <span class="material-symbols-outlined text-base animate-spin">progress_activity</span>
+                  <span class="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
                   {{ submitMsg }}
                 </span>
                 <span v-else>{{ submitMsg }}</span>
@@ -721,11 +710,11 @@ onMounted(fetchAccounts)
           </div>
 
           <!-- Modal footer -->
-          <div class="px-6 pb-6 flex gap-3">
+          <div class="ui-modal-foot shrink-0">
             <button
               @click="closeModal"
               :disabled="submitting"
-              class="flex-1 py-2.5 rounded-lg border border-border-subtle text-sm font-medium text-slate-400 hover:text-slate-200 transition-colors disabled:opacity-40"
+              class="ui-btn-ghost h-9 px-4 rounded-lg"
             >
               Cancel
             </button>
@@ -735,11 +724,10 @@ onMounted(fetchAccounts)
               v-if="activeTab === 'alpaca'"
               @click="runAlpacaTestSuite"
               :disabled="submitting || testRunning"
-              class="py-2.5 px-4 rounded-lg border border-primary/60 text-primary text-sm font-medium hover:bg-primary/10 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+              class="ui-btn h-9 px-4"
               title="Run a 5-endpoint probe (account, clock, bars, latest quote, news) against Alpaca with these credentials. Read-only; does not save."
             >
-              <span v-if="testRunning" class="material-symbols-outlined text-base animate-spin">progress_activity</span>
-              <span v-else class="material-symbols-outlined text-base">network_check</span>
+              <span v-if="testRunning" class="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
               {{ testRunning ? 'Testing...' : 'Test' }}
             </button>
 
@@ -748,10 +736,10 @@ onMounted(fetchAccounts)
               v-if="activeTab === 'alpaca' || activeTab === 'kalshi' || activeTab === 'binanceus'"
               @click="submitLink"
               :disabled="submitting"
-              class="flex-1 py-2.5 rounded-lg bg-primary text-background-dark text-sm font-bold hover:brightness-110 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+              class="ui-btn-primary"
             >
-              <span v-if="submitting" class="material-symbols-outlined text-base animate-spin">progress_activity</span>
-              {{ submitting ? (editMode ? 'Saving...' : 'Linking...') : (editMode ? 'Save Changes' : 'Link Account') }}
+              <span v-if="submitting" class="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
+              {{ submitting ? (editMode ? 'Saving...' : 'Linking...') : (editMode ? 'Save changes' : 'Link account') }}
             </button>
 
           </div>
@@ -766,32 +754,29 @@ onMounted(fetchAccounts)
     <Transition name="fade">
       <div
         v-if="showTestPopup"
-        class="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm"
+        class="ui-overlay z-[60]"
         @click.self="showTestPopup = false"
       >
         <Transition name="slide-up" appear>
           <div
             v-if="showTestPopup"
-            class="relative w-full max-w-lg max-h-[85vh] overflow-y-auto bg-surface border border-border-subtle rounded-2xl shadow-2xl"
+            class="ui-modal max-w-lg flex flex-col max-h-[85vh]"
           >
-            <div class="px-6 py-4 border-b border-border-subtle flex items-center justify-between">
-              <div class="flex items-center gap-2">
-                <span class="material-symbols-outlined text-primary">network_check</span>
-                <h3 class="text-base font-semibold text-slate-100">Alpaca Connection Test</h3>
-              </div>
+            <div class="ui-modal-head shrink-0">
+              <h3 class="text-base font-medium text-slate-100">Alpaca connection test</h3>
               <button
                 @click="showTestPopup = false"
-                class="text-slate-500 hover:text-slate-300 transition-colors"
+                class="ui-icon-btn ml-auto shrink-0"
                 aria-label="Close test results"
               >
-                <span class="material-symbols-outlined">close</span>
+                <span class="material-symbols-outlined text-[18px]">close</span>
               </button>
             </div>
 
-            <div class="px-6 py-4">
+            <div class="ui-modal-body flex-1 overflow-y-auto">
               <!-- Loading -->
               <div v-if="testRunning" class="flex items-center gap-3 py-6 text-slate-400 text-sm">
-                <span class="material-symbols-outlined animate-spin">progress_activity</span>
+                <span class="material-symbols-outlined text-[18px] animate-spin">progress_activity</span>
                 Running 5-endpoint probe against Alpaca...
               </div>
 
@@ -801,87 +786,78 @@ onMounted(fetchAccounts)
                      The not-run state (total=0) is what shows when the user
                      hits Test in edit mode without re-pasting the secret;
                      showing "0 of 0 tests failed" was misleading, so route
-                     that case to a neutral amber "Probe could not run" banner
-                     and rely on the Hints panel below to guide them. -->
+                     that case to a neutral "Probe could not run" line with
+                     a warning dot and rely on the Hints panel below. -->
                 <div
                   v-if="(testResult.summary?.total ?? 0) === 0"
-                  class="mb-4 px-4 py-3 rounded-lg border text-sm flex items-center gap-2 border-amber-500/40 bg-amber-500/10 text-amber-300"
+                  class="mb-4 flex items-center gap-2 text-sm text-slate-200"
                 >
-                  <span class="material-symbols-outlined">info</span>
-                  <span><strong>Probe could not run</strong> — see hints below.</span>
+                  <span class="ui-dot ui-dot-warn"></span>
+                  <span>Probe could not run <span class="text-slate-500">— see hints below</span></span>
                 </div>
                 <div
                   v-else
-                  class="mb-4 px-4 py-3 rounded-lg border text-sm flex items-center gap-2"
-                  :class="testResult.ok
-                    ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
-                    : 'border-red-500/40 bg-red-500/10 text-red-300'"
+                  class="mb-4 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm"
                 >
-                  <span class="material-symbols-outlined">{{ testResult.ok ? 'check_circle' : 'error' }}</span>
-                  <span>
-                    <strong>{{ testResult.ok
+                  <span class="ui-dot" :class="testResult.ok ? 'bg-gain' : 'ui-dot-error'"></span>
+                  <span class="tabular-nums" :class="testResult.ok ? 'text-gain' : 'text-loss'">
+                    {{ testResult.ok
                       ? `All ${testResult.summary.total} tests passed`
-                      : `${testResult.summary.failed} of ${testResult.summary.total} tests failed` }}</strong>
-                    <span v-if="testResult.feed" class="text-slate-400 ml-2">feed={{ testResult.feed }}, paper={{ testResult.paper }}</span>
+                      : `${testResult.summary.failed} of ${testResult.summary.total} tests failed` }}
                   </span>
+                  <span v-if="testResult.feed" class="text-xs text-slate-500">feed={{ testResult.feed }}, paper={{ testResult.paper }}</span>
                 </div>
 
                 <!-- Per-test rows -->
-                <ul v-if="testResult.tests?.length" class="space-y-2 mb-4">
+                <ul v-if="testResult.tests?.length" class="mb-4 rounded-lg border border-white/[0.07] divide-y divide-white/[0.05]">
                   <li
                     v-for="t in testResult.tests"
                     :key="t.name"
-                    class="px-3 py-2 rounded-lg border border-border-subtle bg-black/30 text-sm flex items-start gap-3"
+                    class="px-4 py-3 flex items-start gap-3"
                   >
-                    <span
-                      class="material-symbols-outlined mt-0.5 shrink-0"
-                      :class="t.ok ? 'text-emerald-400' : 'text-red-400'"
-                    >{{ t.ok ? 'check_circle' : 'cancel' }}</span>
+                    <span class="ui-dot mt-1.5" :class="t.ok ? 'bg-gain' : 'ui-dot-error'"></span>
                     <div class="flex-1 min-w-0">
                       <div class="flex items-baseline justify-between gap-2">
                         <code class="text-slate-200 font-mono text-xs">{{ t.name }}</code>
                         <span
-                          class="text-[11px] tabular-nums"
-                          :class="t.ok ? 'text-emerald-400' : 'text-red-400'"
+                          class="text-xs tabular-nums"
+                          :class="t.ok ? 'text-slate-500' : 'text-loss'"
                         >HTTP {{ t.status }}</span>
                       </div>
                       <p
                         class="text-xs mt-1 break-words"
-                        :class="t.ok ? 'text-slate-400' : 'text-red-300/80'"
+                        :class="t.ok ? 'text-slate-400' : 'text-loss'"
                       >{{ t.message }}</p>
                     </div>
                   </li>
                 </ul>
 
                 <!-- Hints -->
-                <div v-if="testResult.hints?.length" class="space-y-1 px-3 py-2 rounded-lg border border-amber-500/30 bg-amber-500/5">
-                  <div class="text-amber-300 text-xs font-medium flex items-center gap-1.5 mb-1">
-                    <span class="material-symbols-outlined text-sm">lightbulb</span>
-                    Hints
-                  </div>
+                <div v-if="testResult.hints?.length" class="rounded-lg border border-white/[0.07] px-4 py-3 space-y-1">
+                  <div class="text-xs text-slate-500 mb-1">Hints</div>
                   <p
                     v-for="(h, i) in testResult.hints"
                     :key="i"
-                    class="text-xs text-amber-200/80 leading-relaxed"
+                    class="text-xs text-slate-300 leading-relaxed"
                   >{{ h }}</p>
                 </div>
               </div>
 
               <!-- Initial / no result -->
               <div v-else class="text-slate-400 text-sm py-4">
-                Click "Test" to run the probe.
+                Click Test to run the probe.
               </div>
             </div>
 
-            <div class="px-6 py-3 border-t border-border-subtle flex justify-end gap-2">
+            <div class="ui-modal-foot shrink-0">
               <button
                 @click="showTestPopup = false"
-                class="py-2 px-4 rounded-lg border border-border-subtle text-sm text-slate-300 hover:bg-slate-700/30 transition-colors"
+                class="ui-btn-ghost h-9 px-4 rounded-lg"
               >
                 Close
               </button>
               <!-- R16 phase-2: when the popup was triggered by a failed
-                   pre-save test, offer a "Save Anyway" path that calls
+                   pre-save test, offer a "Save anyway" path that calls
                    submitLink with bypassTest=true so the user can override
                    the gate (e.g. transient Alpaca outage, or knowingly
                    saving creds for a feed they'll subscribe to later). -->
@@ -889,9 +865,9 @@ onMounted(fetchAccounts)
                 v-if="activeTab === 'alpaca' && testResult && !testResult.ok && !testRunning"
                 @click="showTestPopup = false; submitLink({ bypassTest: true })"
                 :disabled="submitting"
-                class="py-2 px-4 rounded-lg border border-amber-500/40 bg-amber-500/10 text-sm text-amber-300 hover:bg-amber-500/20 transition-colors disabled:opacity-50"
+                class="ui-btn h-9 px-4"
               >
-                Save Anyway
+                Save anyway
               </button>
             </div>
           </div>
@@ -902,9 +878,91 @@ onMounted(fetchAccounts)
 </template>
 
 <style scoped>
-.fade-enter-active, .fade-leave-active { transition: opacity 0.2s ease; }
-.fade-enter-from, .fade-leave-to       { opacity: 0; }
+/* Account rows. Small screens: name · status (· actions from sm), then the
+   details as one wrapping line. Wide screens: a column per field. */
+.bk-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "name status"
+    "details details"
+    "error error"
+    "actions actions";
+  column-gap: 16px;
+  align-items: center;
+}
+.bk-name { grid-area: name; }
+.bk-status { grid-area: status; }
+.bk-details {
+  grid-area: details;
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: 16px;
+  row-gap: 4px;
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 16px;
+}
+.bk-empty { display: none; }
+.bk-error { grid-area: error; margin-top: 8px; }
+.bk-actions { grid-area: actions; margin-top: 12px; }
 
-.slide-up-enter-active, .slide-up-leave-active { transition: all 0.2s ease; }
+@media (min-width: 640px) {
+  .bk-row {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-areas:
+      "name status actions"
+      "details details details"
+      "error error error";
+  }
+  .bk-actions { margin-top: 0; justify-content: flex-end; }
+}
+
+@media (min-width: 1280px) {
+  .bk-row,
+  .bk-head {
+    grid-template-columns: minmax(0, 1.3fr) 104px minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.2fr) 148px;
+    column-gap: 16px;
+  }
+  .bk-row {
+    grid-template-areas:
+      "name status key acct refresh actions"
+      "error error error error error error";
+  }
+  .bk-details { display: contents; }
+  .bk-key { grid-area: key; }
+  .bk-acct { grid-area: acct; }
+  .bk-refresh { grid-area: refresh; }
+  .bk-empty { display: inline; }
+  .bk-error { margin-top: 4px; }
+}
+
+/* Modal status line: busy is neutral, success gain, failure loss. */
+.msg { @apply rounded-lg border px-4 py-3 text-sm break-words; }
+.msg-busy { @apply border-white/[0.07] bg-raised text-slate-300; }
+.msg-ok { @apply border-gain/20 bg-gain/5 text-gain; }
+.msg-err { @apply border-loss/20 bg-loss/5 text-loss; }
+
+/* On/off switch: off is a raised track, on is the off-white primary. */
+.switch {
+  @apply relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border border-white/[0.08] bg-raised
+    transition-colors duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25;
+}
+.switch-on { @apply bg-slate-200 border-slate-200; }
+.switch-knob { @apply inline-block size-3.5 translate-x-0.5 rounded-full bg-slate-500 transition-transform duration-150 ease-out; }
+.switch-on .switch-knob { @apply translate-x-[18px] bg-background-dark; }
+
+.fade-enter-active, .fade-leave-active { transition: opacity 180ms cubic-bezier(0.22, 1, 0.36, 1); }
+.fade-enter-from, .fade-leave-to       { opacity: 0; }
+.fade-enter-active .modal-panel, .fade-leave-active .modal-panel { transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1); }
+.fade-enter-from .modal-panel, .fade-leave-to .modal-panel { transform: translateY(6px); }
+
+.slide-up-enter-active, .slide-up-leave-active { transition: opacity 150ms cubic-bezier(0.22, 1, 0.36, 1), transform 150ms cubic-bezier(0.22, 1, 0.36, 1); }
 .slide-up-enter-from, .slide-up-leave-to       { opacity: 0; transform: translateY(6px); }
+
+@media (prefers-reduced-motion: reduce) {
+  .fade-enter-active, .fade-leave-active,
+  .fade-enter-active .modal-panel, .fade-leave-active .modal-panel,
+  .slide-up-enter-active, .slide-up-leave-active { transition: none; }
+}
 </style>

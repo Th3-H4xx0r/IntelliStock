@@ -270,9 +270,9 @@ function parseLine(line) {
 
 function logLevelClass(line) {
   const l = (line || '').toLowerCase()
-  if (l.includes(' error') || l.includes('traceback') || l.includes('failed')) return 'text-red-400'
+  if (l.includes(' error') || l.includes('traceback') || l.includes('failed')) return 'text-loss'
   if (l.includes(' warn') || l.includes('warning') || l.includes('retry')) return 'text-amber-400'
-  if (l.includes('completed') || l.includes(' ok ') || l.includes('success')) return 'text-emerald-400'
+  if (l.includes('completed') || l.includes(' ok ') || l.includes('success')) return 'text-gain'
   return 'text-slate-300'
 }
 
@@ -345,10 +345,10 @@ async function downloadFullLog() {
 // ── Derived ───────────────────────────────────────────────────────────────────
 const statusDotClass = computed(() => {
   const s = String(status.value || '').toLowerCase()
-  if (s === 'running') return 'bg-sky-400 animate-pulse'
-  if (s === 'completed') return 'bg-slate-500'
-  if (s === 'failed') return 'bg-red-500'
-  return 'bg-slate-700'
+  if (s === 'running') return 'ui-dot-live'
+  if (s === 'completed') return 'ui-dot-off'
+  if (s === 'failed') return 'ui-dot-error'
+  return 'ui-dot-off'
 })
 
 const shortBuildId = computed(() => {
@@ -383,100 +383,96 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="glass-card rounded-2xl border border-border-subtle overflow-hidden mb-6">
+  <div class="ui-card overflow-hidden mb-6">
     <!-- Header (always visible) -->
-    <div class="flex items-center justify-between gap-3 px-4 py-3 bg-[#0d1117]">
+    <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 min-h-14 px-5 py-2.5">
       <div class="flex items-center gap-2 min-w-0">
-        <span class="size-2 rounded-full shrink-0" :class="statusDotClass"></span>
-        <span class="text-xs font-semibold text-slate-300 font-mono truncate">
+        <span class="ui-dot" :class="statusDotClass"></span>
+        <span class="text-sm text-slate-100 truncate">
           nexus-{{ shortBuildId }}.log
         </span>
-        <span v-if="status && status !== 'none'" class="text-[10px] text-slate-500 shrink-0">· {{ friendlyStatus }}</span>
-        <span v-if="lines.length" class="text-[10px] text-slate-600 font-mono shrink-0">{{ lines.length }} lines</span>
-        <span v-if="totalLines > lines.length + droppedCount" class="text-[10px] text-slate-600 font-mono shrink-0">
+        <span v-if="status && status !== 'none'" class="text-xs text-slate-400 shrink-0">{{ friendlyStatus }}</span>
+        <span v-if="lines.length" class="text-xs text-slate-500 tabular-nums shrink-0">{{ lines.length }} lines</span>
+        <span v-if="totalLines > lines.length + droppedCount" class="text-xs text-slate-500 tabular-nums shrink-0">
           of {{ totalLines }}
         </span>
-        <span v-if="droppedCount > 0" class="text-[10px] text-amber-500/70 shrink-0" title="Older lines evicted — use Download for full log">
+        <span v-if="droppedCount > 0" class="text-xs text-slate-500 shrink-0" title="Older lines evicted — use Download for full log">
           (last 10k)
         </span>
-        <span v-if="source === 'db'" class="text-[10px] text-amber-500/70 shrink-0">
+        <span v-if="source === 'db'" class="text-xs text-slate-500 shrink-0">
           (last 500 — log file not available)
         </span>
-        <span v-if="showReconnecting" class="text-[10px] text-amber-500/80 shrink-0 inline-flex items-center gap-1">
-          <span class="material-symbols-outlined text-[11px] animate-spin">progress_activity</span>
+        <span v-if="showReconnecting" class="text-xs text-amber-400 shrink-0 inline-flex items-center gap-1">
+          <span class="material-symbols-outlined text-[14px] animate-spin">progress_activity</span>
           reconnecting
         </span>
       </div>
-      <div class="flex items-center gap-1.5 shrink-0">
+      <div class="flex items-center gap-1 shrink-0">
         <input
           v-if="open && lines.length"
           v-model="search"
-          placeholder="Search logs..."
-          class="w-32 sm:w-44 bg-[#161b22] border border-[#30363d] rounded px-2 py-0.5 text-[11px] text-slate-300 placeholder-slate-600 focus:outline-none focus:border-sky-500/50 font-mono"
+          placeholder="Search"
+          aria-label="Search logs"
+          class="ui-input h-8 w-32 sm:w-44 text-xs mr-1"
         />
         <button
           v-if="open && lines.length"
           @click="togglePause"
-          class="inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] transition-colors"
-          :class="paused
-            ? 'text-amber-400 bg-amber-500/10 hover:bg-amber-500/20'
-            : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'"
+          class="ui-btn-ghost px-2 text-xs"
+          :class="paused ? 'text-amber-400' : ''"
           :title="paused ? 'Resume live tail' : 'Pause live tail'"
         >
-          <span class="material-symbols-outlined text-[13px]">{{ paused ? 'play_arrow' : 'pause' }}</span>
+          <span class="material-symbols-outlined text-[16px]">{{ paused ? 'play_arrow' : 'pause' }}</span>
           <span class="hidden sm:inline">{{ paused ? 'Resume' : 'Pause' }}</span>
         </button>
         <button
           v-if="open && lines.length"
           @click="copyLogs"
-          class="inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] text-slate-400 hover:text-slate-200 hover:bg-white/5 transition-colors"
+          class="ui-btn-ghost px-2 text-xs"
           title="Copy visible logs"
         >
-          <span class="material-symbols-outlined text-[13px]">content_copy</span>
+          <span class="material-symbols-outlined text-[16px]">content_copy</span>
           <span class="hidden sm:inline">Copy</span>
         </button>
         <button
           v-if="open && lines.length"
           @click="downloadFullLog"
-          class="inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] text-slate-400 hover:text-slate-200 hover:bg-white/5 transition-colors"
+          class="ui-btn-ghost px-2 text-xs"
           title="Download full log file"
         >
-          <span class="material-symbols-outlined text-[13px]">download</span>
+          <span class="material-symbols-outlined text-[16px]">download</span>
           <span class="hidden sm:inline">Download</span>
         </button>
         <button
           @click="toggleOpen"
-          class="inline-flex items-center gap-1.5 px-3 py-1 rounded text-[11px] font-semibold border transition-colors"
-          :class="open
-            ? 'border-sky-500/30 bg-sky-500/10 text-sky-400 hover:bg-sky-500/20'
-            : 'border-border-subtle text-slate-400 hover:text-slate-200 hover:bg-surface'"
+          class="ui-btn ml-1"
         >
-          <span class="material-symbols-outlined text-[13px]">{{ open ? 'visibility_off' : 'terminal' }}</span>
-          {{ open ? 'Hide Logs' : 'View Live Logs' }}
+          <span class="material-symbols-outlined text-[16px]">{{ open ? 'visibility_off' : 'terminal' }}</span>
+          {{ open ? 'Hide logs' : 'View live logs' }}
         </button>
       </div>
     </div>
 
     <!-- Body -->
-    <div v-if="open" class="bg-[#0d1117] border-t border-[#21262d] relative">
+    <div v-if="open" class="bg-background-dark border-t border-white/[0.06] relative">
       <!-- Loading -->
-      <div v-if="loading && !lines.length" class="flex items-center gap-2 px-4 py-6 text-slate-500 text-xs font-mono">
-        <span class="material-symbols-outlined text-[14px] animate-spin">progress_activity</span>
-        Loading logs...
+      <div v-if="loading && !lines.length" class="flex items-center gap-2 px-5 py-6 text-slate-500 text-sm">
+        <span class="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
+        Loading logs…
       </div>
       <!-- Empty -->
       <div
         v-else-if="lines.length === 0"
-        class="px-4 py-6 text-slate-600 text-xs font-mono italic"
+        class="px-5 py-6 text-slate-500 text-sm"
       >
         <template v-if="status === 'none'">
           No builds yet. Start the Nexus engine above to begin a build.
         </template>
         <template v-else-if="error">
-          Can't reach logs endpoint. Retrying...
+          Can't reach the logs endpoint. Retrying…
         </template>
         <template v-else>
-          Waiting for log output...
+          Waiting for log output…
         </template>
       </div>
       <!-- Log lines (virtualized) -->
@@ -492,7 +488,7 @@ onUnmounted(() => {
             <div
               v-for="(line, idx) in virtualLogs.items"
               :key="virtualLogs.startIdx + idx"
-              class="flex items-start gap-0 group hover:bg-white/[0.03] border-l-2 border-transparent hover:border-sky-500/40"
+              class="flex items-start gap-0 group hover:bg-white/[0.03] border-l-2 border-transparent hover:border-white/20"
             >
               <span class="shrink-0 w-28 px-3 py-0.5 text-[10px] text-slate-600 select-none whitespace-nowrap">
                 <template v-if="parseLine(line).time">
@@ -509,7 +505,7 @@ onUnmounted(() => {
           <div
             v-for="(line, idx) in virtualLogs.items"
             :key="idx"
-            class="flex items-start gap-0 group hover:bg-white/[0.03] border-l-2 border-transparent hover:border-sky-500/40"
+            class="flex items-start gap-0 group hover:bg-white/[0.03] border-l-2 border-transparent hover:border-white/20"
           >
             <span class="shrink-0 w-28 px-3 py-0.5 text-[10px] text-slate-600 select-none whitespace-nowrap">
               <template v-if="parseLine(line).time">
@@ -526,9 +522,9 @@ onUnmounted(() => {
       <button
         v-if="open && lines.length && !isAutoScroll"
         @click="scrollToBottom"
-        class="absolute bottom-3 right-3 inline-flex items-center gap-1 px-3 py-1 rounded-full text-[11px] font-semibold border border-sky-500/30 bg-sky-500/15 text-sky-300 hover:bg-sky-500/25 transition-colors shadow-md"
+        class="ui-btn absolute bottom-3 right-3 shadow-[0_8px_24px_rgba(0,0,0,0.45)]"
       >
-        <span class="material-symbols-outlined text-[13px]">arrow_downward</span>
+        <span class="material-symbols-outlined text-[16px]">arrow_downward</span>
         Jump to latest
       </button>
     </div>

@@ -142,75 +142,77 @@ onMounted(loadAccounts)
 
 <template>
   <AppShell>
-    <main class="flex-1 px-4 py-6 sm:px-6 sm:py-8 lg:px-8 lg:py-10 space-y-6">
+    <main class="ui-page">
 
       <!-- Header -->
-      <div class="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <p class="text-primary text-xs font-bold uppercase tracking-widest mb-2 flex items-center gap-1.5">
-            <span class="material-symbols-outlined text-[16px]">sports_soccer</span> Kalshi
-          </p>
-          <h1 class="text-2xl sm:text-3xl font-bold leading-tight text-slate-100">Prediction markets</h1>
-          <p class="text-slate-500 mt-1.5 text-sm">Autonomous soccer event-contract trading.</p>
+      <header class="flex flex-wrap items-end justify-between gap-x-4 gap-y-3">
+        <div class="min-w-0">
+          <h1 class="ui-page-title">Prediction markets</h1>
+          <p class="ui-page-sub">Kalshi · autonomous soccer event-contract trading</p>
         </div>
 
         <div class="flex items-center gap-2 flex-wrap">
           <!-- account selector -->
-          <div v-if="accounts.length === 1" class="flex items-center gap-2 bg-surface border border-border-subtle rounded-lg text-sm text-slate-300 px-3 py-2">
-            <span class="material-symbols-outlined text-primary text-[16px]">account_circle</span>{{ selected?.account_name }}
-          </div>
+          <span v-if="accounts.length === 1" class="h-8 px-3 inline-flex items-center rounded-lg border border-white/[0.07] text-[13px] text-slate-300">
+            {{ selected?.account_name }}
+          </span>
           <div v-else-if="accounts.length" class="relative">
-            <button @click="dropdownOpen = !dropdownOpen" class="flex items-center gap-2 bg-surface border border-border-subtle rounded-lg text-sm text-slate-200 pl-3 pr-2 py-2 hover:border-primary/50 transition-colors">
-              <span class="material-symbols-outlined text-primary text-[16px]">account_circle</span>
-              <span class="max-w-[150px] truncate">{{ selected?.account_name }}</span>
-              <span class="material-symbols-outlined text-slate-500 text-[18px] transition-transform" :class="{ 'rotate-180': dropdownOpen }">expand_more</span>
+            <button type="button" @click="dropdownOpen = !dropdownOpen" class="ui-btn pr-2" :aria-expanded="dropdownOpen" aria-haspopup="true">
+              <span class="max-w-[160px] truncate">{{ selected?.account_name }}</span>
+              <span class="material-symbols-outlined text-[18px] text-slate-500 transition-transform duration-150 ease-out" :class="{ 'rotate-180': dropdownOpen }">expand_more</span>
             </button>
             <div v-if="dropdownOpen" @click="dropdownOpen = false" class="fixed inset-0 z-40"></div>
-            <div v-if="dropdownOpen" class="absolute right-0 mt-1.5 w-60 z-50 glass-card rounded-xl overflow-hidden py-1 shadow-xl shadow-black/40">
-              <button v-for="a in accounts" :key="a.id" @click="pickAccount(a.id)" class="w-full text-left px-3 py-2.5 text-sm flex items-center gap-2 hover:bg-primary/10 transition-colors" :class="a.id === selectedId ? 'text-primary' : 'text-slate-300'">
-                <span class="material-symbols-outlined text-[16px]" :class="a.id === selectedId ? 'text-primary' : 'text-transparent'">check</span>{{ a.account_name }}
+            <div v-if="dropdownOpen" class="absolute right-0 mt-2 w-60 z-50 rounded-xl border border-white/[0.08] bg-surface p-1.5 shadow-[0_16px_40px_rgba(0,0,0,0.5)]">
+              <button v-for="a in accounts" :key="a.id" type="button" @click="pickAccount(a.id)"
+                      class="w-full h-10 px-3 rounded-lg text-left text-sm flex items-center gap-2 transition-colors duration-150 ease-out"
+                      :class="a.id === selectedId ? 'bg-raised text-slate-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]' : 'text-slate-300 hover:bg-white/[0.03]'">
+                <span class="material-symbols-outlined text-[16px]" :class="a.id === selectedId ? 'text-slate-300' : 'text-transparent'">check</span>
+                <span class="truncate">{{ a.account_name }}</span>
               </button>
             </div>
           </div>
 
           <!-- Lifecycle controls (only when an instance exists) -->
           <template v-if="hasInstance">
-            <button @click="openCreate"
-                    class="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-primary text-background-dark text-sm font-semibold hover:brightness-110 transition-all">
-              <span class="material-symbols-outlined text-[18px]">add</span> New instance
+            <button @click="openCreate" class="ui-btn-primary h-8 px-3 text-[13px]">
+              <span class="material-symbols-outlined text-[16px]">add</span> New instance
             </button>
-            <button v-if="anyRunning" @click="kill" :disabled="busy"
-                    class="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-red-500/40 text-red-400 text-sm font-semibold hover:bg-red-500/10 transition-all disabled:opacity-50">
-              <span class="material-symbols-outlined text-[18px]">stop_circle</span> Kill
+            <button v-if="anyRunning" @click="kill" :disabled="busy" class="ui-btn text-loss">
+              <span class="material-symbols-outlined text-[16px]">stop_circle</span> Kill
             </button>
           </template>
         </div>
-      </div>
+      </header>
 
       <!-- Loading -->
-      <div v-if="loadingAcct" class="glass-card rounded-2xl h-[200px] animate-pulse"></div>
+      <div v-if="loadingAcct" class="mt-8 space-y-3" aria-hidden="true">
+        <div class="h-[120px] rounded-xl bg-surface"></div>
+        <div class="grid grid-cols-1 gap-8 lg:grid-cols-[minmax(0,1fr)_340px]">
+          <div class="h-[300px] rounded-xl bg-surface"></div>
+          <div class="h-[300px] rounded-xl bg-surface"></div>
+        </div>
+      </div>
 
       <!-- No Kalshi account -->
-      <div v-else-if="!accounts.length"
-           class="rounded-2xl border border-border-subtle bg-surface/20 px-8 py-12 flex flex-col items-center gap-3 text-center">
-        <span class="material-symbols-outlined text-4xl text-slate-700">sports_soccer</span>
-        <p class="text-slate-400 text-sm font-medium">No Kalshi account linked.</p>
-        <p class="text-slate-600 text-xs max-w-sm">Link a Kalshi brokerage (demo or live) to create a trading instance here.</p>
-        <RouterLink to="/brokerages" class="mt-1 px-4 py-2 rounded-lg bg-primary text-background-dark text-xs font-bold hover:brightness-110 transition-all">Link a brokerage</RouterLink>
+      <div v-else-if="!accounts.length" class="mt-8 ui-card ui-empty">
+        <p>No Kalshi account linked. Link a demo or live Kalshi brokerage to create a trading instance here.</p>
+        <RouterLink to="/brokerages" class="ui-btn-primary">Link a brokerage</RouterLink>
       </div>
 
       <!-- Account but NO instance -> create CTA -->
-      <div v-else-if="!hasInstance"
-           class="rounded-2xl border border-border-subtle bg-surface/20 px-8 py-14 flex flex-col items-center gap-3 text-center">
-        <span class="material-symbols-outlined text-5xl text-primary/70">smart_toy</span>
-        <p class="text-slate-200 text-base font-semibold">No trading instance yet</p>
-        <p class="text-slate-500 text-sm max-w-md">
-          Create a Kalshi trading instance for <span class="text-slate-300">{{ selected?.account_name }}</span> to
-          start scanning soccer markets, flagging edge, and (when started) trading.
-        </p>
-        <p v-if="isLive" class="text-amber-400/90 text-xs max-w-md">⚠ This is a LIVE account — once you start the instance it trades real money.</p>
-        <button @click="openCreate" class="mt-2 flex items-center gap-1.5 px-5 py-2.5 rounded-lg bg-primary text-background-dark text-sm font-bold hover:brightness-110 transition-all">
-          <span class="material-symbols-outlined text-[18px]">add</span> Create Kalshi instance
+      <div v-else-if="!hasInstance" class="mt-8 ui-card ui-empty">
+        <div class="max-w-md space-y-2">
+          <p class="text-base text-slate-200">No trading instance yet</p>
+          <p>
+            Create a Kalshi trading instance for <span class="text-slate-200">{{ selected?.account_name }}</span> to
+            start scanning soccer markets, flagging edge and, once started, trading.
+          </p>
+          <p v-if="isLive" class="inline-flex items-center gap-2 text-xs text-slate-300">
+            <span class="ui-dot ui-dot-warn"></span>Live account: once started, the instance trades real money
+          </p>
+        </div>
+        <button @click="openCreate" class="ui-btn-primary">
+          <span class="material-symbols-outlined text-[16px]">add</span> Create Kalshi instance
         </button>
       </div>
 
@@ -218,112 +220,173 @@ onMounted(loadAccounts)
       <template v-else>
         <!-- All instances — manage each (start/stop/details/delete). Only ONE may run
              per brokerage, so Start is disabled on the others while one is running. -->
-        <div class="space-y-2">
-          <div v-for="inst in instances" :key="inst.id"
-               @click="selectedInstanceId = inst.id"
-               class="glass-card rounded-2xl px-4 py-3 flex items-center gap-3 flex-wrap cursor-pointer transition-all"
-               :class="instance && inst.id === instance.id ? 'ring-1 ring-primary/60' : 'hover:border-primary/30'">
-            <span class="size-2 rounded-full" :class="inst.running ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'"></span>
-            <span class="text-sm font-semibold text-slate-200">{{ inst.name }}</span>
-            <span class="text-xs font-medium px-2 py-0.5 rounded-md" :class="inst.running ? 'bg-emerald-500/15 text-emerald-400' : 'bg-slate-500/15 text-slate-400'">{{ inst.running ? 'Running' : 'Stopped' }}</span>
-            <span v-if="inst.live_enabled" class="text-xs font-medium px-2 py-0.5 rounded-md bg-red-500/15 text-red-400">Live · real money</span>
-            <span v-else class="text-xs font-medium px-2 py-0.5 rounded-md bg-primary/15 text-primary">Paper</span>
-            <div class="ml-auto flex items-center gap-1.5" @click.stop>
-              <button @click="startStop(!inst.running, inst.id)"
-                      :disabled="busy || (!inst.running && anyRunning)"
-                      :title="(!inst.running && anyRunning) ? 'Stop the running instance first — only one may run per brokerage' : ''"
-                      class="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-                      :class="inst.running ? 'border border-amber-500/40 text-amber-400 hover:bg-amber-500/10' : 'bg-primary text-background-dark hover:brightness-110'">
-                <span class="material-symbols-outlined text-[16px]">{{ inst.running ? 'pause' : 'play_arrow' }}</span>{{ inst.running ? 'Stop' : 'Start' }}
-              </button>
-              <button @click="$router.push(`/kalshi/instances/${inst.id}`)"
-                      class="flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-border-subtle text-slate-300 text-xs font-semibold hover:border-primary/50 transition-all">
-                Details <span class="material-symbols-outlined text-[14px]">arrow_forward</span>
-              </button>
-              <button @click="removeInstance(inst)" :disabled="busy"
-                      class="flex items-center px-2 py-1.5 rounded-lg border border-red-500/30 text-red-400 text-xs font-semibold hover:bg-red-500/10 transition-all disabled:opacity-40"
-                      title="Delete instance">
-                <span class="material-symbols-outlined text-[16px]">delete</span>
-              </button>
+        <section class="mt-8" aria-labelledby="kx-instances">
+          <div class="mb-3">
+            <h2 id="kx-instances" class="ui-section-title">Instances</h2>
+            <p class="ui-section-sub">One may run per brokerage. Select one to follow its logs</p>
+          </div>
+          <div class="ui-card overflow-hidden">
+            <div class="kx-inst-grid hidden sm:grid ui-th">
+              <span>Instance</span><span>Status</span><span></span>
+            </div>
+            <div class="ui-rows">
+              <div v-for="inst in instances" :key="inst.id"
+                   @click="selectedInstanceId = inst.id"
+                   class="kx-inst-grid grid items-center min-h-14 px-5 py-2 cursor-pointer transition-colors duration-150 ease-out"
+                   :class="instance && inst.id === instance.id ? 'bg-raised shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]' : 'hover:bg-white/[0.03]'">
+                <span class="min-w-0">
+                  <span class="block text-sm text-slate-100 truncate">{{ inst.name }}</span>
+                  <span class="block text-xs mt-0.5" :class="inst.live_enabled ? 'text-slate-300' : 'text-slate-500'">{{ inst.live_enabled ? 'Live · real money' : 'Paper' }}</span>
+                </span>
+                <span class="inline-flex items-center gap-2 text-sm" :class="inst.running ? 'text-slate-200' : 'text-slate-500'">
+                  <span class="ui-dot" :class="inst.running ? 'ui-dot-live' : 'ui-dot-off'"></span>{{ inst.running ? 'Running' : 'Stopped' }}
+                </span>
+                <div class="kx-inst-actions flex items-center justify-end gap-1" @click.stop>
+                  <button @click="startStop(!inst.running, inst.id)"
+                          :disabled="busy || (!inst.running && anyRunning)"
+                          :title="(!inst.running && anyRunning) ? 'Stop the running instance first — only one may run per brokerage' : ''"
+                          class="ui-btn" :class="inst.running ? 'text-loss' : ''">
+                    <span class="material-symbols-outlined text-[16px]">{{ inst.running ? 'pause' : 'play_arrow' }}</span>{{ inst.running ? 'Stop' : 'Start' }}
+                  </button>
+                  <button @click="$router.push(`/kalshi/instances/${inst.id}`)" class="ui-btn-ghost">
+                    Details <span class="material-symbols-outlined text-[16px]">arrow_forward</span>
+                  </button>
+                  <button @click="removeInstance(inst)" :disabled="busy"
+                          class="ui-icon-btn hover:text-loss disabled:opacity-40"
+                          title="Delete instance" aria-label="Delete instance">
+                    <span class="material-symbols-outlined text-[18px]">delete</span>
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
-        </div>
+        </section>
 
         <!-- Chart + summary -->
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        <section class="mt-12 grid grid-cols-1 gap-8 items-start lg:grid-cols-[minmax(0,1fr)_340px]" aria-label="Portfolio">
           <KalshiPortfolioChart :brokerage-id="selectedId" />
-          <div class="glass-card rounded-2xl p-4 sm:p-5">
-            <div class="flex items-center gap-2 mb-4">
-              <span class="material-symbols-outlined text-primary text-[18px]">account_balance_wallet</span>
-              <span class="text-[11px] sm:text-xs font-semibold text-slate-400 uppercase tracking-widest">Account summary</span>
-            </div>
-            <div class="grid grid-cols-2 gap-3">
-              <div class="rounded-xl border border-border-subtle bg-surface/40 p-3"><div class="text-lg font-bold text-slate-100 tabular-nums">{{ pct(clv.overall.avg_clv) }}</div><div class="text-[10px] uppercase tracking-wide text-slate-500 font-semibold mt-0.5">Avg CLV</div></div>
-              <div class="rounded-xl border border-border-subtle bg-surface/40 p-3"><div class="text-lg font-bold text-slate-100 tabular-nums">{{ clv.overall.n }}</div><div class="text-[10px] uppercase tracking-wide text-slate-500 font-semibold mt-0.5">Fixtures</div></div>
-              <div class="rounded-xl border border-border-subtle bg-surface/40 p-3"><div class="text-lg font-bold text-slate-100 tabular-nums">{{ positions.length }}</div><div class="text-[10px] uppercase tracking-wide text-slate-500 font-semibold mt-0.5">Open</div></div>
-              <div class="rounded-xl border border-border-subtle bg-surface/40 p-3"><div class="text-lg font-bold tabular-nums" :class="edges.length ? 'text-emerald-400' : 'text-slate-100'">{{ edges.length ? pct(edges[0].edge) : '—' }}</div><div class="text-[10px] uppercase tracking-wide text-slate-500 font-semibold mt-0.5">Top edge</div></div>
-            </div>
-          </div>
-        </div>
-
-        <div class="glass-card rounded-2xl p-4 sm:p-5">
-          <div class="flex items-center gap-2 mb-3"><span class="material-symbols-outlined text-primary text-[18px]">bolt</span><span class="text-[11px] sm:text-xs font-semibold text-slate-400 uppercase tracking-widest">Edge Radar</span></div>
-          <p v-if="!edges.length" class="text-sm text-slate-500">No +EV contracts flagged right now.</p>
-          <div v-for="e in edges" :key="e.market_ticker" class="flex items-center justify-between text-sm py-2 border-b border-border-subtle/60 last:border-0"><span class="text-slate-300">{{ e.market_ticker }} <span class="text-slate-500">· {{ e.side }}</span></span><span class="text-emerald-400 font-bold tabular-nums">+{{ pct(e.edge) }}</span></div>
-        </div>
-
-        <div class="glass-card rounded-2xl p-4 sm:p-5">
-          <div class="flex items-center gap-2 mb-3"><span class="material-symbols-outlined text-primary text-[18px]">receipt_long</span><span class="text-[11px] sm:text-xs font-semibold text-slate-400 uppercase tracking-widest">Open positions</span></div>
-          <p v-if="!positions.length" class="text-sm text-slate-500">No open positions.</p>
-          <div class="space-y-2.5">
-            <div v-for="p in positions" :key="p.market_ticker" class="rounded-xl border border-border-subtle bg-surface/40 p-3">
-              <div class="flex items-start gap-3">
-                <img v-if="p.pick_logo" :src="p.pick_logo" class="w-9 h-9 rounded-full object-contain bg-surface shrink-0" @error="(e) => e.target.style.display='none'" />
-                <div v-else class="w-9 h-9 rounded-full bg-surface flex items-center justify-center text-[11px] font-bold text-slate-400 shrink-0">{{ posInitials(p) }}</div>
-                <div class="min-w-0 flex-1">
-                  <div class="text-sm font-semibold text-slate-100 truncate">{{ p.match || p.market_ticker }}</div>
-                  <div class="text-xs text-primary font-medium truncate">Yes · {{ posPick(p) }}</div>
-                </div>
-                <div class="text-right shrink-0">
-                  <div class="text-sm font-bold text-slate-100 tabular-nums">{{ p.current_value == null ? '—' : '$' + p.current_value.toFixed(2) }}</div>
-                  <div class="text-xs font-semibold tabular-nums" :class="(p.unrealized_cents || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'">{{ p.unrealized_cents == null ? '' : (p.unrealized_cents >= 0 ? '+' : '') + '$' + (p.unrealized_cents / 100).toFixed(2) }}</div>
-                </div>
+          <div class="ui-card px-5 py-5">
+            <p class="text-sm font-medium text-slate-200">Account summary</p>
+            <div class="mt-4 grid grid-cols-2 gap-x-4 gap-y-5">
+              <div>
+                <p class="text-xs text-slate-500">Avg CLV</p>
+                <p class="mt-1 text-xl font-medium text-slate-100 tabular-nums">{{ pct(clv.overall.avg_clv) }}</p>
               </div>
-              <div class="flex items-center gap-2 mt-2.5">
-                <span class="px-2 py-0.5 rounded-md bg-primary/10 text-primary text-[11px] font-semibold tabular-nums">{{ p.contracts }}×</span>
-                <span class="px-2 py-0.5 rounded-md bg-primary/10 text-primary text-[11px] font-semibold tabular-nums">Buy {{ p.odds_pct == null ? '—' : p.odds_pct.toFixed(0) + '%' }}</span>
-                <span class="ml-auto text-[11px] text-slate-500 tabular-nums">${{ (p.max_payout || 0).toFixed(0) }} max payout</span>
+              <div>
+                <p class="text-xs text-slate-500">Fixtures</p>
+                <p class="mt-1 text-xl font-medium text-slate-100 tabular-nums">{{ clv.overall.n }}</p>
+              </div>
+              <div>
+                <p class="text-xs text-slate-500">Open</p>
+                <p class="mt-1 text-xl font-medium text-slate-100 tabular-nums">{{ positions.length }}</p>
+              </div>
+              <div>
+                <p class="text-xs text-slate-500">Top edge</p>
+                <p class="mt-1 text-xl font-medium tabular-nums" :class="edges.length ? 'text-gain' : 'text-slate-100'">{{ edges.length ? pct(edges[0].edge) : '—' }}</p>
               </div>
             </div>
           </div>
-        </div>
+        </section>
 
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
-          <div class="glass-card rounded-2xl p-4 sm:p-5">
-            <div class="flex items-center gap-2 mb-3"><span class="material-symbols-outlined text-primary text-[18px]">trending_up</span><span class="text-[11px] sm:text-xs font-semibold text-slate-400 uppercase tracking-widest">CLV scorecard</span></div>
-            <p v-if="!clvLeagues().length" class="text-sm text-slate-500">No CLV logged yet.</p>
-            <div v-for="[lg, s] in clvLeagues()" :key="lg" class="flex items-center justify-between text-sm py-2 border-b border-border-subtle/60 last:border-0"><span class="text-slate-300">{{ lg }} <span class="text-slate-500">({{ s.n }})</span></span><span class="font-bold tabular-nums" :class="s.avg_clv >= 0 ? 'text-emerald-400' : 'text-red-400'">{{ pct(s.avg_clv) }}</span></div>
+        <!-- Edge radar -->
+        <section class="mt-12" aria-labelledby="kx-edges">
+          <div class="mb-3">
+            <h2 id="kx-edges" class="ui-section-title">Edge radar</h2>
+            <p class="ui-section-sub">+EV contracts flagged on the last scan</p>
           </div>
-          <div class="glass-card rounded-2xl p-4 sm:p-5">
-            <div class="flex items-center gap-2 mb-3"><span class="material-symbols-outlined text-primary text-[18px]">speed</span><span class="text-[11px] sm:text-xs font-semibold text-slate-400 uppercase tracking-widest">Odds-budget guard</span></div>
-            <div v-if="scanBudget" class="text-sm text-slate-400">
-              <div class="flex justify-between mb-1.5"><span>OddsPapi this month</span><span class="text-slate-300 tabular-nums">{{ scanBudget.used }} / {{ scanBudget.limit }}</span></div>
-              <div class="h-2 rounded-full bg-surface overflow-hidden"><div class="h-full bg-primary rounded-full" :style="{ width: Math.min(100, (scanBudget.used / scanBudget.limit) * 100) + '%' }"></div></div>
-              <div class="mt-2 text-xs text-slate-500">~{{ scanBudget.fixtures_per_day }} fixtures/day affordable</div>
+          <div class="ui-card overflow-hidden">
+            <p v-if="!edges.length" class="ui-empty">No +EV contracts flagged right now</p>
+            <div v-else class="ui-rows">
+              <div v-for="e in edges" :key="e.market_ticker" class="ui-row flex items-center justify-between gap-4">
+                <span class="min-w-0 truncate text-sm text-slate-100">{{ e.market_ticker }} <span class="text-slate-500">· {{ e.side }}</span></span>
+                <span class="text-sm text-gain tabular-nums">+{{ pct(e.edge) }}</span>
+              </div>
             </div>
-            <p v-else class="text-sm text-slate-500">No budget data.</p>
           </div>
+        </section>
+
+        <!-- Open positions -->
+        <section class="mt-12" aria-labelledby="kx-positions">
+          <div class="mb-3">
+            <h2 id="kx-positions" class="ui-section-title">Open positions</h2>
+            <p class="ui-section-sub tabular-nums">{{ positions.length }} position{{ positions.length === 1 ? '' : 's' }}</p>
+          </div>
+          <div class="ui-card overflow-hidden">
+            <p v-if="!positions.length" class="ui-empty">No open positions</p>
+            <template v-else>
+              <div class="kx-pos-grid hidden sm:grid ui-th">
+                <span>Market</span>
+                <span class="hidden md:block text-right">Contracts</span>
+                <span class="hidden md:block text-right">Bought at</span>
+                <span class="text-right">Max payout</span>
+                <span class="text-right">Value</span>
+              </div>
+              <ul class="ui-rows">
+                <li v-for="p in positions" :key="p.market_ticker" class="kx-pos-grid grid items-center min-h-14 px-5 py-2">
+                  <span class="flex items-center gap-3 min-w-0">
+                    <img v-if="p.pick_logo" :src="p.pick_logo" class="size-8 rounded-full object-contain bg-raised shrink-0" @error="(e) => e.target.style.display='none'" />
+                    <span v-else class="size-8 rounded-full bg-raised flex items-center justify-center text-[11px] font-medium text-slate-400 shrink-0">{{ posInitials(p) }}</span>
+                    <span class="min-w-0">
+                      <span class="block text-sm text-slate-100 truncate">{{ p.match || p.market_ticker }}</span>
+                      <span class="block text-xs text-slate-500 mt-0.5 truncate">Yes · {{ posPick(p) }}</span>
+                    </span>
+                  </span>
+                  <span class="hidden md:block text-right text-sm text-slate-300 tabular-nums">{{ p.contracts }}×</span>
+                  <span class="hidden md:block text-right text-sm text-slate-300 tabular-nums">{{ p.odds_pct == null ? '—' : p.odds_pct.toFixed(0) + '%' }}</span>
+                  <span class="hidden sm:block text-right text-sm text-slate-300 tabular-nums">${{ (p.max_payout || 0).toFixed(0) }}</span>
+                  <span class="text-right tabular-nums">
+                    <span class="block text-sm text-slate-100">{{ p.current_value == null ? '—' : '$' + p.current_value.toFixed(2) }}</span>
+                    <span class="block text-xs mt-0.5" :class="(p.unrealized_cents || 0) >= 0 ? 'text-gain' : 'text-loss'">{{ p.unrealized_cents == null ? '' : (p.unrealized_cents >= 0 ? '+' : '-') + '$' + Math.abs(p.unrealized_cents / 100).toFixed(2) }}</span>
+                  </span>
+                </li>
+              </ul>
+            </template>
+          </div>
+        </section>
+
+        <div class="mt-12 grid grid-cols-1 gap-x-8 gap-y-12 lg:grid-cols-2">
+          <section aria-labelledby="kx-clv">
+            <div class="mb-3">
+              <h2 id="kx-clv" class="ui-section-title">CLV scorecard</h2>
+              <p class="ui-section-sub">Closing-line value by league</p>
+            </div>
+            <div class="ui-card overflow-hidden">
+              <p v-if="!clvLeagues().length" class="ui-empty">No CLV logged yet</p>
+              <div v-else class="ui-rows">
+                <div v-for="[lg, s] in clvLeagues()" :key="lg" class="ui-row flex items-center justify-between gap-4">
+                  <span class="text-sm text-slate-100">{{ lg }} <span class="text-slate-500 tabular-nums">({{ s.n }})</span></span>
+                  <span class="text-sm tabular-nums" :class="s.avg_clv >= 0 ? 'text-gain' : 'text-loss'">{{ pct(s.avg_clv) }}</span>
+                </div>
+              </div>
+            </div>
+          </section>
+          <section aria-labelledby="kx-budget">
+            <div class="mb-3">
+              <h2 id="kx-budget" class="ui-section-title">Odds-budget guard</h2>
+              <p class="ui-section-sub">OddsPapi calls against the monthly limit</p>
+            </div>
+            <div class="ui-card px-5 py-5">
+              <div v-if="scanBudget">
+                <div class="flex items-baseline justify-between gap-4">
+                  <span class="text-sm text-slate-400">OddsPapi this month</span>
+                  <span class="text-sm text-slate-100 tabular-nums">{{ scanBudget.used }} / {{ scanBudget.limit }}</span>
+                </div>
+                <div class="mt-3 h-1 rounded-full bg-raised overflow-hidden"><div class="h-full bg-slate-300 rounded-full" :style="{ width: Math.min(100, (scanBudget.used / scanBudget.limit) * 100) + '%' }"></div></div>
+                <p class="mt-3 text-xs text-slate-500 tabular-nums">~{{ scanBudget.fixtures_per_day }} fixtures/day affordable</p>
+              </div>
+              <p v-else class="text-sm text-slate-500">No budget data</p>
+            </div>
+          </section>
         </div>
 
         <!-- Live logs (streams the engine's per-instance log) -->
-        <div class="glass-card rounded-2xl p-4 sm:p-5">
-          <div class="flex items-center gap-2 mb-3">
-            <span class="material-symbols-outlined text-primary text-[18px]">terminal</span>
-            <span class="text-[11px] sm:text-xs font-semibold text-slate-400 uppercase tracking-widest">Live logs</span>
-            <span v-if="instance" class="text-[11px] text-slate-500 normal-case">· {{ instance.name }}</span>
+        <section v-if="instance" class="mt-12" aria-labelledby="kx-logs">
+          <div class="mb-3">
+            <h2 id="kx-logs" class="ui-section-title">Live logs</h2>
+            <p class="ui-section-sub">{{ instance.name }}</p>
           </div>
-          <InstanceLiveLogs v-if="instance" :key="instance.id" :instance-id="instance.id" />
-        </div>
+          <InstanceLiveLogs :key="instance.id" :instance-id="instance.id" />
+        </section>
       </template>
     </main>
 
@@ -337,3 +400,27 @@ onMounted(loadAccounts)
     />
   </AppShell>
 </template>
+
+<style scoped>
+.kx-inst-grid {
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 16px;
+  row-gap: 8px;
+}
+.kx-inst-grid > .kx-inst-actions { grid-column: 1 / -1; justify-content: flex-start; }
+@media (min-width: 640px) {
+  .kx-inst-grid { grid-template-columns: minmax(0, 1fr) 112px auto; }
+  .kx-inst-grid > .kx-inst-actions { grid-column: auto; justify-content: flex-end; }
+}
+/* Hidden cells take no track: phone market · value; sm adds payout; md all. */
+.kx-pos-grid {
+  grid-template-columns: minmax(0, 1fr) 96px;
+  column-gap: 16px;
+}
+@media (min-width: 640px) {
+  .kx-pos-grid { grid-template-columns: minmax(0, 1fr) 96px 112px; }
+}
+@media (min-width: 768px) {
+  .kx-pos-grid { grid-template-columns: minmax(0, 1fr) 80px 80px 96px 112px; }
+}
+</style>

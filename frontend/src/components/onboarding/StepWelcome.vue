@@ -1,56 +1,34 @@
 <script setup>
-import { computed } from 'vue'
-
 defineProps({
   username: { type: String, default: '' },
 })
 
-const headline = 'Welcome to IntelliStock'
-const letters = computed(() => Array.from(headline))
+const items = [
+  { label: 'LLM models',      desc: 'OpenAI · Gemini · Azure · NVIDIA · DeepSeek' },
+  { label: 'Stock brokerage', desc: 'Alpaca' },
+  { label: 'Instances',       desc: 'Live or paper, fully autonomous' },
+]
 </script>
 
 <template>
-  <div class="flex flex-col items-center text-center gap-7 py-6 sm:py-10">
-    <div class="size-20 rounded-2xl bg-primary/10 border border-primary/30 flex items-center justify-center relative">
-      <span class="material-symbols-outlined text-primary text-[42px]">auto_awesome</span>
-      <div class="absolute -inset-2 rounded-3xl border border-primary/20 animate-pulse"></div>
-    </div>
-
-    <h1 class="onboarding-title text-3xl sm:text-5xl font-extrabold leading-tight tracking-tight max-w-2xl">
-      <span
-        v-for="(ch, idx) in letters"
-        :key="idx"
-        class="onboarding-letter"
-        :style="{ animationDelay: (0.05 + idx * 0.04) + 's' }"
-      >{{ ch === ' ' ? ' ' : ch }}</span>
+  <div class="py-2 sm:py-6">
+    <h1 class="text-2xl sm:text-3xl font-medium leading-tight tracking-[-0.01em] text-slate-100">
+      Set up IntelliStock
     </h1>
 
-    <p
-      class="text-slate-400 text-sm sm:text-base max-w-xl onboarding-letter"
-      :style="{ animationDelay: (0.1 + letters.length * 0.04) + 's' }"
-    >
-      <template v-if="username">Hey <span class="text-primary font-semibold">{{ username }}</span> —</template>
-      <template v-else>Glad you're here —</template>
-      let's get your account-aware autonomous trading workspace dialed in. We'll set up an LLM model,
-      link a brokerage, and spin up your first instance. Should take about two minutes.
+    <p class="mt-3 max-w-xl text-sm sm:text-base leading-6 sm:leading-7 text-slate-400">
+      We'll set up an LLM model, link a brokerage, and create your first autonomous trading
+      instance. It takes about two minutes.
+    </p>
+    <p class="mt-2 text-sm text-slate-500">
+      <template v-if="username">Signed in as <span class="text-slate-300">{{ username }}</span></template>
+      <template v-else>Glad you're here</template>
     </p>
 
-    <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 max-w-2xl w-full mt-2">
-      <div
-        v-for="(item, idx) in [
-          { icon: 'memory',           label: 'LLM models',  desc: 'OpenAI · Gemini · Azure · NVIDIA · DeepSeek' },
-          { icon: 'account_balance',  label: 'Stock brokerage',  desc: 'Alpaca' },
-          { icon: 'rocket_launch',    label: 'Instances',   desc: 'Live or paper, fully autonomous' },
-        ]"
-        :key="item.label"
-        class="rounded-xl border border-border-subtle bg-surface/50 px-4 py-3 flex items-center gap-3 onboarding-letter text-left"
-        :style="{ animationDelay: (0.5 + idx * 0.1) + 's' }"
-      >
-        <span class="material-symbols-outlined text-primary text-[22px]">{{ item.icon }}</span>
-        <div class="min-w-0">
-          <p class="text-xs font-semibold text-slate-200">{{ item.label }}</p>
-          <p class="text-[11px] text-slate-500 truncate">{{ item.desc }}</p>
-        </div>
+    <div class="mt-8 grid grid-cols-1 sm:grid-cols-3 gap-px rounded-xl overflow-hidden border border-white/[0.07] bg-white/[0.06]">
+      <div v-for="item in items" :key="item.label" class="bg-surface px-4 py-4">
+        <p class="text-sm font-medium text-slate-100">{{ item.label }}</p>
+        <p class="mt-1 text-xs leading-5 text-slate-500">{{ item.desc }}</p>
       </div>
     </div>
   </div>

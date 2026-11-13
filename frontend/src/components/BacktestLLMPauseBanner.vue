@@ -1,35 +1,40 @@
 <!-- frontend/src/components/BacktestLLMPauseBanner.vue
-     Yellow diagnostic banner shown when a backtest has been auto-paused
-     due to a critical LLM failure (status='paused_llm_critical'). Reads
-     the diagnostic fields written by backtest_critical_abort.handle().
+     Diagnostic panel shown when a backtest has been auto-paused due to a
+     critical LLM failure (status='paused_llm_critical'). Reads the
+     diagnostic fields written by backtest_critical_abort.handle().
+     Paused = amber dot and a word, like every other status in the app.
      -->
 <template>
-  <div
+  <section
     v-if="visible"
-    class="border border-amber-500/30 bg-amber-500/5 rounded-lg p-4 mb-4"
+    class="ui-card px-5 py-4"
+    aria-labelledby="llm-pause-title"
   >
-    <div class="flex items-start gap-3">
-      <span class="material-symbols-outlined text-amber-300 text-xl mt-0.5">pause_circle</span>
-      <div class="flex-1 min-w-0">
-        <div class="text-amber-300 font-semibold mb-2">
-          Backtest paused: LLM critical failure
-        </div>
-        <div class="text-amber-100/80 text-sm space-y-1">
-          <div><span class="text-amber-300/70 w-24 inline-block">Bar:</span> {{ formatBar(barTime) }}</div>
-          <div><span class="text-amber-300/70 w-24 inline-block">Reason:</span> {{ reasonTag }} <span class="text-amber-100/50">({{ attempts }} attempts)</span></div>
-          <div><span class="text-amber-300/70 w-24 inline-block">Provider:</span> {{ provider }} <span class="text-amber-100/50">&bull;  Model: {{ model }}</span></div>
-          <div><span class="text-amber-300/70 w-24 inline-block">Call site:</span> {{ callSite }}</div>
-          <div><span class="text-amber-300/70 w-24 inline-block">Paused at:</span> {{ formatTs(pausedAt) }}</div>
-        </div>
-        <div v-if="sample" class="mt-3 bg-black/20 border border-amber-500/20 rounded p-2 font-mono text-xs text-amber-100/70 break-all">
-          {{ sample }}
-        </div>
-        <div class="text-amber-100/60 text-xs mt-3">
-          Click <span class="font-semibold">"Resume Backtest"</span> above when the provider is healthy again. The same bar will retry from the snapshot.
-        </div>
-      </div>
+    <div class="flex items-center gap-2">
+      <span class="ui-dot ui-dot-warn" aria-hidden="true"></span>
+      <h2 id="llm-pause-title" class="text-sm font-medium text-slate-100">
+        Backtest paused: LLM critical failure
+      </h2>
     </div>
-  </div>
+    <dl class="mt-3 grid grid-cols-[88px_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-sm">
+      <dt class="text-slate-500">Bar</dt>
+      <dd class="text-slate-200 tabular-nums">{{ formatBar(barTime) }}</dd>
+      <dt class="text-slate-500">Reason</dt>
+      <dd class="text-slate-200">{{ reasonTag }} <span class="text-slate-500 tabular-nums">· {{ attempts }} attempts</span></dd>
+      <dt class="text-slate-500">Provider</dt>
+      <dd class="text-slate-200">{{ provider }} <span class="text-slate-500">· model {{ model }}</span></dd>
+      <dt class="text-slate-500">Call site</dt>
+      <dd class="text-slate-200 break-all">{{ callSite }}</dd>
+      <dt class="text-slate-500">Paused at</dt>
+      <dd class="text-slate-200 tabular-nums">{{ formatTs(pausedAt) }}</dd>
+    </dl>
+    <p v-if="sample" class="mt-3 rounded-lg border border-white/[0.06] bg-background-dark px-3 py-2 font-mono text-xs leading-5 text-slate-400 break-all">
+      {{ sample }}
+    </p>
+    <p class="mt-3 text-xs text-slate-500">
+      Resume the backtest when the provider is healthy again. The same bar will retry from the snapshot.
+    </p>
+  </section>
 </template>
 
 <script setup>
