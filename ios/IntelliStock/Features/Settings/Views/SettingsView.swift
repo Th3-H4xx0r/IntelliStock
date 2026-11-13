@@ -119,6 +119,27 @@ struct SettingsView: View {
                     subtitle: appVersionString()
                 ) { EmptyView() }
 
+                // Over-the-air updates. Brings the update sheet back even
+                // after Later.
+                Button {
+                    Task { await services.appUpdates.checkNow() }
+                } label: {
+                    SettingsRow(
+                        icon: "system_update",
+                        tile: "arrow.down.app",
+                        title: "Check for updates",
+                        subtitle: appUpdateSubtitle(services.appUpdates.status)
+                    ) {
+                        if services.appUpdates.status == .checking {
+                            ProgressView()
+                                .controlSize(.small)
+                                .tint(DS.Text.muted)
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(services.appUpdates.status == .checking)
+
                 NavigationLink(value: Route.connect) {
                     SettingsRow(
                         icon: "database",

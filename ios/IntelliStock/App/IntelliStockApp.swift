@@ -13,7 +13,10 @@ struct IntelliStockApp: App {
                 .environment(services)
                 // Dark only, the off-white tint, Inter: the web app's look.
                 .dsAppearance()
-                .onAppear { appDelegate.attach(push: services.push) }
+                .onAppear {
+                    appDelegate.attach(push: services.push)
+                    appDelegate.attach(updates: services.appUpdates)
+                }
         }
     }
 }
