@@ -1,9 +1,12 @@
 import SwiftUI
 
-/// The Instances tab root — `InstancesScreen` in `instances_screen.dart`:
-/// the equity instances (pinned first) as an inset-grouped list under a
-/// User/AI filter. A row opens the instance; its pin, live, start/stop, add
-/// stock and delete actions sit in swipe actions and the context menu.
+/// The Instances tab root — `InstancesScreen` in `instances_screen.dart`,
+/// styled as the web's `InstancesView.vue`: the subtitle under the large
+/// title, the All / User created / AI created filter, the pinned instances
+/// as cards ("Pinned"), then every other instance as a row ("Other
+/// instances"). A card or row opens the instance; pin, start/stop, live
+/// trading, add stock and delete sit in its swipe actions and context menu
+/// (a card also carries the web's pin, Start / Stop and More controls).
 struct InstancesView: View {
     @Environment(AppServices.self) private var services
 
@@ -11,6 +14,9 @@ struct InstancesView: View {
         InstancesContent(services: services)
     }
 }
+
+/// The page subtitle (`ui-page-sub`).
+private let instancesPageSub = "Live trading and backtesting bots"
 
 private struct InstancesContent: View {
     let services: AppServices
@@ -32,12 +38,12 @@ private struct InstancesContent: View {
 
     var body: some View {
         content
-            .listStyle(.insetGrouped)
+            .dsList()
             .navigationTitle("Instances")
             .navigationBarTitleDisplayMode(.large)
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
-                    ToolbarAddButton("New Instance") { showCreate = true }
+                    ToolbarAddButton("New instance") { showCreate = true }
                 }
             }
             .task { await model.poll(lifecycle: services.lifecycle) }
@@ -71,10 +77,12 @@ private struct InstancesContent: View {
             InstancesSkeleton()
         case .failed:
             List {
+                pageSub
                 Section {
                     ErrorRow(message: model.state.errorMessage ?? "") {
                         Task { await model.reload() }
                     }
+                    .dsClearRow(top: 24)
                 }
             }
         case .loaded(let state):
@@ -82,48 +90,68 @@ private struct InstancesContent: View {
         }
     }
 
+    /// The subtitle under the large title, as the list's first row.
+    private var pageSub: some View {
+        Section {
+            Text(instancesPageSub)
+                .font(DS.Font.pageSub)
+                .foregroundStyle(DS.Text.muted)
+                .dsClearRow(top: 0)
+        }
+    }
+
     private func loadedBody(_ state: InstancesState) -> some View {
-        let items = sortPinnedFirst(state.filtered, pinned.pinned)
+        let pinnedIds = pinned.pinned
+        let pinnedItems = state.filtered.filter { pinnedIds.contains($0.id) }
+        let others = state.filtered.filter { !pinnedIds.contains($0.id) }
         return List {
+            pageSub
             Section {
-                Picker("Filter", selection: Binding(get: { state.filter }, set: { model.setFilter($0) })) {
-                    Text("All (\(state.allCount))").tag(InstanceFilter.all)
-                    Text("User Created (\(state.userCount))").tag(InstanceFilter.user)
-                    Text("AI Created (\(state.aiCount))").tag(InstanceFilter.ai)
+                DSSegmentedControl(
+                    "Filter instances",
+                    selection: Binding(get: { state.filter }, set: { model.setFilter($0) }),
+                    options: [InstanceFilter.all, .user, .ai]
+                ) { filter in
+                    switch filter {
+                    case .all: "All \(state.allCount)"
+                    case .user: "User created \(state.userCount)"
+                    case .ai: "AI created \(state.aiCount)"
+                    }
                 }
-                .pickerStyle(.segmented)
-                .listRowBackground(Color.clear)
-                .listRowInsets(EdgeInsets())
+                .dsClearRow(top: 16)
             }
 
             if state.instances.isEmpty {
-                Section {
+                DSSection {
                     EmptyState(
-                        systemImage: Symbol.named("memory"),
                         title: "No instances yet",
-                        subtitle: "Create an instance to run live trading or backtesting strategies.",
-                        actionLabel: "Create Your First Instance",
+                        subtitle: "Create one to run a strategy live or in a backtest",
+                        actionLabel: "New instance",
                         onAction: { showCreate = true }
                     )
-                    .listRowBackground(Color.clear)
                 }
             } else if state.filtered.isEmpty {
-                Section {
-                    EmptyState(
-                        systemImage: Symbol.named("filter_alt_off"),
-                        title: state.filter == .ai ? "No AI-created instances" : "No user-created instances"
-                    )
-                    .listRowBackground(Color.clear)
+                DSSection {
+                    EmptyState(title: state.filter == .ai ? "No AI-created instances" : "No user-created instances")
                 }
             } else {
-                Section {
-                    ForEach(items) { inst in
-                        row(inst, busy: state.busyIds.contains(inst.id))
+                if !pinnedItems.isEmpty {
+                    DSSection("Pinned", subtitle: "Saved on this device", style: .plain) {
+                        ForEach(pinnedItems) { inst in
+                            pinCard(inst, busy: state.busyIds.contains(inst.id))
+                        }
+                    }
+                }
+                if !others.isEmpty {
+                    DSSection(pinnedItems.isEmpty ? nil : "Other instances", rowMinHeight: 64) {
+                        ForEach(others) { inst in
+                            row(inst, busy: state.busyIds.contains(inst.id))
+                        }
                     }
                 }
             }
             if let message = state.errorMessage {
-                Section { ErrorRow(message: message) }
+                Section { ErrorRow(message: message).dsClearRow() }
             }
         }
         .refreshable {
@@ -132,6 +160,37 @@ private struct InstancesContent: View {
                 services.instanceRows.refreshDetached(list, brokerages: services.dashboard.brokeragesValue, force: true)
             }
         }
+    }
+
+    // MARK: Pinned card
+
+    private func pinCard(_ inst: Instance, busy: Bool) -> some View {
+        let rows = services.instanceRows
+        let brokerages = services.dashboard.brokeragesValue
+        let shown = rows.merged(inst)
+        let accountId = inst.brokerageId.flatMap { $0.isEmpty ? nil : $0 }
+        let paper = instanceIsPaper(shown, brokerages: brokerages)
+        return InstancePinCard(
+            inst: shown,
+            detail: rows.details[inst.id],
+            moneyKind: paper.map { $0 ? "Paper" : "Live" },
+            kind: instanceKindLabel(shown, detailLoaded: rows.details[inst.id] != nil),
+            accountName: accountId.map { instanceBrokerageName($0, nested: shown.brokerage, brokerages: brokerages) },
+            summary: accountId.flatMap { rows.accounts.summary($0) },
+            summaryPending: accountId.map { rows.accounts.isPending($0) } ?? false,
+            strategyName: instanceStrategyName(shown),
+            busy: busy,
+            onOpen: { services.router.push(.instance(inst.id)) },
+            onUnpin: { pinned.toggle(inst.id) },
+            onStart: { Task { await model.start(inst.id) } },
+            onStop: { Task { await model.stop(inst.id) } }
+        ) {
+            menuItems(inst, busy: busy, isPinned: true)
+        }
+        .dsClearRow(bottom: 16)
+        .swipeActions(edge: .leading) { pinSwipe(inst, isPinned: true) }
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) { deleteSwipe(inst, busy: busy) }
+        .contextMenu { menuItems(inst, busy: busy, isPinned: true) }
     }
 
     // MARK: Row
@@ -145,57 +204,66 @@ private struct InstancesContent: View {
         return NavigationLink(value: Route.instance(inst.id)) {
             InstanceRow(
                 inst: shown,
-                subtitle: instanceRowSubtitle(shown, brokerages: brokerages),
+                subtitle: instanceListSubtitle(shown, brokerages: brokerages),
                 meta: instanceRowMeta(
                     uptime: rows.uptime(inst),
                     kind: instanceKindLabel(shown, detailLoaded: rows.details[inst.id] != nil)
                 ),
-                isPaper: instanceIsPaper(shown, brokerages: brokerages),
-                isPinned: isPinned,
                 busy: busy,
                 summary: accountId.flatMap { rows.accounts.summary($0) },
                 summaryPending: accountId.map { rows.accounts.isPending($0) } ?? false
             )
         }
-        .swipeActions(edge: .leading) {
+        .swipeActions(edge: .leading) { pinSwipe(inst, isPinned: isPinned) }
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) { deleteSwipe(inst, busy: busy) }
+        .contextMenu { menuItems(inst, busy: busy, isPinned: isPinned) }
+    }
+
+    // MARK: Actions
+
+    private func pinSwipe(_ inst: Instance, isPinned: Bool) -> some View {
+        Button(isPinned ? "Unpin" : "Pin", systemImage: isPinned ? "pin.slash" : "pin") {
+            pinned.toggle(inst.id)
+        }
+        .tint(DS.Swipe.neutral)
+    }
+
+    private func deleteSwipe(_ inst: Instance, busy: Bool) -> some View {
+        Button("Delete", systemImage: "trash", role: .destructive) { confirmDelete(inst) }
+            .disabled(busy || confirmRunning)
+    }
+
+    /// The context menu and a card's More menu (the web's ⋯ menu, with the
+    /// app's actions).
+    @ViewBuilder
+    private func menuItems(_ inst: Instance, busy: Bool, isPinned: Bool) -> some View {
+        Section {
+            if inst.runCommand {
+                Button("Stop", systemImage: "stop.fill") { Task { await model.stop(inst.id) } }
+                    .disabled(busy)
+            } else {
+                Button("Start", systemImage: "play.fill") { Task { await model.start(inst.id) } }
+                    .disabled(busy)
+            }
+            Button("Live trading", systemImage: "chart.xyaxis.line") {
+                services.router.push(.liveTrading(inst.id))
+            }
+        }
+        Section {
             Button(isPinned ? "Unpin" : "Pin", systemImage: isPinned ? "pin.slash" : "pin") {
                 pinned.toggle(inst.id)
             }
-            .tint(.orange)
+            Button("Add stock", systemImage: "plus") {
+                addStockFor = InstanceSheetTarget(id: inst.id)
+            }
+            .disabled(busy)
+            Button("Copy ID", systemImage: "doc.on.doc") {
+                UIPasteboard.general.string = inst.id
+            }
         }
-        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+        Section {
             Button("Delete", systemImage: "trash", role: .destructive) { confirmDelete(inst) }
                 .disabled(busy || confirmRunning)
-        }
-        .contextMenu {
-            Section {
-                if inst.runCommand {
-                    Button("Stop", systemImage: "stop.fill") { Task { await model.stop(inst.id) } }
-                        .disabled(busy)
-                } else {
-                    Button("Start", systemImage: "play.fill") { Task { await model.start(inst.id) } }
-                        .disabled(busy)
-                }
-                Button("View Live", systemImage: "chart.xyaxis.line") {
-                    services.router.push(.liveTrading(inst.id))
-                }
-            }
-            Section {
-                Button(isPinned ? "Unpin" : "Pin", systemImage: isPinned ? "pin.slash" : "pin") {
-                    pinned.toggle(inst.id)
-                }
-                Button("Add Stock…", systemImage: "plus") {
-                    addStockFor = InstanceSheetTarget(id: inst.id)
-                }
-                .disabled(busy)
-                Button("Copy ID", systemImage: "doc.on.doc") {
-                    UIPasteboard.general.string = inst.id
-                }
-            }
-            Section {
-                Button("Delete", systemImage: "trash", role: .destructive) { confirmDelete(inst) }
-                    .disabled(busy || confirmRunning)
-            }
         }
     }
 
@@ -209,7 +277,7 @@ private struct InstancesContent: View {
     }
 }
 
-/// The Delete Instance confirmation, shared by the list's swipe and context
+/// The Delete instance confirmation, shared by the list's swipe and context
 /// menu and Instance detail's toolbar menu. `onConfirm` runs the delete
 /// (`InstancesModel.delete`).
 func instanceDeleteRequest(
@@ -218,7 +286,7 @@ func instanceDeleteRequest(
     onError: @escaping (any Error) -> Void
 ) -> ConfirmRequest {
     ConfirmRequest(
-        title: "Delete Instance",
+        title: "Delete instance",
         body: "Delete \"\(inst.name.isEmpty ? inst.id : inst.name)\"? This cannot be undone.",
         confirmLabel: "Delete",
         role: .destructive,
@@ -247,6 +315,22 @@ func instanceRowSubtitle(_ inst: Instance, brokerages: [BrokerageAccount]?) -> S
     return parts.joined(separator: " · ")
 }
 
+/// The list row's subtitle: `instanceRowSubtitle` with the money kind after
+/// the account, as the web's pinned cards say it — "Strategy EB · Alpaca
+/// Live · Live", "AI · Strategy F14 · Paper Test · Paper".
+func instanceListSubtitle(_ inst: Instance, brokerages: [BrokerageAccount]?) -> String {
+    let base = instanceRowSubtitle(inst, brokerages: brokerages)
+    guard let paper = instanceIsPaper(inst, brokerages: brokerages) else { return base }
+    return "\(base) · \(paper ? "Paper" : "Live")"
+}
+
+/// The linked strategy's name (the web's `pinStrategyName`): its own name,
+/// else "Strategy <id>"; nil without a strategy.
+func instanceStrategyName(_ inst: Instance) -> String? {
+    guard let sid = inst.strategyId else { return nil }
+    return (inst.strategy?["name"]).flatMap { $0.isNull ? nil : $0.dartDescription } ?? "Strategy \(sid)"
+}
+
 /// A brokerage id as a human name: the nested map's `account_name`, the
 /// loaded list's name, or the id shortened in the middle (`bf78ad0c…3404`).
 func instanceBrokerageName(_ id: String, nested: JSONObject?, brokerages: [BrokerageAccount]?) -> String {
@@ -267,39 +351,34 @@ struct InstanceSheetTarget: Identifiable, Hashable {
 }
 
 /// Run state as a dot and a word: `Crashed` (red), `Running` (green,
-/// pulsing) or `Stopped`.
+/// pulsing) or `Stopped`, with an optional detail in the same line:
+/// "● Running · Up 6h 12m".
 struct InstanceStatusDot: View {
     let inst: Instance
-    var font: Font = .subheadline
-    /// Said after the state in the same style: "Running · Up 6h 12m".
+    var font: Font = DS.Font.body
     var detail: String = ""
 
     var body: some View {
-        let label = inst.crashed ? "Crashed" : (inst.runCommand ? "Running" : "Stopped")
-        let color: Color = inst.crashed ? DS.Palette.danger : (inst.runCommand ? DS.Palette.success : .secondary)
-        StatusDot(detail.isEmpty ? label : "\(label) · \(detail)", color: color,
-                  pulsing: inst.runCommand && !inst.crashed, font: font)
+        let state = InstanceRunState(inst)
+        StatusDot(detail.isEmpty ? state.word : "\(state.word) · \(detail)", tone: state.tone,
+                  pulsing: state == .running, font: font)
     }
 }
 
-/// One instance in the list, in the manner of the Dashboard's holdings rows:
+/// One instance in "Other instances", in the web's order: the status dot
+/// and the name, then the strategy, account and Paper / Live, then the run
+/// state with the uptime and kind; the account's equity and today's change
+/// on the right when a brokerage is linked (the 1D line is the pinned
+/// cards'; the web's rows draw none). At accessibility sizes the figures
+/// move under the text.
 ///
-///     Swing trader (paper)                              Paper
-///     Swing trader paper ·          ╱╲╱   $17,966.98
-///     Swing Trade Paper                   +$12.34 · +0.07%
-///     ● Running · 6h 12m · Swing
-///
-/// The name across the row with the Paper / Live flag; under it the
-/// strategy and account over a quiet line with the run state, uptime and
-/// kind, and on the right the account's 1D curve, equity and today's change
-/// when a brokerage is linked. At accessibility sizes the figures move under
-/// the text.
+///     ● Strategy EB                                $5,396.11
+///       Strategy EB · Alpaca Live · Live           −$23.30 · −0.43%
+///       Running · 6h 12m · Equity
 private struct InstanceRow: View {
     let inst: Instance
     let subtitle: String
     let meta: String
-    let isPaper: Bool?
-    let isPinned: Bool
     let busy: Bool
     let summary: DashboardAccountSummary?
     let summaryPending: Bool
@@ -308,105 +387,91 @@ private struct InstanceRow: View {
 
     var body: some View {
         let stacked = dynamicTypeSize.isAccessibilitySize
-        let top = stacked
+        let state = InstanceRunState(inst)
+        let layout = stacked
             ? AnyLayout(VStackLayout(alignment: .leading, spacing: 6))
             : AnyLayout(HStackLayout(alignment: .center, spacing: 12))
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(inst.name.isEmpty ? inst.id : inst.name)
-                    .font(.headline)
-                    .lineLimit(stacked ? nil : 1)
-                if isPinned {
-                    Image(systemName: "pin.fill")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .accessibilityLabel("Pinned")
-                }
-                Spacer(minLength: 8)
-                if let isPaper {
-                    StatusBadge(label: isPaper ? "Paper" : "Live", color: isPaper ? DS.Palette.info : DS.Palette.danger)
-                }
-            }
-            top {
-                VStack(alignment: .leading, spacing: 4) {
+        layout {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                DSStatusDot(state.tone)
+                    .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 4 }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(inst.name.isEmpty ? inst.id : inst.name)
+                        .font(DS.Font.body)
+                        .foregroundStyle(DS.Text.primary)
+                        .lineLimit(stacked ? nil : 1)
                     Text(subtitle)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(stacked ? nil : 2)
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.muted)
+                        .lineLimit(stacked ? nil : 1)
                     if busy {
                         HStack(spacing: 6) {
                             ProgressView()
-                                .controlSize(.small)
+                                .controlSize(.mini)
                             Text("Working…")
-                                .foregroundStyle(.secondary)
                         }
-                        .font(.footnote)
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.muted)
                     } else {
-                        InstanceStatusDot(inst: inst, font: .footnote, detail: meta)
+                        Text(meta.isEmpty ? state.word : "\(state.word) · \(meta)")
+                            .font(DS.Font.caption)
+                            .foregroundStyle(state == .stopped ? DS.Text.faint : DS.Text.secondary)
+                            .monospacedDigit()
+                            .lineLimit(1)
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                figures
-                    .layoutPriority(1)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            figures
+                .layoutPriority(1)
         }
-        .padding(.vertical, 2)
         .accessibilityElement(children: .combine)
     }
 
-    /// The account's figures, a redacted placeholder while its first fetch
-    /// runs, or nothing (no brokerage, or no history for its type).
+    /// The account's figures, skeleton lines while its first fetch runs, or
+    /// nothing (no brokerage, or no history for its type).
     @ViewBuilder
     private var figures: some View {
         if let summary {
-            HStack(spacing: 12) {
-                if summary.spark.count > 1 {
-                    Sparkline(values: summary.spark, height: 24)
-                        .frame(width: 60, height: 24)
-                        .accessibilityHidden(true)
-                }
-                EntityRowValue(
-                    fmtMoney(summary.equity),
-                    detail: instanceRowChangeText(summary),
-                    detailColor: summary.dayChange == nil ? nil : summary.direction.color
-                )
-            }
+            EntityRowValue(
+                fmtMoney(summary.equity),
+                detail: instanceRowChangeText(summary),
+                detailColor: summary.dayChange == nil ? nil : summary.direction.color
+            )
         } else if summaryPending {
-            HStack(spacing: 12) {
-                Skeleton(height: 18, radius: 5)
-                    .frame(width: 60, height: 24)
-                EntityRowValue("$00,000.00", detail: "+$00.00 · +0.00%")
-                    .redacted(reason: .placeholder)
+            VStack(alignment: .trailing, spacing: 6) {
+                Skeleton(width: 72, height: 14)
+                Skeleton(width: 96, height: 10)
             }
             .accessibilityHidden(true)
         }
     }
 }
 
-/// The list's loading shape: the filter and rows, redacted.
+/// The list's loading shape (the web's): the subtitle, the filter, and rows
+/// of static skeleton lines.
 private struct InstancesSkeleton: View {
     var body: some View {
         List {
             Section {
-                Picker("Filter", selection: .constant(0)) {
-                    Text("All").tag(0)
-                    Text("User Created").tag(1)
-                    Text("AI Created").tag(2)
-                }
-                .pickerStyle(.segmented)
-                .listRowBackground(Color.clear)
-                .listRowInsets(EdgeInsets())
+                Text(instancesPageSub)
+                    .font(DS.Font.pageSub)
+                    .foregroundStyle(DS.Text.muted)
+                    .dsClearRow(top: 0)
+                Skeleton(width: 280, height: 34, radius: DS.Radius.control)
+                    .dsClearRow(top: 16)
             }
-            Section {
+            DSSection(rowMinHeight: 64) {
                 ForEach(0..<6, id: \.self) { _ in
-                    EntityRow("Instance name", subtitle: "Strategy 000 · Brokerage") {
-                        StatusDot("Stopped", color: .secondary)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Skeleton(width: 176, height: 16)
+                        Skeleton(width: 112, height: 12)
                     }
                 }
             }
         }
-        .redacted(reason: .placeholder)
         .disabled(true)
-        .accessibilityLabel("Loading")
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Loading instances")
     }
 }

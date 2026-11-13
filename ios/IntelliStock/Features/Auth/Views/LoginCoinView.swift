@@ -139,20 +139,21 @@ final class LoginCoinScene: LoginCoinPlaying {
     }
 }
 
-/// Shown when the 3D coin cannot load: a flat accent disc with the same
-/// silhouette, so the layout never jumps — `_Fallback`, without its gradient.
+/// Shown when the 3D coin cannot load: a flat raised disc with the same
+/// silhouette and a muted chart glyph, so the layout never jumps —
+/// `_Fallback`, without its gradient or accent.
 private struct LoginCoinFallback: View {
     let size: CGFloat
 
     var body: some View {
         let d = size * 0.62
         Circle()
-            .fill(DS.Palette.accent.opacity(DS.tintFill))
-            .overlay(Circle().strokeBorder(DS.Palette.accent.opacity(0.55), lineWidth: 1.4))
+            .fill(DS.Surface.raised)
+            .overlay(Circle().strokeBorder(DS.Line.input, lineWidth: DS.Line.width))
             .overlay(
                 Image(systemName: Symbol.named("show_chart"))
-                    .font(.system(size: d * 0.45))
-                    .foregroundStyle(DS.Palette.accent.opacity(0.9))
+                    .font(.system(size: d * 0.4, weight: .light))
+                    .foregroundStyle(DS.Text.muted)
             )
             .frame(width: d, height: d)
     }

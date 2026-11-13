@@ -1,10 +1,10 @@
 import SwiftUI
 
-/// The self-learning subsystem (`/learning`) — `LearningScreen`: engine and
-/// mode controls, pending approvals, noise floors, findings and observed
-/// runs. An inset-grouped list: the overview counts are a `StatGrid`, the
-/// engine is a section with its Start / Stop button and mode picker, and
-/// each finding is a severity-badged row that discloses its body.
+/// The self-learning subsystem (`/learning`) — `LearningScreen`, drawn as the
+/// web's `LearningView.vue`: the engine's status and Start / Stop engine,
+/// the counters, the engine's mode and targets, then pending approvals,
+/// noise floors, findings and observed runs, each a section on one card.
+/// Each finding opens in place to show its ladder.
 struct LearningView: View {
     @Environment(AppServices.self) private var services
     @State private var model: LearningModel?
@@ -18,21 +18,25 @@ struct LearningView: View {
             if let model {
                 switch model.state {
                 case .loading:
-                    LoadingState(label: "Loading learning data…").frame(maxHeight: .infinity)
+                    LearningSkeleton()
                 case .failed(let e):
-                    ErrorRow(message: KalshiFormat.errorText(e), onRetry: { Task { await model.load() } })
-                        .padding(16)
-                        .frame(maxHeight: .infinity, alignment: .top)
+                    List {
+                        Section {
+                            ErrorRow(message: KalshiFormat.errorText(e), onRetry: { Task { await model.load() } })
+                                .dsClearRow(top: 8)
+                        }
+                    }
+                    .dsList()
+                    .refreshable { await model.load() }
                 case .loaded(let s):
                     content(model, s)
                 }
             } else {
-                Color.clear
+                LearningSkeleton()
             }
         }
-        .background(DS.Surface.canvas)
         .navigationTitle("Learning")
-        .navigationBarTitleDisplayMode(.inline)
+        .navigationBarTitleDisplayMode(.large)
         .toast($toast)
         .task {
             if model == nil {
@@ -53,173 +57,192 @@ struct LearningView: View {
 
     private func content(_ model: LearningModel, _ s: LearningSnapshot) -> some View {
         List {
-            overview(s)
+            Section {
+                header(model, s)
+                    .dsClearRow(top: 4)
+            }
+            if s.overview != nil {
+                Section {
+                    counters(s)
+                        .dsClearRow()
+                }
+            }
             engine(model, s)
             if let partial = s.partialError {
                 Section {
                     ErrorRow(message: partial)
-                        .listRowInsets(EdgeInsets())
-                        .listRowBackground(Color.clear)
+                        .dsClearRow()
                 }
             }
-            Section("Pending approvals") {
-                if s.approvals.isEmpty {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("No approvals waiting")
-                        Text("The subsystem is observe-only — it records and reports, and does not yet propose changes.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                } else {
-                    ForEach(s.approvals) { a in approvalRow(model, a) }
-                }
-            }
-            Section("Measured noise floors") {
-                if s.floors.isEmpty {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("No floor measured yet").foregroundStyle(DS.Palette.warning)
-                        Text("Two runs of one window have differed by ~16pp here, so nothing is promotable until a target has a measured floor.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                } else {
-                    ForEach(Array(s.floors.enumerated()), id: \.offset) { _, f in floorRow(f) }
-                }
-            }
-            Section("Findings & reports") {
-                if s.findings.isEmpty {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Nothing raised yet")
-                        Text("Findings appear as completed runs are observed.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                } else {
-                    ForEach(s.findings) { f in LearningFindingRow(finding: f) }
-                }
-            }
-            Section("Observed runs") {
-                if s.funnels.isEmpty {
-                    Text("No runs observed yet").foregroundStyle(.secondary)
-                } else {
-                    ForEach(Array(s.funnels.enumerated()), id: \.offset) { _, r in funnelRow(r) }
-                }
-            }
+            approvals(model, s)
+            floors(s)
+            findings(s)
+            runs(s)
         }
-        .listStyle(.insetGrouped)
+        .dsList()
         .refreshable { await model.load() }
     }
 
-    // MARK: Overview + engine
+    // MARK: Header, counters, engine
 
-    private func overview(_ s: LearningSnapshot) -> some View {
+    /// The web's header: the page's one-line purpose, the engine's state and
+    /// mode as a quiet line, and Start engine / Stop engine.
+    private func header(_ model: LearningModel, _ s: LearningSnapshot) -> some View {
+        let running = s.engineRunning
+        let modeLabel = s.observeOnly ? "Observe only" : (s.overview?.mode ?? s.mode).dsSentenceCased
+        return VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("What the system decided, what it declined to do, and what that says about it")
+                    .font(DS.Font.pageSub)
+                    .foregroundStyle(DS.Text.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 8) {
+                    StatusDot(running ? "Engine running" : "Engine stopped", tone: running ? .live : .off, font: DS.Font.caption)
+                    Text("·")
+                        .foregroundStyle(DS.Text.faint)
+                        .accessibilityHidden(true)
+                    Text(modeLabel)
+                        .foregroundStyle(s.observeOnly ? DS.Text.secondary : DS.Text.soft)
+                }
+                .font(DS.Font.caption)
+            }
+            HStack(spacing: 8) {
+                if running {
+                    Button("Stop engine", role: .destructive) { Task { show(await model.setRunning(false)) } }
+                        .buttonStyle(.dsSecondary(size: .medium))
+                } else {
+                    Button("Start engine") { Task { show(await model.setRunning(true)) } }
+                        .buttonStyle(.dsSecondary(size: .medium))
+                }
+                if model.acting {
+                    ProgressView()
+                        .controlSize(.small)
+                        .padding(.leading, 4)
+                }
+            }
+            .disabled(model.acting)
+        }
+    }
+
+    /// The counters card (the web's): four figures in two columns.
+    private func counters(_ s: LearningSnapshot) -> some View {
         let ov = s.overview
-        let engineOn = ov?.engineRunning ?? false
-        return Section {
-            StatGrid(columns: 2) {
+        return Card(padding: EdgeInsets(top: 16, leading: DS.cardPadding, bottom: 16, trailing: DS.cardPadding)) {
+            StatGrid(columns: 2, verticalSpacing: 16) {
                 StatCell(label: "Open findings", value: String(ov?.openFindings ?? 0))
                 StatCell(label: "Runs observed", value: String(ov?.runsObserved ?? 0))
                 StatCell(label: "Decisions", value: String(ov?.decisionsObserved ?? 0))
                 StatCell(label: "Refusals", value: String(ov?.refusalsObserved ?? 0))
             }
-            .padding(.vertical, 4)
-        } header: {
-            DSSectionHeader("Overview") {
-                HStack(spacing: 10) {
-                    StatusBadge(label: s.observeOnly ? "Observe only" : (ov?.mode ?? "—").dsSentenceCased, color: s.observeOnly ? DS.Palette.info : DS.Palette.success, pulsing: !s.observeOnly)
-                    StatusDot(engineOn ? "Engine on" : "Engine off", color: engineOn ? DS.Palette.success : .secondary, pulsing: engineOn, font: .footnote)
-                }
-            }
+            .statValueStyle(.figure)
         }
     }
 
+    /// The engine's mode and what it may touch.
     private func engine(_ model: LearningModel, _ s: LearningSnapshot) -> some View {
-        let running = s.engineRunning
-        return Section {
-            HStack {
-                StatusDot(running ? "Engine running" : "Engine stopped", color: running ? DS.Palette.success : .secondary, pulsing: running, font: .body)
-                Spacer()
-                if running {
-                    Button("Stop") { Task { show(await model.setRunning(false)) } }
-                        .buttonStyle(.bordered)
-                        .disabled(model.acting)
-                } else {
-                    Button("Start") { Task { show(await model.setRunning(true)) } }
-                        .dsProminentButton()
-                        .disabled(model.acting)
-                }
-            }
-            LabeledContent("Mode") {
-                Picker("Mode", selection: Binding(
-                    get: { s.mode },
-                    set: { mode in Task { show(await model.setMode(mode)) } }
-                )) {
-                    ForEach(["observe", "propose", "act"], id: \.self) { Text($0.dsSentenceCased).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(maxWidth: 240)
-                .disabled(model.acting)
+        DSSection(
+            "Engine",
+            subtitle: "Nothing is promotable until a target has a measured noise floor, whatever these say",
+            footer: "Budgets and the permission matrix are on the web — a phone is where you answer a proposal, not where you tune a matrix"
+        ) {
+            HStack(spacing: 12) {
+                Text("Mode")
+                    .font(DS.Font.body)
+                    .foregroundStyle(DS.Text.secondary)
+                Spacer(minLength: 8)
+                DSSegmentedControl(
+                    "Mode",
+                    selection: Binding(
+                        get: { s.mode },
+                        set: { mode in Task { show(await model.setMode(mode)) } }
+                    ),
+                    options: ["observe", "propose", "act"],
+                    isDisabled: { _ in model.acting }
+                ) { $0.dsSentenceCased }
             }
             Button {
                 targetsOpen = true
             } label: {
-                HStack {
-                    Text(s.targetsLabel).foregroundStyle(.primary)
-                    Spacer()
+                HStack(spacing: 12) {
+                    Text(s.targetsLabel)
+                        .font(DS.Font.body)
+                        .foregroundStyle(DS.Text.primary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     Image(systemName: "chevron.right")
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(.tertiary)
+                        .font(.system(size: 13))
+                        .foregroundStyle(DS.Text.faint)
                         .accessibilityHidden(true)
                 }
+                .contentShape(Rectangle())
             }
-            .tint(.primary)
+            .buttonStyle(.plain)
             .disabled(s.targets == nil)
-        } header: {
-            Text("Engine")
-        } footer: {
-            Text("Budgets and the permission matrix are on the web tab — a phone is where you answer a proposal, not where you tune a matrix.")
         }
     }
 
     // MARK: Approvals
 
-    /// A proposal waiting for an answer: its rung, class and document, the
-    /// summary and target, then Approve and Reject side by side.
+    private func approvals(_ model: LearningModel, _ s: LearningSnapshot) -> some View {
+        let live = s.liveApprovals.count
+        return DSSection("Pending approvals") {
+            if s.approvals.isEmpty {
+                EmptyState(
+                    title: "No approvals waiting",
+                    subtitle: s.observeOnly
+                        ? "The subsystem is in observe mode — it records and reports, and does not propose changes"
+                        : "Nothing is waiting on you right now"
+                )
+            } else {
+                ForEach(s.approvals) { a in approvalRow(model, a) }
+            }
+        } accessory: {
+            if live > 0 {
+                StatusDot("\(live) live — waits indefinitely", tone: .warn, font: DS.Font.caption)
+            }
+        }
+    }
+
+    /// A proposal waiting for an answer (the web's row): its rung, class
+    /// and document; the summary; the target and when it was asked; then
+    /// Approve and Reject.
     private func approvalRow(_ model: LearningModel, _ a: LearningApproval) -> some View {
         let live = a.holdsForever
         let busy = deciding.contains(a.id) || model.acting
-        return VStack(alignment: .leading, spacing: 8) {
+        let requested = fmtDateTime(a.requestedAt)
+        var meta = a.target
+        if requested != "—", !requested.isEmpty { meta += " · requested \(requested)" }
+        if live { meta += " · this one waits until you answer" }
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 12) {
+                HStack(spacing: 6) {
+                    if live { DSStatusDot(.warn) }
+                    Text(a.rung).foregroundStyle(DS.Text.label)
+                }
+                Text(a.actionClass).foregroundStyle(DS.Text.muted)
+                Text("doc \(a.documentId.isEmpty ? "—" : a.documentId)")
+                    .foregroundStyle(DS.Text.muted)
+                    .monospacedDigit()
+            }
+            .font(DS.Font.caption)
+            .lineLimit(1)
+            Text(a.summary)
+                .font(DS.Font.body)
+                .foregroundStyle(DS.Text.primary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(meta)
+                .font(DS.Font.caption)
+                .foregroundStyle(DS.Text.muted)
+                .monospacedDigit()
+                .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 8) {
-                AppBadge(label: a.rung, color: live ? DS.Palette.danger : DS.Palette.info)
-                Text(a.actionClass).font(.footnote).foregroundStyle(.secondary)
-                Spacer()
-                Text("doc \(a.documentId)").font(.footnote).foregroundStyle(.secondary)
+                Button("Approve") { decide(model, a, "approved") }
+                Button("Reject") { decide(model, a, "rejected") }
             }
-            Text(a.summary).font(.body)
-            Text(live ? "\(a.target) · this one waits until you answer" : a.target)
-                .font(.footnote)
-                .foregroundStyle(live ? DS.Palette.danger : Color.secondary)
-            HStack(spacing: 10) {
-                Button {
-                    decide(model, a, "approved")
-                } label: {
-                    Text("Approve").frame(maxWidth: .infinity)
-                }
-                .tint(DS.Palette.success)
-                Button {
-                    decide(model, a, "rejected")
-                } label: {
-                    Text("Reject").frame(maxWidth: .infinity)
-                }
-                .tint(DS.Palette.danger)
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.large)
+            .buttonStyle(.dsSecondary)
             .disabled(busy)
-            .padding(.top, 4)
+            .padding(.top, 6)
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 8)
     }
 
     private func decide(_ model: LearningModel, _ a: LearningApproval, _ decision: String) {
@@ -231,103 +254,301 @@ struct LearningView: View {
         }
     }
 
-    // MARK: Floors + runs
+    // MARK: Floors
 
+    private func floors(_ s: LearningSnapshot) -> some View {
+        DSSection(
+            "Measured noise floors",
+            subtitle: "A target with no measured floor cannot promote anything — two runs of one window have differed by ~16pp here, so an unmeasured target's results are not attributable"
+        ) {
+            if s.floors.isEmpty {
+                VStack(spacing: 4) {
+                    HStack(spacing: 8) {
+                        DSStatusDot(.warn)
+                        Text("No floor has been measured yet")
+                            .font(DS.Font.body)
+                            .foregroundStyle(DS.Text.label)
+                    }
+                    Text("Nothing is promotable until one is")
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.muted)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 40)
+                .accessibilityElement(children: .combine)
+            } else {
+                ForEach(Array(s.floors.enumerated()), id: \.offset) { _, f in floorRow(f) }
+            }
+        }
+    }
+
+    /// A target's floor (the web's table row): the target and its window
+    /// class, the floor and its repeats; an unmeasured one says why in amber.
     private func floorRow(_ f: LearningFloor) -> some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(f.target).font(.headline)
-                Text(f.windowClass).font(.subheadline).foregroundStyle(.secondary)
-                if !f.measured, !f.reason.isEmpty {
-                    Text(f.reason).font(.footnote).foregroundStyle(DS.Palette.warning)
+                Text(f.target)
+                    .font(DS.Font.body)
+                    .foregroundStyle(DS.Text.primary)
+                Text(f.windowClass)
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.muted)
+                if !f.measured {
+                    Text(f.reason.isEmpty ? "Not measured" : f.reason)
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Palette.amber)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            Text(f.measured ? "\(dartToStringAsFixed(f.floorPp, 2))pp" : "—")
-                .monospacedDigit()
-                .foregroundStyle(f.measured ? Color.primary : DS.Palette.warning)
+            EntityRowValue(
+                f.measured ? "\(dartToStringAsFixed(f.floorPp, 2))pp" : "—",
+                color: f.measured ? DS.Text.label : DS.Palette.amber,
+                detail: "\(f.n) repeat\(f.n == 1 ? "" : "s")"
+            )
         }
         .accessibilityElement(children: .combine)
     }
 
+    // MARK: Findings
+
+    private func findings(_ s: LearningSnapshot) -> some View {
+        DSSection("Findings & reports") {
+            if s.findings.isEmpty {
+                EmptyState(
+                    title: "Nothing raised yet",
+                    subtitle: s.overview.map { !$0.engineRunning } == true
+                        ? "The self-learning engine is stopped — start it to begin observing"
+                        : "Findings appear as completed runs are observed"
+                )
+            } else {
+                ForEach(s.findings) { f in LearningFindingRow(finding: f) }
+            }
+        }
+    }
+
+    // MARK: Runs
+
+    private func runs(_ s: LearningSnapshot) -> some View {
+        DSSection("Observed runs") {
+            if s.funnels.isEmpty {
+                EmptyState(title: "No runs observed yet")
+            } else {
+                ForEach(Array(s.funnels.enumerated()), id: \.offset) { _, r in funnelRow(r) }
+            }
+        }
+    }
+
+    /// One observed run (the web's table row): the run and its target with
+    /// decided / executed / refused under them, and the buy conversion on
+    /// the right (amber under 25%).
     private func funnelRow(_ r: LearningFunnel) -> some View {
         let pct = r.buyConversionPct
         return HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Run \(r.runId)").font(.headline)
-                Text(r.target).font(.subheadline).foregroundStyle(.secondary)
+                Text("Run \(r.runId)")
+                    .font(DS.Font.body)
+                    .foregroundStyle(DS.Text.primary)
+                    .monospacedDigit()
+                Text(r.target)
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.muted)
                 Text("\(r.decided) decided · \(r.executed) executed · \(r.refused) refused")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.muted)
+                    .monospacedDigit()
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             EntityRowValue(
                 pct.map { "\(dartToStringAsFixed($0, 1))%" } ?? "—",
-                color: pct.map { $0 < 25 } == true ? DS.Palette.danger : nil,
-                detail: "buy conv."
+                color: pct.map { $0 < 25 } == true ? DS.Palette.amber : DS.Text.label,
+                detail: "Buy conv."
             )
         }
         .accessibilityElement(children: .combine)
     }
 }
 
-/// A finding (`_FindingCard`): the severity badge, title and target; expand
-/// it for the body and its ladder stepper.
-private struct LearningFindingRow: View {
+/// A finding (the web's row): the severity as a dot and a word with the
+/// target, the title and its detail, and a chevron. Tap it to open the
+/// thread: when it was detected, then the ladder stepper — Detected with
+/// its evidence, and each rung not reached yet.
+struct LearningFindingRow: View {
     let finding: LearningFinding
 
-    @State private var open = false
+    @State private var open: Bool
+
+    /// `open` starts the row opened (a deep link, a preview).
+    init(finding: LearningFinding, open: Bool = false) {
+        self.finding = finding
+        _open = State(initialValue: open)
+    }
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         let f = finding
-        DisclosureGroup(isExpanded: $open) {
-            VStack(alignment: .leading, spacing: 0) {
-                Text(f.detail)
-                    .font(.subheadline)
-                    .padding(.bottom, 12)
-                step("Detected", "\(f.kind) · run \(f.runId.isEmpty ? "—" : f.runId)", DS.Palette.danger, reached: true)
-                if !f.evidence.isEmpty {
-                    Text(f.evidence.entries.map { "\($0.key): \($0.value.dartDescription)" }.joined(separator: "\n"))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .padding(.leading, 20)
-                        .padding(.bottom, 12)
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(DSMotion.standard(reduceMotion: reduceMotion)) { open.toggle() }
+            } label: {
+                HStack(alignment: .top, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 12) {
+                            StatusDot(f.severity.dsSentenceCased, tone: Self.severityTone(f.severity), font: DS.Font.caption)
+                            Text(f.target)
+                                .font(DS.Font.caption)
+                                .foregroundStyle(DS.Text.muted)
+                                .lineLimit(1)
+                        }
+                        Text(f.title)
+                            .font(DS.Font.body)
+                            .foregroundStyle(DS.Text.primary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if !f.detail.isEmpty {
+                            Text(f.detail)
+                                .font(DS.Font.caption)
+                                .foregroundStyle(DS.Text.muted)
+                                .lineLimit(open ? nil : 2)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    Image(systemName: open ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 14))
+                        .foregroundStyle(DS.Text.muted)
+                        .padding(.top, 2)
+                        .accessibilityHidden(true)
                 }
-                ForEach(LearningModel.ladder, id: \.name) { rung in
-                    step(rung.name, rung.detail, Color(uiColor: .tertiaryLabel), reached: false)
-                }
+                .contentShape(Rectangle())
             }
-            .padding(.vertical, 4)
-        } label: {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 8) {
-                    StatusBadge(label: f.severity.dsSentenceCased, color: LearningModel.severityColor(f.severity))
-                    Text(f.target).font(.footnote).foregroundStyle(.secondary).lineLimit(1)
-                }
-                Text(f.title).font(.headline).foregroundStyle(.primary)
+            .buttonStyle(.plain)
+            .accessibilityHint(open ? "Collapses the ladder" : "Shows the ladder")
+
+            if open {
+                thread(f)
+                    .padding(.top, 16)
             }
         }
-        .accessibilityHint(open ? "Collapses the ladder" : "Shows the ladder")
+        .padding(.vertical, 8)
     }
 
-    private func step(_ label: String, _ detail: String, _ color: Color, reached: Bool) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Circle().fill(color).frame(width: 10, height: 10).padding(.top, 4)
+    private func thread(_ f: LearningFinding) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Detected \(fmtDateTime(f.detectedAt)) · run \(f.runId.isEmpty ? "—" : f.runId)")
+                .font(DS.Font.caption)
+                .foregroundStyle(DS.Text.muted)
+                .monospacedDigit()
             VStack(alignment: .leading, spacing: 0) {
-                Text(label).font(.footnote.weight(.semibold)).foregroundStyle(reached ? Color.primary : Color.secondary)
-                Text(detail).font(.caption).foregroundStyle(.secondary)
-                if !reached {
-                    Text("not reached — the subsystem observes only").font(.caption).foregroundStyle(.secondary)
+                step(isFirst: true, isLast: false, reached: true) {
+                    Text("Detected")
+                        .font(DS.Font.body)
+                        .foregroundStyle(DS.Text.soft)
+                    Text("\(f.kind) · \(f.target)")
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.muted)
+                    if !f.evidence.isEmpty {
+                        Text(f.evidence.entries.map { "\($0.key): \($0.value.dartDescription)" }.joined(separator: "\n"))
+                            .font(DS.Font.mono)
+                            .foregroundStyle(DS.Text.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(12)
+                            .background(DS.Surface.page, in: .rect(cornerRadius: DS.Radius.control, style: .continuous))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
+                                    .strokeBorder(DS.Line.divider, lineWidth: DS.Line.width)
+                            }
+                            .padding(.top, 8)
+                    }
+                }
+                ForEach(Array(LearningModel.ladder.enumerated()), id: \.element.name) { i, rung in
+                    step(isFirst: false, isLast: i == LearningModel.ladder.count - 1, reached: false) {
+                        Text(rung.name)
+                            .font(DS.Font.body)
+                            .foregroundStyle(DS.Text.muted)
+                        Text(rung.detail)
+                            .font(DS.Font.caption)
+                            .foregroundStyle(DS.Text.faint)
+                        Text("Not reached yet")
+                            .font(DS.Font.caption)
+                            .foregroundStyle(DS.Text.faint)
+                            .padding(.top, 2)
+                    }
                 }
             }
         }
-        .padding(.bottom, 12)
+    }
+
+    /// One rung: a 10 pt dot on the stepper's hairline (zinc-200 once
+    /// reached, zinc-700 before), its lines beside it.
+    private func step<C: View>(isFirst: Bool, isLast: Bool, reached: Bool, @ViewBuilder _ content: () -> C) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            content()
+        }
+        .padding(.leading, 20)
+        .padding(.bottom, isLast ? 0 : 16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(alignment: .topLeading) {
+            // The hairline runs from this dot to the next; the last rung's
+            // only reaches its own dot.
+            Rectangle()
+                .fill(DS.Line.input)
+                .frame(width: DS.Line.width, height: isLast ? 9 : nil)
+                .frame(maxHeight: isLast ? nil : .infinity, alignment: .top)
+                .padding(.top, isFirst ? 9 : 0)
+                .padding(.leading, 4.5)
+        }
+        .overlay(alignment: .topLeading) {
+            Circle()
+                .fill(reached ? DS.Text.soft : DS.Chart.series[2])
+                .frame(width: 10, height: 10)
+                .padding(.top, 4)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    /// The web's severity dot: high loss, medium amber, anything else off.
+    static func severityTone(_ severity: String) -> DSStatusTone {
+        switch severity.lowercased() {
+        case "high": .error
+        case "medium": .warn
+        default: .off
+        }
+    }
+}
+
+/// The first load (the web's): a header line and blocks where the counters
+/// and the first section will be.
+private struct LearningSkeleton: View {
+    var body: some View {
+        List {
+            Section {
+                VStack(alignment: .leading, spacing: 16) {
+                    Skeleton(width: 280, height: 14)
+                    Skeleton(width: 160, height: 12)
+                    Skeleton(width: 112, height: 36, radius: DS.Radius.control)
+                }
+                .dsClearRow(top: 4)
+            }
+            Section {
+                Skeleton(height: 112, radius: DS.Radius.card)
+                    .dsClearRow()
+            }
+            Section {
+                VStack(alignment: .leading, spacing: 12) {
+                    Skeleton(width: 144, height: 16)
+                    Skeleton(height: 112, radius: DS.Radius.card)
+                }
+                .dsClearRow()
+            }
+        }
+        .dsList()
+        .disabled(true)
+        .accessibilityLabel("Loading")
     }
 }
 
 /// Which strategy documents the subsystem may write to and which instances it
-/// watches (`_TargetsSheet`). The two lists mean opposite things when empty,
-/// and each says so. Save is the toolbar's confirm action.
+/// watches (`_TargetsSheet`), in the web's words. The two lists mean opposite
+/// things when empty, and each says so.
 struct LearningTargetsSheet: View {
     let targets: LearningTargets
     let model: LearningModel
@@ -350,97 +571,126 @@ struct LearningTargetsSheet: View {
     }
 
     var body: some View {
-        NavigationStack {
-            Form {
-                Section {
-                    ForEach(targets.strategies) { doc in
-                        checkRow(on: armed.contains(doc.id), toggle: { toggle(&armed, doc.id) }) {
-                            HStack {
-                                Text(doc.name).lineLimit(1)
-                                Spacer()
-                                moneyBadge(doc.money, running: false)
+        ModalSheet("Documents & instances", subtitle: "What the subsystem may change, and whose runs it observes") {
+            DSField(
+                "Strategy documents the subsystem may write to",
+                help: "Arming a document is what lets the subsystem change it. Empty means it writes nowhere, whatever the permission matrix says"
+            ) {
+                if targets.strategies.isEmpty {
+                    Text("No strategy documents found")
+                        .font(DS.Font.body)
+                        .foregroundStyle(DS.Text.muted)
+                } else {
+                    OptionList {
+                        ForEach(targets.strategies) { doc in
+                            CheckboxRow(isOn: armed.contains(doc.id), action: { toggle(&armed, doc.id) }) {
+                                HStack(spacing: 8) {
+                                    Text(doc.name)
+                                        .font(DS.Font.body)
+                                        .foregroundStyle(DS.Text.soft)
+                                        .lineLimit(1)
+                                    Text("#\(doc.id)")
+                                        .font(DS.Font.caption)
+                                        .foregroundStyle(DS.Text.faint)
+                                        .monospacedDigit()
+                                    Spacer(minLength: 4)
+                                    moneyTag(doc.money, running: false)
+                                }
+                                Text(documentDetail(doc))
+                                    .font(DS.Font.caption)
+                                    .foregroundStyle(DS.Text.muted)
                             }
-                            Text(doc.instanceNames.isEmpty ? "#\(doc.id) · not attached to an instance" : "#\(doc.id) · \(doc.instanceNames.joined(separator: ", "))")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
                         }
                     }
-                } header: {
-                    Text("Documents the subsystem may write to")
-                } footer: {
-                    Text("Empty means it writes nowhere.")
-                }
-                Section {
-                    ForEach(targets.instances) { inst in
-                        checkRow(on: watched.contains(inst.id), toggle: { toggle(&watched, inst.id) }) {
-                            HStack {
-                                Text(inst.name).lineLimit(1)
-                                Spacer()
-                                moneyBadge(inst.money, running: inst.running)
-                            }
-                            Text("\(inst.kind) · doc #\(inst.strategyId ?? "—")").font(.footnote).foregroundStyle(.secondary)
-                        }
-                    }
-                } header: {
-                    Text("Instances to watch")
-                } footer: {
-                    Text(watched.isEmpty ? "None selected — watching every instance." : "Only the selected instances are observed.")
-                        .foregroundStyle(watched.isEmpty ? DS.Palette.info : Color.secondary)
-                }
-                if let error {
-                    Section { ErrorRow(message: error).listRowInsets(EdgeInsets()) }
                 }
             }
-            .navigationTitle("Documents & instances")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }.disabled(saving)
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button {
-                        Task { await save() }
-                    } label: {
-                        if saving {
-                            ProgressView().accessibilityLabel("Saving…")
-                        } else {
-                            Label("Save", systemImage: "checkmark")
+            DSField(
+                "Instances to watch",
+                help: "Which instances' runs the engine observes. Selecting none watches everything — observing is read-only, so narrowing is the deliberate act"
+            ) {
+                VStack(alignment: .leading, spacing: 8) {
+                    if watched.isEmpty {
+                        Text("Watching every instance")
+                            .font(DS.Font.caption)
+                            .foregroundStyle(DS.Text.secondary)
+                    }
+                    if targets.instances.isEmpty {
+                        Text("No instances found")
+                            .font(DS.Font.body)
+                            .foregroundStyle(DS.Text.muted)
+                    } else {
+                        OptionList {
+                            ForEach(targets.instances) { inst in
+                                CheckboxRow(isOn: watched.contains(inst.id), action: { toggle(&watched, inst.id) }) {
+                                    HStack(spacing: 8) {
+                                        Text(inst.name)
+                                            .font(DS.Font.body)
+                                            .foregroundStyle(DS.Text.soft)
+                                            .lineLimit(1)
+                                        Text(inst.kind)
+                                            .font(DS.Font.caption)
+                                            .foregroundStyle(DS.Text.faint)
+                                        Spacer(minLength: 4)
+                                        moneyTag(inst.money, running: inst.running)
+                                    }
+                                    Text("doc #\(inst.strategyId ?? "—")")
+                                        .font(DS.Font.caption)
+                                        .foregroundStyle(DS.Text.muted)
+                                        .monospacedDigit()
+                                }
+                            }
                         }
                     }
-                    .dsGlassProminentButton()
-                    .disabled(saving)
                 }
             }
+            if let error {
+                ErrorRow(message: error)
+            }
+        } footer: {
+            Button("Cancel") { dismiss() }
+                .buttonStyle(.dsGhost(size: .medium))
+                .disabled(saving)
+            Button {
+                Task { await save() }
+            } label: {
+                Text(saving ? "Saving…" : "Save")
+            }
+            .buttonStyle(.dsPrimary)
+            .disabled(saving)
         }
         .presentationDetents([.large])
-        .presentationDragIndicator(.visible)
+    }
+
+    private func documentDetail(_ doc: LearningStrategyTarget) -> String {
+        let subs = "\(doc.subStrategies) sub-strateg\(doc.subStrategies == 1 ? "y" : "ies")"
+        return doc.instanceNames.isEmpty
+            ? "\(subs) · not attached to an instance"
+            : "\(subs) · used by \(doc.instanceNames.joined(separator: ", "))"
     }
 
     private func toggle(_ list: inout [String], _ id: String) {
         if let i = list.firstIndex(of: id) { list.remove(at: i) } else { list.append(id) }
     }
 
-    private func checkRow<L: View>(on: Bool, toggle: @escaping () -> Void, @ViewBuilder label: () -> L) -> some View {
-        Button(action: toggle) {
-            HStack(spacing: 10) {
-                VStack(alignment: .leading, spacing: 2) { label() }
-                    .foregroundStyle(.primary)
-                Image(systemName: on ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(on ? AnyShapeStyle(DS.Palette.accent) : AnyShapeStyle(.tertiary))
-            }
-        }
-        .tint(.primary)
-        .accessibilityAddTraits(on ? .isSelected : [])
-    }
-
+    /// The web's money tag: real money as an amber dot and a word, unverified
+    /// and paper as quiet words, else a running dot.
     @ViewBuilder
-    private func moneyBadge(_ money: String, running: Bool) -> some View {
-        if money == "live" {
-            AppBadge(label: "real money", color: DS.Palette.danger)
-        } else if money == "unknown" {
-            AppBadge(label: "unverified", color: DS.Palette.warning)
-        } else if running {
-            AppBadge(label: "running", color: DS.Palette.success)
+    private func moneyTag(_ money: String, running: Bool) -> some View {
+        switch money {
+        case "live":
+            StatusDot("Real money", tone: .warn, font: DS.Font.caption)
+        case "unknown":
+            Text("Unverified")
+                .font(DS.Font.caption)
+                .foregroundStyle(DS.Text.secondary)
+        case "paper":
+            Text("Paper")
+                .font(DS.Font.caption)
+                .foregroundStyle(DS.Text.muted)
+        default:
+            if running {
+                StatusDot("Running", tone: .live, font: DS.Font.caption)
+            }
         }
     }
 

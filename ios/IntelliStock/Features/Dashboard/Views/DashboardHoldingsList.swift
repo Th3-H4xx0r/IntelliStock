@@ -1,10 +1,9 @@
 import SwiftUI
 
 /// The selected account's uninvested cash and holdings under the hero chart
-/// — `_HoldingsList` in `dashboard_screen.dart` — as a "Holdings" list
-/// section with the Total / Daily switch in its header. Hidden while it has
-/// no data, so it never shows an empty section. Each holding row opens the
-/// stock screen with the position.
+/// — the web's `DashboardHoldings` — as a "Holdings" card section: "N
+/// positions" under the title and the Daily / Total control beside it. Hidden
+/// while it has no data. Each holding row opens the stock screen.
 struct DashboardHoldingsSection: View {
     let holdings: AccountHoldingsModel
     @Bindable var feed: DashboardFeedModel
@@ -23,7 +22,10 @@ struct DashboardHoldingsSection: View {
         let sparksLoading = sparks == nil
         // Total account value → each row's ring shows its share of the portfolio.
         let total = (data.cash ?? 0) + positions.reduce(0) { $0 + $1.marketValue }
-        return Section {
+        return DSSection(
+            "Holdings",
+            subtitle: "\(positions.count) position\(positions.count == 1 ? "" : "s")"
+        ) {
             if let cash = data.cash {
                 DashboardCashRow(cash: cash, total: total)
             }
@@ -43,37 +45,32 @@ struct DashboardHoldingsSection: View {
                     )
                 }
                 .accessibilityHint("Opens \(p.symbol)")
+                .entityRowTitleMedium()
             }
-        } header: {
-            DashboardGroupHeader(group: "Holdings") {
-                Picker("P&L", selection: $feed.pnlMode) {
-                    Text(HoldingsPnlMode.total.label).tag(HoldingsPnlMode.total)
-                    Text(HoldingsPnlMode.daily.label).tag(HoldingsPnlMode.daily)
-                }
-                .pickerStyle(.segmented)
-                .fixedSize()
-                .controlSize(.small)
-            }
+        } accessory: {
+            DSSegmentedControl("P&L period", selection: $feed.pnlMode, options: [.daily, .total]) { $0.label }
         }
     }
 }
 
-/// `_CashRow`: a teal ring, `Cash` / `Available to invest`, and the amount.
+/// `Cash` / `Available to invest` and the amount; the quiet ring is its
+/// share of the account.
 private struct DashboardCashRow: View {
     let cash: Double
     let total: Double
 
     var body: some View {
         EntityRow("Cash", subtitle: "Available to invest") {
-            MiniAllocationRing(fraction: total > 0 ? cash / total : 0, color: DS.Palette.teal)
+            MiniAllocationRing(fraction: total > 0 ? cash / total : 0, color: DS.Text.muted, size: 20)
         } trailing: {
             EntityRowValue(fmtMoney(cash))
         }
     }
 }
 
-/// `_HoldingRow`: ring, symbol and quantity, a 60 × 24 sparkline, then the
-/// value with the P&L for the current mode under it in green or red.
+/// One holding (the web's row): the symbol and quantity, the period's
+/// sparkline, then the value with the period's P&L under it in gain or
+/// loss. The quiet ring before the symbol is its share of the account.
 private struct DashboardHoldingRow: View {
     let position: AccountPosition
     let total: Double
@@ -84,14 +81,15 @@ private struct DashboardHoldingRow: View {
     var body: some View {
         let p = position
         let pnl = HoldingRowPnl(position: p, spark: spark, mode: mode)
-        let color: Color = !pnl.hasPnl ? .secondary : (pnl.up ? DS.Palette.up : DS.Palette.down)
+        let color: Color = !pnl.hasPnl ? DS.Text.faint : (pnl.up ? DS.Palette.gain : DS.Palette.loss)
         EntityRow(p.symbol, subtitle: DashboardFormat.qtyShort(p.qty)) {
-            MiniAllocationRing(fraction: total > 0 ? p.marketValue / total : 0, color: DS.Palette.accent)
+            MiniAllocationRing(fraction: total > 0 ? p.marketValue / total : 0, color: DS.Text.secondary, size: 20)
         } trailing: {
             HStack(spacing: 12) {
                 Group {
                     if sparkLoading {
-                        Skeleton(height: 18, radius: 5)
+                        // The web's placeholder: a 2 pt raised line.
+                        Skeleton(height: 2, radius: 1)
                     } else if let spark {
                         Sparkline(values: spark, height: 24)
                             .id("\(p.symbol)-\(mode.rawValue)")
@@ -99,7 +97,7 @@ private struct DashboardHoldingRow: View {
                         Color.clear
                     }
                 }
-                .frame(width: 60, height: 24)
+                .frame(width: 72, height: 24)
                 EntityRowValue(fmtMoney(p.marketValue), detail: pnl.label, detailColor: color)
             }
         }

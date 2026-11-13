@@ -1,11 +1,11 @@
 import SwiftUI
 import UIKit
 
-/// A crypto instance — `CryptoInstanceDetailScreen`: instance info, the
-/// brokerage, the fixed + dynamic allocation as the drill-in `Sector3DChart`
-/// (as in Flutter), and its backtests (refreshed every 4 s while one is
-/// running). An inset-grouped list under the inline instance name; Start /
-/// Stop and Edit sit in the toolbar.
+/// A crypto instance — `CryptoInstanceDetailScreen`, in the web page's order:
+/// the status and strategy under the instance name, the account value, the
+/// fixed + dynamic allocation (the drill-in `Sector3DChart`), its backtests
+/// (refreshed every 4 s while one is running), then the instance and
+/// brokerage details last. Start / Stop and Edit sit in the toolbar.
 struct CryptoInstanceDetailView: View {
     let instanceId: String
 
@@ -18,11 +18,11 @@ struct CryptoInstanceDetailView: View {
         Group {
             if let model {
                 if model.loading {
-                    ProgressView()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    CryptoDetailSkeleton()
                 } else if let error = model.error {
                     ErrorRow(message: error, onRetry: { Task { await model.retry() } })
-                        .padding(20)
+                        .padding(.horizontal, DS.pageGutter)
+                        .padding(.top, 16)
                         .frame(maxHeight: .infinity, alignment: .top)
                 } else if let inst = model.inst {
                     content(model, inst)
@@ -31,9 +31,9 @@ struct CryptoInstanceDetailView: View {
                 Color.clear
             }
         }
-        .background(DS.Surface.canvas)
+        .background(DS.Surface.page)
         .navigationTitle(model?.inst.map(CryptoModel.displayName) ?? "")
-        .navigationBarTitleDisplayMode(.inline)
+        .navigationBarTitleDisplayMode(.large)
         .toolbar { toolbar }
         .task(id: instanceId) {
             // Reused on reappear: the data stays on screen while it refreshes.
@@ -58,8 +58,8 @@ struct CryptoInstanceDetailView: View {
 
     // MARK: Toolbar
 
-    /// Edit, then Start / Stop as the primary action (the Dart buttons under
-    /// the header).
+    /// Edit, then Start / Stop (the web header's buttons), as plain toolbar
+    /// items on the system glass.
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
         if let model, let inst = model.inst, !model.loading, model.error == nil {
@@ -76,7 +76,6 @@ struct CryptoInstanceDetailView: View {
                 } label: {
                     Text(inst.runCommand ? "Stop" : "Start")
                 }
-                .dsProminentButton()
                 .disabled(model.busy)
             }
         }
@@ -88,24 +87,73 @@ struct CryptoInstanceDetailView: View {
         let band = model.band
         let strat = model.strategy
         let brokerage = model.brokerage
+        let crashed = inst.crashed
+        let running = inst.runCommand
         return List {
-            Section("Instance info") {
-                LabeledContent("Status") {
+            // The web header's subtitle, then the account value.
+            Section {
+                HStack(spacing: 8) {
                     StatusDot(
                         CryptoModel.statusLabel(inst),
-                        color: inst.crashed ? DS.Palette.danger : (inst.runCommand ? DS.Palette.success : .secondary),
-                        pulsing: inst.runCommand && !inst.crashed
+                        tone: crashed ? .error : (running ? .live : .off),
+                        pulsing: running && !crashed,
+                        font: DS.Font.pageSub
                     )
+                    Text("·").foregroundStyle(DS.Text.faint)
+                    Text("24/7 crypto · \(strat.isEmpty ? "—" : CryptoCatalog.capitalized(strat)) strategy")
+                        .lineLimit(1)
                 }
-                LabeledContent("Band", value: band.isEmpty ? "—" : CryptoCatalog.capitalized(band))
-                LabeledContent("Cadence", value: CryptoInstanceDetailModel.cadence[band] ?? "~15 min")
-                LabeledContent("Uptime", value: inst.runCommand ? CryptoInstanceDetailModel.fmtDuration(inst.uptimeSeconds) : "—")
-                LabeledContent("Created by", value: inst.createdBy)
-                LabeledContent("ID") {
-                    Text(inst.id)
+                .font(DS.Font.pageSub)
+                .foregroundStyle(DS.Text.muted)
+                .dsClearRow(top: 0)
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Account value")
+                        .font(DS.Font.body)
+                        .foregroundStyle(DS.Text.secondary)
+                    Text(model.value != nil ? CryptoInstanceDetailModel.fmtUsd(model.value) : "—")
+                        .dsValueHero()
+                        .foregroundStyle(DS.Text.primary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.6)
+                }
+                .accessibilityElement(children: .combine)
+                .dsClearRow(top: 24)
+            }
+
+            DSSection("Allocation", subtitle: "Fixed weights, the rest dynamic", rowMinHeight: 44) {
+                // The drilled ring hangs up to 20 pt past the frame, so it
+                // keeps clear space around it.
+                Sector3DChart(slices: model.slices)
+                    .frame(width: 220)
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 4)
+                    .padding(.bottom, 8)
+                if !model.allocChips.isEmpty {
+                    MarketsFlowLayout(spacing: 6) {
+                        ForEach(Array(model.allocChips.enumerated()), id: \.offset) { _, chip in
+                            MarketsChip(text: chip.text)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+                DSKeyValueRow("Dynamic strategy", strat.isEmpty ? "—" : CryptoCatalog.capitalized(strat))
+            }
+
+            backtests(model)
+
+            DSSection("Details", subtitle: "Instance and brokerage", rowMinHeight: 44) {
+                HStack(alignment: .firstTextBaseline, spacing: 16) {
+                    Text("ID")
+                        .foregroundStyle(DS.Text.secondary)
+                    Spacer(minLength: 8)
+                    Text(verbatim: inst.id)
+                        .font(DS.Font.mono)
+                        .foregroundStyle(DS.Text.label)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
+                .font(DS.Font.body)
+                .accessibilityElement(children: .combine)
                 .contextMenu {
                     Button {
                         UIPasteboard.general.string = inst.id
@@ -113,45 +161,30 @@ struct CryptoInstanceDetailView: View {
                         Label("Copy ID", systemImage: "doc.on.doc")
                     }
                 }
+                DSKeyValueRow("Band", band.isEmpty ? "—" : CryptoCatalog.capitalized(band))
+                DSKeyValueRow("Cadence", CryptoInstanceDetailModel.cadence[band] ?? "~15 min")
+                DSKeyValueRow("Uptime", running ? CryptoInstanceDetailModel.fmtDuration(inst.uptimeSeconds) : "—")
+                DSKeyValueRow("Created by", inst.createdBy.dsSentenceCased)
+                DSKeyValueRow("Account", brokerage?["account_name"].flatMap { $0.isNull ? nil : $0.dartDescription } ?? inst.brokerageId ?? "—")
+                DSKeyValueRow("Mode", model.isPaper ? "Paper" : "Live")
+                DSKeyValueRow("Account value", model.value != nil ? CryptoInstanceDetailModel.fmtUsd(model.value) : "—")
             }
-            Section("Brokerage") {
-                LabeledContent("Account", value: brokerage?["account_name"].flatMap { $0.isNull ? nil : $0.dartDescription } ?? inst.brokerageId ?? "—")
-                LabeledContent("Mode", value: model.isPaper ? "Paper" : "Live")
-                LabeledContent("Account value", value: model.value != nil ? CryptoInstanceDetailModel.fmtUsd(model.value) : "—")
-                    .monospacedDigit()
-            }
-            Section("Allocation") {
-                // The Dart `Center(SizedBox(width: 220))`; the drilled ring
-                // hangs up to 20 pt past the frame, so it keeps clear rows.
-                Sector3DChart(slices: model.slices)
-                    .frame(width: 220)
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 8)
-                    .padding(.bottom, 12)
-                LabeledContent("Dynamic strategy", value: strat.isEmpty ? "—" : CryptoCatalog.capitalized(strat))
-                if !model.allocChips.isEmpty {
-                    MarketsFlowLayout {
-                        ForEach(Array(model.allocChips.enumerated()), id: \.offset) { _, chip in
-                            MarketsChip(text: chip.text, color: chip.dynamic ? DS.Palette.accent : .secondary, tint: chip.dynamic ? DS.Palette.accent : nil)
-                        }
-                    }
-                    .padding(.vertical, 4)
-                }
-            }
-            backtests(model)
         }
-        .listStyle(.insetGrouped)
+        .dsList()
         .refreshable { await model.load() }
     }
 
     private func backtests(_ model: CryptoInstanceDetailModel) -> some View {
         DSSection(
-            "Backtests (\(model.backtests.count))",
-            action: DSSectionAction("New Backtest", systemImage: Symbol.named("add")) { backtesting = true }
+            "Backtests",
+            subtitle: "\(model.backtests.count) for this instance",
+            action: DSSectionAction("New backtest", systemImage: Symbol.named("add")) { backtesting = true },
+            rowMinHeight: 64
         ) {
             if model.backtests.isEmpty {
-                Text("No backtests yet for this instance.")
-                    .foregroundStyle(.secondary)
+                Text("No backtests yet for this instance")
+                    .font(DS.Font.body)
+                    .foregroundStyle(DS.Text.muted)
             } else {
                 ForEach(model.backtests) { b in backtestRow(b) }
             }
@@ -165,19 +198,47 @@ struct CryptoInstanceDetailView: View {
         let finished = ["finished", "completed", "done"].contains(b.status.lowercased())
         let coinText = coins.isEmpty ? "Dynamic" : coins.prefix(5).joined(separator: " ")
         return NavigationLink(value: Route.backtest(b.id)) {
-            EntityRow("#\(b.id)", subtitle: "\(coinText) · \(b.startDate ?? "?") → \(b.endDate ?? "?")", subtitleLineLimit: 2) {
-                HStack(spacing: 8) {
+            EntityRow(b.id, subtitle: "\(coinText) · \(b.startDate ?? "?") → \(b.endDate ?? "?")", subtitleLineLimit: 2) {
+                HStack(spacing: 12) {
                     if !finished {
-                        StatusDot(b.status.dsSentenceCased, color: CryptoInstanceDetailModel.btStatusColor(b.status), font: .footnote)
+                        StatusDot(b.status.dsSentenceCased, status: b.status, font: DS.Font.caption)
                     }
-                    EntityRowValue(
-                        CryptoInstanceDetailModel.fmtPnl(b.pnl),
-                        color: CryptoInstanceDetailModel.pnlColor(b.pnl),
-                        detail: CryptoInstanceDetailModel.fmtPct(b.pnlPercent),
-                        detailColor: CryptoInstanceDetailModel.pnlColor(b.pnlPercent)
-                    )
+                    // A run still going has no P&L yet: the status says enough.
+                    if finished || b.pnl != nil {
+                        EntityRowValue(
+                            CryptoInstanceDetailModel.fmtPnl(b.pnl),
+                            color: CryptoInstanceDetailModel.pnlColor(b.pnl),
+                            detail: CryptoInstanceDetailModel.fmtPct(b.pnlPercent),
+                            detailColor: CryptoInstanceDetailModel.pnlColor(b.pnlPercent)
+                        )
+                    }
                 }
             }
         }
+    }
+}
+
+/// The first load: the header, the value and a card, as static blocks.
+private struct CryptoDetailSkeleton: View {
+    var body: some View {
+        List {
+            Section {
+                VStack(alignment: .leading, spacing: 24) {
+                    Skeleton(width: 200, height: 14)
+                    VStack(alignment: .leading, spacing: 12) {
+                        Skeleton(width: 100, height: 14)
+                        Skeleton(width: 180, height: 40)
+                    }
+                }
+                .dsClearRow(top: 0)
+            }
+            DSSection {
+                Skeleton(height: 220)
+                    .padding(.vertical, 12)
+            }
+        }
+        .dsList()
+        .allowsHitTesting(false)
+        .accessibilityLabel("Loading instance")
     }
 }

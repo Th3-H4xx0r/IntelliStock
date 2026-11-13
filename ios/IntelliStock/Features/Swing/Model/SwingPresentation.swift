@@ -6,6 +6,20 @@ import SwiftUI
 /// Reasoning longer than this starts collapsed behind "Show more".
 nonisolated let swingReasoningCollapseChars = 240
 
+/// Collapsed reasoning (the web's `reasoningPreview`): cut on a word
+/// boundary when one is close, else hard, and end in "…".
+nonisolated func swingReasoningPreview(_ text: String, limit: Int = swingReasoningCollapseChars) -> (text: String, truncated: Bool) {
+    let full = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard full.count > limit else { return (full, false) }
+    let cut = String(full.prefix(limit))
+    var head = cut
+    if let space = cut.lastIndex(of: " "), cut.distance(from: cut.startIndex, to: space) > Int(Double(limit) * 0.6) {
+        head = String(cut[..<space])
+    }
+    let trimmed = head.replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression)
+    return ("\(trimmed)…", true)
+}
+
 /// (label, value) pairs for a signal's proposal grid (`proposalFields`).
 nonisolated func swingProposalFields(_ s: SwingSignal) -> [(label: String, value: String)] {
     if s.isWheel {
@@ -28,12 +42,27 @@ nonisolated func swingProposalFields(_ s: SwingSignal) -> [(label: String, value
     ]
 }
 
-/// `_scoreColor`: ≥ 75 green, ≥ 50 amber, else red; nil secondary.
+/// The score's text colour, as the web's `scoreClass`: a score is not a
+/// gain or a loss, so it steps the zinc ramp — ≥ 75 zinc-200, ≥ 50 zinc-400,
+/// lower or none zinc-500.
 nonisolated func swingScoreColor(_ score: Int?) -> Color {
-    guard let score else { return .secondary }
-    if score >= 75 { return DS.Palette.success }
-    if score >= 50 { return DS.Palette.warning }
-    return DS.Palette.danger
+    guard let score else { return DS.Text.muted }
+    if score >= 75 { return DS.Text.soft }
+    if score >= 50 { return DS.Text.secondary }
+    return DS.Text.muted
+}
+
+/// The order the review sends, named as the web's confirm button
+/// (`reviewConfirmLabel`): "Approve sell 1 QCOM put", "Approve buy 12 AMD",
+/// "Approve ½ · AMD". The swipe hint under the review card shows it.
+nonisolated func swingReviewActionLabel(_ s: SwingSignal, _ decision: String) -> String {
+    if decision == "approve_half" { return "Approve ½ · \(s.symbol)" }
+    if s.isWheel {
+        let n = max(1, s.qty ?? 1)
+        return "Approve sell \(n) \(s.symbol) put\(n == 1 ? "" : "s")"
+    }
+    guard let shares = s.shares else { return "Approve buy \(s.symbol)" }
+    return "Approve buy \(shares) \(s.symbol)"
 }
 
 /// `session X` / `session —`.

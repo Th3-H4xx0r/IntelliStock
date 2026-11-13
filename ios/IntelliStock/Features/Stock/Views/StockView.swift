@@ -1,10 +1,13 @@
 import SwiftUI
 
-/// The full-screen stock view — `StockScreen` in `stock_screen.dart` — as
-/// an inset-grouped list, Stocks style: the ticker is the inline title; the
-/// hero shows the live price, today's move and the company name, over a
-/// gapless scrubbable chart and its ranges; then the user's position, the
-/// bot's decisions, key statistics, About and recent orders, each a section.
+/// The full-screen stock view — the web's `StockView.vue` — as a
+/// `.dsList()`: the ticker is the (large) title, the company and exchange
+/// under it; the price, its move and the range's caption over a gapless
+/// scrubbable chart with price gridlines and the range control; then the
+/// user's position, the symbol's open orders (each cancelable), the bot's
+/// decisions, key statistics, About and the order history, each a section.
+/// For an equity, Sell and Buy sit at the bottom and open the trade ticket
+/// (`TradeTicketSheet`).
 struct StockView: View {
     let route: StockRoute
 
@@ -20,6 +23,10 @@ private struct StockContent: View {
     let services: AppServices
 
     @State private var model: StockModel
+    /// Open orders for the symbol, cancels, and the position after a trade.
+    @State private var trade: StockTradeModel
+    @State private var ticket: TradeTicketRequest?
+    @State private var aboutOpen = false
 
     init(route: StockRoute, services: AppServices) {
         self.route = route
@@ -29,6 +36,49 @@ private struct StockContent: View {
             brokerageId: route.brokerageId,
             client: { [unowned services] in services.apiClient }
         ))
+        _trade = State(initialValue: StockTradeModel(
+            symbol: route.symbol,
+            backend: { [unowned services] in TradeRepository(client: services.apiClient) }
+        ))
+    }
+
+    /// The accounts the app can trade (Alpaca).
+    private var tradableAccounts: [BrokerageAccount] {
+        TradeTicket.tradableAccounts(services.dashboard.brokeragesValue ?? [])
+    }
+
+    /// Buy and Sell show for an equity, once a tradable account is known.
+    private var canTrade: Bool {
+        TradeTicket.isTradableSymbol(route.symbol) && !tradableAccounts.isEmpty
+    }
+
+    /// The position to show: re-read after a trade on this screen's account
+    /// (or on any account when the screen came without one), else the
+    /// dashboard's snapshot.
+    private var shownPosition: (position: AccountPosition, total: Double?)? {
+        if let live = trade.livePosition, route.brokerageId == nil || live.accountId == route.brokerageId {
+            return live.position.map { ($0, live.total) }
+        }
+        return route.position.map { ($0, route.portfolioTotal) }
+    }
+
+    /// Opens a ticket on `side`, starting on the dashboard's account when it
+    /// is tradable.
+    private func openTicket(_ side: TradeSide) {
+        let accounts = tradableAccounts
+        let selected = DashboardFormat.resolveSelected(services.dashboard.brokeragesValue ?? [], services.selectedAccount.selectedId)
+        guard let accountId = TradeTicket.defaultAccountId(accounts, dashboardSelected: selected?.id, route: route.brokerageId) else { return }
+        let model = model
+        let fallback = route.position?.lastPrice
+        let services = services
+        ticket = TradeTicketRequest(model: TradeTicketModel(
+            symbol: route.symbol,
+            side: side,
+            accounts: accounts,
+            accountId: accountId,
+            lastPrice: { model.series?.vals.last ?? fallback },
+            backend: { [unowned services] in TradeRepository(client: services.apiClient) }
+        ))
     }
 
     var body: some View {
@@ -37,37 +87,30 @@ private struct StockContent: View {
         let infoLoading = model.info == nil
         let hasSummary = !stockInfoText(info, "summary").isEmpty
         List {
-            // The text keeps the list's margins; the chart and range sit in a
-            // full-width section of their own, nearly edge to edge
-            // (`DashboardPortfolioMetrics.chartMargin`).
             Section {
-                header(info)
-                    .padding(.top, 4)
-                    .listRowBackground(Color.clear)
-                    .listRowInsets(EdgeInsets(top: 0, leading: DashboardPortfolioMetrics.chartMargin, bottom: 0, trailing: DashboardPortfolioMetrics.chartMargin))
-                    .listRowSeparator(.hidden)
-            }
-            // Full width with the chart's margins, so the price lines up with it.
-            .listSectionMargins(.horizontal, 0)
-            .listSectionSpacing(0)
-            Section {
+                VStack(alignment: .leading, spacing: 24) {
+                    // The web header's subtitle: the company and exchange.
+                    Text(subtitle(info))
+                        .font(DS.Font.pageSub)
+                        .foregroundStyle(DS.Text.muted)
+                        .lineLimit(1)
+                        .redacted(reason: infoLoading ? .placeholder : [])
+                    header(info)
+                }
+                .dsClearRow(top: 0)
                 VStack(alignment: .leading, spacing: 0) {
                     chartArea
-                    Picker("Range", selection: Binding(get: { model.range }, set: { model.setRange($0) })) {
-                        ForEach(stockRanges, id: \.self) { Text($0).tag($0) }
-                    }
-                    .pickerStyle(.segmented)
-                    .padding(.top, 12)
+                    DSSegmentedControl("Chart range", selection: Binding(get: { model.range }, set: { model.setRange($0) }), options: stockRanges) { $0 }
+                        .padding(.top, 16)
+                    DSDivider()
+                        .padding(.top, 16)
                 }
-                .padding(.top, 20)
-                .listRowBackground(Color.clear)
-                .listRowInsets(EdgeInsets(top: 0, leading: DashboardPortfolioMetrics.chartMargin, bottom: 8, trailing: DashboardPortfolioMetrics.chartMargin))
-                .listRowSeparator(.hidden)
+                .dsClearRow(top: 24)
             }
-            .listSectionMargins(.horizontal, 0)
-            if let position = route.position {
-                positionSection(position)
+            if let shown = shownPosition {
+                positionSection(shown.position, total: shown.total)
             }
+            StockOpenOrdersSection(model: trade, showsAccount: tradableAccounts.count > 1)
             if let option = parseOccSymbol(route.symbol) {
                 underlyingSection(option)
             }
@@ -84,20 +127,55 @@ private struct StockContent: View {
             }
             ordersSection
         }
-        .listStyle(.insetGrouped)
-        .contentMargins(.top, 0, for: .scrollContent)
+        .dsList()
         .navigationTitle(stockDisplayTitle(route.symbol))
-        .navigationBarTitleDisplayMode(.inline)
-        .refreshable { await model.refreshHistory() }
+        .navigationBarTitleDisplayMode(.large)
+        .refreshable {
+            await model.refreshHistory()
+            await trade.reloadOpenOrders()
+        }
         .task(id: model.range) { await model.pollHistory(lifecycle: services.lifecycle) }
         .task { await model.loadDetails() }
+        // Reached from search before the dashboard loaded its accounts.
+        .task {
+            if services.dashboard.brokeragesValue == nil { await services.dashboard.loadBrokerages() }
+        }
+        .task(id: tradableAccounts.map(\.id)) {
+            await trade.loadOpenOrders(tradableAccounts)
+        }
+        .safeAreaInset(edge: .bottom) {
+            if canTrade {
+                TradeActionBar(onSell: { openTicket(.sell) }, onBuy: { openTicket(.buy) })
+            }
+        }
+        .sheet(item: $ticket) { request in
+            TradeTicketSheet(model: request.model) { accountId in
+                let trade = trade
+                let routeAccount = route.brokerageId
+                Task { await trade.refreshAfterTrade(accountId: accountId, routeAccountId: routeAccount) }
+            }
+            .presentationDetents([.large])
+        }
+        .tradeCancelAlert($trade.cancelPrompt) { prompt in
+            let trade = trade
+            Task { await trade.cancel(brokerageId: prompt.brokerageId, orderId: prompt.order.id) }
+        }
+        .toast($trade.toast)
     }
 
     // MARK: Hero
 
+    /// "Apple Inc. · NasdaqGS"; an option's expiry; "Stock" without a name.
+    private func subtitle(_ info: JSONObject) -> String {
+        if parseOccSymbol(route.symbol) != nil {
+            return stockStatusLine(symbol: route.symbol, name: "")
+        }
+        let parts = [stockInfoText(info, "name"), stockInfoText(info, "exchange")].filter { !$0.isEmpty }
+        return parts.isEmpty ? (model.info == nil ? "Company name · Exchange" : "Stock") : parts.joined(separator: " · ")
+    }
+
     @ViewBuilder
     private func header(_ info: JSONObject) -> some View {
-        let name = stockStatusLine(symbol: route.symbol, name: stockInfoText(info, "name"))
         let vals = model.series?.vals
         let ready = (vals?.count ?? 0) >= 2
         if ready, let vals {
@@ -107,20 +185,33 @@ private struct StockContent: View {
             let shown = (idx != nil && idx! >= 0 && idx! < vals.count) ? vals[idx!] : last
             let dAbs = shown - first
             let dPct = first != 0 ? dAbs / first * 100 : 0
+            let ts = model.series?.ts
+            let caption = idx.flatMap { i in ts.flatMap { i < $0.count ? dashboardScrubCaption($0[i], range: model.range) : nil } }
+                ?? dashboardRangeCaption(model.range)
             HeroValueHeader(
                 fmtMoney(shown),
                 numericValue: shown,
-                valueAnimation: idx == nil ? .easeOut(duration: 0.45) : nil,
+                valueAnimation: idx == nil ? DSMotion.ease(0.45) : nil,
                 change: "\(fmtPnl(dAbs)) (\(fmtPct(dPct)))",
                 direction: ChangeDirection(dAbs),
-                status: name.isEmpty ? nil : name
+                changeLabel: caption
             )
         } else if model.historyLoading {
-            HeroValueHeader("$000.00", change: "+$0.00 (+0.00%)", status: name.isEmpty ? "Company name" : name)
-                .redacted(reason: .placeholder)
-                .accessibilityLabel("Loading")
+            VStack(alignment: .leading, spacing: 12) {
+                Skeleton(width: 192, height: 44, radius: DS.Radius.small)
+                Skeleton(width: 160, height: 16)
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Loading")
         } else {
-            HeroValueHeader("—", status: "No price data")
+            VStack(alignment: .leading, spacing: 8) {
+                Text("—")
+                    .font(DS.Font.hero)
+                    .foregroundStyle(DS.Text.faint)
+                Text("No price data")
+                    .font(DS.Font.body)
+                    .foregroundStyle(DS.Text.muted)
+            }
         }
     }
 
@@ -136,48 +227,63 @@ private struct StockContent: View {
             ScrubbableAreaChart(
                 timestamps: series.ts,
                 values: series.vals,
-                lineColor: up ? DS.Palette.success : DS.Palette.danger,
-                height: 260,
+                lineColor: up ? DS.Palette.gain : DS.Palette.loss,
+                height: 280,
                 onScrub: { model.scrubIndex = $0 },
                 animate: true,
                 drawInKey: AnyHashable(model.range),
-                indexed: true // evenly-spaced points → no weekend/overnight gaps
+                indexed: true, // evenly-spaced points → no weekend/overnight gaps
+                showsYAxis: true
             )
             .id(model.range)
         } else if model.historyLoading {
-            Skeleton(height: 260, radius: 12)
+            Skeleton(height: 280, radius: DS.Radius.control)
         } else {
             // Loaded but no usable series (illiquid/obscure tickers).
             let error = model.history.error != nil && model.series == nil
-            Text(error ? "Couldn't load prices" : "No chart data available for \(route.symbol)")
-                .font(.footnote)
-                .foregroundStyle(error ? DS.Palette.danger : .secondary)
+            Text(error ? "Couldn't load prices" : "No chart data for \(route.symbol)")
+                .font(DS.Font.body)
+                .foregroundStyle(DS.Text.muted)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: .infinity)
-                .frame(height: 260)
+                .frame(height: 280)
         }
     }
 
     // MARK: Your position
 
-    private func positionSection(_ p: AccountPosition) -> some View {
-        let color = ChangeDirection(p.unrealizedPnl).color
-        let total = route.portfolioTotal
+    /// The account the screen's position is in, for the section's subtitle.
+    private var positionAccount: BrokerageAccount? {
+        let id = trade.livePosition?.accountId ?? route.brokerageId
+        return (services.dashboard.brokeragesValue ?? []).first { $0.id == id }
+    }
+
+    /// The web's "Your position" card: value with its share of the account,
+    /// total P&L since bought, shares and average cost.
+    private func positionSection(_ p: AccountPosition, total: Double?) -> some View {
         let frac: Double? = (total ?? 0) > 0 ? p.marketValue / total! : nil
-        return Section("Your position") {
-            HStack(spacing: 16) {
-                if let frac {
-                    AllocationRing(fraction: frac, color: color, size: 46, lineWidth: 5, labelColor: .primary)
-                }
-                StatGrid {
-                    StatCell(label: "Total P&L", value: fmtPnl(p.unrealizedPnl), valueColor: color, footnote: fmtPct(p.unrealizedPnlPct))
-                    StatCell(label: "Value", value: fmtMoney(p.marketValue))
+        let option = isOccOptionSymbol(route.symbol)
+        let qty = DashboardFormat.qtyNumber(abs(p.qty))
+        return DSSection(
+            "Your position",
+            subtitle: positionAccount.map { "\(DashboardFormat.accountName($0)) · \(TradeTicket.modeText($0))" },
+            style: .plain
+        ) {
+            Card {
+                StatGrid(columns: 2) {
+                    StatCell(label: "Value", footnote: frac.map { "\(dartToStringAsFixed($0 * 100, 1))% of the account" }) {
+                        Text(fmtMoney(p.marketValue)).font(DS.Font.figureLarge)
+                    }
+                    StatCell(label: "Total P&L", footnote: "\(fmtPct(p.unrealizedPnlPct)) since bought") {
+                        Text(fmtPnl(p.unrealizedPnl))
+                            .font(DS.Font.figureLarge)
+                            .foregroundStyle(dashboardChangeColor(p.unrealizedPnl))
+                    }
+                    StatCell(label: option ? "Contracts" : "Shares", value: p.qty < 0 ? "\(qty) short" : qty)
+                    StatCell(label: "Average cost", value: fmtMoney(p.avgEntryPrice))
                 }
             }
-            .padding(.vertical, 4)
-            Text(stockPositionLine(symbol: route.symbol, qty: p.qty, avg: p.avgEntryPrice))
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+            .dsClearRow()
         }
     }
 
@@ -190,24 +296,26 @@ private struct StockContent: View {
         let qty = route.position?.qty
         let put = option.optionType.lowercased() == "put"
         let riskBelow: Bool? = (qty ?? 0) < 0 ? put : nil
-        return Section(option.underlying) {
-            VStack(alignment: .leading, spacing: 12) {
-                if let text = stockOptionPlanText(route.symbol, qty: qty, premium: route.position?.avgEntryPrice) {
-                    Text(text)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+        return DSSection(option.underlying, style: .plain) {
+            Card {
+                VStack(alignment: .leading, spacing: 12) {
+                    if let text = stockOptionPlanText(route.symbol, qty: qty, premium: route.position?.avgEntryPrice) {
+                        Text(text)
+                            .font(DS.Font.body)
+                            .foregroundStyle(DS.Text.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    SwingOrderChart(symbol: option.underlying, strike: option.strike, riskBelow: riskBelow)
                 }
-                SwingOrderChart(symbol: option.underlying, strike: option.strike, riskBelow: riskBelow)
             }
-            .padding(.vertical, 6)
+            .dsClearRow()
         }
     }
 
     // MARK: Bot activity
 
     private var botSection: some View {
-        Section("Bot activity") {
+        DSSection("Bot activity", subtitle: "Why the bot bought or sold \(stockDisplayTitle(route.symbol))") {
             if route.brokerageId == nil {
                 emptyRow("No linked brokerage")
             } else if let events = model.botEvents {
@@ -224,8 +332,14 @@ private struct StockContent: View {
         }
     }
 
+    /// The web's empty card line: one centred sentence in zinc-400.
     private func emptyRow(_ msg: String) -> some View {
-        Text(msg).foregroundStyle(.secondary)
+        Text(msg)
+            .font(DS.Font.body)
+            .foregroundStyle(DS.Text.secondary)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 16)
     }
 
     // MARK: Key statistics
@@ -234,27 +348,25 @@ private struct StockContent: View {
     private func statsSection(_ info: JSONObject) -> some View {
         let cells = stockStatCells(info: info, series: model.series, range: model.range, symbol: route.symbol)
         if !cells.isEmpty {
-            Section("Key statistics") {
-                StatGrid(columns: 3) {
-                    ForEach(Array(cells.enumerated()), id: \.offset) { _, cell in
-                        StatCell(label: cell.label, value: cell.value)
-                    }
+            // The web's key-value rows, 44 tall.
+            DSSection("Key statistics", rowMinHeight: 44) {
+                ForEach(Array(cells.enumerated()), id: \.offset) { _, cell in
+                    DSKeyValueRow(cell.label, cell.value)
                 }
-                .padding(.vertical, 6)
             }
         }
     }
 
     private var statsSkeleton: some View {
-        Section("Key statistics") {
-            StatGrid(columns: 3) {
-                ForEach(0..<6, id: \.self) { _ in
-                    StatCell(label: "Prev close", value: "$000.00")
+        DSSection("Key statistics", rowMinHeight: 44) {
+            ForEach(0..<6, id: \.self) { _ in
+                HStack {
+                    Skeleton(width: 80, height: 12)
+                    Spacer()
+                    Skeleton(width: 64, height: 12)
                 }
+                .accessibilityHidden(true)
             }
-            .padding(.vertical, 6)
-            .redacted(reason: .placeholder)
-            .accessibilityHidden(true)
         }
     }
 
@@ -262,41 +374,54 @@ private struct StockContent: View {
 
     private func aboutSection(_ info: JSONObject) -> some View {
         let tags = [stockInfoText(info, "sector"), stockInfoText(info, "industry")].filter { !$0.isEmpty }
-        return Section("About") {
-            VStack(alignment: .leading, spacing: 12) {
-                if !tags.isEmpty {
-                    DashboardFlowLayout(spacing: 8) {
-                        ForEach(tags, id: \.self) { t in
-                            Text(t)
-                                .font(.footnote.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 5)
-                                .background(Color(uiColor: .tertiarySystemFill), in: .rect(cornerRadius: 8, style: .continuous))
+        let summary = stockInfoText(info, "summary")
+        return DSSection("About", style: .plain) {
+            Card {
+                VStack(alignment: .leading, spacing: 0) {
+                    if !tags.isEmpty {
+                        Text(tags.joined(separator: " · "))
+                            .font(DS.Font.caption)
+                            .foregroundStyle(DS.Text.muted)
+                            .padding(.bottom, 12)
+                    }
+                    Text(summary)
+                        .font(DS.Font.body)
+                        .foregroundStyle(DS.Text.label)
+                        .lineSpacing(4)
+                        .lineLimit(aboutOpen ? nil : 6)
+                    if summary.count > 360 {
+                        Button(aboutOpen ? "Show less" : "Show more") {
+                            withAnimation(DSMotion.standard) { aboutOpen.toggle() }
                         }
+                        .font(DS.Font.body)
+                        .foregroundStyle(DS.Text.secondary)
+                        .buttonStyle(.plain)
+                        .padding(.top, 8)
                     }
                 }
-                Text(stockInfoText(info, "summary"))
-                    .font(.body)
-                    .lineSpacing(3)
-                    .lineLimit(10)
             }
-            .padding(.vertical, 6)
+            .dsClearRow()
         }
     }
 
     private var aboutSkeleton: some View {
-        Section("About") {
-            Text("A placeholder paragraph that holds the shape of the company summary while it loads from the server.")
-                .redacted(reason: .placeholder)
-                .accessibilityHidden(true)
+        DSSection("About", style: .plain) {
+            Card {
+                VStack(alignment: .leading, spacing: 8) {
+                    Skeleton(height: 12)
+                    Skeleton(height: 12)
+                    Skeleton(height: 12).padding(.trailing, 96)
+                }
+            }
+            .accessibilityHidden(true)
+            .dsClearRow()
         }
     }
 
     // MARK: Order history
 
     private var ordersSection: some View {
-        Section("Order history") {
+        DSSection("Order history", subtitle: "Fills in \(stockDisplayTitle(route.symbol))") {
             if route.brokerageId == nil {
                 emptyRow("No linked brokerage")
             } else if let orders = model.orders {
@@ -314,76 +439,64 @@ private struct StockContent: View {
     }
 }
 
-/// One bot buy/sell for the symbol (`_BotEventRow`): the side and strategy,
-/// when, the reason, who backed it, and the price.
+/// One bot buy/sell for the symbol (the web's row): "Buy · Momentum
+/// breakout" with the price and when on the right, the reason, then who
+/// backed it and whether it was overridden.
 private struct StockBotEventRow: View {
     let event: BotTradeEvent
 
     var body: some View {
-        let color = event.isBuy ? DS.Palette.success : DS.Palette.danger
         let reason = event.reason.trimmingCharacters(in: .whitespacesAndNewlines)
         let backers = event.backers
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 8) {
-                Text(event.side.capitalized)
-                    .dsBadge(color)
-                Text(event.title)
-                    .font(.headline)
+        let meta = [event.price.map { fmtMoney($0) }, event.ts.map { fmtRelative($0) }].compactMap { $0 }.joined(separator: " · ")
+        let footer = [backers.isEmpty ? nil : "Backed by \(backers.joined(separator: ", "))", event.overrideApplied ? "Overridden" : nil]
+            .compactMap { $0 }
+            .joined(separator: " · ")
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 16) {
+                (Text(event.side.capitalized).foregroundStyle(DS.Text.secondary)
+                    + Text("  ·  ").foregroundStyle(DS.Text.faint)
+                    + Text(event.title).foregroundStyle(DS.Text.primary))
+                    .font(DS.Font.body)
                     .lineLimit(1)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                if let ts = event.ts {
-                    Text(fmtRelative(ts))
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                if !meta.isEmpty {
+                    Text(meta)
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.muted)
+                        .monospacedDigit()
                 }
             }
             if !reason.isEmpty {
                 Text(reason)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(4)
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.secondary)
+                    .lineSpacing(3)
+                    .lineLimit(3)
             }
-            if !backers.isEmpty {
-                Text("Backed by \(backers.joined(separator: ", "))")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+            if !footer.isEmpty {
+                Text(footer)
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.muted)
                     .lineLimit(1)
             }
-            if event.price != nil || event.overrideApplied {
-                HStack(spacing: 10) {
-                    if let price = event.price {
-                        Text("@ \(fmtMoney(price))")
-                            .font(.footnote.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                    }
-                    if event.overrideApplied {
-                        Text("Overridden")
-                            .dsBadge(DS.Palette.accent)
-                    }
-                }
-            }
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 6)
         .accessibilityElement(children: .combine)
     }
 }
 
-/// One recent fill (`_OrderRow`): the side, quantity at price, when, and the
-/// fill's total.
+/// One fill (the web's history row): the side over "12 sh · Nov 9, 3:42 PM";
+/// the fill price over its total.
 private struct StockOrderRow: View {
     let trade: Trade
 
     var body: some View {
-        let isBuy = trade.side.lowercased() == "buy"
         EntityRow(
-            "\(DashboardFormat.qtyNumber(trade.qty)) @ \(fmtMoney(trade.price))",
-            subtitle: fmtDateTime(trade.ts)
+            trade.side.capitalized,
+            subtitle: "\(DashboardFormat.qtyNumber(trade.qty)) sh · \(fmtDateTime(trade.ts))"
         ) {
-            Text(trade.side.capitalized)
-                .dsBadge(isBuy ? DS.Palette.success : DS.Palette.danger)
-                .frame(minWidth: 40, alignment: .leading)
-        } trailing: {
-            EntityRowValue(fmtMoney(trade.price * trade.qty))
+            EntityRowValue(fmtMoney(trade.price), detail: "Total \(fmtMoney(trade.price * trade.qty))")
         }
     }
 }

@@ -86,6 +86,17 @@ struct Sector3DChartRenderTests {
         c.b > c.r && c.r > c.g
     }
 
+    /// The dark (app) palette is the zinc ramp: grey, with at most zinc's
+    /// faint cool cast — no hue.
+    private func isZinc(_ c: (r: Int, g: Int, b: Int)) -> Bool {
+        max(c.r, c.g, c.b) - min(c.r, c.g, c.b) <= 16
+    }
+
+    /// The light palette keeps the violets; the dark one is zinc.
+    private func hasPaletteHue(_ c: (r: Int, g: Int, b: Int), _ scheme: ColorScheme) -> Bool {
+        scheme == .dark ? isZinc(c) : isViolet(c)
+    }
+
     @Test(arguments: [ColorScheme.light, .dark], [0.0, 1.0])
     func rendersTheGoldenStatesWithFlatFaces(scheme: ColorScheme, drill: Double) throws {
         let slices = Sector3DGeometryTests.slices
@@ -107,7 +118,7 @@ struct Sector3DChartRenderTests {
         for i in clear {
             let colors = facePoints(i, scene).map(px.at)
             let first = colors[0]
-            #expect(isViolet(first), "wedge \(i) is \(first)")
+            #expect(hasPaletteHue(first, scheme), "wedge \(i) is \(first)")
             for c in colors.dropFirst() {
                 // One solid colour per face: no gradient across it.
                 #expect(abs(c.r - first.r) <= 2 && abs(c.g - first.g) <= 2 && abs(c.b - first.b) <= 2,
@@ -140,7 +151,7 @@ struct Sector3DChartRenderTests {
         let top = px.at(facePoints(0, scene)[0])
         let wall = px.at(wallPoint)
         #expect(top.r + top.g + top.b > wall.r + wall.g + wall.b)
-        #expect(isViolet(wall))
+        #expect(isZinc(wall))
     }
 
     @Test(arguments: [1, 3, 8])

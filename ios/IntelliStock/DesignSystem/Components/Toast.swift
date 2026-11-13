@@ -1,9 +1,9 @@
 import SwiftUI
 
-/// A transient confirmation — the native form of a SnackBar. Shows as a glass
-/// capsule at the top for 2.5 s (tap to dismiss early) and is announced to
-/// VoiceOver. Use inline `ErrorRow`s, not toasts, for failures that need
-/// action (`feedback.md`).
+/// A transient confirmation. Shows at the top for 2.5 s (tap to dismiss
+/// early) on the menu surface (`ui-menu`: the card fill, an 8% hairline, 12
+/// radius, a soft drop shadow), and is announced to VoiceOver. Use inline
+/// `ErrorRow`s, not toasts, for failures that need action.
 nonisolated struct Toast: Identifiable, Equatable, Sendable {
     enum Style: Sendable {
         case info, success, error
@@ -47,7 +47,7 @@ private struct ToastModifier: ViewModifier {
                         }
                 }
             }
-            .animation(.snappy, value: toast)
+            .animation(DSMotion.ease(0.2), value: toast)
     }
 }
 
@@ -55,16 +55,23 @@ private struct ToastCapsule: View {
     let toast: Toast
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
             Image(systemName: symbol)
+                .font(.system(size: 16))
                 .foregroundStyle(tint)
             Text(toast.message)
-                .font(.subheadline.weight(.medium))
+                .font(DS.Font.body)
+                .foregroundStyle(DS.Text.primary)
                 .multilineTextAlignment(.leading)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
-        .glassEffect(.regular, in: .capsule)
+        .background(DS.Surface.card, in: .rect(cornerRadius: DS.Radius.card, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: DS.Radius.card, style: .continuous)
+                .strokeBorder(DS.Line.input, lineWidth: DS.Line.width)
+        }
+        .shadow(color: .black.opacity(0.5), radius: 20, y: 16)
         .accessibilityElement(children: .combine)
     }
 
@@ -78,9 +85,9 @@ private struct ToastCapsule: View {
 
     private var tint: Color {
         switch toast.style {
-        case .info: .secondary
-        case .success: DS.Palette.success
-        case .error: DS.Palette.danger
+        case .info: DS.Text.muted
+        case .success: DS.Palette.gain
+        case .error: DS.Palette.loss
         }
     }
 }

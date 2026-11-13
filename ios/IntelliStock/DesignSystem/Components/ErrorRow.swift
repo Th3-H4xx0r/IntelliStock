@@ -1,31 +1,39 @@
 import SwiftUI
 
-/// An inline error with an optional Retry — `ErrorBanner` in
-/// `common_widgets.dart`. Red text on a 15 % red tint; failures stay in the
-/// interface rather than in an alert (`feedback.md`).
+/// An error (`ui-error`): loss-red 14 pt text on a faint loss-tinted card
+/// (loss at 5%, a loss-20% hairline, 12 radius), with an optional Retry
+/// (`ui-btn`). Failures stay in the interface, not in an alert.
 struct ErrorRow: View {
     let message: String
     var onRetry: (() -> Void)?
 
-    @Environment(\.colorScheme) private var colorScheme
-
     var body: some View {
-        let ink = DS.Palette.onTint(DS.Palette.danger, in: colorScheme)
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            Image(systemName: Symbol.named("error_outline"))
-                .foregroundStyle(ink)
-                .accessibilityHidden(true)
+        HStack(alignment: .center, spacing: 12) {
             Text(message)
-                .font(.subheadline)
-                .foregroundStyle(ink)
+                .font(DS.Font.body)
+                .foregroundStyle(DS.Palette.loss)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
             if let onRetry {
                 Button("Retry", action: onRetry)
-                    .font(.subheadline.weight(.semibold))
-                    .buttonStyle(.borderless)
+                    .buttonStyle(.dsSecondary)
             }
         }
-        .padding(16)
-        .background(DS.Palette.danger.opacity(DS.tintFill), in: .rect(cornerRadius: DS.Radius.control, style: .continuous))
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
+        .dsErrorSurface()
+        .accessibilityElement(children: .combine)
+    }
+}
+
+extension View {
+    /// The error box's surface (`ui-error`) behind any view.
+    func dsErrorSurface(radius: CGFloat = DS.Radius.card) -> some View {
+        self
+            .background(DS.Palette.loss.opacity(DS.tintFill), in: .rect(cornerRadius: radius, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .strokeBorder(DS.Palette.loss.opacity(DS.tintBorder), lineWidth: DS.Line.width)
+            }
     }
 }

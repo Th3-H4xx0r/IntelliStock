@@ -162,9 +162,9 @@ final class LearningModel {
     /// `_severityColor`.
     static func severityColor(_ severity: String) -> Color {
         switch severity.lowercased() {
-        case "high": DS.Palette.danger
-        case "medium": DS.Palette.warning
-        default: .secondary
+        case "high": DS.Palette.loss
+        case "medium": DS.Palette.amber
+        default: DS.Text.muted
         }
     }
 }

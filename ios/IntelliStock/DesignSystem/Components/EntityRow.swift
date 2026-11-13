@@ -4,12 +4,14 @@ import SwiftUI
 /// model, a holding. Use it as the label of a `NavigationLink` inside a
 /// `List`, which adds the chevron and makes the whole row the tap target.
 ///
-/// - **Leading** (optional): an `IconTile`, a brand logo, or a ring.
-/// - **Title:** `.headline`, one line. An optional pin glyph follows it.
-/// - **Subtitle:** `.subheadline` in `.secondary`, one or two lines.
-/// - **Trailing:** a value (`EntityRowValue`), a `StatusDot`, or one
-///   `StatusBadge`. Never a row of buttons: secondary actions go in
-///   `.swipeActions` and `.contextMenu`.
+/// The web row (`ui-row`):
+///
+/// - **Leading** (optional): a muted glyph (`IconTile`), a brand logo, or a ring.
+/// - **Title:** 14 pt zinc-100, one line. An optional pin glyph follows it.
+/// - **Subtitle:** 12 pt zinc-500, 2 pt below, one or two lines.
+/// - **Trailing:** a value (`EntityRowValue`, right-aligned, monospaced
+///   digits), a `StatusDot`, or one `StatusBadge` (a dot and a word). Never a
+///   row of buttons: secondary actions go in `.swipeActions` and `.contextMenu`.
 ///
 /// At accessibility text sizes the trailing slot moves under the text, so
 /// nothing truncates (`typography.md › Supporting Dynamic Type`). VoiceOver
@@ -31,6 +33,7 @@ struct EntityRow<Leading: View, Trailing: View>: View {
     private let trailing: Trailing
 
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.dsEntityTitleMedium) private var titleMedium
 
     /// A row with custom leading and trailing views.
     init(
@@ -60,19 +63,21 @@ struct EntityRow<Leading: View, Trailing: View>: View {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         Text(title)
-                            .font(.headline)
+                            .font(titleMedium ? DS.Font.bodyMedium : DS.Font.body)
+                            .foregroundStyle(DS.Text.primary)
                             .lineLimit(stacked ? nil : 1)
                         if isPinned {
                             Image(systemName: "pin.fill")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                                .font(.system(size: 10))
+                                .foregroundStyle(DS.Text.muted)
                                 .accessibilityLabel("Pinned")
                         }
                     }
                     if let subtitle {
                         Text(subtitle)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
+                            .font(DS.Font.caption)
+                            .foregroundStyle(DS.Text.muted)
+                            .monospacedDigit()
                             .lineLimit(stacked ? nil : min(max(subtitleLineLimit, 1), 2))
                     }
                 }
@@ -114,13 +119,14 @@ extension EntityRow where Leading == EmptyView, Trailing == EmptyView {
 }
 
 extension EntityRow where Leading == IconTile<IconTileSymbol> {
-    /// A row led by a 32 pt `IconTile` around an SF Symbol.
+    /// A row led by a muted SF Symbol in a 32 pt column (`IconTile`; `tint`
+    /// is ignored: icons take their text role's colour).
     init(
         _ title: String,
         subtitle: String? = nil,
         subtitleLineLimit: Int = 1,
         systemImage: String,
-        tint: Color = DS.Palette.accent,
+        tint: Color = DS.Text.muted,
         isPinned: Bool = false,
         @ViewBuilder trailing: () -> Trailing
     ) {
@@ -139,7 +145,7 @@ extension EntityRow where Leading == IconTile<IconTileSymbol>, Trailing == Empty
         subtitle: String? = nil,
         subtitleLineLimit: Int = 1,
         systemImage: String,
-        tint: Color = DS.Palette.accent,
+        tint: Color = DS.Text.muted,
         isPinned: Bool = false
     ) {
         self.init(
@@ -155,17 +161,29 @@ extension EntityRow where Leading == IconTile<IconTileSymbol>, Trailing == Empty
     }
 }
 
+extension EnvironmentValues {
+    @Entry var dsEntityTitleMedium = false
+}
+
+extension View {
+    /// `EntityRow` titles inside draw at 14/500, as the web sets symbols
+    /// (holdings, orders, movers).
+    func entityRowTitleMedium(_ medium: Bool = true) -> some View {
+        environment(\.dsEntityTitleMedium, medium)
+    }
+}
+
 /// Sizes shared by rows, so a custom leading view (a brand logo in an
 /// `IconTile`, a `MiniAllocationRing`) lines up with the symbol tiles.
 nonisolated enum EntityRowMetrics {
-    /// The leading tile's side.
-    static let iconSize: CGFloat = 32
+    /// The leading glyph column's width.
+    static let iconSize: CGFloat = 24
 }
 
-/// A trailing figure for an `EntityRow`: the value in `.body` with monospaced
-/// digits, with an optional second line under it in `.footnote`, such as a
-/// P&L, a percentage, or "131 sh @ $89.80". Colour only for meaning: green or
-/// red P&L.
+/// A trailing figure for an `EntityRow`: the value in 14 pt zinc-100 with
+/// monospaced digits, right-aligned, with an optional 12 pt line under it
+/// (zinc-500, or gain/loss for a signed P&L), such as "+$41.48 · +2.08%" or
+/// "131 sh @ $89.80". Colour only for meaning.
 ///
 ///     EntityRowValue("$2,031.08", detail: "+$41.48 · +2.08%", detailColor: DS.Palette.up)
 struct EntityRowValue: View {
@@ -184,12 +202,12 @@ struct EntityRowValue: View {
     var body: some View {
         VStack(alignment: .trailing, spacing: 2) {
             Text(value)
-                .font(.body)
-                .foregroundStyle(valueColor ?? Color.primary)
+                .font(DS.Font.body)
+                .foregroundStyle(valueColor ?? DS.Text.primary)
             if let detail {
                 Text(detail)
-                    .font(.footnote)
-                    .foregroundStyle(detailColor ?? Color.secondary)
+                    .font(DS.Font.caption)
+                    .foregroundStyle(detailColor ?? DS.Text.muted)
             }
         }
         .monospacedDigit()
@@ -200,7 +218,7 @@ struct EntityRowValue: View {
 #Preview("Rows") {
     NavigationStack {
         List {
-            Section("Instances") {
+            DSSection("Instances") {
                 NavigationLink(value: 1) {
                     EntityRow(
                         "Alpaca Paper — forward test",
@@ -217,7 +235,7 @@ struct EntityRowValue: View {
                     }
                 }
             }
-            Section("Backtests") {
+            DSSection("Backtests") {
                 NavigationLink(value: 3) {
                     EntityRow("swing-paper", subtitle: "#554589 · Jul 7 – Sep 18, 2026") {
                         EntityRowValue("+$1,204.18", color: DS.Palette.up, detail: "+12.04%", detailColor: DS.Palette.up)
@@ -229,18 +247,20 @@ struct EntityRowValue: View {
                     }
                 }
             }
-            Section("Holdings") {
+            DSSection("Holdings") {
                 EntityRow("TQQQ", subtitle: "22.4 sh") {
                     MiniAllocationRing(fraction: 0.31, color: DS.Palette.down)
                 } trailing: {
                     EntityRowValue("$1,823.74", detail: "−$12.40 · −0.68%", detailColor: DS.Palette.down)
                 }
             }
-            Section {
-                EntityRow("Settings", systemImage: "gearshape", tint: .gray)
+            DSSection {
+                EntityRow("Settings", systemImage: "gearshape")
             }
         }
+        .dsList()
         .navigationTitle("Rows")
         .navigationDestination(for: Int.self) { Text("Detail \($0)") }
     }
+    .dsAppearance()
 }

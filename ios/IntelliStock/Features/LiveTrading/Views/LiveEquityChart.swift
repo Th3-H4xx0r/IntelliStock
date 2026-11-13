@@ -1,9 +1,11 @@
 import Charts
 import SwiftUI
 
-/// The live equity chart — `EquityChart` in `equity_chart.dart`: area,
-/// line or candles over a gapless index axis (1D area/line on the fixed
-/// full-day minute axis), with a scrub that reports the nearest point. It
+/// The live equity chart — `EquityChart` in `equity_chart.dart`, drawn as
+/// the web hero's: area (a faint same-hue fade), line or candles over a
+/// gapless index axis (1D area/line on the fixed full-day minute axis), the
+/// dotted opening value and white-5% price gridlines, with a scrub that
+/// reports the nearest point. It
 /// draws itself in from the leading edge for each range and style
 /// (`chartDrawIn`); polls leave it still.
 struct LiveEquityChart: View {
@@ -23,8 +25,8 @@ struct LiveEquityChart: View {
         let n = min(history.timestamps.count, history.values.count)
         if n == 0 {
             Text("No equity data yet")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .font(DS.Font.body)
+                .foregroundStyle(DS.Text.muted)
                 .frame(maxWidth: .infinity)
                 .frame(height: height)
         } else {
@@ -70,7 +72,7 @@ struct LiveEquityChart: View {
                 case .area, .line:
                     // Stocks' dotted baseline at the range's opening value.
                     RuleMark(y: .value("Open", values[0]))
-                        .foregroundStyle(Color.secondary.opacity(0.5))
+                        .foregroundStyle(DS.Chart.baseline)
                         .lineStyle(StrokeStyle(lineWidth: 1, dash: DS.baselineDash))
                     ForEach(0..<n, id: \.self) { i in
                         if style == .area {
@@ -79,12 +81,17 @@ struct LiveEquityChart: View {
                                 yStart: .value("Floor", bounds.min),
                                 yEnd: .value("Equity", values[i])
                             )
-                            .foregroundStyle(color.opacity(DS.chartAreaOpacity))
+                            // The faint same-hue fade under a P&L line (the web hero's).
+                            .foregroundStyle(LinearGradient(
+                                colors: [color.opacity(DS.Chart.areaTopOpacity), color.opacity(0)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            ))
                             .interpolationMethod(.monotone)
                         }
                         LineMark(x: .value("x", xs[i]), y: .value("Equity", values[i]))
                             .foregroundStyle(color)
-                            .lineStyle(StrokeStyle(lineWidth: style == .area ? 2 : 1.75, lineCap: .round, lineJoin: .round))
+                            .lineStyle(StrokeStyle(lineWidth: style == .area ? 1.75 : 1.25, lineCap: .round, lineJoin: .round))
                             .interpolationMethod(.monotone)
                     }
                 }
@@ -92,8 +99,8 @@ struct LiveEquityChart: View {
                     let fraction = LiveEquityGeometry.hairlineFraction(idx, xs: xs, timeAxis: timeAxis)
                     let x = domain.lowerBound + fraction * (domain.upperBound - domain.lowerBound)
                     RuleMark(x: .value("Scrub", style == .candle ? candleX(fraction, candles.count) : x))
-                        .foregroundStyle(color.opacity(0.55))
-                        .lineStyle(StrokeStyle(lineWidth: 1.2))
+                        .foregroundStyle(DS.Chart.scrubLine)
+                        .lineStyle(StrokeStyle(lineWidth: 1))
                     if style != .candle {
                         PointMark(x: .value("x", xs[idx]), y: .value("Equity", values[idx]))
                             .foregroundStyle(color)
@@ -104,7 +111,21 @@ struct LiveEquityChart: View {
             .chartXScale(domain: domain)
             .chartYScale(domain: bounds.min...bounds.max)
             .chartXAxis(.hidden)
-            .chartYAxis(.hidden)
+            // The web hero's price gridlines: white 5%, 11 pt zinc-500 labels.
+            .chartYAxis {
+                AxisMarks(position: .trailing, values: .automatic(desiredCount: 4)) { value in
+                    AxisGridLine(stroke: StrokeStyle(lineWidth: 1))
+                        .foregroundStyle(DS.Chart.grid)
+                    AxisValueLabel {
+                        if let price = value.as(Double.self) {
+                            Text(fmtMoney(price))
+                                .font(DS.Font.micro)
+                                .monospacedDigit()
+                                .foregroundStyle(DS.Text.muted)
+                        }
+                    }
+                }
+            }
             .chartLegend(.hidden)
             .chartXSelection(value: $selectedX)
             .frame(height: plotHeight)

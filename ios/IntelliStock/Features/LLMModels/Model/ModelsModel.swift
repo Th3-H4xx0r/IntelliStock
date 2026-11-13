@@ -198,7 +198,7 @@ final class ModelEditorModel {
         if submitting {
             return draft.provider == "claude-cli" ? (isEdit ? "Updating…" : "Saving…") : "Testing…"
         }
-        return isEdit ? "Test & Update" : "Test & Save"
+        return isEdit ? "Test & update" : "Test & save"
     }
 }
 

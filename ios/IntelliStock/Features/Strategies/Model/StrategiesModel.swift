@@ -188,7 +188,8 @@ final class StrategiesModel {
     }
 }
 
-/// Rank theming (`_rankAccentColor`, `_rankTextColor`, `_rankMedal`).
+/// Rank labels (`_rankMedal`). The screens now show the rank as a plain,
+/// quiet number (the web's `#` column); the coloured medal accents are gone.
 nonisolated enum StrategyRank {
     static func medal(_ rank: Int) -> String {
         switch rank {
@@ -197,19 +198,5 @@ nonisolated enum StrategyRank {
         case 3: "🥉"
         default: "#\(rank)"
         }
-    }
-
-    static func accent(_ rank: Int) -> Color {
-        switch rank {
-        case 1: Color(red: 0xF5 / 255, green: 0x9E / 255, blue: 0x0B / 255)
-        case 2: Color(red: 0x94 / 255, green: 0xA3 / 255, blue: 0xB8 / 255)
-        case 3: Color(red: 0xEA / 255, green: 0x58 / 255, blue: 0x0C / 255)
-        default: DS.Palette.accent
-        }
-    }
-
-    /// The rank's text colour: the accent, made legible on its tint.
-    @MainActor static func text(_ rank: Int, in scheme: ColorScheme) -> Color {
-        rank <= 3 ? DS.Palette.onTint(accent(rank), in: scheme) : DS.Palette.accent
     }
 }

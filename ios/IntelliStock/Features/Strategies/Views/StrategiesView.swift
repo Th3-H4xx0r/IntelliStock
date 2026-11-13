@@ -1,9 +1,10 @@
 import SwiftUI
 
-/// The Strategies tab — `StrategiesScreen`: the agent's top-5, every
-/// strategy with its best backtest, sorting and paging. An inset-grouped list
-/// under a large title: sorting and page size are toolbar menus, Create
-/// Strategy is the `+`, and each row's backtest button is a swipe action and
+/// The Strategies tab — the web's `StrategiesView.vue`: "Strategies" with
+/// "All trading strategies with their best AI backtest results" under it,
+/// the agent's top 5 ranked by P&L %, then every strategy with its best
+/// backtest, sorted and paged. Sorting and page size are toolbar menus,
+/// Create strategy is the `+`, and each row's backtest is a swipe action and
 /// a context-menu item.
 struct StrategiesView: View {
     @Environment(AppServices.self) private var services
@@ -17,7 +18,7 @@ struct StrategiesView: View {
                 Color.clear
             }
         }
-        .background(DS.Surface.canvas)
+        .background(DS.Surface.page)
         .navigationTitle("Strategies")
         .navigationBarTitleDisplayMode(.large)
         .toolbar {
@@ -26,8 +27,8 @@ struct StrategiesView: View {
                 ToolbarItem(placement: .topBarTrailing) { pageMenu(model) }
             }
             ToolbarItem(placement: .topBarTrailing) {
-                // Flutter pushed /instances?createStrategy=1: the Instances tab.
-                ToolbarAddButton("Create Strategy") { services.router.go("/instances") }
+                // The web pushes /instances?createStrategy=1: the Instances tab.
+                ToolbarAddButton("Create strategy") { services.router.go("/instances") }
             }
         }
         .task {
@@ -41,11 +42,11 @@ struct StrategiesView: View {
     // MARK: Toolbar
 
     private static let sortFields: [(StrategySortField, String)] = [
-        (.name, "Name"), (.bestPnl, "Best P&L"), (.bestPct, "Best P&L%"), (.backtests, "Backtests"),
+        (.name, "Name"), (.bestPnl, "Best P&L"), (.bestPct, "Best P&L %"), (.backtests, "Backtests"),
     ]
 
-    /// The Dart sort chips as a menu: choosing the active field again flips
-    /// its direction, shown by the arrow beside it (Files does the same).
+    /// The web's sortable columns as a menu: choosing the active field again
+    /// flips its direction, shown by the arrow beside it (Files does the same).
     private func sortMenu(_ model: StrategiesModel) -> some View {
         Menu {
             ForEach(Self.sortFields, id: \.0) { field, label in
@@ -67,15 +68,14 @@ struct StrategiesView: View {
 
     /// Per page and the page jump.
     private func pageMenu(_ model: StrategiesModel) -> some View {
-        ToolbarMenu("Page Options") {
-            Picker("Per Page", selection: Binding(get: { model.perPage }, set: { model.setPerPage($0) })) {
-                ForEach(StrategiesModel.perPageOptions, id: \.self) { Text("\($0)/page").tag($0) }
+        ToolbarMenu("Page options") {
+            Picker("Per page", selection: Binding(get: { model.perPage }, set: { model.setPerPage($0) })) {
+                ForEach(StrategiesModel.perPageOptions, id: \.self) { Text("\($0) per page").tag($0) }
             }
             .pickerStyle(.menu)
             if model.totalPages > 1 {
-                // The Dart page buttons: the five-page window around the
-                // current page.
-                Picker("Go to Page", selection: Binding(get: { model.page }, set: { model.setPage($0) })) {
+                // The five-page window around the current page.
+                Picker("Go to page", selection: Binding(get: { model.page }, set: { model.setPage($0) })) {
                     ForEach(StrategiesModel.pageWindow(page: model.page, totalPages: model.totalPages), id: \.self) { Text("Page \($0)").tag($0) }
                 }
                 .pickerStyle(.menu)
@@ -87,81 +87,59 @@ struct StrategiesView: View {
 
     private func content(_ model: StrategiesModel) -> some View {
         List {
+            Section {
+                Text("All trading strategies with their best AI backtest results")
+                    .font(DS.Font.pageSub)
+                    .foregroundStyle(DS.Text.muted)
+                    .dsClearRow(top: 0, bottom: 4)
+            }
             if model.loading {
-                Section {
-                    ForEach(0..<3, id: \.self) { _ in skeletonRow }
-                }
-                Section {
+                DSSection {
                     ForEach(0..<5, id: \.self) { _ in skeletonRow }
+                } accessory: {
+                    Skeleton(width: 128, height: 16)
                 }
             } else {
                 let top5 = model.top5Enriched
                 if !top5.isEmpty {
-                    Section {
+                    DSSection("Top \(top5.count) strategies", subtitle: "Ranked by P&L %") {
                         ForEach(top5) { e in top5Row(e) }
-                    } header: {
-                        Text("Top \(top5.count) best strategies")
-                    } footer: {
-                        Text("ranked by P&L%")
                     }
                 }
                 let paged = model.pagedRows
-                if paged.isEmpty {
-                    Section {
-                        EmptyState(
-                            systemImage: Symbol.named("schema"),
-                            title: "No strategies found.",
-                            subtitle: "Create your first strategy to get started."
-                        )
-                        .listRowBackground(Color.clear)
-                    }
-                } else {
-                    Section {
+                DSSection("All strategies", subtitle: "\(model.rows.count) strategies") {
+                    if paged.isEmpty {
+                        EmptyState(title: "No strategies found", subtitle: "Create your first strategy to get started")
+                    } else {
                         ForEach(paged) { row in strategyRow(row) }
-                    } footer: {
-                        Text("All trading strategies with their best AI backtest results.")
                     }
                 }
                 pagination(model)
             }
         }
-        .listStyle(.insetGrouped)
+        .dsList()
         .refreshable { await model.fetchAll() }
     }
 
     // MARK: Rows
 
-    /// The rank: a medal for the top three, "#n" for the rest.
+    /// The rank: the number, quiet (the web's `#` column).
     private func rankMark(_ rank: Int) -> some View {
-        Group {
-            if rank <= 3 {
-                Image(systemName: "medal.fill")
-                    .font(.title3)
-                    .foregroundStyle(StrategyRank.accent(rank))
-            } else {
-                Text("#\(rank)")
-                    .font(.headline.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .frame(width: EntityRowMetrics.iconSize)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Rank \(rank)")
+        Text("\(rank)")
+            .font(DS.Font.body)
+            .foregroundStyle(DS.Text.muted)
+            .monospacedDigit()
+            .frame(width: 16, alignment: .leading)
+            .accessibilityLabel("Rank \(rank)")
     }
 
     private func pnlValue(_ pnl: Double?, _ pct: Double?) -> some View {
-        Group {
-            if pnl == nil && pct == nil {
-                Text("—").foregroundStyle(.secondary)
-            } else {
-                EntityRowValue(
-                    pnl.map(fmtPnl) ?? "—",
-                    color: pnlColor(pnl),
-                    detail: pct.map(fmtPct),
-                    detailColor: pnlColor(pct)
-                )
-            }
-        }
+        EntityRowValue(
+            fmtPnl(pnl),
+            color: backtestPnlColor(pnl),
+            detail: fmtPct(pct),
+            detailColor: backtestPnlColor(pct)
+        )
     }
 
     private func top5Row(_ e: StrategiesModel.Top5Entry) -> some View {
@@ -187,7 +165,7 @@ struct StrategiesView: View {
                 Button(action: backtest) {
                     Label("Backtest", systemImage: Symbol.named("analytics"))
                 }
-                .tint(DS.Palette.info)
+                .tint(DS.Swipe.neutral)
             }
         }
         .contextMenu {
@@ -195,7 +173,7 @@ struct StrategiesView: View {
                 Button {
                     services.router.push(.strategy(sid.dartDescription))
                 } label: {
-                    Label("View Strategy", systemImage: Symbol.named("open_in_new"))
+                    Label("View strategy", systemImage: Symbol.named("open_in_new"))
                 }
             }
             if let backtest {
@@ -206,20 +184,21 @@ struct StrategiesView: View {
         }
     }
 
+    /// A strategy (the web's table row, folded for a phone): the name over
+    /// "ID 3 · Rank 1 · 2 subs · 1 instance · 4 backtests", the best P&L
+    /// and its % on the right.
     private func strategyRow(_ row: StrategyListRow) -> some View {
-        let subtitle = "ID \(row.id) · \(row.subCount) subs" + (row.runCount > 0 ? " · \(row.runCount) runs" : "")
+        var parts = ["ID \(row.id)"]
+        if let rank = row.rank { parts.append("Rank \(rank)") }
+        parts.append("\(row.subCount) \(row.subCount == 1 ? "sub" : "subs")")
+        if !row.instancesUsing.isEmpty {
+            parts.append("\(row.instancesUsing.count) \(row.instancesUsing.count == 1 ? "instance" : "instances")")
+        }
+        if row.runCount > 0 { parts.append("\(row.runCount) \(row.runCount == 1 ? "backtest" : "backtests")") }
         let backtest: (() -> Void)? = row.bestPnlBid.map { bid in { services.router.push(.backtest(bid)) } }
         return NavigationLink(value: Route.strategy(String(row.id))) {
-            StrategyRowLabel(title: row.name, subtitle: subtitle) {
-                if let rank = row.rank {
-                    rankMark(rank)
-                } else {
-                    Image(systemName: Symbol.named("schema"))
-                        .font(.title3)
-                        .foregroundStyle(.secondary)
-                        .frame(width: EntityRowMetrics.iconSize)
-                        .accessibilityHidden(true)
-                }
+            StrategyRowLabel(title: row.name, subtitle: parts.joined(separator: " · ")) {
+                EmptyView()
             } trailing: {
                 pnlValue(row.bestPnl, row.bestPct)
             }
@@ -227,15 +206,15 @@ struct StrategiesView: View {
         .swipeActions(edge: .trailing) {
             if let backtest {
                 Button(action: backtest) {
-                    Label("Best Backtest", systemImage: Symbol.named("analytics"))
+                    Label("Best backtest", systemImage: Symbol.named("analytics"))
                 }
-                .tint(DS.Palette.info)
+                .tint(DS.Swipe.neutral)
             }
         }
         .contextMenu {
             if let backtest {
                 Button(action: backtest) {
-                    Label("Best Backtest", systemImage: Symbol.named("analytics"))
+                    Label("Best backtest", systemImage: Symbol.named("analytics"))
                 }
             }
         }
@@ -243,26 +222,25 @@ struct StrategiesView: View {
 
     // MARK: Pagination
 
+    /// The web's card footer: "20 strategies · page 1 of 3" with Previous /
+    /// Next (shown only when there is more than one page).
     @ViewBuilder
     private func pagination(_ model: StrategiesModel) -> some View {
         let total = model.rows.count
         let pages = model.totalPages
-        if pages <= 1 {
+        if pages > 1 {
             Section {
-            } footer: {
-                Text("\(total) strategies")
-            }
-        } else {
-            Section {
-                HStack {
-                    pageButton("arrow_back", "Previous page", enabled: model.page > 1) { model.setPage(model.page - 1) }
-                    Spacer()
+                HStack(spacing: 4) {
                     Text("\(total) strategies · page \(model.page) of \(pages)")
-                        .font(.footnote.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    pageButton("arrow_forward", "Next page", enabled: model.page < pages) { model.setPage(model.page + 1) }
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.muted)
+                        .monospacedDigit()
+                    Spacer(minLength: 8)
+                    pageButton("chevron_left", "Previous page", enabled: model.page > 1) { model.setPage(model.page - 1) }
+                    pageButton("chevron_right", "Next page", enabled: model.page < pages) { model.setPage(model.page + 1) }
                 }
+                .frame(minHeight: 44)
+                .dsClearRow(top: 4, bottom: 16, horizontal: DS.pageGutter + 4)
             }
         }
     }
@@ -270,22 +248,22 @@ struct StrategiesView: View {
     private func pageButton(_ icon: String, _ label: String, enabled: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: Symbol.named(icon))
-                .font(.body.weight(.semibold))
-                .frame(width: 44, height: 44)
-                .contentShape(.rect)
         }
-        .buttonStyle(.borderless)
+        .buttonStyle(.dsIcon(side: 44))
         .disabled(!enabled)
         .accessibilityLabel(label)
     }
 
     // MARK: Skeleton
 
+    /// The loading shape (`ui-skel`): a name and a figure per row.
     private var skeletonRow: some View {
-        EntityRow("Strategy name placeholder", subtitle: "ID 000 · 2 subs") {
-            EntityRowValue("+$1,234.56", detail: "+12.34%")
+        HStack(spacing: 24) {
+            Skeleton(width: 176, height: 16)
+            Spacer(minLength: 8)
+            Skeleton(width: 80, height: 16)
         }
-        .redacted(reason: .placeholder)
+        .accessibilityHidden(true)
     }
 }
 
@@ -310,12 +288,14 @@ private struct StrategyRowLabel<Leading: View, Trailing: View>: View {
                 leading()
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title)
-                        .font(.headline)
+                        .font(DS.Font.body)
+                        .foregroundStyle(DS.Text.primary)
                         .lineLimit(stacked ? nil : 2)
                     Text(subtitle)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(stacked ? nil : 1)
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.muted)
+                        .monospacedDigit()
+                        .lineLimit(stacked ? nil : 2)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }

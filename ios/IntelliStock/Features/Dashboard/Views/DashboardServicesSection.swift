@@ -1,18 +1,14 @@
 import SwiftUI
 
-/// Status and controls for the background services — `_ServicesSection`
-/// and its five cards in `dashboard_screen.dart` (`ServiceCard`) — as the
-/// dashboard's "Services" group, one list section per engine:
+/// Status and controls for the background services — the web dashboard's
+/// "Services" card: one row per engine with what it does, its status as a
+/// dot and a word, one line of activity, and its controls as buttons. Each
+/// row's context menu holds the same controls.
 ///
-/// - a status row: what the engine does, and a dot with its state. Its
-///   context menu holds every control the Dart card had;
-/// - the card's stats as `LabeledContent` rows;
-/// - the card's primary action as one inline row (Start, Stop, Terminate).
-///
-/// Each action marks its engine busy (its controls disabled, a spinner on
-/// the inline row) and refreshes the snapshot when it succeeds; failures are
-/// swallowed, as in Dart. The snapshot refreshes by pull-to-refresh and the
-/// 10 s poll, both run from `DashboardView`.
+/// Each action marks its engine busy (its controls disabled, a spinner in
+/// the row) and refreshes the snapshot when it succeeds; failures are
+/// swallowed, as in Dart. The snapshot refreshes by pull-to-refresh, the
+/// header's refresh button and the 10 s poll, run from `DashboardView`.
 struct DashboardServicesSection: View {
     /// Opens the "Start AI Backtest Agent" sheet, which `DashboardView` hosts.
     let onStartAgent: () -> Void
@@ -25,35 +21,39 @@ struct DashboardServicesSection: View {
     static let footer = "Status and controls for all IntelliStock background services."
 
     var body: some View {
-        switch model.services {
-        case .loading:
-            Section {
+        DSSection("Services", subtitle: "Background engines that feed the bots", rowMinHeight: 68) {
+            switch model.services {
+            case .loading:
                 ForEach(0..<5, id: \.self) { _ in
-                    EntityRow("Service name", subtitle: "Engine description") {
-                        StatusDot("Stopped", color: .secondary)
-                    }
-                    .redacted(reason: .placeholder)
-                    .accessibilityHidden(true)
+                    Skeleton(width: 160, height: 16)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityHidden(true)
                 }
-            } header: {
-                DashboardGroupHeader(group: "Services")
-            } footer: {
-                Text(Self.footer)
-            }
-        case .failed:
-            Section {
-                ErrorRow(message: model.services.errorMessage ?? "") {
-                    Task { await model.refreshNow() }
+            case .failed:
+                HStack(spacing: 16) {
+                    Text(model.services.errorMessage ?? "")
+                        .font(DS.Font.body)
+                        .foregroundStyle(DS.Palette.loss)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Button("Retry") { Task { await model.refreshNow() } }
+                        .buttonStyle(.dsSecondary)
                 }
-            } header: {
-                DashboardGroupHeader(group: "Services")
+            case .loaded(let svc):
+                priceEngine(svc)
+                discoverEngine(svc)
+                agent(svc)
+                digest(svc)
+                nexus(svc)
             }
-        case .loaded(let svc):
-            priceEngine(svc)
-            discoverEngine(svc)
-            agent(svc)
-            digest(svc)
-            nexus(svc)
+        } accessory: {
+            Button {
+                Task { await model.refreshNow() }
+            } label: {
+                Image(systemName: Symbol.named("refresh"))
+            }
+            .buttonStyle(.dsIcon)
+            .padding(.trailing, -6)
+            .accessibilityLabel("Refresh services")
         }
     }
 
@@ -62,96 +62,92 @@ struct DashboardServicesSection: View {
         Task { await model.run(id, action) }
     }
 
-    // MARK: Price Engine
+    // MARK: Price engine
 
     private func priceEngine(_ svc: ServicesSnapshot) -> some View {
         let id = "price_engine"
         let engine = svc.engineById(id)
-        let busy = model.isBusy(id)
         let running = svc.isRunning(id)
         let primary: DashboardServiceAction = running
             ? DashboardServiceAction(label: "Terminate", symbol: Symbol.named("stop_circle"), destructive: true) {
                 run(id) { try await repo.terminatePrice() }
             }
-            : DashboardServiceAction(label: "Start", symbol: Symbol.named("play_circle")) {
+            : DashboardServiceAction(label: "Start broker", symbol: Symbol.named("play_circle")) {
                 run(id) { try await repo.startPriceService() }
             }
-        return DashboardServiceSection(
-            group: "Services",
-            title: "Price Engine", subtitle: "Live market data",
+        return DashboardServiceRow(
+            title: "Price engine", subtitle: "Live market data",
             status: engine?.status ?? "stopped",
-            stats: [.cell("Details", engine?.details ?? "No extra details")],
-            primary: primary,
-            busy: busy
+            activity: .text(Self.nonEmpty(engine?.details) ?? "—"),
+            actions: [primary],
+            busy: model.isBusy(id)
         )
     }
 
-    // MARK: Discover Engine
+    // MARK: Discover engine
 
     private func discoverEngine(_ svc: ServicesSnapshot) -> some View {
         let id = "discover_engine"
         let engine = svc.engineById(id)
-        let busy = model.isBusy(id)
         let running = svc.isRunning(id)
-        return DashboardServiceSection(
-            title: "Discover Engine", subtitle: "Opportunity discovery",
+        return DashboardServiceRow(
+            title: "Discover engine", subtitle: "Opportunity discovery",
             status: engine?.status ?? "stopped",
-            stats: [.cell("Details", engine?.details ?? "No extra details")],
-            primary: DashboardServiceAction(
-                label: running ? "Stop" : "Start",
-                symbol: Symbol.named(running ? "stop_circle" : "play_circle"),
-                destructive: running
-            ) {
-                run(id) { try await repo.controlDiscover(running: !running) }
-            },
-            busy: busy
+            activity: .text(Self.nonEmpty(engine?.details) ?? "—"),
+            actions: [
+                DashboardServiceAction(
+                    label: running ? "Stop" : "Start",
+                    symbol: Symbol.named(running ? "stop_circle" : "play_circle"),
+                    destructive: running
+                ) {
+                    run(id) { try await repo.controlDiscover(running: !running) }
+                },
+            ],
+            busy: model.isBusy(id)
         )
     }
 
-    // MARK: AI Backtest Agent
+    // MARK: AI backtest agent
 
     private func agent(_ svc: ServicesSnapshot) -> some View {
         let id = "ai_backtest_engine"
         let engine = svc.engineById(id)
-        let busy = model.isBusy(id)
         let running = svc.isRunning(id)
         let paused = svc.isPaused(id)
         let control = svc.agentControl
-        var stats: [DashboardServiceStat] = [
-            .cell("Backtests today", control?["count_today"].flatMap { $0.isNull ? nil : $0.dartDescription } ?? "—"),
-            .cell("Last run", Self.asString(control?["last_run_date"]) ?? "—"),
-        ]
+        let count = control?["count_today"].flatMap { $0.isNull ? nil : $0.dartDescription } ?? "0"
+        var activity = "\(count) backtests today · last run \(Self.asString(control?["last_run_date"]) ?? "—")"
         if let resumeAt = Self.asString(control?["resume_at"]) {
-            stats.append(.cell("Resume at", resumeAt))
+            activity += " · resumes \(resumeAt)"
         }
         let active = running || paused
-        var secondary: [DashboardServiceAction] = []
+        var actions: [DashboardServiceAction] = []
         if paused {
-            secondary.append(DashboardServiceAction(label: "Resume", symbol: Symbol.named("play_circle")) {
+            actions.append(DashboardServiceAction(label: "Resume", symbol: Symbol.named("play_circle")) {
                 run(id) { try await repo.controlAgent(paused: false) }
             })
         } else if running {
-            secondary.append(DashboardServiceAction(label: "Pause", symbol: Symbol.named("pause_circle")) {
+            actions.append(DashboardServiceAction(label: "Pause", symbol: Symbol.named("pause_circle")) {
                 run(id) { try await repo.controlAgent(paused: true) }
             })
         }
-        return DashboardServiceSection(
-            title: "AI Backtest Agent", subtitle: "Automated strategy search",
+        actions.append(DashboardServiceAction(
+            label: active ? "Stop" : "Start",
+            symbol: Symbol.named(active ? "stop_circle" : "play_circle"),
+            destructive: active
+        ) {
+            if active {
+                run(id) { try await repo.controlAgent(running: false) }
+            } else {
+                onStartAgent()
+            }
+        })
+        return DashboardServiceRow(
+            title: "AI backtest agent", subtitle: "Automated strategy search",
             status: engine?.status ?? "stopped",
-            stats: stats,
-            primary: DashboardServiceAction(
-                label: active ? "Stop" : "Start",
-                symbol: Symbol.named(active ? "stop_circle" : "play_circle"),
-                destructive: active
-            ) {
-                if active {
-                    run(id) { try await repo.controlAgent(running: false) }
-                } else {
-                    onStartAgent()
-                }
-            },
-            secondary: secondary,
-            busy: busy
+            activity: .text(activity),
+            actions: actions,
+            busy: model.isBusy(id)
         )
     }
 
@@ -161,57 +157,60 @@ struct DashboardServicesSection: View {
         return nil
     }
 
-    // MARK: Daily Digest
+    private static func nonEmpty(_ s: String?) -> String? {
+        guard let s, !s.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+        return s
+    }
+
+    // MARK: Daily digest
 
     private func digest(_ svc: ServicesSnapshot) -> some View {
         let id = "daily_digest_engine"
         let control = svc.digestControl
         let running = control?["running"] == .bool(true)
-        let busy = model.isBusy(id)
-        return DashboardServiceSection(
-            title: "Daily Digest", subtitle: "Discord market summaries",
+        let morning = fmtDateTime(control?["last_morning_at"])
+        let evening = fmtDateTime(control?["last_evening_at"])
+        return DashboardServiceRow(
+            title: "Daily digest", subtitle: "Discord market summaries",
             status: running ? "running" : "stopped",
-            stats: [
-                .cell("Last morning", fmtDateTime(control?["last_morning_at"])),
-                .cell("Last evening", fmtDateTime(control?["last_evening_at"])),
-            ],
-            primary: DashboardServiceAction(
-                label: running ? "Stop" : "Start",
-                symbol: Symbol.named(running ? "stop_circle" : "play_circle"),
-                destructive: running
-            ) {
-                run(id) { try await repo.controlDigest(running: !running) }
-            },
-            secondary: [
-                DashboardServiceAction(label: "Send Now", symbol: Symbol.named("send")) {
+            activity: .text("Morning \(morning.isEmpty ? "—" : morning) · evening \(evening.isEmpty ? "—" : evening)"),
+            actions: [
+                DashboardServiceAction(label: "Send now", symbol: Symbol.named("send")) {
                     run(id) { try await repo.digestSendNow() }
                 },
+                DashboardServiceAction(
+                    label: running ? "Stop" : "Start",
+                    symbol: Symbol.named(running ? "stop_circle" : "play_circle"),
+                    destructive: running
+                ) {
+                    run(id) { try await repo.controlDigest(running: !running) }
+                },
             ],
-            busy: busy
+            busy: model.isBusy(id)
         )
     }
 
-    // MARK: Nexus Graph Engine
+    // MARK: Nexus graph engine
 
     private func nexus(_ svc: ServicesSnapshot) -> some View {
         let id = "nexus_graph_engine"
         let engine = svc.engineById(id)
-        let busy = model.isBusy(id)
         let running = svc.isRunning(id)
         let progress = Self.nexusProgress(svc.nexusStatus)
-        return DashboardServiceSection(
-            title: "Nexus Graph Engine", subtitle: "Knowledge graph builder",
+        return DashboardServiceRow(
+            title: "Nexus graph engine", subtitle: "Knowledge graph builder",
             status: engine?.status ?? "stopped",
-            stats: [progress.map { .progress($0.pct, $0.phase) } ?? .cell("Build", "No build in progress")],
-            primary: DashboardServiceAction(
-                label: running ? "Stop" : "Start",
-                symbol: Symbol.named(running ? "stop_circle" : "play_circle"),
-                destructive: running
-            ) {
-                run(id) { try await repo.controlNexus(running: !running) }
-            },
-            busy: busy,
-            footer: Self.footer
+            activity: progress.map { .progress($0.pct, $0.phase) } ?? .text("No build in progress"),
+            actions: [
+                DashboardServiceAction(
+                    label: running ? "Stop" : "Start",
+                    symbol: Symbol.named(running ? "stop_circle" : "play_circle"),
+                    destructive: running
+                ) {
+                    run(id) { try await repo.controlNexus(running: !running) }
+                },
+            ],
+            busy: model.isBusy(id)
         )
     }
 
@@ -225,16 +224,8 @@ struct DashboardServicesSection: View {
     }
 }
 
-/// One stat row in a service section.
-enum DashboardServiceStat {
-    /// `ServiceStatCell`: a label and its value.
-    case cell(String, String)
-    /// `NexusProgressCell`: build progress bar + last phase.
-    case progress(Int, String?)
-}
-
 /// One engine control: its label, symbol and action. A destructive one
-/// (Stop, Terminate) draws in red.
+/// (Stop, Terminate) draws its label in loss red.
 struct DashboardServiceAction {
     let label: String
     let symbol: String
@@ -242,93 +233,103 @@ struct DashboardServiceAction {
     let action: () -> Void
 }
 
-/// One engine (`ServiceCard`): a status row carrying every control in its
-/// context menu, the stat rows, and the primary action as an inline row.
-private struct DashboardServiceSection: View {
-    var group: String?
+/// An engine's activity line: text, or the nexus build's progress.
+enum DashboardServiceActivity {
+    case text(String)
+    case progress(Int, String?)
+}
+
+/// One engine (the web's phone row): name and purpose with the status on the
+/// right, the activity line, then the controls. Its context menu repeats
+/// the controls.
+private struct DashboardServiceRow: View {
     let title: String
     let subtitle: String
     let status: String
-    let stats: [DashboardServiceStat]
-    let primary: DashboardServiceAction
-    var secondary: [DashboardServiceAction] = []
+    let activity: DashboardServiceActivity
+    let actions: [DashboardServiceAction]
     let busy: Bool
-    var footer: String?
 
     var body: some View {
-        Section {
-            LabeledContent {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(DS.Font.body)
+                        .foregroundStyle(DS.Text.primary)
+                    Text(subtitle)
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.muted)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 StatusDot(
-                    DashboardFormat.pillLabel(status),
-                    status: status,
-                    pulsing: status.lowercased() == "running"
+                    DashboardFormat.pillLabel(status.lowercased()),
+                    status: status
                 )
-            } label: {
-                Text(subtitle)
             }
-            .contentShape(Rectangle())
-            .contextMenu {
-                controlButton(primary)
-                ForEach(secondary.indices, id: \.self) { i in
-                    controlButton(secondary[i])
+            activityView
+            HStack(spacing: 8) {
+                ForEach(actions.indices, id: \.self) { i in
+                    let a = actions[i]
+                    Button(a.label, role: a.destructive ? .destructive : nil, action: a.action)
+                        .buttonStyle(.dsSecondary)
+                }
+                if busy {
+                    ProgressView()
+                        .controlSize(.small)
+                        .padding(.leading, 4)
                 }
             }
-            .accessibilityHint("Touch and hold for the engine's controls")
-            ForEach(stats.indices, id: \.self) { i in
-                statRow(stats[i])
+            .disabled(busy)
+        }
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+        .contextMenu {
+            ForEach(actions.indices, id: \.self) { i in
+                let a = actions[i]
+                Button(role: a.destructive ? .destructive : nil, action: a.action) {
+                    Label(a.label, systemImage: a.symbol)
+                }
+                .disabled(busy)
             }
-            // Text only, as Settings draws its action rows: a destructive
-            // row's symbol would keep the accent while its text turns red.
-            InlineActionRow(
-                primary.label,
-                role: primary.destructive ? .destructive : nil,
-                isBusy: busy,
-                action: primary.action
-            )
-        } header: {
-            DashboardGroupHeader(group: group, title: title)
-        } footer: {
-            if let footer { Text(footer) }
         }
-    }
-
-    private func controlButton(_ c: DashboardServiceAction) -> some View {
-        Button(role: c.destructive ? .destructive : nil, action: c.action) {
-            Label(c.label, systemImage: c.symbol)
-        }
-        .disabled(busy)
+        .accessibilityHint("Touch and hold for the engine's controls")
     }
 
     @ViewBuilder
-    private func statRow(_ stat: DashboardServiceStat) -> some View {
-        switch stat {
-        case .cell(let label, let value):
-            LabeledContent(label) {
-                Text(value)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.trailing)
-            }
+    private var activityView: some View {
+        switch activity {
+        case .text(let text):
+            Text(text)
+                .font(DS.Font.caption)
+                .foregroundStyle(DS.Text.muted)
+                .monospacedDigit()
+                .lineLimit(2)
         case .progress(let pct, let phase):
-            VStack(alignment: .leading, spacing: 6) {
-                LabeledContent("Build progress") {
-                    Text("\(pct)%").monospacedDigit()
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 12) {
+                    DashboardBar(fraction: Double(min(max(pct, 0), 100)) / 100, color: DS.Text.label)
+                        .frame(width: 96)
+                    Text("\(pct)%")
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.label)
+                        .monospacedDigit()
                 }
-                ProgressView(value: Double(min(max(pct, 0), 100)), total: 100)
-                    .tint(DS.Palette.accent)
                 if let phase {
                     Text(phase)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.muted)
                         .lineLimit(1)
                 }
             }
             .accessibilityElement(children: .combine)
+            .accessibilityLabel("Build progress \(pct)%")
         }
     }
 }
 
-/// The "Start AI Backtest Agent" sheet: an optional special request, then
-/// Cancel or Start Agent (`_showStartAgentSheet`).
+/// The "Start AI backtest agent" sheet (the web's modal): an optional
+/// special request with its help line, then Cancel or Start agent.
 struct DashboardStartAgentSheet: View {
     let onStart: (String?) -> Void
 
@@ -337,24 +338,28 @@ struct DashboardStartAgentSheet: View {
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section {
-                    TextField("e.g. Focus on high-volatility stocks…", text: $text, axis: .vertical)
-                        .lineLimit(3...3)
-                } header: {
-                    Text("Special Request")
-                } footer: {
-                    Text("Optionally provide a special request for this run.")
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    Text("Optionally give this run a special request")
+                        .font(DS.Font.body)
+                        .foregroundStyle(DS.Text.muted)
+                    DSField("Special request (optional)", help: "Passed to the agent's strategy-generation model every cycle") {
+                        DSTextField("e.g. Include Nexus graph analysis, focus on high-volatility stocks", text: $text, axis: .vertical)
+                            .lineLimit(3...3)
+                    }
                 }
+                .padding(.horizontal, 24)
+                .padding(.top, 8)
             }
-            .navigationTitle("Start AI Backtest Agent")
+            .background(DS.Surface.card)
+            .navigationTitle("Start AI backtest agent")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Start Agent") {
+                    Button("Start agent") {
                         dismiss()
                         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                         onStart(trimmed.isEmpty ? nil : trimmed)

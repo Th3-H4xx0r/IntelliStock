@@ -7,19 +7,21 @@ import Testing
 /// pagination and playback-speed groups), plus the list / detail / playback
 /// controller logic.
 struct BacktestStatusColorTests {
+    /// The web backtests list's map: green only while running, zinc-400 when
+    /// done, amber paused, zinc-600 queued or stopped, red failed.
     @Test(arguments: [
-        ("completed", DS.Palette.success), ("finished", DS.Palette.success), ("running", DS.Palette.success),
-        ("queued", DS.Palette.warning), ("paused", DS.Palette.warning), ("paused_llm_critical", DS.Palette.warning),
-        ("stopped", DS.Palette.danger), ("failed", DS.Palette.danger), ("error", DS.Palette.danger),
-        ("cancelled", DS.Palette.danger), ("aborted_llm_failure", DS.Palette.danger),
-        ("gibberish", Color.secondary), ("RUNNING", DS.Palette.success),
+        ("completed", DS.Text.secondary), ("finished", DS.Text.secondary), ("running", DS.Palette.success),
+        ("queued", DS.Text.faint), ("paused", DS.Palette.warning), ("paused_llm_critical", DS.Palette.warning),
+        ("stopped", DS.Text.faint), ("failed", DS.Palette.danger), ("error", DS.Palette.danger),
+        ("cancelled", DS.Text.faint), ("aborted_llm_failure", DS.Palette.danger),
+        ("gibberish", DS.Text.faint), ("RUNNING", DS.Palette.success),
     ])
     func colorForStatus(_ status: String, _ color: Color) {
         #expect(StatusBadge.color(forStatus: status) == color)
     }
 
-    @Test func nilIsSecondary() {
-        #expect(StatusBadge.color(forStatus: nil) == Color.secondary)
+    @Test func nilIsStopped() {
+        #expect(StatusBadge.color(forStatus: nil) == DS.Text.faint)
     }
 }
 
@@ -179,17 +181,20 @@ struct BacktestDetailModelTests {
     }
 
     @Test func presentationHelpers() {
-        #expect(BacktestDetailFormat.levelColor("ERROR boom") == DS.Palette.danger)
-        #expect(BacktestDetailFormat.levelColor("retrying") == DS.Palette.warning)
-        #expect(BacktestDetailFormat.levelColor("Trade profit") == DS.Palette.success)
-        #expect(BacktestDetailFormat.levelColor("broker tick") == DS.Palette.info)
+        // The web's log colours: loss, amber, then the zinc ramp (no green).
+        #expect(BacktestDetailFormat.levelColor("ERROR boom") == DS.Palette.loss)
+        #expect(BacktestDetailFormat.levelColor("retrying") == DS.Palette.amber)
+        #expect(BacktestDetailFormat.levelColor("Trade profit") == DS.Text.primary)
+        #expect(BacktestDetailFormat.levelColor("broker tick") == DS.Text.label)
+        #expect(BacktestDetailFormat.levelColor("tick 42") == DS.Text.secondary)
         #expect(BacktestDetailFormat.appliedLabel(venue: "kraken", rate: 0) == "Kraken")
         #expect(BacktestDetailFormat.appliedLabel(venue: nil, rate: 0.0025) == "Alpaca")
         #expect(BacktestDetailFormat.appliedLabel(venue: nil, rate: 0.5) == "—")
         #expect(BacktestDetailFormat.fmtBar("2026-06-10T14:00:00") == "2026-06-10")
         #expect(BacktestDetailFormat.fmtBar(nil) == "unknown")
         #expect(BacktestDetailFormat.truncateReason(String(repeating: "x", count: 361)).count == 360)
-        #expect(BacktestDetailModel.actionMeta("delete").title == "Delete Backtest")
+        #expect(BacktestDetailModel.actionMeta("delete").title == "Delete backtest")
+        #expect(BacktestDetailModel.actionMeta("pause").verb == "Pause")
     }
 }
 

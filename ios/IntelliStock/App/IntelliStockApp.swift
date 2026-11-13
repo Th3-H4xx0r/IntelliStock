@@ -11,6 +11,8 @@ struct IntelliStockApp: App {
         WindowGroup {
             RootView()
                 .environment(services)
+                // Dark only, the off-white tint, Inter: the web app's look.
+                .dsAppearance()
                 .onAppear { appDelegate.attach(push: services.push) }
         }
     }

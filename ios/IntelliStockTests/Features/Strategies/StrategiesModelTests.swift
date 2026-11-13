@@ -99,7 +99,9 @@ struct StrategyDetailModelTests {
         m.setBtSort("pnl")
         #expect(m.sortedBacktests.map(\.backtestId) == ["a", "b"])
         #expect(m.bestPnlBacktest?.backtestId == "b")
-        #expect(StrategyDetailModel.phaseColor("ENTRY") == DS.Palette.success)
+        // The web sets every phase in quiet zinc-400: no hue.
+        #expect(StrategyDetailModel.phaseColor("ENTRY") == DS.Text.secondary)
+        #expect(StrategyDetailModel.phaseColor("post") == DS.Text.secondary)
     }
 
     @Test func missingStrategyIsAnError() async {

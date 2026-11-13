@@ -37,7 +37,8 @@ final class DashboardAccountScope {
         )
         orders = AccountOrdersModel(
             brokerageId: brokerageId,
-            repository: { DashboardRepository(client: client()) }
+            repository: { DashboardRepository(client: client()) },
+            trade: { TradeRepository(client: client()) }
         )
     }
 }

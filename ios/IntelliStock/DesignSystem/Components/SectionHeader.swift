@@ -1,8 +1,9 @@
 import SwiftUI
 
-/// A heading over content outside a `List`: a `.headline` title, an optional
-/// `.subheadline` secondary line, and an optional trailing view —
-/// `SectionHeader` in `common_widgets.dart`.
+/// A heading over content outside a `List` (`ui-section-title` +
+/// `ui-section-sub`): a 16/500 zinc-100 title, an optional 14 pt zinc-500
+/// line, and an optional trailing view. Put it 12 pt above its card
+/// (`DS.sectionHeaderGap`).
 ///
 /// The redesign removed eyebrows: no upper case, no tracking, no tint. The
 /// `eyebrow:` argument is still accepted so existing call sites compile, but it
@@ -26,15 +27,17 @@ struct SectionHeader<Trailing: View>: View {
     }
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
+        HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.headline)
+                    .font(DS.Font.sectionTitle)
+                    .foregroundStyle(DS.Text.primary)
                     .accessibilityAddTraits(.isHeader)
                 if let subtitle {
                     Text(subtitle)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                        .font(DS.Font.sectionSub)
+                        .foregroundStyle(DS.Text.muted)
+                        .monospacedDigit()
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -54,13 +57,14 @@ extension SectionHeader where Trailing == EmptyView {
     ScrollView {
         VStack(alignment: .leading, spacing: 12) {
             SectionHeader(title: "Sub-strategies (2)", eyebrow: "COMPOSITION")
-            Card { Text("strategy_swing").font(.headline) }
+            Card { Text("strategy_swing") }
             SectionHeader(title: "Backtests (3)", subtitle: "Newest first") {
-                Button("See All") {}
-                    .font(.subheadline)
+                Button("See all") {}
+                    .buttonStyle(.dsGhost)
             }
         }
         .padding()
     }
-    .background(DS.Surface.canvas)
+    .background(DS.Surface.page)
+    .dsAppearance()
 }

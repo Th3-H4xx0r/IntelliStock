@@ -36,17 +36,18 @@ nonisolated enum CryptoCatalog {
         return String(s[..<slash])
     }
 
-    /// Per-coin hues for the table dots, meter and legend (`_kPalette`).
+    /// Per-coin swatches for the table, meter and legend: the web's graphite
+    /// ramp (`PALETTE` in CryptoCreateInstanceModal.vue), off-white first.
     static let palette: [Color] = [
-        Color(red: 0xA7 / 255, green: 0x8B / 255, blue: 0xFA / 255),
-        Color(red: 0x7C / 255, green: 0x9B / 255, blue: 0xFF / 255),
-        Color(red: 0x5A / 255, green: 0xD1 / 255, blue: 0xE0 / 255),
-        Color(red: 0x5E / 255, green: 0xE6 / 255, blue: 0xB8 / 255),
-        Color(red: 0xF0 / 255, green: 0xB3 / 255, blue: 0x54 / 255),
-        Color(red: 0xF3 / 255, green: 0x79 / 255, blue: 0x9F / 255),
-        Color(red: 0xB9 / 255, green: 0x8B / 255, blue: 0xFF / 255),
+        Color(hex: 0xEDEDED),
+        Color(hex: 0xC4C4C8),
+        Color(hex: 0xA1A1A6),
+        Color(hex: 0x85858B),
+        Color(hex: 0x6B6B70),
+        Color(hex: 0x55555A),
     ]
-    static let dynamicColor = Color(red: 0x7C / 255, green: 0x5C / 255, blue: 0xE6 / 255)
+    /// The Dynamic remainder's swatch (`DYNAMIC_SWATCH`, #333336).
+    static let dynamicColor = Color(hex: 0x333336)
 
     static func color(_ index: Int) -> Color { palette[index % palette.count] }
 

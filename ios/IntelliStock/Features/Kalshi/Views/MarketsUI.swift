@@ -1,16 +1,16 @@
 import SwiftUI
 
 // Small building blocks shared by the markets screens (Kalshi, Crypto,
-// Backtests, Strategies, Nexus, Learning). Not design-system components:
-// each mirrors a recurring Dart idiom in those screens.
+// Backtests, Strategies, Nexus, Learning), drawn in the web style. Not
+// design-system components: each mirrors a recurring idiom in those screens.
 
 // The wrapping chip row is `FlowLayout` (DesignSystem), aliased as
 // `MarketsFlowLayout`.
 
-/// A short coloured label — the screens' `_pill` / `_badge` / `_chip`
-/// containers, drawn in the app's one badge style (`.dsBadge`: a
-/// `.caption2` semibold capsule, colour text on a 15 % fill). The text is
-/// kept as written; callers pass it in sentence case.
+/// A short label beside a title — the screens' `_pill` / `_badge` / `_chip`
+/// flags. The web has no pills, so it is quiet 12 pt text (`.dsBadge`):
+/// gain, loss and amber keep their colour, every other colour reads
+/// zinc-400. The text is kept as written; callers pass it in sentence case.
 struct MarketsTag: View {
     let text: String
     var color: Color = DS.Palette.accent
@@ -21,9 +21,10 @@ struct MarketsTag: View {
     }
 }
 
-/// A small neutral tag (coin tickers, symbols, sub-strategy names): secondary
-/// text on a system fill capsule, Stocks-style. `tint` gives it a 15 % colour
-/// fill instead (the Dynamic coin).
+/// A small neutral tag (coin tickers, symbols, sub-strategy names): the
+/// web's symbol chip — 12/500 zinc-200 on the raised surface, a 6% hairline
+/// and 6 radius. `color` and `tint` are kept so call sites compile; the
+/// chip has no hue.
 struct MarketsChip: View {
     let text: String
     var color: Color = .secondary
@@ -31,18 +32,23 @@ struct MarketsChip: View {
 
     var body: some View {
         Text(text)
-            .font(.caption.weight(.medium))
-            .foregroundStyle(color)
+            .font(DS.Font.captionMedium)
+            .foregroundStyle(DS.Text.soft)
+            .monospacedDigit()
             .lineLimit(1)
             .padding(.horizontal, 8)
-            .padding(.vertical, 3)
-            .background(tint?.opacity(DS.tintFill) ?? Color(uiColor: .tertiarySystemFill), in: Capsule())
+            .frame(minHeight: 24)
+            .background(DS.Surface.raised, in: .rect(cornerRadius: DS.Radius.small, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: DS.Radius.small, style: .continuous)
+                    .strokeBorder(DS.Line.divider, lineWidth: DS.Line.width)
+            }
     }
 }
 
-/// A form label with a tap-to-reveal explanation — the sheets' `_label(text,
-/// info)` with its `Tooltip(triggerMode: tap)`, as an info button opening a
-/// compact popover.
+/// A field label with a tap-to-reveal explanation — the web's
+/// `ui-field-label` with its `InfoTip`: the label in 14 pt zinc-300, a
+/// zinc-600 info glyph that opens a compact popover.
 struct MarketsInfoLabel: View {
     let text: String
     let info: String
@@ -50,34 +56,41 @@ struct MarketsInfoLabel: View {
     @State private var showing = false
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 6) {
             Text(text)
+                .font(DS.Font.body)
+                .foregroundStyle(DS.Text.label)
             Button {
                 showing = true
             } label: {
-                Image(systemName: Symbol.named("info_outline"))
-                    .font(.footnote)
-                    .foregroundStyle(.tertiary)
+                Image(systemName: "info.circle")
+                    .font(.system(size: 13))
+                    .foregroundStyle(DS.Text.faint)
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.plain)
+            .padding(.vertical, -6)
             .accessibilityLabel("About \(text)")
             .popover(isPresented: $showing) {
                 Text(info)
-                    .font(.footnote)
-                    .padding()
+                    .font(DS.Font.small)
+                    .foregroundStyle(DS.Text.label)
+                    .padding(16)
                     .frame(maxWidth: 300)
+                    .presentationBackground(DS.Surface.raised)
                     .presentationCompactAdaptation(.popover)
             }
         }
     }
 }
 
-/// A round team crest: the network image, else initials on a grey disc
-/// (`_posCrest`, `_crest`, `_teamBadge`).
+/// A round team crest: the network image on the raised disc, else its
+/// initials in 11/500 zinc-400 (`_posCrest`, `_crest`, `_teamBadge`).
 struct MarketsCrest: View {
     let url: String
     let initials: String
-    var size: CGFloat = 36
+    var size: CGFloat = 32
 
     var body: some View {
         Group {
@@ -94,16 +107,17 @@ struct MarketsCrest: View {
             }
         }
         .frame(width: size, height: size)
+        .background(DS.Surface.raised)
         .clipShape(Circle())
         .accessibilityHidden(true)
     }
 
     private var fallback: some View {
         Text(initials)
-            .font(.caption2.weight(.bold))
-            .foregroundStyle(.secondary)
+            .font(DS.Font.inter(size <= 24 ? 10 : 11, .medium, relativeTo: .caption2))
+            .foregroundStyle(DS.Text.secondary)
             .frame(width: size, height: size)
-            .background(DS.Surface.inset)
+            .background(DS.Surface.raised)
     }
 }
 
@@ -147,22 +161,5 @@ struct MarketsDatePickerSheet: View {
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
-    }
-}
-
-/// A numeric form row: the Dart label on the left, a right-aligned decimal
-/// field on the right.
-struct MarketsNumberRow: View {
-    let label: String
-    @Binding var text: String
-    var prompt: String?
-
-    var body: some View {
-        LabeledContent(label) {
-            TextField(label, text: $text, prompt: prompt.map { Text($0) })
-                .keyboardType(.decimalPad)
-                .multilineTextAlignment(.trailing)
-                .monospacedDigit()
-        }
     }
 }

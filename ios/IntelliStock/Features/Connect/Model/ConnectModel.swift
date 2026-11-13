@@ -37,7 +37,7 @@ final class ConnectModel {
         isEditing = services.urlStore.isConfigured
     }
 
-    var buttonLabel: String { probeFailed ? "Save anyway" : "Test & Connect" }
+    var buttonLabel: String { probeFailed ? "Save anyway" : "Test & connect" }
 
     /// Typing clears the error and the "Save anyway" state.
     func textChanged() {
@@ -47,7 +47,7 @@ final class ConnectModel {
         }
     }
 
-    /// The primary button: "Test & Connect", or "Save anyway" after a failed
+    /// The primary button: "Test & connect", or "Save anyway" after a failed
     /// probe.
     func submit() async -> Outcome? {
         // The keyboard's Go is not disabled like the button: guard here.

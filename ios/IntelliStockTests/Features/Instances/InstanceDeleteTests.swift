@@ -75,7 +75,7 @@ struct InstanceDeleteTests {
         let inst = Instance(id: "alpaca-main", name: "Alpaca Main", createdBy: "user", runCommand: false)
         var ran = false
         let request = instanceDeleteRequest(inst, onConfirm: { ran = true }, onError: { _ in })
-        #expect(request.title == "Delete Instance")
+        #expect(request.title == "Delete instance")
         #expect(request.body == "Delete \"Alpaca Main\"? This cannot be undone.")
         #expect(request.confirmLabel == "Delete")
         #expect(request.role == .destructive)

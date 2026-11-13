@@ -161,10 +161,8 @@ struct Sector3DChart: View {
                         interaction.back(at: Self.now)
                     } label: {
                         Label("Back", systemImage: Symbol.named("keyboard_arrow_up"))
-                            .font(.footnote.weight(.semibold))
-                            .frame(minHeight: 30)
                     }
-                    .buttonStyle(.glass)
+                    .buttonStyle(.dsSecondary)
                     .padding(.bottom, 6)
                     .opacity(drilledChrome)
                 }
@@ -232,21 +230,22 @@ struct Sector3DChart: View {
             let sel = scene.selected
             ForEach(slices.indices, id: \.self) { i in
                 Text(verbatim: "\(Int(slices[i].pct.rounded()))%")
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(i == sel ? AnyShapeStyle(DS.Palette.accent) : AnyShapeStyle(.secondary))
+                    .font(DS.Font.captionMedium)
+                    .monospacedDigit()
+                    .foregroundStyle(i == sel ? DS.Text.primary : DS.Text.muted)
                     .fixedSize()
                     .position(scene.labels[i])
             }
             let c = scene.centre
             Text(verbatim: "\(Int(slices[sel].pct.rounded()))%")
-                .font(.title.weight(.heavy))
+                .font(DS.Font.figureLarge)
                 .monospacedDigit()
-                .foregroundStyle(.primary)
+                .foregroundStyle(DS.Text.primary)
                 .fixedSize()
                 .position(x: c.x, y: c.y - 9)
             Text(verbatim: slices[sel].sector)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .font(DS.Font.caption)
+                .foregroundStyle(DS.Text.muted)
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(maxWidth: scene.layout.ri * 1.7)
@@ -259,10 +258,11 @@ struct Sector3DChart: View {
     private func header(_ slice: SectorSlice) -> some View {
         VStack(spacing: 2) {
             Text("Allocation")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Text("\(Text(verbatim: "\(slice.sector)  ").foregroundStyle(.primary))\(Text(verbatim: "\(Int(slice.pct.rounded()))%").foregroundStyle(DS.Palette.accent))")
-                .font(.headline)
+                .font(DS.Font.caption)
+                .foregroundStyle(DS.Text.muted)
+            Text("\(Text(verbatim: "\(slice.sector)  ").foregroundStyle(DS.Text.primary))\(Text(verbatim: "\(Int(slice.pct.rounded()))%").foregroundStyle(DS.Text.secondary))")
+                .font(DS.Font.bodyMedium)
+                .monospacedDigit()
                 .lineLimit(1)
         }
         .allowsHitTesting(false)
@@ -389,7 +389,7 @@ private struct Sector3DPreviewCard: View {
         ScrollView {
             Card {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Sector allocation").font(.subheadline.weight(.semibold))
+                    Text("Sector allocation").font(DS.Font.bodyMedium)
                     Sector3DChart(slices: slices, debugDrill: debugDrill)
                 }
             }

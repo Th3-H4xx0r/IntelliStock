@@ -507,11 +507,11 @@ struct Sector3DGeometryTests {
         }
     }
 
-    @Test func darkKeepsTheDartPaletteAndBrightensTheFocus() {
+    @Test func darkUsesTheZincRampAndBrightensTheFocus() {
         let dark = Sector3DPalette.dark
-        #expect(dark.hi.deep == Sector3DRGB(0x7C5CE6) && dark.hi.bright == Sector3DRGB(0xEBE0FF))
-        #expect(dark.mid.deep == Sector3DRGB(0x4A2C9E) && dark.mid.bright == Sector3DRGB(0xB79BFF))
-        #expect(dark.lo.deep == Sector3DRGB(0x24114F) && dark.lo.bright == Sector3DRGB(0x7E55E6))
+        #expect(dark.hi.deep == Sector3DRGB(0x52525B) && dark.hi.bright == Sector3DRGB(0xF4F4F5))
+        #expect(dark.mid.deep == Sector3DRGB(0x3F3F46) && dark.mid.bright == Sector3DRGB(0xA1A1AA))
+        #expect(dark.lo.deep == Sector3DRGB(0x27272A) && dark.lo.bright == Sector3DRGB(0x71717A))
         #expect(dark.topColor(brightness: 1).luminance > dark.topColor(brightness: 0.72).luminance)
     }
 
