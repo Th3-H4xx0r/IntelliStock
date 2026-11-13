@@ -220,6 +220,21 @@ def test_the_public_origin_comes_from_the_proxy_or_the_setting(monkeypatch):
     assert au.public_base(req) == ""
 
 
+def test_behind_cloudflare_the_visitor_scheme_counts(monkeypatch):
+    """Production: Cloudflare terminates TLS and the proxy behind it reports
+    http, but Cloudflare's CF-Visitor says the phone came in over https."""
+    monkeypatch.delenv("APP_UPDATES_PUBLIC_URL", raising=False)
+    cf = _Req({"host": "intellistock-api.example.dev", "x-forwarded-proto": "http",
+               "cf-visitor": '{"scheme":"https"}'})
+    assert au.public_base(cf) == "https://intellistock-api.example.dev"
+    rfc = _Req({"host": "api.example.dev", "forwarded": 'for=1.2.3.4;proto="https";host=api.example.dev'})
+    assert au.public_base(rfc) == "https://api.example.dev"
+    # A visitor that really used http, or a garbled header, still gets no link.
+    assert au.public_base(_Req({"host": "api.example.dev", "cf-visitor": '{"scheme":"http"}'})) == ""
+    assert au.public_base(_Req({"host": "api.example.dev", "cf-visitor": "not json"})) == ""
+    assert au.public_base(_Req({"host": "evil\nhost", "cf-visitor": '{"scheme":"https"}'})) == ""
+
+
 # ── Push ────────────────────────────────────────────────────────────────────
 
 def test_publishing_pushes_to_every_user_with_an_iphone(monkeypatch):
