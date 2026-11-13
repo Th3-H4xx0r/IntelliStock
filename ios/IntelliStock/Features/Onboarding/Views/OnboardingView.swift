@@ -7,7 +7,9 @@ import SwiftUI
 ///
 /// Shown bare by the gate, and pushed as `Route.onboarding` from the
 /// dashboard; pushed, it hides the navigation and tab bars so it covers the
-/// shell as the Dart route did. Native form: the plain grouped background.
+/// shell as the Dart route did. Styled as the web's `OnboardingShell`: the
+/// page colour, a top bar (the app tile, "IntelliStock", "Setup", Exit) and
+/// the static stepper, each over a hairline, then the step, then the footer.
 struct OnboardingView: View {
     @Environment(AppServices.self) private var services
     @State private var model: OnboardingModel?
@@ -17,7 +19,7 @@ struct OnboardingView: View {
             if let model {
                 OnboardingContent(model: model)
             } else {
-                DS.Surface.canvas.ignoresSafeArea()
+                DS.Surface.page.ignoresSafeArea()
             }
         }
         .toolbar(.hidden, for: .navigationBar)
@@ -41,11 +43,14 @@ private struct OnboardingContent: View {
         let state = model.state
         VStack(spacing: 0) {
             topBar
-                .padding(.horizontal, 20)
-                .padding(.vertical, 12)
+                .padding(.horizontal, DS.pageGutter)
+                .frame(height: 56)
+            DSDivider()
 
             OnboardingProgressHeader(currentIndex: state.stepIndex)
-                .padding(.vertical, 4)
+                .padding(.horizontal, DS.pageGutter)
+                .padding(.vertical, 16)
+            DSDivider()
 
             ZStack {
                 step(state.currentStep)
@@ -54,11 +59,10 @@ private struct OnboardingContent: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .clipped()
-            .padding(.top, 8)
 
             footer(state)
         }
-        .background(DS.Surface.canvas.ignoresSafeArea())
+        .background(DS.Surface.page.ignoresSafeArea())
         .confirmAlert($exitRequest)
         .task { await model.loadState() }
     }
@@ -66,15 +70,15 @@ private struct OnboardingContent: View {
     // MARK: Top bar
 
     private var topBar: some View {
-        HStack(spacing: 10) {
-            IconTile(systemImage: Symbol.named("auto_awesome"), size: 36)
-            VStack(alignment: .leading, spacing: 1) {
-                Text("IntelliStock")
-                    .font(.subheadline.weight(.semibold))
-                Text("Welcome flow")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
+        HStack(spacing: 12) {
+            AppWordmark(iconSize: 28)
+            Rectangle()
+                .fill(Color.white.opacity(0.1))
+                .frame(width: DS.Line.width, height: 16)
+                .accessibilityHidden(true)
+            Text("Setup")
+                .font(DS.Font.body)
+                .foregroundStyle(DS.Text.muted)
             Spacer()
             Button {
                 exitRequest = ConfirmRequest(
@@ -85,14 +89,14 @@ private struct OnboardingContent: View {
                     onConfirm: { services.router.go("/dashboard") }
                 )
             } label: {
-                Label("Exit", systemImage: Symbol.named("close"))
-                    .labelStyle(.titleAndIcon)
-                    .font(.subheadline)
+                HStack(spacing: 6) {
+                    Text("Exit")
+                    Image(systemName: Symbol.named("close"))
+                        .font(.system(size: 14))
+                }
             }
-            // A floating control over the step (there is no navigation bar
-            // here), so it takes the system glass, like a bar button.
-            .buttonStyle(.glass)
-            .tint(.primary)
+            .buttonStyle(.dsGhost)
+            .padding(.trailing, -12)
         }
     }
 
@@ -124,47 +128,55 @@ private struct OnboardingContent: View {
     private func footer(_ state: OnboardingState) -> some View {
         let busy = state.busy
         let showBack = !state.isFirstStep && !state.isLastStep
-        return HStack(spacing: 12) {
+        return HStack(spacing: 8) {
             if showBack {
                 Button {
-                    withAnimation(.easeInOut(duration: 0.35)) { model.back() }
+                    withAnimation(DSMotion.ease(0.3)) { model.back() }
                 } label: {
-                    Label("Back", systemImage: Symbol.named("arrow_back"))
+                    HStack(spacing: 6) {
+                        Image(systemName: Symbol.named("arrow_back"))
+                            .font(.system(size: 14))
+                        Text("Back")
+                    }
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(.dsGhost(size: .medium))
+                .padding(.leading, -12)
                 .disabled(busy)
             }
             Spacer()
             if OnboardingState.isSkippable(state.stepIndex) {
-                Button("Skip for Now") {
-                    withAnimation(.easeInOut(duration: 0.35)) { model.skip() }
+                Button("Skip for now") {
+                    withAnimation(DSMotion.ease(0.3)) { model.skip() }
                 }
-                .font(.footnote)
-                .buttonStyle(.borderless)
-                .tint(.secondary)
+                .buttonStyle(.dsGhost(size: .medium))
                 .disabled(busy)
             }
             Button(action: handleNext) {
                 HStack(spacing: 6) {
                     if busy {
-                        ProgressView().tint(DS.Palette.onAccent)
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(DS.Palette.onAccent)
                     }
-                    Text(state.isLastStep ? "Open Dashboard" : "Next")
+                    Text(state.isLastStep ? "Open dashboard" : (state.isFirstStep ? "Get started" : "Next"))
                     if !busy {
                         Image(systemName: Symbol.named("arrow_forward"))
+                            .font(.system(size: 14))
                     }
                 }
-                .lineLimit(1)
-                // Back and Skip for Now beside it squeezed "Next" onto two lines.
+                // Back and Skip for now beside it squeezed "Next" onto two lines.
                 .fixedSize(horizontal: true, vertical: false)
-                .padding(.horizontal, 4)
             }
-            .dsProminentButton()
-            .controlSize(.large)
+            .buttonStyle(.dsPrimary)
             .disabled(busy)
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 12)
+        .padding(.horizontal, DS.pageGutter + 4)
+        .padding(.vertical, 14)
+        .background {
+            DS.Surface.page
+                .overlay(alignment: .top) { DSDivider() }
+                .ignoresSafeArea(edges: .bottom)
+        }
     }
 
     private func handleNext() {
@@ -176,52 +188,57 @@ private struct OnboardingContent: View {
             }
             return
         }
-        withAnimation(.easeInOut(duration: 0.35)) { model.next() }
+        withAnimation(DSMotion.ease(0.3)) { model.next() }
     }
 }
 
-/// The numbered step circles joined by connectors — `_ProgressHeader`.
+/// The numbered steps joined by connectors — `_ProgressHeader`, as the
+/// web's static stepper: a done step is a raised circle with a check, the
+/// current one off-white with a dark number, the rest a hairline ring with a
+/// zinc-500 number; connectors zinc-500 behind, white 8% ahead.
 private struct OnboardingProgressHeader: View {
     let currentIndex: Int
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 0) {
-                ForEach(Array(OnboardingState.labels.enumerated()), id: \.offset) { index, label in
-                    circle(index)
-                        .accessibilityLabel("Step \(index + 1), \(label)")
-                        .accessibilityAddTraits(index == currentIndex ? .isSelected : [])
-                    if index < OnboardingState.labels.count - 1 {
-                        Capsule()
-                            .fill(index < currentIndex ? DS.Palette.accent.opacity(0.6) : Color(uiColor: .separator))
-                            .frame(width: 20, height: 2)
-                    }
+        HStack(spacing: 8) {
+            ForEach(Array(OnboardingState.labels.enumerated()), id: \.offset) { index, label in
+                circle(index)
+                    .accessibilityLabel("Step \(index + 1), \(label)")
+                    .accessibilityAddTraits(index == currentIndex ? .isSelected : [])
+                if index < OnboardingState.labels.count - 1 {
+                    Rectangle()
+                        .fill(index < currentIndex ? DS.Text.muted : Color.white.opacity(0.08))
+                        .frame(minWidth: 8, maxWidth: .infinity)
+                        .frame(height: DS.Line.width)
+                        .accessibilityHidden(true)
                 }
             }
-            .padding(.horizontal, 20)
-            .animation(.easeInOut(duration: 0.3), value: currentIndex)
         }
+        .animation(DSMotion.standard, value: currentIndex)
     }
 
     private func circle(_ index: Int) -> some View {
         let done = index < currentIndex
         let current = index == currentIndex
-        let active = done || current
         return ZStack {
-            Circle()
-                .fill(active ? DS.Palette.accent.opacity(DS.tintFill) : .clear)
-            Circle()
-                .strokeBorder(active ? DS.Palette.accent : Color(uiColor: .tertiaryLabel), lineWidth: current ? 2 : 1)
             if done {
+                Circle().fill(DS.Surface.raised)
                 Image(systemName: Symbol.named("check"))
-                    .font(.caption2.weight(.bold))
-                    .foregroundStyle(.tint)
-            } else {
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(DS.Text.label)
+            } else if current {
+                Circle().fill(DS.Palette.accent)
                 Text("\(index + 1)")
-                    .font(.caption2.weight(.bold))
-                    .foregroundStyle(current ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
+                    .font(DS.Font.captionMedium)
+                    .foregroundStyle(DS.Palette.onAccent)
+            } else {
+                Circle().strokeBorder(Color.white.opacity(0.1), lineWidth: DS.Line.width)
+                Text("\(index + 1)")
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.muted)
             }
         }
-        .frame(width: 26, height: 26)
+        .monospacedDigit()
+        .frame(width: 24, height: 24)
     }
 }

@@ -1,133 +1,90 @@
 <template>
-  <section style="padding: 80px 0 80px;">
-    <div class="max-w-7xl mx-auto px-6">
+  <section aria-labelledby="strategy-title">
+    <div class="mx-auto w-full max-w-[1200px] px-4 sm:px-6 lg:px-8">
+      <div class="border-t border-white/[0.06] py-20 md:py-28">
 
-      <!-- Section header -->
-      <div class="max-w-2xl mb-14 md:mb-16">
-        <p v-reveal class="reveal text-brand text-xs font-bold uppercase tracking-widest mb-4">Strategy Engine</p>
-        <h2 v-reveal class="reveal delay-100 text-4xl md:text-5xl font-bold leading-tight">
-          Build strategies from<br class="hidden md:block"> real market signals.
-        </h2>
-        <p v-reveal class="reveal delay-200 text-slate-400 text-lg mt-6">
-          IntelliStock's strategy engine wires together live data sources, AI-driven signals,
-          and relationship intelligence from the Graph Nexus — all configurable without writing boilerplate.
-        </p>
-      </div>
-
-      <!-- Two-column layout -->
-      <div class="grid lg:grid-cols-2 gap-12 md:gap-14 items-start">
-
-        <!-- Feature list -->
-        <ul class="space-y-8">
-          <li v-reveal class="reveal delay-100 flex items-start gap-5">
-            <div class="shrink-0 size-11 bg-brand/10 border border-brand/20 rounded-xl flex items-center justify-center mt-0.5">
-              <span class="material-symbols-outlined text-brand text-xl">hub</span>
-            </div>
-            <div>
-              <h4 class="font-bold text-lg mb-1">Graph Nexus Analysis</h4>
-              <p class="text-slate-400 text-sm leading-relaxed">
-                Query the knowledge graph for supply-chain shocks, institutional ownership shifts,
-                government contract wins, and patent partnerships — then feed insights directly into
-                your strategy's decision layer.
-              </p>
-            </div>
-          </li>
-
-          <li v-reveal class="reveal delay-200 flex items-start gap-5">
-            <div class="shrink-0 size-11 bg-brand/10 border border-brand/20 rounded-xl flex items-center justify-center mt-0.5">
-              <span class="material-symbols-outlined text-brand text-xl">news</span>
-            </div>
-            <div>
-              <h4 class="font-bold text-lg mb-1">Benzinga Real-Time Events</h4>
-              <p class="text-slate-400 text-sm leading-relaxed">
-                Pull live ratings changes, analyst upgrades, insider trades, government trades,
-                M&amp;A activity, IPO calendars, earnings surprises, and prediction-market odds
-                — all cached and deduped automatically.
-              </p>
-            </div>
-          </li>
-
-          <li v-reveal class="reveal delay-300 flex items-start gap-5">
-            <div class="shrink-0 size-11 bg-brand/10 border border-brand/20 rounded-xl flex items-center justify-center mt-0.5">
-              <span class="material-symbols-outlined text-brand text-xl">psychology</span>
-            </div>
-            <div>
-              <h4 class="font-bold text-lg mb-1">LLM Sentiment Engine</h4>
-              <p class="text-slate-400 text-sm leading-relaxed">
-                An LLM-powered sentiment layer synthesizes Benzinga events, graph relationships,
-                and historic outcome patterns into a single directional signal with confidence scores
-                — configurable by model (GPT-4o, Gemini, Claude).
-              </p>
-            </div>
-          </li>
-
-          <li v-reveal class="reveal delay-400 flex items-start gap-5">
-            <div class="shrink-0 size-11 bg-brand/10 border border-brand/20 rounded-xl flex items-center justify-center mt-0.5">
-              <span class="material-symbols-outlined text-brand text-xl">school</span>
-            </div>
-            <div>
-              <h4 class="font-bold text-lg mb-1">Adaptive Learning</h4>
-              <p class="text-slate-400 text-sm leading-relaxed">
-                Outcome tracking records predicted signals against next-day actual prices.
-                A learning stage runs at session start to summarize what worked — and feeds
-                those patterns back to the LLM on the next trade decision.
-              </p>
-            </div>
-          </li>
-        </ul>
-
-        <!-- Visual card panel -->
-        <div v-reveal class="reveal from-right delay-150 space-y-4">
-
-          <!-- Signal pipeline card -->
-          <div class="mk-glass-card rounded-2xl p-7 space-y-5">
-            <div class="flex items-center justify-between">
-              <p class="text-xs font-bold uppercase tracking-widest text-brand">Signal Pipeline</p>
-              <div class="px-2 py-0.5 bg-emerald-500/10 border border-emerald-500/20 rounded-full text-emerald-400 text-[10px] font-bold uppercase">Live</div>
-            </div>
-
-            <!-- Pipeline steps -->
-            <div class="space-y-2">
-              <div v-for="step in pipeline" :key="step.label"
-                class="flex items-center gap-3 p-3 rounded-lg bg-surface border border-border-subtle">
-                <div class="size-2 rounded-full flex-shrink-0" :class="step.color"></div>
-                <span class="text-sm font-medium flex-1">{{ step.label }}</span>
-                <span class="text-xs text-slate-500">{{ step.source }}</span>
-              </div>
-            </div>
-          </div>
-
-          <!-- Data sources row -->
-          <div class="grid grid-cols-3 gap-3">
-            <div v-for="src in sources" :key="src.label"
-              class="mk-card-hover bg-surface border border-border-subtle rounded-xl p-4 flex flex-col items-center gap-2 text-center">
-              <span class="material-symbols-outlined text-brand text-xl">{{ src.icon }}</span>
-              <span class="text-[11px] font-medium text-slate-300">{{ src.label }}</span>
-            </div>
-          </div>
-
+        <!-- Section header -->
+        <div class="max-w-2xl">
+          <p class="text-sm text-slate-500">Strategy engine</p>
+          <h2 id="strategy-title" class="mt-3 text-3xl leading-[1.15] md:text-[40px] md:leading-[1.1] font-medium tracking-[-0.02em] text-slate-100">
+            Build strategies from real market signals
+          </h2>
+          <p class="mt-5 text-base leading-7 md:text-lg md:leading-8 text-slate-400">
+            IntelliStock's strategy engine wires together live data sources, AI-driven signals,
+            and relationship intelligence from the Graph Nexus, all configurable without writing boilerplate.
+          </p>
         </div>
-      </div>
 
+        <!-- Features left, the pipeline they feed right -->
+        <div class="mt-14 grid gap-12 lg:grid-cols-2 lg:gap-16 items-start">
+
+          <ul class="divide-y divide-white/[0.06] border-y border-white/[0.06]">
+            <li v-for="f in features" :key="f.title" class="py-6">
+              <h3 class="text-base font-medium text-slate-100">{{ f.title }}</h3>
+              <p class="mt-2 text-sm leading-6 text-slate-400">{{ f.desc }}</p>
+            </li>
+          </ul>
+
+          <div class="space-y-4">
+            <!-- Signal pipeline -->
+            <div class="ui-card overflow-hidden">
+              <div class="h-12 px-5 flex items-center justify-between border-b border-white/[0.06]">
+                <p class="text-sm font-medium text-slate-200">Signal pipeline</p>
+                <span class="inline-flex items-center gap-2 text-xs text-slate-300">
+                  <span class="ui-dot ui-dot-live"></span>Live
+                </span>
+              </div>
+              <ol class="ui-rows">
+                <li v-for="(step, i) in pipeline" :key="step.label" class="min-h-12 px-5 py-2 flex items-center gap-4">
+                  <span class="w-4 text-xs text-slate-600 tabular-nums">{{ i + 1 }}</span>
+                  <span class="flex-1 min-w-0 text-sm text-slate-200">{{ step.label }}</span>
+                  <span class="text-xs text-slate-500 text-right">{{ step.source }}</span>
+                </li>
+              </ol>
+            </div>
+
+            <!-- Data sources -->
+            <div class="ui-card px-5 py-4">
+              <p class="text-xs text-slate-500">Data sources</p>
+              <ul class="mt-3 grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-2.5">
+                <li v-for="src in sources" :key="src" class="text-sm text-slate-300">{{ src }}</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+
+      </div>
     </div>
   </section>
 </template>
 
 <script setup>
-const pipeline = [
-  { label: 'Graph Nexus relationships',    source: 'Neo4j',       color: 'bg-brand' },
-  { label: 'Benzinga event calendar',      source: 'Benzinga',    color: 'bg-violet-400' },
-  { label: 'Institutional ownership data', source: 'SEC 13F',     color: 'bg-amber-400' },
-  { label: 'LLM sentiment + confidence',   source: 'GPT-4o / Gemini', color: 'bg-emerald-400' },
-  { label: 'Outcome-weighted learning',    source: 'RethinkDB',   color: 'bg-rose-400' },
+const features = [
+  {
+    title: 'Graph Nexus analysis',
+    desc: "Query the knowledge graph for supply-chain shocks, institutional ownership shifts, government contract wins, and patent partnerships, then feed insights directly into your strategy's decision layer.",
+  },
+  {
+    title: 'Benzinga real-time events',
+    desc: 'Pull live ratings changes, analyst upgrades, insider trades, government trades, M&A activity, IPO calendars, earnings surprises, and prediction-market odds, all cached and deduped automatically.',
+  },
+  {
+    title: 'LLM sentiment engine',
+    desc: 'A sentiment layer synthesizes Benzinga events, graph relationships, and historic outcome patterns into a single directional signal with confidence scores, using the model you choose: Claude, Gemini, OpenRouter, a local Ollama model and others.',
+  },
+  {
+    title: 'Adaptive learning',
+    desc: 'Outcome tracking records predicted signals against next-day actual prices. A learning stage runs at session start to summarize what worked, and feeds those patterns back to the LLM on the next trade decision.',
+  },
 ]
 
-const sources = [
-  { label: 'Polygon.io',    icon: 'candlestick_chart' },
-  { label: 'SEC EDGAR',     icon: 'gavel' },
-  { label: 'Benzinga',      icon: 'newspaper' },
-  { label: 'USASpending',   icon: 'account_balance' },
-  { label: 'PatentsView',   icon: 'lightbulb' },
-  { label: 'Wikidata',      icon: 'device_hub' },
+const pipeline = [
+  { label: 'Graph Nexus relationships',    source: 'Neo4j' },
+  { label: 'Benzinga event calendar',      source: 'Benzinga' },
+  { label: 'Institutional ownership data', source: 'SEC 13F' },
+  { label: 'LLM sentiment + confidence',   source: 'Your chosen model' },
+  { label: 'Outcome-weighted learning',    source: 'PostgreSQL' },
 ]
+
+const sources = ['Polygon.io', 'SEC EDGAR', 'Benzinga', 'USASpending', 'PatentsView', 'Wikidata']
 </script>

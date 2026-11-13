@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import Testing
 @testable import IntelliStock
 
@@ -20,7 +21,7 @@ struct DesignSystemKitTests {
         #expect(ChangeDirection.flat.systemImage == nil)
         #expect(ChangeDirection.up.color == DS.Palette.up)
         #expect(ChangeDirection.down.color == DS.Palette.down)
-        #expect(ChangeDirection.flat.color == Color.secondary)
+        #expect(ChangeDirection.flat.color == DS.Text.muted)
         #expect(ChangeDirection.up.accessibilityPrefix == "Up")
         #expect(ChangeDirection.flat.accessibilityPrefix.isEmpty)
     }
@@ -75,9 +76,46 @@ struct DesignSystemKitTests {
         #expect(ToolbarSymbol.more == "ellipsis")
     }
 
-    @Test func cardTokensFollowTheSpec() {
-        #expect(DS.cardPadding == 16)
+    /// The web's `ui-card` (`rounded-xl`, `p-5`) and control radii.
+    @Test func cardTokensFollowTheWeb() {
+        #expect(DS.cardPadding == 20)
         #expect(DS.cardGroupSpacing == 12)
-        #expect(DS.Radius.card == 22)
+        #expect(DS.Radius.card == 12)
+        #expect(DS.Radius.control == 8)
+        #expect(DS.Radius.small == 6)
+        #expect(DS.rowMinHeight == 56)
+    }
+
+    /// The web palette, exactly (tailwind.config.js and the zinc ramp).
+    @Test func paletteMatchesTheWebTokens() {
+        #expect(DS.Surface.page == Color(hex: 0x0F0F10))
+        #expect(DS.Surface.card == Color(hex: 0x161617))
+        #expect(DS.Surface.raised == Color(hex: 0x1E1E20))
+        #expect(DS.Palette.accent == Color(hex: 0xEDEDED))
+        #expect(DS.Palette.gain == Color(hex: 0x4CC38A))
+        #expect(DS.Palette.loss == Color(hex: 0xE5484D))
+        #expect(DS.Text.primary == Color(hex: 0xF4F4F5))
+        #expect(DS.Text.muted == Color(hex: 0x71717A))
+        // The legacy names resolve to the tokens.
+        #expect(DS.Palette.success == DS.Palette.gain)
+        #expect(DS.Palette.danger == DS.Palette.loss)
+        #expect(DS.Palette.warning == DS.Palette.amber)
+    }
+
+    /// The sparkline never stretches less than 0.5% of the price to full height.
+    @Test func sparklineDomainHasAMinimumSpan() {
+        let flat = Sparkline.domain([100, 100.01, 100])
+        // 0.5% of the middle value (100.005), centred on it.
+        #expect(abs((flat.upperBound - flat.lowerBound) - 100.005 * 0.005) < 1e-9)
+        #expect(abs((flat.upperBound + flat.lowerBound) / 2 - 100.005) < 1e-9)
+        let wide = Sparkline.domain([90, 110])
+        #expect(wide.lowerBound == 90 && wide.upperBound == 110)
+    }
+
+    /// Inter is bundled and registered (UIAppFonts).
+    @Test func interIsRegistered() {
+        for face in ["Inter-Regular", "Inter-Medium", "Inter-SemiBold"] {
+            #expect(UIFont(name: face, size: 14) != nil, "\(face) is not registered")
+        }
     }
 }

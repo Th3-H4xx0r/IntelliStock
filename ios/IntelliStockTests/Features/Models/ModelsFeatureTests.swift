@@ -275,7 +275,7 @@ import Testing
         await editor.testOnly()
         #expect(editor.statusMsg == "Use the cable icon on the saved row to test a claude-cli model.")
         #expect(stub.requests.isEmpty)
-        #expect(editor.primaryLabel == "Test & Save")
+        #expect(editor.primaryLabel == "Test & save")
     }
 
     @Test func geminiWithoutAKeySavesWithoutTesting() async throws {

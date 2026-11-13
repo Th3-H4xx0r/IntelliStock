@@ -1,39 +1,38 @@
 import SwiftUI
 
-/// The Settings-app row icon: a white, filled glyph on a solid rounded square.
-///
-/// The spec allows these tiles only in navigation lists (More, Settings), where
-/// the colour tells destinations apart at a glance. Everywhere else, rows use
-/// `IconTile` or no icon. The tile scales with Dynamic Type like the row's text.
+/// The leading glyph of a navigation-list row (More, Settings). It used to be
+/// a white glyph on a coloured square; the web has no icon tiles or coloured
+/// icons, so it is now the plain SF Symbol, 17 pt regular in zinc-500,
+/// centred in a column that scales with Dynamic Type so the rows line up.
+/// `color` is ignored.
 struct SettingsIconTile: View {
     let systemImage: String
     let color: Color
 
-    @ScaledMetric(relativeTo: .body) private var size: CGFloat = 30
+    @ScaledMetric(relativeTo: .body) private var size: CGFloat = 24
 
-    init(systemImage: String, color: Color) {
+    init(systemImage: String, color: Color = DS.Text.muted) {
         self.systemImage = systemImage
         self.color = color
     }
 
     var body: some View {
         Image(systemName: systemImage)
-            .symbolVariant(.fill)
-            .font(.system(size: size * 0.52, weight: .semibold))
-            .foregroundStyle(.white)
+            .font(.system(size: 17, weight: .regular))
+            .foregroundStyle(DS.Text.muted)
             .frame(width: size, height: size)
-            .background(color, in: .rect(cornerRadius: size * 0.24, style: .continuous))
             .accessibilityHidden(true)
     }
 }
 
 #Preview {
     List {
-        Section {
+        DSSection {
             Label { Text("Brokerages") } icon: { SettingsIconTile(systemImage: "building.columns", color: .green) }
-            Label { Text("Models") } icon: { SettingsIconTile(systemImage: "brain.head.profile", color: .pink) }
+            Label { Text("Models") } icon: { SettingsIconTile(systemImage: "brain.head.profile", color: .gray) }
             Label { Text("Settings") } icon: { SettingsIconTile(systemImage: "gearshape", color: .gray) }
         }
     }
-    .listStyle(.insetGrouped)
+    .dsList()
+    .dsAppearance()
 }

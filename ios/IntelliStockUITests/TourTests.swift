@@ -67,8 +67,8 @@ final class TourTests: XCTestCase {
         tapTab("More")
         settle(1)
         shot("20-tab-More")
-        let more = ["Crypto", "Backtests", "Brokerages", "Agent Runs", "Nexus Graph",
-                    "Learning", "Models", "Token Usage", "Settings"]
+        let more = ["Crypto", "Backtests", "Brokerages", "Agent runs", "Nexus graph",
+                    "Learning", "Models", "Token usage", "Settings"]
         for (n, row) in more.enumerated() {
             tapTab("More")
             guard tapRow(row) else { continue }
@@ -153,7 +153,7 @@ final class TourTests: XCTestCase {
     }
 
     private func signIn(url: String, user: String, pass: String) {
-        // Connect: the only text field on screen. Its button reads "Test & Connect".
+        // Connect: the only text field on screen. Its button reads "Test & connect".
         if app.staticTexts["Connect to your instance"].waitForExistence(timeout: 8) {
             let urlField = app.textFields.firstMatch
             urlField.tap()
@@ -166,7 +166,7 @@ final class TourTests: XCTestCase {
             if saveAnyway.exists { saveAnyway.tap() }
         }
         // Login: a username text field and a password secure field.
-        let signIn = app.buttons["Sign In"]
+        let signIn = app.buttons["Sign in"]
         if signIn.waitForExistence(timeout: 15) {
             settle(2)
             shot("02-login")

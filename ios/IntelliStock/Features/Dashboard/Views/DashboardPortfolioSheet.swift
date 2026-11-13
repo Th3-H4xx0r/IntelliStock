@@ -1,9 +1,9 @@
 import SwiftUI
 
-/// The account switcher — the "Portfolios" bottom sheet the dashboard's
-/// account label opens (redesign spec 2026-10-02, Dashboard). One row per
-/// brokerage account: its logo, its name over "Live" or "Paper", its equity
-/// with today's change, and a checkmark on the account the dashboard shows.
+/// The account switcher — the sheet the dashboard's switcher opens, the
+/// web's "Accounts" panel: one row per account, its name over its kind
+/// ("Alpaca · Paper"), its value and today's change, and a check on the
+/// account the dashboard shows.
 /// A tap selects that account (`SelectedAccountModel.select`, as the old
 /// menu did) and closes the sheet.
 ///
@@ -25,7 +25,7 @@ struct DashboardPortfolioSheet: View {
     var body: some View {
         NavigationStack {
             List {
-                Section {
+                DSSection {
                     ForEach(accounts) { account in
                         let hero = account.id == selectedId ? heroSummary : nil
                         Button {
@@ -43,8 +43,9 @@ struct DashboardPortfolioSheet: View {
                     }
                 }
             }
-            .listStyle(.insetGrouped)
-            .navigationTitle("Portfolios")
+            .dsList()
+            .background(DS.Surface.card)
+            .navigationTitle("Accounts")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -54,6 +55,7 @@ struct DashboardPortfolioSheet: View {
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
+        .presentationBackground(DS.Surface.page)
         // Cached figures show at once; fresh ones replace them as they land.
         .onAppear { portfolios.refreshDetached(accounts) }
     }
@@ -68,29 +70,25 @@ private struct DashboardPortfolioRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            IconTile(size: EntityRowMetrics.iconSize) {
-                BrokerageLogo(brokerageType: account.brokerageType, size: EntityRowMetrics.iconSize * 0.5)
-            }
             VStack(alignment: .leading, spacing: 2) {
                 Text(DashboardFormat.accountName(account))
-                    .font(.headline)
-                    .foregroundStyle(Color.primary)
+                    .font(DS.Font.body)
+                    .foregroundStyle(DS.Text.primary)
                     .lineLimit(1)
-                Text(account.isPaper ? "Paper" : "Live")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                Text(dashboardAccountKind(account))
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.muted)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             figures
             Image(systemName: "checkmark")
-                .font(.body.weight(.semibold))
-                .foregroundStyle(.tint)
+                .font(.system(size: 14))
+                .foregroundStyle(DS.Text.secondary)
                 .opacity(selected ? 1 : 0)
                 .accessibilityHidden(true)
         }
-        .padding(.vertical, 2)
         // A list button tints its label; the row reads as text.
-        .foregroundStyle(Color.primary)
+        .foregroundStyle(DS.Text.primary)
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
     }
@@ -101,24 +99,24 @@ private struct DashboardPortfolioRow: View {
             let direction = summary.direction
             VStack(alignment: .trailing, spacing: 2) {
                 Text(fmtMoney(summary.equity))
-                    .font(.headline.monospacedDigit())
-                    .foregroundStyle(Color.primary)
-                Text(summary.changeText)
-                    .font(.footnote.monospacedDigit())
-                    .foregroundStyle(direction.color)
+                    .font(DS.Font.body)
+                    .foregroundStyle(DS.Text.primary)
+                Text(summary.dayChangePct.map { fmtPct($0) } ?? summary.changeText)
+                    .font(DS.Font.caption)
+                    .foregroundStyle(summary.dayChangePct == nil ? direction.color : dashboardChangeColor(summary.dayChangePct))
             }
+            .monospacedDigit()
             .lineLimit(1)
         } else if loading {
-            VStack(alignment: .trailing, spacing: 2) {
-                Text("$00,000.00").font(.headline.monospacedDigit())
-                Text("+$00.00 (+0.00%)").font(.footnote.monospacedDigit())
+            VStack(alignment: .trailing, spacing: 4) {
+                Skeleton(width: 72, height: 14)
+                Skeleton(width: 44, height: 12)
             }
-            .redacted(reason: .placeholder)
             .accessibilityLabel("Loading")
         } else {
             Text("—")
-                .font(.headline)
-                .foregroundStyle(.secondary)
+                .font(DS.Font.body)
+                .foregroundStyle(DS.Text.faint)
                 .accessibilityLabel("No data")
         }
     }

@@ -1,13 +1,15 @@
 import SwiftUI
 
 /// The full-screen biometric gate shown while the app is locked and signed in
-/// — `LockScreen` in `lock_screen.dart`, restyled Apple-native: the app tile
-/// with no glow, system type, and a Face ID / Touch ID button.
+/// — `LockScreen` in `lock_screen.dart`, styled as the web's sign-in page:
+/// the page colour, the app tile with a hairline and no glow, a 24/500 title
+/// with a zinc-400 line, the full-width primary button for Face ID / Touch
+/// ID, and "Log out" as a quiet text action.
 ///
 /// - Prompts the moment it appears, and again whenever the app returns from a
 ///   real background (not `.inactive`, which the Face ID sheet itself causes —
 ///   that would loop after a cancel).
-/// - Offers "Log Out" only after a failed attempt.
+/// - Offers "Log out" only after a failed attempt.
 struct LockView: View {
     @Environment(AppServices.self) private var services
     @Environment(\.scenePhase) private var scenePhase
@@ -22,49 +24,49 @@ struct LockView: View {
 
     var body: some View {
         ZStack {
-            Color(uiColor: .systemGroupedBackground)
+            DS.Surface.page
                 .ignoresSafeArea()
 
             VStack(spacing: 0) {
                 Spacer()
                 VStack(spacing: 0) {
-                    AppLogoView(size: 92, radius: 26)
+                    AppLogoView(size: 72, radius: 18)
                         .overlay {
-                            RoundedRectangle(cornerRadius: 26, style: .continuous)
-                                .strokeBorder(Color(uiColor: .separator), lineWidth: 0.5)
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                .strokeBorder(DS.Line.card, lineWidth: DS.Line.width)
                         }
-                        .padding(.bottom, 32)
+                        .padding(.bottom, 28)
 
                     Text(headline)
-                        .font(.title2.weight(.semibold))
+                        .font(DS.Font.pageTitle)
+                        .foregroundStyle(DS.Text.primary)
                         .multilineTextAlignment(.center)
                         .accessibilityAddTraits(.isHeader)
 
                     Text(subtitle)
-                        .font(.body)
-                        .foregroundStyle(.secondary)
+                        .font(DS.Font.body)
+                        .foregroundStyle(DS.Text.secondary)
                         .multilineTextAlignment(.center)
-                        .padding(.top, 10)
+                        .padding(.top, 8)
 
                     AuthPillButton(
-                        label: "Login with \(method)",
+                        label: "Unlock with \(method)",
                         systemImage: isFace ? "faceid" : "touchid",
+                        showChevron: false,
                         busy: busy,
                         action: attempt
                     )
-                    .padding(.top, 42)
+                    .padding(.top, 32)
                 }
-                .frame(maxWidth: 328)
+                .frame(maxWidth: 384)
                 Spacer()
 
                 // The escape hatch only appears once biometrics actually fail —
                 // on a normal relaunch the prompt just succeeds.
                 if failed {
-                    Button("Log Out", action: exitToLogin)
-                        .font(.body)
-                        .foregroundStyle(.secondary)
+                    Button("Log out", action: exitToLogin)
+                        .buttonStyle(.dsGhost(size: .large))
                         .disabled(busy)
-                        .frame(minHeight: 44)
                 }
             }
             .padding(.horizontal, 24)
@@ -91,14 +93,14 @@ struct LockView: View {
 
     private var headline: String {
         if busy { return "Authenticating…" }
-        if failed { return "\(method) wasn\u{2019}t recognized." }
-        return "IntelliStock is locked."
+        if failed { return "\(method) wasn\u{2019}t recognized" }
+        return "IntelliStock is locked"
     }
 
     private var subtitle: String {
-        if busy { return "Hold still." }
-        if failed { return "Try again." }
-        return "Verify your identity to continue."
+        if busy { return "Hold still" }
+        if failed { return "Try again" }
+        return "Verify your identity to continue"
     }
 
     private func resolveMethod() {

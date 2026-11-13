@@ -1,198 +1,291 @@
 import SwiftUI
 
-// The sections of the backtest detail screen (backtest_detail_screen.dart's
-// private widgets), each an inset-grouped list `Section`: title-style
-// headers, `StatGrid`s and `LabeledContent` rows, no cards or grey tiles.
+// The sections of the backtest detail screen, each a `DSSection` (or a card
+// in a plain one) in the web's words and order (`BacktestDetailView.vue`).
 
 // MARK: - LLM pause banner
 
-/// Shown only when the status is `paused_llm_critical` —
-/// `BacktestLlmPauseBanner`: the pause details as rows, under a warning
-/// headline.
+/// Shown only when the status is `paused_llm_critical` — the web's
+/// `BacktestLLMPauseBanner`: an amber dot and the headline, the pause
+/// details as key-value lines, the provider's sample, and what to do.
 struct BacktestLlmPauseBanner: View {
     let summary: BacktestSummary
 
-    @Environment(\.colorScheme) private var colorScheme
-
     var body: some View {
         if (summary.status ?? "").lowercased() == "paused_llm_critical" {
-            let ink = DS.Palette.onTint(DS.Palette.warning, in: colorScheme)
             Section {
-                Label {
-                    Text("Backtest paused: LLM critical failure")
-                        .font(.headline)
-                } icon: {
-                    Image(systemName: Symbol.named("pause_circle_outline"))
+                Card {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack(spacing: 8) {
+                            DSStatusDot(.warn)
+                            Text("Backtest paused: LLM critical failure")
+                                .font(DS.Font.bodyMedium)
+                                .foregroundStyle(DS.Text.primary)
+                                .accessibilityAddTraits(.isHeader)
+                        }
+                        Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 16, verticalSpacing: 6) {
+                            line("Bar", Text(BacktestDetailFormat.fmtBar(summary.pauseBarTime)).monospacedDigit())
+                            line("Reason", Text("\(summary.pauseReasonTag ?? "unknown") \(Text("· \(BacktestDetailFormat.numText(summary.pauseAttempts, "?")) attempts").foregroundStyle(DS.Text.muted))"))
+                            line("Provider", Text("\(summary.pauseProvider ?? "?") \(Text("· model \(summary.pauseModel ?? "?")").foregroundStyle(DS.Text.muted))"))
+                            line("Call site", Text(summary.pauseCallSite ?? "unknown"))
+                            line("Paused at", Text(BacktestDetailFormat.fmtPausedAt(summary.pausedAt)).monospacedDigit())
+                        }
+                        .font(DS.Font.body)
+                        if let sample = summary.pauseSample, !sample.isEmpty {
+                            Text(sample)
+                                .font(DS.Font.mono)
+                                .foregroundStyle(DS.Text.secondary)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .dsCardSurface(fill: DS.Surface.page, radius: DS.Radius.control, border: DS.Line.divider)
+                        }
+                        Text("Resume the backtest when the provider is healthy again. The same bar will retry from the snapshot")
+                            .font(DS.Font.caption)
+                            .foregroundStyle(DS.Text.muted)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
-                .foregroundStyle(ink)
-                LabeledContent("Bar", value: BacktestDetailFormat.fmtBar(summary.pauseBarTime))
-                LabeledContent("Reason", value: "\(summary.pauseReasonTag ?? "unknown")  (\(BacktestDetailFormat.numText(summary.pauseAttempts, "?")) attempts)")
-                LabeledContent("Provider", value: "\(summary.pauseProvider ?? "?")  •  Model: \(summary.pauseModel ?? "?")")
-                LabeledContent("Call site", value: summary.pauseCallSite ?? "unknown")
-                LabeledContent("Paused at", value: BacktestDetailFormat.fmtPausedAt(summary.pausedAt))
-                if let sample = summary.pauseSample, !sample.isEmpty {
-                    Text(sample)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                }
-            } footer: {
-                Text("Tap \"Resume\" above when the provider is healthy again. The same bar will retry from the snapshot.")
+                .dsClearRow()
             }
+        }
+    }
+
+    private func line(_ key: String, _ value: Text) -> some View {
+        GridRow {
+            Text(key)
+                .foregroundStyle(DS.Text.muted)
+                .frame(width: 72, alignment: .leading)
+            value
+                .foregroundStyle(DS.Text.soft)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }
 
 // MARK: - Nexus lookback banner
 
+/// "Nexus lookback training" (`ui-card px-5 py-4`): the day count, a bar,
+/// the start, current and end dates, and what it is doing.
 struct BacktestNexusLookbackBanner: View {
     let lookback: NexusLookback
 
     var body: some View {
         Section {
-            VStack(alignment: .leading, spacing: 6) {
-                LabeledContent("Day \(lookback.current) / \(lookback.total)") {
-                    Text(lookback.currentDate ?? "")
-                        .monospacedDigit()
+            Card(padding: EdgeInsets(top: 16, leading: 20, bottom: 16, trailing: 20)) {
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack(spacing: 16) {
+                        Text("Nexus lookback training")
+                            .font(DS.Font.bodyMedium)
+                            .foregroundStyle(DS.Text.primary)
+                        Spacer(minLength: 8)
+                        Text("Day \(lookback.current) of \(lookback.total)")
+                            .font(DS.Font.caption)
+                            .foregroundStyle(DS.Text.secondary)
+                            .monospacedDigit()
+                    }
+                    BacktestProgressBar(fraction: lookback.fraction)
+                        .padding(.top, 12)
+                    HStack {
+                        Text(lookback.startDate ?? "")
+                        Spacer()
+                        Text(lookback.currentDate ?? "").foregroundStyle(DS.Text.label)
+                        Spacer()
+                        Text(lookback.endDate ?? "")
+                    }
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.muted)
+                    .monospacedDigit()
+                    .padding(.top, 8)
+                    Text("Building historical event context before trading begins. This runs once per scope")
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 12)
                 }
-                ProgressView(value: min(max(lookback.fraction, 0), 1))
-                HStack {
-                    Text(lookback.startDate ?? "")
-                    Spacer()
-                    Text(lookback.endDate ?? "")
-                }
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
+                .accessibilityElement(children: .combine)
             }
-            .padding(.vertical, 4)
-        } header: {
-            Text("Nexus Lookback Training")
-        } footer: {
-            Text("Building historical event context before trading begins. This runs once per scope.")
+            .dsClearRow()
         }
     }
 }
 
-// MARK: - Stat grid
+// MARK: - Results
 
-/// The run's figures in a Stocks-style `StatGrid` (the total P&L is the
-/// screen's hero).
-struct BacktestStatGrid: View {
+/// The web's results card: "Total P&L" with the figure in gain or loss and
+/// "+47.51% return" under it, then a divider and the run's figures —
+/// portfolio, trades, elapsed, win rate and portfolio high.
+struct BacktestResultsCard: View {
     let summary: BacktestSummary
     let elapsed: Num?
 
     var body: some View {
         let s = summary
-        let winRate = s.winRatePercent
-        Section("Results") {
-            StatGrid(columns: 2) {
-                StatCell(label: "P&L %", value: fmtPct(s.pnlPercent?.double), valueColor: pnlColor(s.pnlPercent?.double))
-                StatCell(
-                    label: "Portfolio",
-                    value: fmtMoney(s.portfolioEndValue?.double),
-                    valueColor: pnlColor((s.portfolioEndValue?.double ?? 0) - (s.portfolioStartValue?.double ?? 0)),
-                    footnote: "From \(fmtMoney(s.portfolioStartValue?.double))"
-                )
-                StatCell(
-                    label: "Trades",
-                    value: BacktestDetailFormat.numText(s.totalTrades, "—"),
-                    footnote: "\(BacktestDetailFormat.numText(s.totalBuys, "0")) buy / \(BacktestDetailFormat.numText(s.totalSells, "0")) sell"
-                )
-                StatCell(
-                    label: "Win rate",
-                    value: winRate.map { "\(dartToStringAsFixed($0.double, 1))%" } ?? "—",
-                    footnote: "\(BacktestDetailFormat.numText(s.winningRoundTrips, "0"))W / \(BacktestDetailFormat.numText(s.losingRoundTrips, "0"))L"
-                )
-                StatCell(
-                    label: "Portfolio high",
-                    value: fmtMoney(s.portfolioValueHigh?.double),
-                    footnote: "Low: \(fmtMoney(s.portfolioValueLow?.double))"
-                )
-                StatCell(label: "Elapsed", value: fmtElapsed(elapsed?.double))
+        let pnl = s.pnl?.double
+        let pct = s.pnlPercent?.double
+        Section {
+            Card(padding: 0) {
+                VStack(alignment: .leading, spacing: 0) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text("Total P&L")
+                            .font(DS.Font.caption)
+                            .foregroundStyle(DS.Text.muted)
+                        Text(fmtPnl(pnl))
+                            .dsValueHero()
+                            .foregroundStyle(backtestPnlColor(pnl))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.6)
+                            .padding(.top, 12)
+                        HStack(spacing: 6) {
+                            Text(fmtPct(pct)).foregroundStyle(backtestPnlColor(pct))
+                            Text("return").foregroundStyle(DS.Text.muted)
+                        }
+                        .font(DS.Font.body)
+                        .monospacedDigit()
+                        .padding(.top, 12)
+                    }
+                    .padding(DS.cardPadding)
+                    .accessibilityElement(children: .combine)
+                    DSDivider()
+                    StatGrid(columns: 2) {
+                        StatCell(label: "Portfolio", value: fmtMoney(s.portfolioEndValue?.double), footnote: "from \(fmtMoney(s.portfolioStartValue?.double))")
+                        StatCell(
+                            label: "Trades",
+                            value: BacktestDetailFormat.numText(s.totalTrades, "—"),
+                            footnote: "\(BacktestDetailFormat.numText(s.totalBuys, "0")) buy · \(BacktestDetailFormat.numText(s.totalSells, "0")) sell"
+                        )
+                        StatCell(label: "Elapsed", value: fmtElapsed(elapsed?.double))
+                        StatCell(
+                            label: "Win rate",
+                            value: s.winRatePercent.map { "\(dartToStringAsFixed($0.double, 1))%" } ?? "—",
+                            footnote: "\(BacktestDetailFormat.numText(s.winningRoundTrips, "0"))W · \(BacktestDetailFormat.numText(s.losingRoundTrips, "0"))L"
+                        )
+                        StatCell(label: "Portfolio high", value: fmtMoney(s.portfolioValueHigh?.double), footnote: "Low \(fmtMoney(s.portfolioValueLow?.double))")
+                    }
+                    .statValueStyle(.medium)
+                    .padding(DS.cardPadding)
+                }
             }
-            .padding(.vertical, 4)
+            .dsClearRow()
         }
     }
 }
 
-// MARK: - AI credits
+// MARK: - LLM cost
 
-/// "AI credits": the totals as a `StatGrid`, then by model, call site and
-/// provider as rows. It refreshes with the screen's pull-to-refresh.
+/// "LLM cost for this backtest" / "AI credits": the totals, then the cost by
+/// model, by call site and by provider, on one card. It refreshes with the
+/// screen's pull-to-refresh.
 struct BacktestLlmCostCard: View {
     let llmCost: LlmCost?
     let loading: Bool
     let error: String?
 
     var body: some View {
-        Section {
+        DSSection("LLM cost for this backtest", subtitle: "AI credits") {
             if let error {
-                Text(error).foregroundStyle(DS.Palette.danger)
+                Text(error)
+                    .font(DS.Font.body)
+                    .foregroundStyle(DS.Palette.loss)
             } else if llmCost == nil, loading {
-                totalsGrid(LlmCost(json: .null))
-                    .redacted(reason: .placeholder)
+                StatGrid(columns: 2) {
+                    ForEach(0..<4, id: \.self) { _ in
+                        VStack(alignment: .leading, spacing: 12) {
+                            Skeleton(width: 64, height: 12)
+                            Skeleton(width: 80, height: 22)
+                        }
+                    }
+                }
+                .padding(.vertical, 12)
+                .accessibilityHidden(true)
             } else if let cost = llmCost, (cost.totalCalls?.double ?? 0) != 0 {
                 totalsGrid(cost)
+                group("By model", "No models recorded", cost.byModel)
+                group("By call site", "No call sites recorded", cost.byCallSite)
+                group("By provider", "No providers recorded", cost.byProvider)
             } else {
-                Text("No LLM calls were attributed to this backtest.")
-                    .foregroundStyle(.secondary)
+                Text("No LLM calls were attributed to this backtest. (Either the strategy ran with no LLM stages enabled, or the backtest finished before the telemetry sink flushed.)")
+                    .font(DS.Font.body)
+                    .foregroundStyle(DS.Text.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.vertical, 8)
             }
-        } header: {
-            HStack(spacing: 8) {
-                Text("AI credits")
-                if loading { ProgressView().controlSize(.mini) }
+        } accessory: {
+            if loading {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 32, height: 32)
             }
-        } footer: {
-            Text("LLM cost for this backtest")
-        }
-        if error == nil, let cost = llmCost, (cost.totalCalls?.double ?? 0) != 0 {
-            group("By model", cost.byModel)
-            group("By call site", cost.byCallSite)
-            group("By provider", cost.byProvider)
         }
     }
 
     private func totalsGrid(_ c: LlmCost) -> some View {
-        StatGrid(columns: 2) {
-            StatCell(label: "Total cost", value: fmtUsdCost(c.totalCostUsd?.double))
-            StatCell(
-                label: "Calls",
-                value: BacktestDetailFormat.numText(c.totalCalls, "0"),
-                footnote: "\(BacktestDetailFormat.numText(c.okCalls, "0")) ok · \(BacktestDetailFormat.numText(c.failedCalls, "0")) failed"
-            )
-            StatCell(label: "Input tokens", value: tokens(c.totalInputTokens))
-            StatCell(label: "Output tokens", value: tokens(c.totalOutputTokens))
-        }
-        .padding(.vertical, 4)
-    }
-
-    private func tokens(_ n: Num?) -> String {
-        switch n {
-        case .int(let i): fmtTokens(i)
-        case .double(let d): fmtTokens(d)
-        case nil: fmtTokens(Int?.none)
-        }
-    }
-
-    @ViewBuilder
-    private func group(_ title: String, _ rows: [LlmCostRow]) -> some View {
-        if !rows.isEmpty {
-            Section(title) {
-                ForEach(Array(rows.prefix(6).enumerated()), id: \.offset) { _, r in
-                    LabeledContent {
-                        Text(fmtUsdCost(r.costUsd?.double)).monospacedDigit()
-                    } label: {
-                        Text(r.key).lineLimit(1).truncationMode(.middle)
+        let failed = c.failedCalls?.double ?? 0
+        return StatGrid(columns: 2) {
+            StatCell(label: "Total cost") {
+                Text(fmtUsdCost(c.totalCostUsd?.double)).font(DS.Font.figureLarge)
+            }
+            StatCell(label: "Calls") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(BacktestDetailFormat.numText(c.totalCalls, "0"))
+                    Group {
+                        if failed > 0 {
+                            Text("\(BacktestDetailFormat.numText(c.okCalls, "0")) ok · \(Text("\(BacktestDetailFormat.numText(c.failedCalls, "0")) failed").foregroundStyle(DS.Palette.amber))")
+                        } else {
+                            Text("\(BacktestDetailFormat.numText(c.okCalls, "0")) ok")
+                        }
                     }
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.muted)
+                }
+            }
+            StatCell(label: "Input tokens", value: fmtTokens(c.totalInputTokens))
+            StatCell(
+                label: "Output tokens",
+                value: fmtTokens(c.totalOutputTokens),
+                footnote: (c.totalReasoningTokens?.double ?? 0) > 0 ? "incl. \(fmtTokens(c.totalReasoningTokens)) reasoning" : nil
+            )
+        }
+        .statValueStyle(.figure)
+        .padding(.vertical, 12)
+    }
+
+    private func group(_ title: String, _ empty: String, _ rows: [LlmCostRow]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(DS.Font.caption)
+                .foregroundStyle(DS.Text.muted)
+                .padding(.bottom, 4)
+            if rows.isEmpty {
+                Text(empty)
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.muted)
+            } else {
+                ForEach(Array(rows.prefix(6).enumerated()), id: \.offset) { _, r in
+                    HStack(spacing: 12) {
+                        Text(r.key)
+                            .foregroundStyle(DS.Text.label)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer(minLength: 8)
+                        Text(fmtUsdCost(r.costUsd?.double))
+                            .foregroundStyle(DS.Text.primary)
+                            .monospacedDigit()
+                    }
+                    .font(DS.Font.body)
+                    .accessibilityElement(children: .combine)
                 }
             }
         }
+        .padding(.vertical, 8)
     }
 }
 
 // MARK: - Crypto fees
 
-/// Per-platform fee estimate (crypto backtests only) — `_CryptoFeesCard`.
+/// "Estimated fees per platform" (crypto backtests only): the volume traded,
+/// then each venue's taker rate and fee, the applied one marked.
 struct BacktestCryptoFeesCard: View {
     let summary: BacktestSummary
 
@@ -204,38 +297,46 @@ struct BacktestCryptoFeesCard: View {
             let appliedRate = fees["taker_rate"]?.double ?? 0.0025
             let emulated = summary.feeEmulated == true
             let appliedLabel = BacktestDetailFormat.appliedLabel(venue: summary.feeVenue, rate: appliedRate)
-            Section {
-                LabeledContent("Crypto volume traded") {
-                    Text(fmtMoney(volume)).monospacedDigit()
-                }
+            DSSection("Estimated fees per platform", subtitle: "Crypto", rowMinHeight: 48) {
+                DSKeyValueRow("Crypto volume traded", fmtMoney(volume))
                 ForEach(BacktestDetailFormat.feePlatforms, id: \.id) { p in
                     let applied = abs(p.rate - appliedRate) < 1e-9
-                    HStack(spacing: 10) {
-                        HStack(spacing: 6) {
-                            Text(p.name).lineLimit(1)
-                            if applied { MarketsTag(text: "Applied") }
+                    HStack(spacing: 16) {
+                        HStack(spacing: 8) {
+                            Text(p.name)
+                                .foregroundStyle(applied ? DS.Text.primary : DS.Text.label)
+                                .lineLimit(1)
+                            if applied {
+                                Text("Applied")
+                                    .font(DS.Font.caption)
+                                    .foregroundStyle(DS.Text.muted)
+                            }
                         }
-                        Spacer()
+                        Spacer(minLength: 8)
                         Text("\(dartToStringAsFixed(p.rate * 100, 2))%")
-                            .font(.footnote.monospacedDigit())
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(DS.Text.muted)
+                            .frame(minWidth: 56, alignment: .trailing)
                         Text(fmtMoney(applied ? (actual > 0 ? actual : volume * p.rate) : volume * p.rate))
-                            .monospacedDigit()
-                            .foregroundStyle(applied ? Color.primary : Color.secondary)
+                            .foregroundStyle(applied ? DS.Text.primary : DS.Text.secondary)
                             .frame(minWidth: 84, alignment: .trailing)
                     }
-                }
-            } header: {
-                HStack(spacing: 8) {
-                    Text("Fees · crypto")
-                    if emulated {
-                        MarketsTag(text: "Emulated · \(appliedLabel)", color: DS.Palette.warning)
-                    }
+                    .font(DS.Font.body)
+                    .monospacedDigit()
+                    .accessibilityElement(children: .combine)
                 }
             } footer: {
                 Text(emulated
-                     ? "\(appliedLabel) fees were emulated here (not your instance's brokerage) — the \"applied\" row. Other venues are estimates (volume × rate); actual tiers vary."
-                     : "\(appliedLabel) is the fee actually charged in this backtest; other venues are estimates at their listed taker rate (volume × rate) — actual tiers vary.")
+                     ? "\(appliedLabel) fees were emulated here (not your instance's brokerage) — it's the “applied” row. Other venues are estimates at their listed taker rate (volume × rate) — actual tiers vary"
+                     : "\(appliedLabel) is the fee actually charged in this backtest. Other venues are estimates at their listed taker rate (volume × rate) — actual tiers vary")
+            } accessory: {
+                if emulated {
+                    HStack(spacing: 8) {
+                        DSStatusDot(.warn)
+                        Text("Emulated · \(appliedLabel)")
+                            .font(DS.Font.caption)
+                            .foregroundStyle(DS.Text.secondary)
+                    }
+                }
             }
         }
     }
@@ -243,30 +344,77 @@ struct BacktestCryptoFeesCard: View {
 
 // MARK: - Strategy
 
-/// The run's strategy as a disclosure: its name, then each sub-strategy and
-/// its raw config (monospaced, as code-like keys are).
+/// The run's strategy (the web's collapsible card): its name over
+/// "Strategy"; open it for the id and each sub-strategy with its weight,
+/// position, phase and scope, and its config.
 struct BacktestStrategySection: View {
     let schema: StrategySchema
     let strategyId: String?
     @Binding var open: Bool
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     var body: some View {
-        Section("Strategy") {
-            DisclosureGroup(isExpanded: $open) {
-                if let strategyId {
-                    LabeledContent("ID", value: strategyId)
-                }
-                ForEach(Array(schema.strategies.enumerated()), id: \.offset) { i, sub in
-                    subStrategy(i, sub)
-                }
-                if schema.strategies.isEmpty {
-                    Text("No sub-strategies defined").foregroundStyle(.secondary)
-                }
+        DSSection {
+            Button {
+                withAnimation(DSMotion.standard(reduceMotion: reduceMotion)) { open.toggle() }
             } label: {
-                Text(schema.name ?? "—")
-                    .font(.headline)
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(schema.name ?? "—")
+                            .font(DS.Font.body)
+                            .foregroundStyle(DS.Text.primary)
+                            .lineLimit(1)
+                        Text("Strategy")
+                            .font(DS.Font.caption)
+                            .foregroundStyle(DS.Text.muted)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 14))
+                        .foregroundStyle(DS.Text.muted)
+                        .rotationEffect(.degrees(open ? 180 : 0))
+                        .accessibilityHidden(true)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint(open ? "Hides the strategy" : "Shows the strategy")
+            if open {
+                details(schema)
             }
         }
+    }
+
+    private func details(_ schema: StrategySchema) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let strategyId {
+                Text("ID \(strategyId)")
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.muted)
+                    .monospacedDigit()
+                    .padding(.bottom, 8)
+            }
+            Text("Sub-strategies")
+                .font(DS.Font.caption)
+                .foregroundStyle(DS.Text.muted)
+            VStack(spacing: 0) {
+                if schema.strategies.isEmpty {
+                    Text("No sub-strategies defined")
+                        .font(DS.Font.body)
+                        .foregroundStyle(DS.Text.muted)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 12)
+                }
+                ForEach(Array(schema.strategies.enumerated()), id: \.offset) { i, sub in
+                    if i > 0 { DSDivider() }
+                    subStrategy(i, sub)
+                }
+            }
+            .dsCardSurface(fill: .clear, radius: DS.Radius.control, border: DS.Line.divider)
+        }
+        .padding(.vertical, 8)
     }
 
     private func subStrategy(_ index: Int, _ sub: BacktestSubStrategy) -> some View {
@@ -275,65 +423,94 @@ struct BacktestStrategySection: View {
         for e in sub.config.entries {
             if let i = combined.firstIndex(where: { $0.0 == e.key }) { combined[i].1 = e.value } else { combined.append((e.key, e.value)) }
         }
-        let meta = [sub.weight.map { "\(dartToStringAsFixed($0.double * 100, 0))%" }, sub.decisionPhase].compactMap { $0 }
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
+        let meta = [
+            sub.weight.map { "\(dartToStringAsFixed($0.double * 100, 0))%" },
+            sub.executionPosition.map { "pos \($0.description)" },
+            sub.decisionPhase,
+            sub.executionScope,
+        ].compactMap { $0 }
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
                 Text("\(index + 1)")
-                    .font(.headline.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                Text(sub.strategy ?? "?").font(.headline)
-                Spacer()
-                if !meta.isEmpty {
-                    Text(meta.joined(separator: " · "))
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.muted)
+                    .monospacedDigit()
+                    .frame(width: 16, alignment: .leading)
+                // The web wraps the weight, position, phase and scope under
+                // the name when the line runs out.
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(sub.strategy ?? "?")
+                        .font(DS.Font.bodyMedium)
+                        .foregroundStyle(DS.Text.primary)
+                        .lineLimit(1)
+                    if !meta.isEmpty {
+                        Text(meta.joined(separator: " · "))
+                            .font(DS.Font.caption)
+                            .foregroundStyle(DS.Text.secondary)
+                            .monospacedDigit()
+                    }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             if !combined.isEmpty {
-                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
-                    ForEach(Array(combined.enumerated()), id: \.offset) { _, kv in
-                        GridRow {
-                            Text(kv.0)
-                                .font(.caption.monospaced())
-                                .foregroundStyle(.secondary)
-                            Text(kv.1.dartDescription)
-                                .font(.caption.monospaced())
-                                .lineLimit(2)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Config")
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.muted)
+                    LazyVGrid(columns: [GridItem(.flexible(), spacing: 16, alignment: .topLeading), GridItem(.flexible(), alignment: .topLeading)], alignment: .leading, spacing: 8) {
+                        ForEach(Array(combined.enumerated()), id: \.offset) { _, kv in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(kv.0)
+                                    .font(DS.Font.caption)
+                                    .foregroundStyle(DS.Text.muted)
+                                    .lineLimit(1)
+                                Text(kv.1.isNull ? "null" : kv.1.dartDescription)
+                                    .font(DS.Font.body)
+                                    .foregroundStyle(DS.Text.soft)
+                                    .monospacedDigit()
+                                    .lineLimit(1)
+                            }
+                            .accessibilityElement(children: .combine)
                         }
                     }
                 }
+                .padding(.leading, 28)
             }
         }
-        .padding(.vertical, 4)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
     }
 }
 
 // MARK: - Logs
 
-/// "Logs": one row that opens the log viewer.
+/// The log's card row: "backtest-<id>.log" and its line count; it opens the
+/// log viewer.
 struct BacktestLogsSection: View {
     let id: String
     let model: BacktestDetailModel
 
     var body: some View {
-        Section("Logs") {
+        var meta: [String] = []
+        if !model.logLines.isEmpty { meta.append("\(model.logLines.count) lines") }
+        if model.logSource == "db" { meta.append("last 500 — no full log file") }
+        return DSSection {
             NavigationLink {
                 BacktestLogsScreen(id: id, model: model)
             } label: {
-                LabeledContent {
-                    if !model.logLines.isEmpty {
-                        Text("\(model.logLines.count) lines")
-                    }
-                } label: {
-                    Label("View Logs", systemImage: Symbol.named("terminal"))
+                EntityRow("backtest-\(id).log", subtitle: meta.isEmpty ? nil : meta.joined(separator: " · ")) {
+                    Text("View logs")
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.secondary)
                 }
             }
         }
     }
 }
 
-/// The backtest's log, pushed from its row — the Dart `_LogsPanel` body.
-/// The first open loads it (`GET /backtests/:id/logs`), as the panel did.
+/// The backtest's log, pushed from its row: monospaced lines on the page,
+/// coloured by level as the web colours them. The first open loads it
+/// (`GET /backtests/:id/logs`).
 struct BacktestLogsScreen: View {
     let id: String
     let model: BacktestDetailModel
@@ -341,31 +518,41 @@ struct BacktestLogsScreen: View {
     var body: some View {
         Group {
             if model.logsLoading {
-                LoadingState(label: "Loading logs…")
-                    .frame(maxHeight: .infinity)
-            } else if let error = model.logsError {
-                ContentUnavailableView {
-                    Label(error, systemImage: Symbol.named("error_outline"))
+                VStack(alignment: .leading, spacing: 8) {
+                    Skeleton(width: 220, height: 12)
+                    Skeleton(width: 150, height: 12)
+                    Skeleton(width: 180, height: 12)
                 }
+                .padding(20)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .accessibilityLabel("Loading logs")
+            } else if let error = model.logsError {
+                ErrorRow(message: error) { Task { await model.loadLogs() } }
+                    .padding(DS.pageGutter)
+                    .frame(maxHeight: .infinity, alignment: .top)
             } else if model.logLines.isEmpty {
-                ContentUnavailableView("No logs available.", systemImage: Symbol.named("terminal"))
+                Card(padding: 0) {
+                    EmptyState(title: "No logs available for this backtest")
+                }
+                .padding(DS.pageGutter)
+                .frame(maxHeight: .infinity, alignment: .top)
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 2) {
                         ForEach(Array(model.logLines.enumerated()), id: \.offset) { _, line in
                             Text(line)
-                                .font(.system(.caption2, design: .monospaced))
+                                .font(DS.Font.monoSmall)
                                 .foregroundStyle(BacktestDetailFormat.levelColor(line))
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
                     }
-                    .padding(16)
+                    .padding(DS.cardPadding)
                     .textSelection(.enabled)
                 }
                 .defaultScrollAnchor(.bottom)
             }
         }
-        .background(DS.Surface.panel)
+        .background(DS.Surface.page)
         .navigationTitle("backtest-\(id).log")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -373,13 +560,14 @@ struct BacktestLogsScreen: View {
                 ToolbarItem(placement: .status) {
                     HStack(spacing: 6) {
                         if !model.logLines.isEmpty {
-                            Text("\(model.logLines.count) lines")
+                            Text("\(model.logLines.count) lines").monospacedDigit()
                         }
                         if model.logSource == "db" {
-                            Text("(last 500)").foregroundStyle(DS.Palette.warning)
+                            Text("last 500 — no full log file")
                         }
                     }
-                    .font(.footnote)
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.muted)
                 }
             }
         }
@@ -391,8 +579,8 @@ struct BacktestLogsScreen: View {
 
 // MARK: - Portfolio chart
 
-/// The portfolio value over time, under the hero: a readout of the value
-/// (scrubbed or latest) against the start, then the chart.
+/// "Portfolio value over time": the value (scrubbed or latest) as the
+/// figure, its change against the start, then the chart with its axis.
 struct BacktestPortfolioChart: View {
     let history: [PortfolioValuePoint]
     let startValue: Double?
@@ -407,58 +595,91 @@ struct BacktestPortfolioChart: View {
         let i = scrubIdx.flatMap { $0 >= 0 && $0 < values.count ? $0 : nil }
         let display = i.map { values[$0] } ?? values.last ?? 0
         let pnl = display - startVal
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Portfolio value over time")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(fmtMoney(display))
-                    .font(.headline.monospacedDigit())
-                    .contentTransition(.numericText(value: display))
-                Text(fmtPnl(pnl)).font(.subheadline.monospacedDigit()).foregroundStyle(pnlColor(pnl))
-                Text("vs start").font(.footnote).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 0) {
+            Text(fmtMoney(display))
+                .dsValueHero()
+                .foregroundStyle(DS.Text.primary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+                .contentTransition(.numericText(value: display))
+            HStack(spacing: 6) {
+                Text(fmtPnl(pnl)).foregroundStyle(backtestPnlColor(pnl))
+                Text("vs start").foregroundStyle(DS.Text.muted)
+                Spacer(minLength: 8)
+                Text(i.map { fmtDateTime(timestamps[$0]) } ?? " ")
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.muted)
             }
-            Text(i.map { fmtDateTime(timestamps[$0]) } ?? " ")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+            .font(DS.Font.body)
+            .monospacedDigit()
+            .padding(.top, 8)
             ScrubbableAreaChart(
                 timestamps: timestamps,
                 values: values,
-                lineColor: isUp ? DS.Palette.success : DS.Palette.danger,
-                height: 220,
+                lineColor: isUp ? DS.Palette.gain : DS.Palette.loss,
+                height: 260,
                 baseline: startValue,
-                onScrub: { scrubIdx = $0 }
+                onScrub: { scrubIdx = $0 },
+                showsYAxis: true
             )
-            .padding(.top, 4)
+            .padding(.top, 24)
         }
     }
 }
 
 // MARK: - P&L per stock
 
+/// "P&L per stock": a table card — stock, P&L, P&L % and price change.
 struct BacktestPnlPerStockCard: View {
     let summary: BacktestSummary
 
     var body: some View {
-        Section {
-            ForEach(summary.tickers, id: \.self) { sym in
-                let p = summary.pnlPerStock?[sym]?.double
-                let pp = summary.pnlPercentPerStock?[sym]?.double
-                let pc = summary.stockPriceChange?[sym]?.double
-                HStack(spacing: 12) {
-                    Text(sym).font(.headline.monospaced())
-                    Spacer()
-                    Text(fmtPnl(p)).foregroundStyle(pnlColor(p))
-                    Text(fmtPct(pp)).font(.footnote).foregroundStyle(pnlColor(pp))
-                    Text(fmtPct(pc)).font(.footnote).foregroundStyle(pnlColor(pc))
+        DSSection("P&L per stock", style: .plain) {
+            Card(padding: 0) {
+                DSTableHeader {
+                    Text("Stock")
+                    Spacer(minLength: 8)
+                    Text("P&L").frame(width: Self.pnlWidth, alignment: .trailing)
+                    Text("P&L %").frame(width: Self.pctWidth, alignment: .trailing)
+                    Text("Price chg").frame(width: Self.pctWidth, alignment: .trailing)
                 }
-                .monospacedDigit()
-                .accessibilityElement(children: .combine)
+                DSRows {
+                    ForEach(summary.tickers, id: \.self) { sym in
+                        let p = summary.pnlPerStock?[sym]?.double
+                        let pp = summary.pnlPercentPerStock?[sym]?.double
+                        let pc = summary.stockPriceChange?[sym]?.double
+                        DSRow {
+                            HStack(spacing: 12) {
+                                Text(sym)
+                                    .font(DS.Font.bodyMedium)
+                                    .foregroundStyle(DS.Text.primary)
+                                    .lineLimit(1)
+                                Spacer(minLength: 8)
+                                Text(fmtPnl(p))
+                                    .foregroundStyle(backtestPnlColor(p))
+                                    .frame(width: Self.pnlWidth, alignment: .trailing)
+                                Text(fmtPct(pp))
+                                    .foregroundStyle(backtestPnlColor(pp))
+                                    .frame(width: Self.pctWidth, alignment: .trailing)
+                                Text(fmtPct(pc))
+                                    .foregroundStyle(DS.Text.secondary)
+                                    .frame(width: Self.pctWidth, alignment: .trailing)
+                            }
+                            .font(DS.Font.body)
+                            .monospacedDigit()
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                            .accessibilityElement(children: .combine)
+                        }
+                    }
+                }
             }
-        } header: {
-            Text("P&L per Stock")
+            .dsClearRow()
         }
     }
+
+    private static let pnlWidth: CGFloat = 88
+    private static let pctWidth: CGFloat = 64
 }
 
 // MARK: - Stock accordion
@@ -491,19 +712,29 @@ struct BacktestStockAccordion: View {
         let trades = trades
         VStack(spacing: 0) {
             Button(action: onToggle) {
-                HStack(spacing: 8) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(sym).font(.headline.monospaced()).foregroundStyle(.primary)
-                        Text("\(trades.count) trades").font(.subheadline).foregroundStyle(.secondary)
+                HStack(spacing: 12) {
+                    HStack(alignment: .firstTextBaseline, spacing: 12) {
+                        Text(sym)
+                            .font(DS.Font.bodyMedium)
+                            .foregroundStyle(DS.Text.primary)
+                        Text("\(fmtPnl(pnl)) (\(fmtPct(pnlPct)))")
+                            .font(DS.Font.body)
+                            .foregroundStyle(backtestPnlColor(pnl))
+                            .lineLimit(1)
+                        Text("\(trades.count) trades")
+                            .font(DS.Font.caption)
+                            .foregroundStyle(DS.Text.muted)
+                            .lineLimit(1)
                     }
-                    Spacer()
-                    EntityRowValue(fmtPnl(pnl), color: pnlColor(pnl), detail: fmtPct(pnlPct), detailColor: pnlColor(pnlPct))
-                    Image(systemName: "chevron.right")
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(.tertiary)
-                        .rotationEffect(.degrees(expanded ? 90 : 0))
+                    .monospacedDigit()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 14))
+                        .foregroundStyle(DS.Text.muted)
+                        .rotationEffect(.degrees(expanded ? 180 : 0))
                         .accessibilityHidden(true)
                 }
+                .frame(minHeight: 40)
                 .contentShape(.rect)
             }
             .buttonStyle(.plain)
@@ -525,75 +756,120 @@ struct BacktestStockAccordion: View {
                 return ta != tb ? ta > tb : a.offset < b.offset
             }
             .map(\.element)
-        if !prices.isEmpty {
-            let buys = trades.filter { ($0.action ?? "").lowercased().contains("buy") }
-            let sells = trades.filter { ($0.action ?? "").lowercased().contains("sell") }
-            let markers = buys.map { ScrubbableChartMarker(date: $0.timestamp ?? Date(), value: $0.price?.double ?? 0, color: DS.Palette.success) }
-                + sells.map { ScrubbableChartMarker(date: $0.timestamp ?? Date(), value: $0.price?.double ?? 0, color: DS.Palette.danger) }
-            ScrubbableAreaChart(
-                timestamps: prices.map(\.timestamp),
-                values: prices.map(\.close),
-                lineColor: DS.Palette.info,
-                height: 220,
-                markers: markers
-            )
-            .padding(.vertical, 12)
-        }
-        if !trades.isEmpty {
-            Divider()
-            BacktestTradeTable(trades: trades)
-        }
-        if !decisions.isEmpty {
-            Divider()
-            BacktestDecisionTrace(decisions: decisions, limit: decisionLimit, onShowMore: onShowMoreDecisions)
+        VStack(alignment: .leading, spacing: 0) {
+            DSDivider()
+            if prices.isEmpty {
+                Text("No price data for \(sym)")
+                    .font(DS.Font.body)
+                    .foregroundStyle(DS.Text.muted)
+                    .padding(.vertical, 16)
+            } else {
+                let buys = trades.filter { ($0.action ?? "").lowercased().contains("buy") }
+                let sells = trades.filter { ($0.action ?? "").lowercased().contains("sell") }
+                let markers = buys.map { ScrubbableChartMarker(date: $0.timestamp ?? Date(), value: $0.price?.double ?? 0, color: DS.Palette.gain) }
+                    + sells.map { ScrubbableChartMarker(date: $0.timestamp ?? Date(), value: $0.price?.double ?? 0, color: DS.Palette.loss) }
+                HStack(spacing: 12) {
+                    BacktestDotWord(word: "Buy", color: DS.Palette.gain)
+                    BacktestDotWord(word: "Sell", color: DS.Palette.loss)
+                }
+                .font(DS.Font.caption)
+                .foregroundStyle(DS.Text.muted)
+                .padding(.top, 16)
+                ScrubbableAreaChart(
+                    timestamps: prices.map(\.timestamp),
+                    values: prices.map(\.close),
+                    lineColor: DS.Chart.lead,
+                    height: 220,
+                    markers: markers,
+                    showsYAxis: true
+                )
+                .padding(.vertical, 12)
+            }
+            if !trades.isEmpty {
+                DSDivider()
+                BacktestTradeTable(trades: trades)
+            }
+            if !decisions.isEmpty {
+                DSDivider()
+                BacktestDecisionTrace(decisions: decisions, limit: decisionLimit, onShowMore: onShowMoreDecisions)
+            }
         }
     }
 }
 
-/// The trade table (Time / Action / Shares / Price / Total / Cash After),
-/// scrolling sideways like the Dart `DataTable`.
+/// A 6 pt dot and a word (the web's buy / sell / decision markers).
+struct BacktestDotWord: View {
+    let word: String
+    let color: Color
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Circle().fill(color).frame(width: 6, height: 6)
+            Text(word)
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// The trade table (Time / Action / Shares / Price / Total / Cash after),
+/// scrolling sideways as the web's table does on a phone.
 struct BacktestTradeTable: View {
     let trades: [BacktestTrade]
 
+    private static let headers = ["Time", "Action", "Shares", "Price", "Total", "Cash after"]
+
     var body: some View {
-        ScrollView(.horizontal) {
-            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 8) {
+        ScrollView(.horizontal, showsIndicators: false) {
+            Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 0) {
                 GridRow {
-                    ForEach(["Time", "Action", "Shares", "Price", "Total", "Cash After"], id: \.self) { h in
-                        Text(h).font(.caption).foregroundStyle(.secondary)
+                    ForEach(Self.headers, id: \.self) { h in
+                        Text(h)
+                            .font(DS.Font.caption)
+                            .foregroundStyle(DS.Text.muted)
+                            .frame(height: 40)
                             .gridColumnAlignment(h == "Time" || h == "Action" ? .leading : .trailing)
                     }
                 }
-                ForEach(Array(trades.enumerated()), id: \.offset) { _, t in
+                Rectangle().fill(DS.Line.divider).frame(height: 1).gridCellUnsizedAxes(.horizontal)
+                ForEach(Array(trades.enumerated()), id: \.offset) { i, t in
                     let isBuy = (t.action ?? "").lowercased().contains("buy")
-                    GridRow {
-                        Text(fmtDateTime(t.timestamp))
-                        BacktestActionBadge(action: t.action ?? "")
-                        Text(t.shares.map { dartToStringAsFixed($0.double, 4) } ?? "—")
-                        Text(fmtMoney(t.price?.double))
-                        Text(t.total.map { fmtMoney(abs($0.double)) } ?? "—")
-                            .foregroundStyle(isBuy ? DS.Palette.danger : DS.Palette.success)
-                        Text(fmtMoney(t.cashAfter?.double))
+                    if i > 0 {
+                        Rectangle().fill(DS.Line.row).frame(height: 1).gridCellUnsizedAxes(.horizontal)
                     }
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                    GridRow {
+                        Text(fmtDateTime(t.timestamp)).foregroundStyle(DS.Text.secondary).frame(height: 48)
+                        BacktestActionBadge(action: t.action ?? "")
+                        Text(t.shares.map { dartToStringAsFixed($0.double, 4) } ?? "—").foregroundStyle(DS.Text.label)
+                        Text(fmtMoney(t.price?.double)).foregroundStyle(DS.Text.label)
+                        Text(t.total.map { fmtMoney(abs($0.double)) } ?? "—")
+                            .foregroundStyle(isBuy ? DS.Palette.loss : DS.Palette.gain)
+                        Text(fmtMoney(t.cashAfter?.double)).foregroundStyle(DS.Text.secondary)
+                    }
+                    .font(DS.Font.body)
+                    .monospacedDigit()
+                    .lineLimit(1)
                 }
             }
-            .padding(.vertical, 12)
+            .padding(.bottom, 4)
         }
     }
 }
 
-/// The Buy / Sell tag (`_ActionBadge`), sentence-cased.
+/// The Buy / Sell marker: a dot and the word, sentence-cased (no pill).
 struct BacktestActionBadge: View {
     let action: String
 
     var body: some View {
-        let c: Color = action.lowercased().contains("buy") ? DS.Palette.success : DS.Palette.danger
-        MarketsTag(text: action.lowercased().dsSentenceCased, color: c)
+        let c: Color = action.lowercased().contains("buy") ? DS.Palette.gain : DS.Palette.loss
+        BacktestDotWord(word: action.lowercased().dsSentenceCased, color: c)
+            .foregroundStyle(DS.Text.soft)
     }
 }
 
+/// "Decision trace": each evaluation, newest first, as a bordered block —
+/// its time, the decision as a dot and a word with any override and the
+/// lead strategy, the weighted score, the reason and each strategy's vote —
+/// then "Show 5 more".
 struct BacktestDecisionTrace: View {
     let decisions: [BacktestDecision]
     let limit: Int
@@ -603,82 +879,160 @@ struct BacktestDecisionTrace: View {
         let visible = Array(decisions.prefix(limit))
         let remaining = decisions.count - visible.count
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Decision Trace").font(.subheadline.weight(.semibold))
+            HStack(alignment: .firstTextBaseline) {
+                Text("Decision trace")
+                    .font(DS.Font.bodyMedium)
+                    .foregroundStyle(DS.Text.primary)
                 Spacer()
-                Text("\(decisions.count) evaluations").font(.footnote).foregroundStyle(.secondary)
+                Text("\(decisions.count) evaluations")
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.muted)
+                    .monospacedDigit()
             }
-            ForEach(Array(visible.enumerated()), id: \.offset) { i, d in
-                if i > 0 { Divider() }
+            ForEach(Array(visible.enumerated()), id: \.offset) { _, d in
                 entry(d)
             }
             if remaining > 0 {
                 Button(action: onShowMore) {
-                    Text("Show more (\(remaining) remaining)")
-                        .frame(maxWidth: .infinity)
+                    HStack(spacing: 4) {
+                        Text("Show \(min(BacktestDetailView.decisionPage, remaining)) more")
+                            .foregroundStyle(DS.Text.secondary)
+                        Text("· \(remaining) remaining")
+                            .foregroundStyle(DS.Text.muted)
+                    }
+                    .font(DS.Font.body)
+                    .monospacedDigit()
+                    .frame(maxWidth: .infinity, minHeight: 40)
+                    .contentShape(.rect)
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(.plain)
+                .dsCardSurface(fill: .clear, radius: DS.Radius.control, border: DS.Line.divider)
             }
         }
-        .padding(.vertical, 12)
+        .padding(.vertical, 16)
     }
 
     private func color(_ label: String) -> Color {
-        label == "BUY" ? DS.Palette.success : (label == "SELL" ? DS.Palette.danger : .secondary)
+        label == "BUY" ? DS.Palette.gain : (label == "SELL" ? DS.Palette.loss : DS.Text.faint)
     }
 
     private func entry(_ d: BacktestDecision) -> some View {
         let label = d.decisionLabel()
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(fmtDateTime(d.timestamp)).font(.footnote).foregroundStyle(.secondary)
-                    MarketsFlowLayout(spacing: 6, runSpacing: 4) {
-                        AppBadge(label: label.lowercased(), color: color(label))
-                        if d.overrideApplied == true { AppBadge(label: "Override", color: DS.Palette.warning) }
-                        if let primary = d.primaryStrategy { MarketsChip(text: primary) }
-                    }
-                }
-                Spacer()
-                if let score = d.normalizedScore {
-                    VStack(alignment: .trailing, spacing: 0) {
-                        Text("Weighted Score").font(.caption).foregroundStyle(.secondary)
-                        Text(dartToStringAsFixed(score.double, 3)).font(.footnote.monospacedDigit())
-                    }
-                }
-            }
-            if let reason = d.finalReason, !reason.isEmpty {
-                Text(reason).font(.subheadline)
-            }
-            ForEach(Array(d.strategies.enumerated()), id: \.offset) { _, s in
-                HStack(alignment: .top, spacing: 6) {
-                    AppBadge(label: s.decisionLabel().lowercased(), color: color(s.decisionLabel()))
-                    VStack(alignment: .leading, spacing: 0) {
-                        Text(s.strategy ?? "?").font(.subheadline.weight(.semibold))
-                        if let r = s.reason {
-                            Text(BacktestDetailFormat.truncateReason(r)).font(.footnote).foregroundStyle(.secondary)
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 16) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(fmtDateTime(d.timestamp))
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.muted)
+                        .monospacedDigit()
+                    FlowLayout(spacing: 8, runSpacing: 4) {
+                        BacktestDotWord(word: label.lowercased().dsSentenceCased, color: color(label))
+                            .font(DS.Font.body)
+                            .foregroundStyle(DS.Text.primary)
+                        if d.overrideApplied == true {
+                            Text("Override").font(DS.Font.caption).foregroundStyle(DS.Palette.amber)
+                        }
+                        if let primary = d.primaryStrategy {
+                            Text(primary).font(DS.Font.caption).foregroundStyle(DS.Text.secondary)
+                        }
+                        if let intent = d.primaryActionIntent {
+                            Text(intent).font(DS.Font.caption).foregroundStyle(DS.Text.muted)
                         }
                     }
                 }
+                Spacer(minLength: 0)
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("Weighted score")
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.muted)
+                    Text(d.normalizedScore.map { dartToStringAsFixed($0.double, 3) } ?? "—")
+                        .font(DS.Font.body)
+                        .foregroundStyle(DS.Text.soft)
+                        .monospacedDigit()
+                }
+            }
+            if d.overrideApplied == true, let pre = d.preOverrideAction, !pre.isEmpty {
+                Text("Final action changed from \(pre.uppercased()) to \(label).")
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.secondary)
+            }
+            if let reason = d.finalReason, !reason.isEmpty {
+                Text(reason)
+                    .font(DS.Font.body)
+                    .foregroundStyle(DS.Text.soft)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if !d.postDecision.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Post-decision output")
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.muted)
+                    ForEach(Array(d.postDecision.enumerated()), id: \.offset) { _, post in
+                        let name = post.strategy ?? "post_decision"
+                        let verdict = backtestDecisionLabel(post.decision)
+                        let reason = post.reason.map { " · \(BacktestDetailFormat.truncateReason($0))" } ?? ""
+                        Text("\(name) \(Text("→").foregroundStyle(DS.Text.faint)) \(verdict)\(Text(reason).foregroundStyle(DS.Text.secondary))")
+                            .font(DS.Font.caption)
+                            .foregroundStyle(DS.Text.soft)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .dsCardSurface(fill: .clear, radius: DS.Radius.control, border: DS.Line.divider)
+            }
+            ForEach(Array(d.strategies.enumerated()), id: \.offset) { _, s in
+                let sLabel = s.decisionLabel()
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Text(s.strategy ?? "strategy")
+                            .font(DS.Font.body)
+                            .foregroundStyle(DS.Text.soft)
+                            .lineLimit(1)
+                        Spacer(minLength: 8)
+                        BacktestDotWord(word: sLabel.lowercased().dsSentenceCased, color: color(sLabel))
+                            .font(DS.Font.caption)
+                            .foregroundStyle(DS.Text.label)
+                    }
+                    Text(["Weight \(s.weight.map { "\(dartToStringAsFixed($0.double * 100, 0))%" } ?? "—")", s.actionIntent].compactMap { $0 }.joined(separator: " · "))
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.muted)
+                        .monospacedDigit()
+                    if let r = s.reason, !r.isEmpty {
+                        Text(BacktestDetailFormat.truncateReason(r))
+                            .font(DS.Font.caption)
+                            .foregroundStyle(DS.Text.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .dsCardSurface(radius: DS.Radius.control, border: DS.Line.divider)
             }
         }
+        .padding(16)
+        .dsCardSurface(fill: DS.Surface.page, radius: DS.Radius.control, border: DS.Line.divider)
     }
 }
 
 // MARK: - Round trips
 
+/// "Round trip statistics": four figures on one card.
 struct BacktestRoundTripStats: View {
     let summary: BacktestSummary
 
     var body: some View {
-        Section("Round trip statistics") {
-            StatGrid(columns: 2) {
-                StatCell(label: "Round trips", value: BacktestDetailFormat.numText(summary.roundTrips, "—"))
-                StatCell(label: "Total RT P&L", value: fmtPnl(summary.totalRoundTripPnl?.double), valueColor: pnlColor(summary.totalRoundTripPnl?.double))
-                StatCell(label: "Avg winning", value: fmtMoney(summary.avgWinningRoundTrip?.double), valueColor: DS.Palette.success)
-                StatCell(label: "Avg losing", value: fmtMoney(summary.avgLosingRoundTrip?.double), valueColor: DS.Palette.danger)
+        DSSection("Round trip statistics", style: .plain) {
+            Card {
+                StatGrid(columns: 2) {
+                    StatCell(label: "Round trips", value: BacktestDetailFormat.numText(summary.roundTrips, "—"))
+                    StatCell(label: "Total round trip P&L", value: fmtPnl(summary.totalRoundTripPnl?.double), valueColor: backtestPnlColor(summary.totalRoundTripPnl?.double))
+                    StatCell(label: "Avg winning", value: fmtMoney(summary.avgWinningRoundTrip?.double), valueColor: DS.Palette.gain)
+                    StatCell(label: "Avg losing", value: fmtMoney(summary.avgLosingRoundTrip?.double), valueColor: DS.Palette.loss)
+                }
+                .statValueStyle(.figure)
             }
-            .padding(.vertical, 4)
+            .dsClearRow()
         }
     }
 }
@@ -715,11 +1069,28 @@ nonisolated enum TrScorecardFormat {
         }
     }
 
+    /// The web's `TR_TONE`: pass gain, fail loss, untested zinc-500.
     static func verdictColor(_ v: TrVerdict) -> Color {
         switch v {
-        case .pass: DS.Palette.success
-        case .fail: DS.Palette.danger
-        case .untested: .secondary
+        case .pass: DS.Palette.gain
+        case .fail: DS.Palette.loss
+        case .untested: DS.Text.muted
+        }
+    }
+
+    /// The web's `toneOf`: gain above zero, loss below, zinc-500 for zero or
+    /// no figure.
+    static func tone(_ v: Double?) -> Color {
+        guard let v, v.isFinite, v != 0 else { return DS.Text.muted }
+        return v > 0 ? DS.Palette.gain : DS.Palette.loss
+    }
+
+    /// A window's "Beat?" colour.
+    static func beatColor(_ beat: Bool?) -> Color {
+        switch beat {
+        case true?: DS.Palette.gain
+        case false?: DS.Palette.loss
+        case nil: DS.Text.muted
         }
     }
 
@@ -775,37 +1146,36 @@ nonisolated enum TrScorecardFormat {
     }
 }
 
-/// "vs S&P 500 by market type": each period's return a year, drawdown and
-/// pass flags against SPY, then each tested period's market-type windows.
+/// "vs S&P 500 by market type" with the AI training cutoff under it: each
+/// period's return a year, drawdown and pass flags against the S&P, then
+/// each tested period's market-type windows and the notes, on one card.
 /// Shown only when the summary carries a TR scorecard.
 struct BacktestTrScorecardSection: View {
     let card: TrScorecard
 
     var body: some View {
-        if let error = card.error {
-            Section(TrScorecardFormat.title) {
-                Text(TrScorecardFormat.errorNote(error))
-                    .foregroundStyle(.secondary)
-            }
-        } else {
-            let rows = TrScorecardFormat.periods(card)
-            Section {
-                ForEach(rows) { periodSummary($0) }
-            } header: {
-                Text(TrScorecardFormat.title)
-            } footer: {
-                if let cutoff = card.cutoff {
-                    Text("AI training cutoff: \(cutoff)")
+        DSSection(TrScorecardFormat.title, subtitle: card.cutoff.map { "AI training cutoff: \($0)" }) {
+            if let error = card.error {
+                HStack(spacing: 8) {
+                    DSStatusDot(.warn)
+                    Text(TrScorecardFormat.errorNote(error))
+                        .font(DS.Font.body)
+                        .foregroundStyle(DS.Text.secondary)
                 }
-            }
-            ForEach(rows.filter { !$0.period.untested }) { row in
-                windowsSection(row)
-            }
-            if !card.notes.isEmpty {
-                Section("Scorecard notes") {
-                    ForEach(Array(card.notes.enumerated()), id: \.offset) { _, note in
-                        Text(note).font(.footnote).foregroundStyle(.secondary)
+            } else {
+                let rows = TrScorecardFormat.periods(card)
+                ForEach(rows) { periodSummary($0) }
+                ForEach(rows.filter { !$0.period.untested }) { windows($0) }
+                if !card.notes.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(Array(card.notes.enumerated()), id: \.offset) { _, note in
+                            Text(note)
+                                .font(DS.Font.caption)
+                                .foregroundStyle(DS.Text.muted)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
+                    .padding(.vertical, 4)
                 }
             }
         }
@@ -813,81 +1183,99 @@ struct BacktestTrScorecardSection: View {
 
     private func periodSummary(_ row: TrScorecardFormat.PeriodRow) -> some View {
         let p = row.period
-        return VStack(alignment: .leading, spacing: 8) {
+        return VStack(alignment: .leading, spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(row.label).font(.headline)
+                Text(row.label)
+                    .font(DS.Font.body)
+                    .foregroundStyle(DS.Text.primary)
                 if let dates = TrScorecardFormat.dates(p.start, p.end) {
-                    Text(dates).font(.footnote.monospacedDigit()).foregroundStyle(.secondary)
+                    Text(dates)
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.muted)
+                        .monospacedDigit()
                 }
             }
             Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
-                figure("Return/yr", TrScorecardFormat.signedPct(p.cagr))
-                figure("S&P/yr", TrScorecardFormat.signedPct(p.spyCagr))
-                figure("Difference", TrScorecardFormat.points(p.excessPp), color: pnlColor(p.excessPp))
-                figure("Worst drop", TrScorecardFormat.pct(p.maxDd))
-                figure("S&P worst drop", TrScorecardFormat.pct(p.spyMaxDd))
-                verdict("Beat S&P in all market types", p.passAllRegimes)
-                verdict("+5 pts/yr target", p.passPlus5)
+                figure("Return/yr", TrScorecardFormat.signedPct(p.cagr), color: DS.Text.soft)
+                figure("S&P/yr", TrScorecardFormat.signedPct(p.spyCagr), color: DS.Text.secondary)
+                figure("Difference", TrScorecardFormat.points(p.excessPp), color: TrScorecardFormat.tone(p.excessPp))
+                figure("Worst drop", TrScorecardFormat.pct(p.maxDd), color: DS.Text.soft)
+                figure("S&P worst drop", TrScorecardFormat.pct(p.spyMaxDd), color: DS.Text.secondary)
+                figure("Beat S&P in all market types", TrScorecardFormat.verdictLabel(p.passAllRegimes), color: TrScorecardFormat.verdictColor(p.passAllRegimes))
+                figure("+5 pts/yr target", TrScorecardFormat.verdictLabel(p.passPlus5), color: TrScorecardFormat.verdictColor(p.passPlus5))
             }
-            .font(.subheadline)
+            .font(DS.Font.body)
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 8)
         .accessibilityElement(children: .combine)
     }
 
-    private func figure(_ label: String, _ value: String, color: Color = .primary) -> some View {
+    private func figure(_ label: String, _ value: String, color: Color) -> some View {
         GridRow {
-            Text(label).foregroundStyle(.secondary)
+            Text(label)
+                .font(DS.Font.caption)
+                .foregroundStyle(DS.Text.muted)
             Text(value)
                 .monospacedDigit()
                 .foregroundStyle(color)
                 .gridColumnAlignment(.trailing)
+                .frame(maxWidth: .infinity, alignment: .trailing)
         }
     }
 
-    private func verdict(_ label: String, _ v: TrVerdict) -> some View {
-        GridRow {
-            Text(label).foregroundStyle(.secondary)
-            AppBadge(label: TrScorecardFormat.verdictLabel(v), color: TrScorecardFormat.verdictColor(v))
-                .gridColumnAlignment(.trailing)
-        }
-    }
+    private static let windowHeaders = ["Market type", "Dates", "Strategy", "S&P", "Beat?"]
 
-    private func windowsSection(_ row: TrScorecardFormat.PeriodRow) -> some View {
+    private func windows(_ row: TrScorecardFormat.PeriodRow) -> some View {
         let p = row.period
         let random = TrScorecardFormat.randomLines(candidates: p.randomPctileCandidates, universe: p.randomPctileUniverse)
-        return Section(row.label) {
+        return VStack(alignment: .leading, spacing: 4) {
+            Text(row.label)
+                .font(DS.Font.body)
+                .foregroundStyle(DS.Text.primary)
             ForEach(random, id: \.self) { line in
-                Text(line).font(.subheadline)
+                Text(line)
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.secondary)
+                    .monospacedDigit()
             }
             if p.windows.isEmpty {
-                Text("No market-type windows fall inside this period.")
-                    .foregroundStyle(.secondary)
+                Text("No market-type windows fall inside this period")
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.muted)
             } else {
-                ScrollView(.horizontal) {
-                    Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 8) {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 0) {
                         GridRow {
-                            ForEach(["Market type", "Dates", "Strategy", "S&P", "Beat?"], id: \.self) { h in
-                                Text(h).font(.caption).foregroundStyle(.secondary)
+                            ForEach(Self.windowHeaders, id: \.self) { h in
+                                Text(h)
+                                    .font(DS.Font.caption)
+                                    .foregroundStyle(DS.Text.muted)
+                                    .frame(height: 36)
                                     .gridColumnAlignment(h == "Market type" || h == "Dates" ? .leading : .trailing)
                             }
                         }
-                        ForEach(Array(p.windows.enumerated()), id: \.offset) { _, w in
-                            GridRow {
-                                Text(TrScorecardFormat.marketType(w.kind))
-                                Text(TrScorecardFormat.dates(w.start, w.end) ?? "—")
-                                    .foregroundStyle(.secondary)
-                                Text(TrScorecardFormat.signedPct(w.ret))
-                                Text(TrScorecardFormat.signedPct(w.spyRet))
-                                    .foregroundStyle(.secondary)
-                                Text(TrScorecardFormat.beatLabel(w.beat))
+                        Rectangle().fill(DS.Line.divider).frame(height: 1).gridCellUnsizedAxes(.horizontal)
+                        ForEach(Array(p.windows.enumerated()), id: \.offset) { i, w in
+                            if i > 0 {
+                                Rectangle().fill(DS.Line.row).frame(height: 1).gridCellUnsizedAxes(.horizontal)
                             }
-                            .font(.caption.monospacedDigit())
+                            GridRow {
+                                Text(TrScorecardFormat.marketType(w.kind)).foregroundStyle(DS.Text.soft).frame(height: 40)
+                                Text(TrScorecardFormat.dates(w.start, w.end) ?? "—").foregroundStyle(DS.Text.secondary)
+                                Text(TrScorecardFormat.signedPct(w.ret)).foregroundStyle(DS.Text.soft)
+                                Text(TrScorecardFormat.signedPct(w.spyRet)).foregroundStyle(DS.Text.secondary)
+                                Text(TrScorecardFormat.beatLabel(w.beat)).foregroundStyle(TrScorecardFormat.beatColor(w.beat))
+                            }
+                            .font(DS.Font.body)
+                            .monospacedDigit()
                         }
                     }
-                    .padding(.vertical, 12)
+                    .padding(.horizontal, 16)
                 }
+                .dsCardSurface(fill: .clear, radius: DS.Radius.control, border: DS.Line.divider)
+                .padding(.top, 8)
             }
         }
+        .padding(.vertical, 8)
     }
 }

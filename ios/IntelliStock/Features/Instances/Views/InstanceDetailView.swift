@@ -1,11 +1,14 @@
 import SwiftUI
 
 /// One instance — `InstanceDetailScreen` in `instance_detail_screen.dart` —
-/// as an inset-grouped list (redesign spec 2026-10-02). The instance's name
-/// is the inline title; Start / Stop is the toolbar's primary action and the
-/// rest (Live Trading, Clear State, the brokerage and strategy links) sits in
-/// its More menu. Sections: status, brokerage, strategy, the swing and wheel
-/// lanes, stocks, live logs and the instance's backtests.
+/// styled as the web's `InstanceDetailView.vue`. The instance's name is the
+/// title; Start / Stop is the toolbar's primary action and the rest (Live
+/// trading, Clear data, the brokerage and strategy links) sits in its More
+/// menu. Under the title: the id, origin and run state, then the linked
+/// account's value today. Sections, in the web's order: Instance info,
+/// Brokerage, Strategy, Stocks, Backtests — with the swing review queue and
+/// wheel book up top on a swing instance, and the live logs before the
+/// backtests.
 struct InstanceDetailView: View {
     let instanceId: String
 
@@ -75,9 +78,9 @@ private struct InstanceDetailContent: View {
     var body: some View {
         @Bindable var signalActions = signalActions
         content
-            .listStyle(.insetGrouped)
+            .dsList()
             .navigationTitle(title)
-            .navigationBarTitleDisplayMode(.inline)
+            .navigationBarTitleDisplayMode(.large)
             .toolbar { toolbar }
             .task { if model.value == nil { await model.load() } }
             .task { await model.runUptimeTicker() }
@@ -125,41 +128,40 @@ private struct InstanceDetailContent: View {
                         Text(inst.runCommand ? "Stop" : "Start")
                     }
                 }
-                .dsProminentButton()
                 .disabled(toggling)
                 .accessibilityLabel(inst.runCommand ? "Stop" : "Start")
             }
             ToolbarItem(placement: .topBarTrailing) {
                 ToolbarMenu {
                     Section {
-                        Button("Live Trading", systemImage: "chart.xyaxis.line") {
+                        Button("Live trading", systemImage: "chart.xyaxis.line") {
                             services.router.push(.liveTrading(inst.id))
                         }
-                        Button("New Backtest", systemImage: "play.circle") { sheet = .createBacktest }
+                        Button("New backtest", systemImage: "play.circle") { sheet = .createBacktest }
                     }
                     Section {
-                        Button(inst.brokerageId != nil ? "Change Brokerage" : "Link Brokerage", systemImage: "link") {
+                        Button(inst.brokerageId != nil ? "Change brokerage" : "Link brokerage", systemImage: "link") {
                             sheet = .linkBrokerage(inst.brokerageId)
                         }
                         if inst.strategyId == nil {
-                            Button("Link Strategy", systemImage: "link") { sheet = .linkStrategy }
+                            Button("Link strategy", systemImage: "link") { sheet = .linkStrategy }
                         }
-                        Button("Add Stock…", systemImage: "plus") { sheet = .addStock }
+                        Button("Add stock", systemImage: "plus") { sheet = .addStock }
                         Button("Copy ID", systemImage: "doc.on.doc") { UIPasteboard.general.string = inst.id }
                     }
                     Section {
-                        Button("Clear State", systemImage: "eraser", role: .destructive) { sheet = .clearState }
+                        Button("Clear data", systemImage: "eraser", role: .destructive) { sheet = .clearState }
                         if inst.brokerageId != nil {
-                            Button("Unlink Brokerage", systemImage: "xmark", role: .destructive) { confirmUnlinkBrokerage() }
+                            Button("Unlink brokerage", systemImage: "xmark", role: .destructive) { confirmUnlinkBrokerage() }
                                 .disabled(confirmRunning)
                         }
                         if inst.strategyId != nil {
-                            Button("Unlink Strategy", systemImage: "xmark", role: .destructive) { confirmUnlinkStrategy() }
+                            Button("Unlink strategy", systemImage: "xmark", role: .destructive) { confirmUnlinkStrategy() }
                                 .disabled(confirmRunning)
                         }
                     }
                     Section {
-                        Button("Delete Instance", systemImage: "trash", role: .destructive) { confirmDelete(inst) }
+                        Button("Delete instance", systemImage: "trash", role: .destructive) { confirmDelete(inst) }
                             .disabled(confirmRunning || services.instances.isBusy(inst.id))
                     }
                 }
@@ -200,6 +202,7 @@ private struct InstanceDetailContent: View {
                     ErrorRow(message: model.state.errorMessage ?? "") {
                         Task { await model.reload() }
                     }
+                    .dsClearRow(top: 8)
                 }
             }
         case .loaded(let state):
@@ -207,7 +210,7 @@ private struct InstanceDetailContent: View {
                 detail(inst, state)
             } else {
                 List {
-                    Section { ErrorRow(message: "Instance not found") }
+                    Section { ErrorRow(message: "Instance not found").dsClearRow(top: 8) }
                 }
             }
         }
@@ -218,10 +221,10 @@ private struct InstanceDetailContent: View {
         let pendingIds = Set(signals.state.value?.signals.map(\.id) ?? [])
         return ScrollViewReader { proxy in
           List {
-            if let message = state.errorMessage {
-                Section { ErrorRow(message: message) }
-            }
             heroSection(inst, state)
+            if let message = state.errorMessage {
+                Section { ErrorRow(message: message).dsClearRow() }
+            }
             // The review queue sits up top: it is what this screen is for on
             // a swing or wheel instance.
             if lanes.any {
@@ -238,17 +241,17 @@ private struct InstanceDetailContent: View {
                     brokerageId: inst.brokerageId,
                     portfolioTotal: inst.brokerageId.flatMap { services.instanceRows.accounts.summary($0)?.equity }
                 ) { id in
-                    withAnimation { proxy.scrollTo(swingSignalAnchor(id), anchor: .top) }
+                    withAnimation(DSMotion.ease(0.3)) { proxy.scrollTo(swingSignalAnchor(id), anchor: .top) }
                 }
             }
-            statusSection(inst, state)
+            infoSection(inst, state)
             brokerageSection(inst)
             strategySection(inst)
             stocksSection(inst)
-            Section("Live logs") {
+            // The panel carries its own "Live logs" heading.
+            DSSection(style: .plain) {
                 LiveLogsPanel(instanceId: inst.id)
-                    .listRowInsets(EdgeInsets())
-                    .listRowBackground(Color.clear)
+                    .dsClearRow()
             }
             InstanceBacktestsSection(
                 state: state,
@@ -268,115 +271,163 @@ private struct InstanceDetailContent: View {
 
     // MARK: Hero
 
-    /// The hero: the linked account's equity with today's change, one quiet
-    /// line with the run state, uptime and Paper / Live, then the wheel
-    /// book's cash as a secondary figure. Without an account figure the
-    /// quiet line stands alone.
+    /// Under the title: "alpaca-main · Created by user · ● Running" (the
+    /// web's page subline), then the linked account's value today with its
+    /// change, and the wheel book's cash as a secondary figure.
     private func heroSection(_ inst: Instance, _ state: InstanceDetailState) -> some View {
         let accounts = services.instanceRows.accounts
+        let brokerages = services.dashboard.brokeragesValue
         let summary = inst.brokerageId.flatMap { accounts.summary($0) }
         let pending = summary == nil && (inst.brokerageId.map { accounts.isPending($0) } ?? false)
         let cash = wheel.state.value?.cash
         return Section {
-            Group {
-                if let summary {
-                    HeroValueHeader(
-                        fmtMoney(summary.equity),
-                        numericValue: summary.equity,
-                        change: summary.dayChange == nil ? nil : summary.changeText,
-                        direction: summary.direction,
-                        changeLabel: "Today"
-                    ) {
-                        heroStatusLine(inst, state)
+            VStack(alignment: .leading, spacing: 0) {
+                subline(inst)
+                if let bid = inst.brokerageId, summary != nil || pending {
+                    accountLabel(inst, bid, brokerages: brokerages)
+                        .padding(.top, 24)
+                        .padding(.bottom, 4)
+                    if let summary {
+                        HeroValueHeader(
+                            fmtMoney(summary.equity),
+                            numericValue: summary.equity,
+                            change: summary.dayChange == nil ? nil : summary.changeText,
+                            direction: summary.direction,
+                            changeLabel: "Today"
+                        ) {
+                            if let cash {
+                                Text("Cash available \(fmtMoney(cash))")
+                                    .monospacedDigit()
+                            }
+                        }
+                    } else {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Skeleton(width: 220, height: 40, radius: DS.Radius.small)
+                            Skeleton(width: 150, height: 14)
+                        }
+                        .accessibilityLabel("Loading")
                     }
-                } else if pending {
-                    HeroValueHeader("$00,000.00", change: "+$00.00 (+0.00%)", changeLabel: "Today") {
-                        heroStatusLine(inst, state)
-                    }
-                    .redacted(reason: .placeholder)
-                } else {
-                    heroStatusLine(inst, state)
                 }
             }
-            .padding(.vertical, 6)
-            if let cash {
-                LabeledContent("Cash available") {
-                    Text(fmtMoney(cash)).monospacedDigit()
-                }
-            }
+            .dsClearRow(top: 0, bottom: 8)
         }
     }
 
-    /// "● Running · Up 6h 12m · Paper": a Live account keeps its red badge.
-    private func heroStatusLine(_ inst: Instance, _ state: InstanceDetailState) -> some View {
-        let paper = instanceIsPaper(inst, brokerages: services.dashboard.brokeragesValue)
-        var parts: [String] = []
-        if inst.runCommand, state.liveUptimeSecs > 0 { parts.append("Up \(instanceUptimeShort(state.liveUptimeSecs))") }
-        if paper == true { parts.append("Paper") }
+    /// "alpaca-main · Created by user · ● Running".
+    private func subline(_ inst: Instance) -> some View {
+        let state = InstanceRunState(inst)
         return HStack(spacing: 8) {
-            InstanceStatusDot(inst: inst, font: .footnote, detail: parts.joined(separator: " · "))
-            if paper == false {
-                StatusBadge(label: "Live", color: DS.Palette.danger)
-            }
+            Text(inst.id)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Text("·").foregroundStyle(DS.Text.faint)
+            Text(inst.createdBy == "ai" ? "Created by AI" : "Created by user")
+                .lineLimit(1)
+            Text("·").foregroundStyle(DS.Text.faint)
+            StatusDot(state.word, tone: state.tone, pulsing: state == .running, font: DS.Font.body)
         }
+        .font(DS.Font.body)
+        .foregroundStyle(DS.Text.muted)
+        .monospacedDigit()
         .accessibilityElement(children: .combine)
     }
 
-    // MARK: Status
+    /// "Alpaca Live · Paper", or "Alpaca Live · Live money" with the warning
+    /// word in amber.
+    private func accountLabel(_ inst: Instance, _ bid: String, brokerages: [BrokerageAccount]?) -> some View {
+        let name = instanceBrokerageName(bid, nested: inst.brokerage, brokerages: brokerages)
+        let paper = instanceIsPaper(inst, brokerages: brokerages)
+        var line = Text(name).foregroundStyle(DS.Text.muted)
+        if let paper {
+            line = line + Text(" · ").foregroundStyle(DS.Text.faint)
+                + (paper ? Text("Paper").foregroundStyle(DS.Text.muted) : Text("Live money").foregroundStyle(DS.Palette.amber))
+        }
+        return line
+            .font(DS.Font.caption)
+            .lineLimit(1)
+    }
 
-    private func statusSection(_ inst: Instance, _ state: InstanceDetailState) -> some View {
-        Section("Details") {
-            StatGrid(columns: 2) {
-                StatCell(
-                    label: "Uptime",
-                    value: instanceUptimeLabel(state.liveUptimeSecs),
-                    valueColor: inst.runCommand ? DS.Palette.success : .secondary
-                )
-                StatCell(label: "Granularity", value: instanceGranLabel(inst.granularityTimeIncrement))
-                if let maxUsage = inst.maxUsage {
-                    StatCell(label: "Max usage", value: fmtMoney(maxUsage))
-                }
-                StatCell(label: "Created by", value: inst.createdBy == "ai" ? "AI" : "User")
+    // MARK: Instance info
+
+    private func infoSection(_ inst: Instance, _ state: InstanceDetailState) -> some View {
+        DSSection("Instance info", rowMinHeight: 44) {
+            DSKeyValueRow("Granularity", instanceGranLabel(inst.granularityTimeIncrement))
+            DSKeyValueRow(
+                "Uptime",
+                instanceUptimeLabel(state.liveUptimeSecs),
+                valueColor: inst.runCommand && state.liveUptimeSecs > 0 ? DS.Text.primary : DS.Text.muted
+            )
+            DSKeyValueRow("Created by", inst.createdBy == "ai" ? "AI" : "User")
+            if let maxUsage = inst.maxUsage {
+                DSKeyValueRow("Max usage", fmtMoney(maxUsage))
             }
-            .padding(.vertical, 4)
-            LabeledContent("ID") {
+            HStack(spacing: 16) {
+                Text("ID")
+                    .foregroundStyle(DS.Text.secondary)
+                Spacer(minLength: 8)
                 Text(inst.id)
+                    .foregroundStyle(DS.Text.primary)
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
+            .font(DS.Font.body)
+            .accessibilityElement(children: .combine)
             .contextMenu {
                 Button("Copy ID", systemImage: "doc.on.doc") { UIPasteboard.general.string = inst.id }
             }
+        } accessory: {
+            Button("Clear data", role: .destructive) { sheet = .clearState }
+                .buttonStyle(.dsSecondary)
         }
     }
 
     // MARK: Brokerage
 
     private func brokerageSection(_ inst: Instance) -> some View {
+        let brokerages = services.dashboard.brokeragesValue
         var name = "—"
         var type = ""
         if let b = inst.brokerage {
             name = (b["account_name"] ?? .null).string ?? "—"
             type = (b["brokerage_type"] ?? .null).string ?? ""
         } else if let id = inst.brokerageId {
-            name = instanceBrokerageName(id, nested: nil, brokerages: services.dashboard.brokeragesValue)
+            name = instanceBrokerageName(id, nested: nil, brokerages: brokerages)
         }
+        // The data account is often the trading account itself: name it
+        // from the nested brokerage then.
         let dataSource = inst.alpacaDataBrokerageId.map {
-            instanceBrokerageName($0, nested: nil, brokerages: services.dashboard.brokeragesValue)
+            instanceBrokerageName($0, nested: $0 == inst.brokerageId ? inst.brokerage : nil, brokerages: brokerages)
         } ?? "—"
         let linked = inst.brokerageId != nil
-        return Section("Brokerage") {
-            LabeledContent("Trading account", value: "\(name)\(type.isEmpty ? "" : " (\(type))")")
-            LabeledContent("Market data source", value: dataSource)
-            if !linked {
-                InlineActionRow("Link Brokerage", systemImage: "link") { sheet = .linkBrokerage(inst.brokerageId) }
+        let paper = instanceIsPaper(inst, brokerages: brokerages)
+        return DSSection("Brokerage", rowMinHeight: 44) {
+            if linked {
+                EntityRow(name, subtitle: type.isEmpty ? nil : type.dsSentenceCased)
+                if let paper {
+                    DSKeyValueRow("Mode", paper ? "Paper" : "Live")
+                }
+            } else {
+                Text("No brokerage linked")
+                    .font(DS.Font.body)
+                    .foregroundStyle(DS.Text.muted)
+            }
+            DSKeyValueRow("Market data source", dataSource)
+        } accessory: {
+            HStack(spacing: 8) {
+                if linked {
+                    Button("Unlink", role: .destructive) { confirmUnlinkBrokerage() }
+                        .buttonStyle(.dsSecondary)
+                        .disabled(confirmRunning)
+                }
+                Button(linked ? "Change" : "Link") { sheet = .linkBrokerage(inst.brokerageId) }
+                    .buttonStyle(.dsSecondary)
             }
         }
     }
 
     private func confirmUnlinkBrokerage() {
         confirm = ConfirmRequest(
-            title: "Unlink Brokerage",
+            title: "Unlink brokerage",
             body: "Remove the brokerage from this instance?",
             confirmLabel: "Unlink",
             role: .destructive,
@@ -389,38 +440,43 @@ private struct InstanceDetailContent: View {
 
     private func strategySection(_ inst: Instance) -> some View {
         let name = (inst.strategy?["name"]).flatMap { $0.isNull ? nil : $0.dartDescription } ?? inst.strategyId ?? "—"
-        let subs = inst.strategy?["strategies"]?.array ?? []
-        return Section("Strategy") {
-            if inst.strategyId == nil {
+        let subs = (inst.strategy?["strategies"]?.array ?? []).filter(\.isObject)
+        let linked = inst.strategyId != nil
+        return DSSection("Strategy", rowMinHeight: 44) {
+            if !linked {
                 Text("No strategy linked")
-                    .foregroundStyle(.secondary)
-                InlineActionRow("Link Strategy", systemImage: "link") { sheet = .linkStrategy }
+                    .font(DS.Font.body)
+                    .foregroundStyle(DS.Text.muted)
             } else {
-                LabeledContent("Name", value: name)
-                LabeledContent("ID", value: inst.strategyId ?? "—")
-                if !subs.isEmpty {
-                    LabeledContent("Sub-strategies") {
-                        VStack(alignment: .trailing, spacing: 2) {
-                            ForEach(Array(subs.prefix(5).enumerated()), id: \.offset) { _, sub in
-                                if sub.isObject {
-                                    Text(sub["strategy"].isNull ? "?" : sub["strategy"].dartDescription)
-                                        .lineLimit(1)
-                                }
-                            }
-                            if subs.count > 5 {
-                                Text("+\(subs.count - 5) more")
-                                    .font(.footnote)
-                            }
-                        }
-                    }
+                EntityRow(name, subtitle: "ID \(inst.strategyId ?? "—")")
+                ForEach(Array(subs.prefix(5).enumerated()), id: \.offset) { _, sub in
+                    Text(sub["strategy"].isNull ? "?" : sub["strategy"].dartDescription)
+                        .font(DS.Font.body)
+                        .foregroundStyle(DS.Text.secondary)
+                        .lineLimit(1)
                 }
+                if subs.count > 5 {
+                    Text("+\(subs.count - 5) more")
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.muted)
+                        .monospacedDigit()
+                }
+            }
+        } accessory: {
+            if linked {
+                Button("Unlink", role: .destructive) { confirmUnlinkStrategy() }
+                    .buttonStyle(.dsSecondary)
+                    .disabled(confirmRunning)
+            } else {
+                Button("Link") { sheet = .linkStrategy }
+                    .buttonStyle(.dsSecondary)
             }
         }
     }
 
     private func confirmUnlinkStrategy() {
         confirm = ConfirmRequest(
-            title: "Unlink Strategy",
+            title: "Unlink strategy",
             body: "Remove the strategy from this instance?",
             confirmLabel: "Unlink",
             role: .destructive,
@@ -432,14 +488,18 @@ private struct InstanceDetailContent: View {
     // MARK: Stocks
 
     private func stocksSection(_ inst: Instance) -> some View {
-        DSSection("Stocks (\(inst.stocks.count))", action: DSSectionAction("Add", systemImage: "plus") { sheet = .addStock }) {
+        let count = inst.stocks.count
+        return DSSection("Stocks", subtitle: "\(count) symbol\(count == 1 ? "" : "s")", rowMinHeight: 44) {
             if inst.stocks.isEmpty {
                 Text("No stocks added")
-                    .foregroundStyle(.secondary)
+                    .font(DS.Font.body)
+                    .foregroundStyle(DS.Text.muted)
             } else {
                 ForEach(inst.stocks, id: \.self) { sym in
                     Text(sym)
-                        .font(.headline)
+                        .font(DS.Font.bodyMedium)
+                        .foregroundStyle(DS.Text.primary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                             Button("Remove", systemImage: "trash", role: .destructive) { removeStock(sym) }
                         }
@@ -449,6 +509,9 @@ private struct InstanceDetailContent: View {
                         .accessibilityHint("Swipe left to remove")
                 }
             }
+        } accessory: {
+            Button("Add stock") { sheet = .addStock }
+                .buttonStyle(.dsSecondary)
         }
     }
 
@@ -479,8 +542,9 @@ private struct InstanceDetailContent: View {
     }
 }
 
-/// The instance's backtests (`_BacktestsSection`): sort and New Backtest in
-/// the header, a row per backtest that opens it, and paging.
+/// The instance's backtests (the web's Backtests section): "N runs" under
+/// the title, sort and New backtest beside it, a row per backtest that
+/// opens it, and the pager.
 private struct InstanceBacktestsSection: View {
     let state: InstanceDetailState
     let onNew: () -> Void
@@ -488,12 +552,14 @@ private struct InstanceBacktestsSection: View {
     let onPage: (Int) -> Void
 
     var body: some View {
-        Section {
+        DSSection("Backtests", subtitle: "\(state.btTotal) \(state.btTotal == 1 ? "run" : "runs")") {
             if state.btLoading, state.backtests.isEmpty {
-                DashboardPlaceholderRows(count: 3)
+                ForEach(0..<4, id: \.self) { _ in
+                    Skeleton(width: 192, height: 16)
+                        .accessibilityHidden(true)
+                }
             } else if state.backtests.isEmpty {
-                Text("No backtests yet")
-                    .foregroundStyle(.secondary)
+                EmptyState(title: "No backtests run for this instance yet")
             } else {
                 ForEach(state.backtests) { bt in
                     NavigationLink(value: Route.backtest(bt.id)) {
@@ -501,52 +567,54 @@ private struct InstanceBacktestsSection: View {
                     }
                 }
                 if state.btTotalPages > 1 {
-                    HStack {
-                        Button {
-                            onPage(state.btPage - 1)
-                        } label: {
-                            Image(systemName: "chevron.backward")
-                                .frame(width: 44, height: 44)
-                        }
-                        .disabled(state.btPage <= 1)
-                        .accessibilityLabel("Previous page")
-                        Spacer()
-                        Text("Page \(state.btPage) of \(state.btTotalPages)")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        Button {
-                            onPage(state.btPage + 1)
-                        } label: {
-                            Image(systemName: "chevron.forward")
-                                .frame(width: 44, height: 44)
-                        }
-                        .disabled(state.btPage >= state.btTotalPages)
-                        .accessibilityLabel("Next page")
-                    }
-                    .buttonStyle(.borderless)
+                    pager
                 }
             }
-        } header: {
-            DSSectionHeader("Backtests") {
-                HStack(spacing: 18) {
-                    if !state.backtests.isEmpty {
-                        Menu {
-                            sortButton("Date", "completed_at")
-                            sortButton("PnL", "pnl")
-                        } label: {
-                            Label("Sort", systemImage: "arrow.up.arrow.down")
-                                .labelStyle(.iconOnly)
-                        }
-                        .accessibilityLabel("Sort")
+        } accessory: {
+            HStack(spacing: 4) {
+                if !state.backtests.isEmpty {
+                    Menu {
+                        sortButton("Date completed", "completed_at")
+                        sortButton("P&L", "pnl")
+                    } label: {
+                        Image(systemName: "arrow.up.arrow.down")
+                            .font(.system(size: 16))
+                            .foregroundStyle(DS.Text.muted)
+                            .frame(width: 32, height: 32)
+                            .contentShape(Rectangle())
                     }
-                    Button(action: onNew) {
-                        Label("New Backtest", systemImage: "plus")
-                            .labelStyle(.iconOnly)
-                    }
-                    .accessibilityLabel("New Backtest")
+                    .accessibilityLabel("Sort")
                 }
+                Button("New backtest", action: onNew)
+                    .buttonStyle(.dsSecondary)
             }
+        }
+    }
+
+    /// "Page 1 of 3 · 37 total" and the previous / next buttons.
+    private var pager: some View {
+        HStack(spacing: 4) {
+            Text("Page \(state.btPage) of \(state.btTotalPages) · \(state.btTotal) total")
+                .font(DS.Font.caption)
+                .foregroundStyle(DS.Text.muted)
+                .monospacedDigit()
+            Spacer()
+            Button {
+                onPage(state.btPage - 1)
+            } label: {
+                Image(systemName: "chevron.backward")
+            }
+            .buttonStyle(.dsIcon)
+            .disabled(state.btPage <= 1)
+            .accessibilityLabel("Previous page")
+            Button {
+                onPage(state.btPage + 1)
+            } label: {
+                Image(systemName: "chevron.forward")
+            }
+            .buttonStyle(.dsIcon)
+            .disabled(state.btPage >= state.btTotalPages)
+            .accessibilityLabel("Next page")
         }
     }
 
@@ -565,72 +633,104 @@ private struct InstanceBacktestsSection: View {
     }
 }
 
-/// One backtest row (`_BacktestCard`): the stocks, the date range, the P&L,
-/// the status when it is not finished, and progress while it runs.
+/// One backtest row (the web's table row, stacked for a phone): "#81204"
+/// over its stocks, the P&L and P&L % on the right; then the period, and
+/// the status with the completion date or the run's progress.
 private struct InstanceBacktestRowView: View {
     let bt: InstanceBacktestRow
     let progress: Int?
 
     var body: some View {
         let running = instanceBacktestIsRunning(bt.status)
-        let finished = ["finished", "completed"].contains(bt.status.lowercased())
         VStack(alignment: .leading, spacing: 6) {
-            EntityRow(
-                bt.stocks.isEmpty ? "(no stocks)" : bt.stocks.joined(separator: ", "),
-                subtitle: bt.startDate.map { "\($0) → \(bt.endDate ?? "?")" }
-            ) {
-                VStack(alignment: .trailing, spacing: 2) {
-                    if let pnl = bt.pnl {
-                        Text(fmtPnl(pnl))
-                            .font(.body.monospacedDigit())
-                            .foregroundStyle(pnlColor(pnl))
-                    }
-                    if !finished {
-                        StatusDot(bt.status.dsSentenceCased, status: bt.status, pulsing: running, font: .footnote)
-                    }
-                }
+            EntityRow("#\(bt.id)", subtitle: stocksText) {
+                EntityRowValue(
+                    bt.pnl.map { fmtPnl($0) } ?? "—",
+                    color: bt.pnl.map { pnlColor($0) } ?? DS.Text.muted,
+                    detail: bt.pnlPercent.map { fmtPct($0) },
+                    detailColor: bt.pnlPercent.map { pnlColor($0) }
+                )
             }
-            if running, let progress {
-                ProgressView(value: min(max(Double(progress) / 100, 0), 1)) {
-                    EmptyView()
-                } currentValueLabel: {
+            if let start = bt.startDate {
+                Text("\(start) → \(bt.endDate ?? "?")")
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.secondary)
+                    .monospacedDigit()
+            }
+            HStack(spacing: 4) {
+                StatusDot(bt.status.replacingOccurrences(of: "_", with: " ").dsSentenceCased, status: bt.status, pulsing: running, font: DS.Font.caption)
+                if running, let progress {
+                    // The web's 4 pt bar: zinc-300 on raised.
+                    Capsule()
+                        .fill(DS.Surface.raised)
+                        .frame(width: 80, height: 4)
+                        .overlay(alignment: .leading) {
+                            Capsule()
+                                .fill(DS.Text.label)
+                                .frame(width: 80 * Double(min(max(progress, 0), 100)) / 100, height: 4)
+                        }
+                        .padding(.horizontal, 8)
                     Text("\(progress)%")
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.secondary)
+                        .monospacedDigit()
+                } else if let completed = bt.completedAt {
+                    Text("· \(fmtDateTime(completed))")
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.muted)
+                        .monospacedDigit()
+                        .lineLimit(1)
                 }
-                .tint(DS.Palette.info)
-            }
-            if let completed = bt.completedAt {
-                Text("Completed: \(fmtDateTime(completed))")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
             }
         }
+        .padding(.vertical, 4)
         .accessibilityElement(children: .combine)
         .accessibilityHint("Opens the backtest")
     }
+
+    /// The first four stocks, then "+N"; "—" for none (the web's).
+    private var stocksText: String {
+        guard !bt.stocks.isEmpty else { return "—" }
+        let shown = bt.stocks.prefix(4).joined(separator: ", ")
+        return bt.stocks.count > 4 ? "\(shown) +\(bt.stocks.count - 4)" : shown
+    }
 }
 
-/// The detail screen's loading shape.
+/// The detail screen's loading shape: static blocks where the subline, the
+/// account value and the first sections will be.
 private struct InstanceDetailSkeleton: View {
     var body: some View {
         List {
-            Section("Status") {
-                StatGrid(columns: 3) {
-                    StatCell(label: "Status", value: "Running")
-                    StatCell(label: "Uptime", value: "00h 00m")
-                    StatCell(label: "Granularity", value: "1d")
+            Section {
+                VStack(alignment: .leading, spacing: 12) {
+                    Skeleton(width: 220, height: 14)
+                    Skeleton(width: 120, height: 12)
+                        .padding(.top, 16)
+                    Skeleton(width: 220, height: 40, radius: DS.Radius.small)
+                }
+                .dsClearRow(top: 0, bottom: 8)
+            }
+            DSSection("Instance info", rowMinHeight: 44) {
+                ForEach(0..<4, id: \.self) { _ in
+                    HStack {
+                        Skeleton(width: 96, height: 14)
+                        Spacer()
+                        Skeleton(width: 64, height: 14)
+                    }
                 }
             }
-            Section("Brokerage") {
-                LabeledContent("Trading account", value: "Account name")
-                LabeledContent("Market data source", value: "Account name")
-            }
-            Section("Strategy") {
-                LabeledContent("Name", value: "Strategy name")
-                LabeledContent("ID", value: "000")
+            DSSection("Brokerage", rowMinHeight: 44) {
+                ForEach(0..<2, id: \.self) { _ in
+                    HStack {
+                        Skeleton(width: 120, height: 14)
+                        Spacer()
+                        Skeleton(width: 80, height: 14)
+                    }
+                }
             }
         }
-        .redacted(reason: .placeholder)
         .disabled(true)
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel("Loading")
     }
 }

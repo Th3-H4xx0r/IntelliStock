@@ -25,154 +25,149 @@
      the same route, behind its own confirmation) is the only thing that puts
      the gate back. -->
 <template>
-  <div class="glass-card rounded-2xl p-5" :class="cardBorder">
-    <div class="flex items-center justify-between mb-4 gap-2">
-      <p class="text-xs font-bold uppercase tracking-widest text-slate-500">Live Readiness</p>
-      <span
-        class="text-[10px] font-bold px-2 py-0.5 rounded-full border uppercase tracking-wider shrink-0"
-        :class="badgeClass"
-      >{{ badgeLabel }}</span>
+  <section class="flex flex-col min-w-0" aria-labelledby="live-readiness-title">
+    <div class="flex items-center justify-between gap-3 min-h-8 mb-3">
+      <h2 id="live-readiness-title" class="text-base font-medium text-slate-100">Live readiness</h2>
+      <span class="inline-flex items-center gap-2 text-sm text-slate-300 shrink-0">
+        <span class="ui-dot" :class="badgeClass"></span>
+        {{ badgeLabel }}
+      </span>
     </div>
 
-    <!-- Which of the two kinds of report this is, is the thing an operator
-         needs to know here: one survives a deploy, the other must not. -->
-    <div
-      v-if="isWaived"
-      class="rounded-lg border border-red-500/25 bg-red-500/5 px-3 py-2 mb-4 flex items-start gap-2"
-    >
-      <span class="material-symbols-outlined text-red-300 text-[14px] mt-0.5">gpp_maybe</span>
-      <p class="text-[11px] text-red-200/80 leading-relaxed">
-        Standing operator waiver — carried forward automatically on every deploy.
+    <div class="ui-card flex-1 flex flex-col" :class="cardBorder">
+      <!-- Which of the two kinds of report this is, is the thing an operator
+           needs to know here: one survives a deploy, the other must not. -->
+      <p
+        v-if="isWaived"
+        class="px-5 py-3 flex items-start gap-2 text-xs text-slate-300 leading-relaxed border-b border-white/[0.06]"
+      >
+        <span class="ui-dot ui-dot-error mt-1.5"></span>
+        <span>Standing operator waiver — carried forward automatically on every deploy</span>
       </p>
-    </div>
-    <div v-else class="rounded-lg border border-amber-500/25 bg-amber-500/5 px-3 py-2 mb-4 flex items-start gap-2">
-      <span class="material-symbols-outlined text-amber-400 text-[14px] mt-0.5">deployed_code_alert</span>
-      <p class="text-[11px] text-amber-200/80 leading-relaxed">
+      <p v-else class="px-5 py-3 text-xs text-slate-500 leading-relaxed border-b border-white/[0.06]">
         An earned report is bound to the image it was gathered on, and a deploy
         invalidates it.
       </p>
-    </div>
 
-    <div class="space-y-3 text-sm">
-      <!-- No readiness fields at all: an older API build. Saying "no report" -->
-      <!-- here would announce a missing gate that may well be present.      -->
-      <div v-if="status === 'unsupported'" class="text-xs text-slate-500 leading-relaxed">
-        This API build does not report live-readiness state. Update the backend
-        to see whether a report exists for this instance.
+      <div class="ui-rows">
+        <!-- No readiness fields at all: an older API build. Saying "no report" -->
+        <!-- here would announce a missing gate that may well be present.      -->
+        <p v-if="status === 'unsupported'" class="px-5 py-3 text-sm text-slate-400 leading-relaxed">
+          This API build does not report live-readiness state. Update the backend
+          to see whether a report exists for this instance.
+        </p>
+
+        <template v-else-if="status === 'missing'">
+          <p class="px-5 py-3 text-sm text-slate-400 leading-relaxed">
+            No readiness report on this instance. A funded broker will refuse to
+            start until one is earned — or waived below.
+          </p>
+        </template>
+
+        <template v-else>
+          <div class="kv">
+            <span>State</span>
+            <span class="text-slate-100">{{ report.state || '—' }}</span>
+          </div>
+          <div class="kv">
+            <span>Artifact</span>
+            <span
+              class="text-slate-100 tabular-nums truncate max-w-[55%]"
+              :title="report.artifact_hash || ''"
+            >{{ shortHash(report.artifact_hash) || '—' }}</span>
+          </div>
+          <div class="kv">
+            <span>Checks passed</span>
+            <span class="tabular-nums" :class="counts.passed === counts.total && counts.total > 0 ? 'text-gain' : 'text-amber-400'">
+              {{ counts.passed }}/{{ counts.total }}
+            </span>
+          </div>
+          <div v-if="report.fingerprint" class="kv">
+            <span>Fingerprint</span>
+            <span class="text-slate-300 tabular-nums" :title="report.fingerprint">{{ shortHash(report.fingerprint) }}</span>
+          </div>
+        </template>
+
+        <template v-if="waivedAt || waivedBy">
+          <div class="kv">
+            <span>Gate waived by</span>
+            <span class="text-slate-100">{{ waivedBy || 'unknown' }}</span>
+          </div>
+          <div class="kv">
+            <span>Waived at</span>
+            <span class="text-slate-100 tabular-nums" :title="waivedAt || ''">{{ fmtWhen(waivedAt) }}</span>
+          </div>
+          <!-- The carry-forward is invisible otherwise: the operator never -->
+          <!-- pressed anything, so the row has to say when it last happened. -->
+          <div v-if="reboundAt" class="kv">
+            <span>Last carried forward</span>
+            <span
+              class="text-slate-100 tabular-nums"
+              :title="reboundFrom ? `re-bound from image ${reboundFrom}` : ''"
+            >{{ fmtWhen(reboundAt) }}</span>
+          </div>
+          <p v-if="waivedIsStale" class="px-5 py-3 text-xs text-loss leading-relaxed">
+            The waiver names an image other than the one this report is bound to.
+            Re-waive before starting live.
+          </p>
+        </template>
       </div>
 
-      <template v-else-if="status === 'missing'">
-        <p class="text-xs text-slate-400 leading-relaxed">
-          No readiness report on this instance. A funded broker will refuse to
-          start until one is earned — or waived below.
-        </p>
-      </template>
-
-      <template v-else>
-        <div class="flex justify-between gap-2">
-          <span class="text-slate-500">State</span>
-          <span class="text-slate-200 font-mono text-xs">{{ report.state || '—' }}</span>
-        </div>
-        <div class="flex justify-between gap-2">
-          <span class="text-slate-500">Artifact</span>
-          <span
-            class="text-slate-200 font-mono text-xs truncate max-w-[55%]"
-            :title="report.artifact_hash || ''"
-          >{{ shortHash(report.artifact_hash) || '—' }}</span>
-        </div>
-        <div class="flex justify-between gap-2">
-          <span class="text-slate-500">Checks passed</span>
-          <span class="font-mono text-xs" :class="counts.passed === counts.total && counts.total > 0 ? 'text-emerald-400' : 'text-amber-400'">
-            {{ counts.passed }}/{{ counts.total }}
-          </span>
-        </div>
-        <div v-if="report.fingerprint" class="flex justify-between gap-2">
-          <span class="text-slate-500">Fingerprint</span>
-          <span class="text-slate-400 font-mono text-xs" :title="report.fingerprint">{{ shortHash(report.fingerprint) }}</span>
-        </div>
-      </template>
-
-      <div v-if="waivedAt || waivedBy" class="pt-3 mt-1 border-t border-red-500/20 space-y-2">
-        <div class="flex justify-between gap-2">
-          <span class="text-red-300/80 text-xs font-semibold">Gate waived by</span>
-          <span class="text-red-200 font-mono text-xs">{{ waivedBy || 'unknown' }}</span>
-        </div>
-        <div class="flex justify-between gap-2">
-          <span class="text-red-300/80 text-xs font-semibold">Waived at</span>
-          <span class="text-red-200 font-mono text-xs" :title="waivedAt || ''">{{ fmtWhen(waivedAt) }}</span>
-        </div>
-        <!-- The carry-forward is invisible otherwise: the operator never -->
-        <!-- pressed anything, so the row has to say when it last happened. -->
-        <div v-if="reboundAt" class="flex justify-between gap-2">
-          <span class="text-red-300/80 text-xs font-semibold">Last carried forward</span>
-          <span
-            class="text-red-200 font-mono text-xs"
-            :title="reboundFrom ? `re-bound from image ${reboundFrom}` : ''"
-          >{{ fmtWhen(reboundAt) }}</span>
-        </div>
-        <p v-if="waivedIsStale" class="text-[11px] text-red-300 leading-relaxed">
-          The waiver names an image other than the one this report is bound to.
-          Re-waive before starting live.
-        </p>
+      <div class="mt-auto px-5 py-4 border-t border-white/[0.06] flex flex-wrap gap-2">
+        <button
+          @click="openWaiver"
+          title="Bypass the live-readiness gate (audited)"
+          class="ui-btn text-loss flex-1"
+        >
+          {{ isWaived ? 'Re-waive with a new reason…' : 'Waive live-readiness gate…' }}
+        </button>
+        <button
+          v-if="isWaived"
+          @click="showRevoke = true"
+          title="End the standing waiver — a funded start is gated again"
+          class="ui-btn flex-1"
+        >
+          Revoke waiver
+        </button>
       </div>
     </div>
-
-    <div class="mt-4 pt-4 border-t border-border-subtle space-y-2">
-      <button
-        @click="openWaiver"
-        title="Bypass the live-readiness gate (audited)"
-        class="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold border transition-colors
-               border-red-500/30 text-red-300 hover:bg-red-500/10"
-      >
-        <span class="material-symbols-outlined text-[14px]">gpp_maybe</span>
-        {{ isWaived ? 'Re-waive with a new reason…' : 'Waive live-readiness gate…' }}
-      </button>
-      <button
-        v-if="isWaived"
-        @click="showRevoke = true"
-        title="End the standing waiver — a funded start is gated again"
-        class="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold border transition-colors
-               border-border-subtle text-slate-400 hover:text-slate-200 hover:bg-white/5"
-      >
-        <span class="material-symbols-outlined text-[14px]">lock_reset</span>
-        Revoke waiver
-      </button>
-    </div>
-  </div>
+  </section>
 
   <!-- ── Revoke confirmation ─────────────────────────────────────────────── -->
   <Teleport to="body">
     <Transition name="fade">
       <div
         v-if="showRevoke"
-        class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+        class="ui-overlay"
         @click.self="closeRevoke"
       >
-        <div class="relative w-full max-w-md bg-surface border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
-          <div class="px-6 py-5 border-b border-border-subtle">
-            <h2 class="text-base font-bold">Revoke the standing waiver</h2>
-            <p class="text-[11px] text-slate-500 truncate mt-0.5">
-              Instance <span class="font-mono text-slate-300">{{ instanceId }}</span>
-            </p>
+        <div class="ui-modal max-w-md">
+          <div class="ui-modal-head">
+            <div class="min-w-0">
+              <h2 class="text-base font-medium text-slate-100">Revoke the standing waiver</h2>
+              <p class="text-sm text-slate-500 truncate mt-1">
+                Instance <span class="text-slate-300">{{ instanceId }}</span>
+              </p>
+            </div>
           </div>
-          <div class="px-6 py-5 space-y-3">
-            <p class="text-xs text-slate-300 leading-relaxed">
+          <div class="ui-modal-body space-y-3">
+            <p class="text-sm text-slate-300 leading-relaxed">
               This removes the readiness report and the waiver stamps. A funded
               broker on this instance will refuse to start again until the gate
               is earned — or waived afresh.
             </p>
-            <p v-if="revokeMsg" class="text-xs leading-relaxed"
-               :class="revokeOk ? 'text-emerald-300' : 'text-red-300'">
+            <p v-if="revokeMsg" class="text-sm leading-relaxed"
+               :class="revokeOk ? 'text-gain' : 'text-loss'">
               {{ revokeMsg }}
             </p>
           </div>
-          <div class="px-6 py-4 border-t border-border-subtle flex gap-3">
+          <div class="ui-modal-foot">
             <button @click="closeRevoke" :disabled="revoking"
-                    class="flex-1 py-2.5 rounded-lg border border-border-subtle text-sm font-medium text-slate-400 hover:text-slate-200 transition-colors disabled:opacity-50">
+                    class="ui-btn-ghost h-9 px-4">
               {{ revokeOk ? 'Close' : 'Cancel' }}
             </button>
             <button v-if="!revokeOk" @click="submitRevoke" :disabled="revoking"
-                    class="flex-1 py-2.5 rounded-lg bg-red-500 text-white text-sm font-bold hover:brightness-110 transition-all disabled:opacity-40 disabled:cursor-not-allowed">
+                    class="ui-btn h-9 px-4 text-loss">
               {{ revoking ? 'Revoking…' : 'Revoke waiver' }}
             </button>
           </div>
@@ -186,37 +181,33 @@
     <Transition name="fade">
       <div
         v-if="showWaiver"
-        class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+        class="ui-overlay"
         @click.self="closeWaiver"
       >
-        <div class="relative w-full max-w-lg bg-surface border border-red-500/40 rounded-2xl shadow-2xl overflow-hidden">
-          <div class="flex items-center justify-between px-6 py-5 border-b border-red-500/25">
-            <div class="flex items-center gap-3 min-w-0">
-              <div class="size-9 rounded-xl bg-red-500/15 border border-red-500/30 flex items-center justify-center shrink-0">
-                <span class="material-symbols-outlined text-red-300 text-lg">warning</span>
-              </div>
-              <div class="min-w-0">
-                <h2 class="text-base font-bold">Waive the live-readiness gate</h2>
-                <p class="text-[11px] text-slate-500 truncate">
-                  Real money · instance <span class="font-mono text-slate-300">{{ instanceId }}</span>
-                </p>
-              </div>
+        <div class="ui-modal max-w-lg">
+          <div class="ui-modal-head border-b border-white/[0.06]">
+            <div class="min-w-0">
+              <h2 class="text-base font-medium text-slate-100">Waive the live-readiness gate</h2>
+              <p class="text-sm text-slate-500 truncate mt-1">
+                Real money · instance <span class="text-slate-300">{{ instanceId }}</span>
+              </p>
             </div>
             <button @click="closeWaiver" :disabled="saving"
-                    class="text-slate-500 hover:text-slate-300 transition-colors disabled:opacity-40">
-              <span class="material-symbols-outlined">close</span>
+                    class="ui-icon-btn ml-auto shrink-0 disabled:opacity-40"
+                    aria-label="Close">
+              <span class="material-symbols-outlined text-[18px]">close</span>
             </button>
           </div>
 
-          <div class="px-6 py-5 space-y-4 max-h-[70vh] overflow-y-auto">
-            <div class="rounded-xl border border-red-500/30 bg-red-500/5 px-4 py-3 space-y-1.5">
-              <p class="text-xs text-red-200 leading-relaxed">
+          <div class="px-6 py-5 space-y-5 max-h-[70vh] overflow-y-auto">
+            <div class="rounded-xl border border-loss/20 bg-loss/5 px-4 py-3 space-y-2">
+              <p class="text-sm text-slate-200 leading-relaxed">
                 This writes a readiness report that a funded broker will accept,
                 with every check marked passed on your say-so rather than on
                 evidence. It is recorded against your username, pages the
                 operator channel, and is bound to the image deployed right now.
               </p>
-              <p class="text-[11px] text-red-300/80 leading-relaxed">
+              <p class="text-xs text-slate-400 leading-relaxed">
                 It stands until you revoke it: the launcher re-binds it to each
                 newly deployed image, so a deploy will not quietly put the gate
                 back.
@@ -224,8 +215,8 @@
             </div>
 
             <div>
-              <label class="block text-xs font-medium text-slate-400 mb-1.5">
-                Type <span class="font-mono text-red-300">{{ phrase }}</span> to confirm
+              <label class="ui-field-label">
+                Type <span class="font-mono text-slate-100">{{ phrase }}</span> to confirm
               </label>
               <input
                 v-model="confirmText"
@@ -234,51 +225,51 @@
                 autocomplete="off"
                 spellcheck="false"
                 :placeholder="phrase"
-                class="w-full bg-surface border rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-700 font-mono focus:outline-none transition-colors"
-                :class="confirmOk ? 'border-emerald-500/40 focus:border-emerald-400' : 'border-red-500/30 focus:border-red-400'"
+                class="ui-input font-mono"
+                :class="confirmOk ? 'border-gain/40 focus:border-gain/60' : ''"
               />
-              <p v-if="confirmText && !confirmOk" class="text-[11px] text-slate-500 mt-1">
+              <p v-if="confirmText && !confirmOk" class="ui-help">
                 Must match exactly — the server compares it character for character.
               </p>
             </div>
 
             <div>
-              <label class="block text-xs font-medium text-slate-400 mb-1.5">
-                Reason (at least {{ WAIVER_MIN_REASON_CHARS }} characters)
+              <label class="ui-field-label">
+                Reason <span class="text-slate-500">(at least {{ WAIVER_MIN_REASON_CHARS }} characters)</span>
               </label>
               <textarea
                 v-model="reasonText"
                 :disabled="saving"
                 rows="3"
-                placeholder="Why you are accepting the live risk on this instance."
-                class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-700 focus:outline-none focus:border-red-400 transition-colors resize-y"
+                placeholder="Why you are accepting the live risk on this instance"
+                class="ui-input resize-y"
               ></textarea>
-              <p class="text-[11px] mt-1" :class="reasonOk ? 'text-slate-600' : 'text-amber-400'">
+              <p class="ui-help tabular-nums" :class="reasonOk ? '' : 'text-amber-400'">
                 {{ reasonLen }}/{{ WAIVER_MIN_REASON_CHARS }} characters — this is the whole audit record.
               </p>
             </div>
 
-            <div v-if="msg" class="rounded-xl px-4 py-3 text-xs leading-relaxed"
+            <div v-if="msg" class="rounded-lg border px-4 py-3 text-sm leading-relaxed"
                  :class="ok
-                   ? 'border border-emerald-500/30 bg-emerald-500/5 text-emerald-300'
-                   : 'border border-red-500/30 bg-red-500/5 text-red-300'">
-              <p class="font-semibold">{{ msg }}</p>
-              <div v-if="ok && result" class="mt-2 space-y-1 font-mono text-[11px] text-emerald-200/80">
-                <div :title="result.fingerprint">fingerprint {{ shortHash(result.fingerprint) }}</div>
-                <div :title="result.artifact_hash">artifact&nbsp;&nbsp;&nbsp; {{ shortHash(result.artifact_hash) }}</div>
+                   ? 'border-gain/20 bg-gain/5 text-gain'
+                   : 'border-loss/20 bg-loss/5 text-loss'">
+              <p class="font-medium">{{ msg }}</p>
+              <div v-if="ok && result" class="mt-2 space-y-1 text-xs text-slate-300 tabular-nums">
+                <div :title="result.fingerprint"><span class="text-slate-500">Fingerprint</span> {{ shortHash(result.fingerprint) }}</div>
+                <div :title="result.artifact_hash"><span class="text-slate-500">Artifact</span> {{ shortHash(result.artifact_hash) }}</div>
               </div>
             </div>
           </div>
 
-          <div class="px-6 py-4 border-t border-border-subtle flex gap-3">
+          <div class="ui-modal-foot">
             <button @click="closeWaiver" :disabled="saving"
-                    class="flex-1 py-2.5 rounded-lg border border-border-subtle text-sm font-medium text-slate-400 hover:text-slate-200 transition-colors disabled:opacity-50">
+                    class="ui-btn-ghost h-9 px-4">
               {{ ok ? 'Close' : 'Cancel' }}
             </button>
             <button v-if="!ok"
                     @click="submitWaiver"
                     :disabled="!canSubmit || saving"
-                    class="flex-1 py-2.5 rounded-lg bg-red-500 text-white text-sm font-bold hover:brightness-110 transition-all disabled:opacity-40 disabled:cursor-not-allowed">
+                    class="ui-btn h-9 px-4 text-loss">
               {{ saving ? 'Waiving…' : 'Waive the gate' }}
             </button>
           </div>
@@ -332,17 +323,17 @@ const badgeLabel = computed(() => {
   if (status.value === 'missing') return 'No report'
   return isWaived.value ? 'Waived' : 'Reported'
 })
+// The status dot beside the title. An earned report is a pass (gain, no live
+// ring); a waiver is a bypass (red); no report is a warning (amber).
 const badgeClass = computed(() => {
-  if (status.value === 'present' && !isWaived.value) {
-    return 'bg-emerald-500/10 text-emerald-400 border-emerald-500/25'
-  }
-  if (status.value === 'present') return 'bg-red-500/10 text-red-300 border-red-500/30'
-  if (status.value === 'missing') return 'bg-amber-500/10 text-amber-400 border-amber-500/25'
-  return 'bg-slate-500/10 text-slate-500 border-slate-700'
+  if (status.value === 'present' && !isWaived.value) return 'bg-gain'
+  if (status.value === 'present') return 'ui-dot-error'
+  if (status.value === 'missing') return 'ui-dot-warn'
+  return 'ui-dot-off'
 })
-// A waived instance wears the warning border; everything else keeps
-// .glass-card's own, so the card sits flush with its neighbours.
-const cardBorder = computed(() => (isWaived.value ? 'border border-red-500/25' : ''))
+// A waived instance wears a faint loss hairline; everything else keeps
+// .ui-card's own, so the card sits flush with its neighbours.
+const cardBorder = computed(() => (isWaived.value ? 'border-loss/25' : ''))
 
 function shortHash(v) { return shortArtifactHash(v) }
 
@@ -465,6 +456,20 @@ async function submitRevoke() {
 <style scoped>
 /* Matches the instance page's own modal transition (scoped there, so it does
    not reach a teleported child). */
-.fade-enter-active, .fade-leave-active { transition: opacity 0.2s ease; }
+.fade-enter-active, .fade-leave-active { transition: opacity 150ms cubic-bezier(0.22, 1, 0.36, 1); }
 .fade-enter-from, .fade-leave-to       { opacity: 0; }
+
+/* Label / value row — same rhythm as the instance page's own cards. */
+.kv {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 44px;
+  padding: 10px 20px;
+  font-size: 14px;
+  line-height: 20px;
+}
+.kv > :first-child { color: #a1a1aa; min-width: 0; }
+.kv > :last-child { text-align: right; }
 </style>

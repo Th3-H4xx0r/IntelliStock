@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import AppShell from '../layouts/AppShell.vue'
 import CryptoCreateInstanceModal from '../components/crypto/CryptoCreateInstanceModal.vue'
@@ -128,155 +128,157 @@ function onBacktestCreated(id) { if (id) router.push(`/backtests/${id}`) }
 // ── Detail view ────────────────────────────────────────────────────────────────
 function openDetail(inst) { router.push(`/crypto/instances/${encodeURIComponent(inst.id)}`) }
 
-onMounted(async () => { await Promise.all([fetchBrokerages(), fetchInstances()]) })
+// ── Row overflow menu (presentation only: one open at a time; closes on an
+//    outside pointerdown or Escape). Items call the same handlers as before. ──
+const menuFor = ref(null)
+function toggleMenu(id) { menuFor.value = menuFor.value === id ? null : id }
+function closeMenu() { menuFor.value = null }
+function onDocPointerDown(e) {
+  if (menuFor.value == null) return
+  if (!e.target.closest?.(`[data-menu-root="${menuFor.value}"]`)) closeMenu()
+}
+function onDocKeydown(e) { if (e.key === 'Escape') closeMenu() }
+function fixedSummary(inst) { return allocChips(inst).map((c) => `${c.ticker} ${c.pct}%`).join(', ') }
+
+onMounted(async () => {
+  document.addEventListener('pointerdown', onDocPointerDown)
+  document.addEventListener('keydown', onDocKeydown)
+  await Promise.all([fetchBrokerages(), fetchInstances()])
+})
+onUnmounted(() => {
+  document.removeEventListener('pointerdown', onDocPointerDown)
+  document.removeEventListener('keydown', onDocKeydown)
+})
 </script>
 
 <template>
   <AppShell>
-    <main class="flex-1 px-4 py-6 sm:px-6 sm:py-8 lg:px-8 lg:py-10">
+    <main class="ui-page">
 
       <!-- Header -->
-      <div class="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between mb-6">
-        <div>
-          <p class="text-primary text-xs font-bold uppercase tracking-widest mb-1 flex items-center gap-1.5">
-            <span class="material-symbols-outlined text-[16px]">currency_bitcoin</span> Trading
-          </p>
-          <h1 class="text-2xl sm:text-3xl font-bold leading-tight">Crypto</h1>
-          <p class="text-slate-400 text-sm mt-1 max-w-md">Autonomous 24/7 crypto trading — pin fixed weights, leave the rest dynamic.</p>
+      <header class="flex flex-wrap items-end justify-between gap-x-4 gap-y-3">
+        <div class="min-w-0">
+          <h1 class="ui-page-title">Crypto</h1>
+          <p class="ui-page-sub">Autonomous 24/7 crypto trading. Pin fixed weights, leave the rest dynamic</p>
         </div>
-        <div class="flex items-center gap-3 w-full sm:w-auto">
-          <button @click="fetchInstances"
-                  class="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-border-subtle text-sm text-slate-400 hover:text-slate-200 hover:bg-surface transition-all shrink-0" title="Refresh">
+        <div class="flex items-center gap-2">
+          <button @click="fetchInstances" class="ui-icon-btn" title="Refresh" aria-label="Refresh instances">
             <span class="material-symbols-outlined text-[18px]">refresh</span>
           </button>
-          <button @click="openCreate"
-                  class="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-primary text-background-dark font-semibold text-sm hover:brightness-110 transition-all flex-1 sm:flex-none">
-            <span class="material-symbols-outlined text-[18px]">add</span>
+          <button @click="openCreate" class="ui-btn-primary">
+            <span class="material-symbols-outlined text-[16px]">add</span>
             New crypto instance
           </button>
         </div>
-      </div>
+      </header>
 
       <!-- Loading -->
-      <div v-if="loading" class="flex items-center gap-3 text-slate-400 text-sm">
-        <span class="material-symbols-outlined animate-spin text-xl">progress_activity</span>
-        Loading crypto instances...
-      </div>
-
-      <!-- Error -->
-      <div v-else-if="loadError" class="rounded-xl bg-red-500/10 border border-red-500/20 px-5 py-4 text-red-400 text-sm">{{ loadError }}</div>
-
-      <!-- No brokerage -->
-      <div v-else-if="!brokerages.length && !instances.length"
-           class="rounded-2xl border border-border-subtle bg-surface/20 px-8 py-12 flex flex-col items-center gap-3 text-center">
-        <span class="material-symbols-outlined text-4xl text-slate-700">currency_bitcoin</span>
-        <p class="text-slate-400 text-sm font-medium">No Alpaca account linked.</p>
-        <p class="text-slate-600 text-xs max-w-sm">Link an Alpaca brokerage to create a crypto trading instance.</p>
-        <RouterLink to="/brokerages" class="mt-1 px-4 py-2 rounded-lg bg-primary text-background-dark text-xs font-bold hover:brightness-110 transition-all">Link a brokerage</RouterLink>
-      </div>
-
-      <!-- Empty state -->
-      <div v-else-if="instances.length === 0"
-           class="rounded-2xl border border-border-subtle bg-surface/30 px-8 py-16 flex flex-col items-center gap-4 text-center">
-        <span class="material-symbols-outlined text-5xl text-primary/70">currency_bitcoin</span>
-        <p class="text-slate-300 font-semibold">No crypto instances yet</p>
-        <p class="text-slate-500 text-sm max-w-xs">Create a crypto instance to trade a fixed + dynamic coin allocation around the clock.</p>
-        <button @click="openCreate" class="mt-2 px-5 py-2 rounded-lg bg-primary text-background-dark font-semibold text-sm hover:brightness-110 transition-all">
-          Create your first crypto instance
-        </button>
-      </div>
-
-      <!-- Instance cards -->
-      <div v-else class="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-5">
-        <div v-for="inst in instances" :key="inst.id" class="glass-card rounded-2xl p-5 sm:p-6 flex flex-col gap-4">
-          <!-- Header -->
-          <div class="flex items-start justify-between gap-3 min-w-0">
-            <div class="flex items-center gap-3 min-w-0 cursor-pointer group" @click="openDetail(inst)" title="View details">
-              <div class="size-10 rounded-xl bg-surface border border-border-subtle flex items-center justify-center shrink-0">
-                <span class="material-symbols-outlined text-primary text-xl">currency_bitcoin</span>
-              </div>
-              <div class="min-w-0">
-                <p class="font-semibold text-slate-100 leading-tight truncate group-hover:text-primary transition-colors" :title="inst.name || inst.id">{{ inst.name || inst.id }}</p>
-                <p class="text-xs text-slate-500 font-mono mt-0.5 truncate">{{ inst.id }}</p>
-              </div>
-            </div>
-            <div class="flex flex-col items-end gap-1.5 shrink-0">
-              <span class="text-[10px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wider bg-primary/15 text-primary border border-primary/20">24/7 · crypto</span>
-              <div class="flex items-center gap-1.5 text-xs font-semibold px-2 py-1 rounded-full"
-                   :class="inst.crashed ? 'bg-red-500/10 text-red-400 border border-red-500/20'
-                     : inst.runCommand ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                     : 'bg-slate-500/10 text-slate-500 border border-slate-700'">
-                <div class="size-1.5 rounded-full" :class="inst.crashed ? 'bg-red-400' : inst.runCommand ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'"></div>
-                {{ inst.crashed ? 'Crashed' : inst.runCommand ? 'Running' : 'Stopped' }}
-              </div>
-            </div>
-          </div>
-
-          <!-- Value -->
-          <div>
-            <p class="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Account value</p>
-            <p class="text-xl font-bold text-slate-100 tabular-nums mt-0.5">
-              {{ inst.brokerage_id && values[inst.brokerage_id] != null ? fmtUsd(values[inst.brokerage_id]) : '—' }}
-            </p>
-          </div>
-
-          <!-- Meta -->
-          <div class="space-y-1.5 text-xs text-slate-500">
-            <div v-if="inst.brokerage_id" class="flex items-center gap-1.5 min-w-0">
-              <span class="text-slate-400 shrink-0">Brokerage:</span>
-              <span class="text-slate-300 truncate">{{ brokerageMap[inst.brokerage_id] || inst.brokerage_id }}</span>
-            </div>
-            <div v-if="inst.crypto_config?.band" class="flex items-center gap-1.5">
-              <span class="text-slate-400">Band:</span>
-              <span class="text-slate-300 capitalize">{{ inst.crypto_config.band }}</span>
-            </div>
-          </div>
-
-          <!-- Allocation chips -->
-          <div>
-            <p class="text-xs font-medium text-slate-400 uppercase tracking-wider mb-2">Allocation</p>
-            <div class="flex flex-wrap gap-1.5">
-              <span v-for="c in allocChips(inst)" :key="c.ticker"
-                    class="px-2 py-0.5 rounded-md bg-surface border border-border-subtle text-xs font-mono text-slate-300 tabular-nums">
-                {{ c.ticker }} {{ c.pct }}%
-              </span>
-              <span class="px-2 py-0.5 rounded-md bg-primary/10 border border-primary/30 text-xs font-mono text-primary tabular-nums">
-                Dynamic {{ Math.round(dynamicPct(inst)) }}%
-              </span>
-            </div>
-          </div>
-
-          <!-- Actions -->
-          <div class="flex flex-wrap items-center gap-2 pt-1 mt-auto">
-            <button @click="openDetail(inst)" :disabled="busy[inst.id]"
-                    class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-300 hover:bg-surface border border-border-subtle transition-colors disabled:opacity-40">
-              <span class="material-symbols-outlined text-[14px]">visibility</span> View
-            </button>
-            <button @click="openEdit(inst)" :disabled="busy[inst.id]"
-                    class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-amber-400 hover:bg-amber-500/10 border border-amber-500/20 transition-colors disabled:opacity-40">
-              <span class="material-symbols-outlined text-[14px]">tune</span> Edit
-            </button>
-            <button @click="openBacktest(inst)" :disabled="busy[inst.id]"
-                    class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-sky-400 hover:bg-sky-500/10 border border-sky-500/20 transition-colors disabled:opacity-40">
-              <span class="material-symbols-outlined text-[14px]">analytics</span> Backtest
-            </button>
-            <button v-if="!inst.runCommand" @click="startInstance(inst.id)" :disabled="busy[inst.id]"
-                    class="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-emerald-400 hover:bg-emerald-500/10 border border-emerald-500/20 transition-colors disabled:opacity-40">
-              <span v-if="busy[inst.id]" class="material-symbols-outlined text-[14px] animate-spin">progress_activity</span>
-              <span v-else class="material-symbols-outlined text-[14px]">play_arrow</span> Start
-            </button>
-            <button v-else @click="stopInstance(inst.id)" :disabled="busy[inst.id]"
-                    class="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-amber-400 hover:bg-amber-500/10 border border-amber-500/20 transition-colors disabled:opacity-40">
-              <span v-if="busy[inst.id]" class="material-symbols-outlined text-[14px] animate-spin">progress_activity</span>
-              <span v-else class="material-symbols-outlined text-[14px]">stop</span> Stop
-            </button>
-            <button @click="deleteInstance(inst)" :disabled="busy[inst.id]"
-                    class="flex items-center px-2 py-1.5 rounded-lg border border-red-500/30 text-red-400 text-xs font-semibold hover:bg-red-500/10 transition-all disabled:opacity-40" title="Delete instance">
-              <span class="material-symbols-outlined text-[16px]">delete</span>
-            </button>
+      <div v-if="loading" class="mt-8 ui-card overflow-hidden" aria-hidden="true">
+        <div class="h-10 border-b border-white/[0.06]"></div>
+        <div class="ui-rows">
+          <div v-for="n in 3" :key="n" class="h-16 px-5 flex items-center gap-6">
+            <div class="h-4 w-40 ui-skel"></div>
+            <div class="h-3 w-16 ui-skel"></div>
+            <div class="ml-auto h-4 w-20 ui-skel"></div>
           </div>
         </div>
       </div>
+
+      <!-- Error -->
+      <div v-else-if="loadError" class="mt-8 ui-error">{{ loadError }}</div>
+
+      <!-- No brokerage -->
+      <div v-else-if="!brokerages.length && !instances.length" class="mt-8 ui-card ui-empty">
+        <p>No Alpaca account linked. Link an Alpaca brokerage to create a crypto trading instance.</p>
+        <RouterLink to="/brokerages" class="ui-btn-primary">Link a brokerage</RouterLink>
+      </div>
+
+      <!-- Empty state -->
+      <div v-else-if="instances.length === 0" class="mt-8 ui-card ui-empty">
+        <p>No crypto instances yet. Create one to trade a fixed + dynamic coin allocation around the clock.</p>
+        <button @click="openCreate" class="ui-btn-primary">Create your first crypto instance</button>
+      </div>
+
+      <!-- Instances: one calm row each; the row opens the instance -->
+      <section v-else class="mt-8" aria-labelledby="cr-list">
+        <div class="mb-3">
+          <h2 id="cr-list" class="ui-section-title">Instances</h2>
+          <p class="ui-section-sub tabular-nums">{{ instances.length }} instance{{ instances.length === 1 ? '' : 's' }} · open one for its allocation and backtests</p>
+        </div>
+        <div class="ui-card">
+          <div class="cr-row hidden md:grid ui-th">
+            <span class="cr-name">Instance</span>
+            <span class="cr-status">Status</span>
+            <span class="cr-dyn text-right">Dynamic</span>
+            <span class="cr-value text-right">Account value</span>
+            <span class="cr-ctrl"></span>
+          </div>
+          <ul class="ui-rows">
+            <li v-for="inst in instances" :key="inst.id"
+                class="cr-row grid items-center min-h-16 px-5 py-3 cursor-pointer transition-colors duration-150 ease-out hover:bg-white/[0.03] last:rounded-b-xl max-md:first:rounded-t-xl focus-visible:outline-none focus-visible:bg-white/[0.03]"
+                tabindex="0"
+                :title="`Open ${inst.name || inst.id}`"
+                @click="openDetail(inst)"
+                @keydown.enter.self="openDetail(inst)">
+              <!-- Name + one muted subline -->
+              <span class="cr-name min-w-0">
+                <span class="block text-sm text-slate-100 truncate">{{ inst.name || inst.id }}</span>
+                <span class="block text-xs text-slate-500 mt-0.5 truncate" :title="`${inst.id}${fixedSummary(inst) ? ' · ' + fixedSummary(inst) : ''}`">
+                  <template v-if="inst.brokerage_id">{{ brokerageMap[inst.brokerage_id] || inst.brokerage_id }}</template>
+                  <template v-if="inst.crypto_config?.band"> · <span class="capitalize">{{ inst.crypto_config.band }}</span> band</template>
+                  <template v-if="fixedSummary(inst)"> · {{ fixedSummary(inst) }}</template>
+                </span>
+              </span>
+
+              <!-- Status: a dot and a word -->
+              <span class="cr-status inline-flex items-center gap-2 text-sm"
+                    :class="inst.crashed ? 'text-loss' : inst.runCommand ? 'text-slate-200' : 'text-slate-500'">
+                <span class="ui-dot" :class="inst.crashed ? 'ui-dot-error' : inst.runCommand ? 'ui-dot-live' : 'ui-dot-off'"></span>
+                {{ inst.crashed ? 'Crashed' : inst.runCommand ? 'Running' : 'Stopped' }}
+              </span>
+
+              <!-- Key figures -->
+              <span class="cr-dyn text-right text-sm text-slate-300 tabular-nums">{{ Math.round(dynamicPct(inst)) }}%</span>
+              <span class="cr-value text-right text-sm text-slate-100 tabular-nums">
+                {{ inst.brokerage_id && values[inst.brokerage_id] != null ? fmtUsd(values[inst.brokerage_id]) : '—' }}
+              </span>
+
+              <!-- One primary control + overflow menu -->
+              <span class="cr-ctrl flex items-center justify-end gap-1" @click.stop>
+                <button v-if="!inst.runCommand" @click="startInstance(inst.id)" :disabled="busy[inst.id]" class="ui-btn">
+                  <span v-if="busy[inst.id]" class="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
+                  <span v-else class="material-symbols-outlined text-[16px]">play_arrow</span> Start
+                </button>
+                <button v-else @click="stopInstance(inst.id)" :disabled="busy[inst.id]" class="ui-btn text-loss">
+                  <span v-if="busy[inst.id]" class="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
+                  <span v-else class="material-symbols-outlined text-[16px]">stop</span> Stop
+                </button>
+                <span class="relative" :data-menu-root="inst.id">
+                  <button type="button" class="ui-icon-btn" :class="menuFor === inst.id ? 'bg-raised text-slate-200' : ''"
+                          @click="toggleMenu(inst.id)" :aria-expanded="menuFor === inst.id" aria-haspopup="menu" aria-label="More actions">
+                    <span class="material-symbols-outlined text-[18px]">more_horiz</span>
+                  </button>
+                  <div v-if="menuFor === inst.id" class="ui-menu" role="menu">
+                    <button type="button" role="menuitem" class="ui-menu-item" :disabled="busy[inst.id]" @click="closeMenu(); openDetail(inst)">
+                      <span class="material-symbols-outlined text-[16px] text-slate-500">visibility</span> View details
+                    </button>
+                    <button type="button" role="menuitem" class="ui-menu-item" :disabled="busy[inst.id]" @click="closeMenu(); openEdit(inst)">
+                      <span class="material-symbols-outlined text-[16px] text-slate-500">tune</span> Edit
+                    </button>
+                    <button type="button" role="menuitem" class="ui-menu-item" :disabled="busy[inst.id]" @click="closeMenu(); openBacktest(inst)">
+                      <span class="material-symbols-outlined text-[16px] text-slate-500">analytics</span> Backtest
+                    </button>
+                    <div class="ui-menu-sep"></div>
+                    <button type="button" role="menuitem" class="ui-menu-item text-loss" :disabled="busy[inst.id]" @click="closeMenu(); deleteInstance(inst)">
+                      <span class="material-symbols-outlined text-[16px]">delete</span> Delete
+                    </button>
+                  </div>
+                </span>
+              </span>
+            </li>
+          </ul>
+        </div>
+      </section>
     </main>
 
     <CryptoCreateInstanceModal
@@ -296,3 +298,35 @@ onMounted(async () => { await Promise.all([fetchBrokerages(), fetchInstances()])
     />
   </AppShell>
 </template>
+
+<style scoped>
+/* One calm row per instance.
+   phone   name · value / status · controls
+   md      name · status · value · controls
+   lg      name · status · dynamic · value · controls */
+.cr-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: "name value" "status ctrl";
+  column-gap: 16px;
+  row-gap: 8px;
+}
+.cr-name { grid-area: name; }
+.cr-status { grid-area: status; }
+.cr-dyn { grid-area: dyn; display: none; }
+.cr-value { grid-area: value; }
+.cr-ctrl { grid-area: ctrl; }
+@media (min-width: 768px) {
+  .cr-row {
+    grid-template-columns: minmax(0, 1fr) 112px 120px 136px;
+    grid-template-areas: "name status value ctrl";
+    row-gap: 0;
+  }
+}
+@media (min-width: 1024px) {
+  .cr-row {
+    grid-template-columns: minmax(0, 1fr) 112px 88px 120px 136px;
+    grid-template-areas: "name status dyn value ctrl";
+  }
+  .cr-dyn { display: block; }
+}
+</style>

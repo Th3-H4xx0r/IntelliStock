@@ -25,8 +25,8 @@ struct AppWordmark: View {
         HStack(spacing: 10) {
             AppLogoView(size: iconSize)
             Text("IntelliStock")
-                .font(.title3.bold())
-                .foregroundStyle(.primary)
+                .font(DS.Font.large)
+                .foregroundStyle(DS.Text.primary)
         }
         .accessibilityElement(children: .combine)
     }

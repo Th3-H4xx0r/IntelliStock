@@ -1,8 +1,8 @@
 import SwiftUI
 
-/// Settings — `SettingsScreen` in `settings_screen.dart`, as a Settings-app
-/// style inset-grouped list: Security, Preferences, Account, About. There is
-/// deliberately no appearance setting (the app follows the system, per HIG).
+/// Settings — `SettingsScreen` in `settings_screen.dart`, as the web's card
+/// rows: Security, Preferences, Account, About. There is no appearance
+/// setting: the app is dark only, like the web.
 struct SettingsView: View {
     @Environment(AppServices.self) private var services
 
@@ -17,33 +17,16 @@ struct SettingsView: View {
     var body: some View {
         let lock = services.lock
         List {
-            Section("Security") {
-                SettingsRow(
-                    icon: "lock",
-                    color: .green,
-                    title: "Biometric Lock",
-                    subtitle: biometricsSubtitle
-                ) {
-                    if biometricsAvailable == nil || lockToggleBusy {
-                        ProgressView()
-                    } else {
-                        Toggle("Biometric Lock", isOn: Binding(
-                            get: { lock.enabled },
-                            set: { value in Task { await handleLockToggle(value) } }
-                        ))
-                        .labelsHidden()
-                        .disabled(biometricsAvailable != true)
-                    }
-                }
+            DSSection("Security") {
+                biometricRow(lock)
 
                 SettingsRow(
                     icon: "schedule",
-                    color: .indigo,
                     title: "Auto-lock after",
-                    subtitle: "Time before the app locks in background"
+                    subtitle: "Time before the app locks in the background"
                 ) {
                     Menu {
-                        Section("Lock the app after this much time in the background.") {
+                        Section("Lock the app after this much time in the background") {
                             Picker("Auto-lock timeout", selection: Binding(
                                 get: { lock.timeout },
                                 set: { value in Task { await lock.setTimeout(value) } }
@@ -55,15 +38,18 @@ struct SettingsView: View {
                             .pickerStyle(.inline)
                         }
                     } label: {
-                        // The system menu-picker look: the value in secondary
-                        // with the up-down chevrons.
-                        HStack(spacing: 4) {
+                        // The web select's value and chevrons.
+                        HStack(spacing: 6) {
                             Text(lock.timeout.label)
-                            Image(systemName: Symbol.named("unfold_more"))
-                                .font(.caption.weight(.semibold))
+                                .monospacedDigit()
+                            Image(systemName: "chevron.up.chevron.down")
+                                .font(.system(size: 12))
+                                .foregroundStyle(DS.Text.muted)
                         }
-                        .font(.body)
-                        .foregroundStyle(lock.enabled ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
+                        .font(DS.Font.body)
+                        .foregroundStyle(lock.enabled ? DS.Text.secondary : DS.Text.faint)
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
                     }
                     .disabled(!lock.enabled)
                     .accessibilityLabel("Auto-lock timeout, \(lock.timeout.label)")
@@ -72,67 +58,63 @@ struct SettingsView: View {
                 SettingsRow(
                     icon: "check_circle",
                     tile: Symbol.named("check"),
-                    color: .blue,
                     title: "Require unlock on launch",
                     subtitle: "Always prompt when the app is opened fresh"
                 ) {
-                    // Settings shows a read-only state as plain secondary text.
+                    // A read-only state reads as quiet text.
                     Text(lock.enabled ? "On" : "Off")
-                        .foregroundStyle(.secondary)
+                        .font(DS.Font.body)
+                        .foregroundStyle(DS.Text.secondary)
                 }
             }
 
-            Section("Preferences") {
+            DSSection("Preferences") {
                 NavigationLink(value: Route.notificationSettings) {
                     SettingsRow(
                         icon: "notifications",
-                        color: .red,
                         title: "Notifications",
-                        subtitle: "Discord & iOS push per alert category"
+                        subtitle: "Discord and iOS push per alert category"
                     ) { EmptyView() }
                 }
             }
 
-            Section("Account") {
+            DSSection("Account") {
                 SettingsRow(
                     icon: "person",
-                    color: .gray,
                     title: "Signed in as",
                     subtitle: services.session.username
                 ) { EmptyView() }
-
-                Button {
-                    confirmLogout()
-                } label: {
-                    SettingsRow(
-                        icon: "logout",
-                        color: .red,
-                        title: "Log out",
-                        titleColor: DS.Palette.danger,
-                        subtitle: "Sign out of your account"
-                    ) { EmptyView() }
-                }
-                .buttonStyle(.plain)
-                .disabled(actionBusy)
 
                 Button {
                     confirmReRunOnboarding()
                 } label: {
                     SettingsRow(
                         icon: "replay",
-                        color: .orange,
-                        title: "Re-run Onboarding",
+                        title: "Re-run onboarding",
                         subtitle: "Reset and walk through setup again"
+                    ) { EmptyView() }
+                }
+                .buttonStyle(.plain)
+                .disabled(actionBusy)
+
+                Button {
+                    confirmLogout()
+                } label: {
+                    SettingsRow(
+                        icon: "logout",
+                        title: "Log out",
+                        titleColor: DS.Palette.loss,
+                        subtitle: "Sign out of your account"
                     ) { EmptyView() }
                 }
                 .buttonStyle(.plain)
                 .disabled(actionBusy)
             }
 
-            Section("About") {
+            DSSection("About") {
                 SettingsRow(
                     icon: "bolt",
-                    color: .purple,
+                    tile: "bolt",
                     title: "Version",
                     subtitle: appVersionString()
                 ) { EmptyView() }
@@ -140,7 +122,6 @@ struct SettingsView: View {
                 NavigationLink(value: Route.connect) {
                     SettingsRow(
                         icon: "database",
-                        color: .blue,
                         title: "Backend",
                         subtitle: services.urlStore.baseUrl,
                         verbatimSubtitle: true
@@ -153,7 +134,6 @@ struct SettingsView: View {
                     SettingsRow(
                         icon: "check",
                         tile: "doc.text",
-                        color: .gray,
                         title: "Open-source licenses",
                         subtitle: "Third-party package licenses"
                     ) { SettingsChevron() }
@@ -161,7 +141,7 @@ struct SettingsView: View {
                 .buttonStyle(.plain)
             }
         }
-        .listStyle(.insetGrouped)
+        .dsList()
         .navigationTitle("Settings")
         .navigationBarTitleDisplayMode(.inline)
         .confirmAlert($confirm, isRunning: $actionBusy)
@@ -169,6 +149,26 @@ struct SettingsView: View {
         .sheet(isPresented: $licensesOpen) { SettingsLicensesSheet() }
         .task {
             biometricsAvailable = await services.biometrics.canCheck()
+        }
+    }
+
+    /// Biometric lock: the whole row is the switch (the web's switch rows),
+    /// a spinner while the check or the toggle runs.
+    @ViewBuilder
+    private func biometricRow(_ lock: AppLock) -> some View {
+        if biometricsAvailable == nil || lockToggleBusy {
+            SettingsRow(icon: "lock", title: "Biometric lock", subtitle: biometricsSubtitle) {
+                ProgressView()
+                    .controlSize(.small)
+            }
+        } else {
+            Toggle(isOn: Binding(
+                get: { lock.enabled },
+                set: { value in Task { await handleLockToggle(value) } }
+            )) {
+                SettingsRow(icon: "lock", title: "Biometric lock", subtitle: biometricsSubtitle) { EmptyView() }
+            }
+            .disabled(biometricsAvailable != true)
         }
     }
 
@@ -188,7 +188,7 @@ struct SettingsView: View {
         defer { lockToggleBusy = false }
         if newValue {
             if !(await services.lock.enable()) {
-                toast = Toast("Biometric authentication failed or unavailable.", style: .error)
+                toast = Toast("Biometric authentication failed or is unavailable", style: .error)
             }
         } else {
             await services.lock.disable()
@@ -199,7 +199,7 @@ struct SettingsView: View {
         confirm = ConfirmRequest(
             title: "Log out",
             body: "You will be signed out of IntelliStock. Your data stays on the server.",
-            confirmLabel: "Log Out",
+            confirmLabel: "Log out",
             role: .destructive,
             onConfirm: { await services.session.clear() },
             onError: { error in toast = Toast(settingsErrorText(error), style: .error) }
@@ -209,9 +209,9 @@ struct SettingsView: View {
     private func confirmReRunOnboarding() {
         let services = services
         confirm = ConfirmRequest(
-            title: "Re-run Onboarding",
-            body: "This will reset your onboarding state on the server. Continue?",
-            confirmLabel: "Reset & Re-run",
+            title: "Re-run onboarding",
+            body: "This resets your onboarding state on the server. Continue?",
+            confirmLabel: "Reset and re-run",
             role: nil,
             onConfirm: {
                 // The gate shows onboarding as soon as the user says so.
@@ -228,15 +228,15 @@ struct SettingsView: View {
     }
 }
 
-/// A settings row: a Settings-style icon tile, title + subtitle, and a
-/// trailing view.
+/// A settings row (the web's `ui-row`): a muted glyph, the title in 14 pt
+/// zinc-100 (or loss red for a destructive one) over a 12 pt zinc-500
+/// subtitle, and a trailing view.
 private struct SettingsRow<Trailing: View>: View {
     /// The Dart (Material) icon name, kept for traceability.
     let icon: String
-    /// The tile's SF Symbol when the mapped one is circled or reads poorly
-    /// filled; nil uses `Symbol.named(icon)`.
+    /// The SF Symbol when the mapped one reads poorly; nil uses
+    /// `Symbol.named(icon)`.
     var tile: String?
-    let color: Color
     let title: String
     var titleColor: Color?
     let subtitle: String?
@@ -245,11 +245,11 @@ private struct SettingsRow<Trailing: View>: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            SettingsIconTile(systemImage: tile ?? Symbol.named(icon), color: color)
+            SettingsIconTile(systemImage: tile ?? Symbol.named(icon))
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.body)
-                    .foregroundStyle(titleColor.map { AnyShapeStyle($0) } ?? AnyShapeStyle(.primary))
+                    .font(DS.Font.body)
+                    .foregroundStyle(titleColor ?? DS.Text.primary)
                 if let subtitle, !subtitle.isEmpty {
                     Group {
                         if verbatimSubtitle {
@@ -258,15 +258,15 @@ private struct SettingsRow<Trailing: View>: View {
                             Text(subtitle)
                         }
                     }
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.muted)
                     .lineLimit(2)
                 }
             }
-            Spacer(minLength: 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
             trailing
         }
-        .frame(minHeight: 44)
+        .frame(minHeight: 40)
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
     }
@@ -274,46 +274,59 @@ private struct SettingsRow<Trailing: View>: View {
 
 private struct SettingsChevron: View {
     var body: some View {
-        Image(systemName: "chevron.right")
-            .font(.footnote.weight(.semibold))
-            .foregroundStyle(.tertiary)
+        Image(systemName: "chevron.forward")
+            .font(.system(size: 13))
+            .foregroundStyle(DS.Text.faint)
             .accessibilityHidden(true)
     }
 }
 
-/// `showLicensePage` → native form: the app name and version, and a note that
-/// the native app bundles no third-party packages.
+/// `showLicensePage` → a short sheet: the app name and version, and a note
+/// that the native app bundles no third-party packages.
 private struct SettingsLicensesSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        NavigationStack {
-            List {
-                Section {
-                    VStack(spacing: 8) {
-                        AppLogoView(size: 56)
-                        Text("IntelliStock").font(.title3.bold())
-                        Text(appVersionString())
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .listRowBackground(Color.clear)
+        VStack(spacing: 0) {
+            HStack(alignment: .top, spacing: 12) {
+                Text("Open-source licenses")
+                    .font(DS.Font.sectionTitle)
+                    .foregroundStyle(DS.Text.primary)
+                    .accessibilityAddTraits(.isHeader)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark")
                 }
-                Section {
-                    Text("This app is built only with Apple frameworks and bundles no third-party packages.")
-                        .foregroundStyle(.secondary)
-                }
+                .buttonStyle(.dsIcon)
+                .accessibilityLabel("Close")
             }
-            .navigationTitle("Open-source licenses")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") { dismiss() }
-                }
+            .padding(.horizontal, 24)
+            .padding(.top, 20)
+            .padding(.bottom, 16)
+
+            VStack(spacing: 8) {
+                AppLogoView(size: 56)
+                Text("IntelliStock")
+                    .font(DS.Font.baseMedium)
+                    .foregroundStyle(DS.Text.primary)
+                Text(appVersionString())
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.muted)
+                    .monospacedDigit()
             }
+            .padding(.top, 8)
+
+            Text("This app is built only with Apple frameworks and bundles no third-party packages.")
+                .font(DS.Font.body)
+                .foregroundStyle(DS.Text.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 32)
+                .padding(.top, 24)
+            Spacer(minLength: 0)
         }
+        .frame(maxWidth: .infinity)
         .presentationDetents([.medium])
         .presentationDragIndicator(.visible)
+        .presentationBackground(DS.Surface.card)
     }
 }

@@ -3,7 +3,9 @@ import SwiftUI
 /// The signed-in shell — `AppShell` in `app_shell.dart`. Five tabs, each with
 /// its own navigation stack bound to `AppRouter`, so detail routes push
 /// inside the current tab and the tab bar stays visible
-/// (`tab-bars.md › Best practices`). The tab bar draws the symbols filled.
+/// (`tab-bars.md › Best practices`). The symbols draw as outlines, like the
+/// web's line icons. iOS 26 draws the bar itself as Liquid Glass and ignores
+/// a custom bar appearance, so it is left as the system draws it.
 ///
 /// The chat's entry is the tab bar's bottom accessory, a glass capsule above
 /// the tabs (`ChatAccessoryView`), and `chatbotPresenter()` hosts the chat
@@ -32,6 +34,8 @@ struct MainTabView: View {
                 TabStack(tab: .more) { MoreTabView() }
             }
         }
+        // Outline glyphs, as the web's icon set draws.
+        .environment(\.symbolVariants, .none)
         // No chat bar over a pushed Onboarding, which hides the tab bar and
         // covers the shell as the Dart route did.
         .modifier(ShellChatAccessory(isEnabled: services.router.stack(for: services.router.tab).last != .onboarding))
@@ -55,7 +59,8 @@ private struct TabStack<Root: View>: View {
             set: { router.setStack($0, for: tab) }
         )) {
             root()
-                .navigationDestination(for: Route.self) { RouteDestination(route: $0) }
+                .dsScreenBackground()
+                .navigationDestination(for: Route.self) { RouteDestination(route: $0).dsScreenBackground() }
         }
     }
 }

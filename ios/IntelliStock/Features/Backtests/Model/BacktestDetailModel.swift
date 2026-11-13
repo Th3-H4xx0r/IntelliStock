@@ -212,12 +212,14 @@ final class BacktestDetailModel {
 
     // MARK: Action copy (`_actionMeta`)
 
-    static func actionMeta(_ action: String) -> (title: String, body: String, icon: String) {
+    /// (title, verb, body, symbol) for the detail's confirm dialog, in the
+    /// web's words ("Pause backtest", "Pause").
+    static func actionMeta(_ action: String) -> (title: String, verb: String, body: String, icon: String) {
         switch action {
-        case "pause": ("Pause Backtest", "The backtest will be paused and can be resumed later.", "pause_circle")
-        case "resume": ("Resume Backtest", "The backtest will continue from where it was paused.", "play_circle")
-        case "stop": ("Stop Backtest", "This will permanently stop the backtest.", "stop_circle")
-        default: ("Delete Backtest", "This will permanently delete all results and data.", "delete_forever")
+        case "pause": ("Pause backtest", "Pause", "The backtest will be paused and can be resumed later.", "pause_circle")
+        case "resume": ("Resume backtest", "Resume", "The backtest will continue from where it was paused.", "play_circle")
+        case "stop": ("Stop backtest", "Stop", "This will permanently stop the backtest.", "stop_circle")
+        default: ("Delete backtest", "Delete", "This will permanently delete all results and data.", "delete_forever")
         }
     }
 }
@@ -225,14 +227,16 @@ final class BacktestDetailModel {
 // MARK: - Presentation helpers
 
 nonisolated enum BacktestDetailFormat {
-    /// `_LogLine._levelColor`.
+    /// A log line's colour, the web's `logLevelClass`: errors loss red,
+    /// warnings amber, good news zinc-100, broker lines zinc-300, the rest
+    /// zinc-400. No other hue.
     static func levelColor(_ line: String) -> Color {
         let l = line.lowercased()
-        if l.contains("error") || l.contains("fail") || l.contains("exception") { return DS.Palette.danger }
-        if l.contains("warn") || l.contains("retry") || l.contains("skip") { return DS.Palette.warning }
-        if l.contains("success") || l.contains("completed") || l.contains("profit") || l.contains("passed") { return DS.Palette.success }
-        if l.contains("broker") { return DS.Palette.info }
-        return .secondary
+        if l.contains("error") || l.contains("fail") || l.contains("exception") { return DS.Palette.loss }
+        if l.contains("warn") || l.contains("retry") || l.contains("skip") { return DS.Palette.amber }
+        if l.contains("success") || l.contains("completed") || l.contains("profit") || l.contains("passed") { return DS.Text.primary }
+        if l.contains("broker") { return DS.Text.label }
+        return DS.Text.secondary
     }
 
     /// The crypto fee venues: (name, id, taker rate).

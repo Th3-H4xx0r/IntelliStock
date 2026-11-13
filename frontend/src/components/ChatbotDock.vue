@@ -191,10 +191,10 @@ defineExpose({ open: openChatbot, close: closeChatbot, toggle: toggleChatbot })
       <button
         v-if="!expanded"
         @click="openChatbot"
-        class="fixed z-[45] right-4 bottom-[max(1rem,env(safe-area-inset-bottom))] sm:right-6 sm:bottom-6 size-12 rounded-full bg-primary text-background-dark flex items-center justify-center hover:bg-white chatbot-bubble"
+        class="fixed z-[45] right-4 bottom-[max(1rem,env(safe-area-inset-bottom))] sm:right-6 sm:bottom-6 size-12 rounded-full bg-primary text-background-dark flex items-center justify-center hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 chatbot-bubble"
         aria-label="Open assistant"
       >
-        <span class="material-symbols-outlined text-[26px]">smart_toy</span>
+        <span class="material-symbols-outlined text-[22px]">chat</span>
       </button>
     </Transition>
 
@@ -210,11 +210,11 @@ defineExpose({ open: openChatbot, close: closeChatbot, toggle: toggleChatbot })
             // past it (+1rem gap) so the sidebar stops clipping the
             // chatbot in fullscreen. Below lg the sidebar is a drawer
             // and inset-4 alone is correct.
-            ? 'inset-x-0 bottom-0 top-[max(0.5rem,env(safe-area-inset-top))] sm:inset-4 sm:top-4 sm:bottom-4 lg:left-[calc(14rem+1rem)] rounded-t-2xl sm:rounded-2xl border-t border-x sm:border border-border-subtle'
-            : 'right-4 sm:right-6 bottom-[max(1rem,env(safe-area-inset-bottom))] sm:bottom-6 w-[420px] max-w-[calc(100vw-2rem)] h-[640px] max-h-[calc(100vh-3rem)] rounded-2xl border border-border-subtle',
+            ? 'inset-x-0 bottom-0 top-[max(0.5rem,env(safe-area-inset-top))] sm:inset-4 sm:top-4 sm:bottom-4 lg:left-[calc(14rem+1rem)] rounded-t-2xl sm:rounded-2xl border-t border-x sm:border border-white/[0.08]'
+            : 'right-4 sm:right-6 bottom-[max(1rem,env(safe-area-inset-bottom))] sm:bottom-6 w-[420px] max-w-[calc(100vw-2rem)] h-[640px] max-h-[calc(100vh-3rem)] rounded-2xl border border-white/[0.08]',
         ]"
       >
-        <div class="relative h-full flex flex-col bg-surface/95 backdrop-blur-xl rounded-[inherit] overflow-hidden shadow-2xl">
+        <div class="relative h-full flex flex-col bg-surface rounded-[inherit] overflow-hidden shadow-[0_24px_48px_rgba(0,0,0,0.5)]">
 
           <ChatHeader
             :title="title"
@@ -231,37 +231,37 @@ defineExpose({ open: openChatbot, close: closeChatbot, toggle: toggleChatbot })
           <!-- Conversation history toggle (mobile-friendly drawer) -->
           <div
             v-if="conversations.length > 1"
-            class="border-b border-border-subtle px-3 sm:px-4 py-1.5 flex items-center gap-2 text-xs"
+            class="h-9 border-b border-white/[0.06] px-2 sm:px-3 flex items-center gap-2 text-xs"
           >
             <button
               @click="conversationListOpen = !conversationListOpen"
-              class="inline-flex items-center gap-1 text-slate-400 hover:text-slate-200 transition"
+              class="h-7 px-2 rounded-md inline-flex items-center gap-1.5 text-slate-400 hover:text-slate-100 hover:bg-raised transition-colors duration-150 ease-out tabular-nums"
+              :aria-expanded="conversationListOpen"
             >
-              <span class="material-symbols-outlined text-[14px]">{{ conversationListOpen ? 'expand_less' : 'history' }}</span>
+              <span class="material-symbols-outlined text-[16px]">{{ conversationListOpen ? 'expand_less' : 'history' }}</span>
               {{ conversations.length }} conversation{{ conversations.length === 1 ? '' : 's' }}
             </button>
             <button
               @click="onNewConversation"
-              class="ml-auto inline-flex items-center gap-1 text-primary hover:brightness-125 transition"
+              class="ml-auto h-7 px-2 rounded-md inline-flex items-center gap-1 text-slate-400 hover:text-slate-100 hover:bg-raised transition-colors duration-150 ease-out"
             >
-              <span class="material-symbols-outlined text-[14px]">add</span>
+              <span class="material-symbols-outlined text-[16px]">add</span>
               New
             </button>
           </div>
           <div
             v-if="conversationListOpen"
-            class="border-b border-border-subtle px-2 py-2 max-h-40 overflow-y-auto bg-surface/95"
+            class="border-b border-white/[0.06] p-1.5 max-h-40 overflow-y-auto"
           >
             <button
               v-for="c in conversations"
               :key="c.id"
               @click="loadConversation(c.id); conversationListOpen = false"
-              class="w-full text-left px-2 py-1.5 rounded-md text-xs flex items-center gap-2 transition"
-              :class="c.id === currentId ? 'bg-primary/10 text-primary' : 'text-slate-300 hover:bg-surface'"
+              class="w-full h-9 text-left px-2.5 rounded-md text-sm flex items-center gap-2 transition-colors duration-150 ease-out"
+              :class="c.id === currentId ? 'bg-raised text-slate-100' : 'text-slate-300 hover:bg-white/[0.03]'"
             >
-              <span class="material-symbols-outlined text-[14px]">chat</span>
               <span class="truncate flex-1">{{ c.title || 'Untitled' }}</span>
-              <span class="text-[10px] text-slate-500">{{ c.message_count || 0 }} msg</span>
+              <span class="text-xs text-slate-500 tabular-nums">{{ c.message_count || 0 }} msg</span>
             </button>
           </div>
 
@@ -282,17 +282,14 @@ defineExpose({ open: openChatbot, close: closeChatbot, toggle: toggleChatbot })
             <!-- Empty conversation state -->
             <div
               v-else-if="!messages.length && !showSettings"
-              class="absolute inset-0 flex flex-col items-center justify-center text-center px-6 gap-3"
+              class="absolute inset-0 flex flex-col items-center justify-center text-center px-6 gap-2"
             >
-              <div class="size-12 rounded-2xl bg-primary/15 border border-primary/30 flex items-center justify-center">
-                <span class="material-symbols-outlined text-primary text-[24px]">smart_toy</span>
-              </div>
-              <p class="text-sm font-semibold text-slate-200">How can I help?</p>
-              <p class="text-xs text-slate-500 max-w-xs leading-relaxed">
-                Ask about your portfolio, run a backtest, link a brokerage, or just say hi.
-                I can show charts, tables, and run actions on your behalf with your approval.
+              <p class="text-sm font-medium text-slate-200">How can I help?</p>
+              <p class="text-sm text-slate-500 max-w-xs leading-relaxed">
+                Ask about your portfolio, run a backtest or link a brokerage.
+                I can show charts and tables, and run actions for you with your approval.
               </p>
-              <div class="flex flex-wrap gap-2 justify-center pt-1">
+              <div class="flex flex-col items-center gap-2 pt-3">
                 <button
                   v-for="s in [
                     'List my instances',
@@ -301,7 +298,7 @@ defineExpose({ open: openChatbot, close: closeChatbot, toggle: toggleChatbot })
                   ]"
                   :key="s"
                   @click="onSend(s)"
-                  class="text-[11px] px-2.5 py-1 rounded-full border border-border-subtle text-slate-300 hover:border-primary/40 hover:text-primary transition"
+                  class="ui-btn font-normal text-slate-300"
                 >{{ s }}</button>
               </div>
             </div>
@@ -310,7 +307,7 @@ defineExpose({ open: openChatbot, close: closeChatbot, toggle: toggleChatbot })
             <div
               v-else-if="!showSettings"
               ref="messagesEl"
-              class="absolute inset-0 overflow-y-auto overflow-x-hidden px-3 sm:px-4 py-3 space-y-3"
+              class="absolute inset-0 overflow-y-auto overflow-x-hidden px-3 sm:px-4 py-4 space-y-4"
             >
               <template v-for="m in messages" :key="m.id">
                 <ChatToolCall
@@ -323,22 +320,21 @@ defineExpose({ open: openChatbot, close: closeChatbot, toggle: toggleChatbot })
                 <ChatMessage v-else :message="m" />
               </template>
 
-              <div v-if="sending" class="flex items-center gap-1.5 text-slate-500 text-xs px-2">
+              <div v-if="sending" class="flex items-center gap-1.5 text-slate-500 text-xs px-1">
                 <span class="chatbot-dot"></span>
                 <span class="chatbot-dot" style="animation-delay: 0.15s"></span>
                 <span class="chatbot-dot" style="animation-delay: 0.3s"></span>
                 <span class="ml-1">Thinking…</span>
               </div>
 
-              <div v-if="errorMessage" class="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-red-300 text-xs flex items-start gap-2">
-                <span class="material-symbols-outlined text-[14px] mt-0.5">error</span>
-                <p class="flex-1 break-words">{{ errorMessage }}</p>
+              <div v-if="errorMessage" class="rounded-lg border border-loss/20 bg-loss/5 pl-3 pr-1.5 py-2 text-loss text-xs flex items-start gap-2">
+                <p class="flex-1 break-words py-0.5">{{ errorMessage }}</p>
                 <button
                   @click="clearError"
-                  class="shrink-0 size-5 rounded-md flex items-center justify-center text-red-300/70 hover:text-red-200 transition"
+                  class="shrink-0 size-6 rounded-md flex items-center justify-center text-loss/70 hover:text-loss transition-colors duration-150 ease-out"
                   aria-label="Dismiss error"
                 >
-                  <span class="material-symbols-outlined text-[14px]">close</span>
+                  <span class="material-symbols-outlined text-[16px]">close</span>
                 </button>
               </div>
             </div>
@@ -363,7 +359,7 @@ defineExpose({ open: openChatbot, close: closeChatbot, toggle: toggleChatbot })
             ref="composerRef"
             :busy="sending"
             :disabled="needsModel"
-            :placeholder="needsModel ? 'Pick a model first…' : 'Ask me anything…'"
+            :placeholder="needsModel ? 'Pick a model first' : 'Ask a question'"
             @send="onSend"
           />
         </div>
@@ -375,25 +371,31 @@ defineExpose({ open: openChatbot, close: closeChatbot, toggle: toggleChatbot })
 <style scoped>
 .chatbot-bubble {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5), 0 8px 24px rgba(0, 0, 0, 0.45);
-  transition: background-color 160ms cubic-bezier(0.22, 1, 0.36, 1), transform 120ms cubic-bezier(0.22, 1, 0.36, 1);
+  transition: background-color 150ms cubic-bezier(0.22, 1, 0.36, 1), transform 120ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 .chatbot-bubble:active { transform: scale(0.97); }
+/* Typing indicator: shown only while a reply is actually in flight. */
 .chatbot-dot {
   display: inline-block;
-  width: 6px;
-  height: 6px;
+  width: 4px;
+  height: 4px;
   border-radius: 999px;
-  background: #a1a1a6;
+  background: #a1a1aa;
   animation: chatbot-dot 1.1s ease-in-out infinite both;
 }
 @keyframes chatbot-dot {
-  0%, 80%, 100% { transform: scale(0.55); opacity: 0.4; }
-  40% { transform: scale(1); opacity: 1; }
+  0%, 80%, 100% { opacity: 0.3; }
+  40% { opacity: 1; }
 }
 
-.dock-bubble-enter-active, .dock-bubble-leave-active { transition: opacity 0.25s, transform 0.3s cubic-bezier(0.34,1.56,0.64,1); }
-.dock-bubble-enter-from, .dock-bubble-leave-to { opacity: 0; transform: translateY(20px) scale(0.85); }
+.dock-bubble-enter-active, .dock-bubble-leave-active { transition: opacity 150ms cubic-bezier(0.22, 1, 0.36, 1), transform 150ms cubic-bezier(0.22, 1, 0.36, 1); }
+.dock-bubble-enter-from, .dock-bubble-leave-to { opacity: 0; transform: scale(0.96); }
 
-.dock-panel-enter-active, .dock-panel-leave-active { transition: opacity 0.3s, transform 0.35s cubic-bezier(0.16,1,0.3,1); }
-.dock-panel-enter-from, .dock-panel-leave-to { opacity: 0; transform: translateY(40px) scale(0.97); }
+.dock-panel-enter-active, .dock-panel-leave-active { transition: opacity 180ms cubic-bezier(0.22, 1, 0.36, 1), transform 220ms cubic-bezier(0.22, 1, 0.36, 1); }
+.dock-panel-enter-from, .dock-panel-leave-to { opacity: 0; transform: translateY(8px); }
+@media (prefers-reduced-motion: reduce) {
+  .dock-bubble-enter-active, .dock-bubble-leave-active,
+  .dock-panel-enter-active, .dock-panel-leave-active { transition: none; }
+  .chatbot-dot { animation: none; opacity: 0.6; }
+}
 </style>

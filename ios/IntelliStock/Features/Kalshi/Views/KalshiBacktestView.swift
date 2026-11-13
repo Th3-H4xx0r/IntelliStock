@@ -1,10 +1,11 @@
 import SwiftUI
 
-/// The Kalshi backtest launcher — `KalshiBacktestScreen`: settings seeded
-/// from the instance config, a risk preset, dates, leagues, and the list of
-/// this brokerage's backtests (refreshed every 3 s). A native `Form`; each
-/// backtest row opens its results, with Stop and Delete on swipe and in the
-/// context menu.
+/// The Kalshi backtest launcher — `KalshiBacktestScreen`, as the web's
+/// Backtest page: the settings card (seeded from the instance config: a risk
+/// preset, the model, dates, leagues and the numbers), Run backtest, and the
+/// list of this brokerage's backtests (refreshed every 3 s). Each backtest
+/// row opens its results, with Stop and Delete on swipe and in the context
+/// menu.
 struct KalshiBacktestView: View {
     let instanceId: String
 
@@ -27,7 +28,7 @@ struct KalshiBacktestView: View {
             }
         }
         .navigationTitle("Backtest")
-        .navigationBarTitleDisplayMode(.inline)
+        .navigationBarTitleDisplayMode(.large)
         .toast($toast)
         .task(id: instanceId) {
             // Reused on reappear (after Run Backtest or a result), so the
@@ -54,50 +55,67 @@ struct KalshiBacktestView: View {
         }
     }
 
+    static let subtitle = "Run this instance's settings over past fixtures"
+
     private func form(_ model: KalshiBacktestModel) -> some View {
         @Bindable var m = model
-        return Form {
-            if let err = model.err {
-                Section {
-                    Text(err).foregroundStyle(DS.Palette.warning)
-                }
-            }
-            Section("New backtest") {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Risk tolerance").font(.footnote).foregroundStyle(.secondary)
-                    Picker("Risk tolerance", selection: Binding(get: { model.tier }, set: { model.applyPreset($0) })) {
-                        ForEach(KalshiBacktestPreset.all, id: \.key) { p in Text(p.label).tag(p.key) }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                }
-                Picker("Analyst LLM model", selection: Binding(get: { model.modelId }, set: { model.selectModel($0) })) {
-                    Text("None (statistical model only)").tag(String?.none)
-                    ForEach(model.models.indices, id: \.self) { i in
-                        let row = model.models[i]
-                        Text(KalshiFormat.firstNonNull(row["name"], row["model"], row["id"]))
-                            .tag(Optional(KalshiFormat.firstNonNull(row["id"])))
-                    }
-                }
-                Toggle("Use LLM analyst in this backtest", isOn: $m.useLlm)
-                    .disabled(model.modelId == nil)
-                dateRow("Start", model.start) { picking = .start }
-                dateRow("End", model.end) { picking = .end }
-                KalshiLeaguePicker(selected: $m.leagues)
-            }
+        return List {
             Section {
-                ForEach(KalshiBacktestModel.Field.allCases, id: \.self) { f in
-                    MarketsNumberRow(label: f.label, text: Binding(get: { model.text(f) }, set: { model.edit(f, $0) }))
-                }
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("OddsPapi API key (saved; blank = model-only)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    TextField("OddsPapi API key (saved; blank = model-only)", text: $m.oddsKey)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
+                Text(Self.subtitle)
+                    .font(DS.Font.pageSub)
+                    .foregroundStyle(DS.Text.muted)
+                    .dsClearRow(top: 0)
+                if let err = model.err {
+                    ErrorRow(message: err)
+                        .dsClearRow(top: 16)
                 }
             }
+
+            DSSection("New backtest", subtitle: "Prefilled from the instance config", rowMinHeight: 44) {
+                DSField("Risk tolerance") {
+                    DSSegmentedControl(
+                        "Risk tolerance",
+                        selection: Binding(get: { model.tier }, set: { model.applyPreset($0) }),
+                        options: KalshiBacktestPreset.all.map(\.key),
+                        fullWidth: true,
+                        segmentHeight: 32
+                    ) { key in KalshiBacktestPreset.all.first { $0.key == key }?.label ?? key }
+                }
+                .padding(.vertical, 8)
+                DSField("Analyst LLM model") {
+                    FormSelect("Analyst LLM model", display: modelLabel(model), selection: Binding(get: { model.modelId }, set: { model.selectModel($0) })) {
+                        Text("None (statistical model only)").tag(String?.none)
+                        ForEach(model.models.indices, id: \.self) { i in
+                            let row = model.models[i]
+                            Text(KalshiFormat.firstNonNull(row["name"], row["model"], row["id"]))
+                                .tag(Optional(KalshiFormat.firstNonNull(row["id"])))
+                        }
+                    }
+                }
+                .padding(.vertical, 8)
+                FormToggle("Use the LLM analyst in this backtest", isOn: $m.useLlm)
+                    .disabled(model.modelId == nil)
+                FormGrid {
+                    dateField("Start date", model.start) { picking = .start }
+                    dateField("End date", model.end) { picking = .end }
+                }
+                .padding(.vertical, 8)
+                KalshiLeaguePicker(selected: $m.leagues, asRow: true)
+                FormGrid {
+                    ForEach(KalshiBacktestModel.Field.allCases, id: \.self) { f in
+                        DSField(f.label) {
+                            FormTextField("0", text: Binding(get: { model.text(f) }, set: { model.edit(f, $0) }), keyboard: .decimalPad)
+                                .monospacedDigit()
+                        }
+                    }
+                }
+                .padding(.vertical, 12)
+                DSField("OddsPapi API key", help: "Sharp line, free tier. Saved for next time; blank means model only") {
+                    FormTextField("oddspapi apiKey", text: $m.oddsKey, mono: true)
+                }
+                .padding(.vertical, 8)
+            }
+
             Section {
                 Button {
                     Task {
@@ -106,19 +124,21 @@ struct KalshiBacktestView: View {
                         }
                     }
                 } label: {
-                    Text(model.submitting ? "Starting…" : "Run Backtest")
-                        .fontWeight(.semibold)
-                        .frame(maxWidth: .infinity)
+                    HStack(spacing: 6) {
+                        if model.submitting { ProgressView().controlSize(.mini).tint(DS.Palette.onAccent) }
+                        Text(model.submitting ? "Starting…" : "Run backtest")
+                    }
                 }
-                .dsProminentButton()
-                .controlSize(.large)
+                .buttonStyle(.dsPrimary(size: .large, fullWidth: true))
                 .disabled(!model.canSubmit)
-                .listRowBackground(Color.clear)
-                .listRowInsets(EdgeInsets())
+                .dsClearRow()
             }
-            Section("Backtests") {
+
+            DSSection("Backtests", subtitle: "For this Kalshi account") {
                 if model.backtests.isEmpty {
-                    Text("No backtests yet.").foregroundStyle(.secondary)
+                    Text("No backtests yet")
+                        .font(DS.Font.body)
+                        .foregroundStyle(DS.Text.muted)
                 } else {
                     ForEach(Array(model.backtests.enumerated()), id: \.offset) { _, b in
                         backtestRow(model, b)
@@ -126,25 +146,42 @@ struct KalshiBacktestView: View {
                 }
             }
         }
-    }
-
-    private func dateRow(_ label: String, _ date: Date?, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            LabeledContent(label) {
-                Text(date.map(KalshiFormat.ymd) ?? "Not set")
-                    .monospacedDigit()
-                    .foregroundStyle(date == nil ? .tertiary : .secondary)
+        .dsList()
+        .scrollDismissesKeyboard(.interactively)
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("Done") { formEndEditing() }
             }
         }
-        .foregroundStyle(.primary)
     }
 
-    private func statusColor(_ s: String?) -> Color {
-        switch s {
-        case "finished": DS.Palette.success
-        case "error": DS.Palette.danger
-        case "stopped": .secondary
-        default: DS.Palette.warning
+    private func modelLabel(_ model: KalshiBacktestModel) -> String {
+        guard let id = model.modelId,
+              let row = model.models.first(where: { KalshiFormat.firstNonNull($0["id"]) == id }) else { return "None (statistical model only)" }
+        return KalshiFormat.firstNonNull(row["name"], row["model"], row["id"])
+    }
+
+    /// A date as the web's date input: the value (or "Not set") in a
+    /// `ui-input`; tapping opens the picker sheet.
+    private func dateField(_ label: String, _ date: Date?, action: @escaping () -> Void) -> some View {
+        DSField(label) {
+            Button(action: action) {
+                HStack {
+                    Text(date.map(KalshiFormat.ymd) ?? "Not set")
+                        .foregroundStyle(date == nil ? DS.Text.faint : DS.Text.soft)
+                        .monospacedDigit()
+                    Spacer(minLength: 4)
+                    Image(systemName: "calendar")
+                        .font(.system(size: 13))
+                        .foregroundStyle(DS.Text.muted)
+                }
+                .contentShape(Rectangle())
+                .dsInput()
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(label)
+            .accessibilityValue(date.map(KalshiFormat.ymd) ?? "Not set")
         }
     }
 
@@ -173,9 +210,15 @@ struct KalshiBacktestView: View {
             ) {
                 VStack(alignment: .trailing, spacing: 2) {
                     Text(pnlValue.map { KalshiFormat.money(cents: $0) } ?? "—")
+                        .font(DS.Font.body)
                         .monospacedDigit()
-                        .foregroundStyle((pnlValue ?? 0) >= 0 ? DS.Palette.success : DS.Palette.danger)
-                    StatusDot(active ? "\(status ?? "") \(progress)%" : (status ?? ""), color: statusColor(status), pulsing: active, font: .footnote)
+                        .foregroundStyle(pnlValue == nil ? DS.Text.muted : ((pnlValue ?? 0) >= 0 ? DS.Palette.gain : DS.Palette.loss))
+                    StatusDot(
+                        (active ? "\(status ?? "") \(progress)%" : (status ?? "")).dsSentenceCased,
+                        status: status,
+                        pulsing: active,
+                        font: DS.Font.caption
+                    )
                 }
             }
         }
@@ -185,36 +228,36 @@ struct KalshiBacktestView: View {
             Button {
                 delete()
             } label: {
-                Label("Delete Backtest", systemImage: Symbol.named("delete"))
+                Label("Delete backtest", systemImage: Symbol.named("delete"))
             }
-            .tint(DS.Palette.danger)
+            .tint(DS.Swipe.destructive)
             if active {
                 Button {
                     stop()
                 } label: {
-                    Label("Stop Backtest", systemImage: Symbol.named("stop_circle"))
+                    Label("Stop backtest", systemImage: Symbol.named("stop_circle"))
                 }
-                .tint(DS.Palette.warning)
+                .tint(DS.Swipe.neutral)
             }
         }
         .contextMenu {
             Button {
                 services.router.push(.kalshiBacktestResult(id))
             } label: {
-                Label("View Results", systemImage: Symbol.named("visibility"))
+                Label("View results", systemImage: Symbol.named("visibility"))
             }
             if active {
                 Button {
                     stop()
                 } label: {
-                    Label("Stop Backtest", systemImage: Symbol.named("stop_circle"))
+                    Label("Stop backtest", systemImage: Symbol.named("stop_circle"))
                 }
             }
             Divider()
             Button(role: .destructive) {
                 delete()
             } label: {
-                Label("Delete Backtest", systemImage: Symbol.named("delete"))
+                Label("Delete backtest", systemImage: Symbol.named("delete"))
             }
         }
     }

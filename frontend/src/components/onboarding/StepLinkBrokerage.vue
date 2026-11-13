@@ -87,97 +87,93 @@ async function saveAlpaca() {
 <template>
   <div class="space-y-6">
     <div>
-      <p class="text-primary text-xs font-bold uppercase tracking-widest mb-2 onboarding-letter" style="animation-delay: 0.05s">
-        Step 2 · Link a brokerage
-      </p>
-      <h2 class="onboarding-title text-2xl sm:text-3xl font-bold leading-tight onboarding-letter" style="animation-delay: 0.15s">
-        Plug in where the orders go.
+      <p class="text-sm text-slate-500">Step 2 · Link a brokerage</p>
+      <h2 class="mt-2 text-xl sm:text-2xl font-medium leading-tight text-slate-100">
+        Connect the account your orders go to
       </h2>
-      <p class="mt-3 text-slate-400 text-sm onboarding-letter" style="animation-delay: 0.25s">
+      <p class="mt-3 text-sm leading-6 text-slate-400">
         Alpaca is the supported stock brokerage for paper and live trading.
       </p>
     </div>
 
     <!-- Existing brokerages -->
-    <div v-if="brokerages.length" class="space-y-2 onboarding-letter" style="animation-delay: 0.3s">
-      <p class="text-[11px] font-semibold uppercase tracking-widest text-slate-500">Already linked</p>
-      <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
-        <div
-          v-for="b in brokerages"
-          :key="b.id"
-          class="rounded-lg border border-border-subtle bg-surface/40 px-3 py-2.5 flex items-center gap-3"
-        >
-          <span class="material-symbols-outlined text-primary text-[20px]">
-            {{ b.brokerage_type === 'alpaca' ? 'show_chart' : 'savings' }}
-          </span>
+    <div v-if="brokerages.length">
+      <p class="ui-label mb-2">Already linked</p>
+      <div class="rounded-xl border border-white/[0.07] ui-rows">
+        <div v-for="b in brokerages" :key="b.id" class="min-h-14 px-4 py-2 flex items-center gap-3">
           <div class="min-w-0 flex-1">
-            <p class="text-sm font-medium text-slate-100 truncate">{{ b.account_name }}</p>
-            <p class="text-[11px] text-slate-500 truncate uppercase tracking-widest">
-              {{ b.brokerage_type }}<span v-if="b.brokerage_type === 'alpaca'"> · {{ b.alpaca_paper ? 'Paper' : 'Live' }}</span>
+            <p class="text-sm text-slate-100 truncate">{{ b.account_name }}</p>
+            <p class="mt-0.5 text-xs text-slate-500 truncate">
+              <span class="capitalize">{{ b.brokerage_type }}</span><span v-if="b.brokerage_type === 'alpaca'"> · {{ b.alpaca_paper ? 'Paper' : 'Live' }}</span>
             </p>
           </div>
-          <span class="text-[10px]" :class="b.status === 'active' ? 'text-emerald-400' : 'text-yellow-400'">{{ b.status }}</span>
+          <span class="inline-flex items-center gap-2 text-xs shrink-0" :class="b.status === 'active' ? 'text-slate-500' : 'text-slate-300'">
+            <span v-if="b.status !== 'active'" class="ui-dot ui-dot-warn"></span>{{ b.status }}
+          </span>
         </div>
       </div>
       <button
         v-if="!showForm"
+        type="button"
         @click="showForm = true"
-        class="mt-1 inline-flex items-center gap-1.5 text-xs text-primary hover:brightness-125 transition-all"
+        class="ui-btn-ghost mt-2 -ml-3"
       >
-        <span class="material-symbols-outlined text-[14px]">add</span>
+        <span class="material-symbols-outlined text-[16px]">add</span>
         Link another brokerage
       </button>
     </div>
 
     <!-- Add form -->
-    <div v-if="showForm" class="rounded-xl border border-border-subtle bg-surface/40 p-4 sm:p-5 space-y-4 onboarding-letter" style="animation-delay: 0.35s">
+    <div v-if="showForm" class="rounded-xl border border-white/[0.07] p-4 sm:p-5 space-y-5">
       <!-- Alpaca form -->
-      <div class="space-y-4">
+      <div class="space-y-5">
         <div>
-          <label class="block text-xs font-medium text-slate-400 mb-1.5">Account Name <span class="text-red-400">*</span></label>
+          <label class="ui-field-label">Account name <span class="text-slate-500">*</span></label>
           <input v-model="alpaca.account_name" type="text" placeholder="e.g. Alpaca paper main"
-            class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors" />
+            class="ui-input" />
         </div>
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
-            <label class="block text-xs font-medium text-slate-400 mb-1.5">API Key ID <span class="text-red-400">*</span></label>
+            <label class="ui-field-label">API key ID <span class="text-slate-500">*</span></label>
             <input v-model="alpaca.key" type="text" placeholder="PKxxxxxxxxxx"
-              class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono" />
+              class="ui-input font-mono" />
           </div>
           <div>
-            <label class="block text-xs font-medium text-slate-400 mb-1.5">Secret Key <span class="text-red-400">*</span></label>
+            <label class="ui-field-label">Secret key <span class="text-slate-500">*</span></label>
             <input v-model="alpaca.secret" type="password" placeholder="••••••••••"
-              class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono" />
+              class="ui-input font-mono" />
           </div>
         </div>
-        <div class="flex flex-wrap items-center gap-4">
-          <label class="flex items-center gap-2 cursor-pointer">
+        <div class="flex flex-wrap items-center gap-x-6 gap-y-3">
+          <label class="flex items-center gap-2.5 cursor-pointer">
             <button type="button" @click="alpaca.paper = !alpaca.paper"
-              :class="alpaca.paper ? 'bg-primary border-primary' : 'bg-surface border-border-subtle'"
-              class="relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 transition-colors">
-              <span :class="alpaca.paper ? 'translate-x-4' : 'translate-x-0.5'"
-                class="inline-block size-3.5 rounded-full bg-white shadow transition-transform"></span>
+              :class="alpaca.paper ? 'bg-slate-200' : 'bg-raised'"
+              class="relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border border-white/[0.08] transition-colors duration-150 ease-out"
+              role="switch" :aria-checked="alpaca.paper">
+              <span :class="alpaca.paper ? 'translate-x-[18px] bg-background-dark' : 'translate-x-0.5 bg-slate-500'"
+                class="inline-block size-3.5 rounded-full transition-transform duration-150 ease-out"></span>
             </button>
             <span class="text-sm text-slate-300">Paper trading</span>
           </label>
           <div class="flex items-center gap-2">
-            <span class="text-xs text-slate-400">Data feed:</span>
-            <button @click="alpaca.data_feed = 'iex'"
-              :class="alpaca.data_feed === 'iex' ? 'bg-primary/15 text-primary border-primary/40' : 'border-border-subtle text-slate-400'"
-              class="px-2.5 py-1 rounded-md text-xs font-semibold border transition-all">IEX</button>
-            <button @click="alpaca.data_feed = 'sip'"
-              :class="alpaca.data_feed === 'sip' ? 'bg-primary/15 text-primary border-primary/40' : 'border-border-subtle text-slate-400'"
-              class="px-2.5 py-1 rounded-md text-xs font-semibold border transition-all">SIP</button>
+            <span class="text-sm text-slate-400">Data feed</span>
+            <div class="ui-seg">
+              <button type="button" @click="alpaca.data_feed = 'iex'"
+                :class="alpaca.data_feed === 'iex' ? 'ui-seg-btn-active' : ''"
+                class="ui-seg-btn">IEX</button>
+              <button type="button" @click="alpaca.data_feed = 'sip'"
+                :class="alpaca.data_feed === 'sip' ? 'ui-seg-btn-active' : ''"
+                class="ui-seg-btn">SIP</button>
+            </div>
           </div>
         </div>
 
         <Transition name="step">
-          <div v-if="submitMsg" class="rounded-lg px-3 py-2.5 text-sm font-medium"
-            :class="submitOk
-              ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400'
-              : 'bg-red-500/10 border border-red-500/20 text-red-400'">
-            <span v-if="submitting" class="inline-flex items-center gap-2">
-              <span class="material-symbols-outlined text-base animate-spin">progress_activity</span>
+          <div v-if="submitMsg" class="rounded-xl border px-4 py-3 text-sm"
+            :class="submitOk ? 'border-gain/20 bg-gain/5 text-gain' : 'border-loss/20 bg-loss/5 text-loss'"
+            role="status">
+            <span v-if="submitting" class="inline-flex items-center gap-2 text-slate-300">
+              <span class="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
               {{ submitMsg }}
             </span>
             <span v-else>{{ submitMsg }}</span>
@@ -185,12 +181,11 @@ async function saveAlpaca() {
         </Transition>
 
         <div class="flex flex-col-reverse sm:flex-row items-stretch sm:items-center gap-2 sm:justify-end">
-          <button v-if="brokerages.length" @click="showForm = false" :disabled="submitting"
-            class="px-3 py-2 text-sm text-slate-400 hover:text-slate-100 transition-colors disabled:opacity-40">Cancel</button>
-          <button @click="saveAlpaca" :disabled="submitting || !alpacaValid"
-            class="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-primary/90 text-background-dark text-sm font-bold hover:brightness-110 transition-all disabled:opacity-40">
-            <span v-if="submitting" class="material-symbols-outlined text-base animate-spin">progress_activity</span>
-            <span v-else class="material-symbols-outlined text-[16px]">link</span>
+          <button v-if="brokerages.length" type="button" @click="showForm = false" :disabled="submitting"
+            class="ui-btn-ghost h-9">Cancel</button>
+          <button type="button" @click="saveAlpaca" :disabled="submitting || !alpacaValid"
+            class="ui-btn-primary">
+            <span v-if="submitting" class="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
             {{ submitting ? 'Working…' : 'Test &amp; link Alpaca' }}
           </button>
         </div>

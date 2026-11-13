@@ -360,7 +360,7 @@ const isStale           = computed(() => brokerFetchFailed.value)
 
 function pnlColorClass(v) {
   if (v == null || Number.isNaN(Number(v)) || Number(v) === 0) return 'text-slate-400'
-  return Number(v) > 0 ? 'text-emerald-400' : 'text-red-400'
+  return Number(v) > 0 ? 'text-gain' : 'text-loss'
 }
 
 const lookback = computed(() => {
@@ -507,7 +507,7 @@ function positionChange(symbol) {
 
 function positionChartOptions(symbol) {
   const ch = positionChange(symbol)
-  const lineColor = ch.isUp ? '#10b981' : '#ef4444'
+  const lineColor = ch.isUp ? '#4cc38a' : '#e5484d'   // gain / loss tokens
   const isCandle = chartStyle.value === 'candle'
   const isLine = chartStyle.value === 'line'
   const pts = positionPoints(symbol)
@@ -520,21 +520,21 @@ function positionChartOptions(symbol) {
       ? { type: 'solid' }
       : (isLine
           ? { type: 'solid', opacity: 0 }
-          : { type: 'gradient', gradient: { shadeIntensity: 1, opacityFrom: 0.4, opacityTo: 0.02 } }),
+          : { type: 'gradient', gradient: { colorStops: [{ offset: 0, color: lineColor, opacity: 0.12 }, { offset: 100, color: lineColor, opacity: 0 }] } }),
     colors: [lineColor],
-    plotOptions: { candlestick: { colors: { upward: '#10b981', downward: '#ef4444' }, wick: { useFillColor: true } } },
+    plotOptions: { candlestick: { colors: { upward: '#4cc38a', downward: '#e5484d' }, wick: { useFillColor: true } } },
     xaxis: {
       // Numeric sequential x — same trick as the equity chart, prevents
       // weekend-gap flat lines on per-position charts too.
       type: 'numeric',
-      labels: { show: isCandle, style: { colors: '#64748b', fontSize: '9px' } },
+      labels: { show: isCandle, style: { colors: '#71717a', fontSize: '11px' } },
       axisBorder: { show: false },
       axisTicks: { show: false },
       tooltip: { enabled: false },
     },
     yaxis: {
       decimalsInFloat: 2,
-      labels: { show: isCandle, style: { colors: '#64748b', fontSize: '9px' }, formatter: v => '$' + Number(v || 0).toFixed(2) },
+      labels: { show: isCandle, style: { colors: '#71717a', fontSize: '11px' }, formatter: v => '$' + Number(v || 0).toFixed(2) },
       tooltip: { enabled: false },
     },
     dataLabels: { enabled: false },
@@ -678,7 +678,7 @@ const rangeLabel = computed(() => {
 
 const chartOptions = computed(() => {
   const up = rangeStats.value.isUp
-  const lineColor = up ? '#10b981' : '#ef4444'  // emerald-500 / red-500 — RH parity
+  const lineColor = up ? '#4cc38a' : '#e5484d'  // gain / loss tokens, as on the dashboard
   const isCandle = chartStyle.value === 'candle'
   const isLine = chartStyle.value === 'line'
   return {
@@ -689,7 +689,7 @@ const chartOptions = computed(() => {
       sparkline: { enabled: false },
       animations: { enabled: true, easing: 'linear', dynamicAnimation: { speed: 350 } },
     },
-    grid: { borderColor: 'rgba(30, 37, 53, 0.4)', strokeDashArray: 3, padding: { left: 6, right: 6, top: 0, bottom: 0 } },
+    grid: { borderColor: 'rgba(255,255,255,0.05)', strokeDashArray: 0, xaxis: { lines: { show: false } }, padding: { left: 6, right: 6, top: 0, bottom: 0 } },
     stroke: {
       // Straight curve for RH-style jagged tick rendering (broker portfolio
       // history is sampled finely enough that smoothing introduces fake
@@ -701,12 +701,12 @@ const chartOptions = computed(() => {
       ? { type: 'solid' }
       : (isLine
           ? { type: 'solid', opacity: 0 }
-          : { type: 'gradient', gradient: { shadeIntensity: 1, opacityFrom: 0.35, opacityTo: 0.02 } }),
+          : { type: 'gradient', gradient: { colorStops: [{ offset: 0, color: lineColor, opacity: 0.1 }, { offset: 100, color: lineColor, opacity: 0 }] } }),
     colors: [lineColor],
-    markers: { size: 0, hover: { size: 5, sizeOffset: 3 } },
+    markers: { size: 0, hover: { size: 4, sizeOffset: 2 } },
     plotOptions: {
       candlestick: {
-        colors: { upward: '#10b981', downward: '#ef4444' },
+        colors: { upward: '#4cc38a', downward: '#e5484d' },
         wick: { useFillColor: true },
       },
     },
@@ -717,7 +717,7 @@ const chartOptions = computed(() => {
       type: 'numeric',
       tickAmount: 6,
       labels: {
-        style: { colors: '#64748b', fontSize: '10px' },
+        style: { colors: '#71717a', fontSize: '11px' },
         formatter: (val) => {
           const i = Math.round(Number(val))
           if (isCandle) {
@@ -727,7 +727,7 @@ const chartOptions = computed(() => {
           return xLabels.value[i] || ''
         },
       },
-      crosshairs: { show: true, stroke: { color: lineColor, width: 1, dashArray: 3 } },
+      crosshairs: { show: true, stroke: { color: 'rgba(237,237,237,0.3)', width: 1, dashArray: 0 } },
       axisBorder: { show: false },
       axisTicks: { show: false },
       tooltip: { enabled: false },
@@ -738,7 +738,7 @@ const chartOptions = computed(() => {
       decimalsInFloat: 2,
       forceNiceScale: true,
       labels: {
-        style: { colors: '#64748b', fontSize: '10px' },
+        style: { colors: '#71717a', fontSize: '11px' },
         formatter: v => '$' + Number(v || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
       },
       tooltip: { enabled: false },
@@ -888,463 +888,401 @@ watch(
 
 <template>
   <AppShell>
-    <main class="flex-1 px-4 py-6 sm:px-6 lg:px-8 lg:py-10 w-full mx-auto pb-24 sm:pb-10">
+    <main class="ui-page pb-24 sm:pb-8" :class="fullscreenMode ? 'max-w-none' : ''">
       <!-- Breadcrumb + back -->
-      <div class="flex items-center gap-2 text-sm text-slate-500 mb-6">
-        <button @click="router.push(`/instances/${instanceId}`)" class="hover:text-primary transition-colors flex items-center gap-1 min-h-[44px]">
+      <div class="flex items-center gap-2 text-sm text-slate-500">
+        <button @click="router.push(`/instances/${instanceId}`)" class="inline-flex items-center gap-1 min-h-[44px] sm:min-h-8 -ml-2 px-2 rounded-md text-slate-400 hover:text-slate-100 hover:bg-raised transition-colors duration-150 ease-out">
           <span class="material-symbols-outlined text-[16px]">arrow_back</span>
-          Back to Instance
+          Back to instance
         </button>
-        <span>/</span>
-        <span class="text-slate-300 truncate max-w-xs">Live Trading ({{ instanceId }})</span>
+        <span class="text-slate-600">/</span>
+        <span class="text-slate-300 truncate max-w-xs">Live trading · <span class="font-mono text-xs">{{ instanceId }}</span></span>
       </div>
 
       <!-- Header -->
-      <div class="flex items-start justify-between gap-4 mb-6 flex-wrap">
-        <div class="flex items-center gap-4 min-w-0">
-          <div class="size-12 rounded-2xl bg-sky-500/10 border border-sky-500/20 flex items-center justify-center shrink-0">
-            <span class="material-symbols-outlined text-sky-400 text-2xl">monitoring</span>
-          </div>
-          <div class="min-w-0">
-            <h1 class="text-xl sm:text-2xl font-bold truncate">Live Trading Terminal</h1>
-            <p class="text-xs text-slate-500 font-mono mt-0.5">Real-time positions & executions</p>
-          </div>
+      <header class="mt-4 flex flex-wrap items-end justify-between gap-x-4 gap-y-3">
+        <div class="min-w-0">
+          <h1 class="ui-page-title truncate">Live trading terminal</h1>
+          <p class="ui-page-sub">Real-time positions and executions</p>
         </div>
         <div class="flex items-center gap-2 sm:gap-3 shrink-0 flex-wrap">
-          <div
-            class="flex items-center gap-1.5 px-3 py-1.5 rounded-md border"
-            :class="{
-              'bg-emerald-500/10 border-emerald-500/20': statusColor === 'emerald',
-              'bg-amber-500/10 border-amber-500/20': statusColor === 'amber',
-              'bg-slate-500/10 border-slate-700': statusColor === 'slate',
-            }"
-          >
-            <div
-              class="w-2 h-2 rounded-full"
-              :class="{
-                'bg-emerald-400 animate-pulse shadow-[0_0_8px_#34d399]': statusColor === 'emerald',
-                'bg-amber-400': statusColor === 'amber',
-                'bg-slate-500': statusColor === 'slate',
-              }"
-            ></div>
-            <span
-              class="text-[10px] font-bold"
-              :class="{
-                'text-emerald-400': statusColor === 'emerald',
-                'text-amber-400': statusColor === 'amber',
-                'text-slate-400': statusColor === 'slate',
-              }"
-            >{{ statusLabel }}</span>
-          </div>
+          <span class="inline-flex items-center gap-2 text-sm"
+                :class="statusColor === 'emerald' ? 'text-slate-200' : statusColor === 'amber' ? 'text-slate-300' : 'text-slate-500'">
+            <span class="ui-dot" :class="statusColor === 'emerald' ? 'ui-dot-live' : statusColor === 'amber' ? 'ui-dot-warn' : 'ui-dot-off'"></span>
+            {{ statusLabel.charAt(0) + statusLabel.slice(1).toLowerCase() }}
+          </span>
           <span
             v-if="brokerFetchFailed"
-            class="text-[10px] text-red-400 inline-flex items-center gap-1 px-2 py-0.5 rounded border border-red-500/40 bg-red-500/10 max-w-[260px]"
+            class="text-xs text-loss inline-flex items-center gap-1 max-w-[260px]"
             :title="liveState?.broker_fetch_error || ''"
           >
-            <span class="material-symbols-outlined text-[13px]">cloud_off</span>
+            <span class="material-symbols-outlined text-[16px]">cloud_off</span>
             <span class="truncate">Broker offline ({{ liveState?.broker_fetch_error }})</span>
           </span>
           <span
             v-else-if="containerStale"
-            class="text-[10px] text-slate-400 inline-flex items-center gap-1"
+            class="text-xs text-slate-500 inline-flex items-center gap-1"
             :title="`Container LiveState writer last updated ${liveState?.container_seconds_since_update}s ago. Live data above is still fresh from the broker.`"
           >
-            <span class="material-symbols-outlined text-[13px]">sync_disabled</span>
+            <span class="material-symbols-outlined text-[16px]">sync_disabled</span>
             Container offline
           </span>
-          <span v-if="lastError && liveState" class="text-[10px] text-red-400/80 inline-flex items-center gap-1 max-w-[200px]" :title="lastError">
-            <span class="material-symbols-outlined text-[13px]">error</span>
+          <span v-if="lastError && liveState" class="text-xs text-loss inline-flex items-center gap-1 max-w-[200px]" :title="lastError">
+            <span class="material-symbols-outlined text-[16px]">error</span>
             <span class="truncate">Feed error</span>
           </span>
           <!-- Desktop-only kill switch; mobile version is sticky below -->
           <button
             v-if="!notRunning"
             @click="openHaltModal"
-            class="hidden sm:inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold border border-red-500/30 bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors min-h-[44px]"
+            class="hidden sm:inline-flex ui-btn text-loss"
           >
-            <span class="material-symbols-outlined text-[14px]">block</span>
+            <span class="material-symbols-outlined text-[16px]">block</span>
             Halt
           </button>
           <button
             v-if="!notRunning"
             @click="openOrderModal"
-            class="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold border border-sky-500/30 bg-sky-500/10 text-sky-400 hover:bg-sky-500/20 transition-colors min-h-[44px]"
+            class="ui-btn h-11 sm:h-8"
           >
-            <span class="material-symbols-outlined text-[14px]">add_shopping_cart</span>
-            Manual Order
+            <span class="material-symbols-outlined text-[16px]">add_shopping_cart</span>
+            Manual order
           </button>
           <!-- Fullscreen toggle: hides sidebar and (where supported) calls
                document.requestFullscreen so the chart fills the viewport. -->
           <button
             @click="toggleFullscreen"
             :title="fullscreenMode ? 'Exit fullscreen' : 'Enter fullscreen'"
-            class="inline-flex items-center justify-center size-11 rounded-lg text-xs font-bold border border-border-subtle text-slate-400 hover:text-slate-100 hover:border-primary/30 transition-colors"
+            :aria-label="fullscreenMode ? 'Exit fullscreen' : 'Enter fullscreen'"
+            class="ui-icon-btn size-11 sm:size-8"
           >
             <span class="material-symbols-outlined text-[18px]">
               {{ fullscreenMode ? 'fullscreen_exit' : 'fullscreen' }}
             </span>
           </button>
         </div>
-      </div>
+      </header>
 
       <!-- Historic lookback banner (mirrors BacktestResults.nexus_lookback UI) -->
       <!-- Guarded against (a) halted/not-running state and (b) stale snapshots
            so a dead broker can't keep animating a fake percentage. -->
       <div
         v-if="lookback && !notRunning && !isStale"
-        class="glass-card rounded-2xl p-4 sm:p-5 mb-4 sm:mb-5 border border-sky-500/30 bg-sky-500/5"
+        class="mt-8 ui-card px-5 py-4"
         role="progressbar"
         :aria-valuenow="lookbackPct"
         aria-valuemin="0"
         aria-valuemax="100"
         aria-label="Historic lookback training progress"
       >
-        <div class="flex items-center justify-between gap-3 flex-wrap mb-3">
-          <div class="flex items-center gap-2 min-w-0">
-            <span class="material-symbols-outlined text-sky-400 text-[18px] animate-pulse">history</span>
+        <div class="flex items-center justify-between gap-3 flex-wrap">
+          <div class="flex items-center gap-3 min-w-0">
+            <span class="material-symbols-outlined text-slate-500 text-[18px]">history</span>
             <div class="min-w-0">
-              <p class="text-xs font-bold text-sky-400 uppercase tracking-wider">Historic Lookback Training</p>
-              <p class="text-[11px] text-slate-400 font-mono mt-0.5 truncate">
+              <p class="text-sm font-medium text-slate-200">Historic lookback training</p>
+              <p class="text-xs text-slate-500 mt-0.5 truncate tabular-nums">
                 {{ lookback.spec_name || 'graph_nexus_analysis' }}
                 · {{ lookback.start_date }} → {{ lookback.end_date }}
               </p>
             </div>
           </div>
           <div class="text-right shrink-0">
-            <p class="text-xl sm:text-2xl font-black text-sky-400 tabular-nums leading-none">
-              {{ lookback.current }}<span class="text-sm text-slate-500 font-normal">/{{ lookback.total }}</span>
+            <p class="text-xl font-medium text-slate-100 tabular-nums leading-none">
+              {{ lookback.current }}<span class="text-sm text-slate-500">/{{ lookback.total }}</span>
             </p>
-            <p class="text-[10px] text-slate-500 tabular-nums mt-0.5">{{ lookbackPct }}% · {{ lookback.current_date }}</p>
+            <p class="text-xs text-slate-500 tabular-nums mt-1">{{ lookbackPct }}% · {{ lookback.current_date }}</p>
           </div>
         </div>
-        <div class="h-1.5 bg-slate-800 rounded-full overflow-hidden">
+        <div class="mt-3 h-1 bg-raised rounded-full overflow-hidden">
           <div
-            class="h-full rounded-full bg-gradient-to-r from-sky-500 to-primary transition-all duration-700"
-            :style="{ width: lookbackPct + '%' }"
+            class="h-full rounded-full bg-slate-300 origin-left transition-transform duration-500 ease-out"
+            :style="{ transform: `scaleX(${lookbackPct / 100})` }"
           ></div>
         </div>
-        <p class="text-[10px] text-slate-500 mt-2">
+        <p class="text-xs text-slate-500 mt-3">
           Trades are deferred until warmup completes.
           The Nexus strategy needs this context before it can make day-1 decisions.
         </p>
       </div>
 
       <!-- Not-running empty state -->
-      <div v-if="notRunning" class="glass-card rounded-2xl p-10 text-center border border-border-subtle mb-6">
-        <div class="size-16 rounded-2xl bg-slate-500/10 border border-slate-700 flex items-center justify-center mx-auto mb-4">
-          <span class="material-symbols-outlined text-slate-500 text-3xl">power_off</span>
+      <div v-if="notRunning" class="mt-8 ui-card ui-empty">
+        <div class="max-w-md space-y-2">
+          <p class="text-base text-slate-200">No live session</p>
+          <p>This instance has never booted a broker, or its broker is already shut down.</p>
+          <p class="text-xs text-slate-500">Start the instance from the Instance page to begin a live session.</p>
         </div>
-        <h2 class="text-lg font-bold text-slate-200 mb-1">No live session</h2>
-        <p class="text-sm text-slate-500">This instance has never booted a broker (or its broker is already shut down).</p>
-        <p class="text-xs text-slate-600 mt-2">Start the instance from the Instance page to begin a live session.</p>
       </div>
 
       <!-- Main grid (only shown when liveState exists) -->
-      <div v-else-if="liveState" class="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-5">
+      <div v-else-if="liveState" class="mt-8 grid grid-cols-1 lg:grid-cols-2 gap-x-8 gap-y-12 items-start">
 
         <!-- Left: hero equity card + secondary stats -->
-        <div class="flex flex-col gap-4 sm:gap-5">
+        <div class="flex flex-col gap-6 min-w-0">
           <!-- Brokerage hero card: equity, change, chart, range tabs, stats -->
-          <div class="glass-card rounded-2xl p-4 sm:p-6 flex flex-col">
+          <div class="ui-card px-5 pt-5 pb-5 flex flex-col">
             <!-- Hero: equity + uptime -->
-            <div class="flex items-start justify-between gap-3 mb-2">
+            <div class="flex items-start justify-between gap-3">
               <div class="min-w-0">
-                <p class="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">Portfolio Equity</p>
-                <p class="text-2xl sm:text-3xl font-black text-slate-100 tabular-nums leading-none break-all">
+                <p class="text-sm text-slate-400">Portfolio equity</p>
+                <p class="mt-2 text-[36px] font-medium text-slate-100 tabular-nums leading-none tracking-[-0.02em] break-all">
                   {{ fmtMoney(equity) }}
                 </p>
-                <!-- Range change with arrow (RH-style green/red) -->
-                <p
-                  class="text-xs sm:text-sm font-bold tabular-nums mt-2 flex items-center gap-1.5"
-                  :class="rangeStats.isUp ? 'text-emerald-400' : 'text-red-400'"
-                >
-                  <span class="material-symbols-outlined text-[14px] sm:text-[16px]">
-                    {{ rangeStats.isUp ? 'arrow_upward' : 'arrow_downward' }}
-                  </span>
-                  <span>{{ rangeStats.isUp ? '+' : '' }}{{ fmtMoney(rangeStats.dollars) }}</span>
-                  <span class="opacity-80">({{ rangeStats.isUp ? '+' : '' }}{{ rangeStats.pct.toFixed(2) }}%)</span>
-                  <span class="text-slate-500 font-normal text-[10px] sm:text-xs">{{ rangeLabel }}</span>
+                <!-- Range change -->
+                <p class="mt-2 text-sm tabular-nums">
+                  <span :class="rangeStats.isUp ? 'text-gain' : 'text-loss'">{{ rangeStats.isUp ? '+' : '' }}{{ fmtMoney(rangeStats.dollars) }} ({{ rangeStats.isUp ? '+' : '' }}{{ rangeStats.pct.toFixed(2) }}%)</span>
+                  <span class="text-slate-500 ml-1.5">{{ rangeLabel }}</span>
                 </p>
               </div>
               <div class="text-right shrink-0">
-                <p class="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">Uptime</p>
-                <p class="text-sm sm:text-base font-bold text-slate-300 tabular-nums">{{ uptimeDisplay }}</p>
+                <p class="text-xs text-slate-500">Uptime</p>
+                <p class="mt-1 text-sm text-slate-300 tabular-nums">{{ uptimeDisplay }}</p>
               </div>
             </div>
             <!-- Chart (fixed height — tabs sit immediately below, not pushed to card bottom) -->
-            <div class="mt-3 -mx-1">
-              <div v-if="graphSeries[0].data.length === 0" class="h-[280px] sm:h-[360px] flex items-center justify-center text-slate-600 text-xs font-mono">
+            <div class="mt-4 -mx-2">
+              <div v-if="graphSeries[0].data.length === 0" class="h-[320px] flex items-center justify-center text-sm text-slate-500">
                 No equity history yet — broker is fetching…
               </div>
               <VueApexCharts
                 v-else
                 :key="chartStyle"
                 :type="chartType"
-                :height="280"
+                :height="320"
                 :options="chartOptions"
                 :series="graphSeries"
-                class="sm:!h-[360px]"
               />
             </div>
             <!-- Range tabs immediately below the chart + chart-style toggle on the right -->
-            <div class="flex items-center justify-between gap-3 mt-2 flex-wrap">
-              <div class="flex items-center gap-1 overflow-x-auto no-scrollbar flex-1 justify-center sm:justify-start">
-                <button
-                  v-for="r in timeRanges"
-                  :key="r"
-                  @click="currentRange = r"
-                  class="px-3 sm:px-4 py-1.5 rounded-md text-[11px] sm:text-xs font-bold transition-colors whitespace-nowrap min-h-[32px]"
-                  :class="currentRange === r
-                    ? (rangeStats.isUp
-                        ? 'bg-emerald-500/15 text-emerald-400'
-                        : 'bg-red-500/15 text-red-400')
-                    : 'text-slate-500 hover:text-slate-300 hover:bg-surface-bright'"
-                >{{ r }}</button>
+            <div class="flex items-center justify-between gap-3 mt-3 flex-wrap">
+              <div class="overflow-x-auto no-scrollbar max-w-full">
+                <div class="ui-seg" role="group" aria-label="Range">
+                  <button
+                    v-for="r in timeRanges"
+                    :key="r"
+                    @click="currentRange = r"
+                    class="ui-seg-btn tabular-nums whitespace-nowrap"
+                    :class="currentRange === r ? 'ui-seg-btn-active' : ''"
+                    :aria-pressed="currentRange === r"
+                  >{{ r }}</button>
+                </div>
               </div>
               <!-- Chart style toggle (line / area / candle) -->
-              <div class="flex items-center gap-1 bg-surface p-1 rounded-lg border border-border-subtle shrink-0">
+              <div class="ui-seg shrink-0" role="group" aria-label="Chart style">
                 <button
                   v-for="s in chartStyles"
                   :key="s.id"
                   @click="chartStyle = s.id"
                   :title="s.label"
-                  class="inline-flex items-center justify-center w-8 h-8 rounded-md transition-colors"
-                  :class="chartStyle === s.id
-                    ? 'bg-slate-700/60 text-slate-100'
-                    : 'text-slate-500 hover:text-slate-300 hover:bg-surface-bright'"
+                  :aria-label="s.label"
+                  :aria-pressed="chartStyle === s.id"
+                  class="ui-seg-btn px-2 inline-flex items-center justify-center"
+                  :class="chartStyle === s.id ? 'ui-seg-btn-active' : ''"
                 >
-                  <span class="material-symbols-outlined text-[18px]">{{ s.icon }}</span>
+                  <span class="material-symbols-outlined text-[16px]">{{ s.icon }}</span>
                 </button>
               </div>
             </div>
-            <!-- Range high / low / avg / volatility -->
-            <div v-if="rangeStats.high != null" class="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4 pt-4 border-t border-border-subtle">
+            <!-- Range high / low / day / total -->
+            <div v-if="rangeStats.high != null" class="grid grid-cols-2 sm:grid-cols-4 gap-4 mt-5 pt-5 border-t border-white/[0.06]">
               <div>
-                <div class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Range High</div>
-                <div class="text-xs sm:text-sm font-bold text-slate-200 tabular-nums">{{ fmtMoney(rangeStats.high) }}</div>
+                <div class="text-xs text-slate-500">Range high</div>
+                <div class="mt-1 text-sm font-medium text-slate-200 tabular-nums">{{ fmtMoney(rangeStats.high) }}</div>
               </div>
               <div>
-                <div class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Range Low</div>
-                <div class="text-xs sm:text-sm font-bold text-slate-200 tabular-nums">{{ fmtMoney(rangeStats.low) }}</div>
+                <div class="text-xs text-slate-500">Range low</div>
+                <div class="mt-1 text-sm font-medium text-slate-200 tabular-nums">{{ fmtMoney(rangeStats.low) }}</div>
               </div>
               <div>
-                <div class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Day P&L</div>
-                <div class="text-xs sm:text-sm font-bold tabular-nums" :class="dayPnl >= 0 ? 'text-emerald-400' : 'text-red-400'">
+                <div class="text-xs text-slate-500">Day P&amp;L</div>
+                <div class="mt-1 text-sm font-medium tabular-nums" :class="dayPnl >= 0 ? 'text-gain' : 'text-loss'">
                   {{ fmtPct(dayPnlPct) }}
                 </div>
               </div>
               <div>
-                <div class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Total P&L</div>
-                <div class="text-xs sm:text-sm font-bold tabular-nums" :class="totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400'">
+                <div class="text-xs text-slate-500">Total P&amp;L</div>
+                <div class="mt-1 text-sm font-medium tabular-nums" :class="totalPnl >= 0 ? 'text-gain' : 'text-loss'">
                   {{ fmtPct(totalPnlPct) }}
                 </div>
               </div>
             </div>
           </div>
           <!-- Compact secondary stats: cash + buying power + total P&L $ -->
-          <div class="grid grid-cols-3 gap-2 sm:gap-4">
-            <div class="glass-card rounded-2xl p-3 sm:p-4">
-              <span class="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1">Cash</span>
-              <span class="text-sm sm:text-lg font-bold text-slate-200 tabular-nums">{{ fmtMoney(cash) }}</span>
+          <div class="ui-card grid grid-cols-3 divide-x divide-white/[0.06]">
+            <div class="px-4 sm:px-5 py-4 min-w-0">
+              <span class="text-xs text-slate-500 block">Cash</span>
+              <span class="mt-1 block text-base sm:text-lg font-medium text-slate-100 tabular-nums truncate">{{ fmtMoney(cash) }}</span>
             </div>
-            <div class="glass-card rounded-2xl p-3 sm:p-4">
-              <span class="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1">Buying Power</span>
-              <span class="text-sm sm:text-lg font-bold text-slate-200 tabular-nums">{{ fmtMoney(buyingPower) }}</span>
+            <div class="px-4 sm:px-5 py-4 min-w-0">
+              <span class="text-xs text-slate-500 block">Buying power</span>
+              <span class="mt-1 block text-base sm:text-lg font-medium text-slate-100 tabular-nums truncate">{{ fmtMoney(buyingPower) }}</span>
             </div>
-            <div class="glass-card rounded-2xl p-3 sm:p-4">
-              <span class="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1">Total P&L</span>
+            <div class="px-4 sm:px-5 py-4 min-w-0">
+              <span class="text-xs text-slate-500 block">Total P&amp;L</span>
               <span
-                class="text-sm sm:text-lg font-bold tabular-nums"
-                :class="totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400'"
+                class="mt-1 block text-base sm:text-lg font-medium tabular-nums truncate"
+                :class="totalPnl >= 0 ? 'text-gain' : 'text-loss'"
               >{{ fmtMoney(totalPnl) }}</span>
             </div>
           </div>
-          <!-- Recent Executions — moved into the left column under cash/BP/Total P&L -->
-          <section class="glass-card rounded-2xl p-3 sm:p-5 flex flex-col">
-            <div class="flex items-center justify-between mb-3 shrink-0">
-              <h3 class="text-xs font-bold text-slate-500 tracking-widest uppercase">Recent Executions</h3>
-              <span class="text-[10px] text-slate-600 font-mono">{{ trades.length }}</span>
+          <!-- Recent executions — in the left column under cash/BP/Total P&L -->
+          <section class="mt-6" aria-labelledby="lt-exec">
+            <div class="mb-3">
+              <h2 id="lt-exec" class="ui-section-title">Recent executions</h2>
+              <p class="ui-section-sub tabular-nums">{{ trades.length }} recorded</p>
             </div>
-            <div v-if="trades.length === 0" class="text-xs text-slate-600 italic font-mono px-1 py-4">
-              No executions recorded yet.
-            </div>
-            <div v-else class="overflow-y-auto pr-2 font-mono space-y-2 no-scrollbar" style="max-height: 420px">
-              <div
-                v-for="(t, i) in trades"
-                :key="(t.order_id || '') + '_' + i"
-                class="bg-surface/50 p-3 rounded-lg border border-border-subtle"
-              >
-                <div class="flex justify-between items-start gap-3 mb-2">
-                  <div class="min-w-0 flex-1">
-                    <div class="flex items-baseline gap-2 flex-wrap">
-                      <span
-                        class="text-base font-black uppercase tracking-wide"
-                        :class="t.side === 'buy' ? 'text-emerald-400' : 'text-red-400'"
-                      >{{ t.side || '—' }}</span>
-                      <span class="text-base font-black text-slate-100 tracking-wide">{{ t.symbol || '' }}</span>
-                      <span
-                        v-if="isOptionRow(t)"
-                        class="px-1.5 py-0.5 rounded text-[9px] font-bold border uppercase tracking-wider text-zinc-200 bg-zinc-500/10 border-zinc-500/20"
-                      >Option</span>
+            <div class="ui-card overflow-hidden">
+              <p v-if="trades.length === 0" class="ui-empty">No executions recorded yet</p>
+              <template v-else>
+                <div class="lt-exec-grid hidden sm:grid ui-th">
+                  <span>Execution</span><span class="text-right">Quantity</span><span class="text-right">Fill price</span><span class="text-right">Total</span>
+                </div>
+                <div class="overflow-y-auto no-scrollbar ui-rows" style="max-height: 420px">
+                  <div
+                    v-for="(t, i) in trades"
+                    :key="(t.order_id || '') + '_' + i"
+                    class="lt-exec-grid grid items-center min-h-14 px-5 py-2"
+                  >
+                    <div class="min-w-0">
+                      <div class="flex items-baseline gap-2 min-w-0">
+                        <span class="text-xs text-slate-400 capitalize shrink-0">{{ t.side || '—' }}</span>
+                        <span class="text-sm font-medium text-slate-100 truncate">{{ t.symbol || '' }}</span>
+                        <span v-if="isOptionRow(t)" class="text-xs text-slate-500 shrink-0">Option</span>
+                      </div>
+                      <div v-if="isOptionRow(t)" class="text-xs text-slate-500 mt-0.5 truncate">{{ describeOption(t) }}</div>
+                      <div class="text-xs text-slate-500 mt-0.5 tabular-nums">{{ fmtDateTime(t.ts) }}<span class="sm:hidden"> · {{ displayQuantity(t, 4) }} {{ quantityLabel(t).toLowerCase() }} @ {{ fmtMoney(t.price) }}</span></div>
                     </div>
-                    <div v-if="isOptionRow(t)" class="text-[10px] text-slate-500 mt-0.5">{{ describeOption(t) }}</div>
-                  </div>
-                  <div class="text-right shrink-0">
-                    <div class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Fill Price</div>
-                    <div class="text-lg font-black text-slate-100 tabular-nums leading-tight">{{ fmtMoney(t.price) }}</div>
-                  </div>
-                </div>
-                <div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                  <div class="col-span-2 sm:col-span-1">
-                    <div class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">When</div>
-                    <div class="text-sm font-bold text-slate-100 tabular-nums">{{ fmtDateTime(t.ts) }}</div>
-                  </div>
-                  <div>
-                    <div class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">{{ quantityLabel(t) }}</div>
-                    <div
-                      class="text-sm font-bold text-slate-100 tabular-nums"
-                      :title="String(t.qty || 0)"
-                    >{{ displayQuantity(t, 4) }}</div>
-                  </div>
-                  <div>
-                    <div class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Total</div>
-                    <div class="text-sm font-bold text-slate-100 tabular-nums">{{ fmtMoney(tradeTotal(t)) }}</div>
+                    <div class="hidden sm:block text-right tabular-nums">
+                      <div class="text-sm text-slate-200" :title="String(t.qty || 0)">{{ displayQuantity(t, 4) }}</div>
+                      <div class="text-xs text-slate-500 mt-0.5">{{ quantityLabel(t) }}</div>
+                    </div>
+                    <div class="hidden sm:block text-right text-sm text-slate-200 tabular-nums">{{ fmtMoney(t.price) }}</div>
+                    <div class="text-right text-sm text-slate-100 tabular-nums">{{ fmtMoney(tradeTotal(t)) }}</div>
                   </div>
                 </div>
-              </div>
+              </template>
             </div>
           </section>
         </div>
 
-        <!-- Right: positions only — full-height, 2-column card grid -->
-        <div class="flex flex-col gap-4 sm:gap-5">
-          <section class="glass-card rounded-2xl p-3 sm:p-5 flex flex-col h-full">
-            <div class="flex items-center justify-between mb-3 shrink-0">
-              <h3 class="text-xs font-bold text-slate-500 tracking-widest uppercase">Active Positions</h3>
-              <span class="text-[10px] text-slate-600 font-mono">{{ positions.length }}</span>
-            </div>
-            <div v-if="positions.length === 0" class="text-xs text-slate-600 italic font-mono px-1 py-4">
-              No open positions.
-            </div>
-            <div v-else class="grid grid-cols-1 xl:grid-cols-2 gap-3 font-mono">
-              <div
-                v-for="p in positions"
-                :key="p.symbol"
-                class="bg-surface/50 p-3 rounded-lg border border-border-subtle"
-              >
-                <div class="flex justify-between items-start gap-3 mb-2">
-                  <div class="min-w-0 flex-1">
-                    <div class="flex items-baseline gap-2 flex-wrap">
-                      <span class="text-base font-black text-slate-100 tracking-wide">{{ p.symbol }}</span>
-                      <span
-                        v-if="isOptionRow(p)"
-                        class="px-1.5 py-0.5 rounded text-[9px] font-bold border uppercase tracking-wider text-zinc-200 bg-zinc-500/10 border-zinc-500/20"
-                      >Option</span>
-                      <span
-                        v-if="isOptionRow(p) && isShortPosition(p)"
-                        class="px-1.5 py-0.5 rounded text-[9px] font-bold border uppercase tracking-wider text-amber-300 bg-amber-500/10 border-amber-500/20"
-                      >Short</span>
-                      <span
-                        class="text-xs font-bold tabular-nums"
-                        :class="p.avg_entry_price ? pnlColorClass(p.unrealized_pnl_pct) : 'text-slate-500'"
-                      >{{ p.avg_entry_price ? fmtPct(p.unrealized_pnl_pct) : '—' }}</span>
-                    </div>
-                    <div v-if="isOptionRow(p)" class="text-[10px] text-slate-500 mt-0.5">{{ describeOption(p) }}</div>
-                    <!-- Range change from RH historicals (matches global range/style) -->
-                    <div
-                      v-if="positionChange(p.symbol).hasData"
-                      class="text-[10px] font-bold tabular-nums mt-0.5 flex items-center gap-1"
-                      :class="positionChange(p.symbol).isUp ? 'text-emerald-400/90' : 'text-red-400/90'"
-                    >
-                      <span class="material-symbols-outlined text-[11px]">
-                        {{ positionChange(p.symbol).isUp ? 'arrow_upward' : 'arrow_downward' }}
-                      </span>
-                      <span>{{ positionChange(p.symbol).isUp ? '+' : '' }}{{ positionChange(p.symbol).pct.toFixed(2) }}%</span>
-                      <span class="text-slate-500 font-normal">{{ currentRange }}</span>
-                    </div>
+        <!-- Right: positions only — 2-column card grid -->
+        <section class="min-w-0" aria-labelledby="lt-positions">
+          <div class="mb-3">
+            <h2 id="lt-positions" class="ui-section-title">Active positions</h2>
+            <p class="ui-section-sub tabular-nums">{{ positions.length }} open</p>
+          </div>
+          <div v-if="positions.length === 0" class="ui-card ui-empty">No open positions</div>
+          <div v-else class="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            <div
+              v-for="p in positions"
+              :key="p.symbol"
+              class="ui-card px-4 py-4 flex flex-col min-w-0"
+            >
+              <div class="flex justify-between items-start gap-3">
+                <div class="min-w-0 flex-1">
+                  <div class="flex items-baseline gap-2 flex-wrap min-w-0">
+                    <span class="text-base font-medium text-slate-100 truncate max-w-full">{{ p.symbol }}</span>
+                    <span v-if="isOptionRow(p)" class="text-xs text-slate-500">Option</span>
+                    <span v-if="isOptionRow(p) && isShortPosition(p)" class="text-xs text-slate-300">Short</span>
                   </div>
-                  <div class="text-right shrink-0">
-                    <div class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Market Value</div>
-                    <div class="text-lg font-black text-slate-100 tabular-nums leading-tight">{{ fmtMoney(p.market_value) }}</div>
+                  <div v-if="isOptionRow(p)" class="text-xs text-slate-500 mt-0.5">{{ describeOption(p) }}</div>
+                  <div class="text-xs mt-0.5 tabular-nums">
+                    <span :class="p.avg_entry_price ? pnlColorClass(p.unrealized_pnl_pct) : 'text-slate-500'">{{ p.avg_entry_price ? fmtPct(p.unrealized_pnl_pct) : '—' }}</span>
+                    <span class="text-slate-500 ml-1">unrealized</span>
                   </div>
-                </div>
-                <!-- Per-position price chart -->
-                <div class="mb-2 -mx-1">
+                  <!-- Range change from historicals (matches global range/style) -->
                   <div
-                    v-if="!(positionHistoricals[p.symbol] && positionHistoricals[p.symbol].length)"
-                    class="h-[80px] flex items-center justify-center text-[10px] text-slate-600 font-mono"
+                    v-if="positionChange(p.symbol).hasData"
+                    class="text-xs tabular-nums mt-0.5"
                   >
-                    {{ isOptionRow(p) ? 'No price chart for options' : (positionHistLoading ? 'Loading chart…' : 'No price history') }}
-                  </div>
-                  <VueApexCharts
-                    v-else
-                    :key="p.symbol + '-' + chartStyle + '-' + currentRange"
-                    :type="chartType"
-                    :height="chartStyle === 'candle' ? 110 : 80"
-                    :options="positionChartOptions(p.symbol)"
-                    :series="positionSeries(p.symbol)"
-                  />
-                </div>
-                <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-2">
-                  <div>
-                    <div class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">{{ quantityLabel(p) }}</div>
-                    <div
-                      class="text-xs font-bold text-slate-300 tabular-nums"
-                      :title="String(p.qty || 0)"
-                    >{{ displayQuantity(p, 8) }}</div>
-                  </div>
-                  <div>
-                    <div class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Last</div>
-                    <div class="text-xs font-bold text-slate-300 tabular-nums">{{ fmtMoney(p.last_price) }}</div>
-                  </div>
-                  <div>
-                    <div class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Entry</div>
-                    <div class="text-xs font-bold text-slate-300 tabular-nums">{{ p.avg_entry_price ? fmtMoney(p.avg_entry_price) : '—' }}</div>
-                  </div>
-                  <div>
-                    <div class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">P&amp;L $</div>
-                    <div
-                      class="text-xs font-bold tabular-nums"
-                      :class="p.avg_entry_price ? pnlColorClass(p.unrealized_pnl) : 'text-slate-500'"
-                    >{{ p.avg_entry_price ? fmtMoney(p.unrealized_pnl) : '—' }}</div>
+                    <span :class="positionChange(p.symbol).isUp ? 'text-gain' : 'text-loss'">{{ positionChange(p.symbol).isUp ? '+' : '' }}{{ positionChange(p.symbol).pct.toFixed(2) }}%</span>
+                    <span class="text-slate-500 ml-1">{{ currentRange }}</span>
                   </div>
                 </div>
-                <div v-if="canClosePosition(p)" class="flex justify-end">
-                  <button
-                    @click="openClosePosModal(p.symbol)"
-                    class="inline-flex items-center gap-1 px-3 py-2 rounded-lg text-[11px] font-bold border border-red-500/30 bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors min-h-[36px]"
-                    title="Close position (market sell)"
-                  >
-                    <span class="material-symbols-outlined text-[13px]">logout</span>
-                    Close
-                  </button>
+                <div class="text-right shrink-0">
+                  <div class="text-xs text-slate-500">Market value</div>
+                  <div class="mt-1 text-base font-medium text-slate-100 tabular-nums">{{ fmtMoney(p.market_value) }}</div>
                 </div>
-                <p v-else class="text-[10px] text-slate-600 text-right">
-                  Managed by the wheel lane, which buys puts back automatically. Close it at the broker if needed.
-                </p>
               </div>
+              <!-- Per-position price chart -->
+              <div class="my-3 -mx-1">
+                <div
+                  v-if="!(positionHistoricals[p.symbol] && positionHistoricals[p.symbol].length)"
+                  class="h-[80px] flex items-center justify-center text-xs text-slate-600"
+                >
+                  {{ isOptionRow(p) ? 'No price chart for options' : (positionHistLoading ? 'Loading chart…' : 'No price history') }}
+                </div>
+                <VueApexCharts
+                  v-else
+                  :key="p.symbol + '-' + chartStyle + '-' + currentRange"
+                  :type="chartType"
+                  :height="chartStyle === 'candle' ? 110 : 80"
+                  :options="positionChartOptions(p.symbol)"
+                  :series="positionSeries(p.symbol)"
+                />
+              </div>
+              <div class="grid grid-cols-4 xl:grid-cols-2 gap-x-3 gap-y-3 pt-3 border-t border-white/[0.06]">
+                <div class="min-w-0">
+                  <div class="text-xs text-slate-500">{{ quantityLabel(p) }}</div>
+                  <div class="mt-0.5 text-[13px] text-slate-300 tabular-nums truncate" :title="String(p.qty || 0)">{{ displayQuantity(p, 8) }}</div>
+                </div>
+                <div class="min-w-0">
+                  <div class="text-xs text-slate-500">Last</div>
+                  <div class="mt-0.5 text-[13px] text-slate-300 tabular-nums truncate">{{ fmtMoney(p.last_price) }}</div>
+                </div>
+                <div class="min-w-0">
+                  <div class="text-xs text-slate-500">Entry</div>
+                  <div class="mt-0.5 text-[13px] text-slate-300 tabular-nums truncate">{{ p.avg_entry_price ? fmtMoney(p.avg_entry_price) : '—' }}</div>
+                </div>
+                <div class="min-w-0">
+                  <div class="text-xs text-slate-500">P&amp;L $</div>
+                  <div
+                    class="mt-0.5 text-[13px] tabular-nums truncate"
+                    :class="p.avg_entry_price ? pnlColorClass(p.unrealized_pnl) : 'text-slate-500'"
+                  >{{ p.avg_entry_price ? fmtMoney(p.unrealized_pnl) : '—' }}</div>
+                </div>
+              </div>
+              <div v-if="canClosePosition(p)" class="flex justify-end mt-3">
+                <button
+                  @click="openClosePosModal(p.symbol)"
+                  class="ui-btn text-loss"
+                  title="Close position (market sell)"
+                >
+                  <span class="material-symbols-outlined text-[16px]">logout</span>
+                  Close
+                </button>
+              </div>
+              <p v-else class="mt-3 text-xs text-slate-500 text-right leading-snug">
+                Managed by the wheel lane, which buys puts back automatically. Close it at the broker if needed.
+              </p>
             </div>
-          </section>
-        </div>
+          </div>
+        </section>
       </div>
 
       <!-- Loading placeholder -->
-      <div v-else class="glass-card rounded-2xl p-10 text-center border border-border-subtle">
-        <span class="material-symbols-outlined text-slate-600 text-3xl animate-spin">progress_activity</span>
-        <p class="text-sm text-slate-500 mt-3">Loading live state…</p>
-        <p v-if="lastError" class="text-xs text-red-400 mt-1">{{ lastError }}</p>
+      <div v-else class="mt-8" aria-busy="true">
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-8" aria-hidden="true">
+          <div class="h-[520px] rounded-xl bg-surface"></div>
+          <div class="h-[520px] rounded-xl bg-surface"></div>
+        </div>
+        <p class="mt-3 text-sm text-slate-500">Loading live state…</p>
+        <p v-if="lastError" class="mt-1 text-sm text-loss">{{ lastError }}</p>
       </div>
 
       <!-- Live log panel (always visible once we have any state; gracefully shows "not running" otherwise) -->
-      <div class="mt-4 sm:mt-5">
+      <section class="mt-12" aria-labelledby="lt-logs">
+        <div class="mb-3">
+          <h2 id="lt-logs" class="ui-section-title">Live logs</h2>
+        </div>
         <InstanceLiveLogs :instance-id="instanceId" />
-      </div>
+      </section>
 
       <!-- Sticky mobile halt button — only on small screens when not already halted -->
       <button
         v-if="!notRunning"
         @click="openHaltModal"
-        class="sm:hidden fixed bottom-4 right-4 z-20 inline-flex items-center gap-1.5 px-4 py-3 rounded-full text-sm font-bold border border-red-500/40 bg-red-500/20 text-red-300 shadow-2xl min-h-[48px]"
+        class="sm:hidden fixed bottom-20 right-4 z-20 inline-flex items-center gap-1.5 h-12 px-5 rounded-full text-sm font-medium border border-loss/30 bg-raised text-loss shadow-[0_8px_24px_rgba(0,0,0,0.5)]"
       >
         <span class="material-symbols-outlined text-[18px]">block</span>
         Halt
@@ -1353,31 +1291,27 @@ watch(
       <!-- Command toast -->
       <div
         v-if="commandToast"
-        class="fixed bottom-4 left-4 sm:left-auto sm:right-4 z-30 max-w-sm bg-[#0d1117] border rounded-xl shadow-2xl p-3 text-xs font-mono"
-        :class="{
-          'border-sky-500/40': commandToast.status === 'pending' || commandToast.status === 'running',
-          'border-emerald-500/40': commandToast.status === 'completed',
-          'border-red-500/40': commandToast.status === 'failed',
-        }"
+        class="fixed bottom-4 left-4 sm:left-auto sm:right-4 z-30 max-w-sm bg-raised border rounded-xl shadow-[0_16px_40px_rgba(0,0,0,0.5)] px-4 py-3 text-xs"
+        :class="commandToast.status === 'failed' ? 'border-loss/30' : 'border-white/[0.08]'"
       >
-        <div class="flex items-start gap-2">
+        <div class="flex items-start gap-2.5">
           <span
             class="material-symbols-outlined text-[16px] shrink-0"
             :class="{
-              'text-sky-400 animate-spin': commandToast.status === 'pending' || commandToast.status === 'running',
-              'text-emerald-400': commandToast.status === 'completed',
-              'text-red-400': commandToast.status === 'failed',
+              'text-slate-400 animate-spin': commandToast.status === 'pending' || commandToast.status === 'running',
+              'text-gain': commandToast.status === 'completed',
+              'text-loss': commandToast.status === 'failed',
             }"
           >{{ ['pending','running'].includes(commandToast.status) ? 'progress_activity' : (commandToast.status === 'completed' ? 'task_alt' : 'error') }}</span>
           <div class="min-w-0 flex-1">
-            <p class="text-[11px] font-bold text-slate-200 uppercase tracking-wide">{{ commandToast.type }} · {{ commandToast.status }}</p>
-            <p v-if="commandToast.error" class="text-red-400 mt-1 break-words">{{ commandToast.error }}</p>
-            <p v-else-if="commandToast.result && Object.keys(commandToast.result).length" class="text-slate-400 mt-1 break-words">
+            <p class="text-sm text-slate-100">{{ String(commandToast.type || '').replace(/_/g, ' ') }} <span class="text-slate-500">· {{ commandToast.status }}</span></p>
+            <p v-if="commandToast.error" class="text-loss mt-1 break-words">{{ commandToast.error }}</p>
+            <p v-else-if="commandToast.result && Object.keys(commandToast.result).length" class="text-slate-400 mt-1 break-words font-mono">
               {{ JSON.stringify(commandToast.result) }}
             </p>
           </div>
-          <button @click="commandToast = null" class="text-slate-600 hover:text-slate-300 shrink-0">
-            <span class="material-symbols-outlined text-[14px]">close</span>
+          <button @click="commandToast = null" class="ui-icon-btn size-6 -mr-1 shrink-0" aria-label="Dismiss">
+            <span class="material-symbols-outlined text-[16px]">close</span>
           </button>
         </div>
       </div>
@@ -1386,38 +1320,43 @@ watch(
       <Teleport to="body">
         <div
           v-if="haltModalOpen"
-          class="fixed inset-0 z-[120] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4"
+          class="ui-overlay z-[120]"
           @click.self="closeHaltModal"
         >
-          <div class="w-full max-w-md bg-[#0d1117] border border-red-500/30 rounded-2xl shadow-2xl overflow-hidden">
-            <div class="flex items-center gap-3 px-5 py-4 border-b border-red-500/20">
-              <span class="material-symbols-outlined text-red-400">block</span>
-              <h3 class="text-base font-bold text-slate-100">Halt Live Trading</h3>
+          <div class="ui-modal max-w-md">
+            <div class="ui-modal-head">
+              <div class="min-w-0">
+                <h2 class="text-base font-medium text-slate-100">Halt live trading</h2>
+                <p class="text-sm text-slate-400 mt-1">This cancels all open orders and stops the running broker. It <span class="text-slate-100">does not</span> liquidate open positions.</p>
+              </div>
             </div>
-            <div class="px-5 py-5 space-y-3 text-sm text-slate-300">
-              <p class="text-amber-400/80 text-xs font-mono">This cancels all open orders and stops the running broker. It does NOT liquidate open positions.</p>
-              <label class="block text-[11px] font-bold text-slate-500 uppercase">Reason (optional)</label>
-              <input
-                v-model="haltReasonInput"
-                type="text"
-                class="w-full bg-[#161b22] border border-[#30363d] rounded px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-red-500/50"
-                placeholder="e.g. risk breach"
-              />
-              <label class="block text-[11px] font-bold text-slate-500 uppercase mt-2">Type <span class="text-red-400 font-black">HALT</span> to confirm</label>
-              <input
-                v-model="haltConfirmInput"
-                type="text"
-                class="w-full bg-[#161b22] border border-[#30363d] rounded px-3 py-2 text-sm font-mono text-slate-200 placeholder-slate-600 focus:outline-none focus:border-red-500/50"
-                placeholder="HALT"
-              />
+            <div class="ui-modal-body space-y-4">
+              <div>
+                <label class="ui-field-label">Reason <span class="text-slate-500">(optional)</span></label>
+                <input
+                  v-model="haltReasonInput"
+                  type="text"
+                  class="ui-input"
+                  placeholder="e.g. risk breach"
+                />
+              </div>
+              <div>
+                <label class="ui-field-label">Type <span class="font-mono text-loss">HALT</span> to confirm</label>
+                <input
+                  v-model="haltConfirmInput"
+                  type="text"
+                  class="ui-input font-mono"
+                  placeholder="HALT"
+                />
+              </div>
             </div>
-            <div class="px-5 py-4 border-t border-[#30363d] flex items-center justify-end gap-2">
-              <button @click="closeHaltModal" class="px-4 py-2 rounded-lg text-sm text-slate-400 hover:text-slate-200 border border-border-subtle min-h-[44px]">Cancel</button>
+            <div class="ui-modal-foot">
+              <button @click="closeHaltModal" class="ui-btn-ghost h-11 sm:h-9 px-4">Cancel</button>
               <button
                 @click="confirmHalt"
                 :disabled="haltConfirmInput.trim().toUpperCase() !== 'HALT'"
-                class="px-4 py-2 rounded-lg text-sm font-bold border border-red-500/30 bg-red-500/10 text-red-400 hover:bg-red-500/20 disabled:opacity-40 disabled:cursor-not-allowed min-h-[44px]"
-              >Halt Now</button>
+                class="ui-btn text-loss h-11 sm:h-9 px-4"
+              >Halt now</button>
             </div>
           </div>
         </div>
@@ -1427,31 +1366,32 @@ watch(
       <Teleport to="body">
         <div
           v-if="closePosModalOpen"
-          class="fixed inset-0 z-[120] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4"
+          class="ui-overlay z-[120]"
           @click.self="closeClosePosModal"
         >
-          <div class="w-full max-w-md bg-[#0d1117] border border-red-500/30 rounded-2xl shadow-2xl overflow-hidden">
-            <div class="flex items-center gap-3 px-5 py-4 border-b border-red-500/20">
-              <span class="material-symbols-outlined text-red-400">logout</span>
-              <h3 class="text-base font-bold text-slate-100">Close Position</h3>
+          <div class="ui-modal max-w-md">
+            <div class="ui-modal-head">
+              <div class="min-w-0">
+                <h2 class="text-base font-medium text-slate-100">Close position</h2>
+                <p class="text-sm text-slate-400 mt-1">Submit a market sell for the full quantity of <span class="text-slate-100 font-medium">{{ closePosSymbol }}</span>.</p>
+              </div>
             </div>
-            <div class="px-5 py-5 space-y-3 text-sm text-slate-300">
-              <p>Submit a market sell for the full quantity of <span class="font-black text-slate-100">{{ closePosSymbol }}</span>.</p>
-              <label class="block text-[11px] font-bold text-slate-500 uppercase">Type <span class="text-red-400 font-black">CLOSE {{ closePosSymbol }}</span> to confirm</label>
+            <div class="ui-modal-body">
+              <label class="ui-field-label">Type <span class="font-mono text-loss">CLOSE {{ closePosSymbol }}</span> to confirm</label>
               <input
                 v-model="closePosConfirmInput"
                 type="text"
-                class="w-full bg-[#161b22] border border-[#30363d] rounded px-3 py-2 text-sm font-mono text-slate-200 placeholder-slate-600 focus:outline-none focus:border-red-500/50"
+                class="ui-input font-mono"
                 :placeholder="`CLOSE ${closePosSymbol}`"
               />
             </div>
-            <div class="px-5 py-4 border-t border-[#30363d] flex items-center justify-end gap-2">
-              <button @click="closeClosePosModal" class="px-4 py-2 rounded-lg text-sm text-slate-400 hover:text-slate-200 border border-border-subtle min-h-[44px]">Cancel</button>
+            <div class="ui-modal-foot">
+              <button @click="closeClosePosModal" class="ui-btn-ghost h-11 sm:h-9 px-4">Cancel</button>
               <button
                 @click="confirmClosePosition"
                 :disabled="closePosConfirmInput.trim().toUpperCase() !== `CLOSE ${closePosSymbol}`"
-                class="px-4 py-2 rounded-lg text-sm font-bold border border-red-500/30 bg-red-500/10 text-red-400 hover:bg-red-500/20 disabled:opacity-40 disabled:cursor-not-allowed min-h-[44px]"
-              >Submit Sell</button>
+                class="ui-btn text-loss h-11 sm:h-9 px-4"
+              >Submit sell</button>
             </div>
           </div>
         </div>
@@ -1461,80 +1401,84 @@ watch(
       <Teleport to="body">
         <div
           v-if="orderModalOpen"
-          class="fixed inset-0 z-[120] bg-black/70 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4"
+          class="ui-overlay z-[120] items-end sm:items-center p-0 sm:p-4"
           @click.self="closeOrderModal"
         >
-          <div class="w-full sm:max-w-lg max-h-[92dvh] flex flex-col bg-[#0d1117] border border-sky-500/30 rounded-t-2xl sm:rounded-2xl shadow-2xl overflow-hidden">
-            <div class="flex items-center gap-3 px-5 py-4 border-b border-sky-500/20 shrink-0">
-              <span class="material-symbols-outlined text-sky-400">add_shopping_cart</span>
-              <h3 class="text-base font-bold text-slate-100">Manual Order</h3>
+          <div class="ui-modal sm:max-w-lg max-h-[92dvh] flex flex-col rounded-b-none sm:rounded-2xl">
+            <div class="ui-modal-head shrink-0">
+              <div class="min-w-0">
+                <h2 class="text-base font-medium text-slate-100">Manual order</h2>
+                <p class="text-sm text-slate-500 mt-1">Sent to this instance's broker</p>
+              </div>
             </div>
-            <div class="px-5 py-5 space-y-4 text-sm text-slate-300 overflow-y-auto">
+            <div class="ui-modal-body space-y-4 overflow-y-auto">
               <div>
-                <label class="block text-[11px] font-bold text-slate-500 uppercase mb-1">Symbol</label>
+                <label class="ui-field-label">Symbol</label>
                 <input
                   v-model="orderForm.symbol"
                   type="text"
-                  class="w-full bg-[#161b22] border border-[#30363d] rounded px-3 py-2 text-sm font-mono text-slate-200 uppercase focus:outline-none focus:border-sky-500/50"
+                  class="ui-input font-mono uppercase"
                   placeholder="AAPL"
                 />
               </div>
-              <div class="grid grid-cols-2 gap-3">
+              <div class="grid grid-cols-2 gap-4">
                 <div>
-                  <label class="block text-[11px] font-bold text-slate-500 uppercase mb-1">Side</label>
-                  <select v-model="orderForm.side" class="w-full bg-[#161b22] border border-[#30363d] rounded px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-sky-500/50 min-h-[44px]">
+                  <label class="ui-field-label">Side</label>
+                  <select v-model="orderForm.side" class="ui-input max-sm:h-11">
                     <option value="buy">Buy</option>
                     <option value="sell">Sell</option>
                   </select>
                 </div>
                 <div>
-                  <label class="block text-[11px] font-bold text-slate-500 uppercase mb-1">Order Type</label>
-                  <select v-model="orderForm.order_type" class="w-full bg-[#161b22] border border-[#30363d] rounded px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-sky-500/50 min-h-[44px]">
+                  <label class="ui-field-label">Order type</label>
+                  <select v-model="orderForm.order_type" class="ui-input max-sm:h-11">
                     <option value="market">Market</option>
                     <option value="limit">Limit</option>
                   </select>
                 </div>
               </div>
-              <div class="grid grid-cols-2 gap-3">
-                <div>
-                  <label class="block text-[11px] font-bold text-slate-500 uppercase mb-1">Qty (shares)</label>
-                  <input
-                    v-model="orderForm.qty"
-                    type="number"
-                    min="0"
-                    step="any"
-                    class="w-full bg-[#161b22] border border-[#30363d] rounded px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-sky-500/50"
-                    placeholder="0"
-                  />
+              <div>
+                <div class="grid grid-cols-2 gap-4">
+                  <div>
+                    <label class="ui-field-label">Qty (shares)</label>
+                    <input
+                      v-model="orderForm.qty"
+                      type="number"
+                      min="0"
+                      step="any"
+                      class="ui-input tabular-nums"
+                      placeholder="0"
+                    />
+                  </div>
+                  <div>
+                    <label class="ui-field-label">Notional ($)</label>
+                    <input
+                      v-model="orderForm.notional"
+                      type="number"
+                      min="0"
+                      step="any"
+                      class="ui-input tabular-nums"
+                      placeholder="0.00"
+                    />
+                  </div>
                 </div>
-                <div>
-                  <label class="block text-[11px] font-bold text-slate-500 uppercase mb-1">Notional ($)</label>
-                  <input
-                    v-model="orderForm.notional"
-                    type="number"
-                    min="0"
-                    step="any"
-                    class="w-full bg-[#161b22] border border-[#30363d] rounded px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-sky-500/50"
-                    placeholder="0.00"
-                  />
-                </div>
+                <p class="ui-help">Fill qty or notional, not both</p>
               </div>
-              <p class="text-[10px] text-slate-600 -mt-2">Fill qty OR notional, not both.</p>
               <div v-if="orderForm.order_type === 'limit'">
-                <label class="block text-[11px] font-bold text-slate-500 uppercase mb-1">Limit Price</label>
+                <label class="ui-field-label">Limit price</label>
                 <input
                   v-model="orderForm.limit_price"
                   type="number"
                   min="0"
                   step="any"
-                  class="w-full bg-[#161b22] border border-[#30363d] rounded px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-sky-500/50"
+                  class="ui-input tabular-nums"
                   placeholder="0.00"
                 />
               </div>
-              <div class="grid grid-cols-2 gap-3">
+              <div class="grid grid-cols-2 gap-4">
                 <div>
-                  <label class="block text-[11px] font-bold text-slate-500 uppercase mb-1">TIF</label>
-                  <select v-model="orderForm.tif" class="w-full bg-[#161b22] border border-[#30363d] rounded px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-sky-500/50 min-h-[44px]">
+                  <label class="ui-field-label">TIF</label>
+                  <select v-model="orderForm.tif" class="ui-input max-sm:h-11">
                     <option value="day">Day</option>
                     <option value="gtc">GTC</option>
                     <option value="ioc">IOC</option>
@@ -1545,27 +1489,27 @@ watch(
                 </div>
                 <div class="flex items-end">
                   <label
-                    class="flex items-center gap-2 text-xs min-h-[44px]"
-                    :class="(orderForm.order_type !== 'limit' || orderForm.tif !== 'day') ? 'text-slate-600 cursor-not-allowed' : 'text-slate-400'"
+                    class="flex items-center gap-2 text-sm min-h-[44px] sm:min-h-9"
+                    :class="(orderForm.order_type !== 'limit' || orderForm.tif !== 'day') ? 'text-slate-600 cursor-not-allowed' : 'text-slate-300'"
                     :title="(orderForm.order_type !== 'limit' || orderForm.tif !== 'day') ? 'Requires order_type=limit + tif=day' : ''"
                   >
                     <input
                       v-model="orderForm.extended_hours"
                       :disabled="orderForm.order_type !== 'limit' || orderForm.tif !== 'day'"
                       type="checkbox"
-                      class="size-4 rounded border-[#30363d] bg-[#161b22] text-sky-500 focus:ring-sky-500/50 disabled:opacity-40 disabled:cursor-not-allowed"
+                      class="size-4 accent-primary disabled:opacity-40 disabled:cursor-not-allowed"
                     />
                     Extended hours
                   </label>
                 </div>
               </div>
             </div>
-            <div class="px-5 py-4 border-t border-[#30363d] flex items-center justify-end gap-2 shrink-0">
-              <button @click="closeOrderModal" class="px-4 py-2 rounded-lg text-sm text-slate-400 hover:text-slate-200 border border-border-subtle min-h-[44px]">Cancel</button>
+            <div class="ui-modal-foot shrink-0">
+              <button @click="closeOrderModal" class="ui-btn-ghost h-11 sm:h-9 px-4">Cancel</button>
               <button
                 @click="confirmOrder"
-                class="px-4 py-2 rounded-lg text-sm font-bold border border-sky-500/30 bg-sky-500/10 text-sky-400 hover:bg-sky-500/20 min-h-[44px]"
-              >Submit Order</button>
+                class="ui-btn-primary h-11 sm:h-9"
+              >Submit order</button>
             </div>
           </div>
         </div>
@@ -1577,4 +1521,12 @@ watch(
 <style scoped>
 .no-scrollbar::-webkit-scrollbar { display: none; }
 .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+/* Executions: phone shows execution · total (qty and price ride in the subline). */
+.lt-exec-grid {
+  grid-template-columns: minmax(0, 1fr) 104px;
+  column-gap: 16px;
+}
+@media (min-width: 640px) {
+  .lt-exec-grid { grid-template-columns: minmax(0, 1fr) 80px 96px 104px; }
+}
 </style>

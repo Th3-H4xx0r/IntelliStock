@@ -1,13 +1,13 @@
 import Charts
 import SwiftUI
 
-/// One open position — `PositionCard` in `position_card.dart` — as a list
-/// row: the symbol (with an Option or Short flag) and market value, the
-/// range move and unrealized %, a sparkline in the screen's chart style, then
-/// quantity / last / entry as a `StatGrid`, the P&L in dollars and percent
-/// under the market value. Close lives in the row's
-/// swipe action and context menu (stock only; the wheel lane buys its puts
-/// back itself, which the row says instead).
+/// One open position — `PositionCard` in `position_card.dart` — as a card
+/// row in the web's order: the symbol (with Option and Short), the option's
+/// terms, the unrealized % and the range move on the left, the market value
+/// on the right; a sparkline in the screen's chart style; then shares, last,
+/// entry and P&L under a divider. Close lives in the row's swipe action and
+/// context menu (stock only; the wheel lane buys its puts back itself, which
+/// the row says instead).
 struct LivePositionRow: View {
     let position: Position
     let chartStyle: LiveChartStyle
@@ -21,51 +21,63 @@ struct LivePositionRow: View {
         let p = position
         let up = LivePositionMath.isUp(historicals, unrealizedPnl: p.unrealizedPnl)
         let sparkColor = up ? DS.Palette.up : DS.Palette.down
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(p.symbol)
-                    .font(.headline)
-                if p.isOption {
-                    StatusBadge(label: p.isShort ? "Short option" : "Option", color: p.isShort ? DS.Palette.warning : DS.Palette.accent)
-                }
-                Spacer(minLength: 8)
-                Text(fmtMoney(p.marketValue))
-                    .font(.headline.monospacedDigit())
-            }
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                if historicals.count >= 2 {
-                    HStack(spacing: 2) {
-                        Image(systemName: up ? "arrow.up.right" : "arrow.down.right")
-                            .accessibilityHidden(true)
-                        Text(LivePositionMath.rangeText(historicals, range: range, unrealizedPnl: p.unrealizedPnl))
+        let hasEntry = p.avgEntryPrice != nil
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(p.symbol)
+                            .font(DS.Font.baseMedium)
+                            .foregroundStyle(DS.Text.primary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        if p.isOption {
+                            Text("Option")
+                                .font(DS.Font.caption)
+                                .foregroundStyle(DS.Text.muted)
+                            if p.isShort {
+                                Text("Short")
+                                    .font(DS.Font.caption)
+                                    .foregroundStyle(DS.Text.label)
+                            }
+                        }
                     }
-                    .foregroundStyle(sparkColor)
-                } else if p.isOption {
-                    Text(p.optionDescription)
-                        .foregroundStyle(.secondary)
+                    if p.isOption {
+                        Text(p.optionDescription)
+                            .font(DS.Font.caption)
+                            .foregroundStyle(DS.Text.muted)
+                    }
+                    HStack(spacing: 4) {
+                        Text(hasEntry ? fmtPct(p.unrealizedPnlPct) : "—")
+                            .foregroundStyle(hasEntry ? livePnlTone(p.unrealizedPnlPct) : DS.Text.muted)
+                        Text("unrealized")
+                            .foregroundStyle(DS.Text.muted)
+                    }
+                    .font(DS.Font.caption)
+                    if historicals.count >= 2 {
+                        Text(LivePositionMath.rangeText(historicals, range: range, unrealizedPnl: p.unrealizedPnl))
+                            .font(DS.Font.caption)
+                            .foregroundStyle(sparkColor)
+                    }
                 }
-                Spacer(minLength: 8)
-                // The unrealized P&L, dollars then percent (`P&L $` and the
-                // header % in Dart).
-                if p.avgEntryPrice != nil {
-                    Text([p.unrealizedPnl.map { fmtPnl($0) }, p.unrealizedPnlPct.map { fmtPct($0) }]
-                        .compactMap { $0 }
-                        .joined(separator: " · "))
-                        .foregroundStyle(p.unrealizedPnl != nil ? pnlColor(p.unrealizedPnl) : .secondary)
+                .monospacedDigit()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                VStack(alignment: .trailing, spacing: 4) {
+                    Text("Market value")
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.muted)
+                    Text(fmtMoney(p.marketValue))
+                        .font(DS.Font.baseMedium)
+                        .foregroundStyle(DS.Text.primary)
+                        .monospacedDigit()
                 }
-            }
-            .font(.subheadline.monospacedDigit())
-            if p.isOption, historicals.count >= 2 {
-                Text(p.optionDescription)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
             }
 
             Group {
                 if historicals.isEmpty {
                     Text(p.isOption ? "No price chart for options" : "No price history")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.faint)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     spark(sparkColor)
@@ -73,20 +85,41 @@ struct LivePositionRow: View {
             }
             .frame(height: chartStyle == .candle ? 90 : 64)
 
-            StatGrid(columns: 3) {
-                StatCell(label: p.isOption ? "Contracts" : "Shares", value: p.isOption ? p.quantityText : DashboardFormat.qtyCompact(p.qty))
-                StatCell(label: "Last", value: fmtMoney(p.lastPrice))
-                StatCell(label: "Entry", value: p.avgEntryPrice != nil ? fmtMoney(p.avgEntryPrice) : "—")
+            DSDivider()
+
+            HStack(alignment: .top, spacing: 12) {
+                figure(p.isOption ? "Contracts" : "Shares", p.isOption ? p.quantityText : DashboardFormat.qtyCompact(p.qty))
+                figure("Last", fmtMoney(p.lastPrice))
+                figure("Entry", hasEntry ? fmtMoney(p.avgEntryPrice) : "—")
+                figure("P&L", hasEntry ? fmtMoney(p.unrealizedPnl) : "—", color: hasEntry ? livePnlTone(p.unrealizedPnl) : DS.Text.muted)
             }
 
             if !p.canClose {
                 Text("Managed by the wheel lane, which buys puts back automatically. Close it at the broker if needed.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.muted)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(.vertical, 6)
+        .padding(.vertical, 8)
         .accessibilityElement(children: .combine)
+    }
+
+    /// One of the four figures under the chart: a 12 pt label over a 13 pt
+    /// zinc-300 value (the web's position card).
+    private func figure(_ label: String, _ value: String, color: Color = DS.Text.label) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(DS.Font.caption)
+                .foregroundStyle(DS.Text.muted)
+            Text(value)
+                .font(DS.Font.small)
+                .foregroundStyle(color)
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     @ViewBuilder
@@ -113,18 +146,23 @@ struct LivePositionRow: View {
             } else {
                 if let first = values.first {
                     RuleMark(y: .value("Start", first))
-                        .foregroundStyle(Color.secondary.opacity(0.5))
+                        .foregroundStyle(DS.Chart.baseline)
                         .lineStyle(StrokeStyle(lineWidth: 1, dash: DS.baselineDash))
                 }
                 ForEach(values.indices, id: \.self) { i in
                     if chartStyle == .area {
                         AreaMark(x: .value("i", i), yStart: .value("Floor", lo - pad), yEnd: .value("v", values[i]))
-                            .foregroundStyle(color.opacity(DS.chartAreaOpacity))
+                            // The faint same-hue fade under a P&L line (the web's).
+                            .foregroundStyle(LinearGradient(
+                                colors: [color.opacity(DS.Chart.areaTopOpacity), color.opacity(0)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            ))
                             .interpolationMethod(.monotone)
                     }
                     LineMark(x: .value("i", i), y: .value("v", values[i]))
                         .foregroundStyle(color)
-                        .lineStyle(StrokeStyle(lineWidth: 1.5))
+                        .lineStyle(StrokeStyle(lineWidth: chartStyle == .line ? 1.25 : 1.75))
                         .interpolationMethod(.monotone)
                 }
             }
@@ -144,36 +182,52 @@ struct LivePositionRow: View {
     }
 }
 
-/// One execution (`_TradeRow`): "SELL EL" over when it filled, and
-/// "131 sh @ $89.80" over the fill's total.
+/// One execution (`_TradeRow`), as the web's phone row: the side in 12 pt
+/// zinc-400 before the symbol (with Option), when it filled and
+/// "131 sh @ $89.80" under them, and the fill's total on the right.
 struct LiveTradeRow: View {
     let trade: Trade
 
     var body: some View {
-        let isBuy = trade.side.lowercased() == "buy"
         HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text("\(Text(trade.side.uppercased()).foregroundStyle(isBuy ? DS.Palette.up : DS.Palette.down)) \(trade.symbol)")
-                        .font(.headline)
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(trade.side.isEmpty ? "—" : trade.side.lowercased().dsSentenceCased)
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.secondary)
+                    Text(trade.symbol)
+                        .font(DS.Font.bodyMedium)
+                        .foregroundStyle(DS.Text.primary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                     if trade.isOption {
-                        StatusBadge(label: "Option", color: DS.Palette.accent)
+                        Text("Option")
+                            .font(DS.Font.caption)
+                            .foregroundStyle(DS.Text.muted)
                             .fixedSize()
                     }
                 }
-                Text(fmtDateTime(trade.ts))
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                Text("\(fmtDateTime(trade.ts)) · \(liveFillText(trade))")
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.muted)
+                    .monospacedDigit()
                     .lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            EntityRowValue(liveFillText(trade), detail: fmtMoney(trade.total))
+            Text(fmtMoney(trade.total))
+                .font(DS.Font.body)
+                .foregroundStyle(DS.Text.primary)
+                .monospacedDigit()
                 .layoutPriority(1)
         }
         .accessibilityElement(children: .combine)
     }
+}
+
+/// The web's `pnlColorClass`: gain or loss, zinc-400 for zero or nothing.
+nonisolated func livePnlTone(_ v: Double?) -> Color {
+    guard let v, !v.isNaN, v != 0 else { return DS.Text.secondary }
+    return v > 0 ? DS.Palette.gain : DS.Palette.loss
 }
 
 /// `131 sh @ $89.80`, or `2 contracts @ $1.20` for an option.

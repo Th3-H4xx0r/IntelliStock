@@ -3,10 +3,9 @@ import SwiftUI
 /// The auth flow's main action — `AuthPillButton` in `auth_pill_button.dart`,
 /// shared by the lock and login screens so they cannot drift.
 ///
-/// Native form: a full-width `.glassProminent` capsule at the large control
-/// size (a floating, functional control, so Liquid Glass is allowed). Both
-/// ends reserve the same width so the label stays centred with or without a
-/// leading glyph.
+/// The web's primary button, full width at 44 pt (`.dsPrimary(size:
+/// .large)`). Both ends reserve the same width so the label stays centred
+/// with or without a leading glyph.
 struct AuthPillButton: View {
     let label: String
     /// SF Symbol shown before the label (`faceid`, `touchid`).
@@ -26,7 +25,7 @@ struct AuthPillButton: View {
                 Group {
                     if let systemImage {
                         Image(systemName: systemImage)
-                            .font(.title3)
+                            .font(.system(size: 18))
                     }
                 }
                 .frame(width: endWidth, alignment: .leading)
@@ -42,23 +41,20 @@ struct AuthPillButton: View {
                         Text(label)
                     }
                 }
-                .font(.headline)
                 .frame(maxWidth: .infinity)
 
                 Group {
                     if showChevron {
                         Image(systemName: Symbol.named("chevron_right"))
-                            .font(.subheadline.weight(.semibold))
+                            .font(.system(size: 14, weight: .medium))
                     }
                 }
                 .frame(width: endWidth, alignment: .trailing)
                 .accessibilityHidden(true)
             }
-            .padding(.horizontal, 8)
-            .frame(minHeight: 44)
+            .padding(.horizontal, -8)
         }
-        .dsGlassProminentButton()
-        .controlSize(.large)
+        .buttonStyle(.dsPrimary(size: .large, fullWidth: true))
         .disabled(busy)
         .opacity(busy && busyLabel == nil ? 0.6 : 1)
     }

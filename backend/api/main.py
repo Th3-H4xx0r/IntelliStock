@@ -6,6 +6,7 @@ Run from backend: uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
 
 import json
 import os
+import re
 import sys
 
 _backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -23,7 +24,7 @@ import time
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional, Union
 
-from fastapi import FastAPI, HTTPException, Depends, Request, Response
+from fastapi import Body, FastAPI, HTTPException, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
@@ -5336,6 +5337,299 @@ def api_brokerage_order_book(
     body = {"brokerage_id": brokerage_id, "supported": True, "open": open_orders, "recent": recent}
     _ORDER_BOOK_CACHE[key] = (now + _ORDER_BOOK_TTL, body)
     return body
+
+
+# ── Manual orders (web and iOS position controls) ─────────────────────────────
+# The operator's own buy/sell from the stock page. Equities only, Alpaca only.
+# Validation is a pure function so it can be tested without HTTP.
+
+_MANUAL_ORDER_SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,9}$")
+_MANUAL_CLIENT_ORDER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,48}$")
+_ALPACA_ORDER_ID_RE = re.compile(r"^[A-Za-z0-9-]{1,64}$")
+# Alpaca books fractional shares to 9 decimals (a dollar order fills that
+# way), so "Sell all" must be able to send the held quantity exactly.
+_MANUAL_QTY_MAX_DECIMALS = 9
+_ALPACA_UNREACHABLE = "Couldn't reach Alpaca. The order was not confirmed — check Orders before trying again"
+
+
+class ManualOrderError(ValueError):
+    """A manual order the server refuses before it reaches the broker."""
+
+
+def _manual_order_decimal(value, field: str):
+    """A finite Decimal from a JSON number (or numeric string); None when absent."""
+    if value is None:
+        return None
+    from decimal import Decimal, InvalidOperation
+    try:
+        if isinstance(value, bool):
+            raise InvalidOperation
+        if isinstance(value, (int, float)):
+            number = Decimal(str(value))
+        elif isinstance(value, str) and value.strip():
+            number = Decimal(value.strip())
+        else:
+            raise InvalidOperation
+    except InvalidOperation:
+        raise ManualOrderError(f"{field} must be a number") from None
+    if not number.is_finite():
+        raise ManualOrderError(f"{field} must be a number")
+    return number
+
+
+def _decimal_places(number) -> int:
+    exponent = number.normalize().as_tuple().exponent
+    return -exponent if isinstance(exponent, int) and exponent < 0 else 0
+
+
+def _decimal_text(number) -> str:
+    return format(number.normalize(), "f")
+
+
+def build_manual_order(payload) -> dict:
+    """Validate a manual order request and return the Alpaca /v2/orders body.
+
+    Pure: no I/O. Raises ManualOrderError with a plain sentence the clients
+    show as-is. Exactly one of qty (shares) or notional (dollars).
+    """
+    import uuid as _uuid
+
+    if not isinstance(payload, dict):
+        raise ManualOrderError("Send the order as a JSON object")
+
+    raw_symbol = payload.get("symbol")
+    symbol = raw_symbol.strip().upper() if isinstance(raw_symbol, str) else ""
+    if not symbol:
+        raise ManualOrderError("Enter a stock symbol")
+    if not _MANUAL_ORDER_SYMBOL_RE.match(symbol):
+        raise ManualOrderError("Enter a stock symbol like AAPL. Options and crypto aren't supported here")
+
+    side = payload.get("side")
+    side = side.strip().lower() if isinstance(side, str) else side
+    if side not in ("buy", "sell"):
+        raise ManualOrderError("Choose buy or sell")
+
+    order_type = payload.get("type")
+    order_type = "market" if order_type is None else (order_type.strip().lower() if isinstance(order_type, str) else order_type)
+    if order_type not in ("market", "limit"):
+        raise ManualOrderError("Order type must be market or limit")
+
+    tif = payload.get("time_in_force")
+    tif = "day" if tif is None else (tif.strip().lower() if isinstance(tif, str) else tif)
+    if tif not in ("day", "gtc"):
+        raise ManualOrderError("Time in force must be day or gtc")
+
+    extended = payload.get("extended_hours", False)
+    if extended is None:
+        extended = False
+    if not isinstance(extended, bool):
+        raise ManualOrderError("extended_hours must be true or false")
+
+    qty = _manual_order_decimal(payload.get("qty"), "Shares")
+    notional = _manual_order_decimal(payload.get("notional"), "Dollar amount")
+    if qty is not None and notional is not None:
+        raise ManualOrderError("Enter shares or a dollar amount, not both")
+    if qty is None and notional is None:
+        raise ManualOrderError("Enter a number of shares or a dollar amount")
+    if qty is not None:
+        if qty <= 0:
+            raise ManualOrderError("Shares must be more than zero")
+        if _decimal_places(qty) > _MANUAL_QTY_MAX_DECIMALS:
+            raise ManualOrderError(f"Shares can have at most {_MANUAL_QTY_MAX_DECIMALS} decimal places")
+    if notional is not None:
+        if notional <= 0:
+            raise ManualOrderError("The dollar amount must be more than zero")
+        if _decimal_places(notional) > 2:
+            raise ManualOrderError("The dollar amount can't go past cents")
+        if order_type != "market":
+            raise ManualOrderError("Dollar amounts work with market orders only")
+        if tif != "day":
+            raise ManualOrderError("Dollar amounts are day orders only")
+    if qty is not None and qty != qty.to_integral_value() and tif != "day":
+        raise ManualOrderError("Fractional shares are day orders only")
+
+    limit = _manual_order_decimal(payload.get("limit_price"), "Limit price")
+    if order_type == "limit":
+        if limit is None or limit <= 0:
+            raise ManualOrderError("Enter a limit price above zero")
+        if limit >= 1 and _decimal_places(limit) > 2:
+            raise ManualOrderError("Limit prices of $1 or more go to the cent")
+        if limit < 1 and _decimal_places(limit) > 4:
+            raise ManualOrderError("Limit prices under $1 go to 4 decimal places at most")
+    elif limit is not None:
+        raise ManualOrderError("A market order doesn't take a limit price")
+
+    if extended and (order_type != "limit" or tif != "day"):
+        raise ManualOrderError("Extended hours needs a limit order for the day")
+
+    client_order_id = payload.get("client_order_id")
+    if client_order_id is None or client_order_id == "":
+        client_order_id = f"app-{_uuid.uuid4().hex}"
+    elif not isinstance(client_order_id, str) or not _MANUAL_CLIENT_ORDER_ID_RE.match(client_order_id):
+        raise ManualOrderError("client_order_id must be up to 48 letters, digits, - or _")
+
+    order = {
+        "symbol": symbol,
+        "side": side,
+        "type": order_type,
+        "time_in_force": tif,
+        "client_order_id": client_order_id,
+    }
+    if qty is not None:
+        order["qty"] = _decimal_text(qty)
+    else:
+        order["notional"] = _decimal_text(notional)
+    if limit is not None:
+        order["limit_price"] = _decimal_text(limit)
+    if extended:
+        order["extended_hours"] = True
+    return order
+
+
+def _alpaca_trading_target(row: dict) -> tuple[str, dict]:
+    """(base URL, auth headers) for one Alpaca brokerage row, for writes.
+
+    The base URL follows the row's paper flag, which is what the review
+    screen shows as "Paper" or "Live money"; a stored URL that disagrees with
+    that flag is refused rather than trusted.
+    """
+    from urllib.parse import urlsplit
+    from stock_credential_boundary import resolve_alpaca_brokerage_credentials
+
+    brokerage_id = str(row.get("id") or "")
+    try:
+        creds = resolve_alpaca_brokerage_credentials(row, expected_brokerage_id=brokerage_id)
+    except StockCredentialError:
+        raise HTTPException(status_code=400, detail="Couldn't read this account's Alpaca keys. Check it on Brokerages")
+    host = "paper-api.alpaca.markets" if row.get("alpaca_paper") is True else "api.alpaca.markets"
+    stored = row.get("alpaca_base_url")
+    if stored:
+        parts = urlsplit(str(stored).strip())
+        if parts.scheme != "https" or parts.hostname != host or parts.path not in ("", "/"):
+            raise HTTPException(
+                status_code=400,
+                detail="This account's Alpaca address doesn't match its paper or live setting. Check it on Brokerages",
+            )
+    headers = {"APCA-API-KEY-ID": creds.key, "APCA-API-SECRET-KEY": creds.secret}
+    return f"https://{host}", headers
+
+
+def _alpaca_error_message(res) -> str:
+    """Alpaca's own words for a refusal ({"code", "message"}), else the status."""
+    try:
+        data = res.json()
+        if isinstance(data, dict) and str(data.get("message") or "").strip():
+            return str(data["message"]).strip()[:300]
+    except Exception:
+        pass
+    text = str(getattr(res, "text", "") or "").strip()
+    return text[:300] if text else f"HTTP {res.status_code}"
+
+
+def _clear_order_book_cache(brokerage_id: str) -> None:
+    for key in [k for k in _ORDER_BOOK_CACHE if k and k[0] == str(brokerage_id)]:
+        _ORDER_BOOK_CACHE.pop(key, None)
+
+
+def _manual_order_brokerage(brokerage_id: str) -> dict:
+    row = db_store.get("BrokerageAccounts", str(brokerage_id))
+    if not row:
+        raise HTTPException(status_code=404, detail="Brokerage not found")
+    if str(row.get("brokerage_type") or "").strip().lower() != "alpaca":
+        raise HTTPException(status_code=400, detail="Trading from the app supports Alpaca accounts only")
+    return row
+
+
+@app.post("/brokerages/{brokerage_id}/orders", response_class=JSONResponse)
+def api_brokerage_place_order(
+    brokerage_id: str,
+    body: Any = Body(default=None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Place the operator's own order on a linked Alpaca account.
+
+    Validated by build_manual_order, sent once to Alpaca's /v2/orders (never
+    retried), and answered with the order in the order-book shape.
+    """
+    import logging
+    import requests as _requests
+
+    log = logging.getLogger("uvicorn.error")
+    row = _manual_order_brokerage(brokerage_id)
+    try:
+        order = build_manual_order(body)
+    except ManualOrderError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    base_url, headers = _alpaca_trading_target(row)
+
+    try:
+        res = _requests.post(f"{base_url}/v2/orders", json=order, headers=headers, timeout=15)
+    except Exception as e:
+        _clear_order_book_cache(brokerage_id)
+        log.warning("manual-order: Alpaca unreachable for %s %s brokerage=%s: %s",
+                    order["side"], order["symbol"], brokerage_id, type(e).__name__)
+        raise HTTPException(status_code=502, detail=_ALPACA_UNREACHABLE)
+
+    if res.status_code >= 500:
+        _clear_order_book_cache(brokerage_id)
+        log.warning("manual-order: Alpaca %s for %s %s brokerage=%s",
+                    res.status_code, order["side"], order["symbol"], brokerage_id)
+        raise HTTPException(status_code=502, detail=_ALPACA_UNREACHABLE)
+    if res.status_code >= 400:
+        message = _alpaca_error_message(res)
+        log.info("manual-order: Alpaca refused %s %s brokerage=%s status=%s: %s",
+                 order["side"], order["symbol"], brokerage_id, res.status_code, message)
+        raise HTTPException(status_code=400, detail=f"Alpaca rejected the order: {message}")
+
+    try:
+        placed = normalize_alpaca_orders([res.json()])
+    except Exception:
+        placed = []
+    _clear_order_book_cache(brokerage_id)
+    if not placed:
+        log.warning("manual-order: Alpaca answered %s without an order for %s %s brokerage=%s",
+                    res.status_code, order["side"], order["symbol"], brokerage_id)
+        raise HTTPException(status_code=502, detail=_ALPACA_UNREACHABLE)
+    log.info("manual-order: %s %s qty=%s notional=%s type=%s brokerage=%s alpaca_order=%s",
+             order["side"], order["symbol"], order.get("qty"), order.get("notional"),
+             order["type"], brokerage_id, placed[0]["id"])
+    return {"brokerage_id": brokerage_id, "order": placed[0]}
+
+
+@app.delete("/brokerages/{brokerage_id}/orders/{order_id}", response_class=JSONResponse)
+def api_brokerage_cancel_order(
+    brokerage_id: str,
+    order_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Cancel one open order on a linked Alpaca account (Alpaca answers 204)."""
+    import logging
+    import requests as _requests
+
+    log = logging.getLogger("uvicorn.error")
+    row = _manual_order_brokerage(brokerage_id)
+    if not _ALPACA_ORDER_ID_RE.match(order_id or ""):
+        raise HTTPException(status_code=400, detail="That isn't an Alpaca order id")
+    base_url, headers = _alpaca_trading_target(row)
+
+    try:
+        res = _requests.delete(f"{base_url}/v2/orders/{order_id}", headers=headers, timeout=15)
+    except Exception as e:
+        _clear_order_book_cache(brokerage_id)
+        log.warning("cancel-order: Alpaca unreachable for %s brokerage=%s: %s",
+                    order_id, brokerage_id, type(e).__name__)
+        raise HTTPException(status_code=502, detail="Couldn't reach Alpaca. The cancel was not confirmed — check Orders")
+    _clear_order_book_cache(brokerage_id)
+    if res.status_code >= 500:
+        log.warning("cancel-order: Alpaca %s for %s brokerage=%s", res.status_code, order_id, brokerage_id)
+        raise HTTPException(status_code=502, detail="Couldn't reach Alpaca. The cancel was not confirmed — check Orders")
+    if res.status_code >= 400:
+        message = _alpaca_error_message(res)
+        log.info("cancel-order: Alpaca refused %s brokerage=%s status=%s: %s",
+                 order_id, brokerage_id, res.status_code, message)
+        raise HTTPException(status_code=400, detail=f"Alpaca couldn't cancel this order: {message}")
+    log.info("cancel-order: canceled %s brokerage=%s", order_id, brokerage_id)
+    return {"brokerage_id": brokerage_id, "order_id": order_id, "canceled": True}
 
 
 @app.get("/brokerages/{brokerage_id}/bot-activity", response_class=JSONResponse)

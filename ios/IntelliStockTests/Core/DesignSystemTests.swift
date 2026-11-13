@@ -10,25 +10,46 @@ import UIKit
 struct DesignSystemTests {
     // MARK: StatusBadge
 
+    /// The web's status map (`ui-dot-live|warn|off|error`): green only for
+    /// what is running, zinc-400 for done, amber for paused, zinc-600 for
+    /// stopped or queued, red for failed.
     @Test func statusColorsMapKnownStatuses() {
-        #expect(StatusBadge.color(forStatus: "running") == DS.Palette.success)
-        #expect(StatusBadge.color(forStatus: "failed") == DS.Palette.danger)
-        #expect(StatusBadge.color(forStatus: "queued") == DS.Palette.warning)
-        #expect(StatusBadge.color(forStatus: "whatever") == Color.secondary)
+        #expect(StatusBadge.color(forStatus: "running") == DS.Palette.gain)
+        #expect(StatusBadge.color(forStatus: "failed") == DS.Palette.loss)
+        #expect(StatusBadge.color(forStatus: "paused") == DS.Palette.amber)
+        #expect(StatusBadge.color(forStatus: "queued") == DS.Text.faint)
+        #expect(StatusBadge.color(forStatus: "whatever") == DS.Text.faint)
     }
 
     @Test func statusColorsCoverEveryDartCase() {
-        for s in ["running", "active", "completed", "finished", "passed", "RUNNING"] {
-            #expect(StatusBadge.color(forStatus: s) == DS.Palette.success)
+        for s in ["running", "active", "passed", "RUNNING"] {
+            #expect(StatusBadge.color(forStatus: s) == DS.Palette.gain)
         }
-        for s in ["paused", "paused_llm_critical", "queued", "pending"] {
-            #expect(StatusBadge.color(forStatus: s) == DS.Palette.warning)
+        for s in ["completed", "finished", "building"] {
+            #expect(StatusBadge.color(forStatus: s) == DS.Text.secondary)
         }
         #expect(StatusBadge.color(forStatus: "building") == DS.Palette.info)
-        for s in ["stopped", "cancelled", "error", "failed", "aborted_llm_failure"] {
+        for s in ["paused", "paused_llm_critical"] {
+            #expect(StatusBadge.color(forStatus: s) == DS.Palette.warning)
+        }
+        for s in ["queued", "pending", "stopped", "cancelled"] {
+            #expect(StatusBadge.color(forStatus: s) == DS.Text.faint)
+        }
+        for s in ["error", "failed", "aborted_llm_failure"] {
             #expect(StatusBadge.color(forStatus: s) == DS.Palette.danger)
         }
-        #expect(StatusBadge.color(forStatus: nil) == Color.secondary)
+        #expect(StatusBadge.color(forStatus: nil) == DS.Text.faint)
+    }
+
+    /// A legacy colour argument picks the matching dot.
+    @Test func statusToneFollowsALegacyColour() {
+        #expect(DSStatusTone(color: DS.Palette.success) == .live)
+        #expect(DSStatusTone(color: DS.Palette.warning) == .warn)
+        #expect(DSStatusTone(color: DS.Palette.danger) == .error)
+        #expect(DSStatusTone(color: DS.Palette.info) == .neutral)
+        #expect(DSStatusTone(color: Color.secondary) == .off)
+        #expect(DSStatusTone.live.wordColor == DS.Text.soft)
+        #expect(DSStatusTone.off.wordColor == DS.Text.muted)
     }
 
     // MARK: TypedConfirmField

@@ -1,9 +1,10 @@
 import SwiftUI
 
-/// One strategy (`/strategies/:id`) — `StrategyDetailScreen`: the overview
-/// with the best backtest, the sub-strategy composition and the backtest
-/// history. Read-only, as in Flutter. An inset-grouped list under the inline
-/// strategy name; "Backtest This Strategy" is the toolbar's play button.
+/// One strategy (`/strategies/:id`) — the web's `StrategyDetailView.vue`:
+/// "Strategy ID 3 · 2 sub-strategies · 5 backtests" under the inline name,
+/// the best backtest's P&L and P&L % with "View best backtest", the
+/// sub-strategies (weight, scope, config), and the backtest history.
+/// Read-only. "Backtest this strategy" is the toolbar's play button.
 struct StrategyDetailView: View {
     let strategyId: String
 
@@ -15,22 +16,27 @@ struct StrategyDetailView: View {
         Group {
             if let model {
                 if model.loading {
-                    ProgressView()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    skeleton
                 } else if let strategy = model.strategy {
                     detail(model, strategy)
                 } else {
-                    ContentUnavailableView {
-                        Label("Strategy not found", systemImage: Symbol.named("schema"))
-                    } actions: {
-                        Button("Back to Strategies") { services.router.go("/strategies") }
+                    List {
+                        Section {
+                            Card(padding: 0) {
+                                EmptyState(title: "Strategy not found", actionLabel: "Back to strategies") {
+                                    services.router.go("/strategies")
+                                }
+                            }
+                            .dsClearRow(top: 8)
+                        }
                     }
+                    .dsList()
                 }
             } else {
                 Color.clear
             }
         }
-        .background(DS.Surface.canvas)
+        .background(DS.Surface.page)
         .navigationTitle(model?.strategy?.name ?? "Strategy")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -39,7 +45,7 @@ struct StrategyDetailView: View {
                     Button {
                         backtesting = true
                     } label: {
-                        Label("Backtest This Strategy", systemImage: "play.fill")
+                        Label("Backtest this strategy", systemImage: "play.fill")
                     }
                 }
             }
@@ -60,167 +66,313 @@ struct StrategyDetailView: View {
         }
     }
 
+    /// The loading shape (the web's): the header lines, then card blocks.
+    private var skeleton: some View {
+        List {
+            Section {
+                VStack(alignment: .leading, spacing: 12) {
+                    Skeleton(width: 256, height: 14)
+                    Skeleton(width: 200, height: 24)
+                    Skeleton(height: 180, radius: DS.Radius.card)
+                        .padding(.top, 36)
+                }
+                .dsClearRow(top: 4)
+            }
+        }
+        .dsList()
+        .disabled(true)
+        .accessibilityLabel("Loading")
+    }
+
     // MARK: Detail
 
     private func detail(_ model: StrategyDetailModel, _ strategy: Strategy) -> some View {
         let best = model.bestPnlBacktest
         return List {
             Section {
-                StatGrid(columns: 3) {
-                    StatCell(label: "Best P&L", value: best.map { fmtPnl($0.overallProfit) } ?? "—", valueColor: best.map { pnlColor($0.overallProfit) })
-                    StatCell(label: "Best P&L%", value: best.map { fmtPct($0.pnlPercent) } ?? "—", valueColor: best.map { pnlColor($0.pnlPercent) })
-                    StatCell(label: "Backtests", value: "\(model.strategyBacktests.count)")
-                    StatCell(label: "Strategy ID", value: "\(strategy.id)")
-                    StatCell(label: "Sub-strategies", value: "\(strategy.strategies.count)")
-                }
-                .padding(.vertical, 4)
-                if let best {
-                    NavigationLink(value: Route.backtest(best.backtestId)) {
-                        Label("Best Backtest", systemImage: Symbol.named("analytics"))
-                    }
-                }
-            } header: {
-                DSSectionHeader("Overview") {
-                    if model.isAgentBest {
-                        MarketsTag(text: "Agent best", color: DS.Palette.warning)
-                    }
-                }
+                header(model, strategy, best: best)
+                    .dsClearRow(top: 0, bottom: 4)
             }
 
-            Section("Sub-strategies (\(strategy.strategies.count))") {
+            DSSection("Sub-strategies", subtitle: "\(strategy.strategies.count) in this strategy") {
                 if strategy.strategies.isEmpty {
-                    Text("No sub-strategies defined.").foregroundStyle(.secondary)
+                    EmptyState(title: "No sub-strategies defined")
                 } else {
-                    ForEach(Array(strategy.strategies.enumerated()), id: \.offset) { _, sub in
-                        StrategySubStrategyRow(sub: sub)
+                    ForEach(Array(strategy.strategies.enumerated()), id: \.offset) { i, sub in
+                        StrategySubStrategyRow(sub: sub, index: i)
                     }
                 }
             }
 
             backtestsSection(model, best: best)
         }
-        .listStyle(.insetGrouped)
+        .dsList()
         .refreshable { await model.refresh() }
     }
 
-    private static let btSortFields = [("created_at", "Date"), ("pnl", "P&L"), ("pct", "P&L%")]
+    /// The web header: the id and counts, "Agent best" when it is the
+    /// agent's pick, then the best backtest's figures and the way to it.
+    private func header(_ model: StrategyDetailModel, _ strategy: Strategy, best: AgentResult?) -> some View {
+        VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Strategy ID \(strategy.id) · \(strategy.strategies.count) sub-strategies · \(model.strategyBacktests.count) backtests")
+                    .font(DS.Font.pageSub)
+                    .foregroundStyle(DS.Text.muted)
+                    .monospacedDigit()
+                if model.isAgentBest {
+                    HStack(spacing: 4) {
+                        Image(systemName: "star")
+                            .font(.system(size: 14))
+                            .foregroundStyle(DS.Text.muted)
+                        Text("Agent best")
+                            .font(DS.Font.caption)
+                            .foregroundStyle(DS.Text.secondary)
+                    }
+                    .accessibilityElement(children: .combine)
+                }
+            }
+            if let best {
+                HStack(alignment: .bottom, spacing: 32) {
+                    figure("Best P&L", fmtPnl(best.overallProfit), backtestPnlColor(best.overallProfit))
+                    figure("Best P&L %", fmtPct(best.pnlPercent), backtestPnlColor(best.pnlPercent))
+                    Spacer(minLength: 0)
+                }
+                Button("View best backtest") { services.router.push(.backtest(best.backtestId)) }
+                    .buttonStyle(.dsSecondary)
+            }
+        }
+    }
 
-    /// The backtest history, its Date / P&L / P&L% sort chips as a header
-    /// menu (choosing the active field again flips it).
+    private func figure(_ label: String, _ value: String, _ color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(label)
+                .font(DS.Font.caption)
+                .foregroundStyle(DS.Text.muted)
+            Text(value)
+                .font(DS.Font.figureLarge)
+                .foregroundStyle(color)
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private static let btSortFields = [("created_at", "Date"), ("pnl", "P&L"), ("pct", "P&L %")]
+
+    /// The backtest history, its Date / P&L / P&L % columns' sort as a
+    /// header menu (choosing the active field again flips it).
     private func backtestsSection(_ model: StrategyDetailModel, best: AgentResult?) -> some View {
-        Section {
+        DSSection("Backtests", subtitle: "\(model.strategyBacktests.count) recorded") {
             if model.strategyBacktests.isEmpty {
-                Text("No backtests yet.").foregroundStyle(.secondary)
+                EmptyState(title: "No backtests recorded for this strategy yet")
             } else {
                 let bestId = best?.backtestId
                 ForEach(Array(model.sortedBacktests.enumerated()), id: \.offset) { _, bt in
                     backtestRow(bt, isBest: bt.backtestId == bestId)
                 }
             }
-        } header: {
-            DSSectionHeader("Backtests (\(model.strategyBacktests.count))") {
-                if !model.strategyBacktests.isEmpty {
-                    Menu {
-                        ForEach(Self.btSortFields, id: \.0) { field, label in
-                            Button {
-                                model.setBtSort(field)
-                            } label: {
-                                if model.btSortField == field {
-                                    Label(label, systemImage: Symbol.named(model.btSortAsc ? "arrow_upward" : "arrow_downward"))
-                                } else {
-                                    Text(label)
-                                }
+        } accessory: {
+            if !model.strategyBacktests.isEmpty {
+                Menu {
+                    ForEach(Self.btSortFields, id: \.0) { field, label in
+                        Button {
+                            model.setBtSort(field)
+                        } label: {
+                            if model.btSortField == field {
+                                Label(label, systemImage: Symbol.named(model.btSortAsc ? "arrow_upward" : "arrow_downward"))
+                            } else {
+                                Text(label)
                             }
                         }
-                    } label: {
-                        Label("Sort", systemImage: "arrow.up.arrow.down")
-                            .labelStyle(.titleAndIcon)
-                            .font(.footnote)
                     }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrow.up.arrow.down")
+                            .font(.system(size: 13))
+                        Text("Sort")
+                    }
+                    .font(DS.Font.body)
+                    .foregroundStyle(DS.Text.secondary)
+                    .frame(minHeight: 32)
+                    .contentShape(Rectangle())
                 }
-            }
-        } footer: {
-            if model.strategyBacktests.isEmpty {
-                Text("Run a backtest to see results here.")
+                .accessibilityLabel("Sort")
             }
         }
     }
 
+    /// One backtest (the web's row): when it ran, a star on the best one, the
+    /// stocks and the period under it, and its P&L and P&L % on the right.
     private func backtestRow(_ bt: AgentResult, isBest: Bool) -> some View {
-        var parts: [String] = []
-        if !bt.stocksUsed.isEmpty {
-            parts.append(bt.stocksUsed.prefix(4).joined(separator: ", ") + (bt.stocksUsed.count > 4 ? " +\(bt.stocksUsed.count - 4)" : ""))
-        }
-        if bt.startDate != nil {
-            parts.append("\(fmtDate(bt.startDate)) – \(fmtDate(bt.endDate))")
-        }
+        let stocks = BacktestStocksText.stocks(bt.stocksUsed)
+        let period = bt.startDate != nil ? BacktestRowFormat.dateRange(bt.startDate, bt.endDate) : nil
         return NavigationLink(value: Route.backtest(bt.backtestId)) {
-            EntityRow(fmtDateTime(bt.createdAt), subtitle: parts.isEmpty ? nil : parts.joined(separator: " · "), subtitleLineLimit: 2) {
-                Image(systemName: Symbol.named("auto_awesome"))
-                    .font(.footnote)
-                    .foregroundStyle(DS.Palette.warning)
-                    .opacity(isBest ? 1 : 0)
-                    .accessibilityLabel(isBest ? "Best backtest" : "")
-                    .accessibilityHidden(!isBest)
-            } trailing: {
-                EntityRowValue(fmtPnl(bt.overallProfit), color: pnlColor(bt.overallProfit), detail: fmtPct(bt.pnlPercent), detailColor: pnlColor(bt.pnlPercent))
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 8) {
+                        Text(fmtDateTime(bt.createdAt))
+                            .font(DS.Font.body)
+                            .foregroundStyle(DS.Text.primary)
+                            .lineLimit(1)
+                        if isBest {
+                            Image(systemName: "star")
+                                .font(.system(size: 14))
+                                .foregroundStyle(DS.Text.secondary)
+                                .accessibilityLabel("Best backtest")
+                        }
+                    }
+                    // The web's Stocks and Period columns, a line each.
+                    ForEach([stocks, period].compactMap { $0 }, id: \.self) { line in
+                        Text(line)
+                            .font(DS.Font.caption)
+                            .foregroundStyle(DS.Text.muted)
+                            .lineLimit(1)
+                    }
+                }
+                .monospacedDigit()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                EntityRowValue(fmtPnl(bt.overallProfit), color: backtestPnlColor(bt.overallProfit), detail: fmtPct(bt.pnlPercent), detailColor: backtestPnlColor(bt.pnlPercent))
             }
+            .accessibilityElement(children: .combine)
         }
     }
 }
 
-/// One sub-strategy: its name, position, weight and scope over the phase;
-/// expand it for the config as `LabeledContent` rows with human labels, and
-/// the raw keys in a monospaced "Raw config" disclosure.
+/// One sub-strategy (the web's card, as a row): its name and position with
+/// the phase on the right, its weight and scope, then its config — the
+/// fields with human labels, and the raw keys behind "Raw config".
 private struct StrategySubStrategyRow: View {
     let sub: SubStrategy
+    let index: Int
 
-    @State private var open = false
     @State private var rawOpen = false
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     var body: some View {
-        DisclosureGroup(isExpanded: $open) {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(sub.strategy)
+                        .font(DS.Font.bodyMedium)
+                        .foregroundStyle(DS.Text.primary)
+                        .lineLimit(1)
+                    Text("Position \(sub.executionPosition)")
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.muted)
+                        .monospacedDigit()
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Text(sub.decisionPhase.isEmpty ? "pre" : sub.decisionPhase)
+                    .font(DS.Font.caption)
+                    .foregroundStyle(StrategyDetailModel.phaseColor(sub.decisionPhase))
+            }
+            HStack(alignment: .top, spacing: 16) {
+                field("Weight", sub.weight.map(JSON.dartDoubleString) ?? "—")
+                field("Scope", sub.executionScope ?? "—")
+            }
             if sub.config.isEmpty {
-                Text("No config.").foregroundStyle(.secondary)
+                Text("No config")
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Text.muted)
             } else {
+                config
+            }
+        }
+        .padding(.vertical, 12)
+    }
+
+    private func field(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label)
+                .font(DS.Font.caption)
+                .foregroundStyle(DS.Text.muted)
+            Text(value)
+                .font(DS.Font.body)
+                .foregroundStyle(DS.Text.soft)
+                .monospacedDigit()
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+    }
+
+    /// The config (the web's "Config" list): each field's label and value,
+    /// then "Raw config", tap to open, with the keys as stored.
+    private var config: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            DSDivider()
+                .padding(.bottom, 8)
+            Text("Config")
+                .font(DS.Font.caption)
+                .foregroundStyle(DS.Text.muted)
+            VStack(alignment: .leading, spacing: 6) {
                 ForEach(sub.config.entries, id: \.key) { entry in
-                    LabeledContent(getStrategyConfigFieldMeta(sub.strategy, entry.key).label) {
+                    HStack(alignment: .firstTextBaseline, spacing: 12) {
+                        Text(getStrategyConfigFieldMeta(sub.strategy, entry.key).label)
+                            .foregroundStyle(DS.Text.secondary)
+                            .lineLimit(1)
+                        Spacer(minLength: 8)
                         Text(entry.value.dartDescription)
+                            .foregroundStyle(DS.Text.soft)
+                            .monospacedDigit()
                             .lineLimit(1)
                             .truncationMode(.tail)
                     }
-                }
-                DisclosureGroup("Raw config", isExpanded: $rawOpen) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        ForEach(sub.config.entries, id: \.key) { entry in
-                            Text("\(entry.key): \(entry.value.dartDescription)")
-                                .font(.caption.monospaced())
-                                .foregroundStyle(.secondary)
-                                .textSelection(.enabled)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .font(DS.Font.caption)
+                    .accessibilityElement(children: .combine)
                 }
             }
-        } label: {
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(sub.strategy).font(.headline).lineLimit(1)
-                    Text("position \(sub.executionPosition) · Weight \(sub.weight.map(JSON.dartDoubleString) ?? "—") · Scope \(sub.executionScope ?? "—")")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
+            disclosure("Raw config", detail: nil, open: rawOpen) { rawOpen.toggle() }
+            if rawOpen {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(sub.config.entries, id: \.key) { entry in
+                        Text("\(entry.key): \(entry.value.dartDescription)")
+                            .font(DS.Font.mono)
+                            .foregroundStyle(DS.Text.secondary)
+                            .textSelection(.enabled)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                StatusBadge(label: sub.decisionPhase.dsSentenceCased, color: StrategyDetailModel.phaseColor(sub.decisionPhase))
+                .padding(12)
+                .dsCardSurface(fill: DS.Surface.page, radius: DS.Radius.control, border: DS.Line.divider)
             }
         }
     }
+
+    private func disclosure(_ title: String, detail: String?, open: Bool, toggle: @escaping () -> Void) -> some View {
+        Button {
+            withAnimation(DSMotion.standard(reduceMotion: reduceMotion)) { toggle() }
+        } label: {
+            HStack(spacing: 8) {
+                Text(title)
+                    .foregroundStyle(DS.Text.label)
+                if let detail {
+                    Text(detail)
+                        .foregroundStyle(DS.Text.muted)
+                        .monospacedDigit()
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 12))
+                    .foregroundStyle(DS.Text.muted)
+                    .rotationEffect(.degrees(open ? 180 : 0))
+                    .accessibilityHidden(true)
+            }
+            .font(DS.Font.caption)
+            .frame(minHeight: 36)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(open ? .isSelected : [])
+    }
 }
 
-/// "Backtest this strategy" — `_BacktestModal`: choose a linked, free or new
-/// instance, set the parameters, and queue the run. A native form; Run
-/// Backtest is the toolbar's confirm action.
+/// "Backtest this strategy" — the web's modal, as a sheet in the trade
+/// ticket's layout: the strategy under the title, the instance (an already
+/// linked one, a free one, or a new one with its name), then the backtest's
+/// parameters, and Cancel / Run backtest at the bottom.
 struct StrategyBacktestSheet: View {
     let onQueued: (String) -> Void
 
@@ -242,20 +394,19 @@ struct StrategyBacktestSheet: View {
         NavigationStack {
             Group {
                 if model.loadingInsts {
-                    LoadingState(label: "Loading instances...").frame(maxHeight: .infinity)
+                    LoadingState(label: "Loading instances…")
+                        .frame(maxHeight: .infinity)
                 } else {
                     form
                 }
             }
-            .navigationTitle("Backtest This Strategy")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }.disabled(model.busy)
-                }
-                ToolbarItem(placement: .confirmationAction) { runButton }
-            }
+            .background(DS.Surface.card)
+            .safeAreaInset(edge: .top, spacing: 0) { header }
+            .safeAreaInset(edge: .bottom, spacing: 0) { footer }
+            .toolbar(.hidden, for: .navigationBar)
+            .navigationTitle("Backtest this strategy")
         }
+        .presentationBackground(DS.Surface.card)
         .interactiveDismissDisabled(model.busy)
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
@@ -265,139 +416,248 @@ struct StrategyBacktestSheet: View {
             let first = Calendar.current.date(from: DateComponents(year: 2015, month: 1, day: 1))!
             let text = field == .start ? model.start : model.end
             let initial = DartDateTime.tryParse(text) ?? (field == .start ? now.addingTimeInterval(-365 * 86400) : now)
-            MarketsDatePickerSheet(title: field == .start ? "Start Date" : "End Date", initial: initial, range: first...now) { d in
+            MarketsDatePickerSheet(title: field == .start ? "Start date" : "End date", initial: initial, range: first...now) { d in
                 if field == .start { model.start = KalshiFormat.ymd(d) } else { model.end = KalshiFormat.ymd(d) }
             }
         }
     }
 
+    // MARK: Header and footer (`ui-modal-head`, `ui-modal-foot`)
+
+    private var header: some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Backtest this strategy")
+                    .font(DS.Font.sectionTitle)
+                    .foregroundStyle(DS.Text.primary)
+                    .accessibilityAddTraits(.isHeader)
+                Text(model.strategyName)
+                    .font(DS.Font.body)
+                    .foregroundStyle(DS.Text.muted)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Button { dismiss() } label: {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(.dsIcon)
+            .disabled(model.busy)
+            .accessibilityLabel("Close")
+        }
+        .padding(.horizontal, 24)
+        .padding(.top, 20)
+        .padding(.bottom, 16)
+        .background(DS.Surface.card)
+    }
+
+    private var footer: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if !model.msg.isEmpty {
+                Text(model.msg)
+                    .font(DS.Font.body)
+                    .foregroundStyle(model.busy ? DS.Text.secondary : (model.msgOk ? DS.Palette.gain : DS.Palette.loss))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: 8) {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .buttonStyle(.dsGhost(size: .medium))
+                    .disabled(model.busy)
+                Button {
+                    Task {
+                        if let id = await model.submit() {
+                            dismiss()
+                            onQueued(id)
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        if model.busy {
+                            ProgressView()
+                                .controlSize(.small)
+                                .tint(DS.Palette.onAccent)
+                        }
+                        Text("Run backtest")
+                    }
+                }
+                .buttonStyle(.dsPrimary)
+                .disabled(model.busy || model.loadingInsts)
+            }
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 16)
+        .background {
+            DS.Surface.card
+                .overlay(alignment: .top) { DSDivider() }
+                .ignoresSafeArea(edges: .bottom)
+        }
+    }
+
+    // MARK: Form
+
     private var form: some View {
         @Bindable var m = model
-        return Form {
-            Section {
-                LabeledContent("Strategy", value: model.strategyName)
-            }
-            Section("Select instance") {
-                if !model.linkedInstances.isEmpty {
-                    Text("Already linked to this strategy").font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
-                    ForEach(model.linkedInstances.indices, id: \.self) { i in
-                        instanceRow(model.linkedInstances[i], linked: true)
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                DSField("Instance") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        if !model.linkedInstances.isEmpty {
+                            groupLabel("Already linked to this strategy")
+                            ForEach(model.linkedInstances.indices, id: \.self) { i in
+                                instanceOption(model.linkedInstances[i], linked: true)
+                            }
+                        }
+                        if !model.freeInstances.isEmpty {
+                            if !model.linkedInstances.isEmpty {
+                                groupLabel("Available instances (no strategy)")
+                                    .padding(.top, 6)
+                            }
+                            ForEach(model.freeInstances.indices, id: \.self) { i in
+                                instanceOption(model.freeInstances[i], linked: false)
+                            }
+                        }
+                        option(selected: model.selectedInstId.isEmpty, action: { model.selectedInstId = "" }) {
+                            Text("Create new instance")
+                                .font(DS.Font.body)
+                                .foregroundStyle(DS.Text.soft)
+                        }
+                        .padding(.top, model.linkedInstances.isEmpty && model.freeInstances.isEmpty ? 0 : 6)
                     }
                 }
-                if !model.freeInstances.isEmpty {
-                    Text("Available instances (no strategy)").font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
-                    ForEach(model.freeInstances.indices, id: \.self) { i in
-                        instanceRow(model.freeInstances[i], linked: false)
-                    }
-                }
-                Button {
-                    model.selectedInstId = ""
-                } label: {
-                    HStack {
-                        Label("Create new instance", systemImage: Symbol.named("add_circle")).foregroundStyle(.primary)
-                        Spacer()
-                        check(selected: model.selectedInstId.isEmpty)
-                    }
-                }
-                .tint(.primary)
-                .accessibilityAddTraits(model.selectedInstId.isEmpty ? .isSelected : [])
                 if model.selectedInstId.isEmpty {
-                    TextField("New instance name", text: $m.newInstName, prompt: Text("e.g. My Strategy Test"))
+                    DSField("New instance name") {
+                        DSTextField("e.g. My strategy test", text: $m.newInstName)
+                    }
+                }
+                DSDivider()
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("Backtest parameters")
+                        .font(DS.Font.bodyMedium)
+                        .foregroundStyle(DS.Text.primary)
+                    DSField("Stocks (comma-separated)") {
+                        DSTextField("AAPL, MSFT, NVDA", text: $m.stocks)
+                            .textInputAutocapitalization(.characters)
+                            .autocorrectionDisabled()
+                    }
+                    HStack(alignment: .top, spacing: 12) {
+                        DSField("Start date") { dateButton(model.start) { picking = .start } }
+                        DSField("End date") { dateButton(model.end) { picking = .end } }
+                    }
+                    HStack(alignment: .top, spacing: 12) {
+                        DSField("Granularity") {
+                            Menu {
+                                Picker("Granularity", selection: $m.granularity) {
+                                    ForEach(StrategyBacktestFormModel.granularities, id: \.value) { g in Text(g.label).tag(g.value) }
+                                }
+                            } label: {
+                                selectLabel(StrategyBacktestFormModel.granularities.first { $0.value == model.granularity }?.label ?? model.granularity)
+                            }
+                            .accessibilityLabel("Granularity")
+                        }
+                        DSField("Initial cash ($)") {
+                            DSTextField("10000", text: $m.cash)
+                                .keyboardType(.numberPad)
+                                .monospacedDigit()
+                        }
+                    }
                 }
             }
-            Section("Backtest parameters") {
-                LabeledContent("Stocks (comma-separated)") {
-                    TextField("Stocks (comma-separated)", text: $m.stocks, prompt: Text("AAPL, MSFT, NVDA"))
-                        .multilineTextAlignment(.trailing)
-                        .textInputAutocapitalization(.characters)
-                        .autocorrectionDisabled()
-                }
-                dateRow("Start date", model.start) { picking = .start }
-                dateRow("End date", model.end) { picking = .end }
-                Picker("Granularity", selection: $m.granularity) {
-                    ForEach(StrategyBacktestFormModel.granularities, id: \.value) { g in Text(g.label).tag(g.value) }
-                }
-                LabeledContent("Initial cash ($)") {
-                    TextField("10000", text: $m.cash)
-                        .keyboardType(.numberPad)
-                        .multilineTextAlignment(.trailing)
-                        .monospacedDigit()
-                }
-            }
-            if !model.msg.isEmpty {
-                let color = model.msgOk ? DS.Palette.success : DS.Palette.danger
-                Section {
-                    Label(model.msg, systemImage: Symbol.named(model.msgOk ? "check_circle" : "error"))
-                        .font(.footnote)
-                        .foregroundStyle(color)
-                }
-            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 24)
         }
+        .scrollDismissesKeyboard(.interactively)
     }
 
-    private func dateRow(_ label: String, _ value: String, action: @escaping () -> Void) -> some View {
+    private func groupLabel(_ text: String) -> some View {
+        Text(text)
+            .font(DS.Font.caption)
+            .foregroundStyle(DS.Text.muted)
+            .padding(.bottom, 2)
+    }
+
+    /// A selectable option (the web's radio rows): bordered, raised with a
+    /// brighter hairline when chosen, a radio mark at the leading edge.
+    private func option<Content: View>(selected: Bool, action: @escaping () -> Void, @ViewBuilder content: () -> Content) -> some View {
         Button(action: action) {
-            LabeledContent(label) {
-                Text(value.isEmpty ? "YYYY-MM-DD" : value)
-                    .monospacedDigit()
-                    .foregroundStyle(value.isEmpty ? .tertiary : .secondary)
-            }
-        }
-        .foregroundStyle(.primary)
-    }
-
-    private func instanceRow(_ inst: JSONObject, linked: Bool) -> some View {
-        let id = StrategyBacktestFormModel.instanceId(inst)
-        let selected = model.selectedInstId == id
-        return Button {
-            model.selectedInstId = id
-        } label: {
-            HStack(spacing: 10) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(StrategyBacktestFormModel.instanceName(inst))
-                        .foregroundStyle(.primary)
-                    Text(id)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+            HStack(spacing: 12) {
+                ZStack {
+                    Circle()
+                        .strokeBorder(selected ? DS.Palette.accent : DS.Line.focus, lineWidth: 1)
+                    if selected {
+                        Circle()
+                            .fill(DS.Palette.accent)
+                            .padding(4)
+                    }
                 }
-                Spacer()
-                if linked { MarketsTag(text: "Linked", color: DS.Palette.success) }
-                check(selected: selected)
+                .frame(width: 16, height: 16)
+                .accessibilityHidden(true)
+                content()
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .frame(minHeight: 48)
+            .contentShape(Rectangle())
+            .dsCardSurface(
+                fill: selected ? DS.Surface.raised : .clear,
+                radius: DS.Radius.control,
+                border: selected ? Color.white.opacity(0.2) : DS.Line.card
+            )
         }
-        .tint(.primary)
+        .buttonStyle(.plain)
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
-    /// The selected row's checkmark (the Dart radio button).
-    private func check(selected: Bool) -> some View {
-        Image(systemName: "checkmark")
-            .font(.body.weight(.semibold))
-            .foregroundStyle(DS.Palette.accent)
-            .opacity(selected ? 1 : 0)
-            .accessibilityHidden(true)
-    }
-
-    /// The Dart footer button, in the toolbar: the same label, spinner and
-    /// in-flight guard.
-    private var runButton: some View {
-        Button {
-            Task {
-                if let id = await model.submit() {
-                    dismiss()
-                    onQueued(id)
+    private func instanceOption(_ inst: JSONObject, linked: Bool) -> some View {
+        let id = StrategyBacktestFormModel.instanceId(inst)
+        return option(selected: model.selectedInstId == id, action: { model.selectedInstId = id }) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(StrategyBacktestFormModel.instanceName(inst))
+                        .font(DS.Font.body)
+                        .foregroundStyle(DS.Text.primary)
+                        .lineLimit(1)
+                    Text(id)
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.muted)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                if linked {
+                    Text("Linked")
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Text.secondary)
                 }
             }
-        } label: {
-            if model.busy {
-                ProgressView()
-            } else {
-                Label("Run Backtest", systemImage: "checkmark")
-            }
         }
-        .dsGlassProminentButton()
-        .disabled(model.busy)
+    }
+
+    /// A date as the web's date input: the value, or the zinc-600 hint.
+    private func dateButton(_ value: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(value.isEmpty ? "YYYY-MM-DD" : value)
+                .foregroundStyle(value.isEmpty ? DS.Text.faint : DS.Text.soft)
+                .monospacedDigit()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .dsInput()
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// A select as the web draws it: the value and a chevron in an input.
+    private func selectLabel(_ text: String) -> some View {
+        HStack(spacing: 8) {
+            Text(text)
+                .foregroundStyle(DS.Text.soft)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Image(systemName: "chevron.up.chevron.down")
+                .font(.system(size: 12))
+                .foregroundStyle(DS.Text.muted)
+        }
+        .contentShape(Rectangle())
+        .dsInput()
     }
 }

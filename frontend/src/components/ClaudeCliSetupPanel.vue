@@ -219,48 +219,47 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="rounded-lg border border-sky-500/20 bg-sky-500/5 px-3 py-3 space-y-3 text-[11px] leading-relaxed text-slate-300">
-    <div class="flex items-center justify-between">
-      <div class="font-semibold text-slate-200">Claude Code CLI setup</div>
+  <div class="rounded-lg border border-white/[0.07] px-4 py-3 space-y-3 text-xs leading-relaxed text-slate-300">
+    <div class="flex items-center justify-between gap-3">
+      <div class="text-sm font-medium text-slate-200">Claude Code CLI setup</div>
       <button
         @click="fetchStatus"
         :disabled="status.loading"
-        class="text-slate-500 hover:text-slate-300 transition-colors disabled:opacity-40"
+        class="ui-icon-btn -mr-2 disabled:opacity-40"
         title="Refresh status"
+        aria-label="Refresh status"
       >
-        <span class="material-symbols-outlined text-base" :class="{ 'animate-spin': status.loading }">refresh</span>
+        <span class="material-symbols-outlined text-[18px]" :class="{ 'animate-spin': status.loading }">refresh</span>
       </button>
     </div>
 
     <!-- Status row -->
     <div v-if="status.loading" class="text-slate-500">Probing claude CLI status...</div>
-    <div v-else-if="status.error" class="text-red-300">Status probe failed: {{ status.error }}</div>
-    <div v-else class="flex flex-wrap gap-x-4 gap-y-1">
-      <span>
-        <span class="text-slate-500">installed:</span>
-        <span :class="status.installed ? 'text-emerald-300' : 'text-amber-300'">
-          {{ status.installed ? '✓ yes' : '✗ no' }}
-        </span>
+    <div v-else-if="status.error" class="text-loss">Status probe failed: {{ status.error }}</div>
+    <div v-else class="flex flex-wrap gap-x-5 gap-y-1">
+      <span class="inline-flex items-center gap-1.5">
+        <span class="text-slate-500">Installed</span>
+        <span class="ui-dot" :class="status.installed ? 'bg-gain' : 'ui-dot-warn'"></span>
+        <span class="text-slate-200">{{ status.installed ? 'Yes' : 'No' }}</span>
       </span>
-      <span v-if="status.installed">
-        <span class="text-slate-500">version:</span>
+      <span v-if="status.installed" class="inline-flex items-center gap-1.5">
+        <span class="text-slate-500">Version</span>
         <span class="font-mono text-slate-200">{{ status.version || 'unknown' }}</span>
       </span>
-      <span v-if="status.installed">
-        <span class="text-slate-500">authenticated:</span>
-        <span :class="status.authenticated ? 'text-emerald-300' : 'text-amber-300'">
-          {{ status.authenticated ? '✓ yes' : '✗ no' }}
-        </span>
+      <span v-if="status.installed" class="inline-flex items-center gap-1.5">
+        <span class="text-slate-500">Authenticated</span>
+        <span class="ui-dot" :class="status.authenticated ? 'bg-gain' : 'ui-dot-warn'"></span>
+        <span class="text-slate-200">{{ status.authenticated ? 'Yes' : 'No' }}</span>
       </span>
-      <span v-if="status.installed && status.authenticated && status.account">
-        <span class="text-slate-500">account:</span>
-        <span class="font-mono text-slate-200">{{ status.account }}</span>
+      <span v-if="status.installed && status.authenticated && status.account" class="inline-flex items-center gap-1.5 min-w-0">
+        <span class="text-slate-500">Account</span>
+        <span class="font-mono text-slate-200 truncate">{{ status.account }}</span>
       </span>
     </div>
 
     <!-- Not installed -->
     <div v-if="!status.loading && !status.installed && !status.error" class="space-y-1.5">
-      <p class="text-amber-300">
+      <p class="text-slate-200">
         The <span class="font-mono">claude</span> binary was not found on the server.
       </p>
       <p class="text-slate-400">
@@ -271,7 +270,7 @@ onUnmounted(() => {
     </div>
 
     <!-- Installed but not authenticated → two-step paste-back login -->
-    <div v-if="!status.loading && status.installed && !status.authenticated && !status.error" class="space-y-2">
+    <div v-if="!status.loading && status.installed && !status.authenticated && !status.error" class="space-y-3">
       <p class="text-slate-400">
         Claude is installed but not authenticated. Start the Claude subscription
         sign-in below — you'll get a link to open in your browser, then paste the
@@ -281,7 +280,7 @@ onUnmounted(() => {
         <button
           @click="startLogin"
           :disabled="_LIVE_STATES.includes(loginJob.state)"
-          class="px-3 py-1.5 rounded-md bg-primary text-background-dark text-xs font-bold hover:brightness-110 transition-all disabled:opacity-60"
+          class="ui-btn"
         >
           <template v-if="loginJob.state === 'submitting'">Verifying...</template>
           <template v-else-if="loginJob.state === 'parsed'">Sign-in in progress...</template>
@@ -290,7 +289,7 @@ onUnmounted(() => {
         <button
           v-if="_LIVE_STATES.includes(loginJob.state)"
           @click="cancelLogin"
-          class="px-2 py-1 rounded-md border border-border-subtle text-slate-400 hover:text-slate-200 text-xs"
+          class="ui-btn-ghost text-[13px]"
         >
           Cancel
         </button>
@@ -299,16 +298,17 @@ onUnmounted(() => {
       <!-- Step-by-step login flow -->
       <div v-if="loginJob.state && loginJob.state !== 'failed'" class="space-y-2">
         <div v-if="loginJob.loginUrl" class="space-y-1.5">
-          <div>
+          <div class="flex flex-wrap items-center gap-x-1">
             <span class="text-slate-500">1. Open this link and sign in:</span>
             <a :href="loginJob.loginUrl" target="_blank" rel="noopener noreferrer"
-              class="ml-1 font-mono text-sky-300 underline break-all">{{ loginJob.loginUrl }}</a>
+              class="font-mono text-slate-200 underline decoration-slate-600 underline-offset-2 hover:decoration-slate-300 break-all transition-colors duration-150 ease-out">{{ loginJob.loginUrl }}</a>
             <button
               @click="copyToClipboard(loginJob.loginUrl)"
-              class="ml-2 text-slate-500 hover:text-slate-300"
+              class="ui-icon-btn size-7"
               title="Copy URL"
+              aria-label="Copy URL"
             >
-              <span class="material-symbols-outlined text-base align-middle">content_copy</span>
+              <span class="material-symbols-outlined text-[16px]">content_copy</span>
             </button>
           </div>
           <div class="text-slate-500">2. Copy the authorization code shown after you sign in.</div>
@@ -316,11 +316,12 @@ onUnmounted(() => {
         </div>
         <!-- Unsafe host: show the raw text only, never a clickable link. -->
         <div v-else-if="loginJob.rawLoginUrl" class="space-y-1.5">
-          <div class="text-amber-300">
-            claude returned a login URL on an unrecognised host — open it
-            manually (not rendered as a link for safety):
+          <div class="flex items-start gap-2 text-slate-200">
+            <span class="ui-dot ui-dot-warn mt-1.5"></span>
+            <span>claude returned a login URL on an unrecognised host — open it
+            manually (not rendered as a link for safety):</span>
           </div>
-          <div class="font-mono text-slate-300 break-all bg-black/40 rounded px-2 py-1">{{ loginJob.rawLoginUrl }}</div>
+          <div class="font-mono text-slate-300 break-all bg-background-dark rounded-md px-3 py-2">{{ loginJob.rawLoginUrl }}</div>
           <div class="text-slate-500">Then copy the authorization code and paste it below.</div>
         </div>
 
@@ -331,14 +332,14 @@ onUnmounted(() => {
             placeholder="Paste authorization code"
             :disabled="loginJob.state === 'submitting' || loginJob.state === 'success'"
             @keyup.enter="submitCode"
-            class="flex-1 min-w-[200px] bg-surface border border-border-subtle rounded-md px-3 py-2 text-xs text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono disabled:opacity-50"
+            class="ui-input h-8 flex-1 min-w-[200px] text-xs font-mono"
           />
           <button
             @click="submitCode"
             :disabled="!loginJob.code.trim() || loginJob.state === 'submitting' || loginJob.state === 'success'"
-            class="px-3 py-2 rounded-md bg-primary text-background-dark text-xs font-bold hover:brightness-110 transition-all disabled:opacity-60 inline-flex items-center gap-1.5"
+            class="ui-btn"
           >
-            <span v-if="loginJob.state === 'submitting'" class="material-symbols-outlined text-base animate-spin">progress_activity</span>
+            <span v-if="loginJob.state === 'submitting'" class="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
             <template v-if="loginJob.state === 'submitting'">Submitting...</template>
             <template v-else>Submit code</template>
           </button>
@@ -347,22 +348,22 @@ onUnmounted(() => {
           Exchanging the code with Claude — this can take up to ~30 seconds.
         </p>
 
-        <div v-if="loginJob.state === 'success'" class="rounded-md border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-emerald-300">
-          ✓ Claude re-authenticated.
+        <div v-if="loginJob.state === 'success'" class="text-gain">
+          Claude re-authenticated.
         </div>
       </div>
 
-      <div v-if="loginJob.error" class="rounded-md border border-red-500/20 bg-red-500/10 px-3 py-2 text-red-300 space-y-1">
+      <div v-if="loginJob.error" class="rounded-lg border border-loss/20 bg-loss/5 px-3 py-2 text-loss space-y-1.5">
         <div>{{ loginJob.error }}</div>
         <pre v-if="loginJob.outputTail"
-          class="font-mono text-[10px] text-red-200/80 bg-black/30 rounded px-2 py-1 max-h-40 overflow-auto whitespace-pre-wrap break-all">{{ loginJob.outputTail }}</pre>
+          class="font-mono text-[11px] text-slate-400 bg-background-dark rounded-md px-3 py-2 max-h-40 overflow-auto whitespace-pre-wrap break-all">{{ loginJob.outputTail }}</pre>
       </div>
     </div>
 
     <!-- Authenticated → logout panel -->
-    <div v-if="!status.loading && status.installed && status.authenticated && !status.error" class="space-y-2">
-      <p class="text-emerald-300">
-        ✓ Claude Code CLI is installed and authenticated. Models can now use <span class="font-mono">claude-cli</span> as their provider.
+    <div v-if="!status.loading && status.installed && status.authenticated && !status.error" class="space-y-3">
+      <p class="text-slate-300">
+        Claude Code CLI is installed and authenticated. Models can now use <span class="font-mono">claude-cli</span> as their provider.
       </p>
       <p v-if="status.auth_message" class="text-slate-500">
         {{ status.auth_message }}
@@ -371,13 +372,13 @@ onUnmounted(() => {
         <button
           @click="startLogin"
           :disabled="_LIVE_STATES.includes(loginJob.state)"
-          class="px-3 py-1.5 rounded-md border border-border-subtle text-slate-300 hover:text-primary hover:border-primary/40 text-xs font-medium transition-colors disabled:opacity-60"
+          class="ui-btn"
         >
           Re-authenticate Claude
         </button>
         <button
           @click="logout"
-          class="px-3 py-1.5 rounded-md border border-border-subtle text-slate-300 hover:text-red-300 hover:border-red-500/30 text-xs font-medium transition-colors"
+          class="ui-btn"
         >
           Sign out of Claude
         </button>
@@ -387,27 +388,29 @@ onUnmounted(() => {
            of an expired/expiring token). Mirrors the not-authenticated flow. -->
       <div v-if="loginJob.state && loginJob.state !== 'failed'" class="space-y-2 pt-1">
         <div v-if="loginJob.loginUrl" class="space-y-1.5">
-          <div>
+          <div class="flex flex-wrap items-center gap-x-1">
             <span class="text-slate-500">1. Open this link and sign in:</span>
             <a :href="loginJob.loginUrl" target="_blank" rel="noopener noreferrer"
-              class="ml-1 font-mono text-sky-300 underline break-all">{{ loginJob.loginUrl }}</a>
+              class="font-mono text-slate-200 underline decoration-slate-600 underline-offset-2 hover:decoration-slate-300 break-all transition-colors duration-150 ease-out">{{ loginJob.loginUrl }}</a>
             <button
               @click="copyToClipboard(loginJob.loginUrl)"
-              class="ml-2 text-slate-500 hover:text-slate-300"
+              class="ui-icon-btn size-7"
               title="Copy URL"
+              aria-label="Copy URL"
             >
-              <span class="material-symbols-outlined text-base align-middle">content_copy</span>
+              <span class="material-symbols-outlined text-[16px]">content_copy</span>
             </button>
           </div>
           <div class="text-slate-500">2. Copy the authorization code shown after you sign in.</div>
           <div class="text-slate-500">3. Paste it below:</div>
         </div>
         <div v-else-if="loginJob.rawLoginUrl" class="space-y-1.5">
-          <div class="text-amber-300">
-            claude returned a login URL on an unrecognised host — open it
-            manually (not rendered as a link for safety):
+          <div class="flex items-start gap-2 text-slate-200">
+            <span class="ui-dot ui-dot-warn mt-1.5"></span>
+            <span>claude returned a login URL on an unrecognised host — open it
+            manually (not rendered as a link for safety):</span>
           </div>
-          <div class="font-mono text-slate-300 break-all bg-black/40 rounded px-2 py-1">{{ loginJob.rawLoginUrl }}</div>
+          <div class="font-mono text-slate-300 break-all bg-background-dark rounded-md px-3 py-2">{{ loginJob.rawLoginUrl }}</div>
           <div class="text-slate-500">Then copy the authorization code and paste it below.</div>
         </div>
 
@@ -418,21 +421,21 @@ onUnmounted(() => {
             placeholder="Paste authorization code"
             :disabled="loginJob.state === 'submitting' || loginJob.state === 'success'"
             @keyup.enter="submitCode"
-            class="flex-1 min-w-[200px] bg-surface border border-border-subtle rounded-md px-3 py-2 text-xs text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono disabled:opacity-50"
+            class="ui-input h-8 flex-1 min-w-[200px] text-xs font-mono"
           />
           <button
             @click="submitCode"
             :disabled="!loginJob.code.trim() || loginJob.state === 'submitting' || loginJob.state === 'success'"
-            class="px-3 py-2 rounded-md bg-primary text-background-dark text-xs font-bold hover:brightness-110 transition-all disabled:opacity-60 inline-flex items-center gap-1.5"
+            class="ui-btn"
           >
-            <span v-if="loginJob.state === 'submitting'" class="material-symbols-outlined text-base animate-spin">progress_activity</span>
+            <span v-if="loginJob.state === 'submitting'" class="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
             <template v-if="loginJob.state === 'submitting'">Submitting...</template>
             <template v-else>Submit code</template>
           </button>
           <button
             v-if="_LIVE_STATES.includes(loginJob.state)"
             @click="cancelLogin"
-            class="px-2 py-1 rounded-md border border-border-subtle text-slate-400 hover:text-slate-200 text-xs"
+            class="ui-btn-ghost text-[13px]"
           >
             Cancel
           </button>
@@ -440,15 +443,15 @@ onUnmounted(() => {
         <p v-if="loginJob.state === 'submitting'" class="text-slate-500">
           Exchanging the code with Claude — this can take up to ~30 seconds.
         </p>
-        <div v-if="loginJob.state === 'success'" class="rounded-md border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-emerald-300">
-          ✓ Claude re-authenticated.
+        <div v-if="loginJob.state === 'success'" class="text-gain">
+          Claude re-authenticated.
         </div>
       </div>
 
-      <div v-if="loginJob.error" class="rounded-md border border-red-500/20 bg-red-500/10 px-3 py-2 text-red-300 space-y-1">
+      <div v-if="loginJob.error" class="rounded-lg border border-loss/20 bg-loss/5 px-3 py-2 text-loss space-y-1.5">
         <div>{{ loginJob.error }}</div>
         <pre v-if="loginJob.outputTail"
-          class="font-mono text-[10px] text-red-200/80 bg-black/30 rounded px-2 py-1 max-h-40 overflow-auto whitespace-pre-wrap break-all">{{ loginJob.outputTail }}</pre>
+          class="font-mono text-[11px] text-slate-400 bg-background-dark rounded-md px-3 py-2 max-h-40 overflow-auto whitespace-pre-wrap break-all">{{ loginJob.outputTail }}</pre>
       </div>
     </div>
   </div>

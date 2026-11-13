@@ -4,6 +4,8 @@ import { useRouter, useRoute } from 'vue-router'
 import { getUser, clearSession } from '../utils/auth.js'
 import { fullscreenMode } from '../composables/useFullscreen.js'
 import ChatbotDock from '../components/ChatbotDock.vue'
+import SymbolSearch from '../components/SymbolSearch.vue'
+import { openSymbolSearch, symbolSearchShortcut } from '../composables/useSymbolSearch.js'
 // new-logo.png lives in /public/ — served at the root URL without a
 // content hash. If the bytes change and you hit cache issues, bust
 // it with a query string at the call site rather than at the import.
@@ -144,6 +146,20 @@ onBeforeUnmount(() => {
           </button>
         </div>
 
+        <!-- Search stocks: / or the shortcut opens it from anywhere -->
+        <div class="px-3 pb-2">
+          <button
+            type="button"
+            class="w-full h-9 px-3 flex items-center gap-2.5 rounded-lg border border-white/[0.07] bg-white/[0.02] text-sm text-slate-500 transition-colors duration-150 ease-out hover:text-slate-300 hover:border-white/[0.12] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25"
+            aria-label="Search stocks"
+            @click="closeSidebar(); openSymbolSearch()"
+          >
+            <span class="material-symbols-outlined w-[18px] text-[18px] shrink-0" aria-hidden="true">search</span>
+            <span class="flex-1 text-left">Search</span>
+            <kbd class="h-5 px-1.5 inline-flex items-center rounded-[5px] border border-white/10 bg-raised font-sans text-[11px] leading-none text-slate-500">{{ symbolSearchShortcut }}</kbd>
+          </button>
+        </div>
+
         <!-- Nav -->
         <nav class="flex-1 px-3 pb-4 overflow-y-auto">
           <div v-for="(group, gi) in navGroups" :key="group.label" :class="gi === 0 ? 'pt-2' : 'pt-6'">
@@ -197,22 +213,34 @@ onBeforeUnmount(() => {
       >
         <!-- Mobile top bar -->
         <header v-show="!fullscreenMode" class="lg:hidden h-14 px-4 border-b border-white/[0.06] bg-background-dark sticky top-0 z-30 flex items-center justify-between">
-          <button
-            class="inline-flex items-center justify-center size-9 rounded-lg text-slate-300 hover:bg-raised transition-colors"
-            aria-label="Open navigation"
-            @click="toggleSidebar"
-          >
-            <span class="material-symbols-outlined text-[20px]">menu</span>
-          </button>
+          <div class="w-[72px] flex items-center">
+            <button
+              class="inline-flex items-center justify-center size-9 rounded-lg text-slate-300 hover:bg-raised transition-colors"
+              aria-label="Open navigation"
+              @click="toggleSidebar"
+            >
+              <span class="material-symbols-outlined text-[20px]">menu</span>
+            </button>
+          </div>
           <img :src="fullLogoUrl" alt="IntelliStock" class="h-7 w-auto" draggable="false" />
-          <button
-            @click="logout"
-            class="inline-flex items-center justify-center size-9 rounded-lg text-slate-500 hover:text-slate-200 hover:bg-raised transition-colors"
-            aria-label="Sign out"
-            title="Sign out"
-          >
-            <span class="material-symbols-outlined text-[18px]">logout</span>
-          </button>
+          <div class="w-[72px] flex items-center justify-end">
+            <button
+              class="inline-flex items-center justify-center size-9 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-raised transition-colors"
+              aria-label="Search stocks"
+              title="Search"
+              @click="openSymbolSearch"
+            >
+              <span class="material-symbols-outlined text-[20px]">search</span>
+            </button>
+            <button
+              @click="logout"
+              class="inline-flex items-center justify-center size-9 rounded-lg text-slate-500 hover:text-slate-200 hover:bg-raised transition-colors"
+              aria-label="Sign out"
+              title="Sign out"
+            >
+              <span class="material-symbols-outlined text-[18px]">logout</span>
+            </button>
+          </div>
         </header>
 
         <div class="flex-1 min-w-0">
@@ -224,5 +252,8 @@ onBeforeUnmount(() => {
 
     <!-- Global chatbot dock — only on authenticated pages, hidden in fullscreen views. -->
     <ChatbotDock v-if="!fullscreenMode" />
+
+    <!-- App-wide stock search (one instance; the triggers above open it). -->
+    <SymbolSearch />
   </div>
 </template>

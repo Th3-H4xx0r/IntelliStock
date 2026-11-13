@@ -149,70 +149,71 @@ onMounted(fetchUsers)
 
 <template>
   <AppShell>
-    <main class="flex-1 px-4 py-6 sm:px-6 sm:py-8 lg:px-8 lg:py-10">
+    <main class="ui-page">
 
       <!-- Header -->
-      <div class="mb-6 sm:mb-8">
-        <p class="text-primary text-xs font-bold uppercase tracking-widest mb-1">Users</p>
-        <h1 class="text-2xl sm:text-3xl font-bold leading-tight">Accounts</h1>
-        <p class="text-slate-400 text-sm mt-1 max-w-xl">
-          Every account has full access — there is no separate administrator tier.
-          Create one per person who needs to sign in, and delete the ones that no
-          longer should.
-        </p>
-      </div>
+      <header class="flex flex-wrap items-end justify-between gap-x-4 gap-y-2">
+        <div class="min-w-0">
+          <h1 class="ui-page-title">Users</h1>
+          <p class="ui-page-sub max-w-2xl">
+            Every account has full access; there is no separate administrator tier.
+            Create one per person who needs to sign in, and delete the ones that no
+            longer should
+          </p>
+        </div>
+      </header>
 
-      <div class="grid grid-cols-1 xl:grid-cols-3 gap-6">
+      <div class="mt-8 grid grid-cols-1 gap-x-8 gap-y-12 items-start lg:grid-cols-[minmax(0,1fr)_340px]">
 
         <!-- The list -->
-        <div class="xl:col-span-2">
-          <div v-if="loading" class="flex items-center gap-3 text-slate-400 text-sm">
-            <span class="material-symbols-outlined animate-spin text-xl">progress_activity</span>
-            Loading users...
+        <section class="min-w-0" aria-labelledby="users-title">
+          <div class="mb-3">
+            <h2 id="users-title" class="ui-section-title">Accounts</h2>
           </div>
 
-          <div v-else-if="loadError"
-               class="rounded-xl bg-red-500/10 border border-red-500/20 px-5 py-4 text-red-400 text-sm">
+          <div v-if="loading" class="ui-card overflow-hidden" aria-hidden="true">
+            <div class="ui-th flex"><div class="ui-skel h-3 w-20"></div></div>
+            <div class="ui-rows">
+              <div v-for="n in 3" :key="n" class="h-14 px-5 flex items-center">
+                <div class="ui-skel h-4 w-40"></div>
+              </div>
+            </div>
+          </div>
+
+          <div v-else-if="loadError" class="ui-error">
             {{ loadError }}
           </div>
 
-          <div v-else class="glass-card rounded-2xl overflow-hidden">
+          <div v-else class="ui-card overflow-hidden">
             <div class="overflow-x-auto">
               <table class="w-full text-sm">
                 <thead>
-                  <tr class="text-left text-[11px] uppercase tracking-widest text-slate-500 border-b border-border-subtle">
-                    <th scope="col" class="px-5 py-3 font-semibold">Username</th>
-                    <th scope="col" class="px-5 py-3 font-semibold">Created</th>
-                    <th scope="col" class="px-5 py-3 font-semibold text-right">Actions</th>
+                  <tr class="h-10 text-left text-xs text-slate-500 border-b border-white/[0.06]">
+                    <th scope="col" class="px-5 font-normal">Username</th>
+                    <th scope="col" class="px-5 font-normal">Created</th>
+                    <th scope="col" class="px-5 font-normal text-right"><span class="sr-only">Actions</span></th>
                   </tr>
                 </thead>
-                <tbody>
+                <tbody class="divide-y divide-white/[0.05]">
                   <tr v-for="user in users" :key="user.id"
-                      class="border-b border-border-subtle/60 last:border-0">
-                    <td class="px-5 py-3.5">
+                      class="h-14 transition-colors duration-150 ease-out hover:bg-white/[0.03]">
+                    <td class="px-5">
                       <div class="flex items-center gap-2 min-w-0">
-                        <span class="font-medium text-slate-100 truncate">{{ user.username }}</span>
-                        <span v-if="isMe(user)"
-                              class="px-2 py-0.5 rounded-full bg-primary/15 text-primary text-[10px] font-bold uppercase tracking-widest shrink-0">
-                          you
-                        </span>
+                        <span class="text-slate-100 truncate">{{ user.username }}</span>
+                        <span v-if="isMe(user)" class="text-xs text-slate-500 shrink-0">You</span>
                       </div>
                     </td>
-                    <td class="px-5 py-3.5 text-slate-400 whitespace-nowrap">
+                    <td class="px-5 text-slate-400 whitespace-nowrap tabular-nums">
                       {{ formatCreated(user.created_at) }}
                     </td>
-                    <td class="px-5 py-3.5 text-right">
+                    <td class="px-5 text-right">
                       <button
                         type="button"
                         :disabled="!!deleteBlockedReason(user)"
                         :title="deleteBlockedReason(user) || `Delete ${user.username}`"
                         @click="askDelete(user)"
-                        class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold
-                               border border-red-500/30 text-red-400 hover:bg-red-500/10
-                               disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent
-                               transition-colors"
+                        class="ui-btn text-loss"
                       >
-                        <span class="material-symbols-outlined text-[16px]">delete</span>
                         Delete
                       </button>
                     </td>
@@ -221,117 +222,104 @@ onMounted(fetchUsers)
               </table>
             </div>
           </div>
-        </div>
+        </section>
 
         <!-- Create form -->
-        <div class="glass-card rounded-2xl p-5 sm:p-6 h-fit">
-          <h2 class="font-semibold text-slate-100">Add a user</h2>
-          <p class="text-xs text-slate-500 mt-1 mb-4">
-            They will be able to do everything you can.
-          </p>
+        <section class="min-w-0" aria-labelledby="add-user-title">
+          <div class="mb-3">
+            <h2 id="add-user-title" class="ui-section-title">Add a user</h2>
+            <p class="ui-section-sub">They will be able to do everything you can</p>
+          </div>
 
-          <form @submit.prevent="createUser" class="space-y-4" novalidate>
-            <div class="space-y-1.5">
-              <label for="new-username"
-                     class="text-xs font-semibold uppercase tracking-widest text-slate-400">Username</label>
+          <form @submit.prevent="createUser" class="ui-card p-5 space-y-4" novalidate>
+            <div>
+              <label for="new-username" class="ui-field-label">Username</label>
               <input
                 id="new-username"
                 v-model="form.username"
                 type="text"
                 autocomplete="off"
                 :disabled="creating"
-                class="w-full bg-background-dark border border-border-subtle rounded-xl px-4 py-2.5 text-sm text-slate-100
-                       placeholder-slate-600 focus:outline-none focus:border-primary/60 focus:ring-1 focus:ring-primary/30
-                       disabled:opacity-50 transition-colors"
+                class="ui-input"
               />
             </div>
 
-            <div class="space-y-1.5">
-              <label for="new-password"
-                     class="text-xs font-semibold uppercase tracking-widest text-slate-400">Password</label>
+            <div>
+              <label for="new-password" class="ui-field-label">Password</label>
               <input
                 id="new-password"
                 v-model="form.password"
                 type="password"
                 autocomplete="new-password"
-                placeholder="at least 8 characters"
+                placeholder="At least 8 characters"
                 :disabled="creating"
-                class="w-full bg-background-dark border border-border-subtle rounded-xl px-4 py-2.5 text-sm text-slate-100
-                       placeholder-slate-600 focus:outline-none focus:border-primary/60 focus:ring-1 focus:ring-primary/30
-                       disabled:opacity-50 transition-colors"
+                class="ui-input"
               />
             </div>
 
-            <div class="space-y-1.5">
-              <label for="confirm-password"
-                     class="text-xs font-semibold uppercase tracking-widest text-slate-400">Confirm password</label>
+            <div>
+              <label for="confirm-password" class="ui-field-label">Confirm password</label>
               <input
                 id="confirm-password"
                 v-model="form.confirm"
                 type="password"
                 autocomplete="new-password"
                 :disabled="creating"
-                class="w-full bg-background-dark border border-border-subtle rounded-xl px-4 py-2.5 text-sm text-slate-100
-                       placeholder-slate-600 focus:outline-none focus:border-primary/60 focus:ring-1 focus:ring-primary/30
-                       disabled:opacity-50 transition-colors"
+                class="ui-input"
               />
             </div>
 
-            <div v-if="createErr"
-                 class="rounded-xl bg-red-500/10 border border-red-500/20 px-4 py-3 text-red-400 text-xs">
+            <p v-if="createErr" class="text-sm text-loss">
               {{ createErr }}
-            </div>
-            <div v-else-if="createdMsg"
-                 class="rounded-xl bg-emerald-500/10 border border-emerald-500/20 px-4 py-3 text-emerald-400 text-xs">
+            </p>
+            <p v-else-if="createdMsg" class="text-sm text-gain">
               {{ createdMsg }}
-            </div>
+            </p>
 
             <button
               type="submit"
               :disabled="creating"
-              class="w-full inline-flex items-center justify-center gap-2 py-2.5 rounded-xl font-semibold text-sm
-                     bg-primary text-background-dark hover:brightness-110 active:brightness-95
-                     disabled:opacity-60 disabled:cursor-not-allowed transition-all"
+              class="ui-btn-primary w-full"
             >
-              <span class="material-symbols-outlined text-[18px]">person_add</span>
               {{ creating ? 'Creating…' : 'Create user' }}
             </button>
           </form>
-        </div>
+        </section>
       </div>
 
       <!-- Delete confirmation -->
       <div v-if="pendingDelete"
-           class="fixed inset-0 z-50 flex items-center justify-center px-4 bg-black/60 backdrop-blur-sm"
+           class="ui-overlay"
            role="dialog" aria-modal="true" aria-labelledby="delete-user-title">
-        <div class="glass-card rounded-2xl p-6 w-full max-w-sm space-y-4">
-          <h2 id="delete-user-title" class="font-semibold text-slate-100">
-            Delete {{ pendingDelete.username }}?
-          </h2>
-          <p class="text-sm text-slate-400">
-            They lose access immediately and any script signing in as them stops
-            working. This cannot be undone.
-          </p>
-
-          <div v-if="deleteErr"
-               class="rounded-xl bg-red-500/10 border border-red-500/20 px-4 py-3 text-red-400 text-xs">
-            {{ deleteErr }}
+        <div class="ui-modal max-w-sm">
+          <div class="ui-modal-head">
+            <div class="min-w-0">
+              <h2 id="delete-user-title" class="text-base font-medium text-slate-100">
+                Delete {{ pendingDelete.username }}?
+              </h2>
+              <p class="text-sm text-slate-500 mt-1">
+                They lose access immediately and any script signing in as them stops
+                working. This cannot be undone.
+              </p>
+            </div>
           </div>
 
-          <div class="flex gap-3 pt-1">
+          <div v-if="deleteErr" class="ui-modal-body">
+            <p class="text-sm text-loss">{{ deleteErr }}</p>
+          </div>
+
+          <div class="ui-modal-foot">
             <button
               type="button"
               :disabled="deleting"
               @click="pendingDelete = null"
-              class="flex-1 py-2.5 rounded-xl text-sm font-semibold border border-border-subtle
-                     text-slate-300 hover:bg-surface/60 disabled:opacity-50 transition-colors"
+              class="ui-btn-ghost"
             >Cancel</button>
             <button
               type="button"
               :disabled="deleting"
               @click="confirmDelete"
-              class="flex-1 py-2.5 rounded-xl text-sm font-semibold bg-red-500/90 text-white
-                     hover:bg-red-500 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+              class="ui-btn text-loss"
             >{{ deleting ? 'Deleting…' : 'Delete' }}</button>
           </div>
         </div>

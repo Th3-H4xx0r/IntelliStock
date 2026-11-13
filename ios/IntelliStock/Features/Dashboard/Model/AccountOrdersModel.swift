@@ -23,7 +23,8 @@ nonisolated enum OrdersMode: String, Hashable, Sendable, CaseIterable {
 }
 
 /// The selected stock account's open orders and recent order history for
-/// the dashboard's Orders section. Read-only.
+/// the dashboard's Orders section. An open order can be canceled behind a
+/// confirm when the model has a trade backend; nothing else is changed.
 ///
 /// One instance per selected account (it lives in `DashboardAccountScope`).
 /// Polls every 30 s while the dashboard is on screen, pausing in the
@@ -47,12 +48,53 @@ final class AccountOrdersModel {
     /// The modes whose list the user expanded with "Show all".
     private(set) var expanded: Set<OrdersMode> = []
 
+    /// The cancel waiting on its confirmation; the dashboard list presents it.
+    var cancelPrompt: TradeCancelPrompt?
+    /// The last cancel's failure, shown at the top of the section.
+    private(set) var cancelError: String?
+    /// Order ids whose cancel is in flight.
+    private(set) var canceling: Set<String> = []
+
     @ObservationIgnored private let repository: () -> DashboardRepository
+    @ObservationIgnored private let trade: (() -> any TradeBackend)?
     @ObservationIgnored private var modeSettled = false
 
-    init(brokerageId: String, repository: @escaping () -> DashboardRepository) {
+    /// Without `trade`, the section stays read-only.
+    init(brokerageId: String, repository: @escaping () -> DashboardRepository, trade: (() -> any TradeBackend)? = nil) {
         self.brokerageId = brokerageId
         self.repository = repository
+        self.trade = trade
+    }
+
+    // MARK: Cancel
+
+    /// An open order on this account can be canceled from its row.
+    func canCancel(_ order: BrokerOrder) -> Bool {
+        trade != nil && TradeTicket.isCancelable(order) && !canceling.contains(order.id)
+    }
+
+    func requestCancel(_ order: BrokerOrder) {
+        guard canCancel(order) else { return }
+        cancelPrompt = TradeCancelPrompt(
+            brokerageId: brokerageId,
+            order: order,
+            message: TradeTicket.cancelPromptBody(order, account: nil)
+        )
+    }
+
+    /// Cancels a REAL order (after its confirm), then re-reads the book.
+    func cancel(_ orderId: String) async {
+        guard let trade, !canceling.contains(orderId) else { return }
+        canceling.insert(orderId)
+        defer { canceling.remove(orderId) }
+        cancelError = nil
+        do {
+            try await trade().cancelOrder(brokerageId, orderId: orderId)
+        } catch {
+            if error.isCancellation { return }
+            cancelError = TradeTicket.cancelErrorText(error)
+        }
+        await fetch()
     }
 
     // MARK: What the section shows

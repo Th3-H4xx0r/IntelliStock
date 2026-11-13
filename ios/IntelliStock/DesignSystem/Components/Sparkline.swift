@@ -4,9 +4,10 @@ import SwiftUI
 /// A tiny price line for a row — the dashboard's `_MiniSpark`, moved into the
 /// design system (`DashboardMiniSpark` is a typealias of it).
 ///
-/// A Swift Charts line, 1.5 pt wide and monotone, with no axes, grid or
-/// legend. It is green when the last value is at or above the first and red
-/// otherwise, unless you pass `color`. An optional `baseline` draws Stocks'
+/// The web's sparkline: a straight-segment line, 1.5 pt wide, with no axes,
+/// grid or legend, gain when the last value is at or above the first and
+/// loss otherwise, unless you pass `color`. A near-flat series (a T-bill ETF)
+/// draws near-flat: the vertical span is never less than 0.5% of the price. An optional `baseline` draws Stocks'
 /// dotted reference line (the previous close, say). It draws itself in from
 /// the left on first appearance (`chartDrawIn`; skipped under Reduce Motion,
 /// or with `animated: false`); give it a new `.id` to replay. Decorative: the
@@ -28,6 +29,16 @@ struct Sparkline: View {
         self.animated = animated
     }
 
+    /// The y range: the values' range, widened about its middle to at least
+    /// 0.5% of the middle value (the web's rule).
+    nonisolated static func domain(_ values: [Double]) -> ClosedRange<Double> {
+        guard let lo = values.min(), let hi = values.max() else { return 0...1 }
+        let mid = (lo + hi) / 2
+        var span = max(hi - lo, abs(mid) * 0.005)
+        if span < 1e-9 { span = 1 }
+        return (mid - span / 2)...(mid + span / 2)
+    }
+
     /// True when the line ends at or above where it started.
     nonisolated static func isUp(_ values: [Double]) -> Bool {
         guard let first = values.first, let last = values.last else { return true }
@@ -40,27 +51,25 @@ struct Sparkline: View {
         } else {
             let tint = color ?? (Self.isUp(values) ? DS.Palette.up : DS.Palette.down)
             let all = baseline.map { values + [$0] } ?? values
-            let lo = all.min()!
-            let hi = all.max()!
-            let span = abs(hi - lo) < 1e-9 ? 1 : hi - lo
+            let domain = Self.domain(all)
             Chart {
                 if let baseline {
                     RuleMark(y: .value("Baseline", baseline))
-                        .foregroundStyle(Color(uiColor: .tertiaryLabel))
+                        .foregroundStyle(DS.Chart.baseline)
                         .lineStyle(StrokeStyle(lineWidth: 1, dash: DS.baselineDash))
                 }
                 ForEach(values.indices, id: \.self) { i in
                     LineMark(x: .value("i", i), y: .value("v", values[i]))
                         .foregroundStyle(tint)
                         .lineStyle(StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
-                        .interpolationMethod(.monotone)
+                        .interpolationMethod(.linear)
                 }
             }
             .chartXAxis(.hidden)
             .chartYAxis(.hidden)
             .chartLegend(.hidden)
             .chartXScale(domain: 0...(values.count - 1))
-            .chartYScale(domain: lo...(lo + span))
+            .chartYScale(domain: domain)
             .chartPlotStyle { $0.padding(.vertical, 2) }
             .chartDrawIn(duration: ChartDrawIn.sparkDuration, enabled: animated, bleed: 2)
             .frame(height: height)
@@ -72,7 +81,7 @@ struct Sparkline: View {
 /// A circular allocation ring — the dashboard's `_AllocationRing` /
 /// `_DiversityGauge`, moved into the design system (`DashboardAllocationRing`
 /// is a typealias of it). The arc is this item's share of the whole, in a flat
-/// stroke over a `systemFill` track, with the percentage in the centre
+/// stroke over a raised track, with the percentage in the centre
 /// (`showsLabel`). For a 24 pt row ring use `MiniAllocationRing`.
 struct AllocationRing: View {
     let fraction: Double
@@ -110,14 +119,14 @@ struct AllocationRing: View {
         let f = min(max(fraction, 0), 1)
         ZStack {
             Circle()
-                .stroke(Color(uiColor: .systemFill), lineWidth: lineWidth)
+                .stroke(DS.Surface.raised, lineWidth: lineWidth)
             Circle()
                 .trim(from: 0, to: f)
                 .stroke(color, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
                 .rotationEffect(.degrees(-90))
             if showsLabel {
                 Text(Self.percentLabel(fraction))
-                    .font(.caption2.weight(.bold))
+                    .font(DS.Font.inter(11, .medium, relativeTo: .caption2))
                     .monospacedDigit()
                     .dsMinimumScaleFactor(0.7, textStyle: .caption2)
                     .lineLimit(1)
@@ -155,20 +164,21 @@ struct MiniAllocationRing: View {
     List {
         HStack(spacing: 12) {
             MiniAllocationRing(fraction: 0.41, color: DS.Palette.up)
-            Text("GLD").font(.headline)
+            Text("GLD")
             Sparkline(values: [10, 11, 10.5, 12, 12.4, 12.1, 13], baseline: 10.8)
                 .frame(width: 60, height: 24)
             Spacer()
             EntityRowValue("$2,031.08", detail: "+2.08%", detailColor: DS.Palette.up)
         }
         HStack(spacing: 12) {
-            MiniAllocationRing(fraction: 0.004, color: DS.Palette.teal)
-            Text("TQQQ").font(.headline)
+            MiniAllocationRing(fraction: 0.004, color: DS.Text.secondary)
+            Text("TQQQ")
             Sparkline(values: [13, 12.5, 12.8, 11, 10.2, 10.9, 9.8])
                 .frame(width: 60, height: 24)
             Spacer()
             EntityRowValue("$1,823.74", detail: "−0.68%", detailColor: DS.Palette.down)
         }
-        AllocationRing(fraction: 0.62, color: DS.Palette.accent, size: 46, lineWidth: 5, labelColor: .primary)
+        AllocationRing(fraction: 0.62, color: DS.Palette.accent, size: 46, lineWidth: 5, labelColor: DS.Text.primary)
     }
+    .dsAppearance()
 }

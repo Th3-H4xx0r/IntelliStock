@@ -35,233 +35,259 @@
      Re-send and Dismiss; a waiting card offers Dismiss after 2 minutes in
      any case (round 3 FU-1). -->
 <template>
-  <section class="glass-card rounded-2xl p-5">
-    <div class="flex items-center justify-between mb-4 gap-2">
-      <p class="text-xs font-bold uppercase tracking-widest text-slate-500">
-        Pending AI Signals <span v-if="loaded" class="text-slate-700 ml-1">({{ signals.length }})</span>
-      </p>
+  <section class="min-w-0" aria-labelledby="pending-signals-title">
+    <div class="flex items-center justify-between gap-3 min-h-8 mb-3">
+      <div class="min-w-0">
+        <h2 id="pending-signals-title" class="text-base font-medium text-slate-100">
+          Pending AI signals <span v-if="loaded" class="text-slate-500 tabular-nums font-normal ml-1">{{ signals.length }}</span>
+        </h2>
+        <p class="text-sm text-slate-500 mt-0.5">Scored candidates waiting for your review</p>
+      </div>
       <button
         @click="load"
         :disabled="loading"
-        class="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-400 hover:bg-slate-800 px-2 py-1 rounded-lg border border-slate-700 transition-colors disabled:opacity-40"
+        class="ui-icon-btn shrink-0 disabled:opacity-40"
+        title="Refresh"
+        aria-label="Refresh"
       >
-        <span class="material-symbols-outlined text-[13px]" :class="loading ? 'animate-spin' : ''">
+        <span class="material-symbols-outlined text-[18px]" :class="loading ? 'animate-spin' : ''">
           {{ loading ? 'progress_activity' : 'refresh' }}
         </span>
-        Refresh
       </button>
     </div>
 
-    <div v-if="notice" class="mb-3 rounded-lg border px-3 py-2 text-xs" :class="noticeClass">
-      {{ notice.text }}
-    </div>
-    <div v-if="loadError" class="mb-3 rounded-lg border border-rose-500/20 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">
-      {{ loadError }}
-    </div>
+    <div class="ui-card overflow-hidden">
+      <div v-if="notice || loadError" class="px-5 pt-4 space-y-2">
+        <div v-if="notice" class="rounded-lg border px-4 py-3 text-sm" :class="noticeClass">
+          {{ notice.text }}
+        </div>
+        <div v-if="loadError" class="rounded-lg border border-loss/20 bg-loss/5 px-4 py-3 text-sm text-loss">
+          {{ loadError }}
+        </div>
+      </div>
 
-    <div v-if="sections.loadingText" class="text-xs text-slate-500">Loading…</div>
-    <div
-      v-else-if="sections.empty"
-      class="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-6 text-center"
-    >
-      <p class="text-sm text-slate-400">Nothing waiting for review.</p>
-      <p class="text-xs text-slate-600 mt-1">
-        Scores from the review threshold up to the auto-approve threshold wait here.
-      </p>
-    </div>
-
-    <div v-else-if="sections.pending" class="space-y-2">
+      <div v-if="sections.loadingText">
+        <span class="sr-only">Loading</span>
+        <div class="px-5 py-4 space-y-3" aria-hidden="true">
+          <div class="h-4 w-40 ui-skel"></div>
+          <div class="h-4 w-64 ui-skel"></div>
+        </div>
+      </div>
       <div
-        v-for="s in signals"
-        :key="s.id"
-        class="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-3"
+        v-else-if="sections.empty"
+        class="px-6 py-10 text-center"
       >
-        <div class="flex items-center gap-2 flex-wrap">
-          <span class="text-base font-black text-slate-100 tracking-wide font-mono">{{ s.symbol }}</span>
-          <span class="px-2 py-0.5 rounded-full text-[10px] font-bold border uppercase" :class="laneClass(s.lane)">
-            {{ s.lane }}
-          </span>
-          <span
-            class="px-2 py-0.5 rounded-full text-[10px] font-bold border tabular-nums"
-            :class="scoreClass(s.score)"
-            :title="s.recommendation || ''"
-          >{{ s.score ?? '—' }}</span>
-          <span class="text-[11px] text-slate-600">
-            session {{ s.session || '—' }} · {{ fmtWhen(s.created_at) }}
-          </span>
-        </div>
-
-        <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-3">
-          <div v-for="row in proposalRows(s)" :key="row.label" class="min-w-0">
-            <div class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">{{ row.label }}</div>
-            <div
-              class="text-xs font-bold text-slate-200 tabular-nums truncate"
-              :class="row.mono ? 'font-mono' : ''"
-              :title="row.value"
-            >{{ row.value }}</div>
-          </div>
-        </div>
-
-        <p v-if="s.reasoning" class="text-xs text-slate-300 mt-3 leading-relaxed whitespace-pre-line break-words">
-          {{ expanded[s.id] ? String(s.reasoning).trim() : reasoningPreview(s.reasoning).text }}
-          <button
-            v-if="reasoningPreview(s.reasoning).truncated"
-            @click="toggleExpanded(s.id)"
-            class="ml-1 text-[11px] font-semibold text-sky-400 hover:underline"
-          >{{ expanded[s.id] ? 'Show less' : 'Show more' }}</button>
+        <p class="text-sm text-slate-400">Nothing waiting for review</p>
+        <p class="text-xs text-slate-500 mt-1">
+          Scores from the review threshold up to the auto-approve threshold wait here.
         </p>
-        <p v-if="joinKeyRisks(s.key_risks)" class="text-[11px] text-amber-300/80 mt-2 break-words">
-          Risks: {{ joinKeyRisks(s.key_risks) }}
-        </p>
-
-        <!-- Confirm step: nothing is sent until this second click. -->
-        <div
-          v-if="confirming[s.id]"
-          class="mt-3 rounded-lg border px-3 py-2"
-          :class="confirming[s.id] === 'reject'
-            ? 'border-slate-700 bg-slate-800/40'
-            : 'border-emerald-500/25 bg-emerald-500/5'"
-        >
-          <p class="text-xs text-slate-200">{{ confirmPrompt(s, confirming[s.id]) }}</p>
-          <input
-            v-model="reasons[s.id]"
-            maxlength="500"
-            placeholder="Reason (optional)"
-            :disabled="!!deciding[s.id]"
-            class="mt-2 w-full rounded-lg bg-slate-900 border border-slate-700 px-2 py-1.5 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-slate-500"
-          />
-          <div class="flex gap-2 mt-2 flex-wrap">
-            <button
-              @click="submit(s)"
-              :disabled="!!deciding[s.id]"
-              class="px-3 py-1.5 rounded-lg text-xs font-semibold border disabled:opacity-50"
-              :class="decisionClass(confirming[s.id])"
-            >{{ deciding[s.id] ? 'Working…' : `Confirm ${DECISION_LABELS[confirming[s.id]]}` }}</button>
-            <button
-              @click="cancelConfirm(s.id)"
-              :disabled="!!deciding[s.id]"
-              class="px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-800 disabled:opacity-50"
-            >Cancel</button>
-          </div>
-        </div>
-        <div v-else class="flex gap-2 mt-3 flex-wrap">
-          <button
-            v-for="d in decisionsFor(s)"
-            :key="d"
-            @click="startConfirm(s.id, d)"
-            :disabled="!!deciding[s.id]"
-            class="px-3 py-1.5 rounded-lg text-xs font-semibold border disabled:opacity-50"
-            :class="decisionClass(d)"
-          >{{ DECISION_LABELS[d] }}</button>
-        </div>
       </div>
-    </div>
 
-    <div v-if="sections.waiting" class="mt-4">
-      <p class="text-[11px] font-bold uppercase tracking-widest text-amber-400/80 mb-2">
-        Waiting for the broker ({{ Object.keys(uncertain).length }})
-      </p>
-      <div class="space-y-2">
+      <div v-else-if="sections.pending" class="divide-y divide-white/[0.05]">
         <div
-          v-for="(entry, id) in uncertain"
-          :key="`uncertain-${id}`"
-          class="rounded-lg border px-4 py-3"
-          :class="uncertainCardClass(entry)"
+          v-for="s in signals"
+          :id="swingSignalAnchor(s.id)"
+          :key="s.id"
+          class="px-5 py-4 scroll-mt-24"
         >
-          <div class="flex items-center gap-2 flex-wrap">
-            <span class="text-base font-black text-slate-100 tracking-wide font-mono">{{ entry.signal.symbol }}</span>
-            <span class="px-2 py-0.5 rounded-full text-[10px] font-bold border uppercase" :class="laneClass(entry.signal.lane)">
-              {{ entry.signal.lane }}
+          <div class="flex items-baseline gap-x-3 gap-y-1 flex-wrap">
+            <span class="text-sm font-medium text-slate-100">{{ s.symbol }}</span>
+            <span class="text-xs text-slate-400 capitalize">{{ s.lane }}</span>
+            <span
+              class="text-xs tabular-nums"
+              :class="scoreClass(s.score)"
+              :title="s.recommendation || ''"
+            >Score {{ s.score ?? '—' }}</span>
+            <span class="text-xs text-slate-500 tabular-nums">
+              Session {{ s.session || '—' }} · {{ fmtWhen(s.created_at) }}
             </span>
-            <span class="px-2 py-0.5 rounded-full text-[10px] font-bold border" :class="uncertainBadgeClass(entry)">
-              {{ uncertainBadge(entry) }}
-            </span>
-            <span class="text-[11px] text-slate-600">session {{ entry.signal.session || '—' }}</span>
           </div>
-          <p v-if="!entry.resolved" class="text-xs text-amber-200/90 mt-2 leading-relaxed">{{ WAITING_COPY }}</p>
-          <p v-else-if="entry.resolved === 'submitted'" class="text-xs text-slate-300 mt-2">
-            The broker submitted it. Check open orders for the fill.
-          </p>
-          <p v-else class="text-xs text-slate-300 mt-2">
-            It failed at the broker; the live log says why.
-          </p>
-          <div v-if="waitingCanDismiss(entry, nowMs)" class="flex gap-2 mt-3">
+
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-3 mt-3 max-w-3xl">
+            <div v-for="row in proposalRows(s)" :key="row.label" class="min-w-0">
+              <div class="text-xs text-slate-500">{{ row.label }}</div>
+              <div
+                class="text-sm text-slate-100 tabular-nums truncate mt-0.5"
+                :class="row.mono ? 'font-mono text-[13px]' : ''"
+                :title="row.value"
+              >{{ row.value }}</div>
+            </div>
+          </div>
+
+          <p v-if="s.reasoning" class="text-sm text-slate-300 mt-3 leading-relaxed whitespace-pre-line break-words max-w-3xl">
+            {{ expanded[s.id] ? String(s.reasoning).trim() : reasoningPreview(s.reasoning).text }}
             <button
-              @click="dismissUncertain(id)"
-              class="px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-800"
-            >Dismiss</button>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Round 3 minor 2: not gated on a good pending read. -->
-    <div v-if="sections.stuck" class="mt-4">
-      <p class="text-[11px] font-bold uppercase tracking-widest text-amber-400/80 mb-2">
-        Approved, not yet sent ({{ stuck.length }})
-      </p>
-      <div class="space-y-2">
-        <div
-          v-for="s in stuck"
-          :key="`stuck-${s.id}`"
-          class="rounded-lg border border-amber-500/20 bg-amber-500/5 px-4 py-3"
-        >
-          <div class="flex items-center gap-2 flex-wrap">
-            <span class="text-base font-black text-slate-100 tracking-wide font-mono">{{ s.symbol }}</span>
-            <span class="px-2 py-0.5 rounded-full text-[10px] font-bold border uppercase" :class="laneClass(s.lane)">
-              {{ s.lane }}
-            </span>
-            <span class="px-2 py-0.5 rounded-full text-[10px] font-bold border uppercase text-amber-300 bg-amber-500/10 border-amber-500/20">
-              {{ s.status === 'approved_half' ? 'approved ½' : 'approved' }}
-            </span>
-            <span class="text-[11px] text-slate-600">session {{ s.session || '—' }}</span>
-          </div>
-          <p class="text-xs text-slate-300 mt-2">{{ stuckLabel(s, nowMs) }}</p>
-
-          <p v-if="resendBlockedReason(s, today)" class="text-[11px] text-slate-500 mt-2">
-            {{ resendBlockedReason(s, today) }}
+              v-if="reasoningPreview(s.reasoning).truncated"
+              @click="toggleExpanded(s.id)"
+              class="ml-1 text-xs text-slate-400 hover:text-slate-100 underline-offset-2 hover:underline transition-colors duration-150 ease-out"
+            >{{ expanded[s.id] ? 'Show less' : 'Show more' }}</button>
           </p>
-          <div v-if="resendConfirming[s.id] && !resendBlockedReason(s, today)" class="mt-3 rounded-lg border border-amber-500/25 bg-amber-500/5 px-3 py-2">
-            <p class="text-xs text-slate-200">{{ resendPrompt(s) }}</p>
-            <div class="flex gap-2 mt-2 flex-wrap">
+          <p v-if="joinKeyRisks(s.key_risks)" class="text-xs text-slate-400 mt-2 break-words">
+            <span class="text-slate-500">Risks</span> {{ joinKeyRisks(s.key_risks) }}
+          </p>
+
+          <!-- Confirm step: nothing is sent until this second click. An
+               approval's second click is in the order review modal below;
+               a rejection confirms here. -->
+          <div
+            v-if="confirming[s.id] === 'reject'"
+            class="mt-3 rounded-lg border border-white/[0.07] bg-raised px-4 py-3"
+          >
+            <p class="text-sm text-slate-200">{{ confirmPrompt(s, confirming[s.id]) }}</p>
+            <input
+              v-model="reasons[s.id]"
+              maxlength="500"
+              placeholder="Reason (optional)"
+              :disabled="!!deciding[s.id]"
+              class="ui-input h-8 mt-3"
+            />
+            <div class="flex gap-2 mt-3 flex-wrap">
               <button
-                @click="resend(s)"
-                :disabled="!!resending[s.id]"
-                class="px-3 py-1.5 rounded-lg text-xs font-semibold border border-amber-500/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20 disabled:opacity-50"
-              >{{ resending[s.id] ? 'Working…' : 'Confirm Re-send' }}</button>
+                @click="submit(s)"
+                :disabled="!!deciding[s.id]"
+                :class="decisionClass(confirming[s.id])"
+              >{{ deciding[s.id] ? 'Working…' : `Confirm ${DECISION_LABELS[confirming[s.id]]}` }}</button>
               <button
-                @click="cancelResend(s.id)"
-                :disabled="!!resending[s.id]"
-                class="px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-800 disabled:opacity-50"
+                @click="cancelConfirm(s.id)"
+                :disabled="!!deciding[s.id]"
+                class="ui-btn-ghost"
               >Cancel</button>
             </div>
           </div>
           <div v-else class="flex gap-2 mt-3 flex-wrap">
             <button
-              v-if="!resendBlockedReason(s, today)"
-              @click="startResend(s.id)"
-              :disabled="!!resending[s.id]"
-              class="px-3 py-1.5 rounded-lg text-xs font-semibold border border-amber-500/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20 disabled:opacity-50"
-            >Re-send</button>
-            <button
-              @click="dismissStuck(s.id)"
-              :disabled="!!resending[s.id]"
-              class="px-3 py-1.5 rounded-lg text-xs font-semibold border border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-800 disabled:opacity-50"
-            >Dismiss</button>
+              v-for="d in decisionsFor(s)"
+              :key="d"
+              @click="onDecisionClick(s, d)"
+              :disabled="!!deciding[s.id]"
+              class="ui-btn"
+            >{{ DECISION_LABELS[d] }}</button>
           </div>
         </div>
       </div>
+
+      <div v-if="sections.waiting" class="border-t border-white/[0.06]">
+        <p class="h-10 px-5 flex items-center gap-2 text-xs text-slate-400 border-b border-white/[0.06]">
+          <span class="ui-dot ui-dot-warn"></span>
+          Waiting for the broker <span class="text-slate-500 tabular-nums">{{ Object.keys(uncertain).length }}</span>
+        </p>
+        <div class="divide-y divide-white/[0.05]">
+          <div
+            v-for="(entry, id) in uncertain"
+            :key="`uncertain-${id}`"
+            class="px-5 py-4"
+          >
+            <div class="flex items-baseline gap-x-3 gap-y-1 flex-wrap">
+              <span class="text-sm font-medium text-slate-100">{{ entry.signal.symbol }}</span>
+              <span class="text-xs text-slate-400 capitalize">{{ entry.signal.lane }}</span>
+              <span class="text-xs" :class="uncertainBadgeClass(entry)">
+                {{ uncertainBadge(entry) }}
+              </span>
+              <span class="text-xs text-slate-500 tabular-nums">Session {{ entry.signal.session || '—' }}</span>
+            </div>
+            <p v-if="!entry.resolved" class="text-sm text-slate-200 mt-2 leading-relaxed">{{ WAITING_COPY }}</p>
+            <p v-else-if="entry.resolved === 'submitted'" class="text-sm text-slate-300 mt-2">
+              The broker submitted it. Check open orders for the fill.
+            </p>
+            <p v-else class="text-sm text-slate-300 mt-2">
+              It failed at the broker; the live log says why.
+            </p>
+            <div v-if="waitingCanDismiss(entry, nowMs)" class="flex gap-2 mt-3">
+              <button
+                @click="dismissUncertain(id)"
+                class="ui-btn-ghost"
+              >Dismiss</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Round 3 minor 2: not gated on a good pending read. -->
+      <div v-if="sections.stuck" class="border-t border-white/[0.06]">
+        <p class="h-10 px-5 flex items-center gap-2 text-xs text-slate-400 border-b border-white/[0.06]">
+          <span class="ui-dot ui-dot-warn"></span>
+          Approved, not yet sent <span class="text-slate-500 tabular-nums">{{ stuck.length }}</span>
+        </p>
+        <div class="divide-y divide-white/[0.05]">
+          <div
+            v-for="s in stuck"
+            :key="`stuck-${s.id}`"
+            class="px-5 py-4"
+          >
+            <div class="flex items-baseline gap-x-3 gap-y-1 flex-wrap">
+              <span class="text-sm font-medium text-slate-100">{{ s.symbol }}</span>
+              <span class="text-xs text-slate-400 capitalize">{{ s.lane }}</span>
+              <span class="text-xs text-slate-400">
+                {{ s.status === 'approved_half' ? 'Approved ½' : 'Approved' }}
+              </span>
+              <span class="text-xs text-slate-500 tabular-nums">Session {{ s.session || '—' }}</span>
+            </div>
+            <p class="text-sm text-slate-300 mt-2">{{ stuckLabel(s, nowMs) }}</p>
+
+            <p v-if="resendBlockedReason(s, today)" class="text-xs text-slate-500 mt-2">
+              {{ resendBlockedReason(s, today) }}
+            </p>
+            <div v-if="resendConfirming[s.id] && !resendBlockedReason(s, today)" class="mt-3 rounded-lg border border-white/[0.07] bg-raised px-4 py-3">
+              <p class="text-sm text-slate-200">{{ resendPrompt(s) }}</p>
+              <div class="flex gap-2 mt-3 flex-wrap">
+                <button
+                  @click="resend(s)"
+                  :disabled="!!resending[s.id]"
+                  class="ui-btn-primary h-8 px-3 text-[13px]"
+                >{{ resending[s.id] ? 'Working…' : 'Confirm re-send' }}</button>
+                <button
+                  @click="cancelResend(s.id)"
+                  :disabled="!!resending[s.id]"
+                  class="ui-btn-ghost"
+                >Cancel</button>
+              </div>
+            </div>
+            <div v-else class="flex gap-2 mt-3 flex-wrap">
+              <button
+                v-if="!resendBlockedReason(s, today)"
+                @click="startResend(s.id)"
+                :disabled="!!resending[s.id]"
+                class="ui-btn"
+              >Re-send</button>
+              <button
+                @click="dismissStuck(s.id)"
+                :disabled="!!resending[s.id]"
+                class="ui-btn-ghost"
+              >Dismiss</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <p class="px-5 py-3 border-t border-white/[0.06] text-xs text-slate-500 leading-relaxed">
+        Approval rebuilds the order at the live price: shares, stop and target for swing, strike and expiry for the wheel.
+      </p>
     </div>
 
-    <p class="text-[10px] text-slate-600 mt-3 leading-relaxed">
-      Approval rebuilds the order at the live price: shares, stop and target for swing, strike and expiry for the wheel.
-    </p>
+    <!-- Order review: Approve / Approve ½ open it; its confirm calls submit(). -->
+    <SwingOrderReviewModal
+      v-if="review"
+      :signal="review.signal"
+      :decision="review.decision"
+      :api-base="apiBase"
+      :cash="cash"
+      :reason="reasons[review.signal.id] || ''"
+      :busy="reviewBusy"
+      :result="shownReviewResult"
+      :error="reviewError"
+      @update:reason="reasons[review.signal.id] = $event"
+      @cancel="cancelReview"
+      @confirm="confirmReview"
+      @close="closeReview"
+    />
   </section>
 </template>
 
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { getToken } from '../../utils/auth.js'
+import SwingOrderReviewModal from './SwingOrderReviewModal.vue'
+import { swingSignalAnchor } from '../../utils/swingReview.js'
 import {
   DECISION_LABELS,
   classifyDecisionFailure,
@@ -296,7 +322,12 @@ const POLL_MS = 30000
 const props = defineProps({
   instanceId: { type: String, required: true },
   apiBase: { type: String, required: true },
+  /** The wheel account's cash (from the wheel panel), for the review's collateral warning. */
+  cash: { type: Number, default: null },
 })
+// pending-ids: the live pending queue, for the wheel's scan rows.
+// decided: a decision request settled (the wheel re-reads its signal links).
+const emit = defineEmits(['pending-ids', 'decided'])
 
 const signals = ref([])
 const loading = ref(false)
@@ -354,31 +385,30 @@ function showNotice(tone, text) {
   noticeTimer = setTimeout(() => { notice.value = null }, 8000)
 }
 
+// Notices: gain for a success, loss for a failure, neutral for a stale card.
 const noticeClass = computed(() => ({
-  ok: 'border-emerald-500/20 bg-emerald-500/10 text-emerald-300',
-  warn: 'border-amber-500/20 bg-amber-500/10 text-amber-300',
-  error: 'border-rose-500/20 bg-rose-500/10 text-rose-300',
+  ok: 'border-gain/20 bg-gain/5 text-gain',
+  warn: 'border-white/[0.08] bg-raised text-slate-200',
+  error: 'border-loss/20 bg-loss/5 text-loss',
 }[notice.value?.tone] || ''))
 
-function laneClass(lane) {
-  return lane === 'wheel'
-    ? 'text-zinc-200 bg-zinc-500/10 border-zinc-500/20'
-    : 'text-sky-400 bg-sky-500/10 border-sky-500/20'
-}
-
+// The score is a figure, not a money move: brighter text for a higher
+// score, no colour.
 function scoreClass(score) {
   return {
-    high: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20',
-    mid: 'text-amber-400 bg-amber-500/10 border-amber-500/20',
-    low: 'text-rose-400 bg-rose-500/10 border-rose-500/20',
-    unknown: 'text-slate-400 bg-slate-500/10 border-slate-700',
+    high: 'text-slate-200',
+    mid: 'text-slate-400',
+    low: 'text-slate-500',
+    unknown: 'text-slate-500',
   }[scoreTone(score)]
 }
 
+// The confirm button: an approval sends a real order, so it is the one
+// primary action on the card; a rejection stays a plain button.
 function decisionClass(decision) {
   return decision === 'reject'
-    ? 'border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-800'
-    : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20'
+    ? 'ui-btn'
+    : 'ui-btn-primary h-8 px-3 text-[13px]'
 }
 
 function toggleExpanded(id) {
@@ -452,16 +482,12 @@ function dismissStuck(id) {
   removeStuck(id)
 }
 
-function uncertainCardClass(entry) {
-  if (entry.resolved === 'submitted') return 'border-emerald-500/20 bg-emerald-500/5'
-  if (entry.resolved === 'failed') return 'border-rose-500/20 bg-rose-500/5'
-  return 'border-amber-500/25 bg-amber-500/5'
-}
-
+// The badge is a word: gain once the broker submitted it, loss if it
+// failed, amber while delivery is still uncertain.
 function uncertainBadgeClass(entry) {
-  if (entry.resolved === 'submitted') return 'text-emerald-300 bg-emerald-500/10 border-emerald-500/20'
-  if (entry.resolved === 'failed') return 'text-rose-300 bg-rose-500/10 border-rose-500/20'
-  return 'text-amber-300 bg-amber-500/10 border-amber-500/20'
+  if (entry.resolved === 'submitted') return 'text-gain'
+  if (entry.resolved === 'failed') return 'text-loss'
+  return 'text-amber-400'
 }
 
 function startResend(id) {
@@ -558,7 +584,8 @@ async function submit(signal) {
       } else {
         showNotice(outcome.tone, outcome.message)
       }
-      return
+      emit('decided')
+      return { kind: outcome.uncertain ? 'uncertain' : 'sent', message: outcome.message }
     }
     let detail = ''
     try { detail = (await res.json())?.detail } catch { /* keep */ }
@@ -569,12 +596,86 @@ async function submit(signal) {
     }
     if (verdict.removeCard) removeCard(signal.id)
     showNotice(verdict.kind === 'stale' ? 'warn' : 'error', verdict.message)
+    emit('decided')
+    return { kind: verdict.kind === 'stale' ? 'stale' : 'failed', message: verdict.message }
   } catch (e) {
-    showNotice('error', classifyDecisionFailure(0, e?.message).message)
+    const message = classifyDecisionFailure(0, e?.message).message
+    showNotice('error', message)
+    return { kind: 'failed', message }
   } finally {
     guard.release(signal.id)
     deciding.value = omit(deciding.value, signal.id)
   }
+}
+
+// -- Order review (mirrors iOS SwingOrderReviewSheet) -------------------------
+// Approve and Approve ½ open the review instead of the inline confirm. The
+// review's confirm calls submit(signal) above, exactly as the inline step
+// did: same decision (confirming[id]), same optional reason (reasons[id]),
+// same guard against a second click. Reject keeps its inline confirm.
+const review = ref(null)        // { signal, decision } while open
+const reviewResult = ref(null)  // { kind, message } once the request settled
+const reviewError = ref('')     // the last refusal; the confirm stays available
+let reviewCloseTimer = null
+
+const reviewBusy = computed(() => !!(review.value && deciding.value[review.value.signal.id]))
+// The signal left the queue while the review was open (decided on another
+// device, so a poll took its confirm with it): nothing can be sent from here.
+const shownReviewResult = computed(() => {
+  if (reviewResult.value) return reviewResult.value
+  const r = review.value
+  if (r && !reviewBusy.value && confirming.value[r.signal.id] !== r.decision) {
+    return { kind: 'stale', message: 'This signal is no longer pending — it was decided elsewhere.' }
+  }
+  return null
+})
+
+function onDecisionClick(signal, decision) {
+  if (decision === 'reject') {
+    startConfirm(signal.id, decision)
+    return
+  }
+  startConfirm(signal.id, decision)
+  if (confirming.value[signal.id] !== decision) return
+  clearTimeout(reviewCloseTimer)
+  review.value = { signal, decision }
+  reviewResult.value = null
+  reviewError.value = ''
+}
+
+async function confirmReview() {
+  const r = review.value
+  if (!r || reviewBusy.value || shownReviewResult.value) return
+  reviewError.value = ''
+  const out = await submit(r.signal)
+  if (!out || review.value !== r) return
+  if (out.kind === 'failed') {
+    reviewError.value = out.message
+    return
+  }
+  reviewResult.value = out
+  if (out.kind === 'sent' || out.kind === 'uncertain') {
+    // As on iOS: the sent mark shows, then the review closes by itself.
+    reviewCloseTimer = setTimeout(() => { if (review.value === r) closeReview() }, 1800)
+  }
+}
+
+function cancelReview() {
+  const r = review.value
+  if (!r || reviewBusy.value) return
+  cancelConfirm(r.signal.id)
+  closeReview()
+}
+
+function closeReview() {
+  if (reviewBusy.value) return
+  clearTimeout(reviewCloseTimer)
+  const r = review.value
+  // A review closed after a refusal leaves no half-finished confirm behind.
+  if (r && confirming.value[r.signal.id] === r.decision && !reviewResult.value) cancelConfirm(r.signal.id)
+  review.value = null
+  reviewResult.value = null
+  reviewError.value = ''
 }
 
 function startPolling() {
@@ -597,10 +698,19 @@ onMounted(() => {
 onUnmounted(() => {
   stopPolling()
   clearTimeout(noticeTimer)
+  clearTimeout(reviewCloseTimer)
 })
+
+// The wheel's scan rows read the pending queue to know which rows can jump
+// to a card here.
+watch(signals, list => emit('pending-ids', list.map(s => s.id)), { immediate: true })
 
 watch(() => props.instanceId, (next, prev) => {
   if (next === prev) return
+  clearTimeout(reviewCloseTimer)
+  review.value = null
+  reviewResult.value = null
+  reviewError.value = ''
   signals.value = []
   loaded.value = false
   loadError.value = ''

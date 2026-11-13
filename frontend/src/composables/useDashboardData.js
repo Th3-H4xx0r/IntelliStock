@@ -272,3 +272,60 @@ export function useOrderBook(brokerageId) {
 
   return { book, error, reload }
 }
+
+/**
+ * The instances that trade the selected account (GET /instances, filtered by
+ * brokerage_id), polled every 30s so a start or stop shows up. A failed poll
+ * keeps the last good list.
+ */
+export function useAccountInstances(brokerageId) {
+  const all = ref(null)   // every instance | null while loading
+  const error = ref('')
+
+  async function load() {
+    try {
+      const d = await apiGet('/instances')
+      all.value = Array.isArray(d?.instances) ? d.instances : (Array.isArray(d) ? d : [])
+      error.value = ''
+    } catch {
+      if (all.value == null) error.value = "Couldn't load instances"
+    }
+  }
+
+  const instances = ref(null)
+  watch([all, brokerageId], ([list, id]) => {
+    instances.value = list == null ? null : list.filter(i => id != null && String(i?.brokerage_id ?? '') === String(id))
+  }, { immediate: true })
+
+  load()
+  poll(load, 30_000)
+  return { instances, error }
+}
+
+/**
+ * The bots' latest buy/sell decisions on the selected account, newest first
+ * (GET /brokerages/{id}/bot-activity), polled every 60s.
+ */
+export function useBotActivity(brokerageId, limit = 6) {
+  const events = ref(null)  // [] | null while loading
+  const total = ref(0)
+  let generation = 0
+
+  async function load() {
+    const id = brokerageId.value
+    if (!id) { events.value = null; return }
+    const gen = generation
+    try {
+      const d = await apiGet(`/brokerages/${encodeURIComponent(id)}/bot-activity?per_page=${limit}`)
+      if (gen !== generation) return
+      events.value = Array.isArray(d?.events) ? d.events : []
+      total.value = Number(d?.total) || events.value.length
+    } catch {
+      if (gen === generation && events.value == null) events.value = []
+    }
+  }
+
+  watch(brokerageId, () => { generation += 1; events.value = null; load() }, { immediate: true })
+  poll(load, 60_000)
+  return { events, total }
+}

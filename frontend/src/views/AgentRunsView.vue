@@ -227,14 +227,16 @@ const pageNumbers = computed(() => {
 })
 
 // ── Stepper helpers ─────────────────────────────────────────────────────────
+// Status as a dot and a word. The green ring is only for a run or stage that
+// is actually running; a pass is a plain green dot.
 const STATUS_META = {
-  running:   { icon: null,           spin: true,  color: 'text-sky-400',    bg: 'bg-sky-500/10 border-sky-500/30',    label: 'Running'   },
-  passed:    { icon: 'check_circle', spin: false, color: 'text-emerald-400', bg: 'bg-emerald-500/10 border-emerald-500/30', label: 'Passed'  },
-  failed:    { icon: 'cancel',       spin: false, color: 'text-red-400',    bg: 'bg-red-500/10 border-red-500/30',    label: 'Failed'    },
-  tossed:    { icon: 'do_not_disturb_on', spin: false, color: 'text-amber-400', bg: 'bg-amber-500/10 border-amber-500/30', label: 'Tossed' },
-  duplicate: { icon: 'content_copy', spin: false, color: 'text-slate-500',  bg: 'bg-slate-500/10 border-slate-500/20', label: 'Duplicate' },
-  stopped:   { icon: 'stop_circle',  spin: false, color: 'text-slate-500',  bg: 'bg-slate-500/10 border-slate-500/20', label: 'Stopped'   },
-  error:     { icon: 'error',        spin: false, color: 'text-red-400',    bg: 'bg-red-500/10 border-red-500/30',    label: 'Error'     },
+  running:   { dot: 'ui-dot-live',  text: 'text-slate-200', label: 'Running'   },
+  passed:    { dot: 'bg-gain',      text: 'text-slate-200', label: 'Passed'    },
+  failed:    { dot: 'ui-dot-error', text: 'text-slate-300', label: 'Failed'    },
+  tossed:    { dot: 'ui-dot-warn',  text: 'text-slate-300', label: 'Tossed'    },
+  duplicate: { dot: 'ui-dot-off',   text: 'text-slate-500', label: 'Duplicate' },
+  stopped:   { dot: 'ui-dot-off',   text: 'text-slate-500', label: 'Stopped'   },
+  error:     { dot: 'ui-dot-error', text: 'text-slate-300', label: 'Error'     },
 }
 
 function stageMeta(status) {
@@ -244,18 +246,6 @@ function stageMeta(status) {
 function runMeta(run) {
   return STATUS_META[run.status] || STATUS_META.stopped
 }
-
-// Card border/accent color per overall status
-const RUN_BORDER = {
-  running:   'border-sky-500/20',
-  passed:    'border-emerald-500/20',
-  failed:    'border-red-500/20',
-  tossed:    'border-amber-500/20',
-  duplicate: 'border-slate-700',
-  stopped:   'border-slate-700',
-  error:     'border-red-500/20',
-}
-function runBorder(run) { return RUN_BORDER[run.status] || 'border-slate-700' }
 
 function fmtDateTime(v) {
   if (!v) return '—'
@@ -277,7 +267,7 @@ function fmtPct(v) {
   return (n >= 0 ? '+' : '') + n.toFixed(2) + '%'
 }
 function pnlColor(v) {
-  return parseFloat(v) >= 0 ? 'text-emerald-400' : 'text-red-400'
+  return parseFloat(v) >= 0 ? 'text-gain' : 'text-loss'
 }
 
 // Cycle grouping — group runs by cycle_id
@@ -309,44 +299,39 @@ onUnmounted(() => {
 
 <template>
   <AppShell>
-    <main class="flex-1 px-4 py-6 sm:px-6 sm:py-8 lg:px-8 lg:py-10">
+    <main class="ui-page">
 
       <!-- Header -->
-      <div class="mb-6">
+      <header>
         <!-- Title row -->
-        <div class="flex items-start justify-between gap-3 mb-3">
+        <div class="flex items-start justify-between gap-4">
           <div class="min-w-0">
-            <h1 class="text-xl sm:text-2xl font-bold text-slate-100">AI Agent Runs</h1>
-            <p class="text-slate-500 text-xs sm:text-sm mt-1 hidden sm:block">Strategy attempts by the AI Backtest Agent — live progress, stage results, and outcomes.</p>
+            <h1 class="ui-page-title">AI agent runs</h1>
+            <p class="ui-page-sub hidden sm:block">Strategy attempts by the AI backtest agent: live progress, stage results and outcomes</p>
           </div>
-          <!-- Status pill always visible top-right -->
+          <!-- Agent status, always visible top-right -->
           <span
-            class="shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold border"
-            :class="agentRunning
-              ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20'
-              : agentPaused
-                ? 'text-amber-400 bg-amber-500/10 border-amber-500/20'
-                : 'text-slate-500 bg-slate-500/10 border-slate-700'"
+            class="shrink-0 mt-1 inline-flex items-center gap-2 text-sm"
+            :class="agentRunning ? 'text-slate-200' : agentPaused ? 'text-slate-300' : 'text-slate-500'"
           >
             <span
-              class="size-1.5 rounded-full"
-              :class="agentRunning ? 'bg-emerald-400 animate-pulse' : agentPaused ? 'bg-amber-400' : 'bg-slate-600'"
+              class="ui-dot"
+              :class="agentRunning ? 'ui-dot-live' : agentPaused ? 'ui-dot-warn' : 'ui-dot-off'"
             ></span>
             {{ agentRunning ? 'Running' : agentPaused ? 'Paused' : 'Stopped' }}
           </span>
         </div>
 
         <!-- Controls row -->
-        <div class="flex items-center gap-2 flex-wrap">
+        <div class="mt-6 flex items-center gap-2 flex-wrap">
           <!-- Start -->
           <button
             v-if="!agentRunning && !agentPaused"
             @click="openStartAgent"
             :disabled="svcBusy"
-            class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-emerald-500/30 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 transition-colors disabled:opacity-50"
+            class="ui-btn-primary h-8 px-3 text-[13px]"
           >
-            <span class="material-symbols-outlined text-[14px]">play_arrow</span>
-            <span>Start</span>
+            Start
           </button>
 
           <!-- Pause (only when running) -->
@@ -354,10 +339,9 @@ onUnmounted(() => {
             v-if="agentRunning"
             @click="pauseAgent"
             :disabled="svcBusy"
-            class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-amber-500/30 bg-amber-500/10 text-amber-400 hover:bg-amber-500/20 transition-colors disabled:opacity-50"
+            class="ui-btn"
           >
-            <span class="material-symbols-outlined text-[14px]">pause</span>
-            <span>Pause</span>
+            Pause
           </button>
 
           <!-- Unpause / Resume (only when paused and no timer running) -->
@@ -365,10 +349,9 @@ onUnmounted(() => {
             v-if="agentPaused && !scheduledUnpauseAt"
             @click="openUnpauseModal"
             :disabled="svcBusy"
-            class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-sky-500/30 bg-sky-500/10 text-sky-400 hover:bg-sky-500/20 transition-colors disabled:opacity-50"
+            class="ui-btn"
           >
-            <span class="material-symbols-outlined text-[14px]">play_arrow</span>
-            <span>Unpause</span>
+            Unpause
           </button>
 
           <!-- Scheduled-unpause timer ring -->
@@ -376,47 +359,48 @@ onUnmounted(() => {
             v-if="scheduledUnpauseAt"
             class="flex items-center gap-2"
           >
-            <!-- Ring + stop button -->
-            <div class="relative flex items-center justify-center" style="width:44px;height:44px">
+            <!-- Ring + cancel button -->
+            <div class="relative size-11 flex items-center justify-center">
               <svg
-                class="absolute inset-0"
-                style="transform: rotate(-90deg)"
+                class="absolute inset-0 -rotate-90"
                 viewBox="0 0 44 44"
                 width="44"
                 height="44"
+                aria-hidden="true"
               >
                 <!-- Track -->
                 <circle
                   cx="22" cy="22" r="18"
                   fill="none"
-                  stroke="rgba(148,163,184,0.12)"
-                  stroke-width="3.5"
+                  stroke="rgba(255,255,255,0.08)"
+                  stroke-width="3"
                 />
                 <!-- Countdown arc (depletes as time passes) -->
                 <circle
                   cx="22" cy="22" r="18"
                   fill="none"
-                  stroke="rgb(56,189,248)"
-                  stroke-width="3.5"
+                  stroke="#ededed"
+                  stroke-width="3"
                   stroke-linecap="round"
                   :stroke-dasharray="RING_C"
                   :stroke-dashoffset="RING_C * (unpauseProgress / 100)"
-                  class="transition-all duration-1000 ease-linear"
+                  class="transition-[stroke-dashoffset] duration-1000 ease-linear"
                 />
               </svg>
-              <!-- Square stop / cancel button in centre -->
+              <!-- Cancel button in the centre -->
               <button
                 @click="cancelUnpauseTimer"
-                class="relative z-10 size-[22px] rounded-sm flex items-center justify-center bg-red-500/15 border border-red-500/40 text-red-400 hover:bg-red-500/30 transition-colors"
+                class="relative z-10 size-6 rounded-md flex items-center justify-center text-slate-400 hover:text-loss hover:bg-raised transition-colors duration-150 ease-out"
                 title="Cancel scheduled resume"
+                aria-label="Cancel scheduled resume"
               >
-                <span class="material-symbols-outlined" style="font-size:12px;font-variation-settings:'FILL' 1">stop</span>
+                <span class="material-symbols-outlined text-[14px]" style="font-variation-settings:'FILL' 1">stop</span>
               </button>
             </div>
             <!-- Countdown label -->
-            <div class="flex flex-col leading-none">
-              <span class="text-[10px] text-sky-400 font-mono font-semibold">{{ fmtCountdown(unpauseRemaining) }}</span>
-              <span class="text-[9px] text-slate-600 mt-0.5">resuming</span>
+            <div class="flex flex-col">
+              <span class="text-sm text-slate-200 tabular-nums leading-4">{{ fmtCountdown(unpauseRemaining) }}</span>
+              <span class="text-xs text-slate-500 leading-4">until resume</span>
             </div>
           </div>
 
@@ -425,10 +409,9 @@ onUnmounted(() => {
             v-if="agentRunning || agentPaused"
             @click="stopAgent"
             :disabled="svcBusy"
-            class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-red-500/30 bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors disabled:opacity-50"
+            class="ui-btn text-loss"
           >
-            <span class="material-symbols-outlined text-[14px]">stop</span>
-            <span>Stop</span>
+            Stop
           </button>
 
           <!-- Spacer -->
@@ -438,254 +421,236 @@ onUnmounted(() => {
           <select
             v-model="perPage"
             @change="onPerPageChange"
-            class="bg-surface border border-border-subtle rounded-lg px-2 py-1.5 text-xs text-slate-300 focus:outline-none focus:border-primary/40"
+            aria-label="Runs per page"
+            class="ui-input w-auto h-8 pl-3 pr-8 text-[13px] tabular-nums cursor-pointer"
           >
-            <option v-for="n in PER_PAGE_OPTIONS" :key="n" :value="n">{{ n }}/page</option>
+            <option v-for="n in PER_PAGE_OPTIONS" :key="n" :value="n">{{ n }} per page</option>
           </select>
           <!-- Refresh -->
           <button
             @click="refresh"
-            class="p-1.5 rounded-lg border border-border-subtle text-slate-400 hover:text-slate-200 hover:bg-surface transition-all"
+            class="ui-icon-btn"
             title="Refresh"
+            aria-label="Refresh runs"
           >
-            <span class="material-symbols-outlined text-[16px]" :class="loading ? 'animate-spin' : ''">refresh</span>
+            <span class="material-symbols-outlined text-[18px]" :class="loading ? 'animate-spin' : ''">refresh</span>
           </button>
         </div>
-      </div>
+      </header>
 
       <!-- Loading skeletons -->
-      <div v-if="loading && runs.length === 0" class="space-y-4">
-        <div v-for="n in 3" :key="n" class="glass-card rounded-2xl h-48 animate-pulse"></div>
+      <div v-if="loading && runs.length === 0" class="mt-8 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4" aria-hidden="true">
+        <div v-for="n in 3" :key="n" class="ui-card p-5 h-48">
+          <div class="ui-skel h-4 w-40"></div>
+          <div class="ui-skel h-3 w-24 mt-2"></div>
+          <div class="ui-skel h-3 w-48 mt-8"></div>
+          <div class="ui-skel h-3 w-36 mt-4"></div>
+        </div>
       </div>
 
       <!-- Empty state -->
-      <div v-else-if="!loading && runs.length === 0" class="flex flex-col items-center justify-center py-24 text-center">
-        <div class="size-16 rounded-2xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center mb-4">
-          <span class="material-symbols-outlined text-amber-400 text-3xl">smart_toy</span>
+      <div v-else-if="!loading && runs.length === 0" class="mt-8 ui-card ui-empty">
+        <div>
+          <p class="text-slate-200">No agent runs yet</p>
+          <p class="mt-1 text-slate-500">Start the AI backtest agent to see strategy attempts here</p>
         </div>
-        <p class="text-slate-400 font-medium">No agent runs yet</p>
-        <p class="text-slate-600 text-sm mt-1">Start the AI Backtest Agent to see strategy attempts here.</p>
       </div>
 
       <!-- Cycles / cards -->
-      <div v-else class="space-y-8">
-        <div v-for="cycle in cycles" :key="cycle.cycle_id">
+      <div v-else class="mt-8 space-y-10">
+        <section v-for="cycle in cycles" :key="cycle.cycle_id" :aria-label="`Cycle started ${fmtDateTime(cycle.started_at)}`">
 
           <!-- Cycle header -->
-          <div class="flex items-center gap-2 mb-3">
-            <div class="h-px flex-1 bg-border-subtle"></div>
-            <span class="text-[10px] text-slate-600 font-mono uppercase tracking-wider shrink-0 px-1">
+          <div class="flex items-center gap-3 mb-3">
+            <span class="text-xs text-slate-500 tabular-nums shrink-0">
               {{ fmtDateTime(cycle.started_at) }}
             </span>
-            <div class="h-px flex-1 bg-border-subtle"></div>
+            <div class="h-px flex-1 bg-white/[0.06]"></div>
           </div>
 
           <!-- Strategy cards grid -->
           <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-            <div
+            <article
               v-for="run in cycle.strategies"
               :key="run.id"
-              class="glass-card rounded-2xl p-5 flex flex-col gap-4 border"
-              :class="runBorder(run)"
+              class="ui-card p-5 flex flex-col gap-5"
             >
               <!-- Card header -->
               <div class="flex items-start justify-between gap-3">
-                <div class="flex items-center gap-3 min-w-0">
-                  <div class="size-9 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center shrink-0">
-                    <span class="material-symbols-outlined text-amber-400 text-base">smart_toy</span>
-                  </div>
-                  <div class="min-w-0">
-                    <p class="text-sm font-semibold text-slate-100 truncate">{{ run.name || 'Unnamed Strategy' }}</p>
-                    <p class="text-[11px] text-slate-500 mt-0.5 font-mono">{{ fmtDateTime(run.created_at) }}</p>
-                  </div>
+                <div class="min-w-0">
+                  <p class="text-sm font-medium text-slate-100 truncate">{{ run.name || 'Unnamed strategy' }}</p>
+                  <p class="text-xs text-slate-500 mt-0.5 tabular-nums">{{ fmtDateTime(run.created_at) }}</p>
                 </div>
-                <!-- Status badge -->
+                <!-- Status -->
                 <span
-                  class="shrink-0 text-[10px] font-bold px-2 py-0.5 rounded-full border uppercase tracking-wide"
-                  :class="stageMeta(run.status).color + ' ' + stageMeta(run.status).bg"
+                  class="shrink-0 inline-flex items-center gap-2 text-xs"
+                  :class="stageMeta(run.status).text"
                 >
+                  <span class="ui-dot" :class="stageMeta(run.status).dot"></span>
                   {{ stageMeta(run.status).label }}
                 </span>
               </div>
 
               <!-- Vertical stepper -->
-              <div class="flex flex-col gap-0">
+              <ol class="flex flex-col">
                 <template v-for="(stage, si) in run.stages" :key="si">
-                  <div class="flex gap-3">
-                    <!-- Connector + icon column -->
-                    <div class="flex flex-col items-center">
-                      <!-- Icon -->
-                      <div
-                        class="size-7 rounded-full border flex items-center justify-center shrink-0 z-10"
-                        :class="stageMeta(stage.status).bg"
-                      >
-                        <span
-                          v-if="stageMeta(stage.status).spin && run.status === 'running'"
-                          class="material-symbols-outlined text-[14px] animate-spin text-sky-400"
-                        >progress_activity</span>
-                        <span
-                          v-else
-                          class="material-symbols-outlined text-[14px]"
-                          :class="stageMeta(stage.status).color"
-                        >{{ stageMeta(stage.status).icon || 'radio_button_unchecked' }}</span>
-                      </div>
+                  <li class="flex gap-3">
+                    <!-- Connector + node column -->
+                    <div class="w-3 shrink-0 flex flex-col items-center pt-1.5">
+                      <span
+                        class="ui-dot"
+                        :class="stage.status === 'running' && run.status !== 'running' ? 'ui-dot-off' : stageMeta(stage.status).dot"
+                      ></span>
                       <!-- Line to next step -->
                       <div
                         v-if="si < run.stages.length - 1"
-                        class="w-px flex-1 mt-1 mb-1"
-                        :class="stage.status === 'running' ? 'bg-sky-500/30' : (stage.status === 'passed' ? 'bg-emerald-500/30' : 'bg-slate-700')"
+                        class="w-px flex-1 mt-1.5 bg-white/[0.08]"
                       ></div>
                     </div>
 
                     <!-- Stage content -->
-                    <div class="pb-3 flex-1 min-w-0">
-                      <p class="text-xs font-semibold text-slate-300 leading-none mt-0.5">{{ stage.label }}</p>
+                    <div class="pb-4 flex-1 min-w-0">
+                      <p class="text-sm text-slate-200">{{ stage.label }}</p>
                       <!-- Stocks used -->
-                      <p v-if="stage.stocks && stage.stocks.length" class="text-[10px] text-slate-600 mt-1 truncate">
+                      <p v-if="stage.stocks && stage.stocks.length" class="text-xs text-slate-500 mt-0.5 truncate">
                         {{ stage.stocks.join(', ') }}
                       </p>
                       <!-- P&L result -->
-                      <div v-if="stage.pnl != null" class="flex items-center gap-2 mt-1.5">
-                        <span class="text-[11px] font-mono font-semibold" :class="pnlColor(stage.pnl)">
-                          {{ fmtPnl(stage.pnl) }}
-                        </span>
-                        <span class="text-[10px] font-mono text-slate-500">{{ fmtPct(stage.pnl_pct) }}</span>
-                      </div>
+                      <p v-if="stage.pnl != null" class="flex items-baseline gap-2 mt-1 text-xs tabular-nums">
+                        <span :class="pnlColor(stage.pnl)">{{ fmtPnl(stage.pnl) }}</span>
+                        <span class="text-slate-500">{{ fmtPct(stage.pnl_pct) }}</span>
+                      </p>
                       <!-- Details / verdict -->
-                      <p v-if="stage.details" class="text-[10px] text-slate-600 mt-1 truncate">
+                      <p v-if="stage.details" class="text-xs text-slate-500 mt-1 truncate">
                         {{ stage.details }}
                       </p>
                       <!-- Running indicator (only if parent run is still running) -->
-                      <p v-else-if="stage.status === 'running' && run.status === 'running'" class="text-[10px] text-sky-500 mt-1 italic">
-                        In progress...
+                      <p v-else-if="stage.status === 'running' && run.status === 'running'" class="text-xs text-slate-400 mt-1">
+                        In progress
                       </p>
                     </div>
-                  </div>
+                  </li>
                 </template>
 
                 <!-- No stages yet (queued) -->
-                <div v-if="!run.stages || run.stages.length === 0" class="flex gap-3">
-                  <div class="flex flex-col items-center">
-                    <div class="size-7 rounded-full border border-slate-700 bg-slate-500/10 flex items-center justify-center shrink-0">
-                      <span class="material-symbols-outlined text-[14px] text-slate-500 animate-pulse">hourglass_empty</span>
-                    </div>
+                <li v-if="!run.stages || run.stages.length === 0" class="flex gap-3">
+                  <div class="w-3 shrink-0 flex justify-center pt-1.5">
+                    <span class="ui-dot ui-dot-off"></span>
                   </div>
-                  <div class="pb-3 flex-1">
-                    <p class="text-xs text-slate-500 italic mt-0.5">Queued...</p>
-                  </div>
-                </div>
-              </div>
+                  <p class="pb-4 text-sm text-slate-500">Queued</p>
+                </li>
+              </ol>
 
               <!-- Final result footer -->
               <div
                 v-if="run.final_result || (run.status === 'running' && !agentRunning && !agentPaused)"
-                class="mt-auto pt-3 border-t border-border-subtle"
+                class="mt-auto pt-4 border-t border-white/[0.06]"
               >
-                <p v-if="run.final_result" class="text-[11px] text-slate-500 leading-snug">
-                  <span class="font-semibold" :class="run.status === 'passed' ? 'text-emerald-400' : run.status === 'failed' ? 'text-red-400' : 'text-slate-400'">
-                    {{ run.status === 'passed' ? '✓' : run.status === 'failed' ? '✗' : '○' }}
-                  </span>
+                <p v-if="run.final_result" class="flex items-baseline gap-2 text-xs text-slate-400 leading-5">
+                  <span
+                    class="ui-dot relative -top-px"
+                    :class="run.status === 'passed' ? 'bg-gain' : run.status === 'failed' ? 'ui-dot-error' : 'ui-dot-off'"
+                  ></span>
                   {{ run.final_result }}
                 </p>
                 <!-- Stale running indicator with force-stop button -->
                 <div v-if="run.status === 'running' && !agentRunning && !agentPaused" class="flex items-center justify-between gap-2">
-                  <p class="text-[11px] text-amber-500/70 italic">Agent stopped — run may be stale</p>
+                  <p class="text-xs text-amber-400">Agent stopped — run may be stale</p>
                   <button
                     @click="forceStopRun(run.id)"
-                    class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold border border-red-500/30 bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors shrink-0"
+                    class="ui-btn h-7 px-2.5 text-xs text-loss shrink-0"
                   >
-                    <span class="material-symbols-outlined text-[11px]">close</span>
-                    Mark Stopped
+                    Mark stopped
                   </button>
                 </div>
               </div>
-            </div>
+            </article>
           </div>
-        </div>
+        </section>
       </div>
 
       <!-- Pagination -->
       <div v-if="totalPages > 1" class="flex flex-col sm:flex-row items-center justify-between gap-3 mt-8">
-        <p class="text-xs text-slate-500 self-start sm:self-auto">{{ total }} runs · page {{ page }} of {{ totalPages }}</p>
+        <p class="text-xs text-slate-500 tabular-nums self-start sm:self-auto">{{ total }} runs <span class="text-slate-600">·</span> page {{ page }} of {{ totalPages }}</p>
         <div class="flex items-center gap-1 flex-wrap justify-center">
           <button
             @click="goToPage(page - 1)"
             :disabled="page <= 1"
-            class="px-2 py-1.5 rounded-lg border border-border-subtle text-xs text-slate-400 hover:text-slate-200 hover:bg-surface transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+            class="ui-icon-btn disabled:opacity-30 disabled:cursor-default"
+            aria-label="Previous page"
           >
-            <span class="material-symbols-outlined text-[14px]">chevron_left</span>
+            <span class="material-symbols-outlined text-[18px]">chevron_left</span>
           </button>
-          <template v-for="p in pageNumbers" :key="p">
-            <span v-if="p === '...'" class="px-1 text-slate-600 text-xs">…</span>
-            <button
-              v-else
-              @click="goToPage(p)"
-              class="min-w-[30px] px-2 py-1.5 rounded-lg border text-xs transition-colors"
-              :class="p === page
-                ? 'border-primary/40 bg-primary/10 text-primary font-semibold'
-                : 'border-border-subtle text-slate-400 hover:text-slate-200 hover:bg-surface'"
-            >{{ p }}</button>
-          </template>
+          <div class="ui-seg">
+            <template v-for="p in pageNumbers" :key="p">
+              <span v-if="p === '...'" class="h-7 px-1 inline-flex items-center text-xs text-slate-600">…</span>
+              <button
+                v-else
+                @click="goToPage(p)"
+                class="ui-seg-btn min-w-7 px-2 tabular-nums"
+                :class="p === page ? 'ui-seg-btn-active' : ''"
+                :aria-current="p === page ? 'page' : undefined"
+              >{{ p }}</button>
+            </template>
+          </div>
           <button
             @click="goToPage(page + 1)"
             :disabled="page >= totalPages"
-            class="px-2 py-1.5 rounded-lg border border-border-subtle text-xs text-slate-400 hover:text-slate-200 hover:bg-surface transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+            class="ui-icon-btn disabled:opacity-30 disabled:cursor-default"
+            aria-label="Next page"
           >
-            <span class="material-symbols-outlined text-[14px]">chevron_right</span>
+            <span class="material-symbols-outlined text-[18px]">chevron_right</span>
           </button>
         </div>
       </div>
 
     </main>
 
-    <!-- ── Start Agent modal ───────────────────────────────────────────────── -->
+    <!-- ── Start agent modal ───────────────────────────────────────────────── -->
     <Teleport to="body">
       <Transition name="modal-fade">
         <div
           v-if="showStartAgentModal"
-          class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+          class="ui-overlay"
           @click.self="closeStartAgent"
         >
-          <div class="w-full max-w-md bg-[#0d1117] border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
+          <div class="modal-panel ui-modal max-w-md">
             <!-- Modal header -->
-            <div class="flex items-center gap-3 px-6 py-4 border-b border-border-subtle">
-              <div class="size-9 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center shrink-0">
-                <span class="material-symbols-outlined text-amber-400 text-base">smart_toy</span>
-              </div>
-              <div>
-                <p class="text-sm font-semibold text-slate-100">Start AI Backtest Agent</p>
-                <p class="text-[11px] text-slate-500 mt-0.5">Optionally provide a special instruction for strategy generation.</p>
+            <div class="ui-modal-head">
+              <div class="min-w-0">
+                <h2 class="text-base font-medium text-slate-100">Start AI backtest agent</h2>
+                <p class="text-sm text-slate-500 mt-1">Optionally give a special instruction for strategy generation</p>
               </div>
             </div>
 
             <!-- Modal body -->
-            <div class="px-6 py-5">
-              <label class="block text-xs font-medium text-slate-400 mb-2">
-                Special Request
-                <span class="text-slate-600 font-normal ml-1">(optional)</span>
+            <div class="ui-modal-body">
+              <label for="ar-request" class="ui-field-label">
+                Special request
+                <span class="text-slate-500">(optional)</span>
               </label>
               <textarea
+                id="ar-request"
                 v-model="startAgentRequest"
-                placeholder="e.g. Focus on high-volatility tech stocks, avoid leveraged ETFs…"
+                placeholder="e.g. Focus on high-volatility tech stocks, avoid leveraged ETFs"
                 rows="4"
-                class="w-full bg-surface border border-border-subtle rounded-xl px-3 py-2.5 text-sm text-slate-200 placeholder-slate-600 resize-none focus:outline-none focus:border-primary/40 transition-colors"
+                class="ui-input resize-none"
                 @keydown.ctrl.enter="confirmStartAgent"
               ></textarea>
-              <p class="text-[10px] text-slate-600 mt-1.5">Ctrl+Enter to start</p>
+              <p class="ui-help">Ctrl+Enter to start</p>
             </div>
 
             <!-- Modal footer -->
-            <div class="flex items-center justify-end gap-2 px-6 py-4 border-t border-border-subtle">
+            <div class="ui-modal-foot">
               <button
                 @click="closeStartAgent"
-                class="px-4 py-2 rounded-lg text-sm font-medium text-slate-400 hover:text-slate-200 hover:bg-surface border border-transparent hover:border-border-subtle transition-colors"
+                class="ui-btn-ghost h-9 px-4"
               >Cancel</button>
               <button
                 @click="confirmStartAgent"
-                class="px-4 py-2 rounded-lg text-sm font-semibold text-background-dark bg-emerald-500 hover:bg-emerald-400 transition-colors"
+                class="ui-btn-primary"
               >
-                <span class="material-symbols-outlined text-[14px] align-middle mr-1">play_arrow</span>
-                Start Agent
+                Start agent
               </button>
             </div>
           </div>
@@ -693,43 +658,39 @@ onUnmounted(() => {
       </Transition>
     </Teleport>
 
-    <!-- ── Unpause / Schedule Resume modal ───────────────────────────────── -->
+    <!-- ── Unpause / schedule resume modal ───────────────────────────────── -->
     <Teleport to="body">
       <Transition name="modal-fade">
         <div
           v-if="showUnpauseModal"
-          class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+          class="ui-overlay"
           @click.self="closeUnpauseModal"
         >
-          <div class="w-full max-w-sm bg-[#0d1117] border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
+          <div class="modal-panel ui-modal max-w-sm">
             <!-- Modal header -->
-            <div class="flex items-center gap-3 px-6 py-4 border-b border-border-subtle">
-              <div class="size-9 rounded-xl bg-sky-500/10 border border-sky-500/20 flex items-center justify-center shrink-0">
-                <span class="material-symbols-outlined text-sky-400 text-base">play_circle</span>
+            <div class="ui-modal-head">
+              <div class="min-w-0">
+                <h2 class="text-base font-medium text-slate-100">Resume agent</h2>
+                <p class="text-sm text-slate-500 mt-1">Resume now or schedule an automatic resume</p>
               </div>
-              <div>
-                <p class="text-sm font-semibold text-slate-100">Resume Agent</p>
-                <p class="text-[11px] text-slate-500 mt-0.5">Resume now or schedule an automatic resume.</p>
-              </div>
-              <button @click="closeUnpauseModal" class="ml-auto text-slate-600 hover:text-slate-300 transition-colors">
+              <button @click="closeUnpauseModal" class="ui-icon-btn ml-auto shrink-0" aria-label="Close">
                 <span class="material-symbols-outlined text-[18px]">close</span>
               </button>
             </div>
 
             <!-- Modal body -->
-            <div class="px-6 py-5 space-y-4">
-              <!-- Preset chips -->
+            <div class="ui-modal-body space-y-5">
+              <!-- Presets -->
               <div>
-                <p class="text-[11px] text-slate-500 font-medium mb-2 uppercase tracking-wider">Resume in</p>
+                <p class="ui-field-label">Resume in</p>
                 <div class="flex flex-wrap gap-2">
                   <button
                     v-for="preset in UNPAUSE_PRESETS"
                     :key="preset.minutes"
                     @click="confirmUnpause(preset.minutes)"
-                    class="px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors"
                     :class="preset.minutes === 0
-                      ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20'
-                      : 'border-sky-500/30 bg-sky-500/10 text-sky-400 hover:bg-sky-500/20'"
+                      ? 'ui-btn-primary h-8 px-3 text-[13px]'
+                      : 'ui-btn tabular-nums'"
                   >
                     {{ preset.label }}
                   </button>
@@ -737,33 +698,34 @@ onUnmounted(() => {
               </div>
 
               <!-- Custom delay input -->
-              <div class="pt-1">
-                <p class="text-[11px] text-slate-500 font-medium mb-2 uppercase tracking-wider">Custom delay</p>
+              <div>
+                <label for="ar-custom-delay" class="ui-field-label">Custom delay</label>
                 <div class="flex items-center gap-2">
                   <input
+                    id="ar-custom-delay"
                     v-model.number="unpauseCustomMins"
                     type="number"
                     min="1"
                     max="1440"
                     placeholder="minutes"
-                    class="w-24 bg-surface border border-border-subtle rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-sky-500/40 transition-colors"
+                    class="ui-input w-24 tabular-nums"
                     @keydown.enter="unpauseCustomMins > 0 && confirmUnpause(unpauseCustomMins)"
                   />
-                  <span class="text-xs text-slate-500">minutes</span>
+                  <span class="text-sm text-slate-500">minutes</span>
                   <button
                     @click="unpauseCustomMins > 0 && confirmUnpause(unpauseCustomMins)"
                     :disabled="!unpauseCustomMins || unpauseCustomMins < 1"
-                    class="px-3 py-2 rounded-lg text-xs font-semibold border border-sky-500/30 bg-sky-500/10 text-sky-400 hover:bg-sky-500/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    class="ui-btn ml-auto h-9"
                   >Schedule</button>
                 </div>
               </div>
             </div>
 
             <!-- Modal footer -->
-            <div class="flex items-center justify-end px-6 py-4 border-t border-border-subtle">
+            <div class="ui-modal-foot">
               <button
                 @click="closeUnpauseModal"
-                class="px-4 py-2 rounded-lg text-sm font-medium text-slate-400 hover:text-slate-200 hover:bg-surface border border-transparent hover:border-border-subtle transition-colors"
+                class="ui-btn-ghost h-9 px-4"
               >Cancel</button>
             </div>
           </div>
@@ -775,12 +737,8 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.modal-fade-enter-active,
-.modal-fade-leave-active {
-  transition: opacity 0.2s ease;
-}
-.modal-fade-enter-from,
-.modal-fade-leave-to {
-  opacity: 0;
-}
+.modal-fade-enter-active, .modal-fade-leave-active { transition: opacity 180ms cubic-bezier(0.22, 1, 0.36, 1); }
+.modal-fade-enter-active .modal-panel, .modal-fade-leave-active .modal-panel { transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1); }
+.modal-fade-enter-from, .modal-fade-leave-to { opacity: 0; }
+.modal-fade-enter-from .modal-panel, .modal-fade-leave-to .modal-panel { transform: translateY(6px); }
 </style>

@@ -1,14 +1,16 @@
 import SwiftUI
 
-/// One backtest (`/backtests/:id`) — `BacktestDetailScreen`: status and
-/// lifecycle actions, stats, AI credits, crypto fees, strategy, logs, the
-/// portfolio chart, per-stock charts / trades / decision traces and round
-/// trips. Polls status every 3 s while the run is active.
+/// One backtest (`/backtests/:id`) — the web's `BacktestDetailView.vue`, as a
+/// `.dsList()` under the large "Backtest #id" title: the status, period and
+/// stocks with the run's progress, then the LLM-pause and Nexus-lookback
+/// cards, the results card (total P&L over the run's figures), the TR
+/// scorecard, crypto fees, LLM cost, strategy, logs, the portfolio chart,
+/// P&L per stock, the per-stock charts and trades, and round-trip
+/// statistics. Polls status every 3 s while the run is active.
 ///
-/// An inset-grouped list under the inline "Backtest #id" title. The P&L is the
-/// hero, over the portfolio chart; every lifecycle action (Pause, Resume,
-/// Stop, Rerun, Playback, Delete) sits in the toolbar's More menu, each still
-/// behind its confirmation and the double-submit guard.
+/// Every lifecycle action (Pause, Resume, Stop, Rerun, Live playback,
+/// Delete) sits in the toolbar's More menu, each still behind its
+/// confirmation and the double-submit guard.
 struct BacktestDetailView: View {
     let id: String
 
@@ -22,6 +24,8 @@ struct BacktestDetailView: View {
     /// A confirmed action in flight (no double submit, rerun never double-posts).
     @State private var acting = false
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     static let decisionPage = 5
 
     var body: some View {
@@ -32,11 +36,11 @@ struct BacktestDetailView: View {
                 Color.clear
             }
         }
-        .background(DS.Surface.canvas)
+        .background(DS.Surface.page)
         .navigationTitle("Backtest #\(id)")
-        .navigationBarTitleDisplayMode(.inline)
+        .navigationBarTitleDisplayMode(.large)
         .toolbar {
-            // Only once the summary is on screen, where the Dart chips were.
+            // Only once the summary is on screen, where the web's buttons are.
             if let model, model.summary != nil, !model.loading, model.error == nil {
                 ToolbarItem(placement: .topBarTrailing) { actionMenu(model) }
             }
@@ -53,17 +57,15 @@ struct BacktestDetailView: View {
     @ViewBuilder
     private func content(_ model: BacktestDetailModel) -> some View {
         if model.loading {
-            ProgressView()
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            skeleton
         } else if let error = model.error {
             List {
                 Section {
                     ErrorRow(message: error, onRetry: { Task { await model.load() } })
-                        .listRowInsets(EdgeInsets())
-                        .listRowBackground(Color.clear)
+                        .dsClearRow(top: 8)
                 }
             }
-            .listStyle(.insetGrouped)
+            .dsList()
         } else if let summary = model.summary {
             loaded(model, summary)
         } else {
@@ -71,10 +73,28 @@ struct BacktestDetailView: View {
         }
     }
 
+    /// The loading shape (the web's): the status line, then the results card
+    /// and a chart-sized block.
+    private var skeleton: some View {
+        List {
+            Section {
+                VStack(alignment: .leading, spacing: 32) {
+                    Skeleton(width: 260, height: 14)
+                    Skeleton(height: 132, radius: DS.Radius.card)
+                    Skeleton(height: 240, radius: DS.Radius.card)
+                }
+                .dsClearRow(top: 4)
+            }
+        }
+        .dsList()
+        .disabled(true)
+        .accessibilityLabel("Loading")
+    }
+
     // MARK: Toolbar menu
 
-    /// The Dart action chips, as a More menu: run controls, then Rerun and
-    /// Playback, then Delete.
+    /// The web's action buttons, as a More menu: run controls, then Rerun
+    /// and Live playback, then Delete.
     private func actionMenu(_ model: BacktestDetailModel) -> some View {
         let s = model.currentStatus.lowercased()
         let isRunning = s == "running"
@@ -117,7 +137,7 @@ struct BacktestDetailView: View {
                 Button {
                     services.router.push(.backtestPlayback(id))
                 } label: {
-                    Label("Playback", systemImage: "film")
+                    Label("Live playback", systemImage: "film")
                 }
             }
             Section {
@@ -135,34 +155,32 @@ struct BacktestDetailView: View {
 
     private func loaded(_ model: BacktestDetailModel, _ summary: BacktestSummary) -> some View {
         List {
-            hero(model, summary)
+            header(model, summary)
             BacktestLlmPauseBanner(summary: summary)
             if let lookback = model.nexusLookback {
                 BacktestNexusLookbackBanner(lookback: lookback)
             }
-            BacktestStatGrid(summary: summary, elapsed: model.elapsedSeconds)
+            BacktestResultsCard(summary: summary, elapsed: model.elapsedSeconds)
             if let card = summary.trScorecard {
                 BacktestTrScorecardSection(card: card)
             }
+            BacktestCryptoFeesCard(summary: summary)
             BacktestLlmCostCard(
                 llmCost: model.llmCost,
                 loading: model.llmCostLoading,
                 error: model.llmCostError
             )
-            BacktestCryptoFeesCard(summary: summary)
-            if !summary.tickers.isEmpty {
-                Section("Symbols") {
-                    MarketsFlowLayout(spacing: 6, runSpacing: 6) {
-                        ForEach(summary.tickers, id: \.self) { MarketsChip(text: $0) }
-                    }
-                    .padding(.vertical, 4)
-                }
-            }
             if let schema = summary.strategySchema {
                 BacktestStrategySection(schema: schema, strategyId: summary.strategyId, open: $strategyOpen)
             }
             BacktestLogsSection(id: id, model: model)
-            if let perStock = summary.pnlPerStock, !perStock.isEmpty {
+            if let graph = model.graphData, !graph.portfolioValueHistory.isEmpty {
+                DSSection("Portfolio value over time", style: .plain) {
+                    BacktestPortfolioChart(history: graph.portfolioValueHistory, startValue: summary.portfolioStartValue?.double)
+                        .dsClearRow()
+                }
+            }
+            if let perStock = summary.pnlPerStock, !perStock.isEmpty, !summary.tickers.isEmpty {
                 BacktestPnlPerStockCard(summary: summary)
             }
             if let graph = model.graphData, !summary.tickers.isEmpty {
@@ -170,46 +188,58 @@ struct BacktestDetailView: View {
             }
             BacktestRoundTripStats(summary: summary)
         }
-        .listStyle(.insetGrouped)
-        // The Dart AI-credits refresh button folds into pull-to-refresh.
+        .dsList()
+        // The web's LLM-cost refresh button folds into pull-to-refresh.
         .refreshable {
             await model.load()
             await model.refreshLlmCost()
         }
     }
 
-    /// The P&L as the hero, the status and dates as its status line, the
-    /// run's progress while active, then the portfolio chart.
-    private func hero(_ model: BacktestDetailModel, _ summary: BacktestSummary) -> some View {
-        Section {
-            VStack(alignment: .leading, spacing: DS.cardGroupSpacing) {
-                HeroValueHeader(
-                    fmtPnl(summary.pnl?.double),
-                    numericValue: summary.pnl?.double,
-                    change: fmtPct(summary.pnlPercent?.double),
-                    direction: ChangeDirection(summary.pnl?.double)
-                ) {
-                    HStack(spacing: 8) {
-                        StatusDot(model.currentStatus.dsSentenceCased, status: model.currentStatus, pulsing: model.isActive, font: .footnote)
-                        Text(BacktestRowFormat.dateRange(summary.startDate, summary.endDate))
+    /// The web header's subtitle — the status as a dot and a word, the
+    /// period and the stocks — then the run's progress while it is active.
+    private func header(_ model: BacktestDetailModel, _ summary: BacktestSummary) -> some View {
+        let status = model.currentStatus
+        return Section {
+            VStack(alignment: .leading, spacing: 16) {
+                FlowLayout(spacing: 6, runSpacing: 4) {
+                    StatusDot(
+                        BacktestStatusText.label(status),
+                        status: status,
+                        pulsing: status.lowercased() == "running",
+                        font: DS.Font.pageSub
+                    )
+                    separator
+                    Text("\(summary.startDate ?? "?") → \(summary.endDate ?? "?")")
+                        .monospacedDigit()
+                    if !summary.tickers.isEmpty {
+                        separator
+                        Text(summary.tickers.joined(separator: ", "))
                     }
                 }
-                if let progress = model.progress, model.isActive {
-                    VStack(spacing: 4) {
+                .font(DS.Font.pageSub)
+                .foregroundStyle(DS.Text.muted)
+                if let progress = model.progress, ["running", "queued", "pending"].contains(status.lowercased()) {
+                    VStack(alignment: .leading, spacing: 8) {
                         HStack {
-                            Text("Progress").font(.footnote).foregroundStyle(.secondary)
+                            Text("Progress").foregroundStyle(DS.Text.muted)
                             Spacer()
-                            Text("\(Int(progress.double.rounded()))%").font(.footnote.monospacedDigit()).foregroundStyle(.secondary)
+                            Text("\(Int(progress.double.rounded()))%")
+                                .foregroundStyle(DS.Text.label)
+                                .monospacedDigit()
                         }
-                        ProgressView(value: min(max(progress.double / 100, 0), 1))
+                        .font(DS.Font.caption)
+                        BacktestProgressBar(fraction: progress.double / 100)
                     }
-                }
-                if let graph = model.graphData, !graph.portfolioValueHistory.isEmpty {
-                    BacktestPortfolioChart(history: graph.portfolioValueHistory, startValue: summary.portfolioStartValue?.double)
+                    .accessibilityElement(children: .combine)
                 }
             }
-            .padding(.vertical, 6)
+            .dsClearRow(top: 0, bottom: 4)
         }
+    }
+
+    private var separator: some View {
+        Text("·").foregroundStyle(DS.Text.faint).accessibilityHidden(true)
     }
 
     private func ask(_ model: BacktestDetailModel, _ action: String) {
@@ -217,7 +247,7 @@ struct BacktestDetailView: View {
         confirm = ConfirmRequest(
             title: meta.title,
             body: "\(meta.body)\n\nBacktest #\(id)",
-            confirmLabel: String(meta.title.split(separator: " ").last ?? ""),
+            confirmLabel: meta.verb,
             role: action == "stop" || action == "delete" ? .destructive : nil,
             onConfirm: {
                 acting = true
@@ -241,7 +271,7 @@ struct BacktestDetailView: View {
 
     private func askRerun(_ model: BacktestDetailModel) {
         confirm = ConfirmRequest(
-            title: "Rerun Backtest",
+            title: "Rerun backtest",
             body: "A new backtest will be created with the same settings.\n\nBacktest #\(id)",
             confirmLabel: "Rerun",
             role: nil,
@@ -262,7 +292,7 @@ struct BacktestDetailView: View {
     // MARK: Per-stock accordions
 
     private func stocks(_ summary: BacktestSummary, _ graph: BacktestGraphData) -> some View {
-        Section {
+        DSSection("Stock charts and trades", subtitle: "\(summary.tickers.count) stocks") {
             ForEach(summary.tickers, id: \.self) { sym in
                 BacktestStockAccordion(
                     sym: sym,
@@ -271,7 +301,7 @@ struct BacktestDetailView: View {
                     expanded: expandedStocks.contains(sym),
                     decisionLimit: decisionLimits[sym] ?? Self.decisionPage,
                     onToggle: {
-                        withAnimation(.snappy) {
+                        withAnimation(DSMotion.standard(reduceMotion: reduceMotion)) {
                             if expandedStocks.contains(sym) { expandedStocks.remove(sym) } else { expandedStocks.insert(sym) }
                         }
                     },
@@ -280,42 +310,58 @@ struct BacktestDetailView: View {
                     }
                 )
             }
-        } header: {
-            DSSectionHeader("Stock charts & trades") {
-                HStack(spacing: 14) {
-                    Button("Expand All") { expandedStocks.formUnion(summary.tickers) }
-                    if !expandedStocks.isEmpty {
-                        Button("Collapse All") {
-                            expandedStocks.removeAll()
-                            decisionLimits.removeAll()
-                        }
+        } accessory: {
+            HStack(spacing: 8) {
+                if !expandedStocks.isEmpty {
+                    Button("Collapse all") {
+                        expandedStocks.removeAll()
+                        decisionLimits.removeAll()
                     }
+                    .buttonStyle(.dsSecondary)
                 }
-                .font(.footnote)
-                .buttonStyle(.borderless)
+                Button("Expand all") { expandedStocks.formUnion(summary.tickers) }
+                    .buttonStyle(.dsSecondary)
             }
         }
     }
 
     // MARK: Pending (no summary)
 
+    /// Not finished yet (`ui-empty`): the sentence, then the status and its
+    /// progress, or the status alone.
     private func pending(_ model: BacktestDetailModel) -> some View {
-        ContentUnavailableView {
-            Label("This backtest has not completed yet.", systemImage: Symbol.named("hourglass_empty"))
-        } description: {
-            if let progress = model.progress {
-                VStack(spacing: 4) {
-                    HStack {
-                        Text(model.currentStatus)
-                        Spacer()
-                        Text("\(Int(progress.double.rounded()))%")
+        List {
+            Section {
+                Card(padding: 0) {
+                    VStack(spacing: 12) {
+                        Text("This backtest has not completed yet")
+                            .font(DS.Font.body)
+                            .foregroundStyle(DS.Text.label)
+                        if let progress = model.progress {
+                            VStack(spacing: 8) {
+                                HStack {
+                                    Text(BacktestStatusText.label(model.currentStatus))
+                                    Spacer()
+                                    Text("\(Int(progress.double.rounded()))%").monospacedDigit()
+                                }
+                                .font(DS.Font.caption)
+                                .foregroundStyle(DS.Text.muted)
+                                BacktestProgressBar(fraction: progress.double / 100)
+                            }
+                            .frame(width: 224)
+                        } else {
+                            Text("Status: \(BacktestStatusText.label(model.currentStatus))")
+                                .font(DS.Font.caption)
+                                .foregroundStyle(DS.Text.muted)
+                        }
                     }
-                    .font(.footnote.monospacedDigit())
-                    ProgressView(value: min(max(progress.double / 100, 0), 1))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 40)
+                    .padding(.horizontal, 24)
                 }
-                .frame(width: 200)
-                .padding(.top, 4)
+                .dsClearRow(top: 8)
             }
         }
+        .dsList()
     }
 }

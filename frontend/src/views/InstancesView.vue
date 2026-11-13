@@ -1,9 +1,11 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import AppShell from '../layouts/AppShell.vue'
 import { getToken } from '../utils/auth.js'
 import LlmConfigForm from '../components/LlmConfigForm.vue'
+import LiveUptime from '../components/LiveUptime.vue'
+import { fmtUsd, fmtSignedUsd, fmtPct, signClass } from '../utils/dashboardAnalytics.js'
 import {
   applyStrategyLlmDraft,
   buildStrategyLlmTestPayload,
@@ -79,6 +81,8 @@ const addStockId    = ref('')
 const addStockSym   = ref('')
 const addStockBusy  = ref(false)
 const addStockMsg   = ref('')
+const addStockOk    = ref('')     // "Added AAPL" after a successful add
+const addStockInput = ref(null)
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function authHeaders() {
@@ -352,7 +356,9 @@ function openAddStock(id) {
   addStockSym.value = ''
   addStockMsg.value = ''
   addStockBusy.value = false
+  addStockOk.value = ''
   showAddStock.value = true
+  nextTick(() => addStockInput.value?.focus())
 }
 
 function closeAddStock() {
@@ -365,6 +371,7 @@ async function submitAddStock() {
   if (!sym) { addStockMsg.value = 'Symbol is required'; return }
   addStockBusy.value = true
   addStockMsg.value  = ''
+  addStockOk.value   = ''
   try {
     const res = await fetch(`${API_BASE}/instances/${encodeURIComponent(addStockId.value)}/stocks`, {
       method: 'POST',
@@ -374,11 +381,14 @@ async function submitAddStock() {
     const data = await res.json().catch(() => ({}))
     if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`)
     await fetchInstances()
-    showAddStock.value = false
+    // Stay open for the next symbol: clear the field and keep focus in it.
+    addStockSym.value = ''
+    addStockOk.value = `Added ${sym}`
   } catch (e) {
     addStockMsg.value = e.message || 'Failed to add stock'
   } finally {
     addStockBusy.value = false
+    nextTick(() => addStockInput.value?.focus())
   }
 }
 
@@ -916,6 +926,227 @@ async function submitLinkStrategy() {
   }
 }
 
+// ── Row overflow menu (presentation only) ─────────────────────────────────────
+// One menu open at a time. Opening focuses the first item; arrows move between
+// items; Escape closes and returns focus to the ⋯ button; a pointerdown
+// anywhere outside a menu closes it.
+const openMenuId = ref(null)
+
+function menuRoot(id) {
+  return document.querySelector(`[data-row-menu="${CSS.escape(String(id))}"]`)
+}
+function menuItems(id) {
+  return [...(menuRoot(id)?.querySelectorAll('[role="menuitem"]:not(:disabled)') || [])]
+}
+function toggleMenu(id) {
+  openMenuId.value = openMenuId.value === id ? null : id
+  if (openMenuId.value != null) nextTick(() => menuItems(id)[0]?.focus())
+}
+function closeMenu(returnFocus = false) {
+  const id = openMenuId.value
+  openMenuId.value = null
+  if (returnFocus && id != null) menuRoot(id)?.querySelector('[aria-haspopup]')?.focus()
+}
+function onMenuKey(e, id) {
+  if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
+  e.preventDefault()
+  const items = menuItems(id)
+  if (!items.length) return
+  const i = items.indexOf(document.activeElement)
+  const next = e.key === 'ArrowDown' ? (i + 1) % items.length : (i - 1 + items.length) % items.length
+  items[next].focus()
+}
+function onDocPointer(e) {
+  if (openMenuId.value != null && !e.target.closest?.('[data-row-menu]')) closeMenu()
+}
+function onDocKey(e) {
+  if (e.key === 'Escape' && openMenuId.value != null) closeMenu(true)
+}
+onMounted(() => {
+  document.addEventListener('pointerdown', onDocPointer)
+  document.addEventListener('keydown', onDocKey)
+})
+onUnmounted(() => {
+  document.removeEventListener('pointerdown', onDocPointer)
+  document.removeEventListener('keydown', onDocKey)
+})
+
+// ── Pinned instances ──────────────────────────────────────────────────────────
+// Pins live in this browser, as the iOS app keeps its own on-device
+// (UserDefaults `pinned_instances`). Insertion order, best-effort: the page
+// works the same when storage is blocked.
+const PIN_KEY = 'intellistock_pinned_instances'
+function readPins() {
+  try {
+    const v = JSON.parse(localStorage.getItem(PIN_KEY) || '[]')
+    return Array.isArray(v) ? v.map(String) : []
+  } catch { return [] }
+}
+const pinnedIds = ref(readPins())
+function isPinned(id) { return pinnedIds.value.includes(String(id)) }
+function togglePin(id) {
+  const key = String(id)
+  pinnedIds.value = isPinned(key) ? pinnedIds.value.filter(x => x !== key) : [...pinnedIds.value, key]
+  try { localStorage.setItem(PIN_KEY, JSON.stringify(pinnedIds.value)) } catch { /* storage blocked */ }
+}
+// Pinned cards follow the same User/AI filter as the list; the list shows the rest.
+const pinnedInstances = computed(() =>
+  pinnedIds.value.map(id => filteredInstances.value.find(i => i.id === id)).filter(Boolean))
+const listInstances = computed(() => filteredInstances.value.filter(i => !isPinned(i.id)))
+
+// What the cards show beyond the list, as on iOS: each pinned instance's
+// detail (GET /instances/{id}: uptime, strategy doc, brokerage) and its
+// account's day (GET /brokerages/{id}/portfolio-history?range=1D). Fetched
+// for pinned instances only; a failure keeps the last good answer.
+const pinDetails  = ref({})   // instance id → { inst, at }
+const pinAccounts = ref({})   // brokerage id → { value, change_abs, change_pct, values }
+
+async function fetchPinDetail(id) {
+  try {
+    const res = await fetchWithTimeout(`${API_BASE}/instances/${encodeURIComponent(id)}`, { headers: authHeaders() })
+    if (!res.ok) return
+    const inst = await res.json()
+    pinDetails.value = { ...pinDetails.value, [id]: { inst, at: Date.now() } }
+  } catch { /* keep the last detail */ }
+}
+async function fetchPinAccount(bid) {
+  try {
+    const res = await fetchWithTimeout(`${API_BASE}/brokerages/${encodeURIComponent(bid)}/portfolio-history?range=1D`, { headers: authHeaders() })
+    if (!res.ok) return
+    const d = await res.json()
+    const values = (Array.isArray(d?.values) ? d.values : []).map(Number).filter(Number.isFinite)
+    pinAccounts.value = {
+      ...pinAccounts.value,
+      [bid]: { value: d?.current_value, change_abs: d?.change_abs, change_pct: d?.change_pct, values },
+    }
+  } catch { /* keep the last figures */ }
+}
+function refreshPinned() {
+  const list = pinnedInstances.value
+  list.forEach(i => fetchPinDetail(i.id))
+  // Portfolio history serves stock accounts; Kalshi has its own tab.
+  const bids = [...new Set(list.map(i => i.brokerage_id).filter(Boolean))]
+    .filter(bid => String(brokerages.value.find(b => b.id === bid)?.brokerage_type || '').toLowerCase() !== 'kalshi')
+  bids.forEach(fetchPinAccount)
+}
+// Refetch when the pinned set, its links or a run state changes…
+watch(
+  () => pinnedInstances.value.map(i => `${i.id}|${i.strategy_id ?? ''}|${i.brokerage_id ?? ''}|${i.runCommand}`).join(','),
+  (key) => { if (key) refreshPinned() },
+)
+// …and gently while the page is visible.
+const PIN_POLL_MS = 60_000
+let pinPollTimer = null
+onMounted(() => {
+  pinPollTimer = setInterval(() => {
+    if (document.visibilityState === 'visible' && pinnedInstances.value.length) refreshPinned()
+  }, PIN_POLL_MS)
+})
+onUnmounted(() => {
+  clearInterval(pinPollTimer)
+})
+
+// Card text (presentation only), mirroring the iOS instance rows.
+function runState(inst) {
+  return inst.crashed ? 'crashed' : inst.runCommand ? 'running' : 'stopped'
+}
+// Uptime as the detail reported it and when; LiveUptime ticks it from there.
+function pinUptime(inst) {
+  const d = pinDetails.value[inst.id]
+  if (runState(inst) !== 'running' || !d) return null
+  const up = Number(d.inst?.uptime_seconds)
+  if (!(d.inst?.run_command ?? d.inst?.runCommand) || !Number.isFinite(up)) return null
+  return { seconds: up, at: d.at }
+}
+// "Swing" when the strategy runs a swing or wheel lane, else "Equity";
+// nothing until a linked strategy's doc has loaded.
+function pinKind(inst) {
+  const doc = pinDetails.value[inst.id]?.inst?.strategy
+  if (inst.strategy_id && !doc) return null
+  const subs = Array.isArray(doc?.strategies) ? doc.strategies : []
+  const lanes = subs.map(s => String(s?.strategy || '').replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase())
+  return lanes.some(l => l === 'strategy_swing' || l === 'strategy_wheel') ? 'Swing' : 'Equity'
+}
+function pinStateWord(inst) {
+  return { running: 'Running', stopped: 'Stopped', crashed: 'Crashed' }[runState(inst)]
+}
+
+// The account's 1D line for a pinned card, scaled like the dashboard
+// Sparkline (never stretching less than 0.5% of the value to full height),
+// with room on the right for the live "now" dot. Returns the line, the area
+// under it, and where the last point sits (as % of the box) for the dot.
+const pinGradId = id => `pin-area-${String(id).replace(/[^A-Za-z0-9_-]/g, '_')}`
+const PIN_SPARK_W = 160
+const PIN_SPARK_H = 40
+function pinSpark(values) {
+  const v = (values || []).filter(Number.isFinite)
+  if (v.length < 2) return null
+  const lo = Math.min(...v)
+  const hi = Math.max(...v)
+  const mid = (lo + hi) / 2
+  const span = Math.max(hi - lo, Math.abs(mid) * 0.005) || 1
+  const min = mid - span / 2
+  const padY = 5
+  const usableW = PIN_SPARK_W - 6
+  const usableH = PIN_SPARK_H - padY * 2
+  const step = usableW / (v.length - 1)
+  const pts = v.map((y, i) => [i * step, padY + usableH - ((y - min) / span) * usableH])
+  const line = pts.map(([x, y], i) => `${i ? 'L' : 'M'}${x.toFixed(1)},${y.toFixed(1)}`).join('')
+  const [lx, ly] = pts[pts.length - 1]
+  return {
+    line,
+    area: `${line}L${lx.toFixed(1)},${PIN_SPARK_H}L0,${PIN_SPARK_H}Z`,
+    up: v[v.length - 1] >= v[0],
+    left: `${(lx / PIN_SPARK_W) * 100}%`,
+    top: `${(ly / PIN_SPARK_H) * 100}%`,
+  }
+}
+
+// A card that just started plays one "ignition" flash around its border.
+// Only a stopped → running change counts, never the first load.
+const pinIgnite = ref({})   // instance id → true while the flash plays
+const pinWasRunning = new Map()
+watch(
+  () => pinnedInstances.value.map(i => `${i.id}\u0000${runState(i) === 'running' ? 1 : 0}`).join('\u0001'),
+  (key) => {
+    for (const pair of key ? key.split('\u0001') : []) {
+      const [id, on] = pair.split('\u0000')
+      const running = on === '1'
+      if (running && pinWasRunning.get(id) === false) {
+        pinIgnite.value = { ...pinIgnite.value, [id]: true }
+        setTimeout(() => {
+          const next = { ...pinIgnite.value }
+          delete next[id]
+          pinIgnite.value = next
+        }, 1600)
+      }
+      pinWasRunning.set(id, running)
+    }
+  },
+  { immediate: true },
+)
+// Paper or Live money, from the detail's brokerage or the loaded account.
+function pinMoneyKind(inst) {
+  if (!inst.brokerage_id) return null
+  const nested = pinDetails.value[inst.id]?.inst?.brokerage
+  if (typeof nested?.alpaca_paper === 'boolean') return nested.alpaca_paper ? 'Paper' : 'Live'
+  const acct = brokerages.value.find(b => b.id === inst.brokerage_id)
+  const type = String(acct?.brokerage_type || '').toLowerCase()
+  if (type === 'alpaca' || type === 'binanceus') return acct.alpaca_paper ? 'Paper' : 'Live'
+  if (type === 'kalshi' && acct.kalshi_environment) return String(acct.kalshi_environment).toLowerCase() === 'live' ? 'Live' : 'Paper'
+  return null
+}
+function pinStrategyName(inst) {
+  if (!inst.strategy_id) return null
+  return strategyMap.value[inst.strategy_id] || pinDetails.value[inst.id]?.inst?.strategy?.name || `Strategy ${inst.strategy_id}`
+}
+function pinAccountName(inst) {
+  if (!inst.brokerage_id) return null
+  return brokerages.value.find(b => b.id === inst.brokerage_id)?.account_name
+    || pinDetails.value[inst.id]?.inst?.brokerage?.account_name
+    || inst.brokerage_id
+}
+
 onMounted(async () => {
   await Promise.all([fetchBrokerages(), fetchStrategies(), fetchInstances()])
   if (String(route.query.createStrategy || '') === '1') {
@@ -928,279 +1159,451 @@ onMounted(async () => {
 
 <template>
   <AppShell>
-    <main class="flex-1 px-4 py-6 sm:px-6 sm:py-8 lg:px-8 lg:py-10">
+    <main class="ui-page">
 
       <!-- Header -->
-      <div class="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between mb-6">
-        <div>
-          <p class="text-primary text-xs font-bold uppercase tracking-widest mb-1">Trading</p>
-          <h1 class="text-2xl sm:text-3xl font-bold leading-tight">Instances</h1>
-          <p class="text-slate-400 text-sm mt-1 max-w-md">Manage live trading and backtesting instances.</p>
+      <header class="flex flex-wrap items-end justify-between gap-x-4 gap-y-3">
+        <div class="min-w-0">
+          <h1 class="ui-page-title">Instances</h1>
+          <p class="ui-page-sub">Live trading and backtesting bots</p>
         </div>
-        <div class="flex items-center gap-3 w-full sm:w-auto">
+        <div class="flex items-center gap-2">
           <button
             @click="fetchInstances"
-            class="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-border-subtle text-sm text-slate-400 hover:text-slate-200 hover:bg-surface transition-all shrink-0"
+            class="ui-icon-btn"
             title="Refresh"
+            aria-label="Refresh instances"
           >
             <span class="material-symbols-outlined text-[18px]">refresh</span>
           </button>
+          <button @click="openCreate" class="ui-btn-primary">New instance</button>
+        </div>
+      </header>
+
+      <!-- Filter -->
+      <div class="mt-8 mb-3 flex items-center justify-between gap-4">
+        <div class="ui-seg" role="group" aria-label="Filter instances">
           <button
-            @click="openCreate"
-            class="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-primary text-background-dark font-semibold text-sm hover:brightness-110 transition-all flex-1 sm:flex-none"
+            v-for="f in [{ label: 'All', value: 'all' }, { label: 'User created', value: 'user' }, { label: 'AI created', value: 'ai' }]"
+            :key="f.value"
+            type="button"
+            @click="filter = f.value"
+            class="ui-seg-btn inline-flex items-center gap-1.5"
+            :class="filter === f.value ? 'ui-seg-btn-active' : ''"
+            :aria-pressed="filter === f.value"
           >
-            <span class="material-symbols-outlined text-[18px]">add</span>
-            New Instance
+            {{ f.label }}
+            <span v-if="f.value !== 'all'" class="tabular-nums text-slate-500">
+              {{ instances.filter(i => (i.created_by || 'user') === f.value).length }}
+            </span>
+            <span v-else class="tabular-nums text-slate-500">{{ instances.length }}</span>
           </button>
         </div>
       </div>
 
-      <!-- Filter pills -->
-      <div class="flex flex-wrap items-center gap-2 mb-6">
-        <button
-          v-for="f in [{ label: 'All', value: 'all' }, { label: 'User Created', value: 'user' }, { label: 'AI Created', value: 'ai' }]"
-          :key="f.value"
-          @click="filter = f.value"
-          class="px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all"
-          :class="filter === f.value
-            ? 'bg-primary/15 text-primary border-primary/40'
-            : 'border-border-subtle text-slate-400 hover:text-slate-200 hover:bg-surface'"
-        >
-          {{ f.label }}
-          <span v-if="f.value !== 'all'" class="ml-1 text-[10px] opacity-60">
-            ({{ instances.filter(i => (i.created_by || 'user') === f.value).length }})
-          </span>
-          <span v-else class="ml-1 text-[10px] opacity-60">({{ instances.length }})</span>
-        </button>
-      </div>
-
       <!-- Loading -->
-      <div v-if="loading" class="flex items-center gap-3 text-slate-400 text-sm">
-        <span class="material-symbols-outlined animate-spin text-xl">progress_activity</span>
-        Loading instances...
+      <div v-if="loading" class="ui-card overflow-hidden" aria-label="Loading instances">
+        <div class="hidden md:block h-10 border-b border-white/[0.06]"></div>
+        <div class="ui-rows">
+          <div v-for="n in 6" :key="n" class="h-16 px-5 flex flex-col justify-center gap-2">
+            <div class="ui-skel h-4 w-44"></div>
+            <div class="ui-skel h-3 w-28"></div>
+          </div>
+        </div>
       </div>
 
       <!-- Error -->
-      <div v-else-if="loadError" class="rounded-xl bg-red-500/10 border border-red-500/20 px-5 py-4 text-red-400 text-sm">
+      <div v-else-if="loadError" class="ui-error">
         {{ loadError }}
       </div>
 
       <!-- Empty state (no instances at all) -->
-      <div
-        v-else-if="instances.length === 0"
-        class="rounded-2xl border border-border-subtle bg-surface/30 px-8 py-16 flex flex-col items-center gap-4 text-center"
-      >
-        <span class="material-symbols-outlined text-5xl text-slate-600">memory</span>
-        <p class="text-slate-300 font-semibold">No instances yet</p>
-        <p class="text-slate-500 text-sm max-w-xs">Create an instance to run live trading or backtesting strategies.</p>
-        <button
-          @click="openCreate"
-          class="mt-2 px-5 py-2 rounded-lg bg-primary text-background-dark font-semibold text-sm hover:brightness-110 transition-all"
-        >
-          Create your first instance
-        </button>
+      <div v-else-if="instances.length === 0" class="ui-card">
+        <div class="ui-empty">
+          <p>No instances yet. Create one to run a strategy live or in a backtest.</p>
+          <button @click="openCreate" class="ui-btn-primary">New instance</button>
+        </div>
       </div>
 
       <!-- Empty state (filter has no results) -->
-      <div
-        v-else-if="filteredInstances.length === 0"
-        class="rounded-2xl border border-border-subtle bg-surface/30 px-8 py-12 flex flex-col items-center gap-3 text-center"
-      >
-        <span class="material-symbols-outlined text-4xl text-slate-600">filter_alt_off</span>
-        <p class="text-slate-400 text-sm">No {{ filter === 'ai' ? 'AI-created' : 'user-created' }} instances.</p>
+      <div v-else-if="filteredInstances.length === 0" class="ui-card">
+        <p class="ui-empty">No {{ filter === 'ai' ? 'AI-created' : 'user-created' }} instances</p>
       </div>
 
-      <!-- Instance cards -->
-      <div v-else class="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-5">
-        <div
-          v-for="inst in filteredInstances"
-          :key="inst.id"
-          class="glass-card rounded-2xl p-5 sm:p-6 flex flex-col gap-4"
-        >
-          <!-- Card header -->
-          <div class="flex items-start justify-between gap-3 min-w-0">
-            <div class="flex items-center gap-3 min-w-0">
-              <div class="size-10 rounded-xl bg-surface border border-border-subtle flex items-center justify-center shrink-0">
-                <span class="material-symbols-outlined text-primary text-xl">memory</span>
-              </div>
-              <div class="min-w-0">
-                <p class="font-semibold text-slate-100 leading-tight truncate" :title="inst.name || inst.id">{{ inst.name || inst.id }}</p>
-                <p class="text-xs text-slate-500 font-mono mt-0.5 truncate">{{ inst.id }}</p>
-              </div>
-            </div>
-            <!-- Badges -->
-            <div class="flex flex-col items-end gap-1.5 shrink-0">
-              <!-- Origin badge -->
-              <span
-                class="text-[10px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wider"
-                :class="(inst.created_by || 'user') === 'ai'
-                  ? 'bg-zinc-500/15 text-zinc-300 border border-zinc-500/20'
-                  : 'bg-slate-500/10 text-slate-500 border border-slate-700'"
-              >
-                {{ (inst.created_by || 'user') === 'ai' ? 'AI' : 'User' }}
-              </span>
-              <!-- Running status (crashed = held open for log capture) -->
-              <div
-                class="flex items-center gap-1.5 text-xs font-semibold px-2 py-1 rounded-full"
-                :class="inst.crashed
-                  ? 'bg-red-500/10 text-red-400 border border-red-500/20'
-                  : inst.runCommand
-                    ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                    : 'bg-slate-500/10 text-slate-500 border border-slate-700'"
-              >
-                <div class="size-1.5 rounded-full" :class="inst.crashed ? 'bg-red-400' : inst.runCommand ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'"></div>
-                {{ inst.crashed ? 'Crashed' : inst.runCommand ? 'Running' : 'Stopped' }}
-              </div>
-            </div>
-          </div>
-
-          <!-- Meta info -->
-          <div class="space-y-1.5 text-xs text-slate-500">
-            <div v-if="inst.strategy_id" class="flex items-center gap-1.5 min-w-0">
-              <span class="text-slate-400 shrink-0">Strategy:</span>
-              <span class="relative group/strat inline-flex items-center gap-1 cursor-default min-w-0">
-                <span class="text-slate-300 truncate" :title="strategyMap[inst.strategy_id] || inst.strategy_id">{{ strategyMap[inst.strategy_id] || inst.strategy_id }}</span>
-                <!-- Hover popover with strategy ID -->
-                <span
-                  class="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 whitespace-nowrap
-                         rounded-md bg-[#1a2030] border border-border-subtle px-2 py-1
-                         text-[11px] font-mono text-slate-400 shadow-lg
-                         opacity-0 group-hover/strat:opacity-100 pointer-events-none transition-opacity z-10"
-                >
-                  ID: {{ inst.strategy_id }}
-                </span>
-              </span>
-            </div>
-            <div v-else class="flex items-center gap-1.5">
-              <span class="text-slate-600 italic">No strategy linked</span>
-            </div>
-            <div v-if="inst.brokerage_id" class="flex items-center gap-1.5 min-w-0">
-              <span class="text-slate-400 shrink-0">Brokerage:</span>
-              <span class="text-slate-300 truncate">{{ brokerageMap[inst.brokerage_id] || inst.brokerage_id }}</span>
-            </div>
-          </div>
-
-          <!-- Stocks list -->
-          <div>
-            <div class="flex items-center justify-between mb-2">
-              <p class="text-xs font-medium text-slate-400 uppercase tracking-wider">
-                Stocks
-                <span class="text-slate-600 ml-1">({{ (inst.stocks || []).length }})</span>
-              </p>
-              <button
-                @click="openAddStock(inst.id)"
-                class="flex items-center gap-0.5 text-[11px] text-slate-500 hover:text-primary transition-colors"
-              >
-                <span class="material-symbols-outlined text-[14px]">add</span>
-                Add
-              </button>
-            </div>
-
-            <div v-if="(inst.stocks || []).length === 0" class="text-xs text-slate-600 italic">
-              No stocks added
-            </div>
-            <div v-else class="flex flex-wrap gap-1.5">
-              <span
-                v-for="sym in inst.stocks"
-                :key="sym"
-                class="flex items-center gap-1 px-2 py-0.5 rounded-md bg-surface border border-border-subtle text-xs font-mono text-slate-300"
-              >
-                {{ sym }}
-                <button
-                  @click="removeStock(inst.id, sym)"
-                  :disabled="busy[inst.id]"
-                  class="text-slate-600 hover:text-red-400 transition-colors disabled:opacity-40"
-                  :title="`Remove ${sym}`"
-                >
-                  <span class="material-symbols-outlined text-[12px]">close</span>
-                </button>
-              </span>
-            </div>
-          </div>
-
-          <!-- Actions -->
-          <div class="flex flex-wrap items-center gap-2 pt-1 mt-auto">
-            <!-- View -->
-            <button
-              @click="router.push('/instances/' + encodeURIComponent(inst.id))"
-              class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-primary hover:bg-primary/10 border border-primary/20 transition-colors"
-            >
-              <span class="material-symbols-outlined text-[14px]">open_in_new</span>
-              View
-            </button>
-            <!-- Create Backtest -->
-            <button
-              @click="openCreateBacktest(inst.id)"
-              :disabled="busy[inst.id]"
-              class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-sky-400 hover:bg-sky-500/10 border border-sky-500/20 transition-colors disabled:opacity-40"
-            >
-              <span class="material-symbols-outlined text-[14px]">play_circle</span>
-              Backtest
-            </button>
-            <!-- Link Strategy (no strategy linked) -->
-            <button
-              v-if="!inst.strategy_id"
-              @click="openLinkStrategy(inst.id)"
-              :disabled="busy[inst.id]"
-              class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-zinc-300 hover:bg-zinc-500/10 border border-zinc-500/20 transition-colors disabled:opacity-40"
-            >
-              <span class="material-symbols-outlined text-[14px]">link</span>
-              Link Strategy
-            </button>
-            <!-- Edit Strategy (strategy linked) -->
-            <button
-              v-if="inst.strategy_id"
-              @click="openEditStrategy(inst.strategy_id)"
-              :disabled="busy[inst.id]"
-              class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-amber-400 hover:bg-amber-500/10 border border-amber-500/20 transition-colors disabled:opacity-40"
-            >
-              <span class="material-symbols-outlined text-[14px]">tune</span>
-              Strategy
-            </button>
-            <!-- Edit Brokerage (only when brokerage is linked) -->
-            <button
-              v-if="inst.brokerage_id"
-              @click="openChangeBrokerage(inst)"
-              :disabled="busy[inst.id]"
-              class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-teal-400 hover:bg-teal-500/10 border border-teal-500/20 transition-colors disabled:opacity-40"
-            >
-              <span class="material-symbols-outlined text-[14px]">account_balance</span>
-              Brokerage
-            </button>
-            <!-- Start / Stop -->
-            <button
-              v-if="!inst.runCommand"
-              @click="startInstance(inst.id)"
-              :disabled="busy[inst.id]"
-              class="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-emerald-400 hover:bg-emerald-500/10 border border-emerald-500/20 transition-colors disabled:opacity-40"
-            >
-              <span v-if="busy[inst.id]" class="material-symbols-outlined text-[14px] animate-spin">progress_activity</span>
-              <span v-else class="material-symbols-outlined text-[14px]">play_arrow</span>
-              Start
-            </button>
-            <button
-              v-else
-              @click="stopInstance(inst.id)"
-              :disabled="busy[inst.id]"
-              class="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-amber-400 hover:bg-amber-500/10 border border-amber-500/20 transition-colors disabled:opacity-40"
-            >
-              <span v-if="busy[inst.id]" class="material-symbols-outlined text-[14px] animate-spin">progress_activity</span>
-              <span v-else class="material-symbols-outlined text-[14px]">stop</span>
-              Stop
-            </button>
-
-            <!-- Delete -->
-            <button
-              @click="openDelete(inst.id, inst.name)"
-              :disabled="busy[inst.id]"
-              class="w-full sm:w-auto inline-flex items-center justify-center gap-1 px-3 py-1.5 rounded-lg text-xs font-medium text-slate-500 hover:text-red-400 hover:bg-red-500/5 border border-border-subtle transition-colors sm:ml-auto disabled:opacity-40"
-            >
-              <span class="material-symbols-outlined text-[14px]">delete</span>
-              Delete
-            </button>
-          </div>
+      <!-- Instance list: one line per instance. The whole row opens it;
+           Start/Stop and the ⋯ menu sit above the row link. -->
+      <template v-else>
+      <!-- ── Pinned: a card per pinned instance ─────────────────────────── -->
+      <section v-if="pinnedInstances.length" class="mt-6" aria-labelledby="pinned-title">
+        <div class="mb-3">
+          <h2 id="pinned-title" class="ui-section-title">Pinned</h2>
+          <p class="ui-section-sub">Saved in this browser</p>
         </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+          <article
+            v-for="inst in pinnedInstances"
+            :key="inst.id"
+            class="pin-card ui-card p-5 relative flex flex-col"
+            :class="[`pin-${runState(inst)}`, pinIgnite[inst.id] ? 'pin-ignite' : '']"
+          >
+            <!-- Running: a light orbits the border, with a soft glow behind it.
+                 It fades in on start and out on stop; starting also flashes
+                 the whole border once. -->
+            <span class="pin-fx" aria-hidden="true">
+              <span class="pin-glow"><span class="pin-ring pin-ring-wide"><span class="pin-orbit"></span></span></span>
+              <span class="pin-ring"><span class="pin-orbit"></span></span>
+              <span class="pin-flash"></span>
+            </span>
+
+            <!-- Head: name (the card link), id · paper/live · origin, actions -->
+            <div class="flex items-start justify-between gap-3">
+              <div class="min-w-0">
+                <RouterLink
+                  :to="'/instances/' + encodeURIComponent(inst.id)"
+                  class="block text-base font-medium truncate focus-visible:outline-none after:absolute after:inset-0 after:rounded-xl after:content-[''] focus-visible:after:ring-2 focus-visible:after:ring-white/25"
+                  :class="runState(inst) === 'stopped' ? 'text-slate-300' : 'text-slate-100'"
+                  :title="inst.name || inst.id"
+                >{{ inst.name || inst.id }}</RouterLink>
+                <p class="text-xs text-slate-500 mt-1 truncate tabular-nums">
+                  {{ inst.id }}
+                  <template v-if="pinMoneyKind(inst)">
+                    <span class="text-slate-600" aria-hidden="true">·</span> {{ pinMoneyKind(inst) }}
+                  </template>
+                  <template v-if="(inst.created_by || 'user') === 'ai'">
+                    <span class="text-slate-600" aria-hidden="true">·</span> AI created
+                  </template>
+                </p>
+              </div>
+
+              <div class="relative flex items-center gap-1 shrink-0 -mr-1" :class="openMenuId === inst.id ? 'z-30' : 'z-10'">
+                <button
+                  type="button"
+                  @click.stop="togglePin(inst.id)"
+                  class="ui-icon-btn"
+                  title="Unpin"
+                  :aria-label="`Unpin ${inst.name || inst.id}`"
+                >
+                  <span class="material-symbols-outlined text-[18px] pin-filled">push_pin</span>
+                </button>
+                <button
+                  v-if="!inst.runCommand"
+                  @click.stop="startInstance(inst.id)"
+                  :disabled="busy[inst.id]"
+                  class="ui-btn w-16 ml-1"
+                >
+                  <span v-if="busy[inst.id]" class="material-symbols-outlined text-[16px] animate-spin" aria-label="Working">progress_activity</span>
+                  <template v-else>Start</template>
+                </button>
+                <button
+                  v-else
+                  @click.stop="stopInstance(inst.id)"
+                  :disabled="busy[inst.id]"
+                  class="ui-btn w-16 ml-1 text-loss"
+                >
+                  <span v-if="busy[inst.id]" class="material-symbols-outlined text-[16px] animate-spin" aria-label="Working">progress_activity</span>
+                  <template v-else>Stop</template>
+                </button>
+
+                <div class="relative" :data-row-menu="inst.id">
+                  <button
+                    type="button"
+                    @click.stop="toggleMenu(inst.id)"
+                    class="ui-icon-btn"
+                    :class="openMenuId === inst.id ? 'bg-raised text-slate-200' : ''"
+                    aria-haspopup="menu"
+                    :aria-expanded="openMenuId === inst.id"
+                    :aria-label="`More actions for ${inst.name || inst.id}`"
+                  >
+                    <span class="material-symbols-outlined text-[18px]">more_horiz</span>
+                  </button>
+                  <div
+                    v-if="openMenuId === inst.id"
+                    class="ui-menu"
+                    role="menu"
+                    @keydown="onMenuKey($event, inst.id)"
+                  >
+                    <button type="button" role="menuitem" class="ui-menu-item menu-focus"
+                      @click="closeMenu(); router.push('/instances/' + encodeURIComponent(inst.id))">View</button>
+                    <button type="button" role="menuitem" class="ui-menu-item menu-focus"
+                      :disabled="busy[inst.id]"
+                      @click="closeMenu(); openCreateBacktest(inst.id)">Run backtest</button>
+                    <button v-if="!inst.strategy_id" type="button" role="menuitem" class="ui-menu-item menu-focus"
+                      :disabled="busy[inst.id]"
+                      @click="closeMenu(); openLinkStrategy(inst.id)">Link strategy</button>
+                    <button v-if="inst.strategy_id" type="button" role="menuitem" class="ui-menu-item menu-focus"
+                      :disabled="busy[inst.id]"
+                      @click="closeMenu(); openEditStrategy(inst.strategy_id)">
+                      Edit strategy
+                      <span class="ml-auto pl-4 text-xs text-slate-500 tabular-nums">ID {{ inst.strategy_id }}</span>
+                    </button>
+                    <button v-if="inst.brokerage_id" type="button" role="menuitem" class="ui-menu-item menu-focus"
+                      :disabled="busy[inst.id]"
+                      @click="closeMenu(); openChangeBrokerage(inst)">Change brokerage</button>
+                    <button type="button" role="menuitem" class="ui-menu-item menu-focus"
+                      @click="closeMenu(); openAddStock(inst.id)">
+                      Edit stocks
+                      <span class="ml-auto pl-4 text-xs text-slate-500 tabular-nums">{{ (inst.stocks || []).length }}</span>
+                    </button>
+                    <button type="button" role="menuitem" class="ui-menu-item menu-focus"
+                      @click="closeMenu(); togglePin(inst.id)">Unpin</button>
+                    <div class="ui-menu-sep" role="separator"></div>
+                    <button type="button" role="menuitem" class="ui-menu-item menu-focus text-loss"
+                      :disabled="busy[inst.id]"
+                      @click="closeMenu(); openDelete(inst.id, inst.name)">Delete</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Status: dot (pinging while it runs) · live uptime · kind -->
+            <p class="mt-4 flex items-center gap-2.5 text-sm" :class="runState(inst) === 'stopped' ? 'text-slate-500' : 'text-slate-200'">
+              <span
+                class="pin-dot"
+                :class="runState(inst) === 'running' ? 'pin-dot-live' : runState(inst) === 'crashed' ? 'bg-loss' : 'bg-slate-600'"
+                aria-hidden="true"
+              ></span>
+              <span class="truncate tabular-nums">
+                <span :class="runState(inst) === 'running' ? 'text-gain' : runState(inst) === 'crashed' ? 'text-loss' : ''">{{ pinStateWord(inst) }}</span>
+                <template v-if="pinUptime(inst)">
+                  <span class="text-slate-600" aria-hidden="true"> · </span>
+                  <LiveUptime :seconds="pinUptime(inst).seconds" :at="pinUptime(inst).at" class="text-slate-400" />
+                </template>
+                <template v-if="pinKind(inst)">
+                  <span class="text-slate-600" aria-hidden="true"> · </span>
+                  <span class="text-slate-400">{{ pinKind(inst) }}</span>
+                </template>
+              </span>
+            </p>
+
+            <!-- The linked account's day: equity, today's change and its 1D line -->
+            <div class="mt-5 flex items-end justify-between gap-4 min-h-16">
+              <template v-if="inst.brokerage_id">
+                <div class="min-w-0">
+                  <p class="text-xs text-slate-500 truncate">{{ pinAccountName(inst) }} · today</p>
+                  <p
+                    class="mt-1 text-2xl font-medium tabular-nums leading-tight"
+                    :class="runState(inst) === 'stopped' ? 'text-slate-300' : 'text-slate-100'"
+                  >{{ pinAccounts[inst.brokerage_id] ? fmtUsd(pinAccounts[inst.brokerage_id].value) : '—' }}</p>
+                  <p
+                    v-if="pinAccounts[inst.brokerage_id] && pinAccounts[inst.brokerage_id].change_abs != null"
+                    class="mt-1 text-xs tabular-nums"
+                    :class="signClass(pinAccounts[inst.brokerage_id].change_abs)"
+                  >
+                    {{ fmtSignedUsd(pinAccounts[inst.brokerage_id].change_abs) }} · {{ fmtPct(pinAccounts[inst.brokerage_id].change_pct) }}
+                  </p>
+                  <p v-else class="mt-1 text-xs text-slate-600">&nbsp;</p>
+                </div>
+                <div
+                  v-if="pinSpark(pinAccounts[inst.brokerage_id]?.values)"
+                  class="pin-spark relative w-2/5 max-w-40 h-10 shrink-0"
+                  :class="[runState(inst) === 'running' ? 'pin-spark-live' : '', pinSpark(pinAccounts[inst.brokerage_id].values).up ? 'pin-up' : 'pin-down']"
+                  aria-hidden="true"
+                >
+                  <svg :viewBox="`0 0 ${PIN_SPARK_W} ${PIN_SPARK_H}`" preserveAspectRatio="none" class="pin-spark-svg block w-full h-10 overflow-visible">
+                    <defs>
+                      <linearGradient :id="pinGradId(inst.id)" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0" stop-color="currentColor" stop-opacity="0.18" />
+                        <stop offset="1" stop-color="currentColor" stop-opacity="0" />
+                      </linearGradient>
+                    </defs>
+                    <path :d="pinSpark(pinAccounts[inst.brokerage_id].values).area" :fill="`url(#${pinGradId(inst.id)})`" />
+                    <path
+                      :d="pinSpark(pinAccounts[inst.brokerage_id].values).line"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                      stroke-linejoin="round"
+                      stroke-linecap="round"
+                      vector-effect="non-scaling-stroke"
+                    />
+                  </svg>
+                  <!-- "Now": the line's last point, pinging while it runs -->
+                  <span
+                    class="pin-now"
+                    :style="{ left: pinSpark(pinAccounts[inst.brokerage_id].values).left, top: pinSpark(pinAccounts[inst.brokerage_id].values).top }"
+                  ></span>
+                </div>
+              </template>
+              <p v-else class="text-sm text-slate-600 self-center">No brokerage linked</p>
+            </div>
+
+            <!-- Strategy and symbols -->
+            <dl class="mt-5 pt-4 border-t border-white/[0.06] grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-sm">
+              <dt class="text-slate-500">Strategy</dt>
+              <dd class="truncate" :class="inst.strategy_id ? 'text-slate-300' : 'text-slate-600'" :title="pinStrategyName(inst) || ''">
+                {{ pinStrategyName(inst) || 'No strategy linked' }}
+              </dd>
+              <dt class="text-slate-500">Symbols</dt>
+              <dd class="truncate tabular-nums" :class="(inst.stocks || []).length ? 'text-slate-300' : 'text-slate-600'" :title="(inst.stocks || []).join(', ')">
+                {{ (inst.stocks || []).length ? inst.stocks.join(', ') : 'None' }}
+              </dd>
+            </dl>
+          </article>
+        </div>
+      </section>
+
+      <!-- ── Everything else: one line per instance ──────────────────────── -->
+      <section v-if="listInstances.length" :class="pinnedInstances.length ? 'mt-12' : ''" :aria-label="pinnedInstances.length ? 'Other instances' : 'Instances'">
+        <div v-if="pinnedInstances.length" class="mb-3">
+          <h2 class="ui-section-title">Other instances</h2>
+        </div>
+      <div class="ui-card">
+        <div class="inst-row hidden md:grid ui-th">
+          <span>Instance</span>
+          <span>Status</span>
+          <span class="hidden lg:block">Strategy</span>
+          <span class="hidden lg:block">Brokerage</span>
+          <span></span>
+        </div>
+
+        <ul class="ui-rows">
+          <li
+            v-for="inst in listInstances"
+            :key="inst.id"
+            class="inst-row ui-row relative grid items-center transition-colors duration-150 ease-out hover:bg-white/[0.03] last:rounded-b-xl max-md:first:rounded-t-xl"
+          >
+            <!-- Instance: name (the row link) and id · origin · symbols -->
+            <div class="min-w-0">
+              <RouterLink
+                :to="'/instances/' + encodeURIComponent(inst.id)"
+                class="flex items-center gap-2 min-w-0 focus-visible:outline-none after:absolute after:inset-0 after:content-[''] focus-visible:after:ring-2 focus-visible:after:ring-inset focus-visible:after:ring-white/25"
+                :title="inst.name || inst.id"
+              >
+                <span class="md:hidden ui-dot" :class="inst.crashed ? 'ui-dot-error' : inst.runCommand ? 'ui-dot-live' : 'ui-dot-off'"></span>
+                <span class="text-sm text-slate-100 truncate">{{ inst.name || inst.id }}</span>
+                <span class="sr-only md:hidden">{{ inst.crashed ? 'Crashed' : inst.runCommand ? 'Running' : 'Stopped' }}</span>
+              </RouterLink>
+              <p class="text-xs text-slate-500 mt-0.5 truncate tabular-nums pl-3.5 md:pl-0">
+                {{ inst.id }}
+                <span class="hidden sm:inline">
+                  <span class="text-slate-600" aria-hidden="true">·</span>
+                  {{ (inst.created_by || 'user') === 'ai' ? 'AI created' : 'User created' }}
+                </span>
+                <template v-if="(inst.stocks || []).length">
+                  {{ ' ' }}<span class="text-slate-600" aria-hidden="true">·</span>
+                  {{ inst.stocks.length }} symbol{{ inst.stocks.length === 1 ? '' : 's' }}
+                </template>
+              </p>
+            </div>
+
+            <!-- Running status (crashed = held open for log capture) -->
+            <span
+              class="hidden md:inline-flex items-center gap-2 text-sm"
+              :class="inst.crashed || inst.runCommand ? 'text-slate-200' : 'text-slate-500'"
+            >
+              <span class="ui-dot" :class="inst.crashed ? 'ui-dot-error' : inst.runCommand ? 'ui-dot-live' : 'ui-dot-off'"></span>
+              {{ inst.crashed ? 'Crashed' : inst.runCommand ? 'Running' : 'Stopped' }}
+            </span>
+
+            <!-- Strategy -->
+            <span class="hidden lg:block min-w-0 truncate text-sm" :class="inst.strategy_id ? 'text-slate-300' : 'text-slate-600'">
+              {{ inst.strategy_id ? (strategyMap[inst.strategy_id] || inst.strategy_id) : 'No strategy' }}
+            </span>
+
+            <!-- Brokerage -->
+            <span class="hidden lg:block min-w-0 truncate text-sm" :class="inst.brokerage_id ? 'text-slate-300' : 'text-slate-600'">
+              {{ inst.brokerage_id ? (brokerageMap[inst.brokerage_id] || inst.brokerage_id) : '—' }}
+            </span>
+
+            <!-- Start / Stop and the overflow menu -->
+            <div class="relative flex items-center justify-end gap-2" :class="openMenuId === inst.id ? 'z-30' : 'z-10'">
+              <button
+                v-if="!inst.runCommand"
+                @click.stop="startInstance(inst.id)"
+                :disabled="busy[inst.id]"
+                class="ui-btn w-16"
+              >
+                <span v-if="busy[inst.id]" class="material-symbols-outlined text-[16px] animate-spin" aria-label="Working">progress_activity</span>
+                <template v-else>Start</template>
+              </button>
+              <button
+                v-else
+                @click.stop="stopInstance(inst.id)"
+                :disabled="busy[inst.id]"
+                class="ui-btn w-16 text-loss"
+              >
+                <span v-if="busy[inst.id]" class="material-symbols-outlined text-[16px] animate-spin" aria-label="Working">progress_activity</span>
+                <template v-else>Stop</template>
+              </button>
+
+              <div class="relative" :data-row-menu="inst.id">
+                <button
+                  type="button"
+                  @click.stop="toggleMenu(inst.id)"
+                  class="ui-icon-btn"
+                  :class="openMenuId === inst.id ? 'bg-raised text-slate-200' : ''"
+                  aria-haspopup="menu"
+                  :aria-expanded="openMenuId === inst.id"
+                  :aria-label="`More actions for ${inst.name || inst.id}`"
+                >
+                  <span class="material-symbols-outlined text-[18px]">more_horiz</span>
+                </button>
+
+                <div
+                  v-if="openMenuId === inst.id"
+                  class="ui-menu"
+                  role="menu"
+                  @keydown="onMenuKey($event, inst.id)"
+                >
+                  <button
+                    type="button" role="menuitem" class="ui-menu-item menu-focus"
+                    @click="closeMenu(); router.push('/instances/' + encodeURIComponent(inst.id))"
+                  >View</button>
+                  <button
+                    type="button" role="menuitem" class="ui-menu-item menu-focus"
+                    :disabled="busy[inst.id]"
+                    @click="closeMenu(); openCreateBacktest(inst.id)"
+                  >Run backtest</button>
+                  <!-- Link strategy (no strategy linked) -->
+                  <button
+                    v-if="!inst.strategy_id"
+                    type="button" role="menuitem" class="ui-menu-item menu-focus"
+                    :disabled="busy[inst.id]"
+                    @click="closeMenu(); openLinkStrategy(inst.id)"
+                  >Link strategy</button>
+                  <!-- Edit strategy (strategy linked) -->
+                  <button
+                    v-if="inst.strategy_id"
+                    type="button" role="menuitem" class="ui-menu-item menu-focus"
+                    :disabled="busy[inst.id]"
+                    @click="closeMenu(); openEditStrategy(inst.strategy_id)"
+                  >
+                    Edit strategy
+                    <span class="ml-auto pl-4 text-xs text-slate-500 tabular-nums">ID {{ inst.strategy_id }}</span>
+                  </button>
+                  <!-- Change brokerage (only when a brokerage is linked) -->
+                  <button
+                    v-if="inst.brokerage_id"
+                    type="button" role="menuitem" class="ui-menu-item menu-focus"
+                    :disabled="busy[inst.id]"
+                    @click="closeMenu(); openChangeBrokerage(inst)"
+                  >Change brokerage</button>
+                  <button
+                    type="button" role="menuitem" class="ui-menu-item menu-focus"
+                    @click="closeMenu(); openAddStock(inst.id)"
+                  >
+                    Edit stocks
+                    <span class="ml-auto pl-4 text-xs text-slate-500 tabular-nums">{{ (inst.stocks || []).length }}</span>
+                  </button>
+                  <button
+                    type="button" role="menuitem" class="ui-menu-item menu-focus"
+                    @click="closeMenu(); togglePin(inst.id)"
+                  >Pin to top</button>
+                  <div class="ui-menu-sep" role="separator"></div>
+                  <button
+                    type="button" role="menuitem" class="ui-menu-item menu-focus text-loss"
+                    :disabled="busy[inst.id]"
+                    @click="closeMenu(); openDelete(inst.id, inst.name)"
+                  >Delete</button>
+                </div>
+              </div>
+            </div>
+          </li>
+        </ul>
       </div>
+      </section>
+      </template>
 
     </main>
   </AppShell>
@@ -1210,71 +1613,59 @@ onMounted(async () => {
     <Transition name="fade">
       <div
         v-if="showDelete"
-        class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+        class="ui-overlay"
         @click.self="closeDelete"
       >
-        <div class="relative w-full max-w-sm bg-surface border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
+        <div class="modal-panel ui-modal max-w-sm">
 
-          <div class="flex items-center justify-between px-6 py-5 border-b border-border-subtle">
-            <div class="flex items-center gap-3">
-              <div class="size-9 rounded-xl bg-red-500/10 border border-red-500/20 flex items-center justify-center shrink-0">
-                <span class="material-symbols-outlined text-red-400 text-lg">delete</span>
-              </div>
-              <h2 class="text-base font-bold">Delete Instance</h2>
-            </div>
-            <button @click="closeDelete" :disabled="deleting" class="text-slate-500 hover:text-slate-300 transition-colors disabled:opacity-40">
-              <span class="material-symbols-outlined">close</span>
+          <div class="ui-modal-head">
+            <h2 class="text-base font-medium text-slate-100">Delete instance</h2>
+            <button @click="closeDelete" :disabled="deleting" class="ui-icon-btn ml-auto shrink-0 disabled:opacity-40" aria-label="Close">
+              <span class="material-symbols-outlined text-[18px]">close</span>
             </button>
           </div>
 
-          <div class="px-6 py-5 space-y-4">
+          <div class="ui-modal-body space-y-4">
             <!-- Normal state -->
             <div v-if="!deleteForce">
               <p class="text-sm text-slate-300">
-                Are you sure you want to delete
-                <span class="font-semibold text-slate-100">{{ deleteTarget?.name || deleteTarget?.id }}</span>?
+                Delete
+                <span class="text-slate-100">{{ deleteTarget?.name || deleteTarget?.id }}</span>?
               </p>
-              <p class="text-xs text-slate-500 mt-1.5">This action cannot be undone.</p>
+              <p class="text-sm text-slate-500 mt-1">This can't be undone</p>
             </div>
 
             <!-- Force state — linked to strategy -->
             <div v-else>
               <p class="text-sm text-slate-300">
-                This instance is linked to a strategy and cannot be deleted normally.
+                This instance is linked to a strategy and can't be deleted normally.
               </p>
-              <p class="text-xs text-slate-500 mt-1.5">
-                Force-deleting will remove the instance without unlinking it from the strategy.
+              <p class="text-sm text-slate-500 mt-1">
+                Force-deleting removes the instance without unlinking it from the strategy.
               </p>
             </div>
 
             <!-- Error message -->
             <Transition name="slide-up">
-              <div
-                v-if="deleteError"
-                class="rounded-lg px-4 py-3 text-xs bg-red-500/10 border border-red-500/20 text-red-400 font-mono break-words"
-              >
+              <div v-if="deleteError" class="msg msg-err">
                 {{ deleteError }}
               </div>
             </Transition>
           </div>
 
-          <div class="px-6 pb-6 flex gap-3">
-            <button @click="closeDelete" :disabled="deleting"
-              class="flex-1 py-2.5 rounded-lg border border-border-subtle text-sm font-medium text-slate-400 hover:text-slate-200 transition-colors disabled:opacity-40">
+          <div class="ui-modal-foot">
+            <button @click="closeDelete" :disabled="deleting" class="ui-btn-ghost h-9 px-4 rounded-lg">
               Cancel
             </button>
             <!-- Normal delete -->
-            <button v-if="!deleteForce" @click="confirmDelete(false)" :disabled="deleting"
-              class="flex-1 py-2.5 rounded-lg bg-red-500/80 hover:bg-red-500 text-white text-sm font-bold transition-all disabled:opacity-50 flex items-center justify-center gap-2">
-              <span v-if="deleting" class="material-symbols-outlined text-base animate-spin">progress_activity</span>
+            <button v-if="!deleteForce" @click="confirmDelete(false)" :disabled="deleting" class="ui-btn h-9 px-4 text-loss">
+              <span v-if="deleting" class="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
               {{ deleting ? 'Deleting...' : 'Delete' }}
             </button>
             <!-- Force delete -->
-            <button v-else @click="confirmDelete(true)" :disabled="deleting"
-              class="flex-1 py-2.5 rounded-lg bg-red-600 hover:bg-red-500 text-white text-sm font-bold transition-all disabled:opacity-50 flex items-center justify-center gap-2 border border-red-400/30">
-              <span v-if="deleting" class="material-symbols-outlined text-base animate-spin">progress_activity</span>
-              <span v-else class="material-symbols-outlined text-base">warning</span>
-              {{ deleting ? 'Deleting...' : 'Force Delete' }}
+            <button v-else @click="confirmDelete(true)" :disabled="deleting" class="ui-btn h-9 px-4 text-loss">
+              <span v-if="deleting" class="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
+              {{ deleting ? 'Deleting...' : 'Force delete' }}
             </button>
           </div>
         </div>
@@ -1287,51 +1678,41 @@ onMounted(async () => {
     <Transition name="fade">
       <div
         v-if="showLinkStrategy"
-        class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+        class="ui-overlay"
         @click.self="closeLinkStrategy"
       >
-        <div class="relative w-full max-w-sm bg-surface border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
-          <div class="flex items-center justify-between px-6 py-5 border-b border-border-subtle">
-            <div class="flex items-center gap-3">
-              <div class="size-9 rounded-xl bg-zinc-500/10 border border-zinc-500/20 flex items-center justify-center shrink-0">
-                <span class="material-symbols-outlined text-zinc-300 text-lg">link</span>
-              </div>
-              <h2 class="text-base font-bold">Link Strategy</h2>
-            </div>
-            <button @click="closeLinkStrategy" :disabled="linkStrategyBusy" class="text-slate-500 hover:text-slate-300 transition-colors disabled:opacity-40">
-              <span class="material-symbols-outlined">close</span>
+        <div class="modal-panel ui-modal max-w-sm">
+          <div class="ui-modal-head">
+            <h2 class="text-base font-medium text-slate-100">Link strategy</h2>
+            <button @click="closeLinkStrategy" :disabled="linkStrategyBusy" class="ui-icon-btn ml-auto shrink-0 disabled:opacity-40" aria-label="Close">
+              <span class="material-symbols-outlined text-[18px]">close</span>
             </button>
           </div>
-          <div class="px-6 py-5 space-y-4">
+          <div class="ui-modal-body space-y-4">
             <div>
-              <label class="block text-xs font-medium text-slate-400 mb-1.5">Strategy</label>
-              <select
-                v-model="linkStrategyId"
-                class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary transition-colors"
-              >
-                <option value="">Select a strategy...</option>
+              <label class="ui-field-label">Strategy</label>
+              <select v-model="linkStrategyId" class="ui-input">
+                <option value="">Select a strategy</option>
                 <option v-for="s in strategies" :key="s.id" :value="s.id">{{ s.name || s.id }}</option>
               </select>
             </div>
             <Transition name="slide-up">
               <div
                 v-if="linkStrategyMsg"
-                class="rounded-lg px-4 py-3 text-xs font-mono break-words"
-                :class="linkStrategyOk ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400' : 'bg-red-500/10 border border-red-500/20 text-red-400'"
+                class="msg"
+                :class="linkStrategyOk ? 'msg-ok' : 'msg-err'"
               >
                 {{ linkStrategyMsg }}
               </div>
             </Transition>
           </div>
-          <div class="px-6 pb-6 flex gap-3">
-            <button @click="closeLinkStrategy" :disabled="linkStrategyBusy"
-              class="flex-1 py-2.5 rounded-lg border border-border-subtle text-sm font-medium text-slate-400 hover:text-slate-200 transition-colors disabled:opacity-40">
+          <div class="ui-modal-foot">
+            <button @click="closeLinkStrategy" :disabled="linkStrategyBusy" class="ui-btn-ghost h-9 px-4 rounded-lg">
               Cancel
             </button>
-            <button @click="submitLinkStrategy" :disabled="linkStrategyBusy || !linkStrategyId"
-              class="flex-1 py-2.5 rounded-lg bg-zinc-600 hover:bg-zinc-500 text-white text-sm font-bold transition-all disabled:opacity-50 flex items-center justify-center gap-2">
-              <span v-if="linkStrategyBusy" class="material-symbols-outlined text-base animate-spin">progress_activity</span>
-              {{ linkStrategyBusy ? 'Linking...' : 'Link Strategy' }}
+            <button @click="submitLinkStrategy" :disabled="linkStrategyBusy || !linkStrategyId" class="ui-btn-primary">
+              <span v-if="linkStrategyBusy" class="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
+              {{ linkStrategyBusy ? 'Linking...' : 'Link strategy' }}
             </button>
           </div>
         </div>
@@ -1344,28 +1725,20 @@ onMounted(async () => {
     <Transition name="fade">
       <div
         v-if="showChangeBrokerage"
-        class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+        class="ui-overlay"
         @click.self="closeChangeBrokerage"
       >
-        <div class="relative w-full max-w-sm bg-surface border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
-          <div class="flex items-center justify-between px-6 py-5 border-b border-border-subtle">
-            <div class="flex items-center gap-3">
-              <div class="size-9 rounded-xl bg-primary/10 border border-primary/20 flex items-center justify-center shrink-0">
-                <span class="material-symbols-outlined text-primary text-lg">account_balance</span>
-              </div>
-              <h2 class="text-base font-bold">Change Brokerage</h2>
-            </div>
-            <button @click="closeChangeBrokerage" :disabled="changeBrokerageBusy" class="text-slate-500 hover:text-slate-300 transition-colors disabled:opacity-40">
-              <span class="material-symbols-outlined">close</span>
+        <div class="modal-panel ui-modal max-w-sm">
+          <div class="ui-modal-head">
+            <h2 class="text-base font-medium text-slate-100">Change brokerage</h2>
+            <button @click="closeChangeBrokerage" :disabled="changeBrokerageBusy" class="ui-icon-btn ml-auto shrink-0 disabled:opacity-40" aria-label="Close">
+              <span class="material-symbols-outlined text-[18px]">close</span>
             </button>
           </div>
-          <div class="px-6 py-5 space-y-4">
+          <div class="ui-modal-body space-y-4">
             <div>
-              <label class="block text-xs font-medium text-slate-400 mb-1.5">Brokerage</label>
-              <select
-                v-model="changeBrokerageId"
-                class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary transition-colors"
-              >
+              <label class="ui-field-label">Brokerage</label>
+              <select v-model="changeBrokerageId" class="ui-input">
                 <option value="">Unlink brokerage</option>
                 <option v-for="b in brokerages" :key="b.id" :value="b.id">{{ b.account_name }} ({{ b.brokerage_type }})</option>
               </select>
@@ -1373,21 +1746,19 @@ onMounted(async () => {
             <Transition name="slide-up">
               <div
                 v-if="changeBrokerageMsg"
-                class="rounded-lg px-4 py-3 text-xs font-mono break-words"
-                :class="changeBrokerageOk ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400' : 'bg-red-500/10 border border-red-500/20 text-red-400'"
+                class="msg"
+                :class="changeBrokerageOk ? 'msg-ok' : 'msg-err'"
               >
                 {{ changeBrokerageMsg }}
               </div>
             </Transition>
           </div>
-          <div class="px-6 pb-6 flex gap-3">
-            <button @click="closeChangeBrokerage" :disabled="changeBrokerageBusy"
-              class="flex-1 py-2.5 rounded-lg border border-border-subtle text-sm font-medium text-slate-400 hover:text-slate-200 transition-colors disabled:opacity-40">
+          <div class="ui-modal-foot">
+            <button @click="closeChangeBrokerage" :disabled="changeBrokerageBusy" class="ui-btn-ghost h-9 px-4 rounded-lg">
               Cancel
             </button>
-            <button @click="submitChangeBrokerage" :disabled="changeBrokerageBusy"
-              class="flex-1 py-2.5 rounded-lg bg-primary hover:brightness-110 text-white text-sm font-bold transition-all disabled:opacity-50 flex items-center justify-center gap-2">
-              <span v-if="changeBrokerageBusy" class="material-symbols-outlined text-base animate-spin">progress_activity</span>
+            <button @click="submitChangeBrokerage" :disabled="changeBrokerageBusy" class="ui-btn-primary">
+              <span v-if="changeBrokerageBusy" class="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
               {{ changeBrokerageBusy ? 'Saving...' : 'Save' }}
             </button>
           </div>
@@ -1401,49 +1772,47 @@ onMounted(async () => {
     <Transition name="fade">
       <div
         v-if="showCreate"
-        class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+        class="ui-overlay"
         @click.self="closeCreate"
       >
-        <div class="relative w-full max-w-sm bg-surface border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
+        <div class="modal-panel ui-modal max-w-md flex flex-col max-h-[90vh]">
 
-          <div class="flex items-center justify-between px-6 py-5 border-b border-border-subtle">
-            <h2 class="text-base font-bold">New Instance</h2>
-            <button @click="closeCreate" class="text-slate-500 hover:text-slate-300 transition-colors">
-              <span class="material-symbols-outlined">close</span>
+          <div class="ui-modal-head shrink-0">
+            <h2 class="text-base font-medium text-slate-100">New instance</h2>
+            <button @click="closeCreate" class="ui-icon-btn ml-auto shrink-0" aria-label="Close">
+              <span class="material-symbols-outlined text-[18px]">close</span>
             </button>
           </div>
 
-          <div class="px-6 py-5 space-y-4">
+          <div class="ui-modal-body flex-1 overflow-y-auto space-y-5">
             <div>
-              <label class="block text-xs font-medium text-slate-400 mb-1.5">Instance ID <span class="text-red-400">*</span></label>
+              <label class="ui-field-label">Instance ID <span class="text-slate-500">*</span></label>
               <input
                 v-model="createForm.id"
                 type="text"
                 placeholder="e.g. my-live-instance"
-                class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono"
+                class="ui-input font-mono"
               />
-              <p class="text-[11px] text-slate-600 mt-1">Unique identifier for this instance</p>
+              <p class="ui-help">Unique identifier for this instance</p>
             </div>
             <div>
-              <label class="block text-xs font-medium text-slate-400 mb-1.5">Display Name <span class="text-slate-600">(optional)</span></label>
+              <label class="ui-field-label">Display name <span class="text-slate-500">(optional)</span></label>
               <input
                 v-model="createForm.name"
                 type="text"
-                placeholder="e.g. Momentum Strategy Live"
-                class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors"
+                placeholder="e.g. Momentum strategy live"
+                class="ui-input"
               />
             </div>
             <div>
-              <label class="block text-xs font-medium text-slate-400 mb-1.5">Granularity</label>
-              <div class="flex gap-1.5 flex-wrap">
+              <label class="ui-field-label">Granularity</label>
+              <div class="ui-seg flex-wrap" role="group" aria-label="Granularity">
                 <button
                   v-for="g in GRANULARITIES"
                   :key="g.value"
                   @click="createForm.granularity = g.value"
-                  class="px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all"
-                  :class="createForm.granularity === g.value
-                    ? 'bg-primary/15 text-primary border-primary/40'
-                    : 'border-border-subtle text-slate-400 hover:text-slate-200'"
+                  class="ui-seg-btn tabular-nums"
+                  :class="createForm.granularity === g.value ? 'ui-seg-btn-active' : ''"
                 >
                   {{ g.label }}
                 </button>
@@ -1453,24 +1822,20 @@ onMounted(async () => {
               <button
                 type="button"
                 @click="createForm.run_command = !createForm.run_command"
-                class="relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 transition-colors"
-                :class="createForm.run_command ? 'bg-primary border-primary' : 'bg-surface border-border-subtle'"
+                class="ui-switch focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25"
+                role="switch"
+                :aria-checked="createForm.run_command"
+                aria-label="Start immediately after creation"
               >
-                <span
-                  class="inline-block size-3.5 rounded-full bg-white shadow transition-transform"
-                  :class="createForm.run_command ? 'translate-x-4' : 'translate-x-0.5'"
-                ></span>
+                <span class="ui-switch-knob"></span>
               </button>
               <span class="text-sm text-slate-300">Start immediately after creation</span>
             </div>
 
             <!-- Brokerage -->
             <div v-if="brokerages.length">
-              <label class="block text-xs font-medium text-slate-400 mb-1.5">Brokerage <span class="text-slate-600">(optional)</span></label>
-              <select
-                v-model="createForm.brokerage_id"
-                class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary transition-colors"
-              >
+              <label class="ui-field-label">Brokerage <span class="text-slate-500">(optional)</span></label>
+              <select v-model="createForm.brokerage_id" class="ui-input">
                 <option value="">None</option>
                 <option v-for="b in brokerages" :key="b.id" :value="b.id">
                   {{ b.account_name }} ({{ b.brokerage_type }})
@@ -1480,26 +1845,23 @@ onMounted(async () => {
 
             <!-- Max usage -->
             <div v-if="createForm.brokerage_id">
-              <label class="block text-xs font-medium text-slate-400 mb-1.5">Max Usage <span class="text-slate-600">($, optional)</span></label>
+              <label class="ui-field-label">Max usage <span class="text-slate-500">($, optional)</span></label>
               <input
                 v-model="createForm.max_usage"
                 type="number"
                 min="0"
                 step="100"
                 placeholder="e.g. 10000"
-                class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono"
+                class="ui-input tabular-nums"
               />
-              <p class="text-[11px] text-slate-600 mt-1">Maximum capital this instance can use from the brokerage</p>
+              <p class="ui-help">Maximum capital this instance can use from the brokerage</p>
             </div>
 
             <!-- Strategy -->
             <div>
-              <label class="block text-xs font-medium text-slate-400 mb-1.5">Strategy <span class="text-slate-600">(optional)</span></label>
+              <label class="ui-field-label">Strategy <span class="text-slate-500">(optional)</span></label>
               <div class="flex gap-2">
-                <select
-                  v-model="createForm.strategy_id"
-                  class="flex-1 bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary transition-colors"
-                >
+                <select v-model="createForm.strategy_id" class="ui-input flex-1 min-w-0">
                   <option value="">None</option>
                   <option v-for="s in strategies" :key="s.id" :value="String(s.id)">
                     {{ s.name || s.id }}
@@ -1508,14 +1870,13 @@ onMounted(async () => {
                 <button
                   type="button"
                   @click="openCreateStrategy"
-                  class="shrink-0 flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold text-zinc-300 hover:bg-zinc-500/10 border border-zinc-500/20 transition-colors"
+                  class="ui-btn h-9 shrink-0"
                   title="Create new strategy"
                 >
-                  <span class="material-symbols-outlined text-[14px]">add</span>
                   New
                 </button>
               </div>
-              <p v-if="createForm.strategy_id" class="text-[11px] text-slate-600 mt-1">
+              <p v-if="createForm.strategy_id" class="ui-help">
                 Strategy will be linked after instance creation
               </p>
             </div>
@@ -1523,13 +1884,11 @@ onMounted(async () => {
             <Transition name="slide-up">
               <div
                 v-if="createMsg"
-                class="rounded-lg px-4 py-3 text-sm font-medium"
-                :class="createOk
-                  ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400'
-                  : 'bg-red-500/10 border border-red-500/20 text-red-400'"
+                class="msg"
+                :class="creating ? 'msg-busy' : createOk ? 'msg-ok' : 'msg-err'"
               >
                 <span v-if="creating" class="inline-flex items-center gap-2">
-                  <span class="material-symbols-outlined text-base animate-spin">progress_activity</span>
+                  <span class="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
                   {{ createMsg }}
                 </span>
                 <span v-else>{{ createMsg }}</span>
@@ -1537,14 +1896,12 @@ onMounted(async () => {
             </Transition>
           </div>
 
-          <div class="px-6 pb-6 flex gap-3">
-            <button @click="closeCreate" :disabled="creating"
-              class="flex-1 py-2.5 rounded-lg border border-border-subtle text-sm font-medium text-slate-400 hover:text-slate-200 transition-colors disabled:opacity-40">
+          <div class="ui-modal-foot shrink-0">
+            <button @click="closeCreate" :disabled="creating" class="ui-btn-ghost h-9 px-4 rounded-lg">
               Cancel
             </button>
-            <button @click="submitCreate" :disabled="creating"
-              class="flex-1 py-2.5 rounded-lg bg-primary text-background-dark text-sm font-bold hover:brightness-110 transition-all disabled:opacity-50 flex items-center justify-center gap-2">
-              <span v-if="creating" class="material-symbols-outlined text-base animate-spin">progress_activity</span>
+            <button @click="submitCreate" :disabled="creating" class="ui-btn-primary">
+              <span v-if="creating" class="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
               {{ creating ? 'Creating...' : 'Create' }}
             </button>
           </div>
@@ -1558,96 +1915,89 @@ onMounted(async () => {
     <Transition name="fade">
       <div
         v-if="showEditStrategy"
-        class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+        class="ui-overlay"
         @click.self="closeEditStrategy"
       >
-        <div class="relative w-full max-w-2xl bg-surface border border-border-subtle rounded-2xl shadow-2xl flex flex-col max-h-[90vh]">
+        <div class="modal-panel ui-modal max-w-2xl flex flex-col max-h-[90vh]">
 
           <!-- Header -->
-          <div class="flex items-center justify-between px-6 py-5 border-b border-border-subtle shrink-0">
-            <div class="flex items-center gap-3 min-w-0">
-              <div class="size-9 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center shrink-0">
-                <span class="material-symbols-outlined text-amber-400 text-lg">tune</span>
-              </div>
-              <h2 class="text-base font-bold truncate">Edit Strategy</h2>
-            </div>
-            <button @click="closeEditStrategy" :disabled="editStrategySaving" class="text-slate-500 hover:text-slate-300 transition-colors disabled:opacity-40 ml-4 shrink-0">
-              <span class="material-symbols-outlined">close</span>
+          <div class="ui-modal-head shrink-0">
+            <h2 class="text-base font-medium text-slate-100 truncate">Edit strategy</h2>
+            <button @click="closeEditStrategy" :disabled="editStrategySaving" class="ui-icon-btn ml-auto shrink-0 disabled:opacity-40" aria-label="Close">
+              <span class="material-symbols-outlined text-[18px]">close</span>
             </button>
           </div>
 
           <!-- Body -->
-          <div class="flex-1 overflow-y-auto px-6 py-5 space-y-5">
+          <div class="ui-modal-body flex-1 overflow-y-auto space-y-6">
 
             <!-- Loading -->
-            <div v-if="editStrategyLoading" class="flex items-center gap-3 text-slate-400 text-sm py-8 justify-center">
-              <span class="material-symbols-outlined animate-spin text-xl">progress_activity</span>
-              Loading strategy...
+            <div v-if="editStrategyLoading" class="space-y-3 py-2" aria-label="Loading strategy">
+              <div class="ui-skel h-4 w-32"></div>
+              <div class="ui-skel h-9 w-full rounded-lg"></div>
+              <div class="ui-skel h-40 w-full rounded-xl"></div>
             </div>
 
             <template v-else-if="editStrategyData">
               <!-- Strategy name -->
               <div>
-                <label class="block text-xs font-medium text-slate-400 mb-1.5">Strategy Name</label>
+                <label class="ui-field-label">Strategy name</label>
                 <input
                   v-model="editStrategyData.name"
                   type="text"
-                  class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors"
+                  class="ui-input"
                 />
               </div>
 
               <!-- Sub-strategies -->
               <div>
-                <div v-if="availableStrategyOptions.length" class="mb-4">
-                  <label class="block text-xs font-medium text-slate-400 mb-1.5">Add Sub-strategy</label>
+                <div v-if="availableStrategyOptions.length" class="mb-6">
+                  <label class="ui-field-label">Add sub-strategy</label>
                   <div class="flex gap-2">
-                    <select
-                      v-model="editStrategyPickName"
-                      class="flex-1 bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary transition-colors"
-                    >
+                    <select v-model="editStrategyPickName" class="ui-input flex-1 min-w-0">
                       <option v-for="s in availableStrategyOptions" :key="s.value" :value="s.value">{{ s.label }} · {{ s.value }}</option>
                     </select>
                     <button
                       type="button"
                       @click="addEditSubStrategy"
-                      class="shrink-0 flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold text-primary hover:bg-primary/10 border border-primary/20 transition-colors"
+                      class="ui-btn h-9 shrink-0"
                     >
-                      <span class="material-symbols-outlined text-[14px]">add</span>
                       Add
                     </button>
                   </div>
                 </div>
 
-                <p class="text-xs font-medium text-slate-400 uppercase tracking-wider mb-3">
+                <p class="text-sm text-slate-200 mb-3">
                   Sub-strategies
-                  <span class="text-slate-600 ml-1">({{ editStrategyData.strategies?.length || 0 }})</span>
+                  <span class="text-slate-500 tabular-nums ml-1">{{ editStrategyData.strategies?.length || 0 }}</span>
                 </p>
 
-                <div v-if="!editStrategyData.strategies?.length" class="text-xs text-slate-600 italic">
-                  No sub-strategies configured.
+                <div v-if="!editStrategyData.strategies?.length" class="text-sm text-slate-500">
+                  No sub-strategies configured
                 </div>
 
-                <div class="space-y-4">
+                <div class="space-y-3">
                   <div
                     v-for="(sub, idx) in editStrategyData.strategies"
                     :key="idx"
-                    class="rounded-xl border border-border-subtle bg-surface/40 p-4 space-y-4"
+                    class="rounded-xl border border-white/[0.07] p-4 space-y-5"
                   >
                     <!-- Sub-strategy header -->
                     <div class="flex items-start justify-between gap-3">
                       <div class="min-w-0">
-                        <div class="flex items-center gap-2 flex-wrap">
-                          <p class="text-sm font-bold text-slate-100">{{ strategyLabel(sub.strategy) }}</p>
-                          <span class="text-[10px] text-slate-600 font-mono">{{ strategyCanonicalId(sub.strategy) }}</span>
+                        <div class="flex items-baseline gap-2 flex-wrap">
+                          <p class="text-sm font-medium text-slate-100">{{ strategyLabel(sub.strategy) }}</p>
+                          <span class="text-xs text-slate-500 font-mono">{{ strategyCanonicalId(sub.strategy) }}</span>
                         </div>
-                        <p v-if="getStrategyMeta(sub.strategy)?.description" class="text-[11px] text-slate-500 mt-0.5 leading-relaxed">
+                        <p v-if="getStrategyMeta(sub.strategy)?.description" class="text-xs text-slate-500 mt-1 leading-relaxed">
                           {{ getStrategyMeta(sub.strategy)?.description }}
                         </p>
                       </div>
                       <button
                         @click="removeSubStrategy(idx)"
-                        class="shrink-0 text-slate-600 hover:text-red-400 transition-colors"
+                        class="ui-icon-btn -mr-2 -mt-1 shrink-0 hover:text-loss"
                         title="Remove sub-strategy"
+                        aria-label="Remove sub-strategy"
                       >
                         <span class="material-symbols-outlined text-[18px]">delete</span>
                       </button>
@@ -1657,70 +2007,66 @@ onMounted(async () => {
                     <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
                       <!-- Weight -->
                       <div>
-                        <label class="block text-[11px] font-medium text-slate-500 mb-1">Weight</label>
+                        <label class="sub-label">Weight</label>
                         <input
                           v-model.number="sub.weight"
                           type="number" min="0" max="1" step="0.05"
-                          class="w-full bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono"
+                          class="ui-input tabular-nums"
                         />
                       </div>
                       <!-- Execution Position -->
                       <div>
-                        <label class="block text-[11px] font-medium text-slate-500 mb-1">Exec Position</label>
+                        <label class="sub-label">Exec position</label>
                         <input
                           v-model.number="sub.execution_position"
                           type="number" step="1"
-                          class="w-full bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono"
+                          class="ui-input tabular-nums"
                         />
                       </div>
                       <!-- Decision Phase -->
                       <div>
-                        <label class="block text-[11px] font-medium text-slate-500 mb-1">Phase</label>
-                        <div class="flex gap-1">
+                        <label class="sub-label">Phase</label>
+                        <div class="ui-seg w-full">
                           <button
                             v-for="p in ['pre', 'post']" :key="p"
                             @click="sub.decision_phase = p"
-                            class="flex-1 py-1.5 rounded-md text-[11px] font-semibold border transition-all"
-                            :class="sub.decision_phase === p
-                              ? 'bg-primary/15 text-primary border-primary/40'
-                              : 'border-border-subtle text-slate-500 hover:text-slate-300'"
-                          >{{ p }}</button>
+                            class="ui-seg-btn flex-1 h-8 px-0"
+                            :class="sub.decision_phase === p ? 'ui-seg-btn-active' : ''"
+                          >{{ p === 'pre' ? 'Pre' : 'Post' }}</button>
                         </div>
                       </div>
                       <!-- Execution Scope -->
                       <div>
-                        <label class="block text-[11px] font-medium text-slate-500 mb-1">Scope</label>
-                        <div class="flex gap-1">
+                        <label class="sub-label">Scope</label>
+                        <div class="ui-seg w-full">
                           <button
                             v-for="s in ['per_symbol', 'run_once']" :key="s"
                             @click="sub.execution_scope = s"
-                            class="flex-1 py-1.5 rounded-md text-[10px] font-semibold border transition-all"
-                            :class="sub.execution_scope === s
-                              ? 'bg-primary/15 text-primary border-primary/40'
-                              : 'border-border-subtle text-slate-500 hover:text-slate-300'"
-                          >{{ s === 'per_symbol' ? 'per sym' : 'once' }}</button>
+                            class="ui-seg-btn flex-1 h-8 px-0"
+                            :class="sub.execution_scope === s ? 'ui-seg-btn-active' : ''"
+                          >{{ s === 'per_symbol' ? 'Per sym' : 'Once' }}</button>
                         </div>
                       </div>
                     </div>
 
                     <!-- LLM -->
                     <div v-if="llmConfigGroups(sub).length">
-                      <p class="text-[11px] font-medium text-slate-500 uppercase tracking-wider mb-2">LLM</p>
+                      <p class="sub-section">LLM</p>
                       <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         <div
                           v-for="group in llmConfigGroups(sub)"
                           :key="group.label"
-                          class="rounded-lg border border-border-subtle bg-surface px-3 py-3 space-y-2"
+                          class="rounded-lg border border-white/[0.07] px-3 py-3"
                         >
                           <div class="flex items-start justify-between gap-3">
                             <div class="min-w-0">
-                              <p class="text-xs font-semibold text-slate-200">{{ group.label }}</p>
-                              <p class="text-[11px] text-slate-500 leading-relaxed">{{ llmConfigSummary(sub, group) }}</p>
+                              <p class="text-sm text-slate-200">{{ group.label }}</p>
+                              <p class="text-xs text-slate-500 mt-0.5 leading-relaxed">{{ llmConfigSummary(sub, group) }}</p>
                             </div>
                             <button
                               type="button"
                               @click="openLlmConfigModal(sub, group)"
-                              class="shrink-0 rounded-md border border-primary/20 px-2.5 py-1 text-[11px] font-semibold text-primary hover:bg-primary/10 transition-colors"
+                              class="ui-btn shrink-0"
                             >
                               Edit
                             </button>
@@ -1731,22 +2077,20 @@ onMounted(async () => {
 
                     <!-- Config fields -->
                     <div v-if="configEntries(sub).length">
-                      <p class="text-[11px] font-medium text-slate-500 uppercase tracking-wider mb-2">Config</p>
-                      <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                      <p class="sub-section">Config</p>
+                      <div class="grid grid-cols-2 sm:grid-cols-3 gap-x-3 gap-y-4">
                       <div v-for="[key, val] in configEntries(sub)" :key="key">
-                        <label class="block text-[11px] font-medium text-slate-500 mb-1">{{ getStrategyConfigFieldMeta(sub.strategy, key).label }}</label>
+                        <label class="sub-label">{{ getStrategyConfigFieldMeta(sub.strategy, key).label }}</label>
                         <!-- Boolean toggle -->
                         <template v-if="getConfigType(getRefConfig(sub.strategy)[key] ?? val) === 'boolean'">
                           <button
                             type="button"
                             @click="sub.config[key] = !sub.config[key]"
-                              class="relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 transition-colors"
-                              :class="sub.config[key] ? 'bg-primary border-primary' : 'bg-surface border-border-subtle'"
+                              class="ui-switch focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25"
+                              role="switch"
+                              :aria-checked="!!sub.config[key]"
                             >
-                              <span
-                                class="inline-block size-3.5 rounded-full bg-white shadow transition-transform"
-                                :class="sub.config[key] ? 'translate-x-4' : 'translate-x-0.5'"
-                              ></span>
+                              <span class="ui-switch-knob"></span>
                             </button>
                           </template>
                           <!-- Number input -->
@@ -1755,7 +2099,7 @@ onMounted(async () => {
                               :value="sub.config[key]"
                               @input="updateConfigField(sub, key, $event.target.value, 'number')"
                               type="number"
-                              class="w-full bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono"
+                              class="ui-input tabular-nums"
                             />
                           </template>
                           <!-- String / fallback -->
@@ -1766,21 +2110,21 @@ onMounted(async () => {
                               @blur="syncConfigJsonDraft(sub, key, val)"
                               rows="4"
                               spellcheck="false"
-                              class="w-full bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono resize-y"
-                              :class="getConfigFieldError(sub, key) ? 'border-red-500/60 focus:border-red-400' : ''"
+                              class="ui-input text-xs font-mono resize-y"
+                              :class="getConfigFieldError(sub, key) ? 'border-loss/60 focus:border-loss' : ''"
                             ></textarea>
                           </template>
                           <template v-else>
                             <input
                               v-model="sub.config[key]"
                               type="text"
-                              class="w-full bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono"
+                              class="ui-input font-mono"
                             />
                           </template>
-                          <p v-if="getConfigFieldError(sub, key)" class="mt-1 text-[10px] leading-relaxed text-red-400">
+                          <p v-if="getConfigFieldError(sub, key)" class="mt-1.5 text-xs leading-relaxed text-loss">
                             Invalid JSON: {{ getConfigFieldError(sub, key) }}
                           </p>
-                        <p v-if="getStrategyConfigFieldMeta(sub.strategy, key).description" class="mt-1 text-[10px] leading-relaxed text-slate-600">
+                        <p v-if="getStrategyConfigFieldMeta(sub.strategy, key).description" class="mt-1.5 text-xs leading-relaxed text-slate-500">
                           {{ getStrategyConfigFieldMeta(sub.strategy, key).description }}
                         </p>
                       </div>
@@ -1793,7 +2137,7 @@ onMounted(async () => {
             </template>
 
             <!-- Error (no data, no loading) -->
-            <div v-else-if="editStrategyMsg && !editStrategyOk" class="rounded-lg px-4 py-3 text-sm bg-red-500/10 border border-red-500/20 text-red-400">
+            <div v-else-if="editStrategyMsg && !editStrategyOk" class="msg msg-err">
               {{ editStrategyMsg }}
             </div>
 
@@ -1801,10 +2145,8 @@ onMounted(async () => {
             <Transition name="slide-up">
               <div
                 v-if="editStrategyMsg && editStrategyData"
-                class="rounded-lg px-4 py-3 text-sm font-medium"
-                :class="editStrategyOk
-                  ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400'
-                  : 'bg-red-500/10 border border-red-500/20 text-red-400'"
+                class="msg"
+                :class="editStrategySaving ? 'msg-busy' : editStrategyOk ? 'msg-ok' : 'msg-err'"
               >
                 {{ editStrategyMsg }}
               </div>
@@ -1812,17 +2154,16 @@ onMounted(async () => {
           </div>
 
           <!-- Footer -->
-          <div class="px-6 pb-6 pt-4 border-t border-border-subtle flex gap-3 shrink-0">
-            <button @click="closeEditStrategy" :disabled="editStrategySaving"
-              class="flex-1 py-2.5 rounded-lg border border-border-subtle text-sm font-medium text-slate-400 hover:text-slate-200 transition-colors disabled:opacity-40">
+          <div class="ui-modal-foot shrink-0">
+            <button @click="closeEditStrategy" :disabled="editStrategySaving" class="ui-btn-ghost h-9 px-4 rounded-lg">
               Cancel
             </button>
             <button
               v-if="editStrategyData && !editStrategyLoading"
               @click="submitEditStrategy" :disabled="editStrategySaving"
-              class="flex-1 py-2.5 rounded-lg bg-amber-500 text-black text-sm font-bold hover:bg-amber-400 transition-all disabled:opacity-50 flex items-center justify-center gap-2">
-              <span v-if="editStrategySaving" class="material-symbols-outlined text-base animate-spin">progress_activity</span>
-              {{ editStrategySaving ? 'Saving...' : 'Save Changes' }}
+              class="ui-btn-primary">
+              <span v-if="editStrategySaving" class="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
+              {{ editStrategySaving ? 'Saving...' : 'Save changes' }}
             </button>
           </div>
         </div>
@@ -1835,71 +2176,64 @@ onMounted(async () => {
     <Transition name="fade">
       <div
         v-if="showCreateBacktest"
-        class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+        class="ui-overlay"
         @click.self="closeCreateBacktest"
       >
-        <div class="relative w-full max-w-md bg-surface border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
+        <div class="modal-panel ui-modal max-w-md flex flex-col max-h-[90vh]">
 
-          <div class="flex items-center justify-between px-6 py-5 border-b border-border-subtle">
-            <div class="flex items-center gap-3">
-              <div class="size-9 rounded-xl bg-primary/10 border border-primary/20 flex items-center justify-center shrink-0">
-                <span class="material-symbols-outlined text-primary text-lg">play_circle</span>
-              </div>
-              <div>
-                <h2 class="text-base font-bold">Create Backtest</h2>
-                <p class="text-[11px] text-slate-500 font-mono mt-0.5">{{ createBtForm.instance_id }}</p>
-              </div>
+          <div class="ui-modal-head shrink-0">
+            <div class="min-w-0">
+              <h2 class="text-base font-medium text-slate-100">Create backtest</h2>
+              <p class="text-sm text-slate-500 mt-1 truncate">{{ createBtForm.instance_id }}</p>
             </div>
-            <button @click="closeCreateBacktest" :disabled="creatingBacktest" class="text-slate-500 hover:text-slate-300 transition-colors disabled:opacity-40">
-              <span class="material-symbols-outlined">close</span>
+            <button @click="closeCreateBacktest" :disabled="creatingBacktest" class="ui-icon-btn ml-auto shrink-0 disabled:opacity-40" aria-label="Close">
+              <span class="material-symbols-outlined text-[18px]">close</span>
             </button>
           </div>
 
-          <div class="px-6 py-5 space-y-4">
+          <div class="ui-modal-body flex-1 overflow-y-auto space-y-5">
             <!-- Stocks -->
             <div>
-              <label class="block text-xs font-medium text-slate-400 mb-1.5">Stocks <span class="text-red-400">*</span></label>
+              <label class="ui-field-label">Stocks <span class="text-slate-500">*</span></label>
               <input
                 v-model="createBtForm.stocks"
                 type="text"
                 placeholder="e.g. AAPL, MSFT, TSLA"
-                class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono uppercase"
+                class="ui-input font-mono"
               />
-              <p class="text-[11px] text-slate-600 mt-1">Comma-separated ticker symbols</p>
+              <p class="ui-help">Comma-separated ticker symbols</p>
             </div>
 
             <!-- Date range -->
             <div class="grid grid-cols-2 gap-3">
               <div>
-                <label class="block text-xs font-medium text-slate-400 mb-1.5">Start Date <span class="text-red-400">*</span></label>
+                <label class="ui-field-label">Start date <span class="text-slate-500">*</span></label>
                 <input
                   v-model="createBtForm.start_date"
                   type="date"
-                  class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary transition-colors"
+                  class="ui-input tabular-nums [color-scheme:dark]"
                 />
               </div>
               <div>
-                <label class="block text-xs font-medium text-slate-400 mb-1.5">End Date <span class="text-red-400">*</span></label>
+                <label class="ui-field-label">End date <span class="text-slate-500">*</span></label>
                 <input
                   v-model="createBtForm.end_date"
                   type="date"
-                  class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary transition-colors"
+                  class="ui-input tabular-nums [color-scheme:dark]"
                 />
               </div>
             </div>
 
             <!-- Granularity -->
             <div>
-              <label class="block text-xs font-medium text-slate-400 mb-1.5">Granularity</label>
-              <div class="flex gap-1.5 flex-wrap">
+              <label class="ui-field-label">Granularity</label>
+              <div class="ui-seg flex-wrap" role="group" aria-label="Granularity">
                 <button
                   v-for="g in GRANULARITIES"
                   :key="g.value"
                   @click="createBtForm.granularity = g.value"
-                  class="px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all"
-                  :class="createBtForm.granularity === g.value
-                    ? 'bg-primary/15 text-primary border-primary/40'
-                    : 'border-border-subtle text-slate-400 hover:text-slate-200'"
+                  class="ui-seg-btn tabular-nums"
+                  :class="createBtForm.granularity === g.value ? 'ui-seg-btn-active' : ''"
                 >
                   {{ g.label }}
                 </button>
@@ -1908,27 +2242,25 @@ onMounted(async () => {
 
             <!-- Initial cash -->
             <div>
-              <label class="block text-xs font-medium text-slate-400 mb-1.5">Initial Cash <span class="text-slate-600">($)</span></label>
+              <label class="ui-field-label">Initial cash <span class="text-slate-500">($)</span></label>
               <input
                 v-model="createBtForm.initial_cash"
                 type="number"
                 min="1"
                 step="1000"
                 placeholder="100000"
-                class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono"
+                class="ui-input tabular-nums"
               />
             </div>
 
             <Transition name="slide-up">
               <div
                 v-if="createBtMsg"
-                class="rounded-lg px-4 py-3 text-sm font-medium"
-                :class="createBtOk
-                  ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400'
-                  : 'bg-red-500/10 border border-red-500/20 text-red-400'"
+                class="msg"
+                :class="creatingBacktest ? 'msg-busy' : createBtOk ? 'msg-ok' : 'msg-err'"
               >
                 <span v-if="creatingBacktest" class="inline-flex items-center gap-2">
-                  <span class="material-symbols-outlined text-base animate-spin">progress_activity</span>
+                  <span class="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
                   {{ createBtMsg }}
                 </span>
                 <span v-else>{{ createBtMsg }}</span>
@@ -1936,16 +2268,13 @@ onMounted(async () => {
             </Transition>
           </div>
 
-          <div class="px-6 pb-6 flex gap-3">
-            <button @click="closeCreateBacktest" :disabled="creatingBacktest"
-              class="flex-1 py-2.5 rounded-lg border border-border-subtle text-sm font-medium text-slate-400 hover:text-slate-200 transition-colors disabled:opacity-40">
+          <div class="ui-modal-foot shrink-0">
+            <button @click="closeCreateBacktest" :disabled="creatingBacktest" class="ui-btn-ghost h-9 px-4 rounded-lg">
               Cancel
             </button>
-            <button @click="submitCreateBacktest" :disabled="creatingBacktest"
-              class="flex-1 py-2.5 rounded-lg bg-primary text-white text-sm font-bold hover:brightness-110 transition-all disabled:opacity-50 flex items-center justify-center gap-2">
-              <span v-if="creatingBacktest" class="material-symbols-outlined text-base animate-spin">progress_activity</span>
-              <span v-else class="material-symbols-outlined text-base">play_circle</span>
-              {{ creatingBacktest ? 'Queuing...' : 'Run Backtest' }}
+            <button @click="submitCreateBacktest" :disabled="creatingBacktest" class="ui-btn-primary">
+              <span v-if="creatingBacktest" class="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
+              {{ creatingBacktest ? 'Queuing...' : 'Run backtest' }}
             </button>
           </div>
         </div>
@@ -1958,53 +2287,44 @@ onMounted(async () => {
     <Transition name="fade">
       <div
         v-if="showCreateStrategy"
-        class="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+        class="ui-overlay z-[60] bg-black/70"
       >
-        <div class="relative w-full max-w-2xl bg-surface border border-border-subtle rounded-2xl shadow-2xl flex flex-col max-h-[90vh]">
+        <div class="modal-panel ui-modal max-w-2xl flex flex-col max-h-[90vh]">
 
           <!-- Header -->
-          <div class="flex items-center justify-between px-6 py-5 border-b border-border-subtle shrink-0">
-            <div class="flex items-center gap-3 min-w-0">
-              <div class="size-9 rounded-xl bg-zinc-500/10 border border-zinc-500/20 flex items-center justify-center shrink-0">
-                <span class="material-symbols-outlined text-zinc-300 text-lg">add_circle</span>
-              </div>
-              <h2 class="text-base font-bold">New Strategy</h2>
-            </div>
-            <button @click="closeCreateStrategy" :disabled="creatingStrategy" class="text-slate-500 hover:text-slate-300 transition-colors disabled:opacity-40 ml-4 shrink-0">
-              <span class="material-symbols-outlined">close</span>
+          <div class="ui-modal-head shrink-0">
+            <h2 class="text-base font-medium text-slate-100">New strategy</h2>
+            <button @click="closeCreateStrategy" :disabled="creatingStrategy" class="ui-icon-btn ml-auto shrink-0 disabled:opacity-40" aria-label="Close">
+              <span class="material-symbols-outlined text-[18px]">close</span>
             </button>
           </div>
 
           <!-- Body -->
-          <div class="flex-1 overflow-y-auto px-6 py-5 space-y-5">
+          <div class="ui-modal-body flex-1 overflow-y-auto space-y-6">
 
             <!-- Name -->
             <div>
-              <label class="block text-xs font-medium text-slate-400 mb-1.5">Strategy Name <span class="text-red-400">*</span></label>
+              <label class="ui-field-label">Strategy name <span class="text-slate-500">*</span></label>
               <input
                 v-model="newStrategyForm.name"
                 type="text"
-                placeholder="e.g. My Momentum Strategy"
-                class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors"
+                placeholder="e.g. My momentum strategy"
+                class="ui-input"
               />
             </div>
 
             <!-- Add sub-strategy -->
             <div v-if="availableStrategyOptions.length">
-              <label class="block text-xs font-medium text-slate-400 mb-1.5">Add Sub-strategy</label>
+              <label class="ui-field-label">Add sub-strategy</label>
               <div class="flex gap-2">
-                <select
-                  v-model="newStrategyPickName"
-                  class="flex-1 bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary transition-colors"
-                >
+                <select v-model="newStrategyPickName" class="ui-input flex-1 min-w-0">
                   <option v-for="s in availableStrategyOptions" :key="s.value" :value="s.value">{{ s.label }} · {{ s.value }}</option>
                 </select>
                 <button
                   type="button"
                   @click="addNewSubStrategy"
-                  class="shrink-0 flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold text-primary hover:bg-primary/10 border border-primary/20 transition-colors"
+                  class="ui-btn h-9 shrink-0"
                 >
-                  <span class="material-symbols-outlined text-[14px]">add</span>
                   Add
                 </button>
               </div>
@@ -2012,34 +2332,35 @@ onMounted(async () => {
 
             <!-- Sub-strategy cards -->
             <div>
-              <p class="text-xs font-medium text-slate-400 uppercase tracking-wider mb-3">
+              <p class="text-sm text-slate-200 mb-3">
                 Sub-strategies
-                <span class="text-slate-600 ml-1">({{ newStrategyForm.strategies.length }})</span>
+                <span class="text-slate-500 tabular-nums ml-1">{{ newStrategyForm.strategies.length }}</span>
               </p>
-              <div v-if="!newStrategyForm.strategies.length" class="text-xs text-slate-600 italic">
-                No sub-strategies added yet. Use the selector above to add one.
+              <div v-if="!newStrategyForm.strategies.length" class="text-sm text-slate-500">
+                No sub-strategies yet. Add one with the selector above.
               </div>
-              <div class="space-y-4">
+              <div class="space-y-3">
                 <div
                   v-for="(sub, idx) in newStrategyForm.strategies"
                   :key="idx"
-                  class="rounded-xl border border-border-subtle bg-surface/40 p-4 space-y-4"
+                  class="rounded-xl border border-white/[0.07] p-4 space-y-5"
                 >
                   <!-- Header -->
                   <div class="flex items-start justify-between gap-3">
                     <div class="min-w-0">
-                      <div class="flex items-center gap-2 flex-wrap">
-                        <p class="text-sm font-bold text-slate-100">{{ strategyLabel(sub.strategy) }}</p>
-                        <span class="text-[10px] text-slate-600 font-mono">{{ strategyCanonicalId(sub.strategy) }}</span>
+                      <div class="flex items-baseline gap-2 flex-wrap">
+                        <p class="text-sm font-medium text-slate-100">{{ strategyLabel(sub.strategy) }}</p>
+                        <span class="text-xs text-slate-500 font-mono">{{ strategyCanonicalId(sub.strategy) }}</span>
                       </div>
-                      <p v-if="getStrategyMeta(sub.strategy)?.description" class="text-[11px] text-slate-500 mt-0.5 leading-relaxed">
+                      <p v-if="getStrategyMeta(sub.strategy)?.description" class="text-xs text-slate-500 mt-1 leading-relaxed">
                         {{ getStrategyMeta(sub.strategy)?.description }}
                       </p>
                     </div>
                     <button
                       @click="removeNewSubStrategy(idx)"
-                      class="shrink-0 text-slate-600 hover:text-red-400 transition-colors"
+                      class="ui-icon-btn -mr-2 -mt-1 shrink-0 hover:text-loss"
                       title="Remove"
+                      aria-label="Remove sub-strategy"
                     >
                       <span class="material-symbols-outlined text-[18px]">delete</span>
                     </button>
@@ -2048,32 +2369,32 @@ onMounted(async () => {
                   <!-- Core fields -->
                   <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
                     <div>
-                      <label class="block text-[11px] font-medium text-slate-500 mb-1">Weight</label>
+                      <label class="sub-label">Weight</label>
                       <input v-model.number="sub.weight" type="number" min="0" max="1" step="0.05"
-                        class="w-full bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono" />
+                        class="ui-input tabular-nums" />
                     </div>
                     <div>
-                      <label class="block text-[11px] font-medium text-slate-500 mb-1">Exec Position</label>
+                      <label class="sub-label">Exec position</label>
                       <input v-model.number="sub.execution_position" type="number" step="1"
-                        class="w-full bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono" />
+                        class="ui-input tabular-nums" />
                     </div>
                     <div>
-                      <label class="block text-[11px] font-medium text-slate-500 mb-1">Phase</label>
-                      <div class="flex gap-1">
+                      <label class="sub-label">Phase</label>
+                      <div class="ui-seg w-full">
                         <button v-for="p in ['pre', 'post']" :key="p" @click="sub.decision_phase = p"
-                          class="flex-1 py-1.5 rounded-md text-[11px] font-semibold border transition-all"
-                          :class="sub.decision_phase === p ? 'bg-primary/15 text-primary border-primary/40' : 'border-border-subtle text-slate-500 hover:text-slate-300'">
-                          {{ p }}
+                          class="ui-seg-btn flex-1 h-8 px-0"
+                          :class="sub.decision_phase === p ? 'ui-seg-btn-active' : ''">
+                          {{ p === 'pre' ? 'Pre' : 'Post' }}
                         </button>
                       </div>
                     </div>
                     <div>
-                      <label class="block text-[11px] font-medium text-slate-500 mb-1">Scope</label>
-                      <div class="flex gap-1">
+                      <label class="sub-label">Scope</label>
+                      <div class="ui-seg w-full">
                         <button v-for="s in ['per_symbol', 'run_once']" :key="s" @click="sub.execution_scope = s"
-                          class="flex-1 py-1.5 rounded-md text-[10px] font-semibold border transition-all"
-                          :class="sub.execution_scope === s ? 'bg-primary/15 text-primary border-primary/40' : 'border-border-subtle text-slate-500 hover:text-slate-300'">
-                          {{ s === 'per_symbol' ? 'per sym' : 'once' }}
+                          class="ui-seg-btn flex-1 h-8 px-0"
+                          :class="sub.execution_scope === s ? 'ui-seg-btn-active' : ''">
+                          {{ s === 'per_symbol' ? 'Per sym' : 'Once' }}
                         </button>
                       </div>
                     </div>
@@ -2081,22 +2402,22 @@ onMounted(async () => {
 
                   <!-- LLM -->
                   <div v-if="llmConfigGroups(sub).length">
-                    <p class="text-[11px] font-medium text-slate-500 uppercase tracking-wider mb-2">LLM</p>
+                    <p class="sub-section">LLM</p>
                     <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       <div
                         v-for="group in llmConfigGroups(sub)"
                         :key="group.label"
-                        class="rounded-lg border border-border-subtle bg-surface px-3 py-3 space-y-2"
+                        class="rounded-lg border border-white/[0.07] px-3 py-3"
                       >
                         <div class="flex items-start justify-between gap-3">
                           <div class="min-w-0">
-                            <p class="text-xs font-semibold text-slate-200">{{ group.label }}</p>
-                            <p class="text-[11px] text-slate-500 leading-relaxed">{{ llmConfigSummary(sub, group) }}</p>
+                            <p class="text-sm text-slate-200">{{ group.label }}</p>
+                            <p class="text-xs text-slate-500 mt-0.5 leading-relaxed">{{ llmConfigSummary(sub, group) }}</p>
                           </div>
                           <button
                             type="button"
                             @click="openLlmConfigModal(sub, group)"
-                            class="shrink-0 rounded-md border border-primary/20 px-2.5 py-1 text-[11px] font-semibold text-primary hover:bg-primary/10 transition-colors"
+                            class="ui-btn shrink-0"
                           >
                             Edit
                           </button>
@@ -2107,21 +2428,21 @@ onMounted(async () => {
 
                   <!-- Config -->
                   <div v-if="configEntries(sub).length">
-                    <p class="text-[11px] font-medium text-slate-500 uppercase tracking-wider mb-2">Config</p>
-                    <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                    <p class="sub-section">Config</p>
+                    <div class="grid grid-cols-2 sm:grid-cols-3 gap-x-3 gap-y-4">
                       <div v-for="[key, val] in configEntries(sub)" :key="key">
-                        <label class="block text-[11px] font-medium text-slate-500 mb-1">{{ getStrategyConfigFieldMeta(sub.strategy, key).label }}</label>
+                        <label class="sub-label">{{ getStrategyConfigFieldMeta(sub.strategy, key).label }}</label>
                         <template v-if="getConfigType(getRefConfig(sub.strategy)[key] ?? val) === 'boolean'">
                           <button type="button" @click="sub.config[key] = !sub.config[key]"
-                            class="relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 transition-colors"
-                            :class="sub.config[key] ? 'bg-primary border-primary' : 'bg-surface border-border-subtle'">
-                            <span class="inline-block size-3.5 rounded-full bg-white shadow transition-transform"
-                              :class="sub.config[key] ? 'translate-x-4' : 'translate-x-0.5'"></span>
+                            class="ui-switch focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25"
+                            role="switch"
+                            :aria-checked="!!sub.config[key]">
+                            <span class="ui-switch-knob"></span>
                           </button>
                         </template>
                         <template v-else-if="getConfigType(getRefConfig(sub.strategy)[key] ?? val) === 'number'">
                           <input :value="sub.config[key]" @input="updateConfigField(sub, key, $event.target.value, 'number')"
-                            type="number" class="w-full bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono" />
+                            type="number" class="ui-input tabular-nums" />
                         </template>
                         <template v-else-if="getConfigType(getRefConfig(sub.strategy)[key] ?? val) === 'json'">
                           <textarea
@@ -2130,18 +2451,18 @@ onMounted(async () => {
                             @blur="syncConfigJsonDraft(sub, key, val)"
                             rows="4"
                             spellcheck="false"
-                            class="w-full bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono resize-y"
-                            :class="getConfigFieldError(sub, key) ? 'border-red-500/60 focus:border-red-400' : ''"
+                            class="ui-input text-xs font-mono resize-y"
+                            :class="getConfigFieldError(sub, key) ? 'border-loss/60 focus:border-loss' : ''"
                           ></textarea>
                         </template>
                         <template v-else>
                           <input v-model="sub.config[key]" type="text"
-                            class="w-full bg-surface border border-border-subtle rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-primary transition-colors font-mono" />
+                            class="ui-input font-mono" />
                         </template>
-                        <p v-if="getConfigFieldError(sub, key)" class="mt-1 text-[10px] leading-relaxed text-red-400">
+                        <p v-if="getConfigFieldError(sub, key)" class="mt-1.5 text-xs leading-relaxed text-loss">
                           Invalid JSON: {{ getConfigFieldError(sub, key) }}
                         </p>
-                        <p v-if="getStrategyConfigFieldMeta(sub.strategy, key).description" class="mt-1 text-[10px] leading-relaxed text-slate-600">
+                        <p v-if="getStrategyConfigFieldMeta(sub.strategy, key).description" class="mt-1.5 text-xs leading-relaxed text-slate-500">
                           {{ getStrategyConfigFieldMeta(sub.strategy, key).description }}
                         </p>
                       </div>
@@ -2156,13 +2477,11 @@ onMounted(async () => {
             <Transition name="slide-up">
               <div
                 v-if="createStrategyMsg"
-                class="rounded-lg px-4 py-3 text-sm font-medium"
-                :class="createStrategyOk
-                  ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400'
-                  : 'bg-red-500/10 border border-red-500/20 text-red-400'"
+                class="msg"
+                :class="creatingStrategy ? 'msg-busy' : createStrategyOk ? 'msg-ok' : 'msg-err'"
               >
                 <span v-if="creatingStrategy" class="inline-flex items-center gap-2">
-                  <span class="material-symbols-outlined text-base animate-spin">progress_activity</span>
+                  <span class="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
                   {{ createStrategyMsg }}
                 </span>
                 <span v-else>{{ createStrategyMsg }}</span>
@@ -2171,15 +2490,13 @@ onMounted(async () => {
           </div>
 
           <!-- Footer -->
-          <div class="px-6 pb-6 pt-4 border-t border-border-subtle flex gap-3 shrink-0">
-            <button @click="closeCreateStrategy" :disabled="creatingStrategy"
-              class="flex-1 py-2.5 rounded-lg border border-border-subtle text-sm font-medium text-slate-400 hover:text-slate-200 transition-colors disabled:opacity-40">
+          <div class="ui-modal-foot shrink-0">
+            <button @click="closeCreateStrategy" :disabled="creatingStrategy" class="ui-btn-ghost h-9 px-4 rounded-lg">
               Cancel
             </button>
-            <button @click="submitCreateStrategy" :disabled="creatingStrategy"
-              class="flex-1 py-2.5 rounded-lg bg-zinc-600 hover:bg-zinc-500 text-white text-sm font-bold transition-all disabled:opacity-50 flex items-center justify-center gap-2">
-              <span v-if="creatingStrategy" class="material-symbols-outlined text-base animate-spin">progress_activity</span>
-              {{ creatingStrategy ? 'Creating...' : 'Create Strategy' }}
+            <button @click="submitCreateStrategy" :disabled="creatingStrategy" class="ui-btn-primary">
+              <span v-if="creatingStrategy" class="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
+              {{ creatingStrategy ? 'Creating...' : 'Create strategy' }}
             </button>
           </div>
         </div>
@@ -2187,73 +2504,70 @@ onMounted(async () => {
     </Transition>
   </Teleport>
 
-  <!-- ── Add Stock Modal ───────────────────────────────────────────────────── -->
+  <!-- ── LLM Config Modal ──────────────────────────────────────────────────── -->
   <Teleport to="body">
     <Transition name="fade">
       <div
         v-if="showLlmConfigModal"
-        class="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+        class="ui-overlay z-[70] bg-black/70"
       >
-        <div class="relative w-full max-w-lg bg-surface border border-border-subtle rounded-2xl shadow-2xl flex flex-col max-h-[90vh]">
-          <div class="flex items-center justify-between px-6 py-5 border-b border-border-subtle shrink-0">
-            <div>
-              <h2 class="text-base font-bold">{{ llmConfigTarget?.group?.label || 'LLM Config' }}</h2>
-              <p class="text-[11px] text-slate-500 mt-0.5">Select a model from your saved configurations.</p>
+        <div class="modal-panel ui-modal max-w-lg flex flex-col max-h-[90vh]">
+          <div class="ui-modal-head shrink-0">
+            <div class="min-w-0">
+              <h2 class="text-base font-medium text-slate-100">{{ llmConfigTarget?.group?.label || 'LLM config' }}</h2>
+              <p class="text-sm text-slate-500 mt-1">Pick one of your saved models</p>
             </div>
-            <button @click="closeLlmConfigModal" class="text-slate-500 hover:text-slate-300 transition-colors">
-              <span class="material-symbols-outlined">close</span>
+            <button @click="closeLlmConfigModal" class="ui-icon-btn ml-auto shrink-0" aria-label="Close">
+              <span class="material-symbols-outlined text-[18px]">close</span>
             </button>
           </div>
 
-          <div class="flex-1 overflow-y-auto px-6 py-5 space-y-4">
+          <div class="ui-modal-body flex-1 overflow-y-auto space-y-4">
             <div>
-              <label class="block text-xs font-medium text-slate-400 mb-1.5">Model</label>
+              <label class="ui-field-label">Model</label>
               <select
                 v-model="llmConfigDraft.modelId"
                 @change="onModelSelect"
-                class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-primary transition-colors"
+                class="ui-input"
               >
-                <option value="" disabled>Select a model...</option>
+                <option value="" disabled>Select a model</option>
                 <option v-for="m in savedModels" :key="m.id" :value="m.id">{{ m.name }} — {{ getLlmProviderLabel(m.provider) }} / {{ m.model }}</option>
               </select>
             </div>
 
             <!-- Show selected model details (read-only) -->
-            <div v-if="llmConfigDraft.modelId" class="rounded-lg border border-border-subtle bg-surface px-4 py-3 space-y-1.5">
-              <div class="flex items-center gap-2 text-xs">
-                <span class="text-slate-500 w-20 shrink-0">Provider</span>
-                <span class="text-slate-200">{{ getLlmProviderLabel(llmConfigDraft.provider) }}</span>
+            <dl v-if="llmConfigDraft.modelId" class="rounded-lg border border-white/[0.07] px-4 py-1 divide-y divide-white/[0.05] text-sm">
+              <div class="flex items-center justify-between gap-4 h-10">
+                <dt class="text-slate-500">Provider</dt>
+                <dd class="text-slate-200 truncate">{{ getLlmProviderLabel(llmConfigDraft.provider) }}</dd>
               </div>
-              <div class="flex items-center gap-2 text-xs">
-                <span class="text-slate-500 w-20 shrink-0">Model</span>
-                <span class="text-slate-200 font-mono">{{ llmConfigDraft.model }}</span>
+              <div class="flex items-center justify-between gap-4 h-10">
+                <dt class="text-slate-500">Model</dt>
+                <dd class="text-slate-200 font-mono text-xs truncate">{{ llmConfigDraft.model }}</dd>
               </div>
-              <div class="flex items-center gap-2 text-xs">
-                <span class="text-slate-500 w-20 shrink-0">Effort</span>
-                <span class="text-slate-200">{{ effortLabel(llmConfigDraft) }}</span>
+              <div class="flex items-center justify-between gap-4 h-10">
+                <dt class="text-slate-500">Effort</dt>
+                <dd class="text-slate-200">{{ effortLabel(llmConfigDraft) }}</dd>
               </div>
-            </div>
+            </dl>
 
-            <div v-if="savedModels.length === 0" class="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-3 text-[11px] leading-relaxed text-amber-300/80">
-              No models saved yet. Go to the <strong>Models</strong> tab to add one first.
-            </div>
+            <p v-if="savedModels.length === 0" class="flex items-start gap-2 text-sm text-slate-400">
+              <span class="ui-dot ui-dot-warn mt-2"></span>
+              <span>No models saved yet. Add one on the <span class="text-slate-200">Models</span> page first.</span>
+            </p>
 
-            <div
-              v-if="llmConfigMsg"
-              class="rounded-lg px-3 py-3 text-[11px] leading-relaxed border border-red-500/20 bg-red-500/10 text-red-300"
-            >
+            <div v-if="llmConfigMsg" class="msg msg-err">
               {{ llmConfigMsg }}
             </div>
           </div>
 
-          <div class="px-6 pb-6 pt-4 border-t border-border-subtle flex gap-3 shrink-0">
-            <button @click="closeLlmConfigModal"
-              class="flex-1 py-2.5 rounded-lg border border-border-subtle text-sm font-medium text-slate-400 hover:text-slate-200 transition-colors">
+          <div class="ui-modal-foot shrink-0">
+            <button @click="closeLlmConfigModal" class="ui-btn-ghost h-9 px-4 rounded-lg">
               Cancel
             </button>
             <button @click="saveLlmConfigModal"
               :disabled="!llmConfigDraft.modelId"
-              class="flex-1 py-2.5 rounded-lg bg-primary text-background-dark text-sm font-bold hover:brightness-110 transition-all disabled:opacity-60 disabled:cursor-not-allowed">
+              class="ui-btn-primary">
               Save
             </button>
           </div>
@@ -2262,44 +2576,76 @@ onMounted(async () => {
     </Transition>
   </Teleport>
 
+  <!-- ── Edit Stocks Modal (the add-stock flow, with the current list) ─────── -->
   <Teleport to="body">
     <Transition name="fade">
       <div
         v-if="showAddStock"
-        class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+        class="ui-overlay"
         @click.self="closeAddStock"
       >
-        <div class="relative w-full max-w-xs bg-surface border border-border-subtle rounded-2xl shadow-2xl overflow-hidden">
-          <div class="flex items-center justify-between px-6 py-5 border-b border-border-subtle">
-            <h2 class="text-base font-bold">Add Stock</h2>
-            <button @click="closeAddStock" class="text-slate-500 hover:text-slate-300 transition-colors">
-              <span class="material-symbols-outlined">close</span>
+        <div class="modal-panel ui-modal max-w-sm flex flex-col max-h-[90vh]">
+          <div class="ui-modal-head shrink-0">
+            <div class="min-w-0">
+              <h2 class="text-base font-medium text-slate-100">Edit stocks</h2>
+              <p class="text-sm text-slate-500 mt-1 truncate">{{ addStockId }}</p>
+            </div>
+            <button @click="closeAddStock" class="ui-icon-btn ml-auto shrink-0" aria-label="Close">
+              <span class="material-symbols-outlined text-[18px]">close</span>
             </button>
           </div>
-          <div class="px-6 py-5 space-y-4">
+          <div class="ui-modal-body flex-1 overflow-y-auto space-y-5">
+            <!-- Current symbols, each removable -->
+            <ul
+              v-if="(instances.find(i => i.id === addStockId)?.stocks || []).length"
+              class="rounded-lg border border-white/[0.07] divide-y divide-white/[0.05]"
+            >
+              <li
+                v-for="sym in instances.find(i => i.id === addStockId).stocks"
+                :key="sym"
+                class="h-10 pl-4 pr-1 flex items-center justify-between gap-3"
+              >
+                <span class="text-sm text-slate-200 tabular-nums">{{ sym }}</span>
+                <button
+                  @click="removeStock(addStockId, sym)"
+                  :disabled="busy[addStockId]"
+                  class="ui-icon-btn hover:text-loss disabled:opacity-40"
+                  :title="`Remove ${sym}`"
+                  :aria-label="`Remove ${sym}`"
+                >
+                  <span class="material-symbols-outlined text-[18px]">close</span>
+                </button>
+              </li>
+            </ul>
+            <p v-else class="text-sm text-slate-500">No stocks yet</p>
+
             <div>
-              <label class="block text-xs font-medium text-slate-400 mb-1.5">Ticker Symbol</label>
-              <input
-                v-model="addStockSym"
-                type="text"
-                placeholder="e.g. AAPL"
-                @keydown.enter="submitAddStock"
-                class="w-full bg-surface border border-border-subtle rounded-lg px-3 py-2.5 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-primary transition-colors font-mono uppercase"
-              />
+              <label class="ui-field-label">Add a ticker symbol</label>
+              <div class="flex gap-2">
+                <input
+                  ref="addStockInput"
+                  v-model="addStockSym"
+                  type="text"
+                  placeholder="e.g. AAPL"
+                  autocapitalize="characters"
+                  @keydown.enter="submitAddStock"
+                  @input="addStockOk = ''"
+                  class="ui-input font-mono flex-1 min-w-0"
+                />
+                <button @click="submitAddStock" :disabled="addStockBusy" class="ui-btn h-9 px-4 shrink-0">
+                  <span v-if="addStockBusy" class="material-symbols-outlined text-[16px] animate-spin">progress_activity</span>
+                  {{ addStockBusy ? 'Adding' : 'Add stock' }}
+                </button>
+              </div>
+              <p v-if="addStockOk" class="mt-2 text-xs text-gain" role="status">{{ addStockOk }}</p>
             </div>
-            <div v-if="addStockMsg" class="rounded-lg px-4 py-3 text-sm bg-red-500/10 border border-red-500/20 text-red-400">
+            <div v-if="addStockMsg" class="msg msg-err">
               {{ addStockMsg }}
             </div>
           </div>
-          <div class="px-6 pb-6 flex gap-3">
-            <button @click="closeAddStock" :disabled="addStockBusy"
-              class="flex-1 py-2.5 rounded-lg border border-border-subtle text-sm font-medium text-slate-400 hover:text-slate-200 transition-colors disabled:opacity-40">
-              Cancel
-            </button>
-            <button @click="submitAddStock" :disabled="addStockBusy"
-              class="flex-1 py-2.5 rounded-lg bg-primary text-background-dark text-sm font-bold hover:brightness-110 transition-all disabled:opacity-50 flex items-center justify-center gap-2">
-              <span v-if="addStockBusy" class="material-symbols-outlined text-base animate-spin">progress_activity</span>
-              {{ addStockBusy ? 'Adding...' : 'Add Stock' }}
+          <div class="ui-modal-foot shrink-0">
+            <button @click="closeAddStock" :disabled="addStockBusy" class="ui-btn-ghost h-9 px-4 rounded-lg">
+              Done
             </button>
           </div>
         </div>
@@ -2309,9 +2655,224 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-.fade-enter-active, .fade-leave-active { transition: opacity 0.2s ease; }
-.fade-enter-from, .fade-leave-to       { opacity: 0; }
+/* Instance rows: one line each. Hidden cells take no track, so each
+   breakpoint lists only what shows:
+   phone  name (+ status dot) · actions
+   md     name · status · actions
+   lg+    name · status · strategy · brokerage · actions
+   Actions = Start/Stop (64) + gap (8) + ⋯ (32). */
+.inst-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 16px;
+}
+@media (min-width: 768px) {
+  .inst-row { grid-template-columns: minmax(0, 1fr) 112px 104px; }
+}
+@media (min-width: 1024px) {
+  .inst-row { grid-template-columns: minmax(0, 1.4fr) 112px minmax(0, 1fr) minmax(0, 1fr) 104px; column-gap: 24px; }
+}
 
-.slide-up-enter-active, .slide-up-leave-active { transition: all 0.2s ease; }
+/* Pinned cards.
+   Running is the one place this page moves, so it gets a little show:
+   - a light orbits the card's border (a conic gradient spun behind a 1px
+     ring mask) with a soft blurred glow following it;
+   - the border and the top of the card take a faint green tint;
+   - the status dot pings, the uptime ticks, and the 1D line draws in and
+     ends in a pinging "now" dot;
+   - Start flashes the whole border once; Stop fades the orbit out.
+   Stopped cards are still; crashed cards get a red hairline. Only transform
+   and opacity animate in a loop, and none of it runs under reduced motion. */
+.pin-card {
+  --pin-live: 76, 195, 138;
+  transition: border-color 400ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.pin-card:hover { border-color: rgba(255, 255, 255, 0.12); }
+.pin-running {
+  border-color: rgba(var(--pin-live), 0.18);
+  background-image: linear-gradient(180deg, rgba(var(--pin-live), 0.055) 0, rgba(var(--pin-live), 0) 128px);
+}
+.pin-running:hover { border-color: rgba(var(--pin-live), 0.3); }
+.pin-crashed { border-color: rgba(229, 72, 77, 0.28); }
+.pin-crashed:hover { border-color: rgba(229, 72, 77, 0.4); }
+
+.pin-fx { position: absolute; inset: -1px; border-radius: 12px; pointer-events: none; }
+
+/* A 1px ring: the element's padding box minus its content box. */
+.pin-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  overflow: hidden;
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 700ms cubic-bezier(0.22, 1, 0.36, 1), visibility 0s linear 700ms;
+}
+.pin-running .pin-ring {
+  opacity: 1;
+  visibility: visible;
+  transition: opacity 700ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* The comet: a long faint tail brightening to a near-white head. The square
+   is twice the card's width, so it covers the card at any aspect. */
+.pin-orbit {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 200%;
+  aspect-ratio: 1;
+  background: conic-gradient(
+    from 0deg,
+    rgba(var(--pin-live), 0) 0turn,
+    rgba(var(--pin-live), 0) 0.55turn,
+    rgba(var(--pin-live), 0.36) 0.82turn,
+    rgba(var(--pin-live), 0.9) 0.965turn,
+    rgba(214, 255, 233, 1) 0.99turn,
+    rgba(var(--pin-live), 0) 0.995turn
+  );
+  transform: translate(-50%, -50%) rotate(0turn);
+  animation: pin-orbit 6s linear infinite;
+  will-change: transform;
+}
+@keyframes pin-orbit {
+  to { transform: translate(-50%, -50%) rotate(1turn); }
+}
+
+/* The glow: a wider copy of the ring, blurred, so light spills off the edge
+   where the comet is. */
+.pin-glow {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  filter: blur(10px);
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 700ms cubic-bezier(0.22, 1, 0.36, 1), visibility 0s linear 700ms;
+}
+.pin-running .pin-glow {
+  opacity: 0.9;
+  visibility: visible;
+  transition: opacity 700ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.pin-glow .pin-ring { padding: 3px; opacity: 1; visibility: inherit; transition: none; }
+
+/* Start: the whole border lights and settles. */
+.pin-flash {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  border: 1px solid rgba(var(--pin-live), 0.9);
+  box-shadow: 0 0 24px rgba(var(--pin-live), 0.28), inset 0 0 24px rgba(var(--pin-live), 0.1);
+  opacity: 0;
+}
+.pin-ignite .pin-flash { animation: pin-flash 1.5s cubic-bezier(0.22, 1, 0.36, 1) both; }
+@keyframes pin-flash {
+  0%   { opacity: 0; }
+  10%  { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+/* Status dot: two staggered rings ping out of it while it runs. */
+.pin-dot { position: relative; display: inline-block; width: 7px; height: 7px; border-radius: 9999px; flex-shrink: 0; }
+.pin-dot-live { background: rgb(var(--pin-live)); box-shadow: 0 0 8px rgba(var(--pin-live), 0.55); }
+.pin-dot-live::before,
+.pin-dot-live::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  background: rgba(var(--pin-live), 0.5);
+  animation: pin-ping 2.4s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+.pin-dot-live::after { animation-delay: 1.2s; }
+@keyframes pin-ping {
+  0%        { transform: scale(1);   opacity: 0.6; }
+  70%, 100% { transform: scale(3.2); opacity: 0; }
+}
+.pin-ignite .pin-dot-live { animation: pin-pop 700ms cubic-bezier(0.22, 1, 0.36, 1); }
+@keyframes pin-pop {
+  0%   { transform: scale(1); }
+  35%  { transform: scale(1.9); }
+  100% { transform: scale(1); }
+}
+
+/* The 1D line: gain or loss by the day so far, a faint same-hue fade under
+   it, and its last point marked as "now". */
+.pin-spark.pin-up   { color: #4cc38a; }
+.pin-spark.pin-down { color: #e5484d; }
+.pin-spark:not(.pin-spark-live) { opacity: 0.6; }
+.pin-spark-live .pin-spark-svg { animation: pin-draw 1.2s cubic-bezier(0.22, 1, 0.36, 1) both; }
+@keyframes pin-draw {
+  from { clip-path: inset(-4px 100% -4px 0); }
+  to   { clip-path: inset(-4px -4px -4px 0); }
+}
+.pin-now {
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  margin: -3px 0 0 -3px;
+  border-radius: 9999px;
+  background: currentColor;
+  box-shadow: 0 0 0 2px #161617;
+}
+.pin-spark-live .pin-now { animation: pin-now-in 420ms cubic-bezier(0.22, 1, 0.36, 1) 1s both; }
+.pin-spark-live .pin-now::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  background: currentColor;
+  animation: pin-ping 2.4s cubic-bezier(0, 0, 0.2, 1) 1.4s infinite;
+  opacity: 0;
+}
+@keyframes pin-now-in {
+  from { transform: scale(0); opacity: 0; }
+  to   { transform: scale(1); opacity: 1; }
+}
+
+.pin-filled { font-variation-settings: 'FILL' 1; }
+
+@media (prefers-reduced-motion: reduce) {
+  .pin-card { transition: none; }
+  .pin-orbit { animation: none; background: rgba(var(--pin-live), 0.35); }
+  .pin-glow { display: none; }
+  .pin-ignite .pin-flash,
+  .pin-ignite .pin-dot-live { animation: none; }
+  .pin-dot-live::before,
+  .pin-dot-live::after,
+  .pin-spark-live .pin-now::after { animation: none; opacity: 0; }
+  .pin-spark-live .pin-spark-svg,
+  .pin-spark-live .pin-now { animation: none; }
+}
+
+/* Keyboard focus inside the ⋯ menu matches its hover step. */
+.menu-focus { @apply focus-visible:outline-none focus-visible:bg-white/[0.04]; }
+
+/* Small field label used inside sub-strategy panels. */
+.sub-label { @apply block text-xs text-slate-500 mb-1.5; }
+.sub-section { @apply text-sm text-slate-300 mb-3; }
+
+/* Modal status line: busy is neutral, success gain, failure loss. */
+.msg { @apply rounded-lg border px-4 py-3 text-sm break-words; }
+.msg-busy { @apply border-white/[0.07] bg-raised text-slate-300; }
+.msg-ok { @apply border-gain/20 bg-gain/5 text-gain; }
+.msg-err { @apply border-loss/20 bg-loss/5 text-loss; }
+
+.fade-enter-active, .fade-leave-active { transition: opacity 180ms cubic-bezier(0.22, 1, 0.36, 1); }
+.fade-enter-from, .fade-leave-to       { opacity: 0; }
+.fade-enter-active .modal-panel, .fade-leave-active .modal-panel { transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1); }
+.fade-enter-from .modal-panel, .fade-leave-to .modal-panel { transform: translateY(6px); }
+
+.slide-up-enter-active, .slide-up-leave-active { transition: opacity 150ms cubic-bezier(0.22, 1, 0.36, 1), transform 150ms cubic-bezier(0.22, 1, 0.36, 1); }
 .slide-up-enter-from, .slide-up-leave-to       { opacity: 0; transform: translateY(6px); }
+
+@media (prefers-reduced-motion: reduce) {
+  .fade-enter-active, .fade-leave-active,
+  .fade-enter-active .modal-panel, .fade-leave-active .modal-panel,
+  .slide-up-enter-active, .slide-up-leave-active { transition: none; }
+}
 </style>

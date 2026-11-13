@@ -47,7 +47,16 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSRequiresIPhoneOS: true
         ITSAppUsesNonExemptEncryption: false
-        UILaunchScreen: {}
+        UILaunchScreen:
+          UIColorName: LaunchBackground
+        # Dark only, like the web app: the graphite palette has no light variant.
+        UIUserInterfaceStyle: Dark
+        # Inter, the web app's typeface (OFL). The synced Resources/Fonts folder
+        # copies the files to the bundle root. Use them through `DS.Font`.
+        UIAppFonts:
+          - Inter-Regular.ttf
+          - Inter-Medium.ttf
+          - Inter-SemiBold.ttf
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
         UISupportedInterfaceOrientations:

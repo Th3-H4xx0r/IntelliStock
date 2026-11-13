@@ -1,7 +1,8 @@
 import SwiftUI
 
-/// Which way a figure moved, and how the hero and rows draw it: green with
-/// `arrow.up.right`, red with `arrow.down.right`, or secondary with no arrow.
+/// Which way a figure moved, and how the hero and rows colour it: gain, loss,
+/// or zinc-500 when flat. (`systemImage` names an arrow for screens that
+/// still want one; the web draws none.)
 nonisolated enum ChangeDirection: Hashable, Sendable {
     case up, down, flat
 
@@ -19,7 +20,7 @@ nonisolated enum ChangeDirection: Hashable, Sendable {
         switch self {
         case .up: DS.Palette.up
         case .down: DS.Palette.down
-        case .flat: Color.secondary
+        case .flat: DS.Text.muted
         }
     }
 
@@ -42,20 +43,20 @@ nonisolated enum ChangeDirection: Hashable, Sendable {
     }
 }
 
-/// The hero at the top of a value screen, Stocks style: the big figure, the
-/// change under it, and one status line.
+/// The hero at the top of a value screen, as the web dashboard and stock page
+/// draw it: the big figure, the change under it, and one status line.
 ///
-/// - **Value:** `.dsValueHero()` with monospaced digits. Pass `numericValue`
-///   and the figure rolls between values with the odometer-style
-///   `.contentTransition(.numericText(value:))`, animated by `valueAnimation`
-///   (pass nil while scrubbing so the label tracks the finger).
-/// - **Change:** `.subheadline` semibold in green or red, with an arrow
-///   symbol. `changeLabel` adds a secondary word after it ("Today").
-/// - **Status:** one `.footnote` line in `.secondary`, such as "Markets
-///   closed" or the stock's name, optionally with a status dot.
+/// - **Value:** 40/500 (`DS.Font.hero`) zinc-100, monospaced digits. Pass
+///   `numericValue` and the figure rolls between values with
+///   `.contentTransition(.numericText(value:))`, animated by
+///   `valueAnimation` (pass nil while scrubbing so it tracks the finger).
+/// - **Change:** 14 pt in gain or loss, 8 pt below; `changeLabel` adds a
+///   zinc-500 word after it ("Today"). No arrow.
+/// - **Status:** one 12 pt zinc-500 line, such as "Market closed" or the
+///   stock's name, optionally with a status dot.
 ///
-/// Then the chart, then the range `Picker(.segmented)`. Never repeat the
-/// navigation title here: the title names the thing, the hero shows the number.
+/// Then the chart, then the range control. Never repeat the navigation
+/// title here: the title names the thing, the hero shows the number.
 ///
 ///     HeroValueHeader(
 ///         fmtMoney(equity),
@@ -78,8 +79,8 @@ struct HeroValueHeader<Status: View>: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    /// A hero with a custom status line (a `StatusDot`, a `RelativeTimeText`).
-    /// It is set in `.footnote` and `.secondary`.
+    /// A hero with a custom status line (a `StatusDot`, a `RelativeTimeText`),
+    /// set in 12 pt zinc-500.
     init(
         _ value: String,
         numericValue: Double? = nil,
@@ -101,31 +102,28 @@ struct HeroValueHeader<Status: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: alignment, spacing: 4) {
+        VStack(alignment: alignment, spacing: 0) {
             Text(value)
                 .dsValueHero()
+                .foregroundStyle(DS.Text.primary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.6)
                 .contentTransition(numericValue.map { ContentTransition.numericText(value: $0) } ?? .identity)
                 .animation(reduceMotion ? nil : valueAnimation, value: numericValue)
 
             if let change {
-                HStack(spacing: 4) {
-                    if let symbol = direction.systemImage {
-                        Image(systemName: symbol)
-                            .accessibilityHidden(true)
-                    }
+                HStack(spacing: 6) {
                     Text(change)
-                        .monospacedDigit()
+                        .foregroundStyle(direction == .flat ? DS.Text.secondary : direction.color)
                     if let changeLabel {
                         Text(changeLabel)
-                            .fontWeight(.regular)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(DS.Text.muted)
                     }
                 }
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(direction.color)
+                .font(DS.Font.body)
+                .monospacedDigit()
                 .lineLimit(1)
+                .padding(.top, 8)
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel([direction.accessibilityPrefix, change, changeLabel ?? ""]
                     .filter { !$0.isEmpty }
@@ -133,8 +131,9 @@ struct HeroValueHeader<Status: View>: View {
             }
 
             status
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+                .font(DS.Font.caption)
+                .foregroundStyle(DS.Text.muted)
+                .padding(.top, 6)
         }
         .frame(maxWidth: .infinity, alignment: Alignment(horizontal: alignment, vertical: .center))
     }
@@ -149,7 +148,7 @@ struct HeroStatusLine: View {
     var body: some View {
         if let text {
             if let dotColor {
-                StatusDot(text, color: dotColor, font: .footnote)
+                StatusDot(text, color: dotColor, font: DS.Font.caption)
             } else {
                 Text(text)
             }
@@ -209,5 +208,5 @@ extension HeroValueHeader where Status == HeroStatusLine {
             }
         }
     }
-    return Demo()
+    return Demo().dsAppearance()
 }

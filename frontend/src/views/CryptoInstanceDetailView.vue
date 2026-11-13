@@ -5,6 +5,7 @@ import AppShell from '../layouts/AppShell.vue'
 import CryptoCreateInstanceModal from '../components/crypto/CryptoCreateInstanceModal.vue'
 import CryptoBacktestModal from '../components/crypto/CryptoBacktestModal.vue'
 import CryptoAllocationChart from '../components/crypto/CryptoAllocationChart.vue'
+import PortfolioChart from '../components/PortfolioChart.vue'
 import { getToken } from '../utils/auth.js'
 
 // Detail view for a crypto (kind='crypto') instance — mirrors the equity
@@ -46,7 +47,8 @@ const brokerage = computed(() => brokerages.value.find((b) => b.id === inst.valu
 const isPaper = computed(() => !!(brokerage.value?.alpaca_paper))
 
 // ── Allocation ──────────────────────────────────────────────────────────────────
-const PALETTE = ['#a78bfa', '#7c9bff', '#5ad1e0', '#5ee6b8', '#f0b354', '#f3799f', '#b98bff']
+// Neutral steps (shares, not gains or losses), same as the create modal.
+const PALETTE = ['#ededed', '#c4c4c8', '#a1a1a6', '#85858b', '#6b6b70', '#55555a']
 const allocations = computed(() => (Array.isArray(cfg.value.allocations) ? cfg.value.allocations : []))
 const coins = computed(() =>
   allocations.value.map((a, i) => ({
@@ -180,187 +182,185 @@ function onBacktestCreated() { showBacktest.value = false; fetchBacktests() }
 
 // ── Backtest row formatting ─────────────────────────────────────────────────────
 function btCoins(b) { return (b.stocks || []).map((s) => String(s).split('/')[0]) }
+function btCoinsLabel(b) { const c = btCoins(b); return c.length ? c.slice(0, 4).join(', ') + (c.length > 4 ? ` +${c.length - 4}` : '') : 'Dynamic' }
+// Status as a dot and a word: green only while a run is actually running.
 function statusStyle(s) {
   const v = String(s || '').toLowerCase()
-  if (['finished', 'completed', 'done'].includes(v)) return 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
-  if (['running', 'queued', 'pending'].includes(v)) return 'bg-sky-500/10 text-sky-400 border-sky-500/20'
-  if (['error', 'failed'].includes(v)) return 'bg-red-500/10 text-red-400 border-red-500/20'
-  if (v === 'paused') return 'bg-amber-500/10 text-amber-400 border-amber-500/20'
-  return 'bg-slate-500/10 text-slate-400 border-slate-700'
+  if (['finished', 'completed', 'done'].includes(v)) return 'text-slate-300'
+  if (['running', 'queued', 'pending'].includes(v)) return 'text-slate-200'
+  if (['error', 'failed'].includes(v)) return 'text-loss'
+  if (v === 'paused') return 'text-slate-300'
+  return 'text-slate-500'
 }
-function pnlColor(n) { const v = Number(n); return v > 0 ? 'text-emerald-400' : v < 0 ? 'text-red-400' : 'text-slate-300' }
-function fmtPnl(n) { const v = Number(n); if (!Number.isFinite(v)) return '—'; return `${v >= 0 ? '+' : ''}${fmtUsd(v)}` }
-function fmtPct(n) { const v = Number(n); if (!Number.isFinite(v)) return '—'; return `${v >= 0 ? '+' : ''}${v.toFixed(2)}%` }
+function statusDot(s) {
+  const v = String(s || '').toLowerCase()
+  if (v === 'running') return 'ui-dot-live'
+  if (['queued', 'pending', 'paused'].includes(v)) return 'ui-dot-warn'
+  if (['error', 'failed'].includes(v)) return 'ui-dot-error'
+  return 'ui-dot-off'
+}
+function pnlColor(n) { const v = Number(n); return n == null ? 'text-slate-500' : v > 0 ? 'text-gain' : v < 0 ? 'text-loss' : 'text-slate-400' }
+function fmtPnl(n) { const v = Number(n); if (n == null || !Number.isFinite(v)) return '—'; return `${v >= 0 ? '+' : '-'}${fmtUsd(Math.abs(v))}` }
+function fmtPct(n) { const v = Number(n); if (n == null || !Number.isFinite(v)) return '—'; return `${v >= 0 ? '+' : ''}${v.toFixed(2)}%` }
 function fmtDate(s) { if (!s) return '—'; const d = new Date(s); return Number.isNaN(d.getTime()) ? String(s) : d.toLocaleString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) }
 </script>
 
 <template>
   <AppShell>
-    <main class="flex-1 px-4 py-6 sm:px-6 sm:py-8 lg:px-8 lg:py-10">
+    <main class="ui-page">
       <!-- Breadcrumb -->
-      <div class="flex items-center gap-2 text-sm text-slate-500 mb-5">
-        <RouterLink to="/crypto" class="inline-flex items-center gap-1 hover:text-slate-300 transition-colors">
-          <span class="material-symbols-outlined text-[18px]">arrow_back</span> Crypto
+      <div class="flex items-center gap-2 text-sm text-slate-500">
+        <RouterLink to="/crypto" class="inline-flex items-center gap-1 h-8 -ml-2 px-2 rounded-md text-slate-400 hover:text-slate-100 hover:bg-raised transition-colors duration-150 ease-out">
+          <span class="material-symbols-outlined text-[16px]">arrow_back</span> Crypto
         </RouterLink>
-        <span class="text-slate-700">/</span>
+        <span class="text-slate-600">/</span>
         <span class="text-slate-300 truncate">{{ inst?.name || instanceId }}</span>
       </div>
 
-      <div v-if="loading" class="flex items-center gap-3 text-slate-400 text-sm">
-        <span class="material-symbols-outlined animate-spin text-xl">progress_activity</span> Loading…
+      <div v-if="loading" class="mt-4 space-y-3" aria-hidden="true">
+        <div class="h-7 w-56 ui-skel"></div>
+        <div class="h-4 w-40 ui-skel"></div>
+        <div class="mt-8 grid grid-cols-1 gap-8 lg:grid-cols-[minmax(0,1fr)_340px]">
+          <div class="h-[360px] rounded-xl bg-surface"></div>
+          <div class="h-[360px] rounded-xl bg-surface"></div>
+        </div>
       </div>
-      <div v-else-if="error" class="rounded-xl bg-red-500/10 border border-red-500/20 px-5 py-4 text-red-400 text-sm">{{ error }}</div>
+      <div v-else-if="error" class="mt-6 ui-error">{{ error }}</div>
 
       <template v-else-if="inst">
         <!-- Header -->
-        <div class="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4 mb-8">
-          <div class="flex items-center gap-4 min-w-0">
-            <div class="size-14 rounded-2xl bg-surface border border-border-subtle flex items-center justify-center shrink-0">
-              <span class="material-symbols-outlined text-primary text-3xl">currency_bitcoin</span>
-            </div>
-            <div class="min-w-0">
-              <div class="flex items-center gap-2 flex-wrap">
-                <h1 class="text-2xl sm:text-3xl font-bold leading-tight truncate">{{ inst.name || inst.id }}</h1>
-                <span class="text-[10px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wider bg-primary/15 text-primary border border-primary/20">24/7 · crypto</span>
-              </div>
-              <p class="text-sm text-slate-500 font-mono mt-0.5 truncate">{{ inst.id }}</p>
-            </div>
+        <header class="mt-4 flex flex-wrap items-end justify-between gap-x-4 gap-y-3">
+          <div class="min-w-0">
+            <h1 class="ui-page-title truncate">{{ inst.name || inst.id }}</h1>
+            <p class="ui-page-sub flex flex-wrap items-center gap-x-2 gap-y-1">
+              <span class="inline-flex items-center gap-1.5" :class="crashed ? 'text-loss' : running ? 'text-slate-300' : ''">
+                <span class="ui-dot" :class="crashed ? 'ui-dot-error' : running ? 'ui-dot-live' : 'ui-dot-off'"></span>
+                {{ crashed ? 'Crashed' : running ? 'Running' : 'Stopped' }}
+              </span>
+              <span class="text-slate-600" aria-hidden="true">·</span>
+              <span>24/7 crypto · {{ strategyLabel }} strategy</span>
+            </p>
           </div>
 
-          <div class="flex items-center gap-2.5 flex-wrap">
-            <div class="flex items-center gap-1.5 text-sm font-semibold px-3 py-1.5 rounded-full"
-                 :class="crashed ? 'bg-red-500/10 text-red-400 border border-red-500/20'
-                   : running ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                   : 'bg-slate-500/10 text-slate-500 border border-slate-700'">
-              <div class="size-1.5 rounded-full" :class="crashed ? 'bg-red-400' : running ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'"></div>
-              {{ crashed ? 'Crashed' : running ? 'Running' : 'Stopped' }}
-            </div>
+          <div class="flex items-center gap-2 flex-wrap">
             <button @click="toggleRun" :disabled="busy"
-                    class="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-semibold border transition-colors disabled:opacity-40"
-                    :class="running ? 'text-amber-400 border-amber-500/30 hover:bg-amber-500/10' : 'text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/10'">
-              <span class="material-symbols-outlined text-[18px]">{{ running ? 'stop' : 'play_arrow' }}</span>
+                    :class="running ? 'ui-btn text-loss' : 'ui-btn-primary h-8 px-3 text-[13px]'">
+              <span class="material-symbols-outlined text-[16px]">{{ running ? 'stop' : 'play_arrow' }}</span>
               {{ running ? 'Stop' : 'Start' }}
             </button>
-            <button @click="showEdit = true"
-                    class="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-semibold text-amber-400 border border-amber-500/30 hover:bg-amber-500/10 transition-colors">
-              <span class="material-symbols-outlined text-[18px]">tune</span> Edit
+            <button @click="showEdit = true" class="ui-btn">
+              <span class="material-symbols-outlined text-[16px]">tune</span> Edit
             </button>
-            <button @click="refresh" title="Refresh"
-                    class="inline-flex items-center justify-center px-2.5 py-2 rounded-lg border border-border-subtle text-slate-400 hover:text-slate-200 hover:bg-surface transition-colors">
+            <button @click="refresh" title="Refresh" aria-label="Refresh" class="ui-icon-btn">
               <span class="material-symbols-outlined text-[18px]">refresh</span>
             </button>
           </div>
-        </div>
+        </header>
 
-        <!-- Info cards -->
-        <div class="grid grid-cols-1 lg:grid-cols-3 gap-5 mb-6">
-          <!-- Instance info -->
-          <div class="glass-card rounded-2xl p-5 sm:p-6">
-            <p class="text-[11px] font-bold uppercase tracking-widest text-slate-500 mb-4">Instance info</p>
-            <dl class="space-y-3 text-sm">
-              <div class="flex justify-between gap-3"><dt class="text-slate-500">Band</dt><dd class="text-slate-200 font-medium">{{ bandLabel }}</dd></div>
-              <div class="flex justify-between gap-3"><dt class="text-slate-500">Cadence</dt><dd class="text-slate-200 font-medium">{{ cadence }}</dd></div>
-              <div class="flex justify-between gap-3"><dt class="text-slate-500">Uptime</dt><dd class="text-emerald-400 font-medium tabular-nums">{{ running ? fmtDuration(liveSecs) : '—' }}</dd></div>
-              <div class="flex justify-between gap-3"><dt class="text-slate-500">Created by</dt><dd class="text-slate-200 font-medium capitalize">{{ inst.created_by || 'user' }}</dd></div>
-            </dl>
+        <!-- Hero: the account's equity, with the allocation beside it -->
+        <section class="mt-8 grid grid-cols-1 gap-x-8 gap-y-12 items-start lg:grid-cols-[minmax(0,1fr)_340px]" aria-label="Account and allocation">
+          <PortfolioChart v-if="brokerage && brokerage.id" :key="brokerage.id" :account="brokerage" variant="hero" />
+          <div v-else>
+            <p class="text-sm text-slate-400">Account value</p>
+            <p class="mt-4 text-[44px] font-medium text-slate-100 tabular-nums leading-none tracking-[-0.02em]">{{ accountValue != null ? fmtUsd(accountValue) : '—' }}</p>
           </div>
 
-          <!-- Brokerage -->
-          <div class="glass-card rounded-2xl p-5 sm:p-6">
-            <p class="text-[11px] font-bold uppercase tracking-widest text-slate-500 mb-4">Brokerage</p>
-            <div class="flex items-center gap-2.5 mb-4">
-              <div class="size-9 rounded-lg bg-surface border border-border-subtle flex items-center justify-center shrink-0">
-                <span class="material-symbols-outlined text-slate-400 text-lg">account_balance</span>
-              </div>
-              <div class="min-w-0">
-                <p class="text-sm font-semibold text-slate-100 truncate">{{ brokerage?.account_name || inst.brokerage_id || '—' }}</p>
-                <p class="text-xs text-slate-500">Alpaca</p>
-              </div>
+          <div>
+            <div class="mb-3">
+              <h2 class="ui-section-title">Allocation</h2>
+              <p class="ui-section-sub">Fixed weights, the rest dynamic</p>
             </div>
-            <dl class="space-y-3 text-sm">
-              <div class="flex justify-between gap-3">
-                <dt class="text-slate-500">Mode</dt>
-                <dd class="font-medium" :class="isPaper ? 'text-sky-400' : 'text-emerald-400'">{{ isPaper ? 'Paper' : 'Live' }}</dd>
+            <div class="ui-card divide-y divide-white/[0.06]">
+              <div class="px-5 py-5 flex justify-center">
+                <CryptoAllocationChart :allocations="chartAllocs" :dynamic-pct="dynamicPct" :size="168" />
               </div>
-              <div class="flex justify-between gap-3"><dt class="text-slate-500">Account value</dt><dd class="text-slate-200 font-bold tabular-nums">{{ accountValue != null ? fmtUsd(accountValue) : '—' }}</dd></div>
-            </dl>
-          </div>
-
-          <!-- Allocation -->
-          <div class="glass-card rounded-2xl p-5 sm:p-6">
-            <p class="text-[11px] font-bold uppercase tracking-widest text-slate-500 mb-4">Allocation</p>
-            <div class="flex justify-center">
-              <CryptoAllocationChart :allocations="chartAllocs" :dynamic-pct="dynamicPct" :size="160" />
-            </div>
-            <div class="mt-4 pt-4 border-t border-border-subtle">
-              <p class="text-xs text-slate-500 mb-1">Dynamic strategy</p>
-              <p class="text-sm font-semibold text-primary">{{ strategyLabel }}</p>
+              <div class="px-5 py-4 flex justify-between gap-3 text-sm">
+                <span class="text-slate-500">Dynamic strategy</span>
+                <span class="text-slate-200">{{ strategyLabel }}</span>
+              </div>
             </div>
           </div>
-        </div>
+        </section>
 
-        <!-- Backtests -->
-        <div class="glass-card rounded-2xl p-5 sm:p-6">
-          <div class="flex items-center justify-between gap-3 mb-4">
-            <p class="text-[11px] font-bold uppercase tracking-widest text-slate-500">
-              Backtests <span class="text-slate-600">({{ btTotal }})</span>
-            </p>
-            <button @click="showBacktest = true"
-                    class="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-primary/[0.14] border border-primary/45 text-primary font-semibold text-[13px] hover:bg-primary/25 transition-colors">
-              <span class="material-symbols-outlined text-[16px]">add</span> New Backtest
+        <!-- Backtests: one calm row each; the row opens the result -->
+        <section class="mt-12" aria-labelledby="ci-backtests">
+          <div class="flex items-end justify-between gap-4 mb-3">
+            <div>
+              <h2 id="ci-backtests" class="ui-section-title">Backtests</h2>
+              <p class="ui-section-sub tabular-nums">{{ btTotal }} for this instance</p>
+            </div>
+            <button @click="showBacktest = true" class="ui-btn">
+              <span class="material-symbols-outlined text-[16px]">add</span> New backtest
             </button>
           </div>
 
-          <div v-if="btLoading && !backtests.length" class="py-8 text-center text-slate-500 text-sm">Loading backtests…</div>
-          <div v-else-if="!backtests.length" class="py-10 text-center">
-            <span class="material-symbols-outlined text-3xl text-slate-700">analytics</span>
-            <p class="text-slate-500 text-sm mt-2">No backtests yet for this instance.</p>
-          </div>
+          <div class="ui-card overflow-hidden">
+            <div v-if="btLoading && !backtests.length" class="ui-rows" aria-hidden="true">
+              <div v-for="n in 3" :key="n" class="h-16 px-5 flex items-center"><div class="h-4 w-48 ui-skel"></div></div>
+            </div>
+            <p v-else-if="!backtests.length" class="ui-empty">No backtests yet for this instance</p>
 
-          <div v-else class="overflow-x-auto -mx-1">
-            <table class="w-full min-w-[720px] text-sm">
-              <thead>
-                <tr class="text-[10.5px] uppercase tracking-wider text-slate-600 border-b border-border-subtle">
-                  <th class="text-left font-medium py-2 px-2">ID</th>
-                  <th class="text-left font-medium py-2 px-2">Coins</th>
-                  <th class="text-left font-medium py-2 px-2">Period</th>
-                  <th class="text-left font-medium py-2 px-2">Completed</th>
-                  <th class="text-left font-medium py-2 px-2">Status</th>
-                  <th class="text-right font-medium py-2 px-2">Elapsed</th>
-                  <th class="text-right font-medium py-2 px-2">P&amp;L</th>
-                  <th class="text-right font-medium py-2 px-2">P&amp;L %</th>
-                  <th class="py-2 px-2"></th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="b in backtests" :key="b.id" class="border-b border-border-subtle/60 hover:bg-surface/40 transition-colors">
-                  <td class="py-2.5 px-2 font-mono text-slate-400 text-xs">{{ b.id }}</td>
-                  <td class="py-2.5 px-2">
-                    <div class="flex flex-wrap gap-1">
-                      <span v-for="t in btCoins(b).slice(0, 4)" :key="t" class="text-[11px] font-mono text-slate-300">{{ t }}</span>
-                      <span v-if="btCoins(b).length > 4" class="text-[11px] text-slate-600">+{{ btCoins(b).length - 4 }}</span>
-                      <span v-if="!btCoins(b).length" class="text-[11px] text-primary">Dynamic</span>
-                    </div>
-                  </td>
-                  <td class="py-2.5 px-2 text-slate-400 text-xs whitespace-nowrap">{{ b.start_date }} → {{ b.end_date }}</td>
-                  <td class="py-2.5 px-2 text-slate-400 text-xs whitespace-nowrap">{{ fmtDate(b.completed_at) }}</td>
-                  <td class="py-2.5 px-2">
-                    <span class="inline-block text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded border" :class="statusStyle(b.status)">{{ b.status }}</span>
-                  </td>
-                  <td class="py-2.5 px-2 text-right text-slate-400 text-xs tabular-nums whitespace-nowrap">{{ b.time_elapsed_seconds != null ? fmtDuration(b.time_elapsed_seconds) : '—' }}</td>
-                  <td class="py-2.5 px-2 text-right font-semibold tabular-nums" :class="pnlColor(b.pnl)">{{ fmtPnl(b.pnl) }}</td>
-                  <td class="py-2.5 px-2 text-right font-semibold tabular-nums" :class="pnlColor(b.pnl_percent)">{{ fmtPct(b.pnl_percent) }}</td>
-                  <td class="py-2.5 px-2 text-right">
-                    <button @click="router.push(`/backtests/${b.id}`)"
-                            class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-border-subtle text-xs text-slate-300 hover:text-primary hover:border-primary/40 transition-colors">
-                      <span class="material-symbols-outlined text-[14px]">open_in_new</span> View
-                    </button>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+            <template v-else>
+              <div class="bt-row hidden md:grid ui-th">
+                <span class="bt-name">Backtest</span>
+                <span class="bt-status">Status</span>
+                <span class="bt-done">Completed</span>
+                <span class="bt-pnl text-right">P&amp;L</span>
+                <span class="bt-go"></span>
+              </div>
+              <ul class="ui-rows">
+                <li v-for="b in backtests" :key="b.id"
+                    class="bt-row grid items-center min-h-16 px-5 py-3 cursor-pointer transition-colors duration-150 ease-out hover:bg-white/[0.03] focus-visible:outline-none focus-visible:bg-white/[0.03]"
+                    tabindex="0"
+                    :title="`Open backtest ${b.id}`"
+                    @click="router.push(`/backtests/${b.id}`)"
+                    @keydown.enter.self="router.push(`/backtests/${b.id}`)">
+                  <span class="bt-name min-w-0">
+                    <span class="block text-sm text-slate-100 truncate font-mono">{{ b.id }}</span>
+                    <span class="block text-xs text-slate-500 mt-0.5 truncate tabular-nums">{{ btCoinsLabel(b) }} · {{ b.start_date }} → {{ b.end_date }}</span>
+                  </span>
+                  <span class="bt-status inline-flex items-center gap-2 text-sm capitalize" :class="statusStyle(b.status)">
+                    <span class="ui-dot" :class="statusDot(b.status)"></span>{{ b.status }}
+                  </span>
+                  <span class="bt-done min-w-0 tabular-nums">
+                    <span class="block text-sm text-slate-300 truncate">{{ fmtDate(b.completed_at) }}</span>
+                    <span class="block text-xs text-slate-500 mt-0.5">{{ b.time_elapsed_seconds != null ? fmtDuration(b.time_elapsed_seconds) : '—' }}</span>
+                  </span>
+                  <span class="bt-pnl text-right tabular-nums">
+                    <span class="block text-sm" :class="pnlColor(b.pnl)">{{ fmtPnl(b.pnl) }}</span>
+                    <span class="block text-xs mt-0.5" :class="pnlColor(b.pnl_percent)">{{ fmtPct(b.pnl_percent) }}</span>
+                  </span>
+                  <span class="bt-go hidden md:flex justify-end text-slate-600">
+                    <span class="material-symbols-outlined text-[18px]">chevron_right</span>
+                  </span>
+                </li>
+              </ul>
+            </template>
           </div>
-        </div>
+        </section>
+
+        <!-- Details: rarely needed, so last -->
+        <section class="mt-12" aria-labelledby="ci-details">
+          <div class="mb-3">
+            <h2 id="ci-details" class="ui-section-title">Details</h2>
+            <p class="ui-section-sub">Instance and brokerage</p>
+          </div>
+          <div class="ui-card grid grid-cols-1 md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-white/[0.06]">
+            <dl class="px-5 py-4 text-sm divide-y divide-white/[0.05]">
+              <div class="flex justify-between gap-3 py-2.5"><dt class="text-slate-500">ID</dt><dd class="text-slate-300 font-mono text-xs truncate">{{ inst.id }}</dd></div>
+              <div class="flex justify-between gap-3 py-2.5"><dt class="text-slate-500">Band</dt><dd class="text-slate-200">{{ bandLabel }}</dd></div>
+              <div class="flex justify-between gap-3 py-2.5"><dt class="text-slate-500">Cadence</dt><dd class="text-slate-200 tabular-nums">{{ cadence }}</dd></div>
+              <div class="flex justify-between gap-3 py-2.5"><dt class="text-slate-500">Uptime</dt><dd class="text-slate-200 tabular-nums">{{ running ? fmtDuration(liveSecs) : '—' }}</dd></div>
+              <div class="flex justify-between gap-3 py-2.5"><dt class="text-slate-500">Created by</dt><dd class="text-slate-200 capitalize">{{ inst.created_by || 'user' }}</dd></div>
+            </dl>
+            <dl class="px-5 py-4 text-sm divide-y divide-white/[0.05]">
+              <div class="flex justify-between gap-3 py-2.5"><dt class="text-slate-500">Account</dt><dd class="text-slate-200 truncate">{{ brokerage?.account_name || inst.brokerage_id || '—' }}</dd></div>
+              <div class="flex justify-between gap-3 py-2.5"><dt class="text-slate-500">Broker</dt><dd class="text-slate-200">Alpaca</dd></div>
+              <div class="flex justify-between gap-3 py-2.5"><dt class="text-slate-500">Mode</dt><dd class="text-slate-200">{{ isPaper ? 'Paper' : 'Live' }}</dd></div>
+              <div class="flex justify-between gap-3 py-2.5"><dt class="text-slate-500">Account value</dt><dd class="text-slate-100 tabular-nums">{{ accountValue != null ? fmtUsd(accountValue) : '—' }}</dd></div>
+            </dl>
+          </div>
+        </section>
       </template>
     </main>
 
@@ -378,3 +378,34 @@ function fmtDate(s) { if (!s) return '—'; const d = new Date(s); return Number
     />
   </AppShell>
 </template>
+
+<style scoped>
+/* phone   name · P&L / status
+   md      name · status · P&L · chevron
+   lg      name · status · completed · P&L · chevron */
+.bt-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: "name pnl" "status pnl";
+  column-gap: 16px;
+  row-gap: 6px;
+}
+.bt-name { grid-area: name; }
+.bt-status { grid-area: status; }
+.bt-done { grid-area: done; display: none; }
+.bt-pnl { grid-area: pnl; }
+.bt-go { grid-area: go; }
+@media (min-width: 768px) {
+  .bt-row {
+    grid-template-columns: minmax(0, 1fr) 112px 120px 24px;
+    grid-template-areas: "name status pnl go";
+    row-gap: 0;
+  }
+}
+@media (min-width: 1024px) {
+  .bt-row {
+    grid-template-columns: minmax(0, 1fr) 112px 176px 120px 24px;
+    grid-template-areas: "name status done pnl go";
+  }
+  .bt-done { display: block; }
+}
+</style>

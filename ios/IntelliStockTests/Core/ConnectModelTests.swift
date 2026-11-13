@@ -59,7 +59,7 @@ struct ConnectModelTests {
         let services = services([:])
         let model = ConnectModel(services: services, probe: { _ in false })
         model.url = "https://down.example.test"
-        #expect(model.buttonLabel == "Test & Connect")
+        #expect(model.buttonLabel == "Test & connect")
         #expect(await model.submit() == nil)
         #expect(model.probeFailed)
         #expect(model.error == "Couldn't reach https://down.example.test/health. Check the URL, or save anyway.")
@@ -77,7 +77,7 @@ struct ConnectModelTests {
         model.textChanged()
         #expect(model.error == nil)
         #expect(!model.probeFailed)
-        #expect(model.buttonLabel == "Test & Connect")
+        #expect(model.buttonLabel == "Test & connect")
     }
 
     @Test func editingWithTheSameServerKeepsTheSession() async {

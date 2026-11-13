@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import VueApexCharts from 'vue3-apexcharts'
+import AppShell from '../layouts/AppShell.vue'
 import { getToken } from '../utils/auth.js'
 
 const API_BASE = import.meta.env.DEV ? '/api' : (import.meta.env.VITE_API_URL || '/api')
@@ -67,6 +68,12 @@ const equitySeries = computed(() => {
   const ec = (result.value && result.value.equity_curve) || []
   return [{ name: 'Cumulative P&L ($)', data: trades.value.map((t, i) => ({ x: Number(t.kickoff) * 1000 || (i + 1), y: (ec[i] || 0) / 100, day: dayOf(t.kickoff) })) }]
 })
+// The curve is P&L, so it takes the gain/loss colour of where it ends.
+const equityColor = computed(() => {
+  const ec = (result.value && result.value.equity_curve) || []
+  return (ec.length ? ec[ec.length - 1] : 0) >= 0 ? '#4cc38a' : '#e5484d'
+})
+const axisLabel = { colors: '#71717a', fontSize: '11px', fontFamily: 'inherit' }
 const equityOpts = computed(() => ({
   chart: { type: 'area', toolbar: { show: false }, animations: { enabled: false },
     background: 'transparent', fontFamily: 'Inter, sans-serif', zoom: { enabled: false },
@@ -75,13 +82,13 @@ const equityOpts = computed(() => ({
       markerClick: (e, ctx, { dataPointIndex }) => pickIdx(dataPointIndex),
     } },
   dataLabels: { enabled: false },
-  stroke: { curve: 'smooth', width: 2.5 },
-  fill: { type: 'gradient', gradient: { shadeIntensity: 1, opacityFrom: 0.28, opacityTo: 0 } },
-  markers: { size: 0, hover: { size: 5 } },
+  stroke: { curve: 'smooth', width: 1.5 },
+  fill: { type: 'gradient', gradient: { colorStops: [{ offset: 0, color: equityColor.value, opacity: 0.1 }, { offset: 100, color: equityColor.value, opacity: 0 }] } },
+  markers: { size: 0, hover: { size: 4 } },
   xaxis: { type: 'datetime', axisBorder: { show: false }, axisTicks: { show: false },
-    labels: { style: { colors: '#64748b', fontSize: '11px' } } },
-  yaxis: { labels: { style: { colors: '#64748b', fontSize: '11px' }, formatter: (v) => `$${Math.round(v)}` } },
-  colors: ['#34d399'], grid: { borderColor: '#1e293b', strokeDashArray: 4 },
+    labels: { style: axisLabel } },
+  yaxis: { tickAmount: 4, labels: { style: axisLabel, formatter: (v) => `$${Math.round(v)}` } },
+  colors: [equityColor.value], grid: { borderColor: 'rgba(255,255,255,0.05)', strokeDashArray: 0, xaxis: { lines: { show: false } } },
   tooltip: { theme: 'dark', x: { format: 'MMM dd' } },
 }))
 function pickIdx(i) {
@@ -96,13 +103,15 @@ function pickLabel(t) {
   return t.side
 }
 function fmtPct(v) { return v == null ? '—' : `${(v * 100).toFixed(1)}%` }
-function fmtMoney(c) { return c == null ? '—' : `$${(c / 100).toFixed(2)}` }
+function fmtMoney(c) { return c == null ? '—' : `${c < 0 ? '-' : ''}$${Math.abs(c / 100).toFixed(2)}` }
 const s = computed(() => (status.value && status.value.summary) || {})
 const confColor = computed(() => {
   const p = s.value.profit_confidence ?? 0
-  return p >= 0.9 ? 'text-emerald-400' : p >= 0.75 ? 'text-amber-400' : 'text-rose-400'
+  return p >= 0.9 ? 'text-gain' : p >= 0.75 ? 'text-amber-400' : 'text-loss'
 })
-function statusColor(st) { return st === 'finished' ? 'text-emerald-400' : st === 'error' ? 'text-rose-400' : st === 'stopped' ? 'text-slate-400' : 'text-amber-400' }
+// Status as a dot and a word: green only while the run is actually running.
+function statusColor(st) { return st === 'finished' ? 'text-slate-300' : st === 'error' ? 'text-loss' : st === 'stopped' ? 'text-slate-500' : 'text-slate-200' }
+function statusDot(st) { return st === 'running' ? 'ui-dot-live' : st === 'pending' ? 'ui-dot-warn' : st === 'error' ? 'ui-dot-error' : 'ui-dot-off' }
 
 onMounted(async () => {
   await load()
@@ -113,135 +122,152 @@ onBeforeUnmount(() => { if (pollTimer) clearInterval(pollTimer); if (clockTimer)
 </script>
 
 <template>
-  <main class="max-w-6xl mx-auto px-4 py-6 space-y-6">
-    <div>
-      <button @click="router.back()" class="text-sm text-slate-400 hover:text-slate-200">← Back</button>
-      <div class="flex items-center gap-3 mt-1">
-        <h1 class="text-xl font-semibold text-slate-100">Backtest <span class="font-mono text-slate-400 text-base">{{ id.slice(0, 8) }}</span></h1>
-        <span v-if="status" :class="statusColor(status.status)" class="text-sm">{{ status.status }}</span>
-        <span v-if="status && elapsed" class="text-xs text-slate-500">· {{ elapsed }}</span>
-      </div>
-      <div v-if="running" class="flex items-center gap-2 mt-2 max-w-md">
-        <div class="flex-1 h-2 rounded-full bg-slate-700/60 overflow-hidden">
-          <div class="h-full bg-amber-400 rounded-full transition-all" :style="{ width: Math.max(3, Math.round((status && status.progress) || 0)) + '%' }"></div>
+  <AppShell>
+    <main class="ui-page">
+      <button @click="router.back()" class="inline-flex items-center gap-1 h-8 -ml-2 px-2 rounded-md text-sm text-slate-400 hover:text-slate-100 hover:bg-raised transition-colors duration-150 ease-out">
+        <span class="material-symbols-outlined text-[16px]">arrow_back</span> Back
+      </button>
+      <header class="mt-4">
+        <h1 class="ui-page-title">Backtest <span class="text-slate-500 font-mono text-xl">{{ id.slice(0, 8) }}</span></h1>
+        <p class="ui-page-sub flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span v-if="status" class="inline-flex items-center gap-1.5 capitalize" :class="statusColor(status.status)"><span class="ui-dot" :class="statusDot(status.status)"></span>{{ status.status }}</span>
+          <template v-if="status && elapsed"><span class="text-slate-600" aria-hidden="true">·</span><span class="tabular-nums">{{ elapsed }}</span></template>
+        </p>
+        <div v-if="running" class="flex items-center gap-3 mt-3 max-w-md">
+          <div class="flex-1 h-1 rounded-full bg-raised overflow-hidden">
+            <div class="h-full bg-slate-300 rounded-full" :style="{ width: Math.max(3, Math.round((status && status.progress) || 0)) + '%' }"></div>
+          </div>
+          <span class="text-xs text-slate-400 tabular-nums">{{ Math.round((status && status.progress) || 0) }}%</span>
         </div>
-        <span class="text-xs text-slate-400">{{ Math.round((status && status.progress) || 0) }}%</span>
-      </div>
-    </div>
+      </header>
 
-    <div v-if="status && status.error" class="bg-rose-500/10 border border-rose-500/40 rounded-lg p-3 text-sm text-rose-300">
-      <span class="font-semibold">Error:</span> {{ status.error }}
-    </div>
-
-    <!-- Summary hero -->
-    <section class="bg-surface border border-border-subtle rounded-xl p-4">
-      <div class="grid grid-cols-2 md:grid-cols-6 gap-3">
-        <div><div class="text-xs text-slate-500">Total P&L</div><div class="text-lg font-semibold" :class="(s.pnl_cents >= 0) ? 'text-emerald-400' : 'text-rose-400'">{{ fmtMoney(s.pnl_cents) }}</div></div>
-        <div><div class="text-xs text-slate-500">ROI</div><div class="text-lg font-semibold text-slate-100">{{ fmtPct(s.roi) }}</div></div>
-        <div><div class="text-xs text-slate-500">Bets</div><div class="text-lg font-semibold text-slate-100">{{ s.n_bets ?? '—' }}</div></div>
-        <div><div class="text-xs text-slate-500">Win rate</div><div class="text-lg font-semibold text-slate-100">{{ fmtPct(s.win_rate) }}</div></div>
-        <div><div class="text-xs text-slate-500">Avg CLV</div><div class="text-lg font-semibold text-slate-100">{{ fmtPct(s.clv_avg) }}</div></div>
-        <div><div class="text-xs text-slate-500">API / cache</div><div class="text-lg font-semibold text-slate-100">{{ s.api_calls ?? 0 }} / {{ s.cache_hits ?? 0 }}</div></div>
-      </div>
-      <div class="mt-3 pt-3 border-t border-border-subtle/50 text-xs text-slate-500 flex flex-wrap gap-x-4 gap-y-1">
-        <span>Fixtures: <span class="text-slate-300">{{ s.n_fixtures ?? 0 }}</span></span>
-        <span>Bet: <span class="text-emerald-400">{{ s.bet ?? 0 }}</span></span>
-        <span>No-edge: <span class="text-slate-300">{{ s.no_bet ?? 0 }}</span></span>
-        <span>Unsettled: <span class="text-slate-300">{{ s.unsettled ?? 0 }}</span></span>
-        <span>Unmatched: <span class="text-amber-400">{{ s.unmatched ?? 0 }}</span></span>
-        <span>No-price: <span class="text-slate-300">{{ s.no_candle_data ?? 0 }}</span></span>
-      </div>
-      <div v-if="s.profit_confidence != null" class="mt-2 pt-2 border-t border-border-subtle/50 text-xs flex flex-wrap items-center gap-x-4 gap-y-1">
-        <span class="text-slate-500">Trust:</span>
-        <span :class="confColor">Profit confidence {{ (s.profit_confidence * 100).toFixed(0) }}%</span>
-        <span class="text-slate-500">90% P&L range {{ fmtMoney(s.pnl_ci_low_cents) }} → {{ fmtMoney(s.pnl_ci_high_cents) }}</span>
-        <span v-if="s.pnl_ci_low_cents < 0" class="text-amber-400/80">— spans a loss, so this edge is not statistically proven</span>
-      </div>
-    </section>
-
-    <!-- Scrubbable equity chart -->
-    <section v-if="trades.length" class="bg-surface border border-border-subtle rounded-xl p-4">
-      <div class="flex items-center justify-between mb-2">
-        <h2 class="text-sm font-semibold text-slate-200">Equity curve</h2>
-        <span v-if="selectedDay" class="text-xs text-primary">{{ selectedDay === 'all' ? 'All' : selectedDay }} · {{ selectedTrades.length }} trade(s)</span>
-      </div>
-      <VueApexCharts type="area" height="280" :options="equityOpts" :series="equitySeries" />
-      <!-- day chips -->
-      <div class="flex flex-wrap gap-2 mt-3">
-        <button @click="selectedDay = 'all'; tab = 'trades'"
-                class="px-2.5 py-1 rounded-full text-xs border transition-colors"
-                :class="selectedDay === 'all' ? 'bg-primary/20 border-primary text-primary' : 'border-border-subtle text-slate-400 hover:text-slate-200'">
-          All · {{ trades.length }}
-        </button>
-        <button v-for="d in dayKeys" :key="d" @click="selectedDay = d; tab = 'trades'"
-                class="px-2.5 py-1 rounded-full text-xs border transition-colors"
-                :class="selectedDay === d ? 'bg-primary/20 border-primary text-primary' : 'border-border-subtle text-slate-400 hover:text-slate-200'">
-          {{ d }} · {{ tradesByDay[d].length }}
-        </button>
-      </div>
-    </section>
-
-    <!-- Tabs -->
-    <section class="bg-surface border border-border-subtle rounded-xl p-4">
-      <div class="flex gap-4 border-b border-border-subtle/50 mb-3">
-        <button v-for="t in ['trades', 'decisions', 'logs']" :key="t" @click="tab = t"
-                class="pb-2 text-sm capitalize" :class="tab === t ? 'text-primary border-b-2 border-primary' : 'text-slate-400 hover:text-slate-200'">
-          {{ t === 'decisions' ? 'Decision log' : t }}
-        </button>
+      <div v-if="status && status.error" class="mt-6 ui-error">
+        <span class="font-medium">Error:</span> {{ status.error }}
       </div>
 
-      <!-- Trades (cards for the selected day) -->
-      <div v-if="tab === 'trades'">
-        <div v-if="!selectedTrades.length" class="text-sm text-slate-500">
-          {{ trades.length ? 'Pick a day above to see its trades.' : 'No bets were placed under these settings over this range.' }}
+      <!-- Summary -->
+      <section class="mt-8 ui-card divide-y divide-white/[0.06]" aria-label="Summary">
+        <div class="px-5 py-5 grid grid-cols-2 md:grid-cols-[minmax(0,1.4fr)_repeat(5,minmax(0,1fr))] gap-x-6 gap-y-5 items-end">
+          <div class="col-span-2 md:col-span-1">
+            <p class="text-xs text-slate-500">Total P&amp;L</p>
+            <p class="mt-1 text-2xl font-medium tabular-nums leading-tight" :class="(s.pnl_cents >= 0) ? 'text-gain' : 'text-loss'">{{ fmtMoney(s.pnl_cents) }}</p>
+          </div>
+          <div><p class="text-xs text-slate-500">ROI</p><p class="mt-1 text-base font-medium text-slate-100 tabular-nums">{{ fmtPct(s.roi) }}</p></div>
+          <div><p class="text-xs text-slate-500">Bets</p><p class="mt-1 text-base font-medium text-slate-100 tabular-nums">{{ s.n_bets ?? '—' }}</p></div>
+          <div><p class="text-xs text-slate-500">Win rate</p><p class="mt-1 text-base font-medium text-slate-100 tabular-nums">{{ fmtPct(s.win_rate) }}</p></div>
+          <div><p class="text-xs text-slate-500">Avg CLV</p><p class="mt-1 text-base font-medium text-slate-100 tabular-nums">{{ fmtPct(s.clv_avg) }}</p></div>
+          <div><p class="text-xs text-slate-500">API / cache</p><p class="mt-1 text-base font-medium text-slate-100 tabular-nums">{{ s.api_calls ?? 0 }} / {{ s.cache_hits ?? 0 }}</p></div>
         </div>
-        <div v-else class="grid grid-cols-1 md:grid-cols-2 gap-3">
-          <div v-for="(t, i) in selectedTrades" :key="i" class="bg-surface border border-border-subtle rounded-lg p-3">
-            <div class="flex items-center justify-between">
-              <div class="flex items-center gap-1.5 text-sm text-slate-100 font-medium min-w-0">
-                <img v-if="t.home_flag" :src="t.home_flag" class="w-4 h-3 rounded-sm object-cover shrink-0" alt="" />
-                <span class="truncate">{{ t.home || t.side }}</span>
-                <span class="text-slate-500 text-xs shrink-0">v</span>
-                <img v-if="t.away_flag" :src="t.away_flag" class="w-4 h-3 rounded-sm object-cover shrink-0" alt="" />
-                <span class="truncate">{{ t.away }}</span>
-              </div>
-              <div class="text-sm font-semibold shrink-0 ml-2" :class="(t.realized_pnl_cents >= 0) ? 'text-emerald-400' : 'text-rose-400'">{{ fmtMoney(t.realized_pnl_cents) }}</div>
-            </div>
-            <div class="text-xs text-slate-400 mt-1">
-              <span v-if="t.league" class="mr-1 text-slate-500">{{ t.league }}</span>
-              <span class="text-slate-200">{{ pickLabel(t) }}</span> · entry {{ t.entry_cents }}¢ × {{ t.size }}
-            </div>
-            <!-- flags / badges -->
-            <div class="flex flex-wrap gap-1.5 mt-2">
-              <span class="px-1.5 py-0.5 rounded text-[10px] bg-slate-700/50 text-slate-300">edge {{ (t.edge * 100).toFixed(1) }}%</span>
-              <span class="px-1.5 py-0.5 rounded text-[10px]" :class="t.sharp_prob != null ? 'bg-sky-500/20 text-sky-300' : 'bg-amber-500/20 text-amber-300'">{{ t.sharp_prob != null ? 'sharp' : 'model-only' }}</span>
-              <span class="px-1.5 py-0.5 rounded text-[10px]" :class="t.outcome === 'win' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'">{{ t.outcome }}</span>
-              <span v-if="t.clv != null" class="px-1.5 py-0.5 rounded text-[10px] bg-slate-700/50 text-slate-300">CLV {{ (t.clv * 100).toFixed(1) }}%</span>
-            </div>
+        <div class="px-5 py-3 text-xs text-slate-500 flex flex-wrap gap-x-5 gap-y-1 tabular-nums">
+          <span>Fixtures <span class="text-slate-300">{{ s.n_fixtures ?? 0 }}</span></span>
+          <span>Bet <span class="text-slate-300">{{ s.bet ?? 0 }}</span></span>
+          <span>No edge <span class="text-slate-300">{{ s.no_bet ?? 0 }}</span></span>
+          <span>Unsettled <span class="text-slate-300">{{ s.unsettled ?? 0 }}</span></span>
+          <span>Unmatched <span class="text-slate-300">{{ s.unmatched ?? 0 }}</span></span>
+          <span>No price <span class="text-slate-300">{{ s.no_candle_data ?? 0 }}</span></span>
+        </div>
+        <div v-if="s.profit_confidence != null" class="px-5 py-3 text-xs flex flex-wrap items-center gap-x-5 gap-y-1 tabular-nums">
+          <span class="text-slate-500">Trust</span>
+          <span :class="confColor">Profit confidence {{ (s.profit_confidence * 100).toFixed(0) }}%</span>
+          <span class="text-slate-500">90% P&amp;L range <span class="text-slate-300">{{ fmtMoney(s.pnl_ci_low_cents) }} → {{ fmtMoney(s.pnl_ci_high_cents) }}</span></span>
+          <span v-if="s.pnl_ci_low_cents < 0" class="inline-flex items-center gap-2 text-slate-400"><span class="ui-dot ui-dot-warn"></span>The range spans a loss, so this edge is not statistically proven</span>
+        </div>
+      </section>
+
+      <!-- Scrubbable equity chart -->
+      <section v-if="trades.length" class="mt-12" aria-labelledby="kbr-equity">
+        <div class="flex items-end justify-between gap-4 mb-3">
+          <div>
+            <h2 id="kbr-equity" class="ui-section-title">Equity curve</h2>
+            <p class="ui-section-sub">Cumulative P&amp;L by kickoff. Pick a point or a day to see its trades</p>
+          </div>
+          <span v-if="selectedDay" class="text-xs text-slate-400 tabular-nums shrink-0">{{ selectedDay === 'all' ? 'All' : selectedDay }} · {{ selectedTrades.length }} trade(s)</span>
+        </div>
+        <div class="ui-card px-5 pt-4 pb-5">
+          <div class="-mx-2">
+            <VueApexCharts type="area" height="280" :options="equityOpts" :series="equitySeries" />
+          </div>
+          <!-- day filter -->
+          <div class="flex flex-wrap gap-1.5 mt-4 pt-4 border-t border-white/[0.06]">
+            <button @click="selectedDay = 'all'; tab = 'trades'"
+                    class="h-7 px-2.5 rounded-md text-xs tabular-nums transition-colors duration-150 ease-out"
+                    :class="selectedDay === 'all' ? 'bg-raised text-slate-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]' : 'text-slate-500 hover:text-slate-200'">
+              All · {{ trades.length }}
+            </button>
+            <button v-for="d in dayKeys" :key="d" @click="selectedDay = d; tab = 'trades'"
+                    class="h-7 px-2.5 rounded-md text-xs tabular-nums transition-colors duration-150 ease-out"
+                    :class="selectedDay === d ? 'bg-raised text-slate-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]' : 'text-slate-500 hover:text-slate-200'">
+              {{ d }} · {{ tradesByDay[d].length }}
+            </button>
           </div>
         </div>
-      </div>
+      </section>
 
-      <!-- Decision log -->
-      <div v-else-if="tab === 'decisions'" class="overflow-x-auto">
-        <table class="w-full text-xs">
-          <thead><tr class="text-left text-slate-500"><th class="py-1">Fixture</th><th>Decision</th><th>Reason</th></tr></thead>
-          <tbody>
-            <tr v-for="(d, i) in (result && result.decision_log) || []" :key="i" class="border-t border-border-subtle/40">
-              <td class="py-1 text-slate-300">{{ d.label }}</td>
-              <td><span :class="d.decision === 'placed' ? 'text-emerald-400' : d.decision === 'no_bet' ? 'text-slate-300' : 'text-amber-400'">{{ d.decision }}</span></td>
-              <td class="text-slate-500">{{ d.reason || (d.bets ? d.bets.length + ' side(s)' : '') }}</td>
-            </tr>
-          </tbody>
-        </table>
-        <p v-if="!(result && result.decision_log && result.decision_log.length)" class="text-sm text-slate-500">No decision log recorded.</p>
-      </div>
+      <!-- Tabs -->
+      <section class="mt-12" aria-label="Details">
+        <div class="ui-seg mb-3" role="tablist">
+          <button v-for="t in ['trades', 'decisions', 'logs']" :key="t" @click="tab = t"
+                  class="ui-seg-btn" :class="tab === t ? 'ui-seg-btn-active' : ''" role="tab" :aria-selected="tab === t">
+            {{ t === 'decisions' ? 'Decision log' : (t === 'trades' ? 'Trades' : 'Logs') }}
+          </button>
+        </div>
 
-      <!-- Logs -->
-      <div v-else class="bg-black/40 rounded-lg p-3 font-mono text-[11px] text-slate-300 max-h-96 overflow-y-auto whitespace-pre-wrap">
-        <div v-for="(line, i) in (result && result.logs) || []" :key="i">{{ line }}</div>
-        <p v-if="!(result && result.logs && result.logs.length)" class="text-slate-500">No logs recorded.</p>
-      </div>
-    </section>
-  </main>
+        <!-- Trades (rows for the selected day) -->
+        <div v-if="tab === 'trades'" class="ui-card overflow-hidden">
+          <p v-if="!selectedTrades.length" class="ui-empty">
+            {{ trades.length ? 'Pick a day above to see its trades' : 'No bets were placed under these settings over this range' }}
+          </p>
+          <ul v-else class="ui-rows">
+            <li v-for="(t, i) in selectedTrades" :key="i" class="min-h-14 px-5 py-3 flex items-start justify-between gap-4">
+              <div class="min-w-0">
+                <div class="flex items-center gap-1.5 text-sm text-slate-100 min-w-0">
+                  <img v-if="t.home_flag" :src="t.home_flag" class="w-4 h-3 rounded-sm object-cover shrink-0" alt="" />
+                  <span class="truncate">{{ t.home || t.side }}</span>
+                  <span class="text-slate-500 text-xs shrink-0">v</span>
+                  <img v-if="t.away_flag" :src="t.away_flag" class="w-4 h-3 rounded-sm object-cover shrink-0" alt="" />
+                  <span class="truncate">{{ t.away }}</span>
+                </div>
+                <p class="text-xs text-slate-500 mt-0.5 tabular-nums">
+                  <span v-if="t.league">{{ t.league }} · </span><span class="text-slate-300">{{ pickLabel(t) }}</span> · entry {{ t.entry_cents }}¢ × {{ t.size }}
+                </p>
+                <p class="text-xs text-slate-500 mt-0.5 tabular-nums">
+                  Edge {{ (t.edge * 100).toFixed(1) }}% · {{ t.sharp_prob != null ? 'Sharp' : 'Model only' }} · <span class="capitalize">{{ t.outcome }}</span><span v-if="t.clv != null"> · CLV {{ (t.clv * 100).toFixed(1) }}%</span>
+                </p>
+              </div>
+              <div class="text-sm tabular-nums shrink-0" :class="(t.realized_pnl_cents >= 0) ? 'text-gain' : 'text-loss'">{{ fmtMoney(t.realized_pnl_cents) }}</div>
+            </li>
+          </ul>
+        </div>
+
+        <!-- Decision log -->
+        <div v-else-if="tab === 'decisions'" class="ui-card overflow-hidden">
+          <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead>
+                <tr class="text-left text-xs text-slate-500 border-b border-white/[0.06]">
+                  <th class="h-10 px-5 font-normal">Fixture</th><th class="h-10 px-5 font-normal">Decision</th><th class="h-10 px-5 font-normal">Reason</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-white/[0.05]">
+                <tr v-for="(d, i) in (result && result.decision_log) || []" :key="i">
+                  <td class="h-12 px-5 text-slate-200">{{ d.label }}</td>
+                  <td class="h-12 px-5"><span :class="d.decision === 'placed' ? 'text-slate-200' : d.decision === 'no_bet' ? 'text-slate-500' : 'text-slate-400'">{{ d.decision }}</span></td>
+                  <td class="h-12 px-5 text-slate-500">{{ d.reason || (d.bets ? d.bets.length + ' side(s)' : '') }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p v-if="!(result && result.decision_log && result.decision_log.length)" class="ui-empty">No decision log recorded</p>
+        </div>
+
+        <!-- Logs -->
+        <div v-else class="ui-card p-2">
+          <div class="rounded-lg bg-background-dark px-4 py-3 font-mono text-xs leading-relaxed text-slate-300 max-h-96 overflow-y-auto whitespace-pre-wrap">
+            <div v-for="(line, i) in (result && result.logs) || []" :key="i">{{ line }}</div>
+            <p v-if="!(result && result.logs && result.logs.length)" class="text-slate-500">No logs recorded</p>
+          </div>
+        </div>
+      </section>
+    </main>
+  </AppShell>
 </template>

@@ -1,363 +1,233 @@
-# How to build a screen
+# How to build a screen: the web look in SwiftUI
 
-This is the working guide for every IntelliStock screen. The binding rules are in
-`docs/superpowers/specs/2026-10-02-ios-ui-redesign.md`. This page shows how to meet them with the
-kit in `DesignSystem/Components/`. Model each screen on Stocks (numbers, charts), Wallet (cards,
-transactions) and Settings (forms, lists).
+This design system mirrors the web app's tokens (`frontend/tailwind.config.js`) and its `ui-*`
+classes (`frontend/src/style.css`). Restyle a screen by swapping system styling for the DS API below; never re-type a hex
+value, radius or font at a call site. The reference screens are done: copy them.
 
-## The rules that matter most
+- `Features/Dashboard/Views/*` (lists, cards in clear rows, section headers, segmented controls,
+  services rows with buttons)
+- `Features/Stock/Views/StockView.swift` (hero + chart, stat card, key-value rows)
+- `Features/Trade/Views/TradeTicketSheet.swift` (a form: fields with labels above, header/footer)
+- `Features/Trade/Views/TradeReviewView.swift`, `Features/SymbolSearch/Views/SymbolSearchView.swift`
 
-1. **Lists, not cards.** Any screen made of rows, key-value pairs or settings is a `List` with
-   `.listStyle(.insetGrouped)`. A `Card` holds only a hero or a chart. Nothing nests more than one
-   level: no card in a card, and no grey tile in a card.
-2. **Titles.** Tab roots get a large title. A pushed screen gets an inline title naming the
-   entity. Content never repeats the title; the hero shows the number instead.
-3. **No upper case** except tickers and real acronyms (`P&L`, `SPY`, `AI`). Never use
-   `.textCase(.uppercase)`, `.tracking(_:)`, `.uppercased()` on a label, or an eyebrow.
-4. **Rows navigate. They never carry buttons.** Secondary actions go in `.swipeActions` and
-   `.contextMenu`. The primary action goes in the toolbar, and everything else in a `ToolbarMenu`.
-   Every action and every confirmation stays; only its place and style change.
-5. **Colour has one meaning each.** Violet marks something you can tap. Green and red mark P&L
-   and price change. Status colours appear only in `StatusBadge` and `StatusDot`. Headers, card
-   titles and section icons get no colour.
-6. **Type is system text styles only.** Use `.headline` for row titles, `.subheadline`
-   `.secondary` for subtitles, and `.footnote` for metadata. Monospace is for logs and raw config
-   keys.
-7. **Refresh by pulling.** Every list and detail screen gets `.refreshable`. There are no refresh
-   buttons.
-8. **Still banned:** gradients, glows, coloured shadows, blur, and Liquid Glass on content. Glass
-   belongs only on floating controls; the system bars and the chat accessory get it automatically.
+Dark only, one graphite ramp, Inter, no hue except gain/loss (money, success/error, destructive)
+and amber (a warning or paused dot, a small warning word). The root already applies
+`.dsAppearance()`; every tab root and pushed route already gets the page colour.
 
-## The kit
+## 1. Web class → DS API
 
-| Component | Use it for |
+| Web | SwiftUI |
 |---|---|
-| `EntityRow(title, subtitle:, systemImage:, isPinned:) { trailing }` | One thing in a list (an instance, a backtest, a model). Wrap it in a `NavigationLink`. |
-| `EntityRowValue(value, color:, detail:, detailColor:)` | An `EntityRow`'s trailing figure, with an optional second line (P&L, %). |
-| `StatusDot(label, color:, pulsing:)` / `StatusDot(label, status:)` | Run state: "● Running", "● Stopped", "● Markets closed". |
-| `StatusBadge(label:, color:, pulsing:)` | One flag worth noticing (severity, Live, Failed). At most one per row. |
-| `AppBadge(label:, color:)` | The same capsule as `StatusBadge`. The label is sentence-cased. |
-| `.dsBadge(color)` | The badge capsule on any text, for a one-off tag. |
-| `DSSection(title, action:, footer:) { rows }` | A list section with an optional trailing header verb and a footer. |
-| `DSSectionHeader(title) { accessory }` | A section header with a custom accessory: a `Picker` or a `Menu`. |
-| `InlineActionRow(title, systemImage:, role:, isBusy:) { }` | A secondary action shown as a list row in accent text, or red when destructive. |
-| `HeroValueHeader(value, numericValue:, change:, direction:, changeLabel:, status:, statusColor:)` | The big figure, the change line and the status line at the top of a value screen. |
-| `ChangeDirection(delta)` | The direction `.up`, `.down` or `.flat`, which sets the colour and the arrow. |
-| `StatGrid(columns: 2 or 3) { StatCell(label:, value:, valueColor:, footnote:) }` | Numeric summaries in the style of Stocks' key statistics. |
-| `Card { }` / `Card("Title") { }` | A hero or a chart, with 22 pt corners and 16 pt padding. |
-| `ScrubbableAreaChart(...)` | The value chart: 2 pt monotone line, flat fill, a dotted baseline at the start value, and at most 4 date labels. |
-| `Sparkline(values:)` | A 1.5 pt price line inside a row. |
-| `.chartDrawIn(trigger:, duration:, enabled:, interacting:)` | Every chart's entrance: it draws in from the leading edge, replaying when `trigger` (the series' range or account) changes. |
-| `AllocationRing` / `MiniAllocationRing(fraction:, color:)` | A share of the portfolio: 44 pt with its label, or 24 pt in a row. |
-| `ToolbarMenu { }` | The toolbar's More menu. |
-| `ToolbarAddButton(title) { }` | The `+` create button. The title is what VoiceOver reads. |
-| `SectionHeader(title:, subtitle:) { trailing }` | A heading over content outside a `List`. Rarely needed now. |
-| `EmptyState`, `ErrorRow`, `LoadingState`, `.confirmAlert`, `TypedConfirmField`, `Toast` | These are unchanged; see their doc comments. |
+| page `bg-background-dark` | automatic on routes (`dsScreenBackground()`); sheets: `.presentationBackground(DS.Surface.page)` or `DS.Surface.card` |
+| `ui-page-title` / `ui-page-sub` | large navigation title (Inter 30/500, set by the bar); a subtitle line `Text(..).font(DS.Font.pageSub).foregroundStyle(DS.Text.muted)` as the first `dsClearRow()` |
+| `ui-section-title` + `ui-section-sub` | `DSSection("Title", subtitle: "…")` in a list; `SectionHeader(title:subtitle:)` outside one |
+| `ui-label` | `.font(DS.Font.caption).foregroundStyle(DS.Text.muted)` |
+| `ui-card` | `Card { }` (20 pt padding), `Card(padding: 0) { }`, `Card("Title") { }` (header row + divider), `.dsCardSurface()` on any view |
+| `ui-th` | `DSTableHeader("Symbol", trailing: "Value")` or `DSTableHeader { … }` |
+| `ui-rows` / `ui-row` | in a List: `DSSection { rows }`; outside: `DSRows { DSRow { … } }` |
+| `dl` key-value rows | `DSKeyValueRow("Prev close", "$188.42")` (rows 44 tall: `DSSection(…, rowMinHeight: 44)`) |
+| `ui-btn-primary` | `.buttonStyle(.dsPrimary)`; bottom CTA `.dsPrimary(size: .large, fullWidth: true)` |
+| `ui-btn` | `.buttonStyle(.dsSecondary)`; destructive = `Button("Stop", role: .destructive) {}.buttonStyle(.dsSecondary)` |
+| `ui-btn-ghost` | `.buttonStyle(.dsGhost)` (Cancel, Back, Show all) |
+| `ui-icon-btn` | `.buttonStyle(.dsIcon)` + `.accessibilityLabel` |
+| `ui-seg` | `DSSegmentedControl("Label", selection: $x, options: [...]) { $0.label }` (`fullWidth:`, `segmentHeight: 32` in forms, `isDisabled:`) |
+| `ui-input` | `DSTextField("Placeholder", text: $t, prefix: "$")`, or `.dsInput(focused:prefix:)` on your own `TextField` |
+| `ui-field-label` + `ui-help` | `DSField("Label", help: "…") { field }`; `DSField("Shares") { accessory } content: { field }` puts a control at the label's end |
+| `ui-switch` | any `Toggle` (the root sets `DSSwitchToggleStyle`) |
+| `ui-dot` + word | `StatusDot("Running", tone: .live, pulsing: true)`, `StatusDot(word, status: serverStatus)`, `DSStatusDot(.warn)` alone |
+| `ui-error` | `ErrorRow(message:onRetry:)`; `.dsErrorSurface()` behind custom content |
+| `ui-empty` | `EmptyState(title: "No orders yet", subtitle: "…", actionLabel:, onAction:)` inside a card or row |
+| `ui-skel` | `Skeleton(width:height:)` shaped like the content; no `.redacted` shimmer-alikes for new code |
+| hero figure | `HeroValueHeader(value, change:, direction:, changeLabel: "Today")` (40/500, change 14 gain/loss) |
+| stat block | `StatGrid(columns: 2) { StatCell(label:value:footnote:) }` (2 or 3 columns) + `.statValueStyle(.medium)` (or `.figure`, `.large`) |
+| row | `EntityRow(title, subtitle:) { EntityRowValue(value, detail:, detailColor:) }`; symbols 14/500: `.entityRowTitleMedium()` |
+| sparkline / chart | `Sparkline(values:)`, `ScrubbableAreaChart(…, showsYAxis: true)` |
+| modal | a sheet; native `.alert` / `.confirmationDialog` stay native |
 
-Each component has a doc comment and a `#Preview`. Open the file in Xcode's canvas to see it in
-light and dark mode.
+Type roles (`DS.Font`): `pageTitle` 24/500, `sectionTitle` 16/500, `body` 14 (default),
+`bodyMedium` 14/500, `base` 16, `baseMedium`, `small` 13, `smallMedium`, `caption` 12,
+`captionMedium` 12/500, `micro` 11 (axes), `large` 18/500, `figure` 20/500, `figureLarge` 24/500,
+`hero` 40/500, `mono`/`monoSmall` for logs and ids. Add `.monospacedDigit()` to every figure.
 
-## Example 1: a list root (Instances)
+Colours: `DS.Surface.page|card|raised|hover|bar`; `DS.Text.primary` (zinc-100) `soft` (200)
+`label` (300) `secondary` (400) `muted` (500) `faint` (600); `DS.Palette.accent` (off-white),
+`gain`, `loss`, `amber`; `DS.Line.card|divider|row|input|focus`; `DS.Chart.*`. Legacy names still
+compile and resolve to these: `success`=gain, `danger`=loss, `warning`=amber, `info`/`teal`=zinc-400,
+`up`/`down`, `Surface.canvas|panel|inset`. Motion: `DSMotion.standard` (150 ms ease-out),
+`DSMotion.ease(_:)`; never `.spring`/`.bouncy`/`.snappy` on chrome.
+
+## 2. Before → after
 
 ```swift
-struct InstancesView: View {
-    @Environment(AppServices.self) private var services
-    @State private var model = InstancesModel()
-    @State private var creating = false
-    @State private var confirm: ConfirmRequest?
+// System fonts → Inter roles
+Text(name).font(.headline)                    →  Text(name).font(DS.Font.bodyMedium)   // row title: DS.Font.body
+Text(sub).font(.subheadline)                  →  Text(sub).font(DS.Font.body)          // or .caption for a subline
+Text(meta).font(.footnote)                    →  Text(meta).font(DS.Font.caption)
+Text("$1,204").font(.title2.weight(.semibold))→  Text("$1,204").font(DS.Font.figure).monospacedDigit()
+Text(x).font(.caption.monospaced())           →  Text(x).font(DS.Font.mono)
+.fontWeight(.semibold) / .bold()              →  pick the medium role; never weight modifiers
 
-    var body: some View {
-        List {
-            // A filter goes in the list, not in an eyebrow block above it.
-            Section {
-                Picker("Show", selection: $model.filter) {
-                    Text("All (\(model.all.count))").tag(InstanceFilter.all)
-                    Text("User (\(model.user.count))").tag(InstanceFilter.user)
-                    Text("AI (\(model.ai.count))").tag(InstanceFilter.ai)
-                }
-                .pickerStyle(.segmented)
-                .listRowBackground(Color.clear)
-                .listRowInsets(EdgeInsets())
-            }
+// Secondary text → the zinc ramp (be explicit)
+.foregroundStyle(.secondary)                  →  .foregroundStyle(DS.Text.muted)      // sublines, labels, meta
+                                                  .foregroundStyle(DS.Text.secondary)  // secondary body text
+.foregroundStyle(.tertiary)                   →  .foregroundStyle(DS.Text.faint)
+Color.primary / Color.secondary               →  DS.Text.primary / DS.Text.muted      // these are NOT remapped
 
-            Section {
-                ForEach(model.visible) { inst in
-                    NavigationLink(value: Route.instance(inst.id)) {
-                        EntityRow(inst.name, subtitle: inst.subtitle, systemImage: "cpu", isPinned: inst.pinned) {
-                            StatusDot(inst.running ? "Running" : "Stopped",
-                                      color: inst.running ? DS.Palette.success : .secondary,
-                                      pulsing: inst.running)
-                        }
-                    }
-                    .swipeActions(edge: .leading) {
-                        Button(inst.pinned ? "Unpin" : "Pin", systemImage: inst.pinned ? "pin.slash" : "pin") {
-                            Task { await model.togglePin(inst) }
-                        }
-                        .tint(.orange)
-                    }
-                    .swipeActions(edge: .trailing) {
-                        Button("Delete", systemImage: "trash", role: .destructive) {
-                            confirm = model.deleteRequest(inst)   // the same confirmation as before
-                        }
-                    }
-                    .contextMenu {
-                        Button(inst.running ? "Stop" : "Start",
-                               systemImage: inst.running ? "stop.fill" : "play.fill") { … }
-                        Button("View Live", systemImage: "chart.xyaxis.line") {
-                            services.router.push(.liveTrading(inst.id))
-                        }
-                        Divider()
-                        Button("Delete", systemImage: "trash", role: .destructive) {
-                            confirm = model.deleteRequest(inst)
-                        }
-                    }
-                }
-            }
+// Hues → meaning only
+.foregroundStyle(Color.green)                 →  .foregroundStyle(DS.Palette.gain)    // signed money / success only
+.foregroundStyle(.orange) (a warning)         →  HStack { DSStatusDot(.warn); Text(w) }   // or DS.Palette.amber on a short word
+.foregroundStyle(.blue|.purple|.teal) (chrome)→  DS.Text.secondary (or primary), no hue
+pnlColor(x)                                   →  dashboardChangeColor(pct) (zinc-500 for ~0%) or pnlColor (gain/loss)
+
+// Tinted badges → dot + word, or quiet text
+Text("Live").dsBadge(.green)                  →  StatusDot("Live", tone: .live)
+StatusBadge(label: "Failed", color: .red)     →  unchanged call; it now draws ● Failed (12 pt)
+Text("AI").padding().background(.blue.opacity(0.15), in: Capsule())
+                                              →  Text("AI").font(DS.Font.caption).foregroundStyle(DS.Text.secondary)
+
+// Icon tiles → plain muted glyph
+SettingsIconTile(systemImage: "gearshape", color: .gray)   (now draws a 17 pt zinc-500 glyph; drop `color:`)
+Image(systemName: s).foregroundStyle(.tint)   →  .foregroundStyle(DS.Text.muted), .font(.system(size: 16|17))
+
+// Segmented picker
+Picker("Mode", selection: $mode) { … }.pickerStyle(.segmented)
+                                              →  DSSegmentedControl("Mode", selection: $mode, options: Mode.allCases) { $0.label }
+
+// Prominent / glass buttons
+Button("Start") {}.buttonStyle(.borderedProminent)  →  .buttonStyle(.dsPrimary)
+Button("Stop") {}.buttonStyle(.bordered)            →  .buttonStyle(.dsSecondary)
+Button("Run backtest") {}.dsGlassProminentButton()  →  .buttonStyle(.dsPrimary(size: .large, fullWidth: true))
+Button(...).buttonStyle(.glass)                     →  .buttonStyle(.dsSecondary)
+
+// Cards
+.background(DS.Surface.panel, in: .rect(cornerRadius: 22))   →  .dsCardSurface()   // or Card { }
+
+// Empty / error / loading
+ContentUnavailableView("No data", systemImage: …)  →  EmptyState(title: "No data yet", subtitle: "…")
+ProgressView() as a first load                     →  Skeleton blocks shaped like the content
+```
+
+Copy: sentence case ("New instance", "Cancel order"), no trailing period on titles, labels,
+buttons or one-line subtitles, no exclamation marks. Borrow the web's words where it has the same
+screen (`frontend/src/views/*.vue`). Keep every fact, field and action.
+
+## 3. A List, the web way
+
+```swift
+List {
+    Section { pageHeader.dsClearRow(top: 8) }                // anything with its own surface
+    DSSection("Holdings", subtitle: "5 positions") {          // header outside, rows on one card
+        ForEach(rows) { r in
+            NavigationLink(value: Route.stock(…)) { EntityRow(r.symbol, subtitle: r.qty) { EntityRowValue(…) } }
+                .swipeActions { Button("Cancel order", systemImage: "xmark") { … }.tint(DS.Palette.loss) }
+                .contextMenu { … }
         }
-        .listStyle(.insetGrouped)
-        .navigationTitle("Instances")                       // a tab root has a large title
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                ToolbarAddButton("New Instance") { creating = true }
-            }
-        }
-        .refreshable { await model.refresh() }               // no refresh button
-        .overlay {
-            if model.visible.isEmpty, !model.isLoading {
-                ContentUnavailableView("No Instances", systemImage: "cpu",
-                                       description: Text("Create one with +."))
-            }
-        }
-        .confirmAlert($confirm)
-        .sheet(isPresented: $creating) { NewInstanceSheet() }
+    } accessory: {
+        DSSegmentedControl("P&L period", selection: $mode, options: [.daily, .total]) { $0.label }
+    }
+    DSSection("Market", subtitle: "Today's session", style: .plain) {   // header, no card
+        Card("Sector performance", padding: 0) { … }.dsClearRow()
     }
 }
+.dsList()
 ```
 
-For row identifiers, show a human name. Where you only have an ID, truncate it in the middle
-and give the row a copy action in its context menu:
+- `.dsList()` replaces `.listStyle(.insetGrouped)`: grouped (headers scroll), page background,
+  32 pt between sections. **Every `Section` must become a `DSSection`** (or hold only
+  `dsClearRow()` rows): a raw `Section` in a `.dsList()` draws full-width grey rows.
+- `DSSection` draws the card per row (rounded first/last, 7% outline, 5% hairlines between rows,
+  56 pt min height, 20 pt inside, page gutter 16). It splits its content with `Group(subviews:)`,
+  so `ForEach`, `if`, swipe actions, context menus and `NavigationLink` chevrons all work. Change
+  the row height with `rowMinHeight:` (44 for key-value rows, 68 for two-line rows with buttons).
+- `action: DSSectionAction("Add", systemImage: "plus") { }` is a ghost verb in the header;
+  `accessory:` takes any view; `footer: "…"` is a 12 pt zinc-500 line under the card.
+- Buttons inside a row: give each a DS style (`.dsSecondary`, `.plain`) so each is its own target.
+- Swipe actions draw a white label on their tint: use `.tint(DS.Swipe.neutral)` (zinc-700) for
+  every non-destructive action and `.tint(DS.Palette.loss)` for a destructive one. Never
+  `.tint(DS.Palette.accent)` or `.tint(DS.Palette.info)` there: white on off-white/zinc-400 is
+  unreadable (Backtests, Crypto, Strategies, Live trading still do this).
+- A `Form`: convert it to a `List` + `.dsList()` with `DSSection`s, or to a `ScrollView` of
+  `DSField`s like the trade ticket. Toggles in rows already draw the web switch.
+- Keep `.refreshable`, `.searchable` and every `.task`; only styling moves.
+- Header with an icon refresh: `DSSection(…) { … } accessory: { Button {…} label: { Image(systemName: "arrow.clockwise") }.buttonStyle(.dsIcon) }`.
 
-```swift
-Text(inst.brokerageId)
-    .font(.subheadline)
-    .foregroundStyle(.secondary)
-    .lineLimit(1)
-    .truncationMode(.middle)
-// in .contextMenu:
-Button("Copy ID", systemImage: "doc.on.doc") { UIPasteboard.general.string = inst.brokerageId }
+## 4. Chrome, sheets, toolbars
+
+- Navigation bars are configured globally (Inter titles, off-white buttons, page colour). iOS 26
+  draws bar buttons and the tab bar as Liquid Glass and ignores a custom tab bar appearance; leave
+  both alone. Large titles show only because the scroll-edge appearance is transparent: do not
+  set a bar background per screen.
+- Toolbar items: plain `Button("Start")`/`ToolbarAddButton`/`ToolbarMenu`. Do **not** put
+  `.dsPrimary` in a toolbar (it draws a white slab inside the glass capsule).
+- Sheets: keep the grabber; set `.presentationBackground(DS.Surface.card)` (or `.page`). A form
+  sheet can follow `TradeTicketSheet`: header (title 16/500 + subtitle, `xmark` icon button),
+  fields, footer (`.dsGhost` Cancel + `.dsPrimary` action over a `DSDivider()`).
+- Status: green only for something actually running/live (`.live`, may `pulsing`); paused amber;
+  stopped/queued zinc-600; done zinc-400 (`.neutral`); failed loss. `StatusBadge.color(forStatus:)`
+  and `StatusDot(_, status:)` already use this map.
+- Instances (running cards): copy the web's `.pin-*` CSS (end of `frontend/src/views/InstancesView.vue`): ping the dot
+  with `DSStatusDot(.live, pinging: true)`, a green-tinted card border (`DS.Palette.gain.opacity(0.18)`
+  via `.dsCardSurface(border:)`), the orbiting light and glow (build it in the Instances folder;
+  respect Reduce Motion), live ticking uptime (`TimelineView`), and the sparkline's pulsing end dot.
+
+## 5. Snapshot harness
+
+Files: `ios/IntelliStockTests/Snapshots/SnapshotHarness.swift` (engine, docs at the top),
+`SnapshotScreens.swift` (one `@Test` per screen), `SnapshotFixtures.swift` (stub JSON by path;
+account ids `SnapshotFixtures.alpacaLiveId`, `paperTestId`, `swingPaperId`, `kalshiId`).
+
+Run (skipped unless `IS_SNAPSHOT_DIR` is set; `TEST_RUNNER_` passes it to the test process):
+
+```sh
+cd ios && xcodegen generate
+TEST_RUNNER_IS_SNAPSHOT_DIR=/path/out TEST_RUNNER_IS_SNAPSHOT_ONLY=instances \
+xcodebuild test -project IntelliStock.xcodeproj -scheme IntelliStock \
+  -destination 'platform=iOS Simulator,id=<your sim id>' -derivedDataPath /private/tmp/claude-501/dd-<you> \
+  -only-testing:IntelliStockTests/SnapshotScreens
 ```
 
-## Example 2: a detail screen (Backtest detail)
+Add a screen:
 
 ```swift
-struct BacktestDetailView: View {
-    let id: String
-    @State private var model: BacktestDetailModel
-    @State private var confirm: ConfirmRequest?
-    @State private var rerunning = false
-
-    var body: some View {
-        List {
-            // The hero and its chart are the only card-like content. Put them in the
-            // first section, with the list's insets, and never full bleed.
-            Section {
-                VStack(alignment: .leading, spacing: DS.cardGroupSpacing) {
-                    HeroValueHeader(
-                        fmtPnl(model.pnl),
-                        numericValue: model.pnl,
-                        change: fmtPct(model.pnlPct),
-                        direction: ChangeDirection(model.pnl),
-                        status: model.dateRangeText            // "Jul 7 – Sep 18, 2026"
-                    )
-                    ScrubbableAreaChart(timestamps: model.times, values: model.equity,
-                                        lineColor: ChangeDirection(model.pnl).color,
-                                        height: 220, baseline: model.startValue)
-                }
-                .padding(.vertical, 4)
-            }
-
-            DSSection("Results") {
-                StatGrid {
-                    StatCell(label: "Portfolio", value: fmtMoney(model.endValue))
-                    StatCell(label: "Trades", value: "\(model.trades)", footnote: "\(model.buys) buy · \(model.sells) sell")
-                    StatCell(label: "Win rate", value: fmtPct(model.winRate))
-                    StatCell(label: "Elapsed", value: model.elapsedText)
-                }
-            }
-
-            DSSection("Run") {
-                LabeledContent("Instance", value: model.instanceName)
-                LabeledContent("Strategy", value: model.strategyName)
-                LabeledContent("Granularity", value: "15 minutes")
-            }
-
-            DSSection("Logs") {
-                NavigationLink("View Logs") { BacktestLogsView(id: id) }
-            }
-        }
-        .listStyle(.insetGrouped)
-        .navigationTitle("Backtest #\(id)")
-        .navigationBarTitleDisplayMode(.inline)              // pushed: inline title, no echo below
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                ToolbarMenu {
-                    Section {
-                        Button("Rerun", systemImage: "arrow.clockwise") { confirm = model.rerunRequest() }
-                            .disabled(rerunning)              // keep the double-submit guard
-                        Button("Playback", systemImage: "play.rectangle") { … }
-                    }
-                    Section {
-                        Button("Delete", systemImage: "trash", role: .destructive) { confirm = model.deleteRequest() }
-                    }
-                }
-            }
-        }
-        .refreshable { await model.refresh() }
-        .confirmAlert($confirm, isRunning: $rerunning)
+@Test func backtests() async throws {
+    try await Snapshot.capture("backtests", pages: 3) { services in
+        SnapshotHost.shell(services, tab: .more, stack: [.backtests])   // real tab + nav bars
     }
 }
+// A sheet: Snapshot.capture("x") { _ in SnapshotHost.sheet { MySheet(…) } }
+// Data first: let env = Snapshot.makeServices(); …await env.services.someRepository…;
+//             Snapshot.capture("x", environment: env) { … }
+// Typing: Snapshot.capture("x", prepare: { w in Snapshot.type("AA", in: w); Snapshot.endEditing(w) }) { … }
 ```
 
-For a screen whose single primary action is Start or Stop, put that action in the toolbar beside
-the menu:
+Missing data? Add the path to `SnapshotFixtures.respond` (read the model's `init(json:)` for keys).
+`IS_SNAPSHOT_ONLY` filters by name prefix. PNGs are 1206×2622 (3x); `pages:` scrolls the main
+scroll view. Use a simulator id (a new simulator's name is not found by `xcodebuild` at first).
 
-```swift
-ToolbarItem(placement: .primaryAction) {
-    Button(running ? "Stop" : "Start") { … }
-        .dsProminentButton()          // never a bare .borderedProminent
-}
+## 6. Leftover grep (run on your folders; justify or fix each hit)
+
+```sh
+grep -rnE '\.purple|\.indigo|\.blue|\.teal|\.orange|\.pink|\.mint|\.cyan|Color\.accentColor|\.accentColor|\.bold\(|fontWeight\(\.(bold|heavy|black|semibold)|\.textCase\(\.uppercase|\.uppercased\(\)|\.font\(\.(largeTitle|title|title2|title3|headline|subheadline|body|callout|footnote|caption|caption2)\b|Color\.(green|red)\b|LinearGradient|\.ultraThinMaterial|\.regularMaterial|\.shadow\(' <folders>
+# also: insetGrouped, pickerStyle(.segmented), glassEffect, buttonStyle(.glass, borderedProminent,
+#       foregroundStyle(.secondary), Color.secondary, Color.primary, ContentUnavailableView, Section {
 ```
 
-If the action is the whole point of the screen (approve a signal, link a brokerage), use a
-full-width prominent button in the first section instead.
+Accepted: `.uppercased()` on tickers/data, `LinearGradient` only for the faint fade under a P&L
+line (`DS.Chart.areaTopOpacity` → 0), `.shadow` only on a floating menu/toast, `.font(.system(size:))`
+for SF Symbols.
 
-## Example 3: a form (Link brokerage)
+## 7. Things that bite
 
-```swift
-NavigationStack {                       // sheets bring their own stack
-    Form {
-        Section {
-            Picker("Brokerage", selection: $draft.type) { … }
-            TextField("Account name", text: $draft.name)
-        }
-        DSSection("Keys", footer: "Keys are stored on your server, never on this device.") {
-            SecureField("API key", text: $draft.key)
-            SecureField("Secret", text: $draft.secret)
-            Toggle("Paper trading", isOn: $draft.paper)
-        }
-        if let error = model.error {
-            Section { ErrorRow(message: error) { model.clearError() } }
-        }
-        Section {
-            InlineActionRow("Test Connection", systemImage: "bolt.horizontal", isBusy: model.testing) {
-                Task { await model.test() }
-            }
-        }
-    }
-    .navigationTitle("Link Brokerage")
-    .navigationBarTitleDisplayMode(.inline)
-    .toolbar {
-        ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-        ToolbarItem(placement: .confirmationAction) {
-            Button("Link") { Task { await model.link() } }
-                .disabled(!draft.isValid || model.saving)
-        }
-    }
-}
-.presentationDetents([.large])
-```
-
-Form rules:
-
-- Use system controls (`TextField`, `SecureField`, `Picker`, `Toggle`, `DatePicker`,
-  `LabeledContent`), and add no card wrappers.
-- Put explanations in a section footer, not a paragraph above the form.
-- Confirm and Cancel go in the toolbar.
-
-## Toolbar convention
-
-- **Create:** `ToolbarAddButton`, trailing.
-- **Primary action:** at most one, `.dsProminentButton()`, trailing.
-- **Everything else:** `ToolbarMenu`, grouped in `Section`s with destructive items last. Sort
-  and page-size choices go in the menu as `Picker`s:
-
-  ```swift
-  ToolbarMenu("Sort and Page Size") {
-      Picker("Sort", selection: $sort) { ForEach(StrategySort.allCases) { Text($0.label).tag($0) } }
-      Picker("Per Page", selection: $perPage) { ForEach([10, 20, 50], id: \.self) { Text("\($0) per page").tag($0) } }
-  }
-  ```
-
-- **No refresh buttons.** The only search button left is the Dashboard's `magnifyingglass`.
-- **More symbol:** `ToolbarSymbol.more` is the bare `ellipsis`. iOS 26 already draws each toolbar
-  item on a glass circle, so the result reads as the familiar circled ellipsis without a circle
-  drawn inside another circle (`toolbars.md` › Actions).
-
-## Status: dot or badge?
-
-- **Running or stopped** (any state that changes on its own) uses a `StatusDot` with a word. The
-  dot carries the colour and the word stays secondary.
-- **A flag** (severity, Live versus Paper, Failed) uses one `StatusBadge`.
-- **Who made it** (User or AI) is plain secondary text in the subtitle: "AI · Strategy 197".
-
-## Charts
-
-- Use `ScrubbableAreaChart` for any value-over-time chart. It already has the house style: a
-  2 pt monotone line, a flat `DS.chartAreaOpacity` fill, one dotted baseline at the start value
-  (or `baseline:`), and at most four `.caption2` date labels.
-- Place it with margins: inside a `Card`, or in a list section with the list's insets.
-- Follow it with the range `Picker(.segmented)`.
-- Use `Sparkline` inside rows, framed about 60 × 24.
-- Every chart draws itself in from the leading edge with `.chartDrawIn`, as `Sparkline` does:
-  - It eases out over 0.9 s (0.65 s for a row-sized chart). Under Reduce Motion the chart
-    shows at once.
-  - Key `trigger` on what names the series: the range and account, or the range the data was
-    loaded for. Never key it on the points, so polls leave the chart still.
-  - Pass `interacting: selection != nil` on a scrubbable chart. A scrub during the draw-in
-    uncovers the whole chart.
-  - On a chart with axes, apply it inside `.chartPlotStyle`, so the axes and legend stay put.
-
-## Empty, loading, error
-
-- **A whole empty screen:** `ContentUnavailableView`, or `EmptyState` with an action.
-- **Empty inside a section:** one `.secondary` row, such as "No open positions".
-- **Loading:** a centred `ProgressView()` for a whole screen, or `.redacted(reason: .placeholder)`
-  on rows that keep their real layout. Prefer that to `Skeleton`.
-- **Errors:** `ErrorRow(message:onRetry:)`.
-
-## The chat accessory
-
-The chat's entry is the tab bar's bottom accessory: `ChatAccessoryView`
-(`Features/Chatbot/Views/ChatAccessoryView.swift`), attached in `App/MainTabView.swift` together
-with `chatbotPresenter()`, which hosts the chat sheet. Screens don't need to do anything for it.
-
-- Content and the bottom safe area already sit above it.
-- A screen's own floating control (Live Trading's Halt, the playback transport) must be laid out
-  against the bottom safe area, with `.safeAreaInset(edge: .bottom)` or an overlay that respects
-  the safe area. Never use a fixed offset from the screen edge.
-
-## What R1 changed for every screen automatically
-
-- `Card`'s default padding is now 16. Its corner radius stays 22.
-- `SectionHeader` draws a `.headline` title and ignores `eyebrow:`. Drop that argument when you
-  edit the call.
-- `StatTile` draws as a `StatCell`, with no grey tile.
-- `AppBadge` uses the `StatusBadge` capsule and sentence-cases its label.
-- `StatusBadge` is text only; it shows a dot only when `pulsing` is true.
-- `ScrubbableAreaChart` draws a dotted start-value baseline.
-- `IconTile` corners are 30 % of the tile's size.
-- `DashboardAllocationRing` and `DashboardMiniSpark` are typealiases of `AllocationRing` and
-  `Sparkline`.
-
-## Before you call a screen done
-
-- [ ] No `.uppercased()`, `.textCase(.uppercase)` or `.tracking` on user-facing text, and no
-      upper-case string literals except tickers and acronyms.
-- [ ] No refresh toolbar buttons; `.refreshable` is present.
-- [ ] No row of tinted capsule buttons; every old action is reachable by tap, swipe, context menu
-      or toolbar.
-- [ ] No card inside a card, and no grey tile inside a card.
-- [ ] The inline title on a pushed screen is not repeated in the content.
-- [ ] No gradients, glows, coloured shadows or blur.
-- [ ] Every icon-only button has an accessibility label, and every target is 44 pt or more.
-- [ ] Checked in light, dark and an accessibility text size.
+- `DS.Font` is static Inter; `.fontWeight`/`.bold()` on it fakes a weight. Use the role.
+- `.foregroundStyle(.secondary)` resolves to zinc-400 and `.tertiary` to zinc-500 (root mapping),
+  but `Color.secondary`/`Color.primary` are system colours and are not remapped.
+- `Card("Title")` now draws a header row with a divider (the web's card header), not a title in
+  the padding; for a bare title use `Card { VStack { Text(t).font(DS.Font.bodyMedium) … } }`.
+- `StatusBadge`, `AppBadge`, `.dsBadge` no longer draw capsules; `IconTile` and
+  `SettingsIconTile` are bare zinc-500 glyphs (`EntityRowMetrics.iconSize` is 24).
+- `HeroValueHeader` draws no arrow; pass `changeLabel` ("Today", or the range caption via
+  `dashboardRangeCaption(range)`).
+- Do not feed an `onGeometryChange` measurement back into the same view's padding; no TaskGroups
+  capturing MainActor state.
+- Accessibility identifiers, routes, data flow and tests' behaviour must not change; update only
+  tests that assert old colours or strings.

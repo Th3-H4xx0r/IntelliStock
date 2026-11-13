@@ -7,8 +7,10 @@ import SwiftUI
 /// session lands after the hold so the gate takes over. `redirectPath` is
 /// handled by the gate (`AppServices.didSignIn`), as the Dart router did.
 ///
-/// Native form: the plain grouped background, inset-grouped field rows and the
-/// shared glass `AuthPillButton` — no bloom, no frosted card.
+/// Styled as the web's sign-in page under the coin: "Sign in to IntelliStock"
+/// and its line, then a card with the labelled username and password fields
+/// and the full-width primary button, then the invitation note. No bloom,
+/// no glow, no frosted card.
 struct LoginView: View {
     let redirectPath: String?
 
@@ -21,7 +23,7 @@ struct LoginView: View {
             if let model {
                 LoginContent(model: model, entrance: entrance)
             } else {
-                DS.Surface.canvas.ignoresSafeArea()
+                DS.Surface.page.ignoresSafeArea()
             }
         }
         .onAppear {
@@ -48,8 +50,12 @@ private struct LoginContent: View {
     @State private var showPassword = false
     @FocusState private var focus: LoginField?
 
-    /// The shared measure of the auth flow (kept in step with the lock screen).
-    private let columnWidth: CGFloat = 340
+    /// The shared measure of the auth flow (the web's `max-w-sm`, kept in
+    /// step with the lock screen).
+    private let columnWidth: CGFloat = 384
+    /// The coin at rest: smaller than the Dart 322 so the web's form card
+    /// fits under it on a phone. It still grows to full size on success.
+    private let coinSize: CGFloat = 240
 
     var body: some View {
         let succeeded = model.state.succeeded
@@ -58,7 +64,7 @@ private struct LoginContent: View {
         GeometryReader { proxy in
             ScrollView {
                 VStack(spacing: 0) {
-                    LoginCoinView(phase: model.coinPhase, onEntranceStarted: entrance.onCoinEntranceStarted)
+                    LoginCoinView(phase: model.coinPhase, size: coinSize, onEntranceStarted: entrance.onCoinEntranceStarted)
 
                     // Everything below the coin collapses on success, which
                     // lifts the coin to the middle without measuring anything.
@@ -71,8 +77,9 @@ private struct LoginContent: View {
                             .transition(.opacity.combined(with: .offset(y: 40)))
                     }
                 }
-                .frame(maxWidth: columnWidth)
-                .padding(.horizontal, 24)
+                // A fixed width: the coin's 470 pt viewport would otherwise
+                // widen the column past the page gutter.
+                .frame(width: max(min(columnWidth, proxy.size.width - DS.pageGutter * 2), 0))
                 .frame(maxWidth: .infinity)
                 // Sits above centre: the coin needs headroom and the form
                 // reads better high on the screen.
@@ -83,7 +90,7 @@ private struct LoginContent: View {
             // The success coin grows beyond its slot; don't crop it.
             .scrollClipDisabled()
         }
-        .background(DS.Surface.canvas.ignoresSafeArea())
+        .background(DS.Surface.page.ignoresSafeArea())
         // Tapping the background gives up focus, so the keyboard drops.
         .contentShape(Rectangle())
         .onTapGesture { focus = nil }
@@ -93,80 +100,102 @@ private struct LoginContent: View {
 
     @ViewBuilder
     private func form(busy: Bool) -> some View {
-        VStack(spacing: 0) {
-            Text("Welcome back")
-                .font(.title2.weight(.semibold))
-                .multilineTextAlignment(.center)
-                .padding(.top, 20)
-                .padding(.bottom, 28)
-                .accessibilityAddTraits(.isHeader)
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Sign in to IntelliStock")
+                    .font(DS.Font.pageTitle)
+                    .foregroundStyle(DS.Text.primary)
+                    .accessibilityAddTraits(.isHeader)
+                Text("IntelliStock is invite-only. Sign in with your credentials.")
+                    .font(DS.Font.body)
+                    .foregroundStyle(DS.Text.secondary)
+                    .lineSpacing(4)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.top, 12)
 
-            VStack(spacing: 14) {
+            // The form card (`ui-card p-6`).
+            VStack(alignment: .leading, spacing: 20) {
                 if let error = model.displayedError {
-                    LoginErrorBanner(message: error)
+                    ErrorRow(message: error)
                         .transition(.opacity)
                 }
 
-                // The placeholder carries the field name, so there are no
-                // labels above the inputs.
-                VStack(spacing: 0) {
-                    LoginFieldRow(systemImage: Symbol.named("person")) {
-                        TextField("Username", text: $username)
-                            .textContentType(.username)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .submitLabel(.next)
-                            .focused($focus, equals: .username)
-                            .onSubmit { focus = .password }
-                    }
-                    Divider().padding(.leading, 48)
-                    LoginFieldRow(systemImage: Symbol.named("lock")) {
-                        Group {
-                            if showPassword {
-                                TextField("Password", text: $password)
-                            } else {
-                                SecureField("Password", text: $password)
-                            }
+                VStack(alignment: .leading, spacing: 20) {
+                    DSField("Username") {
+                        TextField(text: $username, prompt: Text("your username").foregroundStyle(DS.Text.faint)) {
+                            Text("Username")
                         }
-                        .textContentType(.password)
+                        .textContentType(.username)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                        .submitLabel(.done)
-                        .focused($focus, equals: .password)
-                        .onSubmit(submit)
+                        .submitLabel(.next)
+                        .focused($focus, equals: .username)
+                        .onSubmit { focus = .password }
+                        .frame(minHeight: 40)
+                        .dsInput(focused: focus == .username)
+                    }
+                    DSField("Password") {
+                        HStack(spacing: 4) {
+                            Group {
+                                if showPassword {
+                                    TextField(text: $password, prompt: Text("••••••••").foregroundStyle(DS.Text.faint)) {
+                                        Text("Password")
+                                    }
+                                } else {
+                                    SecureField(text: $password, prompt: Text("••••••••").foregroundStyle(DS.Text.faint)) {
+                                        Text("Password")
+                                    }
+                                }
+                            }
+                            .textContentType(.password)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .submitLabel(.done)
+                            .focused($focus, equals: .password)
+                            .onSubmit(submit)
 
-                        Button {
-                            showPassword.toggle()
-                        } label: {
-                            Image(systemName: Symbol.named(showPassword ? "visibility_off" : "visibility"))
-                                .foregroundStyle(.secondary)
-                                .frame(width: 44, height: 44)
+                            Button {
+                                showPassword.toggle()
+                            } label: {
+                                Image(systemName: Symbol.named(showPassword ? "visibility_off" : "visibility"))
+                            }
+                            .buttonStyle(.dsIcon)
+                            .padding(.trailing, -8)
+                            .disabled(busy)
+                            .accessibilityLabel(showPassword ? "Hide password" : "Show password")
                         }
-                        .buttonStyle(.plain)
-                        .disabled(busy)
-                        .accessibilityLabel(showPassword ? "Hide password" : "Show password")
+                        .frame(minHeight: 40)
+                        .dsInput(focused: focus == .password)
                     }
                 }
-                .background(DS.Surface.panel, in: .rect(cornerRadius: DS.Radius.control, style: .continuous))
                 .disabled(busy)
-                .opacity(busy ? 0.5 : 1)
                 .onChange(of: username) { model.clearErrors() }
                 .onChange(of: password) { model.clearErrors() }
 
-                AuthPillButton(label: "Sign In", busy: busy, busyLabel: "Signing in\u{2026}", action: submit)
-                    .padding(.top, 4)
-
-                if model.biometricAvailable == true {
-                    biometricRow(busy: busy)
-                        .padding(.top, 4)
-                }
+                AuthPillButton(label: "Sign in", showChevron: false, busy: busy, busyLabel: "Signing in\u{2026}", action: submit)
             }
-            .animation(.easeOut(duration: 0.2), value: model.displayedError)
+            .padding(24)
+            .dsCardSurface()
+            .padding(.top, 32)
+            .animation(DSMotion.ease(0.2), value: model.displayedError)
+
+            if model.biometricAvailable == true {
+                biometricRow(busy: busy)
+                    .padding(.top, 16)
+            }
+
+            Text("Access is by invitation only. Ask someone with an account to create one for you.")
+                .font(DS.Font.caption)
+                .foregroundStyle(DS.Text.muted)
+                .lineSpacing(3)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 24)
         }
     }
 
-    /// The biometric switch as a plain Settings-style row under the form: the
-    /// Settings icon tile, the label and the switch, with no card behind it.
+    /// The biometric switch as a plain row under the card: a muted glyph,
+    /// the label and the web switch.
     private func biometricRow(busy: Bool) -> some View {
         let disabled = model.biometricBusy || busy
         return Toggle(isOn: Binding(
@@ -174,61 +203,19 @@ private struct LoginContent: View {
             set: { want in Task { await model.toggleBiometricLock(want, lock: services.lock) } }
         )) {
             HStack(spacing: 12) {
-                SettingsIconTile(systemImage: model.biometricIsFace ? "faceid" : Symbol.named("fingerprint"), color: .green)
+                SettingsIconTile(systemImage: model.biometricIsFace ? "faceid" : Symbol.named("fingerprint"))
                 Text("Unlock with \(model.biometricMethod)")
+                    .font(DS.Font.body)
+                    .foregroundStyle(DS.Text.label)
             }
         }
-        .padding(.horizontal, 14)
-        .frame(minHeight: 52)
+        .padding(.horizontal, 4)
+        .frame(minHeight: 44)
         .disabled(disabled)
-        .opacity(disabled ? 0.5 : 1)
     }
 
     private func submit() {
         focus = nil
         Task { await model.submit(username: username, password: password) }
-    }
-}
-
-/// A field row: a leading glyph and the input, Settings-style.
-private struct LoginFieldRow<Content: View>: View {
-    let systemImage: String
-    @ViewBuilder let content: Content
-
-    var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: systemImage)
-                .foregroundStyle(.secondary)
-                .frame(width: 24)
-                .accessibilityHidden(true)
-            content
-        }
-        .padding(.leading, 14)
-        .padding(.trailing, 4)
-        .frame(minHeight: 52)
-    }
-}
-
-/// The inline error above the fields — `_ErrorBanner`.
-private struct LoginErrorBanner: View {
-    let message: String
-
-    @Environment(\.colorScheme) private var colorScheme
-
-    var body: some View {
-        let ink = DS.Palette.onTint(DS.Palette.danger, in: colorScheme)
-        HStack(spacing: 9) {
-            Image(systemName: Symbol.named("error"))
-                .foregroundStyle(ink)
-                .accessibilityHidden(true)
-            Text(message)
-                .font(.footnote)
-                .foregroundStyle(ink)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(.horizontal, 13)
-        .padding(.vertical, 11)
-        .background(DS.Palette.danger.opacity(DS.tintFill), in: .rect(cornerRadius: DS.Radius.control, style: .continuous))
-        .accessibilityElement(children: .combine)
     }
 }

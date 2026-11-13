@@ -18,27 +18,32 @@ const props = defineProps({
   block: { type: Object, required: true },
 })
 
-// Default ApexCharts options (dark theme + transparent bg, matching the rest of the app).
+// Default ApexCharts options, matching the dashboard charts: one lead series
+// in off-white, the rest in zinc steps; hairline grid; 11px muted axis labels.
+const AXIS_LABEL = { colors: '#71717a', fontSize: '11px', fontFamily: 'inherit' }
+const SERIES_STEPS = ['#ededed', '#8b8b91', '#5c5c62', '#3f3f46', '#a1a1aa']
+const GAIN = '#4cc38a'
+const LOSS = '#e5484d'
 const chartDefaults = {
   theme: { mode: 'dark' },
   chart: {
     background: 'transparent',
     toolbar: { show: false },
-    animations: { enabled: true },
+    animations: { enabled: true, easing: 'easeout', speed: 300 },
     fontFamily: 'Inter, ui-sans-serif, system-ui, sans-serif',
   },
-  grid: { borderColor: '#1e2535', strokeDashArray: 3 },
-  legend: { labels: { colors: '#94a3b8' } },
+  grid: { borderColor: 'rgba(255,255,255,0.05)', strokeDashArray: 0 },
+  legend: { labels: { colors: '#a1a1aa' }, fontSize: '12px', markers: { size: 4, shape: 'square' } },
   stroke: { curve: 'smooth', width: 2 },
   xaxis: {
     type: 'category',
-    labels: { style: { colors: '#64748b', fontSize: '11px' } },
-    axisBorder: { color: '#1e2535' },
-    axisTicks: { color: '#1e2535' },
+    labels: { style: AXIS_LABEL },
+    axisBorder: { show: false },
+    axisTicks: { show: false },
   },
-  yaxis: { labels: { style: { colors: '#64748b' } } },
+  yaxis: { labels: { style: AXIS_LABEL } },
   tooltip: { theme: 'dark' },
-  colors: ['#ededed', '#85858b', '#4cc38a', '#f59e0b', '#e5484d'],
+  colors: SERIES_STEPS,
 }
 
 const chartOptions = computed(() => {
@@ -126,7 +131,7 @@ const portfolioPositive = computed(() => Number(props.block?.change_abs || 0) >=
 const portfolioOptions = computed(() => {
   if (props.block?.type !== 'portfolio') return chartDefaults
   const positive = portfolioPositive.value
-  const lineColor = positive ? '#34d399' : '#f87171'
+  const lineColor = positive ? GAIN : LOSS
   const xFmt = _xFormat(props.block.range)
   return {
     chart: {
@@ -134,7 +139,7 @@ const portfolioOptions = computed(() => {
       background: 'transparent',
       toolbar: { show: false },
       zoom: { enabled: false },
-      animations: { enabled: true, speed: 400 },
+      animations: { enabled: true, easing: 'easeout', speed: 300 },
       fontFamily: 'Inter, ui-sans-serif, system-ui, sans-serif',
     },
     colors: [lineColor],
@@ -146,7 +151,7 @@ const portfolioOptions = computed(() => {
         opacityTo: 0.02,
         stops: [0, 95],
         colorStops: [
-          { offset: 0,   color: lineColor, opacity: 0.35 },
+          { offset: 0,   color: lineColor, opacity: 0.12 },
           { offset: 100, color: lineColor, opacity: 0.0  },
         ],
       },
@@ -155,7 +160,7 @@ const portfolioOptions = computed(() => {
     dataLabels: { enabled: false },
     grid: {
       borderColor: 'rgba(255,255,255,0.05)',
-      strokeDashArray: 4,
+      strokeDashArray: 0,
       xaxis: { lines: { show: false } },
       yaxis: { lines: { show: true } },
       padding: { left: 0, right: 8 },
@@ -163,7 +168,7 @@ const portfolioOptions = computed(() => {
     xaxis: {
       type: 'datetime',
       labels: {
-        style: { colors: '#64748b', fontSize: '11px' },
+        style: AXIS_LABEL,
         datetimeUTC: false,
         format: xFmt,
       },
@@ -173,7 +178,7 @@ const portfolioOptions = computed(() => {
     },
     yaxis: {
       labels: {
-        style: { colors: '#64748b', fontSize: '11px' },
+        style: AXIS_LABEL,
         // Plain function (not arrow) — vue3-apexcharts has historically lost
         // arrow-fn formatters when re-cloning options across re-renders.
         formatter: function (v) {
@@ -219,7 +224,7 @@ const priceOptions = computed(() => {
   const isSingle = series.length === 1
   const range = String(props.block.range || '').toUpperCase()
   const positive = priceTrendPositive.value
-  const lineColor = isSingle ? (positive ? '#34d399' : '#f87171') : '#00e1ff'
+  const lineColor = isSingle ? (positive ? GAIN : LOSS) : SERIES_STEPS[0]
 
   // Build a flat list of timestamps aligned to the index used in the
   // sequential-x series. For multi-symbol charts we just use the first
@@ -245,10 +250,10 @@ const priceOptions = computed(() => {
       toolbar: { show: false },
       zoom: { enabled: false },
       sparkline: { enabled: false },
-      animations: { enabled: true, easing: 'easeinout', speed: 400 },
+      animations: { enabled: true, easing: 'easeout', speed: 300 },
       fontFamily: 'Inter, ui-sans-serif, system-ui, sans-serif',
     },
-    colors: isSingle ? [lineColor] : ['#ededed', '#85858b', '#4cc38a', '#f59e0b', '#e5484d'],
+    colors: isSingle ? [lineColor] : SERIES_STEPS,
     // Straight curve — same as LiveTradingView's equity + per-position
     // charts. Smoothing on sparse intraday bars produces fake sine-wave
     // artifacts when there are stretches with no real ticks (overnight,
@@ -257,7 +262,7 @@ const priceOptions = computed(() => {
     dataLabels: { enabled: false },
     grid: {
       borderColor: 'rgba(255,255,255,0.05)',
-      strokeDashArray: 4,
+      strokeDashArray: 0,
       xaxis: { lines: { show: false } },
       yaxis: { lines: { show: true } },
       padding: { left: 0, right: 8 },
@@ -270,7 +275,7 @@ const priceOptions = computed(() => {
       type: 'numeric',
       tickAmount: 4,
       labels: {
-        style: { colors: '#64748b', fontSize: '11px', fontFamily: 'inherit' },
+        style: AXIS_LABEL,
         formatter: function (val) {
           const i = Math.round(Number(val))
           const epoch = tsList[i]
@@ -284,7 +289,7 @@ const priceOptions = computed(() => {
     },
     yaxis: {
       labels: {
-        style: { colors: '#64748b', fontSize: '11px', fontFamily: 'inherit' },
+        style: AXIS_LABEL,
         offsetX: -8,
         minWidth: 56,
         formatter: function (v) {
@@ -318,7 +323,7 @@ const priceOptions = computed(() => {
     },
     legend: isSingle
       ? { show: false }
-      : { labels: { colors: '#cbd5e1' }, position: 'top', horizontalAlign: 'left' },
+      : { labels: { colors: '#a1a1aa' }, fontSize: '12px', markers: { size: 4, shape: 'square' }, position: 'top', horizontalAlign: 'left' },
     markers: { size: 0, hover: { size: 4, strokeColors: lineColor, strokeWidth: 2 } },
     theme: { mode: 'dark' },
   }
@@ -332,7 +337,7 @@ const priceOptions = computed(() => {
         opacityTo: 0.02,
         stops: [0, 95],
         colorStops: [
-          { offset: 0,   color: lineColor, opacity: 0.35 },
+          { offset: 0,   color: lineColor, opacity: 0.12 },
           { offset: 100, color: lineColor, opacity: 0.0  },
         ],
       },
@@ -443,8 +448,8 @@ function fmtCell(value) {
 
 const trendIcon = computed(() => {
   if (props.block?.type !== 'stat') return null
-  if (props.block.trend === 'up') return { icon: 'trending_up', cls: 'text-emerald-400' }
-  if (props.block.trend === 'down') return { icon: 'trending_down', cls: 'text-red-400' }
+  if (props.block.trend === 'up') return { icon: 'trending_up', cls: 'text-gain' }
+  if (props.block.trend === 'down') return { icon: 'trending_down', cls: 'text-loss' }
   return null
 })
 </script>
@@ -459,8 +464,8 @@ const trendIcon = computed(() => {
     />
 
     <!-- Chart -->
-    <div v-else-if="block?.type === 'chart'" class="rounded-xl border border-border-subtle bg-surface/50 p-3 sm:p-4 max-w-full overflow-hidden">
-      <p v-if="block.title" class="text-[11px] font-semibold uppercase tracking-widest text-slate-500 mb-1 truncate">{{ block.title }}</p>
+    <div v-else-if="block?.type === 'chart'" class="rounded-xl border border-white/[0.07] bg-background-dark/60 p-4 max-w-full overflow-hidden">
+      <p v-if="block.title" class="text-xs text-slate-500 mb-1 truncate">{{ block.title }}</p>
       <VueApexCharts
         :type="block.chart_type || 'area'"
         :series="block.series || []"
@@ -469,25 +474,25 @@ const trendIcon = computed(() => {
       />
     </div>
 
-    <!-- Portfolio chart (PortfolioChart-style: gradient area, dynamic green/red, header + stats) -->
-    <div v-else-if="block?.type === 'portfolio'" class="rounded-xl border border-border-subtle bg-surface/50 p-3 sm:p-4 max-w-full overflow-hidden">
+    <!-- Portfolio chart (PortfolioChart look: faint same-hue fade, gain/loss line, header + change) -->
+    <div v-else-if="block?.type === 'portfolio'" class="rounded-xl border border-white/[0.07] bg-background-dark/60 p-4 max-w-full overflow-hidden">
       <div class="flex items-start justify-between gap-3 mb-2">
         <div class="min-w-0">
-          <p class="text-[10px] font-semibold uppercase tracking-widest text-slate-500 truncate">{{ block.title || 'Portfolio' }}</p>
-          <p class="text-base sm:text-lg font-bold text-slate-100 leading-tight mt-0.5">
+          <p class="text-xs text-slate-500 truncate">{{ block.title || 'Portfolio' }}</p>
+          <p class="text-xl font-medium text-slate-100 leading-tight mt-1 tabular-nums">
             {{ fmtMoney(block.current_value) }}
           </p>
           <p
             v-if="block.change_abs != null || block.change_pct != null"
-            class="text-[11px] font-mono mt-0.5"
-            :class="portfolioPositive ? 'text-emerald-400' : 'text-red-400'"
+            class="text-xs mt-1 tabular-nums"
+            :class="portfolioPositive ? 'text-gain' : 'text-loss'"
           >
             {{ fmtSignedMoney(block.change_abs) }}<span v-if="block.change_pct != null"> · {{ fmtPct(block.change_pct) }}</span>
           </p>
         </div>
         <span
           v-if="block.range"
-          class="shrink-0 text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-md border border-primary/30 text-primary bg-primary/10"
+          class="shrink-0 text-xs text-slate-500 tabular-nums"
         >{{ block.range }}</span>
       </div>
       <VueApexCharts
@@ -498,29 +503,29 @@ const trendIcon = computed(() => {
       />
     </div>
 
-    <!-- Price-history chart — matches LiveTradingTerminal style.
-         Single symbol: gradient area + dynamic green/red, header shows
-         current price + signed change. Multi-symbol: line chart with legend. -->
-    <div v-else-if="block?.type === 'price'" class="rounded-xl border border-border-subtle bg-surface/50 p-3 sm:p-4 max-w-full overflow-hidden">
+    <!-- Price-history chart.
+         Single symbol: gain/loss line with a faint fade, header shows
+         current price + signed change. Multi-symbol: zinc lines with legend. -->
+    <div v-else-if="block?.type === 'price'" class="rounded-xl border border-white/[0.07] bg-background-dark/60 p-4 max-w-full overflow-hidden">
       <div class="flex items-start justify-between gap-3 mb-2">
         <div class="min-w-0">
-          <p class="text-[10px] font-semibold uppercase tracking-widest text-slate-500 truncate">
+          <p class="text-xs text-slate-500 truncate">
             {{ priceHeader.symbol }}
           </p>
-          <p v-if="priceHeader.last != null" class="text-base sm:text-lg font-bold text-slate-100 leading-tight mt-0.5">
+          <p v-if="priceHeader.last != null" class="text-xl font-medium text-slate-100 leading-tight mt-1 tabular-nums">
             {{ fmtMoney(priceHeader.last) }}
           </p>
           <p
             v-if="priceHeader.changeAbs != null"
-            class="text-[11px] font-mono mt-0.5"
-            :class="priceTrendPositive ? 'text-emerald-400' : 'text-red-400'"
+            class="text-xs mt-1 tabular-nums"
+            :class="priceTrendPositive ? 'text-gain' : 'text-loss'"
           >
             {{ fmtSignedMoney(priceHeader.changeAbs) }}<span v-if="priceHeader.changePct != null"> · {{ fmtPct(priceHeader.changePct) }}</span>
           </p>
         </div>
         <span
           v-if="block.range"
-          class="shrink-0 text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-md border border-primary/30 text-primary bg-primary/10"
+          class="shrink-0 text-xs text-slate-500 tabular-nums"
         >{{ block.range }}</span>
       </div>
       <VueApexCharts
@@ -532,59 +537,58 @@ const trendIcon = computed(() => {
     </div>
 
     <!-- Table -->
-    <div v-else-if="block?.type === 'table'" class="rounded-xl border border-border-subtle bg-surface/50 px-3 py-3 sm:px-4 max-w-full overflow-x-auto">
-      <p v-if="block.title" class="text-[11px] font-semibold uppercase tracking-widest text-slate-500 mb-2">{{ block.title }}</p>
-      <table class="w-full text-xs table-fixed">
+    <div v-else-if="block?.type === 'table'" class="rounded-xl border border-white/[0.07] bg-background-dark/60 max-w-full overflow-x-auto">
+      <p v-if="block.title" class="px-4 pt-3 text-xs text-slate-500">{{ block.title }}</p>
+      <table class="w-full text-sm table-fixed">
         <thead>
-          <tr class="border-b border-border-subtle/60">
+          <tr class="h-9 border-b border-white/[0.06]">
             <th
               v-for="h in (block.headers || [])"
               :key="h.key || h.label"
-              :class="['px-2 py-2 text-slate-500 font-semibold uppercase tracking-wider truncate', alignClass(h.align)]"
+              :class="['px-4 text-xs text-slate-500 font-normal truncate', alignClass(h.align)]"
             >{{ h.label }}</th>
           </tr>
         </thead>
-        <tbody>
+        <tbody class="divide-y divide-white/[0.05]">
           <tr
             v-for="(row, idx) in (block.rows || [])"
             :key="idx"
-            class="border-b border-border-subtle/30 last:border-b-0"
           >
             <td
               v-for="h in (block.headers || [])"
               :key="(h.key || h.label) + ':' + idx"
-              :class="['px-2 py-2 text-slate-200 align-top break-words', alignClass(h.align)]"
+              :class="['px-4 py-2.5 text-slate-200 align-top break-words tabular-nums', alignClass(h.align)]"
               style="max-width: 220px; overflow-wrap: anywhere;"
             >{{ fmtCell(row[h.key]) }}</td>
           </tr>
           <tr v-if="!(block.rows || []).length">
-            <td :colspan="(block.headers || []).length || 1" class="px-2 py-3 text-slate-500 italic text-center">No rows.</td>
+            <td :colspan="(block.headers || []).length || 1" class="px-4 py-4 text-slate-500 text-center">No rows</td>
           </tr>
         </tbody>
       </table>
     </div>
 
     <!-- Stat -->
-    <div v-else-if="block?.type === 'stat'" class="rounded-xl border border-border-subtle bg-surface/50 px-4 py-3 inline-flex flex-col">
-      <p class="text-[10px] uppercase tracking-widest text-slate-500 mb-1">{{ block.label }}</p>
-      <div class="flex items-baseline gap-2">
-        <p class="text-xl font-bold text-slate-100">{{ block.value }}</p>
+    <div v-else-if="block?.type === 'stat'" class="rounded-xl border border-white/[0.07] bg-background-dark/60 px-4 py-3 inline-flex flex-col">
+      <p class="text-xs text-slate-500">{{ block.label }}</p>
+      <div class="flex items-baseline gap-2 mt-1">
+        <p class="text-xl font-medium text-slate-100 tabular-nums">{{ block.value }}</p>
         <span
           v-if="trendIcon"
-          class="material-symbols-outlined text-base"
+          class="material-symbols-outlined text-[16px] self-center"
           :class="trendIcon.cls"
         >{{ trendIcon.icon }}</span>
       </div>
-      <p v-if="block.detail" class="text-[11px] text-slate-500 mt-1">{{ block.detail }}</p>
+      <p v-if="block.detail" class="text-xs text-slate-500 mt-1">{{ block.detail }}</p>
     </div>
 
-    <!-- Navigation pill (rendered as a callout; the dock catches navigate blocks separately) -->
-    <div v-else-if="block?.type === 'navigate'" class="text-[11px] text-primary inline-flex items-center gap-1">
+    <!-- Navigation note (rendered as a callout; the dock catches navigate blocks separately) -->
+    <div v-else-if="block?.type === 'navigate'" class="text-xs text-slate-400 inline-flex items-center gap-1">
       <span class="material-symbols-outlined text-[14px]">north_east</span>
-      Navigated to <code class="font-mono ml-1">{{ block.route }}</code>
+      Navigated to <code class="font-mono ml-1 text-slate-300">{{ block.route }}</code>
     </div>
 
-    <div v-else class="text-xs text-slate-500 italic">(unsupported block)</div>
+    <div v-else class="text-xs text-slate-500">Unsupported block</div>
   </div>
 </template>
 
@@ -592,15 +596,18 @@ const trendIcon = computed(() => {
 .chat-md { word-break: break-word; overflow-wrap: anywhere; }
 .chat-md :deep(p) { margin: 0 0 0.6em; line-height: 1.55; word-break: break-word; overflow-wrap: anywhere; }
 .chat-md :deep(p:last-child) { margin-bottom: 0; }
-.chat-md :deep(strong) { color: #f1f5f9; font-weight: 600; }
-.chat-md :deep(em) { color: #cbd5e1; }
+.chat-md :deep(strong) { color: #f4f4f5; font-weight: 500; }
+.chat-md :deep(em) { color: #d4d4d8; }
 .chat-md :deep(code) { background: rgba(237, 237, 237, 0.08); padding: 1px 5px; border-radius: 4px; color: #ededed; font-size: 0.85em; word-break: break-all; }
-.chat-md :deep(pre) { background: #0f0f10; border: 1px solid #232326; padding: 10px 12px; border-radius: 8px; overflow-x: auto; margin: 0.4em 0 0.6em; max-width: 100%; }
-.chat-md :deep(pre code) { background: transparent; padding: 0; color: #cbd5e1; word-break: normal; white-space: pre; }
+.chat-md :deep(pre) { background: #0f0f10; border: 1px solid rgba(255, 255, 255, 0.06); padding: 10px 12px; border-radius: 8px; overflow-x: auto; margin: 0.4em 0 0.6em; max-width: 100%; }
+.chat-md :deep(pre code) { background: transparent; padding: 0; color: #d4d4d8; word-break: normal; white-space: pre; }
 .chat-md :deep(ul), .chat-md :deep(ol) { padding-left: 1.25em; margin: 0.3em 0 0.6em; }
 .chat-md :deep(li) { margin: 0.15em 0; }
 .chat-md :deep(a) { color: #ededed; text-decoration: underline; text-underline-offset: 2px; word-break: break-all; }
-.chat-md :deep(table) { border-collapse: collapse; margin: 0.4em 0 0.6em; font-size: 0.85em; max-width: 100%; display: block; overflow-x: auto; }
-.chat-md :deep(th), .chat-md :deep(td) { border-bottom: 1px solid #233136; padding: 4px 8px; }
-.chat-md :deep(blockquote) { border-left: 2px solid #233136; padding-left: 0.75em; color: #94a3b8; margin: 0.3em 0; }
+.chat-md :deep(h1), .chat-md :deep(h2), .chat-md :deep(h3), .chat-md :deep(h4) { color: #f4f4f5; font-weight: 500; font-size: 1em; margin: 0.8em 0 0.3em; }
+.chat-md :deep(table) { border-collapse: collapse; margin: 0.4em 0 0.6em; font-size: 0.85em; max-width: 100%; display: block; overflow-x: auto; font-variant-numeric: tabular-nums; }
+.chat-md :deep(th) { color: #85858b; font-weight: 400; text-align: left; }
+.chat-md :deep(th), .chat-md :deep(td) { border-bottom: 1px solid rgba(255, 255, 255, 0.06); padding: 4px 8px; }
+.chat-md :deep(blockquote) { border-left: 2px solid rgba(255, 255, 255, 0.12); padding-left: 0.75em; color: #a1a1aa; margin: 0.3em 0; }
+.chat-md :deep(hr) { border: 0; border-top: 1px solid rgba(255, 255, 255, 0.06); margin: 0.8em 0; }
 </style>

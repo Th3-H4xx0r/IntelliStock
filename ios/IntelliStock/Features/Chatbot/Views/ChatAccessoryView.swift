@@ -5,8 +5,9 @@ import SwiftUI
 /// (spec 2026-10-02, G1). The system draws it as a compact glass capsule above
 /// the tab bar, like the Music mini player, so it never covers content.
 ///
-/// It shows `sparkles`, "Ask IntelliStock" and, once a model is picked, the
-/// current conversation's model name in `.secondary`. Tapping it opens the
+/// It shows `sparkles` in zinc-400, "Ask IntelliStock" in 14/500 and, once a
+/// model is picked, the current conversation's model name in zinc-500 — no
+/// hue, as the web's chrome. Tapping it opens the
 /// chat sheet that `chatbotPresenter()` hosts. It reads the session's
 /// `ChatbotModel` from the environment that `chatbotPresenter()` sets, so
 /// apply both to the same `TabView`:
@@ -25,19 +26,19 @@ struct ChatAccessoryView: View {
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: "sparkles")
-                    .font(.body.weight(.semibold))
-                    .foregroundStyle(.tint)
+                    .font(.system(size: 16, weight: .regular))
+                    .foregroundStyle(DS.Text.secondary)
                     .accessibilityHidden(true)
                 Text("Ask IntelliStock")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.primary)
+                    .font(DS.Font.bodyMedium)
+                    .foregroundStyle(DS.Text.primary)
                     .lineLimit(1)
                 Spacer(minLength: 8)
                 // Inline (beside a minimised tab bar) there is room for the title only.
                 if placement != .inline, let modelName {
                     Text(ChatAccessory.shortName(modelName))
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                        .font(DS.Font.body)
+                        .foregroundStyle(DS.Text.muted)
                         .lineLimit(1)
                 }
             }
