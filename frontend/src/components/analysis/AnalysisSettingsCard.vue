@@ -21,7 +21,7 @@
 
       <div v-else-if="loadError" class="px-5 py-4 flex items-center justify-between gap-4">
         <p class="text-sm text-slate-400 min-w-0">{{ loadError }}</p>
-        <button type="button" class="ui-btn shrink-0" @click="load()">Retry</button>
+        <button v-if="loadRetry" type="button" class="ui-btn shrink-0" @click="load()">Retry</button>
       </div>
 
       <form v-else @submit.prevent="save">
@@ -96,7 +96,7 @@ import { useRoute } from 'vue-router'
 import { getAnalysisSettings, saveAnalysisSettings } from '../../composables/useAnalysisApi.js'
 import { getLlmProviderLabel } from '../../utils/strategyConfig.js'
 import {
-  MIN_MOVE_LIMITS, SIGMA_LIMITS, apiFailure, settingsDirty, settingsDraft, settingsIssues, settingsPayload,
+  MIN_MOVE_LIMITS, SIGMA_LIMITS, apiFailure, retryable, settingsChanges, settingsDirty, settingsDraft, settingsIssues,
 } from '../../utils/moveAnalysis.js'
 
 const props = defineProps({
@@ -107,6 +107,7 @@ const props = defineProps({
 const uid = `ai-analysis-${Math.random().toString(36).slice(2, 8)}`
 const loading = ref(true)
 const loadError = ref('')
+const loadRetry = ref(true)
 const models = ref([])
 const savedModelName = ref('')
 const saved = ref(null)            // the last saved draft
@@ -153,6 +154,7 @@ async function load({ quiet = false } = {}) {
     loadError.value = ''
   } else if (!quiet) {
     loadError.value = apiFailure(res.status, res.body, "Couldn't load AI Analysis settings")
+    loadRetry.value = retryable(res.status, res.body)
   }
   loading.value = false
 }
@@ -166,7 +168,9 @@ async function save() {
   if (saving.value || invalid.value || !dirty.value) return
   saving.value = true
   message.value = ''
-  const res = await saveAnalysisSettings(settingsPayload(draft.value))
+  // Only what changed: an absent field is left alone on the server, so this
+  // save can't undo a model or threshold changed on the phone meanwhile.
+  const res = await saveAnalysisSettings(settingsChanges(draft.value, saved.value))
   saving.value = false
   if (res.ok) {
     apply(res.body)

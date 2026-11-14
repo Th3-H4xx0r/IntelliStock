@@ -1,10 +1,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  ALL_KEY, ANALYSIS_RANGES, UNEXPLAINED_KEY, apiFailure, categoryChips, categoryStyle, confidenceText,
-  eventMarkers, explainableCount, filterEvents, filterKeyOf, fmtEventDate, isHollow, pendingCount, quickPicks,
-  rangeFrom, settingsDirty, settingsDraft, settingsIssues, settingsPayload, sortNewestFirst, sourceRow,
-  splitRows, statusText, stripMax,
+  ALL_KEY, ANALYSIS_RANGES, FAILED_STROKE, HOLLOW_STROKE, MARKER_LEGEND, NO_ANALYSIS_TEXT, UNEXPLAINED_KEY,
+  analyzableResults, apiFailure, categoryChips, categoryStyle, confidenceText, eventMarkers, explainBody,
+  explainableCount, familyOf, filterEvents, filterKeyOf, fmtEventDate, isAnalyzableSymbol, isCryptoSymbol,
+  isHollow, isMissingRoute, markerStyle, pendingCount, quickPicks, rangeFrom, reconcileSelection, retryable,
+  sameSymbol, settingsChanges, settingsDirty, settingsDraft, settingsIssues, settingsPayload, sortNewestFirst,
+  sourceRow, splitRows, statusText, stripMax, symbolKey, symbolProfile, withLoadedSymbol,
 } from '../src/utils/moveAnalysis.js'
 
 // Shapes from docs/superpowers/specs/2026-11-14-why-it-moved-design.md (API).
@@ -88,17 +90,100 @@ test('markers land on their bar; off-series dates take the next bar; outside the
   assert.deepEqual(eventMarkers([], events), [])
 })
 
-test('category style: three hue families and greys, shape per family', () => {
-  assert.deepEqual(categoryStyle('earnings'), categoryStyle('analyst'))
-  assert.notEqual(categoryStyle('earnings').shape, categoryStyle('deal_product').shape)
-  assert.notEqual(categoryStyle('deal_product').shape, categoryStyle('macro').shape)
+test('category families match iOS: company news, analysts and peers, macro and policy, two greys', () => {
+  const fam = k => familyOf(k)
+  for (const k of ['earnings', 'guidance', 'deal_product', 'management', 'capital_insider']) assert.equal(fam(k), 'company', k)
+  for (const k of ['analyst', 'sector_peer']) assert.equal(fam(k), 'street', k)
+  for (const k of ['macro', 'regulatory_legal']) assert.equal(fam(k), 'macro', k)
+  assert.equal(fam('market'), 'market')
+  assert.equal(fam('no_catalyst'), 'none')
+  assert.equal(fam('something_new'), 'none')
+  assert.equal(categoryStyle('earnings').label, 'Company news')
+  assert.equal(categoryStyle('analyst').label, 'Analysts and peers')
+  assert.equal(categoryStyle('regulatory_legal').label, 'Macro and policy')
+  // Three hues, three shapes; the greys differ from each other.
+  const shapes = new Set(['earnings', 'analyst', 'macro'].map(k => categoryStyle(k).shape))
+  const colors = new Set(['earnings', 'analyst', 'macro'].map(k => categoryStyle(k).color))
+  assert.equal(shapes.size, 3)
+  assert.equal(colors.size, 3)
   assert.notEqual(categoryStyle('market').color, categoryStyle('no_catalyst').color)
-  assert.deepEqual(categoryStyle('something_new'), categoryStyle('no_catalyst'))
   // Never the app's gain or loss colour.
   for (const k of ['earnings', 'guidance', 'analyst', 'deal_product', 'macro', 'sector_peer',
     'regulatory_legal', 'management', 'capital_insider', 'market', 'no_catalyst']) {
     assert.ok(!['#4cc38a', '#e5484d'].includes(categoryStyle(k).color), k)
   }
+  assert.deepEqual(MARKER_LEGEND.slice(0, 3).map(l => l.label), ['Company news', 'Analysts and peers', 'Macro and policy'])
+})
+
+test('markers: filled when explained, red outline when failed, grey outline otherwise', () => {
+  assert.deepEqual(markerStyle(ev('d', 'explained', 'analyst')), { kind: 'filled', color: categoryStyle('analyst').color, shape: 'diamond' })
+  assert.deepEqual(markerStyle(ev('d', 'failed')), { kind: 'failed', color: FAILED_STROKE, shape: 'circle' })
+  assert.equal(FAILED_STROKE, '#e5484d')
+  assert.deepEqual(markerStyle(ev('d', 'pending')), { kind: 'hollow', color: HOLLOW_STROKE, shape: 'circle' })
+  assert.deepEqual(markerStyle(ev('d', 'unexplained')), { kind: 'hollow', color: HOLLOW_STROKE, shape: 'circle' })
+})
+
+test('selection survives a re-read: the selected day stays, the filter goes to All', () => {
+  const before = [ev('2026-10-02', 'pending'), ev('2026-10-09', 'unexplained'), ev('2026-09-01', 'explained', 'macro')]
+  const after = [ev('2026-10-02', 'explained', 'analyst'), ev('2026-10-09', 'unexplained'), ev('2026-09-01', 'explained', 'macro')]
+  // Watching "Not explained" with Oct 2 selected; it finishes explaining.
+  assert.deepEqual(reconcileSelection(before, CATEGORIES, UNEXPLAINED_KEY, 'NVDA|2026-10-02'),
+    { filter: UNEXPLAINED_KEY, selectedId: 'NVDA|2026-10-02' })
+  assert.deepEqual(reconcileSelection(after, CATEGORIES, UNEXPLAINED_KEY, 'NVDA|2026-10-02'),
+    { filter: ALL_KEY, selectedId: 'NVDA|2026-10-02' })
+  // Still inside the filter: nothing changes.
+  assert.deepEqual(reconcileSelection(after, CATEGORIES, UNEXPLAINED_KEY, 'NVDA|2026-10-09'),
+    { filter: UNEXPLAINED_KEY, selectedId: 'NVDA|2026-10-09' })
+  // The selected day is gone: the newest shown day.
+  assert.deepEqual(reconcileSelection(after, CATEGORIES, 'macro', 'NVDA|2026-12-01'),
+    { filter: 'macro', selectedId: 'NVDA|2026-09-01' })
+  // The filter's chip is gone: All.
+  assert.deepEqual(reconcileSelection(after, CATEGORIES, 'earnings', null),
+    { filter: ALL_KEY, selectedId: 'NVDA|2026-10-09' })
+  assert.deepEqual(reconcileSelection([], CATEGORIES, ALL_KEY, 'x'), { filter: ALL_KEY, selectedId: null })
+})
+
+test('symbols: dash spelling, crypto, what can be analyzed', () => {
+  assert.equal(symbolKey(' brk.b '), 'BRK-B')
+  assert.ok(sameSymbol('BRK.B', 'brk-b'))
+  assert.ok(!sameSymbol('BRK.B', 'BRK.A'))
+  assert.ok(!sameSymbol('', ''))
+  for (const s of ['BTCUSD', 'BTC/USD', 'ethusdt', 'SOLUSDC', 'DOGEUSD']) assert.ok(isCryptoSymbol(s), s)
+  for (const s of ['NVDA', 'TQQQ', 'BRK.B', 'USD', 'SUSD']) assert.ok(!isCryptoSymbol(s), s)
+  for (const s of ['NVDA', 'BRK.B', 'BRK-B', 'GOOGL']) assert.ok(isAnalyzableSymbol(s), s)
+  for (const s of ['BTCUSD', 'BTC/USD', 'SPY261218C00600000', '', '1ABC']) assert.ok(!isAnalyzableSymbol(s), s)
+  assert.deepEqual(analyzableResults([
+    { symbol: 'BTC-USD', type: 'Crypto' }, { symbol: 'COIN', type: 'Stock' }, { symbol: 'ETHUSD', type: 'Stock' },
+    { symbol: 'IBIT', type: 'ETF' }, { name: 'no symbol' },
+  ]).map(r => r.symbol), ['COIN', 'IBIT'])
+  assert.deepEqual(withLoadedSymbol(['TQQQ', 'BRK.B'], 'BRK-B'), ['TQQQ', 'BRK-B'])
+  assert.deepEqual(withLoadedSymbol(['TQQQ'], null), ['TQQQ'])
+})
+
+test('profile line: beta left out when the server could not estimate it', () => {
+  assert.equal(symbolProfile({ sector: 'technology', sector_etf: 'XLK', beta: 1.62 }), 'Technology · XLK · beta 1.62')
+  assert.equal(symbolProfile({ sector: 'consumer_discretionary', sector_etf: 'XLY', beta: null }), 'Consumer discretionary · XLY')
+  assert.equal(symbolProfile({ sector: null, sector_etf: null, beta: null }), '')
+})
+
+test('explain body names the account when there is one', () => {
+  assert.deepEqual(explainBody({ symbol: 'NVDA', range: '3M', brokerageId: 'b1' }),
+    { symbol: 'NVDA', range: '3M', force: false, brokerage_id: 'b1' })
+  assert.deepEqual(explainBody({ symbol: 'NVDA', range: '3M', dates: ['2026-10-02'], force: true, brokerageId: null }),
+    { symbol: 'NVDA', range: '3M', force: true, dates: ['2026-10-02'] })
+  assert.deepEqual(explainBody({ symbol: 'NVDA', range: '1M', dates: [] }), { symbol: 'NVDA', range: '1M', force: false })
+})
+
+test('an old server: a bare "Not Found" 404 is a missing route, not an unknown symbol', () => {
+  assert.ok(isMissingRoute(404, { detail: 'Not Found' }))
+  assert.ok(!isMissingRoute(404, { detail: 'No price history for ZZZZ.' }))
+  assert.ok(!isMissingRoute(500, { detail: 'Not Found' }))
+  assert.equal(apiFailure(404, { detail: 'Not Found' }, 'x'), NO_ANALYSIS_TEXT)
+  assert.equal(NO_ANALYSIS_TEXT, 'This server has no AI analysis yet')
+  assert.equal(retryable(404, { detail: 'Not Found' }), false)
+  assert.equal(retryable(400, { detail: 'Enter a stock or ETF symbol, for example NVDA.' }), false)
+  assert.equal(retryable(500, null), true)
+  assert.equal(retryable(0, null), true)
 })
 
 test('split rows: labels, values, shares against the largest part', () => {
@@ -121,6 +206,7 @@ test('strip scale, counts and words', () => {
   assert.equal(pendingCount({ pending: 3, events }), 3)
   assert.equal(pendingCount({ events }), 1)
   assert.equal(statusText({ status: 'pending' }), 'Explaining…')
+  assert.equal(statusText({ status: 'failed' }), "Couldn't explain this move")
   assert.equal(statusText({ status: 'explained' }), '')
   assert.equal(confidenceText('medium'), 'Medium confidence')
   assert.equal(confidenceText(null), '')
@@ -142,12 +228,15 @@ test('api failures read the server detail', () => {
   assert.equal(apiFailure(500, null, "Couldn't save"), "Couldn't save (HTTP 500)")
 })
 
-test('quick picks: equities only, largest first, once each', () => {
+test('quick picks: equities only (no options, no crypto), largest first, once each', () => {
   const positions = [
     { symbol: 'QQQ', marketValue: 1500 }, { symbol: 'tqqq', marketValue: 2500 },
     { symbol: 'SPY261218C00600000', marketValue: 9000 }, { symbol: 'QQQ', marketValue: 10 },
+    { symbol: 'BTCUSD', marketValue: 8000 }, { symbol: 'BTC/USD', marketValue: 7000 },
+    { symbol: 'BRK.B', marketValue: 900 }, { symbol: 'BRK-B', marketValue: 100 },
   ]
-  assert.deepEqual(quickPicks(positions), ['TQQQ', 'QQQ'])
+  // The largest holding here is crypto, so the default symbol is TQQQ.
+  assert.deepEqual(quickPicks(positions), ['TQQQ', 'QQQ', 'BRK.B'])
   assert.deepEqual(quickPicks(null), [])
 })
 
@@ -166,4 +255,12 @@ test('settings: limits, payload, draft and dirty', () => {
   assert.equal(settingsDirty({ ...draft }, draft), false)
   assert.equal(settingsDirty({ ...draft, model_id: '' }, draft), true)
   assert.equal(settingsDirty({ ...draft, sigma: 3 }, draft), true)
+})
+
+test('settings save sends only what changed; "None" is an explicit null', () => {
+  const saved = { model_id: 'abc', sigma: 2.5, min_move_pct: 3 }
+  assert.deepEqual(settingsChanges({ ...saved, sigma: 3 }, saved), { sigma: 3 })
+  assert.deepEqual(settingsChanges({ ...saved, model_id: '' }, saved), { model_id: null })
+  assert.deepEqual(settingsChanges({ ...saved, model_id: 'def', min_move_pct: '4.5' }, saved), { model_id: 'def', min_move_pct: 4.5 })
+  assert.deepEqual(settingsChanges({ ...saved }, saved), {})
 })

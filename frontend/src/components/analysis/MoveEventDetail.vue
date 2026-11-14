@@ -21,7 +21,7 @@
         </div>
         <p class="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-400">
           <span class="inline-flex items-center gap-2">
-            <CategoryGlyph :category="event.category" :hollow="isHollow(event)" />
+            <CategoryGlyph :category="event.category" :status="event.status" />
             {{ event.status === 'explained' ? (event.category_label || 'Explained') : statusText(event) }}
           </span>
           <template v-if="confidence">
@@ -39,10 +39,10 @@
           <span class="material-symbols-outlined text-[16px] text-slate-500 animate-spin" aria-hidden="true">progress_activity</span>
           Reading the news for this day. This page updates when it's done
         </div>
-        <div v-else-if="event.status === 'failed'" class="mt-5">
-          <p class="text-sm text-slate-200">The explanation failed</p>
-          <p v-if="event.error" class="mt-1 text-sm text-slate-500 break-words">{{ event.error }}</p>
-        </div>
+        <!-- Failed: the status line above already says "Couldn't explain this move" -->
+        <p v-else-if="event.status === 'failed'" class="mt-5 text-sm text-slate-300 break-words">
+          {{ event.error || 'The model gave no usable answer for this day' }}
+        </p>
         <p v-else class="mt-5 text-sm text-slate-400">
           {{ modelConfigured === false ? 'Choose a model in Settings to find out why this day moved' : 'Not explained yet. Explain finds the cause in that day\'s news' }}
         </p>
@@ -125,7 +125,7 @@ import { computed } from 'vue'
 import CategoryGlyph from './CategoryGlyph.vue'
 import { fmtPct, fmtPrice, signClass } from '../../utils/dashboardAnalytics.js'
 import {
-  confidenceText, fmtEventDate, fmtStamp, isHollow, sourceRow, splitRows, statusText,
+  confidenceText, fmtEventDate, fmtStamp, sourceRow, splitRows, statusText,
 } from '../../utils/moveAnalysis.js'
 
 const props = defineProps({

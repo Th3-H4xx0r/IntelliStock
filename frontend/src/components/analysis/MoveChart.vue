@@ -137,6 +137,14 @@
         <text :x="width - 2" :y="10" text-anchor="end" class="axis">{{ fmtPct(stripScale) }}</text>
         <text :x="width - 2" :y="STRIP_H - 2" text-anchor="end" class="axis">{{ fmtPct(-stripScale) }}</text>
       </svg>
+
+      <!-- What the markers mean -->
+      <ul class="mt-3 flex flex-wrap gap-x-4 gap-y-1.5 text-xs text-slate-500" aria-label="Marker legend">
+        <li v-for="l in MARKER_LEGEND" :key="l.key" class="inline-flex items-center gap-1.5">
+          <CategoryGlyph :category="l.category" :status="l.status" />
+          {{ l.label }}
+        </li>
+      </ul>
     </template>
   </div>
 </template>
@@ -145,8 +153,9 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { fmtPct, fmtPrice, fmtUsd } from '../../utils/dashboardAnalytics.js'
 import { niceTicks, paddedBounds } from '../../utils/swingReview.js'
+import CategoryGlyph from './CategoryGlyph.vue'
 import {
-  HOLLOW_STROKE, categoryStyle, eventMarkers, fmtEventDate, isHollow, statusText, stripMax,
+  MARKER_LEGEND, eventMarkers, fmtEventDate, markerStyle, statusText, stripMax,
 } from '../../utils/moveAnalysis.js'
 
 const props = defineProps({
@@ -230,14 +239,13 @@ const xLabels = computed(() => {
 
 // ── Markers ──────────────────────────────────────────────────────────────────
 const markers = computed(() => eventMarkers(props.bars, props.events).map(m => {
-  const hollow = isHollow(m.event)
-  const style = categoryStyle(m.event.category)
+  const style = markerStyle(m.event)
   return {
     ...m,
-    shape: hollow ? 'circle' : style.shape,
-    paint: hollow
-      ? { fill: PAGE_BG, stroke: HOLLOW_STROKE, 'stroke-width': 1.5 }
-      : { fill: style.color, stroke: PAGE_BG, 'stroke-width': 2 },
+    shape: style.shape,
+    paint: style.kind === 'filled'
+      ? { fill: style.color, stroke: PAGE_BG, 'stroke-width': 2 }
+      : { fill: PAGE_BG, stroke: style.color, 'stroke-width': style.kind === 'failed' ? 2 : 1.5 },
   }
 }))
 

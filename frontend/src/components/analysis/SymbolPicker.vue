@@ -61,8 +61,8 @@
         :key="s"
         type="button"
         class="pick"
-        :class="s === current ? 'pick-active' : ''"
-        :aria-pressed="s === current"
+        :class="sameSymbol(s, current) ? 'pick-active' : ''"
+        :aria-pressed="sameSymbol(s, current)"
         @click="choose(s)"
       >{{ s }}</button>
     </div>
@@ -72,7 +72,8 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { searchSymbols } from '../../composables/useAnalysisApi.js'
-import { isTradableSymbol, normalizeSymbol } from '../../utils/trade.js'
+import { normalizeSymbol } from '../../utils/trade.js'
+import { analyzableResults, isAnalyzableSymbol, sameSymbol } from '../../utils/moveAnalysis.js'
 
 const props = defineProps({
   picks: { type: Array, default: () => [] },
@@ -98,7 +99,7 @@ const items = computed(() => {
     sub: [r.name, r.type].filter(Boolean).join(' · '),
   }))
   const typed = normalizeSymbol(query.value)
-  if (isTradableSymbol(typed) && !out.some(it => it.symbol === typed)) {
+  if (isAnalyzableSymbol(typed) && !out.some(it => sameSymbol(it.symbol, typed))) {
     out.push({ symbol: typed, sub: `Analyze ${typed}` })
   }
   return out
@@ -132,12 +133,13 @@ async function run(q) {
     error.value = res.status ? "Search isn't available right now. Type a ticker and press Enter" : "Couldn't reach search. Type a ticker and press Enter"
     return
   }
-  results.value = (Array.isArray(res.body?.results) ? res.body.results : []).filter(r => r?.symbol).slice(0, 12)
+  // Crypto and options can't be analyzed, so they aren't offered.
+  results.value = analyzableResults(Array.isArray(res.body?.results) ? res.body.results : []).slice(0, 12)
 }
 
 function choose(symbol) {
   const s = normalizeSymbol(symbol)
-  if (!isTradableSymbol(s)) return
+  if (!isAnalyzableSymbol(s)) return
   emit('pick', s)
   clearTimeout(debounce)
   gen += 1

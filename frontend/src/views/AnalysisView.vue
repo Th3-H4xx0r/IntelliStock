@@ -131,7 +131,7 @@
                 :aria-pressed="filter === c.key"
                 @click="setFilter(c.key)"
               >
-                <CategoryGlyph v-if="c.key !== ALL_KEY" :category="c.key" :hollow="c.key === UNEXPLAINED_KEY" />
+                <CategoryGlyph v-if="c.key !== ALL_KEY" :category="c.key" :status="c.key === UNEXPLAINED_KEY ? 'unexplained' : 'explained'" />
                 {{ c.label }}
                 <span class="tabular-nums text-slate-500">{{ c.count }}</span>
               </button>
@@ -143,14 +143,20 @@
               <div class="ui-skel h-[280px] w-full rounded-lg"></div>
               <div class="ui-skel h-16 w-full rounded-lg"></div>
             </div>
+            <div v-else-if="state === 'unsupported'" class="ui-card">
+              <div class="ui-empty">
+                <p>{{ NO_ANALYSIS_TEXT }}</p>
+                <p class="-mt-2 text-xs text-slate-500">The server this app talks to predates AI Analysis. Deploy the latest backend to use it</p>
+              </div>
+            </div>
             <div v-else-if="state === 'notfound'" class="ui-card">
               <div class="ui-empty">
-                <p>No price history for {{ symbol }}. Check the ticker, or pick another symbol</p>
+                <p>{{ notFoundText }} Check the ticker, or pick another symbol</p>
               </div>
             </div>
             <div v-else-if="state === 'error' && !moves" class="ui-card px-5 py-4 flex items-center justify-between gap-4">
               <p class="text-sm text-slate-400 min-w-0">{{ loadError }}</p>
-              <button type="button" class="ui-btn shrink-0" @click="reloadMoves">Retry</button>
+              <button v-if="loadRetry" type="button" class="ui-btn shrink-0" @click="reloadMoves">Retry</button>
             </div>
             <template v-else-if="moves">
               <MoveChart
@@ -189,12 +195,12 @@
         <!-- Event list -->
         <section v-if="moves" class="area-list min-w-0" aria-labelledby="events-title">
           <div class="mb-3">
-            <h2 id="events-title" class="ui-section-title">Unusual days</h2>
+            <h2 id="events-title" class="ui-section-title">Moves</h2>
             <p class="ui-section-sub tabular-nums">{{ listSubtitle }}</p>
           </div>
           <div class="ui-card overflow-hidden">
             <div v-if="!events.length" class="px-5 py-8 text-center">
-              <p class="text-sm text-slate-300">No unusual days for {{ symbol }} in this range</p>
+              <p class="text-sm text-slate-300">No flagged moves for {{ symbol }} in this range</p>
               <p class="text-xs text-slate-500 mt-1">
                 A day is flagged when the stock's own move stands out. The thresholds are in
                 <RouterLink to="/models#ai-analysis" class="text-slate-400 underline decoration-white/20 underline-offset-2 hover:text-slate-200">Settings</RouterLink>
@@ -220,7 +226,7 @@
                     {{ e.status === 'explained' ? (e.headline || e.category_label || 'Explained') : statusText(e) }}
                   </span>
                   <span class="mt-0.5 flex items-center gap-1.5 min-w-0 text-xs text-slate-500">
-                    <CategoryGlyph :category="e.category" :hollow="isHollow(e)" />
+                    <CategoryGlyph :category="e.category" :status="e.status" />
                     <span class="truncate">
                       <template v-if="e.status === 'explained' && e.category_label">{{ e.category_label }} · </template>Stock-specific {{ fmtPct(e.specific_pct) }}
                     </span>
@@ -239,6 +245,7 @@
           :data="portfolio"
           :loading="portfolioLoading"
           :error="accountsError || portfolioError"
+          :can-retry="!!accountsError || portfolioRetry"
           :account-name="account?.account_name || ''"
           :has-account="!accountsLoaded || accounts.length > 0 || !!accountsError"
           :current="symbol"
@@ -262,10 +269,11 @@ import SymbolPicker from '../components/analysis/SymbolPicker.vue'
 import { apiGet, loadPositions, saveAccountId, savedAccountId } from '../composables/useStockApi.js'
 import { explainMoves, getAnalysisSettings, getMoves, getPortfolioMoves } from '../composables/useAnalysisApi.js'
 import { fmtPct, signClass } from '../utils/dashboardAnalytics.js'
-import { accountModeLabel, isTradableSymbol, normalizeSymbol, pickAccountId, tradableAccounts } from '../utils/trade.js'
+import { accountModeLabel, normalizeSymbol, pickAccountId, tradableAccounts } from '../utils/trade.js'
 import {
-  ALL_KEY, ANALYSIS_RANGES, POLL_MS, UNEXPLAINED_KEY, apiFailure, categoryChips, explainableCount,
-  filterEvents, fmtEventDate, isHollow, pendingCount, quickPicks, rangeFrom, sortNewestFirst, statusText,
+  ALL_KEY, ANALYSIS_RANGES, NO_ANALYSIS_TEXT, POLL_MS, UNEXPLAINED_KEY, apiFailure, categoryChips, explainableCount,
+  filterEvents, fmtEventDate, isAnalyzableSymbol, isMissingRoute, pendingCount, quickPicks, rangeFrom,
+  reconcileSelection, retryable, sameSymbol, sortNewestFirst, statusText, symbolProfile, withLoadedSymbol,
 } from '../utils/moveAnalysis.js'
 
 const route = useRoute()
@@ -279,7 +287,9 @@ const accountId = ref(null)
 const account = computed(() => accounts.value.find(a => String(a.id) === String(accountId.value)) || null)
 const menuOpen = ref(false)
 const switcherEl = ref(null)
-const picks = ref([])
+const rawPicks = ref([])
+// The loaded symbol in the server's spelling ("BRK-B" for a held "BRK.B").
+const picks = computed(() => withLoadedSymbol(rawPicks.value, moves.value?.symbol))
 let accountGen = 0
 
 const accountsError = ref('')
@@ -312,11 +322,11 @@ async function loadPicks() {
   try {
     const d = await loadPositions(id)
     if (gen !== accountGen || !alive) return
-    picks.value = quickPicks(d.positions)
-    // No symbol in the URL: open on the largest holding.
-    if (!symbol.value && picks.value.length) pickSymbol(picks.value[0], { replace: true })
+    rawPicks.value = quickPicks(d.positions)            // equities only: no crypto, no options
+    // No symbol in the URL: open on the largest stock holding.
+    if (!symbol.value && rawPicks.value.length) pickSymbol(rawPicks.value[0])
   } catch {
-    if (gen === accountGen) picks.value = []
+    if (gen === accountGen) rawPicks.value = []
   }
 }
 
@@ -324,6 +334,7 @@ async function loadPicks() {
 const portfolio = ref(null)
 const portfolioLoading = ref(false)
 const portfolioError = ref('')
+const portfolioRetry = ref(true)
 
 async function loadPortfolio() {
   const id = accountId.value
@@ -337,13 +348,15 @@ async function loadPortfolio() {
     portfolio.value = res.body && typeof res.body === 'object' ? res.body : { holdings: [] }
     portfolioError.value = ''
   } else {
+    // An old server's bare 404 reads "This server has no AI analysis yet".
     portfolioError.value = apiFailure(res.status, res.body, "Couldn't load today's split")
+    portfolioRetry.value = retryable(res.status, res.body)
   }
 }
 
 watch(accountId, id => {
   accountGen += 1
-  picks.value = []
+  rawPicks.value = []
   portfolio.value = null
   portfolioError.value = ''
   if (id == null) return
@@ -352,7 +365,7 @@ watch(accountId, id => {
 })
 
 // ── Symbol and range (kept in the URL) ───────────────────────────────────────
-const symbol = ref(isTradableSymbol(route.query.symbol) ? normalizeSymbol(route.query.symbol) : '')
+const symbol = ref(isAnalyzableSymbol(route.query.symbol) ? normalizeSymbol(route.query.symbol) : '')
 const range = ref(rangeFrom(route.query.range))
 
 function syncQuery() {
@@ -370,9 +383,9 @@ function scrollToChart() {
 
 function pickSymbol(s, { scroll = false } = {}) {
   const next = normalizeSymbol(s)
-  if (!isTradableSymbol(next)) return
+  if (!isAnalyzableSymbol(next)) return
   if (scroll) requestAnimationFrame(scrollToChart)
-  if (next === symbol.value) return
+  if (sameSymbol(next, symbol.value)) return
   symbol.value = next
   syncQuery()
 }
@@ -385,11 +398,15 @@ function setRange(r) {
 
 // ── Moves ────────────────────────────────────────────────────────────────────
 const moves = ref(null)          // the GET /analysis/moves payload for symbol + range
-const state = ref('idle')        // idle | loading | ready | notfound | error
+const state = ref('idle')        // idle | loading | ready | notfound | unsupported | error
 const loadError = ref('')
+const loadRetry = ref(true)
+const notFoundText = ref('')
 const eventId = ref(null)
 const filter = ref(ALL_KEY)
-let movesGen = 0
+let movesGen = 0                 // bumped when the symbol or range changes
+let movesSeq = 0                 // every moves request, numbered
+let appliedSeq = 0               // the newest one whose answer is on screen
 let pollTimer = null
 
 function normalizeMoves(body) {
@@ -413,24 +430,45 @@ async function loadMoves({ quiet = false } = {}) {
     state.value = 'loading'
     loadError.value = ''
   }
-  const res = quiet && document.visibilityState !== 'visible' ? null : await getMoves(sym, rng)
+  if (quiet && document.visibilityState !== 'visible') { schedulePoll(); return }   // tab hidden: try again later
+  const seq = ++movesSeq
+  const res = await getMoves(sym, rng)
   if (gen !== movesGen || !alive) return
-  if (res == null) { schedulePoll(); return }          // tab hidden: try again later
+  // A poll in flight, an Explain's re-read and a refresh can answer out of
+  // order; an answer older than the one on screen would undo it (and could
+  // stop the polling early), so it is dropped.
+  if (seq < appliedSeq) return
+  appliedSeq = seq
   const wasPending = pending.value > 0
   if (res.ok) {
     moves.value = normalizeMoves(res.body)
     state.value = 'ready'
     loadError.value = ''
+    adoptServerSymbol(moves.value.symbol)
     keepSelection()
     if (wasPending && pending.value === 0) loadPortfolio()   // fresh headlines for the account table
+  } else if (isMissingRoute(res.status, res.body)) {
+    moves.value = null
+    state.value = 'unsupported'
   } else if (res.status === 404) {
     moves.value = null
     state.value = 'notfound'
+    const detail = typeof res.body?.detail === 'string' ? res.body.detail.trim() : ''
+    notFoundText.value = detail || `No price history for ${sym}.`
   } else {
     loadError.value = apiFailure(res.status, res.body, `Couldn't load moves for ${sym}`)
+    loadRetry.value = retryable(res.status, res.body)
     state.value = 'error'
   }
   schedulePoll()
+}
+
+/** "BRK.B" is analyzed as "BRK-B": take the server's spelling for the URL and highlights, without a reload. */
+function adoptServerSymbol(serverSymbol) {
+  const s = normalizeSymbol(serverSymbol)
+  if (!s || s === symbol.value || !sameSymbol(s, symbol.value)) return
+  symbol.value = s
+  syncQuery()
 }
 
 function schedulePoll() {
@@ -448,6 +486,9 @@ function resetMoves() {
   moves.value = null
   eventId.value = null
   filter.value = ALL_KEY
+  // An Explain still in flight for the previous symbol never comes back here
+  // (its generation is stale), so its busy state is cleared now.
+  explainBusy.value = false
   explainError.value = ''
   eventBusy.value = {}
   eventErrors.value = {}
@@ -458,7 +499,11 @@ function reloadMoves() {
   loadMoves()
 }
 
-watch([symbol, range], reloadMoves)
+// Adopting the server's spelling of the same symbol is not a new symbol.
+watch([symbol, range], ([s, r], [prevS, prevR]) => {
+  if (r === prevR && sameSymbol(s, prevS)) return
+  reloadMoves()
+})
 
 const bars = computed(() => moves.value?.bars || [])
 const events = computed(() => sortNewestFirst(moves.value?.events || []))
@@ -468,9 +513,11 @@ const selectedEvent = computed(() => events.value.find(e => e.id === eventId.val
 const pending = computed(() => (moves.value ? pendingCount(moves.value) : 0))
 const explainable = computed(() => explainableCount(events.value))
 
+/** After a re-read: keep the selected day (switching the filter to All if it left it). */
 function keepSelection() {
-  if (!chips.value.some(c => c.key === filter.value)) filter.value = ALL_KEY
-  if (!shownEvents.value.some(e => e.id === eventId.value)) eventId.value = shownEvents.value[0]?.id ?? null
+  const next = reconcileSelection(events.value, moves.value?.categories, filter.value, eventId.value)
+  filter.value = next.filter
+  eventId.value = next.selectedId
 }
 
 function setFilter(key) {
@@ -487,20 +534,12 @@ function selectEvent(id, { scroll = false } = {}) {
   }
 }
 
-function humanize(s) {
-  const t = String(s || '').replace(/_/g, ' ').trim()
-  return t ? t.charAt(0).toUpperCase() + t.slice(1) : ''
-}
-
+// `Technology · XLK · beta 1.62`; beta is null (and left out) when the server
+// had too little history to estimate it.
 const symbolMeta = computed(() => {
   const m = moves.value
-  if (!m) return state.value === 'notfound' ? 'Unknown symbol' : ' '
-  const parts = []
-  if (m.sector) parts.push(humanize(m.sector))
-  if (m.sector_etf) parts.push(`Sector ETF ${m.sector_etf}`)
-  const beta = Number(m.beta)
-  if (m.beta != null && Number.isFinite(beta)) parts.push(`Beta ${beta.toFixed(2)}`)
-  return parts.join(' · ') || 'Sector not known'
+  if (!m) return state.value === 'notfound' ? 'Unknown symbol' : ' '
+  return symbolProfile(m) || ' '
 })
 
 const listSubtitle = computed(() => {
@@ -564,7 +603,7 @@ async function explainAll() {
   const dates = events.value.filter(e => e.status === 'unexplained' || e.status === 'failed').map(e => e.date)
   explainBusy.value = true
   explainError.value = ''
-  const res = await explainMoves({ symbol: sym, range: rng })
+  const res = await explainMoves({ symbol: sym, range: rng, brokerageId: accountId.value })
   if (gen !== movesGen || !alive) return
   explainBusy.value = false
   if (!res.ok) {
@@ -581,7 +620,9 @@ async function explainOne(force) {
   const gen = movesGen
   eventBusy.value = { ...eventBusy.value, [ev.id]: true }
   eventErrors.value = { ...eventErrors.value, [ev.id]: '' }
-  const res = await explainMoves({ symbol: symbol.value, range: range.value, dates: [ev.date], force: !!force })
+  const res = await explainMoves({
+    symbol: symbol.value, range: range.value, dates: [ev.date], force: !!force, brokerageId: accountId.value,
+  })
   if (gen !== movesGen || !alive) return
   eventBusy.value = { ...eventBusy.value, [ev.id]: false }
   if (!res.ok) {

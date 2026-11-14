@@ -35,7 +35,7 @@
 
       <div v-else-if="error && !data" class="h-14 px-5 flex items-center justify-between gap-4 text-sm">
         <span class="text-slate-400 min-w-0">{{ error }}</span>
-        <button type="button" class="ui-btn shrink-0" @click="emit('retry')">Retry</button>
+        <button v-if="canRetry" type="button" class="ui-btn shrink-0" @click="emit('retry')">Retry</button>
       </div>
 
       <div v-else-if="!rows.length" class="px-5 py-8 text-center">
@@ -57,11 +57,11 @@
             v-for="r in rows"
             :key="r.symbol"
             class="pm-grid grid min-h-14 px-5 py-2.5 items-center cursor-pointer transition-colors duration-150 ease-out hover:bg-white/[0.03] focus-visible:outline-none focus-visible:bg-white/[0.04]"
-            :class="r.symbol === current ? 'bg-white/[0.025]' : ''"
+            :class="sameSymbol(r.symbol, current) ? 'bg-white/[0.025]' : ''"
             role="button"
             tabindex="0"
             :aria-label="`Analyze ${r.symbol}`"
-            :aria-current="r.symbol === current ? 'true' : undefined"
+            :aria-current="sameSymbol(r.symbol, current) ? 'true' : undefined"
             @click="emit('pick', r.symbol)"
             @keydown.enter.prevent="emit('pick', r.symbol)"
             @keydown.space.prevent="emit('pick', r.symbol)"
@@ -72,7 +72,7 @@
                 <span v-if="r.weight != null" class="text-xs text-slate-500 tabular-nums">{{ r.weight.toFixed(1) }}%</span>
               </span>
               <span v-if="r.note" class="mt-0.5 flex items-center gap-1.5 min-w-0 text-xs" :class="r.noteClass">
-                <CategoryGlyph :category="r.event?.category" :hollow="r.hollow" />
+                <CategoryGlyph :category="r.event?.category" :status="r.status" />
                 <span class="truncate">{{ r.note }}</span>
               </span>
               <!-- Phone: the split columns are hidden, so the parts ride here -->
@@ -113,7 +113,7 @@
 import { computed } from 'vue'
 import CategoryGlyph from './CategoryGlyph.vue'
 import { fmtPct, signClass } from '../../utils/dashboardAnalytics.js'
-import { fmtEventDate, isHollow, statusText } from '../../utils/moveAnalysis.js'
+import { fmtEventDate, sameSymbol, statusText } from '../../utils/moveAnalysis.js'
 
 const props = defineProps({
   data: { type: Object, default: null },
@@ -122,6 +122,8 @@ const props = defineProps({
   accountName: { type: String, default: '' },
   hasAccount: { type: Boolean, default: true },
   current: { type: String, default: '' },
+  // False for a rejected request or a server without the route: Retry can't help.
+  canRetry: { type: Boolean, default: true },
 })
 const emit = defineEmits(['pick', 'retry'])
 
@@ -154,7 +156,7 @@ const rows = computed(() => {
       sector: n(h.sector_pct),
       specific: n(h.specific_pct),
       event: ev,
-      hollow: !ev || isHollow(ev),
+      status: ev ? String(ev.status || 'unexplained') : 'unexplained',
       note,
       noteClass,
     }

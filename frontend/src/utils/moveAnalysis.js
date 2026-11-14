@@ -19,39 +19,73 @@ export const UNEXPLAINED_KEY = 'unexplained'
 export const ALL_KEY = 'all'
 
 // ── Category colour and marker shape ─────────────────────────────────────────
-// Three hue families plus two greys, so a marker's colour never competes with
-// the green/red that carry gains and losses. Blue, purple and amber pass the
-// dark-surface lightness, chroma and contrast checks; blue and purple are
-// close for protan vision, so each family also has its own shape.
+// Three hue families plus two greys, grouped as the iOS screen groups them
+// (ios/IntelliStock/Features/Analysis/Model/AnalysisFormat.swift), so a
+// marker's colour never competes with the green/red that carry gains and
+// losses. Blue, purple and amber pass the dark-surface lightness, chroma and
+// contrast checks; blue and purple are close for protan vision, so each
+// family also has its own shape. The chips and rows always name the category.
 const FAMILIES = {
-  company: { color: '#3987e5', shape: 'circle' },    // results and what analysts make of them
-  news: { color: '#b06fd8', shape: 'diamond' },      // deals, people, regulators, capital
-  outside: { color: '#c98500', shape: 'square' },    // macro and sector peers
-  market: { color: '#a1a1aa', shape: 'circle' },     // a market-wide day, labelled without the LLM
-  none: { color: '#71717a', shape: 'circle' },       // no catalyst found
+  company: { color: '#3987e5', shape: 'circle', label: 'Company news' },
+  street: { color: '#b06fd8', shape: 'diamond', label: 'Analysts and peers' },
+  macro: { color: '#c98500', shape: 'square', label: 'Macro and policy' },
+  market: { color: '#a1a1aa', shape: 'circle', label: 'Market' },        // labelled without the model
+  none: { color: '#71717a', shape: 'circle', label: 'No catalyst' },     // no cited article supported a cause
 }
 
 const CATEGORY_FAMILY = {
   earnings: 'company',
   guidance: 'company',
-  analyst: 'company',
-  deal_product: 'news',
-  management: 'news',
-  regulatory_legal: 'news',
-  capital_insider: 'news',
-  macro: 'outside',
-  sector_peer: 'outside',
+  deal_product: 'company',
+  management: 'company',
+  capital_insider: 'company',
+  analyst: 'street',
+  sector_peer: 'street',
+  macro: 'macro',
+  regulatory_legal: 'macro',
   market: 'market',
   no_catalyst: 'none',
 }
 
-/** Stroke for a hollow marker: unexplained, pending or failed. */
+/** Stroke for a hollow marker: unexplained or pending. */
 export const HOLLOW_STROKE = '#a1a1aa'
+/** Stroke for a failed explanation: the loss colour, as on iOS. */
+export const FAILED_STROKE = '#e5484d'
 
-/** { color, shape } for a category key; unknown keys draw as "no catalyst". */
-export function categoryStyle(key) {
-  return FAMILIES[CATEGORY_FAMILY[key] || 'none']
+/** The family key of a category; unknown keys fall in with "no catalyst". */
+export function familyOf(category) {
+  return CATEGORY_FAMILY[category] || 'none'
 }
+
+/** { color, shape, label } of a category's family. */
+export function categoryStyle(key) {
+  return FAMILIES[familyOf(key)]
+}
+
+/**
+ * How an event's marker is drawn: `filled` in its family's colour and shape
+ * when explained, a red-outlined circle when the explanation failed, a grey
+ * outline while unexplained or pending.
+ */
+export function markerStyle(event) {
+  if (event?.status === 'explained') {
+    const s = categoryStyle(event.category)
+    return { kind: 'filled', color: s.color, shape: s.shape }
+  }
+  if (event?.status === 'failed') return { kind: 'failed', color: FAILED_STROKE, shape: 'circle' }
+  return { kind: 'hollow', color: HOLLOW_STROKE, shape: 'circle' }
+}
+
+/** The legend under the chart: the three families, the greys, and the two outlines. */
+export const MARKER_LEGEND = [
+  { key: 'company', label: FAMILIES.company.label, status: 'explained', category: 'earnings' },
+  { key: 'street', label: FAMILIES.street.label, status: 'explained', category: 'analyst' },
+  { key: 'macro', label: FAMILIES.macro.label, status: 'explained', category: 'macro' },
+  { key: 'market', label: 'Market', status: 'explained', category: 'market' },
+  { key: 'none', label: 'No catalyst', status: 'explained', category: 'no_catalyst' },
+  { key: 'open', label: 'Not explained', status: 'unexplained', category: null },
+  { key: 'failed', label: "Couldn't explain", status: 'failed', category: null },
+]
 
 /** Hollow markers for anything not yet explained. */
 export function isHollow(event) {
@@ -109,6 +143,24 @@ export function filterEvents(events, key) {
   const sorted = sortNewestFirst(events)
   if (!key || key === ALL_KEY) return sorted
   return sorted.filter(e => filterKeyOf(e) === key)
+}
+
+/**
+ * The filter and selection after a re-read. A selected event that still
+ * exists stays selected; when it has left the filter (it finished explaining
+ * under "Not explained", say) the filter goes back to All rather than the
+ * panel jumping to another day. A filter whose chip is gone is All. With the
+ * selection gone, the newest shown event is selected.
+ */
+export function reconcileSelection(events, categories, filter, selectedId) {
+  const list = events || []
+  let next = categoryChips(list, categories).some(c => c.key === filter) ? filter : ALL_KEY
+  const exists = selectedId != null && list.some(e => e.id === selectedId)
+  if (exists) {
+    if (!filterEvents(list, next).some(e => e.id === selectedId)) next = ALL_KEY
+    return { filter: next, selectedId }
+  }
+  return { filter: next, selectedId: filterEvents(list, next)[0]?.id ?? null }
 }
 
 /**
@@ -178,7 +230,7 @@ export function statusText(event) {
   switch (event?.status) {
     case 'unexplained': return 'Not explained yet'
     case 'pending': return 'Explaining…'
-    case 'failed': return 'Explanation failed'
+    case 'failed': return "Couldn't explain this move"
     default: return ''
   }
 }
@@ -232,9 +284,26 @@ export function fmtStamp(iso) {
   return new Date(t).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
 }
 
+export const NO_ANALYSIS_TEXT = 'This server has no AI analysis yet'
+
+/**
+ * A server from before this feature answers every /analysis route with
+ * FastAPI's stock 404, `{"detail": "Not Found"}`. The feature's own 404s carry
+ * a sentence ("No price history for X."), so the exact text tells them apart.
+ */
+export function isMissingRoute(status, body) {
+  return status === 404 && body?.detail === 'Not Found'
+}
+
+/** Whether Retry can help: not for a rejected request (400) or a missing route. */
+export function retryable(status, body) {
+  return status !== 400 && !isMissingRoute(status, body)
+}
+
 /** A readable failure for a request: the server's `detail` when it sent one. */
 export function apiFailure(status, body, fallback) {
   if (!status) return "Couldn't reach the server. Check your connection and try again"
+  if (isMissingRoute(status, body)) return NO_ANALYSIS_TEXT
   const d = body?.detail
   if (typeof d === 'string' && d.trim()) return d.trim()
   if (Array.isArray(d) && d.length) {
@@ -245,16 +314,85 @@ export function apiFailure(status, body, fallback) {
   return `${fallback} (HTTP ${status})`
 }
 
-// ── Symbol picker ────────────────────────────────────────────────────────────
+// ── Symbols ──────────────────────────────────────────────────────────────────
+// The server spells share classes with a dash ("BRK.B" → "BRK-B",
+// move_analysis/service.py normalize_symbol), so symbols compare that way.
 
-/** Equity holdings as quick picks, largest first, each symbol once. */
+/** Upper-cased, trimmed, "." as "-": the server's spelling. */
+export function symbolKey(symbol) {
+  return normalizeSymbol(symbol).replace(/\./g, '-')
+}
+
+/** True when two spellings name the same symbol ("BRK.B" and "brk-b"). */
+export function sameSymbol(a, b) {
+  const ka = symbolKey(a)
+  return !!ka && ka === symbolKey(b)
+}
+
+/**
+ * Crypto pairs: "BTC/USD", or a coin glued to a dollar quote ("BTCUSD",
+ * "ETHUSDT"). Positions carry no asset class, so this goes by the symbol; no
+ * US-listed equity has six or more letters ending in USD.
+ */
+export function isCryptoSymbol(symbol) {
+  const raw = normalizeSymbol(symbol)
+  if (raw.includes('/')) return true
+  return /^[A-Z]{3,6}(USD|USDT|USDC)$/.test(raw)
+}
+
+// The server's own pattern for a stock or ETF (service.py _SYMBOL_RE).
+const ANALYZABLE_RE = /^[A-Z][A-Z0-9]{0,5}(-[A-Z]{1,2})?$/
+
+/** A stock or ETF symbol the server will analyze: no options, no crypto. */
+export function isAnalyzableSymbol(symbol) {
+  return ANALYZABLE_RE.test(symbolKey(symbol)) && !isCryptoSymbol(symbol)
+}
+
+/** Symbol search results the screen can analyze: no crypto, no options. */
+export function analyzableResults(results) {
+  return (results || []).filter(r =>
+    r?.symbol && String(r.type || '').toLowerCase() !== 'crypto' && isAnalyzableSymbol(r.symbol))
+}
+
+/** Equity holdings as quick picks, largest first, each symbol once (crypto and options left out). */
 export function quickPicks(positions) {
   const seen = new Set()
   return [...(positions || [])]
-    .filter(p => isTradableSymbol(p?.symbol))
+    .filter(p => isTradableSymbol(p?.symbol) && isAnalyzableSymbol(p?.symbol))
     .sort((a, b) => (Number(b.marketValue) || 0) - (Number(a.marketValue) || 0))
     .map(p => normalizeSymbol(p.symbol))
-    .filter(s => (seen.has(s) ? false : (seen.add(s), true)))
+    .filter(s => {
+      const k = symbolKey(s)
+      if (seen.has(k)) return false
+      seen.add(k)
+      return true
+    })
+}
+
+/** The quick picks with the loaded symbol in the server's spelling. */
+export function withLoadedSymbol(picks, loaded) {
+  const sym = normalizeSymbol(loaded)
+  if (!sym) return [...(picks || [])]
+  return (picks || []).map(p => (sameSymbol(p, sym) ? sym : p))
+}
+
+/** `Technology · XLK · beta 1.62`, as on iOS; beta is left out when the server could not estimate it. */
+export function symbolProfile(payload) {
+  const parts = []
+  const sector = String(payload?.sector || '').replace(/_/g, ' ').trim()
+  if (sector) parts.push(sector.charAt(0).toUpperCase() + sector.slice(1))
+  if (payload?.sector_etf) parts.push(String(payload.sector_etf))
+  const beta = num(payload?.beta)
+  if (beta != null) parts.push(`beta ${beta.toFixed(2)}`)
+  return parts.join(' · ')
+}
+
+/** The POST /analysis/moves/explain body; `brokerage_id` names the account whose keys read the news. */
+export function explainBody({ symbol, range, dates, force = false, brokerageId = null }) {
+  const body = { symbol, range, force: !!force }
+  if (Array.isArray(dates) && dates.length) body.dates = dates
+  if (brokerageId != null && brokerageId !== '') body.brokerage_id = String(brokerageId)
+  return body
 }
 
 /** The range from a query value, else the default. */
@@ -300,10 +438,23 @@ export function settingsDraft(payload) {
   }
 }
 
+/**
+ * Only the fields the draft changed, for PUT /analysis/settings: the server
+ * leaves an absent field alone and clears the model on an explicit null, so
+ * a save here never undoes a change made on the phone.
+ */
+export function settingsChanges(draft, saved) {
+  const a = settingsPayload(draft)
+  const b = settingsPayload(saved)
+  const out = {}
+  for (const k of ['model_id', 'sigma', 'min_move_pct']) {
+    if (a[k] !== b[k]) out[k] = a[k]
+  }
+  return out
+}
+
 /** True when the draft differs from what was saved. */
 export function settingsDirty(draft, saved) {
   if (!saved) return false
-  const a = settingsPayload(draft)
-  const b = settingsPayload(saved)
-  return a.model_id !== b.model_id || a.sigma !== b.sigma || a.min_move_pct !== b.min_move_pct
+  return Object.keys(settingsChanges(draft, saved)).length > 0
 }

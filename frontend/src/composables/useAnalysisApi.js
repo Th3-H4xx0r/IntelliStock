@@ -6,6 +6,7 @@
 // Contract: docs/superpowers/specs/2026-11-14-why-it-moved-design.md (API).
 
 import { getToken } from '../utils/auth.js'
+import { explainBody } from '../utils/moveAnalysis.js'
 import { API_BASE } from './useStockApi.js'
 
 async function request(method, path, body) {
@@ -44,12 +45,11 @@ export function getMoves(symbol, range) {
 
 /**
  * POST /analysis/moves/explain → { queued }. `dates` omitted queues every
- * unexplained or failed event in the range; 400 when no model is chosen.
+ * unexplained or failed event in the range; `brokerageId` names the account
+ * whose keys read the news; 400 when no model is chosen.
  */
-export function explainMoves({ symbol, range, dates, force = false }) {
-  const body = { symbol, range, force: !!force }
-  if (Array.isArray(dates) && dates.length) body.dates = dates
-  return request('POST', '/analysis/moves/explain', body)
+export function explainMoves({ symbol, range, dates, force = false, brokerageId = null }) {
+  return request('POST', '/analysis/moves/explain', explainBody({ symbol, range, dates, force, brokerageId }))
 }
 
 /** GET /analysis/portfolio?brokerage_id=… → { as_of, spy_pct, totals, holdings } */
