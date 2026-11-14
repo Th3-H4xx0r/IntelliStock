@@ -2,6 +2,7 @@
 import { ref, onMounted } from 'vue'
 import AppShell from '../layouts/AppShell.vue'
 import LlmConfigForm from '../components/LlmConfigForm.vue'
+import AnalysisSettingsCard from '../components/analysis/AnalysisSettingsCard.vue'
 import { getToken } from '../utils/auth.js'
 import {
   buildStrategyLlmTestPayload,
@@ -16,6 +17,8 @@ const API_BASE = import.meta.env.DEV
 const models    = ref([])
 const loading   = ref(true)
 const loadError = ref('')
+// Bumped on every list refresh so the AI Analysis model dropdown follows adds and deletes.
+const modelsVersion = ref(0)
 
 // Modal
 const showModal  = ref(false)
@@ -133,6 +136,7 @@ async function fetchModels() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const data = await res.json()
     models.value = data.models || []
+    modelsVersion.value += 1
   } catch (e) {
     loadError.value = `Failed to load models: ${e.message}`
   } finally {
@@ -646,6 +650,11 @@ onMounted(fetchModels)
           </table>
         </div>
       </section>
+
+      <!-- Which model explains moves on the AI Analysis screen -->
+      <div class="mt-12">
+        <AnalysisSettingsCard :models-version="modelsVersion" />
+      </div>
     </main>
   </AppShell>
 

@@ -23,6 +23,7 @@ nonisolated extension Route {
         case .agentRuns: return "/agent-runs"
         case .nexus: return "/nexus"
         case .learning: return "/learning"
+        case .analysis(let symbol): return symbol.map { "/analysis/\(enc($0))" } ?? "/analysis"
         case .models: return "/models"
         case .tokenUsage: return "/token-usage"
         case .settings: return "/settings"

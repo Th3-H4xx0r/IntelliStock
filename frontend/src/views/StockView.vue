@@ -15,7 +15,15 @@
             <span class="material-symbols-outlined text-[18px]">arrow_back</span>
           </button>
           <div class="min-w-0">
-            <h1 class="ui-page-title">{{ symbol }}</h1>
+            <div class="flex items-baseline gap-3">
+              <h1 class="ui-page-title">{{ symbol }}</h1>
+              <!-- The AI Analysis screen for this symbol; stocks and ETFs only -->
+              <RouterLink
+                v-if="analyzable"
+                :to="{ name: 'analysis', query: { symbol } }"
+                class="text-sm text-slate-400 underline decoration-white/20 underline-offset-2 transition-colors duration-150 ease-out hover:text-slate-100 hover:decoration-white/40"
+              >Why it moved</RouterLink>
+            </div>
             <p class="ui-page-sub truncate">
               <template v-if="info == null"><span class="inline-block align-middle ui-skel h-3.5 w-36"></span></template>
               <template v-else>{{ subtitle }}</template>
@@ -350,12 +358,15 @@ import {
 import {
   botEventBackers, botEventTime, botEventTitle, infoText, ordersForSymbol, positionFor, stockStatCells,
 } from '../utils/stock.js'
+import { isAnalyzableSymbol } from '../utils/moveAnalysis.js'
 
 const route = useRoute()
 const router = useRouter()
 
 const symbol = computed(() => normalizeSymbol(route.params.symbol))
 const tradable = computed(() => isTradableSymbol(symbol.value))
+// Options and crypto have no AI Analysis.
+const analyzable = computed(() => isAnalyzableSymbol(symbol.value))
 
 // ── Accounts ─────────────────────────────────────────────────────────────────
 const accounts = ref([])

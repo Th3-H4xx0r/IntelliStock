@@ -113,6 +113,9 @@ private struct StockContent: View {
             StockOpenOrdersSection(model: trade, showsAccount: tradableAccounts.count > 1)
             if let option = parseOccSymbol(route.symbol) {
                 underlyingSection(option)
+            } else if !AnalysisFormat.isCryptoSymbol(route.symbol) {
+                // Crypto has no sector or market split to explain against.
+                analysisLink
             }
             botSection
             if infoLoading {
@@ -309,6 +312,28 @@ private struct StockContent: View {
                 }
             }
             .dsClearRow()
+        }
+    }
+
+    // MARK: AI analysis
+
+    /// Opens AI analysis on this symbol: which days stood out and why.
+    private var analysisLink: some View {
+        DSSection {
+            NavigationLink(value: Route.analysis(route.symbol)) {
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Why it moved")
+                            .font(DS.Font.body)
+                            .foregroundStyle(DS.Text.primary)
+                        Text("AI analysis of the days \(route.symbol) stood out")
+                            .font(DS.Font.caption)
+                            .foregroundStyle(DS.Text.muted)
+                    }
+                } icon: {
+                    SettingsIconTile(systemImage: "text.magnifyingglass")
+                }
+            }
         }
     }
 

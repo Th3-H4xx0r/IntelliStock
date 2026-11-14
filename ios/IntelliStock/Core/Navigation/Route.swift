@@ -65,6 +65,9 @@ nonisolated enum Route: Hashable, Sendable {
     case agentRuns
     case nexus
     case learning
+    /// The AI analysis screen ("why it moved"), optionally opened on a
+    /// symbol: `/analysis`, `/analysis/NVDA`.
+    case analysis(String?)
     case models
     case tokenUsage
     case settings
@@ -91,6 +94,7 @@ nonisolated enum Route: Hashable, Sendable {
             case "agent-runs": self = .agentRuns
             case "nexus": self = .nexus
             case "learning": self = .learning
+            case "analysis": self = .analysis(nil)
             case "models": self = .models
             case "token-usage": self = .tokenUsage
             case "settings": self = .settings
@@ -105,6 +109,7 @@ nonisolated enum Route: Hashable, Sendable {
             case "instances": self = .instance(id)
             case "strategies": self = .strategy(id)
             case "stock": self = .stock(StockRoute(symbol: id))
+            case "analysis": self = .analysis(id)
             case "settings" where id == "notifications": self = .notificationSettings
             default: return nil
             }

@@ -22,6 +22,12 @@ const routes = [
     meta: { requiresAuth: true },
   },
   {
+    path: '/analysis',
+    name: 'analysis',
+    component: () => import('../views/AnalysisView.vue'),
+    meta: { requiresAuth: true },
+  },
+  {
     path: '/stocks/:symbol',
     name: 'stock',
     component: () => import('../views/StockView.vue'),
