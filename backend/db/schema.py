@@ -86,7 +86,7 @@ ALL_TABLES: tuple = (
     "AlpacaBarsCache", "AlphaAllocations", "AlphaBrokerOrders",
     "AlphaCashActivities", "AlphaEvents", "AlphaExperiments", "AlphaFills",
     "AlphaGates", "AlphaIncidents", "AlphaOrderIntents", "AlphaOutcomes",
-    "AlphaPortfolioSnapshots", "AlphaPredictions", "AlphaState",
+    "AlphaPortfolioSnapshots", "AlphaPredictions", "AlphaState", "AppSettings",
     "BacktestInstances", "BacktestProgress",
     "BacktestResults", "BacktestSteps", "BotTradeDecisions", "BrokerageAccounts",
     "ChatbotConversations", "Config",
@@ -110,7 +110,7 @@ ALL_TABLES: tuple = (
     "LearningObservationRollups", "LearningObservations", "LearningOutcomes",
     "LearningReports", "LiveBootAudit", "LiveCommands", "LiveDecisionAudit",
     "LiveOrderLifecycle", "LiveOrderWAL", "LivePrices", "LivePricesStocks", "LiveState",
-    "MlNewsLLMPromptCache", "Models", "NewsLLM", "NewsLLMCache", "NewsLLMPromptCache",
+    "MlNewsLLMPromptCache", "Models", "MoveEvents", "NewsLLM", "NewsLLMCache", "NewsLLMPromptCache",
     "NewsRaw", "NewsScored", "NexusGraphBuilds", "NexusRuntimeState",
     "NexusStrategyCache", "NotificationPreferences", "OutlierGraphPeers",
     "OutlierUniverseFeatures", "PointInTimeDatasetSnapshots",
@@ -324,6 +324,12 @@ _SPECS = [
     # row "f14-paper|state": what the mirror traded and how the account tracks
     # the frozen rule. Bookkeeping, never read by a prompt.
     TableSpec("ForwardMirrorLedger", indexed_fields=("mirror",), prefix_fields=("id",)),
+    # Why-it-moved analysis (move_analysis.service). MoveEvents ids are
+    # "SYMBOL|YYYY-MM-DD": one row per explained, pending or failed flagged
+    # day. AppSettings holds app-wide settings rows keyed by feature
+    # ("move_analysis"). Neither is read by a strategy or an order path.
+    TableSpec("MoveEvents", prefix_fields=("id",)),
+    TableSpec("AppSettings"),
     TableSpec("LiveBootAudit", indexed_fields=("instance_id",), prefix_fields=("id",)),
     # r.now() wrote a native time on these; the ported writer stores an
     # ISO-8601 string and time_fields decodes it back to a tz-aware datetime,

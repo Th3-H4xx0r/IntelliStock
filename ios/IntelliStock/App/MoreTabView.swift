@@ -1,8 +1,9 @@
 import SwiftUI
 
 /// The More tab — the Flutter "More" sheet (`more_sheet.dart`) as a real tab
-/// with a list: the same nine destinations in the same order on one card,
-/// each led by a muted line glyph (the web sidebar's), then the account card.
+/// with a list: the sheet's nine destinations in the same order plus AI
+/// analysis, on one card, each led by a muted line glyph (the web sidebar's),
+/// then the account card.
 struct MoreTabView: View {
     @Environment(AppServices.self) private var services
 
@@ -17,6 +18,7 @@ struct MoreTabView: View {
         ("smart_toy", "Agent runs", .agentRuns, Symbol.named("smart_toy")),
         ("hub", "Nexus graph", .nexus, Symbol.named("hub")),
         ("lightbulb", "Learning", .learning, Symbol.named("lightbulb")),
+        ("insights", "AI analysis", .analysis(nil), "text.magnifyingglass"),
         ("psychology", "Models", .models, Symbol.named("psychology")),
         ("payments", "Token usage", .tokenUsage, Symbol.named("payments")),
         ("settings", "Settings", .settings, Symbol.named("settings")),

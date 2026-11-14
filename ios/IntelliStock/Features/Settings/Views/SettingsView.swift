@@ -1,8 +1,8 @@
 import SwiftUI
 
 /// Settings — `SettingsScreen` in `settings_screen.dart`, as the web's card
-/// rows: Security, Preferences, Account, About. There is no appearance
-/// setting: the app is dark only, like the web.
+/// rows: Security, Preferences, AI analysis, Account, About. There is no
+/// appearance setting: the app is dark only, like the web.
 struct SettingsView: View {
     @Environment(AppServices.self) private var services
 
@@ -77,6 +77,8 @@ struct SettingsView: View {
                     ) { EmptyView() }
                 }
             }
+
+            AnalysisSettingsSection(services: services)
 
             DSSection("Account") {
                 SettingsRow(
@@ -251,8 +253,8 @@ struct SettingsView: View {
 
 /// A settings row (the web's `ui-row`): a muted glyph, the title in 14 pt
 /// zinc-100 (or loss red for a destructive one) over a 12 pt zinc-500
-/// subtitle, and a trailing view.
-private struct SettingsRow<Trailing: View>: View {
+/// subtitle, and a trailing view. Also used by `AnalysisSettingsSection`.
+struct SettingsRow<Trailing: View>: View {
     /// The Dart (Material) icon name, kept for traceability.
     let icon: String
     /// The SF Symbol when the mapped one reads poorly; nil uses

@@ -25,6 +25,7 @@ struct RouteDestination: View {
         case .agentRuns: AgentRunsView()
         case .nexus: NexusView()
         case .learning: LearningView()
+        case .analysis(let symbol): AnalysisView(symbol: symbol)
         case .models: ModelsView()
         case .tokenUsage: TokenUsageView()
         case .settings: SettingsView()

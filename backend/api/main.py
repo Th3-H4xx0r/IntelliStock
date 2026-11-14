@@ -7009,6 +7009,85 @@ def api_symbol_historicals(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+# ── Why-it-moved analysis ─────────────────────────────────────────────────────
+# Design: docs/superpowers/specs/2026-11-14-why-it-moved-design.md. Read-only
+# with respect to trading: nothing in the order path reads these tables.
+
+
+class MoveAnalysisSettingsBody(BaseModel):
+    model_id: Optional[str] = None
+    sigma: Optional[float] = None
+    min_move_pct: Optional[float] = None
+
+
+class MoveExplainBody(BaseModel):
+    symbol: str
+    range: str = "3M"
+    dates: Optional[List[str]] = None
+    force: bool = False
+    brokerage_id: Optional[str] = None
+
+
+def _move_analysis_call(fn, *args, **kwargs):
+    """Map the service's errors: unknown symbol 404, bad input 400, price
+    provider down 503."""
+    from move_analysis import service as _svc
+    try:
+        return fn(*args, **kwargs)
+    except _svc.NotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except _svc.Unavailable as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/analysis/settings", response_class=JSONResponse)
+def api_move_analysis_settings(current_user: dict = Depends(get_current_user)):
+    from move_analysis import service as _svc
+    return _move_analysis_call(_svc.get_settings, db_store)
+
+
+@app.put("/analysis/settings", response_class=JSONResponse)
+def api_move_analysis_put_settings(body: MoveAnalysisSettingsBody, current_user: dict = Depends(get_current_user)):
+    """Only the fields the client sent are changed, so a null model_id clears
+    the model while an absent one leaves it alone."""
+    from move_analysis import service as _svc
+    try:
+        sent = body.model_dump(exclude_unset=True)
+    except AttributeError:
+        sent = body.dict(exclude_unset=True)
+    return _move_analysis_call(_svc.put_settings, db_store, sent)
+
+
+@app.get("/analysis/moves", response_class=JSONResponse)
+def api_move_analysis_moves(symbol: str, range: str = "3M", current_user: dict = Depends(get_current_user)):
+    """Daily bars split into market, sector and stock-specific parts, and the
+    flagged days with whatever explanation is stored for them."""
+    from move_analysis import service as _svc
+    return _move_analysis_call(_svc.moves_payload, db_store, symbol, range)
+
+
+@app.post("/analysis/moves/explain", response_class=JSONResponse)
+def api_move_analysis_explain(body: MoveExplainBody, current_user: dict = Depends(get_current_user)):
+    """Queue explanations for a symbol's flagged days. Returns at once; the
+    model runs in a background thread and clients poll /analysis/moves."""
+    from move_analysis import service as _svc
+    return _move_analysis_call(
+        _svc.queue_explain, db_store, body.symbol, body.range, body.dates,
+        bool(body.force), brokerage_id=body.brokerage_id)
+
+
+@app.get("/analysis/portfolio", response_class=JSONResponse)
+def api_move_analysis_portfolio(brokerage_id: str, conn=Depends(conn_dependency), current_user: dict = Depends(get_current_user)):
+    """The last finished session's move per holding of one account, as
+    contributions split into market, sector and stock-specific parts."""
+    from move_analysis import service as _svc
+    held = api_brokerage_positions(brokerage_id, conn=conn, current_user=current_user) or {}
+    return _move_analysis_call(
+        _svc.portfolio_payload, db_store, held.get("positions") or [], held.get("cash"))
+
+
 # ── LLM Output Logs ────────────────────────────────────────────────────────────
 
 _LLM_OUTPUT_LOG_DIR = os.path.join(os.environ.get("BACKTEST_LOG_DIR", "/app/backtest_logs"), "llm_outputs")

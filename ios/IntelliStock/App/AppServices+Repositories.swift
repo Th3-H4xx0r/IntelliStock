@@ -9,6 +9,7 @@ import Foundation
 /// `PushRepository` belongs to the core agent and is not listed here.
 extension AppServices {
     var agentRepository: AgentRepository { AgentRepository(client: apiClient) }
+    var analysisRepository: AnalysisRepository { AnalysisRepository(client: apiClient) }
     var authRepository: AuthRepository { AuthRepository(client: apiClient) }
     var backtestRepository: BacktestRepository { BacktestRepository(client: apiClient) }
     var brokerageRepository: BrokerageRepository { BrokerageRepository(client: apiClient) }

@@ -555,7 +555,8 @@ struct RoutePathTests {
         Route.backtests, .backtest("b1"), .backtestPlayback("b1"), .kalshiInstance("k1"),
         .kalshiBacktest("k1"), .kalshiBacktestResult("kb1"), .instance("abc"), .liveTrading("abc"),
         .strategy("s1"), .brokerages, .crypto, .cryptoInstance("c1"), .search,
-        .stock(StockRoute(symbol: "BRK/B")), .agentRuns, .nexus, .learning, .models, .tokenUsage,
+        .stock(StockRoute(symbol: "BRK/B")), .agentRuns, .nexus, .learning, .analysis(nil), .analysis("BRK/B"),
+        .models, .tokenUsage,
         .settings, .notificationSettings, .connect, .onboarding,
     ])
     func pathRoundTrips(route: Route) {
