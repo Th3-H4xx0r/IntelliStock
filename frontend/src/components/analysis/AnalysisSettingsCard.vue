@@ -91,7 +91,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, useId, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { getAnalysisSettings, saveAnalysisSettings } from '../../composables/useAnalysisApi.js'
 import { getLlmProviderLabel } from '../../utils/strategyConfig.js'
@@ -104,7 +104,7 @@ const props = defineProps({
   modelsVersion: { type: Number, default: 0 },
 })
 
-const uid = `ai-analysis-${Math.random().toString(36).slice(2, 8)}`
+const uid = `ai-analysis-${useId()}`
 const loading = ref(true)
 const loadError = ref('')
 const loadRetry = ref(true)
