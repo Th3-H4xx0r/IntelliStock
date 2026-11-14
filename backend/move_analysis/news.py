@@ -1,9 +1,11 @@
-"""News published between the previous close and the close of the day a
-stock moved. Alpaca's news feed (Benzinga) first; Google News when Alpaca has
-nothing or no Alpaca account is linked.
+"""News for explaining one day's move: articles about the company, and
+articles about its peers, its industry and the market that day.
 
-Only articles stamped inside the window are returned, so a write-up published
-after the move cannot be handed to the model as its cause.
+Company articles must be stamped between the previous close and that day's
+close, so a release that came out after the move cannot be handed to the
+model as its cause. Peer and market articles may run a few hours past the
+close, because that is when the day's recaps are written; they are marked so
+the model reads them as accounts of the session, not as new events.
 """
 from __future__ import annotations
 
@@ -14,7 +16,12 @@ from zoneinfo import ZoneInfo
 NY = ZoneInfo("America/New_York")
 ALPACA_NEWS_URL = "https://data.alpaca.markets/v1beta1/news"
 MAX_ARTICLES = 25
+MAX_CONTEXT = 20
 SUMMARY_CHARS = 500
+#: How long after the close a market or peer recap is still accepted.
+RECAP_HOURS = 4
+MARKET_SYMBOLS = ("SPY", "QQQ")
+ALPACA_PAGES = 3
 
 
 def news_window(prev_date: Optional[str], day: str) -> tuple:
@@ -85,49 +92,57 @@ def alpaca_credentials(store, brokerage_id: Optional[str] = None) -> Optional[tu
 
 def fetch_alpaca(symbol: str, start: datetime, end: datetime, key: str,
                  secret: str, *, http_get: Optional[Callable] = None) -> list:
+    """Articles tagged with ``symbol`` (or any of several, comma separated).
+    A several-symbol request reads up to ``ALPACA_PAGES`` pages."""
     if http_get is None:
         import requests
 
         http_get = requests.get
-    response = http_get(
-        ALPACA_NEWS_URL,
-        headers={"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret,
-                 "accept": "application/json"},
+    params = {
         # Oldest first: when a busy day exceeds the page, what is cut is the
         # late recap of the move, not the overnight news that caused it.
         # Alpaca writes share classes with a dot (BRK.B).
-        params={"symbols": symbol.replace("-", "."), "start": _iso(start),
-                "end": _iso(end), "limit": 50, "sort": "asc",
-                "include_content": "false"},
-        timeout=20,
-    )
-    response.raise_for_status()
-    raw = (response.json() or {}).get("news") or []
+        "symbols": symbol.replace("-", "."), "start": _iso(start),
+        "end": _iso(end), "limit": 50, "sort": "asc",
+        "include_content": "false"}
     out = []
-    for item in raw if isinstance(raw, list) else []:
-        if not isinstance(item, dict):
-            continue
-        stamp = _parse_stamp(item.get("created_at"))
-        title = _clean(item.get("headline"), 300)
-        if stamp is None or not title or not (start <= stamp <= end):
-            continue
-        symbols = item.get("symbols") if isinstance(item.get("symbols"), list) else []
-        out.append({
-            "title": title,
-            "summary": _clean(item.get("summary"), SUMMARY_CHARS),
-            "url": _http_url(item.get("url")),
-            "source": _clean(item.get("source") or "Benzinga", 60),
-            "published_at": _iso(stamp),
-            "_breadth": len(symbols) or 99,
-        })
+    for _ in range(ALPACA_PAGES if "," in symbol else 1):
+        response = http_get(
+            ALPACA_NEWS_URL,
+            headers={"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret,
+                     "accept": "application/json"},
+            params=dict(params), timeout=20)
+        response.raise_for_status()
+        body = response.json() or {}
+        raw = body.get("news") or []
+        for item in raw if isinstance(raw, list) else []:
+            if not isinstance(item, dict):
+                continue
+            stamp = _parse_stamp(item.get("created_at"))
+            title = _clean(item.get("headline"), 300)
+            if stamp is None or not title or not (start <= stamp <= end):
+                continue
+            symbols = item.get("symbols") if isinstance(item.get("symbols"), list) else []
+            out.append({
+                "title": title,
+                "summary": _clean(item.get("summary"), SUMMARY_CHARS),
+                "url": _http_url(item.get("url")),
+                "source": _clean(item.get("source") or "Benzinga", 60),
+                "published_at": _iso(stamp),
+                "_breadth": len(symbols) or 99,
+            })
+        token = body.get("next_page_token")
+        if not token:
+            break
+        params["page_token"] = token
     return out
 
 
-def fetch_google(symbol: str, start: datetime, end: datetime) -> list:
+def fetch_google(query: str, start: datetime, end: datetime) -> list:
     from strategies.google_news import fetch_google_news
 
     raw = fetch_google_news(
-        keywords=[f"{symbol} stock"],
+        keywords=[query],
         start_date=start.replace(tzinfo=None),
         # Google's "before:" excludes the date it names, so ask through the
         # next day; the stamp check below still enforces the real window.
@@ -154,32 +169,96 @@ def fetch_google(symbol: str, start: datetime, end: datetime) -> list:
     return out
 
 
-def articles_for(symbol: str, prev_date: Optional[str], day: str, *,
-                 credentials: Optional[tuple] = None,
-                 alpaca: Callable = fetch_alpaca,
-                 google: Callable = fetch_google) -> list:
-    """Up to ``MAX_ARTICLES`` articles, the ones about fewest other symbols
-    first, then oldest first. Never raises: no news is an answer."""
-    start, end = news_window(prev_date, day)
-    found: list = []
-    if credentials:
-        try:
-            found = alpaca(symbol, start, end, credentials[0], credentials[1])
-        except Exception:
-            found = []
-    if not found:
-        try:
-            found = google(symbol, start, end)
-        except Exception:
-            found = []
-    seen = set()
-    unique = []
+_RECAP_WORDS = ("stock market today", "stocks", "wall street", "nasdaq", "s&p",
+                "dow ", "fed ", "yields", "treasury", "selloff", "sell-off",
+                "rally", "rebound", "rotation", "inflation", "jobs report")
+_MOVE_WORDS = ("falls", "fall ", "drops", "plunge", "slides", "sinks", "tumble",
+               "slump", "crash", "jumps", "surges", "soars", "rallies", "climbs",
+               "rises", "gains", "moving", "trading", "higher", "lower", "why ")
+_NOISE_WORDS = ("price target", "maintains", "reiterates", "initiates coverage",
+                "investigation", "class action", "shareholder alert", "deadline")
+
+
+def _context_score(title: str, symbol: str, name: str, group: str) -> int:
+    """How useful a peer or market article is for explaining a group move."""
+    text = f" {title.lower()} "
+    score = 0
+    if name and name.lower() in text or f" {symbol.lower()} " in text:
+        score += 3
+    if any(word in text for word in _RECAP_WORDS):
+        score += 2
+    if any(word in text for word in _MOVE_WORDS):
+        score += 2
+    if group and group.replace("_", " ").split()[0] in text:
+        score += 1
+    if any(word in text for word in _NOISE_WORDS):
+        score -= 3
+    return score
+
+
+def _safe(fetch: Callable, *args) -> list:
+    try:
+        return list(fetch(*args) or [])
+    except Exception:
+        return []
+
+
+def _unique(found: list, seen: set) -> list:
+    out = []
     for article in found:
         key = article["title"].lower()
         if key in seen:
             continue
         seen.add(key)
-        unique.append(article)
-    unique.sort(key=lambda a: (a.get("_breadth", 99), a["published_at"]))
-    return [{k: v for k, v in a.items() if not k.startswith("_")}
-            for a in unique[:MAX_ARTICLES]]
+        out.append(article)
+    return out
+
+
+def _public(article: dict, scope: str, after_close: bool = False) -> dict:
+    row = {k: v for k, v in article.items() if not k.startswith("_")}
+    row["scope"] = scope
+    if after_close:
+        row["after_close"] = True
+    return row
+
+
+def articles_for(symbol: str, prev_date: Optional[str], day: str, *,
+                 credentials: Optional[tuple] = None,
+                 name: str = "", peers: tuple = (), etf: Optional[str] = None,
+                 group: str = "",
+                 alpaca: Callable = fetch_alpaca,
+                 google: Callable = fetch_google) -> list:
+    """Company articles (up to ``MAX_ARTICLES``, those about fewest other
+    symbols first, then oldest first) followed by peer and market articles
+    (up to ``MAX_CONTEXT``, most useful first). Each carries ``scope``:
+    "company" or "context". Never raises: no news is an answer."""
+    start, end = news_window(prev_date, day)
+    recap_end = end + timedelta(hours=RECAP_HOURS)
+    seen: set = set()
+
+    company: list = []
+    if credentials:
+        company += _safe(alpaca, symbol, start, end, credentials[0], credentials[1])
+    # Unquoted: Google's dated search returns almost nothing for a quoted name.
+    company += _safe(google, f"{name or symbol} stock", start, end)
+    company = _unique(company, seen)
+    company.sort(key=lambda a: (a.get("_breadth", 99), a["published_at"]))
+    company = company[:MAX_ARTICLES]
+
+    context: list = []
+    others = [s for s in list(peers)[:6] + [etf, *MARKET_SYMBOLS] if s and s != symbol]
+    if credentials and others:
+        context += _safe(alpaca, ",".join(dict.fromkeys(others)), start, recap_end,
+                         credentials[0], credentials[1])
+    label = group.replace("_", " ") if group else ""
+    context += _safe(google, f"{label} stocks" if label else "stock market today",
+                     start, recap_end)
+    context = _unique(context, seen)
+    scored = [(_context_score(a["title"], symbol, name, group), a) for a in context]
+    scored = [pair for pair in scored if pair[0] > 0]
+    scored.sort(key=lambda pair: (-pair[0], pair[1]["published_at"]))
+    end_iso = _iso(end)
+
+    return ([_public(a, "company") for a in company]
+            + [_public(a, "context", a["published_at"] > end_iso)
+               for _, a in scored[:MAX_CONTEXT]])

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -212,3 +212,125 @@ def test_articles_for_never_raises():
 def test_non_http_urls_are_blanked():
     assert nw._http_url("javascript:alert(1)") == ""
     assert nw._http_url("https://ok.example/x") == "https://ok.example/x"
+
+
+# ── peers, market news and the stricter rules ────────────────────────────────
+
+CONTEXT = {"name": "NVIDIA", "group": "semiconductors",
+           "tape": [("S&P 500 (SPY)", -0.8), ("Semiconductors (SOXX)", -5.5)],
+           "peers": [("AMD", -7.0), ("AVGO", -6.1), ("MU", -8.3), ("INTC", -5.0)]}
+
+
+def test_the_prompt_says_when_the_peers_moved_too():
+    prompt = ex.build_prompt(EVENT, ARTICLES, CONTEXT)
+    assert "Stock: NVDA (NVIDIA)" in prompt and "(XLK, semiconductors)" in prompt
+    assert "Market groups: S&P 500 (SPY) -0.80%" in prompt
+    assert "4 of 4 peers moved the same way" in prompt and "looks like a group move" in prompt
+
+
+def test_the_prompt_says_when_the_stock_moved_alone():
+    alone = dict(CONTEXT, peers=[("AMD", 0.4), ("AVGO", -0.2), ("MU", 0.9), ("INTC", 0.1)])
+    prompt = ex.build_prompt(EVENT, ARTICLES, alone)
+    assert "moved largely on its own" in prompt and "looks like a group move" not in prompt
+    assert ex.peer_summary(EVENT, {"peers": [("AMD", -7.0)]}) is None   # too few to judge
+
+
+def test_market_articles_are_numbered_after_company_ones_and_marked():
+    mixed = [dict(ARTICLES[1], scope="context", after_close=True, title="Chips sink"),
+             dict(ARTICLES[0], scope="company")]
+    prompt = ex.build_prompt(EVENT, ex.ordered(mixed))
+    assert "[1] 2026-10-02T12:31:00Z | Benzinga | Broker cuts NVDA to hold" in prompt
+    assert "[2] 2026-10-02T14:00:00Z | after close | Benzinga | Chips sink" in prompt
+    out = ex.explain_event(EVENT, mixed, lambda p, s: _answer(category="sector_peer", cited=[2]))
+    assert out["sources"] == [{"title": "Chips sink", "summary": "",
+                               "url": "https://example.com/b", "source": "Benzinga",
+                               "published_at": "2026-10-02T14:00:00Z"}]
+
+
+def test_the_rules_name_the_weak_items_and_the_timing():
+    for phrase in ("law firm", "price target", "after close", "point the right way",
+                   "Alone or with the group"):
+        assert phrase in ex.SYSTEM_PROMPT
+
+
+def test_a_group_day_falls_back_to_the_split_when_nothing_is_cited():
+    day = dict(EVENT, market_driven=True)
+    out = ex.explain_event(day, ARTICLES, lambda p, s: _answer(cited=[]))
+    assert out["category"] == "market" and out["sources"] == []
+    assert ex.explain_event(day, [], lambda p, s: 1 / 0)["category"] == "market"
+    kept = ex.explain_event(day, ARTICLES, lambda p, s: _answer(category="macro"))
+    assert kept["category"] == "macro"
+
+
+def test_peer_and_market_news_is_added_after_company_news():
+    calls = []
+
+    def _alpaca(symbols, start, end, key, secret):
+        calls.append((symbols, end))
+        if "," not in symbols:
+            return [{"title": "NVDA downgrade", "summary": "", "url": "", "source": "B",
+                     "published_at": "2026-10-02T12:00:00Z", "_breadth": 1}]
+        return [
+            {"title": "Why AMD shares are falling today", "summary": "", "url": "",
+             "source": "B", "published_at": "2026-10-02T15:00:00Z", "_breadth": 2},
+            {"title": "Stock Market Today: chips sink as yields jump", "summary": "",
+             "url": "", "source": "B", "published_at": "2026-10-02T21:30:00Z", "_breadth": 30},
+            {"title": "Analyst maintains AMD price target", "summary": "", "url": "",
+             "source": "B", "published_at": "2026-10-02T13:00:00Z", "_breadth": 1},
+            {"title": "AMD names new board member", "summary": "", "url": "",
+             "source": "B", "published_at": "2026-10-02T13:00:00Z", "_breadth": 1},
+        ]
+
+    got = nw.articles_for("NVDA", "2026-10-01", "2026-10-02", credentials=("k", "s"),
+                          name="NVIDIA", peers=("AMD", "AVGO"), etf="SOXX",
+                          group="semiconductors", alpaca=_alpaca, google=lambda *a: [])
+    assert [(a["scope"], a["title"]) for a in got] == [
+        ("company", "NVDA downgrade"),
+        ("context", "Why AMD shares are falling today"),
+        ("context", "Stock Market Today: chips sink as yields jump")]
+    assert got[2]["after_close"] is True and "after_close" not in got[1]
+    assert calls[1][0] == "AMD,AVGO,SOXX,SPY,QQQ"
+    # Company news stops at the close; recaps may run past it.
+    assert calls[1][1] - calls[0][1] == timedelta(hours=nw.RECAP_HOURS)
+
+
+def test_a_several_symbol_request_reads_more_than_one_page():
+    pages = []
+
+    class _Resp:
+        def __init__(self, body):
+            self._body = body
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._body
+
+    def _get(url, headers, params, timeout):
+        pages.append(params.get("page_token"))
+        return _Resp({"news": [{"headline": f"Page {len(pages)}", "url": "https://e.com/x",
+                                "created_at": "2026-10-02T12:00:00Z", "symbols": ["AMD"]}],
+                      "next_page_token": "t2" if len(pages) == 1 else None})
+
+    start, end = nw.news_window("2026-10-01", "2026-10-02")
+    got = nw.fetch_alpaca("AMD,AVGO", start, end, "k", "s", http_get=_get)
+    assert [a["title"] for a in got] == ["Page 1", "Page 2"] and pages == [None, "t2"]
+    pages.clear()
+    assert len(nw.fetch_alpaca("AMD", start, end, "k", "s", http_get=_get)) == 1
+
+
+def test_peers_and_company_name_come_from_the_benchmark_fund():
+    from move_analysis import sectors as sc
+    holdings = lambda etf: ["MSFT", "NOW", "CRM", "BRK.B"] + [f"P{i}" for i in range(12)]
+    peers = sc.peers_for("NOW", "IGV", lookup=holdings)
+    assert peers[:3] == ["MSFT", "CRM", "BRK-B"] and "NOW" not in peers
+    assert len(peers) == sc.MAX_PEERS
+    assert sc.peers_for("SPY", None) == []
+    assert sc.peers_for("NOW", "IGV", lookup=lambda etf: 1 / 0) == []
+    assert sc.sector_for("NOW", lookup=lambda s: {"sector": "Technology",
+                                                  "industry": "software-application"}) == ("software", "IGV")
+    assert sc.sector_for("AAPL", lookup=lambda s: {"sector": "Technology",
+                                                   "industry": "consumer-electronics"}) == ("technology", "XLK")
+    assert sc.sector_for("JPM", lookup=lambda s: "Financial Services") == ("financial_services", "XLF")
+    assert sc.sector_for("ZZZ", lookup=lambda s: 1 / 0) == (None, None)

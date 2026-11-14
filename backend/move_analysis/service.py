@@ -29,6 +29,13 @@ SIGMA_BOUNDS = (1.0, 6.0)
 MIN_MOVE_BOUNDS = (0.5, 25.0)
 PENDING_STALE = timedelta(minutes=10)
 MAX_QUEUE = 40
+#: Bumped when the way a cause is found changes, so explanations stored by an
+#: older method are offered for explaining again instead of shown as current.
+EXPLAIN_VERSION = 2
+#: What the model is told the rest of the market did that day.
+TAPE = (("S&P 500", "SPY"), ("Nasdaq 100", "QQQ"), ("Small caps", "IWM"),
+        ("Semiconductors", "SOXX"), ("Software", "IGV"),
+        ("Long Treasuries", "TLT"), ("Oil", "USO"))
 
 _ENSURED = False
 _ENSURE_LOCK = threading.Lock()
@@ -241,14 +248,18 @@ def _apply_explanation(event: dict, fields: dict) -> None:
 
 
 def build_event(store, symbol: str, bar, etf: Optional[str], *,
-                now: Optional[datetime] = None) -> dict:
-    """The event for one flagged bar: fresh numbers, stored explanation."""
+                now: Optional[datetime] = None, model_configured: bool = False) -> dict:
+    """The event for one flagged bar: fresh numbers, stored explanation. An
+    explanation stored by an older method counts as not explained. With no
+    model chosen, a day the market accounts for is labelled from the split."""
     event = _blank_event(symbol, bar, etf)
     try:
         row = store.get(EVENTS_TABLE, event["id"])
     except Exception:
         row = None
     status = (row or {}).get("status")
+    if status == "explained" and row.get("version") != EXPLAIN_VERSION:
+        status = None
     if status == "explained":
         _apply_explanation(event, row)
         event["model_name"] = row.get("model_name")
@@ -259,7 +270,7 @@ def build_event(store, symbol: str, bar, etf: Optional[str], *,
         event["status"] = "failed"
         event["error"] = (row.get("error") if status == "failed"
                           else "The explanation did not finish. Try again.")
-    elif bar.market_driven:
+    elif bar.market_driven and not model_configured:
         _apply_explanation(event, ex.market_explanation(event))
     return event
 
@@ -270,7 +281,8 @@ def moves_payload(store, symbol_raw, range_raw, *, now: Optional[datetime] = Non
     range_key = normalize_range(range_raw)
     settings = get_settings(store)
     computed = compute(symbol, range_key, settings, now=now, **inject)
-    events = [build_event(store, symbol, bar, computed["sector_etf"], now=now)
+    events = [build_event(store, symbol, bar, computed["sector_etf"], now=now,
+                          model_configured=settings["model_id"] is not None)
               for bar in computed["bars"] if bar.flagged]
     events.sort(key=lambda e: e["date"], reverse=True)
     return {
@@ -297,6 +309,7 @@ def queue_explain(store, symbol_raw, range_raw, dates=None, force: bool = False,
                   now: Optional[datetime] = None,
                   spawn: Callable = _spawn,
                   articles_fn: Optional[Callable] = None,
+                  context_fn: Optional[Callable] = None,
                   llm_factory: Optional[Callable] = None,
                   **inject) -> dict:
     """Mark the chosen events pending and explain them in the background."""
@@ -326,10 +339,13 @@ def queue_explain(store, symbol_raw, range_raw, dates=None, force: bool = False,
             status = row.get("status")
             if status == "pending" and not _is_stale_pending(row, stamp):
                 continue
-            if not force and (status == "explained" or (bar.market_driven and not status)):
+            if (not force and status == "explained"
+                    and row.get("version") == EXPLAIN_VERSION):
                 continue
             event = _blank_event(symbol, bar, computed["sector_etf"])
-            jobs.append({"event": event, "prev_date": computed["prev_date"].get(bar.date)})
+            event["market_driven"] = bar.market_driven
+            jobs.append({"event": event, "group": computed["sector"],
+                         "prev_date": computed["prev_date"].get(bar.date)})
             if len(jobs) >= MAX_QUEUE:
                 break
         for job in jobs:
@@ -343,7 +359,7 @@ def queue_explain(store, symbol_raw, range_raw, dates=None, force: bool = False,
             credentials = nw.alpaca_credentials(store, brokerage_id)
         spawn(lambda: run_jobs(store, jobs, model_doc, batch=batch,
                                credentials=credentials, articles_fn=articles_fn,
-                               llm_factory=llm_factory))
+                               context_fn=context_fn, llm_factory=llm_factory))
     return {"queued": len(jobs)}
 
 
@@ -374,6 +390,7 @@ def _keep_alive(store, jobs: list, batch: Optional[str]) -> None:
 
 def run_jobs(store, jobs: list, model_doc: dict, *, batch: Optional[str] = None,
              credentials=None, articles_fn: Optional[Callable] = None,
+             context_fn: Optional[Callable] = None,
              llm_factory: Optional[Callable] = None) -> None:
     """Explain each queued event and store the outcome. Never raises: every
     job ends as an explained or a failed row. Batches run one at a time."""
@@ -381,13 +398,48 @@ def run_jobs(store, jobs: list, model_doc: dict, *, batch: Optional[str] = None,
         _keep_alive(store, jobs, batch)
     try:
         _run_batch(store, jobs, model_doc, batch=batch, credentials=credentials,
-                   articles_fn=articles_fn, llm_factory=llm_factory)
+                   articles_fn=articles_fn, context_fn=context_fn,
+                   llm_factory=llm_factory)
     finally:
         _RUN_LOCK.release()
 
 
+def market_context(jobs: list, *, provider: Optional[Callable] = None) -> Callable:
+    """A ``job -> context`` function for one batch: the company's name, its
+    peers, and what they and the main market groups did on the job's day.
+    Prices are loaded once for the whole batch. Never raises."""
+    if not jobs:
+        return lambda job: {}
+    symbol = jobs[0]["event"]["symbol"]
+    etf = jobs[0]["event"].get("sector_etf")
+    group = jobs[0].get("group")
+    try:
+        name = sc.company_name(symbol)
+    except Exception:
+        name = ""
+    peers = sc.peers_for(symbol, etf)
+    tape = [(label, ticker) for label, ticker in TAPE if ticker != symbol]
+    first = min(job["event"]["date"] for job in jobs)
+    try:
+        start = datetime.fromisoformat(first).date() - timedelta(days=10)
+        moves = px.day_moves([t for _, t in tape] + peers, start, provider=provider)
+    except Exception:
+        moves = {}
+
+    def _context(job: dict) -> dict:
+        day = job["event"]["date"]
+        return {
+            "name": name, "group": group, "peer_symbols": peers,
+            "tape": [(f"{label} ({ticker})", moves.get(ticker, {}).get(day))
+                     for label, ticker in tape],
+            "peers": [(peer, moves.get(peer, {}).get(day)) for peer in peers],
+        }
+
+    return _context
+
+
 def _run_batch(store, jobs: list, model_doc: dict, *, batch, credentials,
-               articles_fn, llm_factory) -> None:
+               articles_fn, llm_factory, context_fn=None) -> None:
     model_name = str(model_doc.get("name") or model_doc.get("model") or "")
     llm_call = None
     setup_error = None
@@ -396,12 +448,17 @@ def _run_batch(store, jobs: list, model_doc: dict, *, batch, credentials,
     except Exception as exc:
         setup_error = str(exc)[:200] or type(exc).__name__
 
+    if context_fn is None:
+        # Injected articles mean a test or an offline run: no price lookups.
+        context_fn = market_context(jobs) if articles_fn is None else (lambda job: {})
+
     for position, job in enumerate(jobs):
         _keep_alive(store, jobs[position:], batch)
         if not _still_ours(store, job, batch):
             continue
         event = job["event"]
         base = {"id": event["id"], "symbol": event["symbol"], "date": event["date"],
+                "version": EXPLAIN_VERSION,
                 "model_id": str(model_doc.get("id")), "model_name": model_name,
                 "snapshot": {k: event.get(k) for k in
                              ("close", "ret_pct", "market_pct", "sector_pct",
@@ -409,14 +466,26 @@ def _run_batch(store, jobs: list, model_doc: dict, *, batch, credentials,
         try:
             if llm_call is None:
                 raise ex.ExplainError(setup_error or "the model could not be set up")
+            try:
+                context = context_fn(job) or {}
+            except Exception:
+                context = {}
             if articles_fn is not None:
                 articles = articles_fn(event["symbol"], job.get("prev_date"), event["date"])
             else:
-                articles = nw.articles_for(event["symbol"], job.get("prev_date"),
-                                           event["date"], credentials=credentials)
-            fields = ex.explain_event(event, articles, llm_call)
+                articles = nw.articles_for(
+                    event["symbol"], job.get("prev_date"), event["date"],
+                    credentials=credentials, name=context.get("name") or "",
+                    peers=tuple(context.get("peer_symbols") or ()),
+                    etf=event.get("sector_etf"), group=job.get("group") or "")
+            fields = ex.explain_event(event, articles, llm_call, context)
             row = dict(base, status="explained", explained_at=_iso(_now()),
-                       article_count=len(articles), error=None, **fields)
+                       article_count=len(articles), error=None,
+                       # What the model was shown, kept for checking a label.
+                       considered=[{"title": a.get("title"), "scope": a.get("scope"),
+                                    "published_at": a.get("published_at")}
+                                   for a in articles],
+                       **fields)
         except Exception as exc:
             row = dict(base, status="failed", failed_at=_iso(_now()),
                        error=(str(exc)[:200] or type(exc).__name__))
@@ -507,7 +576,8 @@ def portfolio_payload(store, positions: list, cash=None, *,
             "contribution_pct": round(contribution, 4),
             "market_pct": round(market, 4), "sector_pct": round(sector, 4),
             "specific_pct": round(specific, 4), "flagged": bar.flagged,
-            "event": (build_event(store, symbol, bar, result["sector_etf"], now=now)
+            "event": (build_event(store, symbol, bar, result["sector_etf"], now=now,
+                                  model_configured=settings["model_id"] is not None)
                       if bar.flagged else None),
         })
     holdings.sort(key=lambda h: abs(h["contribution_pct"]), reverse=True)

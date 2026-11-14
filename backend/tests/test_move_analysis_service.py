@@ -14,6 +14,7 @@ if _BACKEND_DIR not in sys.path:
     sys.path.insert(0, _BACKEND_DIR)
 
 from db.fake import FakeStore  # noqa: E402
+from move_analysis import explain as ex  # noqa: E402
 from move_analysis import prices as px  # noqa: E402
 from move_analysis import service as svc  # noqa: E402
 
@@ -418,3 +419,99 @@ def test_endpoints_map_errors_and_pass_only_sent_fields(monkeypatch):
     with pytest.raises(HTTPException) as err:
         main.api_move_analysis_moves(symbol="NVDA", range="5Y", current_user={"id": "u"})
     assert err.value.status_code == 400
+
+
+# ── group moves, peers and re-explaining ─────────────────────────────────────
+
+
+def test_a_software_stock_is_split_against_the_software_fund(store):
+    lookup = lambda s: {"sector": "Technology", "industry": "software-application",
+                        "name": "ServiceNow, Inc."}
+    out = svc.moves_payload(store, "NOW", "1M", price_provider=_provider(),
+                            sector_lookup=lookup, now=NOW)
+    assert out["sector"] == "software" and out["sector_etf"] == "IGV"
+
+
+def test_a_market_day_waits_for_the_model_once_one_is_chosen(store):
+    svc.put_settings(store, {"model_id": "m1"})
+    out = svc.moves_payload(store, "NVDA", "3M",
+                            **_inject(market_drop={JUMP_DAY: -0.06}))
+    event = next(e for e in out["events"] if e["date"] == JUMP_DAY)
+    assert event["status"] == "unexplained" and event["category"] is None
+
+
+def _queue_market_day(store, answer):
+    prompts = []
+
+    def _factory(doc):
+        def _call(prompt, system):
+            prompts.append(prompt)
+            return answer
+        return _call
+
+    arts = [{"title": "Stocks sink as yields jump", "summary": "", "url": "https://e.com/m",
+             "source": "Benzinga", "published_at": "2026-11-10T21:00:00Z",
+             "scope": "context", "after_close": True}]
+    out = svc.queue_explain(
+        store, "NVDA", "3M", [JUMP_DAY], False, spawn=lambda fn: fn(),
+        articles_fn=lambda s, prev, day: arts, llm_factory=_factory,
+        context_fn=lambda job: {"name": "NVIDIA", "group": "semiconductors",
+                                "tape": [("S&P 500 (SPY)", -6.0)],
+                                "peers": [("AMD", -8.1), ("AVGO", -7.7), ("MU", -9.0)]},
+        **_inject(market_drop={JUMP_DAY: -0.06}))
+    return out, prompts, store.get("MoveEvents", f"NVDA|{JUMP_DAY}")
+
+
+def test_the_model_names_what_moved_the_market_on_a_market_day(store):
+    svc.put_settings(store, {"model_id": "m1"})
+    out, prompts, row = _queue_market_day(store, {
+        "category": "macro", "headline": "Yields jumped", "explanation": "Rates rose.",
+        "confidence": "high", "cited": [1]})
+    assert out == {"queued": 1} and row["category"] == "macro"
+    assert row["version"] == svc.EXPLAIN_VERSION
+    assert row["sources"] == [{"title": "Stocks sink as yields jump", "summary": "",
+                               "url": "https://e.com/m", "source": "Benzinga",
+                               "published_at": "2026-11-10T21:00:00Z"}]
+    assert row["considered"][0]["scope"] == "context"
+    prompt = prompts[0]
+    assert ex.GROUP_NOTE in prompt and "Peers: AMD -8.10%" in prompt
+    assert "| after close |" in prompt and "looks like a group move" in prompt
+
+
+def test_a_market_day_with_no_cited_cause_keeps_the_split_as_its_label(store):
+    svc.put_settings(store, {"model_id": "m1"})
+    _, _, row = _queue_market_day(store, {"category": "no_catalyst", "cited": []})
+    assert row["status"] == "explained" and row["category"] == "market"
+    assert row["headline"].startswith("Moved with")
+    # Stored, so it is not queued again on the next visit.
+    again = svc.queue_explain(store, "NVDA", "3M", [JUMP_DAY], False, spawn=lambda fn: fn(),
+                              articles_fn=lambda *a: [], llm_factory=lambda d: None,
+                              **_inject(market_drop={JUMP_DAY: -0.06}))
+    assert again == {"queued": 0}
+
+
+def test_an_explanation_from_the_old_method_is_offered_again(store):
+    svc.put_settings(store, {"model_id": "m1"})
+    store.insert("MoveEvents", {"id": f"NVDA|{JUMP_DAY}", "symbol": "NVDA",
+                                "date": JUMP_DAY, "status": "explained",
+                                "category": "deal_product", "headline": "A partnership",
+                                "explanation": "x", "confidence": "medium", "sources": []})
+    payload = svc.moves_payload(store, "NVDA", "3M",
+                                **_inject(jumps={"NVDA": {JUMP_DAY: 0.09}}))
+    event = next(e for e in payload["events"] if e["date"] == JUMP_DAY)
+    assert event["status"] == "unexplained" and event["headline"] is None
+    out, ran = _queue(store, dates=[JUMP_DAY])
+    assert out == {"queued": 1} and len(ran) == 1
+
+
+def test_market_context_reports_peers_and_groups_for_the_day(monkeypatch):
+    from move_analysis import sectors as sc
+    monkeypatch.setattr(sc, "company_name", lambda s: "ServiceNow")
+    monkeypatch.setattr(sc, "peers_for", lambda s, etf: ["CRM", "NOPE"])
+    jobs = [{"event": {"symbol": "NOW", "date": JUMP_DAY, "sector_etf": "IGV"},
+             "group": "software"}]
+    context = svc.market_context(jobs, provider=_provider(jumps={"CRM": {JUMP_DAY: 0.05}}))(jobs[0])
+    assert context["name"] == "ServiceNow" and context["group"] == "software"
+    peers = dict(context["peers"])
+    assert peers["CRM"] > 3 and peers["NOPE"] is None
+    assert [label for label, _ in context["tape"]][0] == "S&P 500 (SPY)"
