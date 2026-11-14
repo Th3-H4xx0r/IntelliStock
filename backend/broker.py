@@ -9760,12 +9760,13 @@ def _live_state_snapshot_worker(
 def _reconcile_alpaca_ownership(adapter, order_service):
     """Refresh lifecycle truth before publishing any Alpaca ownership."""
 
-    from live_orders import StartupReconciler
+    from live_orders import StartupReconciler, reconcile_lookup_kwargs
 
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     try:
         broker_snapshot = adapter.capture_reconciliation_snapshot(
-            account_id=order_service.account_id
+            account_id=order_service.account_id,
+            **reconcile_lookup_kwargs(adapter, order_service),
         )
         # cid_prefix lets the reconciler tell OUR orders from everyone else's.
         # make_client_order_id emits "{instance[:8]}-{digest}-{retry}", so the

@@ -586,3 +586,28 @@ class StartupReconciler:
             issues=tuple(issues),
             option_symbols=frozenset(option_symbols),
         )
+
+
+def reconcile_lookup_kwargs(adapter, order_service) -> dict:
+    """Name the orders this instance still holds open, so the snapshot can
+    read any that fell outside its history window (a GTC bracket leg closed
+    more than 30 days after it was submitted). Empty on any doubt: the
+    snapshot is then exactly what it was before."""
+    try:
+        import inspect
+
+        if "lookup_client_order_ids" not in inspect.signature(
+            adapter.capture_reconciliation_snapshot
+        ).parameters:
+            return {}
+        cids = [
+            (record.client_order_id, str(record.broker_order_id or ""))
+            for record in order_service.lifecycle_store.list_for_instance(
+                order_service.instance_id
+            )
+            if not record.terminal
+            and record.intent.account_id == order_service.account_id
+        ]
+        return {"lookup_client_order_ids": tuple(cids)} if cids else {}
+    except Exception:
+        return {}
